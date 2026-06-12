@@ -189,6 +189,24 @@ impl CapabilityId {
     /// nor see a password record (`AGENTS.md` §5.4 — capability checks
     /// before state touches).
     pub const USERS_READ: Self = Self(21);
+    /// Inject decoded keystroke input into a system text console
+    /// (`AGENTS.md` §20, `plans/PI.md` P11 — keyboard input for the video
+    /// console).
+    ///
+    /// The gate on the `console_input` syscall (`abi-v1` number 22): an
+    /// input driver that has decoded a directly attached keyboard
+    /// (USB-HID / PS-2) into a stream of console bytes pushes them into a
+    /// target console's kernel-side input queue, which a
+    /// [`SyscallNumber::STREAM_READ`](crate::SyscallNumber::STREAM_READ)
+    /// of that console then drains. Feeding the system console's input is
+    /// privileged rather than ambient (`AGENTS.md` §4 — no ambient
+    /// authority): only the keyboard-input driver the device manager
+    /// loaded for the discovered keyboard node is granted it, so an
+    /// ordinary task cannot forge keystrokes into another session's login
+    /// (`AGENTS.md` §5.4 — capability checks before state touches). It is
+    /// the producer counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
+    /// which gates the *consumer* (login) of the same console.
+    pub const INPUT_INJECT: Self = Self(22);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -222,6 +240,7 @@ impl CapabilityId {
         (Self::CONSOLE_READ, "CAP_CONSOLE_READ"),
         (Self::RLIMIT_RAISE, "CAP_RLIMIT_RAISE"),
         (Self::USERS_READ, "CAP_USERS_READ"),
+        (Self::INPUT_INJECT, "CAP_INPUT_INJECT"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -337,6 +356,8 @@ mod tests {
         assert_eq!(CapabilityId::CONSOLE_WRITE.as_u16(), 18);
         assert_eq!(CapabilityId::CONSOLE_READ.as_u16(), 19);
         assert_eq!(CapabilityId::RLIMIT_RAISE.as_u16(), 20);
+        assert_eq!(CapabilityId::USERS_READ.as_u16(), 21);
+        assert_eq!(CapabilityId::INPUT_INJECT.as_u16(), 22);
     }
 
     #[test]
@@ -354,6 +375,8 @@ mod tests {
         );
         assert_eq!(CapabilityId::CONSOLE_READ.name(), Some("CAP_CONSOLE_READ"));
         assert_eq!(CapabilityId::RLIMIT_RAISE.name(), Some("CAP_RLIMIT_RAISE"));
+        assert_eq!(CapabilityId::USERS_READ.name(), Some("CAP_USERS_READ"));
+        assert_eq!(CapabilityId::INPUT_INJECT.name(), Some("CAP_INPUT_INJECT"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -364,9 +387,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=20 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=22 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=20 {
+        for raw in 1..=22 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

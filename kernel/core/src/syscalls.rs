@@ -1221,6 +1221,76 @@ where
         Ok(0)
     }
 
+    fn console_input(
+        &self,
+        caller: &CallerContext<'_>,
+        console: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // Resolve the target console against the installed list *before*
+        // touching any state (`AGENTS.md` §5.4 / §20). Unlike the
+        // `stream_*` calls this targets a console by index directly: the
+        // producer is the keyboard-input driver, which feeds a console's
+        // input rather than reading or writing one of its own inherited
+        // streams. A `console` index with no installed console — including
+        // the empty pre-install list — announces the inert interface
+        // (`AGENTS.md` §2.9) rather than fabricating a queue.
+        let Some(device) = self.consoles.get(console as usize) else {
+            return Err(Errno::NotImplemented);
+        };
+        // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
+        // is non-null (`UserPtr`). A zero-length push touches neither the
+        // caller's buffer nor the queue.
+        if len == 0 {
+            return Ok(0);
+        }
+        // Bound the staging allocation so a hostile `len` cannot force an
+        // arbitrarily large kernel buffer (`AGENTS.md` §4 — deterministic
+        // OOM). Pushing a prefix and reporting the count is valid
+        // short-push behaviour; the producer loops for the remainder.
+        let take = core::cmp::min(len, CONSOLE_WRITE_MAX);
+
+        // Copy the bytes in from the caller's address space through the
+        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // touching the queue. `with_caller_aspace` yields `None` when the
+        // caller has no registered address space — fail closed with the
+        // same `BadAddress` an actual fault produces, never leaking which
+        // case occurred (§19.1).
+        let mut payload = alloc::vec![0u8; take];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(buf), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => {
+                // A typed credential may transit this buffer; wipe the
+                // staging copy before returning on the error path too
+                // (`AGENTS.md` §4 — secret hygiene).
+                payload.zeroize();
+                return Err(copy_fault_errno(err));
+            }
+            None => {
+                payload.zeroize();
+                return Err(Errno::BadAddress);
+            }
+        }
+
+        // Push the copied bytes into the console's injected-input queue. A
+        // console that accepts no injected input (a UART reading its own
+        // hardware FIFO) fails closed with `NotImplemented` through
+        // `NULL_CONSOLE_INPUT` (`AGENTS.md` §2.9). A short push (the
+        // bounded queue is near full) reports the accepted count; the
+        // producer retries the remainder (`AGENTS.md` §2.1, never blocks).
+        let pushed = device.input.push(&payload);
+        // The staging buffer held the keystroke bytes (possibly a typed
+        // password); wipe it now the queue has its own copy (`AGENTS.md`
+        // §4 — zero memory that held a credential; §23.1 — secret
+        // hygiene). The queue zeroes its own slots as the consumer drains
+        // them.
+        payload.zeroize();
+        pushed.map(|n| n as u64)
+    }
+
     fn mem_map(
         &self,
         _caller: &CallerContext<'_>,
@@ -5056,6 +5126,162 @@ mod tests {
         // A `stream_echo` on a descriptor that is not a readable stream
         // fails closed rather than toggling another console.
         assert_eq!(h.stream_echo(&ctx, STDOUT, 1), Err(Errno::NotFound));
+    }
+
+    /// `console_input` copies the keyboard-input driver's decoded bytes
+    /// into the target console's injected-input queue, which is the same
+    /// queue the console's `read` half drains — so a `stream_read` from
+    /// the login then sees them (`plans/PI.md` P11 — keyboard input for
+    /// the video console).
+    #[test]
+    fn console_input_pushes_decoded_bytes_into_the_target_console_queue() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The producer's buffer at 0x1000 holds the decoded keystrokes.
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"root\r");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let write: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        // The video console: the same queue is both the injected-input
+        // sink and the read half.
+        let consoles: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::with_input(write, queue, queue)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+
+        assert_eq!(h.console_input(&ctx, 0, 0x1000, 5), Ok(5));
+        // The pushed bytes are now drainable from the console's read half.
+        let mut buf = [0u8; 8];
+        assert_eq!(crate::console::ConsoleRead::read(queue, &mut buf), Ok(5));
+        assert_eq!(&buf[..5], b"root\r");
+    }
+
+    /// `console_input` fails closed for a console index that names no
+    /// installed console — including the empty pre-install list — rather
+    /// than fabricating a queue (`AGENTS.md` §2.9).
+    #[test]
+    fn console_input_fails_closed_for_an_unknown_console() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let write: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let consoles: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::with_input(write, queue, queue)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+
+        // Index past the installed list fails closed.
+        assert_eq!(
+            h.console_input(&ctx, 5, 0x1000, 1),
+            Err(Errno::NotImplemented)
+        );
+        // The empty pre-install list fails closed for every index.
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            bare.console_input(&ctx, 0, 0x1000, 1),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// `console_input` fails closed for a console whose backing accepts no
+    /// injected input — a UART that reads its own hardware FIFO carries
+    /// `NULL_CONSOLE_INPUT` (`AGENTS.md` §2.9).
+    #[test]
+    fn console_input_fails_closed_for_a_console_with_no_injectable_input() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"x");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let write: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        // `new` (not `with_input`) leaves the input half at
+        // `NULL_CONSOLE_INPUT` — a UART that reads its own FIFO.
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            write,
+            &crate::console::NULL_CONSOLE_READ,
+        )]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+
+        assert_eq!(
+            h.console_input(&ctx, 0, 0x1000, 1),
+            Err(Errno::NotImplemented)
+        );
+        // A zero-length push touches neither the buffer nor the queue and
+        // is a valid no-op even on an injectable console.
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let kbd: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::with_input(write, queue, queue)]));
+        let hk = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(kbd);
+        assert_eq!(hk.console_input(&ctx, 0, 0x1000, 0), Ok(0));
+        let mut buf = [0u8; 4];
+        assert_eq!(crate::console::ConsoleRead::read(queue, &mut buf), Ok(0));
     }
 
     /// A `spawn` naming an installed console attaches the child's

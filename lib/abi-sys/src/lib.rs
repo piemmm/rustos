@@ -85,6 +85,7 @@ const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
+const NUM_CONSOLE_INPUT: u64 = SyscallNumber::CONSOLE_INPUT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -367,6 +368,34 @@ pub extern "C" fn sys_stream_echo(fd: u32, enabled: u32) -> i32 {
     }
 }
 
+/// `console_input`: inject `len` bytes of decoded keystroke input at
+/// `buf` into the installed console `console`
+/// (`SyscallNumber::CONSOLE_INPUT`, `AGENTS.md` §20, `plans/PI.md` P11 —
+/// keyboard input for the video console). Returns the number of bytes
+/// enqueued, or a `ROS_E_*` code reinterpreted into the result.
+///
+/// The producer-side call a keyboard-input driver issues after decoding a
+/// directly attached keyboard into console bytes. Gated kernel-side on
+/// `ROS_CAP_INPUT_INJECT`; the kernel validates the capability and the
+/// `(buf, len)` pair against the caller's address space before reading it
+/// (`AGENTS.md` §5.4), then pushes the bytes into the target console's
+/// input queue, which a `ros_sys_stream_read` of that console drains. A
+/// short push (the bounded queue is near full) reports fewer bytes; the
+/// driver retries the remainder and never blocks (`AGENTS.md` §2.1).
+#[must_use]
+#[export_name = "ros_sys_console_input"]
+pub extern "C" fn sys_console_input(console: u32, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`
+    // and the `(buf, len)` pair against the caller's address space before
+    // reading it (`AGENTS.md` §5.4).
+    unsafe {
+        raw_syscall(
+            NUM_CONSOLE_INPUT,
+            [u64::from(console), ptr_arg(buf), len as u64, 0, 0, 0],
+        )
+    }
+}
+
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
 /// calling process's own address space, honouring `flags`
 /// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
@@ -506,6 +535,7 @@ mod tests {
         (NUM_USERS_DB_READ, "users_db_read", 2),
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_ECHO, "stream_echo", 2),
+        (NUM_CONSOLE_INPUT, "console_input", 3),
     ];
 
     #[test]
@@ -713,6 +743,21 @@ mod tests {
             assert_eq!(sys_stream_echo(0, 0), 0);
         });
         assert_eq!(args[1], 0);
+    }
+
+    #[test]
+    fn console_input_marshals_console_pointer_and_len() {
+        let mut keys = *b"root\r";
+        let ptr = keys.as_mut_ptr().cast::<c_void>();
+        // The kernel returns the number of bytes enqueued.
+        let (number, args) = capture(5, || {
+            assert_eq!(sys_console_input(0, ptr, keys.len()), 5);
+        });
+        assert_eq!(number, NUM_CONSOLE_INPUT);
+        assert_eq!(args[0], 0);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], keys.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

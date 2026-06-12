@@ -401,11 +401,17 @@ Pi):
   P11): `boot_aarch64` installs `[VideoConsole, UartConsole]` through
   `BootInfo::with_consoles` when the framebuffer console is active
   (else `[UartConsole]`). `VideoConsole` writes through
-  `video::write_bytes` and reads from the keyboard seam — a directly
-  attached USB-HID / PS/2 keyboard once the P10 input wiring lands;
-  until then every poll reports "no input pending" and the reader
-  parks, so the video login waits at its prompt rather than borrowing
-  the serial line. `UartConsole`
+  `video::write_bytes`; its input half is the shared `VIDEO_KEYBOARD`
+  queue (`rustos_kernel_core::ConsoleInputQueue`), which is both the
+  console's `ConsoleRead` half (drained by a video-login `stream_read`)
+  and its `ConsoleInput` half (fed by the `console_input` syscall a
+  keyboard-input driver issues after decoding a directly attached
+  USB-HID / PS/2 keyboard). Until a keyboard driver pushes anything the
+  queue is empty, so the reader parks at its prompt rather than
+  borrowing the serial line — the video login takes input only from its
+  own keyboard, never the UART. (The keyboard-input driver and its
+  USB-HID/xHCI hardware path land on the Pi-metal P10 track; this is the
+  kernel-side delivery seam it pushes into.) `UartConsole`
   (`serial::write_console_bytes` / `read_console_bytes`) is the UART's
   own stream backing with its **own login session** and never touches
   the display. The UART transmit wait is **bounded**

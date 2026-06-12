@@ -32,6 +32,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_abi::Errno;
 use rustos_kernel_sched_api::SchedulerArch;
+use rustos_sync::SpinLock;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -150,6 +151,194 @@ impl ConsoleRead for NullConsoleRead {
 /// fail-closed without an `Option` branch on the hot path.
 pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
 
+/// A sink that accepts decoded keystroke bytes injected into a console
+/// from a user-space input driver (`AGENTS.md` §20, `plans/PI.md` P11 —
+/// keyboard input for the video console).
+///
+/// The producer counterpart of [`ConsoleRead`]. A keyboard-input driver
+/// that has decoded a directly attached keyboard (USB-HID / PS-2) into a
+/// stream of console bytes calls the `console_input` syscall (`abi-v1`
+/// number 22), which — after checking
+/// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT)
+/// and copying the bytes in — hands them to this half of the addressed
+/// [`ConsoleDevice`]. The matching [`ConsoleRead`] half then drains them
+/// for a `stream_read` consumer (login), so the video console's session
+/// reads its own keyboard rather than the UART's bytes.
+///
+/// Implementations must be [`Sync`]: the single installed console is
+/// shared by the per-CPU syscall handlers, exactly like [`ConsoleWrite`]
+/// and [`ConsoleRead`].
+pub trait ConsoleInput: Sync {
+    /// Enqueue up to `bytes.len()` decoded console bytes, returning the
+    /// number actually accepted.
+    ///
+    /// The caller (the `console_input` handler) has already copied
+    /// `bytes` out of user memory through the validated `copy_from_user`
+    /// boundary (`AGENTS.md` §5.4) and checked
+    /// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT);
+    /// the implementation only moves bytes into its queue. A short push
+    /// (fewer than `bytes.len()`, including zero when the bounded queue
+    /// is full) is permitted and reported through the return value; the
+    /// producer retries the remainder and never blocks (`AGENTS.md`
+    /// §2.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`Errno`] when the console accepts no injected
+    /// input. The default sink ([`NullConsoleInput`]) returns
+    /// [`Errno::NotImplemented`] to mark a console (a UART reading its
+    /// own hardware FIFO) that has no injectable input queue.
+    fn push(&self, bytes: &[u8]) -> Result<usize, Errno>;
+}
+
+/// The console input sink installed for a console that accepts no
+/// injected input.
+///
+/// Every push fails closed with [`Errno::NotImplemented`] — the
+/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
+/// `console_input` syscall targeting a console with no injectable queue
+/// (a UART, which reads its own hardware FIFO) announces an inert
+/// interface rather than silently dropping the keystrokes.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullConsoleInput;
+
+impl ConsoleInput for NullConsoleInput {
+    fn push(&self, _bytes: &[u8]) -> Result<usize, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullConsoleInput`] instance a console with no injectable
+/// input queue carries.
+///
+/// A [`ConsoleDevice`] whose console reads its own hardware (a UART)
+/// points its `input` half here so a `console_input` targeting it fails
+/// closed without an `Option` branch on the hot path.
+pub static NULL_CONSOLE_INPUT: NullConsoleInput = NullConsoleInput;
+
+/// Capacity, in bytes, of a [`ConsoleInputQueue`]'s type-ahead ring.
+///
+/// This is a **fixed bound**, not a scaling capacity (`AGENTS.md`
+/// §24.4): a console type-ahead buffer is the software analogue of a
+/// UART's hardware receive FIFO. A human types a handful of characters
+/// per second, so 256 bytes absorbs realistic type-ahead between
+/// `stream_read` drains; a bound rather than an unbounded queue means a
+/// wedged or absent consumer can never make the keyboard driver's pushes
+/// grow kernel memory without limit (`AGENTS.md` §4). Overflow drops the
+/// excess as a short push (the producer retries, `AGENTS.md` §2.1) — a
+/// dropped surplus keystroke is preferable to unbounded growth.
+pub const CONSOLE_INPUT_QUEUE_CAPACITY: usize = 256;
+
+/// The fixed-capacity byte ring behind a [`ConsoleInputQueue`].
+struct InputRing {
+    buf: [u8; CONSOLE_INPUT_QUEUE_CAPACITY],
+    /// Index of the next byte to drain.
+    head: usize,
+    /// Number of bytes currently queued.
+    len: usize,
+}
+
+impl InputRing {
+    const fn new() -> Self {
+        Self {
+            buf: [0; CONSOLE_INPUT_QUEUE_CAPACITY],
+            head: 0,
+            len: 0,
+        }
+    }
+}
+
+/// A bounded, lock-protected type-ahead queue that is both the
+/// [`ConsoleRead`] half (drained by `stream_read`) and the
+/// [`ConsoleInput`] half (fed by `console_input`) of a keyboard-backed
+/// console (`AGENTS.md` §20, `plans/PI.md` P11).
+///
+/// The video console installs one of these so a directly attached
+/// keyboard's decoded bytes — pushed by the keyboard-input driver — are
+/// drained by the login reading that console, instead of the inert
+/// `Ok(0)` poll a display with no keyboard would otherwise return. The
+/// arch port holds it in a `'static` and references it as both halves of
+/// the console's [`ConsoleDevice`]; the same `'static` is therefore
+/// shared by the producer (`console_input`) and the consumer
+/// (`stream_read`), so a push wakes a reader parked in
+/// [`BlockingConsoleRead`].
+///
+/// A drained byte is **zeroed in place** as it leaves the ring: a typed
+/// password transits this queue between the keyboard driver and login,
+/// so the buffer must not retain the cleartext after the consumer has
+/// taken it (`AGENTS.md` §4 — zero-on-free for memory that held a
+/// credential; §23.1 — secret hygiene).
+pub struct ConsoleInputQueue {
+    ring: SpinLock<InputRing>,
+}
+
+impl Default for ConsoleInputQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConsoleInputQueue {
+    /// Construct an empty queue. `const` so the arch port can place it in
+    /// a `'static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            ring: SpinLock::new(InputRing::new()),
+        }
+    }
+
+    /// Drain up to `buf.len()` queued bytes into `buf`, zeroing each
+    /// drained slot in the ring (`AGENTS.md` §4 — a transited credential
+    /// is not retained), and return the number drained.
+    fn drain(&self, buf: &mut [u8]) -> usize {
+        let mut ring = self.ring.lock();
+        let take = core::cmp::min(ring.len, buf.len());
+        for slot in buf.iter_mut().take(take) {
+            let idx = ring.head % CONSOLE_INPUT_QUEUE_CAPACITY;
+            *slot = ring.buf[idx];
+            ring.buf[idx] = 0;
+            ring.head = (ring.head + 1) % CONSOLE_INPUT_QUEUE_CAPACITY;
+            ring.len -= 1;
+        }
+        take
+    }
+
+    /// Enqueue as many of `bytes` as fit, returning the number accepted
+    /// (a short push when the ring fills; the producer retries the
+    /// remainder and never blocks, `AGENTS.md` §2.1).
+    fn enqueue(&self, bytes: &[u8]) -> usize {
+        let mut ring = self.ring.lock();
+        let mut pushed = 0;
+        for &byte in bytes {
+            if ring.len == CONSOLE_INPUT_QUEUE_CAPACITY {
+                break;
+            }
+            let idx = (ring.head + ring.len) % CONSOLE_INPUT_QUEUE_CAPACITY;
+            ring.buf[idx] = byte;
+            ring.len += 1;
+            pushed += 1;
+        }
+        pushed
+    }
+}
+
+impl ConsoleRead for ConsoleInputQueue {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        // An empty queue is a zero-length read, exactly like a UART with
+        // an empty RX FIFO; `BlockingConsoleRead` parks the caller and
+        // re-polls, so a later `console_input` push wakes it (`AGENTS.md`
+        // §20 — the backing owns blocking).
+        Ok(self.drain(buf))
+    }
+}
+
+impl ConsoleInput for ConsoleInputQueue {
+    fn push(&self, bytes: &[u8]) -> Result<usize, Errno> {
+        Ok(self.enqueue(bytes))
+    }
+}
+
 /// One installed system text console: the output sink and input source
 /// of a single console the per-process descriptor table can attach a
 /// standard stream to (`AGENTS.md` §20, `plans/PI.md` P11).
@@ -173,6 +362,15 @@ pub struct ConsoleDevice {
     pub write: &'static (dyn ConsoleWrite + 'static),
     /// The console's byte source (`stream_read`).
     pub read: &'static (dyn ConsoleRead + 'static),
+    /// The console's injected-input sink (`console_input`).
+    ///
+    /// A keyboard-backed console (the video console) points this and
+    /// [`Self::read`] at the **same** [`ConsoleInputQueue`], so a
+    /// keyboard-input driver's pushes are drained by the login reading
+    /// this console (`plans/PI.md` P11). A console that reads its own
+    /// hardware (a UART) points this at [`NULL_CONSOLE_INPUT`], so a
+    /// `console_input` targeting it fails closed (`AGENTS.md` §2.9).
+    pub input: &'static (dyn ConsoleInput + 'static),
     /// Whether a `stream_read` of this console echoes the bytes it
     /// consumes back to [`Self::write`] — the terminal local-echo of the
     /// console's read line discipline (`AGENTS.md` §20, `plans/PI.md`
@@ -185,16 +383,39 @@ pub struct ConsoleDevice {
 }
 
 impl ConsoleDevice {
-    /// Pair `write` and `read` as one installed console, with terminal
-    /// echo on by default (`AGENTS.md` §20 — interactive consoles echo).
+    /// Pair `write` and `read` as one installed console that accepts no
+    /// injected input, with terminal echo on by default (`AGENTS.md` §20
+    /// — interactive consoles echo).
+    ///
+    /// The console's `input` half is [`NULL_CONSOLE_INPUT`], so a
+    /// `console_input` targeting it fails closed — the right default for
+    /// a console that reads its own hardware (a UART). A keyboard-backed
+    /// console uses [`Self::with_input`] instead.
     #[must_use]
     pub const fn new(
         write: &'static (dyn ConsoleWrite + 'static),
         read: &'static (dyn ConsoleRead + 'static),
     ) -> Self {
+        Self::with_input(write, read, &NULL_CONSOLE_INPUT)
+    }
+
+    /// Pair `write`, `read`, and an injected-input sink `input` as one
+    /// installed console, with terminal echo on by default.
+    ///
+    /// A keyboard-backed console (the video console) passes the same
+    /// [`ConsoleInputQueue`] as both `read` and `input`, so the
+    /// keyboard-input driver's `console_input` pushes are drained by the
+    /// login's `stream_read` of this console (`plans/PI.md` P11).
+    #[must_use]
+    pub const fn with_input(
+        write: &'static (dyn ConsoleWrite + 'static),
+        read: &'static (dyn ConsoleRead + 'static),
+        input: &'static (dyn ConsoleInput + 'static),
+    ) -> Self {
         Self {
             write,
             read,
+            input,
             echo: AtomicBool::new(true),
         }
     }
@@ -534,5 +755,82 @@ mod tests {
         device.set_echo(true);
         device.echo_bytes(b"x");
         assert_eq!(W.taken(), b"x");
+    }
+
+    #[test]
+    fn null_console_input_fails_closed() {
+        // A console with no injectable queue (a UART) refuses every push
+        // rather than silently dropping the keystrokes.
+        assert_eq!(NULL_CONSOLE_INPUT.push(b"abc"), Err(Errno::NotImplemented));
+        assert_eq!(NullConsoleInput.push(&[]), Err(Errno::NotImplemented));
+    }
+
+    #[test]
+    fn input_queue_pushed_bytes_are_drained_in_order() {
+        let queue = ConsoleInputQueue::new();
+        // The producer (keyboard driver) pushes; the consumer (login)
+        // drains, in FIFO order.
+        assert_eq!(queue.push(b"root"), Ok(4));
+        let mut buf = [0u8; 8];
+        assert_eq!(queue.read(&mut buf), Ok(4));
+        assert_eq!(&buf[..4], b"root");
+        // Drained dry, a further read reports the empty poll (which
+        // `BlockingConsoleRead` turns into a park).
+        assert_eq!(queue.read(&mut buf), Ok(0));
+    }
+
+    #[test]
+    fn input_queue_drains_only_what_fits_and_keeps_the_rest() {
+        let queue = ConsoleInputQueue::new();
+        assert_eq!(queue.push(b"abcdef"), Ok(6));
+        // A short destination drains a prefix; the remainder stays queued
+        // for the next read (POSIX short-read semantics).
+        let mut small = [0u8; 4];
+        assert_eq!(queue.read(&mut small), Ok(4));
+        assert_eq!(&small, b"abcd");
+        let mut rest = [0u8; 4];
+        assert_eq!(queue.read(&mut rest), Ok(2));
+        assert_eq!(&rest[..2], b"ef");
+    }
+
+    #[test]
+    fn input_queue_wraps_around_the_ring() {
+        let queue = ConsoleInputQueue::new();
+        // Push, drain a prefix, push again: the second push wraps past the
+        // ring's physical end, and the FIFO order is preserved.
+        assert_eq!(queue.push(b"aaaa"), Ok(4));
+        let mut buf = [0u8; 3];
+        assert_eq!(queue.read(&mut buf), Ok(3));
+        assert_eq!(&buf, b"aaa");
+        assert_eq!(queue.push(b"bcd"), Ok(3));
+        let mut out = [0u8; 8];
+        assert_eq!(queue.read(&mut out), Ok(4));
+        assert_eq!(&out[..4], b"abcd");
+    }
+
+    #[test]
+    fn input_queue_overflow_is_a_short_push() {
+        let queue = ConsoleInputQueue::new();
+        // Filling to capacity accepts exactly the capacity; the surplus is
+        // a short push the producer retries (`AGENTS.md` §2.1), never an
+        // unbounded allocation (`AGENTS.md` §4).
+        let full = [b'x'; CONSOLE_INPUT_QUEUE_CAPACITY];
+        assert_eq!(queue.push(&full), Ok(CONSOLE_INPUT_QUEUE_CAPACITY));
+        assert_eq!(queue.push(b"y"), Ok(0));
+        // Draining one byte frees exactly one slot.
+        let mut one = [0u8; 1];
+        assert_eq!(queue.read(&mut one), Ok(1));
+        assert_eq!(queue.push(b"y"), Ok(1));
+    }
+
+    #[test]
+    fn input_queue_empty_destination_reads_nothing() {
+        let queue = ConsoleInputQueue::new();
+        assert_eq!(queue.push(b"data"), Ok(4));
+        // A zero-length destination drains nothing and leaves the queue
+        // intact.
+        assert_eq!(queue.read(&mut []), Ok(0));
+        let mut buf = [0u8; 8];
+        assert_eq!(queue.read(&mut buf), Ok(4));
     }
 }

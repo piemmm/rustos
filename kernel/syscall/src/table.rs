@@ -426,6 +426,37 @@ pub trait SyscallHandlers {
     fn stream_echo(&self, _caller: &CallerContext<'_>, _fd: u32, _enabled: u32) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Inject decoded keystroke bytes into the installed console `console`
+    /// (`AGENTS.md` §20, `plans/PI.md` P11 — keyboard input for the video
+    /// console).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_INJECT`] and that `buf` is a non-null
+    /// `UserPtr`. The implementation resolves `console` against the
+    /// boot-installed console list, copies up to `len` bytes in through
+    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4), pushes
+    /// them into that console's kernel-side input queue, and returns the
+    /// number enqueued — a short push when the bounded queue is near full,
+    /// which the producer retries (`AGENTS.md` §2.1, never blocks). A
+    /// `STREAM_READ` of the same console then drains them, so the video
+    /// console's login takes input from its own keyboard.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// no console list wired has no input queue to feed, as does a
+    /// `console` whose backing accepts no injected input (a UART reading
+    /// its own hardware FIFO). The real handler is installed in
+    /// `kernel/core`.
+    fn console_input(
+        &self,
+        _caller: &CallerContext<'_>,
+        _console: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -552,32 +583,21 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.cap_revoke(caller, args.0[0], cap)
             }
             SyscallNumber::CLOCK_GET => self.handlers.clock_get(caller),
-            SyscallNumber::IRQ_BIND => {
-                // `validate_arg` already constrained args[0] to fit in
-                // u32 (upper bits zero), so the narrowing is lossless.
-                #[allow(clippy::cast_possible_truncation)]
-                let line = (args.0[0] & 0xFFFF_FFFF) as u32;
-                self.handlers.irq_bind(caller, line)
-            }
+            SyscallNumber::IRQ_BIND => self.handlers.irq_bind(caller, decode_u32(args.0[0])),
             SyscallNumber::IRQ_WAIT => {
                 let handle = IrqHandle::from_raw(args.0[0]);
                 self.handlers.irq_wait(caller, handle, args.0[1])
             }
             SyscallNumber::RANDOM_GET => {
                 let len = decode_len(args.0[1])?;
-                // `validate_arg` already constrained args[2] to fit in u32
-                // (upper bits zero); `from_bits` rejects any reserved bit.
-                #[allow(clippy::cast_possible_truncation)]
-                let flags = RandomFlags::from_bits((args.0[2] & 0xFFFF_FFFF) as u32)?;
+                // `from_bits` rejects any reserved bit.
+                let flags = RandomFlags::from_bits(decode_u32(args.0[2]))?;
                 self.handlers.random_get(caller, args.0[0], len, flags)
             }
             SyscallNumber::STREAM_WRITE => {
-                // `validate_arg` constrained args[0] to fit in u32 (upper
-                // bits zero), so the narrowing is lossless.
-                #[allow(clippy::cast_possible_truncation)]
-                let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
                 let len = decode_len(args.0[2])?;
-                self.handlers.stream_write(caller, fd, args.0[1], len)
+                self.handlers
+                    .stream_write(caller, decode_u32(args.0[0]), args.0[1], len)
             }
             SyscallNumber::SPAWN => {
                 let len = decode_len(args.0[1])?;
@@ -587,17 +607,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.spawn(caller, args.0[0], len, args.0[2])
             }
             SyscallNumber::STREAM_READ => {
-                #[allow(clippy::cast_possible_truncation)]
-                let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
                 let len = decode_len(args.0[2])?;
-                self.handlers.stream_read(caller, fd, args.0[1], len)
+                self.handlers
+                    .stream_read(caller, decode_u32(args.0[0]), args.0[1], len)
             }
             SyscallNumber::MEM_MAP => {
                 let len = decode_len(args.0[0])?;
-                // `validate_arg` already constrained args[1] to fit in u32
-                // (upper bits zero); `from_bits` rejects any reserved bit.
-                #[allow(clippy::cast_possible_truncation)]
-                let flags = MapFlags::from_bits((args.0[1] & 0xFFFF_FFFF) as u32)?;
+                // `from_bits` rejects any reserved bit.
+                let flags = MapFlags::from_bits(decode_u32(args.0[1]))?;
                 self.handlers.mem_map(caller, len, flags, args.0[2])
             }
             SyscallNumber::MEM_UNMAP => {
@@ -614,17 +631,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.wait(caller, pid, args.0[1])
             }
             SyscallNumber::RLIMIT_GET => {
-                // `validate_arg` constrained args[0] to fit in u32 (upper
-                // bits zero), so the narrowing is lossless, and args[1] is a
-                // non-null `UserPtr`.
-                #[allow(clippy::cast_possible_truncation)]
-                let kind = (args.0[0] & 0xFFFF_FFFF) as u32;
-                self.handlers.rlimit_get(caller, kind, args.0[1])
+                self.handlers
+                    .rlimit_get(caller, decode_u32(args.0[0]), args.0[1])
             }
             SyscallNumber::RLIMIT_SET => {
-                #[allow(clippy::cast_possible_truncation)]
-                let kind = (args.0[0] & 0xFFFF_FFFF) as u32;
-                self.handlers.rlimit_set(caller, kind, args.0[1])
+                self.handlers
+                    .rlimit_set(caller, decode_u32(args.0[0]), args.0[1])
             }
             SyscallNumber::USERS_DB_READ => {
                 // `validate_arg` guarantees args[0] is a non-null
@@ -634,13 +646,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::CONSOLE_COUNT => self.handlers.console_count(caller),
             SyscallNumber::STREAM_ECHO => {
-                // `validate_arg` constrained both args to fit in u32 (upper
-                // bits zero), so the narrowings are lossless.
-                #[allow(clippy::cast_possible_truncation)]
-                let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
-                #[allow(clippy::cast_possible_truncation)]
-                let enabled = (args.0[1] & 0xFFFF_FFFF) as u32;
-                self.handlers.stream_echo(caller, fd, enabled)
+                self.handlers
+                    .stream_echo(caller, decode_u32(args.0[0]), decode_u32(args.0[1]))
+            }
+            SyscallNumber::CONSOLE_INPUT => {
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .console_input(caller, decode_u32(args.0[0]), args.0[1], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -809,6 +821,17 @@ fn decode_capability(raw: u64) -> Result<CapabilityId, Errno> {
 
 fn decode_len(raw: u64) -> Result<usize, Errno> {
     usize::try_from(raw).map_err(|_| Errno::LengthOutOfRange)
+}
+
+/// Narrow a `U32`-typed argument register to `u32`.
+///
+/// `validate_arg` has already rejected any value whose upper 32 bits are
+/// non-zero (the `AbiType::U32` rule), so the low-32 truncation is
+/// lossless; the mask makes that explicit and keeps the lint allow in one
+/// place rather than at every call site (`AGENTS.md` §2.2).
+#[allow(clippy::cast_possible_truncation)]
+const fn decode_u32(raw: u64) -> u32 {
+    (raw & 0xFFFF_FFFF) as u32
 }
 
 #[cfg(test)]
@@ -1039,6 +1062,19 @@ mod tests {
             // decoded `(fd, enabled)` without wiring a real console here.
             Ok(0)
         }
+        fn console_input(
+            &self,
+            _c: &CallerContext<'_>,
+            _console: u32,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("console_input");
+            // Echo the length back so the reachability test can assert the
+            // dispatcher decoded `(console, buf, len)` without wiring a
+            // real console input queue here.
+            Ok(len as u64)
+        }
     }
 
     #[test]
@@ -1059,6 +1095,7 @@ mod tests {
                 CapabilityId::PROC_SPAWN,
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::USERS_READ,
+                CapabilityId::INPUT_INJECT,
             ],
             &sink,
         );

@@ -100,8 +100,9 @@ pub use aspace::{AddressSpaceRegistry, AspaceError};
 pub use audit::AuditEvent;
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use console::{
-    BlockingConsoleRead, ConsoleDevice, ConsoleRead, ConsoleWrite, NullConsole, NullConsoleRead,
-    NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_READ,
+    BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead, ConsoleWrite,
+    NullConsole, NullConsoleInput, NullConsoleRead, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES,
+    NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,

@@ -561,6 +561,31 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_INPUT,
+        name: "console_input",
+        arg_count: 3,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` so the C view carries the bytes-enqueued-or-`-errno`
+        // register convention `stream_write` / `console_count` use.
+        ret: AbiType::U64,
+        // Feeding the system console's input is privileged, never ambient
+        // (`AGENTS.md` §4): only the keyboard-input driver that decoded a
+        // discovered keyboard holds `CAP_INPUT_INJECT`. Like the other
+        // per-byte stream operations (`stream_write` / `stream_read`) it
+        // fires once per keystroke, so auditing every call would drown the
+        // log — it is NOT audited (`AGENTS.md` §5.4.4); the device
+        // manager's one-time driver load IS the audited security decision.
+        required_capability: Some(CapabilityId::INPUT_INJECT),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -791,6 +816,17 @@ mod tests {
             Some(CapabilityId::CONSOLE_READ)
         );
         assert!(!stream_echo.audit, "stream_echo must not audit");
+        // console_input feeds keystroke bytes into a console's input
+        // queue, so it is gated on the privileged CAP_INPUT_INJECT — the
+        // system console's input is never ambient (`AGENTS.md` §4) — and,
+        // like the per-byte stream operations, is not audited per call
+        // (`AGENTS.md` §5.4.4).
+        let console_input = spec_for(SyscallNumber::CONSOLE_INPUT).unwrap();
+        assert_eq!(
+            console_input.required_capability,
+            Some(CapabilityId::INPUT_INJECT)
+        );
+        assert!(!console_input.audit, "console_input must not audit");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

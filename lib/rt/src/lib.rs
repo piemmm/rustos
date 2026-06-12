@@ -119,6 +119,9 @@ const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 /// `stream_echo` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
 
+/// `console_input` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CONSOLE_INPUT: u64 = SyscallNumber::CONSOLE_INPUT.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -260,6 +263,41 @@ pub fn set_echo(enabled: bool) -> i64 {
         raw_syscall(
             NUM_STREAM_ECHO,
             [u64::from(STDIN), u64::from(enabled), 0, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Inject `bytes` of decoded keystroke input into the installed console
+/// `console` (`SyscallNumber::CONSOLE_INPUT`, `AGENTS.md` §20,
+/// `plans/PI.md` P11 — keyboard input for the video console), returning
+/// the raw signed register (the bytes enqueued when non-negative, else
+/// `-errno`).
+///
+/// The producer-side call a keyboard-input driver issues after decoding a
+/// directly attached keyboard into a stream of console bytes: the kernel
+/// validates `CAP_INPUT_INJECT` and the `(buf, len)` pair against the
+/// caller's address space (`AGENTS.md` §5.4), then pushes the bytes into
+/// the target console's input queue, which a [`stdin`] read of that
+/// console then drains. A short push (the bounded queue is near full)
+/// reports fewer than `bytes.len()`; the driver retries the remainder and
+/// never blocks (`AGENTS.md` §2.1). A `console` index with no installed
+/// console, or one whose backing accepts no injected input (a UART), fails
+/// closed with `-errno` (`AGENTS.md` §2.9); the wrapper surfaces the raw
+/// signed value so the caller decides how to react.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn console_input(console: u32, bytes: &[u8]) -> i64 {
+    let ptr = bytes.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_INPUT_INJECT` and the `(buf, len)` pair against the caller's
+    // address space before reading it (`AGENTS.md` §5.4). `bytes` is a live
+    // shared `&[u8]` for the duration of the call, so the `(ptr, len)` pair
+    // denotes readable memory.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CONSOLE_INPUT,
+            [u64::from(console), ptr, bytes.len() as u64, 0, 0, 0],
         )
     };
     ret as i64
@@ -783,6 +821,30 @@ mod tests {
         });
         assert_eq!(args[0], u64::from(STDIN));
         assert_eq!(args[1], 0);
+    }
+
+    #[test]
+    fn console_input_marshals_console_pointer_and_len() {
+        let keys = *b"root\r";
+        let (number, args) = capture(5, || {
+            assert_eq!(console_input(0, &keys), 5);
+        });
+        assert_eq!(number, NUM_CONSOLE_INPUT);
+        assert_eq!(args[0], 0);
+        assert_eq!(args[1], keys.as_ptr() as usize as u64);
+        assert_eq!(args[2], keys.len() as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn console_input_surfaces_negative_errno_encoding() {
+        // A console with no injectable input refuses the push with
+        // `NotImplemented`; the wrapper surfaces the raw `-errno` register.
+        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(console_input(0, b"x"), want);
+        });
     }
 
     #[test]

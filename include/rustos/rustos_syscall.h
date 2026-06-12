@@ -45,6 +45,7 @@ extern "C" {
 #define ROS_SYS_USERS_DB_READ 19u
 #define ROS_SYS_CONSOLE_COUNT 20u
 #define ROS_SYS_STREAM_ECHO 21u
+#define ROS_SYS_CONSOLE_INPUT 22u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -69,6 +70,7 @@ int32_t ros_sys_rlimit_set(uint32_t a0, void * a1);
 uint64_t ros_sys_users_db_read(void * a0, uintptr_t a1);
 uint64_t ros_sys_console_count(void);
 int32_t ros_sys_stream_echo(uint32_t a0, uint32_t a1);
+uint64_t ros_sys_console_input(uint32_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -75,6 +75,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
 |  20 | `console_count`| —                                       | `u64` (count) | `CAP_CONSOLE_WRITE` | no    |
 |  21 | `stream_echo`  | `u32 fd`, `u32 enabled`                 | `errno` | `CAP_CONSOLE_READ`      | no      |
+|  22 | `console_input`| `u32 console`, `user_ptr`, `len`        | `u64` (bytes) | `CAP_INPUT_INJECT` | no      |
 
 ### Capability matrix
 
@@ -90,6 +91,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_PROC_SPAWN`   | `spawn`                    |
 | `CAP_CONSOLE_READ` | `stream_read`, `stream_echo` |
 | `CAP_USERS_READ`   | `users_db_read`            |
+| `CAP_INPUT_INJECT` | `console_input`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -189,6 +191,31 @@ unaudited. An `fd` that is not a readable inherited stream fails closed
 with `NotFound`; a console-less build fails closed with `NotImplemented`.
 The first-party Rust wrapper is `rustos_rt::set_echo`; the C stub is
 `ros_sys_stream_echo`.
+
+`console_input` (no. 22) injects decoded keystroke bytes into an
+installed console's kernel-side input queue — the producer counterpart of
+`stream_read`, the path that gives the video console keyboard input
+(`AGENTS.md` §20, `plans/PI.md` P11). `console` names an installed-console
+index directly (not an inherited descriptor: the producer is a driver, not
+a stream owner), and `(buf, len)` is the decoded byte run. A
+keyboard-input driver that has decoded a directly attached keyboard
+(USB-HID / PS-2) pushes the bytes here; the kernel copies them in and
+enqueues them on that console's `ConsoleInputQueue`, which a `stream_read`
+from the console's login then drains — so the video console reads its own
+keyboard rather than the UART (separate session contexts). It is gated on
+**`CAP_INPUT_INJECT`**: feeding the system console's input is privileged,
+never ambient (`AGENTS.md` §4), so only the keyboard-input driver the
+device manager loaded holds it; like the other per-byte stream operations
+it is unaudited (the device manager's one-time driver load is the audited
+decision). A short push (the bounded type-ahead queue is near full)
+reports fewer bytes and the driver retries (`AGENTS.md` §2.1, never
+blocks); a `console` index with no installed console, or one whose backing
+accepts no injected input (a UART reading its own hardware FIFO), fails
+closed with `NotImplemented` (`AGENTS.md` §2.9). The queue zeroes each
+byte as the consumer drains it — a typed password transits it, so the
+buffer retains no cleartext (`AGENTS.md` §4 / §23.1). The first-party Rust
+wrapper is `rustos_rt::console_input`; the C stub is
+`ros_sys_console_input`.
 
 ## Standard streams (fd 0/1/2/3)
 

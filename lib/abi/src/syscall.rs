@@ -275,6 +275,28 @@ impl SyscallNumber {
     /// [`crate::Errno::NotFound`]; a build with no console wired fails
     /// closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_ECHO: Self = Self(21);
+    /// Inject decoded keystroke input into a system text console
+    /// (`AGENTS.md` §20, `plans/PI.md` P11 — keyboard input for the video
+    /// console).
+    ///
+    /// Arguments: `console: u32` (the target installed-console index, as
+    /// reported by [`SyscallNumber::CONSOLE_COUNT`]), `buf: *const u8`
+    /// (the decoded console bytes), and `len: usize` (their length).
+    /// Returns the number of bytes enqueued (a short push when the
+    /// console's bounded input queue is near full — the producer retries
+    /// the remainder; it never blocks, `AGENTS.md` §2.1), or a negative
+    /// error code. The keyboard-input driver that decoded a directly
+    /// attached keyboard pushes the bytes here; a
+    /// [`SyscallNumber::STREAM_READ`] of the same console then drains
+    /// them, so the video console's login takes input from its own
+    /// keyboard rather than the UART (`plans/PI.md` P11 — separate
+    /// session contexts). Gated by
+    /// [`crate::CapabilityId::INPUT_INJECT`]: feeding the system
+    /// console's input is privileged, never ambient (`AGENTS.md` §4).
+    /// A `console` index with no installed console, or one whose backing
+    /// accepts no injected input (a UART that reads its own hardware
+    /// FIFO), fails closed with [`crate::Errno::NotImplemented`].
+    pub const CONSOLE_INPUT: Self = Self(22);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -372,6 +394,7 @@ mod tests {
         assert_eq!(SyscallNumber::USERS_DB_READ.as_u16(), 19);
         assert_eq!(SyscallNumber::CONSOLE_COUNT.as_u16(), 20);
         assert_eq!(SyscallNumber::STREAM_ECHO.as_u16(), 21);
+        assert_eq!(SyscallNumber::CONSOLE_INPUT.as_u16(), 22);
     }
 
     #[test]

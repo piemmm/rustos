@@ -588,7 +588,16 @@ fn run_phases<A: KernelArch>(
                     state.arch.as_ref(),
                     device.read,
                 )));
-            wrapped.push(crate::console::ConsoleDevice::new(device.write, blocking));
+            // Preserve the console's injected-input half across the
+            // wrap: a keyboard-backed console keeps the same
+            // `ConsoleInputQueue` the blocking `read` adapter now drains,
+            // so a `console_input` push still reaches the parked reader
+            // (`plans/PI.md` P11).
+            wrapped.push(crate::console::ConsoleDevice::with_input(
+                device.write,
+                blocking,
+                device.input,
+            ));
         }
         Box::leak(wrapped.into_boxed_slice())
     };

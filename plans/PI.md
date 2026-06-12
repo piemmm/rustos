@@ -2163,23 +2163,52 @@ two users — or the same user twice — can be logged in concurrently.
   CR/LF translation, `stream_echo` disabling echo, fail-closed on a
   non-read fd), console.rs `echo_bytes` unit tests, and lib/rt +
   abi-sys marshalling tests.
+- **Keyboard input for the video console — kernel-side delivery seam
+  LANDED.** The video console's read half is now a kernel-side type-ahead
+  queue a keyboard-input driver feeds, not the inert `Ok(0)` poll a
+  display-with-no-keyboard returned. New `abi-v1` syscall
+  **`console_input`** (no. 22, gated on new **`CAP_INPUT_INJECT`** (22),
+  unaudited): a driver that has decoded a directly attached keyboard
+  pushes the decoded console bytes into a target installed-console index;
+  the kernel copies them in (capability- and bounds-checked, §5.4),
+  enqueues them on that console's `rustos_kernel_core::ConsoleInputQueue`
+  (a bounded type-ahead ring that is both the console's `ConsoleRead`
+  half — drained by a video-login `stream_read`, waking a reader parked
+  in `BlockingConsoleRead` — and its `ConsoleInput` half), and zeroes
+  each byte as the consumer drains it (a typed password transits it,
+  §4 / §23.1). `ConsoleDevice` gained an `input` half (default
+  `NULL_CONSOLE_INPUT`, fail-closed; preserved across the init
+  `BlockingConsoleRead` rebuild); aarch64's `VIDEO_AND_UART_CONSOLES[0]`
+  is backed by the shared `VIDEO_KEYBOARD` queue, while the UART console
+  keeps `NULL_CONSOLE_INPUT` (a `console_input` to it fails closed) so the
+  video login takes input only from its own keyboard, never the serial
+  line. First-party wrapper `rustos_rt::console_input`; C stub
+  `ros_sys_console_input` (header regenerated). Proven by kernel-core
+  queue unit tests (FIFO drain, short read, ring wrap, overflow short
+  push) + the `console_input` handler tests (push→read round trip;
+  fail-closed for an unknown console and for a non-injectable UART
+  console) + lib/rt / abi-sys marshalling tests.
 
 **Remaining (next increments, in order):**
 
-1. **Keyboard input for the video console** — back `VideoConsole`'s
-   keyboard seam with the discovered USB-HID (P10 VL805/xHCI wiring) /
-   PS/2 input path, so the video login takes input from a directly
-   attached keyboard (`AGENTS.md` §20; the UART stays its own session).
-2. **Profile-silenced boot log** — keep the boot log echoed to the
-   screen **only** in debug-profile images, silent on installer images.
-3. **Configurable log policy** — the log output/direction (which
+1. **Keyboard input for the video console — producer + metal.** The
+   kernel-side delivery seam (`console_input` + `ConsoleInputQueue`)
+   above is landed; what remains is the *producer*: a shared `Key`→console-byte
+   keymap (the tty key map a `drivers/input/usb_hid` / PS-2 driver
+   applies to the decoded `rustos_input::Key` events), the driver loop
+   calling `console_input` against the video console's index, and the
+   USB-HID-over-xHCI **VL805 metal** path that delivers the reports
+   (the P10 alternative track). QEMU models no Pi USB, so the producer's
+   decode + keymap are host-proven and the hardware delivery is a metal
+   checklist (`AGENTS.md` §20; the UART stays its own session).
+2. **Configurable log policy** — the log output/direction (which
    consoles/sinks receive log lines), rotation, and on-storage age
    limits become administrator-settable configuration under
    `/System/Settings` (§16.2), replacing the compiled-in routing;
    requires the persistent `/System/Logs` store (§19.4) before rotation
    and age limits are meaningful. The debug-build dual echo stays a
    debug-only exception.
-4. **Login over a real database in production.** The passphrase-derived
+3. **Login over a real database in production.** The passphrase-derived
    root-unlock **primitive is landed**: `drivers/filesystem/rustfs`'s
    `unlock` module (`UnlockDescriptor` — PBKDF2-HMAC-SHA256 over a
    per-volume random salt + bounded iteration count, fail-closed

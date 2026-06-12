@@ -41,5 +41,6 @@
 #define ROS_CAP_CONSOLE_READ ((uint16_t)19u)
 #define ROS_CAP_RLIMIT_RAISE ((uint16_t)20u)
 #define ROS_CAP_USERS_READ ((uint16_t)21u)
+#define ROS_CAP_INPUT_INJECT ((uint16_t)22u)
 
 #endif /* ROS_CAPABILITY_H */

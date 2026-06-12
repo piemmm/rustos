@@ -708,12 +708,21 @@ spec §18.
   `spawn`'s console selector (`CONSOLE_INHERIT` or an explicit validated
   index) plus the `console_count` syscall (no. 20) let PID 1 `init`
   supervise one login per console with wait-any reaping and per-console
-  relaunch budgets. Remaining console wiring (stream-layer echo + its
-  control contract, the video console's keyboard input, configurable log
-  policy) is staged in `plans/PI.md` P11; login's authenticate path on a
-  real volume additionally rides the production `mem_map` producer
-  (`plans/SPAWN.md` SP5b — the userland heap is inert until it lands, so
-  login's path to its prompt is allocation-free).
+  relaunch budgets. Terminal local echo is the kernel's read
+  line-discipline (`stream_read` echoes consumed bytes, CR/LF→CR-LF),
+  toggled per console by the `stream_echo` syscall (no. 21,
+  `CAP_CONSOLE_READ`) that login uses to suppress echo around a password
+  read. The video console's keyboard-input *delivery seam* is wired: a
+  keyboard-input driver pushes decoded console bytes into a console's
+  kernel-side `ConsoleInputQueue` through the `console_input` syscall
+  (no. 22, `CAP_INPUT_INJECT`), which a video-login `stream_read` drains
+  (the UART stays its own session, fail-closed to injection). Remaining
+  console wiring (the keyboard *producer* — a `Key`→byte keymap + the
+  USB-HID/PS-2 driver loop + the Pi VL805/xHCI metal path — and
+  configurable log policy) is staged in `plans/PI.md` P11; login's
+  authenticate path on a real volume additionally rides the production
+  `mem_map` producer (`plans/SPAWN.md` SP5b — the userland heap is inert
+  until it lands, so login's path to its prompt is allocation-free).
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 

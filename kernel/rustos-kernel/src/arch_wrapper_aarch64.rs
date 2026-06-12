@@ -142,16 +142,18 @@ pub static UART_CONSOLE: UartConsole = UartConsole;
 /// boot path lists when the P7b framebuffer boot console is configured
 /// (`plans/PI.md` P11).
 ///
-/// A zero-sized [`ConsoleWrite`] + [`ConsoleRead`] adapter over the
-/// framebuffer text renderer: every `stream_write` byte is rendered on
-/// screen through [`rustos_arch_aarch64::video::write_bytes`]. Its input
-/// half is the **keyboard** seam: the display's session reads a directly
-/// attached keyboard (USB HID / PS-2 — the P10 input wiring), never the
-/// UART, which is its own console with its own login (`plans/PI.md`
-/// P11). Until the P10 keyboard wiring lands the seam reports "no input
-/// pending" on every poll, so kernel-core's `BlockingConsoleRead` parks
-/// a reader until a keyboard exists — the prompt waits instead of
-/// exiting or borrowing the serial line (`AGENTS.md` §2.9 / §5.4).
+/// A zero-sized [`ConsoleWrite`] adapter over the framebuffer text
+/// renderer: every `stream_write` byte is rendered on screen through
+/// [`rustos_arch_aarch64::video::write_bytes`]. The video console's
+/// **input** half is not this type but the shared [`VIDEO_KEYBOARD`]
+/// queue: the display's session reads a directly attached keyboard
+/// (USB HID / PS-2 — the P10 input wiring), whose decoded bytes the
+/// keyboard-input driver pushes through the `console_input` syscall,
+/// never the UART, which is its own console with its own login
+/// (`plans/PI.md` P11). Until a keyboard driver pushes anything the
+/// queue is empty, so kernel-core's `BlockingConsoleRead` parks a reader
+/// until a keystroke arrives — the prompt waits instead of exiting or
+/// borrowing the serial line (`AGENTS.md` §2.9 / §5.4).
 #[derive(Debug, Default, Copy, Clone)]
 pub struct VideoConsole;
 
@@ -168,30 +170,34 @@ impl ConsoleWrite for VideoConsole {
     }
 }
 
-impl ConsoleRead for VideoConsole {
-    fn read(&self, _buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
-        // The keyboard seam (`plans/PI.md` P10): no directly attached
-        // keyboard source is wired yet, so every poll honestly reports
-        // "no input pending". Kernel-core's `BlockingConsoleRead` turns
-        // that into a scheduler park, so the video login waits at its
-        // prompt until input hardware exists rather than reading the
-        // UART console's bytes (`plans/PI.md` P11) or fabricating end of
-        // input (`AGENTS.md` §2.9).
-        Ok(0)
-    }
-}
-
 /// The single `'static` [`VideoConsole`] the boot path lists first when
 /// the framebuffer boot console is active. Zero-sized, like
 /// [`UART_CONSOLE`].
 pub static VIDEO_CONSOLE: VideoConsole = VideoConsole;
+
+/// The video console's keyboard type-ahead queue (`plans/PI.md` P11 —
+/// keyboard input for the video console).
+///
+/// It is both the video console's [`rustos_kernel_core::ConsoleRead`]
+/// half (drained by a `stream_read` from the video login) and its
+/// [`rustos_kernel_core::ConsoleInput`] half (fed by the `console_input`
+/// syscall a keyboard-input driver issues after decoding a directly
+/// attached keyboard). The same `'static` backs both halves, so a
+/// driver's push wakes the reader parked in kernel-core's
+/// `BlockingConsoleRead`. The UART console reads its own hardware FIFO
+/// and so carries no such queue — the video login takes input only from
+/// its own keyboard, never the serial line (`plans/PI.md` P11).
+pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
+    rustos_kernel_core::ConsoleInputQueue::new();
 
 /// The console list installed when the framebuffer boot console is
 /// active: the video console is the primary (index 0, PID 1's banner +
 /// the first login) and the UART is an independent second console with
 /// its own login session (`plans/PI.md` P11).
 pub static VIDEO_AND_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 2] = [
-    rustos_kernel_core::ConsoleDevice::new(&VIDEO_CONSOLE, &VIDEO_CONSOLE),
+    // The video console: written to the framebuffer, read from (and fed
+    // by `console_input` into) the shared keyboard type-ahead queue.
+    rustos_kernel_core::ConsoleDevice::with_input(&VIDEO_CONSOLE, &VIDEO_KEYBOARD, &VIDEO_KEYBOARD),
     rustos_kernel_core::ConsoleDevice::new(&UART_CONSOLE, &UART_CONSOLE),
 ];
 
