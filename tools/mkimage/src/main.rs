@@ -5,7 +5,8 @@
 //!     --kernel <rustos-kernel ELF> \
 //!     --firmware <dir with the pinned blobs> \
 //!     [--manifest <firmware.lock>] \
-//!     [--out images/rustos-aarch64-rpi.img] \
+//!     [--profile debug|installer] \
+//!     [--out images/rustos-aarch64-rpi-<profile>.img] \
 //!     [--root-key <key file>] [--root-key-out <key file>]
 //! ```
 //!
@@ -21,7 +22,8 @@ use std::process::ExitCode;
 
 use rustos_mkimage::firmware::FirmwareManifest;
 use rustos_mkimage::{
-    build_rpi_image, volume_key_from_hex, volume_key_to_hex, EntropySource, HostEntropy, VolumeKey,
+    build_rpi_image, volume_key_from_hex, volume_key_to_hex, EntropySource, HostEntropy,
+    ImageProfile, VolumeKey,
 };
 
 fn main() -> ExitCode {
@@ -40,6 +42,7 @@ struct RpiArgs {
     kernel: PathBuf,
     firmware_dir: PathBuf,
     manifest: PathBuf,
+    profile: ImageProfile,
     out: PathBuf,
     root_key_in: Option<PathBuf>,
     root_key_out: Option<PathBuf>,
@@ -76,8 +79,14 @@ fn run(argv: &[OsString]) -> Result<(), String> {
         key
     };
 
-    let built = build_rpi_image(&kernel_elf, &firmware, &root_key, &mut HostEntropy)
-        .map_err(|e| e.to_string())?;
+    let built = build_rpi_image(
+        &kernel_elf,
+        &firmware,
+        &root_key,
+        &mut HostEntropy,
+        rpi.profile,
+    )
+    .map_err(|e| e.to_string())?;
 
     if let Some(parent) = rpi.out.parent() {
         if !parent.as_os_str().is_empty() {
@@ -120,6 +129,7 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
     let mut kernel = None;
     let mut firmware_dir = None;
     let mut manifest = None;
+    let mut profile = None;
     let mut out = None;
     let mut root_key_in = None;
     let mut root_key_out = None;
@@ -138,6 +148,15 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
             "--kernel" => kernel = Some(value("--kernel")?),
             "--firmware" => firmware_dir = Some(value("--firmware")?),
             "--manifest" => manifest = Some(value("--manifest")?),
+            "--profile" => {
+                let name = value("--profile")?;
+                let name = name
+                    .to_str()
+                    .ok_or_else(|| "--profile value must be valid UTF-8".to_string())?;
+                profile = Some(ImageProfile::from_label(name).ok_or_else(|| {
+                    format!("unknown profile {name:?}; expected `debug` or `installer`")
+                })?);
+            }
             "--out" => out = Some(value("--out")?),
             "--root-key" => root_key_in = Some(value("--root-key")?),
             "--root-key-out" => root_key_out = Some(value("--root-key-out")?),
@@ -145,13 +164,17 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
         }
     }
 
+    let profile = profile.unwrap_or(ImageProfile::Debug);
     Ok(RpiArgs {
         kernel: kernel.ok_or_else(|| format!("--kernel is required\n{}", usage()))?,
         firmware_dir: firmware_dir.ok_or_else(|| format!("--firmware is required\n{}", usage()))?,
         manifest: manifest.unwrap_or_else(|| {
             PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/firmware.lock"))
         }),
-        out: out.unwrap_or_else(|| PathBuf::from("images/rustos-aarch64-rpi.img")),
+        profile,
+        out: out.unwrap_or_else(|| {
+            PathBuf::from(format!("images/rustos-aarch64-rpi-{}.img", profile.label()))
+        }),
         root_key_in,
         root_key_out,
     })
@@ -159,7 +182,7 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
 
 fn usage() -> String {
     "usage: rustos-mkimage rpi --kernel <elf> --firmware <dir> \
-     [--manifest <firmware.lock>] [--out <img>] \
+     [--manifest <firmware.lock>] [--profile debug|installer] [--out <img>] \
      [--root-key <file>] [--root-key-out <file>]"
         .into()
 }

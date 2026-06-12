@@ -110,6 +110,11 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_curses_input",
         description: "lib/curses input decoder (untrusted key/mouse/paste bytes)",
     },
+    Target {
+        package: "rustos-users",
+        test: "fuzz_users",
+        description: "lib/users database parser (untrusted /System/Security/Users bytes)",
+    },
 ];
 
 /// How long to run each harness.

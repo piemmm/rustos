@@ -6,7 +6,10 @@
 //! `/Users`, `/Apps`, and `/Storage`, plus the fixed `/System` subtree.
 //! The user and group databases under `/System/Security`, the first user's
 //! home, and the mount policies are the §11 installer's first-boot job —
-//! the image ships the skeleton the installer fills in.
+//! the image ships the skeleton the installer fills in. A **debug** image
+//! ([`crate::ImageProfile::Debug`]) additionally seeds a pre-authored
+//! `/System/Security/Users` database so the login prompt is usable without
+//! running the installer; an installer image ships none.
 //!
 //! `RustFS` has no plaintext mode: the volume is provisioned under a
 //! caller-supplied volume key, and mounting it requires that key. The
@@ -48,18 +51,25 @@ pub const SYSTEM_SUBDIRS: [&str; 12] = [
 /// the volume size (`RustFS` allocates inodes from this hint's table).
 const ROOT_INODE_HINT: u32 = 4096;
 
+/// Name of the user database file under `/System/Security` (`AGENTS.md`
+/// §16.2).
+pub const USERS_DB_NAME: &str = "Users";
+
 /// Author the `RustFS` root partition: format `sectors` sectors under
-/// `volume_key` and create the §16 directory skeleton.
+/// `volume_key`, create the §16 directory skeleton, and — when `users_db`
+/// is given — write it to `/System/Security/Users`.
 ///
 /// # Errors
 ///
-/// [`MkimageError::RootPartition`] if formatting or any directory
-/// creation fails (including an entropy failure while provisioning the
-/// volume's key hierarchy — never a weakly-keyed volume, `AGENTS.md` §5.4).
+/// [`MkimageError::RootPartition`] if formatting, any directory creation,
+/// or the user-database write fails (including an entropy failure while
+/// provisioning the volume's key hierarchy — never a weakly-keyed volume,
+/// `AGENTS.md` §5.4).
 pub fn build_root_partition(
     sectors: u64,
     volume_key: &VolumeKey,
     entropy: &mut dyn EntropySource,
+    users_db: Option<&str>,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::RootPartition)?;
     let mut fs = RustFs::format(dev, ROOT_INODE_HINT, volume_key, entropy)
@@ -80,6 +90,9 @@ pub fn build_root_partition(
                         fs.create(sub_node, sec.as_bytes(), NodeKind::Directory)
                             .map_err(MkimageError::RootPartition)?;
                     }
+                    if let Some(text) = users_db {
+                        write_users_db(&mut fs, sub_node, text)?;
+                    }
                 }
             }
         }
@@ -87,6 +100,26 @@ pub fn build_root_partition(
 
     fs.flush().map_err(MkimageError::RootPartition)?;
     Ok(fs.into_block().into_bytes())
+}
+
+/// Create `/System/Security/Users` and write `text` into it whole; a short
+/// write is a build failure, never a truncated database (`AGENTS.md` §2.9).
+fn write_users_db(
+    fs: &mut RustFs<MemBlock>,
+    security: rustos_abi::driver::filesystem::NodeId,
+    text: &str,
+) -> Result<(), MkimageError> {
+    fs.create(security, USERS_DB_NAME.as_bytes(), NodeKind::RegularFile)
+        .map_err(MkimageError::RootPartition)?;
+    let written = fs
+        .write_at(security, USERS_DB_NAME.as_bytes(), 0, text.as_bytes())
+        .map_err(MkimageError::RootPartition)?;
+    if written != text.len() {
+        return Err(MkimageError::RootPartition(
+            rustos_abi::DriverError::DeviceFault,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -112,7 +145,7 @@ mod tests {
     }
 
     fn build() -> Vec<u8> {
-        build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7))
+        build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), None)
             .expect("root partition builds")
     }
 
@@ -161,6 +194,37 @@ mod tests {
                 Err(DriverError::DeviceFault)
             }
         }
-        assert!(build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy).is_err());
+        assert!(build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy, None).is_err());
+    }
+
+    #[test]
+    fn a_seeded_users_database_is_written_and_reads_back() {
+        let text = "rustos-users-v1\n# seeded for the test\n";
+        let bytes = build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), Some(text))
+            .expect("root partition builds");
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let security = fs.lookup(system, b"Security").expect("Security exists");
+        let users = fs
+            .lookup(security, USERS_DB_NAME.as_bytes())
+            .expect("Users database exists");
+        let mut buf = vec![0u8; text.len() + 16];
+        let read = fs
+            .read_at(users, 0, &mut buf)
+            .expect("Users database reads");
+        assert_eq!(&buf[..read], text.as_bytes());
+    }
+
+    #[test]
+    fn an_unseeded_root_ships_no_users_database() {
+        let bytes = build();
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = RustFs::open(dev, &TEST_KEY).expect("mounts");
+        let root = fs.root();
+        let system = fs.lookup(root, b"System").expect("/System exists");
+        let security = fs.lookup(system, b"Security").expect("Security exists");
+        assert!(fs.lookup(security, USERS_DB_NAME.as_bytes()).is_err());
     }
 }

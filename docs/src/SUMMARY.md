@@ -44,6 +44,7 @@
   - [`rustos-log`](./lib/log.md)
   - [`rustos-rng`](./lib/rng.md)
   - [`rustos-termcap`](./lib/termcap.md)
+  - [`rustos-users`](./lib/users.md)
   - [`rustos-util`](./lib/util.md)
   - [`rustos-vt`](./lib/vt.md)
 

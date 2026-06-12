@@ -125,6 +125,9 @@ The work splits into three arcs:
 - **Arc C — Real peripherals + bootable image + desktop (P7–P10).**
   Mailbox/framebuffer, SD, USB-HID, the SD-card image, and finally the
   WM/taskbar on the HVS path. These need real hardware to *fully* prove.
+- **Arc D — Multi-user login (P11).** Every text console sits at a
+  `login:` prompt backed by the `/System/Security/Users` database; the
+  video and UART consoles are separate session contexts.
 
 Land them in order; each stage's "Done when" gate is binding.
 
@@ -2001,6 +2004,70 @@ the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
 demo (photo + UART log) is the acceptance artefact. Headless `-M raspi4b`
 CI stays green throughout.
 
+### P11 — Login on the consoles `[~]`
+
+Every *text* console (screen, UART) that reaches user mode sits at a
+`login:` prompt; an authenticated user's **shell of choice** is started as
+their session. The video console and the UART console are **separate
+session contexts** (separate stream backings, separate login instances), so
+two users — or the same user twice — can be logged in concurrently.
+
+**Landed — the credential foundation (host-proven):**
+
+- `lib/crypto`: PBKDF2-HMAC-SHA256 (`pbkdf2_sha256` / `pbkdf2_sha256_verify`,
+  published vectors, `ct_eq` comparison) — the password derivation the user
+  database stores.
+- `lib/users` (`rustos-users`): the `/System/Security/Users` `users-v1`
+  format — full §5.1 account identity (username, uid/gids, display name,
+  home, shell of choice, `CAP_*` grant ceiling, `active`/`locked` state,
+  salted PBKDF2 record at a bounded per-record cost), fail-closed bounded
+  parser (64 KiB / 512-byte lines / 512 records, unique usernames + uids),
+  exact-round-trip serialiser, and `authenticate` with one indistinguishable
+  refusal + a dummy derivation at the database's highest cost for unknown /
+  locked accounts (§19.1). Fuzz harness `fuzz_users` enrolled in
+  `cargo xtask fuzz`. Docs: `docs/src/lib/users.md`.
+- `userland/session/login::auth::UsersAuthenticator`: the production
+  `Authenticator` seam over a parsed `UsersDb`; every refusal is the same
+  `Errno::PermissionDenied`. Login's `Uid`/`Gid` now come from `lib/users`.
+- `tools/mkimage` image profiles: `cargo xtask image --target aarch64-rpi
+  [--profile debug|installer]` emits
+  `images/rustos-aarch64-rpi-<profile>.img`. The **debug** image seeds
+  `/System/Security/Users` with the `root`/`root` test account (per-build
+  random salt, default cost, explicit admin cap ceiling); the **installer**
+  image seeds none (the §11 installer authors it on first boot). Proven by
+  mkimage host tests mounting the built root and authenticating.
+
+**Remaining (next increments, in order):**
+
+1. **Root-volume read path at boot** — the kernel (or an early service)
+   must read `/System/Security/Users` from the mounted RustFS root so the
+   login path can hold a parsed `UsersDb` (blocked on the P8/P9 metal root
+   mount for the Pi; the `virt` boards need an equivalent volume-backed
+   path or a boot-supplied database hand-off).
+2. **The login `Run` binary** — a `rustos-rt` program wiring the real
+   seams: `Prompt` over fd 0/1 (un-echoed password — needs an echo-control
+   contract on the stream backing), `UsersAuthenticator` over the loaded
+   database, and a `SessionLauncher` that spawns the record's shell path
+   via `spawn` and `wait`s; registered as `/System/Services/login` in the
+   kernel program registry; `init`'s `session` directive points at login,
+   which supervises per-console sessions.
+3. **Separate console contexts** — split the aarch64 video console and
+   UART into two independent `ConsoleRead`/`ConsoleWrite` stream backings
+   with their own descriptor sets, and have `init` spawn one login per
+   discovered text console. Keystroke echo / line editing live in the
+   stream layer, not in programs.
+4. **Beacon + bring-up debug removal** — delete the boot-progress beacons
+   (`boot_aarch64`) and the serial bring-up mirror
+   (`kernel/arch/aarch64/src/serial.rs` module docs carry the removal
+   note); keep the boot log echoed to the screen **only** in debug-profile
+   images, silent on installer images.
+
+**Done when:** a metal Pi 4 and the `virt` verticals sit at `login:` on
+every text console, `root`/`root` logs in on a debug image and gets the
+record's shell, a second login on the other console works concurrently,
+an installer image refuses every login until the installer has authored
+users, and no beacon/debug output remains in production boots.
+
 ---
 
 ## 4. Cross-cutting requirements (apply to every stage)
@@ -2025,7 +2092,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo fmt --all && cargo fmt --all --check
 cargo xtask ci            # clippy -D warnings, deps-check, cfg-check, test matrix,
                           # docs-check, deny, c-header drift, proptest/fuzz --quick,
-                          # model-check, spec-review, abi-check
+                          # model-check, spec-review, abi-check, and the image gate
+                          # (both aarch64-rpi profiles built end-to-end)
 cargo xtask fuzz --secs 5
 tools/ci/soak.sh both --secs 10
 ```

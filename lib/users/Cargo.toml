@@ -1,0 +1,24 @@
+[package]
+name = "rustos-users"
+description = "RustOS user-account database: the `/System/Security/Users` format, password verification, and account identity types."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+rustos-caps = { path = "../caps", version = "=0.0.0" }
+rustos-crypto = { path = "../crypto", version = "=0.0.0" }
+
+[dev-dependencies]
+# The §19.6 fuzz harness (`tests/fuzz_users.rs`) drives the parser through
+# the shared seed/budget seam (`rustos_fuzzseed`): one place picks the
+# per-run seed, logs it at start-of-test, and honours the wall-clock budget
+# (`AGENTS.md` §2.2). Test scaffolding only; never in a RustOS build.
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

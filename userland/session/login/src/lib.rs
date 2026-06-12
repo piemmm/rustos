@@ -45,13 +45,16 @@
 //! * [`session`] — the identity types ([`Uid`], [`Gid`],
 //!   [`AuthenticatedUser`], [`SessionKind`]) and the [`Prompt`],
 //!   [`Authenticator`], and [`SessionLauncher`] seams.
+//! * [`auth`] — [`UsersAuthenticator`], the production [`Authenticator`]
+//!   over the `/System/Security/Users` database (`lib/users`).
 //! * [`login`] — the [`Login`] state machine.
 //!
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
-//! audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`, so a
-//! userland service never links a kernel or driver crate (`AGENTS.md` §17.4).
+//! audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`, and
+//! `rustos-users`, so a userland service never links a kernel or driver
+//! crate (`AGENTS.md` §17.4).
 //! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
 //! (`AGENTS.md` §2.9).
 
@@ -61,11 +64,13 @@
 
 extern crate alloc;
 
+pub mod auth;
 pub mod error;
 pub mod events;
 pub mod login;
 pub mod session;
 
+pub use auth::UsersAuthenticator;
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};
 pub use session::{

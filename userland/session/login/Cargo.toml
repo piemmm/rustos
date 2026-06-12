@@ -20,3 +20,7 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # Structured audit logging for every security-relevant login decision (§19.4).
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The user-account database: the `/System/Security/Users` format, the
+# account identity types, and the timing-equalised password verification
+# the `UsersAuthenticator` seam is built on (§5.1).
+rustos-users = { path = "../../../lib/users", version = "=0.0.0" }

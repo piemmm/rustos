@@ -31,8 +31,9 @@ rules, it points to them.
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
 | `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
+| `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 
-Other subcommands (`build`, `coverage`, `image`) exist for development and
+Other subcommands (`build`, `coverage`) exist for development and
 release flows; they are documented by `cargo xtask --help`.
 
 [agents]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md

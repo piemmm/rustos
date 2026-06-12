@@ -8,8 +8,8 @@ crashed, never errored (`AGENTS.md` §10). The installed binary lives at
 `/System/Services/login`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
-the audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`,
-so a userland service never links a kernel or driver crate
+the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`, and
+`rustos-users`, so a userland service never links a kernel or driver crate
 (`AGENTS.md` §17.4).
 
 ## The policy machine, not a credential store
@@ -80,6 +80,22 @@ they are in-memory fixtures. Splitting the seams from the state machine
 keeps the security-relevant policy independent of kernel plumbing and
 exhaustively testable.
 
+## The production authenticator (`UsersAuthenticator`)
+
+`auth::UsersAuthenticator` is the shipped `Authenticator`: it wraps a
+parsed [`rustos-users`](../lib/users.md) database — the
+`/System/Security/Users` text — and delegates the whole verification to
+`UsersDb::authenticate` (PBKDF2-HMAC-SHA256 through `lib/crypto`,
+constant-time hash comparison, and a timing-equalised refusal for unknown
+or locked accounts, `AGENTS.md` §19.1). Every refusal is mapped to the
+same `Errno::PermissionDenied`, and a success is mapped to the
+`AuthenticatedUser` identity tuple straight from the matched record —
+including the user's **shell of choice**, which the `SessionLauncher`
+launches as the text session. Reading the database text off the root
+volume (and wiring the launcher to the real `spawn` path) is the login
+*binary*'s job, staged with the per-console session work in
+`plans/PI.md`.
+
 ## Audit events
 
 `login` owns the reserved `EventId` range `10000..11000`
@@ -102,5 +118,7 @@ covering a successful text login, the graphical option hidden when
 unavailable, an offered graphical session selected and defaulted to text,
 wrong-password retry then success, the fail-closed lockout and zero-budget
 paths, a dead console, and a refused session launch — plus the
-session-choice parser, the `EventId` range and uniqueness invariants, and
-the numeric audit-field formatter.
+session-choice parser, the `EventId` range and uniqueness invariants, the
+numeric audit-field formatter, and the `UsersAuthenticator` (full identity
+mapping on success; one uniform refusal for a wrong password, an unknown
+user, a locked account, and empty credentials).

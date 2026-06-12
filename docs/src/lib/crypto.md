@@ -12,6 +12,7 @@ audit footprint never exceeds a handful of crates.
 | SHA-256   | `sha256(&[u8]) -> [u8; 32]`   | `sha2 = 0.10.9`      |
 | Ed25519 verification | `Ed25519PublicKey::verify` | `ed25519-dalek = 2.1.1` |
 | ChaCha20-Poly1305 AEAD | `aead::seal` / `aead::open` | `chacha20poly1305 = 0.10.1` |
+| PBKDF2-HMAC-SHA256 | `pbkdf2_sha256` / `pbkdf2_sha256_verify` | `hmac = 0.12.1` + `sha2` |
 
 Signing is **not** exposed. Signing keys live behind the local capability
 authority service introduced in later stages and are never linked into
@@ -37,6 +38,20 @@ caller. The one consumer today is the kernel's encrypted-swap layer
 key with a monotonic counter. On any authentication failure `open`
 returns the single opaque `AeadError::Authentication`, leaking nothing
 about why a forgery was rejected (`AGENTS.md` §5.4).
+
+## Password derivation (§5.1)
+
+`kdf::pbkdf2_sha256` derives a 32-byte password hash with PBKDF2-HMAC-SHA256
+(RFC 8018 §5.2): a deliberately slow, salted derivation that makes offline
+guessing of a stolen `/System/Security/Users` record expensive. The output
+length equals the HMAC output, so exactly one PBKDF2 block is computed, and
+the iteration count is a `NonZeroU32` — zero rounds is unrepresentable. It
+is a standard *construction* over the same audited HMAC primitive (the same
+shape as `rustos-rng`'s HMAC-DRBG), not a hand-rolled primitive
+(`AGENTS.md` §2.12). `pbkdf2_sha256_verify` compares through `ct_eq`, so a
+stored-hash comparison cannot leak through timing (`AGENTS.md` §19.1). The
+consumer is `lib/users`, which owns the salt, the accepted cost range, and
+the stored-record encoding.
 
 ## Pinning
 
@@ -78,3 +93,6 @@ as a dedicated step.
 * `ct_eq`: a per-position single-byte-flip sweep, a content-independent
   traversal-count check, and a fixed-seed randomised differential against
   the reference `==`.
+* PBKDF2-HMAC-SHA256: the published SHA-256 re-computations of the
+  RFC 6070 inputs (`("password", "salt")` at 1, 2, and 4096 iterations),
+  plus input-sensitivity and tampered-hash rejections.

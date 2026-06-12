@@ -742,7 +742,10 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // so the Stage-2 QEMU integration tests run as part of every PR per
     // `AGENTS.md` §7; CI hosts therefore need QEMU, `grub-mkrescue`,
     // `xorriso`, and OVMF, all documented under
-    // `docs/src/platform/x86_64.md`.
+    // `docs/src/platform/x86_64.md`. The closing image gate additionally
+    // needs the pinned Pi firmware blobs: an operator-staged directory
+    // (`--firmware`/`$RUSTOS_PI_FIRMWARE`) or `curl` to populate the
+    // checksummed cache (`docs/src/install/raspberry_pi.md`).
     run_fmt(ctx, &[])?;
     run_clippy(ctx, &[])?;
     // Modularity gates (§17.5) are static, deterministic, and cheap, so
@@ -792,6 +795,32 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // Verify the committed copy is in sync so a `lib/abi` change cannot land
     // without regenerating the header non-Rust programs link against.
     run_c_header(ctx, &[])?;
+    // §12/§15.6: every shippable image profile is built on every PR, so an
+    // image-breaking change (kernel link, firmware manifest, root-volume
+    // layout, profile seeding) can never land green. Both profiles of every
+    // delivered image platform are assembled end-to-end and written under
+    // `images/`; the pinned firmware blobs come from the operator-staged
+    // directory or the checksummed `target/pi-firmware` cache.
+    run_image_gate(ctx)?;
+    Ok(())
+}
+
+/// Build every delivered image profile as part of the `ci` gate. The image
+/// platform set follows PLAN.md Stage 8: `aarch64-rpi` is the only platform
+/// delivered so far; new platforms join this gate as they land.
+fn run_image_gate(ctx: &Context) -> Result<(), String> {
+    for profile in ["debug", "installer"] {
+        eprintln!("xtask: [ci] image aarch64-rpi profile {profile}");
+        run_image(
+            ctx,
+            &[
+                OsString::from("--target"),
+                OsString::from("aarch64-rpi"),
+                OsString::from("--profile"),
+                OsString::from(profile),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -829,6 +858,7 @@ struct ImageArgs {
     /// Operator-staged firmware directory (`--firmware` /
     /// `$RUSTOS_PI_FIRMWARE`); `None` means fetch into the build cache.
     firmware_dir: Option<PathBuf>,
+    profile: rustos_mkimage::ImageProfile,
     out: Option<PathBuf>,
     root_key: Option<PathBuf>,
 }
@@ -836,11 +866,14 @@ struct ImageArgs {
 /// Parse `image` arguments: `--target <name>` (required; only
 /// `aarch64-rpi` exists today), `--firmware <dir>` (or
 /// `$RUSTOS_PI_FIRMWARE`; optional — missing blobs are fetched from the
-/// manifest's pinned source otherwise), `--out <path>`,
-/// `--root-key <file>`, and `--headless`.
+/// manifest's pinned source otherwise), `--profile debug|installer`
+/// (default `debug` — the development image seeds the test `root` account;
+/// the installer image seeds none), `--out <path>`, `--root-key <file>`,
+/// and `--headless`.
 fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
     let mut target: Option<String> = None;
     let mut firmware_dir: Option<PathBuf> = None;
+    let mut profile: Option<rustos_mkimage::ImageProfile> = None;
     let mut out: Option<PathBuf> = None;
     let mut root_key: Option<PathBuf> = None;
     let mut it = args.iter();
@@ -860,6 +893,15 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
                 firmware_dir = Some(PathBuf::from(
                     it.next().ok_or("image: --firmware requires a value")?,
                 ));
+            }
+            "--profile" => {
+                let name = it
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .ok_or("image: --profile requires a value")?;
+                profile = Some(rustos_mkimage::ImageProfile::from_label(name).ok_or_else(
+                    || format!("image: unknown profile {name:?}; expected `debug` or `installer`"),
+                )?);
             }
             "--out" => {
                 out = Some(PathBuf::from(
@@ -890,6 +932,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
         firmware_dir.or_else(|| std::env::var_os(PI_FIRMWARE_ENV).map(PathBuf::from));
     Ok(ImageArgs {
         firmware_dir,
+        profile: profile.unwrap_or(rustos_mkimage::ImageProfile::Debug),
         out,
         root_key,
     })
@@ -978,6 +1021,7 @@ fn resolve_root_key(root_key: Option<&Path>) -> Result<rustos_mkimage::VolumeKey
 fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let ImageArgs {
         firmware_dir,
+        profile,
         out,
         root_key,
     } = parse_image_args(args)?;
@@ -1037,6 +1081,7 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         &firmware,
         &key,
         &mut rustos_mkimage::HostEntropy,
+        profile,
     )
     .map_err(|e| format!("image: {e}"))?;
 
@@ -1045,7 +1090,7 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let out = out.unwrap_or_else(|| {
         ctx.workspace_root
             .join("images")
-            .join("rustos-aarch64-rpi.img")
+            .join(format!("rustos-aarch64-rpi-{}.img", profile.label()))
     });
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)
@@ -1064,8 +1109,9 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     }
 
     eprintln!(
-        "xtask: [image] wrote {} ({} bytes); root volume key: {}",
+        "xtask: [image] wrote {} profile {} ({} bytes); root volume key: {}",
         out.display(),
+        profile.label(),
         built.image.len(),
         key_out.display()
     );

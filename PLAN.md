@@ -680,6 +680,16 @@ spec §18.
 - App-bundle loader (signed `AppInfo` verification, granted caps = user ∩
   manifest, fixed `.app` layout enforced, §16.5) and the dynamic-loader policy
   resolving only the bundle's `Libraries/` + `/System/Libraries/` (§16.4).
+- User-account database (`lib/users`): the `/System/Security/Users`
+  `users-v1` format (full §5.1 identity incl. shell of choice and the
+  `CAP_*` grant ceiling), PBKDF2-HMAC-SHA256 password records over
+  `lib/crypto`, fail-closed bounded parsing (fuzzed), and timing-equalised
+  authentication; `login`'s production `Authenticator`
+  (`UsersAuthenticator`) verifies against it. Image profiles
+  (`tools/mkimage` `--profile debug|installer`) seed the debug
+  `root`/`root` test account or, for the installer image, none. Console
+  wiring (login binary, per-console sessions) is staged in
+  `plans/PI.md` P11.
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 

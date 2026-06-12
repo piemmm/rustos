@@ -1062,6 +1062,7 @@ dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-log",
+ "rustos-users",
 ]
 
 [[package]]
@@ -1076,9 +1077,11 @@ name = "rustos-mkimage"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-caps",
  "rustos-crypto",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
+ "rustos-users",
 ]
 
 [[package]]
@@ -2422,6 +2425,16 @@ name = "rustos-useradd"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+]
+
+[[package]]
+name = "rustos-users"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-crypto",
+ "rustos-fuzzseed",
 ]
 
 [[package]]

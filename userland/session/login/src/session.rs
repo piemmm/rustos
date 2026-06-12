@@ -24,19 +24,7 @@ use alloc::vec::Vec;
 use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 
-/// Numeric user identifier (`AGENTS.md` §5.1).
-///
-/// A newtype rather than a bare `u32` so a uid cannot be confused with a gid
-/// or any other identifier. `uid == 0` carries **no** ambient power; powers
-/// come from capabilities (`AGENTS.md` §5.1).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct Uid(pub u32);
-
-/// Numeric group identifier (`AGENTS.md` §5.1).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct Gid(pub u32);
+pub use rustos_users::{Gid, Uid};
 
 /// A username and the password offered for it.
 ///

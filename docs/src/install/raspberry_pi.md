@@ -2,11 +2,25 @@
 
 `cargo xtask image --target aarch64-rpi` (equivalently `cargo xtask build
 --target aarch64-rpi`, with or without `--headless`) emits
-`images/rustos-aarch64-rpi.img`, a flashable SD-card image for the
-Raspberry Pi 4 (BCM2711). The builder is `tools/mkimage`
+`images/rustos-aarch64-rpi-<profile>.img`, a flashable SD-card image for
+the Raspberry Pi 4 (BCM2711). The builder is `tools/mkimage`
 (`rustos-mkimage`): pure Rust, no `parted`/`mkfs` shell-outs (`AGENTS.md`
 §12), with both partitions laid down by the real in-tree filesystem
 drivers.
+
+Both profiles are also assembled end-to-end by the `cargo xtask ci`
+image gate on every change, so an image-breaking change cannot land
+green.
+
+Two image profiles exist (`--profile`, default `debug`):
+
+- **`debug`** — the development image: the root volume is seeded with a
+  `/System/Security/Users` database carrying the single test account
+  `root` / `root` (salted and hashed per build, `lib/users`), so the
+  login prompt is usable without running the installer. A debug image
+  must never ship.
+- **`installer`** — the shippable image: no user accounts; the first-boot
+  installer (`AGENTS.md` §11) authors the user database.
 
 ## Image layout
 
@@ -67,10 +81,11 @@ cargo xtask image --target aarch64-rpi
 
 This one step builds the aarch64 kernel, fetches any missing firmware
 blob from the pinned source, verifies the firmware against the
-manifest, and writes:
+manifest, and writes (for the default `debug` profile; pass
+`--profile installer` for the installer image):
 
-- `images/rustos-aarch64-rpi.img` — the flashable image.
-- `images/rustos-aarch64-rpi.rootkey` — the root volume key (64 hex
+- `images/rustos-aarch64-rpi-debug.img` — the flashable image.
+- `images/rustos-aarch64-rpi-debug.rootkey` — the root volume key (64 hex
   digits, owner-readable only).
 
 RustFS has no plaintext mode, so the root partition is provisioned under
@@ -86,7 +101,7 @@ Write the image to an SD card (replace `sdX` with the card device — this
 destroys its contents):
 
 ```sh
-sudo dd if=images/rustos-aarch64-rpi.img of=/dev/sdX bs=4M conv=fsync
+sudo dd if=images/rustos-aarch64-rpi-debug.img of=/dev/sdX bs=4M conv=fsync
 ```
 
 Connect a 3.3 V serial adapter to the Pi's UART header (GPIO 14/15,

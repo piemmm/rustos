@@ -20,6 +20,14 @@
 //!   The volume key is drawn per image and returned to the operator; it is
 //!   never stored inside the image.
 //!
+//! Two [`ImageProfile`]s exist. **Installer** is the shippable form: the
+//! root carries no user accounts, and the §11 installer authors
+//! `/System/Security/Users` on first boot. **Debug** is the development
+//! form: the root is seeded with a `root`/`root` account
+//! ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], salted and hashed per build) so
+//! the login prompt is usable without running the installer. A debug image
+//! must never ship.
+//!
 //! The builder is driven by `cargo xtask image --target aarch64-rpi` (or
 //! `cargo xtask build --target aarch64-rpi`) and by the `rustos-mkimage`
 //! binary directly; see `docs/src/install/raspberry_pi.md`.
@@ -39,7 +47,9 @@ pub use rustos_drv_fs_rustfs::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
 use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
 use mbr::{PartitionExtent, PART_TYPE_FAT32_LBA, PART_TYPE_RUSTFS};
-use rustos_abi::DriverError;
+use rustos_abi::{CapabilityId, DriverError};
+use rustos_caps::CapabilitySet;
+use rustos_users::{AccountState, Gid, Identity, Salt, Uid, UserRecord, UsersDb};
 
 /// First sector of the FAT32 boot partition (1 MiB alignment, the
 /// universal SD-card convention).
@@ -82,6 +92,8 @@ pub enum MkimageError {
     Entropy(String),
     /// A volume-key file is malformed.
     VolumeKeyFile(String),
+    /// Authoring the seeded user database failed.
+    UsersDb(String),
 }
 
 impl fmt::Display for MkimageError {
@@ -95,11 +107,98 @@ impl fmt::Display for MkimageError {
             Self::RootPartition(err) => write!(f, "root partition: driver error {err:?}"),
             Self::Entropy(msg) => write!(f, "host entropy: {msg}"),
             Self::VolumeKeyFile(msg) => write!(f, "volume-key file: {msg}"),
+            Self::UsersDb(msg) => write!(f, "users database: {msg}"),
         }
     }
 }
 
 impl std::error::Error for MkimageError {}
+
+/// Which kind of image to author (`AGENTS.md` §12).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ImageProfile {
+    /// Development image: the root volume is seeded with the
+    /// [`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`] account so the login prompt is
+    /// usable without the installer. Never shipped.
+    Debug,
+    /// Shippable image: no user accounts; the §11 installer authors
+    /// `/System/Security/Users` on first boot.
+    Installer,
+}
+
+impl ImageProfile {
+    /// The stable name used in image filenames and the CLI.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Installer => "installer",
+        }
+    }
+
+    /// The profile named `name`, if any. Exact and case-sensitive, so a
+    /// profile flag has one spelling (fail closed).
+    #[must_use]
+    pub fn from_label(name: &str) -> Option<Self> {
+        match name {
+            "debug" => Some(Self::Debug),
+            "installer" => Some(Self::Installer),
+            _ => None,
+        }
+    }
+}
+
+/// Username of the debug-profile test account.
+pub const DEBUG_USERNAME: &str = "root";
+
+/// Password of the debug-profile test account. Knowable by design — the
+/// debug image exists for bring-up on development hardware and must never
+/// ship; the installer image seeds no account at all.
+pub const DEBUG_PASSWORD: &str = "root";
+
+/// Build the debug-profile `/System/Security/Users` text: the single
+/// `root` account, its password salted from `entropy` and hashed at the
+/// default PBKDF2 cost, granted the administrative capability ceiling a
+/// bring-up session needs (`AGENTS.md` §5.2 — powers come from
+/// capabilities, not from `uid 0`).
+fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageError> {
+    let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
+    entropy
+        .fill(&mut salt)
+        .map_err(|e| MkimageError::Entropy(format!("users salt: {e:?}")))?;
+
+    let mut capabilities = CapabilitySet::empty();
+    for cap in [
+        CapabilityId::USER_ADMIN,
+        CapabilityId::FS_MOUNT,
+        CapabilityId::PROC_SPAWN,
+        CapabilityId::CONSOLE_READ,
+        CapabilityId::CONSOLE_WRITE,
+    ] {
+        capabilities.insert(cap);
+    }
+
+    let record = UserRecord::with_password(
+        Identity {
+            username: DEBUG_USERNAME,
+            uid: Uid(0),
+            primary_gid: Gid(0),
+            supplementary_gids: &[],
+            display_name: "System Administrator",
+            home: "/Users/root",
+            shell: "/Apps/Shell.app/Run",
+            capabilities,
+            state: AccountState::Active,
+        },
+        DEBUG_PASSWORD.as_bytes(),
+        salt,
+        rustos_users::DEFAULT_ITERATIONS,
+    )
+    .map_err(|e| MkimageError::UsersDb(format!("debug root record: {e}")))?;
+    let db = UsersDb::new(vec![record])
+        .map_err(|e| MkimageError::UsersDb(format!("debug database: {e}")))?;
+    Ok(db.serialise())
+}
 
 /// The assembled image plus the material the operator must keep.
 pub struct RpiImage {
@@ -116,7 +215,9 @@ pub struct RpiImage {
 /// `firmware` is the verified blob set from
 /// [`firmware::FirmwareManifest::load_dir`]; `root_key` is the volume key
 /// to provision the root under (drawn from [`HostEntropy`] by the CLI);
-/// `entropy` seeds the root volume's internal key hierarchy.
+/// `entropy` seeds the root volume's internal key hierarchy and, on a
+/// debug build, the seeded account's password salt; `profile` selects the
+/// [`ImageProfile`].
 ///
 /// # Errors
 ///
@@ -128,10 +229,20 @@ pub fn build_rpi_image(
     firmware: &[FirmwareFile],
     root_key: &VolumeKey,
     entropy: &mut dyn EntropySource,
+    profile: ImageProfile,
 ) -> Result<RpiImage, MkimageError> {
+    let users_db = match profile {
+        ImageProfile::Debug => Some(debug_users_db(entropy)?),
+        ImageProfile::Installer => None,
+    };
     let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
     let boot = fatboot::build_boot_partition(u64::from(BOOT_PART_SECTORS), firmware, &kernel8)?;
-    let root = rootfs::build_root_partition(u64::from(ROOT_PART_SECTORS), root_key, entropy)?;
+    let root = rootfs::build_root_partition(
+        u64::from(ROOT_PART_SECTORS),
+        root_key,
+        entropy,
+        users_db.as_deref(),
+    )?;
 
     let mbr_sector = mbr::encode_mbr(&[
         PartitionExtent {
@@ -267,6 +378,7 @@ mod tests {
             &test_firmware(),
             &TEST_KEY,
             &mut TestEntropy(9),
+            ImageProfile::Installer,
         )
         .expect("image builds");
         assert_eq!(built.image.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
@@ -305,6 +417,55 @@ mod tests {
         .expect("root partition mounts");
         let rustfs_root = rfs.root();
         rfs.lookup(rustfs_root, b"System").expect("/System exists");
+
+        // An installer image ships no user accounts (§11 first-boot job).
+        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let security = rfs.lookup(system, b"Security").expect("Security");
+        assert!(rfs
+            .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
+            .is_err());
+    }
+
+    #[test]
+    fn a_debug_image_seeds_a_root_account_that_authenticates() {
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &TEST_KEY,
+            &mut TestEntropy(9),
+            ImageProfile::Debug,
+        )
+        .expect("image builds");
+
+        let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
+        let root_len = ROOT_PART_SECTORS as usize * SECTOR_BYTES;
+        let root_bytes = built.image[root_at..root_at + root_len].to_vec();
+        let mut rfs = RustFs::open(
+            MemBlock::from_bytes(root_bytes).expect("whole sectors"),
+            &TEST_KEY,
+        )
+        .expect("root partition mounts");
+        let rustfs_root = rfs.root();
+        let system = rfs.lookup(rustfs_root, b"System").expect("/System");
+        let security = rfs.lookup(system, b"Security").expect("Security");
+
+        let users = rfs
+            .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
+            .expect("Users database exists");
+        let mut buf = vec![0u8; rustos_users::MAX_DB_LEN];
+        let read = rfs
+            .read_at(users, 0, &mut buf)
+            .expect("Users database reads");
+        let text = core::str::from_utf8(&buf[..read]).expect("valid UTF-8");
+        let db = UsersDb::parse(text).expect("seeded database parses");
+
+        let record = db
+            .authenticate(DEBUG_USERNAME, DEBUG_PASSWORD.as_bytes())
+            .expect("root/root authenticates");
+        assert_eq!(record.uid(), Uid(0));
+        assert_eq!(record.shell(), "/Apps/Shell.app/Run");
+        assert!(record.capabilities().contains(CapabilityId::USER_ADMIN));
+        assert!(db.authenticate(DEBUG_USERNAME, b"wrong").is_err());
     }
 
     #[test]
@@ -313,9 +474,23 @@ mod tests {
             b"not an elf",
             &test_firmware(),
             &TEST_KEY,
-            &mut TestEntropy(9)
+            &mut TestEntropy(9),
+            ImageProfile::Installer
         )
         .is_err());
+    }
+
+    #[test]
+    fn image_profiles_have_one_spelling_each() {
+        assert_eq!(ImageProfile::from_label("debug"), Some(ImageProfile::Debug));
+        assert_eq!(
+            ImageProfile::from_label("installer"),
+            Some(ImageProfile::Installer)
+        );
+        assert_eq!(ImageProfile::from_label("Debug"), None);
+        assert_eq!(ImageProfile::from_label(""), None);
+        assert_eq!(ImageProfile::Debug.label(), "debug");
+        assert_eq!(ImageProfile::Installer.label(), "installer");
     }
 
     #[test]

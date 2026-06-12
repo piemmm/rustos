@@ -346,6 +346,9 @@ rustos/
 │   │                    #   fail-closed from_term (§2.2, §2.9, §16.1).
 │   ├── theme/           # Shared desktop theme definition: dark/light
 │   │                    #   palettes, corner radii, fonts, cursors (§10).
+│   ├── users/           # User-account database: the /System/Security/Users
+│   │                    #   format, PBKDF2 password records over lib/crypto,
+│   │                    #   and timing-equalised authentication (§5.1).
 │   ├── util/            # Strictly justified utilities.
 │   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox property-channel
 │   │                    #   client (framebuffer + display-size queries), shared
@@ -745,7 +748,10 @@ an update to this section.
 
 - `cargo xtask build --target <platform>` produces:
   - `images/rustos-x86_64.iso` (hybrid BIOS/UEFI, USB-writable)
-  - `images/rustos-aarch64-rpi.img` (SD-card writable)
+  - `images/rustos-aarch64-rpi-<profile>.img` (SD-card writable; the
+    `--profile` flag selects `installer` — the shippable form, no user
+    accounts — or `debug`, the development form seeded with the
+    `root`/`root` test account, which must never ship)
   - `images/rustos-riscv64.img`
   - `images/rustos-web/` (static tree for Apache/Nginx, contains `.wasm`,
     `.html`, `.js` glue, and a service worker)
