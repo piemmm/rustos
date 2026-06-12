@@ -8,9 +8,10 @@ crashed, never errored (`AGENTS.md` §10). The installed binary lives at
 `/System/Services/login`.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
-the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`, and
-`rustos-users`, so a userland service never links a kernel or driver crate
-(`AGENTS.md` §17.4).
+the audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
+`rustos-users`, and `rustos-vt` (the shared terminal-control vocabulary the
+read line discipline keys off), so a userland service never links a kernel
+or driver crate (`AGENTS.md` §17.4).
 
 ## The policy machine, not a credential store
 
@@ -108,12 +109,16 @@ launches as the text session.
 supervises (`plans/PI.md` P11). It wires the real seams:
 
 - **`Prompt`** over the inherited standard streams (`AGENTS.md` §20):
-  prompts to fd 1, lines from fd 0, read byte-wise into the state
-  machine's stack buffers (`INPUT_LINE_MAX` — an over-long line is
-  refused whole, never truncated). The bootstrap stream backing never
-  echoes input, so the password read is un-echoed by construction; the
-  echo-*control* contract lands with the stream-layer echo itself (P11
-  increment 1, "separate console contexts").
+  prompts to fd 1, lines from fd 0, read byte-wise through the shared read
+  line discipline (`rustos_login::push_line_byte`) into the state machine's
+  stack buffers (`INPUT_LINE_MAX` — an over-long line is refused whole,
+  never truncated). The kernel console owns the matching **echo** half:
+  each character is echoed, a Backspace/Delete rubs out the previous one,
+  and the password read disables echo with `stream_echo`
+  (`rustos_rt::set_echo`) so the credential is never rendered — failing the
+  read closed if echo cannot be disabled (`AGENTS.md` §5.4). Because both
+  halves key off the one `lib/vt` erase definition (§2.2), the bytes login
+  keeps always match the screen.
 - **`UsersAuthenticator`** over the database obtained through the
   capability-gated `users_db_read` syscall (`CAP_USERS_READ`, see
   [`architecture/syscalls.md`](../architecture/syscalls.md)) and re-parsed

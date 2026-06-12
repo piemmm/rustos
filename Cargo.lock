@@ -933,6 +933,7 @@ dependencies = [
  "rustos-sync",
  "rustos-users",
  "rustos-util",
+ "rustos-vt",
  "zeroize",
 ]
 
@@ -1075,6 +1076,7 @@ dependencies = [
  "rustos-log",
  "rustos-rt",
  "rustos-users",
+ "rustos-vt",
 ]
 
 [[package]]

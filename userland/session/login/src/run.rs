@@ -94,8 +94,16 @@ mod program {
         }
     }
 
-    /// Read one input line (without its terminator) from standard input
-    /// into `buf`, returning the number of bytes filled.
+    /// Read one edited input line (without its terminator) from standard
+    /// input into `buf`, returning the number of bytes filled.
+    ///
+    /// The read line discipline is shared with the kernel console echo: this
+    /// runs the **buffer** half ([`rustos_login::push_line_byte`]) while the
+    /// kernel console runs the matching **echo** half, both keyed off the one
+    /// `lib/vt` erase definition (`AGENTS.md` §2.2). So a Backspace rubs out
+    /// the last character both on screen and in `buf`; CR and LF both
+    /// terminate (UART terminals commonly send CR); a line longer than `buf`
+    /// is refused, never truncated (`AGENTS.md` §2.9).
     ///
     /// **Allocation-free by design**: every byte lands in the caller's
     /// stack buffer, because the `mem_map`-backed userland heap is not
@@ -105,9 +113,7 @@ mod program {
     /// §20): each `stream_read` parks until input arrives, so a
     /// zero-length read means the stream failed or closed — reported as
     /// a console failure the login loop fails closed on, never spun on
-    /// (`AGENTS.md` §2.1). CR and LF both terminate (UART terminals
-    /// commonly send CR); a line longer than `buf` is refused, never
-    /// truncated (`AGENTS.md` §2.9).
+    /// (`AGENTS.md` §2.1).
     fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
         let mut len = 0;
         let mut byte = [0u8; 1];
@@ -116,15 +122,10 @@ mod program {
             if read == 0 {
                 return Err(Errno::NotFound);
             }
-            match byte[0] {
-                b'\r' | b'\n' => return Ok(len),
-                other => {
-                    if len == buf.len() {
-                        return Err(Errno::LengthOutOfRange);
-                    }
-                    buf[len] = other;
-                    len += 1;
-                }
+            match rustos_login::push_line_byte(buf, &mut len, byte[0]) {
+                rustos_login::LineFeed::Pending => {}
+                rustos_login::LineFeed::Complete => return Ok(len),
+                rustos_login::LineFeed::TooLong => return Err(Errno::LengthOutOfRange),
             }
         }
     }

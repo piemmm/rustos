@@ -55,6 +55,11 @@ rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
+# The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
+# console read line discipline (`src/console.rs`) echoes line terminators and
+# the erase (rub-out) control through `rustos_vt::control` rather than a second
+# definition of those bytes.
+rustos-vt = { path = "../../lib/vt", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The `/System/Security/Users` database format the boot-time root-volume
 # read path (`src/users.rs`) parses and the login path authenticates

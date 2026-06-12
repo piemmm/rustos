@@ -34,6 +34,10 @@ rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # account identity types, and the timing-equalised password verification
 # the `UsersAuthenticator` seam is built on (§5.1).
 rustos-users = { path = "../../../lib/users", version = "=0.0.0" }
+# The single ANSI/VT terminal-control vocabulary (`AGENTS.md` §2.2): the
+# read line discipline (`src/line.rs`) recognises the same erase (rub-out)
+# control the kernel console echo does, from one shared definition.
+rustos-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
 # The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and

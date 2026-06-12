@@ -411,3 +411,24 @@ fn parser_consumes_a_deterministic_byte_sweep_without_panic() {
     // Reaching here without a panic is the assertion.
     let _ = sink;
 }
+
+#[test]
+fn is_line_erase_recognises_both_rub_out_bytes() {
+    use crate::control;
+    // A serial terminal's Backspace (`BS`) and an xterm/keymap Backspace
+    // (`DEL`) both erase; nothing else does.
+    assert!(control::is_line_erase(control::BS));
+    assert!(control::is_line_erase(control::DEL));
+    assert!(!control::is_line_erase(control::CR));
+    assert!(!control::is_line_erase(control::LF));
+    assert!(!control::is_line_erase(b'a'));
+    assert!(!control::is_line_erase(0));
+}
+
+#[test]
+fn erase_echo_is_backspace_space_backspace() {
+    use crate::control;
+    // Rubbing out one glyph: step left, overwrite with a space, step left
+    // again so the cursor rests where the glyph was.
+    assert_eq!(control::ERASE_ECHO, [control::BS, b' ', control::BS]);
+}

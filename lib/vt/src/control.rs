@@ -18,6 +18,9 @@ pub const LF: u8 = 0x0a;
 pub const CR: u8 = 0x0d;
 /// Escape (`ESC`, `^[`) — the introducer for every escape sequence.
 pub const ESC: u8 = 0x1b;
+/// Delete (`DEL`, `^?`) — the byte most modern terminals send for the
+/// Backspace key, and the rub-out control of the read line discipline.
+pub const DEL: u8 = 0x7f;
 
 /// The byte after `ESC` that opens a Control Sequence (`ESC [`).
 pub const CSI: u8 = b'[';
@@ -119,3 +122,24 @@ pub const MODE_ALT_SCREEN: u16 = 1049;
 pub const PASTE_START: u16 = 200;
 /// Extended-key parameter for bracketed-paste end (`CSI 201 ~`).
 pub const PASTE_END: u16 = 201;
+
+/// Whether `byte` is a read-line-discipline **erase** (rub-out) control: the
+/// Backspace ([`BS`], `^H`) or Delete ([`DEL`], `^?`) a terminal sends to rub
+/// out the last character of the line being edited.
+///
+/// Both are accepted because terminals disagree: a serial terminal commonly
+/// sends `BS` for its Backspace key while xterm-class terminals (and the
+/// RustOS keymap, which maps `Backspace` to `DEL`) send `DEL`. This is the
+/// single definition of "which byte erases" (`AGENTS.md` §2.2), shared by the
+/// kernel console echo and a reader's line buffer so the two never disagree.
+#[must_use]
+pub const fn is_line_erase(byte: u8) -> bool {
+    byte == BS || byte == DEL
+}
+
+/// The bytes that visually rub out one already-echoed character on a terminal:
+/// backspace over the glyph, overwrite it with a space, then backspace again so
+/// the cursor rests where the glyph was. The read line discipline writes this
+/// when it erases a character so the screen matches the edited line
+/// (`AGENTS.md` §20).
+pub const ERASE_ECHO: [u8; 3] = [BS, b' ', BS];

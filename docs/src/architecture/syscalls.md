@@ -187,10 +187,16 @@ writes the consumed bytes back to the resolved console's write half (a bare
 CR/LF is rendered as CR-LF so the cursor advances a line), so it needs no
 separate `CAP_CONSOLE_WRITE` — `stream_echo` shares `stream_read`'s
 `CAP_CONSOLE_READ` gate and, as low-volume terminal configuration, is
-unaudited. An `fd` that is not a readable inherited stream fails closed
-with `NotFound`; a console-less build fails closed with `NotImplemented`.
-The first-party Rust wrapper is `rustos_rt::set_echo`; the C stub is
-`ros_sys_stream_echo`.
+unaudited. The line discipline also handles **erase** (rub-out): a
+Backspace or Delete (the one `lib/vt` `control::is_line_erase` definition,
+§2.2) is not echoed as a stray control glyph but rubs out the previous
+character with a `BS SP BS` sequence, bounded by a per-console column so a
+Backspace at the start of the input line never walks back over the prompt.
+The reader's line buffer applies the matching erase to the bytes it keeps
+(`rustos_login::push_line_byte`), so screen and buffer stay in step. An
+`fd` that is not a readable inherited stream fails closed with `NotFound`;
+a console-less build fails closed with `NotImplemented`. The first-party
+Rust wrapper is `rustos_rt::set_echo`; the C stub is `ros_sys_stream_echo`.
 
 `console_input` (no. 22) injects decoded keystroke bytes into an
 installed console's kernel-side input queue — the producer counterpart of
@@ -337,7 +343,7 @@ re-validates arguments — the dispatcher does that first.
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
-| `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
+| `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`, which also resets the line-discipline column) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF and rubbing out the previous character (column-bounded `BS SP BS`) on a Backspace/Delete | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

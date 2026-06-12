@@ -28,11 +28,12 @@
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rustos_abi::Errno;
 use rustos_kernel_sched_api::SchedulerArch;
 use rustos_sync::SpinLock;
+use rustos_vt::control;
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
@@ -380,6 +381,17 @@ pub struct ConsoleDevice {
     /// `AGENTS.md` §5.4). Interior mutability because the single
     /// installed console is shared `&'static`.
     echo: AtomicBool,
+    /// Column of the line-discipline cursor since the last line terminator
+    /// (or echo toggle): the count of characters the user has typed and the
+    /// echo has rendered on the current input line. Bounds the **erase**
+    /// (rub-out): a Backspace rubs out one rendered character only while this
+    /// is non-zero, so a Backspace at the start of the input line never walks
+    /// the cursor back into the prompt the program wrote (`AGENTS.md` §20).
+    /// Reset to zero on a `CR`/`LF` echo and on every [`Self::set_echo`]
+    /// toggle (each starts a fresh edited line). Relaxed ordering for the same
+    /// reason as [`Self::echo`]: a single console carries a single session
+    /// (`plans/PI.md` P11), so there is no cross-CPU race to order against.
+    echo_col: AtomicUsize,
 }
 
 impl ConsoleDevice {
@@ -417,6 +429,7 @@ impl ConsoleDevice {
             read,
             input,
             echo: AtomicBool::new(true),
+            echo_col: AtomicUsize::new(0),
         }
     }
 
@@ -431,8 +444,15 @@ impl ConsoleDevice {
     /// per-console interactive flag with no other state ordered against
     /// it, and a single console carries a single session (`plans/PI.md`
     /// P11).
+    ///
+    /// Toggling echo also resets the line-discipline column to zero: a
+    /// suppressed password read (`login` disables echo around it,
+    /// `AGENTS.md` §5.4) and the prompt that follows it start a fresh edited
+    /// line, so a later Backspace must not rub out into a line the column was
+    /// last counting before the toggle.
     pub fn set_echo(&self, enabled: bool) {
         self.echo.store(enabled, Ordering::Relaxed);
+        self.echo_col.store(0, Ordering::Relaxed);
     }
 
     /// Echo `bytes` (the bytes a `stream_read` just consumed) back to the
@@ -442,9 +462,18 @@ impl ConsoleDevice {
     /// A carriage return or line feed is echoed as the CR-LF pair so the
     /// cursor both returns to column zero *and* advances a line — a bare
     /// CR (what a serial terminal sends for the Return key) would
-    /// otherwise overwrite the current line. Echo is part of the kernel's
-    /// read line discipline, so it does not require the reader to also
-    /// hold `CAP_CONSOLE_WRITE`.
+    /// otherwise overwrite the current line. An **erase** (rub-out) byte —
+    /// Backspace or Delete, [`control::is_line_erase`] — is *not* echoed
+    /// verbatim (that would paint a stray control glyph); instead it rubs
+    /// out the previous character with the `BS SP BS`
+    /// [`control::ERASE_ECHO`] sequence, but only while a character on the
+    /// current input line remains to erase (the per-console `echo_col`
+    /// column). A Backspace at the start of the line is a no-op,
+    /// so it never walks the cursor back over the prompt. This is the echo
+    /// half of the read line discipline; the reader's line buffer applies
+    /// the matching erase to the bytes it keeps (`plans/PI.md` P11). Echo is
+    /// part of the kernel's read line discipline, so it does not require the
+    /// reader to also hold `CAP_CONSOLE_WRITE`.
     ///
     /// Echo is purely cosmetic, so it is **best-effort**: a short write or
     /// a device error is swallowed rather than failing the read the user
@@ -455,17 +484,35 @@ impl ConsoleDevice {
         if !self.echo_enabled() {
             return;
         }
-        let mut start = 0;
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'\r' || bytes[i] == b'\n' {
-                self.echo_run(&bytes[start..i]);
+        // The column persists across calls because the reader drains the
+        // console a byte (or a few) at a time: one logical input line spans
+        // many `echo_bytes` calls, so the rub-out bound must be carried in
+        // the console, not recomputed per call.
+        let mut col = self.echo_col.load(Ordering::Relaxed);
+        // Batch consecutive printable bytes into one device write (fewer
+        // device round-trips, `AGENTS.md` §2.16); flush the pending run when
+        // a control byte needs separate handling.
+        let mut run_start = 0;
+        for i in 0..bytes.len() {
+            let byte = bytes[i];
+            if byte == control::CR || byte == control::LF {
+                self.echo_run(&bytes[run_start..i]);
                 let _ = self.write.write(b"\r\n");
-                start = i + 1;
+                col = 0;
+                run_start = i + 1;
+            } else if control::is_line_erase(byte) {
+                self.echo_run(&bytes[run_start..i]);
+                col += i - run_start;
+                if col > 0 {
+                    let _ = self.write.write(&control::ERASE_ECHO);
+                    col -= 1;
+                }
+                run_start = i + 1;
             }
-            i += 1;
         }
-        self.echo_run(&bytes[start..]);
+        self.echo_run(&bytes[run_start..]);
+        col += bytes.len() - run_start;
+        self.echo_col.store(col, Ordering::Relaxed);
     }
 
     /// Write one run of non-line-break bytes to the console output,
@@ -755,6 +802,79 @@ mod tests {
         device.set_echo(true);
         device.echo_bytes(b"x");
         assert_eq!(W.taken(), b"x");
+    }
+
+    #[test]
+    fn echo_bytes_rubs_out_the_previous_character_on_erase() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // Type "ab", then a Backspace (DEL): the rendered "ab" stays, and
+        // the erase paints `BS SP BS` to wipe the last glyph — never the raw
+        // control byte.
+        device.echo_bytes(b"ab\x7f");
+        assert_eq!(W.taken(), b"ab\x08 \x08");
+    }
+
+    #[test]
+    fn echo_bytes_accepts_bs_as_an_erase_too() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // A serial terminal sends BS (`^H`) rather than DEL for Backspace;
+        // both rub out.
+        device.echo_bytes(b"x\x08");
+        assert_eq!(W.taken(), b"x\x08 \x08");
+    }
+
+    #[test]
+    fn echo_bytes_erase_at_line_start_is_a_no_op() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // A Backspace with nothing typed must not rub out into the prompt:
+        // it writes nothing at all.
+        device.echo_bytes(b"\x7f");
+        assert!(W.taken().is_empty());
+    }
+
+    #[test]
+    fn echo_bytes_column_persists_across_calls() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // The reader drains a byte at a time, so each character is its own
+        // `echo_bytes` call; the rub-out must still know a character was
+        // rendered on an earlier call.
+        device.echo_bytes(b"a");
+        device.echo_bytes(b"\x7f");
+        assert_eq!(W.taken(), b"a\x08 \x08");
+        // The line is now empty again, so a second Backspace is a no-op.
+        device.echo_bytes(b"\x7f");
+        assert_eq!(W.taken(), b"a\x08 \x08");
+    }
+
+    #[test]
+    fn echo_bytes_line_terminator_resets_the_erase_bound() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // After a line is submitted the next line starts empty, so a
+        // Backspace at its head rubs nothing out.
+        device.echo_bytes(b"ab\n");
+        assert_eq!(W.taken(), b"ab\r\n");
+        device.echo_bytes(b"\x7f");
+        assert_eq!(W.taken(), b"ab\r\n");
+    }
+
+    #[test]
+    fn echo_bytes_set_echo_resets_the_erase_bound() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // Typing, then a password read (echo off → on), then a Backspace:
+        // the toggle started a fresh line, so the Backspace rubs nothing out
+        // — it can never walk back into the characters typed before the
+        // password.
+        device.echo_bytes(b"ab");
+        device.set_echo(false);
+        device.set_echo(true);
+        device.echo_bytes(b"\x7f");
+        assert_eq!(W.taken(), b"ab");
     }
 
     #[test]

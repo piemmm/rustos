@@ -42,6 +42,9 @@
 //!
 //! * [`events`] — stable [`rustos_log::EventId`] constants (`10000` range).
 //! * [`error`] — [`LoginError`], the fail-closed outcomes of [`Login::run`].
+//! * [`line`](mod@line) — the read line discipline's buffer half
+//!   ([`push_line_byte`]): assembling one edited input line, with Backspace
+//!   erase, into a caller buffer.
 //! * [`session`] — the identity types ([`Uid`], [`Gid`],
 //!   [`AuthenticatedUser`], [`SessionKind`]) and the [`Prompt`],
 //!   [`Authenticator`], and [`SessionLauncher`] seams.
@@ -52,9 +55,10 @@
 //! # Layering & safety
 //!
 //! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
-//! audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`, and
-//! `rustos-users`, so a userland service never links a kernel or driver
-//! crate (`AGENTS.md` §17.4).
+//! audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
+//! `rustos-users`, and `rustos-vt` (the shared terminal-control vocabulary the
+//! read line discipline keys off), so a userland service never links a kernel
+//! or driver crate (`AGENTS.md` §17.4).
 //! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
 //! (`AGENTS.md` §2.9).
 
@@ -67,11 +71,13 @@ extern crate alloc;
 pub mod auth;
 pub mod error;
 pub mod events;
+pub mod line;
 pub mod login;
 pub mod session;
 
 pub use auth::UsersAuthenticator;
 pub use error::LoginError;
+pub use line::{push_line_byte, LineFeed};
 pub use login::{Login, LoginConfig};
 pub use session::{
     AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind, SessionLauncher,
