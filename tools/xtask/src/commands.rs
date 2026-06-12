@@ -1018,6 +1018,31 @@ fn resolve_root_key(root_key: Option<&Path>) -> Result<rustos_mkimage::VolumeKey
     }
 }
 
+/// The Cargo build profile the production kernel is compiled with for a
+/// given image profile, as `(extra cargo args, target subdirectory)`.
+///
+/// The single freestanding kernel binary cannot read `cfg!(debug_assertions)`
+/// from the image it is planted in, so the boot-log routing the aarch64
+/// console performs (`kernel/arch/aarch64/src/serial.rs`, `AGENTS.md` §10 —
+/// debug build → UART, release build → screen) is only correct if each image
+/// profile compiles the kernel in the matching Cargo profile:
+///
+/// * The `debug` image is the non-shippable development form (it seeds the
+///   `root`/`root` test account and must never ship, `AGENTS.md` §12), so its
+///   kernel is built in Cargo's `dev` profile — `debug_assertions` on — and
+///   the console diverts the boot-log/debug stream to the UART.
+/// * The `installer` image is the shippable form, built `--release`
+///   (optimised, `debug_assertions` off), so its log stream renders on the
+///   user-facing screen.
+fn kernel_build_profile(
+    profile: rustos_mkimage::ImageProfile,
+) -> (&'static [&'static str], &'static str) {
+    match profile {
+        rustos_mkimage::ImageProfile::Debug => (&[], "debug"),
+        rustos_mkimage::ImageProfile::Installer => (&["--release"], "release"),
+    }
+}
+
 fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let ImageArgs {
         firmware_dir,
@@ -1026,18 +1051,21 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         root_key,
     } = parse_image_args(args)?;
 
-    // 1. Build the freestanding aarch64 production kernel (PI.md P1).
+    // 1. Build the freestanding aarch64 production kernel (PI.md P1) in
+    //    the Cargo profile that matches the image profile (see
+    //    `kernel_build_profile`): the `debug` image gets a
+    //    `debug_assertions`-on kernel so the console diverts the boot-log
+    //    stream to the UART, the shippable `installer` image gets an
+    //    optimised `--release` kernel that renders the log on screen.
+    let (build_profile_args, kernel_profile_dir) = kernel_build_profile(profile);
     let mut cmd = ctx.cargo();
-    cmd.args([
-        "build",
-        "--locked",
-        "--release",
-        "-p",
-        "rustos-kernel",
-        "--target",
-        "aarch64-unknown-none",
-    ]);
-    ctx.run("image: kernel build (aarch64-unknown-none, release)", cmd)?;
+    cmd.arg("build").arg("--locked");
+    cmd.args(build_profile_args);
+    cmd.args(["-p", "rustos-kernel", "--target", "aarch64-unknown-none"]);
+    ctx.run(
+        &format!("image: kernel build (aarch64-unknown-none, {kernel_profile_dir})"),
+        cmd,
+    )?;
 
     // 2. Resolve the pinned firmware inputs — an operator-staged directory
     //    is verified as-is; otherwise missing blobs are fetched into the
@@ -1065,7 +1093,7 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let kernel_path = ctx
         .target_dir()
         .join("aarch64-unknown-none")
-        .join("release")
+        .join(kernel_profile_dir)
         .join("rustos-kernel");
     let kernel_elf = std::fs::read(&kernel_path).map_err(|e| {
         format!(
@@ -1153,10 +1181,39 @@ fn relative(base: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_subcommand_available, parse_test_options, RunBudget, TEST_SOAK_SECS};
+    use super::{
+        cargo_subcommand_available, kernel_build_profile, parse_test_options, RunBudget,
+        TEST_SOAK_SECS,
+    };
     use crate::Context;
     use std::ffi::OsString;
     use std::time::Duration;
+
+    /// The image profile dictates the kernel's Cargo build profile so the
+    /// console's `cfg!(debug_assertions)` boot-log routing is correct: the
+    /// `debug` image must build a `dev`-profile kernel (assertions on →
+    /// log to UART) and the shippable `installer` image a `--release`
+    /// kernel (assertions off → log to screen). Regression guard for the
+    /// defect where both images shared a single `--release` kernel and the
+    /// debug log never reached the UART.
+    #[test]
+    fn kernel_build_profile_matches_image_profile() {
+        let (debug_args, debug_dir) = kernel_build_profile(rustos_mkimage::ImageProfile::Debug);
+        assert!(
+            debug_args.is_empty(),
+            "the debug image must build the kernel in Cargo's dev profile (no --release)"
+        );
+        assert_eq!(debug_dir, "debug");
+
+        let (installer_args, installer_dir) =
+            kernel_build_profile(rustos_mkimage::ImageProfile::Installer);
+        assert_eq!(
+            installer_args,
+            &["--release"],
+            "the installer image must build the kernel optimised"
+        );
+        assert_eq!(installer_dir, "release");
+    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()

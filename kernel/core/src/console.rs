@@ -28,6 +28,8 @@
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use rustos_abi::Errno;
 use rustos_kernel_sched_api::SchedulerArch;
 
@@ -171,16 +173,90 @@ pub struct ConsoleDevice {
     pub write: &'static (dyn ConsoleWrite + 'static),
     /// The console's byte source (`stream_read`).
     pub read: &'static (dyn ConsoleRead + 'static),
+    /// Whether a `stream_read` of this console echoes the bytes it
+    /// consumes back to [`Self::write`] — the terminal local-echo of the
+    /// console's read line discipline (`AGENTS.md` §20, `plans/PI.md`
+    /// P11). Defaults to **on** so an interactive user sees what they
+    /// type; the `stream_echo` syscall toggles it (login disables it
+    /// around a password read so a credential is never rendered,
+    /// `AGENTS.md` §5.4). Interior mutability because the single
+    /// installed console is shared `&'static`.
+    echo: AtomicBool,
 }
 
 impl ConsoleDevice {
-    /// Pair `write` and `read` as one installed console.
+    /// Pair `write` and `read` as one installed console, with terminal
+    /// echo on by default (`AGENTS.md` §20 — interactive consoles echo).
     #[must_use]
     pub const fn new(
         write: &'static (dyn ConsoleWrite + 'static),
         read: &'static (dyn ConsoleRead + 'static),
     ) -> Self {
-        Self { write, read }
+        Self {
+            write,
+            read,
+            echo: AtomicBool::new(true),
+        }
+    }
+
+    /// Whether terminal local echo is currently enabled for this console.
+    #[must_use]
+    pub fn echo_enabled(&self) -> bool {
+        self.echo.load(Ordering::Relaxed)
+    }
+
+    /// Enable or disable terminal local echo for this console
+    /// (`stream_echo`). The relaxed ordering is sufficient: echo is a
+    /// per-console interactive flag with no other state ordered against
+    /// it, and a single console carries a single session (`plans/PI.md`
+    /// P11).
+    pub fn set_echo(&self, enabled: bool) {
+        self.echo.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Echo `bytes` (the bytes a `stream_read` just consumed) back to the
+    /// console output when echo is enabled, so an interactive user sees
+    /// what they type (`AGENTS.md` §20 — terminal local echo).
+    ///
+    /// A carriage return or line feed is echoed as the CR-LF pair so the
+    /// cursor both returns to column zero *and* advances a line — a bare
+    /// CR (what a serial terminal sends for the Return key) would
+    /// otherwise overwrite the current line. Echo is part of the kernel's
+    /// read line discipline, so it does not require the reader to also
+    /// hold `CAP_CONSOLE_WRITE`.
+    ///
+    /// Echo is purely cosmetic, so it is **best-effort**: a short write or
+    /// a device error is swallowed rather than failing the read the user
+    /// asked for (`AGENTS.md` §2.16 — never let a cosmetic side effect
+    /// abort the real operation). With echo disabled this is a no-op, so
+    /// a suppressed password read touches the output device not at all.
+    pub fn echo_bytes(&self, bytes: &[u8]) {
+        if !self.echo_enabled() {
+            return;
+        }
+        let mut start = 0;
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\r' || bytes[i] == b'\n' {
+                self.echo_run(&bytes[start..i]);
+                let _ = self.write.write(b"\r\n");
+                start = i + 1;
+            }
+            i += 1;
+        }
+        self.echo_run(&bytes[start..]);
+    }
+
+    /// Write one run of non-line-break bytes to the console output,
+    /// looping over short writes and stopping on a closed/erroring device
+    /// (`AGENTS.md` §2.1 — never spin). Best-effort, for [`Self::echo_bytes`].
+    fn echo_run(&self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            match self.write.write(bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => bytes = &bytes[n.min(bytes.len())..],
+            }
+        }
     }
 }
 
@@ -389,5 +465,74 @@ mod tests {
         // Even a zero-length read announces the inert interface rather
         // than reporting a successful empty read.
         assert_eq!(NullConsoleRead.read(&mut []), Err(Errno::NotImplemented));
+    }
+
+    /// A `ConsoleWrite` that records every byte handed to it, so the echo
+    /// tests can assert exactly what the line discipline emitted.
+    struct EchoRecorder {
+        written: std::sync::Mutex<std::vec::Vec<u8>>,
+    }
+
+    impl EchoRecorder {
+        const fn new() -> Self {
+            Self {
+                written: std::sync::Mutex::new(std::vec::Vec::new()),
+            }
+        }
+
+        fn taken(&self) -> std::vec::Vec<u8> {
+            self.written.lock().unwrap().clone()
+        }
+    }
+
+    impl ConsoleWrite for EchoRecorder {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            self.written.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    fn echo_device(write: &'static EchoRecorder) -> ConsoleDevice {
+        ConsoleDevice::new(write, &NULL_CONSOLE_READ)
+    }
+
+    #[test]
+    fn console_device_echo_is_on_by_default() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        assert!(device.echo_enabled());
+    }
+
+    #[test]
+    fn echo_bytes_writes_printable_bytes_verbatim_when_enabled() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        device.echo_bytes(b"root");
+        assert_eq!(W.taken(), b"root");
+    }
+
+    #[test]
+    fn echo_bytes_translates_cr_and_lf_to_crlf() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        // A bare CR (the Return key on a serial terminal) and a bare LF
+        // both echo as the CR-LF pair so the cursor returns to column zero
+        // *and* advances a line.
+        device.echo_bytes(b"ab\rcd\n");
+        assert_eq!(W.taken(), b"ab\r\ncd\r\n");
+    }
+
+    #[test]
+    fn echo_bytes_is_a_no_op_when_echo_is_disabled() {
+        static W: EchoRecorder = EchoRecorder::new();
+        let device = echo_device(&W);
+        device.set_echo(false);
+        // A suppressed password read must not render the secret at all.
+        device.echo_bytes(b"hunter2");
+        assert!(W.taken().is_empty());
+        // Re-enabling restores echo.
+        device.set_echo(true);
+        device.echo_bytes(b"x");
+        assert_eq!(W.taken(), b"x");
     }
 }

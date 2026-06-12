@@ -221,16 +221,29 @@ The trampoline:
    `rustos_arch_aarch64_main(dtb)`, which forwards to the
    binary-supplied `kernel_main`.
 
-The console (`serial.rs`) writes the boot log to the **video display
-when one is configured** (see [Framebuffer boot
+The console (`serial.rs`) routes the boot log by build profile. A
+**release build** writes it to the **video display when one is
+configured** (see [Framebuffer boot
 console](#framebuffer-boot-console-video-first-uart-fallback)) and
 otherwise through whatever UART the `console` module currently points
 at; before any discovery runs that is the `virt` board's PL011 at
 `0x0900_0000`, which QEMU routes to `-serial stdio`. A **debug build**
-(`cfg(debug_assertions)`) additionally echoes every boot-log/debug line
-to the UART even when the video console is active, so a serial capture
-of a development boot always carries the full diagnostic stream; a
-release build writes each line to exactly one backing.
+(`cfg(debug_assertions)`) routes the whole boot-log/debug stream to the
+**UART instead** — even when the video console is active — so a serial
+capture of a development boot carries the full diagnostic stream while
+the screen stays clear for the user-facing session; with no UART
+discovered the bounded transmit simply drops the bytes and the screen
+is never the debug log's sink.
+
+The single freestanding kernel cannot tell which SD image it was planted
+in, so "debug build" is pinned to the **image profile** by building the
+kernel in the matching Cargo profile (`tools/xtask` `kernel_build_profile`):
+`cargo xtask image --profile debug` compiles a `dev`-profile
+(`debug_assertions`-on) kernel whose log diverts to the UART, while the
+shippable `cargo xtask image --profile installer` compiles a `--release`
+kernel (assertions off) whose log renders on screen. There is no separate
+`--release` flag to forget — the image profile decides both the seeded
+contents and the kernel's log routing.
 
 ## Board-discovered console
 
@@ -376,13 +389,15 @@ Pi):
   alloc-backed `epoch` module into the minimal, allocator-free QEMU
   binaries; the carve-out is documented at the lock).
 - **Routing.** The **boot-log** path (`serial::ConsoleWriter`, the log
-  sink) renders to the screen when `video::is_active` and falls back to
-  the UART otherwise — except that a **debug build**
-  (`cfg(debug_assertions)`) echoes every log/debug line to the UART *as
-  well as* the screen, even while a login session owns the UART, so a
-  serial capture of a development boot always carries the full
-  diagnostic stream; a release build writes each line to exactly one
-  backing. The **stream** path is split per console (`plans/PI.md`
+  sink) routes by build profile. A **release build** renders to the
+  screen when `video::is_active` and falls back to the UART otherwise.
+  A **debug build** (`cfg(debug_assertions)`) routes the whole
+  log/debug stream to the **UART instead** — even while a login session
+  owns the UART — so a serial capture of a development boot carries the
+  full diagnostic stream while the screen stays clear for the
+  user-facing session; with no UART discovered the bounded transmit
+  drops the bytes and the screen is never the debug log's sink. The
+  **stream** path is split per console (`plans/PI.md`
   P11): `boot_aarch64` installs `[VideoConsole, UartConsole]` through
   `BootInfo::with_consoles` when the framebuffer console is active
   (else `[UartConsole]`). `VideoConsole` writes through

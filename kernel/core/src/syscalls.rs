@@ -1072,6 +1072,15 @@ where
             return Ok(0);
         }
 
+        // Echo the consumed bytes back to this console's own output when
+        // terminal echo is enabled (`AGENTS.md` §20 — local echo), so an
+        // interactive user sees what they type. The kernel owns the read
+        // line discipline, so this needs no separate `CAP_CONSOLE_WRITE`;
+        // it is a no-op while a caller has suppressed echo for a password
+        // read (`stream_echo`). Best-effort and cosmetic — it never fails
+        // the read the caller asked for.
+        device.echo_bytes(&payload[..read]);
+
         // Copy the bytes actually read out to the caller's address space
         // through the validated `copy_to_user` boundary (`AGENTS.md`
         // §5.4). `with_caller_aspace` yields `None` when the caller has
@@ -1183,6 +1192,33 @@ where
         // `plans/PI.md` P11); an empty pre-install list honestly
         // reports zero consoles.
         Ok(self.consoles.len() as u64)
+    }
+
+    fn stream_echo(&self, caller: &CallerContext<'_>, fd: u32, enabled: u32) -> SyscallResult {
+        // Resolve `fd` against the caller's per-process descriptor table
+        // *before* touching any state (`AGENTS.md` §5.4 / §20): echo is a
+        // property of an *input* stream's console, so `fd` must be a
+        // readable inherited stream — anything else fails closed with
+        // `NotFound`, never leaking which case occurred. An unregistered
+        // caller resolves to the all-`Closed` default and fails here too.
+        let streams = self.aspaces.read().streams(caller.task_id);
+        if streams.mode(fd) != StreamMode::Read {
+            return Err(Errno::NotFound);
+        }
+        // Resolve the descriptor's console against the installed list. A
+        // missing console — including the empty pre-install list —
+        // announces the inert interface (`AGENTS.md` §2.9) rather than
+        // pretending the toggle took effect.
+        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
+            return Err(Errno::NotImplemented);
+        };
+        // The dispatcher already checked `CAP_CONSOLE_READ`. Any non-zero
+        // value enables echo; zero disables it (the ABI contract). The
+        // toggle is the program's own terminal control — login disables
+        // echo around a password read so the secret is never rendered
+        // (`AGENTS.md` §5.4).
+        device.set_echo(enabled != 0);
+        Ok(0)
     }
 
     fn mem_map(
@@ -4924,6 +4960,102 @@ mod tests {
         // keyboard source was never touched.
         assert!(uart_rx.last_buf_len.lock().is_some());
         assert_eq!(*keyboard.last_buf_len.lock(), None);
+    }
+
+    /// With echo on (the default), `stream_read` echoes the consumed
+    /// bytes back to the *same* console's write half so an interactive
+    /// user sees what they type (`AGENTS.md` §20 — terminal local echo),
+    /// translating the Return key's CR into CR-LF.
+    #[test]
+    fn stream_read_echoes_consumed_bytes_to_the_console_write_half() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"hi\r")));
+        let consoles: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(3));
+        // The consumed bytes were echoed back, with the CR rendered as
+        // CR-LF.
+        assert_eq!(echo.written.lock().as_slice(), b"hi\r\n");
+    }
+
+    /// `stream_echo` disabling echo on the read descriptor's console
+    /// stops a subsequent `stream_read` from echoing (the password-read
+    /// contract, `AGENTS.md` §5.4 — never render a credential).
+    #[test]
+    fn stream_echo_disables_console_echo_for_the_following_read() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"secret")));
+        let consoles: &'static [ConsoleDevice] =
+            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard());
+
+        // Disable echo on the input descriptor, then read: nothing is
+        // echoed back.
+        assert_eq!(h.stream_echo(&ctx, STDIN, 0), Ok(0));
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(6));
+        assert!(echo.written.lock().is_empty());
+
+        // A `stream_echo` on a descriptor that is not a readable stream
+        // fails closed rather than toggling another console.
+        assert_eq!(h.stream_echo(&ctx, STDOUT, 1), Err(Errno::NotFound));
     }
 
     /// A `spawn` naming an installed console attaches the child's

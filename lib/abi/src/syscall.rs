@@ -252,6 +252,29 @@ impl SyscallNumber {
     /// to the principals that drive consoles, not to every task
     /// (`AGENTS.md` §5.4).
     pub const CONSOLE_COUNT: Self = Self(20);
+    /// Set whether one of the calling process's inherited input streams
+    /// echoes the bytes it reads back to its console (`AGENTS.md` §20,
+    /// `plans/PI.md` P11 — terminal local echo).
+    ///
+    /// Arguments: `fd: u32` (the input descriptor — normally
+    /// [`crate::STDIN`]) and `enabled: u32` (`0` disables echo, any other
+    /// value enables it). Returns an error code (`Ok(0)` on success).
+    /// Echo is the line-discipline behaviour of the console *backing*:
+    /// while it is on, every byte a [`SyscallNumber::STREAM_READ`] of `fd`
+    /// consumes is written back to that descriptor's console output so an
+    /// interactive user sees what they type. The kernel performs the echo
+    /// itself (it owns the line discipline), so a reader needs no separate
+    /// [`crate::CapabilityId::CONSOLE_WRITE`] for it; the call is the
+    /// program's contract for suppressing echo — login disables it around
+    /// a password read so the secret is never rendered, then restores it
+    /// (`AGENTS.md` §5.4 — fail closed; never echo a credential). Console
+    /// echo defaults to **on**. Gated by
+    /// [`crate::CapabilityId::CONSOLE_READ`]: terminal echo belongs to the
+    /// principal that reads the console, never to every task. An `fd` that
+    /// is not a readable inherited stream fails closed with
+    /// [`crate::Errno::NotFound`]; a build with no console wired fails
+    /// closed with [`crate::Errno::NotImplemented`].
+    pub const STREAM_ECHO: Self = Self(21);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -348,6 +371,7 @@ mod tests {
         assert_eq!(SyscallNumber::RLIMIT_SET.as_u16(), 18);
         assert_eq!(SyscallNumber::USERS_DB_READ.as_u16(), 19);
         assert_eq!(SyscallNumber::CONSOLE_COUNT.as_u16(), 20);
+        assert_eq!(SyscallNumber::STREAM_ECHO.as_u16(), 21);
     }
 
     #[test]

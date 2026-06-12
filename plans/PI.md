@@ -2084,13 +2084,23 @@ two users — or the same user twice — can be logged in concurrently.
 - **Beacon + bring-up debug removal** (former increment 2): the
   boot-progress beacons (`boot_aarch64`/`serial`/`video`) and the
   serial bring-up mirror in `kernel/arch/aarch64/src/serial.rs` are
-  deleted. The **boot-log** path stays video-first with the UART as the
-  fallback (`AGENTS.md` §10) — except that **debug builds**
-  (`cfg(debug_assertions)`) echo every log/debug line to the UART as
-  well as the screen (`serial::ConsoleWriter`), even while a login
-  session owns the UART, so a serial capture of a development boot
-  always carries the full diagnostic stream; release builds write each
-  line to exactly one backing.
+  deleted. The **boot-log** path routes by build profile
+  (`serial::ConsoleWriter`): a **release build** is video-first with the
+  UART as the fallback (`AGENTS.md` §10), while a **debug build**
+  (`cfg(debug_assertions)`) routes the whole log/debug stream to the
+  **UART instead** — even while a login session owns the UART — so a
+  serial capture of a development boot carries the full diagnostic
+  stream while the screen stays clear for the user-facing session; with
+  no UART discovered the bounded transmit drops the bytes and the
+  screen is never the debug log's sink. Because the single freestanding
+  kernel cannot read which image it was planted in, the routing is tied
+  to the **image profile** by building the kernel in the matching Cargo
+  profile (`tools/xtask` `kernel_build_profile`): `--profile debug`
+  compiles a `dev` (`debug_assertions`-on) kernel that logs to the UART,
+  `--profile installer` compiles a `--release` kernel that logs on
+  screen. The earlier defect was building both images from one
+  `--release` kernel, so `debug_assertions` was always off and the debug
+  log never reached the UART.
 - **Separate console contexts — LANDED** (former increment 1, minus
   echo). The video console and the UART are independent stream backings
   with their own login sessions:
@@ -2137,33 +2147,72 @@ two users — or the same user twice — can be logged in concurrently.
     attachment), lib/rt + abi-sys marshalling tests, and the init
     supervisor host tests; the `-M virt` verticals ride the unchanged
     single-UART list.
+- **Stream-layer echo + echo control — LANDED.** Terminal local echo is
+  the kernel's read line-discipline behaviour, not a per-program job
+  (§2.2): `ConsoleDevice` carries a per-console `echo` flag (default
+  on), and `stream_read` writes the bytes it consumes back to the same
+  console's write half, rendering a bare CR/LF as CR-LF, so a typed
+  username is visible. The **echo-control contract** is the new `abi-v1`
+  syscall **`stream_echo`** (no. 21, `CAP_CONSOLE_READ`, unaudited):
+  `stream_echo(fd, enabled)` toggles the resolved input console's echo;
+  `login` disables it around the password read and restores it after, so
+  a credential is never rendered, and fails the read closed if echo
+  cannot be disabled (`AGENTS.md` §5.4). First-party wrapper
+  `rustos_rt::set_echo`; C stub `ros_sys_stream_echo` (header
+  regenerated). Proven by kernel-core tests (echo to the write half +
+  CR/LF translation, `stream_echo` disabling echo, fail-closed on a
+  non-read fd), console.rs `echo_bytes` unit tests, and lib/rt +
+  abi-sys marshalling tests.
 
 **Remaining (next increments, in order):**
 
-1. **Stream-layer echo + echo control** — keystroke echo / line editing
-   live in the stream layer, not in programs, together with the
-   **echo-control contract** (read_secret's echo-off promise): a
-   control surface over a backing that never echoes would be a §2.1
-   no-op / §2.3 speculative surface, so both land in one increment.
-2. **Keyboard input for the video console** — back `VideoConsole`'s
+1. **Keyboard input for the video console** — back `VideoConsole`'s
    keyboard seam with the discovered USB-HID (P10 VL805/xHCI wiring) /
    PS/2 input path, so the video login takes input from a directly
    attached keyboard (`AGENTS.md` §20; the UART stays its own session).
-3. **Profile-silenced boot log** — keep the boot log echoed to the
+2. **Profile-silenced boot log** — keep the boot log echoed to the
    screen **only** in debug-profile images, silent on installer images.
-4. **Configurable log policy** — the log output/direction (which
+3. **Configurable log policy** — the log output/direction (which
    consoles/sinks receive log lines), rotation, and on-storage age
    limits become administrator-settable configuration under
    `/System/Settings` (§16.2), replacing the compiled-in routing;
    requires the persistent `/System/Logs` store (§19.4) before rotation
    and age limits are meaningful. The debug-build dual echo stays a
    debug-only exception.
-5. **Login over a real database in production** — gated on the P8/P9
-   metal root mount (the kernel-side `load_users_db` + `with_users_db`
-   wiring at boot) and on the production `mem_map` producer
-   (`plans/SPAWN.md` SP5b) so login can parse the delivered text; a
-   `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves
-   `root`/`root` end to end at the prompt.
+4. **Login over a real database in production.** The passphrase-derived
+   root-unlock **primitive is landed**: `drivers/filesystem/rustfs`'s
+   `unlock` module (`UnlockDescriptor` — PBKDF2-HMAC-SHA256 over a
+   per-volume random salt + bounded iteration count, fail-closed
+   encode/decode, `derive_volume_key`) turns an operator passphrase into
+   the volume's `VolumeKey` (`AGENTS.md` §11). It is the LUKS-style
+   indirection above the always-encrypted volume; the plaintext
+   descriptor rides beside the volume (the FAT boot partition on a Pi
+   image). A wrong passphrase derives the wrong key and `RustFs::open`
+   refuses it (`PermissionDenied`) — no separate oracle. Host-proven:
+   the `unlock` unit tests plus an end-to-end rustfs test that formats a
+   volume under a passphrase-derived key and re-mounts it (wrong
+   passphrase refused). Docs: `docs/src/filesystem/rustfs-spec.md` §7
+   (incl. the §19.9 TPM/secure-boot future hand-off, which seals the key
+   to a measured boot and falls back to the passphrase).
+
+   **Still staged** (each its own increment; the chain end to end is
+   gated on these):
+   - **Authoring.** The §11 installer flow provisions the user's
+     encrypted root under their chosen passphrase + writes the
+     descriptor; the debug Pi image bakes a known passphrase (never
+     shipped, like the debug `root` account). A shippable installer
+     image must **not** bake a known passphrase — the installed root is
+     provisioned at install time.
+   - **Boot mount.** The production boot reads the descriptor from the
+     boot partition, prompts for the passphrase on the console, derives
+     the key, mounts the discovered root volume (EMMC2 on metal /
+     virtio-blk on `virt`), runs `load_users_db`, and installs the held
+     text via `with_users_db` (kernel-side `load_users_db` exists;
+     EMMC2 metal mount rides P8).
+   - **Login parse.** The userland `login` parses the served text, which
+     needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
+   - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves
+     `root`/`root` end to end at the prompt over the passphrase path.
 
 **Done when:** a metal Pi 4 and the `virt` verticals sit at `login:` on
 every text console, `root`/`root` logs in on a debug image and gets the

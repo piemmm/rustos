@@ -406,6 +406,26 @@ pub trait SyscallHandlers {
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Set whether one of the calling process's inherited input streams
+    /// echoes the bytes it reads back to its console (`AGENTS.md` §20,
+    /// `plans/PI.md` P11 — terminal local echo).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::CONSOLE_READ`]. `fd` must be a readable inherited
+    /// stream and `enabled` is the ABI's `0`-disables/non-zero-enables
+    /// flag. The implementation toggles the resolved console's echo flag;
+    /// login disables echo around a password read so the secret is never
+    /// rendered, then restores it (`AGENTS.md` §5.4 — never echo a
+    /// credential).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// no console list wired has no echo to toggle. The real handler is
+    /// installed in `kernel/core`.
+    fn stream_echo(&self, _caller: &CallerContext<'_>, _fd: u32, _enabled: u32) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -613,6 +633,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.users_db_read(caller, args.0[0], len)
             }
             SyscallNumber::CONSOLE_COUNT => self.handlers.console_count(caller),
+            SyscallNumber::STREAM_ECHO => {
+                // `validate_arg` constrained both args to fit in u32 (upper
+                // bits zero), so the narrowings are lossless.
+                #[allow(clippy::cast_possible_truncation)]
+                let fd = (args.0[0] & 0xFFFF_FFFF) as u32;
+                #[allow(clippy::cast_possible_truncation)]
+                let enabled = (args.0[1] & 0xFFFF_FFFF) as u32;
+                self.handlers.stream_echo(caller, fd, enabled)
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -1003,6 +1032,12 @@ mod tests {
             // test can assert the dispatcher routed the call without
             // wiring a real console list here.
             Ok(1)
+        }
+        fn stream_echo(&self, _c: &CallerContext<'_>, _fd: u32, _enabled: u32) -> SyscallResult {
+            self.record("stream_echo");
+            // Success so the reachability test can assert the dispatcher
+            // decoded `(fd, enabled)` without wiring a real console here.
+            Ok(0)
         }
     }
 

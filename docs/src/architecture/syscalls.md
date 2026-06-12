@@ -74,6 +74,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
 |  20 | `console_count`| —                                       | `u64` (count) | `CAP_CONSOLE_WRITE` | no    |
+|  21 | `stream_echo`  | `u32 fd`, `u32 enabled`                 | `errno` | `CAP_CONSOLE_READ`      | no      |
 
 ### Capability matrix
 
@@ -87,7 +88,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
 | `CAP_CONSOLE_WRITE`| `stream_write`, `console_count` |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
-| `CAP_CONSOLE_READ` | `stream_read`              |
+| `CAP_CONSOLE_READ` | `stream_read`, `stream_echo` |
 | `CAP_USERS_READ`   | `users_db_read`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
@@ -171,6 +172,23 @@ drive consoles) and unaudited (a pure observer). PID 1 `init` uses it to
 start one login session per discovered console. The first-party Rust
 wrapper is `rustos_rt::console_count`; the C stub is
 `ros_sys_console_count`.
+
+`stream_echo` (no. 21) sets whether one of the caller's inherited input
+streams echoes the bytes a `stream_read` consumes back to its console —
+terminal **local echo** (`AGENTS.md` §20, `plans/PI.md` P11). `fd` is the
+input descriptor (normally fd 0) and `enabled` is `0` to disable, non-zero
+to enable. Console echo defaults to **on**, so a typed username is visible;
+login disables echo around the password read so the credential is never
+rendered, then restores it (`AGENTS.md` §5.4 — never echo a credential).
+The echo is the kernel's read line-discipline behaviour: `stream_read`
+writes the consumed bytes back to the resolved console's write half (a bare
+CR/LF is rendered as CR-LF so the cursor advances a line), so it needs no
+separate `CAP_CONSOLE_WRITE` — `stream_echo` shares `stream_read`'s
+`CAP_CONSOLE_READ` gate and, as low-volume terminal configuration, is
+unaudited. An `fd` that is not a readable inherited stream fails closed
+with `NotFound`; a console-less build fails closed with `NotImplemented`.
+The first-party Rust wrapper is `rustos_rt::set_echo`; the C stub is
+`ros_sys_stream_echo`.
 
 ## Standard streams (fd 0/1/2/3)
 
@@ -291,6 +309,8 @@ re-validates arguments — the dispatcher does that first.
 | `wait`          | hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship, blocks until a child is reapable, and reaps it; the reaped child's exit code is then copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |
 | `rlimit_get`    | validates `kind` against `LimitKind`, then reads the caller's effective limit from the installed resource-limit service and copies the encoded `ResourceLimit` out to the user buffer through `copy_to_user` (`AGENTS.md` §24.3). The default trait method fails closed until the L2 enforcement is installed | Unassigned `kind` → `OutOfRange`. No service wired → `NotImplemented`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(0)`. |
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
+| `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
+| `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

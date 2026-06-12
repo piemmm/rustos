@@ -84,6 +84,7 @@ const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
+const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -344,6 +345,28 @@ pub extern "C" fn sys_console_count() -> u64 {
     unsafe { raw_syscall(NUM_CONSOLE_COUNT, [0, 0, 0, 0, 0, 0]) }
 }
 
+/// `stream_echo`: set whether the input stream `fd` echoes the bytes it
+/// reads back to its console (`SyscallNumber::STREAM_ECHO`, `AGENTS.md`
+/// §20 — terminal local echo). `enabled` is `0` to disable, non-zero to
+/// enable. Returns a `ROS_E_*` code.
+///
+/// Gated kernel-side on `ROS_CAP_CONSOLE_READ`; the kernel performs the
+/// echo itself as part of the read line discipline, so no
+/// `ROS_CAP_CONSOLE_WRITE` is needed. Console echo defaults to **on**; a
+/// program suppresses it around a secret it must not render (a password
+/// prompt) and restores it afterwards (`AGENTS.md` §5.4).
+#[must_use]
+#[export_name = "ros_sys_stream_echo"]
+pub extern "C" fn sys_stream_echo(fd: u32, enabled: u32) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_STREAM_ECHO,
+            [u64::from(fd), u64::from(enabled), 0, 0, 0, 0],
+        ))
+    }
+}
+
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
 /// calling process's own address space, honouring `flags`
 /// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
@@ -482,6 +505,7 @@ mod tests {
         (NUM_RLIMIT_SET, "rlimit_set", 2),
         (NUM_USERS_DB_READ, "users_db_read", 2),
         (NUM_CONSOLE_COUNT, "console_count", 0),
+        (NUM_STREAM_ECHO, "stream_echo", 2),
     ];
 
     #[test]
@@ -672,6 +696,23 @@ mod tests {
         });
         assert_eq!(number, NUM_CONSOLE_COUNT);
         assert_eq!(args, [0; SYSCALL_MAX_ARGS]);
+    }
+
+    #[test]
+    fn stream_echo_marshals_fd_and_enabled_flag() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_stream_echo(0, 1), 0);
+        });
+        assert_eq!(number, NUM_STREAM_ECHO);
+        assert_eq!(args[0], 0);
+        assert_eq!(args[1], 1);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+
+        // A zero flag disables echo.
+        let (_, args) = capture(0, || {
+            assert_eq!(sys_stream_echo(0, 0), 0);
+        });
+        assert_eq!(args[1], 0);
     }
 
     #[test]

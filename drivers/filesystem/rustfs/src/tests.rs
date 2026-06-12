@@ -826,6 +826,36 @@ fn wrong_volume_key_refuses_the_mount() {
 }
 
 #[test]
+fn passphrase_derived_key_unlocks_the_volume() {
+    // The passphrase-unlock indirection (`unlock::UnlockDescriptor`) drives a
+    // real volume end to end (`AGENTS.md` §11): a volume formatted under the
+    // key *derived* from a passphrase mounts only when the same passphrase +
+    // descriptor re-derive that key, and a wrong passphrase is refused
+    // fail-closed exactly like any other wrong key (`AGENTS.md` §5.4).
+    let mut salt_entropy = TestEntropy::new();
+    let desc = UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut salt_entropy)
+        .expect("provision a descriptor");
+    let passphrase = b"correct horse battery staple";
+    let key = desc.derive_volume_key(passphrase);
+
+    let fs = RustFs::format(MemBlock::new(512, 256), 32, &key, &mut TestEntropy::new())
+        .expect("format under the passphrase-derived key");
+    let bytes = fs.into_block().bytes();
+
+    // The same passphrase + descriptor re-derive the identical key and mount.
+    let rederived = desc.derive_volume_key(passphrase);
+    RustFs::open(MemBlock::from_bytes(bytes.clone(), 512, 256), &rederived)
+        .expect("the re-derived key mounts the volume");
+
+    // A wrong passphrase derives a different key, refused like any wrong key.
+    let wrong = desc.derive_volume_key(b"wrong passphrase");
+    assert!(matches!(
+        RustFs::open(MemBlock::from_bytes(bytes, 512, 256), &wrong),
+        Err(DriverError::PermissionDenied)
+    ));
+}
+
+#[test]
 fn no_plaintext_filename_or_data_at_rest() {
     // RustFS has no plaintext mode: a distinctive filename and file content
     // must be absent from the raw on-disk bytes (encrypted at rest).

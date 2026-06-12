@@ -14,10 +14,14 @@
 //!
 //! * [`rustos_login::Prompt`] over the **inherited standard streams**
 //!   (`AGENTS.md` §20):
-//!   prompts go to fd 1, input lines come from fd 0. The bootstrap stream
-//!   backing never echoes input (keystroke echo lives in the stream layer,
-//!   `plans/PI.md` P11 increment 2), so the password read is un-echoed by
-//!   construction; the echo-*control* contract lands with the echo itself.
+//!   prompts go to fd 1, input lines come from fd 0. The console stream
+//!   backing performs terminal local echo in the kernel's read line
+//!   discipline (`plans/PI.md` P11), on by default, so a typed username is
+//!   visible. The password read suppresses echo through the `stream_echo`
+//!   syscall (`rustos_rt::set_echo`) before reading and restores it after,
+//!   so the secret is never rendered (`AGENTS.md` §5.4 — never echo a
+//!   credential); if echo cannot be disabled the read fails closed rather
+//!   than echoing the password.
 //! * [`rustos_login::UsersAuthenticator`] over the user database obtained
 //!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`,
 //!   `AGENTS.md` §5.1) and re-parsed with the fail-closed `rustos-users`
@@ -139,11 +143,24 @@ mod program {
         }
 
         fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-            // The bootstrap stream backing never echoes input, so the
-            // password is un-echoed by construction; the echo-control
-            // contract lands with the stream-layer echo itself
-            // (`plans/PI.md` P11 increment 2).
-            read_line_raw(buf)
+            // Console echo is on by default, so suppress it for the
+            // duration of the password read — a credential must never be
+            // rendered (`AGENTS.md` §5.4). If echo cannot be disabled (the
+            // toggle failed), fail closed rather than reading a secret that
+            // would echo.
+            let toggled = rustos_rt::set_echo(false);
+            if toggled < 0 {
+                return Err(errno_from(toggled));
+            }
+            let result = read_line_raw(buf);
+            // Restore echo for the subsequent interactive prompts. A
+            // failure to re-enable cannot compromise the secret already
+            // read, so it is best-effort. The Return key the user pressed
+            // was not echoed (echo was off), so advance the display a line
+            // ourselves to match the un-suppressed prompts.
+            let _ = rustos_rt::set_echo(true);
+            write_all_stdout(b"\r\n");
+            result
         }
     }
 

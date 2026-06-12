@@ -537,6 +537,30 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::CONSOLE_WRITE),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::STREAM_ECHO,
+        name: "stream_echo",
+        arg_count: 2,
+        args: [
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Terminal echo is a property of the console the reader holds, so
+        // the control shares `stream_read`'s `CAP_CONSOLE_READ` gate —
+        // never ambient (`AGENTS.md` §4). The kernel performs the echo
+        // itself as part of the read line discipline, so toggling it
+        // needs no separate `CAP_CONSOLE_WRITE`. Like the other terminal
+        // operations it is low-volume configuration, not a
+        // security-relevant state change, so — like `console_count` — it
+        // is NOT audited per call (`AGENTS.md` §5.4.4).
+        required_capability: Some(CapabilityId::CONSOLE_READ),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -757,6 +781,16 @@ mod tests {
             Some(CapabilityId::CONSOLE_WRITE)
         );
         assert!(!console_count.audit, "console_count must not audit");
+        // stream_echo controls terminal echo on the console the reader
+        // holds, so it shares stream_read's CAP_CONSOLE_READ gate and, as
+        // low-volume terminal configuration, is not audited (`AGENTS.md`
+        // §5.4.4).
+        let stream_echo = spec_for(SyscallNumber::STREAM_ECHO).unwrap();
+        assert_eq!(
+            stream_echo.required_capability,
+            Some(CapabilityId::CONSOLE_READ)
+        );
+        assert!(!stream_echo.audit, "stream_echo must not audit");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

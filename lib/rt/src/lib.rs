@@ -116,6 +116,9 @@ const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 /// `console_count` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
+/// `stream_echo` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -231,6 +234,35 @@ pub fn stdin(buf: &mut [u8]) -> usize {
         return 0;
     }
     (read as usize).min(buf.len())
+}
+
+/// Set whether standard input (fd 0) echoes the bytes it reads back to its
+/// console (`SyscallNumber::STREAM_ECHO`, `AGENTS.md` §20 — terminal local
+/// echo), returning the raw signed register (`0` on success, else
+/// `-errno`).
+///
+/// Console echo defaults to **on**, so an interactive user sees what they
+/// type at a [`stdin`] read. A program suppresses it around a secret it
+/// must not render — login disables echo before reading a password and
+/// re-enables it afterwards (`AGENTS.md` §5.4 — never echo a credential).
+/// Requires `CAP_CONSOLE_READ`; the kernel performs the echo itself as part
+/// of the read line discipline, so no `CAP_CONSOLE_WRITE` is needed. A
+/// build with no console wired, or an fd 0 that is not a readable stream,
+/// fails closed with `-errno` (`AGENTS.md` §2.9); the wrapper surfaces it
+/// verbatim so the caller decides how to react.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+pub fn set_echo(enabled: bool) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates the capability and resolves fd 0
+    // before touching any state (`AGENTS.md` §5.4).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_STREAM_ECHO,
+            [u64::from(STDIN), u64::from(enabled), 0, 0, 0, 0],
+        )
+    };
+    ret as i64
 }
 
 /// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
@@ -732,6 +764,36 @@ mod tests {
         });
         assert_eq!(number, NUM_CONSOLE_COUNT);
         assert_eq!(args, [0; 6]);
+    }
+
+    #[test]
+    fn set_echo_marshals_stdin_fd_and_the_enabled_flag() {
+        // Enabling echo marshals fd 0 and a non-zero flag.
+        let (number, args) = capture(0, || {
+            assert_eq!(set_echo(true), 0);
+        });
+        assert_eq!(number, NUM_STREAM_ECHO);
+        assert_eq!(args[0], u64::from(STDIN));
+        assert_eq!(args[1], 1);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+
+        // Disabling echo marshals fd 0 and a zero flag.
+        let (_, args) = capture(0, || {
+            assert_eq!(set_echo(false), 0);
+        });
+        assert_eq!(args[0], u64::from(STDIN));
+        assert_eq!(args[1], 0);
+    }
+
+    #[test]
+    fn set_echo_surfaces_negative_errno_encoding() {
+        // A console-less build refuses the toggle with `NotImplemented`;
+        // the wrapper surfaces the raw `-errno` register unchanged.
+        let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(set_echo(true), want);
+        });
     }
 
     #[test]

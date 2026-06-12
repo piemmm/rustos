@@ -72,6 +72,7 @@ mod integrity;
 mod scrub;
 mod superblock;
 mod transaction;
+mod unlock;
 
 #[cfg(test)]
 mod tests;
@@ -88,6 +89,10 @@ use integrity::{
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
 pub use scrub::{ScrubBudget, ScrubReport};
+pub use unlock::{
+    UnlockDescriptor, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN, UNLOCK_MAX_ITERATIONS,
+    UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
+};
 
 use dedupe::{
     chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, DedupeIndex,

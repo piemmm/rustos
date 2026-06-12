@@ -12,17 +12,31 @@
 //! # Two consoles: the display and the UART (`plans/PI.md` P7b / P11)
 //!
 //! The **boot-log** path ([`ConsoleWriter`], and through it
-//! [`SerialSink`]) defaults to the attached display: when the
-//! framebuffer boot console is configured ([`crate::video::is_active`])
-//! every log line is rendered on screen through
-//! [`crate::video::write_bytes`], and the UART carries the log only when
-//! no video output exists (`AGENTS.md` §10 — the screen is the
-//! user-facing console, the serial line is the last resort). The
-//! exception: a **debug build** (`cfg(debug_assertions)`) echoes every
-//! log/debug line to the UART *as well as* the screen — even while a
-//! login session owns the UART — so a serial capture of a development
-//! boot always carries the full diagnostic stream; a release build
-//! writes each line to exactly one backing.
+//! [`SerialSink`]) routes by build profile (`AGENTS.md` §10 — the
+//! screen is the user-facing console, the serial line is the
+//! diagnostic one):
+//!
+//! - A **release build** renders every log line on the attached
+//!   display when the framebuffer boot console is configured
+//!   ([`crate::video::is_active`]) and carries it on the UART only
+//!   when no video output exists.
+//! - A **debug build** (`cfg(debug_assertions)`) routes the whole
+//!   log/debug stream to the **UART instead** — even while a login
+//!   session owns the UART — so a serial capture of a development boot
+//!   carries the full diagnostic stream and the screen stays clear for
+//!   the user-facing session. With no UART discovered the bounded
+//!   transmit simply drops the bytes; the screen is never the debug
+//!   log's sink.
+//!
+//! "Debug build" here is the Cargo `dev` profile, and it lines up with
+//! the **image** profile because `tools/xtask` compiles the kernel in
+//! the matching profile: the non-shippable `debug` SD image is built
+//! from a `dev`-profile (`debug_assertions`-on) kernel, while the
+//! shippable `installer` image is built `--release` (assertions off, log
+//! on screen). The single release kernel cannot observe the image it is
+//! planted in, so this build-profile pairing is what makes the routing
+//! above match the operator's `--profile` choice (`tools/xtask`
+//! `kernel_build_profile`).
 //!
 //! The **stream** path is different: the video console and the UART are
 //! two *separate* `abi-v1` stream backings with their own session
@@ -204,26 +218,27 @@ pub fn write_console_bytes(bytes: &[u8]) -> usize {
     bytes.len()
 }
 
-/// [`core::fmt::Write`] adapter that emits each byte through the
-/// current console: the video console when configured (its renderer
-/// interprets `\n` itself), else the UART. UART bytes get `\n` →
-/// `\r\n` translation so terminals capturing the serial line render
-/// the boot log with proper line breaks.
+/// [`core::fmt::Write`] adapter for the **log/debug** line path that
+/// routes by build profile. A release build emits each byte through the
+/// user-facing console — the video console when configured (its
+/// renderer interprets `\n` itself), else the UART. A debug build
+/// (`cfg(debug_assertions)`) sends the whole stream to the **UART
+/// instead**, so a serial capture of a development boot carries the
+/// full diagnostic stream while the screen stays clear for the session.
 ///
-/// This is the log/debug line path, so a **debug build** echoes every
-/// line to the UART *in addition to* an active video console (a serial
-/// capture of a development boot must carry the full diagnostic
-/// stream); a release build writes to exactly one backing — the screen
-/// when configured, else the UART.
+/// UART bytes get `\n` → `\r\n` translation so terminals capturing the
+/// serial line render the boot log with proper line breaks; the video
+/// renderer needs no such translation.
 pub struct ConsoleWriter;
 
 impl core::fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        if crate::video::is_active() {
+        // Debug builds divert the log/debug stream to the UART (never
+        // the screen); release builds render it on the display when one
+        // is configured and fall back to the UART otherwise.
+        if !cfg!(debug_assertions) && crate::video::is_active() {
             crate::video::write_bytes(s.as_bytes());
-            if !cfg!(debug_assertions) {
-                return Ok(());
-            }
+            return Ok(());
         }
         for byte in s.bytes() {
             if byte == b'\n' {

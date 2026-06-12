@@ -282,6 +282,50 @@ Secret-holding allocations inherit RustOS zero-on-free requirements.
 > KDF of the volume key and the random salt, because `open` must recompute it
 > to unseal the master key on mount.
 
+### Passphrase-derived volume key
+
+The `VolumeKey` above is 256 bits of high-entropy material no human can type,
+so it is never the thing an operator supplies at boot. The standard LUKS-style
+indirection sits *above* the volume: an operator supplies a **passphrase**, and
+the `VolumeKey` is derived from it with PBKDF2-HMAC-SHA256 (`lib/crypto`, the
+same audited KDF that protects `/System/Security/Users`) over a per-volume
+random salt and a tunable iteration count. Both public parameters travel beside
+the volume in a small plaintext **unlock descriptor**
+(`drivers/filesystem/rustfs/src/unlock.rs`, `UnlockDescriptor`): the analogue of
+a LUKS header, laid down where the bootstrap can read it *before* anything is
+decrypted (on a Pi SD image, a file on the FAT boot partition). The descriptor
+is not secret — the salt only makes precomputation per-volume and the count
+makes each guess expensive; the passphrase is never stored. A wrong passphrase
+derives the wrong key, which `RustFs::open` rejects through the wrapped
+master-key AEAD authentication (`PermissionDenied`), so a guess costs a full
+mount attempt and there is no separate passphrase oracle (§5.4). The iteration
+count is bounded (`UNLOCK_MIN_ITERATIONS..=UNLOCK_MAX_ITERATIONS`) and a
+descriptor outside the range, with a wrong magic/KDF id, or a non-zero reserved
+byte is refused fail-closed (§2.9 / §5.4.3).
+
+This `VolumeKey`-from-passphrase layer is authored by the §11 installer flow
+(it sets the real passphrase when it provisions the user's encrypted root) and,
+for development, by the debug Pi image (a known passphrase, never shipped, like
+the debug `root` account). A **shippable installer image must not** bake in a
+known passphrase: the installed root is (re-)provisioned at install time under
+the operator's chosen passphrase. The descriptor format and derivation are the
+landed primitive; wiring the boot path to read the descriptor, prompt for the
+passphrase on the console, mount the root, and serve
+`/System/Security/Users` to login is staged (`plans/PI.md` P11).
+
+> **Hardware-backed key storage (future, §19.9).** Typing a passphrase at every
+> boot is the baseline available on any board. A platform with a hardware root
+> of trust — a TPM with measured boot / sealed storage, an Arm `TrustZone`
+> secure world, an Apple-style Secure Enclave, or the UEFI Secure Boot + TPM
+> chain Windows `BitLocker` uses — should instead **seal** the `VolumeKey` (or
+> the passphrase-derived wrapping key) to the platform's measured state and
+> release it automatically when the boot chain is unmodified, falling back to
+> the passphrase on a recovery path. That hand-off is a future *source* of the
+> `VolumeKey` slotting in beside the passphrase path; it changes nothing about
+> the on-disk volume. Physical attacks (cold-boot, decap) stay out of the
+> charter threat model (§19.9): sealing bounds the remote/offline attacker, not
+> one with the silicon in a lab.
+
 ---
 
 ## 8. Integrity and recovery primitives
