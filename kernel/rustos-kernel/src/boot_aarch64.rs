@@ -66,7 +66,7 @@ use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
-use crate::arch_wrapper_aarch64::{Aarch64BinArch, UART_CONSOLE};
+use crate::arch_wrapper_aarch64::{Aarch64BinArch, UART_ONLY_CONSOLES, VIDEO_AND_UART_CONSOLES};
 use crate::dispatch_aarch64::{production_dispatch, DISPATCH_SLOT};
 use crate::mem_map::{build_memory_map, region_byte_totals};
 
@@ -525,10 +525,13 @@ pub fn boot(
 /// Installs the production `svc` dispatch callback before user space can
 /// be entered (the `kernel_core` `Syscall` phase publishes the resident
 /// hook into [`DISPATCH_SLOT`]), wraps the validated [`Aarch64Arch`] in
-/// the local [`Aarch64BinArch`] `KernelArch`, and installs the
-/// discovered-UART [`UART_CONSOLE`] as the `stream_write` device. A
-/// hand-off that `BootInfo::validate` rejects parks fail-closed rather
-/// than entering the core (`AGENTS.md` §2.9 / §5.4.5).
+/// the local [`Aarch64BinArch`] `KernelArch`, and installs the discovered
+/// console list: with the framebuffer boot console active the video
+/// console is index 0 and the UART an independent second console (one
+/// login session each, `plans/PI.md` P11); otherwise the UART is the
+/// only console. A hand-off that `BootInfo::validate` rejects parks
+/// fail-closed rather than entering the core (`AGENTS.md` §2.9 /
+/// §5.4.5).
 fn enter_kernel_core(
     arch: Aarch64Arch,
     memory_map: rustos_kernel_mem::BootMemoryMap,
@@ -555,12 +558,17 @@ fn enter_kernel_core(
         Level::Info,
         &DISPATCH_SLOT,
     )
-    .with_console(&UART_CONSOLE)
-    // Install the discovered-UART input backing (`plans/PI.md` P6e-2): the
-    // non-blocking RX drain the `stream_read` syscall reads through. It is
-    // the bootstrap stream backing for fd 0 (`AGENTS.md` §20), reusing the
-    // same zero-sized `UART_CONSOLE` device as the output half.
-    .with_console_read(&UART_CONSOLE)
+    // Install the discovered console list (`plans/PI.md` P11): when the
+    // P7b framebuffer boot console came up, the display (with its
+    // keyboard input seam) is the primary console and the UART is an
+    // independent second console with its own login session; with no
+    // display, the discovered UART is the only console. Each entry is
+    // a `stream_write`/`stream_read` backing pair (`AGENTS.md` §20).
+    .with_consoles(if video::is_active() {
+        &VIDEO_AND_UART_CONSOLES
+    } else {
+        &UART_ONLY_CONSOLES
+    })
     // Install the PID 1 spawn seam (`plans/PI.md` P6c-3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s EL0 image and drop into user mode.

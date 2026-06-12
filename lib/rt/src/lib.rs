@@ -56,7 +56,8 @@
 #![deny(missing_docs)]
 
 use rustos_abi::{
-    LimitKind, MapFlags, ResourceLimit, SyscallNumber, STDERR, STDIN, STDINFO, STDOUT,
+    LimitKind, MapFlags, ResourceLimit, SyscallNumber, CONSOLE_INHERIT, STDERR, STDIN, STDINFO,
+    STDOUT,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -111,6 +112,9 @@ const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 
 /// `users_db_read` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
+
+/// `console_count` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -258,6 +262,13 @@ pub fn yield_now() {
 /// **Ready** — the caller keeps running (a true concurrent spawn, not an
 /// `exec`-style hand-off, `AGENTS.md` §4 / §5.4).
 ///
+/// The child's standard streams attach to the **caller's own** console
+/// ([`rustos_abi::CONSOLE_INHERIT`], `AGENTS.md` §20): a spawned session
+/// member (login's shell, a shell's job) stays on the console its parent
+/// was driving. To start a process on a *different* installed console —
+/// PID 1 launching one login per console (`plans/PI.md` P11) — use
+/// [`spawn_at`].
+///
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the new PID, and a
 /// negative value is `-errno` (recover the [`rustos_abi::Errno`]
@@ -272,7 +283,59 @@ pub fn spawn(path: &[u8]) -> i64 {
     // `(path, len)` against the caller's address space before touching it
     // (`AGENTS.md` §5.4). `path` is a live shared `&[u8]` for the duration
     // of the call, so the `(ptr, len)` pair denotes readable memory.
-    let ret = unsafe { raw_syscall(NUM_SPAWN, [ptr, path.len() as u64, 0, 0, 0, 0]) };
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SPAWN,
+            [ptr, path.len() as u64, CONSOLE_INHERIT, 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Spawn the embedded program registered under the absolute `path` with
+/// its standard streams attached to the installed console `console`
+/// (`SyscallNumber::SPAWN`, `AGENTS.md` §20, `plans/PI.md` P11).
+///
+/// The console-selecting form of [`spawn`]: `console` names an index in
+/// the kernel's installed console list (its length is reported by
+/// [`console_count`]); an index with no installed console fails closed
+/// with `-errno` (`NotFound`). PID 1 `init` uses this to start one login
+/// session per discovered text console — the video console and the UART
+/// are separate session contexts.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
+pub fn spawn_at(path: &[u8], console: u32) -> i64 {
+    let ptr = path.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `(path, len)` against the caller's address space and `console`
+    // against the installed console list before touching any state
+    // (`AGENTS.md` §5.4). `path` is a live shared `&[u8]` for the duration
+    // of the call, so the `(ptr, len)` pair denotes readable memory.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SPAWN,
+            [ptr, path.len() as u64, u64::from(console), 0, 0, 0],
+        )
+    };
+    ret as i64
+}
+
+/// Report how many system text consoles are installed
+/// (`SyscallNumber::CONSOLE_COUNT`, `AGENTS.md` §20, `plans/PI.md` P11).
+///
+/// Requires `CAP_CONSOLE_WRITE`. The count is the index space
+/// [`spawn_at`]'s `console` argument selects from; PID 1 `init` uses it
+/// to start one login session per discovered console. The kernel encodes
+/// the result as a signed register: a non-negative value is the count,
+/// a negative value is `-errno` (the wrapper surfaces it verbatim,
+/// `AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+pub fn console_count() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates the capability before any state
+    // is touched (`AGENTS.md` §5.4).
+    let ret = unsafe { raw_syscall(NUM_CONSOLE_COUNT, [0, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -636,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_marshals_path_pointer_and_len() {
+    fn spawn_marshals_path_pointer_len_and_inherit() {
         let path = *b"/Apps/Shell.app/Run";
         let (number, args) = capture(7, || {
             assert_eq!(spawn(&path), 7);
@@ -644,7 +707,31 @@ mod tests {
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        // The plain `spawn` keeps the child on the caller's own console.
+        assert_eq!(args[2], CONSOLE_INHERIT);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn spawn_at_marshals_the_console_index() {
+        let path = *b"/System/Services/login";
+        let (number, args) = capture(8, || {
+            assert_eq!(spawn_at(&path, 1), 8);
+        });
+        assert_eq!(number, NUM_SPAWN);
+        assert_eq!(args[0], path.as_ptr() as usize as u64);
+        assert_eq!(args[1], path.len() as u64);
+        assert_eq!(args[2], 1);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn console_count_marshals_no_arguments_and_surfaces_count() {
+        let (number, args) = capture(2, || {
+            assert_eq!(console_count(), 2);
+        });
+        assert_eq!(number, NUM_CONSOLE_COUNT);
+        assert_eq!(args, [0; 6]);
     }
 
     #[test]

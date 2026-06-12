@@ -68,7 +68,7 @@ use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
 use crate::init_spawn_x86_64::X86_64_INIT_SPAWN;
 use crate::ioapic_controller::IoApicController;
 use crate::mem_map::carve_guard_arena_from_map;
-use crate::serial_sink::COM1_CONSOLE;
+use crate::serial_sink::COM1_CONSOLES;
 use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
@@ -688,11 +688,12 @@ fn try_boot(
         // production dispatch hook.
         &DISPATCH_SLOT,
     )
-    // The COM1 console backing for the standard streams: `stream_write` on
+    // The COM1 console list for the standard streams: `stream_write` on
     // fd 1/2/3 reaches the same serial line the log sink uses, so PID 1
     // `init`'s banner lands (`plans/PI.md` X3a, `AGENTS.md` §20). It is a
-    // stream *backing*, not a program-facing device.
-    .with_console(&COM1_CONSOLE)
+    // stream *backing*, not a program-facing device; the read half fails
+    // closed (no COM1 RX drain is wired on this slice).
+    .with_consoles(&COM1_CONSOLES)
     // The PID 1 (`init`) spawn seam: after `BootCompleted`, `kernel_main`
     // builds `init`'s ring-3 image and drops into it as a resumable user
     // kthread (`plans/PI.md` X3a).

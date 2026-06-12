@@ -26,6 +26,11 @@
 /* Maximum total size, in bytes, of a startup-vector block. */
 #define ROS_PROCESS_START_MAX_TOTAL_LEN ((uint64_t)16777216ull)
 
+/* `console` argument to ros_sys_spawn: attach the child to the caller's own
+ * console (any other value names an installed console index, see
+ * ros_sys_console_count). */
+#define ROS_CONSOLE_INHERIT ((uint64_t)0xffffffffffffffffull)
+
 /* Packed little-endian wire size of a startup-vector header, in bytes. */
 #define ROS_PROCESS_START_HEADER_WIRE_LEN 32u
 /* Packed little-endian wire size of one string slot, in bytes. */

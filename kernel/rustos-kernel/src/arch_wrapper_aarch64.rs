@@ -132,12 +132,76 @@ impl ConsoleRead for UartConsole {
     }
 }
 
-/// The single `'static` [`UartConsole`] the boot path installs through
-/// [`rustos_kernel_core::BootInfo::with_console`] (output) and
-/// [`rustos_kernel_core::BootInfo::with_console_read`] (input).
+/// The single `'static` [`UartConsole`] the boot path lists in the
+/// [`rustos_kernel_core::BootInfo::with_consoles`] console list.
 /// Zero-sized, so it has no `.bss`/`.data` footprint — mirroring
 /// [`rustos_arch_aarch64::SERIAL_SINK`].
 pub static UART_CONSOLE: UartConsole = UartConsole;
+
+/// The video (framebuffer) console device — the **primary** console the
+/// boot path lists when the P7b framebuffer boot console is configured
+/// (`plans/PI.md` P11).
+///
+/// A zero-sized [`ConsoleWrite`] + [`ConsoleRead`] adapter over the
+/// framebuffer text renderer: every `stream_write` byte is rendered on
+/// screen through [`rustos_arch_aarch64::video::write_bytes`]. Its input
+/// half is the **keyboard** seam: the display's session reads a directly
+/// attached keyboard (USB HID / PS-2 — the P10 input wiring), never the
+/// UART, which is its own console with its own login (`plans/PI.md`
+/// P11). Until the P10 keyboard wiring lands the seam reports "no input
+/// pending" on every poll, so kernel-core's `BlockingConsoleRead` parks
+/// a reader until a keyboard exists — the prompt waits instead of
+/// exiting or borrowing the serial line (`AGENTS.md` §2.9 / §5.4).
+#[derive(Debug, Default, Copy, Clone)]
+pub struct VideoConsole;
+
+impl ConsoleWrite for VideoConsole {
+    fn write(&self, bytes: &[u8]) -> Result<usize, rustos_abi::Errno> {
+        // The boot path lists this device only when the framebuffer
+        // console came up, but fail closed rather than silently dropping
+        // bytes if that invariant is ever violated (`AGENTS.md` §2.9).
+        if !rustos_arch_aarch64::video::is_active() {
+            return Err(rustos_abi::Errno::NotImplemented);
+        }
+        rustos_arch_aarch64::video::write_bytes(bytes);
+        Ok(bytes.len())
+    }
+}
+
+impl ConsoleRead for VideoConsole {
+    fn read(&self, _buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
+        // The keyboard seam (`plans/PI.md` P10): no directly attached
+        // keyboard source is wired yet, so every poll honestly reports
+        // "no input pending". Kernel-core's `BlockingConsoleRead` turns
+        // that into a scheduler park, so the video login waits at its
+        // prompt until input hardware exists rather than reading the
+        // UART console's bytes (`plans/PI.md` P11) or fabricating end of
+        // input (`AGENTS.md` §2.9).
+        Ok(0)
+    }
+}
+
+/// The single `'static` [`VideoConsole`] the boot path lists first when
+/// the framebuffer boot console is active. Zero-sized, like
+/// [`UART_CONSOLE`].
+pub static VIDEO_CONSOLE: VideoConsole = VideoConsole;
+
+/// The console list installed when the framebuffer boot console is
+/// active: the video console is the primary (index 0, PID 1's banner +
+/// the first login) and the UART is an independent second console with
+/// its own login session (`plans/PI.md` P11).
+pub static VIDEO_AND_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 2] = [
+    rustos_kernel_core::ConsoleDevice::new(&VIDEO_CONSOLE, &VIDEO_CONSOLE),
+    rustos_kernel_core::ConsoleDevice::new(&UART_CONSOLE, &UART_CONSOLE),
+];
+
+/// The console list installed when no display came up (QEMU `virt`, a
+/// headless Pi): the discovered UART is the only console.
+pub static UART_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
+    [rustos_kernel_core::ConsoleDevice::new(
+        &UART_CONSOLE,
+        &UART_CONSOLE,
+    )];
 
 #[cfg(test)]
 mod tests {

@@ -100,14 +100,15 @@ supervise the `Shell` session — the riscv64 analogue of the aarch64
 `init_spawn`/`spawn_producer` seams. `boot_riscv64::try_boot` installs
 three things on the `BootInfo` hand-off:
 
-- **Console backing (`with_console`).** `RiscvUartConsole` — a zero-sized
+- **Console backing (`with_consoles`).** `RiscvUartConsole` — a zero-sized
   `kernel_core::ConsoleWrite` over the new verbatim arch-port
   `serial::write_console_bytes` (no `\n` translation, unlike the boot-log
   `SbiWriter`) — is the `stream_write` (fd 1) backing PID 1 writes its
-  banner through (`AGENTS.md` §16.4 / §20). No `with_console_read` is
-  installed: the SBI legacy console exposes no non-blocking input drain,
-  so fd 0 reads fail closed this slice (a real input backing is a later
-  increment).
+  banner through (`AGENTS.md` §16.4 / §20), listed as the only entry of
+  the `BootInfo::with_consoles` console list. Its read half is the
+  fail-closed `NULL_CONSOLE_READ`: the SBI legacy console exposes no
+  non-blocking input drain, so fd 0 reads fail closed this slice (a real
+  input backing is a later increment).
 - **PID 1 spawn seam (`with_init`).** `init_spawn_riscv64::RiscvInitSpawn`
   builds the embedded `init` (`Run`) program's image in its own Sv39
   address space (`IDENTITY_GIB = 4`, user bias 64 GiB), switches to it,

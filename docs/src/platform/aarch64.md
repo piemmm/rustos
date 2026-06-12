@@ -315,18 +315,18 @@ coincide on both models. `serial::read_console_bytes` drains whatever
 input is immediately available into the caller's buffer and stops at the
 first byte that is not yet present — it **never busy-waits** for input
 (`AGENTS.md` §2.1), so a read with no pending byte is a valid zero-length
-short read at the device level. `boot_aarch64` installs this through the
+short read at the device level. `boot_aarch64` lists this through the
 same zero-sized `UartConsole` device (it implements both `ConsoleWrite`
-and `ConsoleRead`) via `BootInfo::with_console_read`; the kernel-core
-init pipeline then wraps it in `BlockingConsoleRead`, which turns an
-empty device poll into a scheduler park (`reschedule_current`, the same
-poll-and-park loop the `wait` syscall uses) and re-polls when the caller
-is next dispatched — so a `stream_read` of fd 0 (whose backing the
-spawner attaches to this device, `AGENTS.md` §20) **waits** for the
-discovered UART's input rather than reporting a spurious end-of-input
-(the backing owns blocking, §20). That wait is what holds the login
-session at its `Username: ` prompt (`plans/PI.md` P11) until the user
-types.
+and `ConsoleRead`) in the `BootInfo::with_consoles` console list; the
+kernel-core init pipeline then wraps every listed read half in
+`BlockingConsoleRead`, which turns an empty device poll into a scheduler
+park (`reschedule_current`, the same poll-and-park loop the `wait`
+syscall uses) and re-polls when the caller is next dispatched — so a
+`stream_read` of fd 0 (whose backing the spawner attaches to a console
+entry, `AGENTS.md` §20) **waits** for that console's input rather than
+reporting a spurious end-of-input (the backing owns blocking, §20). That
+wait is what holds each login session at its `Username: ` prompt
+(`plans/PI.md` P11) until the user types.
 
 This is the bootstrap stream **backing** the spawner attaches to fd 0
 (`AGENTS.md` §20); it is not a program-facing interface. The receive-bit
@@ -375,16 +375,30 @@ Pi):
   the single aarch64-none test-matrix build would compile its
   alloc-backed `epoch` module into the minimal, allocator-free QEMU
   binaries; the carve-out is documented at the lock).
-- **Routing.** `serial::ConsoleWriter` (the log sink) and
-  `serial::write_console_bytes` (the `stream_write` fd 1/2 backing)
-  both render to the screen when `video::is_active` and fall back to
-  the UART otherwise. The UART transmit wait is **bounded**
+- **Routing.** The **boot-log** path (`serial::ConsoleWriter`, the log
+  sink) renders to the screen when `video::is_active` and falls back to
+  the UART otherwise — except that a **debug build**
+  (`cfg(debug_assertions)`) echoes every log/debug line to the UART *as
+  well as* the screen, even while a login session owns the UART, so a
+  serial capture of a development boot always carries the full
+  diagnostic stream; a release build writes each line to exactly one
+  backing. The **stream** path is split per console (`plans/PI.md`
+  P11): `boot_aarch64` installs `[VideoConsole, UartConsole]` through
+  `BootInfo::with_consoles` when the framebuffer console is active
+  (else `[UartConsole]`). `VideoConsole` writes through
+  `video::write_bytes` and reads from the keyboard seam — a directly
+  attached USB-HID / PS/2 keyboard once the P10 input wiring lands;
+  until then every poll reports "no input pending" and the reader
+  parks, so the video login waits at its prompt rather than borrowing
+  the serial line. `UartConsole`
+  (`serial::write_console_bytes` / `read_console_bytes`) is the UART's
+  own stream backing with its **own login session** and never touches
+  the display. The UART transmit wait is **bounded**
   (`console::tx_wait`): a transmitter that never drains — e.g. a
   flow-blocked PL011 still attached to the Bluetooth chip — is declared
   wedged after `TX_POLL_BUDGET` polls and bytes are dropped (one cheap
   poll each, recovering the moment the FIFO drains) rather than hanging
-  the kernel on its first log line (`AGENTS.md` §2.1). Console *input*
-  stays on the UART (the display has no receive side).
+  the kernel on its first log line (`AGENTS.md` §2.1).
 
 Fail closed (`AGENTS.md` §2.9): no mailbox node (QEMU `virt` — the
 UART-backed verticals are unchanged), a detached display, or any

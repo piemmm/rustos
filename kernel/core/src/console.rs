@@ -3,10 +3,11 @@
 //! (`AGENTS.md` §10 / §16.4).
 //!
 //! [`ConsoleWrite`] is the output half and [`ConsoleRead`] the input
-//! half; an arch port installs one device implementing each through the
-//! `BootInfo` `with_console` / `with_console_read` seams, and the syscall
-//! handlers own the user-memory copy and the capability check, never the
-//! device.
+//! half; an arch port installs its discovered [`ConsoleDevice`] list
+//! through the `BootInfo::with_consoles` seam (one entry per text
+//! console — the video console and the UART are independent entries,
+//! `plans/PI.md` P11), and the syscall handlers own the user-memory copy
+//! and the capability check, never the device.
 //!
 //! `stream_write` lets the privileged early bring-up principals (PID 1
 //! `init`, login, getty) write a byte buffer to the *hardware* console;
@@ -80,12 +81,12 @@ impl ConsoleWrite for NullConsole {
     }
 }
 
-/// The shared [`NullConsole`] instance the syscall handler defaults to.
+/// The shared [`NullConsole`] instance a write-less console entry
+/// carries.
 ///
-/// `KernelSyscallHandlers::new` points its `console` borrow here so that
-/// the field is always valid without an `Option` branch on the hot
-/// path; the boot path replaces it with the real device through
-/// `KernelSyscallHandlers::with_console`.
+/// A [`ConsoleDevice`] whose console has no output device points its
+/// `write` half here so the direction stays fail-closed without an
+/// `Option` branch on the hot path.
 pub static NULL_CONSOLE: NullConsole = NullConsole;
 
 /// A byte source for the privileged system console input.
@@ -139,14 +140,58 @@ impl ConsoleRead for NullConsoleRead {
     }
 }
 
-/// The shared [`NullConsoleRead`] instance the syscall handler defaults
-/// to.
+/// The shared [`NullConsoleRead`] instance a read-less console entry
+/// carries.
 ///
-/// `KernelSyscallHandlers::new` points its `stream_read` borrow here so
-/// the field is always valid without an `Option` branch on the hot
-/// path; the boot path replaces it with the real device through
-/// `KernelSyscallHandlers::with_console_read`.
+/// A [`ConsoleDevice`] whose console has no input device (a write-only
+/// serial port) points its `read` half here so the direction stays
+/// fail-closed without an `Option` branch on the hot path.
 pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
+
+/// One installed system text console: the output sink and input source
+/// of a single console the per-process descriptor table can attach a
+/// standard stream to (`AGENTS.md` §20, `plans/PI.md` P11).
+///
+/// The boot path installs a `'static` **list** of these through
+/// `BootInfo::with_consoles` — index 0 is the primary console (the
+/// detected display, else the first discovered UART), and each further
+/// entry is an independent console with its own session context (the
+/// UART beside an active video console). A spawner attaches a child's
+/// standard streams to exactly one entry; the video console and the
+/// UART therefore carry **separate login processes** rather than
+/// sharing input (`plans/PI.md` P11 — two concurrent session contexts).
+///
+/// A console with no input device (a write-only serial port, a display
+/// with no keyboard yet) carries [`NULL_CONSOLE_READ`] (or an
+/// empty-polling source) as its `read` half, so reads fail closed or
+/// park rather than borrowing another console's input (`AGENTS.md`
+/// §2.9 / §5.4).
+pub struct ConsoleDevice {
+    /// The console's byte sink (`stream_write`).
+    pub write: &'static (dyn ConsoleWrite + 'static),
+    /// The console's byte source (`stream_read`).
+    pub read: &'static (dyn ConsoleRead + 'static),
+}
+
+impl ConsoleDevice {
+    /// Pair `write` and `read` as one installed console.
+    #[must_use]
+    pub const fn new(
+        write: &'static (dyn ConsoleWrite + 'static),
+        read: &'static (dyn ConsoleRead + 'static),
+    ) -> Self {
+        Self { write, read }
+    }
+}
+
+/// The empty console list the syscall handler defaults to.
+///
+/// With no console installed every console-backed stream access fails
+/// closed with [`Errno::NotImplemented`] — the same inert-interface
+/// announcement [`NULL_CONSOLE`] / [`NULL_CONSOLE_READ`] make — and
+/// `console_count` reports zero. The boot path replaces it through
+/// `KernelSyscallHandlers::with_consoles`.
+pub static NO_CONSOLES: [ConsoleDevice; 0] = [];
 
 /// A [`ConsoleRead`] adapter that **blocks** the calling task until input
 /// arrives — the stream backing owning the wait, exactly as `AGENTS.md`

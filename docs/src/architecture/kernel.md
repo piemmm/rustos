@@ -174,7 +174,7 @@ stack-resident, so the panic path survives a wedged heap.
 | `audit_sink`       | `&'static (dyn Sink + Sync)`      | Lives until power-off.                        |
 | `log_level`        | `rustos_log::Level`               | Installed before the first `PhaseStarted`.    |
 | `dispatcher_callback_slot` | `&'static DispatchCallbackSlot`   | Bin-crate-owned slot; receives the production `DispatchHook` during the `syscall` phase. See below. |
-| `console`          | `&'static (dyn ConsoleWrite + 'static)` | System console that backs a process's standard output stream (the `stream_write` syscall, `AGENTS.md` §20); defaults to the fail-closed `NULL_CONSOLE` until the arch port installs a device via `with_console`. |
+| `consoles`         | `&'static [ConsoleDevice]`        | The installed system console list backing the standard streams (the `stream_write` / `stream_read` syscalls, `AGENTS.md` §20): index 0 the primary console, each further entry an independent console with its own session context (`plans/PI.md` P11). Defaults to the empty fail-closed `NO_CONSOLES` until the arch port installs its discovered list via `with_consoles`. |
 
 `BootInfo::validate()` runs at the top of `kernel_main` and reports any
 violation as a `BootInfoError`; the kernel then logs a `PhaseFailed`

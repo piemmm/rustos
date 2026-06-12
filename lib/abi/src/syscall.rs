@@ -106,13 +106,21 @@ impl SyscallNumber {
     /// path (`plans/SPAWN.md` SP3, `AGENTS.md` §16.5).
     ///
     /// Arguments: `path: *const u8` (user pointer to the program's
-    /// absolute path) and `path_len: usize`. The kernel copies the path
-    /// in through the validated `copy_from_user` boundary (`AGENTS.md`
-    /// §5.4), looks it up in the kernel's embedded-program registry,
-    /// builds a fresh **hardware-isolated** address space for it (§4),
-    /// registers it as a runnable process, and returns the new process's
-    /// PID; the caller keeps running (a true concurrent spawn, not an
-    /// `exec`-style hand-off). Gated by
+    /// absolute path), `path_len: usize`, and `console: u64` — which
+    /// system console the child's standard streams attach to
+    /// (`AGENTS.md` §20 — the spawner, never the program, decides the
+    /// backing). Passing [`CONSOLE_INHERIT`](crate::CONSOLE_INHERIT)
+    /// attaches the child to the **caller's own** descriptor table
+    /// (the default session shape: a child stays on its parent's
+    /// console); any other value names a console index reported by
+    /// [`SyscallNumber::CONSOLE_COUNT`] and an index with no installed
+    /// console fails closed with [`crate::Errno::NotFound`]. The kernel
+    /// copies the path in through the validated `copy_from_user`
+    /// boundary (`AGENTS.md` §5.4), looks it up in the kernel's
+    /// embedded-program registry, builds a fresh **hardware-isolated**
+    /// address space for it (§4), registers it as a runnable process,
+    /// and returns the new process's PID; the caller keeps running (a
+    /// true concurrent spawn, not an `exec`-style hand-off). Gated by
     /// [`crate::CapabilityId::PROC_SPAWN`] — spawning materialises a new
     /// principal and hands it the CPU, so it is privileged rather than
     /// ambient (`AGENTS.md` §4). The spawned program receives only the
@@ -230,6 +238,20 @@ impl SyscallNumber {
     /// a system without accounts refuses every login rather than
     /// inventing one (`AGENTS.md` §5.4.5).
     pub const USERS_DB_READ: Self = Self(19);
+    /// Report how many system text consoles are installed
+    /// (`AGENTS.md` §20, `plans/PI.md` P11).
+    ///
+    /// No arguments. Returns the number of console stream backings the
+    /// boot path installed — each one an independent text console (the
+    /// video console, a UART) a spawner may attach a child's standard
+    /// streams to through [`SyscallNumber::SPAWN`]'s `console`
+    /// argument. PID 1 `init` uses it to start one login session per
+    /// discovered console (`plans/PI.md` P11 — the video console and
+    /// the UART are separate session contexts). Gated by
+    /// [`crate::CapabilityId::CONSOLE_WRITE`]: console topology belongs
+    /// to the principals that drive consoles, not to every task
+    /// (`AGENTS.md` §5.4).
+    pub const CONSOLE_COUNT: Self = Self(20);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -325,6 +347,7 @@ mod tests {
         assert_eq!(SyscallNumber::RLIMIT_GET.as_u16(), 17);
         assert_eq!(SyscallNumber::RLIMIT_SET.as_u16(), 18);
         assert_eq!(SyscallNumber::USERS_DB_READ.as_u16(), 19);
+        assert_eq!(SyscallNumber::CONSOLE_COUNT.as_u16(), 20);
     }
 
     #[test]

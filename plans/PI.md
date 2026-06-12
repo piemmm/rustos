@@ -2084,26 +2084,81 @@ two users — or the same user twice — can be logged in concurrently.
 - **Beacon + bring-up debug removal** (former increment 2): the
   boot-progress beacons (`boot_aarch64`/`serial`/`video`) and the
   serial bring-up mirror in `kernel/arch/aarch64/src/serial.rs` are
-  deleted; console output is video-first with the UART as the fallback,
-  exactly as `AGENTS.md` §10 routes it — except that **debug builds**
+  deleted. The **boot-log** path stays video-first with the UART as the
+  fallback (`AGENTS.md` §10) — except that **debug builds**
   (`cfg(debug_assertions)`) echo every log/debug line to the UART as
-  well as the screen (`serial::ConsoleWriter`), so a serial capture of
-  a development boot always carries the full diagnostic stream; release
-  builds write each line to exactly one backing.
+  well as the screen (`serial::ConsoleWriter`), even while a login
+  session owns the UART, so a serial capture of a development boot
+  always carries the full diagnostic stream; release builds write each
+  line to exactly one backing.
+- **Separate console contexts — LANDED** (former increment 1, minus
+  echo). The video console and the UART are independent stream backings
+  with their own login sessions:
+  - `rustos_abi::DescriptorTable` records, per standard descriptor, the
+    installed-console index backing it (`standard_on(console)`;
+    `standard()` = console 0). `spawn` (now 3-arg) takes a `console`
+    selector — `CONSOLE_INHERIT` (all-ones sentinel) copies the
+    caller's own table (login's shell stays on login's console), any
+    other value names a validated installed-console index and fails
+    closed with `NotFound` otherwise. New `abi-v1` syscall
+    **`console_count`** (no. 20, `CAP_CONSOLE_WRITE`, unaudited)
+    reports the installed-list length. C view regenerated
+    (`ros_sys_spawn` 3-arg, `ros_sys_console_count`,
+    `ROS_CONSOLE_INHERIT`).
+  - kernel-core holds a `'static [ConsoleDevice]` list
+    (`BootInfo::with_consoles` → `KernelSyscallHandlers::with_consoles`;
+    empty fail-closed default). `stream_write`/`stream_read` resolve
+    the descriptor's direction first, then its console index against
+    the list (missing console → `NotImplemented`); the init pipeline
+    wraps every listed read half in `BlockingConsoleRead`.
+    `KernelSpawnCtx` carries the spawner-resolved table to admit.
+  - aarch64 installs `[VideoConsole, UartConsole]` when the P7b
+    framebuffer console is active, else `[UartConsole]`.
+    `serial::write_console_bytes` is now UART-only (the UART console's
+    write half, its own login); `VideoConsole` writes through
+    `video::write_bytes` and reads from the **keyboard seam** — a
+    directly attached USB-HID / PS/2 keyboard once the P10 input wiring
+    lands; until then every poll reports "no input pending" and the
+    reader parks at its prompt rather than borrowing the UART's bytes.
+    x86_64 (COM1) and riscv64 (SBI) list single write-only consoles
+    with fail-closed `NULL_CONSOLE_READ` read halves — behaviour
+    unchanged.
+  - PID 1 `init` supervises **one login per discovered console**
+    (`userland/system/init/src/supervisor.rs`, host-tested over the
+    `Sessions` seam): `console_count` → `spawn_at(session, console)`
+    fan-out, wait-any reaping, relaunch on the exited session's own
+    console within a per-console `SESSION_SPAWN_BUDGET`, exhaustion /
+    spawn / wait failures and a zero-console system fail closed
+    (`EXIT_NO_CONSOLES` 74). The bootstrap slot table is a fixed
+    8-entry stack array until the userland heap (SP5b) lets it size
+    from the count.
+  - Proven by kernel-core unit tests (per-descriptor console routing
+    both directions, console_count, spawn explicit/invalid/inherit
+    attachment), lib/rt + abi-sys marshalling tests, and the init
+    supervisor host tests; the `-M virt` verticals ride the unchanged
+    single-UART list.
 
 **Remaining (next increments, in order):**
 
-1. **Separate console contexts** — split the aarch64 video console and
-   UART into two independent `ConsoleRead`/`ConsoleWrite` stream backings
-   with their own descriptor sets, and have `init` spawn one login per
-   discovered text console. Keystroke echo / line editing live in the
-   stream layer, not in programs — and the **echo-control contract**
-   (read_secret's echo-off promise) lands here, with the echo itself: a
+1. **Stream-layer echo + echo control** — keystroke echo / line editing
+   live in the stream layer, not in programs, together with the
+   **echo-control contract** (read_secret's echo-off promise): a
    control surface over a backing that never echoes would be a §2.1
-   no-op / §2.3 speculative surface today.
-2. **Profile-silenced boot log** — keep the boot log echoed to the
+   no-op / §2.3 speculative surface, so both land in one increment.
+2. **Keyboard input for the video console** — back `VideoConsole`'s
+   keyboard seam with the discovered USB-HID (P10 VL805/xHCI wiring) /
+   PS/2 input path, so the video login takes input from a directly
+   attached keyboard (`AGENTS.md` §20; the UART stays its own session).
+3. **Profile-silenced boot log** — keep the boot log echoed to the
    screen **only** in debug-profile images, silent on installer images.
-3. **Login over a real database in production** — gated on the P8/P9
+4. **Configurable log policy** — the log output/direction (which
+   consoles/sinks receive log lines), rotation, and on-storage age
+   limits become administrator-settable configuration under
+   `/System/Settings` (§16.2), replacing the compiled-in routing;
+   requires the persistent `/System/Logs` store (§19.4) before rotation
+   and age limits are meaningful. The debug-build dual echo stays a
+   debug-only exception.
+5. **Login over a real database in production** — gated on the P8/P9
    metal root mount (the kernel-side `load_users_db` + `with_users_db`
    wiring at boot) and on the production `mem_map` producer
    (`plans/SPAWN.md` SP5b) so login can parse the delivered text; a

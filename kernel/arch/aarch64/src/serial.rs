@@ -9,21 +9,28 @@
 //! [<level>] id=<id> <message> <key>=<value> ...
 //! ```
 //!
-//! # Video first, UART as the fallback (`plans/PI.md` P7b)
+//! # Two consoles: the display and the UART (`plans/PI.md` P7b / P11)
 //!
-//! Console output defaults to the **attached display**: when the
+//! The **boot-log** path ([`ConsoleWriter`], and through it
+//! [`SerialSink`]) defaults to the attached display: when the
 //! framebuffer boot console is configured ([`crate::video::is_active`])
-//! every transmitted byte is rendered on screen through
-//! [`crate::video::write_bytes`], and the UART is used only when no
-//! video output exists (`AGENTS.md` §10 — the screen is the user-facing
-//! console, the serial line is the last resort). The exception is the
-//! log/debug line path ([`ConsoleWriter`], and through it [`SerialSink`]):
-//! a **debug build** (`cfg(debug_assertions)`) echoes every log line to
-//! the UART *as well as* the screen, so a serial capture of a development
-//! boot always carries the full diagnostic stream even with a display
-//! attached; a release build keeps the screen-only routing. Console
-//! *input* stays on the UART either way (the display has no receive
-//! side).
+//! every log line is rendered on screen through
+//! [`crate::video::write_bytes`], and the UART carries the log only when
+//! no video output exists (`AGENTS.md` §10 — the screen is the
+//! user-facing console, the serial line is the last resort). The
+//! exception: a **debug build** (`cfg(debug_assertions)`) echoes every
+//! log/debug line to the UART *as well as* the screen — even while a
+//! login session owns the UART — so a serial capture of a development
+//! boot always carries the full diagnostic stream; a release build
+//! writes each line to exactly one backing.
+//!
+//! The **stream** path is different: the video console and the UART are
+//! two *separate* `abi-v1` stream backings with their own session
+//! contexts (`plans/PI.md` P11 — one login each). [`write_console_bytes`]
+//! / [`read_console_bytes`] are the **UART console's** halves and never
+//! touch the display; the video console's write half goes straight to
+//! [`crate::video::write_bytes`] in the kernel binary's console device,
+//! and its input comes from a keyboard source, never the UART.
 //!
 //! # Board-discovered base and model (`plans/PI.md` P2)
 //!
@@ -172,27 +179,25 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
     read
 }
 
-/// Write `bytes` verbatim to the current console — the video console
-/// when one is configured, else the configured UART — returning the
-/// number written (always `bytes.len()`; both backings accept every
-/// byte).
+/// Write `bytes` verbatim to the configured **UART**, returning the
+/// number written (always `bytes.len()`; the bounded transmit accepts
+/// or drops every byte).
 ///
 /// Unlike [`ConsoleWriter`] this performs **no** `\n` → `\r\n`
 /// translation: it is the raw byte sink the `stream_write` syscall
 /// (`abi-v1` number 11) emits a user program's output through, so the
 /// bytes reach the device exactly as the program wrote them
-/// (`plans/PI.md` P6c-2, `AGENTS.md` §10 / §16.4). The downstream boot
-/// pipeline wraps this in a `kernel_core::ConsoleWrite` device and
-/// installs it on `BootInfo`.
+/// (`plans/PI.md` P6c-2, `AGENTS.md` §10 / §16.4). It deliberately
+/// never routes to the video console: the UART is its own stream
+/// backing with its own login session (`plans/PI.md` P11), so a
+/// program attached to the UART console writes the serial line and
+/// nothing else. The downstream boot pipeline wraps this in a
+/// `kernel_core::ConsoleWrite` device and installs it on `BootInfo`.
 ///
 /// Freestanding-only transmit (the host build's [`putchar`] is inert),
 /// so the host tests of the consuming `ConsoleWrite` adapter observe the
 /// byte count without touching MMIO.
 pub fn write_console_bytes(bytes: &[u8]) -> usize {
-    if crate::video::is_active() {
-        crate::video::write_bytes(bytes);
-        return bytes.len();
-    }
     for &byte in bytes {
         putchar(byte);
     }

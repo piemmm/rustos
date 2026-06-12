@@ -333,11 +333,17 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::SPAWN,
         name: "spawn",
-        arg_count: 2,
+        arg_count: 3,
         args: [
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            // The console selector: `CONSOLE_INHERIT` (the all-ones
+            // sentinel) attaches the child to the caller's own
+            // descriptor table, any other value names an installed
+            // console index (`AGENTS.md` §20 — the spawner decides the
+            // child's stream backing). `U64` so the sentinel is
+            // representable; the handler validates the range.
+            AbiType::U64,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -513,6 +519,23 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // record cannot drown the log.
         required_capability: Some(CapabilityId::USERS_READ),
         audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_COUNT,
+        name: "console_count",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `U64` so the C view carries the count-or-`-errno` register
+        // convention `spawn` / `users_db_read` use (the stub returns the
+        // raw register).
+        ret: AbiType::U64,
+        // Console topology belongs to the principals that drive
+        // consoles (PID 1 `init`, login) rather than to every task
+        // (`AGENTS.md` §5.4); the count itself is low-sensitivity
+        // metadata, so like `cap_query` it is a pure observer and is
+        // NOT audited (`AGENTS.md` §5.4.4 — avoid drowning the log).
+        required_capability: Some(CapabilityId::CONSOLE_WRITE),
+        audit: false,
     },
 ];
 
@@ -724,6 +747,16 @@ mod tests {
         let rlimit_set = spec_for(SyscallNumber::RLIMIT_SET).unwrap();
         assert_eq!(rlimit_set.required_capability, None);
         assert!(rlimit_set.audit, "rlimit_set must be audited");
+        // console_count reports console topology to the principals that
+        // drive consoles, so it shares stream_write's CAP_CONSOLE_WRITE
+        // gate and, as a pure observer, is not audited (`AGENTS.md`
+        // §5.4.4).
+        let console_count = spec_for(SyscallNumber::CONSOLE_COUNT).unwrap();
+        assert_eq!(
+            console_count.required_capability,
+            Some(CapabilityId::CONSOLE_WRITE)
+        );
+        assert!(!console_count.audit, "console_count must not audit");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

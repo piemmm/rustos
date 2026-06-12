@@ -1765,7 +1765,7 @@ const TESTS: &[QemuTest] = &[
     // path (not a test-driven ad-hoc scheduler like X1/X2). It reuses
     // `rustos_kernel::boot`, which now installs the x86_64 PID 1 spawn seam
     // (`init_spawn_x86_64`, via `BootInfo::with_init`) and the COM1 console
-    // backing (`BootInfo::with_console`); only the audit sink is replaced.
+    // backing (`BootInfo::with_consoles`); only the audit sink is replaced.
     // After `BootCompleted`, `kernel_main` builds `init`'s ring-3 image
     // through the capability-checked, audited `kernel_core::spawn_image`
     // (emitting `ProcessSpawned`, EventId 4030) and admits it as a resumable

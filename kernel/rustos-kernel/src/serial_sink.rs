@@ -99,8 +99,8 @@ pub use serial::COM1_BASE as REEXPORT_COM1_BASE;
 
 /// A [`ConsoleWrite`] backing over the COM1 16550 UART.
 ///
-/// The x86_64 production boot path installs this through
-/// `rustos_kernel_core::BootInfo::with_console`, so the `stream_write`
+/// The x86_64 production boot path lists this in the
+/// `rustos_kernel_core::BootInfo::with_consoles` console list, so the `stream_write`
 /// syscall on fd 1/2/3 reaches the same serial line the [`SerialSink`] logs
 /// to (`plans/PI.md` X3a). It is the x86_64 counterpart of the aarch64
 /// `UartConsole`: the bootstrap stream **backing**, not a program-facing
@@ -143,6 +143,16 @@ impl ConsoleWrite for Com1Console {
     }
 }
 
-/// The single `'static` [`Com1Console`] the x86_64 boot path installs as the
-/// console backing through `BootInfo::with_console`.
+/// The single `'static` [`Com1Console`] the x86_64 boot path lists in the
+/// `BootInfo::with_consoles` console list.
 pub static COM1_CONSOLE: Com1Console = Com1Console::new();
+
+/// The x86_64 boot console list: COM1 is the only console. Its read half
+/// is the fail-closed [`rustos_kernel_core::NULL_CONSOLE_READ`] (no
+/// non-blocking COM1 RX drain is wired on this slice), so fd 0 reads keep
+/// failing closed exactly as before (`AGENTS.md` §5.4).
+pub static COM1_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
+    [rustos_kernel_core::ConsoleDevice::new(
+        &COM1_CONSOLE,
+        &rustos_kernel_core::NULL_CONSOLE_READ,
+    )];

@@ -467,8 +467,7 @@ fn run_phases<A: KernelArch>(
         scheduler_config,
         arch,
         dispatcher_callback_slot,
-        console,
-        console_read,
+        consoles,
         programs,
         spawn_service,
         ..
@@ -569,19 +568,30 @@ fn run_phases<A: KernelArch>(
     let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) =
         Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
 
-    // Wrap the boot-installed console input in the blocking adapter
-    // (`AGENTS.md` §20 — the stream backing owns blocking, never the
-    // program): a `stream_read` finding the device empty parks the caller
-    // back on the scheduler until input arrives, instead of reporting a
-    // zero-length read user space cannot distinguish from end of input.
-    // It needs the same `'static` arch handle (to read the current CPU
-    // when parking) as the process-wait producer above, so it is built
-    // and `Box::leak`'d the same way. A boot path that installed no
-    // device keeps failing closed: the wrapped `NULL_CONSOLE_READ` error
-    // propagates straight through without parking.
-    let console_read: &'static (dyn crate::console::ConsoleRead + 'static) = Box::leak(Box::new(
-        crate::console::BlockingConsoleRead::new(state.arch.as_ref(), console_read),
-    ));
+    // Wrap every boot-installed console's input half in the blocking
+    // adapter (`AGENTS.md` §20 — the stream backing owns blocking, never
+    // the program): a `stream_read` finding its device empty parks the
+    // caller back on the scheduler until input arrives, instead of
+    // reporting a zero-length read user space cannot distinguish from
+    // end of input. Each adapter needs the same `'static` arch handle
+    // (to read the current CPU when parking) as the process-wait
+    // producer above, so the rebuilt list is `Box::leak`'d the same way
+    // — a one-shot publish, not a global mutable static (`AGENTS.md`
+    // §2.1). A console whose read half fails closed (a write-only
+    // serial port's `NULL_CONSOLE_READ`) keeps failing closed: the
+    // inner error propagates straight through without parking.
+    let consoles: &'static [crate::console::ConsoleDevice] = {
+        let mut wrapped = alloc::vec::Vec::with_capacity(consoles.len());
+        for device in consoles {
+            let blocking: &'static (dyn crate::console::ConsoleRead + 'static) =
+                Box::leak(Box::new(crate::console::BlockingConsoleRead::new(
+                    state.arch.as_ref(),
+                    device.read,
+                )));
+            wrapped.push(crate::console::ConsoleDevice::new(device.write, blocking));
+        }
+        Box::leak(wrapped.into_boxed_slice())
+    };
 
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
@@ -599,8 +609,7 @@ fn run_phases<A: KernelArch>(
             &state.ipc,
             &state.aspaces,
             &state.rng,
-            console,
-            console_read,
+            consoles,
             &state.frame_allocator,
             // The same leaked-`'static` allocator, handed to the spawn
             // producer as a `'static` page-table frame source so a child's

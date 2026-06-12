@@ -246,11 +246,21 @@ impl ConsoleWrite for RiscvUartConsole {
     }
 }
 
-/// The single `'static` [`RiscvUartConsole`] the boot path installs
-/// through [`rustos_kernel_core::BootInfo::with_console`]. Zero-sized, so
-/// it has no `.bss`/`.data` footprint — mirroring
+/// The single `'static` [`RiscvUartConsole`] the boot path lists in the
+/// [`rustos_kernel_core::BootInfo::with_consoles`] console list.
+/// Zero-sized, so it has no `.bss`/`.data` footprint — mirroring
 /// [`rustos_arch_riscv64::SERIAL_SINK`].
 pub static RISCV_UART_CONSOLE: RiscvUartConsole = RiscvUartConsole;
+
+/// The riscv64 boot console list: the SBI console is the only console.
+/// Its read half is the fail-closed [`rustos_kernel_core::NULL_CONSOLE_READ`]
+/// (the SBI legacy console exposes no non-blocking input drain), so fd 0
+/// reads keep failing closed exactly as before (`AGENTS.md` §5.4).
+pub static RISCV_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
+    [rustos_kernel_core::ConsoleDevice::new(
+        &RISCV_UART_CONSOLE,
+        &rustos_kernel_core::NULL_CONSOLE_READ,
+    )];
 
 /// Failure modes of [`boot`] and [`build_boot_memory_map`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -579,11 +589,12 @@ pub fn try_boot(
         Level::Info,
         &DISPATCH_SLOT,
     )
-    // Install the SBI console as the `stream_write` (fd 1) backing so PID 1
+    // Install the SBI console as the only console-list entry so PID 1
     // `init` and its session can write their startup banners
-    // (`AGENTS.md` §20). No `with_console_read`: the SBI legacy console
-    // exposes no non-blocking input drain, so fd 0 fails closed this slice.
-    .with_console(&RISCV_UART_CONSOLE)
+    // (`AGENTS.md` §20). Its read half is the fail-closed
+    // `NULL_CONSOLE_READ`: the SBI legacy console exposes no
+    // non-blocking input drain, so fd 0 fails closed this slice.
+    .with_consoles(&RISCV_UART_CONSOLES)
     // Install the PID 1 spawn seam (`plans/PI.md` RV-P3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s U-mode image and drop into user mode.

@@ -323,7 +323,7 @@ landed first; the real device/producer wired in a following increment).
   kthread (`spawn_user_kthread`) + registers its caps + frozen address
   space, returning the PID **without** entering/draining (the caller keeps
   running). Handler fields default in `new`, with `with_frames` /
-  `with_spawn` builders (mirroring `with_console`), so the kernel binary
+  `with_spawn` builders (mirroring `with_consoles`), so the kernel binary
   needs no change yet and production `spawn` fails closed with
   `NotImplemented`.
 - Host tests (8 new): happy path through a host `ProcessSpawn` double that

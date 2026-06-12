@@ -14,7 +14,7 @@
 //! (`init_spawn_x86_64`, through `BootInfo::with_init`), the runtime
 //! `ProcessSpawn` producer + embedded-program registry
 //! (`spawn_producer_x86_64`, through `BootInfo::with_spawn`), and the COM1
-//! console backing (`BootInfo::with_console`). After `kernel_core::kernel_main`
+//! console backing (`BootInfo::with_consoles`). After `kernel_core::kernel_main`
 //! emits `AuditEvent::BootCompleted` it builds `init`'s ring-3 image through
 //! the capability-checked, audited spawn caller (emitting
 //! `AuditEvent::ProcessSpawned`, `EventId(4030)`, #1) and admits it as a

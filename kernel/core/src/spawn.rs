@@ -589,7 +589,7 @@ pub trait SpawnCtx {
 ///
 /// Installed into the syscall handler through
 /// [`KernelSyscallHandlers::with_spawn`](crate::KernelSyscallHandlers::with_spawn),
-/// exactly as the console device is installed through `with_console`. It
+/// exactly as the console list is installed through `with_consoles`. It
 /// defaults to
 /// [`NULL_PROCESS_SPAWN`], which fails closed with
 /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9) until an arch port wires a

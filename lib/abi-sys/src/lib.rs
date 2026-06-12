@@ -83,6 +83,7 @@ const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
+const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -310,12 +311,37 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize) -> u64 
 /// `(path, path_len)` pair against the caller's address space before
 /// reading it (`AGENTS.md` §5.4). The caller keeps running — this is a
 /// true concurrent spawn, not an `exec`-style hand-off (`plans/SPAWN.md`
-/// SP3).
+/// SP3). `console` selects the child's standard-stream attachment
+/// (`AGENTS.md` §20): `ROS_CONSOLE_INHERIT` keeps the child on the
+/// caller's own console; any other value names an installed console index
+/// (see `ros_sys_console_count`) and an index with no console fails
+/// closed.
 #[must_use]
 #[export_name = "ros_sys_spawn"]
-pub extern "C" fn sys_spawn(path: *mut c_void, path_len: usize) -> u64 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`.
-    unsafe { raw_syscall(NUM_SPAWN, [ptr_arg(path), path_len as u64, 0, 0, 0, 0]) }
+pub extern "C" fn sys_spawn(path: *mut c_void, path_len: usize, console: u64) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(path, path_len)`
+    // and the console selector.
+    unsafe {
+        raw_syscall(
+            NUM_SPAWN,
+            [ptr_arg(path), path_len as u64, console, 0, 0, 0],
+        )
+    }
+}
+
+/// `console_count`: report how many system text consoles are installed
+/// (`SyscallNumber::CONSOLE_COUNT`, `AGENTS.md` §20). Returns the count,
+/// or a `ROS_E_*` code reinterpreted into the result.
+///
+/// Gated kernel-side on `ROS_CAP_CONSOLE_WRITE`. The count is the index
+/// space `ros_sys_spawn`'s `console` argument selects from — each entry
+/// is an independent text console with its own session context
+/// (`plans/PI.md` P11).
+#[must_use]
+#[export_name = "ros_sys_console_count"]
+pub extern "C" fn sys_console_count() -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here.
+    unsafe { raw_syscall(NUM_CONSOLE_COUNT, [0, 0, 0, 0, 0, 0]) }
 }
 
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
@@ -447,7 +473,7 @@ mod tests {
         (NUM_IRQ_WAIT, "irq_wait", 2),
         (NUM_RANDOM_GET, "random_get", 3),
         (NUM_STREAM_WRITE, "stream_write", 3),
-        (NUM_SPAWN, "spawn", 2),
+        (NUM_SPAWN, "spawn", 3),
         (NUM_STREAM_READ, "stream_read", 3),
         (NUM_MEM_MAP, "mem_map", 3),
         (NUM_MEM_UNMAP, "mem_unmap", 2),
@@ -455,6 +481,7 @@ mod tests {
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
         (NUM_USERS_DB_READ, "users_db_read", 2),
+        (NUM_CONSOLE_COUNT, "console_count", 0),
     ];
 
     #[test]
@@ -625,16 +652,26 @@ mod tests {
     }
 
     #[test]
-    fn spawn_marshals_path_pointer_and_len() {
+    fn spawn_marshals_path_pointer_len_and_console() {
         let mut path = *b"/Apps/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(7, || {
-            assert_eq!(sys_spawn(ptr, path.len()), 7);
+            assert_eq!(sys_spawn(ptr, path.len(), rustos_abi::CONSOLE_INHERIT), 7);
         });
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        assert_eq!(args[2], rustos_abi::CONSOLE_INHERIT);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn console_count_marshals_no_arguments() {
+        let (number, args) = capture(2, || {
+            assert_eq!(sys_console_count(), 2);
+        });
+        assert_eq!(number, NUM_CONSOLE_COUNT);
+        assert_eq!(args, [0; SYSCALL_MAX_ARGS]);
     }
 
     #[test]

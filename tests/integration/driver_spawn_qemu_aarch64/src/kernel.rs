@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use rustos_abi::{CapabilityId, DriverRegisterReply, SYSCALL_MAX_ARGS};
+use rustos_abi::{CapabilityId, DescriptorTable, DriverRegisterReply, SYSCALL_MAX_ARGS};
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
 use rustos_arch_aarch64::paging::{
     configure_device_gigapages, configure_ram_gigapages, AddressSpace as ArchAddressSpace,
@@ -21,7 +21,7 @@ use rustos_arch_api::CpuId;
 use rustos_bumpalloc::BumpAllocator;
 use rustos_caps::CapabilitySet;
 use rustos_fdt::Fdt;
-use rustos_kernel::arch_wrapper_aarch64::{Aarch64BinArch, UART_CONSOLE};
+use rustos_kernel::arch_wrapper_aarch64::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
 use rustos_kernel::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use rustos_kernel_core::AddressSpaceRegistry;
@@ -429,8 +429,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             sys.ipc,
             sys.aspaces,
             sys.rng,
-            &UART_CONSOLE,
-            &UART_CONSOLE,
+            &UART_ONLY_CONSOLES,
             sys.frames,
             sys.frames,
             &DRIVER_REGISTRY,
@@ -455,6 +454,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.arch,
         SecTaskId(0),
         &NULL_PROCESS_WAIT,
+        DescriptorTable::standard(),
     );
     if AARCH64_PROCESS_SPAWN
         .spawn_with(

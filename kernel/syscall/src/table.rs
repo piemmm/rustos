@@ -237,11 +237,23 @@ pub trait SyscallHandlers {
     /// builds a fresh hardware-isolated address space for it (§4),
     /// registers it as a runnable process, and returns its PID; the
     /// caller keeps running (`plans/SPAWN.md` SP3 — a true concurrent
-    /// spawn, not an `exec`-style hand-off). A build with no spawn
-    /// service wired must fail closed with [`Errno::NotImplemented`], and
-    /// a path naming no registered program with [`Errno::NotFound`],
-    /// rather than silently doing nothing (`AGENTS.md` §2.9).
-    fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult;
+    /// spawn, not an `exec`-style hand-off). `console` selects the
+    /// child's standard-stream attachment (`AGENTS.md` §20):
+    /// [`rustos_abi::CONSOLE_INHERIT`] attaches the child to the
+    /// caller's own descriptor table, any other value names an
+    /// installed console index and the implementation must fail closed
+    /// with [`Errno::NotFound`] when no console is installed at it. A
+    /// build with no spawn service wired must fail closed with
+    /// [`Errno::NotImplemented`], and a path naming no registered
+    /// program with [`Errno::NotFound`], rather than silently doing
+    /// nothing (`AGENTS.md` §2.9).
+    fn spawn(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        console: u64,
+    ) -> SyscallResult;
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
     /// read (`AGENTS.md` §20).
@@ -375,6 +387,23 @@ pub trait SyscallHandlers {
     /// no users-database service wired never fabricates accounts. The
     /// service is installed in `kernel/core`.
     fn users_db_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Report how many system text consoles are installed (`AGENTS.md`
+    /// §20, `plans/PI.md` P11).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::CONSOLE_WRITE`]. The implementation returns the
+    /// length of the boot-installed console list — the index space the
+    /// `spawn` syscall's `console` argument selects from. PID 1 `init`
+    /// uses it to start one login session per discovered console.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// no console list wired never fabricates a console topology. The
+    /// real count is installed in `kernel/core`.
+    fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 }
@@ -532,7 +561,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::SPAWN => {
                 let len = decode_len(args.0[1])?;
-                self.handlers.spawn(caller, args.0[0], len)
+                // args[2] is the console selector: the `CONSOLE_INHERIT`
+                // sentinel or an installed console index, validated by
+                // the handler against the live console list.
+                self.handlers.spawn(caller, args.0[0], len, args.0[2])
             }
             SyscallNumber::STREAM_READ => {
                 #[allow(clippy::cast_possible_truncation)]
@@ -580,6 +612,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 self.handlers.users_db_read(caller, args.0[0], len)
             }
+            SyscallNumber::CONSOLE_COUNT => self.handlers.console_count(caller),
             _ => Err(Errno::NotFound),
         }
     }
@@ -892,11 +925,18 @@ mod tests {
             // arguments without wiring a real console here.
             Ok(len as u64)
         }
-        fn spawn(&self, _c: &CallerContext<'_>, _path: u64, path_len: usize) -> SyscallResult {
+        fn spawn(
+            &self,
+            _c: &CallerContext<'_>,
+            _path: u64,
+            path_len: usize,
+            _console: u64,
+        ) -> SyscallResult {
             self.record("spawn");
             // Echo the path length back so the reachability test can
-            // assert the dispatcher decoded the `(path, path_len)`
-            // arguments without wiring a real spawn service here.
+            // assert the dispatcher decoded the `(path, path_len,
+            // console)` arguments without wiring a real spawn service
+            // here.
             Ok(path_len as u64)
         }
         fn stream_read(
@@ -956,6 +996,13 @@ mod tests {
             // the dispatcher decoded `(buf, len)` without wiring a real
             // users-database service here.
             Ok(len as u64)
+        }
+        fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("console_count");
+            // A fabricated single-console topology so the reachability
+            // test can assert the dispatcher routed the call without
+            // wiring a real console list here.
+            Ok(1)
         }
     }
 

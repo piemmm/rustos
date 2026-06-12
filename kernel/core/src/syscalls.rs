@@ -76,7 +76,7 @@
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::{
     CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags, RandomFlags,
-    ResourceLimit, StreamMode, SyscallNumber, RANDOM_REQUEST_MAX_BYTES,
+    ResourceLimit, StreamMode, SyscallNumber, CONSOLE_INHERIT, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{EndpointId, PortRegistry};
@@ -99,7 +99,7 @@ use alloc::boxed::Box;
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
-use crate::console::{ConsoleRead, ConsoleWrite, NULL_CONSOLE, NULL_CONSOLE_READ};
+use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
@@ -165,22 +165,17 @@ where
     /// reserve mutates its buffer as it serves (`AGENTS.md` §2.1 — the
     /// reserve owns no lock of its own).
     rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
-    /// The system console sink `stream_write` emits to (`AGENTS.md`
-    /// §10 / §16.4). Defaults to [`NULL_CONSOLE`] (fail closed with
-    /// [`Errno::NotImplemented`]); the boot path installs the concrete
-    /// device — the detected framebuffer, else the first discovered
-    /// UART (`plans/PI.md` P6) — through [`Self::with_console`]. Held as
-    /// a `'static` borrow because the installed console lives for the
-    /// lifetime of the running kernel, exactly like `NULL_CONSOLE`.
-    console: &'static (dyn ConsoleWrite + 'static),
-    /// The system console input source `stream_read` draws from
-    /// (`AGENTS.md` §10 / §16.4). Defaults to [`NULL_CONSOLE_READ`] (fail
-    /// closed with [`Errno::NotImplemented`]); the boot path installs the
-    /// concrete device — the first discovered keyboard/UART input source
-    /// (`plans/PI.md` P6) — through [`Self::with_console_read`]. Held as a
-    /// `'static` borrow because the installed console lives for the
-    /// lifetime of the running kernel, exactly like `NULL_CONSOLE_READ`.
-    console_read: &'static (dyn ConsoleRead + 'static),
+    /// The installed system console list `stream_write` / `stream_read`
+    /// resolve a descriptor's console index against (`AGENTS.md` §10 /
+    /// §16.4 / §20). Defaults to the empty [`NO_CONSOLES`] (every
+    /// console-backed access fails closed with
+    /// [`Errno::NotImplemented`]); the boot path installs the discovered
+    /// list — index 0 the primary console (the detected display, else
+    /// the first UART), further entries the independent secondary
+    /// consoles (`plans/PI.md` P11) — through [`Self::with_consoles`].
+    /// Held as a `'static` borrow because the installed consoles live
+    /// for the lifetime of the running kernel.
+    consoles: &'static [ConsoleDevice],
     /// The kernel's live physical-frame allocator, the source of the
     /// frames a spawned process's pages are mapped to (`plans/SPAWN.md`
     /// SP3). [`None`] until the boot path threads it through
@@ -286,14 +281,11 @@ where
             ipc,
             aspaces,
             rng,
-            // Fail closed until the boot path installs a real device
-            // (`AGENTS.md` §2.9 / §5.4): an early `stream_write` returns
-            // `NotImplemented` rather than silently dropping the bytes.
-            console: &NULL_CONSOLE,
-            // Same fail-closed default for the input direction: an early
-            // `stream_read` returns `NotImplemented` rather than
-            // fabricating input (`AGENTS.md` §2.9 / §5.4).
-            console_read: &NULL_CONSOLE_READ,
+            // Fail closed until the boot path installs the discovered
+            // console list (`AGENTS.md` §2.9 / §5.4): an early
+            // `stream_write` / `stream_read` returns `NotImplemented`
+            // rather than touching a device that does not exist.
+            consoles: &NO_CONSOLES,
             // Spawn subsystem unwired until the boot path threads a frame
             // allocator + populated registry + producer (`plans/SPAWN.md`
             // SP3): `spawn` fails closed (`NotImplemented` / `NotFound`).
@@ -316,42 +308,25 @@ where
         }
     }
 
-    /// Install the system console `stream_write` emits to, consuming
-    /// and returning `self`.
+    /// Install the discovered system console list `stream_write` /
+    /// `stream_read` resolve descriptors against, consuming and
+    /// returning `self`.
     ///
     /// Called once by the boot path after it has selected the console
-    /// device from the normalised hardware tree — the detected
-    /// framebuffer when present, else the first discovered UART
-    /// (`plans/PI.md` P6, `AGENTS.md` §18). Until this is called the
-    /// handler holds [`NULL_CONSOLE`] and `stream_write` fails closed
-    /// with [`Errno::NotImplemented`]. The console must be `'static`:
-    /// the boot path leaks the device alongside `KernelState`, which
-    /// lives for the lifetime of the running kernel (`AGENTS.md` §2.1 —
-    /// no global mutable static; the install is a one-shot move).
+    /// devices from the normalised hardware tree (`plans/PI.md` P6 /
+    /// P11, `AGENTS.md` §18): index 0 is the primary console (the
+    /// detected display when present, else the first discovered UART),
+    /// and each further entry is an independent console with its own
+    /// session context (the UART beside an active video console). Until
+    /// this is called the handler holds the empty [`NO_CONSOLES`] and
+    /// every console-backed stream access fails closed with
+    /// [`Errno::NotImplemented`]. The list must be `'static`: the boot
+    /// path leaks it alongside `KernelState`, which lives for the
+    /// lifetime of the running kernel (`AGENTS.md` §2.1 — no global
+    /// mutable static; the install is a one-shot move).
     #[must_use]
-    pub const fn with_console(mut self, console: &'static (dyn ConsoleWrite + 'static)) -> Self {
-        self.console = console;
-        self
-    }
-
-    /// Install the system console input source `stream_read` draws from,
-    /// consuming and returning `self`.
-    ///
-    /// The read counterpart of [`Self::with_console`], called once by the
-    /// boot path after it has selected the console device from the
-    /// normalised hardware tree (`plans/PI.md` P6, `AGENTS.md` §18). Until
-    /// this is called the handler holds [`NULL_CONSOLE_READ`] and
-    /// `stream_read` fails closed with [`Errno::NotImplemented`]. The
-    /// source must be `'static`: the boot path leaks the device alongside
-    /// `KernelState`, which lives for the lifetime of the running kernel
-    /// (`AGENTS.md` §2.1 — no global mutable static; the install is a
-    /// one-shot move).
-    #[must_use]
-    pub const fn with_console_read(
-        mut self,
-        console_read: &'static (dyn ConsoleRead + 'static),
-    ) -> Self {
-        self.console_read = console_read;
+    pub const fn with_consoles(mut self, consoles: &'static [ConsoleDevice]) -> Self {
+        self.consoles = consoles;
         self
     }
 
@@ -993,9 +968,20 @@ where
         // never leaking whether it was closed, the wrong direction, or
         // out of range. An unregistered caller resolves to the
         // all-`Closed` default and fails here too.
-        if self.aspaces.read().streams(caller.task_id).mode(fd) != StreamMode::Write {
+        let streams = self.aspaces.read().streams(caller.task_id);
+        if streams.mode(fd) != StreamMode::Write {
             return Err(Errno::NotFound);
         }
+        // Resolve the descriptor's console index against the installed
+        // console list (`AGENTS.md` §20 — the descriptor names its
+        // backing; the video console and the UART are separate devices,
+        // `plans/PI.md` P11). An index with no installed console —
+        // including the empty pre-install list — announces the inert
+        // interface (`AGENTS.md` §2.9) rather than silently dropping
+        // the bytes.
+        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
+            return Err(Errno::NotImplemented);
+        };
         // The dispatcher already checked `CAP_CONSOLE_WRITE` and that
         // `buf` is non-null (`UserPtr`). A zero-length write touches
         // neither the caller's buffer nor the device.
@@ -1024,11 +1010,8 @@ where
             None => return Err(Errno::BadAddress),
         }
 
-        // Hand the copied bytes to the installed console device. Until
-        // the boot path installs one the default `NULL_CONSOLE` fails
-        // closed with `NotImplemented` (`AGENTS.md` §2.9), never
-        // silently dropping the bytes.
-        self.console.write(&payload).map(|n| n as u64)
+        // Hand the copied bytes to the descriptor's console device.
+        device.write.write(&payload).map(|n| n as u64)
     }
 
     fn stream_read(
@@ -1043,9 +1026,20 @@ where
         // that is not a readable inherited stream fails closed with
         // `NotFound`, never leaking which case occurred. An unregistered
         // caller resolves to the all-`Closed` default and fails here too.
-        if self.aspaces.read().streams(caller.task_id).mode(fd) != StreamMode::Read {
+        let streams = self.aspaces.read().streams(caller.task_id);
+        if streams.mode(fd) != StreamMode::Read {
             return Err(Errno::NotFound);
         }
+        // Resolve the descriptor's console index against the installed
+        // console list (`AGENTS.md` §20, `plans/PI.md` P11 — a login on
+        // the UART console reads the UART, a login on the video console
+        // reads its own keyboard source, never each other's). A missing
+        // console — including the empty pre-install list — announces the
+        // inert interface (`AGENTS.md` §2.9) rather than fabricating
+        // input.
+        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
+            return Err(Errno::NotImplemented);
+        };
         // The dispatcher already checked `CAP_CONSOLE_READ` and that
         // `buf` is non-null (`UserPtr`). A zero-length read touches
         // neither the device nor the caller's buffer.
@@ -1058,13 +1052,11 @@ where
         // the caller loops for the remainder.
         let take = core::cmp::min(len, CONSOLE_READ_MAX);
 
-        // Read from the installed console input source into the kernel
-        // staging buffer first. Until the boot path installs one the
-        // default `NULL_CONSOLE_READ` fails closed with `NotImplemented`
-        // (`AGENTS.md` §2.9), never fabricating input. A faulting device
-        // surfaces its `Errno` here before any user memory is touched.
+        // Read from the descriptor's console input source into the
+        // kernel staging buffer first. A faulting device surfaces its
+        // `Errno` here before any user memory is touched.
         let mut payload = alloc::vec![0u8; take];
-        let read = self.console_read.read(&mut payload)?;
+        let read = device.read.read(&mut payload)?;
         // A correct device never reports more than the buffer it was
         // handed; clamp defensively so a buggy source cannot drive an
         // out-of-bounds copy (`AGENTS.md` §5.4 — validate every input,
@@ -1095,7 +1087,13 @@ where
         }
     }
 
-    fn spawn(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
+    fn spawn(
+        &self,
+        caller: &CallerContext<'_>,
+        path: u64,
+        path_len: usize,
+        console: u64,
+    ) -> SyscallResult {
         // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
         // is non-null (`UserPtr`). Bound the staged path so a hostile
         // `path_len` cannot force an arbitrarily large kernel allocation
@@ -1104,6 +1102,23 @@ where
         if path_len == 0 || path_len > SPAWN_PATH_MAX {
             return Err(Errno::NotFound);
         }
+
+        // Resolve the child's standard-stream attachment *before*
+        // touching any further state (`AGENTS.md` §5.4): `CONSOLE_INHERIT`
+        // copies the caller's own descriptor table (the child stays on
+        // its parent's console, §20), while an explicit value must name
+        // an installed console index — anything else fails closed with
+        // `NotFound`, never attaching the child to a device that does
+        // not exist (`plans/PI.md` P11).
+        let child_streams = if console == CONSOLE_INHERIT {
+            self.aspaces.read().streams(caller.task_id)
+        } else {
+            let index = match u8::try_from(console) {
+                Ok(index) if usize::from(index) < self.consoles.len() => index,
+                _ => return Err(Errno::NotFound),
+            };
+            DescriptorTable::standard_on(index)
+        };
 
         // The spawn subsystem must be fully wired before any state is
         // touched: a build with no frame allocator threaded fails closed
@@ -1156,8 +1171,18 @@ where
             self.arch,
             caller.task_id,
             self.process_wait,
+            child_streams,
         );
         self.spawn_service.spawn(program, &ctx)
+    }
+
+    fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher already checked `CAP_CONSOLE_WRITE`. The count
+        // is the installed list's length — the index space `spawn`'s
+        // `console` argument selects from (`AGENTS.md` §20,
+        // `plans/PI.md` P11); an empty pre-install list honestly
+        // reports zero consoles.
+        Ok(self.consoles.len() as u64)
     }
 
     fn mem_map(
@@ -1370,6 +1395,13 @@ where
     /// until the boot path installs the real producer, so the link is a
     /// no-op until `wait` is wired (`AGENTS.md` §2.9).
     process_wait: &'static (dyn ProcessWait + 'static),
+    /// The standard-stream descriptor table the admitted child is
+    /// established with (`AGENTS.md` §20 — the spawner decides the
+    /// child's stream backing). The spawn handler resolves it from the
+    /// syscall's `console` argument — the caller's own table for
+    /// `CONSOLE_INHERIT`, else `DescriptorTable::standard_on` a
+    /// validated installed-console index (`plans/PI.md` P11).
+    streams: DescriptorTable,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -1384,7 +1416,9 @@ where
     /// supervising task the child is recorded against for a later `wait`.
     /// `page_table_frames` is the `'static` allocator the producer builds
     /// the child's page tables from; `None` fails the spawn closed
-    /// (`AGENTS.md` §2.9, §24.1).
+    /// (`AGENTS.md` §2.9, §24.1). `streams` is the descriptor table the
+    /// child is established with — the spawner's resolved console
+    /// attachment (`AGENTS.md` §20).
     #[must_use]
     // Mirrors `KernelDispatchHook::new`: the same distinct kernel-state
     // borrows threaded explicitly (`AGENTS.md` §2.1 / §4), not a one-use
@@ -1400,6 +1434,7 @@ where
         arch: &'a A,
         parent: SecTaskId,
         process_wait: &'static (dyn ProcessWait + 'static),
+        streams: DescriptorTable,
     ) -> Self {
         Self {
             frames,
@@ -1411,6 +1446,7 @@ where
             arch,
             parent,
             process_wait,
+            streams,
         }
     }
 }
@@ -1498,16 +1534,14 @@ where
             return Err(AdmitError::AspaceConflict);
         }
 
-        // Establish the child's standard streams (`AGENTS.md` §20): a
-        // spawned process inherits the standard descriptor table (`stdin`
-        // readable, `stdout`/`stderr`/`stdinfo` writable), each backed by
-        // the bootstrap console the boot path installed. The program
-        // names only the fd numbers; it never reaches an ambient device
-        // (§4 / §17.4). A richer inheritance policy (e.g. piping a
-        // child's `stdout`) is a later stage.
-        self.aspaces
-            .write()
-            .set_streams(sec_id, DescriptorTable::standard());
+        // Establish the child's standard streams (`AGENTS.md` §20): the
+        // spawner-resolved table — the parent's own (inherit) or the
+        // standard shape on an explicitly selected, validated console
+        // (`plans/PI.md` P11). The program names only the fd numbers; it
+        // never reaches an ambient device (§4 / §17.4). A richer
+        // inheritance policy (e.g. piping a child's `stdout`) is a later
+        // stage.
+        self.aspaces.write().set_streams(sec_id, self.streams);
 
         // Inherit the parent's effective resource limits (`AGENTS.md` §24.3):
         // the child's set is the parent's intersected against the system
@@ -1641,8 +1675,7 @@ where
         ipc: &'a RwLock<PortRegistry>,
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
-        console: &'static (dyn ConsoleWrite + 'static),
-        console_read: &'static (dyn ConsoleRead + 'static),
+        consoles: &'static [ConsoleDevice],
         frames: &'a FrameAllocator,
         page_table_frames: &'static FrameAllocator,
         programs: &'static ProgramRegistry,
@@ -1661,8 +1694,7 @@ where
                 aspaces,
                 rng,
             )
-            .with_console(console)
-            .with_console_read(console_read)
+            .with_consoles(consoles)
             .with_frames(frames)
             .with_page_table_frames(page_table_frames)
             .with_spawn(programs, spawn_service)
@@ -3521,6 +3553,30 @@ mod tests {
         }
     }
 
+    /// Leak a single-console list whose write half is `write` and whose
+    /// read half fails closed — the write-side test fixture for
+    /// [`KernelSyscallHandlers::with_consoles`].
+    fn single_write_console(
+        write: &'static (dyn crate::console::ConsoleWrite + 'static),
+    ) -> &'static [ConsoleDevice] {
+        Box::leak(Box::new([ConsoleDevice::new(
+            write,
+            &crate::console::NULL_CONSOLE_READ,
+        )]))
+    }
+
+    /// Leak a single-console list whose read half is `read` and whose
+    /// write half fails closed — the read-side test fixture for
+    /// [`KernelSyscallHandlers::with_consoles`].
+    fn single_read_console(
+        read: &'static (dyn crate::console::ConsoleRead + 'static),
+    ) -> &'static [ConsoleDevice] {
+        Box::leak(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            read,
+        )]))
+    }
+
     /// `stream_write` copies the caller's bytes in and hands the exact
     /// buffer to the installed console, returning the byte count.
     #[test]
@@ -3551,7 +3607,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console(console);
+        .with_consoles(single_write_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -3601,8 +3657,11 @@ mod tests {
         );
     }
 
-    /// A zero-length `stream_write` succeeds without touching the
-    /// caller's buffer or the device (so it works even with no console).
+    /// A zero-length `stream_write` to an installed console succeeds
+    /// without touching the caller's buffer or the device; with **no**
+    /// console installed even a zero-length write announces the inert
+    /// interface (`AGENTS.md` §2.9 — the descriptor's backing is
+    /// resolved before anything else).
     #[test]
     fn console_write_zero_length_is_ok_and_inert() {
         install_trace_filter();
@@ -3628,10 +3687,24 @@ mod tests {
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
+        )
+        .with_consoles(single_write_console(console));
         assert_eq!(h.stream_write(&ctx, STDOUT, 0x1000, 0), Ok(0));
+        // The device was never touched.
+        assert!(console.written.lock().is_empty());
+
+        // With no console installed the descriptor resolves to no
+        // backing and even a zero-length write fails closed.
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            bare.stream_write(&ctx, STDOUT, 0x1000, 0),
+            Err(Errno::NotImplemented)
+        );
     }
 
     /// `stream_write` from a caller with no registered address space
@@ -3659,7 +3732,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console(console);
+        .with_consoles(single_write_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -3702,7 +3775,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console(console);
+        .with_consoles(single_write_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -3772,7 +3845,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console_read(console);
+        .with_consoles(single_read_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -3830,8 +3903,11 @@ mod tests {
         );
     }
 
-    /// A zero-length `stream_read` succeeds without touching the device
-    /// or the caller's buffer (so it works even with no console).
+    /// A zero-length `stream_read` from an installed console succeeds
+    /// without touching the device or the caller's buffer; with **no**
+    /// console installed even a zero-length read announces the inert
+    /// interface (`AGENTS.md` §2.9 — the descriptor's backing is
+    /// resolved before anything else).
     #[test]
     fn console_read_zero_length_is_ok_and_inert() {
         install_trace_filter();
@@ -3856,10 +3932,25 @@ mod tests {
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
+        let console: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"unseen")));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
+        )
+        .with_consoles(single_read_console(console));
         assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 0), Ok(0));
+        // The device was never read.
+        assert_eq!(*console.last_buf_len.lock(), None);
+
+        // With no console installed the descriptor resolves to no
+        // backing and even a zero-length read fails closed.
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            bare.stream_read(&ctx, STDIN, 0x1000, 0),
+            Err(Errno::NotImplemented)
+        );
     }
 
     /// A device with no input pending reports a zero-length read without
@@ -3893,7 +3984,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console_read(console);
+        .with_consoles(single_read_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -3939,7 +4030,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console_read(console);
+        .with_consoles(single_read_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -3976,7 +4067,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console_read(console);
+        .with_consoles(single_read_console(console));
         aspaces
             .write()
             .set_streams(SecTaskId(2), DescriptorTable::standard());
@@ -4022,7 +4113,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console(console);
+        .with_consoles(single_write_console(console));
         // `STDIN` is read-only; an out-of-range fd resolves to Closed.
         assert_eq!(h.stream_write(&ctx, STDIN, 0x1000, 4), Err(Errno::NotFound));
         assert_eq!(h.stream_write(&ctx, 99, 0x1000, 4), Err(Errno::NotFound));
@@ -4065,7 +4156,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_console_read(console);
+        .with_consoles(single_read_console(console));
         // `STDOUT` is write-only here, so a read of it is refused.
         assert_eq!(h.stream_read(&ctx, STDOUT, 0x1000, 4), Err(Errno::NotFound));
         // The device was never read.
@@ -4247,7 +4338,7 @@ mod tests {
 
         let before = sched.live_task_count();
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len())
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
             .expect("spawn succeeds");
         assert!(
             sched.live_task_count() > before,
@@ -4343,7 +4434,7 @@ mod tests {
         .with_spawn(programs, probe);
         // The probe records and returns `NotImplemented`; the recording, not
         // the result, is what proves the wiring.
-        let _ = h.spawn(&ctx, 0x1000, SPAWN_PATH.len());
+        let _ = h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT);
         assert!(
             probe
                 .saw_static_allocator
@@ -4359,7 +4450,7 @@ mod tests {
         let h2 = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs, probe,
         );
-        let _ = h2.spawn(&ctx, 0x1000, SPAWN_PATH.len());
+        let _ = h2.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT);
         assert!(
             !probe
                 .saw_static_allocator
@@ -4417,7 +4508,7 @@ mod tests {
         );
 
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len())
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
             .expect("spawn succeeds");
         // The child carries the parent's tighter Processes ceiling and the
         // default policy for every other kind.
@@ -4474,7 +4565,7 @@ mod tests {
         .with_process_wait(wait_producer);
 
         let pid = h
-            .spawn(&ctx, 0x1000, SPAWN_PATH.len())
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
             .expect("spawn succeeds");
         // The child (its returned PID) was registered against parent 2.
         assert_eq!(*wait_producer.last_register.lock(), Some((2, pid)));
@@ -4525,7 +4616,7 @@ mod tests {
         .with_spawn(programs, &NULL_PROCESS_SPAWN);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
             Err(Errno::NotImplemented)
         );
     }
@@ -4555,7 +4646,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
             Err(Errno::NotImplemented)
         );
     }
@@ -4596,7 +4687,7 @@ mod tests {
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
             Err(Errno::NotFound)
         );
         assert!(producer.seen_rxe.lock().is_empty());
@@ -4641,7 +4732,7 @@ mod tests {
         .with_spawn(programs, producer);
 
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH.len()),
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT),
             Err(Errno::BadAddress)
         );
         assert!(producer.seen_rxe.lock().is_empty());
@@ -4676,12 +4767,298 @@ mod tests {
         .with_frames(&frames)
         .with_spawn(&EMPTY_PROGRAM_REGISTRY, producer);
 
-        assert_eq!(h.spawn(&ctx, 0x1000, 0), Err(Errno::NotFound));
         assert_eq!(
-            h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1),
+            h.spawn(&ctx, 0x1000, 0, CONSOLE_INHERIT),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH_MAX + 1, CONSOLE_INHERIT),
             Err(Errno::NotFound)
         );
         assert!(producer.seen_rxe.lock().is_empty());
+    }
+
+    /// `console_count` reports the installed list's length, and zero on
+    /// the empty pre-install default — never an invented topology.
+    #[test]
+    fn console_count_reports_the_installed_list_length() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_WRITE], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(bare.console_count(&ctx), Ok(0));
+
+        let video: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let uart: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(video, &crate::console::NULL_CONSOLE_READ),
+            ConsoleDevice::new(uart, &crate::console::NULL_CONSOLE_READ),
+        ]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        assert_eq!(h.console_count(&ctx), Ok(2));
+    }
+
+    /// `stream_write` reaches exactly the console the caller's descriptor
+    /// table names: a process attached to console 1 (the UART beside an
+    /// active video console, `plans/PI.md` P11) writes the UART and never
+    /// the display.
+    #[test]
+    fn stream_write_routes_to_the_descriptor_console() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let line = b"Username: ";
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, line);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let video: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let uart: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(video, &crate::console::NULL_CONSOLE_READ),
+            ConsoleDevice::new(uart, &crate::console::NULL_CONSOLE_READ),
+        ]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+
+        assert_eq!(
+            h.stream_write(&ctx, STDOUT, 0x1000, line.len()),
+            Ok(line.len() as u64)
+        );
+        assert_eq!(uart.written.lock().as_slice(), line);
+        assert!(video.written.lock().is_empty());
+
+        // A descriptor naming a console index with nothing installed at
+        // it fails closed rather than falling back to another device.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(7));
+        assert_eq!(
+            h.stream_write(&ctx, STDOUT, 0x1000, line.len()),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// `stream_read` draws from exactly the console the caller's
+    /// descriptor table names: the UART console's session reads the UART
+    /// RX, never another console's input (`plans/PI.md` P11 — the UART
+    /// no longer feeds the video login).
+    #[test]
+    fn stream_read_routes_to_the_descriptor_console() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let keyboard: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+        let uart_rx: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"root\n")));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(&crate::console::NULL_CONSOLE, keyboard),
+            ConsoleDevice::new(&crate::console::NULL_CONSOLE, uart_rx),
+        ]));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles);
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16), Ok(5));
+        // The UART console's input was drained; the video console's
+        // keyboard source was never touched.
+        assert!(uart_rx.last_buf_len.lock().is_some());
+        assert_eq!(*keyboard.last_buf_len.lock(), None);
+    }
+
+    /// A `spawn` naming an installed console attaches the child's
+    /// standard streams to exactly that console (`plans/PI.md` P11 — one
+    /// login per console), and an index with no installed console fails
+    /// closed with `NotFound`.
+    #[test]
+    fn spawn_attaches_the_child_to_the_selected_console() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
+            ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
+        ]));
+
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_consoles(consoles);
+
+        // An explicit, installed console: the child's table is the
+        // standard shape on exactly that console.
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 1)
+            .expect("spawn succeeds");
+        assert_eq!(
+            aspaces.read().streams(SecTaskId(pid)),
+            DescriptorTable::standard_on(1)
+        );
+
+        // An index with no installed console fails closed before any
+        // state is touched.
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), 2),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.spawn(&ctx, 0x1000, SPAWN_PATH.len(), u64::from(u32::MAX)),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// `CONSOLE_INHERIT` copies the caller's own descriptor table into
+    /// the child (`AGENTS.md` §20 — login's shell stays on login's
+    /// console).
+    #[test]
+    fn spawn_inherit_copies_the_callers_table() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, SPAWN_PATH);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
+        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
+            ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
+        ]));
+
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+            producer,
+        )
+        .with_consoles(consoles);
+
+        // The caller sits on console 1; its child inherits that table
+        // verbatim.
+        aspaces
+            .write()
+            .set_streams(SecTaskId(2), DescriptorTable::standard_on(1));
+        let pid = h
+            .spawn(&ctx, 0x1000, SPAWN_PATH.len(), CONSOLE_INHERIT)
+            .expect("spawn succeeds");
+        assert_eq!(
+            aspaces.read().streams(SecTaskId(pid)),
+            DescriptorTable::standard_on(1)
+        );
     }
 
     /// The dispatcher refuses `spawn` from a caller without

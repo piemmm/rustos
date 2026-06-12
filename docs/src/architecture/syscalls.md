@@ -65,7 +65,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |   9 | `irq_wait`     | `IrqHandle handle`, `u64 timeout_ns`    | `errno` | `CAP_IRQ_BIND`          | no      |
 |  10 | `random_get`   | `user_ptr`, `len`, `u32 flags`          | `u64`   | —                       | no      |
 |  11 | `stream_write` | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_WRITE`     | no      |
-|  12 | `spawn`        | `user_ptr` (path), `len`                | `u64` (pid) | `CAP_PROC_SPAWN`    | yes     |
+|  12 | `spawn`        | `user_ptr` (path), `len`, `u64 console` | `u64` (pid) | `CAP_PROC_SPAWN`    | yes     |
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`             | `u64`   | `CAP_CONSOLE_READ`      | no      |
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
@@ -73,6 +73,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  17 | `rlimit_get`   | `u32 kind`, `user_ptr` (out)            | `errno` | —                       | no      |
 |  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
+|  20 | `console_count`| —                                       | `u64` (count) | `CAP_CONSOLE_WRITE` | no    |
 
 ### Capability matrix
 
@@ -84,7 +85,7 @@ is exhaustive — anything not listed below is ungated:
 | ------------------ | -------------------------- |
 | `CAP_USER_ADMIN`   | `cap_revoke`               |
 | `CAP_IRQ_BIND`     | `irq_bind`, `irq_wait`     |
-| `CAP_CONSOLE_WRITE`| `stream_write`             |
+| `CAP_CONSOLE_WRITE`| `stream_write`, `console_count` |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
 | `CAP_CONSOLE_READ` | `stream_read`              |
 | `CAP_USERS_READ`   | `users_db_read`            |
@@ -160,6 +161,17 @@ at the format's 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always
 suffices. The first-party Rust wrapper is `rustos_rt::users_db_read`; the
 C stub is `ros_sys_users_db_read`.
 
+`console_count` (no. 20) reports how many system text consoles the boot
+path installed (`AGENTS.md` §20, `plans/PI.md` P11) — the index space
+`spawn`'s `console` argument selects from. Each entry is an independent
+console with its own session context: with the framebuffer boot console
+active the aarch64 list is `[video, uart]`, otherwise `[uart]`. Gated on
+`CAP_CONSOLE_WRITE` (console topology belongs to the principals that
+drive consoles) and unaudited (a pure observer). PID 1 `init` uses it to
+start one login session per discovered console. The first-party Rust
+wrapper is `rustos_rt::console_count`; the C stub is
+`ros_sys_console_count`.
+
 ## Standard streams (fd 0/1/2/3)
 
 A program performs **all** of its text I/O over the four inherited
@@ -171,24 +183,31 @@ works whatever the spawner backed the stream with.
 
 The per-process **descriptor table** is part of the process model
 (`rustos_abi::DescriptorTable`, `lib/abi/src/process.rs`): a fixed table
-of four `StreamMode`s (`Closed` / `Read` / `Write`), one per standard
-descriptor. The spawner establishes it when it admits a process
+of four entries, one per standard descriptor, each recording its
+`StreamMode` (`Closed` / `Read` / `Write`) **and the installed-console
+index backing it**. The spawner establishes it when it admits a process
 (`AddressSpaceRegistry::set_streams`, keyed by the same `TaskId` as the
-address space) — `init` and every program it spawns inherit the standard
-table (fd 0 readable, fd 1/2/3 writable). The dispatcher's handler
-resolves `fd` against this table **before** any state is touched: an `fd`
-that is not the right direction (or a process whose table was never
-established) fails closed with `NotFound`, so the inherited descriptor —
-not an ambient device — is the authority (`AGENTS.md` §4 / §5.4).
+address space): `spawn`'s `console` argument selects either the caller's
+own table (`CONSOLE_INHERIT` — login's shell stays on login's console) or
+the standard shape (`DescriptorTable::standard_on`: fd 0 readable, fd
+1/2/3 writable) on an explicitly named, validated console index — PID 1
+launching one login per console (`plans/PI.md` P11). The dispatcher's
+handler resolves `fd` against this table **before** any state is touched:
+an `fd` that is not the right direction (or a process whose table was
+never established) fails closed with `NotFound`, so the inherited
+descriptor — not an ambient device — is the authority (`AGENTS.md` §4 /
+§5.4).
 
-In this bootstrap phase every descriptor's kernel *stream backing* is the
-discovered console the boot path installed (`BootInfo::with_console` /
-`with_console_read`), so a console-backed stream additionally requires
-`CAP_CONSOLE_WRITE` / `CAP_CONSOLE_READ` — the coarse "may use a
-console-backed stream" gate the dispatcher checks, on top of the fd-level
-descriptor gate. The first-party Rust wrappers are `rustos_rt::stdout` /
-`stderr` / `stdinfo` / `stdin`; a program never names `console_*` or a
-device (`AGENTS.md` §20, §2.2).
+Every descriptor's kernel *stream backing* is one entry of the discovered
+console list the boot path installed (`BootInfo::with_consoles` — index 0
+the primary console, each further entry an independent console such as
+the UART beside an active video console), so a console-backed stream
+additionally requires `CAP_CONSOLE_WRITE` / `CAP_CONSOLE_READ` — the
+coarse "may use a console-backed stream" gate the dispatcher checks, on
+top of the fd-level descriptor gate. A descriptor naming an index with no
+installed console fails closed with `NotImplemented`. The first-party
+Rust wrappers are `rustos_rt::stdout` / `stderr` / `stdinfo` / `stdin`; a
+program never names `console_*` or a device (`AGENTS.md` §20, §2.2).
 
 ## Argument validation
 
@@ -264,9 +283,9 @@ re-validates arguments — the dispatcher does that first.
 | `irq_bind`      | `IrqTable::bind(line, caller.task_id)`                                                                        | `LineOutOfRange` / `LineAlreadyBound` → `OutOfRange`; `ArchUnsupported` → `NotImplemented`. |
 | `irq_wait`      | `IrqTable::try_wait_step` polled against `KernelArch::monotonic_ns`, yielding via `Scheduler::yield_current` between iterations | `Ready` → `Ok(0)`; `TimedOut` → `TimedOut`; `NotFound` → `NotFound`; scheduler `NoSuchTask` → `NotFound`. |
 | `random_get`    | draws CSPRNG output from `KernelState.rng` (the `rustos_rng::OutputReserve`, see [the RNG page](../lib/rng.md)) into a fixed kernel staging buffer, each chunk copied out through `copy_to_user` | `len > RANDOM_REQUEST_MAX_BYTES` → `LengthOutOfRange`. `len == 0` → `Ok(0)`. Unseeded reserve / entropy shortage → `EntropyNotReady`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(len)`. |
-| `stream_write` | resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20), then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to the descriptor's backing — in the bootstrap session the installed `ConsoleWrite` device (`with_console`; default `NULL_CONSOLE`) | `fd` not a writable inherited stream → `NotFound`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. No device wired → `NotImplemented`. Otherwise `Ok(bytes_written)`. |
-| `stream_read` | resolves `fd` against the caller's per-process descriptor table, then reads from the descriptor's backing — in the bootstrap session the boot-installed `ConsoleRead` device (`with_console_read`; default `NULL_CONSOLE_READ`) wrapped in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `fd` not a readable inherited stream → `NotFound`. `len == 0` → `Ok(0)`. No device wired → `NotImplemented`. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
-| `spawn`         | copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
+| `stream_write` | resolves `fd` against the caller's per-process descriptor table (`AddressSpaceRegistry::streams`, established at spawn, `AGENTS.md` §20) — direction first, then the descriptor's console index against the installed console list (`with_consoles`) — then copies the caller's bytes in through `copy_from_user` (bounded by `CONSOLE_WRITE_MAX`) and hands them to that console's `ConsoleWrite` device | `fd` not a writable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_written)`. |
+| `stream_read` | resolves `fd` against the caller's per-process descriptor table — direction first, then the descriptor's console index against the installed console list — then reads from that console's `ConsoleRead` device, wrapped by the init pipeline in kernel-core's `BlockingConsoleRead`, which parks the caller on the scheduler (`reschedule_current`, the `wait`-syscall poll-and-park loop) until the device yields input (`AGENTS.md` §20 — the backing owns blocking; each console's input is its own — the UART never feeds the video console's session, `plans/PI.md` P11) — into a kernel staging buffer (bounded by `CONSOLE_READ_MAX`), then copies the bytes read out through `copy_to_user` | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. `len == 0` → `Ok(0)`. No input pending → blocks until input arrives (an unparkable caller → `NotImplemented`). Faulting buffer / no registered address space → `BadAddress`. Otherwise `Ok(bytes_read ≥ 1)`. |
+| `spawn`         | resolves the `console` argument first (`CONSOLE_INHERIT` → the caller's own descriptor table; else a validated installed-console index → `DescriptorTable::standard_on`), copies the absolute program path in through `copy_from_user` (bounded by `SPAWN_PATH_MAX`), resolves it in the `ProgramRegistry`, then hands the validated `rxe` to the installed `ProcessSpawn` producer (`with_spawn`; default `NULL_PROCESS_SPAWN`) which builds a fresh isolated address space and admits a **Ready** user kthread (established with the resolved descriptor table) through `SpawnCtx::admit_process`, returning the child PID — the caller keeps running (`plans/SPAWN.md` SP3) | Console index with no installed console → `NotFound`. Frame allocator not threaded (`with_frames`) → `NotImplemented`. Empty / over-long path → `NotFound`. Faulting path / no registered address space → `BadAddress`. Unknown path → `NotFound`. No producer wired → `NotImplemented`. Otherwise `Ok(pid)`. |
 | `mem_map`       | rejects a zero `len`, decodes `flags` through `MapFlags::from_bits`, then hands `(len, flags, addr_hint)` to the installed `MemMap` producer (`with_mem_map`; default `NULL_MEM_MAP`) which maps a fresh zeroed `RW` region into the caller's **own** live address space and returns its base (`plans/SPAWN.md` SP5) | `len == 0` → `LengthOutOfRange`. Reserved flag bit → `OutOfRange`. No producer wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 | `mem_unmap`     | rejects a zero `len`, then hands `(base, len)` to the same `MemMap` producer, which zeroes the frames it reclaims (`AGENTS.md` §4) and fails closed when the range does not name a region the caller mapped | `len == 0` → `LengthOutOfRange`. No producer wired → `NotImplemented`. Range not mapped by the caller → producer errno. Otherwise `Ok(0)`. |
 | `wait`          | hands `(caller.task_id, pid)` to the installed `ProcessWait` producer (`with_process_wait`; default `NULL_PROCESS_WAIT`) which validates the parent/child relationship, blocks until a child is reapable, and reaps it; the reaped child's exit code is then copied out to `status` through `copy_to_user` and the child's PID returned (`plans/SPAWN.md` SP6) | No producer wired → `NotImplemented`. `pid` not a child of the caller → `NotFound`. Faulting `status` / no registered address space → `BadAddress`. Otherwise `Ok(pid)`. |

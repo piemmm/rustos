@@ -124,7 +124,17 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn spawn(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn spawn(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _console: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

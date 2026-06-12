@@ -701,12 +701,19 @@ spec §18.
   `spawn`/`wait`. The embedded-program registry carries per-program
   capability grants and argument vectors (`EmbeddedProgram` — login
   additionally holds `CAP_PROC_SPAWN` + `CAP_USERS_READ`; the shell only
-  the console pair). Remaining console wiring (per-console sessions,
-  stream-layer echo + its control contract) is staged in `plans/PI.md`
-  P11; login's authenticate path on a real volume additionally rides the
-  production `mem_map` producer (`plans/SPAWN.md` SP5b — the userland
-  heap is inert until it lands, so login's path to its prompt is
-  allocation-free).
+  the console pair). Per-console sessions are wired: the kernel installs
+  one stream backing per discovered text console (`BootInfo::with_consoles`
+  — the video console and the UART are separate session contexts), the
+  per-process descriptor table records each descriptor's console index,
+  `spawn`'s console selector (`CONSOLE_INHERIT` or an explicit validated
+  index) plus the `console_count` syscall (no. 20) let PID 1 `init`
+  supervise one login per console with wait-any reaping and per-console
+  relaunch budgets. Remaining console wiring (stream-layer echo + its
+  control contract, the video console's keyboard input, configurable log
+  policy) is staged in `plans/PI.md` P11; login's authenticate path on a
+  real volume additionally rides the production `mem_map` producer
+  (`plans/SPAWN.md` SP5b — the userland heap is inert until it lands, so
+  login's path to its prompt is allocation-free).
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 

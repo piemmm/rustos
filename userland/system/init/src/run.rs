@@ -14,9 +14,11 @@
 //! first banner line to its inherited standard output (fd 1) through
 //! `rustos_rt::stdout` (the `abi-v1` `stream_write` syscall — `AGENTS.md`
 //! §20, `init` binds to the stream, never a device), then **supervises** the
-//! user's session: it launches the session program through `spawn`, blocks on
-//! it with `wait`, reaps it, and relaunches it (`plans/PI.md` P6e-3b-ii). The
-//! runtime routes `main`'s return value through the `exit` syscall.
+//! user's sessions: one session program per discovered text console
+//! (`console_count` / `spawn_at` — the video console and the UART are
+//! separate session contexts, `plans/PI.md` P11), reaped with wait-any and
+//! relaunched on their own consoles ([`supervisor`]). The runtime routes
+//! `main`'s return value through the `exit` syscall.
 //!
 //! It links **only** the runtime and its own startup-config parser, never the
 //! sibling `rustos-init` orchestrator library, whose `alloc`-and-crypto
@@ -32,64 +34,75 @@
 #![deny(missing_docs)]
 
 mod startup;
+mod supervisor;
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
     use crate::startup::{StartupConfig, BANNER, DEFAULT_CONFIG};
+    use crate::supervisor::{supervise_sessions, Outcome, Sessions};
 
     /// Exit code when the compiled-in startup config does not parse. A
     /// reserved, fail-closed value (`AGENTS.md` §2.9); the default config is
     /// well-formed, so reaching this is a build defect, not a runtime input.
     const EXIT_CONFIG_INVALID: i32 = 70;
 
-    /// Exit code when launching the session program failed — the `spawn`
+    /// Exit code when launching a session program failed — the `spawn`
     /// syscall returned a negative `-errno`. A reserved, fail-closed value
     /// (`AGENTS.md` §2.9) distinct from [`EXIT_CONFIG_INVALID`] so the cause
     /// is unambiguous in the audit transcript.
     const EXIT_SESSION_FAILED: i32 = 71;
 
-    /// Exit code when waiting on the session failed — the `wait` syscall
-    /// returned a negative `-errno` (the supervisor cannot reap the child it
-    /// just spawned). A reserved, fail-closed value (`AGENTS.md` §2.9)
+    /// Exit code when waiting on the sessions failed — the `wait` syscall
+    /// returned a negative `-errno` (the supervisor cannot reap the children
+    /// it spawned). A reserved, fail-closed value (`AGENTS.md` §2.9)
     /// distinct from [`EXIT_SESSION_FAILED`] so the cause is unambiguous.
     const EXIT_WAIT_FAILED: i32 = 72;
 
-    /// Exit code when the session could not stay up: it exited and was
-    /// relaunched [`SESSION_SPAWN_BUDGET`] times without ever blocking, so the
-    /// supervisor stops rather than relaunching it forever. A reserved,
-    /// fail-closed value (`AGENTS.md` §2.9): a session that immediately exits
-    /// every time means the system cannot come up, and PID 1 declares that
-    /// honestly instead of busy-looping on `spawn` (`AGENTS.md` §2.1).
+    /// Exit code when no console's session could stay up: every console
+    /// consumed its relaunch budget (`supervisor::SESSION_SPAWN_BUDGET`)
+    /// without a session ever blocking, so the supervisor stops rather than
+    /// relaunching forever (`AGENTS.md` §2.1 / §2.9).
     const EXIT_SESSION_EXHAUSTED: i32 = 73;
 
-    /// How many times PID 1 will (re)launch the session before concluding it
-    /// cannot stay up and failing closed ([`EXIT_SESSION_EXHAUSTED`]).
-    ///
-    /// On a system with a working input stream the session blocks on `stdin`
-    /// rather than exiting, so the supervisor blocks in `wait` for the
-    /// session's whole lifetime and never approaches this bound — it
-    /// supervises one long-lived session, exactly as intended. The bound
-    /// exists only as a **crash-loop guard**: if the session exits the instant
-    /// it starts (e.g. no input backing is attached), relaunching it without
-    /// limit would be a busy loop on `spawn`, which `AGENTS.md` §2.1 forbids.
-    /// A small budget proves the supervisor genuinely relaunches a dead
-    /// session while keeping the loop bounded.
-    const SESSION_SPAWN_BUDGET: u32 = 3;
+    /// Exit code when the kernel reports no installed console (or refuses
+    /// the count): there is nothing a session could attach its standard
+    /// streams to, so PID 1 reports the system unusable fail-closed
+    /// (`AGENTS.md` §2.9) rather than spawning stream-less sessions.
+    const EXIT_NO_CONSOLES: i32 = 74;
+
+    /// The production [`Sessions`] backing: the real `rustos-rt` syscall
+    /// wrappers (`console_count`, the console-selecting `spawn_at`, and
+    /// wait-any). Zero-sized — PID 1's supervision state lives on `main`'s
+    /// stack inside [`supervise_sessions`].
+    struct RtSessions;
+
+    impl Sessions for RtSessions {
+        fn console_count(&mut self) -> i64 {
+            rustos_rt::console_count()
+        }
+        fn spawn_at(&mut self, path: &[u8], console: u32) -> i64 {
+            rustos_rt::spawn_at(path, console)
+        }
+        fn wait_any(&mut self, status: &mut i32) -> i64 {
+            rustos_rt::wait(rustos_abi::WAIT_ANY, status)
+        }
+    }
 
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
     /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the startup banner to
-    /// its inherited standard output (fd 1), then supervises the user's
-    /// session for the lifetime of PID 1 (see [`supervise_session`]).
+    /// its inherited standard output (fd 1), then supervises one session per
+    /// discovered text console for the lifetime of PID 1
+    /// ([`supervise_sessions`] — `plans/PI.md` P11).
     ///
     /// The banner write is *gated*: `stdout` returns the number of
     /// bytes the kernel accepted, so a short count means the write did not
     /// fully land (a missing `CAP_CONSOLE_WRITE`, an unresolved address
     /// space, an unestablished descriptor, or a closed-fail kernel path).
     /// PID 1 cannot usefully proceed without the console it was spawned to
-    /// drive, so it parks fail-closed rather than supervising a session on a
+    /// drive, so it parks fail-closed rather than supervising sessions on a
     /// console it never reached (`AGENTS.md` §2.9). This is a terminal park,
     /// not a retry loop (`AGENTS.md` §2.1).
     fn main() -> i32 {
@@ -102,57 +115,11 @@ mod program {
                 core::hint::spin_loop();
             }
         }
-        supervise_session(config.session().as_bytes())
-    }
-
-    /// Supervise the user's `session` program across the lifetime of PID 1:
-    /// launch it, block until it exits, reap it, and relaunch it.
-    ///
-    /// This is the standing init duty (`plans/PI.md` P6e-3b-ii): the session is
-    /// a separate, hardware-isolated process (a true `spawn`, not an
-    /// `exec`-style hand-off, `AGENTS.md` §4), so PID 1 keeps running and
-    /// *owns* its lifecycle rather than spawning-and-forgetting it. Each cycle:
-    ///
-    /// 1. `spawn` the session. A negative result is a failed launch (an unknown
-    ///    path, an unwired spawn subsystem, a build failure); it is fail-loud
-    ///    ([`EXIT_SESSION_FAILED`], `AGENTS.md` §2.9), never ignored.
-    /// 2. `wait` on exactly that child, blocking until it exits and reaping it
-    ///    (`plans/SPAWN.md` SP6). A negative result means the supervisor cannot
-    ///    reap its own child — a kernel-state inconsistency it surfaces as
-    ///    [`EXIT_WAIT_FAILED`] rather than continuing blindly.
-    /// 3. Relaunch, up to [`SESSION_SPAWN_BUDGET`] launches total. The bound is
-    ///    a crash-loop guard (see its docs): a session that blocks on input
-    ///    never reaches it; one that exits instantly stops the loop at
-    ///    [`EXIT_SESSION_EXHAUSTED`] instead of busy-looping on `spawn`
-    ///    (`AGENTS.md` §2.1).
-    ///
-    /// The reaped child's exit status is read but not yet acted on; a policy
-    /// that distinguishes a clean logout from a crash (and resets the budget
-    /// on a session that ran long enough) awaits a clock/session-state ABI.
-    fn supervise_session(session: &[u8]) -> i32 {
-        let mut launches: u32 = 0;
-        loop {
-            let pid = rustos_rt::spawn(session);
-            if pid < 0 {
-                return EXIT_SESSION_FAILED;
-            }
-            launches += 1;
-
-            // Block until this session exits, reaping it so it does not linger
-            // as a zombie. `wait` is given the specific child PID, so the
-            // supervisor reaps the session it launched and nothing else.
-            let mut status = 0i32;
-            // PIDs fit an `i32` on this ABI, and `spawn` returned a
-            // non-negative value, so the cast preserves the PID.
-            #[allow(clippy::cast_possible_truncation)]
-            let reaped = rustos_rt::wait(pid as i32, &mut status);
-            if reaped < 0 {
-                return EXIT_WAIT_FAILED;
-            }
-
-            if launches >= SESSION_SPAWN_BUDGET {
-                return EXIT_SESSION_EXHAUSTED;
-            }
+        match supervise_sessions(&mut RtSessions, config.session().as_bytes()) {
+            Outcome::NoConsoles => EXIT_NO_CONSOLES,
+            Outcome::SpawnFailed => EXIT_SESSION_FAILED,
+            Outcome::WaitFailed => EXIT_WAIT_FAILED,
+            Outcome::Exhausted => EXIT_SESSION_EXHAUSTED,
         }
     }
 
@@ -165,11 +132,34 @@ mod program {
 // entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
 // this inert `main` keeps the crate building under the host tooling. It
 // parses the compiled-in default config (and touches the parser's accessors)
-// so a malformed `DEFAULT_CONFIG` is caught by an ordinary `cargo build` and
-// the parser is exercised, not dead code, on the host. It performs no I/O.
+// so a malformed `DEFAULT_CONFIG` is caught by an ordinary `cargo build`,
+// and drives the session supervisor against an inert zero-console seam so
+// neither is dead code on the host. It performs no I/O.
+/// An inert host-stub seam: zero consoles, so the supervisor returns
+/// [`supervisor::Outcome::NoConsoles`] without spawning or waiting.
+#[cfg(not(freestanding))]
+struct NoSessions;
+
+#[cfg(not(freestanding))]
+impl supervisor::Sessions for NoSessions {
+    fn console_count(&mut self) -> i64 {
+        0
+    }
+    fn spawn_at(&mut self, _path: &[u8], _console: u32) -> i64 {
+        -1
+    }
+    fn wait_any(&mut self, _status: &mut i32) -> i64 {
+        -1
+    }
+}
+
 #[cfg(not(freestanding))]
 fn main() {
     if let Ok(config) = startup::StartupConfig::parse(startup::DEFAULT_CONFIG) {
         let _ = (config.session(), startup::BANNER);
     }
+    assert_eq!(
+        supervisor::supervise_sessions(&mut NoSessions, b"session"),
+        supervisor::Outcome::NoConsoles
+    );
 }

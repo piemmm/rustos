@@ -523,6 +523,27 @@ pub const STDINFO: u32 = 3;
 /// (`AGENTS.md` §20): exactly fd 0/1/2/3.
 pub const STD_STREAM_COUNT: usize = 4;
 
+/// The `console` argument to [`crate::SyscallNumber::SPAWN`] that attaches
+/// the child to the **caller's own** descriptor table instead of naming an
+/// installed console index.
+///
+/// The all-ones sentinel: every real console index reported by
+/// [`crate::SyscallNumber::CONSOLE_COUNT`] is small and unsigned, so the
+/// sentinel can never collide with one. Inheriting is the default session
+/// shape — a spawned child (login's shell, a shell's job) stays on the
+/// console its parent was driving (`AGENTS.md` §20 — the spawner decides
+/// the backing, the program only ever names fd numbers).
+pub const CONSOLE_INHERIT: u64 = u64::MAX;
+
+/// Highest console index a descriptor can record — the inclusive bound of
+/// the [`DescriptorTable`] per-descriptor console field (`u8`).
+///
+/// An ABI field-width bound, not a capacity policy (`AGENTS.md` §24.4):
+/// the number of consoles actually installed is discovered at boot and is
+/// far below this; a spawn naming an index with no installed console fails
+/// closed regardless.
+pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
+
 /// The access a single inherited descriptor grants its process.
 ///
 /// A descriptor is established at spawn and points at a kernel *stream
@@ -548,14 +569,19 @@ pub enum StreamMode {
 ///
 /// A fixed table of [`STD_STREAM_COUNT`] entries, one per standard
 /// descriptor (fd 0/1/2/3), recording the access each inherited stream
-/// grants. The spawner establishes it when it creates the process; the
-/// kernel consults it to resolve a `stream_read` / `stream_write` fd to
-/// its backing's direction (`AGENTS.md` §20 — the descriptor table, not
-/// an ambient device, is the authority). The table is small and `Copy`;
+/// grants **and which installed system console backs it** (the
+/// per-descriptor console index). The spawner establishes it when it
+/// creates the process; the kernel consults it to resolve a
+/// `stream_read` / `stream_write` fd to its backing's direction *and*
+/// device (`AGENTS.md` §20 — the descriptor table, not an ambient device,
+/// is the authority). Two processes on different consoles (the video
+/// console and the UART, `plans/PI.md` P11) differ only in this table —
+/// the programs themselves are identical. The table is small and `Copy`;
 /// the backing objects themselves live kernel-side.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DescriptorTable {
     modes: [StreamMode; STD_STREAM_COUNT],
+    consoles: [u8; STD_STREAM_COUNT],
 }
 
 impl DescriptorTable {
@@ -568,24 +594,42 @@ impl DescriptorTable {
     pub const fn closed() -> Self {
         Self {
             modes: [StreamMode::Closed; STD_STREAM_COUNT],
+            consoles: [0; STD_STREAM_COUNT],
         }
     }
 
-    /// The standard text-I/O table: fd 0 readable, fd 1/2/3 writable.
+    /// The standard text-I/O table on the **primary** console (index 0):
+    /// fd 0 readable, fd 1/2/3 writable.
     ///
     /// The shape every bootstrap-session process inherits (`AGENTS.md`
     /// §20): `stdin` is the input source, `stdout`/`stderr`/`stdinfo` are
     /// output sinks. The spawner backs these descriptors with the
-    /// discovered console during early bring-up (`plans/PI.md` P6e-3a),
+    /// boot path's first installed console (`plans/PI.md` P6e-3a),
     /// but the program only ever names the fd numbers.
     #[must_use]
     pub const fn standard() -> Self {
+        Self::standard_on(0)
+    }
+
+    /// The standard text-I/O table attached to console `console`: fd 0
+    /// readable, fd 1/2/3 writable, every descriptor backed by the named
+    /// installed console (`AGENTS.md` §20, `plans/PI.md` P11 — one login
+    /// session per discovered text console).
+    ///
+    /// The index is recorded verbatim; the kernel validates it against
+    /// the installed console list when the table is established at spawn
+    /// and fails closed on an index with no console (`AGENTS.md` §5.4).
+    #[must_use]
+    pub const fn standard_on(console: u8) -> Self {
         let mut modes = [StreamMode::Closed; STD_STREAM_COUNT];
         modes[STDIN as usize] = StreamMode::Read;
         modes[STDOUT as usize] = StreamMode::Write;
         modes[STDERR as usize] = StreamMode::Write;
         modes[STDINFO as usize] = StreamMode::Write;
-        Self { modes }
+        Self {
+            modes,
+            consoles: [console; STD_STREAM_COUNT],
+        }
     }
 
     /// The [`StreamMode`] of descriptor `fd`, or
@@ -603,6 +647,24 @@ impl DescriptorTable {
             self.modes[index]
         } else {
             StreamMode::Closed
+        }
+    }
+
+    /// The installed-console index backing descriptor `fd`, or `0` when
+    /// `fd` is not one of the standard descriptors.
+    ///
+    /// Meaningful only when [`Self::mode`] is not
+    /// [`StreamMode::Closed`]: the kernel resolves the direction first,
+    /// so the index of a closed or out-of-range descriptor is never
+    /// consulted — the out-of-range default exists so this accessor is
+    /// total without leaking the range check (`AGENTS.md` §5.4).
+    #[must_use]
+    pub fn console(&self, fd: u32) -> u8 {
+        let index = fd as usize;
+        if index < STD_STREAM_COUNT {
+            self.consoles[index]
+        } else {
+            0
         }
     }
 }
@@ -650,6 +712,38 @@ mod tests {
         assert_eq!(table.mode(STDOUT), StreamMode::Write);
         assert_eq!(table.mode(STDERR), StreamMode::Write);
         assert_eq!(table.mode(STDINFO), StreamMode::Write);
+        // `standard()` is the primary console: every descriptor backed
+        // by console 0.
+        for fd in [STDIN, STDOUT, STDERR, STDINFO] {
+            assert_eq!(table.console(fd), 0);
+        }
+        assert_eq!(table, DescriptorTable::standard_on(0));
+    }
+
+    #[test]
+    fn standard_on_attaches_every_descriptor_to_the_named_console() {
+        let table = DescriptorTable::standard_on(1);
+        for fd in [STDIN, STDOUT, STDERR, STDINFO] {
+            assert_eq!(table.console(fd), 1);
+        }
+        // The direction shape is identical to the primary table; only
+        // the backing console differs.
+        assert_eq!(table.mode(STDIN), StreamMode::Read);
+        assert_eq!(table.mode(STDOUT), StreamMode::Write);
+        assert_ne!(table, DescriptorTable::standard());
+    }
+
+    #[test]
+    fn out_of_range_descriptor_console_defaults_to_zero() {
+        let table = DescriptorTable::standard_on(3);
+        assert_eq!(table.console(u32::MAX), 0);
+    }
+
+    #[test]
+    fn console_inherit_sentinel_collides_with_no_console_index() {
+        // Every representable console index is below the sentinel, so
+        // the spawn argument space cannot confuse the two.
+        assert!(u64::from(super::CONSOLE_INDEX_MAX) < super::CONSOLE_INHERIT);
     }
 
     #[test]

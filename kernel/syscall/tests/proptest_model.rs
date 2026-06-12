@@ -127,7 +127,17 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn spawn(&self, _c: &CallerContext<'_>, _path: u64, _path_len: usize) -> SyscallResult {
+    fn spawn(
+        &self,
+        _c: &CallerContext<'_>,
+        _path: u64,
+        _path_len: usize,
+        _console: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn console_count(&self, _c: &CallerContext<'_>) -> SyscallResult {
         self.bump();
         Ok(0)
     }
