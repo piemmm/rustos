@@ -1030,6 +1030,7 @@ fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
     put_ecam(&mut backing, 1, 0, 0, 1, (1u32 << 4) << 16); // status: cap list present.
     put_ecam(&mut backing, 1, 0, 0, 2, 0x0C03 << 16); // class = USB controller.
     put_ecam(&mut backing, 1, 0, 0, 3, 0x00 << 16); // header type 0.
+    put_ecam(&mut backing, 1, 0, 0, 4, 0x6010_0000); // BAR0: 32-bit memory, base 0x6010_0000.
     put_ecam(&mut backing, 1, 0, 0, 13, 0x80); // cap pointer -> byte 0x80.
                                                // MSI-X cap at byte 0x80 (dword 32): id=0x11, next=0, table_size=8.
     put_ecam(&mut backing, 1, 0, 0, 32, (0x0007u32 << 16) | 0x11);
@@ -1130,4 +1131,103 @@ fn mechanism_ecam_exposes_the_frozen_bus_seams() {
     let (_backing, window) = vl805_ecam_region();
     let bus = crate::mechanism_ecam(window);
     assert_seams(&bus, &bus, &bus);
+}
+
+/// The ECAM constructor's value is also reachable through the
+/// generic-PCI [`PciBus`] seam (`AGENTS.md` §9): a non-virtio,
+/// DMA-driving device driver maps a BAR and enables bus mastering
+/// through `&dyn PciBus` without naming the concrete `Pci` type.
+#[test]
+fn mechanism_ecam_exposes_the_pci_bus_seam() {
+    use rustos_abi::driver::pci::PciBus;
+
+    fn assert_pci_bus(_: &dyn PciBus) {}
+
+    let (_backing, window) = vl805_ecam_region();
+    let bus = crate::mechanism_ecam(window);
+    assert_pci_bus(&bus);
+}
+
+/// `enable_bus_master` sets the command register's Memory Space Enable
+/// and Bus Master Enable bits on the VL805 while leaving the RW1C
+/// status half untouched (`AGENTS.md` §2.2 — the same activation
+/// `route_msix` performs).
+#[test]
+fn pci_bus_enable_bus_master_sets_command_bits() {
+    use rustos_abi::driver::pci::PciBus;
+
+    let (backing, window) = vl805_ecam_region();
+    let vl805 = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let pci = crate::mechanism_ecam(window);
+    (&pci as &dyn PciBus)
+        .enable_bus_master(vl805)
+        .expect("enable bus master");
+    // Re-read the command/status dword (register 1) straight from the
+    // backing: bits 1 (memory space) and 2 (bus master) set, status
+    // half (high 16) still zero.
+    let off = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 1,
+    }
+    .ecam_offset()
+    .expect("address in range");
+    let command = backing[off / 4];
+    assert_eq!(command & 0x6, 0x6);
+    assert_eq!(command >> 16, 0);
+}
+
+/// `map_bar_window` resolves the VL805's memory BAR0 and routes the
+/// mapping through the supplied [`MmioMapper`] (the kernel allocates
+/// the window, `AGENTS.md` §4).
+#[test]
+fn pci_bus_map_bar_window_maps_vl805_bar0() {
+    use rustos_abi::driver::pci::PciBus;
+
+    let (_backing, window) = vl805_ecam_region();
+    let vl805 = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let pci = crate::mechanism_ecam(window);
+    let mapper = MockMapper::new(true);
+    let bar = (&pci as &dyn PciBus)
+        .map_bar_window(vl805, 0, &mapper)
+        .expect("map bar0");
+    // 32-bit memory BAR planted with base 0x6010_0000; the size probe
+    // over the flat backing reads a 16-byte span.
+    assert_eq!(bar.len(), 0x10);
+}
+
+/// `map_bar_window` fails closed when the requested BAR slot is unused.
+#[test]
+fn pci_bus_map_bar_window_rejects_absent_bar() {
+    use rustos_abi::driver::pci::PciBus;
+
+    let (_backing, window) = vl805_ecam_region();
+    let vl805 = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let pci = crate::mechanism_ecam(window);
+    let mapper = MockMapper::new(true);
+    // BAR5 was never planted; it reads as the all-ones sentinel and
+    // resolves to an (I/O-looking) unused slot — not a mappable
+    // memory window.
+    assert!((&pci as &dyn PciBus)
+        .map_bar_window(vl805, 5, &mapper)
+        .is_err());
 }

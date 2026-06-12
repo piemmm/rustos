@@ -2016,13 +2016,37 @@ absent/partial/out-of-range-cell refusals). **No `lib/abi` change** (so
 no C-header regen). Docs: `docs/src/platform/aarch64.md` ("Platform
 discovery").
 
-**Remaining:** the VL805 `wiring::open_discovered` (consume the
-discovered ECAM-access window + the inbound-DMA aperture: map the window
-under `CAP_MMIO_MAP`, build the bus via `mechanism_ecam`, enumerate, map
-the xHCI BAR + a `DmaRegion` carve below the aperture `top` under
-`CAP_MEM_DMA`, hand both to the xHCI engine; mirror the
-`rpi_hvs`/`emmc2` shape); plus the DWC2 OTG path if needed; then the
-WM/taskbar/session on the HVS path and the on-metal acceptance.
+**Landed — the VL805 `wiring::open_discovered`** (host-provable): the
+generic-PCI seam `rustos_abi::driver::pci::PciBus` (a supertrait of
+`Bus`) carries `map_bar_window` + `enable_bus_master` — the smaller
+surface a non-virtio, DMA-driving controller needs (no MSI-X). `Pci<C>`
+implements it by forwarding to the inherent BAR resolver and a shared
+`enable_bus_master` that `route_msix` also calls (§2.2);
+`mechanism_one`/`mechanism_ecam` now return `impl VirtioPciBus + MsixBus
++ PciBus`. `drivers/bus/usb::wiring::open_discovered(host, bus,
+dma_aperture_top)` consumes a `&dyn PciBus` (so usb never names the pci
+crate, §17.4): it checks `CAP_MMIO_MAP`, enumerates for the USB-class
+function (`0x0C03`), carves the device-shared DMA region from the host
+DMA facility and verifies it lies wholly below the discovered
+inbound-DMA aperture `top` (fail-closed `OutOfRange`, §5.4), enables bus
+mastering, maps BAR0, and brings the controller up via `Xhci::open` +
+`UsbDevice::start`. **No `#[repr(C)]`/syscall change** — a new trait, so
+no C-header regen. Host-proven: pci tests (PciBus coercion,
+`enable_bus_master` command bits, BAR0 map, absent-BAR refusal over the
+VL805 ECAM fixture) + usb `wiring_tests` (the cap/mapper/DMA-host
+fail-closed paths, no-USB-function `NotFound`, DMA-above-aperture
+`OutOfRange`, alloc-failure propagation, and the all-valid path enabling
+mastering and reaching the controller hand-off — the inert mock window
+faults, the metal boundary). Docs: `docs/src/drivers/bus.md`,
+`docs/src/abi/driver_traits.md`, the crate README.
+
+**Remaining:** the `devmgr`/host composition that maps the discovered
+`brcm,bcm2711-pcie` ECAM window, builds the bus (`mechanism_ecam`), reads
+the node's `HwResource::dma` aperture `top`, and calls `open_discovered`
+(it rides the same `DriverHost` DMA-over-IPC gap as the Stage 4.HW
+drvhost increment); plus the DWC2 OTG path if needed; then the
+WM/taskbar/session on the HVS path and the on-metal acceptance (a real
+controller's BAR answering a plausible `CAPLENGTH`).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

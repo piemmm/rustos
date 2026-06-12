@@ -16,6 +16,45 @@ code:
 **Work in progress.** - There is a long way to go before this project is ready
 for prime time, if it ever will be. <span style="color:red">**Do not expect anything to work yet, Do *not* use it.**</span>
 
+## Feature / architecture support
+
+Per-architecture state of features whose support varies by target. Legend:
+`✓` implemented · `◐` in progress · `▢` planned · `—` not applicable.
+Architecture-neutral subsystems (kernel core, scheduler, IPC, capabilities,
+filesystems, userland, desktop) are tracked in [`PLAN.md`](./PLAN.md) and,
+for filesystems, the block below.
+
+| Feature | x86_64 | aarch64 | riscv64 | wasm32 |
+| --- | :-: | :-: | :-: | :-: |
+| Boot + early console | ✓ | ✓ | ✓ | ✓ |
+| Hardware discovery | ✓ ACPI | ✓ FDT | ✓ FDT | ✓ host |
+| MMU / paging | ✓ | ✓ | ✓ | — |
+| Context switch | ✓ | ✓ | ✓ | — |
+| Interrupts + timer | ✓ | ✓ | ✓ | ✓ |
+| SMP bring-up | ✓ | ✓ | ✓ | ✓ |
+| Cross-CPU TLB shootdown | ✓ | ✓ | ✓ | — |
+| Syscall entry | ✓ | ✓ | ✓ | ✓ |
+| Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
+| Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
+| Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
+| Block storage | ✓ virtio | ✓ virtio + eMMC | ✓ virtio | — |
+| Networking | ◐ virtio | ◐ virtio | ◐ virtio | — |
+| Input devices | ✓ ps2 + USB | ✓ virtio + USB | ✓ virtio | ✓ host |
+| Production kernel binary | ✓ | ◐ | ▢ | ▢ |
+| Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
+
+Networking is the virtio-net link-layer driver plus a test ARP/ICMP-echo
+responder only; there is no IP stack (TCP/UDP/IPv4 routing) yet, hence `◐`.
+
+Filesystems are architecture-neutral — one crate runs on every bare-metal
+target (wasm32 has no block device), so per-target ticks add nothing:
+
+| Filesystem | State |
+| --- | :-: |
+| ext4 | ✓ read/write |
+| FAT32 | ✓ read/write |
+| RustFS (native) | ✓ |
+
 ## Building
 
 ```sh

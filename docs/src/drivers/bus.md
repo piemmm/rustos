@@ -482,15 +482,53 @@ built — so a routing failure fails the whole bring-up closed
 `notify_wait` could never wake. Legacy MSI and INTx routing are not
 implemented.
 
+### Generic-PCI BAR hand-off (the xHCI / VL805 path)
+
+A non-virtio PCI device — the Raspberry Pi 4's VL805 `PCIe` xHCI USB
+host controller (`plans/PI.md` P10) — exposes its registers as a whole
+BAR, not the virtio capability tuples, and drives DMA without MSI-X.
+Its driver needs a smaller surface than `VirtioPciBus`: map one BAR,
+and turn on bus mastering. `rustos_abi::driver::pci::PciBus` (a
+supertrait of `Bus`) is that seam:
+
+- `map_bar_window(bdf, bar_index, mapper)` resolves the memory BAR's
+  probed base/length and maps it through the same `CAP_MMIO_MAP`-gated
+  `MmioMapper` (refusing I/O-port and unused BARs);
+- `enable_bus_master(bdf)` sets the function's Memory Space + Bus
+  Master Enable bits (PCI Local Bus 3.0 §6.2.2) so the controller may
+  issue the upstream DMA its rings live in.
+
+`Pci<C>` implements `PciBus` by forwarding to the inherent
+`map_bar_window` / `enable_bus_master`; `route_msix` calls the same
+`enable_bus_master`, so the activation has one definition
+(`AGENTS.md` §2.2). A device-class driver reaches the bus only through
+`&dyn PciBus`, never naming the concrete `drivers/bus/pci` crate
+(`AGENTS.md` §8 / §17.4).
+
+The xHCI driver consumes it in `rustos_drv_bus_usb::wiring`. A
+`devmgr`/host composition maps the discovered `brcm,bcm2711-pcie`
+ECAM-access window, builds the bus over it (`mechanism_ecam`), and
+hands the `&dyn PciBus` plus the discovered inbound-DMA aperture top to
+`open_discovered(host, bus, dma_aperture_top)`. That function checks
+`CAP_MMIO_MAP`, enumerates for the USB-class function (`0x0C03`), carves
+the device-shared DMA region from the host's DMA facility and verifies
+it lies wholly **below** the aperture the bridge lets devices reach
+(fail-closed `OutOfRange`, `AGENTS.md` §5.4), enables bus mastering,
+maps BAR0, and brings the controller up through `Xhci::open` +
+`UsbDevice::start`. QEMU models no Pi USB timing (`AGENTS.md` §0.4), so
+the host tests prove the composition and its fail-closed paths up to
+the controller hand-off; the live controller bring-up is the on-metal
+acceptance item.
+
 ## Constructing the real-hardware bus
 
 The boot pipeline reaches PCI through a single public constructor,
 `rustos_drv_bus_pci::mechanism_one(pio)`. It builds the bus over
 configuration **mechanism #1** — the `0xCF8` address word / `0xCFC`
 data word port pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
-`impl VirtioPciBus + MsixBus`. Both traits have `Bus` as a supertrait,
-so the value also coerces to `&dyn Bus`; the concrete `Pci` type stays
-crate-private (`AGENTS.md` §8). The constructor is
+`impl VirtioPciBus + MsixBus + PciBus`. All three traits have `Bus` as
+a supertrait, so the value also coerces to `&dyn Bus`; the concrete
+`Pci` type stays crate-private (`AGENTS.md` §8). The constructor is
 architecture-neutral and carries no `cfg(target_arch …)` gate: the
 `pio` argument is a `rustos_abi::PortIo` backend, and the only `in`/
 `out` instructions live inside the architecture port that supplies it
@@ -501,8 +539,10 @@ backend — so it is sound to call before the host bridge has been
 probed; configuration access happens lazily on the trait methods. Ring
 0 hands the result to `rustos_kernel::provision_virtio_pci` /
 `provision_and_run` as the `&dyn VirtioPciBus` + `&dyn MsixBus` device
-bus. Non-x86 architectures reach PCIe through memory-mapped ECAM, which
-is a separate seam.
+bus. Non-x86 architectures reach PCIe through memory-mapped ECAM via
+`mechanism_ecam(window)`, which performs no port I/O and exposes the
+same `VirtioPciBus + MsixBus + PciBus` seams; the Pi 4's VL805 xHCI is
+reached through its `PciBus` view (see above).
 
 ## Shared types
 

@@ -46,7 +46,7 @@ pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
     decode_bind_keys, BufferClass, DriverBindKey, DriverError, DriverHandle, DriverHost,
     DriverKind, DriverManifest, DriverRegisterReply, MmioMapError, MmioMapper, MsiMessage, MsixBus,
-    PortIo, PortIo8, RegisterWindow, VirtioMmioBus, VirtioPciBus, WindowError,
+    PciBus, PortIo, PortIo8, RegisterWindow, VirtioMmioBus, VirtioPciBus, WindowError,
     DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
     DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
     DRIVER_SIGNER_PUBKEY_LEN, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,

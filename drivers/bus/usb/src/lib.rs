@@ -46,6 +46,7 @@ pub mod device;
 pub mod regs;
 pub mod ring;
 pub mod trb;
+pub mod wiring;
 
 #[cfg(test)]
 mod tests;

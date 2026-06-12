@@ -325,6 +325,31 @@ impl<C: ConfigSpace> Pci<C> {
             .map_err(MmioMapError::as_driver_error)
     }
 
+    /// Enable memory-space decoding and bus-mastering on function
+    /// `bdf` (PCI Local Bus 3.0 §6.2.2).
+    ///
+    /// Firmware leaves the Bus Master Enable bit clear, so a function
+    /// whose register block is mapped but whose bus-master bit is clear
+    /// can never issue the upstream memory transactions its DMA rings
+    /// depend on. A DMA-driving driver (virtio, xHCI) calls this once
+    /// before programming the device. [`route_msix`](Self::route_msix)
+    /// folds the same activation into its own hand-off, so the two
+    /// share one definition (`AGENTS.md` §2.2).
+    ///
+    /// The in-tree [`ConfigSpace`] backends' accesses are infallible,
+    /// so this cannot fail; the [`PciBus`](rustos_abi::driver::pci::PciBus)
+    /// trait method wraps the result in `Ok` and reserves the error
+    /// arm for a future fallible transport.
+    pub fn enable_bus_master(&self, bdf: u64) {
+        let cmd_addr = addr_with_reg(unpack_bdf(bdf, 0), 1);
+        let command = self.config.read32(cmd_addr);
+        // Preserve the low-16 command bits, drop the high-16 status
+        // bits to 0 (RW1C: a 0 write never clears a status bit), then
+        // OR in memory-space + bus-master enable.
+        let command = (command & 0xFFFF) | CMD_MEMORY_SPACE | CMD_BUS_MASTER;
+        self.config.write32(cmd_addr, command);
+    }
+
     /// Resolve the virtio-1.x configuration structure of kind
     /// `cfg_type` on function `bdf` and ask the kernel `mapper` to map
     /// it, returning the resulting [`RegisterWindow`].
@@ -467,13 +492,7 @@ impl<C: ConfigSpace> Pci<C> {
         // by default, so a device whose interrupt was "routed" but whose
         // bus-master bit is clear would never deliver — fold the enable
         // into the same activation step (PCI Local Bus 3.0 §6.2.2).
-        let cmd_addr = addr_with_reg(unpack_bdf(bdf, 0), 1);
-        let command = self.config.read32(cmd_addr);
-        // Preserve the low-16 command bits, drop the high-16 status
-        // bits to 0 (RW1C: a 0 write never clears a status bit), then
-        // OR in memory-space + bus-master enable.
-        let command = (command & 0xFFFF) | CMD_MEMORY_SPACE | CMD_BUS_MASTER;
-        self.config.write32(cmd_addr, command);
+        self.enable_bus_master(bdf);
 
         let (cap_offset, table_size, table_bar, table_offset) = self.find_msix(bdf)?;
         if entry >= table_size {

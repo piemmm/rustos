@@ -773,6 +773,10 @@ an update to this section.
   it describes.
 - No "aimless waffle". If a paragraph does not change the reader's ability
   to use or maintain the system, delete it.
+- The `README.md` feature/architecture support matrix is part of the docs:
+  every implemented feature whose support varies by target has one terse row,
+  and the matrix is updated in the same change that adds the feature or
+  changes its per-architecture state. Marks only, no prose.
 - **Planning files state the current plan and state, not history. Git is the
   changelog; `PLAN.md` and `plans/*.md` are not.** This binds `PLAN.md`, every
   `plans/*.md`, and any other planning/status/roadmap document.

@@ -21,6 +21,7 @@ capability model, kinds) lives in
 | [`rustos_abi::driver::bus`]           | `Bus` trait + device records.          |
 | [`rustos_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
 | [`rustos_abi::driver::virtio_mmio`]   | `VirtioMmioBus` transport-provisioning seam. |
+| [`rustos_abi::driver::pci`]           | `PciBus` generic BAR / bus-master seam. |
 
 [`rustos_abi::driver`]: #shared-types
 [`rustos_abi::driver::display`]: #display
@@ -31,6 +32,7 @@ capability model, kinds) lives in
 [`rustos_abi::driver::bus`]: #bus
 [`rustos_abi::driver::virtio_pci`]: #virtio-pci-provisioning
 [`rustos_abi::driver::virtio_mmio`]: #virtio-mmio-provisioning
+[`rustos_abi::driver::pci`]: #generic-pci-provisioning
 
 ## Shared types
 
@@ -379,6 +381,29 @@ enumerates through the `Bus` supertrait, picks the slot whose
 `MmioMapper`, and hands the window to a caller-supplied builder — so it
 names neither the concrete `Mmio` type nor the `MmioTransport` it
 produces.
+
+## Generic-PCI provisioning
+
+`trait PciBus: Bus`. A non-virtio, DMA-driving PCI device — the
+Raspberry Pi 4's VL805 `PCIe` xHCI USB host controller — exposes its
+registers as a whole BAR and needs no MSI-X, so it consumes a smaller
+seam than `VirtioPciBus`. A device-class driver (`drivers/bus/usb`)
+reaches the PCI driver through `&dyn PciBus`, never naming the concrete
+`Pci` type (`AGENTS.md` §8 / §17.4):
+
+| Method                                | Capability gate                        |
+|---------------------------------------|----------------------------------------|
+| `map_bar_window(bdf, bar_index, mapper)` | `CAP_MMIO_MAP` (enforced by `mapper`). |
+| `enable_bus_master(bdf)`              | Driver handle.                         |
+
+`map_bar_window` resolves the memory BAR's probed base/length and maps
+it through the `CAP_MMIO_MAP`-gated `MmioMapper` (refusing I/O-port and
+unused BARs); `enable_bus_master` sets the function's Memory Space + Bus
+Master Enable bits so the controller may issue upstream DMA. `Pci<C>`
+implements it by forwarding to the inherent methods, sharing the
+bus-master activation with `route_msix` (`AGENTS.md` §2.2). The xHCI
+bring-up consumes it in `rustos_drv_bus_usb::wiring::open_discovered`
+(see [Bus drivers](../drivers/bus.md#generic-pci-bar-hand-off-the-xhci--vl805-path)).
 
 ## Versioning
 

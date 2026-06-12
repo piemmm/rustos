@@ -32,20 +32,30 @@ bring-up builds on:
   interrupt-IN transfer ring, and the
   `rustos_abi::driver::input::ReportSource` impl that feeds the
   `drivers/input/usb_hid` decoders.
+- `wiring` — the driver-host composition `open_discovered(host, bus,
+  dma_aperture_top)`: given the PCI bus built over the discovered
+  `brcm,bcm2711-pcie` ECAM window (`rustos_drv_bus_pci::mechanism_ecam`,
+  reached through the `lib/abi` `PciBus` seam so this crate never names
+  the PCI crate, `AGENTS.md` §17.4), it enumerates for the USB-class
+  function, carves the device-shared DMA region and verifies it lies
+  below the discovered inbound-DMA aperture (fail-closed `OutOfRange`,
+  §5.4), enables bus mastering, maps BAR0 under `CAP_MMIO_MAP`, and
+  brings the controller up via `Xhci::open` + `UsbDevice::start`.
 
 ## Supported hardware
 
 | Platform | Controller                   | Status                              |
 |----------|------------------------------|-------------------------------------|
-| Pi 4     | VL805 PCIe xHCI (USB-A ports) | protocol layers + HID enumeration host-proven; PCI BAR wiring pending |
+| Pi 4     | VL805 PCIe xHCI (USB-A ports) | protocol layers + HID enumeration + `PciBus` BAR/DMA wiring host-proven; live controller bring-up is the metal acceptance item |
 
 The register window arrives through the hardware tree (PCI BAR
 assignment under `CAP_MMIO_MAP`) — never a compiled-in base
-(`AGENTS.md` §18.1). The PCI BAR / hwtree wiring for the VL805 (and
-the DMA-region grant it carries) is the remaining P10 work and lands
-in follow-up increments. QEMU models no Pi USB timing, so the
-emulation artefact is the host test suite and metal acceptance stays a
-checklist (`plans/PI.md` §0.4 watch-out).
+(`AGENTS.md` §18.1). `wiring::open_discovered` composes the discovered
+ECAM window, the `PciBus` BAR/bus-master seam, and the host DMA
+facility; the live controller bring-up over a real BAR is the remaining
+metal acceptance item. QEMU models no Pi USB timing, so the emulation
+artefact is the host test suite and metal acceptance stays a checklist
+(`plans/PI.md` §0.4 watch-out).
 
 ## Required capabilities
 
@@ -98,3 +108,11 @@ mock controller:
   residuals failing closed, and a `BootKeyboard` from
   `drivers/input/usb_hid` decoding key events end-to-end over the mock
   controller.
+- `wiring::open_discovered`, against mock `PciBus` / `MmioMapper` /
+  DMA host: the `CAP_MMIO_MAP`, mapper-absent, and DMA-host-absent
+  fail-closed paths; a bus with no USB-class function refused
+  (`NotFound`); a DMA carve above the aperture refused (`OutOfRange`)
+  before any hardware is touched; a DMA allocation failure propagated;
+  and the all-valid path enabling bus mastering and reaching the
+  controller hand-off (the inert mock window faults, the on-metal
+  boundary).

@@ -38,6 +38,7 @@
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::msix::MsixBus;
+use rustos_abi::driver::pci::PciBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
 use rustos_abi::{
     CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, MsiMessage, PortIo,
@@ -119,7 +120,7 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// space simply never call it and reach `PCIe` through memory-mapped
 /// ECAM, a separate seam.
 #[must_use]
-pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus {
+pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus {
     Pci::new(mech_one::PortIoConfigSpace::new(pio))
 }
 
@@ -155,7 +156,7 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus {
 /// controller, and the path any `PCIe` host bridge without an I/O-port
 /// space uses.
 #[must_use]
-pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus {
+pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + PciBus {
     Pci::new(mech_ecam::EcamConfigSpace::new(window))
 }
 
@@ -210,5 +211,28 @@ impl<C: ConfigSpace> MsixBus for Pci<C> {
         mapper: &dyn MmioMapper,
     ) -> Result<(), DriverError> {
         Pci::route_msix(self, bdf, entry, message, mapper)
+    }
+}
+
+// The `abi-v1` generic-PCI transport seam (`AGENTS.md` §9): the surface
+// a non-virtio, DMA-driving device driver (xHCI) consumes to map one of
+// the controller's BARs and enable bus mastering, reached through
+// `&dyn PciBus` so the device driver never names this concrete crate
+// (`AGENTS.md` §8 / §17.4). Both methods forward to the inherent
+// enumeration core; the inherent methods win method resolution, so the
+// forward is not recursive.
+impl<C: ConfigSpace> PciBus for Pci<C> {
+    fn map_bar_window(
+        &self,
+        bdf: u64,
+        bar_index: u8,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        Pci::map_bar_window(self, bdf, bar_index, mapper)
+    }
+
+    fn enable_bus_master(&self, bdf: u64) -> Result<(), DriverError> {
+        Pci::enable_bus_master(self, bdf);
+        Ok(())
     }
 }

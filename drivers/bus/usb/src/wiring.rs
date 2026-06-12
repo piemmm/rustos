@@ -1,0 +1,171 @@
+//! Driver-host wiring: discovered VL805 `PCIe` xHCI → [`UsbDevice`].
+//!
+//! This is the `plans/PI.md` P10 metal-wiring seam. On the Raspberry
+//! Pi 4 (BCM2711) the USB-A ports hang off a VL805 `PCIe` xHCI host
+//! controller behind the `SoC`'s `PCIe` root complex. The aarch64
+//! `FdtDiscovery` emits the `brcm,bcm2711-pcie` bridge into
+//! `rustos_abi::hwtree` (a `Bus` node whose ECAM-access window and
+//! inbound-DMA aperture are device-tree-discovered, never compiled-in,
+//! `AGENTS.md` §18.1); a `devmgr`/host composition maps that window,
+//! constructs the bus driver over it (`rustos_drv_bus_pci::mechanism_ecam`),
+//! and hands the resulting [`PciBus`] to [`open_discovered`].
+//!
+//! [`open_discovered`] enumerates the bus for the USB-class function,
+//! enables bus mastering on it, maps its register BAR under
+//! [`CapabilityId::MMIO_MAP`], carves a DMA region under the host's
+//! DMA facility bounded by the discovered inbound-DMA aperture, and
+//! brings the controller up through [`Xhci::open`] + [`UsbDevice::start`].
+//! The PCI walk lives in `drivers/bus/pci` and the controller protocol
+//! in this crate; the wiring composes them through the `lib/abi`
+//! [`PciBus`] seam so neither driver crate names the other
+//! (`AGENTS.md` §8 / §17.4).
+//!
+//! No QEMU vertical exists — QEMU models no Pi USB timing (`AGENTS.md`
+//! §0.4 / §2.1) — so the host tests prove the composition and its
+//! fail-closed paths up to the controller hand-off; the live
+//! controller bring-up is the on-metal acceptance item.
+
+use rustos_abi::driver::bus::BusDevice;
+use rustos_abi::driver::dma::DmaSlab;
+use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, PciBus, RegisterWindow};
+
+use crate::device::UsbDevice;
+use crate::{Xhci, DEFAULT_POLL_BUDGET};
+
+/// PCI base-class + sub-class identifying a USB host controller
+/// (PCI Local Bus 3.0 Appendix D: base `0x0C` Serial Bus Controller,
+/// sub-class `0x03` USB). The VL805 exposes its xHCI as the single USB
+/// function behind the Pi 4's `PCIe` bridge.
+pub const USB_CONTROLLER_CLASS: u16 = 0x0C03;
+
+/// BAR slot carrying the xHCI register block (xHCI 1.2 §5.2.1: the
+/// memory BAR at offset `0x10`, i.e. BAR0).
+pub const XHCI_BAR_INDEX: u8 = 0;
+
+/// Bytes carved for the controller's device-shared DMA structures.
+///
+/// The xHCI engine lays the DCBAA, command/event/transfer rings,
+/// contexts, and report buffers out of this one region
+/// ([`UsbDevice::start`]); 16 KiB comfortably covers the worst case
+/// (a 255-slot controller needs under 7 KiB). This is a fixed
+/// protocol working set for one device, not a scalable capacity
+/// (`AGENTS.md` §24.4).
+pub const XHCI_DMA_BYTES: usize = 16 * 1024;
+
+// A 255-slot controller's device-shared structures need under 7 KiB;
+// the carve must comfortably exceed that for every reported slot count.
+const _: () = assert!(XHCI_DMA_BYTES >= 8 * 1024);
+
+/// Upper bound on functions scanned while locating the USB controller.
+///
+/// A defence bound (`AGENTS.md` §24.4), not a capacity: the VL805 sits
+/// alone behind the Pi 4 bridge, so the controller is found in the
+/// first handful of entries; the cap stops a malfunctioning bus from
+/// driving an unbounded scan.
+const MAX_ENUMERATION: usize = 32;
+
+/// Bring the discovered xHCI controller online from `bus`.
+///
+/// `bus` is the PCI bus driver built over the discovered ECAM-access
+/// window (`rustos_drv_bus_pci::mechanism_ecam`). `dma_aperture_top` is
+/// the *exclusive* upper bound of the CPU-physical window the bridge
+/// lets devices behind it reach (the `dma-ranges` aperture the
+/// hardware tree discovered, `AGENTS.md` §18.1): the carved DMA region
+/// must lie entirely below it or the controller could not reach its
+/// own rings.
+///
+/// On success the returned [`UsbDevice`] owns the mapped register
+/// window and DMA region with the controller halted, reset, and
+/// running; the caller scans the root-hub ports and calls
+/// [`UsbDevice::enumerate_hid`] for a connected device.
+///
+/// # Errors
+///
+/// * [`DriverError::PermissionDenied`] if the host did not grant
+///   [`CapabilityId::MMIO_MAP`].
+/// * [`DriverError::Unsupported`] if the host exposes no
+///   [`MmioMapper`] or no DMA facility.
+/// * [`DriverError::NotFound`] if the bus carries no USB-class
+///   function.
+/// * [`DriverError::OutOfRange`] if the carved DMA region does not lie
+///   below `dma_aperture_top` (fail closed, `AGENTS.md` §5.4), plus any
+///   error of [`PciBus::map_bar_window`], the DMA allocation,
+///   [`Xhci::open`], or [`UsbDevice::start`].
+///
+/// # Capabilities
+///
+/// Requires [`CapabilityId::MMIO_MAP`] (to map the register BAR) in
+/// addition to the load-time [`CapabilityId::DRV_LOAD`]
+/// [`crate::register`] checked; the DMA carve is gated on the host's
+/// own DMA capability (`CAP_MEM_DMA`) at allocation time.
+pub fn open_discovered(
+    host: &dyn DriverHost,
+    bus: &dyn PciBus,
+    dma_aperture_top: u64,
+) -> Result<UsbDevice<RegisterWindow, DmaSlab>, DriverError> {
+    if !host.has_capability(CapabilityId::MMIO_MAP) {
+        return Err(DriverError::PermissionDenied);
+    }
+    let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(DriverError::Unsupported)?;
+    let dma_host = host.virtio_host().ok_or(DriverError::Unsupported)?;
+
+    let bdf = find_usb_controller(bus)?;
+
+    // Carve the device-shared DMA region first and verify it lies
+    // wholly below the discovered inbound-DMA aperture before any
+    // hardware is touched: a region the controller cannot reach is a
+    // fail-closed refusal, never a silent truncation (`AGENTS.md`
+    // §5.4). The slab is dropped (reclaimed) on the early return.
+    let dma = dma_host.alloc_dma_zeroed(XHCI_DMA_BYTES)?;
+    let end = dma
+        .phys()
+        .checked_add(dma.len() as u64)
+        .ok_or(DriverError::OutOfRange)?;
+    if end > dma_aperture_top {
+        return Err(DriverError::OutOfRange);
+    }
+
+    // The controller issues upstream DMA into the region above, so its
+    // Bus Master Enable bit must be set before it runs (firmware leaves
+    // it clear, `AGENTS.md` — PCI Local Bus 3.0 §6.2.2).
+    bus.enable_bus_master(bdf)?;
+    let window = bus.map_bar_window(bdf, XHCI_BAR_INDEX, mapper)?;
+
+    let xhci = Xhci::open(window)?;
+    UsbDevice::start(xhci, dma, DEFAULT_POLL_BUDGET)
+}
+
+/// Locate the bus-local address of the first USB-class function on
+/// `bus`.
+///
+/// Enumerates into a bounded buffer and matches
+/// [`USB_CONTROLLER_CLASS`]; a [`DriverError::BufferTooSmall`] from the
+/// bus still fills the buffer, so the populated entries are searched
+/// either way.
+fn find_usb_controller(bus: &dyn PciBus) -> Result<u64, DriverError> {
+    let mut devices = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; MAX_ENUMERATION];
+    let found = match bus.enumerate(&mut devices) {
+        Ok(n) => n,
+        // The bus filled the buffer before reporting the overflow; the
+        // controller is in the first handful of functions on the Pi 4,
+        // so the populated prefix is searched rather than failing the
+        // whole bring-up on an oversized bus.
+        Err(DriverError::BufferTooSmall) => devices.len(),
+        Err(other) => return Err(other),
+    };
+    devices[..found]
+        .iter()
+        .find(|d| d.class == USB_CONTROLLER_CLASS)
+        .map(|d| d.address)
+        .ok_or(DriverError::NotFound)
+}
+
+#[cfg(test)]
+#[path = "wiring_tests.rs"]
+mod tests;
