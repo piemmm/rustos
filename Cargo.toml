@@ -46,6 +46,7 @@ members = [
     "lib/geometry",
     "lib/icon",
     "lib/input",
+    "lib/keymap",
     "lib/log",
     "lib/procinfo",
     "lib/raster",

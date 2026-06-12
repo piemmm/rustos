@@ -28,8 +28,13 @@
 //!   `code` is the **HID usage ID** from usage page `0x07`
 //!   (`0x04` = `A`, …); the eight boot modifiers surface as usages
 //!   `0xE0..=0xE7` ([`keyboard::MODIFIER_USAGE_BASE`]). `value` is `1`
-//!   for a press and `0` for a release. Keymap translation, repeat,
-//!   and lock state are higher-layer concerns (as for `ps2`).
+//!   for a press and `0` for a release.
+//! * For a directly attached keyboard the [`console`] producer turns
+//!   those usage edges into the console (tty) bytes a terminal sends —
+//!   applying the US layout, the held modifiers, and caps/num lock, then
+//!   the shared `lib/keymap` terminal map — and a driver loop injects
+//!   them through the `console_input` syscall ([`pump_once`],
+//!   `plans/PI.md` P11). Key repeat remains a higher-layer concern.
 //! * Mouse buttons surface as `Key` events with codes
 //!   [`mouse::BUTTON_CODE_BASE`]` + n` (`0x110`/`0x111`/`0x112` for
 //!   left/right/middle — the same codes a virtio pointer device
@@ -63,12 +68,14 @@
 use rustos_abi::driver::input::{InputEvent, InputEventKind};
 use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
+pub mod console;
 pub mod keyboard;
 pub mod mouse;
 
 #[cfg(test)]
 mod tests;
 
+pub use console::{pump_once, ConsoleSink, KeyboardConsole};
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
 pub use rustos_abi::driver::input::ReportSource;

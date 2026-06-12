@@ -2188,19 +2188,44 @@ two users — or the same user twice — can be logged in concurrently.
   push) + the `console_input` handler tests (push→read round trip;
   fail-closed for an unknown console and for a non-injectable UART
   console) + lib/rt / abi-sys marshalling tests.
+- **Keyboard input for the video console — host-side producer LANDED.**
+  The producer that turns decoded key events into the bytes
+  `console_input` injects is now host-proven. The shared terminal key
+  map is the new `lib/keymap` crate (`rustos-keymap`): `encode_key(Key,
+  Modifiers, &mut [u8])` writes the console (tty) bytes one key press
+  sends — a printable char (UTF-8, with the `Ctrl` C0-control and `Alt`
+  meta-prefix arithmetic), `Enter`→CR, `Backspace`→DEL, `Tab`, `Escape`,
+  the arrows (`ESC [ A`..`D`), and the editing/nav/function keys via the
+  canonical `lib/vt` `SS3`/`CSI … ~` tables (no second escape definition,
+  §2.2). It is `no_std`, allocation-free (writes a caller buffer, so it
+  works before the SP5b userland heap), and fail-closed (`MAX_KEY_BYTES`
+  bounds it; an unmappable key emits nothing). `drivers/input/usb_hid`
+  gained a `console` module: the US HID-usage→`rustos_input::Key` table
+  (letters/digits/shifted symbols/named keys/keypad), a stateful
+  `KeyboardConsole` tracking the modifier bits + caps/num lock, and
+  `pump_once` — the driver loop that polls the keyboard, feeds each event
+  through `KeyboardConsole::feed` + `encode_key`, and injects the bytes
+  through a `ConsoleSink` (on metal a `console_input` call against the
+  video console's index; host tests use a recording sink). The
+  HID-usage→`Key` half is HID-specific (a `ps2` keyboard resolves
+  scancode set 1 into the same vocabulary, reusing `lib/keymap`); the
+  `Key`→bytes half is the one shared map (§2.2). Proven by 13 `lib/keymap`
+  unit tests + 13 usb_hid `console` tests (layout, ctrl/alt, caps/num
+  lock, named/arrow/function sequences, fail-closed cases, and the full
+  `BootKeyboard`→keymap→sink "hi" chain). Docs:
+  `docs/src/lib/keymap.md`, `docs/src/drivers/input.md`.
 
 **Remaining (next increments, in order):**
 
-1. **Keyboard input for the video console — producer + metal.** The
-   kernel-side delivery seam (`console_input` + `ConsoleInputQueue`)
-   above is landed; what remains is the *producer*: a shared `Key`→console-byte
-   keymap (the tty key map a `drivers/input/usb_hid` / PS-2 driver
-   applies to the decoded `rustos_input::Key` events), the driver loop
-   calling `console_input` against the video console's index, and the
-   USB-HID-over-xHCI **VL805 metal** path that delivers the reports
-   (the P10 alternative track). QEMU models no Pi USB, so the producer's
-   decode + keymap are host-proven and the hardware delivery is a metal
-   checklist (`AGENTS.md` §20; the UART stays its own session).
+1. **Keyboard input for the video console — VL805/xHCI metal delivery.**
+   The kernel delivery seam (`console_input` + `ConsoleInputQueue`) and
+   the host-side producer (`lib/keymap` + the usb_hid `console` module
+   above) are landed; what remains is the **metal** path that feeds the
+   producer real reports: the USB-HID-over-xHCI **VL805** wiring (the P10
+   alternative track) so the driver's `pump_once` loop runs against a
+   real keyboard and injects into the video console. QEMU models no Pi
+   USB, so this is a metal checklist (`AGENTS.md` §20 / §0.4; the UART
+   stays its own session).
 2. **Configurable log policy** — the log output/direction (which
    consoles/sinks receive log lines), rotation, and on-storage age
    limits become administrator-settable configuration under

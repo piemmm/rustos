@@ -1,0 +1,23 @@
+[package]
+name = "rustos-keymap"
+description = "RustOS shared terminal key map (§6, §2.2 — plans/PI.md P11): the one definition that turns a decoded keyboard `Key` + held `Modifiers` into the console (tty) byte sequence a console-input producer injects, reusing the canonical `lib/vt` escape vocabulary. no_std, allocation-free, fail-closed (§2.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The decoded keyboard vocabulary (`Key` / `NamedKey` / `Modifiers`) this map
+# translates. Shared in `lib/*` so neither a driver nor a GUI crate owns it
+# (§17.4, §2.2).
+rustos-input = { path = "../input", version = "=0.0.0" }
+# The single canonical ANSI / VT / xterm escape + control-byte definition
+# (`vt::control` constants, `vt::key` SS3 / `~` tables). Reused here so there is
+# no second escape-sequence definition anywhere in the tree (§2.2). Only its
+# `const` tables are touched, so this crate stays allocation-free.
+rustos-vt = { path = "../vt", version = "=0.0.0" }
+
+[lints]
+workspace = true

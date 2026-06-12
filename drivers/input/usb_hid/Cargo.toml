@@ -10,6 +10,12 @@ publish.workspace = true
 
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The decoded keyboard `Key` vocabulary the console producer resolves HID
+# usages into, and the shared terminal key map that turns each key press into
+# the console (tty) bytes injected through `console_input` (§2.2, plans/PI.md
+# P11). Both are `lib/*` crates the driver may depend on (§17.4).
+rustos-input = { path = "../../../lib/input", version = "=0.0.0" }
+rustos-keymap = { path = "../../../lib/keymap", version = "=0.0.0" }
 
 [lints]
 workspace = true

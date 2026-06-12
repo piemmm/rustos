@@ -40,8 +40,19 @@ bring-up path.
 - Motion: `Pointer` deltas on axes `0` (X) / `1` (Y); wheel motion is
   `Scroll` on axis `1`.
 
-Keymap translation, key repeat, and modifier/lock state are
-higher-layer concerns, as for `ps2`.
+### Console-input producer
+
+For a keyboard wired to a text console, the `console` module turns the
+raw usage edges above into the console (tty) bytes a terminal sends.
+`KeyboardConsole` tracks the held modifiers and the caps-/num-lock
+state, resolves each press to the `rustos_input::Key` a US layout
+produces (the HID-usage table is HID-specific; a `ps2` keyboard
+resolves scancode set 1 into the same vocabulary), and runs it through
+the shared `lib/keymap` terminal map. `pump_once` is the driver loop:
+poll the keyboard, feed each event, and inject the bytes through a
+`ConsoleSink` — on metal a call to the `console_input` syscall against
+the video console's index (`plans/PI.md` P11), host-tested with a
+recording sink. Key repeat remains a higher-layer concern.
 
 ## Required capabilities
 
@@ -76,3 +87,9 @@ in-process mock report queue:
 - Mouse: button diff, X/Y/wheel deltas, 3-byte (wheel-less) reports,
   device-specific button bits and trailing bytes ignored, short
   reports rejected.
+- Console producer (`console` module): US-layout letters/digits/shifted
+  symbols, caps lock (letters only) and num lock (keypad), the held
+  modifiers (shift, `Ctrl-C` → `0x03`), named/editing/arrow/function
+  sequences, releases and non-key events producing nothing, unknown
+  usages and undersized buffers failing closed, and the full
+  decode→keymap→sink chain through `pump_once`.

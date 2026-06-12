@@ -3,9 +3,13 @@
 Input drivers report user-generated events — keyboard, pointer, and
 scroll — to the focused session. They implement
 [`rustos_abi::driver::input::Input`](../abi/driver_traits.md#input) and
-run as user-space drivers; key repeat, modifier/lock state, keymap
-translation, and routing to a session live above this trait in
-`userland/gui/wm` and the session layer.
+run as user-space drivers. For the **desktop** path, key repeat,
+modifier/lock state, keymap translation, and routing to a surface live
+above this trait in `userland/gui/wm` and the session layer. For a
+**text console**, a keyboard driver instead translates its key events
+to console bytes itself and injects them through the `console_input`
+syscall (see "Console-input producer" below); key repeat remains a
+higher-layer concern either way.
 
 ## Class trait
 
@@ -180,3 +184,23 @@ a source claiming more bytes than its buffer is a `DeviceFault`, and
 events that overflow the caller's `poll` buffer are latched for the
 next call rather than dropped. A per-`poll` report budget bounds the
 work a flooding device can force (`AGENTS.md` §2.1).
+
+#### Console-input producer
+
+For a keyboard wired to a text console, the driver's `console` module
+turns the raw HID-usage edges above into the console (tty) bytes a
+terminal sends (`plans/PI.md` P11). `KeyboardConsole` tracks the held
+modifiers and the caps-/num-lock state, resolves each press to the
+`rustos_input::Key` a US layout produces — the HID-usage table is
+HID-specific, so it lives in the driver; a `ps2` keyboard resolves
+scancode set 1 into the same vocabulary — and runs that key through the
+shared `lib/keymap` terminal map ([`rustos-keymap`](../lib/keymap.md)),
+the one definition that owns the `Key`→bytes translation
+(`AGENTS.md` §2.2). `pump_once` is the driver loop: poll the keyboard,
+feed each event, and inject the produced bytes through a `ConsoleSink`
+— on metal a `console_input` call against the video console's index,
+host-tested with a recording sink. The whole path is allocation-free
+and fails closed (an unknown usage or a non-press produces no bytes).
+Delivering the reports over the Pi 4's VL805 xHCI controller is the
+remaining metal step; QEMU models no Pi USB, so the decode + keymap are
+host-proven and the hardware delivery is a checklist.

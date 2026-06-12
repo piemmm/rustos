@@ -740,6 +740,8 @@ name = "rustos-drv-input-usb-hid"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-input",
+ "rustos-keymap",
 ]
 
 [[package]]
@@ -1047,6 +1049,14 @@ dependencies = [
  "rustos-kernel-sec",
  "rustos-log",
  "rustos-virtio",
+]
+
+[[package]]
+name = "rustos-keymap"
+version = "0.0.0"
+dependencies = [
+ "rustos-input",
+ "rustos-vt",
 ]
 
 [[package]]

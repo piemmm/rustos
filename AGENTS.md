@@ -327,6 +327,9 @@ rustos/
 │   ├── input/           # Shared pointer input-event vocabulary
 │   │                    #   (PointerButton/InputEvent) routed by the WM and
 │   │                    #   taskbar (§17.4).
+│   ├── keymap/          # Shared terminal key map: the one Key+Modifiers ->
+│   │                    #   console (tty) byte encoder a keyboard driver's
+│   │                    #   console_input producer uses, over lib/vt (§2.2).
 │   ├── log/             # Structured logging.
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).

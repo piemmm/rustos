@@ -716,10 +716,16 @@ spec §18.
   keyboard-input driver pushes decoded console bytes into a console's
   kernel-side `ConsoleInputQueue` through the `console_input` syscall
   (no. 22, `CAP_INPUT_INJECT`), which a video-login `stream_read` drains
-  (the UART stays its own session, fail-closed to injection). Remaining
-  console wiring (the keyboard *producer* — a `Key`→byte keymap + the
-  USB-HID/PS-2 driver loop + the Pi VL805/xHCI metal path — and
-  configurable log policy) is staged in `plans/PI.md` P11; login's
+  (the UART stays its own session, fail-closed to injection). The
+  keyboard *producer* is now wired host-side: the shared terminal key map
+  `lib/keymap` (`encode_key` — `Key`+`Modifiers`→console tty bytes,
+  allocation-free, reusing the `lib/vt` escape vocabulary, §2.2) plus the
+  `drivers/input/usb_hid` `console` module (the US HID-usage→`Key` table
+  with modifier + caps/num-lock state, and the `pump_once` driver loop
+  that injects the bytes through a `ConsoleSink` — `console_input` on
+  metal). Remaining console wiring (the Pi VL805/xHCI **metal** path that
+  delivers the HID reports, and configurable log policy) is staged in
+  `plans/PI.md` P11; login's
   authenticate path on a real volume additionally rides the production
   `mem_map` producer (`plans/SPAWN.md` SP5b — the userland heap is inert
   until it lands, so login's path to its prompt is allocation-free).
