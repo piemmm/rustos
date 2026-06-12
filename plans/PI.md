@@ -2094,20 +2094,42 @@ addition). Host-proven: drvhost `mmio_mapper_{default_none,some}_yields_*`
 accessor tests + the `driver_host` `host_serves_both_mmio_and_dma_*` /
 `driver_without_mmio_cap_is_refused_fail_closed` composition tests.
 
-**Remaining — the aarch64 boot invocation only:** wire the actual
-metal call into the production aarch64 boot path — map the discovered
-`brcm,bcm2711-pcie` window, run `pcie_brcm::wiring::open_discovered` to
-train the link, build the bus over the same window (`mechanism_brcm`),
-read the node's `HwResource::dma` aperture `top`, call
-`usb::wiring::open_discovered`, then run `usb_hid::console::pump_once`
-against the enumerated keyboard to feed `VIDEO_KEYBOARD`. This needs
-(a) a generic-timer-backed `pcie_brcm::Delay` impl in the aarch64 port,
-and (b) discovering the outbound `ranges` MMIO window into the hardware
-tree (it is passed in `PcieWindows` by the caller today). QEMU models no
-Pi USB (§0.4), so this carries a metal checklist, not a vertical. Then
-the DWC2 OTG path if needed; then the WM/taskbar/session on the HVS path
-and the on-metal acceptance (a real controller's BAR answering a
-plausible `CAPLENGTH`, and a USB keyboard driving the login).
+**Landed — outbound-window discovery into the hardware tree**
+(host-provable): the `brcm,bcm2711-pcie` node now carries *both* address
+windows the VL805 wiring needs, read from the device tree. Alongside the
+inbound `dma-ranges` aperture (an `HwResource::dma`), the aarch64
+`FdtDiscovery` now decodes the bridge's outbound `ranges` memory window
+(`fdt::outbound_mmio_window`: the first memory-space entry's `phys.hi`
+space code, the 64-bit PCIe base from `phys.mid`/`phys.lo`, the CPU base
+and size from the parent cells) and emits it as a new
+`HwResource::bus_window(cpu_base, size, pcie_base)`. That required
+extending the hwtree ABI with `HwResourceKind::BusWindow` and a third
+`xlate` (far-side/translated base) field on `HwResource` (WIRE_LEN
+24→32; abi-v1 is unfrozen, §2.13) — a `BusWindow` is the general model
+for a CPU↔bus address-translation window, distinct from a plain `Mmio`
+register window so the controller `reg` is never conflated. C-header
+regenerated. Host-proven: `fdt::outbound_*` decoder tests (memory
+decode, I/O-space skip, absent/partial/out-of-range fail-closed), the
+`platform::emits_the_pcie_bridge_with_its_outbound_window` emission test,
+and the `HwResource::bus_window` round-trip in `lib/abi`.
+
+**Remaining — the metal composition only:** assemble `PcieWindows` from
+the discovered node resources (inbound from the `Dma` aperture, outbound
+from the `BusWindow`) and drive the chain on metal — map the controller
+`reg` window, run `pcie_brcm::wiring::open_discovered` to train the link,
+build the bus over the same window (`mechanism_brcm`), read the node's
+`HwResource::dma` aperture `top`, call `usb::wiring::open_discovered`,
+then run `usb_hid::console::pump_once` against the enumerated keyboard to
+feed `VIDEO_KEYBOARD`. This still needs a generic-timer-backed
+`pcie_brcm::Delay` impl, and — because a keyboard pump is a *continuous*
+service, not a one-shot boot step — the architecturally-correct home is a
+`devmgr`-autoloaded userland keyboard driver whose service loop calls
+`pump_once` with a `ConsoleSink` that invokes the `console_input`
+syscall, not a kernel boot body. QEMU models no Pi USB (§0.4), so this
+carries a metal checklist, not a vertical. Then the DWC2 OTG path if
+needed; then the WM/taskbar/session on the HVS path and the on-metal
+acceptance (a real controller's BAR answering a plausible `CAPLENGTH`,
+and a USB keyboard driving the login).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

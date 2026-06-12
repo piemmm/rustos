@@ -29,8 +29,8 @@
 
 /* Packed little-endian wire sizes, in bytes. */
 #define ROS_HW_MATCH_KEY_WIRE_LEN 76u
-#define ROS_HW_RESOURCE_WIRE_LEN 24u
-#define ROS_HW_NODE_WIRE_LEN 508u
+#define ROS_HW_RESOURCE_WIRE_LEN 32u
+#define ROS_HW_NODE_WIRE_LEN 572u
 
 /* Device classes (uint16_t). */
 #define ROS_HW_CLASS_ROOT ((uint16_t)0u)
@@ -57,6 +57,7 @@
 #define ROS_HW_RES_IRQ ((uint16_t)1u)
 #define ROS_HW_RES_PORT ((uint16_t)2u)
 #define ROS_HW_RES_DMA ((uint16_t)3u)
+#define ROS_HW_RES_BUS_WINDOW ((uint16_t)4u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is ROS_HW_MATCH_KEY_WIRE_LEN. */
@@ -76,6 +77,7 @@ typedef struct ros_hw_resource {
     uint32_t flags;
     uint64_t base;
     uint64_t length;
+    uint64_t translated_base;
 } ros_hw_resource_t;
 
 /* One node in the hardware tree. Mirrors the #[repr(C)] layout; the

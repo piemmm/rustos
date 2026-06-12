@@ -761,28 +761,43 @@ by match key. Interior buses (e.g. a `simple-bus` `/soc`) are emitted
 as `Bus` nodes before their children, so the flat stream reconstructs
 the tree shape, and a node describing nothing bindable (no
 representable match key, not memory) is not emitted. Two nodes carry a
-per-device augmentation, each a `Dma` capability-grant request only the
-platform's tree can size:
+per-device augmentation only the platform's tree can size:
 
 - the VideoCore firmware mailbox (`brcm,bcm2835-mbox`, PI Stage P7) — a
-  one-page property-buffer carve bounded by the 30-bit VideoCore
-  aperture, which `drivers/display/rpi_hvs::wiring` binds; and
-- the BCM2711 PCIe host bridge (`brcm,bcm2711-pcie`, PI Stage P10) — the
-  inbound-DMA aperture it grants devices behind it (the VL805 xHCI for
-  the USB-A ports). The aperture is read from the node's `dma-ranges`
-  (`fdt::dma_ranges_aperture`: the 3-cell child PCI address is stepped
-  over, the 2-cell parent CPU base and size decoded), never a board
-  constant (§18.5). It is emitted as `HwResource::dma(top, len)` where
-  `top` is the *exclusive* upper bound of the reachable CPU-physical
-  window (`0xC000_0000` — the low 3 GiB of SDRAM — on the Pi 4) and
-  `len` its extent; the future VL805 wiring carves its xHCI DMA region
-  below `top`. The bridge's own controller/config (ECAM-access) window
-  flows through the generic translated-`reg` path, not the augmentation.
+  `Dma` request for a one-page property-buffer carve bounded by the
+  30-bit VideoCore aperture, which `drivers/display/rpi_hvs::wiring`
+  binds; and
+- the BCM2711 PCIe host bridge (`brcm,bcm2711-pcie`, PI Stage P10) —
+  the host bridge the VL805 xHCI (the USB-A ports) sits behind. It
+  carries two windows the VL805 wiring needs, read from the device
+  tree, never a board constant (§18.5):
+  - the **inbound-DMA aperture** it grants devices behind it, from the
+    node's `dma-ranges` (`fdt::dma_ranges_aperture`: the 3-cell child
+    PCI address stepped over, the 2-cell parent CPU base and size
+    decoded). It is emitted as `HwResource::dma(top, len)` where `top`
+    is the *exclusive* upper bound of the reachable CPU-physical window
+    (`0xC000_0000` — the low 3 GiB of SDRAM — on the Pi 4) and `len`
+    its extent; the VL805 wiring carves its xHCI DMA region below
+    `top`.
+  - the **outbound MMIO window** it forwards to PCIe memory space, from
+    the node's `ranges` (`fdt::outbound_mmio_window`: the first
+    memory-space entry's `phys.hi` space code is checked, the 64-bit
+    PCIe base read from `phys.mid`/`phys.lo`, the CPU base and size
+    from the parent cells). It is emitted as
+    `HwResource::bus_window(cpu_base, size, pcie_base)` (CPU
+    `0x6_0000_0000` → PCIe `0xC000_0000`, 1 GiB on the Pi 4) — a
+    capability-grant request distinct from the controller's own `reg`
+    MMIO so the wiring can both program the root complex's outbound
+    window and translate an enumerated BAR back to a CPU-physical
+    address.
+
+  The bridge's own controller/config (ECAM-access) window flows through
+  the generic translated-`reg` path, not the augmentation.
 
 The walker is host-tested against the shared DTB fixtures (the `virt`-
 and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
-with its `dma-ranges`, fail-closed cases) and exercised by the port's
-`passes_arch_hal_conformance_suite`.
+with its `dma-ranges` and outbound `ranges`, fail-closed cases) and
+exercised by the port's `passes_arch_hal_conformance_suite`.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 

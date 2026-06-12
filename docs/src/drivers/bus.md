@@ -210,12 +210,15 @@ trains. All windows are device-tree-discovered, never compiled-in
 `CAP_MMIO_MAP` and runs the bring-up; the caller then recovers the
 window (`into_regs`) and builds `mechanism_brcm(window)` to enumerate
 the VL805. The crate performs only the link bring-up and so never
-depends on another driver crate (`AGENTS.md` §17.4). The outbound
-`ranges` MMIO window passed in `PcieWindows` is supplied by the
-composition; its discovery into the hardware tree and the kernel-side
-composition itself (which rides the `DriverHost` DMA/MMIO-over-IPC
-gap) are follow-ups tracked in `plans/PI.md` P10. QEMU models no Pi
-PCIe link timing, so metal acceptance is a checklist.
+depends on another driver crate (`AGENTS.md` §17.4). Both windows the
+`PcieWindows` carries are device-tree-discovered: the inbound aperture
+from the node's `dma-ranges` (an `HwResource::dma`) and the outbound
+MMIO window from its `ranges` (an `HwResource::bus_window` carrying the
+CPU base, size, and far-side PCIe base — `kernel/arch/aarch64::fdt::
+outbound_mmio_window`, `AGENTS.md` §18.1). The remaining follow-up is
+the kernel-side composition that assembles `PcieWindows` from those
+resources and drives the chain on metal, tracked in `plans/PI.md` P10.
+QEMU models no Pi PCIe link timing, so metal acceptance is a checklist.
 
 ## MMIO driver — `drivers/bus/mmio`
 

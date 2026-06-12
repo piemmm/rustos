@@ -486,6 +486,7 @@ fn hwtree_enum_macros(out: &mut String) {
         ("IRQ", HwResourceKind::Irq),
         ("PORT", HwResourceKind::Port),
         ("DMA", HwResourceKind::Dma),
+        ("BUS_WINDOW", HwResourceKind::BusWindow),
     ] {
         let _ = writeln!(
             out,
@@ -518,6 +519,7 @@ fn hwtree_structs(out: &mut String) {
          \x20   uint32_t flags;\n\
          \x20   uint64_t base;\n\
          \x20   uint64_t length;\n\
+         \x20   uint64_t translated_base;\n\
          } ros_hw_resource_t;\n\n",
     );
     out.push_str(

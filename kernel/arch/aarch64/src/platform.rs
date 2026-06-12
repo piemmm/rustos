@@ -37,7 +37,8 @@
 //! through the reader, not as a tree node.
 
 use crate::fdt::{
-    bus_level, dma_ranges_aperture, reg_entry_count, translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH,
+    bus_level, dma_ranges_aperture, outbound_mmio_window, reg_entry_count, translated_reg,
+    BusLevel, Fdt, MAX_WALK_DEPTH,
 };
 use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -204,6 +205,20 @@ fn build_node(
             // unreadable `dma-ranges` likewise omits it rather than
             // inventing a window.
             let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
+        }
+        // …and the outbound memory window from its `ranges`: the
+        // CPU-physical aperture the bridge forwards to PCIe memory space
+        // and the PCIe-space base it maps to, so the VL805 wiring can
+        // both program the root complex's outbound window and translate
+        // the enumerated BAR back to a CPU-physical address. Carried as a
+        // single `BusWindow` (CPU base, size, far-side PCIe base) rather
+        // than conflated with the controller's own `reg` MMIO windows
+        // (`AGENTS.md` §18.1). An unreadable `ranges` omits it rather
+        // than inventing a window (§2.9).
+        if let Some((cpu_base, pcie_base, size)) =
+            outbound_mmio_window(node, level.addr_cells, parent_addr_cells, level.size_cells)
+        {
+            let _ = hw.push_resource(HwResource::bus_window(cpu_base, size, pcie_base));
         }
     }
 
@@ -535,6 +550,16 @@ mod tests {
         reg.extend_from_slice(&0x7d50_0000u64.to_be_bytes());
         reg.extend_from_slice(&0x9310u64.to_be_bytes());
         b.prop("reg", &reg);
+        // Outbound `ranges`: <pci.hi=0x02000000 pci.mid=0 pci.lo=0xc0000000
+        // cpu=0x6_00000000 size=0x40000000> — the Pi 4's high MMIO
+        // aperture, CPU 0x6_0000_0000 mapped to PCIe 0xc000_0000, 1 GiB.
+        let mut ranges = Vec::new();
+        ranges.extend_from_slice(&0x0200_0000u32.to_be_bytes());
+        ranges.extend_from_slice(&0u32.to_be_bytes());
+        ranges.extend_from_slice(&0xc000_0000u32.to_be_bytes());
+        ranges.extend_from_slice(&0x6_0000_0000u64.to_be_bytes());
+        ranges.extend_from_slice(&0x4000_0000u64.to_be_bytes());
+        b.prop("ranges", &ranges);
         // <pci.hi=0x02000000 pci.mid=0 pci.lo=0  cpu=0x0  size=0xc0000000>
         let mut dma_ranges = Vec::new();
         dma_ranges.extend_from_slice(&0x0200_0000u32.to_be_bytes());
@@ -555,6 +580,56 @@ mod tests {
             .filter(|r| r.kind() == Some(HwResourceKind::Dma))
             .map(|r| (r.base(), r.length()))
             .collect()
+    }
+
+    fn bus_windows(node: &HwNode) -> Vec<(u64, u64, u64)> {
+        node.resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::BusWindow))
+            .map(|r| (r.base(), r.length(), r.translated_base()))
+            .collect()
+    }
+
+    #[test]
+    fn emits_the_pcie_bridge_with_its_outbound_window() {
+        let nodes = discover_all(&scb_pcie_tree());
+        let pcie = by_key(&nodes, b"brcm,bcm2711-pcie");
+
+        // The outbound `ranges` memory window: CPU 0x6_0000_0000 -> PCIe
+        // 0xc000_0000, 1 GiB, carried as one `BusWindow` (CPU base, size,
+        // far-side PCIe base) distinct from the controller `reg` MMIO.
+        assert_eq!(
+            bus_windows(pcie),
+            [(0x6_0000_0000, 0x4000_0000, 0xc000_0000)]
+        );
+        let win = pcie
+            .resources()
+            .iter()
+            .find(|r| r.kind() == Some(HwResourceKind::BusWindow))
+            .expect("outbound window request");
+        assert_eq!(
+            win.required_capability(),
+            Ok(rustos_abi::CapabilityId::MMIO_MAP)
+        );
+    }
+
+    #[test]
+    fn pcie_bridge_without_ranges_carries_no_outbound_window() {
+        // The without-`dma-ranges` fixture also carries no `ranges`: no
+        // outbound window is invented (`AGENTS.md` §2.9).
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("pcie@7d500000");
+        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_u32("#address-cells", 3);
+        b.prop_u32("#size-cells", 2);
+        b.end_node();
+        b.end_node();
+        let nodes = discover_all(&b.build());
+        let pcie = by_key(&nodes, b"brcm,bcm2711-pcie");
+        assert!(bus_windows(pcie).is_empty());
     }
 
     #[test]

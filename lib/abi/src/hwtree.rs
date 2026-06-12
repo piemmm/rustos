@@ -325,6 +325,15 @@ pub enum HwResourceKind {
     /// A DMA capability requirement (`base`/`len` describe the addressing
     /// constraint; `0`/`0` means "no constraint declared").
     Dma = 3,
+    /// An outbound bus address window with CPU↔bus translation: the CPU
+    /// issues accesses in `base`..`base+len`, which the bus bridge
+    /// translates to `xlate`..`xlate+len` on the far (device) side. The
+    /// motivating case is a PCIe root complex's outbound `ranges`
+    /// window (`AGENTS.md` §18.1): `base` is the CPU-physical aperture,
+    /// `xlate` the PCIe-space base the bridge maps it to, distinct from
+    /// a plain [`Mmio`](Self::Mmio) register window that needs no
+    /// translation.
+    BusWindow = 4,
 }
 
 impl HwResourceKind {
@@ -342,6 +351,7 @@ impl HwResourceKind {
             1 => Some(Self::Irq),
             2 => Some(Self::Port),
             3 => Some(Self::Dma),
+            4 => Some(Self::BusWindow),
             _ => None,
         }
     }
@@ -352,9 +362,10 @@ impl HwResourceKind {
     #[must_use]
     pub const fn required_capability(self) -> CapabilityId {
         match self {
-            // A register/framebuffer window and an x86 I/O port range are
-            // both mapped through the kernel's MMIO-map facility.
-            Self::Mmio | Self::Port => CapabilityId::MMIO_MAP,
+            // A register/framebuffer window, an x86 I/O port range, and
+            // an outbound bus window are all mapped through the kernel's
+            // MMIO-map facility.
+            Self::Mmio | Self::Port | Self::BusWindow => CapabilityId::MMIO_MAP,
             Self::Irq => CapabilityId::IRQ_BIND,
             Self::Dma => CapabilityId::MEM_DMA,
         }
@@ -376,11 +387,12 @@ pub struct HwResource {
     flags: u32,
     base: u64,
     len: u64,
+    xlate: u64,
 }
 
 impl HwResource {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 24;
+    pub const WIRE_LEN: usize = 32;
 
     /// A memory-mapped register/framebuffer window.
     #[must_use]
@@ -407,13 +419,26 @@ impl HwResource {
         Self::new(HwResourceKind::Dma, addr_limit, len, 0)
     }
 
+    /// An outbound bus address window: `cpu_base`..`cpu_base+len` on the
+    /// CPU side, translated to `translated_base`..`translated_base+len`
+    /// on the far (device/bus) side (`AGENTS.md` §18.1).
+    #[must_use]
+    pub fn bus_window(cpu_base: u64, len: u64, translated_base: u64) -> Self {
+        Self::new_xlate(HwResourceKind::BusWindow, cpu_base, len, 0, translated_base)
+    }
+
     fn new(kind: HwResourceKind, base: u64, len: u64, flags: u32) -> Self {
+        Self::new_xlate(kind, base, len, flags, 0)
+    }
+
+    fn new_xlate(kind: HwResourceKind, base: u64, len: u64, flags: u32, xlate: u64) -> Self {
         Self {
             kind: kind.as_u16(),
             capability: kind.required_capability().as_u16(),
             flags,
             base,
             len,
+            xlate,
         }
     }
 
@@ -452,6 +477,14 @@ impl HwResource {
         self.flags
     }
 
+    /// Far-side (translated) base of a [`BusWindow`](HwResourceKind::BusWindow):
+    /// the address `base` maps to on the device/bus side. `0` for every
+    /// other resource kind, which needs no translation.
+    #[must_use]
+    pub const fn translated_base(&self) -> u64 {
+        self.xlate
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -461,6 +494,7 @@ impl HwResource {
         put_u32(&mut out, 4, self.flags);
         put_u64(&mut out, 8, self.base);
         put_u64(&mut out, 16, self.len);
+        put_u64(&mut out, 24, self.xlate);
         out
     }
 
@@ -487,6 +521,7 @@ impl HwResource {
             flags: read_u32(bytes, 4),
             base: read_u64(bytes, 8),
             len: read_u64(bytes, 16),
+            xlate: read_u64(bytes, 24),
         })
     }
 
@@ -497,6 +532,7 @@ impl HwResource {
         flags: 0,
         base: 0,
         len: 0,
+        xlate: 0,
     };
 }
 
@@ -810,6 +846,29 @@ mod tests {
             HwResourceKind::Dma.required_capability(),
             CapabilityId::MEM_DMA
         );
+        assert_eq!(
+            HwResourceKind::BusWindow.required_capability(),
+            CapabilityId::MMIO_MAP
+        );
+    }
+
+    #[test]
+    fn bus_window_carries_its_translation() {
+        // The Pi 4 outbound `ranges`: CPU 0x6_0000_0000 -> PCIe
+        // 0xc000_0000, 1 GiB. The CPU base, length, and far-side base all
+        // survive the round trip, and only this kind carries a non-zero
+        // translation.
+        let win = HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xc000_0000);
+        assert_eq!(win.kind(), Some(HwResourceKind::BusWindow));
+        assert_eq!(win.base(), 0x6_0000_0000);
+        assert_eq!(win.length(), 0x4000_0000);
+        assert_eq!(win.translated_base(), 0xc000_0000);
+        assert_eq!(win.required_capability(), Ok(CapabilityId::MMIO_MAP));
+        let back = HwResource::from_bytes(&win.to_le_bytes()).expect("decode");
+        assert_eq!(back, win);
+        assert_eq!(back.translated_base(), 0xc000_0000);
+        // A plain MMIO window has no translation.
+        assert_eq!(HwResource::mmio(0x1000, 0x1000).translated_base(), 0);
     }
 
     #[test]
@@ -925,7 +984,7 @@ mod tests {
     fn wire_lengths_are_frozen() {
         // Pinned so an accidental layout change is caught (AGENTS.md §9).
         assert_eq!(HwMatchKey::WIRE_LEN, 76);
-        assert_eq!(HwResource::WIRE_LEN, 24);
-        assert_eq!(HwNode::WIRE_LEN, 508);
+        assert_eq!(HwResource::WIRE_LEN, 32);
+        assert_eq!(HwNode::WIRE_LEN, 572);
     }
 }

@@ -224,6 +224,76 @@ pub fn dma_ranges_aperture(
     Some((max_top, len))
 }
 
+/// Decode a PCI host bridge's outbound `ranges` memory window
+/// (Devicetree Spec v0.4 §2.3.8): the CPU-physical aperture the bridge
+/// forwards to PCIe memory space, returned as
+/// `(cpu_base, pcie_base, size)` — the three values the VL805 wiring's
+/// `PcieWindows` outbound fields need, and the
+/// `(base, len, translated_base)` an `HwResource::bus_window` carries
+/// (`AGENTS.md` §18.1).
+///
+/// A PCI `ranges` entry is `<child-PCI-address> <parent-address> <size>`.
+/// The child address is the 3-cell PCI triple `phys.hi`/`phys.mid`/
+/// `phys.lo`: `phys.hi` bit 24..=25 is the space code (`0b10` = 32-bit
+/// memory, `0b11` = 64-bit memory), and `phys.mid`/`phys.lo` are the
+/// 64-bit PCIe-space base. The parent address is the CPU-physical base
+/// (`parent_address` cells) and `size` the window length (`child_size`
+/// cells). The first memory-space entry is returned; an I/O-space entry
+/// (space code `0b01`) is skipped.
+///
+/// `child_address` must be `3` (a PCI bus); `parent_address` and
+/// `child_size` must each decode to a `u64` (`1..=2`). Returns `None` —
+/// never an invented window (`AGENTS.md` §2.9) — when the node carries no
+/// `ranges`, a cell count is out of range, the value is not a whole
+/// number of entries, or no entry describes a memory window.
+#[must_use]
+pub fn outbound_mmio_window(
+    node: &Node<'_>,
+    child_address: u32,
+    parent_address: u32,
+    child_size: u32,
+) -> Option<(u64, u64, u64)> {
+    if child_address != 3
+        || parent_address == 0
+        || parent_address > 2
+        || child_size == 0
+        || child_size > 2
+    {
+        return None;
+    }
+    let value = node.property("ranges")?.value();
+    let entry = ((child_address + parent_address + child_size) * 4) as usize;
+    if value.is_empty() || value.len() % entry != 0 {
+        return None;
+    }
+    let mut off = 0;
+    while off + entry <= value.len() {
+        // `phys.hi` is the first cell; its bits 24..=25 are the space
+        // code. Only memory-space windows (`0b10`/`0b11`) are outbound
+        // MMIO apertures; an I/O-space window is not what the xHCI BAR
+        // lives in, so it is skipped rather than mis-mapped.
+        let phys_hi = read_cells(value, off, 1)?;
+        let space = (phys_hi >> 24) & 0b11;
+        if space == 0b10 || space == 0b11 {
+            // PCIe-space base is the low 64 bits of the PCI triple
+            // (`phys.mid`/`phys.lo`), the two cells after `phys.hi`.
+            let pcie_base = read_cells(value, off + 4, 2)?;
+            let cpu_base = read_cells(value, off + (child_address as usize) * 4, parent_address)?;
+            let size = read_cells(
+                value,
+                off + ((child_address + parent_address) as usize) * 4,
+                child_size,
+            )?;
+            if size == 0 {
+                return None;
+            }
+            return Some((cpu_base, pcie_base, size));
+        }
+        off += entry;
+    }
+    None
+}
+
 /// Decode `reg` entry `index` of the node at `depth` with its parent
 /// bus's cell counts and translate the base through the ancestor buses'
 /// `ranges`, yielding the CPU-physical `(base, length)` window.
@@ -438,8 +508,8 @@ pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) 
 #[cfg(test)]
 mod tests {
     use super::{
-        dma_ranges_aperture, effective_timer_hz, psci_method, timer_clock_frequency, Fdt,
-        PsciMethod,
+        dma_ranges_aperture, effective_timer_hz, outbound_mmio_window, psci_method,
+        timer_clock_frequency, Fdt, PsciMethod,
     };
     use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
 
@@ -546,6 +616,118 @@ mod tests {
         assert_eq!(dma_ranges_aperture(&pcie, 4, 2, 2), None);
         assert_eq!(dma_ranges_aperture(&pcie, 3, 3, 2), None);
         assert_eq!(dma_ranges_aperture(&pcie, 3, 2, 0), None);
+    }
+
+    /// Build a single-node tree whose `pcie` node carries an outbound
+    /// `ranges`, then hand that node to `f`. Same cells as the
+    /// `dma-ranges` helper: child `3`, parent `2`, size `2`.
+    fn with_pcie_ranges(ranges: &[u8], f: impl FnOnce(Option<(u64, u64, u64)>)) {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("pcie@7d500000");
+        b.prop_str("compatible", "brcm,bcm2711-pcie");
+        b.prop_u32("#address-cells", 3);
+        b.prop_u32("#size-cells", 2);
+        if !ranges.is_empty() {
+            b.prop("ranges", ranges);
+        }
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let pcie = fdt
+            .nodes()
+            .filter_map(Result::ok)
+            .find(|n| n.name() == b"pcie@7d500000")
+            .expect("pcie node");
+        f(outbound_mmio_window(&pcie, 3, 2, 2));
+    }
+
+    /// One PCI `ranges` entry: 3-cell child (phys.hi + 64-bit PCIe base),
+    /// 2-cell parent CPU base, 2-cell size.
+    fn ranges_entry(pci_hi: u32, pcie_base: u64, cpu_base: u64, size: u64) -> std::vec::Vec<u8> {
+        let mut v = std::vec::Vec::new();
+        v.extend_from_slice(&pci_hi.to_be_bytes()); // phys.hi (space code)
+        v.extend_from_slice(&pcie_base.to_be_bytes()); // phys.mid + phys.lo
+        v.extend_from_slice(&cpu_base.to_be_bytes());
+        v.extend_from_slice(&size.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn reads_the_bcm2711_pcie_outbound_window() {
+        // The real Pi 4 tree: 32-bit memory space (phys.hi 0x02…),
+        // CPU 0x6_0000_0000 -> PCIe 0xc000_0000, 1 GiB.
+        let r = ranges_entry(0x0200_0000, 0xc000_0000, 0x6_0000_0000, 0x4000_0000);
+        with_pcie_ranges(&r, |win| {
+            assert_eq!(win, Some((0x6_0000_0000, 0xc000_0000, 0x4000_0000)));
+        });
+    }
+
+    #[test]
+    fn outbound_window_skips_an_io_space_entry() {
+        // An I/O-space entry (space code 0b01) precedes the memory
+        // window; the decoder skips it and returns the memory aperture.
+        let mut r = ranges_entry(0x0100_0000, 0x0, 0x6_f000_0000, 0x1000);
+        r.extend_from_slice(&ranges_entry(
+            0x0200_0000,
+            0xc000_0000,
+            0x6_0000_0000,
+            0x4000_0000,
+        ));
+        with_pcie_ranges(&r, |win| {
+            assert_eq!(win, Some((0x6_0000_0000, 0xc000_0000, 0x4000_0000)));
+        });
+    }
+
+    #[test]
+    fn outbound_window_absent_without_ranges() {
+        with_pcie_ranges(&[], |win| assert_eq!(win, None));
+    }
+
+    #[test]
+    fn outbound_window_rejects_a_partial_entry() {
+        // Not a whole number of 7-cell entries: refused, never read past
+        // its end (`AGENTS.md` §2.9).
+        let mut r = ranges_entry(0x0200_0000, 0xc000_0000, 0x6_0000_0000, 0x4000_0000);
+        r.truncate(r.len() - 4);
+        with_pcie_ranges(&r, |win| assert_eq!(win, None));
+    }
+
+    #[test]
+    fn outbound_window_none_when_only_io_space() {
+        // An all-I/O-space `ranges` has no memory window to return.
+        let r = ranges_entry(0x0100_0000, 0x0, 0x6_f000_0000, 0x1000);
+        with_pcie_ranges(&r, |win| assert_eq!(win, None));
+    }
+
+    #[test]
+    fn outbound_window_rejects_out_of_range_cells() {
+        let r = ranges_entry(0x0200_0000, 0xc000_0000, 0x6_0000_0000, 0x4000_0000);
+        let blob = {
+            let mut b = DtbBuilder::new();
+            b.begin_node("");
+            b.prop_u32("#address-cells", 2);
+            b.prop_u32("#size-cells", 2);
+            b.begin_node("pcie@7d500000");
+            b.prop_str("compatible", "brcm,bcm2711-pcie");
+            b.prop("ranges", &r);
+            b.end_node();
+            b.end_node();
+            b.build()
+        };
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let pcie = fdt
+            .nodes()
+            .filter_map(Result::ok)
+            .find(|n| n.name() == b"pcie@7d500000")
+            .expect("pcie node");
+        // A non-PCI child width, or an over-wide parent/size, fails closed.
+        assert_eq!(outbound_mmio_window(&pcie, 2, 2, 2), None);
+        assert_eq!(outbound_mmio_window(&pcie, 3, 3, 2), None);
+        assert_eq!(outbound_mmio_window(&pcie, 3, 2, 0), None);
     }
 
     /// Build a minimal tree carrying a `/timer` node with the given
