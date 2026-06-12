@@ -280,6 +280,63 @@ pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
     Some(found)
 }
 
+/// Most transmit-ready polls one byte may consume before the UART is
+/// declared wedged and the byte dropped ([`tx_wait`]).
+///
+/// Sized for the slowest healthy drain the console supports: a full
+/// 16-deep PL011 FIFO at 9600 baud empties in ≈ 17 ms, and an MMIO
+/// status poll on the BCM2711 costs well over 100 ns, so the budget
+/// covers that drain with generous headroom. A transmitter that is
+/// still not ready after the budget is not draining at all — on the Pi
+/// 4 this is the BT-attached PL011 whose CTS flow control never opens —
+/// and waiting longer would hang the boot (`AGENTS.md` §2.1: an
+/// unbounded wait stalls the kernel before its first log line).
+pub const TX_POLL_BUDGET: u32 = 200_000;
+
+/// Verdict of one bounded transmit-readiness wait ([`tx_wait`]).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TxOutcome {
+    /// The transmitter can accept the byte: write it.
+    Send,
+    /// The transmitter never became ready: drop the byte (the console
+    /// is best-effort output and must never stall the kernel —
+    /// `AGENTS.md` §2.1 / §20 fail-closed no-op semantics).
+    Drop,
+}
+
+/// Wait — boundedly — for the transmitter to accept a byte.
+///
+/// `tx_ready` polls the device's readiness bit; `wedged` is the sticky
+/// verdict of the previous wait. A non-wedged transmitter is polled up
+/// to `budget` times; expiry declares it wedged and drops the byte. A
+/// wedged transmitter is polled exactly once per byte — recovering the
+/// moment the FIFO drains, dropping the byte otherwise — so a UART that
+/// never drains (the Pi 4's BT-attached, flow-blocked PL011) costs the
+/// budget once, not per byte. Returns the verdict and the new wedged
+/// state.
+///
+/// Pure over the `tx_ready` closure so the policy is host-tested; the
+/// freestanding `crate::serial` transmit path supplies the MMIO poll on
+/// the target.
+pub fn tx_wait(mut tx_ready: impl FnMut() -> bool, wedged: bool, budget: u32) -> (TxOutcome, bool) {
+    if wedged {
+        return if tx_ready() {
+            (TxOutcome::Send, false)
+        } else {
+            (TxOutcome::Drop, true)
+        };
+    }
+    let mut remaining = budget;
+    while remaining != 0 {
+        if tx_ready() {
+            return (TxOutcome::Send, false);
+        }
+        remaining -= 1;
+        core::hint::spin_loop();
+    }
+    (TxOutcome::Drop, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,5 +474,92 @@ mod tests {
         // Restore the default so the process-global slot is left as other
         // host tests expect (defence-in-depth; nothing else reads it).
         configure(DEFAULT_CONSOLE_BASE, ConsoleModel::Pl011);
+    }
+
+    #[test]
+    fn tx_wait_sends_immediately_when_ready() {
+        let mut polls = 0u32;
+        let (outcome, wedged) = tx_wait(
+            || {
+                polls += 1;
+                true
+            },
+            false,
+            TX_POLL_BUDGET,
+        );
+        assert_eq!(outcome, TxOutcome::Send);
+        assert!(!wedged);
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn tx_wait_sends_after_a_slow_drain_within_budget() {
+        let mut polls = 0u32;
+        let (outcome, wedged) = tx_wait(
+            || {
+                polls += 1;
+                polls == 7
+            },
+            false,
+            16,
+        );
+        assert_eq!(outcome, TxOutcome::Send);
+        assert!(!wedged);
+        assert_eq!(polls, 7);
+    }
+
+    #[test]
+    fn tx_wait_declares_a_never_ready_transmitter_wedged() {
+        let mut polls = 0u32;
+        let (outcome, wedged) = tx_wait(
+            || {
+                polls += 1;
+                false
+            },
+            false,
+            16,
+        );
+        assert_eq!(outcome, TxOutcome::Drop);
+        assert!(wedged);
+        assert_eq!(polls, 16);
+    }
+
+    #[test]
+    fn tx_wait_polls_a_wedged_transmitter_once_and_drops() {
+        let mut polls = 0u32;
+        let (outcome, wedged) = tx_wait(
+            || {
+                polls += 1;
+                false
+            },
+            true,
+            TX_POLL_BUDGET,
+        );
+        assert_eq!(outcome, TxOutcome::Drop);
+        assert!(wedged);
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn tx_wait_recovers_a_wedged_transmitter_when_the_fifo_drains() {
+        let mut polls = 0u32;
+        let (outcome, wedged) = tx_wait(
+            || {
+                polls += 1;
+                true
+            },
+            true,
+            TX_POLL_BUDGET,
+        );
+        assert_eq!(outcome, TxOutcome::Send);
+        assert!(!wedged);
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn tx_wait_with_zero_budget_drops_and_wedges() {
+        let (outcome, wedged) = tx_wait(|| true, false, 0);
+        assert_eq!(outcome, TxOutcome::Drop);
+        assert!(wedged);
     }
 }

@@ -16,6 +16,7 @@
 //! | ------------- | --------------------------------------------------------------- |
 //! | [`kernel_arch`] | [`Aarch64Arch`] — the `SchedulerArch` impl + `CNTPCT` clock.  |
 //! | [`paging`]    | Stage-1 page-table primitives (descriptors, identity map, `switch`). |
+//! | [`el2`]       | Pinned EL2→EL1 hand-off register values the boot trampoline writes. |
 //! | [`context`]   | Context-switch primitive (`TaskCtx` + `switch`).                |
 //! | [`fault`]     | Set-once synchronous-exception (abort) handler hook.            |
 //! | [`exceptions`] | EL1 vector install + IRQ / sync dispatch.                      |
@@ -91,6 +92,11 @@ pub mod context;
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
+/// Known EL2→EL1 hand-off register values (`HCR_EL2`, `CNTHCTL_EL2`,
+/// `CPTR_EL2`, `MDCR_EL2`) the `boot.s` trampoline writes *whole* before
+/// dropping to EL1 — the EL2 reset state is architecturally UNKNOWN on
+/// real silicon and an UNKNOWN `HCR_EL2.TVM` hangs the MMU switch.
+pub mod el2;
 pub mod exceptions;
 pub mod fault;
 /// aarch64 device-tree access: the aarch64-specific `virt`-board queries
@@ -139,6 +145,11 @@ pub mod syscall_entry;
 /// neutral scheduler-tick callback install + dispatch over the EL1
 /// physical generic timer wired in [`preempt`].
 pub mod timer_hal;
+/// PL011 line and BCM2711 GPIO 14/15 pin-mux bring-up for the discovered
+/// console: real Pi 4 silicon leaves `UART0` unrouted and disabled until
+/// the kernel programs it (QEMU's PL011 powers up enabled, masking the
+/// omission under emulation).
+pub mod uart_init;
 /// aarch64 implementation of the Arch HAL "enter user mode" surface
 /// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `eret`
 /// sequence that drops a built process image into EL0.

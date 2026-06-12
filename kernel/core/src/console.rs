@@ -28,6 +28,10 @@
 //! interface instead of pretending the write succeeded.
 
 use rustos_abi::Errno;
+use rustos_kernel_sched_api::SchedulerArch;
+
+use crate::dispatch_slot::RescheduleAction;
+use crate::kthread::reschedule_current;
 
 /// A byte sink for the privileged system console.
 ///
@@ -144,6 +148,91 @@ impl ConsoleRead for NullConsoleRead {
 /// `KernelSyscallHandlers::with_console_read`.
 pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
 
+/// A [`ConsoleRead`] adapter that **blocks** the calling task until input
+/// arrives — the stream backing owning the wait, exactly as `AGENTS.md`
+/// §20 assigns it ("the backing owns blocking", never the program).
+///
+/// The installed console devices are deliberately non-blocking pollers (a
+/// UART RX drain must never busy-wait inside the device, `AGENTS.md`
+/// §2.1), so a bare device read with an empty FIFO is a zero-length read.
+/// Reported to user space, that zero is indistinguishable from end of
+/// input — an interactive session reading its first keystroke would exit
+/// instantly. This adapter closes that gap at the seam between the device
+/// and the `stream_read` handler: a zero-length inner read parks the
+/// calling task back on the scheduler through [`reschedule_current`]
+/// (the same poll-and-park loop the `wait` syscall's
+/// [`KernelProcessWait`](crate::procwait::KernelProcessWait) producer
+/// uses — cooperative, never a busy-spin, `AGENTS.md` §2.1) and re-polls
+/// the device when next dispatched, returning only once the device
+/// yields bytes or fails.
+///
+/// A caller that cannot be parked (no resumable user kthread is published
+/// on this CPU — a kernel-context read, or a dispatch path outside the
+/// user-kthread protocol) fails closed with [`Errno::NotImplemented`]
+/// rather than busy-spinning or fabricating an end-of-input (`AGENTS.md`
+/// §2.1 / §2.9), mirroring the process-wait producer's contract.
+///
+/// Built and installed by the kernel-core init pipeline (phase `Syscall`)
+/// around whatever [`ConsoleRead`] the boot path provided; an inner
+/// device error (including [`NullConsoleRead`]'s fail-closed
+/// [`Errno::NotImplemented`]) propagates immediately and never parks.
+pub struct BlockingConsoleRead<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    arch: &'static A,
+    inner: &'static (dyn ConsoleRead + 'static),
+}
+
+impl<A> BlockingConsoleRead<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    /// Wrap `inner` so empty polls park the caller until input arrives.
+    ///
+    /// `arch` supplies the current-CPU read the park needs, exactly as it
+    /// does for [`KernelProcessWait`](crate::procwait::KernelProcessWait).
+    #[must_use]
+    pub const fn new(arch: &'static A, inner: &'static (dyn ConsoleRead + 'static)) -> Self {
+        Self { arch, inner }
+    }
+}
+
+impl<A> ConsoleRead for BlockingConsoleRead<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        // A zero-length destination can never receive a byte; report the
+        // empty read instead of parking a caller no input could ever wake
+        // (`AGENTS.md` §2.9 — the handler already screens this, defence in
+        // depth here).
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            // Poll the device first, parking only when it had nothing: a
+            // read with pending input never reschedules (`AGENTS.md`
+            // §2.16 — no needless work on the hot path). An inner error
+            // propagates immediately, fail closed (`AGENTS.md` §2.9).
+            let read = self.inner.read(buf)?;
+            if read > 0 {
+                return Ok(read);
+            }
+            // Park the caller back on the scheduler; control returns here
+            // when it is next dispatched, after which we re-poll. A
+            // `false` means no resumable user kthread is published on
+            // this CPU — the caller is not a parkable user task, so fail
+            // closed rather than busy-spin (`AGENTS.md` §2.1 / §2.9 /
+            // §5.4.5), exactly as the process-wait producer does.
+            let cpu = self.arch.current_cpu();
+            if !reschedule_current(cpu, RescheduleAction::Yield) {
+                return Err(Errno::NotImplemented);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +243,98 @@ mod tests {
         // Even an empty write announces the inert interface rather than
         // pretending success.
         assert_eq!(NullConsole.write(&[]), Err(Errno::NotImplemented));
+    }
+
+    extern crate std;
+
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::test_arch::TestArch;
+
+    /// A scripted inner device: hands out a fixed byte string once, then
+    /// reports empty polls (or a scripted error), recording how many
+    /// times it was polled.
+    struct ScriptedRead {
+        bytes: &'static [u8],
+        error: Option<Errno>,
+        polls: AtomicUsize,
+    }
+
+    impl ScriptedRead {
+        const fn with_bytes(bytes: &'static [u8]) -> Self {
+            Self {
+                bytes,
+                error: None,
+                polls: AtomicUsize::new(0),
+            }
+        }
+
+        const fn with_error(error: Errno) -> Self {
+            Self {
+                bytes: &[],
+                error: Some(error),
+                polls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ConsoleRead for ScriptedRead {
+        fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            if let Some(err) = self.error {
+                return Err(err);
+            }
+            let take = core::cmp::min(self.bytes.len(), buf.len());
+            buf[..take].copy_from_slice(&self.bytes[..take]);
+            Ok(take)
+        }
+    }
+
+    fn leaked_arch() -> &'static TestArch {
+        std::boxed::Box::leak(std::boxed::Box::new(TestArch::with_cpus(1)))
+    }
+
+    #[test]
+    fn blocking_read_returns_pending_bytes_without_parking() {
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(b"hi");
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let mut buf = [0u8; 8];
+        assert_eq!(blocking.read(&mut buf), Ok(2));
+        assert_eq!(&buf[..2], b"hi");
+        // Exactly one device poll: a read with pending input never
+        // reschedules.
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn blocking_read_fails_closed_when_caller_cannot_park() {
+        // The host test thread publishes no resumable user kthread, so
+        // the park is refused and the adapter must fail closed rather
+        // than busy-spin on the empty device.
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(&[]);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let mut buf = [0u8; 8];
+        assert_eq!(blocking.read(&mut buf), Err(Errno::NotImplemented));
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn blocking_read_propagates_inner_errors_without_parking() {
+        static INNER: ScriptedRead = ScriptedRead::with_error(Errno::PermissionDenied);
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        let mut buf = [0u8; 8];
+        assert_eq!(blocking.read(&mut buf), Err(Errno::PermissionDenied));
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn blocking_read_reports_an_empty_request_without_touching_the_device() {
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(b"unseen");
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER);
+        // No byte could ever satisfy a zero-length destination; the
+        // adapter reports the empty read without polling or parking.
+        assert_eq!(blocking.read(&mut []), Ok(0));
+        assert_eq!(INNER.polls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

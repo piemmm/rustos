@@ -564,8 +564,9 @@ pub(crate) struct FrameArenaGrow<'a> {
 
 impl<'a> FrameArenaGrow<'a> {
     /// Wrap the live frame allocator, bounding chained blocks to
-    /// `[0, identity_limit)` (the `IDENTITY_GIB`-gigapage window each
-    /// spawned space identity-maps).
+    /// `[0, identity_limit)` (the identity window each spawned space
+    /// identity-maps — on aarch64 derived from the configured Device/RAM
+    /// gigapage masks, `paging::configured_identity_gigapages`).
     pub(crate) fn new(frames: &'a FrameAllocator, identity_limit: u64) -> Self {
         Self {
             frames,

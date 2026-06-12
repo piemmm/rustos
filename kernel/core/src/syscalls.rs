@@ -1045,7 +1045,11 @@ where
         let read = core::cmp::min(read, take);
         if read == 0 {
             // No input was pending: report a zero-length read without
-            // touching the caller's buffer. The caller loops.
+            // touching the caller's buffer. The production init pipeline
+            // wraps the installed device in `BlockingConsoleRead`, which
+            // parks the caller until input arrives instead of returning
+            // zero (`AGENTS.md` §20); this branch remains for a bare
+            // non-blocking device (host tests), whose caller loops.
             return Ok(0);
         }
 

@@ -26,9 +26,10 @@
 //!    a *fresh, hardware-isolated* PML4 (emitting `ProcessSpawned`, #2), admits
 //!    it **Ready**, and returns its PID — the X3b deliverable.
 //! 3. Calls `wait` on that child. The cooperative drain steps the session,
-//!    which writes its prompt, reads end-of-input (its `stream_read` on fd 0 is
-//!    denied — the session holds only `CAP_CONSOLE_WRITE`, so `stdin` clamps to
-//!    a zero-length read), and `exit`s. `init`'s `wait` then reaps it, returns
+//!    which writes its prompt, reads end-of-input (the x86_64 boot path
+//!    installs no console-read backing, so its `stream_read` on fd 0 fails
+//!    closed at `NULL_CONSOLE_READ` and `stdin` clamps to a zero-length
+//!    read), and `exit`s. `init`'s `wait` then reaps it, returns
 //!    to ring 3, and **relaunches** the session with a second `spawn` — the
 //!    full `wait`→reap→relaunch supervision cycle (`plans/PI.md` X4 follow-on,
 //!    the cross-port sibling of the aarch64 `spawn_session_qemu_aarch64`).

@@ -51,34 +51,71 @@ use core::fmt::Write as _;
 use rustos_log::{Event, Level, Sink};
 
 use crate::console;
+use crate::console::{tx_wait, TxOutcome, TX_POLL_BUDGET};
+
+/// Whether the console transmitter was declared wedged by a budget
+/// expiry ([`tx_wait`]). While set, each byte costs a single readiness
+/// poll (dropped if not ready) instead of a full budget, so a
+/// dead/flow-blocked UART cannot crawl the boot; the first poll that
+/// finds the FIFO draining clears it and transmission resumes.
+static TX_WEDGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Transmit one byte through the currently-configured console UART,
-/// busy-waiting while the transmitter cannot yet accept it.
+/// waiting **boundedly** while the transmitter cannot yet accept it
+/// ([`tx_wait`]): a transmitter that never drains is declared wedged
+/// and the byte dropped rather than hanging the kernel (`AGENTS.md`
+/// §2.1 — on the Pi 4 a flow-blocked, BT-attached PL011 never drains).
 ///
 /// Freestanding-only: the MMIO access is meaningful solely on the target.
 /// The host build omits it (the host tests cover the `Sink` formatting
-/// through a capturing writer and the register helpers in
+/// through a capturing writer and the register/[`tx_wait`] helpers in
 /// [`crate::console`] instead).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn putchar(byte: u8) {
+    use core::sync::atomic::Ordering;
+
     let (base, model) = console::current();
     let status_reg = (base + model.status_offset()) as *const u32;
     let data_reg = (base + model.data_offset()) as *mut u32;
+    let wedged = TX_WEDGED.load(Ordering::Relaxed);
     // SAFETY: `base` is the console UART's MMIO base — the `virt` PL011
     // default or the value discovered from the firmware device tree
     // (`console::configure_from_fdt`). The reads/writes are
     // naturally-aligned 32-bit accesses to device registers at the
     // model's documented offsets and touch no Rust-managed memory.
-    unsafe {
-        while !model.tx_ready(core::ptr::read_volatile(status_reg)) {
-            core::hint::spin_loop();
+    let (outcome, now_wedged) = tx_wait(
+        || unsafe { model.tx_ready(core::ptr::read_volatile(status_reg)) },
+        wedged,
+        TX_POLL_BUDGET,
+    );
+    if now_wedged != wedged {
+        TX_WEDGED.store(now_wedged, Ordering::Relaxed);
+    }
+    if outcome == TxOutcome::Send {
+        // SAFETY: as above — a naturally-aligned 32-bit store to the
+        // model's documented data register, confirmed ready by `tx_wait`.
+        unsafe {
+            core::ptr::write_volatile(data_reg, u32::from(byte));
         }
-        core::ptr::write_volatile(data_reg, u32::from(byte));
     }
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn putchar(_byte: u8) {}
+
+/// Transmit one raw boot-progress beacon byte on the discovered UART.
+///
+/// The aarch64 boot pipeline emits a single milestone digit per
+/// bring-up stage (`docs/src/platform/aarch64.md`, "Boot progress
+/// beacon") so an on-metal boot that dies silently can be bisected from
+/// the serial capture alone. It deliberately bypasses the formatted
+/// [`Sink`] and the video console: the beacon must work pre-MMU and
+/// without the render lock, and a beacon byte must cost exactly one
+/// bounded transmit ([`tx_wait`]). A no-op on the host build (like
+/// every transmit here).
+pub fn boot_beacon_byte(byte: u8) {
+    putchar(byte);
+}
 
 /// Read one byte from the currently-configured console UART **without
 /// blocking**, returning `None` when the receive FIFO holds no byte.
@@ -86,9 +123,10 @@ fn putchar(_byte: u8) {}
 /// This is the non-blocking counterpart of [`putchar`]: it polls the
 /// model's receive-ready bit once and, if a byte is waiting, reads the
 /// data register. It never busy-waits for input (`AGENTS.md` §2.1) — the
-/// caller drains what is available and returns, so a `stream_read` with
-/// no pending input is a valid short (zero-length) read rather than a
-/// spin.
+/// caller drains what is available and returns; waiting for input is the
+/// stream layer's job, not the device's (kernel-core's
+/// `BlockingConsoleRead` parks an empty-handed `stream_read` caller on
+/// the scheduler, `AGENTS.md` §20).
 ///
 /// Freestanding-only: the host build returns `None` (no device), so the
 /// consuming [`read_console_bytes`] reports a zero-length read there.
@@ -126,10 +164,13 @@ fn getchar() -> Option<u8> {
 /// Non-blocking: it drains the receive FIFO into `buf` and stops at the
 /// first byte that is not yet available (or when `buf` is full), so it
 /// never busy-waits for input (`AGENTS.md` §2.1). A read with no pending
-/// input returns `0` — a valid short read the `stream_read` handler
-/// reports to the caller, which loops. This is the device-side **backing**
-/// the stream layer attaches to fd 0 (`plans/PI.md` P6e-2 / `AGENTS.md`
-/// §20); it is not a program-facing interface.
+/// input returns `0` — a valid short read kernel-core's
+/// `BlockingConsoleRead` turns into a scheduler park, re-polling when the
+/// caller is next dispatched, so user space only ever sees a read with
+/// bytes (`AGENTS.md` §20 — the backing owns blocking). This is the
+/// device-side **backing** the stream layer attaches to fd 0
+/// (`plans/PI.md` P6e-2 / `AGENTS.md` §20); it is not a program-facing
+/// interface.
 ///
 /// Freestanding-only receive (the host build's [`getchar`] yields
 /// `None`), so the host tests of the consuming `ConsoleRead` adapter

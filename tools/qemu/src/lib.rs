@@ -191,6 +191,29 @@ pub struct KeyInjection {
     pub key: String,
 }
 
+/// A deterministic serial-input injection request for an interactive
+/// vertical.
+///
+/// The guest's `-serial stdio` console is fed from the runner's stdin,
+/// but a `no_std`, non-interactive guest cannot type at itself and the
+/// runner is non-interactive (`AGENTS.md` §7). To make a real UART
+/// RX→`stream_read` exchange deterministic, the runner pipes QEMU's
+/// stdin, waits for the guest to print
+/// [`ready_marker`](Self::ready_marker) on the serial console (proving
+/// the reader is blocked on input — e.g. the shell prompt), then writes
+/// [`line`](Self::line) to the pipe. QEMU delivers the bytes to the
+/// guest's serial device RX exactly as a human typing would — the
+/// serial-console analogue of [`KeyInjection`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SerialInjection {
+    /// Serial-console substring the runner waits for before writing.
+    /// The guest prints it once it is blocked reading input.
+    pub ready_marker: String,
+    /// Bytes written verbatim to the guest's serial input (include the
+    /// terminating `\n` for line-oriented readers).
+    pub line: String,
+}
+
 /// Tier-1 architecture this runner can target.
 ///
 /// `X86_64` and `Riscv64` ship today; Stage 3b/3d add the remaining
@@ -283,6 +306,11 @@ pub struct Spec {
     /// serial console. `None` attaches no input device. Used by the
     /// aarch64 virtio-input vertical; other arches ignore it today.
     pub input_keyboard: Option<KeyInjection>,
+    /// When `Some`, pipe QEMU's stdin and write the described line to
+    /// the guest's serial input once it prints the readiness marker on
+    /// the serial console. `None` leaves stdin closed (`null`). Used by
+    /// the aarch64 interactive-session vertical.
+    pub serial_input: Option<SerialInjection>,
 }
 
 impl Spec {
@@ -301,6 +329,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            serial_input: None,
         }
     }
 
@@ -334,6 +363,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            serial_input: None,
         }
     }
 
@@ -352,6 +382,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            serial_input: None,
         }
     }
 
@@ -413,6 +444,24 @@ impl Spec {
         self.input_keyboard = Some(KeyInjection {
             ready_marker: ready_marker.into(),
             key: key.into(),
+        });
+        self
+    }
+
+    /// Pipe QEMU's stdin and write `line` to the guest's serial input
+    /// once the guest prints `ready_marker` on the serial console. Used
+    /// by the aarch64 interactive-session vertical to type at the
+    /// blocked shell deterministically without runner interactivity
+    /// (`AGENTS.md` §7).
+    #[must_use]
+    pub fn with_serial_input(
+        mut self,
+        ready_marker: impl Into<String>,
+        line: impl Into<String>,
+    ) -> Self {
+        self.serial_input = Some(SerialInjection {
+            ready_marker: ready_marker.into(),
+            line: line.into(),
         });
         self
     }
@@ -515,7 +564,15 @@ impl Runner {
         if std::env::var_os("RUSTOS_QEMU_DEBUG").is_some() {
             eprintln!("rustos-qemu: {cmd:?}");
         }
-        cmd.stdin(Stdio::null());
+        // Serial input rides the `-serial stdio` console: pipe stdin only
+        // when a vertical asked to type at the guest, otherwise keep it
+        // closed so no stray host input can reach the guest (`AGENTS.md`
+        // §7 — deterministic, non-interactive runs).
+        if spec.serial_input.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -543,15 +600,29 @@ fn supervise(
     // marker as it arrives rather than only after exit.
     let captured = Arc::new(Mutex::new(String::new()));
     let marker_seen = Arc::new(AtomicBool::new(false));
+    let serial_marker_seen = Arc::new(AtomicBool::new(false));
     let reader = {
         let captured = Arc::clone(&captured);
-        let marker_seen = Arc::clone(&marker_seen);
-        let marker = spec.input_keyboard.as_ref().map(|k| k.ready_marker.clone());
         let stdout = child.stdout.take();
+        // Each injection kind watches the serial stream for its own
+        // readiness marker; the drain thread flips the matching flag as
+        // the marker arrives.
+        let mut markers: Vec<(String, Arc<AtomicBool>)> = Vec::new();
+        if let Some(k) = &spec.input_keyboard {
+            markers.push((k.ready_marker.clone(), Arc::clone(&marker_seen)));
+        }
+        if let Some(s) = &spec.serial_input {
+            markers.push((s.ready_marker.clone(), Arc::clone(&serial_marker_seen)));
+        }
         std::thread::spawn(move || {
-            drain_stream(stdout, &captured, marker.as_deref(), Some(&marker_seen));
+            drain_stream(stdout, &captured, &markers);
         })
     };
+
+    // The piped stdin handle the serial injection writes through. Held
+    // for the rest of the run: dropping it closes the guest's serial
+    // input, and QEMU treats a closed stdio chardev as console EOF.
+    let mut serial_stdin = child.stdin.take();
 
     // Drain stderr on its own thread too. QEMU writes its own startup and
     // runtime diagnostics there (not to the guest serial console), so a
@@ -563,7 +634,7 @@ fn supervise(
     let err_reader = {
         let captured_err = Arc::clone(&captured_err);
         let stderr = child.stderr.take();
-        std::thread::spawn(move || drain_stream(stderr, &captured_err, None, None))
+        std::thread::spawn(move || drain_stream(stderr, &captured_err, &[]))
     };
 
     // Poll for completion in short ticks so the deadline is precise to
@@ -573,6 +644,8 @@ fn supervise(
     let tick = Duration::from_millis(25);
     // `injected` starts "done" when no injection was requested.
     let mut injected = spec.input_keyboard.is_none();
+    // `serial_written` starts "done" when no serial input was requested.
+    let mut serial_written = spec.serial_input.is_none();
     // Hold the monitor connection open for the rest of the run: a
     // readline monitor discards a command if the peer disconnects
     // before it is processed, so the stream must outlive the send.
@@ -591,20 +664,32 @@ fn supervise(
                 Err(e) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = reader.join();
-                    let _ = err_reader.join();
-                    let mut serial = captured
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
-                    serial.push_str("\nrustos-qemu: key injection failed: ");
-                    serial.push_str(&e.to_string());
-                    serial.push('\n');
-                    append_stderr(&mut serial, &captured_err);
-                    return Ok(Outcome::Fail { status: -1, serial });
+                    break DoneReason::InjectionFailed(format!("key injection failed: {e}"));
                 }
             }
             injected = true;
+        }
+        if !serial_written && serial_marker_seen.load(Ordering::Acquire) {
+            // Safe to unwrap: `serial_written` is only `false` when
+            // `serial_input` is `Some`, and `run` piped stdin for it.
+            let line = &spec
+                .serial_input
+                .as_ref()
+                .expect("serial input present")
+                .line;
+            let write = serial_stdin
+                .as_mut()
+                .ok_or_else(|| io::Error::other("qemu stdin pipe missing"))
+                .and_then(|stdin| {
+                    stdin.write_all(line.as_bytes())?;
+                    stdin.flush()
+                });
+            if let Err(e) = write {
+                let _ = child.kill();
+                let _ = child.wait();
+                break DoneReason::InjectionFailed(format!("serial input injection failed: {e}"));
+            }
+            serial_written = true;
         }
         if Instant::now() >= deadline {
             // Strict, no-retry kill. `wait` afterwards is best
@@ -618,8 +703,10 @@ fn supervise(
 
     // The child has exited (or been killed); the reader thread sees
     // EOF on the closed pipe and finishes. Drop the monitor connection
-    // only now, once the run is complete.
+    // and the guest's serial input pipe only now, once the run is
+    // complete.
     drop(monitor_conn);
+    drop(serial_stdin);
     let _ = reader.join();
     let _ = err_reader.join();
     let mut serial = captured
@@ -633,6 +720,18 @@ fn supervise(
             budget: spec.timeout,
             serial,
         }),
+        DoneReason::InjectionFailed(reason) => {
+            // The failure message rides the serial log so the report
+            // explains *why* the run was cut short, exactly as a guest
+            // diagnostic would.
+            if !serial.is_empty() && !serial.ends_with('\n') {
+                serial.push('\n');
+            }
+            serial.push_str("rustos-qemu: ");
+            serial.push_str(&reason);
+            serial.push('\n');
+            Ok(Outcome::Fail { status: -1, serial })
+        }
     }
 }
 
@@ -669,6 +768,9 @@ enum DoneReason {
     Exited(i32),
     /// The deadline elapsed; the child was killed.
     TimedOut,
+    /// A requested key/serial injection could not be delivered; the
+    /// child was killed. The message explains which injection and why.
+    InjectionFailed(String),
 }
 
 /// A reserved path for QEMU's monitor unix socket.
@@ -719,13 +821,13 @@ impl Drop for TempFile {
 }
 
 /// Read one of QEMU's output pipes to EOF, appending every chunk to
-/// `captured` and — when `marker_seen` is supplied — raising it once
-/// `marker` has appeared in the stream so far. Best-effort: a read error
-/// simply ends the drain.
+/// `captured` and raising each marker's flag once its substring has
+/// appeared in the stream so far. Best-effort: a read error simply ends
+/// the drain.
 ///
-/// Used for both stdout (serial, with the key-injection readiness marker)
-/// and stderr (QEMU's own diagnostics, marker-free), so the two pipes
-/// share one drain loop (`AGENTS.md` §2.2). Draining stderr is not
+/// Used for both stdout (serial, with the key/serial-injection readiness
+/// markers) and stderr (QEMU's own diagnostics, marker-free), so the two
+/// pipes share one drain loop (`AGENTS.md` §2.2). Draining stderr is not
 /// optional cosmetics: QEMU prints startup failures — e.g. a corrupted
 /// pflash store: `pflash … has invalid size 0` — to stderr and exits
 /// status 1, and a piped-but-unread stderr both loses that diagnostic and
@@ -733,8 +835,7 @@ impl Drop for TempFile {
 fn drain_stream(
     stream: Option<impl Read>,
     captured: &Mutex<String>,
-    marker: Option<&str>,
-    marker_seen: Option<&AtomicBool>,
+    markers: &[(String, Arc<AtomicBool>)],
 ) {
     let Some(mut r) = stream else { return };
     let mut buf = [0u8; 4096];
@@ -747,8 +848,8 @@ fn drain_stream(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.push_str(&chunk);
-                if let (Some(m), Some(seen)) = (marker, marker_seen) {
-                    if !seen.load(Ordering::Acquire) && guard.contains(m) {
+                for (marker, seen) in markers {
+                    if !seen.load(Ordering::Acquire) && guard.contains(marker.as_str()) {
                         seen.store(true, Ordering::Release);
                     }
                 }
@@ -905,6 +1006,45 @@ mod tests {
     }
 
     #[test]
+    fn with_serial_input_records_the_injection_request() {
+        let s = Spec::for_aarch64_kernel("/tmp/k").with_serial_input("rustos$ ", "exit\n");
+        let i = s.serial_input.expect("serial injection recorded");
+        assert_eq!(i.ready_marker, "rustos$ ");
+        assert_eq!(i.line, "exit\n");
+    }
+
+    #[test]
+    fn without_serial_input_records_no_injection() {
+        let s = Spec::for_aarch64_kernel("/tmp/k");
+        assert_eq!(s.serial_input, None);
+    }
+
+    #[test]
+    fn drain_stream_raises_each_marker_flag_independently() {
+        // Two markers watched on one stream: each flag flips exactly when
+        // its own substring has arrived, so the key and serial injections
+        // never trip on each other's readiness.
+        let captured = Mutex::new(String::new());
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let markers = [
+            (String::from("queue armed"), Arc::clone(&first)),
+            (String::from("rustos$ "), Arc::clone(&second)),
+        ];
+        let feed: &[u8] = b"boot ok\nqueue armed\nbanner\nrustos$ ";
+        drain_stream(Some(feed), &captured, &markers);
+        assert!(first.load(Ordering::Acquire));
+        assert!(second.load(Ordering::Acquire));
+        assert_eq!(
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_str(),
+            "boot ok\nqueue armed\nbanner\nrustos$ "
+        );
+    }
+
+    #[test]
     fn with_virtio_net_records_a_capture_free_interface() {
         let s = Spec::for_x86_64_kernel("/tmp/k").with_virtio_net();
         assert_eq!(s.net_devices.len(), 1);
@@ -947,6 +1087,7 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
+            serial_input: None,
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

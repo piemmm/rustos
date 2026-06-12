@@ -22,11 +22,17 @@
 //!    `ProcessSpawned`, #2) and admits it **Ready**.
 //! 2. `wait` on that child (audited `SyscallInvoked` #2), which parks `init`
 //!    back on the scheduler until the child is reapable.
-//! 3. The cooperative drain loop steps the session; it writes its prompt,
-//!    reads end-of-input (no `-M virt` serial RX), and `exit`s (audited
+//! 3. The cooperative drain loop steps the session; it writes its `rustos$ `
+//!    prompt and **blocks** in `stream_read` on the kernel-core
+//!    `BlockingConsoleRead` backing (`AGENTS.md` §20 — the backing owns
+//!    blocking). The harness then types the scripted `exit\n` line at the
+//!    guest's serial input (the runner's serial injection, keyed on the
+//!    prompt marker); the shell's `exit` builtin ends the session (audited
 //!    `SyscallInvoked` #3). `init`'s `wait` then reaps it and reads its code.
 //! 4. `init` relaunches the session — a second `spawn` (audited
-//!    `SyscallInvoked` #4) producing a **third** `ProcessSpawned` (#3).
+//!    `SyscallInvoked` #4) producing a **third** `ProcessSpawned` (#3). The
+//!    second session blocks at its own prompt; the PASS finisher has already
+//!    fired by then, so the run ends without typing at it.
 //!
 //! ## Why the PASS keys on three spawns and four audited syscalls
 //!

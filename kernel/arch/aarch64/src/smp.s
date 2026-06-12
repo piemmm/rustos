@@ -22,7 +22,10 @@
 //
 // SAFETY-INVARIANTs (audited per AGENTS.md §1):
 //   1. Entered at EL1 with the MMU off, exactly once per secondary core,
-//      only after the boot core issued `CPU_ON` for it.
+//      only after the boot core issued `CPU_ON` for it. The known MMU-off
+//      `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`) is written before the first
+//      data access, so the architecturally UNKNOWN PSCI-entry reset state
+//      (EE, WXN, A, SA, …) never governs an access.
 //   2. x0 carries this core's dense CpuId; `smp::start_secondary`
 //      guarantees `x0 < SECONDARY_STACK_COUNT` (the registered pool's
 //      core count), so the per-core stack slice this stub selects
@@ -42,6 +45,16 @@ _start_secondary_aarch64:
 
     // Preserve the dense CpuId (context id) across the stack setup.
     mov     x19, x0
+
+    // SCTLR_EL1 is architecturally UNKNOWN at PSCI `CPU_ON` entry on
+    // real silicon (QEMU resets it benignly): establish the known
+    // MMU-off value — 0x30D0_0800, the ARMv8.0 RES1 bits only, i.e.
+    // `rustos_arch_aarch64::paging::SCTLR_MMU_OFF` (unit-test-pinned) —
+    // before the pool loads below, exactly as `boot.s` `.Lin_el1` does.
+    mov     x0, #0x0800
+    movk    x0, #0x30D0, lsl #16
+    msr     sctlr_el1, x0
+    isb
 
     // sp = base + (cpuid + 1) * stride, where `base` and `stride` are the
     // runtime-published pool start and per-core slice size. Each core

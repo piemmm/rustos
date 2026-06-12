@@ -19,8 +19,16 @@ use rustos_crypto::{sha256, SHA256_OUTPUT_LEN};
 use crate::MkimageError;
 
 /// The firmware files every bootable Pi 4 image must carry, exactly the
-/// set the GPU bootloader reads before the kernel runs.
-pub const REQUIRED_FIRMWARE: [&str; 3] = ["start4.elf", "fixup4.dat", "bcm2711-rpi-4-b.dtb"];
+/// set the GPU bootloader reads before the kernel runs. A name is the
+/// blob's path on the FAT boot partition, so the `disable-bt` overlay
+/// the generated `config.txt` applies (`crate::fatboot::config_txt`)
+/// lives under the firmware's fixed `overlays/` directory.
+pub const REQUIRED_FIRMWARE: [&str; 4] = [
+    "start4.elf",
+    "fixup4.dat",
+    "bcm2711-rpi-4-b.dtb",
+    "overlays/disable-bt.dtbo",
+];
 
 /// The optional PSCI secondary-core stub. Allowed in a manifest, never
 /// required: the kernel's boot stub parks secondary cores itself, so first
@@ -241,12 +249,13 @@ mod tests {
         text
     }
 
-    /// The three required blobs with distinct test contents.
+    /// The four required blobs with distinct test contents.
     fn test_blobs() -> Vec<(&'static str, &'static [u8])> {
         vec![
             ("start4.elf", b"start4 contents".as_slice()),
             ("fixup4.dat", b"fixup4 contents".as_slice()),
             ("bcm2711-rpi-4-b.dtb", b"dtb contents".as_slice()),
+            ("overlays/disable-bt.dtbo", b"overlay contents".as_slice()),
         ]
     }
 
@@ -256,7 +265,11 @@ mod tests {
             std::env::temp_dir().join(format!("rustos-mkimage-fw-{tag}-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp firmware dir");
         for (name, bytes) in blobs {
-            fs::write(dir.join(name), bytes).expect("stage blob");
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create staged subdirectory");
+            }
+            fs::write(path, bytes).expect("stage blob");
         }
         dir
     }
@@ -267,8 +280,9 @@ mod tests {
         let manifest = FirmwareManifest::parse(&manifest_for(&blobs)).expect("manifest parses");
         let dir = stage(&blobs, "ok");
         let files = manifest.load_dir(&dir).expect("blobs verify");
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), 4);
         assert!(files.iter().any(|f| f.name == "start4.elf"));
+        assert!(files.iter().any(|f| f.name == "overlays/disable-bt.dtbo"));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -333,7 +347,7 @@ mod tests {
 
         let empty = stage(&[], "missing-all");
         let missing = manifest.missing_in(&empty);
-        assert_eq!(missing.len(), 3);
+        assert_eq!(missing.len(), 4);
         fs::remove_dir_all(empty).expect("cleanup");
 
         let staged = stage(&blobs, "missing-none");
@@ -391,6 +405,7 @@ mod tests {
             ("start4.elf", b"start4 contents".as_slice()),
             ("fixup4.dat", b"tampered bytes!".as_slice()),
             ("bcm2711-rpi-4-b.dtb", b"dtb contents".as_slice()),
+            ("overlays/disable-bt.dtbo", b"overlay contents".as_slice()),
         ];
         let dir = stage(&tampered, "hash");
         assert!(matches!(
@@ -403,6 +418,7 @@ mod tests {
             ("start4.elf", b"start4 contents".as_slice()),
             ("fixup4.dat", b"short".as_slice()),
             ("bcm2711-rpi-4-b.dtb", b"dtb contents".as_slice()),
+            ("overlays/disable-bt.dtbo", b"overlay contents".as_slice()),
         ];
         let dir = stage(&short, "size");
         assert!(matches!(

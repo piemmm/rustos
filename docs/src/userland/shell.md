@@ -76,8 +76,9 @@ coupling (§17.3 / §17.4), and the same binary must work whatever the spawner
 backed the streams with (§20 — device independence is a property of the
 stream layer). A zero-length read is treated as end of input (a clean session
 end); *blocking* until a byte arrives is the stream backing's job, not the
-program's, so live interactive receive over a real UART is an on-metal item
-(`plans/PI.md` P6e-2).
+program's — kernel-core's `BlockingConsoleRead` parks an empty-handed
+`stream_read` caller until input arrives (`plans/PI.md` P6e-2), so an
+interactive session sits at its prompt waiting for the user to type.
 
 The `RtProcessHost` launches external commands through the `spawn` syscall
 and reaps them through `wait`. The current `spawn` ABI carries only a program

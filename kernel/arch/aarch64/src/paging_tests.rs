@@ -8,6 +8,141 @@
 use super::*;
 
 #[test]
+fn mmu_off_alloc_discipline_is_monotonic_and_fails_closed() {
+    // The MMU-off counter discipline (plain load + store — exclusives
+    // never succeed on the BCM2711's Device-nGnRnE MMU-off memory, so
+    // `fetch_add` would spin forever on real silicon) must hand out
+    // every frame exactly once and then fail closed.
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut seen = [0usize; POOL_SIZE];
+    for slot in &mut seen {
+        let entries = POOL
+            .alloc_with(false)
+            .expect("pool exhausted before POOL_SIZE frames");
+        assert!(entries.iter().all(|&e| e == 0), "frame not zeroed");
+        *slot = entries.as_ptr() as usize;
+    }
+    let mut sorted = seen;
+    sorted.sort_unstable();
+    assert!(
+        sorted.windows(2).all(|w| w[0] != w[1]),
+        "MMU-off discipline handed out an aliased frame"
+    );
+    // Exhaustion fails closed, repeatedly, without wrapping the counter.
+    assert!(POOL.alloc_with(false).is_none());
+    assert!(POOL.alloc_with(false).is_none());
+    // And the MMU-on discipline agrees the pool is exhausted.
+    assert!(POOL.alloc_with(true).is_none());
+}
+
+#[test]
+fn mmu_disciplines_share_one_counter() {
+    // A pool partially consumed MMU-off (the boot identity map) keeps
+    // allocating distinct frames once translation is live.
+    static POOL: PageTablePool = PageTablePool::new();
+    let off = POOL.alloc_with(false).expect("first frame");
+    let on = POOL.alloc_with(true).expect("second frame");
+    assert_ne!(off.as_ptr(), on.as_ptr());
+}
+
+#[test]
+fn identity_window_covers_highest_masked_gigapage() {
+    let mut device = [0u64; GIGAPAGE_MASK_WORDS];
+    let mut ram = [0u64; GIGAPAGE_MASK_WORDS];
+    // Both masks empty: no window at all (callers fail closed).
+    assert_eq!(identity_window_gigapages(&device, &ram), 0);
+    // QEMU virt shape: Device GiB 0, RAM GiB 1 ⇒ 2 gigapages.
+    device[0] = 0b0001;
+    ram[0] = 0b0010;
+    assert_eq!(identity_window_gigapages(&device, &ram), 2);
+    // Pi 4 shape: RAM from GiB 0, MMIO in GiB 3 ⇒ 4 gigapages — a
+    // shorter window would drop the UART/GIC from the space the
+    // instant it activates (the metal silence after "boot completed").
+    device[0] = 0b1000;
+    ram[0] = 0b0001;
+    assert_eq!(identity_window_gigapages(&device, &ram), 4);
+    // A gigapage in a later mask word moves the window past it.
+    ram[1] = 1 << 5; // gigapage 69
+    assert_eq!(identity_window_gigapages(&device, &ram), 70);
+    // The top representable slot yields the full 512-entry window.
+    ram[GIGAPAGE_MASK_WORDS - 1] = 1 << 63;
+    assert_eq!(identity_window_gigapages(&device, &ram), ENTRIES_PER_TABLE);
+}
+
+#[test]
+fn dcache_line_bytes_decodes_dminline() {
+    // Cortex-A72 CTR_EL0: DminLine = 4 ⇒ 16 words ⇒ 64-byte lines.
+    assert_eq!(dcache_line_bytes(0x8444_C004), 64);
+    // Field extremes: 0 ⇒ one word (4 bytes); 0xF ⇒ 2^15 words.
+    assert_eq!(dcache_line_bytes(0), 4);
+    assert_eq!(dcache_line_bytes(0xF_0000), 4 << 0xF);
+    // Neighbouring fields (IminLine, ERG/CWG) must not leak in.
+    assert_eq!(dcache_line_bytes(0xFFF0_FFFF), 4);
+}
+
+#[test]
+fn identity_ram_mask_marks_every_overlapped_gigapage() {
+    let mask = identity_ram_mask(&[
+        // The Pi 4 kernel image: inside gigapage 0.
+        (0x8_0000, 0x10_0000),
+        // An extent straddling the gigapage 3 / 4 boundary marks both.
+        (0xFFFF_FFF0, 0x20),
+        // A zero-length extent contributes nothing.
+        (0x40_0000_0000, 0),
+    ]);
+    assert_eq!(mask[0], 0b1_1001);
+    assert_eq!(mask[1..], [0u64; GIGAPAGE_MASK_WORDS - 1]);
+}
+
+#[test]
+fn identity_ram_mask_clamps_at_the_identity_window() {
+    // The last representable gigapage is marked; the overhang is not.
+    let mask = identity_ram_mask(&[(511u64 << 30, 4 << 30)]);
+    assert_eq!(mask[7], 1 << 63);
+    // An extent entirely beyond the window contributes nothing.
+    assert_eq!(
+        identity_ram_mask(&[(512u64 << 30, 1 << 30)]),
+        [0u64; GIGAPAGE_MASK_WORDS]
+    );
+}
+
+#[test]
+fn identity_gigapage_leaf_leaves_unbacked_slots_invalid() {
+    // Device wins over RAM; RAM maps Normal; neither maps nothing — the
+    // unbacked-space policy that keeps real-silicon speculation from
+    // wandering onto a bus window no device answers.
+    assert_eq!(
+        identity_gigapage_leaf(true, false),
+        Some(device_leaf_attrs(true))
+    );
+    assert_eq!(
+        identity_gigapage_leaf(true, true),
+        Some(device_leaf_attrs(true))
+    );
+    assert_eq!(
+        identity_gigapage_leaf(false, true),
+        Some(normal_leaf_attrs(true))
+    );
+    assert_eq!(identity_gigapage_leaf(false, false), None);
+}
+
+#[test]
+fn ensure_identity_gigapage_installs_an_invalid_slot() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    // Gigapage 3 lies beyond the built span: invalid until ensured.
+    assert_eq!(space.translate(3 << 30), None);
+    assert!(space.ensure_identity_gigapage((3 << 30) | 0x1234));
+    let (pa, _) = space.translate((3 << 30) | 0x4_5000).expect("now mapped");
+    assert_eq!(pa, (3 << 30) | 0x4_5000);
+    // An already-valid slot is left untouched and reported installed.
+    assert!(space.ensure_identity_gigapage(3 << 30));
+    // A physical address beyond the identity window fails closed.
+    assert!(!space.ensure_identity_gigapage(512u64 << 30));
+    assert_eq!(space.translate(2 << 30), None);
+}
+
+#[test]
 fn table_index_extracts_each_level() {
     // VA whose L1/L2/L3 indices are 1, 2, 3 with a 0x40 offset.
     let va = (1u64 << 30) | (2u64 << 21) | (3u64 << 12) | 0x40;
@@ -122,6 +257,41 @@ fn mair_pairs_normal_and_device() {
     // Attr0 = 0xFF (Normal WB RW-allocate), Attr1 = 0x04 (Device-nGnRE).
     assert_eq!(MAIR_VALUE & 0xFF, 0xFF);
     assert_eq!((MAIR_VALUE >> 8) & 0xFF, 0x04);
+}
+
+#[test]
+fn sctlr_mmu_off_pins_the_trampoline_value() {
+    // `boot.s` (`.Lin_el1`) and `smp.s` (`_start_secondary_aarch64`)
+    // hard-code this exact value with `mov`/`movk`; regression test for
+    // the Pi 4 hang where the architecturally UNKNOWN EL1 reset state
+    // was never replaced before use.
+    assert_eq!(SCTLR_MMU_OFF, 0x30D0_0800);
+    // The MMU-off value is exactly the ARMv8.0 RES1 bits: no
+    // translation, no caches, nothing else.
+    assert_eq!(SCTLR_MMU_OFF, SCTLR_RES1);
+}
+
+#[test]
+fn sctlr_mmu_on_enables_translation_and_caches_only() {
+    // M (bit 0), C (bit 2), I (bit 12) on top of the RES1 bits, nothing
+    // more — the whole-register write in `AddressSpace::switch` must not
+    // smuggle any other behaviour in.
+    assert_eq!(SCTLR_MMU_ON, SCTLR_RES1 | (1 << 0) | (1 << 2) | (1 << 12));
+}
+
+#[test]
+fn sctlr_values_keep_the_unknown_reset_traps_clear() {
+    // The bits whose UNKNOWN reset state broke real silicon stay clear
+    // in both installed values: A (1, alignment check), SA (3) / SA0 (4,
+    // SP alignment), WXN (19, writable ⇒ execute-never), E0E (24) / EE
+    // (25, big-endian data).
+    for sctlr in [SCTLR_MMU_OFF, SCTLR_MMU_ON] {
+        for trap_bit in [1, 3, 4, 19, 24, 25] {
+            assert_eq!(sctlr & (1 << trap_bit), 0, "bit {trap_bit} must be clear");
+        }
+        // And every ARMv8.0 RES1 bit is set.
+        assert_eq!(sctlr & SCTLR_RES1, SCTLR_RES1);
+    }
 }
 
 #[test]

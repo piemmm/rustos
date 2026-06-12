@@ -26,10 +26,13 @@
 //! authorises the *act* of spawning under `CAP_PROC_SPAWN`.
 
 use alloc::boxed::Box;
+use core::ptr::NonNull;
 
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
-use rustos_arch_aarch64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
+use rustos_arch_aarch64::paging::{
+    activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
+};
 use rustos_arch_aarch64::userentry::UserMode;
 use rustos_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use rustos_arch_api::EnterUser;
@@ -39,8 +42,8 @@ use rustos_kernel_core::{
     SpawnCallerError, SpawnCtx, SpawnRequest,
 };
 use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysMap, UserAddressSpace,
-    UserStack,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysAddr, PhysMap,
+    UserAddressSpace, UserStack,
 };
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_sync::Once;
@@ -67,20 +70,6 @@ const SHELL_PATH: &[u8] = b"/Apps/Shell.app/Run";
 /// (`AGENTS.md` §2.9).
 pub const USER_IMAGE_BIAS: u64 = SHELL_USER_BIAS;
 
-/// Gigabytes of identity map each spawned child address space provides.
-///
-/// `[0, 2 GiB)` covers the QEMU `virt` board's device MMIO (GiB 0) and the
-/// RAM base at GiB 1, where the kernel image, its boot heap, the leaked
-/// `KernelState`, the page-table pools below, and the live frame allocator
-/// all live. The producer never switches to this space (the spawning caller
-/// keeps its own `TTBR0_EL1` active), so the identity map exists only so the
-/// child itself executes under a translation regime that maps the low kernel
-/// window when the scheduler later resumes it through `activate_user_root`.
-/// [`SHELL_USER_BIAS`] (64 GiB) sits far above it, so the program's pages
-/// land on freshly walked stage-1 tables rather than colliding with an
-/// identity gigapage block — the same window PID 1 uses (`AGENTS.md` §2.2).
-const IDENTITY_GIB: usize = 2;
-
 /// User stack base (1 MiB into the high user region) and size, mirroring the
 /// PID-1 layout (`init_spawn.rs`): the `rustos-rt` runtime carves scratch
 /// space off the stack, so it must comfortably exceed it.
@@ -100,16 +89,32 @@ const CHILD_CANARY: u64 = 0x1117_A5ED_C0DE_5E55;
 /// allocated frame's physical address through to a CPU-dereferenceable
 /// pointer (`AGENTS.md` §24.1 / `plans/WIRING.md` W5b-3).
 ///
-/// It is the **identity** map (`offset == 0`) covering the same
-/// `[0, IDENTITY_GIB GiB)` window each child space identity-maps, because
-/// the aarch64 page-table walk recovers an existing child table by
-/// dereferencing its physical address directly (`paging::ensure_child`:
-/// `phys as *mut`, identity), so the frame view the source hands the port
-/// must satisfy `virtual == physical`. A frame the allocator draws from
-/// outside this window fails the translate and the spawn fails closed
-/// (`AGENTS.md` §2.9) rather than building tables the walk cannot reach —
-/// the same window the child's image data frames already use (§2.2).
-static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+/// It is the **identity** map (`offset == 0`) covering the same window
+/// each child space identity-maps, because the aarch64 page-table walk
+/// recovers an existing child table by dereferencing its physical address
+/// directly (`paging::ensure_child`: `phys as *mut`, identity), so the
+/// frame view the source hands the port must satisfy
+/// `virtual == physical`. The limit is re-derived from the configured
+/// Device/RAM gigapage masks on every translate
+/// ([`configured_identity_gigapages`]), so the bound is the *live*
+/// identity window — board-discovered, and tracking the post-MMU
+/// `/memory` widening — never a board constant a real machine outgrows
+/// (`AGENTS.md` §24.1; the former hard-coded 2 GiB `virt` window left
+/// the Pi 4's gigapage-3 MMIO out of every child map). A frame the
+/// allocator draws from outside the window fails the translate and the
+/// spawn fails closed (`AGENTS.md` §2.9) rather than building tables the
+/// walk cannot reach.
+struct ConfiguredIdentityPhysMap;
+
+impl PhysMap for ConfiguredIdentityPhysMap {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
+        DirectPhysMap::identity((configured_identity_gigapages() as u64) << 30).translate(phys, len)
+    }
+}
+
+/// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table
+/// frame source borrows.
+static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPhysMap;
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's stage-1 hierarchy is built from (`AGENTS.md` §24.1).
@@ -171,15 +176,19 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// A spawned child's effective capability set: exactly `CAP_CONSOLE_WRITE`,
-/// so the session program can write its banner through the `stream_write`
-/// syscall. Passed as both the user grant and the manifest request, so the
+/// A spawned child's effective capability set: exactly `CAP_CONSOLE_WRITE`
+/// and `CAP_CONSOLE_READ`, so the session program can write its prompt and
+/// output through the `stream_write` syscall and read the user's command
+/// lines back through `stream_read` (fd 0, blocking on the kernel-core
+/// `BlockingConsoleRead` backing until input arrives — `AGENTS.md` §20).
+/// Passed as both the user grant and the manifest request, so the
 /// intersection the kernel derives is the same set — the child is granted no
 /// more (`AGENTS.md` §5.2), and never inherits the spawning caller's
 /// authority (`AGENTS.md` §4 — no ambient authority).
 fn child_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::CONSOLE_WRITE);
+    caps.insert(CapabilityId::CONSOLE_READ);
     caps
 }
 
@@ -238,12 +247,25 @@ impl Aarch64ProcessSpawn {
         // stays active under its own `TTBR0_EL1`, so the running parent is
         // never moved out from under itself. The child's mappings below are
         // written through the identity `physmap` (physical frame addresses
-        // the caller's active 2 GiB-identity space already maps), so the
-        // build does not require the child space to be active. The child's
+        // the caller's active identity space already maps), so the build
+        // does not require the child space to be active. The child's
         // own root is reactivated by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2). An allocator
         // exhausted of even the root table fails closed with `NoSpace`.
-        let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, IDENTITY_GIB)
+        //
+        // The window length is derived from the Device/RAM gigapage masks
+        // boot discovery installed (`virt`: 2 GiB; Pi 4: 4 GiB — its
+        // UART/GIC live in gigapage 3), never a board constant: a window
+        // truncated short of the MMIO gigapage would drop the console and
+        // interrupt controller from the active map the moment the
+        // scheduler resumes the child. An empty window or one reaching
+        // the user region at `SHELL_USER_BIAS` fails closed (`AGENTS.md`
+        // §2.9).
+        let identity_gib = configured_identity_gigapages();
+        if identity_gib == 0 || ((identity_gib as u64) << 30) > SHELL_USER_BIAS {
+            return Err(Errno::NoSpace);
+        }
+        let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gib)
             .ok_or(Errno::NoSpace)?;
         let child_root_phys = arch.root_phys();
 
@@ -271,7 +293,7 @@ impl Aarch64ProcessSpawn {
         // child stacks scales with discovered RAM rather than capping at
         // the boot block. A chained block is bounded to the identity window
         // so the stack stays mapped in the child's own root.
-        let grow = FrameArenaGrow::new(ctx.frames(), (IDENTITY_GIB as u64) << 30);
+        let grow = FrameArenaGrow::new(ctx.frames(), (identity_gib as u64) << 30);
         let kernel_stack: Box<dyn KernelStack + Send> =
             match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
                 Some(stack) => {
@@ -288,7 +310,7 @@ impl Aarch64ProcessSpawn {
             };
 
         let mut space = AddressSpace::new(arch);
-        let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+        let physmap = DirectPhysMap::identity((identity_gib as u64) << 30);
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
         // syscall CFI tag (§9 / §19.2). A mismatch fails closed; the registry

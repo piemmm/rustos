@@ -582,6 +582,20 @@ fn run_phases<A: KernelArch>(
     let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) =
         Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
 
+    // Wrap the boot-installed console input in the blocking adapter
+    // (`AGENTS.md` §20 — the stream backing owns blocking, never the
+    // program): a `stream_read` finding the device empty parks the caller
+    // back on the scheduler until input arrives, instead of reporting a
+    // zero-length read user space cannot distinguish from end of input.
+    // It needs the same `'static` arch handle (to read the current CPU
+    // when parking) as the process-wait producer above, so it is built
+    // and `Box::leak`'d the same way. A boot path that installed no
+    // device keeps failing closed: the wrapped `NULL_CONSOLE_READ` error
+    // propagates straight through without parking.
+    let console_read: &'static (dyn crate::console::ConsoleRead + 'static) = Box::leak(Box::new(
+        crate::console::BlockingConsoleRead::new(state.arch.as_ref(), console_read),
+    ));
+
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
     // the same reason as `KernelState`: its borrows reference

@@ -60,8 +60,10 @@ const PRODUCER: &str = "rustos-shell";
 /// reads, and the optional advisory metadata it emits.
 pub trait ReplInput {
     /// Read up to `buf.len()` bytes from standard input (fd 0), returning the
-    /// number read. A return of `0` means no input is pending, which the loop
-    /// treats as end of input.
+    /// number read. The stream *backing* owns blocking (`AGENTS.md` §20): a
+    /// read with no pending input waits in the backing until input arrives,
+    /// so a return of `0` means the input stream has genuinely ended (or has
+    /// no backing at all), which the loop treats as end of input.
     fn read(&mut self, buf: &mut [u8]) -> usize;
 
     /// Write one framed advisory record to the standard information stream

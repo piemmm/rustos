@@ -37,10 +37,21 @@
 //      it. Interrupts are masked before any handler exists.
 //   2. x0 carries the DTB pointer described above; it is preserved across
 //      the EL2->EL1 drop in callee-saved x19 and restored before the call.
-//   3. The stack top and `.bss` bounds come from the active linker script
+//   3. `.Lin_el1` writes the known MMU-off `SCTLR_EL1`
+//      (`paging::SCTLR_MMU_OFF`) before the first EL1 data access, so the
+//      architecturally UNKNOWN EL1 reset state (EE, WXN, A, SA, …) never
+//      governs an access on either entry path. Likewise the EL2 path
+//      writes every EL2 control register *whole* with its known hand-off
+//      value (`el2::HCR_EL2_HANDOFF` and friends, unit-test-pinned) —
+//      the Pi firmware stub leaves HCR_EL2/CNTHCTL_EL2/CPTR_EL2/MDCR_EL2
+//      at their UNKNOWN reset values, and an UNKNOWN HCR_EL2.TVM traps
+//      EL1's first MAIR/TCR/TTBR/SCTLR write into vector-less EL2 — a
+//      silent hang at the MMU switch on real silicon (QEMU resets these
+//      registers benignly, masking the residue).
+//   4. The stack top and `.bss` bounds come from the active linker script
 //      (`aarch64-virt.ld` / `aarch64-rpi4.ld`); `__bss_start`/`__bss_end`
 //      are 16-byte aligned so the `stp` clear loop is exact.
-//   4. `rustos_arch_aarch64_main` is `-> !` and never returns; the trailing
+//   5. `rustos_arch_aarch64_main` is `-> !` and never returns; the trailing
 //      `wfi` park is unreachable under QEMU but is the correct conservative
 //      behaviour on bare metal.
 
@@ -79,19 +90,43 @@ _start:
     cmp     x1, #2
     b.ne    .Lin_el1
 
-    // --- Entered at EL2: configure and drop to EL1 ---
-    // EL1 executes in AArch64 (HCR_EL2.RW = 1).
-    mrs     x0, hcr_el2
-    orr     x0, x0, #(1 << 31)
+    // --- Entered at EL2: establish fully-known EL2 state, drop to EL1 ---
+    // Every EL2 control register below is architecturally UNKNOWN at
+    // first entry on real silicon (the Pi firmware stub sets only
+    // SCTLR_EL2 and CPUECTLR_EL1.SMPEN); QEMU resets them to benign
+    // zeroes, masking any residue. Each is therefore *written whole*
+    // with its known hand-off value (`rustos_arch_aarch64::el2`,
+    // unit-test-pinned) — an `orr` into the live register would carry
+    // UNKNOWN bits (HCR_EL2.TVM traps EL1's first MAIR/TCR/TTBR/SCTLR
+    // write into vector-less EL2: the silent Pi 4 MMU-switch hang).
+
+    // HCR_EL2 = el2::HCR_EL2_HANDOFF: EL1 is AArch64 (RW), stage-2
+    // translation off, no traps, no TGE.
+    mov     x0, #(1 << 31)
     msr     hcr_el2, x0
 
-    // Let EL1/EL0 read the physical counter and program the physical
-    // timer without trapping to EL2 (CNTHCTL_EL2.EL1PCTEN | EL1PCEN),
-    // and present a zero virtual-counter offset.
-    mrs     x0, cnthctl_el2
-    orr     x0, x0, #3
+    // CNTHCTL_EL2 = el2::CNTHCTL_EL2_HANDOFF: EL1/EL0 read the physical
+    // counter and program the physical timer without trapping to EL2
+    // (EL1PCTEN | EL1PCEN); zero virtual-counter offset.
+    mov     x0, #3
     msr     cnthctl_el2, x0
     msr     cntvoff_el2, xzr
+
+    // CPTR_EL2 = el2::CPTR_EL2_HANDOFF: the RES1 bits only — FP/SIMD
+    // (TFP) and CPACR_EL1 (TCPAC) accesses from EL1 do not trap.
+    mov     x0, #0x33ff
+    msr     cptr_el2, x0
+
+    // MDCR_EL2 = el2::MDCR_EL2_HANDOFF: no debug/PMU traps to EL2.
+    msr     mdcr_el2, xzr
+
+    // EL1 reads of MIDR_EL1/MPIDR_EL1 return VPIDR_EL2/VMPIDR_EL2:
+    // mirror the silicon's own identity registers so EL1 never sees an
+    // UNKNOWN core id.
+    mrs     x0, midr_el1
+    msr     vpidr_el2, x0
+    mrs     x0, mpidr_el1
+    msr     vmpidr_el2, x0
 
     // eret into EL1h (M[3:0]=0b0101) with DAIF masked (bits [9:6]).
     mov     x0, #0x3c5
@@ -101,6 +136,19 @@ _start:
     eret
 
 .Lin_el1:
+    // SCTLR_EL1 is architecturally UNKNOWN here on real silicon — both
+    // behind the EL2->EL1 drop above and on a direct-EL1 load — and an
+    // UNKNOWN EE (big-endian data) or WXN bit wrecks EL1 the moment it
+    // is exercised (QEMU resets the register benignly, masking this).
+    // Establish the known MMU-off value before the first EL1 data
+    // access: 0x30D0_0800 = the ARMv8.0 RES1 bits only, i.e.
+    // `rustos_arch_aarch64::paging::SCTLR_MMU_OFF` (a unit test there
+    // pins this hard-coded value).
+    mov     x0, #0x0800
+    movk    x0, #0x30D0, lsl #16
+    msr     sctlr_el1, x0
+    isb
+
     // Establish the boot stack (top of the linker-reserved region).
     adrp    x0, __boot_stack_top
     add     x0, x0, :lo12:__boot_stack_top

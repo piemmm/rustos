@@ -188,16 +188,19 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// A spawned child's effective capability set: exactly `CAP_CONSOLE_WRITE`, so
-/// the session program can write its banner through the `stream_write`
-/// syscall. Passed as both the user grant and the manifest request, so the
+/// A spawned child's effective capability set: exactly `CAP_CONSOLE_WRITE` and
+/// `CAP_CONSOLE_READ` — the session's authority over its standard streams,
+/// identical to the aarch64 producer (`AGENTS.md` §2.2). The x86_64 boot path
+/// installs no console-read backing yet, so a `stream_read` passes the
+/// capability gate and then fails closed at `NULL_CONSOLE_READ` (`AGENTS.md`
+/// §2.9). Passed as both the user grant and the manifest request, so the
 /// intersection the kernel derives is the same set — the child is granted no
 /// more (`AGENTS.md` §5.2), and never inherits the spawning caller's authority
-/// (`AGENTS.md` §4 — no ambient authority). Identical to the aarch64 producer
-/// (`AGENTS.md` §2.2).
+/// (`AGENTS.md` §4 — no ambient authority).
 fn child_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::CONSOLE_WRITE);
+    caps.insert(CapabilityId::CONSOLE_READ);
     caps
 }
 

@@ -915,6 +915,13 @@ fn fetch_missing_firmware(
         .map_err(|e| format!("image: cannot create {}: {e}", cache.display()))?;
     for entry in &missing {
         let url = format!("{}/{}", manifest.source(), entry.name);
+        let dest = cache.join(&entry.name);
+        // A nested pin (e.g. `overlays/disable-bt.dtbo`) lands in a cache
+        // subdirectory that must exist before curl writes the `.part`.
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("image: cannot create {}: {e}", parent.display()))?;
+        }
         let part = cache.join(format!("{}.part", entry.name));
         eprintln!("xtask: [image] fetching pinned firmware blob {url}");
         let status = std::process::Command::new("curl")

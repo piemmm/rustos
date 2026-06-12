@@ -25,9 +25,12 @@ pub const CONFIG_TXT_NAME: &str = "config.txt";
 /// The knobs are the P0 facts of record (`docs/src/platform/aarch64.md`,
 /// "Boot protocol"): AArch64 cores, the RustOS kernel image, a held UART
 /// clock for a stable early console, the PL011 `UART0` routed to the
-/// GPIO 14/15 header (`dtoverlay=disable-bt`), and a default line
-/// configuration of **9600 baud, 8 data bits, no parity, 1 stop bit**
-/// (`init_uart_baud=9600`; 8,N,1 is the firmware's fixed PL011 framing).
+/// GPIO 14/15 header (`dtoverlay=disable-bt`), the PL011 reference clock
+/// pinned to the 48 MHz the kernel's divisor arithmetic assumes
+/// (`init_uart_clock=48000000`, `rustos_arch_aarch64::uart_init`), and a
+/// default line configuration of **9600 baud, 8 data bits, no parity,
+/// 1 stop bit** (`init_uart_baud=9600`; 8,N,1 is the firmware's fixed
+/// PL011 framing).
 /// `armstub=armstub8.bin` is emitted only when the (optional) stub is
 /// among the build inputs.
 #[must_use]
@@ -39,6 +42,7 @@ pub fn config_txt(with_armstub: bool) -> String {
          kernel=kernel8.img\n\
          enable_uart=1\n\
          dtoverlay=disable-bt\n\
+         init_uart_clock=48000000\n\
          init_uart_baud=9600\n",
     );
     if with_armstub {
@@ -60,33 +64,49 @@ pub fn build_boot_partition(
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::BootPartition)?;
     let mut fs = Fat32::format(dev).map_err(MkimageError::BootPartition)?;
-    let root = fs.root();
 
     let with_armstub = firmware.iter().any(|f| f.name == "armstub8.bin");
     let config = config_txt(with_armstub);
 
-    let mut plant = |name: &str, bytes: &[u8]| -> Result<(), MkimageError> {
-        fs.create(root, name.as_bytes(), NodeKind::RegularFile)
-            .map_err(MkimageError::BootPartition)?;
-        let written = fs
-            .write_at(root, name.as_bytes(), 0, bytes)
-            .map_err(MkimageError::BootPartition)?;
-        if written != bytes.len() {
-            return Err(MkimageError::BootPartition(
-                rustos_abi::DriverError::DeviceFault,
-            ));
-        }
-        Ok(())
-    };
-
     for file in firmware {
-        plant(&file.name, &file.bytes)?;
+        plant(&mut fs, &file.name, &file.bytes)?;
     }
-    plant(CONFIG_TXT_NAME, config.as_bytes())?;
-    plant(KERNEL_IMG_NAME, kernel8)?;
+    plant(&mut fs, CONFIG_TXT_NAME, config.as_bytes())?;
+    plant(&mut fs, KERNEL_IMG_NAME, kernel8)?;
 
     fs.flush().map_err(MkimageError::BootPartition)?;
     Ok(fs.into_block().into_bytes())
+}
+
+/// Write one boot-partition file at the slash-separated path `name`,
+/// creating (or reusing) each intermediate directory — the firmware's
+/// fixed `overlays/` directory holds the device-tree overlays the
+/// generated `config.txt` applies.
+fn plant(fs: &mut Fat32<MemBlock>, name: &str, bytes: &[u8]) -> Result<(), MkimageError> {
+    let mut dir = fs.root();
+    let mut parts = name.split('/').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_some() {
+            dir = match fs.lookup(dir, part.as_bytes()) {
+                Ok(existing) => existing,
+                Err(_) => fs
+                    .create(dir, part.as_bytes(), NodeKind::Directory)
+                    .map_err(MkimageError::BootPartition)?,
+            };
+        } else {
+            fs.create(dir, part.as_bytes(), NodeKind::RegularFile)
+                .map_err(MkimageError::BootPartition)?;
+            let written = fs
+                .write_at(dir, part.as_bytes(), 0, bytes)
+                .map_err(MkimageError::BootPartition)?;
+            if written != bytes.len() {
+                return Err(MkimageError::BootPartition(
+                    rustos_abi::DriverError::DeviceFault,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -110,12 +130,20 @@ mod tests {
                 name: "bcm2711-rpi-4-b.dtb".into(),
                 bytes: vec![0x33; 1024],
             },
+            FirmwareFile {
+                name: "overlays/disable-bt.dtbo".into(),
+                bytes: vec![0x55; 256],
+            },
         ]
     }
 
     fn read_back(fs: &mut Fat32<MemBlock>, name: &str) -> Vec<u8> {
-        let root = fs.root();
-        let node = fs.lookup(root, name.as_bytes()).expect("file present");
+        let mut node = fs.root();
+        for part in name.split('/') {
+            node = fs
+                .lookup(node, part.as_bytes())
+                .expect("path component present");
+        }
         let mut out = vec![0u8; 1 << 20];
         let n = fs.read_at(node, 0, &mut out).expect("file reads");
         out.truncate(n);
@@ -137,6 +165,10 @@ mod tests {
         assert_eq!(read_back(&mut fs, "start4.elf"), vec![0x11; 4096]);
         assert_eq!(read_back(&mut fs, "fixup4.dat"), vec![0x22; 64]);
         assert_eq!(read_back(&mut fs, "bcm2711-rpi-4-b.dtb"), vec![0x33; 1024]);
+        assert_eq!(
+            read_back(&mut fs, "overlays/disable-bt.dtbo"),
+            vec![0x55; 256]
+        );
         assert_eq!(read_back(&mut fs, KERNEL_IMG_NAME), kernel8);
 
         let config = read_back(&mut fs, CONFIG_TXT_NAME);
@@ -144,8 +176,9 @@ mod tests {
         assert!(config.contains("arm_64bit=1"));
         assert!(config.contains("kernel=kernel8.img"));
         assert!(config.contains("enable_uart=1"));
-        assert!(config.contains("dtoverlay=disable-bt"));
+        assert!(config.contains("init_uart_clock=48000000"));
         assert!(config.contains("init_uart_baud=9600"));
+        assert!(config.contains("dtoverlay=disable-bt"));
         assert!(!config.contains("armstub="));
     }
 

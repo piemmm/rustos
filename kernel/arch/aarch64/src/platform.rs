@@ -362,11 +362,11 @@ mod tests {
     #[test]
     fn emits_every_described_device_from_a_raspi_tree() {
         let nodes = discover_all(&raspi_like_arm(0x7e20_1000, 0x7e21_5040));
-        // root + psci + soc + gic + mailbox + pl011 + mini-uart + memory:
-        // the generic walk emits *both* UARTs — preferring one is console
-        // policy (`crate::console`), not tree shape — and the `/soc`
-        // simple-bus is itself a bindable bus node.
-        assert_eq!(nodes.len(), 8);
+        // root + psci + soc + gic + mailbox + gpio + pl011 + mini-uart +
+        // memory: the generic walk emits *both* UARTs — preferring one is
+        // console policy (`crate::console`), not tree shape — and the
+        // `/soc` simple-bus is itself a bindable bus node.
+        assert_eq!(nodes.len(), 9);
 
         // Every `/soc` child names the emitted bus node as its parent.
         let soc = by_key(&nodes, b"simple-bus");
@@ -398,6 +398,13 @@ mod tests {
         assert_eq!(dma.kind(), Some(HwResourceKind::Dma));
         assert_eq!(dma.base(), 0x4000_0000, "VC aperture limit");
         assert_eq!(dma.length(), 4096, "one-page property carve");
+
+        // The BCM2711 GPIO controller (the pin-mux block
+        // `uart_init::find_gpio` binds) carries its translated window
+        // with the tree-declared length.
+        let gpio = by_key(&nodes, b"brcm,bcm2711-gpio");
+        assert_eq!(gpio.parent(), soc.id());
+        assert_eq!(mmio_windows(gpio), [(0xfe20_0000, 0xb4)]);
 
         // Both UARTs are serial-class nodes with their bus `reg` values
         // translated to the CPU-physical bases.

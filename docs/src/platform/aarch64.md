@@ -78,7 +78,8 @@ secondaries (`MPIDR_EL1` affinity ≠ 0) until SMP bring-up wants them (P1/P5).
 | `kernel` | `kernel8.img` | the image the firmware loads at `0x8_0000` |
 | `enable_uart` | `1` | hold the core clock so the PL011/mini-UART baud is stable; route the debug UART |
 | `dtoverlay` | `disable-bt` | detach Bluetooth from the PL011 so `UART0` is the primary UART on the GPIO 14/15 header |
-| `init_uart_baud` | `9600` | the firmware programs the PL011 to **9600 baud, 8 data bits, no parity, 1 stop bit** (8,N,1 is the firmware's fixed framing) — the default serial-console line setting |
+| `init_uart_clock` | `48000000` | pin the PL011 reference clock to the 48 MHz the kernel's baud-divisor arithmetic assumes (`uart_init::UART_CLOCK_HZ`) |
+| `init_uart_baud` | `9600` | the firmware's own early output (if any) matches the kernel's line setting — the kernel then programs the PL011 itself to **9600 baud, 8 data bits, no parity, 1 stop bit** (`uart_init`) |
 | `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |
 
 The PSCI conduit on the Pi is **`smc`** (via `armstub8.bin`), versus `hvc` on
@@ -193,12 +194,30 @@ reading the pointer (see [Board-discovered console](#board-discovered-console)).
 The trampoline:
 
 1. Masks interrupts (`DAIFSet`).
-2. If entered at EL2 (a `virtualization=on` board), configures EL1 to
-   run AArch64 (`HCR_EL2.RW`), grants EL1/EL0 the physical counter and
-   timer (`CNTHCTL_EL2`), zeroes `CNTVOFF_EL2`, and `eret`s to EL1. On
-   the default `virt` machine the highest EL is already EL1, so this is
+2. If entered at EL2 (the Pi firmware, or a `virtualization=on` board),
+   establishes a **fully-known EL2 state** before dropping to EL1: every
+   EL2 control register is *written whole* with the unit-test-pinned
+   hand-off values in `rustos_arch_aarch64::el2` — `HCR_EL2 = RW` only
+   (EL1 is AArch64, no stage-2, no traps), `CNTHCTL_EL2 = EL1PCTEN |
+   EL1PCEN` (EL1/EL0 own the physical counter/timer), `CNTVOFF_EL2 = 0`,
+   `CPTR_EL2 =` its RES1 bits (no FP/SIMD trap), `MDCR_EL2 = 0` (no
+   debug/PMU traps), and `VPIDR_EL2`/`VMPIDR_EL2` mirrored from
+   `MIDR_EL1`/`MPIDR_EL1` — then `eret`s to EL1. The EL2 reset state is
+   architecturally UNKNOWN on real silicon (the Pi firmware stub sets
+   only `SCTLR_EL2` and SMPEN; QEMU resets everything benignly), and an
+   UNKNOWN `HCR_EL2.TVM` traps EL1's first `MAIR`/`TCR`/`TTBR`/`SCTLR`
+   write into vector-less EL2 — the silent Pi 4B hang at the MMU switch.
+   An `orr` into a live EL2 register is therefore forbidden here. On the
+   default `virt` machine the highest EL is already EL1, so this is
    skipped.
-3. Establishes the boot stack, zeroes `.bss`, and tail-calls
+3. Writes the known MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, the
+   ARMv8.0 RES1 bits only) before the first EL1 data access. The
+   register is architecturally UNKNOWN when EL1 is first entered on
+   real silicon — QEMU resets it benignly — and an UNKNOWN `EE`
+   (big-endian data) or `WXN` bit otherwise wrecks the boot the moment
+   it is exercised. The secondary-core trampoline (`smp.s`) does the
+   same at its PSCI `CPU_ON` entry.
+4. Establishes the boot stack, zeroes `.bss`, and tail-calls
    `rustos_arch_aarch64_main(dtb)`, which forwards to the
    binary-supplied `kernel_main`.
 
@@ -238,6 +257,83 @@ The runtime walk is safe with the MMU still off: the `lib/fdt` reader
 accesses the blob byte-by-byte, so it takes no multi-byte Device-memory
 load that would fault without exception vectors (`plans/PI.md` W17).
 
+### Console line bring-up (`uart_init`)
+
+Discovering the UART's *address* is not enough on real silicon: QEMU's
+PL011 model powers up enabled, but the metal Pi 4 leaves `UART0` muxed
+away from the header and disabled until the kernel programs it — the
+board boots with a permanently silent serial port otherwise. Right
+after the console is discovered (and before the first log byte) the
+boot path runs `uart_init::init_from_fdt`:
+
+1. **Pin mux.** When the tree carries a BCM2711 GPIO controller
+   (`brcm,bcm2711-gpio`, bus-translated like every `/soc` peripheral),
+   GPIO 14/15 are routed to the PL011 (`GPFSEL1` → `ALT0`) and their
+   pulls released (`GPIO_PUP_PDN_CNTRL_REG0` → no pull). The register
+   window is sized from the BCM2711 datasheet (`GPIO_REGS_LEN`, `0xF4`),
+   not the device tree's historical `0xB4` `reg` length, which predates
+   the BCM2711 pull registers. A tree without the controller (QEMU
+   `virt`) skips the mux.
+2. **Line programming.** The PL011 is disabled, a transmitting frame is
+   waited out (bounded by `console::TX_POLL_BUDGET` — a wedged
+   transmitter must not hang the boot), and the line registers are
+   rewritten in the TRM order: `ICR` clear, `IBRD`/`FBRD` divisors for
+   9600 baud from the pinned 48 MHz reference clock (312 + 32/64),
+   `LCR_H` 8N1 + FIFOs (which latches the divisors), `IMSC` all-masked
+   (the console polls), then `CR` re-enable (`UARTEN|TXE|RXE`).
+
+The register arithmetic — divisor maths with fail-closed range checks,
+the `GPFSEL1`/pull read-modify-write — is pure and host-unit-tested; the
+freestanding layer only performs the volatile MMIO (`AGENTS.md` §2.2).
+A non-PL011 console (the mini-UART fallback) keeps the firmware's line
+state untouched. The same writes run harmlessly under QEMU, so metal
+and emulation share one path.
+
+### Boot progress beacon
+
+An on-metal boot that dies before the first formatted log line is
+bisected by the **boot progress beacon**: `boot_aarch64::boot` emits one
+milestone signal on *each* bring-up channel as it passes five fixed
+points. On the UART the signal is a single ASCII digit
+(`serial::boot_beacon_byte` — raw, bounded, bypassing the formatted
+sink); on the screen it is a 16-pixel colour band
+(`video::boot_beacon_band`), the bands stacking **upward from the
+bottom edge** so the count of bands is the progress even if colours are
+hard to judge. Band colours are symmetric under an R↔B channel swap, so
+they read the same whether the firmware honoured BGRA or RGBA.
+
+| beacon | UART digit | screen band (bottom-up) | milestone just completed |
+|--------|------------|-------------------------|--------------------------|
+| 1 | `1` | green | DTB walked: console discovered, UART line programmed (`uart_init`), GIC + video configured (a band can only appear from here on) |
+| 2 | `2` | magenta | Device gigapage mask derived and installed |
+| 3 | `3` | white | MMU switch returned (translation + caches live) and EL1 vectors installed |
+| 4 | `4` | grey | full-tree FDT walks (memory window, timer, PSCI) completed post-MMU |
+| 5 | `5` | dark green | memory map + kthread guard arena settled — the formatted boot log line follows immediately |
+
+The beacon 2→3 window — the MMU switch — is further subdivided by four
+lower-case UART-only marks emitted by `enable_mmu_and_vectors` (no
+screen bands; the window is too tight for the render path):
+
+| mark | just completed |
+|------|----------------|
+| `a` | identity page tables built in the boot pool |
+| `b` | tables cleaned+invalidated to PoC — the `switch` register sequence is next, so `b` with no `c` pins a hang to the MMU-enable instant itself |
+| `c` | `switch` returned; the `c` byte is itself the first post-MMU access (a Device-mapped UART write), proving translated execution and the Device mask together |
+| `d` | EL1 exception vectors installed (`3` follows immediately) |
+
+Decode rule: the last digit captured / band painted is the last stage
+that **completed**; the stage after it is where the boot died. No `1`
+on the UART and a never-blanked screen means the kernel died before or
+inside the very first DTB walk (or was never entered). A blanked (black)
+screen with no bands means the video console came up inside milestone 1
+but the boot died before the milestone-1 beacon's band — i.e. still
+inside `configure_mmio_from_dtb` after video bring-up.
+
+The beacon is deliberately pre-MMU-safe: the band fill takes no render
+lock (an atomic CAS is UNPREDICTABLE MMU-off) under a boot-CPU/pre-SMP
+contract, and both channels are fail-closed no-ops when their device is
+not configured.
+
 **QEMU caveat (honest emulation gap, `AGENTS.md` §2.1).** QEMU's `raspi*`
 machine models do **not** emulate the Raspberry Pi GPU-firmware DTB
 hand-off: they enter an ELF `-kernel` with `x0 = 0` (GDB-verified on
@@ -260,18 +356,25 @@ coincide on both models. `serial::read_console_bytes` drains whatever
 input is immediately available into the caller's buffer and stops at the
 first byte that is not yet present — it **never busy-waits** for input
 (`AGENTS.md` §2.1), so a read with no pending byte is a valid zero-length
-short read. `boot_aarch64` installs this through the same zero-sized
-`UartConsole` device (it implements both `ConsoleWrite` and `ConsoleRead`)
-via `BootInfo::with_console_read`, so a `stream_read` of fd 0 (whose
-backing the spawner attaches to this device, `AGENTS.md` §20) reads the
-discovered UART.
+short read at the device level. `boot_aarch64` installs this through the
+same zero-sized `UartConsole` device (it implements both `ConsoleWrite`
+and `ConsoleRead`) via `BootInfo::with_console_read`; the kernel-core
+init pipeline then wraps it in `BlockingConsoleRead`, which turns an
+empty device poll into a scheduler park (`reschedule_current`, the same
+poll-and-park loop the `wait` syscall uses) and re-polls when the caller
+is next dispatched — so a `stream_read` of fd 0 (whose backing the
+spawner attaches to this device, `AGENTS.md` §20) **waits** for the
+discovered UART's input rather than reporting a spurious end-of-input
+(the backing owns blocking, §20). That wait is what holds the shell
+session at its `rustos$ ` prompt until the user types.
 
 This is the bootstrap stream **backing** the spawner attaches to fd 0
 (`AGENTS.md` §20); it is not a program-facing interface. The receive-bit
-decoders are host-unit-tested; the standard-stream layer now binds fd 0 to
-this backing (`plans/PI.md` P6e-3a), so a process's `stream_read` of fd 0
-reaches the discovered UART; real RX over `virt`/Pi silicon remains an
-on-metal acceptance item.
+decoders are host-unit-tested; the standard-stream layer binds fd 0 to
+this backing (`plans/PI.md` P6e-3a), and the `spawn_session_qemu_aarch64`
+vertical proves the interactive path end to end: the runner types a
+scripted `exit\n` at the guest's serial input once the blocked session
+prints its prompt.
 
 ## Framebuffer boot console (video first, UART fallback)
 
@@ -320,8 +423,13 @@ Pi):
   even when the video console is active, so the boot log is capturable
   over the serial header alongside the screen; the mirror is removed
   when bring-up no longer needs it (`kernel/arch/aarch64/src/serial.rs`
-  module docs). Console *input* stays on the UART (the display has no
-  receive side).
+  module docs). The UART transmit wait is **bounded**
+  (`console::tx_wait`): a transmitter that never drains — e.g. a
+  flow-blocked PL011 still attached to the Bluetooth chip — is declared
+  wedged after `TX_POLL_BUDGET` polls and bytes are dropped (one cheap
+  poll each, recovering the moment the FIFO drains) rather than hanging
+  the kernel on its first log line (`AGENTS.md` §2.1). Console *input*
+  stays on the UART (the display has no receive side).
 
 Fail closed (`AGENTS.md` §2.9): no mailbox node (QEMU `virt` — the
 UART-backed verticals are unchanged), a detached display, or any
@@ -409,17 +517,73 @@ system-register/assembly/MMIO operations to the freestanding target.
 - **MMU / page tables** (`paging`). Stage-1, 4 KiB granule, three levels
   (start at L1) covering a 39-bit VA region (`TCR_EL1.T0SZ = 25`) — the
   aarch64 mirror of riscv64's Sv39. `AddressSpace::new_identity_gigapages`
-  identity-maps the low GiBs with 1 GiB L1 block descriptors: the
-  gigapages named by the configured Device mask
+  identity-maps the low GiBs with 1 GiB L1 block descriptors under two
+  configured masks: the gigapages named by the Device mask
   (`paging::configure_device_gigapages`) are Device for the board's
-  UART/GIC MMIO, the rest privileged-executable Normal for the kernel
-  image and stack. The mask defaults to GiB 0 (the `virt` MMIO window)
-  and is derived at boot from the *discovered* console/GIC bases minus
-  the kernel image's own gigapages (`paging::identity_device_mask`) — on
-  the Pi 4 that types gigapage 3 (the BCM2711 high-peripheral window)
-  Device and keeps gigapage 0, which holds the kernel at `0x8_0000`,
-  Normal and executable. `map_4k` adds finer mappings; `switch`
-  programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1` and enables `SCTLR_EL1.M`.
+  UART/GIC MMIO, the gigapages named by the RAM mask
+  (`paging::configure_ram_gigapages`) are privileged-executable Normal
+  for the kernel image and stack, and a gigapage in **neither** mask is
+  left *invalid* — on real silicon a Normal write-back executable
+  mapping of unbacked address space invites the core's speculative
+  fetches onto bus windows nothing answers, which wedged the metal
+  Pi 4B the instant translation enabled while QEMU (which answers every
+  address) stayed green. The Device mask defaults to GiB 0 (the `virt`
+  MMIO window) and is derived at boot from the *discovered* console/GIC
+  bases minus the kernel image's own gigapages
+  (`paging::identity_device_mask`) — on the Pi 4 that types gigapage 3
+  (the BCM2711 high-peripheral window) Device and keeps gigapage 0,
+  which holds the kernel at `0x8_0000`, Normal and executable. The RAM
+  mask defaults to *all* slots (host tests and the QEMU integration
+  kernels keep the historic everything-Normal map) and is derived at
+  boot in two phases (`paging::identity_ram_mask`): pre-MMU from the
+  facts in hand — the kernel image's extent, the firmware DTB blob, and
+  the firmware scan-out surface — then widened with the `/memory`
+  window once the post-MMU walk discovers it, both re-installing the
+  mask for later-built process spaces and installing the new gigapages
+  into the live boot space (`AddressSpace::ensure_identity_gigapage`,
+  an invalid→valid L1 update that needs only a store barrier, no TLB
+  invalidation). Every later identity window is *derived from those
+  masks*, never a board constant: PID 1's spawn space (`init_spawn`)
+  and each runtime-spawned child's (`spawn_producer`) size their
+  identity map, their physmap bound, and their stack-arena grow bound
+  with `paging::configured_identity_gigapages` (highest Device or RAM
+  gigapage + 1 — 2 GiB on `virt`, 4 GiB on the Pi 4). The former
+  hard-coded 2 GiB `virt` window left the Pi 4's gigapage-3 UART/GIC
+  out of PID 1's root, silencing the metal console the instant
+  `spawn_init` switched to it; an empty window or one reaching the
+  64 GiB user bias fails the spawn closed. `map_4k` adds finer
+  mappings. Before `switch` runs, the
+  boot path sweeps the just-written tables to the point of coherency
+  (`PageTablePool::clean_invalidate_to_poc`, `dc civac` per
+  `CTR_EL0`-decoded line): the tables were written with the data cache
+  off but the walker reads them back *cacheable* the instant translation
+  enables, and a stale firmware-era line over the pool would shadow the
+  real descriptors on real silicon (cache-less QEMU cannot show it —
+  the same residue hazard Linux's `head.S` invalidates its idmap tables
+  for). The pool's own allocation counter is translation-aware
+  (`PageTablePool::alloc`): with the MMU off it advances by a plain
+  load + store, never an atomic read-modify-write, because LDXR/STXR
+  exclusives are only architecturally guaranteed on cacheable Normal
+  memory — on the BCM2711's MMU-off Device-nGnRnE accesses the
+  exclusive monitor never grants them and a `fetch_add` retry loop
+  spins forever (the metal Pi 4B hung exactly there while QEMU's
+  always-granting monitor stayed green). MMU-off allocation is
+  single-threaded by construction — only the pre-SMP boot CPU runs
+  Rust with translation off and a pool in hand — and once translation
+  is live the counter reverts to `fetch_add`. `switch`
+  programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`, orders the pre-MMU table
+  stores with a full-system `dsb sy` (MMU-off stores are Device-nGnRnE,
+  outside the inner-shareable domain an `ish` barrier covers), and
+  installs the **whole**
+  known `SCTLR_EL1` value (`paging::SCTLR_MMU_ON`: RES1 + translation +
+  data/instruction caches, after an `ic iallu`), never OR-ing `M` into
+  the live register — that would carry the UNKNOWN EL1 reset bits
+  (`WXN`, `EE`, …) into translated execution, the silent pre-vectors
+  hang real Pi 4 hardware exhibited while QEMU stayed green. The data
+  cache is enabled deliberately: the allocator/scheduler LDXR/STXR
+  exclusives are only guaranteed on cacheable Normal memory, and the
+  framebuffer console already cleans its writes to the point of
+  coherency.
 - **Context switch** (`context` + `context.s`). `TaskCtx { sp }` plus
   `rustos_arch_aarch64_switch`, saving the AAPCS64 callee-saved registers
   (`x19`–`x28`, `x29`/FP, `x30`/LR) and the first-run argument `x0`.
@@ -476,7 +640,7 @@ through the semihosting finisher. They are enrolled in
   pipeline to `BootCompleted`** (PI Stage P6c-2): drives the real
   `rustos_kernel::boot_aarch64::boot`, which discovers the console + GIC
   bases MMU-off from the embedded `virt` device tree and derives the
-  identity map's Device gigapage mask from them, enables the stage-1
+  identity map's Device and RAM gigapage masks from them, enables the stage-1
   identity MMU (512×1 GiB gigapages over a static boot `PageTablePool`,
   then `switch`) + EL1 vectors, discovers the rest of the board
   (`/memory`, timer, PSCI), builds the `BootMemoryMap`, installs the discovered-UART

@@ -13,7 +13,7 @@ drivers.
 | Region | Contents |
 | --- | --- |
 | Sector 0 | MBR: two primary partitions, `0x55AA` signature |
-| Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, generated `config.txt`, `kernel8.img` |
+| Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img` |
 | Partition 2 (`0x7F`, RustFS, 64 MiB) | encrypted root volume with the `AGENTS.md` §16 skeleton (`/System`, `/Users`, `/Apps`, `/Storage`) |
 
 `kernel8.img` is the freestanding aarch64 `rustos-kernel` ELF (release
@@ -21,9 +21,14 @@ profile, linked at `0x8_0000` by `aarch64-rpi4.ld`) flattened to the raw
 binary the GPU bootloader copies to memory — see the boot-protocol facts
 of record in [aarch64](../platform/aarch64.md). The generated
 `config.txt` sets `arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
-`dtoverlay=disable-bt` (the PL011 `UART0` on the GPIO 14/15 header), and
-`init_uart_baud=9600` — the serial console defaults to **9600 8N1**
-(plus `armstub=armstub8.bin` only when that optional stub is staged).
+`dtoverlay=disable-bt` (the PL011 `UART0` on the GPIO 14/15 header — the
+overlay itself is a pinned firmware input staged on the partition at
+`overlays/disable-bt.dtbo`), `init_uart_clock=48000000` (the PL011
+reference clock the kernel's baud divisors assume), and
+`init_uart_baud=9600` — the kernel programs the serial console itself to
+**9600 8N1** at boot (`rustos_arch_aarch64::uart_init`: GPIO 14/15 pin
+mux plus PL011 line registers; plus `armstub=armstub8.bin` only when
+that optional stub is staged).
 
 ## The firmware blobs
 

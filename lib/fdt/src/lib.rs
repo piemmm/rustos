@@ -170,6 +170,15 @@ impl<'a> Fdt<'a> {
         Self::new(blob)
     }
 
+    /// Total size in bytes of the blob this reader covers — for a
+    /// [`Fdt::from_ptr`] reader, the header's `totalsize`. Boot paths
+    /// use it to account the firmware blob's RAM extent (the identity
+    /// map must keep the tree readable for the post-MMU walks).
+    #[must_use]
+    pub fn total_size(&self) -> usize {
+        self.blob.len()
+    }
+
     /// Locate the first `/memory` node's first `reg` entry, returning
     /// `(base, size)` in bytes.
     ///
@@ -864,6 +873,13 @@ mod tests {
         let blob = virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(fdt.first_memory_region(), Some((0x8000_0000, 0x1000_0000)));
+    }
+
+    #[test]
+    fn total_size_reports_the_whole_blob() {
+        let blob = virt_like(0x8000_0000, 0x1000_0000, 10_000_000);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(fdt.total_size(), blob.len());
     }
 
     #[test]

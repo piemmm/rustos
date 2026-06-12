@@ -51,11 +51,12 @@ use alloc::sync::Arc;
 
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
 use rustos_arch_aarch64::paging::{
-    configure_device_gigapages, identity_device_mask, AddressSpace, PageTablePool,
+    configure_device_gigapages, configure_ram_gigapages, identity_device_mask, identity_ram_mask,
+    ram_gigapages, AddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, video,
-    Aarch64Arch, Aarch64ArchStorage,
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, serial, syscall_entry,
+    uart_init, video, Aarch64Arch, Aarch64ArchStorage,
 };
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
@@ -117,6 +118,39 @@ const fn yes_no(value: bool) -> &'static str {
     }
 }
 
+/// Boot-progress beacon band colours, one per milestone ([`beacon`];
+/// decode table: `docs/src/platform/aarch64.md`, "Boot progress
+/// beacon"). Each value is symmetric under an R↔B channel swap, so a
+/// band reads the same whether the firmware honoured BGRA or RGBA
+/// (the same reasoning as the video console's grey foreground).
+const BEACON_COLOURS: [u32; 5] = [
+    0xFF00_FF00, // milestone 1: green
+    0xFFFF_00FF, // milestone 2: magenta
+    0xFFFF_FFFF, // milestone 3: white
+    0xFF80_8080, // milestone 4: grey
+    0xFF00_8000, // milestone 5: dark green
+];
+
+/// Emit boot-progress milestone `index` on both bring-up channels: the
+/// digit `'1' + index` on the discovered UART
+/// ([`serial::boot_beacon_byte`]) and one stacked colour band on the
+/// video console when it is configured
+/// ([`rustos_arch_aarch64::video`]'s `boot_beacon_band`).
+///
+/// An on-metal boot that dies silently is bisected by the last digit
+/// captured / band painted (`docs/src/platform/aarch64.md`, "Boot
+/// progress beacon"). Out-of-table indices are ignored (fail closed).
+fn beacon(index: u32) {
+    let Some(&colour) = BEACON_COLOURS.get(index as usize) else {
+        return;
+    };
+    serial::boot_beacon_byte(b'1' + index as u8);
+    // SAFETY: `boot` runs single-threaded on the boot CPU with
+    // interrupts masked, before SMP bring-up — exactly the pre-SMP
+    // contract `boot_beacon_band` requires in place of the render lock.
+    unsafe { video::boot_beacon_band(index, colour) };
+}
+
 extern "C" {
     /// First byte of the kernel image — the board load address — defined
     /// by the board linker script (`aarch64-rpi4.ld` / `aarch64-virt.ld`).
@@ -161,18 +195,47 @@ fn kernel_end_addr() -> u64 {
 /// ([`BOOT_PAGE_TABLES`]), which lives for the kernel's lifetime.
 fn enable_mmu_and_vectors() -> Option<AddressSpace> {
     let space = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)?;
-    // SAFETY: `new_identity_gigapages` identity-maps `[0, 512 GiB)`, so
-    // the currently-executing `pc`, the boot stack, the firmware DTB, and
-    // the board MMIO window all keep their physical addresses — enabling
-    // the MMU does not move the ground under the running code, exactly as
-    // `AddressSpace::switch`'s contract requires. `init_vectors` then
-    // installs the EL1 vector base so a fault during the remaining
+    // Sub-beacon `a`: identity tables built. The lower-case marks `a`-`d`
+    // subdivide the beacon 2→3 window — the MMU switch — on the UART
+    // only (decode table: `docs/src/platform/aarch64.md`).
+    serial::boot_beacon_byte(b'a');
+    // The tables were just written with the data cache off; sweep them
+    // to the point of coherency so the walker's first *cacheable* reads
+    // cannot hit stale firmware-era lines on real silicon.
+    BOOT_PAGE_TABLES.clean_invalidate_to_poc();
+    // Sub-beacon `b`: tables swept to PoC — the very next step is the
+    // `switch` register sequence, so `b` with no `c` pins a hang to the
+    // MMU-enable instant itself (bad descriptors/attributes).
+    serial::boot_beacon_byte(b'b');
+    // SAFETY: `new_identity_gigapages` identity-maps every gigapage in
+    // the configured Device and RAM masks — the caller installed both
+    // before this runs, and the RAM mask is built over the kernel
+    // image's own extent, the firmware DTB, and the scan-out surface
+    // (`identity_ram_mask`) — so the currently-executing `pc`, the boot
+    // stack, the firmware DTB, and the board MMIO window all keep their
+    // physical addresses: enabling the MMU does not move the ground
+    // under the running code, exactly as `AddressSpace::switch`'s
+    // contract requires (unbacked gigapages are deliberately left
+    // invalid so speculation cannot wander into them). `init_vectors`
+    // then installs the EL1 vector base so a fault during the remaining
     // bring-up is taken to a handler rather than locking up silently.
     // Both run once, here, on the boot CPU with interrupts masked.
     unsafe {
         space.switch();
+    }
+    // Sub-beacon `c`: `switch` returned — the byte below is the first
+    // post-MMU access, a write through the Device-mapped UART gigapage,
+    // so `c` proves translated execution *and* the Device mask in one
+    // mark.
+    serial::boot_beacon_byte(b'c');
+    // SAFETY: covered by the block comment above — vectors are installed
+    // once, on the boot CPU, immediately after the switch.
+    unsafe {
         exceptions::init_vectors();
     }
+    // Sub-beacon `d`: EL1 vectors installed; beacon 3 follows in the
+    // caller.
+    serial::boot_beacon_byte(b'd');
     Some(space)
 }
 
@@ -229,6 +292,9 @@ pub fn boot(
     // the vectors not yet installed (the `virt`-only "GiB 0 Device"
     // assumption this replaces).
     let early = configure_mmio_from_dtb(dtb);
+    // Beacon 1: the DTB walked — console discovered, UART line up, GIC
+    // and video configured.
+    beacon(0);
     let (console_base, _) = console::current();
     let (gicd_base, gicc_base) = gic::current();
     // The mailbox doorbell the video console rang is an MMIO window the
@@ -248,6 +314,28 @@ pub fn boot(
         kernel_end_addr(),
     );
     configure_device_gigapages(device_mask);
+    // RAM gigapage mask from the facts in hand pre-MMU: the kernel
+    // image's own extent, the firmware DTB blob, and the firmware
+    // scan-out surface. Every other non-Device gigapage stays *invalid*
+    // in the identity map — on real silicon a Normal write-back
+    // executable mapping of unbacked address space invites the core's
+    // speculative fetches into windows nothing answers, which wedged
+    // the metal Pi 4B at the instant translation enabled while QEMU
+    // (which answers every address) stayed green. The post-MMU
+    // `/memory` discovery widens this mask below.
+    let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
+    configure_ram_gigapages(identity_ram_mask(&[
+        (
+            kernel_start_addr(),
+            kernel_end_addr().saturating_sub(kernel_start_addr()),
+        ),
+        (dtb, early.dtb_len),
+        (fb_base, fb_len),
+    ]));
+    // Beacon 2: the identity map's Device and RAM gigapage masks are
+    // derived and installed — the next step is building + enabling the
+    // MMU.
+    beacon(1);
 
     // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
     // further work. The `kernel_core` allocator and scheduler use atomic
@@ -259,6 +347,9 @@ pub fn boot(
     // optimisation (`plans/PI.md` watch-out).
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
+    // Beacon 3: back from the MMU switch (translation + caches live
+    // when `mmu_on`) with the EL1 vectors installed.
+    beacon(2);
 
     // Discover the rest of the board from the firmware device tree: the
     // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
@@ -266,6 +357,32 @@ pub fn boot(
     // incomplete tree leaves the `virt` defaults in place (fail closed,
     // `AGENTS.md` §2.9).
     let discovered = configure_from_dtb(dtb);
+    // Widen the RAM gigapage mask with the discovered `/memory` window
+    // — a walk that is only safe post-MMU — so later-built process
+    // spaces map the whole window, and install the widened gigapages
+    // into the *live* boot space (an invalid→valid L1 update, no TLB
+    // shootdown needed) before the allocator touches the window.
+    if let Some((ram_base, ram_size)) = discovered.ram_window {
+        let window_mask = identity_ram_mask(&[(ram_base, ram_size)]);
+        let mut merged = ram_gigapages();
+        for (word, add) in merged.iter_mut().zip(window_mask) {
+            *word |= add;
+        }
+        configure_ram_gigapages(merged);
+        if let (Some(space), Some(last_byte)) = (
+            boot_space.as_mut(),
+            (ram_size > 0).then(|| ram_base.saturating_add(ram_size - 1)),
+        ) {
+            let mut gigapage = ram_base >> 30;
+            while gigapage <= (last_byte >> 30) {
+                space.ensure_identity_gigapage(gigapage << 30);
+                gigapage += 1;
+            }
+        }
+    }
+    // Beacon 4: the full-tree FDT walks (memory window, timer, PSCI)
+    // completed under the live translation regime.
+    beacon(3);
 
     // Construct the architecture handle — the single §17.1/§17.2
     // concrete-arch selection point for the kernel image. The counter
@@ -372,6 +489,10 @@ pub fn boot(
     // Device (`virt`: 0x1; Pi 4: 0x8).
     let mut device_mask_buf = [0u8; 16];
     let device_mask_hex = format_hex_u64(device_mask[0], &mut device_mask_buf);
+
+    // Beacon 5: memory map + guard arena settled; the formatted boot
+    // log line follows immediately.
+    beacon(4);
 
     log(
         log_sink,
@@ -538,6 +659,10 @@ struct EarlyDiscovered {
     /// allocated — console output now defaults to the screen, with the
     /// UART as the fallback (`plans/PI.md` P7b, `AGENTS.md` §10).
     video: Option<video::DiscoveredVideo>,
+    /// Total byte length of the firmware device-tree blob (`totalsize`),
+    /// `0` when no readable tree was found — the blob's RAM extent must
+    /// stay in the identity map for the post-MMU walks.
+    dtb_len: u64,
 }
 
 /// Point the console and the GICv2 driver at the bases the firmware tree
@@ -559,6 +684,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
         console: false,
         gic: false,
         video: None,
+        dtb_len: 0,
     };
     if dtb == 0 {
         return out;
@@ -572,7 +698,13 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
         return out;
     };
+    out.dtb_len = fdt.total_size() as u64;
     out.console = console::configure_from_fdt(&fdt).is_some();
+    // Bring the discovered console's line up before the first log byte:
+    // on real Pi 4 silicon UART0 stays silent until GPIO 14/15 are muxed
+    // to the PL011 and its line registers are programmed — QEMU's
+    // powered-up PL011 masks the omission (`uart_init`).
+    uart_init::init_from_fdt(&fdt);
     out.gic = gic::configure_from_fdt(&fdt).is_some();
     out.video = video::configure_from_fdt(&fdt);
     out

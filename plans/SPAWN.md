@@ -342,7 +342,9 @@ binary (`kernel/rustos-kernel/src/spawn_producer.rs`, sibling of
 live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`
 (the §24.1 allocator-backed source — no fixed `MAX_SPAWNS` reserve, so the
 spawn capacity scales with discovered RAM and fails closed `NoSpace` only on
-genuine OOM), builds a fresh 2 GiB-identity isolated user space **without**
+genuine OOM), builds a fresh isolated user space identity-mapping the
+mask-derived window (`paging::configured_identity_gigapages` — 2 GiB on
+`virt`, 4 GiB on the Pi 4) **without**
 switching `TTBR0_EL1` (the
 spawning caller keeps running — the build writes through the identity
 `physmap`, so the child space need not be active), parses the `rxe` against
@@ -377,9 +379,10 @@ follow. **SP3a + SP3b are landed.**
 through the SP3 `spawn` syscall (`rustos_rt::spawn`) as a separate, isolated
 process; `init` keeps running and reacts fail-closed (`EXIT_SESSION_FAILED`)
 to a failed spawn rather than being replaced. `init`'s effective set gained
-`CAP_PROC_SPAWN`; the child receives only its own `CAP_CONSOLE_WRITE`
-(no ambient authority, §4). The minimal `session` program is a banner+exit
-`Run` stub in the `Shell` bundle; growing it into a real shell REPL (wiring
+`CAP_PROC_SPAWN`; the child receives only its own stream authority,
+`{CAP_CONSOLE_WRITE, CAP_CONSOLE_READ}` (no ambient authority, §4). The
+minimal `session` program is a banner+exit `Run` stub in the `Shell`
+bundle; growing it into a real shell REPL (wiring
 in the `rustos-shell` interpreter library) is `plans/PI.md` P6e. Per the
 binding §20 stream model, the REPL does its text I/O over its **inherited
 standard streams (fd 0/1/2/3 — `stdin`/`stdout`/`stderr`/`stdinfo`)**, never

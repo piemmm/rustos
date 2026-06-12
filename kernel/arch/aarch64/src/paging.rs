@@ -105,8 +105,42 @@ pub const TCR_VALUE: u64 = {
     t0sz | irgn0 | orgn0 | sh0 | tg0 | epd1 | ips
 };
 
-/// `SCTLR_EL1.M` (bit 0): enable stage-1 address translation.
-pub const SCTLR_M: u64 = 1 << 0;
+/// The `SCTLR_EL1` bits that are RES1 on ARMv8.0-A (ARM ARM D13.2.118):
+/// bits 29, 28, 23, 22, 20, and 11. Every other bit — including the
+/// booby-traps `EE`/`E0E` (data big-endian), `WXN` (writable implies
+/// execute-never), `A`/`SA`/`SA0` (alignment checking) — is left clear.
+pub const SCTLR_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 << 20) | (1 << 11);
+
+/// The known MMU-off `SCTLR_EL1` (= [`SCTLR_RES1`], `0x30D0_0800`) the
+/// entry trampolines establish before the first EL1 data access.
+///
+/// `SCTLR_EL1` is architecturally **UNKNOWN** when EL1 is first entered
+/// on real silicon — behind the firmware's EL2 hand-off and behind a
+/// PSCI `CPU_ON` alike (QEMU resets it to a benign value, which is why
+/// only hardware ever saw the difference). An UNKNOWN `EE` makes every
+/// data access byte-swapped; an UNKNOWN `WXN` makes the writable kernel
+/// mapping execute-never the instant translation is enabled — a silent
+/// pre-vectors hang on the Pi 4. The trampolines (`boot.s` `.Lin_el1`,
+/// `smp.s` `_start_secondary_aarch64`) therefore write this exact value
+/// — they hard-code `0x30D0_0800`, pinned by a unit test here — so EL1
+/// always starts from known ground (`AGENTS.md` §5.4: fail closed, not
+/// "trust the reset state").
+pub const SCTLR_MMU_OFF: u64 = SCTLR_RES1;
+
+/// The full MMU-on `SCTLR_EL1` value `AddressSpace::switch` (freestanding
+/// only) installs:
+/// [`SCTLR_RES1`] plus `M` (stage-1 translation), `C` (data cache), and
+/// `I` (instruction cache).
+///
+/// Written as a whole — never OR-ed into the live register — so no
+/// UNKNOWN reset bit survives into translated execution (see
+/// [`SCTLR_MMU_OFF`]). `C` is required, not an optimisation: the
+/// LDXR/STXR exclusives the allocator and scheduler rely on are only
+/// guaranteed on cacheable Normal memory (a non-cacheable exclusive
+/// needs a global monitor the BCM2711 does not provide), and the
+/// framebuffer path already cleans its writes to the point of coherency
+/// (`crate::video`).
+pub const SCTLR_MMU_ON: u64 = SCTLR_RES1 | (1 << 0) | (1 << 2) | (1 << 12);
 
 /// Physical-address mask of a descriptor's output-address field
 /// (bits `[47:12]`).
@@ -323,6 +357,228 @@ fn configured_gigapage_is_device(index: usize) -> bool {
         && mask_word_bit(DEVICE_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
 }
 
+/// RAM gigapage mask in effect before any board discovery runs: **all**
+/// slots, reproducing the historic "everything not Device is Normal"
+/// identity map. Host tests and the QEMU integration kernels build
+/// their spaces under this default; a real boot replaces it with the
+/// facts in hand ([`configure_ram_gigapages`]) so that gigapages backed
+/// by nothing are left *invalid* — on real silicon a Normal write-back
+/// executable mapping of unbacked address space invites the core's
+/// speculative fetches and prefetches into windows no bus device
+/// answers, which can wedge the interconnect the instant translation
+/// enables (the metal Pi 4B hung exactly there while QEMU, which
+/// answers every address, stayed green).
+pub const DEFAULT_RAM_GIGAPAGES: [u64; GIGAPAGE_MASK_WORDS] = [u64::MAX; GIGAPAGE_MASK_WORDS];
+
+/// Identity gigapages currently mapped Normal (RAM), one bit per L1
+/// slot. Defaults to [`DEFAULT_RAM_GIGAPAGES`]; overwritten by
+/// [`configure_ram_gigapages`] once boot discovery resolves where RAM
+/// actually lives. Read by [`AddressSpace::new_identity_gigapages`] for
+/// *every* identity space built after configuration, so the whole
+/// system shares one attribute layout. A slot in neither this mask nor
+/// [`DEVICE_GIGAPAGES`] is left invalid (faults on access — fail
+/// closed, `AGENTS.md` §5.4).
+static RAM_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] = [
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+    AtomicU64::new(u64::MAX),
+];
+
+/// Install the identity-map RAM gigapage mask.
+///
+/// Called on a board's boot path once the RAM-backed extents are known
+/// ([`identity_ram_mask`]) and before the boot address space is built;
+/// called again when post-MMU discovery widens the known RAM (the
+/// firmware `/memory` window), so later-built process spaces map it
+/// too. `Release` pairs with the constructor's `Acquire` loads.
+pub fn configure_ram_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
+    for (slot, word) in RAM_GIGAPAGES.iter().zip(mask) {
+        slot.store(word, Ordering::Release);
+    }
+}
+
+/// The identity-map RAM gigapage mask currently in effect.
+#[must_use]
+pub fn ram_gigapages() -> [u64; GIGAPAGE_MASK_WORDS] {
+    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
+    for (word, slot) in mask.iter_mut().zip(&RAM_GIGAPAGES) {
+        *word = slot.load(Ordering::Acquire);
+    }
+    mask
+}
+
+/// `true` if identity gigapage `index` is mapped Normal (RAM) under the
+/// *configured* mask ([`configure_ram_gigapages`]). Scalar — one `u64`
+/// atomic load per query — for the same FP/SIMD-trap reason as
+/// [`configured_gigapage_is_device`].
+fn configured_gigapage_is_ram(index: usize) -> bool {
+    index < ENTRIES_PER_TABLE
+        && mask_word_bit(RAM_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
+}
+
+/// Derive the identity-map RAM gigapage mask from the RAM-backed
+/// extents the boot path knows: each `(base, len)` pair marks every
+/// gigapage it overlaps. A zero-length extent contributes nothing; an
+/// extent reaching past the 512 GiB identity window is clamped (no
+/// representable slot beyond it). The caller passes the kernel image's
+/// own extent among the inputs, so the executing gigapage is always in
+/// the mask — the constructor never builds a space the `switch` caller
+/// cannot fetch from.
+#[must_use]
+pub fn identity_ram_mask(extents: &[(u64, u64)]) -> [u64; GIGAPAGE_MASK_WORDS] {
+    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
+    for &(base, len) in extents {
+        if len == 0 {
+            continue;
+        }
+        let first = (base >> 30) as usize;
+        let last = ((base.saturating_add(len - 1)) >> 30) as usize;
+        let mut index = first;
+        while index <= last && index < ENTRIES_PER_TABLE {
+            mask[index / 64] |= 1 << (index % 64);
+            index += 1;
+        }
+    }
+    mask
+}
+
+/// Fold one combined (Device | RAM) mask word into a running identity
+/// window length: a non-zero word moves the window past its highest set
+/// gigapage. The single accumulation [`identity_window_gigapages`] and
+/// [`configured_identity_gigapages`] share (`AGENTS.md` §2.2).
+const fn window_fold(window: usize, word_index: usize, combined: u64) -> usize {
+    if combined == 0 {
+        window
+    } else {
+        word_index * 64 + (63 - combined.leading_zeros() as usize) + 1
+    }
+}
+
+/// Number of L1 identity gigapages that covers every gigapage named by
+/// either mask: the highest set Device or RAM gigapage plus one, `0`
+/// when both masks are empty.
+///
+/// This is the identity-window length a board-portable caller passes to
+/// [`AddressSpace::new_identity_gigapages`] instead of a hard-coded
+/// board constant: on the QEMU `virt` board (Device GiB 0, RAM GiB 1)
+/// it is 2, on the Pi 4 (RAM from 0, MMIO in GiB 3) it is 4 — a window
+/// truncated short of the MMIO gigapage would drop the console and
+/// interrupt controller from the space the instant it activates.
+#[must_use]
+pub fn identity_window_gigapages(
+    device: &[u64; GIGAPAGE_MASK_WORDS],
+    ram: &[u64; GIGAPAGE_MASK_WORDS],
+) -> usize {
+    let mut window = 0;
+    let mut word_index = 0;
+    while word_index < GIGAPAGE_MASK_WORDS {
+        window = window_fold(window, word_index, device[word_index] | ram[word_index]);
+        word_index += 1;
+    }
+    window
+}
+
+/// [`identity_window_gigapages`] over the *configured* masks
+/// ([`configure_device_gigapages`] / [`configure_ram_gigapages`]).
+///
+/// Deliberately scalar — one atomic `u64` load per mask word, no
+/// 64-byte mask local — for the same FP/SIMD-trap reason as
+/// `configured_gigapage_is_device`.
+#[must_use]
+pub fn configured_identity_gigapages() -> usize {
+    let mut window = 0;
+    let mut word_index = 0;
+    while word_index < GIGAPAGE_MASK_WORDS {
+        let combined = DEVICE_GIGAPAGES[word_index].load(Ordering::Acquire)
+            | RAM_GIGAPAGES[word_index].load(Ordering::Acquire);
+        window = window_fold(window, word_index, combined);
+        word_index += 1;
+    }
+    window
+}
+
+/// Select the leaf attributes for an identity gigapage from its mask
+/// membership: Device wins (MMIO must never be cached or speculated),
+/// RAM maps Normal, and a gigapage in neither mask gets **no**
+/// descriptor — unbacked address space is left invalid so a stray or
+/// speculative access faults instead of wandering onto a bus window
+/// nothing answers ([`configure_ram_gigapages`]). The one policy
+/// [`AddressSpace::new_identity_gigapages`] applies per slot.
+#[must_use]
+pub const fn identity_gigapage_leaf(device: bool, ram: bool) -> Option<u64> {
+    if device {
+        Some(device_leaf_attrs(true))
+    } else if ram {
+        Some(normal_leaf_attrs(true))
+    } else {
+        None
+    }
+}
+
+/// Publish a translation-table store to the MMU's table walker before
+/// the next access depends on it: `dsb ishst` orders the store for the
+/// walker, `isb` discards any fetch-ahead made under the old tables.
+/// Used by [`AddressSpace::ensure_identity_gigapage`]'s invalid→valid
+/// L1 update, which needs no TLB invalidation (a walker never caches an
+/// invalid entry). Host builds walk no hardware tables, so this is a
+/// no-op there.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn publish_table_update() {
+    // SAFETY: barrier-only instruction sequence — no memory or register
+    // operands, no state observed or mutated beyond ordering.
+    unsafe {
+        core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags));
+    }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn publish_table_update() {}
+
+/// True when stage-1 translation is live on this CPU (`SCTLR_EL1.M`).
+///
+/// [`PageTablePool::alloc`] branches its counter discipline on this:
+/// with the MMU off every data access is Device-nGnRnE, where LDXR/STXR
+/// exclusives are not architecturally guaranteed to succeed — on the
+/// BCM2711 the exclusive monitor never grants them, so an atomic
+/// read-modify-write retries forever on real silicon while QEMU's
+/// always-granting monitor keeps every emulated boot green.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn translation_enabled() -> bool {
+    let sctlr: u64;
+    // SAFETY: `SCTLR_EL1` is readable at EL1 and the read has no side
+    // effects.
+    unsafe {
+        core::arch::asm!("mrs {s}, SCTLR_EL1", s = out(reg) sctlr,
+            options(nomem, nostack, preserves_flags));
+    }
+    sctlr & 1 != 0
+}
+
+/// Host twin of the `SCTLR_EL1.M` probe: host tests run under a full
+/// operating-system memory system where atomic read-modify-writes are
+/// always valid, so translation reports live.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+fn translation_enabled() -> bool {
+    true
+}
+
+/// Smallest data-cache line size in bytes encoded by a `CTR_EL0` value:
+/// `DminLine` (bits `[19:16]`) is the log2 of that line's length in
+/// *words*, so the byte length is `4 << DminLine` (ARM ARM D13.2.34 —
+/// 64 bytes on the Cortex-A72's `0x8444_C004`). Pure so the decode is
+/// host-unit-tested; the freestanding cache-maintenance loop
+/// (`PageTablePool::clean_invalidate_to_poc`) feeds it the live
+/// register.
+#[must_use]
+pub const fn dcache_line_bytes(ctr_el0: u64) -> u64 {
+    4 << ((ctr_el0 >> 16) & 0xF)
+}
+
 /// Derive the identity-map Device gigapage mask from the board's
 /// discovered MMIO bases and the kernel image's own extent.
 ///
@@ -395,8 +651,10 @@ pub struct PageTablePool {
 }
 
 // SAFETY: the pool exposes `&self` allocation but every allocated frame
-// is handed out exactly once (monotonic `AtomicUsize`), so distinct
-// allocations never alias.
+// is handed out exactly once — the counter is a monotonic `AtomicUsize`
+// advanced by `fetch_add` whenever translation is live, and by the
+// single-threaded pre-SMP boot CPU alone when it is not
+// ([`PageTablePool::alloc_with`]) — so distinct allocations never alias.
 unsafe impl Sync for PageTablePool {}
 
 impl Default for PageTablePool {
@@ -424,18 +682,105 @@ impl PageTablePool {
     /// Returns `None` when the pool is exhausted — callers handle it as
     /// a closed-fail (`AGENTS.md` §4: deterministic OOM, never panic).
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
-        let idx = self.used.fetch_add(1, Ordering::SeqCst);
+        self.alloc_with(translation_enabled())
+    }
+
+    /// [`Self::alloc`] with the translation state passed in, so the
+    /// host unit tests can exercise both counter disciplines.
+    ///
+    /// With translation live the monotonic counter advances by atomic
+    /// `fetch_add` — the pool is shared (`Sync`) and a concurrent
+    /// allocator on another CPU must observe a unique index. With
+    /// translation *off* that very `fetch_add` is the defect: its
+    /// LDXR/STXR exclusives target Device-nGnRnE memory, where the
+    /// BCM2711 never grants the exclusive monitor, so the retry loop
+    /// spins forever on real silicon (QEMU's monitor always succeeds,
+    /// which kept every emulated boot green). The MMU-off discipline is
+    /// therefore a plain load + store — and that is sound because
+    /// MMU-off allocation is single-threaded by construction: only the
+    /// pre-SMP boot CPU runs Rust with translation disabled and a pool
+    /// in hand (a secondary core allocates nothing before it switches
+    /// to the already-built boot space).
+    fn alloc_with(&self, translation_live: bool) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
+        let idx = if translation_live {
+            let idx = self.used.fetch_add(1, Ordering::SeqCst);
+            if idx >= POOL_SIZE {
+                // Park the counter at the cap so a pathological number
+                // of post-exhaustion calls cannot wrap it.
+                self.used.store(POOL_SIZE, Ordering::SeqCst);
+            }
+            idx
+        } else {
+            let idx = self.used.load(Ordering::SeqCst);
+            if idx < POOL_SIZE {
+                self.used.store(idx + 1, Ordering::SeqCst);
+            }
+            idx
+        };
         if idx >= POOL_SIZE {
-            self.used.store(POOL_SIZE, Ordering::SeqCst);
             return None;
         }
-        // SAFETY: monotonic allocator + atomic fetch_add means this index
-        // is owned by *this* call uniquely; the returned `&'static mut`
-        // never aliases another.
+        // SAFETY: the monotonic counter means this index is owned by
+        // *this* call uniquely — via atomic `fetch_add` when translation
+        // is live, and via the single-threaded pre-SMP boot-CPU
+        // invariant documented above when it is not — so the returned
+        // `&'static mut` never aliases another.
         let cell = &self.storage[idx];
         let table_ref: &'static mut Table = unsafe { &mut *cell.get() };
         Some(&mut table_ref.0)
     }
+
+    /// Clean+invalidate every data-cache line of the pool's backing
+    /// storage to the point of coherency (`dc civac`, line size decoded
+    /// from the live `CTR_EL0` by [`dcache_line_bytes`]).
+    ///
+    /// The boot path calls this once, after the identity tables are
+    /// written and before `AddressSpace::switch` enables the MMU: the
+    /// tables were written with the data cache **off** (every MMU-off
+    /// store is Device-nGnRnE, straight to DRAM), but the walker reads
+    /// them back *cacheable* (`TCR_VALUE` IRGN0/ORGN0) the instant
+    /// translation enables — any stale line the firmware left over the
+    /// pool's addresses would then shadow the real descriptors on real
+    /// silicon (cache-less QEMU cannot show it). The same residue
+    /// hazard is why Linux's `head.S` invalidates its idmap tables to
+    /// PoC before `__enable_mmu`. Fail-closed: the whole fixed-size
+    /// pool is swept (one pass over 64 KiB at boot — off every hot
+    /// path, `AGENTS.md` §2.16), not just the slots handed out so far.
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    pub fn clean_invalidate_to_poc(&self) {
+        let base = self.storage.as_ptr() as u64;
+        let len = core::mem::size_of_val(&self.storage) as u64;
+        let ctr: u64;
+        // SAFETY: `CTR_EL0` is an unprivileged read-only identification
+        // register; reading it has no side effects.
+        unsafe {
+            core::arch::asm!("mrs {ctr}, CTR_EL0", ctr = out(reg) ctr,
+                options(nomem, nostack, preserves_flags));
+        }
+        let line = dcache_line_bytes(ctr);
+        let mut addr = base;
+        while addr < base + len {
+            // SAFETY: `dc civac` performs cache maintenance only — it
+            // never changes memory contents — and every address swept
+            // lies inside this pool's own statically-allocated storage.
+            unsafe {
+                core::arch::asm!("dc civac, {addr}", addr = in(reg) addr,
+                    options(nostack, preserves_flags));
+            }
+            addr += line;
+        }
+        // SAFETY: barrier-only instruction — completes the maintenance
+        // in the full-system domain before the caller enables the MMU.
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        }
+    }
+
+    /// Host twin of the freestanding clean+invalidate: host builds have
+    /// no hardware cache to maintain, so this is a no-op (mirrors
+    /// `publish_table_update`).
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    pub fn clean_invalidate_to_poc(&self) {}
 }
 
 impl PageTableFrames for PageTablePool {
@@ -496,16 +841,21 @@ impl AddressSpace {
             entries: root,
         } = frames.alloc_table()?;
         // The board-configured Device mask says which gigapages hold MMIO
-        // (`virt`: GiB 0; Pi 4: GiB 3); everything else is RAM. The mask
-        // is read one word per slot (`configured_gigapage_is_device`) so
-        // the constructor stays FP/SIMD-free — it runs before some
-        // callers enable `CPACR_EL1.FPEN`.
+        // (`virt`: GiB 0; Pi 4: GiB 3); the RAM mask says which hold
+        // RAM-backed memory. A slot in neither mask stays *invalid*:
+        // unbacked address space must fault, never invite speculation
+        // ([`RAM_GIGAPAGES`]). The masks are read one word per slot
+        // (`configured_gigapage_is_device` /
+        // `configured_gigapage_is_ram`) so the constructor stays
+        // FP/SIMD-free — it runs before some callers enable
+        // `CPACR_EL1.FPEN`.
         for (i, slot) in root.iter_mut().take(gigabytes).enumerate() {
             let paddr = (i as u64) << 30;
-            let leaf = if configured_gigapage_is_device(i) {
-                device_leaf_attrs(true)
-            } else {
-                normal_leaf_attrs(true)
+            let Some(leaf) = identity_gigapage_leaf(
+                configured_gigapage_is_device(i),
+                configured_gigapage_is_ram(i),
+            ) else {
+                continue;
             };
             *slot = descriptor(paddr, leaf);
         }
@@ -514,6 +864,37 @@ impl AddressSpace {
             root,
             frames,
         })
+    }
+
+    /// Install the identity gigapage containing `paddr` into this live
+    /// space when its L1 slot is still invalid, choosing the same leaf
+    /// the constructor would (Device per the configured mask, else
+    /// Normal), and publish the table write to the walker.
+    ///
+    /// The boot path calls this after the post-MMU `/memory` discovery
+    /// widens the known RAM beyond the pre-MMU
+    /// [`configure_ram_gigapages`] facts: an invalid→valid L1 update
+    /// needs no TLB invalidation (a walker never caches an invalid
+    /// entry), only a store barrier before the next access. Returns
+    /// `false` — fail closed, nothing written — when `paddr` lies
+    /// beyond the identity window; an already-valid slot is left
+    /// untouched and reported `true`.
+    pub fn ensure_identity_gigapage(&mut self, paddr: u64) -> bool {
+        let index = (paddr >> 30) as usize;
+        if index >= ENTRIES_PER_TABLE {
+            return false;
+        }
+        if (self.root[index] & attrs::VALID) != 0 {
+            return true;
+        }
+        let leaf = if configured_gigapage_is_device(index) {
+            device_leaf_attrs(true)
+        } else {
+            normal_leaf_attrs(true)
+        };
+        self.root[index] = descriptor((index as u64) << 30, leaf);
+        publish_table_update();
+        true
     }
 
     /// `true` if `vaddr` already resolves to a live leaf (block or page)
@@ -764,7 +1145,8 @@ impl AddressSpace {
     }
 
     /// Activate this address space: program `MAIR_EL1`, `TCR_EL1`,
-    /// `TTBR0_EL1`, and enable the MMU (`SCTLR_EL1.M`), then synchronise.
+    /// `TTBR0_EL1`, and install the full known [`SCTLR_MMU_ON`] value
+    /// (translation plus caches), then synchronise.
     ///
     /// # Safety
     ///
@@ -778,28 +1160,37 @@ impl AddressSpace {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     pub unsafe fn switch(&self) {
         // SAFETY: the caller asserts the new mappings cover `pc`, `sp`,
-        // and MMIO. Programming MAIR/TCR/TTBR0 then setting `SCTLR_EL1.M`
-        // is the documented stage-1 enable sequence; the `tlbi vmalle1`
-        // + `dsb`/`isb` flush stale translations and ensure the new
-        // system-register state is in force before the next access.
+        // and MMIO. Programming MAIR/TCR/TTBR0 then writing `SCTLR_EL1`
+        // is the documented stage-1 enable sequence; the first barrier is
+        // `dsb sy` — not `ish` — because the translation tables were
+        // written with the MMU off, where every store is Device-nGnRnE
+        // and therefore ordered in the *full-system* domain (an
+        // inner-shareable barrier is not architecturally guaranteed to
+        // order them ahead of the walker's first cacheable read; QEMU
+        // cannot show the difference). The `tlbi vmalle1`
+        // + `dsb`/`isb` flush stale translations, `ic iallu` starts the
+        // instruction cache invalid before [`SCTLR_MMU_ON`] enables it,
+        // and the *whole-register* write installs a fully known value —
+        // an OR of `M` into the live register would carry the
+        // architecturally UNKNOWN EL1 reset bits (`WXN`, `EE`, …) into
+        // translated execution, which hangs real silicon (see
+        // [`SCTLR_MMU_OFF`]).
         unsafe {
             core::arch::asm!(
                 "msr MAIR_EL1, {mair}",
                 "msr TCR_EL1, {tcr}",
                 "msr TTBR0_EL1, {ttbr}",
-                "dsb ish",
+                "dsb sy",
                 "tlbi vmalle1",
+                "ic iallu",
                 "dsb ish",
                 "isb",
-                "mrs {tmp}, SCTLR_EL1",
-                "orr {tmp}, {tmp}, {m}",
-                "msr SCTLR_EL1, {tmp}",
+                "msr SCTLR_EL1, {sctlr}",
                 "isb",
                 mair = in(reg) MAIR_VALUE,
                 tcr = in(reg) TCR_VALUE,
                 ttbr = in(reg) self.root_phys,
-                m = in(reg) SCTLR_M,
-                tmp = out(reg) _,
+                sctlr = in(reg) SCTLR_MMU_ON,
                 options(nostack, preserves_flags),
             );
         }

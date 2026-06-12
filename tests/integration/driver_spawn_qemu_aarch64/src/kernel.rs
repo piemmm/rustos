@@ -9,7 +9,10 @@ use alloc::sync::Arc;
 
 use rustos_abi::{CapabilityId, DriverRegisterReply, SYSCALL_MAX_ARGS};
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
-use rustos_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
+use rustos_arch_aarch64::paging::{
+    configure_device_gigapages, configure_ram_gigapages, AddressSpace as ArchAddressSpace,
+    PageTablePool, GIGAPAGE_MASK_WORDS,
+};
 use rustos_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
     Aarch64ArchStorage, SERIAL_SINK,
@@ -244,6 +247,20 @@ fn bring_up_board() -> u64 {
     if gic::configure_from_fdt(&fdt).is_none() {
         qemu_exit::exit_failure(FAIL_GIC);
     }
+
+    // Configure the identity gigapage masks from the `virt` board facts
+    // (Device GiB 0 — the MMIO window — and RAM GiB 1), exactly as the
+    // production boot path derives them from discovery: the production
+    // spawn producer sizes every child's identity window from these masks
+    // (`paging::configured_identity_gigapages`), so driving it under the
+    // unconfigured defaults (RAM = all slots) would request a window
+    // reaching the user bias and the spawn would fail closed.
+    let mut device_mask = [0u64; GIGAPAGE_MASK_WORDS];
+    device_mask[0] = 0b01;
+    configure_device_gigapages(device_mask);
+    let mut ram_mask = [0u64; GIGAPAGE_MASK_WORDS];
+    ram_mask[0] = 0b10;
+    configure_ram_gigapages(ram_mask);
 
     // Enable the identity MMU + EL1 vectors before any atomic
     // read-modify-write runs: the frame allocator, the scheduler, and every

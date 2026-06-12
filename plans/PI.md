@@ -185,6 +185,65 @@ unit test covers the new `build.rs` arch/linker selection; no `cfg-check`
 sits beside `aarch64-virt.ld`; `boot.s` now parks non-boot CPUs
 (`MPIDR_EL1` affinity ≠ 0 → `wfe`) before touching the boot stack, so it
 serves both `virt` (PSCI-held secondaries) and the Pi (all-core release).
+Both EL1 entry trampolines (`boot.s` `.Lin_el1`, `smp.s`) write the known
+MMU-off `SCTLR_EL1` (`paging::SCTLR_MMU_OFF`, ARMv8.0 RES1 bits only,
+unit-test-pinned) before the first EL1 data access, and
+`AddressSpace::switch` installs the whole known `paging::SCTLR_MMU_ON`
+(RES1 + M + C + I, after `ic iallu`) rather than OR-ing `M` into the
+live register: `SCTLR_EL1` is architecturally UNKNOWN at first EL1 entry
+on real silicon (EL2 hand-off and PSCI `CPU_ON` alike), and a carried
+UNKNOWN `WXN`/`EE` bit hung the metal Pi 4 at the MMU switch while QEMU
+(benign reset values) stayed green.
+The same UNKNOWN-reset-state rule holds one level up: the Pi firmware
+stub sets only `SCTLR_EL2` and `CPUECTLR_EL1.SMPEN`, so `boot.s`'s EL2
+path writes every EL2 control register **whole** with the
+unit-test-pinned hand-off values in `rustos_arch_aarch64::el2`
+(`HCR_EL2 = RW`, `CNTHCTL_EL2 = EL1PCTEN|EL1PCEN`, `CPTR_EL2 =` RES1,
+`MDCR_EL2 = 0`, `VPIDR/VMPIDR` mirrored) — an UNKNOWN `HCR_EL2.TVM`
+traps EL1's first `MAIR/TCR/TTBR/SCTLR` write into vector-less EL2,
+hanging the metal Pi 4B silently at the MMU switch while QEMU stayed
+green.
+The boot identity map is bounded to backed memory: gigapages are mapped
+only when named by the configured Device mask or the configured RAM mask
+(`paging::configure_ram_gigapages` / `identity_ram_mask`, default all —
+the historic map — for host tests and the QEMU integration kernels), and
+every other L1 slot is left *invalid* so speculation cannot reach
+unbacked bus windows (the metal Pi 4B wedged at the MMU switch exactly
+there while QEMU stayed green). The boot path derives the RAM mask
+pre-MMU from the kernel image extent, the firmware DTB blob, and the
+scan-out surface, then widens it with the post-MMU-discovered `/memory`
+window — re-installing the mask for later process spaces and extending
+the live boot space via `AddressSpace::ensure_identity_gigapage`
+(invalid→valid, store barrier only). The switch itself is
+real-silicon-honest: the just-written tables are swept to PoC
+(`PageTablePool::clean_invalidate_to_poc`, `dc civac` per
+`CTR_EL0`-decoded line — MMU-off stores bypass the cache but the walker
+reads back cacheable, so firmware cache residue would shadow the
+descriptors) and `switch` orders those Device-nGnRnE stores with a
+full-system `dsb sy` before enabling translation. The pool's allocation
+counter is translation-aware: MMU-off it advances by plain load + store
+(LDXR/STXR exclusives never succeed on the BCM2711's MMU-off
+Device-nGnRnE accesses, so a `fetch_add` spins forever on metal while
+QEMU stays green; MMU-off allocation is pre-SMP boot-CPU-only by
+construction) and reverts to `fetch_add` once translation is live. The
+beacon 2→3 window
+is subdivided by UART-only sub-marks `a`–`d` (tables built / swept to
+PoC / switch returned / vectors installed; decode table in
+`docs/src/platform/aarch64.md`).
+With those fixes the metal Pi 4B (8 GB) boots the production pipeline
+end to end **through user space**: the full beacon sequence, the
+stage-p1 boot line, the kernel-core phase log, PID 1 `init`'s EL0 entry
+and banner, and the spawn/wait/exit supervision cycle all render on
+both UART0 and the HDMI console (every spawned space's identity window
+is derived from the configured Device/RAM gigapage masks,
+`paging::configured_identity_gigapages` — P6c-3/P6d — since the former
+hard-coded 2 GiB `virt` window dropped the Pi's gigapage-3 UART/GIC
+from PID 1's root). The session formerly read end-of-input at its first
+prompt (the metal had nothing queued in the PL011 RX FIFO) and exited,
+exhausting `init`'s crash-loop budget; the kernel-core
+`BlockingConsoleRead` backing (P6e-2) now parks the reader until UART
+RX delivers bytes, so the metal session waits at `rustos$ ` for the
+user to type.
 `kernel/rustos-kernel/build.rs` factors its pure selection logic into
 `src/build_support.rs` (host-unit-tested) and emits a build-glue
 `kernel_isa` cfg + the per-board linker script — no `cfg(target_arch)` in
@@ -228,6 +287,26 @@ the production binary and the existing aarch64 verticals.
 - `boot_aarch64::boot` calls `console::configure_from_fdt` from the `x0`
   DTB before its first log line (MMU-off-safe: the `lib/fdt` reader is
   byte-wise, no multi-byte Device-memory load — W17).
+- Discovery alone leaves real silicon silent: `uart_init::init_from_fdt`
+  runs right after it, muxing GPIO 14/15 to the PL011 (`GPFSEL1` ALT0 +
+  pull-none, gated on a discovered `brcm,bcm2711-gpio` node) and
+  programming the PL011 line (TRM order, 9600 8N1 + FIFOs from the
+  `config.txt`-pinned 48 MHz `init_uart_clock`) — QEMU's powered-up
+  PL011 masked the omission; the metal Pi 4B booted with a permanently
+  silent UART0 without it. Pure, host-tested register arithmetic; the
+  freestanding layer is volatile MMIO only (§2.2).
+- The boot pipeline carries a **boot progress beacon** for on-metal
+  bisection (decode table: `docs/src/platform/aarch64.md`, "Boot
+  progress beacon"): five milestones each emit one raw UART digit
+  (`serial::boot_beacon_byte`) and one bottom-stacked colour band
+  (`video::boot_beacon_band`, lock-free under the boot-CPU/pre-SMP
+  contract, clean-to-PoC), so a silent metal death pinpoints its stage
+  from the serial capture or the screen alone.
+- The real firmware tree is a regression input: the
+  `real_dtb_probe` integration test runs the production discovery walks
+  (console, GPIO, mailbox, memory) over the pinned
+  `bcm2711-rpi-4-b.dtb` when the firmware cache is present (skips
+  honestly when not fetched).
 
 **Done when:** host unit tests cover the mini-UART/PL011 register
 encoders and the `compatible`-string console selection + the discovered
@@ -487,8 +566,11 @@ on its own before the next.
     (`spawn_image` — the new authorise+build+`ProcessSpawned`-audit half of
     `spawn_and_enter`, no enter) while the core registers PID 1 with the
     scheduler + capability table and dispatches it. The aarch64
-    `init_spawn` seam builds a 2 GiB-identity user address space (64 GiB
-    bias avoids the gigapage collision), parses the embedded `rxe`, and
+    `init_spawn` seam builds an identity user address space whose window
+    is derived from the configured Device/RAM gigapage masks
+    (`paging::configured_identity_gigapages` — 2 GiB on `virt`, 4 GiB on
+    the Pi 4, whose UART/GIC live in gigapage 3; the 64 GiB bias avoids
+    the gigapage collision), parses the embedded `rxe`, and
     boxes the `userentry` `eret` as the scheduler task body; the body runs
     under `step` so the per-CPU `current_task` is set when `init`'s first
     `svc` traps back. PID 1 runs as uid 0 with `{CAP_CONSOLE_WRITE}`. The
@@ -568,7 +650,8 @@ on its own before the next.
   double + 8 host tests). **SP3b and SP4 are now landed too, so P6d is
   complete:** the real aarch64 `ProcessSpawn` producer
   (`kernel/rustos-kernel/src/spawn_producer.rs`) builds each child a fresh,
-  hardware-isolated 2 GiB-identity address space whose page tables come from
+  hardware-isolated identity address space (window mask-derived, as PID
+  1's) whose page tables come from
   the kernel's live `FrameAllocator` through a boot-cached `kernel/mem`
   `FrameTableSource` (§24.1 — no fixed reserve, capacity scales with RAM;
   without switching the spawning caller's `TTBR0_EL1`), drives the audited
@@ -629,12 +712,17 @@ on its own before the next.
     zero-sized `UartConsole` now implements `ConsoleRead` (`Ok(0)` inert
     on host), and `boot_aarch64::enter_kernel_core` installs it through
     `BootInfo::with_console_read(&UART_CONSOLE)` beside the existing
-    `.with_console`. This completes the **bootstrap backing** — it feeds
+    `.with_console`; kernel-core's init pipeline wraps whatever device the
+    boot path installed in `BlockingConsoleRead`
+    (`kernel/core/src/console.rs`), which parks an empty-handed
+    `stream_read` caller on the scheduler (`reschedule_current`, the
+    `wait`-syscall poll-and-park loop) and re-polls on redispatch — the
+    backing owns blocking (§20), so user space never sees a spurious
+    end-of-input. This completes the **bootstrap backing** — it feeds
     fd 0's backing object (P6e-3a), it is **not** called directly by the
     shell. The receive-bit decoders are host-unit-tested (2 new
     `console` tests + 1 `arch_wrapper_aarch64` adapter test); the
-    freestanding aarch64 kernel builds clean. Real RX over silicon is
-    exercised once the stream layer binds fd 0 (P6e-3a).
+    freestanding aarch64 kernel builds clean.
   - **P6e-3a — standard-stream ABI + fd table `[x]`.** The two console
     syscalls were evolved **in place** (§2.13) into fd-keyed stream ops:
     `stream_write(fd, buf, len)` (#11) and `stream_read(fd, buf, len)`
@@ -684,8 +772,10 @@ on its own before the next.
       `StdInfoRecord` on fd 3 when a line is dropped (§20.1). It binds to fd
       0/1/2/3 only — **no** `console_*` or device reference (ambient authority
       §4 / hidden coupling §17.3/§17.4). A zero-length read is end of input
-      (clean exit); *blocking* is the stream backing's job (§20), so live UART
-      RX stays an on-metal item (P6e-2). The `RtProcessHost` launches a single
+      (clean exit); *blocking* is the stream backing's job (§20), and the
+      kernel-core `BlockingConsoleRead` backing provides it (P6e-2), so an
+      interactive session sits at its prompt until input arrives. The
+      `RtProcessHost` launches a single
       bare-path command via `spawn` + reaps via `wait`, failing closed
       (`NotImplemented`) on pipes/redirs/args/signals/`cd` the current `spawn`
       ABI cannot express. `lib/abi` gained a tested `Errno::from_i32` decoder
@@ -696,8 +786,9 @@ on its own before the next.
       stdin/stdinfo + `Console`/`ProcessHost` fixtures; 3 new `lib/rt` stdin
       tests; the `Errno::from_i32` round-trip test) and freestanding-built on
       all three bare-metal targets; the `spawn_session_qemu_aarch64` vertical
-      stays green (the session now writes its gated prompt, reads end-of-input,
-      and exits). Docs: `docs/src/userland/shell.md`.
+      proves the interactive loop (the session blocks at its prompt and the
+      runner types a scripted `exit\n` at the guest's serial input). Docs:
+      `docs/src/userland/shell.md`.
     - **P6e-3b-ii — `init` session supervision `[x]`.** PID 1 `init` no
       longer spawns-and-forgets the session: `userland/system/init/src/run.rs`
       now runs a fail-closed **supervise loop** — `spawn` the session, `wait`
@@ -722,10 +813,18 @@ on its own before the next.
       `init`'s `wait`, the session's `exit`, `init`'s second `spawn`); the
       sibling `spawn_init_qemu_aarch64` still PASSes (its witness is now
       `init`'s first audited syscall, the `spawn`, instead of an `exit`) and
-      its doc was updated. Real UART **RX** over fd 0 (so the session blocks
-      instead of exiting at end-of-input) stays an on-metal item — there is no
-      deterministic `-M virt` serial-RX injection (consistent with
-      P6e-2/P6e-3a). Docs: `docs/src/userland/init.md` ("Session supervision").
+      its doc was updated. The session now **blocks** on fd 0 (the kernel-core
+      `BlockingConsoleRead` backing) instead of exiting at end-of-input, and
+      the runner gained deterministic `-M virt` serial-RX injection
+      (`SerialInjection`: pipe QEMU stdin, type a scripted line once the
+      guest prints its prompt marker), so the vertical exercises the full
+      interactive cycle: prompt → injected `exit\n` → reap → relaunch → the
+      second session blocks at its prompt. The session's capability set is
+      `{CAP_CONSOLE_WRITE, CAP_CONSOLE_READ}` on every port (§2.2); ports
+      with no console-read backing (x86_64, riscv64) keep failing closed at
+      `NULL_CONSOLE_READ`, so their session verticals still witness the
+      EOF-exit supervision path. Docs: `docs/src/userland/init.md` ("Session
+      supervision").
     - **Errata — aarch64 exception return-state save/restore `[x]`.** The
       P6e-3b-ii supervise loop hung the `spawn_session_qemu_aarch64` vertical
       (`Outcome::Timeout`): `init`'s `wait` reaped the session and returned,
@@ -1358,7 +1457,8 @@ copy is added on the syscall hot path (§2.16).
   (§24.1 — no fixed `.bss` reserve, capacity scales with RAM, fail-closed
   `NoSpace` only on genuine OOM), builds a 4 GiB-identity child PML4 with
   `new_identity_first_gib`, drives the audited `spawn_image` + `admit_process`
-  (the child gets only `{CAP_CONSOLE_WRITE}`, no ambient authority), and admits
+  (the child gets only `{CAP_CONSOLE_WRITE, CAP_CONSOLE_READ}`, no ambient
+  authority), and admits
   it **Ready** — returning the PID without entering it (a true concurrent spawn).
   **Key decision:** unlike the X3a PID-1 seam (which switches `CR3` to build the
   image), the producer runs under PID 1's own `CR3` — whose
@@ -1790,8 +1890,10 @@ remains (pending hardware).
   (`Fat32::format` / `RustFs::format` — author and consumer share one
   on-disk definition, §2.2), mirroring the
   `tests/integration/{fat32,rustfs}_image` fixture pattern.
-- Boot partition: the verified firmware blobs, a generated `config.txt`
-  (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`;
+- Boot partition: the verified firmware blobs (the `disable-bt` overlay
+  planted at its firmware-fixed `overlays/` path), a generated
+  `config.txt` (`arm_64bit=1`, `kernel=kernel8.img`, `enable_uart=1`,
+  `dtoverlay=disable-bt`, `init_uart_baud=9600`;
   `armstub=armstub8.bin` only when the optional stub is staged), and
   `kernel8.img` — the P1 release ELF flattened by `mkimage`'s fail-closed
   converter (`elfflat`: ELF64/LE/`ET_EXEC`/aarch64 only, `PT_LOAD` layout
@@ -1799,7 +1901,8 @@ remains (pending hardware).
 - Firmware blobs stay uncommitted third-party inputs (§19.3):
   `tools/mkimage/firmware.lock` pins the upstream HTTPS `source`
   directory plus name + byte length + SHA-256 of `start4.elf` /
-  `fixup4.dat` / `bcm2711-rpi-4-b.dtb` at upstream release `1.20240529`
+  `fixup4.dat` / `bcm2711-rpi-4-b.dtb` / `overlays/disable-bt.dtbo`
+  at upstream release `1.20240529`
   (provenance + licence documented in the manifest); verification fails
   closed on any mismatch. `cargo xtask image` fetches any blob missing
   from its `target/pi-firmware/` cache from the pinned source and gates

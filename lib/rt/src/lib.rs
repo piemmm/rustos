@@ -192,9 +192,11 @@ pub fn stdinfo(bytes: &[u8]) -> usize {
 ///
 /// The kernel resolves fd 0 against the caller's descriptor table and
 /// validates the `(buf, len)` pair against the caller's address space
-/// before writing it (`AGENTS.md` §5.4). A short read (fewer bytes than
-/// `buf.len()`, possibly zero when no input is pending) is valid, so the
-/// caller loops.
+/// before writing it (`AGENTS.md` §5.4). The stream *backing* owns
+/// blocking (§20): a read with no pending input parks the caller in the
+/// kernel until input arrives, so a successful read returns at least one
+/// byte. A short read (fewer bytes than `buf.len()`) is valid, so the
+/// caller loops for more.
 ///
 /// The kernel encodes a failure as a negative register (`-errno`, the
 /// standard `abi-v1` convention) — e.g. fd 0 is not a readable stream, or

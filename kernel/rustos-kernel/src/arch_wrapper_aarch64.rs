@@ -123,8 +123,11 @@ impl ConsoleRead for UartConsole {
     fn read(&self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
         // The non-blocking receive path drains whatever input is
         // immediately available and never busy-waits (`AGENTS.md` §2.1);
-        // a read with no pending input is a valid zero-length read the
-        // caller loops on, never an error.
+        // a read with no pending input is a valid zero-length read.
+        // Kernel-core wraps this device in its `BlockingConsoleRead`
+        // adapter, which turns that empty poll into a scheduler park so
+        // a `stream_read` caller waits for input rather than seeing a
+        // spurious end-of-input (`AGENTS.md` §20).
         Ok(serial::read_console_bytes(buf))
     }
 }

@@ -206,7 +206,9 @@ ratchet), not just with the size of the boot block.
   boot-carved block does (§4 — the guard-page invariant is preserved while the
   capacity grows).
 - **Bounded to the identity window.** A chained block must lie wholly within
-  the `IDENTITY_GIB`-gigapage window every spawned address space identity-maps,
+  the identity window every spawned address space identity-maps (on aarch64
+  derived from the configured Device/RAM gigapage masks; a fixed
+  `IDENTITY_GIB` on the other ports),
   so the stack stays mapped — and its guard page faults — in *every* space the
   task runs under. A block the allocator hands back above that window is
   returned to the allocator and the grow **fails closed** (`None`), dropping the

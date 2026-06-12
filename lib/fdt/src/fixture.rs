@@ -275,6 +275,16 @@ pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
     b.prop("reg", &soc_reg(0x7e00_b880, 0x40));
     b.end_node();
 
+    // The BCM2711 GPIO controller at its bus address (CPU-physical
+    // `0xFE20_0000`), the node the aarch64 port's UART pin-mux
+    // discovery binds. The `0xB4` length is the real tree's value (it
+    // predates the BCM2711 pull registers; the consumer sizes the
+    // register window from the datasheet, not this length).
+    b.begin_node("gpio@7e200000");
+    b.prop_str("compatible", "brcm,bcm2711-gpio");
+    b.prop("reg", &soc_reg(0x7e20_0000, 0xb4));
+    b.end_node();
+
     if pl011_base != 0 {
         b.begin_node(&alloc::format!("serial@{pl011_base:x}"));
         b.prop_str("compatible", "arm,pl011");
