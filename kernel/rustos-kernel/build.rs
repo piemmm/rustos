@@ -123,6 +123,14 @@ const PROGRAMS: &[Program] = &[
         prefix: "SHELL",
         rerun: &["src/run.rs", "Run.ld", "Cargo.toml", "build.rs"],
     },
+    Program {
+        pkg: "rustos-login",
+        bin: "rustos-login-run",
+        rel_dir: "../../userland/session/login",
+        fixture: "login_rxe.rs",
+        prefix: "LOGIN",
+        rerun: &["src/run.rs", "Run.ld", "Cargo.toml", "build.rs"],
+    },
 ];
 
 fn main() {

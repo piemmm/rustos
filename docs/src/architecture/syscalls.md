@@ -72,6 +72,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  16 | `wait`         | `i32 pid`, `user_ptr` (status)          | `u64` (pid) | —                   | yes     |
 |  17 | `rlimit_get`   | `u32 kind`, `user_ptr` (out)            | `errno` | —                       | no      |
 |  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
+|  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
 
 ### Capability matrix
 
@@ -86,6 +87,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_CONSOLE_WRITE`| `stream_write`             |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
 | `CAP_CONSOLE_READ` | `stream_read`              |
+| `CAP_USERS_READ`   | `users_db_read`            |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -136,6 +138,27 @@ audited — it changes enforced policy (`AGENTS.md` §5.4.4). The first-party
 Rust wrappers are `rustos_rt::rlimit_get` / `rlimit_set`; the §24 policy,
 the discovered-hardware defaults, and the kernel enforcement are detailed
 in [`resource-limits.md`](./resource-limits.md).
+
+`users_db_read` (no. 19) copies the system user database
+(`/System/Security/Users`, `AGENTS.md` §5.1) the kernel loaded off the
+mounted root volume at boot out to the caller's `(buf, len)` buffer and
+returns the byte count — the exact `users-v1` text, which the caller
+re-parses with the same fail-closed `rustos-users` parser the kernel used
+(`plans/PI.md` P11). It is gated on **`CAP_USERS_READ`**: the text carries
+every account's salted password record, so only the authentication
+principal (login) holds the capability, and every call is **audited**
+(low-volume, security-relevant). The handler serves the
+`kernel/core::users::UsersDbSource` seam, installed by a boot path that
+mounted the root volume and ran the audited `load_users_db` read
+(`KernelSyscallHandlers::with_users_db` / the dispatch hook's mirror);
+until one is installed it fails closed with `NotImplemented`, and a wired
+holder with no database fails closed with `NotFound` — a system without
+accounts refuses every login rather than inventing one (`AGENTS.md`
+§5.4.5). An undersized buffer is refused whole with `BufferTooSmall` (a
+credential database is never truncated, `AGENTS.md` §2.9); a buffer sized
+at the format's 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always
+suffices. The first-party Rust wrapper is `rustos_rt::users_db_read`; the
+C stub is `ros_sys_users_db_read`.
 
 ## Standard streams (fd 0/1/2/3)
 

@@ -390,6 +390,30 @@ pub struct EmbeddedProgram {
     pub path: &'static [u8],
     /// The validated `rxe` image bytes.
     pub rxe: &'static [u8],
+    /// The capabilities the program's manifest requests (`AGENTS.md`
+    /// §5.2, §16.5). The spawn producer grants the spawned child exactly
+    /// this set — each program receives only the authority its own entry
+    /// declares (the shell gets the console pair; login additionally
+    /// gets `PROC_SPAWN` + `USERS_READ`), never the spawning caller's
+    /// set (`AGENTS.md` §4 — no ambient authority).
+    pub caps: &'static [CapabilityId],
+    /// The startup-argument vector handed to the program
+    /// (`rustos_rt::arg`), each entry a NUL-free byte string.
+    pub args: &'static [&'static [u8]],
+}
+
+impl EmbeddedProgram {
+    /// The program's manifest-requested capabilities as a
+    /// [`CapabilitySet`] — the grant the spawn producer admits the child
+    /// with (`AGENTS.md` §5.2).
+    #[must_use]
+    pub fn capability_set(&self) -> CapabilitySet {
+        let mut set = CapabilitySet::empty();
+        for cap in self.caps {
+            set.insert(*cap);
+        }
+        set
+    }
 }
 
 /// Capability-agnostic, path-keyed registry of the embedded programs the
@@ -418,16 +442,16 @@ impl ProgramRegistry {
     /// resolves nothing and fails closed with [`Errno::NotFound`].
     pub const EMPTY: Self = Self::new(&[]);
 
-    /// The validated `rxe` bytes registered under `path`, or [`None`] if
-    /// no embedded program bears that exact path.
+    /// The embedded program registered under `path`, or [`None`] if no
+    /// program bears that exact path.
     ///
     /// The match is exact (a byte-for-byte absolute path); there is no
     /// prefix or alias resolution, so a path either names exactly one
     /// registered program or nothing at all (fail closed, `AGENTS.md`
     /// §2.1).
     #[must_use]
-    pub fn lookup(&self, path: &[u8]) -> Option<&'static [u8]> {
-        self.programs.iter().find(|p| p.path == path).map(|p| p.rxe)
+    pub fn lookup(&self, path: &[u8]) -> Option<&'static EmbeddedProgram> {
+        self.programs.iter().find(|p| p.path == path)
     }
 
     /// Number of registered programs.
@@ -578,15 +602,19 @@ pub trait SpawnCtx {
 /// CPU's syscall dispatch path (the handler is held inside the `Sync`
 /// [`crate::DispatchHook`]), exactly like the console device.
 pub trait ProcessSpawn: Sync {
-    /// Build the program in `rxe` into a fresh isolated address space and
+    /// Build `program`'s `rxe` into a fresh isolated address space and
     /// admit it as a runnable process through `ctx`, returning its PID.
+    ///
+    /// The child is granted exactly `program`'s declared capability set
+    /// and handed its declared argument vector — per-program authority,
+    /// never the spawning caller's (`AGENTS.md` §4, §5.2, §16.5).
     ///
     /// # Errors
     ///
     /// Fails closed with a stable [`Errno`] on any error — a malformed
     /// `rxe`, a build failure, an unrunnable context, or an admission
     /// failure — never a panic or a half-built task (`AGENTS.md` §2.9).
-    fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno>;
+    fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno>;
 }
 
 /// The fail-closed default [`ProcessSpawn`] producer: every build with no
@@ -596,7 +624,7 @@ pub trait ProcessSpawn: Sync {
 pub struct NullProcessSpawn;
 
 impl ProcessSpawn for NullProcessSpawn {
-    fn spawn(&self, _rxe: &[u8], _ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+    fn spawn(&self, _program: &EmbeddedProgram, _ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
 }

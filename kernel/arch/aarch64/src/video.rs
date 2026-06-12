@@ -185,26 +185,6 @@ fn merge_bands(a: Option<DirtyBand>, b: Option<DirtyBand>) -> Option<DirtyBand> 
     }
 }
 
-/// Pixel height of one boot-progress beacon band (the freestanding
-/// `boot_beacon_band`).
-pub const BEACON_BAND_PX: u32 = 16;
-
-/// Pixel-row range `[start, end)` of boot-progress beacon band `index`.
-///
-/// Bands stack **upward from the bottom edge** of the surface (band 0 is
-/// the bottom-most), so they never collide with the boot-log text the
-/// console renders from the top. Returns `None` — the beacon is skipped,
-/// never drawn out of bounds — when the band does not fit the surface
-/// (`AGENTS.md` §2.9).
-#[must_use]
-pub fn beacon_band_rows(geometry: &Geometry, index: u32) -> Option<(u32, u32)> {
-    let end = geometry
-        .height_px
-        .checked_sub(index.checked_mul(BEACON_BAND_PX)?)?;
-    let start = end.checked_sub(BEACON_BAND_PX)?;
-    Some((start, end))
-}
-
 /// A fixed-grid text console rendering the shared 5×7 atlas
 /// ([`rustos_font::glyphs`]) into a borrowed row-major `u32` pixel
 /// buffer.
@@ -393,7 +373,8 @@ static VIDEO_ACTIVE: AtomicBool = AtomicBool::new(false);
 ///
 /// `crate::serial` writes to the screen when this is `true` and falls
 /// back to the UART when it is `false` (video first, serial last
-/// resort).
+/// resort). The log/debug line path additionally echoes to the UART in
+/// debug builds even when this is `true` (`crate::serial::ConsoleWriter`).
 #[must_use]
 pub fn is_active() -> bool {
     VIDEO_ACTIVE.load(Ordering::Acquire)
@@ -418,7 +399,7 @@ pub struct DiscoveredVideo {
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use metal::{boot_beacon_band, configure_from_fdt, write_bytes};
+pub use metal::{configure_from_fdt, write_bytes};
 
 /// Host stand-in for the freestanding writer: rendering needs the
 /// firmware surface, so on the host this is inert (the renderer itself
@@ -664,58 +645,6 @@ mod metal {
                 (row_end - row_start) as usize * stride_bytes,
             );
         }
-    }
-
-    /// Paint boot-progress beacon band `index` in `colour` and clean the
-    /// touched scanlines to the point of coherency, so the band is
-    /// scan-out-visible whether the data cache is on yet or not (pre-MMU
-    /// the writes are uncached and the cleans find no lines — harmless).
-    ///
-    /// Bands stack upward from the bottom edge
-    /// ([`super::beacon_band_rows`]); the count of bands on screen *is*
-    /// the boot progress (`docs/src/platform/aarch64.md`, "Boot progress
-    /// beacon"). A call with no configured console, or a band that does
-    /// not fit the surface, is a no-op (fail closed, `AGENTS.md` §2.9).
-    ///
-    /// # Safety
-    ///
-    /// Boot-CPU, single-threaded, pre-SMP only: it renders **without**
-    /// taking [`RENDER_LOCK`], because the beacon must also work on the
-    /// MMU-off boot path where the lock's atomic read-modify-write is
-    /// UNPREDICTABLE (the constraint that orders the whole aarch64 boot,
-    /// `plans/PI.md` P6c-2). The caller must guarantee no other CPU or
-    /// interrupt handler touches the surface concurrently — true for the
-    /// boot pipeline before SMP bring-up with interrupts masked.
-    pub unsafe fn boot_beacon_band(index: u32, colour: u32) {
-        if !super::is_active() {
-            return;
-        }
-        // SAFETY: `VIDEO_ACTIVE` was observed `true` (acquire), so the
-        // boot CPU's release-published initialisation is visible, and
-        // the caller's pre-SMP single-threaded contract stands in for
-        // the render lock (see the function's safety contract).
-        let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
-            return;
-        };
-        let geometry = *state.console.geometry();
-        let Some((row_start, row_end)) = super::beacon_band_rows(&geometry, index) else {
-            return;
-        };
-        // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
-        // validated at configure time, identity-mapped RAM; the caller's
-        // contract makes this the only live reference.
-        let pixels = unsafe {
-            core::slice::from_raw_parts_mut(state.fb_base as *mut u32, state.pixel_count)
-        };
-        let stride = geometry.stride_px as usize;
-        for row in row_start..row_end {
-            let offset = row as usize * stride;
-            pixels[offset..offset + geometry.width_px as usize].fill(colour);
-        }
-        clean_dcache_range(
-            state.fb_base + row_start as usize * stride * 4,
-            (row_end - row_start) as usize * stride * 4,
-        );
     }
 
     /// Clean `[start, start + len)` from the data cache to the point of
@@ -981,29 +910,6 @@ mod tests {
         // The next glyph lands on the cleared top row.
         let dirty = console.write_byte(&mut pixels, b'C');
         assert_eq!(dirty, Some((0, 8)));
-    }
-
-    // --- Boot-progress beacon bands ----------------------------------
-
-    #[test]
-    fn beacon_bands_stack_up_from_the_bottom_edge() {
-        let geometry = Geometry::for_display(640, 480, 2560).expect("usable surface");
-        assert_eq!(beacon_band_rows(&geometry, 0), Some((464, 480)));
-        assert_eq!(beacon_band_rows(&geometry, 1), Some((448, 464)));
-        assert_eq!(beacon_band_rows(&geometry, 4), Some((400, 416)));
-    }
-
-    #[test]
-    fn a_beacon_band_that_does_not_fit_is_rejected() {
-        let geometry = Geometry::for_display(640, 480, 2560).expect("usable surface");
-        // The last whole band fits; one past it does not, and an index
-        // whose offset arithmetic overflows is rejected, not wrapped.
-        assert_eq!(
-            beacon_band_rows(&geometry, 480 / BEACON_BAND_PX - 1),
-            Some((0, 16))
-        );
-        assert_eq!(beacon_band_rows(&geometry, 480 / BEACON_BAND_PX), None);
-        assert_eq!(beacon_band_rows(&geometry, u32::MAX), None);
     }
 
     #[test]

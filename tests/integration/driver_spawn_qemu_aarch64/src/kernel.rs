@@ -213,6 +213,12 @@ fn reply_send_caps() -> CapabilitySet {
 static DRIVER_PROGRAMS: [EmbeddedProgram; 1] = [EmbeddedProgram {
     path: DRIVER_PATH,
     rxe: PROGRAM_RXE,
+    // The driver's grant and argument vector come from the verified
+    // manifest via the host's load gate, not the registry entry: this
+    // vertical drives `spawn_with` with [`driver_caps`] + the reply
+    // endpoint directly, so the registry-declared sets stay empty.
+    caps: &[],
+    args: &[],
 }];
 
 /// The registry the host resolves [`DRIVER_PATH`] against (byte-for-byte,
@@ -402,7 +408,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     // Resolve the verified driver payload from its `/System/Drivers/` path.
-    let Some(rxe) = DRIVER_REGISTRY.lookup(DRIVER_PATH) else {
+    let Some(program) = DRIVER_REGISTRY.lookup(DRIVER_PATH) else {
         qemu_exit::exit_failure(FAIL_LOOKUP);
     };
 
@@ -451,7 +457,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         &NULL_PROCESS_WAIT,
     );
     if AARCH64_PROCESS_SPAWN
-        .spawn_with(rxe, &ctx, driver_caps(), &[b"drvstub", REPLY_ENDPOINT_ARG])
+        .spawn_with(
+            program.rxe,
+            &ctx,
+            driver_caps(),
+            &[b"drvstub", REPLY_ENDPOINT_ARG],
+        )
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_SPAWN);

@@ -16,7 +16,7 @@ use crate::error::LoginError;
 use crate::events;
 use crate::session::{
     AuthenticatedUser, Authenticator, Credentials, Prompt, SessionKind, SessionLauncher,
-    SessionOutcome,
+    SessionOutcome, INPUT_LINE_MAX,
 };
 
 /// Construction-time configuration for a [`Login`] instance.
@@ -69,39 +69,68 @@ impl<'a> Login<'a> {
         let mut remaining = self.cfg.max_attempts;
         while remaining > 0 {
             remaining -= 1;
-            let credentials = self.read_credentials()?;
-            if let Ok(user) = self.cfg.authenticator.authenticate(&credentials) {
-                return self.start_session(&credentials.username, &user);
+            // The line buffers live on this frame, not the heap: the whole
+            // prompt → authenticate path must work without an allocator
+            // (the `mem_map`-backed userland heap is not required to read
+            // a keystroke). The password buffer is zeroed after every
+            // attempt, success or failure (`AGENTS.md` §4 — nothing that
+            // held a credential survives the attempt).
+            let mut username_buf = [0u8; INPUT_LINE_MAX];
+            let mut password_buf = [0u8; INPUT_LINE_MAX];
+            let attempt = self.attempt(&mut username_buf, &mut password_buf);
+            password_buf.fill(0);
+            match attempt {
+                Ok(Some(outcome)) => return Ok(outcome),
+                Ok(None) => self.cfg.prompt.write("Login incorrect\n"),
+                Err(err) => return Err(err),
             }
-            self.audit_auth_failed(&credentials.username);
-            self.cfg.prompt.write("Login incorrect\n");
         }
         self.audit_locked_out();
         Err(LoginError::TooManyAttempts)
     }
 
-    /// Collect a username and (un-echoed) password from the terminal.
-    fn read_credentials(&self) -> Result<Credentials, LoginError> {
+    /// Run one prompt → authenticate → launch attempt.
+    ///
+    /// Returns `Ok(Some(outcome))` when a session ran, `Ok(None)` when the
+    /// credentials were rejected (the caller consumes one attempt and
+    /// re-prompts), and `Err` for the fail-closed outcomes (console
+    /// failure, session-launch failure).
+    fn attempt(
+        &self,
+        username_buf: &mut [u8],
+        password_buf: &mut [u8],
+    ) -> Result<Option<SessionOutcome>, LoginError> {
         self.cfg.prompt.write("Username: ");
-        let username = self.read("username", |p| p.read_line())?;
+        let username = self.read("username", username_buf, |p, buf| p.read_line(buf))?;
         self.cfg.prompt.write("Password: ");
-        let password = self.read("password", |p| p.read_secret())?;
-        Ok(Credentials { username, password })
+        let password = self.read("password", password_buf, |p, buf| p.read_secret(buf))?;
+        let credentials = Credentials { username, password };
+        if let Ok(user) = self.cfg.authenticator.authenticate(&credentials) {
+            return self.start_session(credentials.username, &user).map(Some);
+        }
+        self.audit_auth_failed(credentials.username);
+        Ok(None)
     }
 
-    /// Run one terminal read, auditing and surfacing a console failure.
-    fn read(
+    /// Run one terminal read into `buf`, auditing and surfacing a console
+    /// failure, and validating the filled bytes as UTF-8 (`AGENTS.md`
+    /// §5.4 — every input validated, in one place). A read whose claimed
+    /// length exceeds `buf` is refused the same way (fail closed).
+    fn read<'b>(
         &self,
         stage: &str,
-        op: impl FnOnce(&dyn Prompt) -> Result<alloc::string::String, Errno>,
-    ) -> Result<alloc::string::String, LoginError> {
-        match op(self.cfg.prompt) {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                self.audit_console_error(stage);
-                Err(LoginError::Console(err))
-            }
-        }
+        buf: &'b mut [u8],
+        op: impl FnOnce(&dyn Prompt, &mut [u8]) -> Result<usize, Errno>,
+    ) -> Result<&'b str, LoginError> {
+        let outcome = match op(self.cfg.prompt, &mut *buf) {
+            Ok(len) if len > buf.len() => Err(Errno::OutOfRange),
+            Ok(len) => core::str::from_utf8(&buf[..len]).map_err(|_| Errno::OutOfRange),
+            Err(err) => Err(err),
+        };
+        outcome.map_err(|err| {
+            self.audit_console_error(stage);
+            LoginError::Console(err)
+        })
     }
 
     /// Choose and launch a session for an authenticated user.
@@ -135,8 +164,9 @@ impl<'a> Login<'a> {
         self.cfg
             .prompt
             .write("Session type — text (default) or graphical? ");
-        let answer = self.read("session choice", |p| p.read_line())?;
-        Ok(SessionKind::from_choice(&answer))
+        let mut answer_buf = [0u8; INPUT_LINE_MAX];
+        let answer = self.read("session choice", &mut answer_buf, |p, buf| p.read_line(buf))?;
+        Ok(SessionKind::from_choice(answer))
     }
 
     fn emit(&self, level: Level, id: EventId, fields: &[Field<'_>]) {
@@ -337,22 +367,25 @@ mod tests {
     use rustos_log::{Event, EventId, Level, Sink};
 
     /// Prompt that replays scripted input lines and records what was written.
+    ///
+    /// Scripted entries are raw bytes, not `&str`, so tests can replay
+    /// invalid UTF-8 and over-long lines through the same fixture.
     struct MockPrompt {
-        lines: RefCell<VecDeque<Result<String, Errno>>>,
-        secrets: RefCell<VecDeque<Result<String, Errno>>>,
+        lines: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
+        secrets: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
         written: RefCell<Vec<String>>,
     }
     impl MockPrompt {
         fn new(lines: &[&str], secrets: &[&str]) -> Self {
             Self {
-                lines: RefCell::new(lines.iter().map(|s| Ok((*s).to_string())).collect()),
-                secrets: RefCell::new(secrets.iter().map(|s| Ok((*s).to_string())).collect()),
+                lines: RefCell::new(lines.iter().map(|s| Ok(s.as_bytes().to_vec())).collect()),
+                secrets: RefCell::new(secrets.iter().map(|s| Ok(s.as_bytes().to_vec())).collect()),
                 written: RefCell::new(Vec::new()),
             }
         }
         fn with_results(
-            lines: Vec<Result<String, Errno>>,
-            secrets: Vec<Result<String, Errno>>,
+            lines: Vec<Result<Vec<u8>, Errno>>,
+            secrets: Vec<Result<Vec<u8>, Errno>>,
         ) -> Self {
             Self {
                 lines: RefCell::new(lines.into_iter().collect()),
@@ -363,22 +396,30 @@ mod tests {
         fn output(&self) -> String {
             self.written.borrow().concat()
         }
+        fn fill(
+            queue: &RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
+            buf: &mut [u8],
+        ) -> Result<usize, Errno> {
+            let line = queue
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Err(Errno::NotFound))?;
+            if line.len() > buf.len() {
+                return Err(Errno::LengthOutOfRange);
+            }
+            buf[..line.len()].copy_from_slice(&line);
+            Ok(line.len())
+        }
     }
     impl Prompt for MockPrompt {
         fn write(&self, text: &str) {
             self.written.borrow_mut().push(text.to_string());
         }
-        fn read_line(&self) -> Result<String, Errno> {
-            self.lines
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or(Err(Errno::NotFound))
+        fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            Self::fill(&self.lines, buf)
         }
-        fn read_secret(&self) -> Result<String, Errno> {
-            self.secrets
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or(Err(Errno::NotFound))
+        fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            Self::fill(&self.secrets, buf)
         }
     }
 
@@ -389,13 +430,14 @@ mod tests {
         caps: CapabilitySet,
     }
     impl Authenticator for FixedAuth {
-        fn authenticate(&self, c: &Credentials) -> Result<AuthenticatedUser, Errno> {
+        fn authenticate(&self, c: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
             if c.username == self.username && c.password == self.password {
                 Ok(AuthenticatedUser {
                     uid: Uid(1000),
                     primary_gid: Gid(1000),
                     supplementary_gids: Vec::new(),
                     capabilities: self.caps,
+                    shell: "/Apps/Shell.app/Run".to_string(),
                 })
             } else {
                 Err(Errno::PermissionDenied)
@@ -605,6 +647,57 @@ mod tests {
         assert_eq!(login.run(), Err(LoginError::TooManyAttempts));
         assert_eq!(sink.count(events::AUTH_FAILED), 2);
         assert_eq!(sink.count(events::LOCKED_OUT), 1);
+        assert!(launcher.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_input_fails_closed_as_a_console_error() {
+        // A line of non-UTF-8 bytes (terminal line noise) must fail closed
+        // as a console error — it is never handed to the authenticator
+        // (`AGENTS.md` §5.4 — every input validated).
+        let prompt =
+            MockPrompt::with_results(alloc::vec![Ok(alloc::vec![0xFF, 0xFE, 0xFD])], Vec::new());
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            prompt: &prompt,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        assert_eq!(login.run(), Err(LoginError::Console(Errno::OutOfRange)));
+        assert_eq!(sink.count(events::CONSOLE_ERROR), 1);
+        assert!(launcher.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn over_long_input_line_fails_closed() {
+        // The prompt refuses a line longer than the caller's buffer
+        // (`INPUT_LINE_MAX`) with `LengthOutOfRange`; login surfaces it as
+        // a console failure rather than truncating (`AGENTS.md` §2.9).
+        let long = alloc::vec![b'a'; crate::session::INPUT_LINE_MAX + 1];
+        let prompt = MockPrompt::with_results(alloc::vec![Ok(long)], Vec::new());
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            prompt: &prompt,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        assert_eq!(
+            login.run(),
+            Err(LoginError::Console(Errno::LengthOutOfRange))
+        );
+        assert_eq!(sink.count(events::CONSOLE_ERROR), 1);
         assert!(launcher.launched.borrow().is_empty());
     }
 

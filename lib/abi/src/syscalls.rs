@@ -491,6 +491,29 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::USERS_DB_READ,
+        name: "users_db_read",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // The user database carries every account's identity and salted
+        // password record, so reading it is privileged rather than ambient
+        // (`AGENTS.md` §4): only the authentication principal (login) is
+        // granted `CAP_USERS_READ`. It IS audited per call (`AGENTS.md`
+        // §5.4.4) — credential-database access is a security-relevant
+        // decision and is low-volume (once per login process), so the
+        // record cannot drown the log.
+        required_capability: Some(CapabilityId::USERS_READ),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

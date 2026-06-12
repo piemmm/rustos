@@ -229,7 +229,7 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            serial_input: None,
+            serial_input: Vec::new(),
         }
     }
 

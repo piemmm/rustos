@@ -26,19 +26,29 @@ use rustos_caps::CapabilitySet;
 
 pub use rustos_users::{Gid, Uid};
 
+/// Maximum accepted input-line length, in bytes, for every prompt read —
+/// a validation bound on untrusted console input (`AGENTS.md` §24.4),
+/// matching the `users-v1` format's own per-line bound. A longer line is
+/// refused by the [`Prompt`] implementation, never silently truncated
+/// (`AGENTS.md` §2.9).
+pub const INPUT_LINE_MAX: usize = 512;
+
 /// A username and the password offered for it.
 ///
-/// Login holds the password only for as long as it takes the
-/// [`Authenticator`] to verify it, then drops it. Zeroing the freed
-/// allocation is the kernel allocator's job (`AGENTS.md` §4 — zero-on-free
-/// for any allocation that ever held credentials); login keeps its lifetime
-/// minimal and never logs it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Credentials {
+/// Both fields **borrow** the caller's stack line buffers rather than
+/// owning heap strings: the whole prompt → authenticate path runs without
+/// an allocator, because the userland heap (the `mem_map` syscall's
+/// production producer, `plans/SPAWN.md` `SP5b`) is not required to read a
+/// keystroke. Login holds the password only for as long as it takes the
+/// [`Authenticator`] to verify it, then zeroes the backing buffer itself
+/// (`AGENTS.md` §4 — nothing that held a credential survives the attempt);
+/// it is never logged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Credentials<'a> {
     /// The offered account name.
-    pub username: String,
+    pub username: &'a str,
     /// The offered secret. Never logged.
-    pub password: String,
+    pub password: &'a str,
 }
 
 /// The identity `kernel/sec` resolves a successful authentication to.
@@ -58,6 +68,11 @@ pub struct AuthenticatedUser {
     pub supplementary_gids: Vec<Gid>,
     /// The maximum capability set this user may exercise this session.
     pub capabilities: CapabilitySet,
+    /// Absolute path of the user's shell of choice (`AGENTS.md` §5.1) —
+    /// the program [`SessionLauncher::launch`] starts as the text
+    /// session. Comes from the account's `/System/Security/Users`
+    /// record; login never substitutes its own default.
+    pub shell: String,
 }
 
 /// Which kind of session to launch after a successful authentication.
@@ -119,27 +134,39 @@ pub struct SessionOutcome {
 /// are not displayed). Login never performs ambient terminal I/O itself
 /// (`AGENTS.md` §4).
 ///
+/// Both reads fill a **caller-provided** buffer instead of returning an
+/// owned string, so the prompt path takes no allocator (`AGENTS.md` §2.16
+/// — the userland heap is not required to read a keystroke; the buffer is
+/// the caller's stack). Login validates the filled bytes as UTF-8 itself
+/// (`AGENTS.md` §5.4 — every input validated, in one place).
+///
 /// [`read_secret`]: Prompt::read_secret
 pub trait Prompt {
     /// Write a prompt or message to the terminal.
     fn write(&self, text: &str);
 
-    /// Read one echoed line of input (the username, the session choice),
-    /// with the trailing newline removed.
+    /// Read one echoed line of input (the username, the session choice)
+    /// into `buf`, returning the number of bytes filled. The line
+    /// terminator is not stored.
     ///
     /// # Errors
     ///
-    /// Returns the implementation's [`Errno`] if the terminal cannot be read
-    /// (closed, timed out, …). Login treats this as fatal and fails closed.
-    fn read_line(&self) -> Result<String, Errno>;
+    /// Returns the implementation's [`Errno`] if the terminal cannot be
+    /// read (closed, timed out, …) — login treats this as fatal and fails
+    /// closed — or [`Errno::LengthOutOfRange`] for a line longer than
+    /// `buf`, which is refused rather than truncated (`AGENTS.md` §2.9).
+    fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 
-    /// Read one line of input **without echoing it** (the password), with the
-    /// trailing newline removed.
+    /// Read one line of input **without echoing it** (the password) into
+    /// `buf`, returning the number of bytes filled. The line terminator is
+    /// not stored.
     ///
     /// # Errors
     ///
-    /// Returns the implementation's [`Errno`] if the terminal cannot be read.
-    fn read_secret(&self) -> Result<String, Errno>;
+    /// As [`Prompt::read_line`]: the implementation's [`Errno`] when the
+    /// terminal cannot be read, [`Errno::LengthOutOfRange`] for an
+    /// over-long line.
+    fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 }
 
 /// Verifies credentials against `kernel/sec` and the credential store.
@@ -159,7 +186,7 @@ pub trait Authenticator {
     /// error whether the account is unknown or the password is wrong, so a
     /// caller cannot probe for valid usernames (`AGENTS.md` §5 — fail closed,
     /// no information leak). Login does not inspect the cause.
-    fn authenticate(&self, credentials: &Credentials) -> Result<AuthenticatedUser, Errno>;
+    fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno>;
 }
 
 /// Starts a session under an authenticated user's identity.

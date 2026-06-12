@@ -32,6 +32,7 @@ use alloc::vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use rustos_abi::driver::DriverHandle;
+use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{Field, Level, Sink};
@@ -44,6 +45,53 @@ use crate::fs::{Credentials, Metadata, Mode, Path, Vfs, VfsError};
 /// Absolute path of the user database on the root volume
 /// (`AGENTS.md` §16.2).
 pub const USERS_DB_PATH: &str = "/System/Security/Users";
+
+/// The kernel-held user database the `users_db_read` syscall serves
+/// (`plans/PI.md` P11).
+///
+/// The boot path that mounts the root volume and runs [`load_users_db`]
+/// installs an implementation holding the validated `users-v1` text;
+/// the syscall handler copies that exact text out to the (capability-
+/// gated, `CAP_USERS_READ`) caller, which re-parses it with the same
+/// fail-closed `rustos-users` parser. Serving the *text* rather than a
+/// re-serialisation keeps one canonical byte representation end to end
+/// (`AGENTS.md` §2.2).
+///
+/// `Sync` because the single installed source is shared by the per-CPU
+/// syscall handlers, exactly like [`crate::ConsoleWrite`].
+pub trait UsersDbSource: Sync {
+    /// The held database's exact `users-v1` text.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when no database is held — the root volume
+    /// is not mounted, or the boot read refused the record — so a
+    /// system without accounts refuses every login rather than
+    /// inventing one (`AGENTS.md` §5.4.5). The default
+    /// [`NullUsersDbSource`] returns [`Errno::NotImplemented`] to mark
+    /// an inert interface (`AGENTS.md` §2.9).
+    fn text(&self) -> Result<&[u8], Errno>;
+}
+
+/// The users-database source installed before any real holder exists.
+///
+/// Every read fails closed with [`Errno::NotImplemented`] — a kernel
+/// build with no users-database service wired never fabricates
+/// accounts (`AGENTS.md` §2.9 / §5.4).
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullUsersDbSource;
+
+impl UsersDbSource for NullUsersDbSource {
+    fn text(&self) -> Result<&[u8], Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullUsersDbSource`] instance the syscall handler
+/// defaults to until a boot path installs a real holder through
+/// `KernelSyscallHandlers::with_users_db` (mirrors
+/// [`crate::console::NULL_CONSOLE`]).
+pub static NULL_USERS_DB: NullUsersDbSource = NullUsersDbSource;
 
 /// `DriverHandle` the loader's private root mount carries. The loader
 /// maps the handle to the caller's borrowed driver itself, so the value

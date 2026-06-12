@@ -175,6 +175,20 @@ impl CapabilityId {
     /// capability (`AGENTS.md` §5.4 — capability checks before state
     /// touches; §4 — no ambient authority).
     pub const RLIMIT_RAISE: Self = Self(20);
+    /// Read the system user database (`/System/Security/Users`,
+    /// `AGENTS.md` §5.1, §16.2) through the `users_db_read` syscall
+    /// (`abi-v1` number 19).
+    ///
+    /// The database carries every account's identity and salted password
+    /// record, so reading it is privileged rather than ambient
+    /// (`AGENTS.md` §4 — no ambient authority; §5.3 — the on-disk record
+    /// is itself permission-checked). Only the authentication principal
+    /// (login) is granted it: login verifies offered credentials against
+    /// the delivered records and drops them immediately (`AGENTS.md` §4 —
+    /// secret hygiene). An ordinary app can neither enumerate accounts
+    /// nor see a password record (`AGENTS.md` §5.4 — capability checks
+    /// before state touches).
+    pub const USERS_READ: Self = Self(21);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -207,6 +221,7 @@ impl CapabilityId {
         (Self::CONSOLE_WRITE, "CAP_CONSOLE_WRITE"),
         (Self::CONSOLE_READ, "CAP_CONSOLE_READ"),
         (Self::RLIMIT_RAISE, "CAP_RLIMIT_RAISE"),
+        (Self::USERS_READ, "CAP_USERS_READ"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an

@@ -46,10 +46,18 @@ fail-closed.
 The `Authenticator` returns the **same** error whether the account is
 unknown or the password is wrong, and `login` never inspects the cause: a
 failed attempt is always reported to the user as `Login incorrect`, so the
-prompt cannot be used to probe for valid usernames (`AGENTS.md` §5). The
-password is held only for as long as the credential check takes and is
-never logged; zeroing its freed allocation is the kernel allocator's job
-(`AGENTS.md` §4).
+prompt cannot be used to probe for valid usernames (`AGENTS.md` §5).
+
+The prompt/credential input path is **allocation-free**: `Prompt`'s reads
+fill caller-provided stack buffers (`INPUT_LINE_MAX`, 512 bytes — a §24.4
+validation bound; an over-long line is refused whole with
+`LengthOutOfRange`, never truncated) and `Credentials` borrows `&str`
+slices of them, so reading a keystroke never touches the userland heap
+(whose production `mem_map` producer is staged, `plans/SPAWN.md` SP5b).
+`Login` validates each filled line as UTF-8 itself — line noise fails
+closed as a console error, never reaching the authenticator — and zeroes
+the password buffer after every attempt, success or failure (`AGENTS.md`
+§4); the password is never logged.
 
 ## Capability handoff (`AGENTS.md` §5.2)
 
@@ -91,10 +99,39 @@ or locked accounts, `AGENTS.md` §19.1). Every refusal is mapped to the
 same `Errno::PermissionDenied`, and a success is mapped to the
 `AuthenticatedUser` identity tuple straight from the matched record —
 including the user's **shell of choice**, which the `SessionLauncher`
-launches as the text session. Reading the database text off the root
-volume (and wiring the launcher to the real `spawn` path) is the login
-*binary*'s job, staged with the per-console session work in
-`plans/PI.md`.
+launches as the text session.
+
+## The `Run` binary (`/System/Services/login`)
+
+`src/run.rs` is the shipped login service — the pure-Rust (`rustos-rt`,
+`AGENTS.md` §1) program PID 1 `init`'s `session` directive launches and
+supervises (`plans/PI.md` P11). It wires the real seams:
+
+- **`Prompt`** over the inherited standard streams (`AGENTS.md` §20):
+  prompts to fd 1, lines from fd 0, read byte-wise into the state
+  machine's stack buffers (`INPUT_LINE_MAX` — an over-long line is
+  refused whole, never truncated). The bootstrap stream backing never
+  echoes input, so the password read is un-echoed by construction; the
+  echo-*control* contract lands with the stream-layer echo itself (P11
+  increment 1, "separate console contexts").
+- **`UsersAuthenticator`** over the database obtained through the
+  capability-gated `users_db_read` syscall (`CAP_USERS_READ`, see
+  [`architecture/syscalls.md`](../architecture/syscalls.md)) and re-parsed
+  with the fail-closed `rustos-users` parser. When no database is held —
+  an installer image, or no root volume mounted — a **deny-all**
+  authenticator is wired instead: the prompt stays up and every attempt is
+  refused (`AGENTS.md` §5.4.5, never an invented account).
+- **`SessionLauncher`** over the `spawn`/`wait` syscalls: the record's
+  shell of choice is spawned (receiving only its registered program grant,
+  `AGENTS.md` §5.2) and waited on; its exit code closes the session.
+
+Each finished session or exhausted attempt budget loops back to a fresh
+prompt; a dead console exits fail-closed and `init` relaunches login. The
+whole path from launch through prompt and credential collection is
+allocation-free (see above) — only parsing a *delivered* user database
+allocates, which arrives with the staged `mem_map` producer
+(`plans/SPAWN.md` SP5b); login's audit records are emitted as terse lines
+on fd 2 until a userland audit transport exists.
 
 ## Audit events
 

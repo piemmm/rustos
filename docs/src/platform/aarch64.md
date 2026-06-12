@@ -226,7 +226,11 @@ when one is configured** (see [Framebuffer boot
 console](#framebuffer-boot-console-video-first-uart-fallback)) and
 otherwise through whatever UART the `console` module currently points
 at; before any discovery runs that is the `virt` board's PL011 at
-`0x0900_0000`, which QEMU routes to `-serial stdio`.
+`0x0900_0000`, which QEMU routes to `-serial stdio`. A **debug build**
+(`cfg(debug_assertions)`) additionally echoes every boot-log/debug line
+to the UART even when the video console is active, so a serial capture
+of a development boot always carries the full diagnostic stream; a
+release build writes each line to exactly one backing.
 
 ## Board-discovered console
 
@@ -289,51 +293,6 @@ A non-PL011 console (the mini-UART fallback) keeps the firmware's line
 state untouched. The same writes run harmlessly under QEMU, so metal
 and emulation share one path.
 
-### Boot progress beacon
-
-An on-metal boot that dies before the first formatted log line is
-bisected by the **boot progress beacon**: `boot_aarch64::boot` emits one
-milestone signal on *each* bring-up channel as it passes five fixed
-points. On the UART the signal is a single ASCII digit
-(`serial::boot_beacon_byte` — raw, bounded, bypassing the formatted
-sink); on the screen it is a 16-pixel colour band
-(`video::boot_beacon_band`), the bands stacking **upward from the
-bottom edge** so the count of bands is the progress even if colours are
-hard to judge. Band colours are symmetric under an R↔B channel swap, so
-they read the same whether the firmware honoured BGRA or RGBA.
-
-| beacon | UART digit | screen band (bottom-up) | milestone just completed |
-|--------|------------|-------------------------|--------------------------|
-| 1 | `1` | green | DTB walked: console discovered, UART line programmed (`uart_init`), GIC + video configured (a band can only appear from here on) |
-| 2 | `2` | magenta | Device gigapage mask derived and installed |
-| 3 | `3` | white | MMU switch returned (translation + caches live) and EL1 vectors installed |
-| 4 | `4` | grey | full-tree FDT walks (memory window, timer, PSCI) completed post-MMU |
-| 5 | `5` | dark green | memory map + kthread guard arena settled — the formatted boot log line follows immediately |
-
-The beacon 2→3 window — the MMU switch — is further subdivided by four
-lower-case UART-only marks emitted by `enable_mmu_and_vectors` (no
-screen bands; the window is too tight for the render path):
-
-| mark | just completed |
-|------|----------------|
-| `a` | identity page tables built in the boot pool |
-| `b` | tables cleaned+invalidated to PoC — the `switch` register sequence is next, so `b` with no `c` pins a hang to the MMU-enable instant itself |
-| `c` | `switch` returned; the `c` byte is itself the first post-MMU access (a Device-mapped UART write), proving translated execution and the Device mask together |
-| `d` | EL1 exception vectors installed (`3` follows immediately) |
-
-Decode rule: the last digit captured / band painted is the last stage
-that **completed**; the stage after it is where the boot died. No `1`
-on the UART and a never-blanked screen means the kernel died before or
-inside the very first DTB walk (or was never entered). A blanked (black)
-screen with no bands means the video console came up inside milestone 1
-but the boot died before the milestone-1 beacon's band — i.e. still
-inside `configure_mmio_from_dtb` after video bring-up.
-
-The beacon is deliberately pre-MMU-safe: the band fill takes no render
-lock (an atomic CAS is UNPREDICTABLE MMU-off) under a boot-CPU/pre-SMP
-contract, and both channels are fail-closed no-ops when their device is
-not configured.
-
 **QEMU caveat (honest emulation gap, `AGENTS.md` §2.1).** QEMU's `raspi*`
 machine models do **not** emulate the Raspberry Pi GPU-firmware DTB
 hand-off: they enter an ELF `-kernel` with `x0 = 0` (GDB-verified on
@@ -365,16 +324,18 @@ poll-and-park loop the `wait` syscall uses) and re-polls when the caller
 is next dispatched — so a `stream_read` of fd 0 (whose backing the
 spawner attaches to this device, `AGENTS.md` §20) **waits** for the
 discovered UART's input rather than reporting a spurious end-of-input
-(the backing owns blocking, §20). That wait is what holds the shell
-session at its `rustos$ ` prompt until the user types.
+(the backing owns blocking, §20). That wait is what holds the login
+session at its `Username: ` prompt (`plans/PI.md` P11) until the user
+types.
 
 This is the bootstrap stream **backing** the spawner attaches to fd 0
 (`AGENTS.md` §20); it is not a program-facing interface. The receive-bit
 decoders are host-unit-tested; the standard-stream layer binds fd 0 to
 this backing (`plans/PI.md` P6e-3a), and the `spawn_session_qemu_aarch64`
 vertical proves the interactive path end to end: the runner types a
-scripted `exit\n` at the guest's serial input once the blocked session
-prints its prompt.
+scripted over-long line at the guest's serial input once the blocked
+login prints its prompt, and login's fail-closed exit drives `init`'s
+reap-and-relaunch cycle.
 
 ## Framebuffer boot console (video first, UART fallback)
 
@@ -417,13 +378,7 @@ Pi):
 - **Routing.** `serial::ConsoleWriter` (the log sink) and
   `serial::write_console_bytes` (the `stream_write` fd 1/2 backing)
   both render to the screen when `video::is_active` and fall back to
-  the UART otherwise. *Temporarily*, while the Pi 4 on-metal verticals
-  are brought up, both paths also mirror every byte to the discovered
-  UART (the PL011 `UART0`, 9600 8N1 per the `config.txt` knobs above)
-  even when the video console is active, so the boot log is capturable
-  over the serial header alongside the screen; the mirror is removed
-  when bring-up no longer needs it (`kernel/arch/aarch64/src/serial.rs`
-  module docs). The UART transmit wait is **bounded**
+  the UART otherwise. The UART transmit wait is **bounded**
   (`console::tx_wait`): a transmitter that never drains — e.g. a
   flow-blocked PL011 still attached to the Bluetooth chip — is declared
   wedged after `TX_POLL_BUDGET` polls and bytes are dropped (one cheap

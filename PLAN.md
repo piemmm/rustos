@@ -692,8 +692,21 @@ spec §18.
   (`rustos_kernel_core::users::load_users_db`) loads the database off the
   mounted root volume through the §5.3-checked VFS delegation, audited
   and fail-closed (proven on `-M virt` by the `users_db_qemu_aarch64`
-  vertical). Console wiring (login binary, per-console sessions) is
-  staged in `plans/PI.md` P11.
+  vertical). The login `Run` binary ships at `/System/Services/login`
+  (PID 1's `session` directive points at it): it obtains the kernel-held
+  database through the `CAP_USERS_READ`-gated `users_db_read` syscall
+  (`abi-v1` no. 19), wires `UsersAuthenticator` (or a deny-all
+  authenticator when no database is held — installer images refuse every
+  login, §5.4.5), and spawns the record's shell of choice via
+  `spawn`/`wait`. The embedded-program registry carries per-program
+  capability grants and argument vectors (`EmbeddedProgram` — login
+  additionally holds `CAP_PROC_SPAWN` + `CAP_USERS_READ`; the shell only
+  the console pair). Remaining console wiring (per-console sessions,
+  stream-layer echo + its control contract) is staged in `plans/PI.md`
+  P11; login's authenticate path on a real volume additionally rides the
+  production `mem_map` producer (`plans/SPAWN.md` SP5b — the userland
+  heap is inert until it lands, so login's path to its prompt is
+  allocation-free).
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 

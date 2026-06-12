@@ -41,15 +41,17 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 
 /// The startup configuration compiled into the `init` `Run` binary.
 ///
-/// This is the "for now" config of `plans/PI.md` P6b: open the console and
-/// start the user's shell. Later stages replace the compiled-in default with a
-/// config read from `/System/Settings` once a filesystem is mounted; the
-/// parser does not change.
+/// The session is the login service (`plans/PI.md` P11): every text console
+/// sits at a `login:` prompt, and the authenticated account's shell of
+/// choice is started by login, never directly by `init`. Later stages
+/// replace the compiled-in default with a config read from
+/// `/System/Settings` once a filesystem is mounted; the parser does not
+/// change.
 pub const DEFAULT_CONFIG: &str = "\
-# RustOS PID 1 startup configuration (plans/PI.md P6b).
-# Open the system console and start the user's session in a shell.
+# RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
+# Open the system console and start the login service as the session.
 console
-session /Apps/Shell.app/Run
+session /System/Services/login
 ";
 
 /// The first line `init` writes to the console once it reaches user mode.
@@ -194,9 +196,9 @@ mod tests {
     use alloc::string::String;
 
     #[test]
-    fn default_config_parses_to_console_plus_shell_session() {
+    fn default_config_parses_to_console_plus_login_session() {
         let config = StartupConfig::parse(DEFAULT_CONFIG).expect("default config parses");
-        assert_eq!(config.session(), "/Apps/Shell.app/Run");
+        assert_eq!(config.session(), "/System/Services/login");
     }
 
     #[test]

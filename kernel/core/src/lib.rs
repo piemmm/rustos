@@ -130,4 +130,6 @@ pub use spawn::{
     EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
-pub use users::{load_users_db, UsersLoadError, USERS_DB_PATH};
+pub use users::{
+    load_users_db, NullUsersDbSource, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
+};

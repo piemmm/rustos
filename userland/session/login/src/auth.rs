@@ -11,6 +11,8 @@
 //! [`Errno::PermissionDenied`], so the prompt cannot probe for valid
 //! usernames (`AGENTS.md` §5.4).
 
+use alloc::string::ToString;
+
 use rustos_abi::Errno;
 use rustos_users::UsersDb;
 
@@ -30,16 +32,17 @@ impl<'a> UsersAuthenticator<'a> {
 }
 
 impl Authenticator for UsersAuthenticator<'_> {
-    fn authenticate(&self, credentials: &Credentials) -> Result<AuthenticatedUser, Errno> {
+    fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
         let record = self
             .db
-            .authenticate(&credentials.username, credentials.password.as_bytes())
+            .authenticate(credentials.username, credentials.password.as_bytes())
             .map_err(|_| Errno::PermissionDenied)?;
         Ok(AuthenticatedUser {
             uid: record.uid(),
             primary_gid: record.primary_gid(),
             supplementary_gids: record.supplementary_gids().to_vec(),
             capabilities: record.capabilities(),
+            shell: record.shell().to_string(),
         })
     }
 }
@@ -49,7 +52,6 @@ mod tests {
     use super::UsersAuthenticator;
     use crate::session::{Authenticator, Credentials};
 
-    use alloc::string::ToString;
     use alloc::vec;
     use rustos_abi::{CapabilityId, Errno};
     use rustos_caps::CapabilitySet;
@@ -95,11 +97,8 @@ mod tests {
         UsersDb::new(vec![ada, locked]).expect("valid db")
     }
 
-    fn credentials(username: &str, password: &str) -> Credentials {
-        Credentials {
-            username: username.to_string(),
-            password: password.to_string(),
-        }
+    fn credentials<'a>(username: &'a str, password: &'a str) -> Credentials<'a> {
+        Credentials { username, password }
     }
 
     #[test]
@@ -114,6 +113,7 @@ mod tests {
         assert_eq!(user.supplementary_gids, vec![Gid(4)]);
         assert!(user.capabilities.contains(CapabilityId::PROC_SPAWN));
         assert!(!user.capabilities.contains(CapabilityId::USER_ADMIN));
+        assert_eq!(user.shell, "/Apps/Shell.app/Run");
     }
 
     #[test]

@@ -210,6 +210,26 @@ impl SyscallNumber {
     /// [`crate::Errno::OutOfRange`]; a build with no resource-limit service
     /// wired fails closed with [`crate::Errno::NotImplemented`].
     pub const RLIMIT_SET: Self = Self(18);
+    /// Read the system user database (`/System/Security/Users`) the kernel
+    /// loaded off the mounted root volume at boot (`AGENTS.md` §5.1,
+    /// `plans/PI.md` P11).
+    ///
+    /// Arguments: `buf: *mut u8` (a non-null user pointer) and
+    /// `len: usize` (the buffer's capacity). Returns the number of bytes
+    /// copied — the database's exact `users-v1` text, which the caller
+    /// parses with the same fail-closed `lib/users` parser the kernel
+    /// used. Gated by [`crate::CapabilityId::USERS_READ`]: the text
+    /// carries every account's salted password record, so only the
+    /// authentication principal (login) may read it (`AGENTS.md` §4 — no
+    /// ambient authority). A buffer smaller than the database fails
+    /// closed with [`crate::Errno::BufferTooSmall`] — the kernel never
+    /// truncates a credential database (`AGENTS.md` §2.9); sizing the
+    /// buffer at the format's own 64 KiB maximum always suffices. A build
+    /// holding no database — no root volume mounted, or the record was
+    /// refused at boot — fails closed with [`crate::Errno::NotFound`], so
+    /// a system without accounts refuses every login rather than
+    /// inventing one (`AGENTS.md` §5.4.5).
+    pub const USERS_DB_READ: Self = Self(19);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -304,6 +324,7 @@ mod tests {
         assert_eq!(SyscallNumber::WAIT.as_u16(), 16);
         assert_eq!(SyscallNumber::RLIMIT_GET.as_u16(), 17);
         assert_eq!(SyscallNumber::RLIMIT_SET.as_u16(), 18);
+        assert_eq!(SyscallNumber::USERS_DB_READ.as_u16(), 19);
     }
 
     #[test]

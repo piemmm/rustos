@@ -84,11 +84,14 @@ struct QemuTest {
     /// the serial console. Used by the aarch64 virtio-input vertical to
     /// make a real device→driver input event deterministic.
     keyboard: Option<(&'static str, &'static str)>,
-    /// When `Some((marker, line))`, pipe QEMU's stdin and write `line`
-    /// to the guest's serial input once it prints `marker` on the
-    /// serial console. Used by the aarch64 interactive-session vertical
-    /// to type at the blocked shell deterministically.
-    serial: Option<(&'static str, &'static str)>,
+    /// Ordered serial-input script: for each `(marker, line)` step, pipe
+    /// QEMU's stdin and write `line` to the guest's serial input once it
+    /// prints `marker` on the serial console past the previous step's
+    /// match. The run fails if the guest exits before every step was
+    /// sent, so an unreached prompt is a test failure. Used by the
+    /// aarch64 interactive-session vertical to hold a deterministic
+    /// multi-exchange dialogue with the blocked login.
+    serial: &'static [(&'static str, &'static str)],
 }
 
 /// Which filesystem volume (if any) the host harness plants on the
@@ -120,7 +123,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
@@ -138,7 +141,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3a (c7-bin) deliverable: boot the production
     // `rustos-kernel` boot pipeline (Multiboot2 → ACPI/MADT →
@@ -164,7 +167,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
     // `rustos-kernel` boot pipeline and, on observing
@@ -191,7 +194,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
     // target QEMU round-trip for the C-callable syscall stub runtime
@@ -220,7 +223,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
     // half of the `lib/abi-sys` syscall-stub round-trip. riscv64 has no
@@ -250,7 +253,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
     // half of the `lib/abi-sys` syscall-stub round-trip. Like riscv64,
@@ -281,7 +284,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // ring-3 exercise for the Arch HAL "enter user mode" primitive
@@ -314,7 +317,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
     // crt0-linked-program spawn round-trip. The build script compiles the
@@ -346,7 +349,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
     // crt0-linked-program spawn round-trip — the EL0 analogue of the riscv64
@@ -379,7 +382,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // crt0-linked-program spawn round-trip — the ring-3 analogue of the
@@ -415,7 +418,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
     // end-to-end C-program round-trip — the headline CC5 work. The build
@@ -447,7 +450,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
     // end-to-end C-program round-trip — the EL0 analogue of the riscv64
@@ -479,7 +482,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
     // end-to-end C-program round-trip — the ring-3 analogue of the
@@ -514,7 +517,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4 deliverable: boot the production kernel pipeline,
     // instantiate `rustos_drvhost::Host`, load a baked-in signed
@@ -533,7 +536,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4 first-driver vertical: boot the production kernel
     // pipeline, then on `AuditEvent::BootCompleted` load the signed
@@ -567,7 +570,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
     // kernel pipeline, then drive a real hardware-interrupt round
@@ -594,7 +597,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-pci-x86-64` performs a
     // full real virtio-blk-pci round-trip — boot → `mechanism_one`
@@ -623,7 +626,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 5 end-to-end FAT32 vertical: `rustos-test-fat32-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
@@ -645,7 +648,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Fat32,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 5 end-to-end rustfs vertical: `rustos-test-rustfs-virtio-blk-
     // pci-x86-64` reuses the exact virtio-blk-pci bring-up above, then
@@ -668,7 +671,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::Rustfs,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-pci-x86-64` performs a
     // full real virtio-net-pci round-trip on the same shared bring-up
@@ -694,7 +697,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-kernel-arch-boot-riscv64` boots
     // the riscv64 `virt`-board pipeline (OpenSBI → S-mode entry →
@@ -715,7 +718,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage RV-P3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-riscv64`
     // boots the *production* riscv64 `rustos-kernel` pipeline
@@ -745,7 +748,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3c: `rustos-test-timer-preempt-qemu-riscv64` is the riscv64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -770,7 +773,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3c: `rustos-test-ipi-smp-qemu-riscv64` is the riscv64
     // multi-hart SMP deliverable. It boots the `virt` board with two
@@ -796,7 +799,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
     // deliverable — the EL1/GICv2 analogue of `ipi_smp_qemu_riscv64`. It
@@ -821,7 +824,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3c: `rustos-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
@@ -853,7 +856,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
     // primitives drive the live scheduler" deliverable — the EL1/GICv2
@@ -888,7 +891,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
     // runtime proven on real silicon — two kernel-thread tasks ping-pong
@@ -918,7 +921,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the riscv64 sibling of the
     // aarch64 kthread-switch vertical above — the same "two kthreads
@@ -946,7 +949,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the x86_64 sibling of the
     // kthread-switch vertical — the same "two kthreads ping-pong through
@@ -974,7 +977,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
     // HAL slice (`rustos_arch_api::CrossCpuTlbShootdown`) proven on real
@@ -995,7 +998,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // WIRING Stage W6: the aarch64 cross-CPU TLB-shootdown vertical. The
     // boot core starts a second core via PSCI `CPU_ON`, then
@@ -1015,7 +1018,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
     // port whose cross-CPU invalidation is entirely hand-written software
@@ -1037,7 +1040,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3c: `rustos-test-memory-isolation-qemu-riscv64` is the riscv64
     // half of the Stage-3 "memory-isolation test passes" per-sub-stage
@@ -1063,7 +1066,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
     // `rustos-test-stack-guard-qemu-riscv64` is the riscv64 sibling of
@@ -1093,7 +1096,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
     // *production* fault-form, the riscv64 sibling of
@@ -1128,7 +1131,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-blk-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-blk-pci
@@ -1153,7 +1156,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4.D Item 4: `rustos-test-virtio-net-mmio-riscv64` is the
     // riscv64 `virt`-board MMIO analogue of the x86_64 virtio-net-pci
@@ -1176,7 +1179,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4 first-driver vertical (display class):
     // `rustos-test-framebuffer-display-qemu-riscv64` boots the riscv64
@@ -1202,7 +1205,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
     // framebuffer vertical): `rustos-test-vesa-qemu-x86-64` boots the
@@ -1229,7 +1232,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage P6c-2 (`plans/PI.md`): `rustos-test-kernel-arch-boot-aarch64`
     // boots the *production* aarch64 `rustos-kernel` pipeline
@@ -1255,7 +1258,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage P6c-3 (`plans/PI.md`): `rustos-test-spawn-init-qemu-aarch64`
     // boots the *production* aarch64 `rustos-kernel` pipeline
@@ -1284,9 +1287,9 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
-    // SPAWN Stage SP3b (`plans/SPAWN.md`):
+    // SPAWN Stage SP3b (`plans/SPAWN.md`) + `plans/PI.md` P11:
     // `rustos-test-spawn-session-qemu-aarch64` boots the *production*
     // aarch64 `rustos-kernel` pipeline (`boot_aarch64::boot`) on the `virt`
     // board with both the `InitSpawn` seam and the runtime `ProcessSpawn`
@@ -1294,20 +1297,34 @@ const TESTS: &[QemuTest] = &[
     // emits `BootCompleted` it spawns PID 1 `init` into EL0 (`ProcessSpawned`,
     // `EventId(4030)` #1); `init` writes its banner and supervises the
     // session: it issues the audited `spawn` syscall (`SyscallInvoked`,
-    // `EventId(5000)` #1) for `/Apps/Shell.app/Run` and `wait`s on it
-    // (`SyscallInvoked` #2). The producer builds the session a fresh,
+    // `EventId(5000)` #1) for `/System/Services/login` (P11) and `wait`s on
+    // it (`SyscallInvoked` #2). The producer builds login a fresh,
     // hardware-isolated address space (`ProcessSpawned` #2) and admits it
-    // Ready; the session writes its `rustos$ ` prompt and **blocks** in
-    // `stream_read` on the kernel-core `BlockingConsoleRead` backing. The
-    // runner then types the scripted `exit\n` line at the guest's serial
-    // input (the `serial` injection below); the shell's `exit` builtin
-    // exits the session (`SyscallInvoked` #3), `init` reaps it and
-    // relaunches (`SyscallInvoked` #4, `ProcessSpawned` #3). The audit sink
-    // reports PASS through the ARM semihosting finisher once it has seen
-    // three `ProcessSpawned` and four audited syscalls — proving the
-    // interactive read path delivered real UART RX bytes to the blocked
-    // session *and* that supervision (reap + restart) ran. Single CPU and a
-    // 60-second budget match the other boot-then-do-fixed-work tests.
+    // Ready; login's `users_db_read` fails closed (no root volume on this
+    // board, so no database is held), it wires the deny-all authenticator,
+    // writes its `Username: ` prompt and **blocks** in `stream_read` on the
+    // kernel-core `BlockingConsoleRead` backing. The runner then holds the
+    // scripted dialogue below with it: it types `root`, waits for the
+    // `Password: ` prompt (proving login read the username line whole and
+    // re-prompted rather than crashing per keystroke — the regression the
+    // allocation-free prompt path fixed), types a password the deny-all
+    // authenticator refuses (`Login incorrect`), waits for the **second**
+    // `Username: ` prompt of the retry loop, and finally types a 513-byte
+    // line (one byte past login's 512-byte `LINE_MAX` validation bound,
+    // `AGENTS.md` §24.4); login refuses the over-long line whole, records
+    // the console error, and exits fail-closed; `init` reaps it and
+    // relaunches it (`ProcessSpawned` #3). The audit sink reports PASS
+    // through the ARM semihosting finisher once it has seen three
+    // `ProcessSpawned` and four audited syscalls — and the runner fails
+    // the run if the guest exits before every scripted prompt appeared
+    // and every line was sent, so a login that dies mid-dialogue cannot
+    // pass on its relaunch alone. Together that proves the interactive
+    // read path delivered real UART RX bytes to the blocked login across
+    // a full prompt→reply→re-prompt exchange *and* that supervision
+    // (reap + restart) ran. Logging in for real rides the P8/P11
+    // root-volume mount; until then every credential check on this board
+    // fails closed (§5.4.5). Single CPU and a 60-second budget match the
+    // other boot-then-do-fixed-work tests.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-aarch64",
         binary: "rustos-test-spawn-session-qemu-aarch64",
@@ -1319,7 +1336,14 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: Some(("rustos$ ", "exit\n")),
+        serial: &[
+            ("Username: ", "root\n"),
+            ("Password: ", "wrong\n"),
+            (
+                "Username: ",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+            ),
+        ],
     },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
     // vertical — the first proof that two **user** (EL0) tasks timeshare one
@@ -1349,7 +1373,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
@@ -1385,7 +1409,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
     // `mem_unmap` vertical — the first proof that an EL0 process obtains and
@@ -1416,7 +1440,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the riscv64 `mem_map`/
     // `mem_unmap` vertical — the riscv64 sibling of the aarch64 vertical above,
@@ -1450,7 +1474,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage RV-X1 (`plans/PI.md` §X tail): the riscv64 single-resumable-
     // user-kthread vertical — the first proof that a U-mode task is admitted as
@@ -1485,7 +1509,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage RV-X2 (`plans/PI.md` §X tail): the riscv64 two-task EL0
     // timeshare vertical — the first proof that TWO U-mode tasks timeshare one
@@ -1521,7 +1545,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
     // concurrent-producer vertical — the cross-port sibling of
@@ -1557,7 +1581,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
     // `mem_unmap` vertical — the x86_64 sibling of the aarch64/riscv64
@@ -1593,7 +1617,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage G1/G2 (`plans/PI.md`): the x86_64 guard-page fault-form
     // vertical — the proof that x86_64, the last `BlockSplit::Pending` port,
@@ -1624,7 +1648,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage G3c (`plans/PI.md`): the x86_64 production guard-page
     // fault-form vertical — the proof that an *overrunning kthread* faults
@@ -1656,7 +1680,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
     // vertical — the first proof that a ring-3 task is admitted as a *resumable*
@@ -1691,7 +1715,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage X2 (`plans/PI.md` §X): the x86_64 two-task EL0 timeshare — the
     // cross-port sibling of the aarch64 SP2c timeshare, and the exerciser for
@@ -1732,7 +1756,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage X3a (`plans/PI.md` §X): the x86_64 PID 1 (`init`) ring-3
     // bring-up vertical — the cross-port sibling of the aarch64
@@ -1765,7 +1789,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage X3b + X4 follow-on (`plans/PI.md` §X): the x86_64 runtime
     // `spawn` concurrent producer **and** `init` session-supervision vertical —
@@ -1806,7 +1830,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
     // vertical — the proof that the `rustos-rt` `mem_map`-backed
@@ -1839,7 +1863,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // SPAWN Stage SP6b (`plans/SPAWN.md` §1): the aarch64 `wait` vertical —
     // the proof that a parent process can block on, reap, and read back the
@@ -1871,7 +1895,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage X4 (`plans/PI.md`): the x86_64 `wait` vertical — the cross-port
     // sibling of the aarch64 `wait_qemu_aarch64`, proving a parent ring-3
@@ -1906,7 +1930,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage RV-X4 (`plans/PI.md` §X tail): the riscv64 `wait` vertical —
     // the cross-port sibling of the aarch64 `wait_qemu_aarch64` / x86_64
@@ -1940,7 +1964,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // PI Stage P2 (`plans/PI.md`): `rustos-test-uart-console-qemu-aarch64`
     // is the runtime proof of the board-discovered console. It boots the
@@ -1969,7 +1993,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-blk-mmio-aarch64` is the aarch64 `virt`-board
@@ -1996,7 +2020,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // `plans/PI.md` P11 (root-volume read path at boot):
     // `rustos-test-users-db-qemu-aarch64` reuses the exact virtio-blk-mmio
@@ -2022,7 +2046,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::UsersRoot,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
@@ -2046,7 +2070,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
     // the EL1/GICv2 + ramfb analogue of the riscv64 framebuffer-display
@@ -2074,7 +2098,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: true,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3b: `rustos-test-timer-preempt-qemu-aarch64` is the aarch64
     // half of the Stage-3 "timer interrupt drives the scheduler"
@@ -2095,7 +2119,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage 3b: `rustos-test-memory-isolation-qemu-aarch64` is the
     // aarch64 half of the Stage-3 "memory-isolation test passes"
@@ -2120,7 +2144,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G1):
     // `rustos-test-stack-guard-qemu-aarch64` proves the live mechanism the
@@ -2149,7 +2173,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G2):
     // `rustos-test-stack-arena-qemu-aarch64` proves the boot-time
@@ -2180,7 +2204,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
     // fault-form. `rustos-test-stack-overrun-qemu-aarch64` proves that an
@@ -2214,7 +2238,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
     // vertical — the EL1/GICv2-SPI analogue of `rustos-test-irq-qemu-x86-64`.
@@ -2243,7 +2267,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: None,
-        serial: None,
+        serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
     // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
@@ -2273,7 +2297,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
-        serial: None,
+        serial: &[],
     },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
     // the `virt`-board virtio-input MMIO analogue of the aarch64 input
@@ -2304,7 +2328,7 @@ const TESTS: &[QemuTest] = &[
         ramfb: false,
         fs_disk: FsDisk::None,
         keyboard: Some(("virtio-qemu: virtio-input eventq armed", "a")),
-        serial: None,
+        serial: &[],
     },
 ];
 
@@ -2483,9 +2507,10 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
     }
 
     // Pipe QEMU's stdin for the interactive-session vertical and let the
-    // runner type the scripted line once the guest prints its prompt.
-    if let Some((marker, line)) = t.serial {
-        spec = spec.with_serial_input(marker, line);
+    // runner replay the scripted exchange, each line typed once the guest
+    // prints that step's prompt.
+    for (marker, line) in t.serial {
+        spec = spec.with_serial_input(*marker, *line);
     }
 
     match Runner::run(&spec).map_err(|e| format!("test --qemu ({}): {e}", t.package))? {

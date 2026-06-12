@@ -228,13 +228,9 @@ counter is translation-aware: MMU-off it advances by plain load + store
 (LDXR/STXR exclusives never succeed on the BCM2711's MMU-off
 Device-nGnRnE accesses, so a `fetch_add` spins forever on metal while
 QEMU stays green; MMU-off allocation is pre-SMP boot-CPU-only by
-construction) and reverts to `fetch_add` once translation is live. The
-beacon 2→3 window
-is subdivided by UART-only sub-marks `a`–`d` (tables built / swept to
-PoC / switch returned / vectors installed; decode table in
-`docs/src/platform/aarch64.md`).
+construction) and reverts to `fetch_add` once translation is live.
 With those fixes the metal Pi 4B (8 GB) boots the production pipeline
-end to end **through user space**: the full beacon sequence, the
+end to end **through user space**: the
 stage-p1 boot line, the kernel-core phase log, PID 1 `init`'s EL0 entry
 and banner, and the spawn/wait/exit supervision cycle all render on
 both UART0 and the HDMI console (every spawned space's identity window
@@ -298,13 +294,6 @@ the production binary and the existing aarch64 verticals.
   PL011 masked the omission; the metal Pi 4B booted with a permanently
   silent UART0 without it. Pure, host-tested register arithmetic; the
   freestanding layer is volatile MMIO only (§2.2).
-- The boot pipeline carries a **boot progress beacon** for on-metal
-  bisection (decode table: `docs/src/platform/aarch64.md`, "Boot
-  progress beacon"): five milestones each emit one raw UART digit
-  (`serial::boot_beacon_byte`) and one bottom-stacked colour band
-  (`video::boot_beacon_band`, lock-free under the boot-CPU/pre-SMP
-  contract, clean-to-PoC), so a silent metal death pinpoints its stage
-  from the serial capture or the screen alone.
 - The real firmware tree is a regression input: the
   `real_dtb_probe` integration test runs the production discovery walks
   (console, GPIO, mailbox, memory) over the pinned
@@ -2053,27 +2042,73 @@ two users — or the same user twice — can be logged in concurrently.
   virt` vertical (virtio-blk MMIO → rustfs mount → loader →
   authenticate). The Pi's metal root mount (P8/P9) and the
   volume-key hand-off to the loader on metal ride the P8/P9 metal
-  items; login consuming the loaded database is increment 2.
+  items.
+- **The login `Run` binary + the `users_db_read` delivery seam**
+  (former increment 1): the login service ships at
+  `/System/Services/login` (`userland/session/login/src/run.rs`, a
+  `rustos-rt` program) and PID 1 `init`'s `session` directive points at
+  it. The kernel-held database is delivered through the new `abi-v1`
+  syscall **`users_db_read`** (no. 19, gated on the new
+  **`CAP_USERS_READ`** (21), audited): the kernel serves the exact
+  `users-v1` text from the `kernel/core::users::UsersDbSource` seam
+  (installed via `with_users_db`; fail-closed `NotImplemented` unwired /
+  `NotFound` with no database / `BufferTooSmall` rather than truncate),
+  and login re-parses it with the same fail-closed `rustos-users`
+  parser. With no database (installer image, no root volume) login wires
+  a deny-all authenticator — the prompt stays up and every attempt is
+  refused (§5.4.5). The `SessionLauncher` spawns the authenticated
+  record's **shell of choice** via `spawn`/`wait`; the embedded-program
+  registry now carries **per-program capability grants + argument
+  vectors** (`EmbeddedProgram.caps`/`.args`, all three arch producers —
+  login holds the console pair + `CAP_PROC_SPAWN` + `CAP_USERS_READ`,
+  the shell only the console pair). Proven by kernel/core +
+  kernel/syscall + login unit tests and the reworked
+  `spawn_session_qemu_{aarch64,x86_64}` verticals (init supervises
+  login; the aarch64 vertical holds an ordered scripted dialogue over
+  the runner's multi-step serial script — `root` → `Password: ` →
+  refused password → `Login incorrect` → second `Username: ` → a
+  513-byte over-bound line → fail-closed exit → reap → relaunch — and
+  the runner fails the run if the guest exits before every scripted
+  prompt appeared, so a login crashing per keystroke cannot pass on
+  relaunch event counts alone).
+  Login's **entire prompt/credential input path is allocation-free** —
+  the userland heap's production `mem_map` producer is staged
+  (`plans/SPAWN.md` SP5b), so any allocation there would abort the
+  process (the original per-keystroke `Vec::push` did exactly that on
+  metal: every typed character killed login and `init`'s relaunch
+  re-printed `Username: `). `rustos_login::Prompt` fills caller stack
+  buffers (`INPUT_LINE_MAX` = 512), `Credentials` borrows `&str`, and
+  `Login::run` zeroes the password buffer after every attempt; only the
+  authenticate path (which parses a delivered database) still needs
+  SP5b and the P8 root mount.
+- **Beacon + bring-up debug removal** (former increment 2): the
+  boot-progress beacons (`boot_aarch64`/`serial`/`video`) and the
+  serial bring-up mirror in `kernel/arch/aarch64/src/serial.rs` are
+  deleted; console output is video-first with the UART as the fallback,
+  exactly as `AGENTS.md` §10 routes it — except that **debug builds**
+  (`cfg(debug_assertions)`) echo every log/debug line to the UART as
+  well as the screen (`serial::ConsoleWriter`), so a serial capture of
+  a development boot always carries the full diagnostic stream; release
+  builds write each line to exactly one backing.
 
 **Remaining (next increments, in order):**
 
-1. **The login `Run` binary** — a `rustos-rt` program wiring the real
-   seams: `Prompt` over fd 0/1 (un-echoed password — needs an echo-control
-   contract on the stream backing), `UsersAuthenticator` over the loaded
-   database, and a `SessionLauncher` that spawns the record's shell path
-   via `spawn` and `wait`s; registered as `/System/Services/login` in the
-   kernel program registry; `init`'s `session` directive points at login,
-   which supervises per-console sessions.
-2. **Separate console contexts** — split the aarch64 video console and
+1. **Separate console contexts** — split the aarch64 video console and
    UART into two independent `ConsoleRead`/`ConsoleWrite` stream backings
    with their own descriptor sets, and have `init` spawn one login per
    discovered text console. Keystroke echo / line editing live in the
-   stream layer, not in programs.
-3. **Beacon + bring-up debug removal** — delete the boot-progress beacons
-   (`boot_aarch64`) and the serial bring-up mirror
-   (`kernel/arch/aarch64/src/serial.rs` module docs carry the removal
-   note); keep the boot log echoed to the screen **only** in debug-profile
-   images, silent on installer images.
+   stream layer, not in programs — and the **echo-control contract**
+   (read_secret's echo-off promise) lands here, with the echo itself: a
+   control surface over a backing that never echoes would be a §2.1
+   no-op / §2.3 speculative surface today.
+2. **Profile-silenced boot log** — keep the boot log echoed to the
+   screen **only** in debug-profile images, silent on installer images.
+3. **Login over a real database in production** — gated on the P8/P9
+   metal root mount (the kernel-side `load_users_db` + `with_users_db`
+   wiring at boot) and on the production `mem_map` producer
+   (`plans/SPAWN.md` SP5b) so login can parse the delivered text; a
+   `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves
+   `root`/`root` end to end at the prompt.
 
 **Done when:** a metal Pi 4 and the `virt` verticals sit at `login:` on
 every text console, `root`/`root` logs in on a debug image and gets the

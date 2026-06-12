@@ -109,6 +109,9 @@ const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 /// `rlimit_set` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 
+/// `users_db_read` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -415,6 +418,47 @@ pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
     // for the duration of the call, so the pointer denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_RLIMIT_SET, [u64::from(kind.as_u32()), ptr, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// Read the system user database (`/System/Security/Users`) the kernel
+/// loaded at boot into `buf` (`SyscallNumber::USERS_DB_READ`,
+/// `plans/PI.md` P11), returning the number of bytes copied.
+///
+/// The copied bytes are the database's exact `users-v1` text, which the
+/// caller parses with the fail-closed `rustos-users` parser. Gated
+/// kernel-side on [`rustos_abi::CapabilityId::USERS_READ`] — only the
+/// authentication principal (login) holds it; the wrapper adds no
+/// authority (`AGENTS.md` §5.4). Sizing `buf` at the format's own
+/// 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always suffices: a
+/// buffer smaller than the database is refused whole — a credential
+/// database is never truncated (`AGENTS.md` §2.9).
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure: the
+/// caller lacks the capability, no database is held (no root volume, or
+/// the boot read refused the record — the caller fails closed and
+/// refuses every login, `AGENTS.md` §5.4.5), or `buf` is too small.
+pub fn users_db_read(buf: &mut [u8]) -> Result<usize, i64> {
+    let len = buf.len() as u64;
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before
+    // writing to it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // `&mut [u8]` for the duration of the call, so the pair denotes
+    // writable memory the kernel may fill.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_USERS_DB_READ, [ptr, len, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller
+    // (`AGENTS.md` §5.4), exactly as `stdin` clamps.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(buf.len()))
 }
 
 /// Send `payload` to the IPC endpoint `endpoint`

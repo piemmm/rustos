@@ -355,6 +355,28 @@ pub trait SyscallHandlers {
     fn rlimit_set(&self, _caller: &CallerContext<'_>, _kind: u32, _value: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Copy the system user database (`/System/Security/Users`) the kernel
+    /// loaded at boot out to the user buffer at `buf` (`AGENTS.md` §5.1,
+    /// `plans/PI.md` P11).
+    ///
+    /// The dispatcher has already checked
+    /// [`rustos_abi::CapabilityId::USERS_READ`] and that `buf` is a
+    /// non-null `UserPtr`. The implementation bounds `len`, copies the
+    /// database's exact `users-v1` text through the validated
+    /// `copy_to_user` boundary (`AGENTS.md` §5.4), and returns the byte
+    /// count. A buffer smaller than the database must fail closed with
+    /// [`Errno::BufferTooSmall`] — a credential database is never
+    /// truncated (`AGENTS.md` §2.9); a kernel holding no database must
+    /// fail closed with [`Errno::NotFound`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// no users-database service wired never fabricates accounts. The
+    /// service is installed in `kernel/core`.
+    fn users_db_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -551,6 +573,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 #[allow(clippy::cast_possible_truncation)]
                 let kind = (args.0[0] & 0xFFFF_FFFF) as u32;
                 self.handlers.rlimit_set(caller, kind, args.0[1])
+            }
+            SyscallNumber::USERS_DB_READ => {
+                // `validate_arg` guarantees args[0] is a non-null
+                // `UserPtr`; args[1] is the buffer capacity.
+                let len = decode_len(args.0[1])?;
+                self.handlers.users_db_read(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -922,6 +950,13 @@ mod tests {
             self.record("rlimit_set");
             Ok(u64::from(kind))
         }
+        fn users_db_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("users_db_read");
+            // Echo the capacity back so the reachability test can assert
+            // the dispatcher decoded `(buf, len)` without wiring a real
+            // users-database service here.
+            Ok(len as u64)
+        }
     }
 
     #[test]
@@ -941,6 +976,7 @@ mod tests {
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::PROC_SPAWN,
                 CapabilityId::CONSOLE_READ,
+                CapabilityId::USERS_READ,
             ],
             &sink,
         );
@@ -1482,6 +1518,65 @@ mod tests {
         bad.0[1] = 0; // null pointer
         assert_eq!(
             d2.dispatch(&ctx, SyscallNumber::RLIMIT_SET.as_u16(), bad),
+            Err(Errno::BadAlignment)
+        );
+        assert_eq!(h2.last(), None);
+    }
+
+    #[test]
+    fn users_db_read_without_capability_is_refused_and_audited() {
+        // The credential database is privileged: without `CAP_USERS_READ`
+        // the dispatcher refuses before the handler is reached (`AGENTS.md`
+        // §5.4 — capability check before state).
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x2000; // buf
+        args.0[1] = 4096; // len
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::USERS_DB_READ.as_u16(), args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None);
+        assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+    }
+
+    #[test]
+    fn users_db_read_decodes_buf_and_len_and_is_audited() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::USERS_READ], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x2000; // buf — a non-null user pointer
+        args.0[1] = 4096; // len
+        let r = d.dispatch(&ctx, SyscallNumber::USERS_DB_READ.as_u16(), args);
+        // The Mock echoes the decoded capacity back.
+        assert_eq!(r, Ok(4096));
+        assert_eq!(h.last(), Some("users_db_read"));
+        assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+
+        // A null `buf` pointer is rejected by the per-arg `UserPtr`
+        // validator before the handler is reached (`AGENTS.md` §5.4).
+        let h2 = MockHandlers::default();
+        let d2 = Dispatcher::new(&h2, &sink);
+        let mut bad = RawArgs::ZERO;
+        bad.0[0] = 0; // null buf
+        bad.0[1] = 4096;
+        assert_eq!(
+            d2.dispatch(&ctx, SyscallNumber::USERS_DB_READ.as_u16(), bad),
             Err(Errno::BadAlignment)
         );
         assert_eq!(h2.last(), None);

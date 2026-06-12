@@ -191,19 +191,24 @@ pub struct KeyInjection {
     pub key: String,
 }
 
-/// A deterministic serial-input injection request for an interactive
+/// One step of a deterministic serial-input script for an interactive
 /// vertical.
 ///
 /// The guest's `-serial stdio` console is fed from the runner's stdin,
 /// but a `no_std`, non-interactive guest cannot type at itself and the
 /// runner is non-interactive (`AGENTS.md` §7). To make a real UART
 /// RX→`stream_read` exchange deterministic, the runner pipes QEMU's
-/// stdin, waits for the guest to print
-/// [`ready_marker`](Self::ready_marker) on the serial console (proving
-/// the reader is blocked on input — e.g. the shell prompt), then writes
-/// [`line`](Self::line) to the pipe. QEMU delivers the bytes to the
-/// guest's serial device RX exactly as a human typing would — the
-/// serial-console analogue of [`KeyInjection`].
+/// stdin and replays the steps of [`Spec::serial_input`] strictly in
+/// order: each step waits for the guest to print
+/// [`ready_marker`](Self::ready_marker) on the serial console *after*
+/// the previous step's match (proving the reader is blocked on input —
+/// e.g. a login prompt), then writes [`line`](Self::line) to the pipe.
+/// QEMU delivers the bytes to the guest's serial device RX exactly as a
+/// human typing would — the serial-console analogue of [`KeyInjection`].
+/// Because matching advances through the log, a repeated prompt (a
+/// second `Username: ` after a refused login) anchors its own step. A
+/// run that exits before every step was sent fails: an unreached marker
+/// means the guest never made the expected exchange (`AGENTS.md` §2.5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SerialInjection {
     /// Serial-console substring the runner waits for before writing.
@@ -306,11 +311,11 @@ pub struct Spec {
     /// serial console. `None` attaches no input device. Used by the
     /// aarch64 virtio-input vertical; other arches ignore it today.
     pub input_keyboard: Option<KeyInjection>,
-    /// When `Some`, pipe QEMU's stdin and write the described line to
-    /// the guest's serial input once it prints the readiness marker on
-    /// the serial console. `None` leaves stdin closed (`null`). Used by
-    /// the aarch64 interactive-session vertical.
-    pub serial_input: Option<SerialInjection>,
+    /// When non-empty, pipe QEMU's stdin and replay the steps in order:
+    /// each waits for its readiness marker on the serial console (past
+    /// the previous step's match) before writing its line. Empty leaves
+    /// stdin closed (`null`). Used by the interactive-session verticals.
+    pub serial_input: Vec<SerialInjection>,
 }
 
 impl Spec {
@@ -329,7 +334,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            serial_input: None,
+            serial_input: Vec::new(),
         }
     }
 
@@ -363,7 +368,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            serial_input: None,
+            serial_input: Vec::new(),
         }
     }
 
@@ -382,7 +387,7 @@ impl Spec {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            serial_input: None,
+            serial_input: Vec::new(),
         }
     }
 
@@ -448,18 +453,21 @@ impl Spec {
         self
     }
 
-    /// Pipe QEMU's stdin and write `line` to the guest's serial input
-    /// once the guest prints `ready_marker` on the serial console. Used
-    /// by the aarch64 interactive-session vertical to type at the
-    /// blocked shell deterministically without runner interactivity
-    /// (`AGENTS.md` §7).
+    /// Append one step to the serial-input script: pipe QEMU's stdin and
+    /// write `line` to the guest's serial input once the guest prints
+    /// `ready_marker` on the serial console, past the previous step's
+    /// match. Call repeatedly to script a whole exchange (prompt → reply
+    /// → next prompt → …); the steps replay strictly in order, and a run
+    /// that exits before every step was sent fails. Used by the
+    /// interactive-session verticals to type at the blocked login
+    /// deterministically without runner interactivity (`AGENTS.md` §7).
     #[must_use]
     pub fn with_serial_input(
         mut self,
         ready_marker: impl Into<String>,
         line: impl Into<String>,
     ) -> Self {
-        self.serial_input = Some(SerialInjection {
+        self.serial_input.push(SerialInjection {
             ready_marker: ready_marker.into(),
             line: line.into(),
         });
@@ -568,10 +576,10 @@ impl Runner {
         // when a vertical asked to type at the guest, otherwise keep it
         // closed so no stray host input can reach the guest (`AGENTS.md`
         // §7 — deterministic, non-interactive runs).
-        if spec.serial_input.is_some() {
-            cmd.stdin(Stdio::piped());
-        } else {
+        if spec.serial_input.is_empty() {
             cmd.stdin(Stdio::null());
+        } else {
+            cmd.stdin(Stdio::piped());
         }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -600,19 +608,17 @@ fn supervise(
     // marker as it arrives rather than only after exit.
     let captured = Arc::new(Mutex::new(String::new()));
     let marker_seen = Arc::new(AtomicBool::new(false));
-    let serial_marker_seen = Arc::new(AtomicBool::new(false));
     let reader = {
         let captured = Arc::clone(&captured);
         let stdout = child.stdout.take();
-        // Each injection kind watches the serial stream for its own
-        // readiness marker; the drain thread flips the matching flag as
-        // the marker arrives.
+        // The key injection watches the serial stream for its readiness
+        // marker; the drain thread flips the flag as the marker arrives.
+        // The serial-input script instead matches against the captured
+        // log in the poll loop below, because its markers are ordered
+        // and positional (each anchors past the previous step's match).
         let mut markers: Vec<(String, Arc<AtomicBool>)> = Vec::new();
         if let Some(k) = &spec.input_keyboard {
             markers.push((k.ready_marker.clone(), Arc::clone(&marker_seen)));
-        }
-        if let Some(s) = &spec.serial_input {
-            markers.push((s.ready_marker.clone(), Arc::clone(&serial_marker_seen)));
         }
         std::thread::spawn(move || {
             drain_stream(stdout, &captured, &markers);
@@ -644,15 +650,34 @@ fn supervise(
     let tick = Duration::from_millis(25);
     // `injected` starts "done" when no injection was requested.
     let mut injected = spec.input_keyboard.is_none();
-    // `serial_written` starts "done" when no serial input was requested.
-    let mut serial_written = spec.serial_input.is_none();
+    // Serial-input script cursor: the next step to send, and the byte
+    // offset in the captured serial log just past the previous step's
+    // matched marker. Matching only ever advances, so each marker must
+    // arrive in order and a repeated prompt (e.g. a second `Username: `
+    // after a refused login) anchors its own step rather than re-firing
+    // on the first occurrence.
+    let mut serial_step = 0usize;
+    let mut serial_search_from = 0usize;
     // Hold the monitor connection open for the rest of the run: a
     // readline monitor discards a command if the peer disconnects
     // before it is processed, so the stream must outlive the send.
     let mut monitor_conn: Option<UnixStream> = None;
-    let done = loop {
+    let done = 'run: loop {
         if let Some(status) = child.try_wait()? {
-            break DoneReason::Exited(status.code().unwrap_or(-1));
+            if serial_step < spec.serial_input.len() {
+                // The guest exited before the script completed: an
+                // unreached marker means the expected exchange never
+                // happened (e.g. a prompt that should have followed a
+                // reply never printed), so the run fails even when the
+                // guest itself reported success (`AGENTS.md` §2.5).
+                break 'run DoneReason::InjectionFailed(format!(
+                    "serial input script incomplete: {serial_step} of {} steps sent \
+                     before exit (next marker {:?} never seen)",
+                    spec.serial_input.len(),
+                    spec.serial_input[serial_step].ready_marker,
+                ));
+            }
+            break 'run DoneReason::Exited(status.code().unwrap_or(-1));
         }
         if !injected && marker_seen.load(Ordering::Acquire) {
             // Safe to unwrap: `injected` is only `false` when both
@@ -664,39 +689,31 @@ fn supervise(
                 Err(e) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break DoneReason::InjectionFailed(format!("key injection failed: {e}"));
+                    break 'run DoneReason::InjectionFailed(format!("key injection failed: {e}"));
                 }
             }
             injected = true;
         }
-        if !serial_written && serial_marker_seen.load(Ordering::Acquire) {
-            // Safe to unwrap: `serial_written` is only `false` when
-            // `serial_input` is `Some`, and `run` piped stdin for it.
-            let line = &spec
-                .serial_input
-                .as_ref()
-                .expect("serial input present")
-                .line;
-            let write = serial_stdin
-                .as_mut()
-                .ok_or_else(|| io::Error::other("qemu stdin pipe missing"))
-                .and_then(|stdin| {
-                    stdin.write_all(line.as_bytes())?;
-                    stdin.flush()
-                });
-            if let Err(e) = write {
-                let _ = child.kill();
-                let _ = child.wait();
-                break DoneReason::InjectionFailed(format!("serial input injection failed: {e}"));
-            }
-            serial_written = true;
+        let advanced = advance_serial_script(
+            &spec.serial_input,
+            &captured,
+            &mut serial_stdin,
+            &mut serial_step,
+            &mut serial_search_from,
+        );
+        if let Err(e) = advanced {
+            let _ = child.kill();
+            let _ = child.wait();
+            break 'run DoneReason::InjectionFailed(format!(
+                "serial input injection failed at step {serial_step}: {e}"
+            ));
         }
         if Instant::now() >= deadline {
             // Strict, no-retry kill. `wait` afterwards is best
             // effort so we don't leave a zombie behind.
             let _ = child.kill();
             let _ = child.wait();
-            break DoneReason::TimedOut;
+            break 'run DoneReason::TimedOut;
         }
         std::thread::sleep(tick);
     };
@@ -733,6 +750,51 @@ fn supervise(
             Ok(Outcome::Fail { status: -1, serial })
         }
     }
+}
+
+/// Advance the ordered serial-input script as far as the captured serial
+/// log currently allows: for each remaining step whose readiness marker
+/// has arrived *past the previous step's match*, write its line to the
+/// guest's serial input and move the cursor on. Matching only ever
+/// advances through the log, so a repeated prompt anchors its own step.
+///
+/// `step` and `search_from` carry the script cursor between poll ticks;
+/// the matched end of a marker is a UTF-8 boundary (it follows a complete
+/// marker match), so the next slice start is always valid.
+///
+/// # Errors
+///
+/// Returns the write error when the guest's stdin pipe is missing or the
+/// write/flush fails; the caller turns it into an injection failure.
+fn advance_serial_script(
+    steps: &[SerialInjection],
+    captured: &Mutex<String>,
+    serial_stdin: &mut Option<std::process::ChildStdin>,
+    step: &mut usize,
+    search_from: &mut usize,
+) -> io::Result<()> {
+    while *step < steps.len() {
+        let s = &steps[*step];
+        let found = {
+            let log = captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            log[*search_from..]
+                .find(&s.ready_marker)
+                .map(|at| *search_from + at + s.ready_marker.len())
+        };
+        let Some(matched_end) = found else { break };
+        // Safe to use stdin: `run` piped it because the script is
+        // non-empty.
+        let stdin = serial_stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("qemu stdin pipe missing"))?;
+        stdin.write_all(s.line.as_bytes())?;
+        stdin.flush()?;
+        *search_from = matched_end;
+        *step += 1;
+    }
+    Ok(())
 }
 
 /// Append QEMU's captured stderr to the serial log under a labelled
@@ -1006,17 +1068,21 @@ mod tests {
     }
 
     #[test]
-    fn with_serial_input_records_the_injection_request() {
-        let s = Spec::for_aarch64_kernel("/tmp/k").with_serial_input("rustos$ ", "exit\n");
-        let i = s.serial_input.expect("serial injection recorded");
-        assert_eq!(i.ready_marker, "rustos$ ");
-        assert_eq!(i.line, "exit\n");
+    fn with_serial_input_records_the_script_steps_in_order() {
+        let s = Spec::for_aarch64_kernel("/tmp/k")
+            .with_serial_input("Username: ", "root\n")
+            .with_serial_input("Password: ", "wrong\n");
+        assert_eq!(s.serial_input.len(), 2);
+        assert_eq!(s.serial_input[0].ready_marker, "Username: ");
+        assert_eq!(s.serial_input[0].line, "root\n");
+        assert_eq!(s.serial_input[1].ready_marker, "Password: ");
+        assert_eq!(s.serial_input[1].line, "wrong\n");
     }
 
     #[test]
     fn without_serial_input_records_no_injection() {
         let s = Spec::for_aarch64_kernel("/tmp/k");
-        assert_eq!(s.serial_input, None);
+        assert!(s.serial_input.is_empty());
     }
 
     #[test]
@@ -1087,7 +1153,7 @@ mod tests {
             display_ramfb: false,
             extra_args: Vec::new(),
             input_keyboard: None,
-            serial_input: None,
+            serial_input: Vec::new(),
         };
         let err = Runner::run(&s).expect_err("missing backing image should fail");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);

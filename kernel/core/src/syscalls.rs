@@ -108,6 +108,7 @@ use crate::rlimit::{authorize_set, LimitSet};
 use crate::spawn::{
     AdmitError, ProcessSpawn, ProgramRegistry, SpawnCtx, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
+use crate::users::{UsersDbSource, NULL_USERS_DB};
 
 /// Production [`SyscallHandlers`] implementation.
 ///
@@ -231,6 +232,13 @@ where
     /// through [`Self::with_process_wait`] once `SP6b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
     process_wait: &'static (dyn ProcessWait + 'static),
+    /// The kernel-held user database the `users_db_read` syscall serves
+    /// (`plans/PI.md` P11). Defaults to [`NULL_USERS_DB`] (fail closed
+    /// with [`Errno::NotImplemented`], `AGENTS.md` §2.9); the boot path
+    /// that mounts the root volume and loads the database installs the
+    /// real holder through [`Self::with_users_db`]. Held as a `'static`
+    /// borrow, exactly like the console device.
+    users_db: &'static (dyn UsersDbSource + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -301,6 +309,10 @@ where
             // scheduler-side producer (`plans/SPAWN.md` SP6b): `wait` fails
             // closed with `NotImplemented`.
             process_wait: &NULL_PROCESS_WAIT,
+            // Users-database service unwired until a boot path that mounted
+            // the root volume installs the loaded holder (`plans/PI.md`
+            // P11): `users_db_read` fails closed with `NotImplemented`.
+            users_db: &NULL_USERS_DB,
         }
     }
 
@@ -393,6 +405,21 @@ where
     ) -> Self {
         self.programs = programs;
         self.spawn_service = spawn_service;
+        self
+    }
+
+    /// Install the users-database holder the `users_db_read` syscall
+    /// serves, consuming and returning `self` (`plans/PI.md` P11).
+    ///
+    /// Called once by a boot path that mounted the root volume and ran
+    /// the audited [`crate::load_users_db`] read. Until this is called
+    /// the handler holds [`NULL_USERS_DB`] and `users_db_read` fails
+    /// closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9). The
+    /// holder must be `'static`: it lives for the lifetime of the
+    /// running kernel, exactly like the console device.
+    #[must_use]
+    pub const fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
+        self.users_db = users_db;
         self
     }
 
@@ -1103,7 +1130,7 @@ where
         // Resolve the path to a registered embedded program. An unknown
         // path fails closed with `NotFound` (`AGENTS.md` §2.1) — there is
         // no prefix or alias resolution.
-        let Some(rxe) = self.programs.lookup(&path_buf) else {
+        let Some(program) = self.programs.lookup(&path_buf) else {
             return Err(Errno::NotFound);
         };
 
@@ -1130,7 +1157,7 @@ where
             caller.task_id,
             self.process_wait,
         );
-        self.spawn_service.spawn(rxe, &ctx)
+        self.spawn_service.spawn(program, &ctx)
     }
 
     fn mem_map(
@@ -1266,6 +1293,36 @@ where
         // limits.
         self.aspaces.write().set_limit(caller.task_id, kind, stored);
         Ok(0)
+    }
+
+    fn users_db_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_USERS_READ` and that `buf` is
+        // a non-null `UserPtr`. Resolve the held database first: a build
+        // with no holder wired fails closed with `NotImplemented`, and a
+        // wired holder with no database fails closed with `NotFound`
+        // (`AGENTS.md` §2.9 / §5.4.5 — a system without accounts refuses
+        // every login rather than inventing one).
+        let text = self.users_db.text()?;
+
+        // The whole text or nothing: a credential database is never
+        // truncated to fit an undersized buffer (`AGENTS.md` §2.9). The
+        // format's own 64 KiB maximum bounds the copy, so a conforming
+        // caller's `MAX_DB_LEN` buffer always suffices.
+        if text.len() > len {
+            return Err(Errno::BufferTooSmall);
+        }
+
+        // Copy the text out through the validated `copy_to_user` boundary
+        // (`AGENTS.md` §5.4). A faulting pointer — or a caller with no
+        // registered address space — fails closed with `BadAddress`, never
+        // leaking which case occurred (§19.1).
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), text)
+        }) {
+            Some(Ok(())) => Ok(text.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 }
 
@@ -1615,6 +1672,21 @@ where
             arch,
             audit,
         }
+    }
+
+    /// Install the users-database holder the `users_db_read` syscall
+    /// serves, consuming and returning `self` (`plans/PI.md` P11).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_users_db`]: called once by a boot
+    /// path that mounted the root volume and ran the audited
+    /// [`crate::load_users_db`] read. A boot path with no root volume
+    /// simply never calls it and `users_db_read` stays fail-closed
+    /// (`AGENTS.md` §2.9).
+    #[must_use]
+    pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
+        self.handlers = self.handlers.with_users_db(users_db);
+        self
     }
 
     /// Borrow the [`KernelSyscallHandlers`] this hook owns.
@@ -4071,8 +4143,8 @@ mod tests {
     }
 
     impl ProcessSpawn for RecordingSpawn {
-        fn spawn(&self, rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
-            self.seen_rxe.lock().extend_from_slice(rxe);
+        fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+            self.seen_rxe.lock().extend_from_slice(program.rxe);
             // Build a one-page host user space and freeze it into the
             // registry-storable snapshot, exactly as the real producer
             // freezes its built image.
@@ -4162,6 +4234,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
         let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
@@ -4208,7 +4282,7 @@ mod tests {
     }
 
     impl ProcessSpawn for PageTableAllocProbeSpawn {
-        fn spawn(&self, _rxe: &[u8], ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+        fn spawn(&self, _program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
             self.saw_static_allocator.store(
                 ctx.page_table_allocator().is_some(),
                 core::sync::atomic::Ordering::SeqCst,
@@ -4253,6 +4327,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
         let probe: &'static PageTableAllocProbeSpawn =
@@ -4329,6 +4405,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
         let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
@@ -4380,6 +4458,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
         let producer: &'static RecordingSpawn = Box::leak(Box::new(RecordingSpawn::new()));
@@ -4432,6 +4512,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
 
@@ -4548,6 +4630,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
         let h = KernelSyscallHandlers::new(
@@ -4634,6 +4718,8 @@ mod tests {
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
                 },
             ])))));
         let h = KernelSyscallHandlers::new(
@@ -5363,5 +5449,208 @@ mod tests {
         );
         // Nothing was stored: the caller still runs under the default.
         assert_eq!(aspaces.read().limits(SecTaskId(2)), LimitSet::DEFAULT);
+    }
+
+    /// A [`UsersDbSource`] double holding a fixed `users-v1` text.
+    struct StaticUsersDb(&'static [u8]);
+    impl UsersDbSource for StaticUsersDb {
+        fn text(&self) -> Result<&[u8], Errno> {
+            Ok(self.0)
+        }
+    }
+
+    /// A wired [`UsersDbSource`] whose boot read refused the record, so
+    /// no database is held (`AGENTS.md` §5.4.5).
+    struct AbsentUsersDb;
+    impl UsersDbSource for AbsentUsersDb {
+        fn text(&self) -> Result<&[u8], Errno> {
+            Err(Errno::NotFound)
+        }
+    }
+
+    /// Stand-in database text the handler tests serve. The handler copies
+    /// the held text verbatim (the caller re-parses it), so the double
+    /// does not need to be a full valid `users-v1` document.
+    static USERS_DB_TEXT: &[u8] = b"users-v1\nroot:0:0::root:/Users/root:/Apps/Shell.app/Run\n";
+
+    /// `users_db_read` copies the held database text out to the caller
+    /// and returns its exact length (`plans/PI.md` P11).
+    #[test]
+    fn users_db_read_copies_held_text_out_to_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let source: &'static StaticUsersDb = Box::leak(Box::new(StaticUsersDb(USERS_DB_TEXT)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(source);
+
+        assert_eq!(
+            h.users_db_read(&ctx, 0x1000, 4096),
+            Ok(USERS_DB_TEXT.len() as u64)
+        );
+        // The exact text landed at the caller's pointer.
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; USERS_DB_TEXT.len()];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(delivered.as_slice(), USERS_DB_TEXT);
+    }
+
+    /// With no holder wired the handler keeps `NULL_USERS_DB` and fails
+    /// closed with `NotImplemented` rather than fabricating accounts
+    /// (`AGENTS.md` §2.9).
+    #[test]
+    fn users_db_read_without_holder_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.users_db_read(&ctx, 0x1000, 4096),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A wired holder with no database (the boot read refused the
+    /// record, or no root volume is mounted) fails closed with
+    /// `NotFound`, so a system without accounts refuses every login
+    /// (`AGENTS.md` §5.4.5).
+    #[test]
+    fn users_db_read_with_no_database_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let source: &'static AbsentUsersDb = Box::leak(Box::new(AbsentUsersDb));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(source);
+        assert_eq!(h.users_db_read(&ctx, 0x1000, 4096), Err(Errno::NotFound));
+    }
+
+    /// An undersized buffer is refused whole with `BufferTooSmall` — a
+    /// credential database is never truncated (`AGENTS.md` §2.9) — and
+    /// nothing is copied to the caller.
+    #[test]
+    fn users_db_read_undersized_buffer_is_buffer_too_small() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let source: &'static StaticUsersDb = Box::leak(Box::new(StaticUsersDb(USERS_DB_TEXT)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(source);
+
+        assert_eq!(
+            h.users_db_read(&ctx, 0x1000, USERS_DB_TEXT.len() - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        // Nothing was copied: the caller's page still reads zero.
+        let untouched = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 8];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(untouched, [0u8; 8]);
+    }
+
+    /// A caller with no registered address space fails closed with
+    /// `BadAddress`, exactly like every other copy-out path (§19.1).
+    #[test]
+    fn users_db_read_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let source: &'static StaticUsersDb = Box::leak(Box::new(StaticUsersDb(USERS_DB_TEXT)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(source);
+        assert_eq!(h.users_db_read(&ctx, 0x1000, 4096), Err(Errno::BadAddress));
     }
 }

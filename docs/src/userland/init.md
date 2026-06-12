@@ -137,8 +137,10 @@ ignored. Exactly two directives are defined and each is required once:
 - `console` — open the system console so the banner (and later output)
   has somewhere to go. Takes no argument.
 - `session <path>` — the absolute path of the program `init` launches as
-  the user's session (the shell). `init` launches it through the
-  process-spawn syscall (`plans/PI.md` P6d) and supervises it (below).
+  the user's session (the login service `/System/Services/login`,
+  `plans/PI.md` P11, which authenticates the user and spawns their shell
+  of choice). `init` launches it through the process-spawn syscall
+  (`plans/PI.md` P6d) and supervises it (below).
 
 Because the config is the first thing a freshly spawned program reads, the
 parser treats it as untrusted input (`AGENTS.md` §19.5): it is

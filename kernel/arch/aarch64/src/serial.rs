@@ -16,17 +16,14 @@
 //! every transmitted byte is rendered on screen through
 //! [`crate::video::write_bytes`], and the UART is used only when no
 //! video output exists (`AGENTS.md` §10 — the screen is the user-facing
-//! console, the serial line is the last resort). Console *input* stays
-//! on the UART either way (the display has no receive side).
-//!
-//! **Temporary on-metal bring-up mirror:** while the Pi 4 hardware
-//! verticals are being brought up, every console byte is *also*
-//! transmitted on the discovered UART (the Pi's PL011 `UART0` with the
-//! image's `dtoverlay=disable-bt`) even when the video console is
-//! active, so the boot log can be captured over the serial header
-//! alongside the screen. Remove the mirror (restore the video-only
-//! fast path in [`write_console_bytes`] and [`ConsoleWriter`]) when
-//! the on-metal acceptance work no longer needs it.
+//! console, the serial line is the last resort). The exception is the
+//! log/debug line path ([`ConsoleWriter`], and through it [`SerialSink`]):
+//! a **debug build** (`cfg(debug_assertions)`) echoes every log line to
+//! the UART *as well as* the screen, so a serial capture of a development
+//! boot always carries the full diagnostic stream even with a display
+//! attached; a release build keeps the screen-only routing. Console
+//! *input* stays on the UART either way (the display has no receive
+//! side).
 //!
 //! # Board-discovered base and model (`plans/PI.md` P2)
 //!
@@ -103,20 +100,6 @@ fn putchar(byte: u8) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn putchar(_byte: u8) {}
 
-/// Transmit one raw boot-progress beacon byte on the discovered UART.
-///
-/// The aarch64 boot pipeline emits a single milestone digit per
-/// bring-up stage (`docs/src/platform/aarch64.md`, "Boot progress
-/// beacon") so an on-metal boot that dies silently can be bisected from
-/// the serial capture alone. It deliberately bypasses the formatted
-/// [`Sink`] and the video console: the beacon must work pre-MMU and
-/// without the render lock, and a beacon byte must cost exactly one
-/// bounded transmit ([`tx_wait`]). A no-op on the host build (like
-/// every transmit here).
-pub fn boot_beacon_byte(byte: u8) {
-    putchar(byte);
-}
-
 /// Read one byte from the currently-configured console UART **without
 /// blocking**, returning `None` when the receive FIFO holds no byte.
 ///
@@ -190,9 +173,9 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
 }
 
 /// Write `bytes` verbatim to the current console — the video console
-/// when one is configured (temporarily mirrored to the UART, see the
-/// module docs), else the configured UART — returning the number
-/// written (always `bytes.len()`; both backings accept every byte).
+/// when one is configured, else the configured UART — returning the
+/// number written (always `bytes.len()`; both backings accept every
+/// byte).
 ///
 /// Unlike [`ConsoleWriter`] this performs **no** `\n` → `\r\n`
 /// translation: it is the raw byte sink the `stream_write` syscall
@@ -208,6 +191,7 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
 pub fn write_console_bytes(bytes: &[u8]) -> usize {
     if crate::video::is_active() {
         crate::video::write_bytes(bytes);
+        return bytes.len();
     }
     for &byte in bytes {
         putchar(byte);
@@ -217,16 +201,24 @@ pub fn write_console_bytes(bytes: &[u8]) -> usize {
 
 /// [`core::fmt::Write`] adapter that emits each byte through the
 /// current console: the video console when configured (its renderer
-/// interprets `\n` itself, and the bytes are temporarily mirrored to
-/// the UART — see the module docs), else the UART alone. UART bytes
-/// get `\n` → `\r\n` translation so terminals capturing the serial
-/// line render the boot log with proper line breaks.
+/// interprets `\n` itself), else the UART. UART bytes get `\n` →
+/// `\r\n` translation so terminals capturing the serial line render
+/// the boot log with proper line breaks.
+///
+/// This is the log/debug line path, so a **debug build** echoes every
+/// line to the UART *in addition to* an active video console (a serial
+/// capture of a development boot must carry the full diagnostic
+/// stream); a release build writes to exactly one backing — the screen
+/// when configured, else the UART.
 pub struct ConsoleWriter;
 
 impl core::fmt::Write for ConsoleWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         if crate::video::is_active() {
             crate::video::write_bytes(s.as_bytes());
+            if !cfg!(debug_assertions) {
+                return Ok(());
+            }
         }
         for byte in s.bytes() {
             if byte == b'\n' {

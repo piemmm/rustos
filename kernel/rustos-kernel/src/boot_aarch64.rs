@@ -55,8 +55,8 @@ use rustos_arch_aarch64::paging::{
     ram_gigapages, AddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, serial, syscall_entry,
-    uart_init, video, Aarch64Arch, Aarch64ArchStorage,
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, uart_init,
+    video, Aarch64Arch, Aarch64ArchStorage,
 };
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
@@ -118,39 +118,6 @@ const fn yes_no(value: bool) -> &'static str {
     }
 }
 
-/// Boot-progress beacon band colours, one per milestone ([`beacon`];
-/// decode table: `docs/src/platform/aarch64.md`, "Boot progress
-/// beacon"). Each value is symmetric under an R↔B channel swap, so a
-/// band reads the same whether the firmware honoured BGRA or RGBA
-/// (the same reasoning as the video console's grey foreground).
-const BEACON_COLOURS: [u32; 5] = [
-    0xFF00_FF00, // milestone 1: green
-    0xFFFF_00FF, // milestone 2: magenta
-    0xFFFF_FFFF, // milestone 3: white
-    0xFF80_8080, // milestone 4: grey
-    0xFF00_8000, // milestone 5: dark green
-];
-
-/// Emit boot-progress milestone `index` on both bring-up channels: the
-/// digit `'1' + index` on the discovered UART
-/// ([`serial::boot_beacon_byte`]) and one stacked colour band on the
-/// video console when it is configured
-/// ([`rustos_arch_aarch64::video`]'s `boot_beacon_band`).
-///
-/// An on-metal boot that dies silently is bisected by the last digit
-/// captured / band painted (`docs/src/platform/aarch64.md`, "Boot
-/// progress beacon"). Out-of-table indices are ignored (fail closed).
-fn beacon(index: u32) {
-    let Some(&colour) = BEACON_COLOURS.get(index as usize) else {
-        return;
-    };
-    serial::boot_beacon_byte(b'1' + index as u8);
-    // SAFETY: `boot` runs single-threaded on the boot CPU with
-    // interrupts masked, before SMP bring-up — exactly the pre-SMP
-    // contract `boot_beacon_band` requires in place of the render lock.
-    unsafe { video::boot_beacon_band(index, colour) };
-}
-
 extern "C" {
     /// First byte of the kernel image — the board load address — defined
     /// by the board linker script (`aarch64-rpi4.ld` / `aarch64-virt.ld`).
@@ -195,18 +162,10 @@ fn kernel_end_addr() -> u64 {
 /// ([`BOOT_PAGE_TABLES`]), which lives for the kernel's lifetime.
 fn enable_mmu_and_vectors() -> Option<AddressSpace> {
     let space = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)?;
-    // Sub-beacon `a`: identity tables built. The lower-case marks `a`-`d`
-    // subdivide the beacon 2→3 window — the MMU switch — on the UART
-    // only (decode table: `docs/src/platform/aarch64.md`).
-    serial::boot_beacon_byte(b'a');
     // The tables were just written with the data cache off; sweep them
     // to the point of coherency so the walker's first *cacheable* reads
     // cannot hit stale firmware-era lines on real silicon.
     BOOT_PAGE_TABLES.clean_invalidate_to_poc();
-    // Sub-beacon `b`: tables swept to PoC — the very next step is the
-    // `switch` register sequence, so `b` with no `c` pins a hang to the
-    // MMU-enable instant itself (bad descriptors/attributes).
-    serial::boot_beacon_byte(b'b');
     // SAFETY: `new_identity_gigapages` identity-maps every gigapage in
     // the configured Device and RAM masks — the caller installed both
     // before this runs, and the RAM mask is built over the kernel
@@ -223,19 +182,11 @@ fn enable_mmu_and_vectors() -> Option<AddressSpace> {
     unsafe {
         space.switch();
     }
-    // Sub-beacon `c`: `switch` returned — the byte below is the first
-    // post-MMU access, a write through the Device-mapped UART gigapage,
-    // so `c` proves translated execution *and* the Device mask in one
-    // mark.
-    serial::boot_beacon_byte(b'c');
     // SAFETY: covered by the block comment above — vectors are installed
     // once, on the boot CPU, immediately after the switch.
     unsafe {
         exceptions::init_vectors();
     }
-    // Sub-beacon `d`: EL1 vectors installed; beacon 3 follows in the
-    // caller.
-    serial::boot_beacon_byte(b'd');
     Some(space)
 }
 
@@ -292,9 +243,6 @@ pub fn boot(
     // the vectors not yet installed (the `virt`-only "GiB 0 Device"
     // assumption this replaces).
     let early = configure_mmio_from_dtb(dtb);
-    // Beacon 1: the DTB walked — console discovered, UART line up, GIC
-    // and video configured.
-    beacon(0);
     let (console_base, _) = console::current();
     let (gicd_base, gicc_base) = gic::current();
     // The mailbox doorbell the video console rang is an MMIO window the
@@ -332,10 +280,6 @@ pub fn boot(
         (dtb, early.dtb_len),
         (fb_base, fb_len),
     ]));
-    // Beacon 2: the identity map's Device and RAM gigapage masks are
-    // derived and installed — the next step is building + enabling the
-    // MMU.
-    beacon(1);
 
     // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
     // further work. The `kernel_core` allocator and scheduler use atomic
@@ -347,9 +291,6 @@ pub fn boot(
     // optimisation (`plans/PI.md` watch-out).
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
-    // Beacon 3: back from the MMU switch (translation + caches live
-    // when `mmu_on`) with the EL1 vectors installed.
-    beacon(2);
 
     // Discover the rest of the board from the firmware device tree: the
     // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
@@ -380,9 +321,6 @@ pub fn boot(
             }
         }
     }
-    // Beacon 4: the full-tree FDT walks (memory window, timer, PSCI)
-    // completed under the live translation regime.
-    beacon(3);
 
     // Construct the architecture handle — the single §17.1/§17.2
     // concrete-arch selection point for the kernel image. The counter
@@ -489,10 +427,6 @@ pub fn boot(
     // Device (`virt`: 0x1; Pi 4: 0x8).
     let mut device_mask_buf = [0u8; 16];
     let device_mask_hex = format_hex_u64(device_mask[0], &mut device_mask_buf);
-
-    // Beacon 5: memory map + guard arena settled; the formatted boot
-    // log line follows immediately.
-    beacon(4);
 
     log(
         log_sink,

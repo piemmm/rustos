@@ -124,9 +124,13 @@ three things on the `BootInfo` hand-off:
   heap-backed software-canary `BoxStack`, never an unguarded raw stack
   (§2.9).
 - **Runtime `spawn` producer (`with_spawn`).**
-  `spawn_producer_riscv64::RiscvProcessSpawn` + a one-entry program
-  registry mapping `/Apps/Shell.app/Run` → the embedded `Shell` `rxe`.
-  When `init` issues the `CAP_PROC_SPAWN`-gated `spawn` syscall, the
+  `spawn_producer_riscv64::RiscvProcessSpawn` + the embedded program
+  registry mapping `/System/Services/login` (the P11 session `init`
+  launches) and `/Apps/Shell.app/Run` (the shell login spawns) to their
+  baked `rxe`s, each entry carrying its program's declared capability set
+  and argument vector (§5.2/§16.5 — login additionally holds
+  `CAP_PROC_SPAWN` + `CAP_USERS_READ`). When `init` issues the
+  `CAP_PROC_SPAWN`-gated `spawn` syscall, the
   producer builds the session a *fresh, hardware-isolated* Sv39 space
   **without** switching the running caller's `satp`, drawing its page
   tables from the allocator-backed `kernel_mem::FrameTableSource` (no fixed
@@ -136,13 +140,13 @@ three things on the `BootInfo` hand-off:
   split+unmapped in the *child's own* (never-activated) root, mirroring
   the PID 1 seam, with the same fail-closed `BoxStack` fallback (§2.9).
 
-The embedded `init`/`Shell` `rxe` blobs are built for the riscv64 target
-by the kernel `build.rs` (the same one-build-path the aarch64/x86_64
+The embedded `init`/`Shell`/login `rxe` blobs are built for the riscv64
+target by the kernel `build.rs` (the same one-build-path the aarch64/x86_64
 images use, §2.2). Proven end-to-end by
 `tests/integration/spawn_init_qemu_riscv64`: it boots the production
 pipeline with only the audit sink swapped and reports `SiFive` PASS once
 it observes `ProcessSpawned` (`EventId(4030)`, PID 1) → the
-`RustOS init: reached user mode` banner → `ProcessSpawned` (`Shell`) →
+`RustOS init: reached user mode` banner → `ProcessSpawned` (the session) →
 `SyscallInvoked` (`EventId(5000)`, `init`'s `spawn`) — proving PID 1
 reached U-mode, wrote its banner over the SBI console backing, and
 trapped back.

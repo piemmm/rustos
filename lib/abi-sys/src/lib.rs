@@ -82,6 +82,7 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
+const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -401,6 +402,24 @@ pub extern "C" fn sys_rlimit_set(kind: u32, value: *mut c_void) -> i32 {
     }
 }
 
+/// `users_db_read`: copy the system user database the kernel loaded at boot
+/// (`/System/Security/Users`, exact `users-v1` text) into the caller's
+/// `(buf, len)` buffer (`SyscallNumber::USERS_DB_READ`). Returns the byte
+/// count, or a `ROS_E_*` code reinterpreted into the result.
+///
+/// Gated kernel-side on `ROS_CAP_USERS_READ` — only the authentication
+/// principal (login) holds it (`AGENTS.md` §4 / §5.4). A buffer smaller
+/// than the database is refused whole (`ROS_E_BUFFER_TOO_SMALL`) — a
+/// credential database is never truncated (`AGENTS.md` §2.9); sizing the
+/// buffer at the format's 64 KiB maximum always suffices.
+#[must_use]
+#[export_name = "ros_sys_users_db_read"]
+pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `(buf, len)` pair
+    // against the caller's address space before writing the text to it.
+    unsafe { raw_syscall(NUM_USERS_DB_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +454,7 @@ mod tests {
         (NUM_WAIT, "wait", 2),
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
+        (NUM_USERS_DB_READ, "users_db_read", 2),
     ];
 
     #[test]

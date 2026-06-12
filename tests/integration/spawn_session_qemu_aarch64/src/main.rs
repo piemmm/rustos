@@ -1,8 +1,9 @@
-//! `plans/PI.md` P6e-3b-ii QEMU integration test: boot the aarch64 (Raspberry
-//! Pi 4) `rustos-kernel` pipeline on the `virt` board, spawn PID 1 (`init`)
-//! into EL0, and prove `init` **supervises** the embedded `Shell` session —
-//! launching it, waiting on and reaping it when it exits, and relaunching it —
-//! rather than spawning it and forgetting it (`AGENTS.md` §20).
+//! `plans/PI.md` P6e-3b-ii / P11 QEMU integration test: boot the aarch64
+//! (Raspberry Pi 4) `rustos-kernel` pipeline on the `virt` board, spawn
+//! PID 1 (`init`) into EL0, and prove `init` **supervises** the embedded
+//! login session (`/System/Services/login`) — launching it, waiting on and
+//! reaping it when it exits, and relaunching it — rather than spawning it
+//! and forgetting it (`AGENTS.md` §20).
 //!
 //! ## What this test asserts
 //!
@@ -16,39 +17,59 @@
 //! `init` writes its banner, then runs its supervise loop
 //! (`userland/system/init/src/run.rs`):
 //!
-//! 1. `spawn` for `/Apps/Shell.app/Run` (audited `SyscallInvoked`,
-//!    `EventId(5000)`, #1). The runtime `ProcessSpawn` producer builds the
-//!    session a *fresh, hardware-isolated* address space (emitting
-//!    `ProcessSpawned`, #2) and admits it **Ready**.
+//! 1. `spawn` for `/System/Services/login` (audited `SyscallInvoked`,
+//!    `EventId(5000)`, #1) — the P11 session. The runtime `ProcessSpawn`
+//!    producer builds login a *fresh, hardware-isolated* address space
+//!    (emitting `ProcessSpawned`, #2) and admits it **Ready**.
 //! 2. `wait` on that child (audited `SyscallInvoked` #2), which parks `init`
 //!    back on the scheduler until the child is reapable.
-//! 3. The cooperative drain loop steps the session; it writes its `rustos$ `
-//!    prompt and **blocks** in `stream_read` on the kernel-core
-//!    `BlockingConsoleRead` backing (`AGENTS.md` §20 — the backing owns
-//!    blocking). The harness then types the scripted `exit\n` line at the
-//!    guest's serial input (the runner's serial injection, keyed on the
-//!    prompt marker); the shell's `exit` builtin ends the session (audited
-//!    `SyscallInvoked` #3). `init`'s `wait` then reaps it and reads its code.
+//! 3. The cooperative drain loop steps login; its `users_db_read` fails
+//!    closed (this board mounts no root volume, so no database is held), it
+//!    wires the deny-all authenticator (`AGENTS.md` §5.4.5), writes its
+//!    `Username: ` prompt, and **blocks** in `stream_read` on the
+//!    kernel-core `BlockingConsoleRead` backing (`AGENTS.md` §20 — the
+//!    backing owns blocking). The runner then holds a scripted dialogue
+//!    with it (the xtask enrolment's ordered `serial` script, each line
+//!    typed only after its prompt appeared past the previous exchange):
+//!    `root` at the first `Username: `, a password at the `Password: `
+//!    prompt — which prints only if login read the username line whole and
+//!    re-prompted (the per-keystroke-crash regression witness) — then,
+//!    after the deny-all authenticator refuses (`Login incorrect`) and
+//!    login re-prompts, a 513-byte line — one byte past login's 512-byte
+//!    `LINE_MAX` validation bound (`AGENTS.md` §24.4) — at the **second**
+//!    `Username: ` prompt. Login refuses the over-long line whole, records
+//!    the console error, and exits fail-closed (audited `SyscallInvoked`
+//!    #3 of the supervision chain). `init`'s `wait` then reaps it and
+//!    reads its code.
 //! 4. `init` relaunches the session — a second `spawn` (audited
-//!    `SyscallInvoked` #4) producing a **third** `ProcessSpawned` (#3). The
-//!    second session blocks at its own prompt; the PASS finisher has already
-//!    fired by then, so the run ends without typing at it.
+//!    `SyscallInvoked` #4 of the chain) producing a **third**
+//!    `ProcessSpawned` (#3). The second login blocks at its own prompt;
+//!    the PASS finisher has already fired by then and the script is
+//!    exhausted, so the run ends without typing at it.
 //!
 //! ## Why the PASS keys on three spawns and four audited syscalls
 //!
 //! The **third** `ProcessSpawned` is the supervision witness: `init` only
 //! reaches its second `spawn` *after* its `wait` returned, which only happens
-//! once the first session was reaped — so a third built image proves the full
-//! reap-and-restart cycle, not merely a single concurrent spawn. The first
-//! session's `exit` (the third audited syscall) is on the critical path only
-//! if the session actually ran: its prompt write is gated through its *own*
-//! isolated address space (`AGENTS.md` §4), and `init`'s `wait` cannot return
-//! until that `exit` recorded the child's code. The four audited syscalls are
-//! `init`'s first `spawn`, `init`'s `wait`, the session's `exit`, and `init`'s
-//! second `spawn`. A regression that never spawns the session, never reaps it,
-//! or never relaunches it never reaches the third `ProcessSpawned`, so the run
-//! times out and the harness reports `Outcome::Timeout` — the documented
-//! fail-loud behaviour (`AGENTS.md` §7).
+//! once the first login was reaped — so a third built image proves the full
+//! reap-and-restart cycle, not merely a single concurrent spawn. Login's
+//! `exit` is on the critical path only if login actually ran and its blocked
+//! `stream_read` received the injected UART RX bytes: its prompt write is
+//! gated through its *own* isolated address space (`AGENTS.md` §4), and
+//! `init`'s `wait` cannot return until that `exit` recorded the child's
+//! code. The supervision chain's audited syscalls are `init`'s first
+//! `spawn`, `init`'s `wait`, login's `exit`, and `init`'s second `spawn`
+//! (login's own audited `users_db_read` rides on top, which the `>=`
+//! thresholds absorb). A regression that never spawns login, never delivers
+//! its input, never reaps it, or never relaunches it never reaches the third
+//! `ProcessSpawned`, so the run times out and the harness reports
+//! `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
+//! §7). The runner adds the converse guard: it fails the run if the guest
+//! exits before every scripted prompt appeared and every line was sent, so
+//! a login that crashes mid-dialogue (e.g. per keystroke) cannot pass on
+//! the relaunch's event counts alone. Logging in for real rides the P8/P11
+//! root-volume mount; until then every credential check on this board fails
+//! closed (§5.4.5).
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -115,7 +136,7 @@ mod kernel {
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// Number of `ProcessSpawned` records seen so far. PASS requires three:
-    /// PID 1 `init` and the **two** session instances it launches — the
+    /// PID 1 `init` and the **two** login instances it launches — the
     /// second launch can only happen after `init` reaped the first, so a third
     /// `ProcessSpawned` is the witness that supervision (reap + restart) ran.
     static SPAWNED: AtomicUsize = AtomicUsize::new(0);
@@ -123,7 +144,7 @@ mod kernel {
     /// Number of audited `SyscallInvoked` records seen so far. PASS requires
     /// four, the prefix of `init`'s supervise loop up to the relaunch:
     /// `init`'s first `spawn`, `init`'s `wait` (which parks it), the first
-    /// session's gated `exit`, and `init`'s second `spawn` (the relaunch).
+    /// login's fail-closed `exit`, and `init`'s second `spawn` (the relaunch).
     static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
