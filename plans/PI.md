@@ -1984,8 +1984,24 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
   port, double enumeration, bad DMA regions); docs:
   `docs/src/drivers/bus.md`.
 
-**Remaining:** the PCI BAR / hwtree wiring for the VL805 (register
-window + DMA-region grant; plus the DWC2 OTG path if needed); then the
+**Landed — ECAM configuration access** (the cross-arch path the VL805
+sits behind): `drivers/bus/pci` gained `mechanism_ecam`, an
+`EcamConfigSpace` `ConfigSpace` impl over a capability-mapped
+`rustos_abi::RegisterWindow` (PCI Express Base 3.0 §7.2.2 flat
+offset, `ConfigAddress::ecam_offset`), fail-closed to the all-ones
+"no device" sentinel on an out-of-window or malformed access (§5.4).
+The mechanism-agnostic enumeration / capability / BAR core is reused
+unchanged (§2.2); host-proven by a flat-ECAM VL805 fixture
+(`1106:3483` xHCI behind a root-port bridge) driving enumeration +
+MSI-X capability decode, plus offset/round-trip/sentinel unit tests.
+Docs: `docs/src/drivers/bus.md`, the crate README.
+
+**Remaining:** the Pi PCIe host-bridge (`brcm,bcm2711-pcie`)
+discovery path in the aarch64 `FdtDiscovery` walk (emit the ECAM
+config window + the inbound-DMA aperture as `hwtree` resources), the
+VL805 `wiring::open_discovered` (map the ECAM window, enumerate, map
+the xHCI BAR + DMA-region grant, hand to the xHCI engine; mirror the
+`rpi_hvs`/`emmc2` shape); plus the DWC2 OTG path if needed; then the
 WM/taskbar/session on the HVS path and the on-metal acceptance.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,

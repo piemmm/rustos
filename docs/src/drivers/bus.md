@@ -10,7 +10,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 
 | Crate                    | Platform              | Status   |
 | ------------------------ | --------------------- | -------- |
-| `drivers/bus/pci`        | x86_64                | Shipped  |
+| `drivers/bus/pci`        | x86_64 (PIO) / PCIe ECAM | Shipped  |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
 | `drivers/bus/usb`        | Pi 4 (VL805 xHCI)     | P10 protocol layers + HID enumeration (host-proven) |
@@ -41,20 +41,54 @@ mapping.
 
 ### Configuration access
 
-Mechanism #1 (PCI Local Bus 3.0 §3.2.2.3.2):
+The enumeration, capability-walk, BAR-sizing, and window/MSI-X
+hand-off core is parameterised over the `ConfigSpace` trait, so it is
+independent of how configuration space is reached. Two access
+mechanisms implement that trait; the caller picks one at construction
+(`mechanism_one` / `mechanism_ecam`).
+
+#### Mechanism #1 — legacy I/O ports (x86_64)
+
+PCI Local Bus 3.0 §3.2.2.3.2:
 
 | Port  | Purpose                       |
 | ----- | ----------------------------- |
 | `0xCF8` | 32-bit configuration address |
 | `0xCFC` | 32-bit configuration data    |
 
-The crate splits the `in`/`out` instructions behind an internal
-`PortIo` trait so the in-crate unit tests can exercise the bridge
-against a recording mock without touching real I/O ports. The only
-`unsafe` blocks in the crate live in `X86PortIo::read32` /
-`X86PortIo::write32`; both carry `// SAFETY:` blocks documenting the
-PCI-port and `nomem`/`nostack`/`preserves_flags` invariants and are
-covered by the round-trip mock test.
+The crate splits the `in`/`out` instructions behind the
+`rustos_abi::PortIo` seam so the in-crate unit tests can exercise the
+bridge against a recording mock without touching real I/O ports; the
+only real `PortIo` implementation lives in the x86_64 architecture
+port. `ConfigAddress::to_cf8` is the single defensive gate — an
+out-of-range address reads the `0xFFFF_FFFF` "no device" sentinel
+rather than reaching a port.
+
+#### ECAM — memory-mapped PCIe configuration (cross-arch)
+
+PCI Express Base 3.0 §7.2.2 maps configuration space flat into MMIO:
+each `(bus, device, function)` owns a 4 KiB block, so a configuration
+dword is a naturally-aligned access at the computed byte offset
+(`ConfigAddress::ecam_offset`):
+
+```text
+ bits 27..20: bus       (one 1 MiB block per bus)
+ bits 19..15: device    (one 32 KiB block per device)
+ bits 14..12: function  (one  4 KiB block per function)
+ bits 11..0 : register byte offset
+```
+
+`EcamConfigSpace` reads and writes through a kernel-mapped
+`rustos_abi::RegisterWindow` over the host bridge's configuration
+region — obtained from the MMIO-map facility after a `CAP_MMIO_MAP`
+check, so the driver never synthesises a pointer (`AGENTS.md` §4).
+An access past the window's length, or a malformed address, resolves
+to the same `0xFFFF_FFFF` sentinel, so an enumeration walk that runs
+off the mapped buses fails closed rather than reading out of bounds
+(`AGENTS.md` §5.4). This is the path the Raspberry Pi 4 (BCM2711)
+root complex uses to reach its VL805 USB host controller, and the
+path any PCIe host bridge without an I/O-port space uses; it carries
+no target-conditional `cfg` (`AGENTS.md` §17.2).
 
 ### Enumeration walk
 
@@ -98,6 +132,19 @@ default PCI tree:
 
 The same enumeration core is exercised by the `Bus::enumerate`
 implementation that the driver host wires up after `register`.
+
+### Acceptance: VL805 over ECAM
+
+`tests::ecam_enumeration_finds_root_port_and_vl805` and
+`tests::ecam_capability_walk_decodes_vl805_msix` lay a flat ECAM
+region (a PCIe root-port bridge at 00:00.0 and the Pi 4's VL805 xHCI
+`1106:3483` at 01:00.0, with absent slots reading the all-ones
+sentinel as real hardware master-aborts) and drive the same
+enumeration and capability-walk core over `EcamConfigSpace`,
+asserting both devices are listed and the VL805's MSI-X capability
+decodes. The BAR *size* probe depends on hardware read-only BAR bits
+and is covered by the mechanism-#1 fixtures, not the plain-memory
+ECAM backing.
 
 ## MMIO driver — `drivers/bus/mmio`
 

@@ -968,3 +968,166 @@ fn mechanism_one_exposes_the_frozen_bus_seams() {
     let bus = crate::mechanism_one(NoopPortIo);
     assert_seams(&bus, &bus, &bus);
 }
+
+// ---- ECAM (PCIe enhanced configuration access) ---------------------------
+//
+// The Raspberry Pi 4 (BCM2711) reaches its VL805 USB host controller
+// through ECAM, not the x86 legacy ports. The fixture below lays a
+// real configuration region flat into a heap buffer — a root-port
+// bridge at 00:00.0 and the VL805 xHCI at 01:00.0 — and drives the
+// enumeration core over it through `EcamConfigSpace`, exactly as the
+// ring-0 boot walk drives a kernel-mapped ECAM window. The
+// read-only enumeration and capability-walk paths are mechanism-
+// independent, so they are realistic over a plain memory backing;
+// the destructive BAR *size* probe depends on the hardware's
+// read-only BAR bits (already covered by the MockConfigSpace
+// fixtures above) and is not asserted here.
+
+use crate::mech_ecam::EcamConfigSpace;
+
+/// VID/DID of the VIA VL805, the Pi 4's PCIe-attached xHCI controller.
+const VL805_VENDOR: u16 = 0x1106;
+const VL805_DEVICE: u16 = 0x3483;
+
+/// Plant one configuration dword at `(bus, device, function, register)`
+/// into the flat ECAM `backing`.
+fn put_ecam(backing: &mut [u32], bus: u8, device: u8, function: u8, register: u8, value: u32) {
+    let off = ConfigAddress {
+        bus,
+        device,
+        function,
+        register,
+    }
+    .ecam_offset()
+    .expect("address in range");
+    backing[off / 4] = value;
+}
+
+/// Build a flat ECAM region (two 1 MiB bus blocks) holding a root-port
+/// bridge at 00:00.0 and the VL805 xHCI at 01:00.0, plus the heap
+/// `Vec` that owns it (returned so it outlives the window).
+fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
+    // Two buses × 1 MiB = 2 MiB region. An absent function's
+    // configuration space reads all-ones on real hardware (the host
+    // bridge master-aborts), so the region starts filled with the
+    // sentinel and the present functions are planted over it.
+    let mut backing = vec![0xFFFF_FFFFu32; (2 * 0x10_0000) / 4];
+
+    // 00:00.0 — PCIe root port (class 0x0604, type-1 header).
+    put_ecam(&mut backing, 0, 0, 0, 0, 0x14E4); // Broadcom host bridge ID (device 0x0000).
+    put_ecam(&mut backing, 0, 0, 0, 2, 0x0604 << 16); // class = PCI bridge.
+    put_ecam(&mut backing, 0, 0, 0, 3, 0x01 << 16); // header type 1.
+
+    // 01:00.0 — VL805 xHCI (class 0x0C03, type-0, MSI-X capable).
+    put_ecam(
+        &mut backing,
+        1,
+        0,
+        0,
+        0,
+        (u32::from(VL805_DEVICE) << 16) | u32::from(VL805_VENDOR),
+    );
+    put_ecam(&mut backing, 1, 0, 0, 1, (1u32 << 4) << 16); // status: cap list present.
+    put_ecam(&mut backing, 1, 0, 0, 2, 0x0C03 << 16); // class = USB controller.
+    put_ecam(&mut backing, 1, 0, 0, 3, 0x00 << 16); // header type 0.
+    put_ecam(&mut backing, 1, 0, 0, 13, 0x80); // cap pointer -> byte 0x80.
+                                               // MSI-X cap at byte 0x80 (dword 32): id=0x11, next=0, table_size=8.
+    put_ecam(&mut backing, 1, 0, 0, 32, (0x0007u32 << 16) | 0x11);
+    put_ecam(&mut backing, 1, 0, 0, 33, 0x0000_1000); // table_bar=0, offset 0x1000.
+    put_ecam(&mut backing, 1, 0, 0, 34, 0x0000_2000); // pba_bar=0, offset 0x2000.
+
+    let base = NonNull::new(backing.as_mut_ptr().cast::<u8>()).expect("non-null heap buffer");
+    let len = backing.len() * 4;
+    // SAFETY: `base` is 4-byte aligned (the `Vec<u32>` allocation
+    // guarantee) and covers exactly `len` bytes; the backing `Vec` is
+    // returned to the caller so it outlives the window, and no other
+    // reference aliases it while the window is live.
+    let window = unsafe { RegisterWindow::from_mapping(0x6000_0000, base, len) };
+    (backing, window)
+}
+
+#[test]
+fn ecam_enumeration_finds_root_port_and_vl805() {
+    let (_backing, window) = vl805_ecam_region();
+    let pci = Pci::new(EcamConfigSpace::new(window));
+    let mut buf = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; 8];
+    let n = (&pci as &dyn Bus).enumerate(&mut buf).expect("enumerates");
+    let got: Vec<_> = buf[..n].to_vec();
+    let want = vec![
+        BusDevice {
+            vendor: 0x14E4,
+            device: 0x0000,
+            class: 0x0604,
+            reserved0: 0,
+            address: ConfigAddress {
+                bus: 0,
+                device: 0,
+                function: 0,
+                register: 0,
+            }
+            .pack_bdf(),
+        },
+        BusDevice {
+            vendor: u32::from(VL805_VENDOR),
+            device: u32::from(VL805_DEVICE),
+            class: 0x0C03,
+            reserved0: 0,
+            address: ConfigAddress {
+                bus: 1,
+                device: 0,
+                function: 0,
+                register: 0,
+            }
+            .pack_bdf(),
+        },
+    ];
+    assert_eq!(got, want);
+}
+
+#[test]
+fn ecam_capability_walk_decodes_vl805_msix() {
+    let (_backing, window) = vl805_ecam_region();
+    let pci = Pci::new(EcamConfigSpace::new(window));
+    let vl805 = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let mut out = [Capability::Other { offset: 0, id: 0 }; 4];
+    let n = pci.capabilities(vl805, &mut out).expect("cap walk ok");
+    assert_eq!(n, 1);
+    assert_eq!(
+        out[0],
+        Capability::MsiX {
+            offset: 0x80,
+            table_size: 8,
+            table_bar: 0,
+            table_offset: 0x1000,
+            pba_bar: 0,
+            pba_offset: 0x2000,
+        }
+    );
+}
+
+/// The ECAM constructor yields a value usable through all three frozen
+/// `abi-v1` bus seams without naming the concrete `Pci` type, mirroring
+/// [`mechanism_one_exposes_the_frozen_bus_seams`].
+#[test]
+fn mechanism_ecam_exposes_the_frozen_bus_seams() {
+    use rustos_abi::driver::msix::MsixBus;
+    use rustos_abi::driver::virtio_pci::VirtioPciBus;
+
+    fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
+
+    let (_backing, window) = vl805_ecam_region();
+    let bus = crate::mechanism_ecam(window);
+    assert_seams(&bus, &bus, &bus);
+}

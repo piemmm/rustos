@@ -46,6 +46,7 @@ use rustos_abi::{
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
+pub(crate) mod mech_ecam;
 pub(crate) mod mech_one;
 
 #[cfg(test)]
@@ -120,6 +121,42 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 #[must_use]
 pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus {
     Pci::new(mech_one::PortIoConfigSpace::new(pio))
+}
+
+/// Construct a real-hardware `PCIe` root bus over the **enhanced
+/// configuration access mechanism** (ECAM / MMCONFIG, PCI Express
+/// Base 3.0 §7.2.2): the host bridge maps configuration space flat
+/// into MMIO, one 4 KiB block per `(bus, device, function)`, and a
+/// configuration dword is reached by a naturally-aligned access at the
+/// computed offset within `window`.
+///
+/// `window` is the kernel-mapped [`RegisterWindow`] over the host
+/// bridge's configuration region, obtained from the MMIO-map facility
+/// after a [`CapabilityId::MMIO_MAP`] check (`AGENTS.md` §4). Its base
+/// is the physical base of `(bus 0, device 0, function 0, register 0)`
+/// and its length bounds the buses the enumeration can reach: an
+/// access past the window resolves to the PCI "no device" sentinel, so
+/// the walk fails closed rather than reading out of bounds.
+///
+/// The returned value is the bus the ring-0 boot pipeline drives
+/// through the [`Bus`], [`VirtioPciBus`], and [`MsixBus`] seams,
+/// identically to [`mechanism_one`]; the concrete `Pci` type stays
+/// crate-private (`AGENTS.md` §8).
+///
+/// Construction performs **no** I/O — it only stores the supplied
+/// window. Configuration access happens lazily on the trait methods.
+///
+/// # Platform
+///
+/// ECAM is architecture-neutral: the window is just mapped memory, so
+/// this constructor carries no target-conditional `cfg` gate
+/// (`AGENTS.md` §17.2 / §17.4). It is the path the Raspberry Pi 4
+/// (BCM2711) root complex uses to reach the VL805 USB host
+/// controller, and the path any `PCIe` host bridge without an I/O-port
+/// space uses.
+#[must_use]
+pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus {
+    Pci::new(mech_ecam::EcamConfigSpace::new(window))
 }
 
 // --- Public re-exports through the `Bus` trait ----------------------------

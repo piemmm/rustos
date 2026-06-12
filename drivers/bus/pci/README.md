@@ -1,10 +1,24 @@
 # `rustos-drv-bus-pci`
 
-PCI/PCIe bus driver. Enumerates devices on x86_64 platforms through
-the configuration-access **mechanism #1** (`0xCF8` / `0xCFC`) and
-walks each function's capability list to surface MSI / MSI-X
-descriptors, virtio-1.x configuration structures, and BAR (Base
-Address Register) windows.
+PCI/PCIe bus driver. Enumerates devices and walks each function's
+capability list to surface MSI / MSI-X descriptors, virtio-1.x
+configuration structures, and BAR (Base Address Register) windows.
+Configuration space is reached through one of two access mechanisms,
+selected at construction by the caller:
+
+- **Mechanism #1** (`0xCF8` / `0xCFC`, x86_64) — the legacy I/O-port
+  bridge (`mechanism_one`), behind the `rustos_abi::PortIo` seam.
+- **ECAM / MMCONFIG** (`mechanism_ecam`) — PCIe enhanced configuration
+  access: configuration space is mapped flat into MMIO, one 4 KiB
+  block per `(bus, device, function)`, reached through a
+  capability-checked `rustos_abi::RegisterWindow`. This is the path
+  the Raspberry Pi 4 (BCM2711) root complex uses to reach its VL805
+  USB host controller, and the path any PCIe host bridge without an
+  I/O-port space uses.
+
+The enumeration, capability-walk, BAR-sizing, and window/MSI-X hand-off
+core is mechanism-agnostic: it is parameterised over the `ConfigSpace`
+trait, which both bridges implement.
 
 ## Supported hardware
 
@@ -16,10 +30,13 @@ Address Register) windows.
 | SMBus             | QEMU `q35` (`8086:2930`)                           |
 | virtio-net-pci    | `1AF4:1041` (modern transitional)                  |
 | virtio-blk-pci    | `1AF4:1042` (modern, virtio-1.x cap layout)        |
+| VL805 xHCI (PCIe) | Pi 4 (BCM2711) USB host, `1106:3483`, over ECAM    |
 
-The fixture in `src/tests.rs` reproduces the exact `q35` PCI topology
-byte for byte; the live-QEMU surface uses the same enumeration core
-through the [`Bus`] trait.
+The `q35` fixture in `src/tests.rs` reproduces that PCI topology byte
+for byte over mechanism #1; the VL805 fixture lays a flat ECAM region
+(a root-port bridge plus the `1106:3483` xHCI) and drives the same
+enumeration core over `EcamConfigSpace`. The live surface uses the
+same core through the [`Bus`] trait.
 
 ## Required capabilities
 
@@ -33,8 +50,6 @@ authority is requested (`AGENTS.md` §4).
 
 ## Limitations
 
-- x86_64-only. ECAM (PCIe enhanced configuration access) is **not**
-  implemented; that is Stage 4.D scope.
 - A memory BAR is mapped only by routing the request through the
   kernel MMIO-map facility (`map_bar_window`); the driver never
   synthesises a pointer (`AGENTS.md` §4).
@@ -63,8 +78,10 @@ authority is requested (`AGENTS.md` §4).
 
 `cargo test -p rustos-drv-bus-pci` runs:
 
-- The PIO-bridge round-trip test against a recording mock.
-- The exact `q35` device-list assertion.
+- The PIO-bridge round-trip test against a recording mock, and the
+  ECAM offset-encoding + round-trip / out-of-window sentinel tests.
+- The exact `q35` device-list assertion (mechanism #1) and the
+  VL805-over-ECAM enumeration + MSI-X capability-decode assertions.
 - Capability-list and BAR-sizing walkers, including the virtio-1.x
   configuration-structure decode.
 - The MSI-X routing hand-off: programming a table entry + enabling
