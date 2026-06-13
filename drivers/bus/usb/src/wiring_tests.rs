@@ -21,7 +21,8 @@ use rustos_abi::driver::dma::{DmaSlab, PoolId};
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapper, PciBus, RegisterWindow,
+    CapabilityId, DriverError, DriverHost, DriverKind, HwDeviceClass, HwMatchKey, HwNode,
+    MmioMapper, PciBus, RegisterWindow,
 };
 
 use super::{open_discovered, USB_CONTROLLER_CLASS};
@@ -138,6 +139,21 @@ impl PciBus for MockPciBus {
     fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
         self.master_enabled.set(true);
         Ok(())
+    }
+
+    fn describe_function(
+        &self,
+        _bdf: u64,
+        parent_id: u32,
+        node_id: u32,
+    ) -> Result<HwNode, DriverError> {
+        // The mock carries only the 16-bit base+sub-class; promote it
+        // to the 24-bit code (prog-if 0) for the emitted key.
+        let class24 = u32::from(self.class) << 8;
+        let mut node = HwNode::new(node_id, parent_id, HwDeviceClass::Bus);
+        node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, class24))
+            .map_err(|_| DriverError::DeviceFault)?;
+        Ok(node)
     }
 }
 

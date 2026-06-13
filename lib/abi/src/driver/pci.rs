@@ -21,6 +21,7 @@
 
 use super::bus::Bus;
 use super::{DriverError, MmioMapper, RegisterWindow};
+use crate::HwNode;
 
 /// A PCI bus that can provision a non-virtio function's resources.
 ///
@@ -81,6 +82,45 @@ pub trait PciBus: Bus {
     /// * [`DriverError::DeviceFault`] if the configuration write cannot
     ///   be completed by the bus transport.
     fn enable_bus_master(&self, bdf: u64) -> Result<(), DriverError>;
+
+    /// Describe the function at `bdf` as a discovered child
+    /// [`HwNode`] to attach beneath the bus's own
+    /// hardware-tree node (`AGENTS.md` §18.1 / §18.3).
+    ///
+    /// A bus that enumerates downstream devices is responsible for
+    /// growing the hardware tree at runtime: each device it finds
+    /// becomes a child node carrying the match keys a driver's signed
+    /// bind table is resolved against (`AGENTS.md` §18.3), so a device
+    /// behind the bus autoloads its driver as match **data** rather than
+    /// by hand-wired composition (`AGENTS.md` §2.2 / §18.5). For a PCI
+    /// function the emitted node carries a single
+    /// [`HwMatchKey::pci`](crate::HwMatchKey::pci) of the function's
+    /// `vendor:device` and its **full 24-bit class code**
+    /// `(base_class << 16) | (sub_class << 8) | prog_if` — the prog-if
+    /// is part of the class so an xHCI host (`0x0C_03_30`) is
+    /// distinguished from the older USB host classes, exactly as the
+    /// generic xHCI driver's bind key requires.
+    ///
+    /// `parent_id` is the id of the bus's own node (the new node's
+    /// parent); `node_id` is the id the tree owner assigns to the child.
+    /// The bus driver synthesises neither — the tree owner allocates ids
+    /// — and attaches no resource capabilities here (those are minted at
+    /// the load gate, `AGENTS.md` §4 / §5.4).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no function responds at `bdf` (an
+    ///   absent function reads the all-ones vendor sentinel) — a
+    ///   fail-closed refusal, never a fabricated node (`AGENTS.md`
+    ///   §2.9 / §18.5).
+    /// * [`DriverError::DeviceFault`] if the configuration read cannot be
+    ///   completed by the bus transport, or the node cannot be assembled.
+    fn describe_function(
+        &self,
+        bdf: u64,
+        parent_id: u32,
+        node_id: u32,
+    ) -> Result<HwNode, DriverError>;
 }
 
 #[cfg(test)]
@@ -88,6 +128,7 @@ mod tests {
     use super::*;
     use crate::driver::bus::BusDevice;
     use crate::driver::mmio::MmioMapError;
+    use crate::{HwDeviceClass, HwMatchKey};
     use core::cell::Cell;
     use core::ptr::NonNull;
 
@@ -159,6 +200,18 @@ mod tests {
             self.master_enabled.set(true);
             Ok(())
         }
+
+        fn describe_function(
+            &self,
+            _bdf: u64,
+            parent_id: u32,
+            node_id: u32,
+        ) -> Result<HwNode, DriverError> {
+            let mut node = HwNode::new(node_id, parent_id, HwDeviceClass::Bus);
+            node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30))
+                .map_err(|_| DriverError::DeviceFault)?;
+            Ok(node)
+        }
     }
 
     fn bus() -> FakeBus {
@@ -214,5 +267,25 @@ mod tests {
             dyn_bus.map_bar_window(0x0001_0000, 0, &mapper),
             Err(DriverError::PermissionDenied)
         ));
+    }
+
+    #[test]
+    fn describe_function_emits_a_child_node_with_the_pci_match_key() {
+        let bus = bus();
+        let dyn_bus: &dyn PciBus = &bus;
+        let node = dyn_bus
+            .describe_function(0x0001_0000, 7, 9)
+            .expect("describes the function");
+        assert_eq!(node.id(), 9);
+        assert_eq!(node.parent(), 7);
+        assert!(!node.is_root());
+        // The lone key is the function's vendor:device:24-bit class, so a
+        // generic xHCI bind key (class `0x0C_03_30`, vendor/device
+        // wildcard) resolves against it (`AGENTS.md` §18.3).
+        assert_eq!(node.match_keys().len(), 1);
+        let bind = HwMatchKey::pci(0, 0, 0x0C_03_30);
+        assert!(bind.matches(&node.match_keys()[0]));
+        // A bind key naming a different class does not.
+        assert!(!HwMatchKey::pci(0, 0, 0x0C_03_20).matches(&node.match_keys()[0]));
     }
 }

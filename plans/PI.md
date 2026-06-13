@@ -2183,11 +2183,24 @@ table, so a new board is match **data**, not new code. Sub-increments
   `HwMatchKey`'s constructors are `const`, and `HwMatchKey::matches` adds
   the PCI/USB class-with-wildcard semantics `rustos_devmgr` resolves
   against (no `#[repr(C)]` change, no C-header drift).
-- **5b** runtime `hwtree` child attachment by the bus drivers (VL805 under
-  the bridge, HID under the VL805); **5c** the production driver-candidate
-  catalogue + `devmgr` autoload wiring (rides DriverSpawner-over-IPC, Stage
-  4.HW increment 1); **5d** the continuous keyboard *service*; **5e**
-  delete `usb_keyboard.rs` (§2.14) once the generic path drives the chain.
+- **5b** runtime `hwtree` child attachment by the bus drivers. **5b-i —
+  done:** `PciBus::describe_function(bdf, parent_id, node_id)` (lib/abi,
+  implemented on `Pci<C>`) returns an enumerated function as a child
+  `HwNode` carrying one `HwMatchKey::pci` of its `vendor:device` and **full
+  24-bit class** read from config dword 2 (`base<<16|sub<<8|prog_if` — the
+  16-bit `BusDevice::class` drops prog_if, so the xHCI `0x0C0330` is told
+  apart from older USB host classes), `HwDeviceClass` from the base class,
+  fail-closed `NotFound` on an absent function (§2.9/§18.5); a new trait
+  method only (no `#[repr(C)]`/C-header drift), host-proven that the VL805
+  node matches `bus_usb::BIND_KEYS`. **5b-ii — staged:** `bus_usb` emits the
+  HID device under the VL805 keyed by its **interface** class
+  (`0x030101`/`0x030102`), which first needs the USB enumeration to read the
+  configuration/interface descriptor (it hard-codes interface 0 / boot
+  keyboard today) so the class is captured, never fabricated (§18.5). Then
+  **5c** the production driver-candidate catalogue + `devmgr` autoload wiring
+  (rides DriverSpawner-over-IPC, Stage 4.HW increment 1); **5d** the
+  continuous keyboard *service*; **5e** delete `usb_keyboard.rs` (§2.14) once
+  the generic path drives the chain.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

@@ -580,10 +580,28 @@ order (one fully-gated increment each):
      changed, so no C-header drift. Docs:
      `docs/src/drivers/hardware-detection.md`.
    - **5b — runtime hardware-tree child attachment.** Let the bus drivers
-     (`pci` enumerate, `bus_usb` enumerate) emit their enumerated children
-     (the VL805 under the PCIe bridge; the HID device under the VL805) as
-     `HwNode`s parented into a growable tree, so the downstream chain nodes
-     exist for matching (§18.2). Host-provable.
+     emit their enumerated children as `HwNode`s parented into a growable
+     tree, so the downstream chain nodes exist for matching (§18.2).
+     Host-provable.
+     - **5b-i — PCI child emission — done.** `PciBus::describe_function(bdf,
+       parent_id, node_id)` (lib/abi) returns the enumerated function as a
+       child `HwNode` carrying one `HwMatchKey::pci` of its `vendor:device`
+       and **full 24-bit class** (`base<<16|sub<<8|prog_if`, read from config
+       dword 2 — the 16-bit `BusDevice::class` drops prog_if, so an xHCI host
+       `0x0C_03_30` is told apart from older USB host classes), with the
+       `HwDeviceClass` derived from the base class; absent function (all-ones
+       vendor) fails closed `NotFound` (§2.9/§18.5). `Pci<C>` implements it
+       (inherent `describe_function`/`read_class_24`); the tree owner assigns
+       ids and resources are minted at the load gate (§4/§5.4). New trait
+       method only — no `#[repr(C)]`/C-header drift. The generic xHCI driver's
+       wildcard `BIND_KEYS` (5a) resolves against the emitted VL805 node.
+     - **5b-ii — USB/HID child emission — staged.** `bus_usb` must emit the
+       enumerated HID device under the VL805 as a child node keyed by its
+       **interface** class (`0x03_01_01` keyboard / `0x03_01_02` mouse). This
+       needs the USB enumeration to read the configuration/interface
+       descriptor (it currently hard-codes interface 0 / boot keyboard), so
+       the honest interface-class triple is captured rather than assumed
+       (§18.5 — never fabricate the key).
    - **5c — production driver-candidate catalogue + `devmgr` autoload
      wiring** over the static + runtime tree, driving the chain through the
      driver-host load gate. Rides the still-open DriverSpawner-over-IPC gap

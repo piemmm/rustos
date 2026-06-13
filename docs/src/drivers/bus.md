@@ -610,6 +610,31 @@ the host tests prove the composition and its fail-closed paths up to
 the controller hand-off; the live controller bring-up is the on-metal
 acceptance item.
 
+### Child-node emission into the hardware tree
+
+A bus that enumerates downstream devices is responsible for growing the
+hardware tree at runtime (`AGENTS.md` §18.1 / §18.3): each device it
+finds becomes a child `HwNode` carrying the match keys a driver's signed
+bind table resolves against, so a device behind the bus autoloads its
+driver as match **data** rather than by a hand-wired composition module
+(`AGENTS.md` §2.2 / §18.5). `PciBus::describe_function(bdf, parent_id,
+node_id)` is that seam: it reads the function's `vendor:device` and its
+**full 24-bit class code** `(base_class << 16) | (sub_class << 8) |
+prog_if` — the prog-if kept so an xHCI host (`0x0C_03_30`) is told apart
+from the older OHCI/UHCI/EHCI USB host classes that share `0x0C_03`,
+exactly what the generic xHCI driver's wildcard bind key needs — and
+returns an `HwNode` parented at `parent_id` with a single
+`HwMatchKey::pci`. The node's `HwDeviceClass` is derived from the PCI
+base class (serial-bus and bridge → `Bus`); driver binding is decided by
+the match key, not the class. An absent function (the all-ones vendor
+sentinel) fails closed with `NotFound`, never a fabricated node
+(`AGENTS.md` §2.9). The tree owner allocates the ids and attaches no
+resource capabilities here — those are minted at the load gate
+(`AGENTS.md` §4 / §5.4). This is the PCI half of `plans/PI.md`
+Stage 4.HW item 5b; the bus-driver `BIND_KEYS` (item 5a) and `devmgr`
+autoload wiring (item 5c) close the data-driven path that supersedes the
+`kernel/rustos-kernel::usb_keyboard` composition scaffold.
+
 ## Constructing the real-hardware bus
 
 The boot pipeline reaches PCI through a single public constructor,

@@ -12,7 +12,10 @@
 #![allow(dead_code)]
 
 use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::{DriverError, MmioMapError, MmioMapper, MsiMessage, RegisterWindow, WindowError};
+use rustos_abi::{
+    DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
+    RegisterWindow, WindowError,
+};
 
 use crate::config::{
     BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, CAP_ID_VENDOR,
@@ -642,6 +645,58 @@ impl<C: ConfigSpace> Pci<C> {
         let dword = self.config.read32(addr_with_reg(base_addr, 2));
         low_u16(dword >> 16)
     }
+
+    /// Read function `base_addr`'s full **24-bit** class code
+    /// `(base_class << 16) | (sub_class << 8) | prog_if`.
+    ///
+    /// Unlike [`read_class`](Self::read_class) — which yields only the
+    /// base + sub-class for the 16-bit [`BusDevice::class`] field — this
+    /// keeps the programming interface (config dword 2, byte 1), so an
+    /// xHCI USB host (`0x0C_03_30`) is distinguished from the older
+    /// OHCI/UHCI/EHCI host classes that share `0x0C_03`. The low byte
+    /// (revision id) is masked off.
+    fn read_class_24(&self, base_addr: ConfigAddress) -> u32 {
+        let dword = self.config.read32(addr_with_reg(base_addr, 2));
+        (dword >> 8) & 0x00FF_FFFF
+    }
+
+    /// Describe the function at `bdf` as a discovered child
+    /// [`HwNode`] parented at `parent_id` and assigned `node_id`.
+    ///
+    /// The node carries one [`HwMatchKey::pci`] of the function's
+    /// `vendor:device` and its full 24-bit class
+    /// ([`read_class_24`](Self::read_class_24)), so `devmgr` resolves a
+    /// driver's signed bind table against it (`AGENTS.md` §18.3). The
+    /// node's [`HwDeviceClass`] is derived from the PCI base class.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no function responds at `bdf` (the
+    ///   vendor id reads the all-ones sentinel) — fail closed, never a
+    ///   fabricated node (`AGENTS.md` §2.9 / §18.5).
+    /// * [`DriverError::DeviceFault`] if the match key cannot be pushed.
+    pub fn describe_function(
+        &self,
+        bdf: u64,
+        parent_id: u32,
+        node_id: u32,
+    ) -> Result<HwNode, DriverError> {
+        let addr = unpack_bdf(bdf, 0);
+        let id = self.config.read32(addr);
+        let vendor = low_u16(id);
+        if vendor == VENDOR_INVALID {
+            return Err(DriverError::NotFound);
+        }
+        let device = low_u16(id >> 16);
+        let class24 = self.read_class_24(addr);
+        // The base class is byte 3 of config dword 2 (bits 16..24 of the
+        // 24-bit code); `low_u8` masks to 8 bits, so the cast is lossless.
+        let base_class = low_u8(class24 >> 16);
+        let mut node = HwNode::new(node_id, parent_id, device_class_from_base(base_class));
+        node.push_match_key(HwMatchKey::pci(vendor, device, class24))
+            .map_err(|_| DriverError::DeviceFault)?;
+        Ok(node)
+    }
 }
 
 #[inline]
@@ -654,6 +709,28 @@ fn low_u8(v: u32) -> u8 {
 fn low_u16(v: u32) -> u16 {
     // Masking to 16 bits then casting is lossless by construction.
     (v & 0xFFFF) as u16
+}
+
+/// Map a PCI base class code (PCI Local Bus 3.0 Appendix D) to the
+/// architecture-neutral [`HwDeviceClass`] a discovered node carries.
+///
+/// The class is informational on the node — driver binding is decided
+/// by the [`HwMatchKey`], not the class (`AGENTS.md` §18.3) — so an
+/// unrecognised base class is reported as [`HwDeviceClass::Other`]
+/// rather than guessed.
+fn device_class_from_base(base_class: u8) -> HwDeviceClass {
+    match base_class {
+        // Mass-storage controller.
+        0x01 => HwDeviceClass::Storage,
+        // Network controller.
+        0x02 => HwDeviceClass::Network,
+        // Display controller.
+        0x03 => HwDeviceClass::Display,
+        // Bridge (0x06) and serial-bus controller (0x0C, incl. USB
+        // host controllers) are buses to further devices.
+        0x06 | 0x0C => HwDeviceClass::Bus,
+        _ => HwDeviceClass::Other,
+    }
 }
 
 #[inline]

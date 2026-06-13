@@ -1028,7 +1028,7 @@ fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
         (u32::from(VL805_DEVICE) << 16) | u32::from(VL805_VENDOR),
     );
     put_ecam(&mut backing, 1, 0, 0, 1, (1u32 << 4) << 16); // status: cap list present.
-    put_ecam(&mut backing, 1, 0, 0, 2, 0x0C03 << 16); // class = USB controller.
+    put_ecam(&mut backing, 1, 0, 0, 2, 0x0C_03_30 << 8); // class = xHCI USB host (prog-if 0x30).
     put_ecam(&mut backing, 1, 0, 0, 3, 0x00 << 16); // header type 0.
     put_ecam(&mut backing, 1, 0, 0, 4, 0x6010_0000); // BAR0: 32-bit memory, base 0x6010_0000.
     put_ecam(&mut backing, 1, 0, 0, 13, 0x80); // cap pointer -> byte 0x80.
@@ -1230,4 +1230,64 @@ fn pci_bus_map_bar_window_rejects_absent_bar() {
     assert!((&pci as &dyn PciBus)
         .map_bar_window(vl805, 5, &mapper)
         .is_err());
+}
+
+/// `describe_function` emits the VL805 as a discovered child node whose
+/// PCI match key carries its full 24-bit class, so the generic xHCI
+/// driver's wildcard bind key (`0x0C_03_30`) resolves against it
+/// (`AGENTS.md` §18.3 — autoload is match *data*, not composition).
+#[test]
+fn describe_function_emits_the_vl805_child_node() {
+    use rustos_abi::driver::pci::PciBus;
+    use rustos_abi::{HwDeviceClass, HwMatchKey};
+
+    let (_backing, window) = vl805_ecam_region();
+    let vl805 = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let pci = crate::mechanism_ecam(window);
+    let node = (&pci as &dyn PciBus)
+        .describe_function(vl805, 4, 11)
+        .expect("describes the VL805");
+    assert_eq!(node.id(), 11);
+    assert_eq!(node.parent(), 4);
+    // A serial-bus (USB host) controller is a bus to further devices.
+    assert_eq!(node.class(), Some(HwDeviceClass::Bus));
+    assert_eq!(node.match_keys().len(), 1);
+    let key = node.match_keys()[0];
+    assert_eq!(key.vendor(), VL805_VENDOR);
+    assert_eq!(key.product(), VL805_DEVICE);
+    assert_eq!(key.class(), 0x0C_03_30);
+    // The generic xHCI bind key (class only, vendor/device wildcard)
+    // binds; a key naming the older USB class (prog-if `0x20`, EHCI)
+    // does not.
+    assert!(HwMatchKey::pci(0, 0, 0x0C_03_30).matches(&key));
+    assert!(!HwMatchKey::pci(0, 0, 0x0C_03_20).matches(&key));
+}
+
+/// `describe_function` fails closed on a `bdf` with no responding
+/// function (the all-ones vendor sentinel), never fabricating a node
+/// (`AGENTS.md` §2.9 / §18.5).
+#[test]
+fn describe_function_rejects_an_absent_function() {
+    use rustos_abi::driver::pci::PciBus;
+
+    let (_backing, window) = vl805_ecam_region();
+    // 00:01.0 was never planted: it reads all-ones.
+    let absent = ConfigAddress {
+        bus: 0,
+        device: 1,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let pci = crate::mechanism_ecam(window);
+    assert!(matches!(
+        (&pci as &dyn PciBus).describe_function(absent, 4, 11),
+        Err(DriverError::NotFound)
+    ));
 }

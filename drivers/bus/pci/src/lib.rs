@@ -41,7 +41,7 @@ use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::pci::PciBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, MsiMessage, PortIo,
+    CapabilityId, DriverError, DriverHandle, DriverHost, HwNode, MmioMapper, MsiMessage, PortIo,
     RegisterWindow,
 };
 
@@ -267,5 +267,14 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
     fn enable_bus_master(&self, bdf: u64) -> Result<(), DriverError> {
         Pci::enable_bus_master(self, bdf);
         Ok(())
+    }
+
+    fn describe_function(
+        &self,
+        bdf: u64,
+        parent_id: u32,
+        node_id: u32,
+    ) -> Result<HwNode, DriverError> {
+        Pci::describe_function(self, bdf, parent_id, node_id)
     }
 }
