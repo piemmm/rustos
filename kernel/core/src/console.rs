@@ -158,13 +158,15 @@ pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
 ///
 /// The producer counterpart of [`ConsoleRead`]. A keyboard-input driver
 /// that has decoded a directly attached keyboard (USB-HID / PS-2) into a
-/// stream of console bytes calls the `console_input` syscall (`abi-v1`
-/// number 22), which — after checking
+/// key edge injects it through the `key_inject` syscall (`abi-v1` number
+/// 22), which — after checking
 /// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT)
-/// and copying the bytes in — hands them to this half of the addressed
-/// [`ConsoleDevice`]. The matching [`ConsoleRead`] half then drains them
-/// for a `stream_read` consumer (login), so the video console's session
-/// reads its own keyboard rather than the UART's bytes.
+/// — hands it to the kernel input-focus arbiter
+/// ([`crate::input_focus`]). While the desktop does not hold focus the
+/// arbiter encodes a key press to its console (tty) bytes and pushes them
+/// here (its *text sink*); the matching [`ConsoleRead`] half then drains
+/// them for a `stream_read` consumer (login), so the video console's
+/// session reads its own keyboard rather than the UART's bytes.
 ///
 /// Implementations must be [`Sync`]: the single installed console is
 /// shared by the per-CPU syscall handlers, exactly like [`ConsoleWrite`]
@@ -173,11 +175,11 @@ pub trait ConsoleInput: Sync {
     /// Enqueue up to `bytes.len()` decoded console bytes, returning the
     /// number actually accepted.
     ///
-    /// The caller (the `console_input` handler) has already copied
-    /// `bytes` out of user memory through the validated `copy_from_user`
-    /// boundary (`AGENTS.md` §5.4) and checked
+    /// The caller (the input-focus arbiter's text sink, fed by the
+    /// `key_inject` handler) has already decoded the key edge and checked
     /// [`CapabilityId::INPUT_INJECT`](rustos_abi::CapabilityId::INPUT_INJECT);
-    /// the implementation only moves bytes into its queue. A short push
+    /// the implementation only moves the encoded bytes into its queue. A
+    /// short push
     /// (fewer than `bytes.len()`, including zero when the bounded queue
     /// is full) is permitted and reported through the return value; the
     /// producer retries the remainder and never blocks (`AGENTS.md`
@@ -196,10 +198,10 @@ pub trait ConsoleInput: Sync {
 /// injected input.
 ///
 /// Every push fails closed with [`Errno::NotImplemented`] — the
-/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
-/// `console_input` syscall targeting a console with no injectable queue
-/// (a UART, which reads its own hardware FIFO) announces an inert
-/// interface rather than silently dropping the keystrokes.
+/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so the input-focus
+/// arbiter's text sink, when it is a console with no injectable queue (a
+/// UART, which reads its own hardware FIFO), announces an inert interface
+/// rather than silently dropping the keystrokes.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct NullConsoleInput;
 
@@ -251,17 +253,18 @@ impl InputRing {
 
 /// A bounded, lock-protected type-ahead queue that is both the
 /// [`ConsoleRead`] half (drained by `stream_read`) and the
-/// [`ConsoleInput`] half (fed by `console_input`) of a keyboard-backed
-/// console (`AGENTS.md` §20, `plans/PI.md` P11).
+/// [`ConsoleInput`] half (the input-focus arbiter's text sink) of a
+/// keyboard-backed console (`AGENTS.md` §20, `plans/PI.md` P11).
 ///
 /// The video console installs one of these so a directly attached
-/// keyboard's decoded bytes — pushed by the keyboard-input driver — are
-/// drained by the login reading that console, instead of the inert
+/// keyboard's decoded bytes — encoded and pushed by the input-focus
+/// arbiter (`crate::input_focus`) while the desktop does not hold focus —
+/// are drained by the login reading that console, instead of the inert
 /// `Ok(0)` poll a display with no keyboard would otherwise return. The
 /// arch port holds it in a `'static` and references it as both halves of
-/// the console's [`ConsoleDevice`]; the same `'static` is therefore
-/// shared by the producer (`console_input`) and the consumer
-/// (`stream_read`), so a push wakes a reader parked in
+/// the console's [`ConsoleDevice`] (and as the arbiter's text sink); the
+/// same `'static` is therefore shared by the producer (the arbiter) and
+/// the consumer (`stream_read`), so a push wakes a reader parked in
 /// [`BlockingConsoleRead`].
 ///
 /// A drained byte is **zeroed in place** as it leaves the ring: a typed
@@ -328,7 +331,7 @@ impl ConsoleRead for ConsoleInputQueue {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         // An empty queue is a zero-length read, exactly like a UART with
         // an empty RX FIFO; `BlockingConsoleRead` parks the caller and
-        // re-polls, so a later `console_input` push wakes it (`AGENTS.md`
+        // re-polls, so a later arbiter push wakes it (`AGENTS.md`
         // §20 — the backing owns blocking).
         Ok(self.drain(buf))
     }

@@ -34,6 +34,7 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
+use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::spawn::{
     InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
@@ -438,6 +439,22 @@ where
     /// §4, §16.5). Held as a `'static` borrow, like the console device.
     pub spawn_service: &'static (dyn ProcessSpawn + 'static),
 
+    /// The kernel input-focus arbiter the keyboard syscalls (`key_inject` /
+    /// `display_acquire` / `display_release` / `keyboard_read`) drive
+    /// (`AGENTS.md` §10 / §17.3 / §20, `plans/PI.md` P11 — input follows
+    /// the surface owner).
+    ///
+    /// Defaults to [`NULL_INPUT_FOCUS`], whose text sink is the fail-closed
+    /// [`crate::console::NULL_CONSOLE_INPUT`]: an arch port that has wired no
+    /// arbiter leaves this default and a `key_inject` in the text focus fails
+    /// closed rather than leaking a key edge to a device (`AGENTS.md` §2.9 /
+    /// §5.4). A port installs its arbiter — its text sink pointed at the
+    /// console that owns the directly attached keyboard — through
+    /// [`Self::with_input_focus`]. Held as a `'static` borrow because the
+    /// arbiter lives for the lifetime of the running kernel, exactly like the
+    /// console list.
+    pub input_focus: &'static InputFocus,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -495,6 +512,11 @@ where
             // SP3): `spawn` fails closed (`NotFound` / `NotImplemented`).
             programs: &EMPTY_PROGRAM_REGISTRY,
             spawn_service: &NULL_PROCESS_SPAWN,
+            // Input-focus arbiter unwired until the arch port installs the
+            // real one through `with_input_focus` (`plans/PI.md` P11):
+            // `key_inject` / `keyboard_read` fail closed through
+            // `NULL_INPUT_FOCUS` (`AGENTS.md` §2.9 / §5.4).
+            input_focus: &NULL_INPUT_FOCUS,
             _marker: core::marker::PhantomData,
         }
     }
@@ -559,6 +581,24 @@ where
     ) -> Self {
         self.programs = programs;
         self.spawn_service = spawn_service;
+        self
+    }
+
+    /// Install the kernel input-focus arbiter the keyboard syscalls drive,
+    /// consuming and returning `self` (`plans/PI.md` P11).
+    ///
+    /// Called by an arch port's boot pipeline after it has built the arbiter
+    /// with its text sink pointed at the console that owns the directly
+    /// attached keyboard (on the Pi, the video console's input queue). Until
+    /// this is called the handover holds [`NULL_INPUT_FOCUS`] and a
+    /// `key_inject` in the default text focus fails closed (`AGENTS.md`
+    /// §2.9). The arbiter must be `'static`: the boot path leaks it alongside
+    /// the kernel state, which lives for the lifetime of the running kernel
+    /// (`AGENTS.md` §2.1 — the install is a one-shot move, not a global
+    /// mutable static).
+    #[must_use]
+    pub fn with_input_focus(mut self, input_focus: &'static InputFocus) -> Self {
+        self.input_focus = input_focus;
         self
     }
 

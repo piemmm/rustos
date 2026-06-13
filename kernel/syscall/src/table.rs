@@ -427,34 +427,76 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Inject decoded keystroke bytes into the installed console `console`
-    /// (`AGENTS.md` §20, `plans/PI.md` P11 — keyboard input for the video
-    /// console).
+    /// Inject one decoded keyboard *key edge* into the kernel input-focus
+    /// arbiter (`AGENTS.md` §20, `plans/PI.md` P11 — input follows the
+    /// surface owner).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::INPUT_INJECT`] and that `buf` is a non-null
-    /// `UserPtr`. The implementation resolves `console` against the
-    /// boot-installed console list, copies up to `len` bytes in through
-    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4), pushes
-    /// them into that console's kernel-side input queue, and returns the
-    /// number enqueued — a short push when the bounded queue is near full,
-    /// which the producer retries (`AGENTS.md` §2.1, never blocks). A
-    /// `STREAM_READ` of the same console then drains them, so the video
-    /// console's login takes input from its own keyboard.
+    /// `UserPtr`. The implementation copies up to `len` bytes in through
+    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4), decodes
+    /// one [`rustos_abi::input::KeyInput`] record fail-closed, and hands it
+    /// to the arbiter, which decides the encoding and destination by who
+    /// holds focus: with the text console foreground it encodes the press
+    /// to console (tty) bytes and enqueues them on the focused console's
+    /// input queue; with the desktop foreground it routes the record to the
+    /// kernel keyboard channel. The driver no longer chooses the encoding
+    /// or destination (`AGENTS.md` §17.4). Returns the number of bytes
+    /// consumed from the record.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
-    /// no console list wired has no input queue to feed, as does a
-    /// `console` whose backing accepts no injected input (a UART reading
-    /// its own hardware FIFO). The real handler is installed in
-    /// `kernel/core`.
-    fn console_input(
-        &self,
-        _caller: &CallerContext<'_>,
-        _console: u32,
-        _buf: u64,
-        _len: usize,
-    ) -> SyscallResult {
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with no
+    /// input-focus arbiter wired has nowhere to route the edge. The real
+    /// handler is installed in `kernel/core`.
+    fn key_inject(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Acquire ownership of the display and claim keyboard input focus
+    /// (`AGENTS.md` §10, §17.3; `plans/PI.md` P11 — input follows the
+    /// surface owner).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::DISPLAY`]. The implementation switches the
+    /// input-focus arbiter's foreground to the desktop keyboard channel, so
+    /// subsequently injected key edges ([`Self::key_inject`]) are delivered
+    /// as records the display owner drains with [`Self::keyboard_read`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// arbiter wired owns no display to acquire. The real handler is
+    /// installed in `kernel/core`.
+    fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Release the display and return keyboard input focus to the text
+    /// console (`AGENTS.md` §10, §17.3; `plans/PI.md` P11).
+    ///
+    /// The inverse of [`Self::display_acquire`]; the dispatcher has already
+    /// checked the caller holds [`CapabilityId::DISPLAY`]. The default
+    /// implementation fails closed with [`Errno::NotImplemented`].
+    fn display_release(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read one decoded keyboard event from the kernel keyboard channel
+    /// (`AGENTS.md` §10; `plans/PI.md` P11 — keyboard input for the
+    /// desktop).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_READ`] and that `buf` is a non-null `UserPtr`.
+    /// The implementation drains one [`rustos_abi::input::KeyInput`] record
+    /// the arbiter routed to the channel into `buf` (at least
+    /// [`rustos_abi::input::KeyInput::WIRE_LEN`] bytes), copies it out
+    /// through the validated boundary (`AGENTS.md` §5.4), and returns the
+    /// number of bytes written — or `0` when the channel is drained.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// arbiter wired has no channel to drain. The real handler is installed
+    /// in `kernel/core`.
+    fn keyboard_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 }
@@ -649,10 +691,19 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .stream_echo(caller, decode_u32(args.0[0]), decode_u32(args.0[1]))
             }
-            SyscallNumber::CONSOLE_INPUT => {
-                let len = decode_len(args.0[2])?;
-                self.handlers
-                    .console_input(caller, decode_u32(args.0[0]), args.0[1], len)
+            SyscallNumber::KEY_INJECT => {
+                // `validate_arg` guarantees args[0] is a non-null
+                // `UserPtr`; args[1] is the record length.
+                let len = decode_len(args.0[1])?;
+                self.handlers.key_inject(caller, args.0[0], len)
+            }
+            SyscallNumber::DISPLAY_ACQUIRE => self.handlers.display_acquire(caller),
+            SyscallNumber::DISPLAY_RELEASE => self.handlers.display_release(caller),
+            SyscallNumber::KEYBOARD_READ => {
+                // `validate_arg` guarantees args[0] is a non-null
+                // `UserPtr`; args[1] is the buffer capacity.
+                let len = decode_len(args.0[1])?;
+                self.handlers.keyboard_read(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1062,17 +1113,26 @@ mod tests {
             // decoded `(fd, enabled)` without wiring a real console here.
             Ok(0)
         }
-        fn console_input(
-            &self,
-            _c: &CallerContext<'_>,
-            _console: u32,
-            _buf: u64,
-            len: usize,
-        ) -> SyscallResult {
-            self.record("console_input");
+        fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("key_inject");
             // Echo the length back so the reachability test can assert the
-            // dispatcher decoded `(console, buf, len)` without wiring a
-            // real console input queue here.
+            // dispatcher decoded `(buf, len)` without wiring a real
+            // input-focus arbiter here.
+            Ok(len as u64)
+        }
+        fn display_acquire(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("display_acquire");
+            Ok(0)
+        }
+        fn display_release(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("display_release");
+            Ok(0)
+        }
+        fn keyboard_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("keyboard_read");
+            // Echo the length back so the reachability test can assert the
+            // dispatcher decoded `(buf, len)` without wiring a real
+            // keyboard channel here.
             Ok(len as u64)
         }
     }
@@ -1096,6 +1156,8 @@ mod tests {
                 CapabilityId::CONSOLE_READ,
                 CapabilityId::USERS_READ,
                 CapabilityId::INPUT_INJECT,
+                CapabilityId::DISPLAY,
+                CapabilityId::INPUT_READ,
             ],
             &sink,
         );

@@ -271,6 +271,173 @@ fn named_to_vt(named: NamedKey) -> Option<VtKey> {
     })
 }
 
+/// The wire keyboard-event vocabulary the abi<->tty bridge crosses to.
+///
+/// Kept behind module aliases so the wire [`AbiModifiers`] never collides with
+/// the `lib/input` [`Modifiers`] this crate's encoder already uses.
+use rustos_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
+
+/// Map a wire [`NamedKeyCode`] to the `lib/input` [`NamedKey`].
+///
+/// The two enumerate the same closed set of non-character keys; this is the
+/// one place the tree crosses between them (`AGENTS.md` §2.2).
+const fn named_key_from_abi(code: NamedKeyCode) -> NamedKey {
+    match code {
+        NamedKeyCode::Enter => NamedKey::Enter,
+        NamedKeyCode::Escape => NamedKey::Escape,
+        NamedKeyCode::Backspace => NamedKey::Backspace,
+        NamedKeyCode::Tab => NamedKey::Tab,
+        NamedKeyCode::Delete => NamedKey::Delete,
+        NamedKeyCode::Insert => NamedKey::Insert,
+        NamedKeyCode::Home => NamedKey::Home,
+        NamedKeyCode::End => NamedKey::End,
+        NamedKeyCode::PageUp => NamedKey::PageUp,
+        NamedKeyCode::PageDown => NamedKey::PageDown,
+        NamedKeyCode::Left => NamedKey::Left,
+        NamedKeyCode::Right => NamedKey::Right,
+        NamedKeyCode::Up => NamedKey::Up,
+        NamedKeyCode::Down => NamedKey::Down,
+        NamedKeyCode::F1 => NamedKey::Function { number: 1 },
+        NamedKeyCode::F2 => NamedKey::Function { number: 2 },
+        NamedKeyCode::F3 => NamedKey::Function { number: 3 },
+        NamedKeyCode::F4 => NamedKey::Function { number: 4 },
+        NamedKeyCode::F5 => NamedKey::Function { number: 5 },
+        NamedKeyCode::F6 => NamedKey::Function { number: 6 },
+        NamedKeyCode::F7 => NamedKey::Function { number: 7 },
+        NamedKeyCode::F8 => NamedKey::Function { number: 8 },
+        NamedKeyCode::F9 => NamedKey::Function { number: 9 },
+        NamedKeyCode::F10 => NamedKey::Function { number: 10 },
+        NamedKeyCode::F11 => NamedKey::Function { number: 11 },
+        NamedKeyCode::F12 => NamedKey::Function { number: 12 },
+    }
+}
+
+/// Map a `lib/input` [`NamedKey`] to its wire [`NamedKeyCode`], or `None` for a
+/// function number outside the defined `F1..=F12` range (fail closed, never
+/// guess — `AGENTS.md` §2.9 / §5.4).
+const fn named_key_to_abi(named: NamedKey) -> Option<NamedKeyCode> {
+    Some(match named {
+        NamedKey::Enter => NamedKeyCode::Enter,
+        NamedKey::Escape => NamedKeyCode::Escape,
+        NamedKey::Backspace => NamedKeyCode::Backspace,
+        NamedKey::Tab => NamedKeyCode::Tab,
+        NamedKey::Delete => NamedKeyCode::Delete,
+        NamedKey::Insert => NamedKeyCode::Insert,
+        NamedKey::Home => NamedKeyCode::Home,
+        NamedKey::End => NamedKeyCode::End,
+        NamedKey::PageUp => NamedKeyCode::PageUp,
+        NamedKey::PageDown => NamedKeyCode::PageDown,
+        NamedKey::Left => NamedKeyCode::Left,
+        NamedKey::Right => NamedKeyCode::Right,
+        NamedKey::Up => NamedKeyCode::Up,
+        NamedKey::Down => NamedKeyCode::Down,
+        NamedKey::Function { number } => match number {
+            1 => NamedKeyCode::F1,
+            2 => NamedKeyCode::F2,
+            3 => NamedKeyCode::F3,
+            4 => NamedKeyCode::F4,
+            5 => NamedKeyCode::F5,
+            6 => NamedKeyCode::F6,
+            7 => NamedKeyCode::F7,
+            8 => NamedKeyCode::F8,
+            9 => NamedKeyCode::F9,
+            10 => NamedKeyCode::F10,
+            11 => NamedKeyCode::F11,
+            12 => NamedKeyCode::F12,
+            _ => return None,
+        },
+    })
+}
+
+/// Map the wire [`AbiModifiers`] to the `lib/input` [`Modifiers`].
+const fn modifiers_from_abi(m: AbiModifiers) -> Modifiers {
+    Modifiers {
+        shift: m.shift,
+        ctrl: m.ctrl,
+        alt: m.alt,
+        meta: m.meta,
+    }
+}
+
+/// Map the `lib/input` [`Modifiers`] to the wire [`AbiModifiers`].
+const fn modifiers_to_abi(m: Modifiers) -> AbiModifiers {
+    AbiModifiers {
+        shift: m.shift,
+        ctrl: m.ctrl,
+        alt: m.alt,
+        meta: m.meta,
+    }
+}
+
+/// Map a wire [`KeyValue`] to the `lib/input` [`Key`].
+const fn key_from_abi(value: KeyValue) -> Key {
+    match value {
+        KeyValue::Char(c) => Key::Char(c),
+        KeyValue::Named(code) => Key::Named(named_key_from_abi(code)),
+    }
+}
+
+/// Encode one decoded [`KeyInput`] record into the console (tty) bytes a
+/// terminal sends, for the kernel input-focus arbiter's *text* sink
+/// (`plans/PI.md` P11).
+///
+/// This is [`encode_key`] reached from the wire vocabulary: it maps the
+/// record's [`KeyValue`] and [`AbiModifiers`] to the `lib/input` [`Key`] /
+/// [`Modifiers`] and encodes them, so the arbiter never owns a second copy of
+/// the layout-to-tty mapping (`AGENTS.md` §2.2). Only a key **press** produces
+/// bytes — a terminal sends nothing on key release — so a
+/// [`KeyInput::Released`] writes nothing and returns `Ok(0)`.
+///
+/// # Errors
+///
+/// Returns [`KeymapError::BufferTooSmall`] if `out` cannot hold the sequence;
+/// a buffer of at least [`MAX_KEY_BYTES`] bytes can never trigger this.
+///
+/// # Capabilities
+///
+/// None.
+pub fn encode_key_input(record: &KeyInput, out: &mut [u8]) -> Result<usize, KeymapError> {
+    match *record {
+        KeyInput::Pressed { key, modifiers } => {
+            encode_key(key_from_abi(key), modifiers_from_abi(modifiers), out)
+        }
+        KeyInput::Released { .. } => Ok(0),
+    }
+}
+
+/// Build a wire [`KeyInput`] record from a decoded [`Key`] edge, for a keyboard
+/// driver's *device* side (`plans/PI.md` P11): the driver resolves its
+/// device's scancodes into a [`Key`] + held [`Modifiers`] and emits the key
+/// edge, leaving the encoding and routing to the kernel arbiter
+/// (`AGENTS.md` §17.4).
+///
+/// `pressed` selects [`KeyInput::Pressed`] versus [`KeyInput::Released`].
+/// Returns `None` for a [`Key`] with no wire representation (a function number
+/// outside `F1..=F12`) — fail closed, never guess (`AGENTS.md` §2.9 / §5.4).
+///
+/// # Capabilities
+///
+/// None.
+#[must_use]
+pub fn key_input(key: Key, modifiers: Modifiers, pressed: bool) -> Option<KeyInput> {
+    let value = match key {
+        Key::Char(c) => KeyValue::Char(c),
+        Key::Named(named) => KeyValue::Named(named_key_to_abi(named)?),
+    };
+    let modifiers = modifiers_to_abi(modifiers);
+    Some(if pressed {
+        KeyInput::Pressed {
+            key: value,
+            modifiers,
+        }
+    } else {
+        KeyInput::Released {
+            key: value,
+            modifiers,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +615,59 @@ mod tests {
             )
             .is_ok());
         }
+    }
+
+    #[test]
+    fn encode_key_input_press_matches_encode_key() {
+        // A pressed record encodes exactly as the equivalent `encode_key`.
+        let record = key_input(
+            Key::Char('c'),
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            true,
+        )
+        .expect("char has a wire form");
+        let mut a = [0u8; MAX_KEY_BYTES];
+        let na = encode_key_input(&record, &mut a).expect("fits");
+        assert_eq!(&a[..na], &[0x03]); // Ctrl-C
+    }
+
+    #[test]
+    fn encode_key_input_release_writes_nothing() {
+        let record =
+            key_input(Key::Char('a'), Modifiers::default(), false).expect("char has a wire form");
+        let mut buf = [0u8; MAX_KEY_BYTES];
+        assert_eq!(encode_key_input(&record, &mut buf), Ok(0));
+    }
+
+    #[test]
+    fn key_input_round_trips_named_and_char_through_the_bridge() {
+        // A named key built from the `lib/input` vocabulary decodes back to
+        // the same key, proving the two halves of the bridge agree (§2.2).
+        for key in [
+            Key::Char('Q'),
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::Left),
+            Key::Named(NamedKey::Function { number: 7 }),
+        ] {
+            let record = key_input(key, Modifiers::default(), true).expect("wire form");
+            assert_eq!(key_from_abi(record.key()), key);
+        }
+    }
+
+    #[test]
+    fn key_input_rejects_an_out_of_range_function_key() {
+        // No wire `NamedKeyCode` exists past F12, so the edge has no record
+        // (fail closed) rather than a guessed encoding.
+        assert_eq!(
+            key_input(
+                Key::Named(NamedKey::Function { number: 13 }),
+                Modifiers::default(),
+                true,
+            ),
+            None
+        );
     }
 }

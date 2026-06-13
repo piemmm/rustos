@@ -55,6 +55,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+use rustos_abi::input::KeyInput;
 use rustos_abi::{
     LimitKind, MapFlags, ResourceLimit, SyscallNumber, CONSOLE_INHERIT, STDERR, STDIN, STDINFO,
     STDOUT,
@@ -119,8 +120,17 @@ const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 /// `stream_echo` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
 
-/// `console_input` syscall number (`AGENTS.md` §2.2, as above).
-const NUM_CONSOLE_INPUT: u64 = SyscallNumber::CONSOLE_INPUT.as_u16() as u64;
+/// `key_inject` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
+
+/// `display_acquire` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
+
+/// `display_release` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
+
+/// `keyboard_read` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -268,38 +278,89 @@ pub fn set_echo(enabled: bool) -> i64 {
     ret as i64
 }
 
-/// Inject `bytes` of decoded keystroke input into the installed console
-/// `console` (`SyscallNumber::CONSOLE_INPUT`, `AGENTS.md` §20,
-/// `plans/PI.md` P11 — keyboard input for the video console), returning
-/// the raw signed register (the bytes enqueued when non-negative, else
-/// `-errno`).
+/// Inject one decoded keyboard `record` into the kernel input-focus arbiter
+/// (`SyscallNumber::KEY_INJECT`, `AGENTS.md` §20, `plans/PI.md` P11 — input
+/// follows the surface owner), returning the raw signed register (the bytes
+/// consumed when non-negative, else `-errno`).
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
-/// directly attached keyboard into a stream of console bytes: the kernel
+/// directly attached keyboard into a [`KeyInput`] key edge: the kernel
 /// validates `CAP_INPUT_INJECT` and the `(buf, len)` pair against the
-/// caller's address space (`AGENTS.md` §5.4), then pushes the bytes into
-/// the target console's input queue, which a [`stdin`] read of that
-/// console then drains. A short push (the bounded queue is near full)
-/// reports fewer than `bytes.len()`; the driver retries the remainder and
-/// never blocks (`AGENTS.md` §2.1). A `console` index with no installed
-/// console, or one whose backing accepts no injected input (a UART), fails
-/// closed with `-errno` (`AGENTS.md` §2.9); the wrapper surfaces the raw
-/// signed value so the caller decides how to react.
+/// caller's address space (`AGENTS.md` §5.4), decodes the record fail-closed,
+/// and routes it by who holds input focus — a *press* encoded to the focused
+/// text console's tty bytes, or the whole record delivered to the desktop
+/// keyboard channel. The driver no longer chooses the encoding or the
+/// destination (`AGENTS.md` §17.4). A malformed record or an unwired arbiter
+/// fails closed with `-errno` (`AGENTS.md` §2.9); the wrapper surfaces the
+/// raw signed value so the caller decides how to react.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
-pub fn console_input(console: u32, bytes: &[u8]) -> i64 {
+pub fn key_inject(record: &KeyInput) -> i64 {
+    let bytes = record.to_le_bytes();
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_INPUT_INJECT` and the `(buf, len)` pair against the caller's
     // address space before reading it (`AGENTS.md` §5.4). `bytes` is a live
-    // shared `&[u8]` for the duration of the call, so the `(ptr, len)` pair
+    // stack array for the duration of the call, so the `(ptr, len)` pair
     // denotes readable memory.
-    let ret = unsafe {
-        raw_syscall(
-            NUM_CONSOLE_INPUT,
-            [u64::from(console), ptr, bytes.len() as u64, 0, 0, 0],
-        )
-    };
+    let ret = unsafe { raw_syscall(NUM_KEY_INJECT, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Acquire ownership of the display and claim keyboard input focus
+/// (`SyscallNumber::DISPLAY_ACQUIRE`, `AGENTS.md` §10 / §17.3 / §20,
+/// `plans/PI.md` P11), returning `0` on success or `-errno`.
+///
+/// The compositing window manager calls this when it takes over the screen:
+/// the kernel input-focus arbiter switches its foreground to the desktop
+/// keyboard channel, so subsequently injected key edges are delivered as
+/// [`KeyInput`] records the manager drains with [`keyboard_read`]. Requires
+/// `CAP_DISPLAY` (`AGENTS.md` §4 — owning the display is privileged).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+pub fn display_acquire() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates `CAP_DISPLAY` before touching state.
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_ACQUIRE, [0, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Release the display and return keyboard input focus to the text console
+/// (`SyscallNumber::DISPLAY_RELEASE`, `AGENTS.md` §10 / §17.3 / §20,
+/// `plans/PI.md` P11), returning `0` on success or `-errno`.
+///
+/// The inverse of [`display_acquire`]; requires `CAP_DISPLAY`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
+pub fn display_release() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointers and the kernel validates `CAP_DISPLAY` before touching state.
+    let ret = unsafe { raw_syscall(NUM_DISPLAY_RELEASE, [0, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Read one decoded keyboard event from the kernel keyboard channel into
+/// `buf` (`SyscallNumber::KEYBOARD_READ`, `AGENTS.md` §10, `plans/PI.md`
+/// P11), returning the raw signed register (the bytes written — one
+/// [`KeyInput`] record's [`KeyInput::WIRE_LEN`], or `0` when the channel is
+/// momentarily drained — when non-negative, else `-errno`).
+///
+/// The principal that owns the display (the window manager) drains the
+/// records the arbiter routed to it while it held focus. The kernel
+/// validates `CAP_INPUT_READ` and the `(buf, len)` pair against the caller's
+/// address space (`AGENTS.md` §5.4); a `buf` shorter than
+/// [`KeyInput::WIRE_LEN`] fails closed with `-errno` (`AGENTS.md` §2.9). A
+/// zero return is a valid empty read, so the caller loops.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn keyboard_read(buf: &mut [u8]) -> i64 {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_INPUT_READ` and the `(buf, len)` pair against the caller's address
+    // space before writing it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
+    // denotes writable memory.
+    let ret = unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -824,27 +885,65 @@ mod tests {
     }
 
     #[test]
-    fn console_input_marshals_console_pointer_and_len() {
-        let keys = *b"root\r";
-        let (number, args) = capture(5, || {
-            assert_eq!(console_input(0, &keys), 5);
+    fn key_inject_marshals_the_record_pointer_and_len() {
+        use rustos_abi::input::{KeyValue, Modifiers};
+        let record = KeyInput::Pressed {
+            key: KeyValue::Char('a'),
+            modifiers: Modifiers::default(),
+        };
+        let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
+            assert_eq!(key_inject(&record), want);
         });
-        assert_eq!(number, NUM_CONSOLE_INPUT);
-        assert_eq!(args[0], 0);
-        assert_eq!(args[1], keys.as_ptr() as usize as u64);
-        assert_eq!(args[2], keys.len() as u64);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(number, NUM_KEY_INJECT);
+        // arg 0 is the record buffer pointer; arg 1 is its WIRE_LEN.
+        assert_ne!(args[0], 0);
+        assert_eq!(args[1], KeyInput::WIRE_LEN as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]
-    fn console_input_surfaces_negative_errno_encoding() {
-        // A console with no injectable input refuses the push with
-        // `NotImplemented`; the wrapper surfaces the raw `-errno` register.
+    fn key_inject_surfaces_negative_errno_encoding() {
+        use rustos_abi::input::{KeyValue, Modifiers};
+        // An unwired arbiter refuses the inject with `NotImplemented`; the
+        // wrapper surfaces the raw `-errno` register.
+        let record = KeyInput::Pressed {
+            key: KeyValue::Char('x'),
+            modifiers: Modifiers::default(),
+        };
         let want = -i64::from(rustos_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(console_input(0, b"x"), want);
+            assert_eq!(key_inject(&record), want);
         });
+    }
+
+    #[test]
+    fn display_acquire_and_release_marshal_no_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(display_acquire(), 0);
+        });
+        assert_eq!(number, NUM_DISPLAY_ACQUIRE);
+        assert_eq!(args, [0; 6]);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(display_release(), 0);
+        });
+        assert_eq!(number, NUM_DISPLAY_RELEASE);
+        assert_eq!(args, [0; 6]);
+    }
+
+    #[test]
+    fn keyboard_read_marshals_the_buffer_pointer_and_len() {
+        let mut buf = [0u8; KeyInput::WIRE_LEN];
+        let want = i64::try_from(KeyInput::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(KeyInput::WIRE_LEN as u64, || {
+            assert_eq!(keyboard_read(&mut buf), want);
+        });
+        assert_eq!(number, NUM_KEYBOARD_READ);
+        assert_ne!(args[0], 0);
+        assert_eq!(args[1], KeyInput::WIRE_LEN as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

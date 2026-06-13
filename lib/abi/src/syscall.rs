@@ -275,28 +275,74 @@ impl SyscallNumber {
     /// [`crate::Errno::NotFound`]; a build with no console wired fails
     /// closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_ECHO: Self = Self(21);
-    /// Inject decoded keystroke input into a system text console
-    /// (`AGENTS.md` §20, `plans/PI.md` P11 — keyboard input for the video
-    /// console).
+    /// Inject one decoded keyboard *key edge* into the kernel input-focus
+    /// arbiter (`AGENTS.md` §20, `plans/PI.md` P11 — input follows the
+    /// surface owner).
     ///
-    /// Arguments: `console: u32` (the target installed-console index, as
-    /// reported by [`SyscallNumber::CONSOLE_COUNT`]), `buf: *const u8`
-    /// (the decoded console bytes), and `len: usize` (their length).
-    /// Returns the number of bytes enqueued (a short push when the
-    /// console's bounded input queue is near full — the producer retries
-    /// the remainder; it never blocks, `AGENTS.md` §2.1), or a negative
-    /// error code. The keyboard-input driver that decoded a directly
-    /// attached keyboard pushes the bytes here; a
-    /// [`SyscallNumber::STREAM_READ`] of the same console then drains
-    /// them, so the video console's login takes input from its own
-    /// keyboard rather than the UART (`plans/PI.md` P11 — separate
-    /// session contexts). Gated by
-    /// [`crate::CapabilityId::INPUT_INJECT`]: feeding the system
-    /// console's input is privileged, never ambient (`AGENTS.md` §4).
-    /// A `console` index with no installed console, or one whose backing
-    /// accepts no injected input (a UART that reads its own hardware
-    /// FIFO), fails closed with [`crate::Errno::NotImplemented`].
-    pub const CONSOLE_INPUT: Self = Self(22);
+    /// Arguments: `buf: *const u8` (one [`crate::input::KeyInput`] record)
+    /// and `len: usize` (its length, [`crate::input::KeyInput::WIRE_LEN`]).
+    /// Returns the number of bytes consumed, or a negative error code. The
+    /// keyboard-input driver that decoded a directly attached keyboard
+    /// (USB-HID / PS-2) emits the *device-resolved key edge* — a pressed or
+    /// released [`crate::input::KeyValue`] plus the held
+    /// [`crate::input::Modifiers`] — and the kernel arbiter decides both
+    /// the **encoding** and the **destination** by who currently holds
+    /// input focus (`plans/PI.md` P11): with the text console foreground it
+    /// encodes the press to its console (tty) bytes through the shared
+    /// `lib/keymap` map and enqueues them on the focused console's input
+    /// queue (drained by a [`SyscallNumber::STREAM_READ`]); with the
+    /// desktop (window manager) foreground it routes the whole record to
+    /// the kernel keyboard channel (drained by
+    /// [`SyscallNumber::KEYBOARD_READ`]). The driver no longer chooses the
+    /// encoding or the destination — that policy left the device
+    /// (`AGENTS.md` §17.4). Gated by
+    /// [`crate::CapabilityId::INPUT_INJECT`]: feeding the system's keyboard
+    /// stream is privileged, never ambient (`AGENTS.md` §4). A malformed
+    /// record is refused fail-closed (`AGENTS.md` §5.4 / §2.9).
+    pub const KEY_INJECT: Self = Self(22);
+    /// Acquire ownership of the display and claim keyboard input focus
+    /// (`AGENTS.md` §10, §17.3; `plans/PI.md` P11 — input follows the
+    /// surface owner).
+    ///
+    /// No arguments. Returns an error code (`Ok(0)` on success). The
+    /// compositing window manager calls this when it takes over the
+    /// screen: the kernel input-focus arbiter switches its foreground from
+    /// the text console to the desktop keyboard channel, so subsequently
+    /// injected key edges ([`SyscallNumber::KEY_INJECT`]) are delivered as
+    /// [`crate::input::KeyInput`] records the manager drains with
+    /// [`SyscallNumber::KEYBOARD_READ`] — the same keyboard stream now
+    /// following the new surface owner automatically (the desktop analogue
+    /// of "input follows the foreground tty", `AGENTS.md` §20). Gated by
+    /// [`crate::CapabilityId::DISPLAY`]: owning the display is privileged,
+    /// never ambient (`AGENTS.md` §4).
+    pub const DISPLAY_ACQUIRE: Self = Self(23);
+    /// Release the display and return keyboard input focus to the text
+    /// console (`AGENTS.md` §10, §17.3; `plans/PI.md` P11).
+    ///
+    /// No arguments. Returns an error code (`Ok(0)` on success). The
+    /// inverse of [`SyscallNumber::DISPLAY_ACQUIRE`]: the window manager
+    /// calls it when it relinquishes the screen, and the kernel input-focus
+    /// arbiter returns its foreground to the text console so a login/shell
+    /// once again receives the keyboard. Gated by
+    /// [`crate::CapabilityId::DISPLAY`].
+    pub const DISPLAY_RELEASE: Self = Self(24);
+    /// Read one decoded keyboard event from the kernel keyboard channel
+    /// (`AGENTS.md` §10; `plans/PI.md` P11 — keyboard input for the
+    /// desktop).
+    ///
+    /// Arguments: `buf: *mut u8` (a buffer of at least
+    /// [`crate::input::KeyInput::WIRE_LEN`] bytes) and `len: usize` (its
+    /// length). Returns the number of bytes written — one
+    /// [`crate::input::KeyInput`] record — or `0` when the channel is
+    /// momentarily drained; a buffer too small to hold a record fails
+    /// closed with [`crate::Errno::BufferTooSmall`] (`AGENTS.md` §2.9). The
+    /// principal that owns the display (the window manager / desktop
+    /// session) drains the records the arbiter routed to it while it held
+    /// focus. Gated by [`crate::CapabilityId::INPUT_READ`]: a keyboard
+    /// stream is delivered only to whoever currently owns the surface, and
+    /// an unattached channel denies rather than leaking to a device
+    /// (`AGENTS.md` §4, §5.4, §20).
+    pub const KEYBOARD_READ: Self = Self(25);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -394,7 +440,10 @@ mod tests {
         assert_eq!(SyscallNumber::USERS_DB_READ.as_u16(), 19);
         assert_eq!(SyscallNumber::CONSOLE_COUNT.as_u16(), 20);
         assert_eq!(SyscallNumber::STREAM_ECHO.as_u16(), 21);
-        assert_eq!(SyscallNumber::CONSOLE_INPUT.as_u16(), 22);
+        assert_eq!(SyscallNumber::KEY_INJECT.as_u16(), 22);
+        assert_eq!(SyscallNumber::DISPLAY_ACQUIRE.as_u16(), 23);
+        assert_eq!(SyscallNumber::DISPLAY_RELEASE.as_u16(), 24);
+        assert_eq!(SyscallNumber::KEYBOARD_READ.as_u16(), 25);
     }
 
     #[test]

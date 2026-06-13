@@ -3,24 +3,27 @@
 //! [`BootKeyboard`](crate::BootKeyboard) decodes the device's reports into
 //! [`InputEvent`] key edges whose `code` is the raw HID usage ID. This module
 //! is the second half of the producer: it tracks the held modifiers and the
-//! caps-/num-lock state, resolves each *press* of a printable or named key
-//! into the [`Key`] a US keyboard layout produces, and runs that key through
-//! the shared terminal key map ([`rustos_keymap::encode_key`]) to get the
-//! console (tty) bytes a terminal sends. A keyboard driver feeds those bytes to
-//! the kernel through the `console_input` syscall, which delivers them to the
-//! target console's read half.
+//! caps-/num-lock state and resolves each printable or named key edge into the
+//! [`Key`] a US keyboard layout produces, then emits the *device-resolved key
+//! edge* — a [`rustos_abi::input::KeyInput`] record built through the shared
+//! [`rustos_keymap::key_input`] map — leaving the encoding and routing to the
+//! kernel input-focus arbiter (`AGENTS.md` §17.4, `plans/PI.md` P11). A keyboard
+//! driver injects each record into the kernel through the `key_inject` syscall,
+//! which decides by who holds input focus whether to encode the press to a text
+//! console's tty bytes or deliver the whole record to the desktop.
 //!
 //! The HID-usage→[`Key`] table is HID-specific (a `ps2` keyboard decodes
 //! scancode set 1 into the same [`Key`] vocabulary), so it lives here; the
-//! [`Key`]→bytes terminal map is shared in `lib/keymap` (`AGENTS.md` §2.2).
+//! [`Key`]→[`KeyInput`] map is shared in `lib/keymap` (`AGENTS.md` §2.2).
 //!
 //! Everything here is allocation-free and fail-closed (`AGENTS.md` §2.9): an
-//! unknown usage or a non-press produces no bytes rather than guessing.
+//! unknown usage or a non-key event produces no record rather than guessing.
 
 use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
+use rustos_abi::input::KeyInput;
 use rustos_abi::DriverError;
 use rustos_input::{Key, Modifiers, NamedKey};
-use rustos_keymap::{encode_key, MAX_KEY_BYTES};
+use rustos_keymap::key_input;
 
 /// HID usage of the Caps Lock key (HID Usage Tables §10, page `0x07`).
 const USAGE_CAPS_LOCK: u16 = 0x39;
@@ -39,14 +42,15 @@ const VALUE_PRESS: i32 = 1;
 /// `value` of a release edge.
 const VALUE_RELEASE: i32 = 0;
 
-/// Sink the [`KeyboardConsole`] producer writes console bytes to.
+/// Sink the [`KeyboardConsole`] producer writes decoded key-edge records to.
 ///
-/// On metal the keyboard driver implements this by calling the `console_input`
-/// syscall against the target console's index; host tests implement it by
-/// recording the bytes (`AGENTS.md` §2.2 — the same seam style as
+/// On metal the keyboard driver implements this by calling the `key_inject`
+/// syscall with the record's wire bytes; host tests implement it by recording
+/// the records (`AGENTS.md` §2.2 — the same seam style as
 /// [`crate::ReportSource`]).
 pub trait ConsoleSink {
-    /// Inject `bytes` into the target console's input stream.
+    /// Inject one [`KeyInput`] record's wire bytes
+    /// ([`KeyInput::WIRE_LEN`]) into the kernel input-focus arbiter.
     ///
     /// # Errors
     ///
@@ -91,31 +95,29 @@ impl KeyboardConsole {
         }
     }
 
-    /// Feed one decoded keyboard [`InputEvent`], writing the console bytes it
-    /// produces into `out` and returning their length.
+    /// Feed one decoded keyboard [`InputEvent`], returning the
+    /// [`KeyInput`] record its key edge resolves to, or [`None`] when the
+    /// edge produces no record.
     ///
-    /// Modifier edges and the lock keys update the internal state and produce
-    /// no bytes (`Ok(0)`). A *press* of a printable or named key produces its
-    /// terminal bytes; a release, an unknown usage, or a non-keyboard event
-    /// produces nothing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DriverError::BufferTooSmall`] if `out` is shorter than
-    /// [`rustos_keymap::MAX_KEY_BYTES`]; pass a buffer of that length to rule
-    /// the error out.
+    /// Modifier edges and the lock keys update the internal state and
+    /// produce no record. A *press* or *release* of a printable or named
+    /// key produces the corresponding [`KeyInput::Pressed`] /
+    /// [`KeyInput::Released`] record carrying the resolved [`Key`] and the
+    /// modifiers held; an unknown usage or a non-keyboard event produces
+    /// nothing. Both edges are emitted so the desktop sees key-up as well
+    /// as key-down; the text path ignores releases in the kernel arbiter.
     ///
     /// # Capabilities
     ///
     /// None (the producer holds no authority; delivery is the sink's).
-    pub fn feed(&mut self, event: InputEvent, out: &mut [u8]) -> Result<usize, DriverError> {
+    pub fn feed(&mut self, event: InputEvent) -> Option<KeyInput> {
         if event.kind != InputEventKind::Key {
-            return Ok(0);
+            return None;
         }
         let pressed = match event.value {
             VALUE_PRESS => true,
             VALUE_RELEASE => false,
-            _ => return Ok(0),
+            _ => return None,
         };
         let usage = event.code;
         if (USAGE_MODIFIER_FIRST..=USAGE_MODIFIER_LAST).contains(&usage) {
@@ -125,44 +127,41 @@ impl KeyboardConsole {
             } else {
                 self.modifier_bits &= !(1u8 << bit);
             }
-            return Ok(0);
+            return None;
         }
         if usage == USAGE_CAPS_LOCK {
             if pressed {
                 self.caps_lock = !self.caps_lock;
             }
-            return Ok(0);
+            return None;
         }
         if usage == USAGE_NUM_LOCK {
             if pressed {
                 self.num_lock = !self.num_lock;
             }
-            return Ok(0);
-        }
-        if !pressed {
-            return Ok(0);
+            return None;
         }
         let modifiers = self.modifiers();
-        match resolve_usage(usage, modifiers.shift, self.caps_lock, self.num_lock) {
-            Some(key) => encode_key(key, modifiers, out).map_err(|_| DriverError::BufferTooSmall),
-            None => Ok(0),
-        }
+        let key = resolve_usage(usage, modifiers.shift, self.caps_lock, self.num_lock)?;
+        // `key_input` returns `None` only for a `Key` with no wire form (a
+        // function number outside `F1..=F12`); `resolve_usage` never
+        // produces one, so a resolvable key always yields a record.
+        key_input(key, modifiers, pressed)
     }
 }
 
 /// Poll `keyboard` once and feed every decoded event through `console`,
-/// writing the produced console bytes to `sink`.
+/// injecting each produced [`KeyInput`] record's wire bytes into `sink`.
 ///
 /// This is the keyboard driver's per-iteration loop: on metal the driver calls
-/// it in its service loop with a [`ConsoleSink`] that invokes `console_input`
-/// against the video console's index; host tests call it with a recording
-/// sink. Returns the number of events drained from the keyboard this call.
+/// it in its service loop with a [`ConsoleSink`] that invokes `key_inject`;
+/// host tests call it with a recording sink. Returns the number of events
+/// drained from the keyboard this call.
 ///
 /// # Errors
 ///
-/// Propagates a [`DriverError`] from the keyboard `poll`, from
-/// [`KeyboardConsole::feed`], or from the `sink` — input is never silently
-/// dropped.
+/// Propagates a [`DriverError`] from the keyboard `poll` or from the `sink` —
+/// input is never silently dropped.
 ///
 /// # Capabilities
 ///
@@ -175,10 +174,8 @@ pub fn pump_once<I: Input, S: ConsoleSink>(
     let mut events = [crate::EVENT_ZERO; EVENT_BATCH];
     let drained = keyboard.poll(&mut events)?;
     for event in &events[..drained] {
-        let mut bytes = [0u8; MAX_KEY_BYTES];
-        let len = console.feed(*event, &mut bytes)?;
-        if len > 0 {
-            sink.write(&bytes[..len])?;
+        if let Some(record) = console.feed(*event) {
+            sink.write(&record.to_le_bytes())?;
         }
     }
     Ok(drained)

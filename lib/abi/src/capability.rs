@@ -207,6 +207,41 @@ impl CapabilityId {
     /// the producer counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
     /// which gates the *consumer* (login) of the same console.
     pub const INPUT_INJECT: Self = Self(22);
+    /// Acquire ownership of the display (the framebuffer seat) and, with
+    /// it, the keyboard input focus (`AGENTS.md` §10, §17.3; `plans/PI.md`
+    /// P11 — input follows the surface owner).
+    ///
+    /// The gate on the `display_acquire` / `display_release` syscalls
+    /// (`abi-v1` numbers 23 / 24): the compositing window manager holds
+    /// this capability and acquires the display when it takes over the
+    /// screen. Acquiring claims the kernel input-focus arbiter's
+    /// foreground (decoded key events route to the desktop keyboard
+    /// channel instead of the text console); releasing returns focus to
+    /// the text console, so input follows the surface owner automatically
+    /// — the desktop analogue of "input follows the foreground tty"
+    /// (`AGENTS.md` §20). Owning the display is privileged rather than
+    /// ambient (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// checks before state touches): only a session's window manager is
+    /// granted it, so an ordinary task cannot seize the screen or steal
+    /// keyboard focus from the active session.
+    pub const DISPLAY: Self = Self(23);
+    /// Read decoded keyboard events from the kernel keyboard channel
+    /// (`AGENTS.md` §10; `plans/PI.md` P11 — keyboard input for the
+    /// desktop).
+    ///
+    /// The gate on the `keyboard_read` syscall (`abi-v1` number 25): the
+    /// principal that owns the display (the window manager / desktop
+    /// session) drains framed [`crate::input::KeyInput`] records the
+    /// kernel input-focus arbiter routed to it while it held focus. It is
+    /// the desktop counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
+    /// which gates the *text* console's consumer (login): a keyboard
+    /// stream is delivered only to whoever currently owns the surface, and
+    /// reading it is privileged rather than ambient (`AGENTS.md` §4; §5.4
+    /// — capability checks before state touches; §20 — bind to streams,
+    /// never to a device). An unattached channel denies rather than
+    /// leaking, so a task without the capability — or one reading when the
+    /// arbiter holds no desktop focus — sees nothing.
+    pub const INPUT_READ: Self = Self(24);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -241,6 +276,8 @@ impl CapabilityId {
         (Self::RLIMIT_RAISE, "CAP_RLIMIT_RAISE"),
         (Self::USERS_READ, "CAP_USERS_READ"),
         (Self::INPUT_INJECT, "CAP_INPUT_INJECT"),
+        (Self::DISPLAY, "CAP_DISPLAY"),
+        (Self::INPUT_READ, "CAP_INPUT_READ"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -358,6 +395,8 @@ mod tests {
         assert_eq!(CapabilityId::RLIMIT_RAISE.as_u16(), 20);
         assert_eq!(CapabilityId::USERS_READ.as_u16(), 21);
         assert_eq!(CapabilityId::INPUT_INJECT.as_u16(), 22);
+        assert_eq!(CapabilityId::DISPLAY.as_u16(), 23);
+        assert_eq!(CapabilityId::INPUT_READ.as_u16(), 24);
     }
 
     #[test]
@@ -377,6 +416,8 @@ mod tests {
         assert_eq!(CapabilityId::RLIMIT_RAISE.name(), Some("CAP_RLIMIT_RAISE"));
         assert_eq!(CapabilityId::USERS_READ.name(), Some("CAP_USERS_READ"));
         assert_eq!(CapabilityId::INPUT_INJECT.name(), Some("CAP_INPUT_INJECT"));
+        assert_eq!(CapabilityId::DISPLAY.name(), Some("CAP_DISPLAY"));
+        assert_eq!(CapabilityId::INPUT_READ.name(), Some("CAP_INPUT_READ"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -387,9 +428,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=22 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=24 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=22 {
+        for raw in 1..=24 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

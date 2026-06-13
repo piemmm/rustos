@@ -182,13 +182,19 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn console_input(
-        &self,
-        _c: &CallerContext<'_>,
-        _console: u32,
-        _buf: u64,
-        _len: usize,
-    ) -> SyscallResult {
+    fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn display_acquire(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn display_release(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn keyboard_read(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

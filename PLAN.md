@@ -552,6 +552,25 @@ order (one fully-gated increment each):
    Arch HAL discovery conformance vertical. Docs:
    `docs/src/platform/aarch64.md`,
    `docs/src/drivers/hardware-detection.md`.
+5. **Migrate the Pi USB-keyboard bring-up chain onto autoload; delete the
+   in-kernel composition module — next priority.** The
+   `kernel/rustos-kernel::usb_keyboard` module is a P10 in-kernel bring-up
+   *scaffold*: the one place §17.4 lets the image binary name the four
+   driver crates of the Pi 4 chain (`pcie_brcm` → `pci::mechanism_brcm`
+   → `bus_usb` → `input_usb_hid`). It does not scale — answering "more
+   boards" by hand-writing one composition module per board is the
+   §2.2/§2.3 sprawl this stage exists to prevent. The steady state is the
+   data-driven §18 path increments 1–4 already deliver: the
+   `brcm,bcm2711-pcie` / VL805 / HID nodes are discovered into the
+   `hwtree`, and `devmgr` autoloads the matching drivers against their
+   signed bind tables, so adding a board becomes match **data**, not a new
+   composition module. When that generic path drives the USB-keyboard
+   chain, **delete** `usb_keyboard.rs` (§2.14) and update §3 / this stage.
+   This rides the still-open DriverSpawner-over-IPC gap (increment 1) — the
+   keyboard's long-term home is a `devmgr`-autoloaded userland keyboard
+   *service*, since the report pump is continuous. Do this immediately
+   after the current `plans/PI.md` P11 input-focus-arbiter work, before
+   further per-board glue accretes.
 
 ---
 

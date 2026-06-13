@@ -27,7 +27,7 @@ use rustos_kernel::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
     BootReserve, DispatchCallbackSlot, EmbeddedProgram, KernelDispatchHook, KernelSpawnCtx,
-    ProgramRegistry, RandomReserve, NULL_PROCESS_WAIT,
+    ProgramRegistry, RandomReserve, NULL_INPUT_FOCUS, NULL_PROCESS_WAIT,
 };
 use rustos_kernel_ipc::{EndpointId, Port, PortRegistry};
 use rustos_kernel_irq::{IrqTable, UnsupportedController};
@@ -435,6 +435,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             &DRIVER_REGISTRY,
             &AARCH64_PROCESS_SPAWN,
             &NULL_PROCESS_WAIT,
+            // This test exercises the driver-spawn / IPC path, not keyboard
+            // input; the arbiter stays fail-closed (`AGENTS.md` §2.9).
+            &NULL_INPUT_FOCUS,
         )));
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);

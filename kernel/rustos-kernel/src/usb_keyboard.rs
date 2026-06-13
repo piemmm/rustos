@@ -38,6 +38,7 @@
 
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::input::KeyInput;
 use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, HwNode, HwResourceKind, MmioMapper,
     RegisterWindow,
@@ -46,7 +47,7 @@ use rustos_caps::CapabilitySet;
 use rustos_drv_bus_pcie_brcm::{self as pcie_brcm, Delay, PcieWindows};
 use rustos_drv_bus_usb::device::UsbDevice;
 use rustos_drv_input_usb_hid::{BootKeyboard, ConsoleSink};
-use rustos_kernel_core::ConsoleInput;
+use rustos_kernel_core::InputFocus;
 
 /// The enumerated boot keyboard the bring-up chain yields: a
 /// [`BootKeyboard`] decoding reports out of the started [`UsbDevice`]
@@ -178,46 +179,43 @@ impl DriverHost for ChainHost<'_> {
     }
 }
 
-/// A [`ConsoleSink`] that injects produced keyboard bytes into a console's
-/// input queue (`AGENTS.md` §20, `plans/PI.md` P11).
+/// A [`ConsoleSink`] that injects produced keyboard records into the kernel
+/// input-focus arbiter (`AGENTS.md` §17.4 / §20, `plans/PI.md` P11).
 ///
-/// The video console points both its read half and its injected-input
-/// half at one [`ConsoleInput`] queue, so bytes written here are drained
-/// by the login reading that console. The queue never blocks: a write that
-/// does not all fit (the type-ahead ring is full because the login has not
-/// yet drained it) keeps what fits and drops the remainder rather than
-/// busy-spinning (`AGENTS.md` §2.1) — a bounded type-ahead overflow, the
-/// same shape as a full UART receive FIFO.
-pub struct QueueConsoleSink<'a> {
-    queue: &'a dyn ConsoleInput,
+/// The HID producer emits one [`KeyInput`] record per key edge; this sink is
+/// the in-kernel counterpart of the `key_inject` syscall, handing each record
+/// straight to the arbiter rather than crossing the user/kernel boundary (the
+/// keyboard driver runs in-kernel on the Pi, `AGENTS.md` §8). The arbiter then
+/// decides the encoding and destination by who holds input focus: with the
+/// text console foreground a press is encoded to the video console's tty bytes
+/// (drained by the login reading that console), and with the desktop
+/// foreground the whole record is routed to the kernel keyboard channel. The
+/// arbiter never blocks (a full bounded sink drops the oldest/overflow,
+/// `AGENTS.md` §2.1).
+pub struct ArbiterConsoleSink<'a> {
+    focus: &'a InputFocus,
 }
 
-impl<'a> QueueConsoleSink<'a> {
-    /// Build a sink delivering to `queue` (the target console's injected
-    /// input source).
+impl<'a> ArbiterConsoleSink<'a> {
+    /// Build a sink delivering to the input-focus arbiter `focus`.
     #[must_use]
-    pub fn new(queue: &'a dyn ConsoleInput) -> Self {
-        Self { queue }
+    pub fn new(focus: &'a InputFocus) -> Self {
+        Self { focus }
     }
 }
 
-impl ConsoleSink for QueueConsoleSink<'_> {
+impl ConsoleSink for ArbiterConsoleSink<'_> {
     fn write(&mut self, bytes: &[u8]) -> Result<(), DriverError> {
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let pushed = self
-                .queue
-                .push(&bytes[offset..])
-                .map_err(|_| DriverError::DeviceFault)?;
-            if pushed == 0 {
-                // The ring is full and the consumer has not drained it;
-                // drop the rest of this key's bytes rather than spin
-                // (the queue is the type-ahead bound, §2.1 / §24.4).
-                break;
-            }
-            offset += pushed;
-        }
-        Ok(())
+        // The producer always writes exactly one whole record. Decode it
+        // fail-closed and hand it to the arbiter; a malformed record or a
+        // fail-closed sink (a build with no injectable text console) surfaces
+        // as a `DeviceFault` rather than dropping input silently
+        // (`AGENTS.md` §2.9).
+        let record = KeyInput::from_bytes(bytes).map_err(|_| DriverError::DeviceFault)?;
+        self.focus
+            .inject(record)
+            .map(|_| ())
+            .map_err(|_| DriverError::DeviceFault)
     }
 }
 
@@ -231,8 +229,8 @@ impl ConsoleSink for QueueConsoleSink<'_> {
 /// ([`rustos_drv_bus_usb::wiring::open_discovered`]), and enumerate the
 /// first connected root-hub port as a boot keyboard. The returned
 /// [`KeyboardChain`] is then polled with [`rustos_drv_input_usb_hid::pump_once`]
-/// in the driver's service loop, feeding the produced bytes to a
-/// [`QueueConsoleSink`].
+/// in the driver's service loop, feeding each produced [`KeyInput`] record to
+/// an [`ArbiterConsoleSink`].
 ///
 /// # Errors
 ///
@@ -273,6 +271,7 @@ mod tests {
 
     use rustos_abi::driver::dma::PoolId;
     use rustos_abi::driver::mmio::MmioMapError;
+    use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
     use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
 
@@ -380,27 +379,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn queue_console_sink_delivers_and_reads_back() {
-        let queue = ConsoleInputQueue::new();
-        let mut sink = QueueConsoleSink::new(&queue);
-        sink.write(b"hi").expect("delivered");
-        let mut buf = [0u8; 8];
-        let read = queue.read(&mut buf).expect("read");
-        assert_eq!(&buf[..read], b"hi");
+    /// A pressed-character [`KeyInput`] record with no modifiers.
+    fn press(c: char) -> KeyInput {
+        KeyInput::Pressed {
+            key: KeyValue::Char(c),
+            modifiers: Modifiers::default(),
+        }
     }
 
     #[test]
-    fn queue_console_sink_drops_overflow_without_spinning() {
-        let queue = ConsoleInputQueue::new();
-        let mut sink = QueueConsoleSink::new(&queue);
-        // Write more than the ring holds: the call returns (no spin) and
-        // the ring is filled to capacity, the surplus dropped.
-        let flood = alloc::vec![b'x'; rustos_kernel_core::CONSOLE_INPUT_QUEUE_CAPACITY + 32];
-        sink.write(&flood).expect("returns without spinning");
-        let mut buf = alloc::vec![0u8; flood.len()];
+    fn arbiter_console_sink_delivers_a_press_to_the_text_sink() {
+        // The arbiter starts in text focus; its text sink is the video
+        // console's input queue, drained by the login reading that console.
+        let queue: &'static ConsoleInputQueue = Box::leak(Box::new(ConsoleInputQueue::new()));
+        let focus = InputFocus::new(queue);
+        let mut sink = ArbiterConsoleSink::new(&focus);
+        sink.write(&press('h').to_le_bytes()).expect("delivered");
+        let mut buf = [0u8; 8];
         let read = queue.read(&mut buf).expect("read");
-        assert_eq!(read, rustos_kernel_core::CONSOLE_INPUT_QUEUE_CAPACITY);
+        assert_eq!(&buf[..read], b"h");
+    }
+
+    #[test]
+    fn arbiter_console_sink_fails_closed_without_an_injectable_text_sink() {
+        // `NULL_INPUT_FOCUS`'s text sink accepts no injected input: a press
+        // that would be enqueued there surfaces a `DeviceFault` rather than
+        // dropping it (`AGENTS.md` §2.9).
+        let mut sink = ArbiterConsoleSink::new(&rustos_kernel_core::NULL_INPUT_FOCUS);
+        assert_eq!(
+            sink.write(&press('x').to_le_bytes()),
+            Err(DriverError::DeviceFault)
+        );
+        // A malformed record is refused too.
+        assert_eq!(sink.write(&[0u8; 4]), Err(DriverError::DeviceFault));
     }
 
     /// Leak a `len`-byte, 4-byte-aligned buffer (the mock host's `'static`

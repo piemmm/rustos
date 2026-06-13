@@ -74,6 +74,7 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
+use rustos_abi::input::KeyInput;
 use rustos_abi::{
     CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags, RandomFlags,
     ResourceLimit, StreamMode, SyscallNumber, CONSOLE_INHERIT, RANDOM_REQUEST_MAX_BYTES,
@@ -101,6 +102,7 @@ use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
+use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
 use crate::random::{reserve_errno, RandomReserve};
@@ -234,6 +236,18 @@ where
     /// real holder through [`Self::with_users_db`]. Held as a `'static`
     /// borrow, exactly like the console device.
     users_db: &'static (dyn UsersDbSource + 'static),
+    /// The kernel input-focus arbiter the `key_inject` / `display_acquire`
+    /// / `display_release` / `keyboard_read` syscalls drive (`AGENTS.md`
+    /// §10 / §17.3 / §20, `plans/PI.md` P11 — input follows the surface
+    /// owner). Defaults to [`NULL_INPUT_FOCUS`], whose text sink is the
+    /// fail-closed [`crate::console::NULL_CONSOLE_INPUT`], so a build with
+    /// no arbiter wired refuses to route a key edge rather than leaking it
+    /// to a device (`AGENTS.md` §2.9 / §5.4); the boot path installs the
+    /// real arbiter — its text sink pointed at the console that owns the
+    /// directly attached keyboard — through [`Self::with_input_focus`].
+    /// Held as a `'static` borrow because the arbiter lives for the
+    /// lifetime of the running kernel, exactly like the console device.
+    input_focus: &'static InputFocus,
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -305,6 +319,12 @@ where
             // the root volume installs the loaded holder (`plans/PI.md`
             // P11): `users_db_read` fails closed with `NotImplemented`.
             users_db: &NULL_USERS_DB,
+            // Input-focus arbiter unwired until the boot path installs the
+            // real one whose text sink owns the keyboard console
+            // (`plans/PI.md` P11): `key_inject` / `keyboard_read` fail
+            // closed (`NotImplemented` / no input) through the shared
+            // `NULL_INPUT_FOCUS` (`AGENTS.md` §2.9 / §5.4).
+            input_focus: &NULL_INPUT_FOCUS,
         }
     }
 
@@ -327,6 +347,26 @@ where
     #[must_use]
     pub const fn with_consoles(mut self, consoles: &'static [ConsoleDevice]) -> Self {
         self.consoles = consoles;
+        self
+    }
+
+    /// Install the kernel input-focus arbiter the keyboard syscalls drive,
+    /// consuming and returning `self`.
+    ///
+    /// Called once by the boot path after it has built the arbiter with its
+    /// text sink pointed at the console that owns the directly attached
+    /// keyboard (on the Pi, the video console's input queue; `plans/PI.md`
+    /// P11). Until this is called the handler holds [`NULL_INPUT_FOCUS`]
+    /// and every `key_inject` in the default text focus fails closed,
+    /// `keyboard_read` returns no input, and `display_acquire` /
+    /// `display_release` toggle an arbiter no driver feeds (`AGENTS.md`
+    /// §2.9). The arbiter must be `'static`: the boot path leaks it
+    /// alongside `KernelState`, which lives for the lifetime of the running
+    /// kernel (`AGENTS.md` §2.1 — no global mutable static; the install is
+    /// a one-shot move).
+    #[must_use]
+    pub const fn with_input_focus(mut self, input_focus: &'static InputFocus) -> Self {
+        self.input_focus = input_focus;
         self
     }
 
@@ -1221,74 +1261,108 @@ where
         Ok(0)
     }
 
-    fn console_input(
-        &self,
-        caller: &CallerContext<'_>,
-        console: u32,
-        buf: u64,
-        len: usize,
-    ) -> SyscallResult {
-        // Resolve the target console against the installed list *before*
-        // touching any state (`AGENTS.md` §5.4 / §20). Unlike the
-        // `stream_*` calls this targets a console by index directly: the
-        // producer is the keyboard-input driver, which feeds a console's
-        // input rather than reading or writing one of its own inherited
-        // streams. A `console` index with no installed console — including
-        // the empty pre-install list — announces the inert interface
-        // (`AGENTS.md` §2.9) rather than fabricating a queue.
-        let Some(device) = self.consoles.get(console as usize) else {
-            return Err(Errno::NotImplemented);
-        };
+    fn key_inject(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
-        // is non-null (`UserPtr`). A zero-length push touches neither the
-        // caller's buffer nor the queue.
-        if len == 0 {
-            return Ok(0);
+        // is non-null (`UserPtr`). A record is fixed-width: a `len` that
+        // cannot hold one fails closed rather than letting the kernel decode
+        // a truncated edge (`AGENTS.md` §2.9 / §5.4 — never act on a partial
+        // input).
+        if len < KeyInput::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
         }
-        // Bound the staging allocation so a hostile `len` cannot force an
-        // arbitrarily large kernel buffer (`AGENTS.md` §4 — deterministic
-        // OOM). Pushing a prefix and reporting the count is valid
-        // short-push behaviour; the producer loops for the remainder.
-        let take = core::cmp::min(len, CONSOLE_WRITE_MAX);
-
-        // Copy the bytes in from the caller's address space through the
-        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
-        // touching the queue. `with_caller_aspace` yields `None` when the
-        // caller has no registered address space — fail closed with the
-        // same `BadAddress` an actual fault produces, never leaking which
-        // case occurred (§19.1).
-        let mut payload = alloc::vec![0u8; take];
+        // Copy exactly one record in from the caller's address space through
+        // the validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // touching the arbiter. The staging buffer lives on the stack and is
+        // wiped on every exit: a key edge can carry a typed character (a
+        // password keystroke transits here), so it must not linger
+        // (`AGENTS.md` §4 — zero memory that held a credential; §23.1).
+        // `with_caller_aspace` yields `None` when the caller has no
+        // registered address space — fail closed with the same `BadAddress`
+        // an actual fault produces, never leaking which case occurred
+        // (§19.1).
+        let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
-            copy_in(space, physmap, VirtAddr::new(buf), &mut payload)
+            copy_in(space, physmap, VirtAddr::new(buf), &mut record_bytes)
         }) {
             Some(Ok(())) => {}
             Some(Err(err)) => {
-                // A typed credential may transit this buffer; wipe the
-                // staging copy before returning on the error path too
-                // (`AGENTS.md` §4 — secret hygiene).
-                payload.zeroize();
+                record_bytes.zeroize();
                 return Err(copy_fault_errno(err));
             }
             None => {
-                payload.zeroize();
+                record_bytes.zeroize();
                 return Err(Errno::BadAddress);
             }
         }
 
-        // Push the copied bytes into the console's injected-input queue. A
-        // console that accepts no injected input (a UART reading its own
-        // hardware FIFO) fails closed with `NotImplemented` through
-        // `NULL_CONSOLE_INPUT` (`AGENTS.md` §2.9). A short push (the
-        // bounded queue is near full) reports the accepted count; the
-        // producer retries the remainder (`AGENTS.md` §2.1, never blocks).
-        let pushed = device.input.push(&payload);
-        // The staging buffer held the keystroke bytes (possibly a typed
-        // password); wipe it now the queue has its own copy (`AGENTS.md`
-        // §4 — zero memory that held a credential; §23.1 — secret
-        // hygiene). The queue zeroes its own slots as the consumer drains
-        // them.
-        payload.zeroize();
-        pushed.map(|n| n as u64)
+        // Decode the record fail-closed: a malformed edge is refused rather
+        // than interpreted (`AGENTS.md` §5.4 / §19.5). The driver no longer
+        // chooses the encoding or destination — the arbiter routes the edge
+        // to the text console or the desktop keyboard channel by who holds
+        // focus (`AGENTS.md` §17.4, `plans/PI.md` P11).
+        let decoded = KeyInput::from_bytes(&record_bytes);
+        record_bytes.zeroize();
+        let record = decoded?;
+        self.input_focus.inject(record).map(|n| n as u64)
+    }
+
+    fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher already checked `CAP_DISPLAY`. Claiming the display
+        // switches the arbiter's foreground to the desktop keyboard channel
+        // so subsequently injected key edges follow the new surface owner
+        // (`AGENTS.md` §10 / §17.3 / §20, `plans/PI.md` P11).
+        self.input_focus.acquire_display();
+        Ok(0)
+    }
+
+    fn display_release(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher already checked `CAP_DISPLAY`. Releasing the
+        // display returns the arbiter's foreground to the text console so a
+        // login/shell once again receives the keyboard (`AGENTS.md` §20,
+        // `plans/PI.md` P11).
+        self.input_focus.release_display();
+        Ok(0)
+    }
+
+    fn keyboard_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
+        // non-null (`UserPtr`). A record is fixed-width: a `len` that cannot
+        // hold one fails closed, the kernel never writes a partial record
+        // (`AGENTS.md` §2.9).
+        if len < KeyInput::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Drain one record into a stack buffer first. `read_key` returns
+        // `0` when the channel is momentarily empty (a valid short read the
+        // caller loops on) or one whole record's `WIRE_LEN`. The buffer is
+        // wiped on every exit (`AGENTS.md` §4 / §23.1 — a key edge may carry
+        // a typed character).
+        let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
+        let read = match self.input_focus.read_key(&mut record_bytes) {
+            Ok(read) => read,
+            Err(err) => {
+                record_bytes.zeroize();
+                return Err(err);
+            }
+        };
+        if read == 0 {
+            record_bytes.zeroize();
+            return Ok(0);
+        }
+
+        // Copy the record out to the caller's address space through the
+        // validated `copy_to_user` boundary (`AGENTS.md` §5.4). A `None`
+        // (unregistered caller) or a fault fails closed with `BadAddress`,
+        // never leaking which case occurred (§19.1).
+        let result = match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &record_bytes[..read])
+        }) {
+            Some(Ok(())) => Ok(read as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        };
+        record_bytes.zeroize();
+        result
     }
 
     fn mem_map(
@@ -1787,6 +1861,7 @@ where
         programs: &'static ProgramRegistry,
         spawn_service: &'static (dyn ProcessSpawn + 'static),
         process_wait: &'static (dyn ProcessWait + 'static),
+        input_focus: &'static InputFocus,
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -1804,7 +1879,8 @@ where
             .with_frames(frames)
             .with_page_table_frames(page_table_frames)
             .with_spawn(programs, spawn_service)
-            .with_process_wait(process_wait),
+            .with_process_wait(process_wait)
+            .with_input_focus(input_focus),
             sched,
             caps,
             arch,
@@ -1963,6 +2039,7 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::boxed::Box;
     use alloc::sync::Arc;
+    use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
     use rustos_caps::CapabilitySet;
     use rustos_kernel_ipc::Port;
@@ -5128,27 +5205,43 @@ mod tests {
         assert_eq!(h.stream_echo(&ctx, STDOUT, 1), Err(Errno::NotFound));
     }
 
-    /// `console_input` copies the keyboard-input driver's decoded bytes
-    /// into the target console's injected-input queue, which is the same
-    /// queue the console's `read` half drains — so a `stream_read` from
-    /// the login then sees them (`plans/PI.md` P11 — keyboard input for
-    /// the video console).
+    /// Build a writable user address space at `0x1000` seeded with one
+    /// encoded [`KeyInput`] record, registered against task 2, plus the
+    /// caller context. The mapping is `READ|WRITE` so the same buffer can
+    /// be read by `key_inject` and written by `keyboard_read`.
+    fn key_inject_aspace(aspaces: &RwLock<AddressSpaceRegistry>, record: KeyInput) {
+        let bytes = record.to_le_bytes();
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &bytes);
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+    }
+
+    fn press_char(c: char) -> KeyInput {
+        KeyInput::Pressed {
+            key: KeyValue::Char(c),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    /// `key_inject` in the default text focus encodes a key *press* to the
+    /// console (tty) bytes through the shared `lib/keymap` map and enqueues
+    /// them on the arbiter's text sink, which is the same queue a
+    /// `stream_read` from the login then drains (`plans/PI.md` P11 —
+    /// keyboard input for the video console).
     #[test]
-    fn console_input_pushes_decoded_bytes_into_the_target_console_queue() {
+    fn key_inject_text_focus_encodes_a_press_to_the_text_sink() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        // The producer's buffer at 0x1000 holds the decoded keystrokes.
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"root\r");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        key_inject_aspace(&aspaces, press_char('a'));
         let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -5157,43 +5250,41 @@ mod tests {
             caps: &caps,
         };
 
-        let write: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        // The arbiter's text sink is the video console's input queue.
         let queue: &'static crate::console::ConsoleInputQueue =
             Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        // The video console: the same queue is both the injected-input
-        // sink and the read half.
-        let consoles: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::with_input(write, queue, queue)]));
+        let focus: &'static InputFocus = Box::leak(Box::new(InputFocus::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_consoles(consoles);
+        .with_input_focus(focus);
 
-        assert_eq!(h.console_input(&ctx, 0, 0x1000, 5), Ok(5));
-        // The pushed bytes are now drainable from the console's read half.
+        assert_eq!(
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        // The encoded byte is now drainable from the text sink.
         let mut buf = [0u8; 8];
-        assert_eq!(crate::console::ConsoleRead::read(queue, &mut buf), Ok(5));
-        assert_eq!(&buf[..5], b"root\r");
+        assert_eq!(crate::console::ConsoleRead::read(queue, &mut buf), Ok(1));
+        assert_eq!(&buf[..1], b"a");
     }
 
-    /// `console_input` fails closed for a console index that names no
-    /// installed console — including the empty pre-install list — rather
-    /// than fabricating a queue (`AGENTS.md` §2.9).
+    /// `key_inject` fails closed when no arbiter is wired: the default
+    /// `NULL_INPUT_FOCUS` text sink is `NULL_CONSOLE_INPUT`, so a press
+    /// that would be enqueued there surfaces `NotImplemented` rather than
+    /// dropping it (`AGENTS.md` §2.9 / §5.4). A `len` too small to hold a
+    /// record fails closed before any state is touched.
     #[test]
-    fn console_input_fails_closed_for_an_unknown_console() {
+    fn key_inject_without_arbiter_fails_closed() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"x");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        key_inject_aspace(&aspaces, press_char('a'));
         let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -5202,49 +5293,38 @@ mod tests {
             caps: &caps,
         };
 
-        let write: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let consoles: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::with_input(write, queue, queue)]));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_consoles(consoles);
+        );
 
-        // Index past the installed list fails closed.
+        // A short buffer is refused before the arbiter is consulted.
         assert_eq!(
-            h.console_input(&ctx, 5, 0x1000, 1),
-            Err(Errno::NotImplemented)
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
         );
-        // The empty pre-install list fails closed for every index.
-        let bare = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
+        // The NULL text sink accepts no injected input.
         assert_eq!(
-            bare.console_input(&ctx, 0, 0x1000, 1),
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
     }
 
-    /// `console_input` fails closed for a console whose backing accepts no
-    /// injected input — a UART that reads its own hardware FIFO carries
-    /// `NULL_CONSOLE_INPUT` (`AGENTS.md` §2.9).
+    /// `display_acquire` switches the arbiter's foreground to the desktop
+    /// keyboard channel, so an injected record is delivered whole to
+    /// `keyboard_read`; `display_release` returns focus to the text
+    /// console (`plans/PI.md` P11 — input follows the surface owner).
     #[test]
-    fn console_input_fails_closed_for_a_console_with_no_injectable_input() {
+    fn display_acquire_routes_records_to_keyboard_read() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"x");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let record = press_char('z');
+        key_inject_aspace(&aspaces, record);
         let rng = unseeded_rng();
-        aspaces
-            .write()
-            .register(SecTaskId(2), space, physmap)
-            .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -5253,35 +5333,46 @@ mod tests {
             caps: &caps,
         };
 
-        let write: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        // `new` (not `with_input`) leaves the input half at
-        // `NULL_CONSOLE_INPUT` — a UART that reads its own FIFO.
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
-            write,
-            &crate::console::NULL_CONSOLE_READ,
-        )]));
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let focus: &'static InputFocus = Box::leak(Box::new(InputFocus::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_consoles(consoles);
+        .with_input_focus(focus);
 
+        // A short read buffer is refused before the channel is touched.
         assert_eq!(
-            h.console_input(&ctx, 0, 0x1000, 1),
-            Err(Errno::NotImplemented)
+            h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN - 1),
+            Err(Errno::BufferTooSmall)
         );
-        // A zero-length push touches neither the buffer nor the queue and
-        // is a valid no-op even on an injectable console.
-        let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let kbd: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::with_input(write, queue, queue)]));
-        let hk = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_consoles(kbd);
-        assert_eq!(hk.console_input(&ctx, 0, 0x1000, 0), Ok(0));
-        let mut buf = [0u8; 4];
-        assert_eq!(crate::console::ConsoleRead::read(queue, &mut buf), Ok(0));
+
+        assert_eq!(h.display_acquire(&ctx), Ok(0));
+        assert_eq!(
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        // The record routed to the desktop channel, not the text sink.
+        let mut text = [0u8; 4];
+        assert_eq!(crate::console::ConsoleRead::read(queue, &mut text), Ok(0));
+        // `keyboard_read` writes the whole record back into the buffer.
+        assert_eq!(
+            h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        // The channel is now drained.
+        assert_eq!(h.keyboard_read(&ctx, 0x1000, KeyInput::WIRE_LEN), Ok(0));
+
+        // Releasing returns focus to the text console: the next press
+        // routes to the text sink (the buffer still holds the 'z' record).
+        assert_eq!(h.display_release(&ctx), Ok(0));
+        assert_eq!(
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        let mut text = [0u8; 4];
+        assert_eq!(crate::console::ConsoleRead::read(queue, &mut text), Ok(1));
+        assert_eq!(&text[..1], b"z");
     }
 
     /// A `spawn` naming an installed console attaches the child's

@@ -185,13 +185,19 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn console_input(
-        &self,
-        _c: &CallerContext<'_>,
-        _console: u32,
-        _buf: u64,
-        _len: usize,
-    ) -> SyscallResult {
+    fn key_inject(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn display_acquire(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn display_release(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn keyboard_read(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)
     }

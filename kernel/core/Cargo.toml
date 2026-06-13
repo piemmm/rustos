@@ -60,6 +60,11 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # the erase (rub-out) control through `rustos_vt::control` rather than a second
 # definition of those bytes.
 rustos-vt = { path = "../../lib/vt", version = "=0.0.0" }
+# The single terminal key map (`AGENTS.md` §2.2): the input-focus arbiter's
+# text sink (`src/input_focus.rs`) encodes a decoded `KeyInput` record to the
+# console (tty) bytes a terminal sends through `rustos_keymap::encode_key_input`
+# rather than a second copy of the layout-to-tty mapping (`plans/PI.md` P11).
+rustos-keymap = { path = "../../lib/keymap", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The `/System/Security/Users` database format the boot-time root-volume
 # read path (`src/users.rs`) parses and the login path authenticates

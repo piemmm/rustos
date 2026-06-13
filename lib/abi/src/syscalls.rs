@@ -53,8 +53,9 @@ pub const SYSCALL_MAX_ARGS: usize = 6;
 ///
 /// Pinned so that [`ENCODED_TABLE`] uses a fixed stride per record and the
 /// encoding is computable in a `const fn` without an allocator. Sized to fit
-/// the longest `abi-v1` name (`stream_write`, 13 bytes).
-pub const SYSCALL_NAME_MAX: usize = 13;
+/// the longest `abi-v1` name (`display_acquire` / `display_release`, 15
+/// bytes).
+pub const SYSCALL_NAME_MAX: usize = 15;
 
 /// Stride, in bytes, of one record inside [`ENCODED_TABLE`].
 pub const SYSCALL_ENCODED_RECORD_LEN: usize = 14 + SYSCALL_NAME_MAX;
@@ -562,28 +563,81 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         audit: false,
     },
     SyscallSpec {
-        number: SyscallNumber::CONSOLE_INPUT,
-        name: "console_input",
-        arg_count: 3,
+        number: SyscallNumber::KEY_INJECT,
+        name: "key_inject",
+        arg_count: 2,
         args: [
-            AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
+            AbiType::Unit,
         ],
-        // `U64` so the C view carries the bytes-enqueued-or-`-errno`
+        // `U64` so the C view carries the bytes-consumed-or-`-errno`
         // register convention `stream_write` / `console_count` use.
         ret: AbiType::U64,
-        // Feeding the system console's input is privileged, never ambient
+        // Feeding the system keyboard stream is privileged, never ambient
         // (`AGENTS.md` §4): only the keyboard-input driver that decoded a
         // discovered keyboard holds `CAP_INPUT_INJECT`. Like the other
-        // per-byte stream operations (`stream_write` / `stream_read`) it
-        // fires once per keystroke, so auditing every call would drown the
+        // per-event stream operations (`stream_write` / `stream_read`) it
+        // fires once per key edge, so auditing every call would drown the
         // log — it is NOT audited (`AGENTS.md` §5.4.4); the device
         // manager's one-time driver load IS the audited security decision.
         required_capability: Some(CapabilityId::INPUT_INJECT),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::DISPLAY_ACQUIRE,
+        name: "display_acquire",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        ret: AbiType::Errno,
+        // Owning the display (and, with it, keyboard input focus) is
+        // privileged, never ambient (`AGENTS.md` §4): only a session's
+        // window manager holds `CAP_DISPLAY`. Taking the screen and
+        // re-routing the system keyboard stream is a security-relevant
+        // ownership change — the analogue of a foreground-tty switch — so
+        // unlike the high-volume stream operations it IS audited per call
+        // (`AGENTS.md` §5.4.4); it is low-volume (once per session
+        // hand-over), so the record cannot drown the log.
+        required_capability: Some(CapabilityId::DISPLAY),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::DISPLAY_RELEASE,
+        name: "display_release",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        ret: AbiType::Errno,
+        // The release half of `display_acquire`; same `CAP_DISPLAY` gate
+        // and same audited posture — returning focus to the text console
+        // is the matching security-relevant ownership change.
+        required_capability: Some(CapabilityId::DISPLAY),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::KEYBOARD_READ,
+        name: "keyboard_read",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` so the C view carries the bytes-read-or-`-errno` register
+        // convention `stream_read` uses.
+        ret: AbiType::U64,
+        // Reading the keyboard channel is privileged, never ambient
+        // (`AGENTS.md` §4): only the display owner (the window manager)
+        // holds `CAP_INPUT_READ`, so the keyboard stream is delivered only
+        // to whoever owns the surface (`AGENTS.md` §20). Like the other
+        // high-volume stream readers (`stream_read`) it fires once per key
+        // edge, so it is NOT audited (`AGENTS.md` §5.4.4).
+        required_capability: Some(CapabilityId::INPUT_READ),
         audit: false,
     },
 ];
@@ -816,17 +870,38 @@ mod tests {
             Some(CapabilityId::CONSOLE_READ)
         );
         assert!(!stream_echo.audit, "stream_echo must not audit");
-        // console_input feeds keystroke bytes into a console's input
-        // queue, so it is gated on the privileged CAP_INPUT_INJECT — the
-        // system console's input is never ambient (`AGENTS.md` §4) — and,
-        // like the per-byte stream operations, is not audited per call
+        // key_inject feeds one decoded key edge into the input-focus
+        // arbiter, so it is gated on the privileged CAP_INPUT_INJECT — the
+        // system keyboard stream is never ambient (`AGENTS.md` §4) — and,
+        // like the per-event stream operations, is not audited per call
         // (`AGENTS.md` §5.4.4).
-        let console_input = spec_for(SyscallNumber::CONSOLE_INPUT).unwrap();
+        let key_inject = spec_for(SyscallNumber::KEY_INJECT).unwrap();
         assert_eq!(
-            console_input.required_capability,
+            key_inject.required_capability,
             Some(CapabilityId::INPUT_INJECT)
         );
-        assert!(!console_input.audit, "console_input must not audit");
+        assert!(!key_inject.audit, "key_inject must not audit");
+        // display_acquire / display_release own the display and keyboard
+        // focus, gated on CAP_DISPLAY and audited per call — re-routing the
+        // keyboard stream is a security-relevant ownership change
+        // (`AGENTS.md` §4 / §5.4.4).
+        for n in [
+            SyscallNumber::DISPLAY_ACQUIRE,
+            SyscallNumber::DISPLAY_RELEASE,
+        ] {
+            let spec = spec_for(n).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::DISPLAY));
+            assert!(spec.audit, "display ownership must be audited");
+        }
+        // keyboard_read drains the kernel keyboard channel for the display
+        // owner, gated on CAP_INPUT_READ and — like stream_read — not
+        // audited per call (`AGENTS.md` §4 / §5.4.4).
+        let keyboard_read = spec_for(SyscallNumber::KEYBOARD_READ).unwrap();
+        assert_eq!(
+            keyboard_read.required_capability,
+            Some(CapabilityId::INPUT_READ)
+        );
+        assert!(!keyboard_read.audit, "keyboard_read must not audit");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

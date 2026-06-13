@@ -470,6 +470,7 @@ fn run_phases<A: KernelArch>(
         consoles,
         programs,
         spawn_service,
+        input_focus,
         ..
     } = boot;
 
@@ -591,8 +592,8 @@ fn run_phases<A: KernelArch>(
             // Preserve the console's injected-input half across the
             // wrap: a keyboard-backed console keeps the same
             // `ConsoleInputQueue` the blocking `read` adapter now drains,
-            // so a `console_input` push still reaches the parked reader
-            // (`plans/PI.md` P11).
+            // so an input-focus arbiter push still reaches the parked
+            // reader (`plans/PI.md` P11).
             wrapped.push(crate::console::ConsoleDevice::with_input(
                 device.write,
                 blocking,
@@ -628,6 +629,7 @@ fn run_phases<A: KernelArch>(
             programs,
             spawn_service,
             process_wait,
+            input_focus,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)

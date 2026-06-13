@@ -939,6 +939,7 @@ dependencies = [
  "rustos-kernel-sched-mlfq",
  "rustos-kernel-sec",
  "rustos-kernel-syscall",
+ "rustos-keymap",
  "rustos-log",
  "rustos-rng",
  "rustos-sync",
@@ -1067,6 +1068,7 @@ dependencies = [
 name = "rustos-keymap"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-input",
  "rustos-vt",
 ]

@@ -29,12 +29,14 @@
 //!   (`0x04` = `A`, …); the eight boot modifiers surface as usages
 //!   `0xE0..=0xE7` ([`keyboard::MODIFIER_USAGE_BASE`]). `value` is `1`
 //!   for a press and `0` for a release.
-//! * For a directly attached keyboard the [`console`] producer turns
-//!   those usage edges into the console (tty) bytes a terminal sends —
-//!   applying the US layout, the held modifiers, and caps/num lock, then
-//!   the shared `lib/keymap` terminal map — and a driver loop injects
-//!   them through the `console_input` syscall ([`pump_once`],
-//!   `plans/PI.md` P11). Key repeat remains a higher-layer concern.
+//! * For a directly attached keyboard the [`console`] producer resolves
+//!   those usage edges into the [`Key`](rustos_input::Key) a US layout
+//!   produces — applying the held modifiers and caps/num lock — and emits
+//!   the decoded [`KeyInput`](rustos_abi::input::KeyInput) record through
+//!   the shared `lib/keymap` map; a driver loop injects each record through
+//!   the `key_inject` syscall ([`pump_once`], `plans/PI.md` P11), leaving
+//!   the encoding and routing to the kernel input-focus arbiter
+//!   (`AGENTS.md` §17.4). Key repeat remains a higher-layer concern.
 //! * Mouse buttons surface as `Key` events with codes
 //!   [`mouse::BUTTON_CODE_BASE`]` + n` (`0x110`/`0x111`/`0x112` for
 //!   left/right/middle — the same codes a virtio pointer device

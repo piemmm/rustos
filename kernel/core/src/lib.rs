@@ -77,6 +77,7 @@ pub mod console;
 pub mod dispatch_slot;
 pub mod fs;
 pub mod init;
+pub mod input_focus;
 pub mod kthread;
 pub mod memmap;
 pub mod panic;
@@ -112,6 +113,7 @@ pub use fs::{
     VfsError,
 };
 pub use init::{kernel_main, InitError, Phase};
+pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
 pub use kthread::{
     reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,
     spawn_user_kthread_with_stack, BoxStack, KernelStack, Yielder, KTHREAD_MAX_CPUS,

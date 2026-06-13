@@ -2165,6 +2165,24 @@ needed; then the WM/taskbar/session on the HVS path and the on-metal
 acceptance (a real controller's BAR answering a plausible `CAPLENGTH`,
 and a USB keyboard driving the login).
 
+**Next priority — migrate the chain onto `hwtree` + `devmgr` autoload,
+then delete the composition module.** `kernel/rustos-kernel::usb_keyboard`
+is a *scaffold*: the one crate §17.4 lets name the four driver crates of
+the Pi 4 chain (`pcie_brcm` → `pci::mechanism_brcm` → `bus_usb` →
+`input_usb_hid`). It must not become the model for board support — one
+hand-written composition module per board is exactly the §2.2/§2.3 sprawl
+to avoid. The scaling-correct steady state is the §18 data-driven path
+(Stage 4.HW): the `brcm,bcm2711-pcie` / VL805 / HID nodes are already
+discovered into the `hwtree`, and `devmgr` autoloads the matching drivers
+against their signed bind tables, so a new board is match **data**, not
+new code. When that generic path drives the USB-keyboard chain, **delete**
+`usb_keyboard.rs` (§2.14) and update §3 / `PLAN.md`; the chain's long-term
+home is a `devmgr`-autoloaded userland keyboard *service* (the report pump
+is continuous), riding the still-open DriverSpawner-over-IPC gap (Stage
+4.HW increment 1). **Do this immediately after the current P11
+input-focus-arbiter work**, before further per-board glue accretes
+(tracked as `PLAN.md` Stage 4.HW increment 5).
+
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
 demo (photo + UART log) is the acceptance artefact. Headless `-M raspi4b`

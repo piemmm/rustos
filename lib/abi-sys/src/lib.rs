@@ -85,7 +85,10 @@ const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
-const NUM_CONSOLE_INPUT: u64 = SyscallNumber::CONSOLE_INPUT.as_u16() as u64;
+const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
+const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
+const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
+const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -368,32 +371,80 @@ pub extern "C" fn sys_stream_echo(fd: u32, enabled: u32) -> i32 {
     }
 }
 
-/// `console_input`: inject `len` bytes of decoded keystroke input at
-/// `buf` into the installed console `console`
-/// (`SyscallNumber::CONSOLE_INPUT`, `AGENTS.md` §20, `plans/PI.md` P11 —
-/// keyboard input for the video console). Returns the number of bytes
-/// enqueued, or a `ROS_E_*` code reinterpreted into the result.
+/// `key_inject`: inject one decoded keyboard key edge at `buf` (a
+/// `ros_key_input_t` record of `len` bytes) into the kernel input-focus
+/// arbiter (`SyscallNumber::KEY_INJECT`, `AGENTS.md` §20, `plans/PI.md`
+/// P11 — input follows the surface owner). Returns the number of bytes
+/// consumed, or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
-/// directly attached keyboard into console bytes. Gated kernel-side on
+/// directly attached keyboard into a key edge. Gated kernel-side on
 /// `ROS_CAP_INPUT_INJECT`; the kernel validates the capability and the
 /// `(buf, len)` pair against the caller's address space before reading it
-/// (`AGENTS.md` §5.4), then pushes the bytes into the target console's
-/// input queue, which a `ros_sys_stream_read` of that console drains. A
-/// short push (the bounded queue is near full) reports fewer bytes; the
-/// driver retries the remainder and never blocks (`AGENTS.md` §2.1).
+/// (`AGENTS.md` §5.4), decodes the record fail-closed, and routes it by who
+/// currently holds input focus — the driver no longer chooses the encoding
+/// or the destination (`AGENTS.md` §17.4).
 #[must_use]
-#[export_name = "ros_sys_console_input"]
-pub extern "C" fn sys_console_input(console: u32, buf: *mut c_void, len: usize) -> u64 {
+#[export_name = "ros_sys_key_inject"]
+pub extern "C" fn sys_key_inject(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`
     // and the `(buf, len)` pair against the caller's address space before
     // reading it (`AGENTS.md` §5.4).
-    unsafe {
-        raw_syscall(
-            NUM_CONSOLE_INPUT,
-            [u64::from(console), ptr_arg(buf), len as u64, 0, 0, 0],
-        )
-    }
+    unsafe { raw_syscall(NUM_KEY_INJECT, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
+/// `display_acquire`: acquire ownership of the display and claim keyboard
+/// input focus (`SyscallNumber::DISPLAY_ACQUIRE`, `AGENTS.md` §10 / §17.3 /
+/// §20, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on success).
+///
+/// The compositing window manager calls this when it takes over the screen:
+/// the kernel input-focus arbiter switches its foreground to the desktop
+/// keyboard channel, so injected key edges are delivered as records the
+/// manager drains with [`sys_keyboard_read`]. Gated kernel-side on
+/// `ROS_CAP_DISPLAY` (`AGENTS.md` §4 — owning the display is privileged).
+#[must_use]
+#[export_name = "ros_sys_display_acquire"]
+pub extern "C" fn sys_display_acquire() -> i32 {
+    // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
+    // validates `CAP_DISPLAY` before touching any state (`AGENTS.md` §5.4).
+    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_ACQUIRE, NO_ARGS)) }
+}
+
+/// `display_release`: release the display and return keyboard input focus to
+/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `AGENTS.md` §10 /
+/// §17.3 / §20, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on
+/// success).
+///
+/// The inverse of [`sys_display_acquire`]; gated kernel-side on
+/// `ROS_CAP_DISPLAY`.
+#[must_use]
+#[export_name = "ros_sys_display_release"]
+pub extern "C" fn sys_display_release() -> i32 {
+    // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
+    // validates `CAP_DISPLAY` before touching any state (`AGENTS.md` §5.4).
+    unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, NO_ARGS)) }
+}
+
+/// `keyboard_read`: read one decoded keyboard event from the kernel keyboard
+/// channel into `buf` (a buffer of `len` bytes, at least one
+/// `ros_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `AGENTS.md`
+/// §10, `plans/PI.md` P11). Returns the number of bytes written — one
+/// record, or `0` when the channel is momentarily drained — or a `ROS_E_*`
+/// code reinterpreted into the result.
+///
+/// The principal that owns the display (the window manager) drains the
+/// records the arbiter routed to it while it held focus. Gated kernel-side
+/// on `ROS_CAP_INPUT_READ`; the kernel validates the capability and the
+/// `(buf, len)` pair against the caller's address space before writing it
+/// (`AGENTS.md` §5.4), and a buffer too small to hold a record fails closed
+/// (`AGENTS.md` §2.9).
+#[must_use]
+#[export_name = "ros_sys_keyboard_read"]
+pub extern "C" fn sys_keyboard_read(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ` and
+    // the `(buf, len)` pair against the caller's address space before writing
+    // it (`AGENTS.md` §5.4).
+    unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
@@ -535,7 +586,10 @@ mod tests {
         (NUM_USERS_DB_READ, "users_db_read", 2),
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_ECHO, "stream_echo", 2),
-        (NUM_CONSOLE_INPUT, "console_input", 3),
+        (NUM_KEY_INJECT, "key_inject", 2),
+        (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
+        (NUM_DISPLAY_RELEASE, "display_release", 0),
+        (NUM_KEYBOARD_READ, "keyboard_read", 2),
     ];
 
     #[test]
@@ -746,18 +800,48 @@ mod tests {
     }
 
     #[test]
-    fn console_input_marshals_console_pointer_and_len() {
-        let mut keys = *b"root\r";
-        let ptr = keys.as_mut_ptr().cast::<c_void>();
-        // The kernel returns the number of bytes enqueued.
-        let (number, args) = capture(5, || {
-            assert_eq!(sys_console_input(0, ptr, keys.len()), 5);
+    fn key_inject_marshals_pointer_and_len() {
+        let mut record = [0u8; 8];
+        let ptr = record.as_mut_ptr().cast::<c_void>();
+        let len = record.len();
+        // The kernel returns the number of bytes consumed.
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_key_inject(ptr, len), len as u64);
         });
-        assert_eq!(number, NUM_CONSOLE_INPUT);
-        assert_eq!(args[0], 0);
-        assert_eq!(args[1], ptr as usize as u64);
-        assert_eq!(args[2], keys.len() as u64);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(number, NUM_KEY_INJECT);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn display_acquire_and_release_marshal_no_arguments() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_display_acquire(), 0);
+        });
+        assert_eq!(number, NUM_DISPLAY_ACQUIRE);
+        assert_eq!(args, NO_ARGS);
+
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_display_release(), 0);
+        });
+        assert_eq!(number, NUM_DISPLAY_RELEASE);
+        assert_eq!(args, NO_ARGS);
+    }
+
+    #[test]
+    fn keyboard_read_marshals_pointer_and_len() {
+        let mut buf = [0u8; 8];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let len = buf.len();
+        // The kernel returns the number of bytes written (one record).
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_keyboard_read(ptr, len), len as u64);
+        });
+        assert_eq!(number, NUM_KEYBOARD_READ);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]

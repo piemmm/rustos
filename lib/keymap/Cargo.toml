@@ -9,6 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The wire keyboard-event vocabulary (`KeyInput` / `KeyValue` / `Modifiers` /
+# `NamedKeyCode`) the abi<->tty bridge (`encode_key_input` / `key_input`)
+# crosses to. Shared here as the single definition of the `Key`<->`KeyValue`
+# mapping the driver (input side) and the kernel arbiter (output side) both use
+# (§2.2), so neither owns a private copy.
+rustos-abi = { path = "../abi", version = "=0.0.0" }
 # The decoded keyboard vocabulary (`Key` / `NamedKey` / `Modifiers`) this map
 # translates. Shared in `lib/*` so neither a driver nor a GUI crate owns it
 # (§17.4, §2.2).
