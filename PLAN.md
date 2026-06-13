@@ -595,13 +595,23 @@ order (one fully-gated increment each):
        ids and resources are minted at the load gate (§4/§5.4). New trait
        method only — no `#[repr(C)]`/C-header drift. The generic xHCI driver's
        wildcard `BIND_KEYS` (5a) resolves against the emitted VL805 node.
-     - **5b-ii — USB/HID child emission — staged.** `bus_usb` must emit the
-       enumerated HID device under the VL805 as a child node keyed by its
-       **interface** class (`0x03_01_01` keyboard / `0x03_01_02` mouse). This
-       needs the USB enumeration to read the configuration/interface
-       descriptor (it currently hard-codes interface 0 / boot keyboard), so
-       the honest interface-class triple is captured rather than assumed
-       (§18.5 — never fabricate the key).
+     - **5b-ii — USB/HID child emission — done.** `bus_usb` emits the
+       enumerated HID device under the VL805 as a child `HwNode` keyed by its
+       **interface** class (`0x03_01_01` keyboard / `0x03_01_02` mouse).
+       `UsbDevice::enumerate_hid` now reads the configuration descriptor and
+       parses its first interface descriptor (`InterfaceInfo::decode`,
+       fail-closed bounded walk by each `bLength`): the discovered
+       `bConfigurationValue` / `bInterfaceNumber` drive `SET_CONFIGURATION` /
+       `SET_PROTOCOL(boot)` (no longer hard-coded `1` / `0`), and the captured
+       24-bit interface class is held as the device's identity. The new
+       `UsbDevice::describe_device(parent_id, node_id)` returns an `HwNode`
+       (class `Input`) carrying one `HwMatchKey::usb` of the device's
+       `vid:pid` + that captured interface class — never fabricated
+       (§18.5) — fail-closed `NotFound` before enumeration; the
+       `usb_hid::BIND_KEYS` class-wildcard keys resolve against it. A new
+       method only — no `#[repr(C)]`/C-header drift. Host-proven (the
+       `InterfaceInfo::decode` fail-closed cases, the emitted-node match, the
+       pre-enumeration refusal).
    - **5c — production driver-candidate catalogue + `devmgr` autoload
      wiring** over the static + runtime tree, driving the chain through the
      driver-host load gate. Rides the still-open DriverSpawner-over-IPC gap

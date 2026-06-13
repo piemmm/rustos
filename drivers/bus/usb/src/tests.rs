@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::device::{
-    DeviceDescriptor, DmaRegion, UsbDevice, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
+    DeviceDescriptor, DmaRegion, InterfaceInfo, UsbDevice, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -88,6 +88,22 @@ impl DmaRegion for MockDma {
 const MOCK_DESCRIPTOR: [u8; 18] = [
     18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40, 0x6D, 0x04, 0x77, 0xC0, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x01,
+];
+
+/// The configuration descriptor fixture the model answers
+/// `GET_DESCRIPTOR(configuration)` with: a 9-byte configuration header
+/// (`bConfigurationValue` = 1) followed by one 9-byte interface
+/// descriptor of the HID boot-keyboard class (`0x03_01_01`,
+/// `bInterfaceNumber` = 0).
+const MOCK_CONFIG_DESCRIPTOR: [u8; 18] = [
+    // Configuration: bLength=9, type=2, wTotalLength=18, 1 interface,
+    // bConfigurationValue=1, iConfiguration=0, bmAttributes=0xA0,
+    // bMaxPower=50.
+    0x09, 0x02, 0x12, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: bLength=9, type=4, bInterfaceNumber=0, alt=0,
+    // 1 endpoint, class=0x03 (HID), sub=0x01 (boot), protocol=0x01
+    // (keyboard), iInterface=0.
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00,
 ];
 
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
@@ -436,18 +452,23 @@ impl MockXhci {
         };
         let data = self.pending_data.take();
         match (setup[0], setup[1]) {
-            // GET_DESCRIPTOR(device)
-            (0x80, 0x06) if setup[3] == 0x01 => {
+            // GET_DESCRIPTOR(device | configuration)
+            (0x80, 0x06) if setup[3] == 0x01 || setup[3] == 0x02 => {
                 let Some((data_addr, buffer, len, isp)) = data else {
                     self.post_transfer_event(status_addr, CompletionCode::TrbError, 1, 0);
                     return;
+                };
+                let source: &[u8] = if setup[3] == 0x01 {
+                    &MOCK_DESCRIPTOR
+                } else {
+                    &MOCK_CONFIG_DESCRIPTOR
                 };
                 let requested = usize::min(
                     len as usize,
                     usize::from(u16::from_le_bytes([setup[6], setup[7]])),
                 );
-                let supplied = usize::min(requested, MOCK_DESCRIPTOR.len());
-                self.write_mem(buffer, &MOCK_DESCRIPTOR[..supplied]);
+                let supplied = usize::min(requested, source.len());
+                self.write_mem(buffer, &source[..supplied]);
                 let residual = len - u32::try_from(supplied).expect("descriptor fits");
                 if residual > 0 && isp {
                     self.post_transfer_event(data_addr, CompletionCode::ShortPacket, 1, residual);
@@ -1318,6 +1339,89 @@ fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
     assert_eq!(events[1].code, 0xE1, "left-shift modifier edge");
     assert_eq!(events[1].value, 1);
     assert_eq!(keyboard.poll(&mut events), Ok(0));
+}
+
+#[test]
+fn interface_info_decodes_and_fails_closed() {
+    // The boot-keyboard fixture: config value 1, interface 0, class
+    // `0x03_01_01`.
+    let info = InterfaceInfo::decode(&MOCK_CONFIG_DESCRIPTOR).expect("fixture decodes");
+    assert_eq!(info.configuration_value, 1);
+    assert_eq!(info.interface_number, 0);
+    assert_eq!(info.class24, 0x03_01_01);
+
+    // Too short to hold the configuration header.
+    assert_eq!(
+        InterfaceInfo::decode(&MOCK_CONFIG_DESCRIPTOR[..8]),
+        Err(DriverError::BadMagic)
+    );
+    // Leading descriptor is not a configuration descriptor.
+    let mut wrong_type = MOCK_CONFIG_DESCRIPTOR;
+    wrong_type[1] = 0x01;
+    assert_eq!(
+        InterfaceInfo::decode(&wrong_type),
+        Err(DriverError::BadMagic)
+    );
+    // An interface descriptor claiming a length that runs off the end.
+    let mut runaway = MOCK_CONFIG_DESCRIPTOR;
+    runaway[9] = 0xFF;
+    assert_eq!(InterfaceInfo::decode(&runaway), Err(DriverError::BadMagic));
+    // A configuration with no interface descriptor at all (only the
+    // 9-byte header).
+    assert_eq!(
+        InterfaceInfo::decode(&MOCK_CONFIG_DESCRIPTOR[..9]),
+        Err(DriverError::BadMagic)
+    );
+    // A second interface class is honoured (boot mouse `0x03_01_02`).
+    let mut mouse = MOCK_CONFIG_DESCRIPTOR;
+    mouse[16] = 0x02;
+    assert_eq!(
+        InterfaceInfo::decode(&mouse)
+            .expect("mouse decodes")
+            .class24,
+        0x03_01_02
+    );
+}
+
+#[test]
+fn describe_device_emits_the_hid_child_node() {
+    use rustos_abi::{HwDeviceClass, HwMatchKey};
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+
+    // The emitted child node carries the device's vid:pid and the
+    // *interface* class read from the configuration descriptor
+    // (`0x03_01_01`), parented at the controller node and assigned the
+    // tree owner's id.
+    let node = device.describe_device(7, 9).expect("identity captured");
+    assert_eq!(node.id(), 9);
+    assert_eq!(node.parent(), 7);
+    assert_eq!(node.class(), Some(HwDeviceClass::Input));
+    assert_eq!(node.match_keys().len(), 1);
+    let emitted = node.match_keys()[0];
+    assert_eq!(emitted, HwMatchKey::usb(0x046D, 0xC077, 0x03_01_01));
+
+    // The generic HID boot-keyboard bind key (`usb_hid::BIND_KEYS`)
+    // resolves against the emitted node by class (vendor/product
+    // wildcard), exactly as `devmgr` will (`AGENTS.md` §18.3).
+    let keyboard_key = rustos_drv_input_usb_hid::BIND_KEYS[0].key;
+    assert!(keyboard_key.matches(&emitted));
+    // A boot-mouse bind key must not bind a keyboard interface.
+    let mouse_key = rustos_drv_input_usb_hid::BIND_KEYS[1].key;
+    assert!(!mouse_key.matches(&emitted));
+}
+
+#[test]
+fn describe_device_before_enumeration_fails_closed() {
+    let mem = shared_mem();
+    let device = started_device(MockXhci::with_device(&mem), &mem);
+    // No device enumerated yet: the identity is absent, so the bus
+    // refuses to fabricate a node (`AGENTS.md` §2.9 / §18.5).
+    assert_eq!(
+        device.describe_device(7, 9).err(),
+        Some(DriverError::NotFound)
+    );
 }
 
 #[test]

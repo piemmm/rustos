@@ -22,7 +22,7 @@
 
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::driver::input::ReportSource;
-use rustos_abi::DriverError;
+use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
@@ -248,6 +248,21 @@ const fn setup_set_protocol_boot(interface: u8) -> [u8; 8] {
     [0x21, 0x0B, 0x00, 0x00, interface, 0x00, 0x00, 0x00]
 }
 
+/// The 8-byte SETUP payload of `GET_DESCRIPTOR(configuration, 0)` for
+/// `len` bytes (USB 2.0 §9.4.3): descriptor type `0x02` in the high
+/// byte of `wValue`, configuration index `0` in the low byte.
+const fn setup_get_configuration_descriptor(len: u16) -> [u8; 8] {
+    let l = len.to_le_bytes();
+    [0x80, 0x06, 0x00, 0x02, 0x00, 0x00, l[0], l[1]]
+}
+
+/// `bDescriptorType` of a configuration descriptor (USB 2.0 §9.4
+/// Table 9-5).
+const DESC_TYPE_CONFIGURATION: u8 = 0x02;
+
+/// `bDescriptorType` of an interface descriptor.
+const DESC_TYPE_INTERFACE: u8 = 0x04;
+
 /// The fields of the 18-byte USB device descriptor this driver uses
 /// (USB 2.0 §9.6.1), decoded fail-closed.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -293,6 +308,94 @@ impl DeviceDescriptor {
 /// configured device.
 const fn setup_set_configuration(value: u8) -> [u8; 8] {
     [0x00, 0x09, value, 0x00, 0x00, 0x00, 0x00, 0x00]
+}
+
+/// The fields of the configuration descriptor and its first interface
+/// descriptor this driver needs (USB 2.0 §9.6.3 / §9.6.5), decoded
+/// fail-closed from the concatenated descriptor bytes the device
+/// returns for `GET_DESCRIPTOR(configuration)`.
+///
+/// The interface's class triple is read from the device — never
+/// assumed — so the hardware-tree child node the bus emits
+/// ([`UsbDevice::describe_device`]) carries the honest class
+/// (`AGENTS.md` §18.5).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct InterfaceInfo {
+    /// `bConfigurationValue` to select with `SET_CONFIGURATION`.
+    pub configuration_value: u8,
+    /// `bInterfaceNumber` of the matched interface (the target of the
+    /// HID `SET_PROTOCOL` class request).
+    pub interface_number: u8,
+    /// The 24-bit USB interface class code
+    /// `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
+    /// (e.g. an HID boot keyboard is `0x03_01_01`, a boot mouse
+    /// `0x03_01_02`), as carried by [`HwMatchKey::usb`].
+    pub class24: u32,
+}
+
+impl InterfaceInfo {
+    /// Byte length of a configuration descriptor header (USB 2.0
+    /// §9.6.3) and of an interface descriptor (§9.6.5).
+    const CONFIG_HEADER_LEN: usize = 9;
+    const INTERFACE_LEN: usize = 9;
+
+    /// Decode the `buf` bytes the device delivered for
+    /// `GET_DESCRIPTOR(configuration)` into the configuration value and
+    /// its **first** interface descriptor's number and class triple.
+    ///
+    /// The concatenated descriptors are walked by each descriptor's
+    /// `bLength` (USB 2.0 §9.4.3) to the first interface descriptor; a
+    /// HID device's class lives on its interface, not the device
+    /// descriptor (whose `bDeviceClass` is `0`).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::BadMagic`] if the leading descriptor is not a
+    /// configuration descriptor, a descriptor claims a length that runs
+    /// off the buffer or is below the two-byte header, or no interface
+    /// descriptor is present — a forged or corrupt reply (`AGENTS.md`
+    /// §5.4 / §2.9).
+    pub fn decode(buf: &[u8]) -> Result<Self, DriverError> {
+        if buf.len() < Self::CONFIG_HEADER_LEN
+            || usize::from(buf[0]) < Self::CONFIG_HEADER_LEN
+            || buf[1] != DESC_TYPE_CONFIGURATION
+        {
+            return Err(DriverError::BadMagic);
+        }
+        let configuration_value = buf[5];
+        let mut offset = usize::from(buf[0]);
+        while offset + 2 <= buf.len() {
+            let length = usize::from(buf[offset]);
+            let end = offset.checked_add(length).ok_or(DriverError::BadMagic)?;
+            if length < 2 || end > buf.len() {
+                return Err(DriverError::BadMagic);
+            }
+            if buf[offset + 1] == DESC_TYPE_INTERFACE {
+                if length < Self::INTERFACE_LEN {
+                    return Err(DriverError::BadMagic);
+                }
+                return Ok(Self {
+                    configuration_value,
+                    interface_number: buf[offset + 2],
+                    class24: (u32::from(buf[offset + 5]) << 16)
+                        | (u32::from(buf[offset + 6]) << 8)
+                        | u32::from(buf[offset + 7]),
+                });
+            }
+            offset = end;
+        }
+        Err(DriverError::BadMagic)
+    }
+}
+
+/// Identity of the enumerated HID device, captured during
+/// [`UsbDevice::enumerate_hid`] so the bus can emit it as a discovered
+/// hardware-tree child node ([`UsbDevice::describe_device`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct HidIdentity {
+    vendor_id: u16,
+    product_id: u16,
+    interface_class: u32,
 }
 
 /// Interrupt-IN endpoint service interval, in xHCI `2^(n) * 125 µs`
@@ -368,6 +471,7 @@ pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     event_cursor: EventRingCursor,
     budget: u32,
     slot: u8,
+    identity: Option<HidIdentity>,
 }
 
 impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
@@ -438,6 +542,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             event_cursor,
             budget,
             slot: 0,
+            identity: None,
         })
     }
 
@@ -719,6 +824,27 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.dma.read(self.layout.ctrl_data, &mut bytes)?;
         let descriptor = DeviceDescriptor::decode(&bytes)?;
 
+        // Read the configuration descriptor to discover the interface's
+        // class triple and number, rather than assuming interface 0 /
+        // boot keyboard (`AGENTS.md` §18.5 — the class is captured, not
+        // fabricated). The whole control-data buffer is requested; the
+        // device short-packets at the configuration's real length.
+        let config_buf_len =
+            u32::try_from(CTRL_DATA_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
+        let config_len_u16 =
+            u16::try_from(CTRL_DATA_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
+        let transferred = self.control(
+            setup_get_configuration_descriptor(config_len_u16),
+            config_buf_len,
+        )?;
+        let transferred = usize::min(
+            usize::try_from(transferred).map_err(|_| DriverError::DeviceFault)?,
+            CTRL_DATA_LEN,
+        );
+        let mut config_bytes = [0u8; CTRL_DATA_LEN];
+        self.dma.read(self.layout.ctrl_data, &mut config_bytes)?;
+        let interface = InterfaceInfo::decode(&config_bytes[..transferred])?;
+
         // Configure the interrupt-IN endpoint (A0 | A3), raising the
         // slot's context entries to cover DCI 3.
         let report_len = u32::try_from(REPORT_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
@@ -743,13 +869,18 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             trb::control_slot(slot),
         ))?;
 
-        self.control(setup_set_configuration(1), 0)?;
-        self.control(setup_set_protocol_boot(0), 0)?;
+        self.control(setup_set_configuration(interface.configuration_value), 0)?;
+        self.control(setup_set_protocol_boot(interface.interface_number), 0)?;
 
         for _ in 0..PRIMED_REPORTS {
             self.arm_report()?;
         }
         self.xhci.ring_doorbell(slot, u32::from(DCI_INTERRUPT_IN))?;
+        self.identity = Some(HidIdentity {
+            vendor_id: descriptor.vendor_id,
+            product_id: descriptor.product_id,
+            interface_class: interface.class24,
+        });
         Ok(descriptor)
     }
 
@@ -781,6 +912,43 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             }
         }
         Err(DriverError::NotFound)
+    }
+
+    /// Describe the enumerated HID device as a discovered child
+    /// [`HwNode`] parented at `parent_id` and assigned `node_id`.
+    ///
+    /// The node carries one [`HwMatchKey::usb`] of the device's
+    /// `vid:pid` and the 24-bit class of the interface this driver
+    /// brought up — both read from the device during
+    /// [`Self::enumerate_hid`], never assumed — so `devmgr` resolves an
+    /// HID driver's signed bind table against it (`AGENTS.md` §18.3 /
+    /// §18.5). Its [`HwDeviceClass`] is [`HwDeviceClass::Input`], the
+    /// HID-class match key mirroring the PCI child node
+    /// [`PciBus::describe_function`](rustos_abi::driver::pci::PciBus::describe_function)
+    /// emits for the controller above it (`AGENTS.md` §2.2).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no device has been enumerated yet
+    ///   (the identity is captured only on a successful
+    ///   [`Self::enumerate_hid`]) — fail closed, never a fabricated node
+    ///   (`AGENTS.md` §2.9 / §18.5).
+    /// * [`DriverError::DeviceFault`] if the match key cannot be pushed.
+    ///
+    /// # Capabilities
+    ///
+    /// None — describing a node mints no resources (`AGENTS.md` §18.1:
+    /// resources are minted at the load gate).
+    pub fn describe_device(&self, parent_id: u32, node_id: u32) -> Result<HwNode, DriverError> {
+        let identity = self.identity.ok_or(DriverError::NotFound)?;
+        let mut node = HwNode::new(node_id, parent_id, HwDeviceClass::Input);
+        node.push_match_key(HwMatchKey::usb(
+            identity.vendor_id,
+            identity.product_id,
+            identity.interface_class,
+        ))
+        .map_err(|_| DriverError::DeviceFault)?;
+        Ok(node)
     }
 }
 

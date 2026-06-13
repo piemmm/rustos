@@ -631,8 +631,31 @@ sentinel) fails closed with `NotFound`, never a fabricated node
 (`AGENTS.md` §2.9). The tree owner allocates the ids and attaches no
 resource capabilities here — those are minted at the load gate
 (`AGENTS.md` §4 / §5.4). This is the PCI half of `plans/PI.md`
-Stage 4.HW item 5b; the bus-driver `BIND_KEYS` (item 5a) and `devmgr`
-autoload wiring (item 5c) close the data-driven path that supersedes the
+Stage 4.HW item 5b.
+
+The USB host driver does the same one level down, for the HID device it
+enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).
+A USB device's class lives on its *interface*, not its device
+descriptor (whose `bDeviceClass` is `0` for an HID device), so
+`UsbDevice::enumerate_hid` reads the configuration descriptor during
+bring-up and parses its first interface descriptor
+(`InterfaceInfo::decode`, walking the concatenated descriptors by each
+`bLength`, fail-closed on a truncated, mistyped, or interface-less
+reply). The discovered `bConfigurationValue` and `bInterfaceNumber`
+drive `SET_CONFIGURATION` and the HID `SET_PROTOCOL(boot)` — neither is
+assumed to be `1` / `0` any more — and the 24-bit interface class
+`(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
+(an HID boot keyboard is `0x03_01_01`, a boot mouse `0x03_01_02`) is
+captured for emission. `UsbDevice::describe_device(parent_id, node_id)`
+then returns an `HwNode` of class `Input`, parented at the controller's
+node, carrying one `HwMatchKey::usb` of the device's `vid:pid` and that
+captured interface class — never a fabricated one (`AGENTS.md` §18.5) —
+so `usb_hid::BIND_KEYS`'s class-wildcard keyboard/mouse keys resolve
+against it exactly as `devmgr` will. It fails closed with `NotFound`
+before a device has been enumerated.
+
+Together with the bus-driver `BIND_KEYS` (item 5a), `devmgr` autoload
+wiring (item 5c) closes the data-driven path that supersedes the
 `kernel/rustos-kernel::usb_keyboard` composition scaffold.
 
 ## Constructing the real-hardware bus

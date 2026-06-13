@@ -2192,12 +2192,18 @@ table, so a new board is match **data**, not new code. Sub-increments
   apart from older USB host classes), `HwDeviceClass` from the base class,
   fail-closed `NotFound` on an absent function (§2.9/§18.5); a new trait
   method only (no `#[repr(C)]`/C-header drift), host-proven that the VL805
-  node matches `bus_usb::BIND_KEYS`. **5b-ii — staged:** `bus_usb` emits the
+  node matches `bus_usb::BIND_KEYS`. **5b-ii — done:** `bus_usb` emits the
   HID device under the VL805 keyed by its **interface** class
-  (`0x030101`/`0x030102`), which first needs the USB enumeration to read the
-  configuration/interface descriptor (it hard-codes interface 0 / boot
-  keyboard today) so the class is captured, never fabricated (§18.5). Then
-  **5c** the production driver-candidate catalogue + `devmgr` autoload wiring
+  (`0x030101`/`0x030102`). `UsbDevice::enumerate_hid` now reads the
+  configuration descriptor and parses its first interface descriptor
+  (`InterfaceInfo::decode`, fail-closed): the discovered `bConfigurationValue`
+  / `bInterfaceNumber` drive `SET_CONFIGURATION` / `SET_PROTOCOL(boot)` (no
+  longer hard-coded `1` / `0`), the 24-bit interface class is captured (never
+  fabricated, §18.5), and `UsbDevice::describe_device(parent, node)` returns an
+  `Input` `HwNode` with one `HwMatchKey::usb` of `vid:pid` + that class (a new
+  method only — no C-header drift), host-proven that the `usb_hid::BIND_KEYS`
+  keyboard key resolves against it. Then **5c** the production
+  driver-candidate catalogue + `devmgr` autoload wiring
   (rides DriverSpawner-over-IPC, Stage 4.HW increment 1); **5d** the
   continuous keyboard *service*; **5e** delete `usb_keyboard.rs` (§2.14) once
   the generic path drives the chain.
