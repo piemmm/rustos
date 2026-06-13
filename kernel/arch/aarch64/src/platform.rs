@@ -197,14 +197,21 @@ fn build_node(
             .checked_sub(1)
             .and_then(|i| levels.get(i))
             .map_or(2, |l| l.addr_cells);
-        if let Some((aperture_top, aperture_len)) =
+        if let Some((aperture_top, aperture_len, inbound_pcie_base)) =
             dma_ranges_aperture(node, level.addr_cells, parent_addr_cells, level.size_cells)
         {
             // No room left simply carries no aperture request; the
             // capacity bound is the ABI's, never a panic (§2.9). An
             // unreadable `dma-ranges` likewise omits it rather than
-            // inventing a window.
-            let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
+            // inventing a window. The far-side PCIe base the inbound
+            // viewport starts at rides the resource's translation field
+            // so the VL805 wiring can program the inbound BAR from the
+            // tree, never a board constant (§18.5).
+            let _ = hw.push_resource(HwResource::dma_translated(
+                aperture_top,
+                aperture_len,
+                inbound_pcie_base,
+            ));
         }
         // …and the outbound memory window from its `ranges`: the
         // CPU-physical aperture the bridge forwards to PCIe memory space
@@ -574,11 +581,11 @@ mod tests {
         b.build()
     }
 
-    fn dma_resources(node: &HwNode) -> Vec<(u64, u64)> {
+    fn dma_resources(node: &HwNode) -> Vec<(u64, u64, u64)> {
         node.resources()
             .iter()
             .filter(|r| r.kind() == Some(HwResourceKind::Dma))
-            .map(|r| (r.base(), r.length()))
+            .map(|r| (r.base(), r.length(), r.translated_base()))
             .collect()
     }
 
@@ -648,8 +655,10 @@ mod tests {
 
         // The augmentation: the inbound-DMA aperture from `dma-ranges` —
         // the low 3 GiB of SDRAM devices behind the bridge may reach.
-        // base is the exclusive top (`AGENTS.md` §18.1).
-        assert_eq!(dma_resources(pcie), [(0xc000_0000, 0xc000_0000)]);
+        // base is the exclusive top, and the far-side PCIe base (0 on the
+        // Pi: memory is viewed at PCIe address 0) rides the translation
+        // field (`AGENTS.md` §18.1).
+        assert_eq!(dma_resources(pcie), [(0xc000_0000, 0xc000_0000, 0)]);
         let dma = pcie
             .resources()
             .iter()

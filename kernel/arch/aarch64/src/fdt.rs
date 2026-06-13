@@ -178,18 +178,25 @@ fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
 /// is the parent bus's `#address-cells` and `child_size` the bridge's own
 /// `#size-cells`; both must decode to a `u64` (`1..=2`).
 ///
-/// Returns `None` — never an invented aperture (`AGENTS.md` §2.9) — when
-/// the node carries no `dma-ranges`, a cell count is out of range, the
-/// value is not a whole number of entries, or a `base + len` overflows.
-/// With multiple entries the aperture spans the lowest base to the
-/// highest top.
+/// Returns `(top, len, bus_base)` — never an invented aperture
+/// (`AGENTS.md` §2.9) — where `top` is the *exclusive* upper bound of the
+/// CPU-physical window a device behind the bridge may reach, `len` its
+/// extent, and `bus_base` the bus/PCIe-space address the lowest entry's
+/// viewport starts at (the inbound translation, the counterpart of
+/// [`outbound_mmio_window`]'s `pcie_base`). For a PCI bus
+/// (`child_address == 3`) `bus_base` is the low 64 bits
+/// (`phys.mid`/`phys.lo`) of the lowest entry's child PCI triple;
+/// otherwise it is `0`. Returns [`None`] when the node carries no
+/// `dma-ranges`, a cell count is out of range, the value is not a whole
+/// number of entries, or a `base + len` overflows. With multiple entries
+/// the aperture spans the lowest base to the highest top.
 #[must_use]
 pub fn dma_ranges_aperture(
     node: &Node<'_>,
     child_address: u32,
     parent_address: u32,
     child_size: u32,
-) -> Option<(u64, u64)> {
+) -> Option<(u64, u64, u64)> {
     if child_address == 0
         || child_address > 3
         || parent_address == 0
@@ -206,6 +213,11 @@ pub fn dma_ranges_aperture(
     }
     let mut min_base: Option<u64> = None;
     let mut max_top: u64 = 0;
+    // Bus/PCIe-space base of the entry with the lowest CPU base — the
+    // inbound viewport's far-side start. A 3-cell PCI child carries it in
+    // `phys.mid`/`phys.lo` (the two cells after `phys.hi`); a non-PCI
+    // child has no translation, so it stays `0`.
+    let mut bus_base_at_min: u64 = 0;
     let mut off = 0;
     while off + entry <= value.len() {
         let parent_base = read_cells(value, off + (child_address as usize) * 4, parent_address)?;
@@ -215,13 +227,20 @@ pub fn dma_ranges_aperture(
             child_size,
         )?;
         let top = parent_base.checked_add(size)?;
+        if min_base.map_or(true, |b| parent_base < b) {
+            bus_base_at_min = if child_address == 3 {
+                read_cells(value, off + 4, 2)?
+            } else {
+                0
+            };
+        }
         min_base = Some(min_base.map_or(parent_base, |b| b.min(parent_base)));
         max_top = max_top.max(top);
         off += entry;
     }
     let base = min_base?;
     let len = max_top.checked_sub(base)?;
-    Some((max_top, len))
+    Some((max_top, len, bus_base_at_min))
 }
 
 /// Decode a PCI host bridge's outbound `ranges` memory window
@@ -517,7 +536,7 @@ mod tests {
     /// then hand that node to `f`. The `PCIe` binding's cells are fixed:
     /// `#address-cells = 3` (the `phys.hi`/`phys.mid`/`phys.lo` triple),
     /// `#size-cells = 2`, with the parent root at `2`/`2`.
-    fn with_pcie_dma_ranges(dma_ranges: &[u8], f: impl FnOnce(Option<(u64, u64)>)) {
+    fn with_pcie_dma_ranges(dma_ranges: &[u8], f: impl FnOnce(Option<(u64, u64, u64)>)) {
         let mut b = DtbBuilder::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
@@ -542,12 +561,23 @@ mod tests {
     }
 
     /// One BCM2711-shaped `dma-ranges` entry: 3-cell child PCI address,
-    /// 2-cell parent CPU base, 2-cell size.
+    /// 2-cell parent CPU base, 2-cell size. The child PCI base
+    /// (`phys.mid`/`phys.lo`, the inbound viewport's far side) is `0`.
     fn dma_ranges_entry(pci_hi: u32, parent_base: u64, size: u64) -> std::vec::Vec<u8> {
+        dma_ranges_entry_at(pci_hi, 0, parent_base, size)
+    }
+
+    /// As [`dma_ranges_entry`] but with an explicit child PCI base
+    /// `pci_base` in `phys.mid`/`phys.lo`.
+    fn dma_ranges_entry_at(
+        pci_hi: u32,
+        pci_base: u64,
+        parent_base: u64,
+        size: u64,
+    ) -> std::vec::Vec<u8> {
         let mut v = std::vec::Vec::new();
         v.extend_from_slice(&pci_hi.to_be_bytes()); // phys.hi
-        v.extend_from_slice(&0u32.to_be_bytes()); // phys.mid
-        v.extend_from_slice(&0u32.to_be_bytes()); // phys.lo
+        v.extend_from_slice(&pci_base.to_be_bytes()); // phys.mid:phys.lo
         v.extend_from_slice(&parent_base.to_be_bytes());
         v.extend_from_slice(&size.to_be_bytes());
         v
@@ -560,7 +590,20 @@ mod tests {
         // the exclusive upper bound, the len the aperture extent.
         let dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
         with_pcie_dma_ranges(&dr, |aperture| {
-            assert_eq!(aperture, Some((0xc000_0000, 0xc000_0000)));
+            // (top, len, inbound PCIe base) — the Pi views memory at
+            // PCIe address 0.
+            assert_eq!(aperture, Some((0xc000_0000, 0xc000_0000, 0)));
+        });
+    }
+
+    #[test]
+    fn pcie_inbound_viewport_carries_a_nonzero_pcie_base() {
+        // A viewport not anchored at PCIe address 0: the child PCI base
+        // (`phys.mid`/`phys.lo`) is captured as the inbound translation,
+        // distinct from the CPU base.
+        let dr = dma_ranges_entry_at(0x0200_0000, 0x4000_0000, 0x0, 0xc000_0000);
+        with_pcie_dma_ranges(&dr, |aperture| {
+            assert_eq!(aperture, Some((0xc000_0000, 0xc000_0000, 0x4000_0000)));
         });
     }
 
@@ -568,11 +611,18 @@ mod tests {
     fn pcie_aperture_spans_multiple_entries() {
         // Two windows: their union runs from the lowest base to the
         // highest top.
-        let mut dr = dma_ranges_entry(0x0200_0000, 0x1_0000_0000, 0x4000_0000);
-        dr.extend_from_slice(&dma_ranges_entry(0x0200_0000, 0x8000_0000, 0x4000_0000));
+        let mut dr = dma_ranges_entry_at(0x0200_0000, 0x1000, 0x1_0000_0000, 0x4000_0000);
+        dr.extend_from_slice(&dma_ranges_entry_at(
+            0x0200_0000,
+            0x2000,
+            0x8000_0000,
+            0x4000_0000,
+        ));
         with_pcie_dma_ranges(&dr, |aperture| {
-            // base = min(0x8000_0000, 0x1_0000_0000), top = max tops.
-            assert_eq!(aperture, Some((0x1_4000_0000, 0xc000_0000)));
+            // base = min(0x8000_0000, 0x1_0000_0000), top = max tops, and
+            // the inbound PCIe base is the lowest-CPU-base entry's
+            // (`0x8000_0000` → `0x2000`).
+            assert_eq!(aperture, Some((0x1_4000_0000, 0xc000_0000, 0x2000)));
         });
     }
 

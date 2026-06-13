@@ -536,9 +536,11 @@ order (one fully-gated increment each):
    request) and, on the BCM2711 PCIe host bridge (`brcm,bcm2711-pcie`,
    P10, the VL805 USB host path), *both* of its address windows — the
    inbound-DMA aperture from the node's `dma-ranges`
-   (`fdt::dma_ranges_aperture`, emitted as `HwResource::dma(top, len)`)
-   and the outbound MMIO window from its `ranges`
-   (`fdt::outbound_mmio_window`, emitted as
+   (`fdt::dma_ranges_aperture`, emitted as
+   `HwResource::dma_translated(top, len, inbound_pcie_base)` — the
+   CPU-reachability top/extent plus the inbound PCIe-space base the
+   inbound BAR is programmed at) and the outbound MMIO window from its
+   `ranges` (`fdt::outbound_mmio_window`, emitted as
    `HwResource::bus_window(cpu_base, size, pcie_base)` — the CPU↔PCIe
    translation the bridge forwards). The orphaned
    per-device finders

@@ -752,6 +752,36 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.xhci.ring_doorbell(slot, u32::from(DCI_INTERRUPT_IN))?;
         Ok(descriptor)
     }
+
+    /// Bring up the first root-hub port reporting a connected device.
+    ///
+    /// xHCI numbers root-hub ports from `1`; this scans `1..=max_ports`
+    /// in order and enumerates the first that reports a device connected
+    /// ([`Self::enumerate_hid`]). A composition that does not know which
+    /// physical port a keyboard is plugged into (the boot keyboard case,
+    /// `plans/PI.md` P10) uses this rather than guessing a port.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no root-hub port reports a
+    ///   connected device (an empty root hub — fail closed, never a
+    ///   guessed port, `AGENTS.md` §5.4 / §2.9).
+    /// * Any error of [`Self::enumerate_hid`] for the matched port, or a
+    ///   faulting port-status read (the scan aborts fail-closed rather
+    ///   than skipping a port whose status could not be read).
+    ///
+    /// # Capabilities
+    ///
+    /// None beyond those the controller's register window already holds.
+    pub fn enumerate_first_connected(&mut self) -> Result<DeviceDescriptor, DriverError> {
+        let max_ports = self.xhci.max_ports();
+        for port in 1..=max_ports {
+            if self.xhci.port_status(port)?.connected() {
+                return self.enumerate_hid(port);
+            }
+        }
+        Err(DriverError::NotFound)
+    }
 }
 
 #[cfg(test)]

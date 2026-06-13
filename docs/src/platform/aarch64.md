@@ -772,13 +772,17 @@ per-device augmentation only the platform's tree can size:
   carries two windows the VL805 wiring needs, read from the device
   tree, never a board constant (§18.5):
   - the **inbound-DMA aperture** it grants devices behind it, from the
-    node's `dma-ranges` (`fdt::dma_ranges_aperture`: the 3-cell child
-    PCI address stepped over, the 2-cell parent CPU base and size
-    decoded). It is emitted as `HwResource::dma(top, len)` where `top`
-    is the *exclusive* upper bound of the reachable CPU-physical window
-    (`0xC000_0000` — the low 3 GiB of SDRAM — on the Pi 4) and `len`
-    its extent; the VL805 wiring carves its xHCI DMA region below
-    `top`.
+    node's `dma-ranges` (`fdt::dma_ranges_aperture`: the 2-cell parent
+    CPU base and size decoded, and the low 64 bits of the 3-cell child
+    PCI address kept as the inbound viewport's far-side base). It is
+    emitted as `HwResource::dma_translated(top, len, pcie_base)` where
+    `top` is the *exclusive* upper bound of the reachable CPU-physical
+    window (`0xC000_0000` — the low 3 GiB of SDRAM — on the Pi 4), `len`
+    its extent, and `pcie_base` the PCIe-space address the inbound BAR is
+    programmed at (`0` on the Pi 4: memory is viewed at PCIe address 0),
+    carried in the resource's translation field; the VL805 wiring carves
+    its xHCI DMA region below `top` and programs the inbound BAR from
+    `pcie_base`/`len`.
   - the **outbound MMIO window** it forwards to PCIe memory space, from
     the node's `ranges` (`fdt::outbound_mmio_window`: the first
     memory-space entry's `phys.hi` space code is checked, the 64-bit

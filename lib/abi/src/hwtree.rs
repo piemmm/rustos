@@ -419,6 +419,22 @@ impl HwResource {
         Self::new(HwResourceKind::Dma, addr_limit, len, 0)
     }
 
+    /// A DMA capability requirement for an inbound bus viewport that
+    /// carries an address translation: `addr_limit`/`len` are the
+    /// CPU-side reachability constraint (the *exclusive* upper bound and
+    /// extent a device behind the bridge may reach), and `bus_base` is
+    /// the far-side (bus/PCIe-space) address the viewport starts at — the
+    /// inbound counterpart of [`bus_window`](Self::bus_window). The
+    /// motivating case is a PCIe root complex's inbound `dma-ranges`
+    /// viewport (`AGENTS.md` §18.1): a bus driver programs the inbound
+    /// BAR from `bus_base`/`len` while the kernel bounds device DMA by
+    /// `addr_limit`. Recovered through
+    /// [`translated_base`](Self::translated_base).
+    #[must_use]
+    pub fn dma_translated(addr_limit: u64, len: u64, bus_base: u64) -> Self {
+        Self::new_xlate(HwResourceKind::Dma, addr_limit, len, 0, bus_base)
+    }
+
     /// An outbound bus address window: `cpu_base`..`cpu_base+len` on the
     /// CPU side, translated to `translated_base`..`translated_base+len`
     /// on the far (device/bus) side (`AGENTS.md` §18.1).
@@ -477,9 +493,12 @@ impl HwResource {
         self.flags
     }
 
-    /// Far-side (translated) base of a [`BusWindow`](HwResourceKind::BusWindow):
-    /// the address `base` maps to on the device/bus side. `0` for every
-    /// other resource kind, which needs no translation.
+    /// Far-side (translated) base of a window that carries a CPU↔bus
+    /// address translation: the bus/device-side address `base` maps to.
+    /// Set for a [`BusWindow`](HwResourceKind::BusWindow) (outbound) and
+    /// for an inbound [`Dma`](HwResourceKind::Dma) viewport built with
+    /// [`dma_translated`](Self::dma_translated); `0` for a plain
+    /// register/port window or an untranslated DMA constraint.
     #[must_use]
     pub const fn translated_base(&self) -> u64 {
         self.xlate
@@ -869,6 +888,34 @@ mod tests {
         assert_eq!(back.translated_base(), 0xc000_0000);
         // A plain MMIO window has no translation.
         assert_eq!(HwResource::mmio(0x1000, 0x1000).translated_base(), 0);
+    }
+
+    #[test]
+    fn translated_dma_viewport_carries_its_bus_base() {
+        // The Pi 4 inbound `dma-ranges`: PCIe base 0 views system memory,
+        // CPU reachability bounded at 0xc000_0000 (the low 3 GiB), 3 GiB
+        // extent. The reachability bound is `base`/`len` (so the existing
+        // DMA consumer is unchanged) and the far-side PCIe base rides
+        // `translated_base`.
+        let dma = HwResource::dma_translated(0xc000_0000, 0xc000_0000, 0);
+        assert_eq!(dma.kind(), Some(HwResourceKind::Dma));
+        assert_eq!(dma.base(), 0xc000_0000);
+        assert_eq!(dma.length(), 0xc000_0000);
+        assert_eq!(dma.translated_base(), 0);
+        assert_eq!(dma.required_capability(), Ok(CapabilityId::MEM_DMA));
+        let back = HwResource::from_bytes(&dma.to_le_bytes()).expect("decode");
+        assert_eq!(back, dma);
+
+        // A non-zero far-side base survives too (a viewport not anchored
+        // at PCIe address 0).
+        let offset = HwResource::dma_translated(0x8000_0000, 0x8000_0000, 0x4000_0000);
+        assert_eq!(offset.translated_base(), 0x4000_0000);
+        assert_eq!(
+            HwResource::from_bytes(&offset.to_le_bytes()).unwrap(),
+            offset
+        );
+        // An untranslated DMA constraint still reads back a zero far-side.
+        assert_eq!(HwResource::dma(0, 0).translated_base(), 0);
     }
 
     #[test]

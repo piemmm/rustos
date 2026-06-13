@@ -84,6 +84,20 @@ rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # both ports' boot paths, so it is a common dependency.
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
+# The VL805/xHCI USB-keyboard composition (`src/usb_keyboard.rs`,
+# `plans/PI.md` P10) wires four loadable driver crates into one in-kernel
+# chain: BCM2711 PCIe root-complex bring-up, the BCM2711 windowed PCI
+# config mechanism, the xHCI controller engine, and the HID
+# boot-keyboard → console-byte producer. `rustos-kernel` is the
+# image-assembly seam (`Layer::Tooling`), the only crate permitted to
+# name driver crates across strata (`AGENTS.md` §17.4 / §8); the engine
+# is architecture-neutral (it consumes only the `lib/abi` driver seams),
+# so it compiles — and its host tests run — on the CI host.
+rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
+rustos-drv-bus-pci = { path = "../../drivers/bus/pci", version = "=0.0.0" }
+rustos-drv-bus-usb = { path = "../../drivers/bus/usb", version = "=0.0.0" }
+rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
+
 # --- Per-architecture boot dependencies ----------------------------
 #
 # The production kernel binary selects exactly one architecture port at

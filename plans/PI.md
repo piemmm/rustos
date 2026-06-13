@@ -2113,19 +2113,53 @@ decode, I/O-space skip, absent/partial/out-of-range fail-closed), the
 `platform::emits_the_pcie_bridge_with_its_outbound_window` emission test,
 and the `HwResource::bus_window` round-trip in `lib/abi`.
 
-**Remaining — the metal composition only:** assemble `PcieWindows` from
-the discovered node resources (inbound from the `Dma` aperture, outbound
-from the `BusWindow`) and drive the chain on metal — map the controller
-`reg` window, run `pcie_brcm::wiring::open_discovered` to train the link,
-build the bus over the same window (`mechanism_brcm`), read the node's
-`HwResource::dma` aperture `top`, call `usb::wiring::open_discovered`,
-then run `usb_hid::console::pump_once` against the enumerated keyboard to
-feed `VIDEO_KEYBOARD`. This still needs a generic-timer-backed
-`pcie_brcm::Delay` impl, and — because a keyboard pump is a *continuous*
-service, not a one-shot boot step — the architecturally-correct home is a
-`devmgr`-autoloaded userland keyboard driver whose service loop calls
-`pump_once` with a `ConsoleSink` that invokes the `console_input`
-syscall, not a kernel boot body. QEMU models no Pi USB (§0.4), so this
+**Landed — the USB-keyboard composition engine** (host-provable). The
+inbound `dma-ranges` aperture is now emitted as
+`HwResource::dma_translated(top, len, inbound_pcie_base)`
+(`fdt::dma_ranges_aperture` captures the child PCI base in the resource's
+translation field — no wire change, the `xlate` field already existed),
+so `PcieWindows` is *fully* tree-derived. The whole chain is composed in
+`kernel/rustos-kernel::usb_keyboard` — the image-assembly seam
+(`Layer::Tooling`) is the one crate that may name the four driver crates
+across strata (§17.4 / §8), so the composition lives there, like
+`virtio_boot`; the engine is architecture-neutral (it consumes only the
+`lib/abi` driver seams + the discovered `HwNode`) and un-gated, so it
+compiles and host-tests on the CI host:
+
+- `pcie_bringup_from_node(&HwNode) -> PcieBringup` reads the three
+  resources (controller `Mmio`, inbound `Dma`, outbound `BusWindow`) off
+  the discovered `brcm,bcm2711-pcie` node, fail-closed per missing
+  resource (§2.9);
+- `ChainHost` is a `DriverHost` view lending the bus driver the kernel's
+  capability-gated MMIO mapper + per-driver DMA host (every map/alloc
+  re-checked kernel-side, §5.4);
+- `bring_up_keyboard(host, &PcieBringup, &dyn Delay)` runs the full chain
+  — `pcie_brcm::wiring::open_discovered` (link train) → `mechanism_brcm`
+  → `usb::wiring::open_discovered` → `UsbDevice::enumerate_first_connected`
+  (new: scans root-hub ports 1..=max for the first connected device,
+  fail-closed `NotFound` on an empty hub) → `BootKeyboard`;
+- `QueueConsoleSink` feeds the produced bytes into the video console's
+  `ConsoleInput` queue (`console_input`/`VIDEO_KEYBOARD`), short-pushing
+  without spin (§2.1).
+
+Host-proven: 8 `usb_keyboard` tests (window assembly + each fail-closed
+missing resource + a non-zero inbound PCIe base, the sink delivers /
+drops-overflow-without-spin, `ChainHost` reports caps/mapper/dma, the
+chain fails closed without `CAP_MMIO_MAP`, and the chain reaches the
+BCM2711 root-complex bring-up over a mapped window and fails closed
+`DeviceFault` on the inert mock — the metal boundary), plus the usb
+`enumerate_first_connected_*` tests.
+
+**Remaining — the aarch64 boot-path invocation only:** call the engine
+from the production aarch64 boot path — discover the `brcm,bcm2711-pcie`
+node, assemble the concrete in-kernel `DriverHost` (a `KernelMmioMapper`
++ per-driver DMA host, the aarch64 analogue of `run_with_driver_host`),
+supply a generic-timer-backed `pcie_brcm::Delay`, call
+`bring_up_keyboard`, and loop `usb_hid::pump_once` with a
+`QueueConsoleSink`. The architecturally-correct long-term home is a
+`devmgr`-autoloaded userland keyboard *service* (the pump is continuous,
+not a one-shot boot step); that rides the still-open DriverSpawner-over-
+IPC gap (Stage 4.HW increment 1). QEMU models no Pi USB (§0.4), so this
 carries a metal checklist, not a vertical. Then the DWC2 OTG path if
 needed; then the WM/taskbar/session on the HVS path and the on-metal
 acceptance (a real controller's BAR answering a plausible `CAPLENGTH`,

@@ -212,13 +212,29 @@ window (`into_regs`) and builds `mechanism_brcm(window)` to enumerate
 the VL805. The crate performs only the link bring-up and so never
 depends on another driver crate (`AGENTS.md` §17.4). Both windows the
 `PcieWindows` carries are device-tree-discovered: the inbound aperture
-from the node's `dma-ranges` (an `HwResource::dma`) and the outbound
-MMIO window from its `ranges` (an `HwResource::bus_window` carrying the
-CPU base, size, and far-side PCIe base — `kernel/arch/aarch64::fdt::
-outbound_mmio_window`, `AGENTS.md` §18.1). The remaining follow-up is
-the kernel-side composition that assembles `PcieWindows` from those
-resources and drives the chain on metal, tracked in `plans/PI.md` P10.
-QEMU models no Pi PCIe link timing, so metal acceptance is a checklist.
+from the node's `dma-ranges` (an `HwResource::dma_translated` carrying
+the CPU-reachability top, extent, and the inbound PCIe-space base) and
+the outbound MMIO window from its `ranges` (an `HwResource::bus_window`
+carrying the CPU base, size, and far-side PCIe base —
+`kernel/arch/aarch64::fdt::{dma_ranges_aperture,outbound_mmio_window}`,
+`AGENTS.md` §18.1).
+
+The whole chain is composed in `kernel/rustos-kernel::usb_keyboard`
+(the image-assembly seam is the one crate permitted to name the four
+driver crates across strata, `AGENTS.md` §17.4 / §8):
+`pcie_bringup_from_node` reads the three resources off the discovered
+`brcm,bcm2711-pcie` `HwNode` into a `PcieBringup`, a `ChainHost` lends
+the bus driver the kernel's capability-gated MMIO mapper + per-driver
+DMA host, and `bring_up_keyboard` runs link-train → `mechanism_brcm` →
+`usb::wiring::open_discovered` → `enumerate_first_connected`, yielding a
+`BootKeyboard` whose decoded bytes a `QueueConsoleSink` feeds into the
+video console's input queue (`console_input`/`VIDEO_KEYBOARD`). That
+engine is host-tested up to the controller hand-off, where the inert
+mock register window faults — the metal boundary. The remaining
+follow-up is the aarch64 boot-path invocation (assembling the concrete
+`DriverHost` + a generic-timer `Delay` and looping `pump_once`); QEMU
+models no Pi PCIe link timing or USB, so metal acceptance is a checklist
+(`plans/PI.md` P10).
 
 ## MMIO driver — `drivers/bus/mmio`
 

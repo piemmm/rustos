@@ -1182,6 +1182,35 @@ fn enumerate_hid_twice_is_refused() {
 }
 
 #[test]
+fn enumerate_first_connected_finds_the_populated_port() {
+    // `with_device` connects a device on root-hub port 1 and leaves the
+    // others empty; the scan enumerates port 1 and lands on slot 1.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let descriptor = device
+        .enumerate_first_connected()
+        .expect("port 1 is connected");
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert_eq!(device.slot(), 1);
+    assert!(device.host_mut().configured);
+}
+
+#[test]
+fn enumerate_first_connected_fails_closed_on_an_empty_root_hub() {
+    // No port reports a connected device: the scan refuses with
+    // `NotFound` rather than guessing a port (`AGENTS.md` §2.9 / §5.4).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.portsc[0] &= !regs::PORTSC_CCS;
+    let mut device = started_device(mock, &mem);
+    assert_eq!(
+        device.enumerate_first_connected(),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(device.slot(), 0, "no device was enumerated");
+}
+
+#[test]
 fn enumerate_hid_fails_closed_on_a_stalled_class_request() {
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
