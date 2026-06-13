@@ -103,12 +103,24 @@ through the 4 KiB `EXT_CFG_DATA` window (`0x8000`) at the register
 byte offset. `BrcmConfigSpace` implements `ConfigSpace` with exactly
 this windowing — the *only* BCM2711-specific knowledge; the
 enumeration, BAR-sizing, and capability walk above it are unchanged.
-`mechanism_brcm(window)` builds the bus over it. An access that lands
-outside the mapped window, or any function but `00.0` on the root bus,
-resolves to the same `0xFFFF_FFFF` sentinel (`AGENTS.md` §5.4). The
-link behind the bridge must be **up** before any downstream access —
-the `drivers/bus/pcie_brcm` root-complex bring-up (below) guarantees
-that before handing its register window here.
+`mechanism_brcm(window, secondary_bus)` builds the bus over it. An
+access that lands outside the mapped window, or any function but `00.0`
+on the root bus, resolves to the same `0xFFFF_FFFF` sentinel
+(`AGENTS.md` §5.4). The link behind the bridge must be **up** before any
+downstream access — the `drivers/bus/pcie_brcm` root-complex bring-up
+(below) guarantees that before handing its register window here.
+
+The BCM2711 root port is a **single-device** link, so the accessor
+forwards a configuration transaction only to `device 0` on
+`secondary_bus` (the bus number the bring-up programmed into the bridge
+bus-number register) and resolves every other downstream target to the
+`0xFFFF_FFFF` sentinel *without* issuing a transaction. This is not just
+hygiene: once the root port forwards downstream, a config read to a
+non-existent target forwards a TLP that nothing answers, and the
+completion timeout becomes a CPU external abort — a flat 256-bus walk
+over forwarded config would wedge the boot CPU. The gate mirrors Linux
+`brcm_pcie_map_conf` returning `NULL` for a non-zero slot on a non-root
+bus.
 
 ### Enumeration walk
 
@@ -197,8 +209,11 @@ discovered `dma-ranges` (the size encoded by `encode_ibar_size`, the
 size rounded up to a power of two); disable the unused `RC_BAR1` /
 `RC_BAR3` inbound windows; confirm the root-port role (fail closed
 with `DeviceFault` otherwise); advertise ASPM L0s+L1 and present the
-root complex as a PCI-PCI bridge; program the outbound (CPU→PCIe) MMIO
-window from the discovered `ranges`; deassert `PERST#`; then poll
+root complex as a PCI-PCI bridge; program the bridge bus-number register
+(primary 0, secondary/subordinate = the single downstream bus) so the
+port forwards configuration to the directly-attached VL805; program the
+outbound (CPU→PCIe) MMIO window from the discovered `ranges`; deassert
+`PERST#`; then poll
 `MISC_PCIE_STATUS` for data-link-active + phy-link-up, bounded by
 `DEFAULT_LINK_POLLS` (100 ms) and failing closed if the link never
 trains. All windows are device-tree-discovered, never compiled-in
@@ -583,7 +598,11 @@ supertrait of `Bus`) is that seam:
 
 - `map_bar_window(bdf, bar_index, mapper)` resolves the memory BAR's
   probed base/length and maps it through the same `CAP_MMIO_MAP`-gated
-  `MmioMapper` (refusing I/O-port and unused BARs);
+  `MmioMapper` (refusing I/O-port and unused BARs). The resolved base is
+  the address held in the BAR — a *PCIe-bus* address; turning it into a
+  CPU mapping is the host bridge's job, so a bridge-aware `MmioMapper`
+  (the Pi 4's `IdentityMmioMapper`, which applies the outbound `ranges`
+  bus→CPU translation) does it, not this architecture-neutral walk;
 - `enable_bus_master(bdf)` sets the function's Memory Space + Bus
   Master Enable bits (PCI Local Bus 3.0 §6.2.2) so the controller may
   issue the upstream DMA its rings live in.

@@ -61,19 +61,32 @@ pub const EXT_CFG_DATA: usize = 0x8000;
 /// registers at [`EXT_CFG_INDEX`] / [`EXT_CFG_DATA`].
 pub struct BrcmConfigSpace {
     window: RegisterWindow,
+    secondary_bus: u8,
 }
 
 impl BrcmConfigSpace {
     /// Construct a [`BrcmConfigSpace`] over the controller register
-    /// `window`.
+    /// `window`, forwarding downstream configuration only to the single
+    /// device on `secondary_bus`.
     ///
     /// The window must cover the controller register block through at
     /// least [`EXT_CFG_INDEX`] (`0x9000`); the device-tree advertises a
     /// `0x9310`-byte window for the `brcm,bcm2711-pcie` node, which the
     /// bring-up driver maps in full.
+    ///
+    /// `secondary_bus` is the bus number the root-complex bring-up
+    /// driver programmed into the root port's bridge bus-number register
+    /// (the BCM2711 root port is a single-device link, so exactly
+    /// `device 0` on this one bus physically exists downstream). Any
+    /// other downstream target resolves to the PCI "no device" sentinel
+    /// without issuing a configuration transaction — see
+    /// [`Self::data_offset`].
     #[must_use]
-    pub const fn new(window: RegisterWindow) -> Self {
-        Self { window }
+    pub const fn new(window: RegisterWindow, secondary_bus: u8) -> Self {
+        Self {
+            window,
+            secondary_bus,
+        }
     }
 
     /// Resolve the controller-relative byte offset a configuration dword
@@ -81,8 +94,10 @@ impl BrcmConfigSpace {
     /// function.
     ///
     /// Returns `None` for the PCI "no device" cases: a malformed
-    /// address, or any function other than `devfn 0` on the root bus
-    /// (the root complex presents only its own header there).
+    /// address, any function other than `devfn 0` on the root bus (the
+    /// root complex presents only its own header there), or any
+    /// downstream target other than `device 0` on the configured
+    /// secondary bus.
     fn data_offset(&self, addr: ConfigAddress) -> Option<usize> {
         // The shared range gate (`AGENTS.md` §5.4); also guarantees the
         // register byte offset is < 256, comfortably inside the 4 KiB
@@ -97,9 +112,22 @@ impl BrcmConfigSpace {
             }
             return Some(reg);
         }
-        // Downstream: select the function's block (the bus/devfn part of
-        // the ECAM block address, register stripped), then access it
-        // through the data window.
+        // Downstream: the BCM2711 root port is a single-device link, so
+        // only `device 0` on the secondary bus physically exists. Issuing
+        // an EXT_CFG access to any other downstream target forwards a
+        // configuration TLP onto the link that nothing answers, which the
+        // root complex turns into a CPU external abort — a flat 256-bus
+        // enumeration over forwarded config would wedge the boot. Resolve
+        // every other downstream target to the "no device" sentinel
+        // *without* touching the controller (`AGENTS.md` §5.4 / §2.9);
+        // this mirrors Linux `brcm_pcie_map_conf` returning `NULL` for a
+        // non-zero slot on a non-root bus.
+        if addr.bus != self.secondary_bus || addr.device != 0 {
+            return None;
+        }
+        // Select the function's block (the bus/devfn part of the ECAM
+        // block address, register stripped), then access it through the
+        // data window.
         let index = u32::try_from(block & !0xFFF).ok()?;
         self.window.write_u32(EXT_CFG_INDEX, index).ok()?;
         Some(EXT_CFG_DATA + reg)
@@ -152,7 +180,7 @@ mod tests {
         // Vendor/device of the root complex at bus 0, dev 0, fn 0,
         // register 0 — read straight from controller offset 0.
         backing[0] = 0x2711_14E4;
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         assert_eq!(
             cs.read32(ConfigAddress {
                 bus: 0,
@@ -167,7 +195,7 @@ mod tests {
     #[test]
     fn root_bus_other_functions_are_no_device() {
         let (_backing, window) = ctrl_window(0x9400);
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         // Any device/function other than 00.0 on the root bus is empty.
         assert_eq!(
             cs.read32(ConfigAddress {
@@ -195,7 +223,7 @@ mod tests {
         // Plant the VL805's vendor/device in the data window at the
         // register offset the driver will read (register 0 → byte 0).
         backing[EXT_CFG_DATA / 4] = 0x3483_1106;
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         let vl805 = ConfigAddress {
             bus: 1,
             device: 0,
@@ -211,29 +239,63 @@ mod tests {
     #[test]
     fn downstream_register_offset_indexes_the_data_window() {
         let (mut backing, window) = ctrl_window(0x9400);
-        // Register 4 (byte 0x10, BAR0) of a downstream function.
+        // Register 4 (byte 0x10, BAR0) of function 1 of the single
+        // downstream device (device 0 on the secondary bus).
         backing[(EXT_CFG_DATA + 0x10) / 4] = 0xDEAD_BEEF;
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         assert_eq!(
             cs.read32(ConfigAddress {
-                bus: 2,
-                device: 3,
+                bus: 1,
+                device: 0,
                 function: 1,
                 register: 4,
             }),
             0xDEAD_BEEF,
         );
-        // Index = (2 << 20) | (3 << 15) | (1 << 12).
+        // Index = (1 << 20) | (1 << 12).
+        assert_eq!(backing[EXT_CFG_INDEX / 4], (1 << 20) | (1 << 12));
+    }
+
+    #[test]
+    fn phantom_downstream_targets_are_no_device_without_an_index_write() {
+        // The wedge guard: on the BCM2711 the root port is a single-device
+        // link, so any downstream target other than device 0 on the
+        // secondary bus must resolve to the "no device" sentinel *without*
+        // issuing a configuration transaction — otherwise the flat
+        // enumerator forwards an unanswered config TLP and the root complex
+        // raises a CPU external abort that wedges the boot.
+        let (backing, window) = ctrl_window(0x9400);
+        let cs = BrcmConfigSpace::new(window, 1);
+        // A non-zero slot on the secondary bus (the first phantom the
+        // enumerator probes after the VL805 at 01:00.0).
         assert_eq!(
-            backing[EXT_CFG_INDEX / 4],
-            (2 << 20) | (3 << 15) | (1 << 12),
+            cs.read32(ConfigAddress {
+                bus: 1,
+                device: 1,
+                function: 0,
+                register: 0,
+            }),
+            0xFFFF_FFFF,
         );
+        // A bus beyond the directly-attached one.
+        assert_eq!(
+            cs.read32(ConfigAddress {
+                bus: 2,
+                device: 0,
+                function: 0,
+                register: 0,
+            }),
+            0xFFFF_FFFF,
+        );
+        // Neither access programmed the index register, so no transaction
+        // was forwarded onto the link.
+        assert_eq!(backing[EXT_CFG_INDEX / 4], 0);
     }
 
     #[test]
     fn downstream_write_round_trips_through_the_window() {
         let (_backing, window) = ctrl_window(0x9400);
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         let addr = ConfigAddress {
             bus: 1,
             device: 0,
@@ -247,7 +309,7 @@ mod tests {
     #[test]
     fn out_of_range_address_is_no_device() {
         let (_backing, window) = ctrl_window(0x9400);
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         assert_eq!(
             cs.read32(ConfigAddress {
                 bus: 0,
@@ -265,7 +327,7 @@ mod tests {
         // downstream access fails closed rather than reaching past the
         // mapping.
         let (_backing, window) = ctrl_window(0x100);
-        let cs = BrcmConfigSpace::new(window);
+        let cs = BrcmConfigSpace::new(window, 1);
         assert_eq!(
             cs.read32(ConfigAddress {
                 bus: 1,

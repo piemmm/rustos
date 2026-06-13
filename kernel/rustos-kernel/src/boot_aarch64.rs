@@ -55,8 +55,8 @@ use rustos_arch_aarch64::paging::{
     ram_gigapages, AddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, syscall_entry,
-    uart_init, video, Aarch64Arch, Aarch64ArchStorage,
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial,
+    syscall_entry, uart_init, video, Aarch64Arch, Aarch64ArchStorage,
 };
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
@@ -108,6 +108,17 @@ const BOOT_CPU: u32 = 0;
 /// `4098`/`4099`; the id is part of the audit contract and may not be
 /// renumbered (`AGENTS.md` §5.4.4).
 const KERNEL_BOOT_AARCH64_REACHED: EventId = EventId(4097);
+
+/// Audit event: the boot path discovered the BCM2711 PCIe root complex
+/// (the VL805 USB host's parent bridge) and recorded its address windows
+/// for the keyboard-service bring-up. Logged once, post-MMU, so a metal
+/// capture shows the discovered chipset windows the in-kernel USB chain
+/// will program — the first half of "what hardware did we find" when a
+/// keyboard is silent. Sits in the `kernel/core`-owned `4000..5000` range,
+/// clear of the boot-reached id above and the x86_64 pipeline's
+/// `4098`/`4099`; the id is part of the audit contract and may not be
+/// renumbered (`AGENTS.md` §5.4.4).
+const KERNEL_PCIE_DISCOVERED: EventId = EventId(4100);
 
 /// Stable `"true"`/`"false"` audit-field value for a boolean condition.
 /// Keeping the boot log to `&'static str` fields means the path takes no
@@ -231,6 +242,14 @@ pub fn boot(
         enable_fp_el1();
     }
 
+    // Ordered UART boot beacons (`serial::beacon`, UART-only — safe with
+    // the MMU off, never the video lock) bisect a metal hang: the
+    // consolidated boot-log line below is emitted only *after* the MMU is
+    // on, so a wedge before/at translation-enable (the classic metal Pi
+    // failure) would otherwise leave no trail. The last tag a serial
+    // capture shows localises the hang (`AGENTS.md` §2.9).
+    serial::beacon("pi-beacon 1/6: boot entry (el1, fp on, mmu off)");
+
     // P2 + P3, *before* the MMU comes on: point the console at the UART
     // and the GICv2 driver at the GICD/GICC bases the firmware tree
     // describes. Both walks early-return at their matched node
@@ -245,8 +264,10 @@ pub fn boot(
     // the vectors not yet installed (the `virt`-only "GiB 0 Device"
     // assumption this replaces).
     let early = configure_mmio_from_dtb(dtb);
+    serial::beacon("pi-beacon 2/6: mmio discovered (console/gic/video/pcie)");
     let (console_base, _) = console::current();
     let (gicd_base, gicc_base) = gic::current();
+    serial::beacon("pi-beacon 2a/6: console/gic bases read");
     // The mailbox doorbell the video console rang is an MMIO window the
     // identity map must type Device like the UART and GIC (on the Pi 4
     // they all share gigapage 3, but the mask is derived from facts,
@@ -278,14 +299,7 @@ pub fn boot(
         kernel_end_addr(),
     );
     configure_device_gigapages(device_mask);
-    // Hand the discovered PCIe windows to the PID 1 spawn seam, which
-    // starts the USB-keyboard service kthread once the scheduler is up
-    // (`plans/PI.md` P10). Recorded here, pre-MMU, while the discovery is
-    // in hand; a board with no bridge records nothing and the service is
-    // never started (§18.4).
-    if let Some(pcie) = early.pcie {
-        crate::keyboard_service::record_discovery(pcie);
-    }
+    serial::beacon("pi-beacon 2b/6: device gigapage mask configured");
     // RAM gigapage mask from the facts in hand pre-MMU: the kernel
     // image's own extent, the firmware DTB blob, and the firmware
     // scan-out surface. Every other non-Device gigapage stays *invalid*
@@ -304,6 +318,7 @@ pub fn boot(
         (dtb, early.dtb_len),
         (fb_base, fb_len),
     ]));
+    serial::beacon("pi-beacon 2c/6: ram gigapage mask configured");
 
     // P6c-2: enable the stage-1 identity MMU and EL1 vectors before any
     // further work. The `kernel_core` allocator and scheduler use atomic
@@ -313,8 +328,97 @@ pub fn boot(
     // P6c-2). It also makes the full-tree FDT walks below
     // (`first_memory_region`) safe, which fault MMU-off under release
     // optimisation (`plans/PI.md` watch-out).
+    //
+    // This is the boot's sharpest cliff: enabling translation against a
+    // mis-typed identity map wedged the metal Pi 4B the instant the MMU
+    // came on. Beacon 3/6 is the last UART output guaranteed to predate
+    // that transition; a serial capture that stops here pins the hang to
+    // MMU-enable, while beacon 4/6 only prints once translation is live.
+    serial::beacon("pi-beacon 3/6: identity map built, enabling mmu");
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
+    serial::beacon(if mmu_on {
+        "pi-beacon 4/6: mmu on (translation live)"
+    } else {
+        "pi-beacon 4/6: mmu enable FAILED (running mmu-off)"
+    });
+
+    // Hand the discovered PCIe windows to the PID 1 spawn seam, which
+    // starts the USB-keyboard service kthread once the scheduler is up
+    // (`plans/PI.md` P10). This MUST run *after* the MMU is enabled: the
+    // seam's `SpinLock` uses an exclusive `compare_exchange` (an atomic
+    // RMW) which is UNPREDICTABLE on the MMU-off Device-typed memory the
+    // boot CPU runs on — the same hazard the allocator and scheduler wait
+    // for the MMU to clear (`plans/PI.md` P6c-2). The windows were read
+    // pre-MMU (a `Copy` value already folded into the identity map's
+    // Device mask above) and are only consumed much later at PID 1 spawn,
+    // so recording them here is purely a deferred store. A board with no
+    // bridge (the QEMU `virt` shape) recorded nothing and the keyboard
+    // service is never started — fail closed, boot continues either way
+    // (`AGENTS.md` §2.9 / §18.4).
+    if let Some(pcie) = early.pcie {
+        // Log the discovered chipset windows once, post-MMU: a metal
+        // capture then shows exactly which BCM2711 PCIe root-complex
+        // register block and inbound/outbound apertures the in-kernel USB
+        // chain will program, so a silent keyboard can be bisected against
+        // the hardware actually found rather than guessed at (the issue's
+        // "discovered chipsets"). Allocation-free hex rendering on the boot
+        // stack, exactly like the consolidated boot line below
+        // (`AGENTS.md` §2.9 — the log path never allocates or panics).
+        let mut regs_base_buf = [0u8; 16];
+        let mut regs_len_buf = [0u8; 16];
+        let mut aperture_top_buf = [0u8; 16];
+        let mut inbound_size_buf = [0u8; 16];
+        let mut inbound_pcie_buf = [0u8; 16];
+        let mut outbound_cpu_buf = [0u8; 16];
+        let mut outbound_pcie_buf = [0u8; 16];
+        let mut outbound_size_buf = [0u8; 16];
+        log(
+            log_sink,
+            &Event {
+                level: Level::Info,
+                id: KERNEL_PCIE_DISCOVERED,
+                message:
+                    "aarch64: discovered brcm,bcm2711-pcie root complex (vl805 usb host bridge)",
+                fields: &[
+                    Field {
+                        key: "regs_base_hex",
+                        value: format_hex_u64(pcie.regs_phys, &mut regs_base_buf),
+                    },
+                    Field {
+                        key: "regs_len_hex",
+                        value: format_hex_u64(pcie.regs_len, &mut regs_len_buf),
+                    },
+                    Field {
+                        key: "dma_aperture_top_hex",
+                        value: format_hex_u64(pcie.dma_aperture_top, &mut aperture_top_buf),
+                    },
+                    Field {
+                        key: "inbound_size_hex",
+                        value: format_hex_u64(pcie.inbound_size, &mut inbound_size_buf),
+                    },
+                    Field {
+                        key: "inbound_pcie_base_hex",
+                        value: format_hex_u64(pcie.inbound_pcie_base, &mut inbound_pcie_buf),
+                    },
+                    Field {
+                        key: "outbound_cpu_base_hex",
+                        value: format_hex_u64(pcie.outbound_cpu_base, &mut outbound_cpu_buf),
+                    },
+                    Field {
+                        key: "outbound_pcie_base_hex",
+                        value: format_hex_u64(pcie.outbound_pcie_base, &mut outbound_pcie_buf),
+                    },
+                    Field {
+                        key: "outbound_size_hex",
+                        value: format_hex_u64(pcie.outbound_size, &mut outbound_size_buf),
+                    },
+                ],
+            },
+        );
+        crate::keyboard_service::record_discovery(pcie);
+    }
+    serial::beacon("pi-beacon 4a/6: pcie discovery recorded (post-mmu)");
 
     // Discover the rest of the board from the firmware device tree: the
     // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
@@ -322,6 +426,7 @@ pub fn boot(
     // incomplete tree leaves the `virt` defaults in place (fail closed,
     // `AGENTS.md` §2.9).
     let discovered = configure_from_dtb(dtb);
+    serial::beacon("pi-beacon 5/6: post-mmu memory/timer/psci discovered");
     // Widen the RAM gigapage mask with the discovered `/memory` window
     // — a walk that is only safe post-MMU — so later-built process
     // spaces map the whole window, and install the widened gigapages
@@ -536,10 +641,15 @@ pub fn boot(
     // moved into `BootInfo` here, so it is built exactly once.
     if ready {
         if let Ok(layout) = layout_result {
+            serial::beacon("pi-beacon 6/6: handover sound, entering kernel core");
             enter_kernel_core(arch, layout.map, log_sink, audit_sink)
         }
     }
 
+    // The handover was rejected (see the boot-log line's fields for which
+    // check failed); park fail-closed, leaving the serial trail intact for
+    // bisection (`AGENTS.md` §2.9).
+    serial::beacon("pi-beacon 6/6: handover REJECTED, parking (see boot log)");
     halt_current_cpu()
 }
 

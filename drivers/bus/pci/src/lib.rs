@@ -176,6 +176,15 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 /// raises a CPU abort; the bring-up driver guarantees this before
 /// handing the window here.
 ///
+/// `secondary_bus` is the bus number the bring-up driver programmed into
+/// the root port's bridge bus-number register. The BCM2711 root port is
+/// a single-device link, so the windowed mechanism forwards a
+/// configuration transaction only to `device 0` on this one bus and
+/// resolves every other downstream target to the PCI "no device"
+/// sentinel without touching the controller — otherwise a flat
+/// enumeration would forward unanswered config TLPs and the root complex
+/// would raise a CPU abort (`AGENTS.md` §5.4 / §2.9).
+///
 /// The returned value is driven through the [`Bus`], [`VirtioPciBus`],
 /// [`MsixBus`], and [`PciBus`] seams identically to [`mechanism_ecam`];
 /// the concrete `Pci` type stays crate-private (`AGENTS.md` §8).
@@ -189,8 +198,11 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 /// §17.2 / §17.4): an architecture without a BCM2711 root complex
 /// simply never calls it.
 #[must_use]
-pub fn mechanism_brcm(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + PciBus {
-    Pci::new(mech_brcm::BrcmConfigSpace::new(window))
+pub fn mechanism_brcm(
+    window: RegisterWindow,
+    secondary_bus: u8,
+) -> impl VirtioPciBus + MsixBus + PciBus {
+    Pci::new(mech_brcm::BrcmConfigSpace::new(window, secondary_bus))
 }
 
 // --- Public re-exports through the `Bus` trait ----------------------------

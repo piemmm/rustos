@@ -2164,8 +2164,11 @@ keyboard service kthread**:
 - `boot_aarch64` runs it pre-MMU, folds the controller-register and
   outbound-window gigapages into the identity **Device** mask
   (`identity_device_mask`) so both are identity-mapped Device memory before
-  the MMU comes on, and stashes the discovery for the spawn seam
-  (`keyboard_service::record_discovery`).
+  the MMU comes on, then stashes the `Copy` discovery for the spawn seam
+  (`keyboard_service::record_discovery`) **after** the MMU is enabled — the
+  seam's `SpinLock` `compare_exchange` is an atomic RMW that is
+  UNPREDICTABLE on MMU-off memory (P6c-2), so the store is deferred past
+  translation-enable while the windows themselves are read pre-MMU.
 - `kernel/rustos-kernel::keyboard_service` supplies the concrete
   `DriverHost` halves: an `IdentityMmioMapper` (capability-gated; admits a
   window only inside the controller block or outbound window, returns a
@@ -2184,6 +2187,80 @@ keyboard service kthread**:
   (`ArbiterConsoleSink`), yielding between polls (§2.1). A bring-up failure
   ends the service fail-closed (the video login parks with no keyboard,
   §2.9); with no discovered bridge (the `virt` shape) nothing is started.
+- **Metal diagnostics (logging).** Because the bring-up is metal-only and
+  was previously silent on failure, it logs one-shot, allocation-free
+  events to the serial sink so a silent keyboard is diagnosable from a UART
+  capture alone (§2.16/§19.4 — never on the poll loop): `boot_aarch64`
+  logs the discovered `brcm,bcm2711-pcie` chipset windows (id `4100`),
+  `spawn_if_present` logs the kthread admitted/skipped (id `4103`), and
+  `bring_up_keyboard` logs each stage and the failing stage+`DriverError`
+  (id `4101`), a one-shot post-link PCIe configuration scan listing every
+  responding function (`function_count_hex` + per-function
+  bdf/vendor/device/class, id `4104`), plus the enumerated device's
+  vid/pid/slot (id `4102`). See `docs/src/platform/aarch64.md`.
+- **Downstream config forwarding + single-device config gate (fixed).**
+  The VL805 on bus 1 was invisible because the BCM2711 ships the root
+  port's type-1 bridge bus-number register (`PCI_PRIMARY_BUS`, config
+  offset `0x18`, exposed at the controller register block's offset 0) at 0,
+  forwarding no configuration to its secondary bus. `BrcmPcieRc::bring_up`
+  programs it (`program_bridge_bus_numbers`, primary 0 / secondary
+  `RC_SECONDARY_BUS` 1) when it presents the RC as a PCI-PCI bridge.
+  Enabling forwarding then exposed a boot **wedge**: the bus walk is a flat
+  256-bus scan, and a config read to a non-existent forwarded target (any
+  device but `01:00.0`, or any bus beyond the directly-attached one) emits
+  a TLP nothing answers — `CFG_READ_UR_MODE` only master-aborts requests
+  the RC itself refuses, so a *forwarded* TLP's completion timeout becomes a
+  CPU external abort that hangs the boot CPU (capture stops right after
+  `4101 link trained`). Fixed in the windowed accessor: the BCM2711 root
+  port is a single-device link, so `mechanism_brcm(window, secondary_bus)`
+  forwards a transaction **only** to `device 0` on the secondary bus and
+  resolves every other downstream target to the `0xFFFF_FFFF` sentinel
+  without touching the controller (mirrors Linux `brcm_pcie_map_conf`); the
+  bridge subordinate is kept equal to the secondary (no on-board switch,
+  §2.3). Host-proven by `bring_up_names_the_downstream_bus_so_config_is_forwarded`
+  and `mech_brcm::phantom_downstream_targets_are_no_device_without_an_index_write`.
+  The metal `4104` capture then listed **two** functions (the bridge plus
+  the VL805 `1106:3483` class `0c03`), confirming discovery is complete.
+- **xHCI DMA-aperture bound — CPU-vs-PCIe address space (fixed).** With the
+  VL805 discovered, the `4101` xHCI controller bring-up failed
+  `err=out_of_range`: the device-shared DMA carve was bounded in the wrong
+  address space. `DmaSlab::phys()` is a *device-visible* (PCIe-space)
+  address, but `keyboard_service::FrameDmaHost` and
+  `rustos_drv_bus_usb::wiring::open_discovered` compared it against the
+  *CPU-physical* inbound-aperture top (`0x2_0000_0000`). The Pi 4 inbound
+  viewport maps PCIe `[0x4_0000_0000, 0x6_0000_0000)` onto RAM
+  `[0, 0x2_0000_0000)`, so every frame's device address (≈ `0x4_xxxx`)
+  exceeded the CPU top and the carve was refused before any hardware was
+  touched. Fixed by bounding each side in its own space: `FrameDmaHost` now
+  checks the frame's CPU-physical span against the CPU window top and
+  translates afterwards, and `bring_up_keyboard` passes `open_discovered`
+  the device-visible top (`inbound_pcie_base + inbound_size`, checked). The
+  redundant, address-space-ambiguous `PcieBringup.dma_aperture_top` field
+  (derivable from `windows`) was removed (§2.2/§2.14). Host-proven by
+  `keyboard_service::dma_host_admits_a_low_frame_through_a_high_pcie_viewport`.
+- **xHCI register BAR mapping — PCIe-bus vs CPU address space (fixed).**
+  With the DMA carve admitted, the `4101` xHCI bring-up then failed
+  `err=length_out_of_range`: the register BAR could not be mapped. A VL805
+  BAR read from PCI configuration space is a *PCIe-bus* address (firmware
+  assigns it inside the outbound window, ≈ `0xc000_0000`), but
+  `keyboard_service::IdentityMmioMapper` only permitted *CPU-physical*
+  addresses and compared the bus address against the outbound **CPU** base
+  (`0x6_0000_0000`); `map_window` returned `InvalidRegion`
+  (→ `LengthOutOfRange`) before the controller was touched. Fixed by making
+  the mapper bridge-aware: it applies the outbound `ranges` translation
+  (`outbound_cpu_base + (bus − outbound_pcie_base)`) to reach the
+  identity-mapped CPU address (the generic PCI walk only knows bus addresses;
+  resolving them is the host bridge's job, mirroring Linux). The controller
+  regs block stays CPU-physical/identity and is resolved first; since the
+  Pi 4 regs island (`0xfd50_0000`) numerically sits inside the outbound PCIe
+  window, a request that only partially overlaps the regs block is refused
+  fail-closed rather than mis-translated (§5.4). `IdentityMmioMapper::new`
+  now takes `outbound_pcie_base`. Host-proven by
+  `keyboard_service::mapper_translates_a_bar_through_the_outbound_viewport`.
+  Metal verification: the next capture should pass the `4101` xHCI stage; if
+  it still stalls, the cause is the live controller protocol (a real BAR
+  answering a plausible `CAPLENGTH`, link training, or the
+  bootloader-pre-loaded VL805 firmware).
 - The seam is the new `kernel/core` `InitSpawnCtx::spawn_kernel_service`
   (admits a `spawn_kthread` whose body drives an object-safe `YieldHandle`,
   so it need not name the port's context-switch type) + `static_frames`

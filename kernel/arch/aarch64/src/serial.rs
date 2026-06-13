@@ -218,6 +218,31 @@ pub fn write_console_bytes(bytes: &[u8]) -> usize {
     bytes.len()
 }
 
+/// Emit a short, ordered boot **beacon** — `tag` followed by `\r\n` — so a
+/// boot that wedges *before* the consolidated boot-log line
+/// (`KERNEL_BOOT_AARCH64_REACHED`, emitted only after the MMU is on) still
+/// leaves a trail on the serial line whose last printed tag localises the
+/// hang.
+///
+/// The beacon writes the **UART only** ([`putchar`] — a plain volatile
+/// MMIO store guarded by a `Relaxed` atomic, with no exclusive-monitor
+/// access), so it is safe to call with the MMU still off, exactly like the
+/// early FDT-discovery path. It performs no allocation and deliberately
+/// never touches the video console: the video renderer takes a render lock
+/// whose compare-exchange is UNPREDICTABLE on the MMU-off memory the boot
+/// CPU runs on (the same reason the allocator and scheduler wait for the
+/// MMU, `plans/PI.md` P6c-2), so a screen mirror could itself wedge the
+/// very boot a beacon exists to trace. The serial line is the single,
+/// always-safe bisection channel (`AGENTS.md` §2.9 — never hang).
+///
+/// Freestanding-only (the whole module is gated to the bare-metal
+/// target): the transmit is meaningful solely on the Pi's UART, so like
+/// [`write_console_bytes`] it carries no host unit test.
+pub fn beacon(tag: &str) {
+    write_console_bytes(tag.as_bytes());
+    write_console_bytes(b"\r\n");
+}
+
 /// [`core::fmt::Write`] adapter for the **log/debug** line path that
 /// routes by build profile. A release build emits each byte through the
 /// user-facing console — the video console when configured (its

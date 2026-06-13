@@ -245,6 +245,42 @@ kernel (assertions off) whose log renders on screen. There is no separate
 `--release` flag to forget — the image profile decides both the seeded
 contents and the kernel's log routing.
 
+### Boot beacons (serial bisection)
+
+The consolidated boot-log line (`KERNEL_BOOT_AARCH64_REACHED`) is emitted
+only *after* the MMU is enabled, so a metal boot that wedges before or at
+translation-enable — the classic Pi 4B failure — would otherwise leave no
+trail at all. To localise such a hang, `boot()` prints ordered,
+UART-only **beacons** (`serial::beacon`) at the milestones a pre-MMU /
+around-MMU wedge falls between. The pre-MMU window between `2/6` and `3/6`
+(building the identity-map masks) is split into finer `2a`..`2c`
+sub-beacons, because a metal capture wedged exactly there with `2/6` the
+last tag shown.
+
+| Beacon | Printed when | A silent line after the previous beacon points at |
+| ------ | ------------ | -------------------------------------------------- |
+| `1/6: boot entry` | EL1 reached, FP enabled, MMU off | entry before `boot()`, or `enable_fp_el1` |
+| `2/6: mmio discovered` | console/GIC/video/PCIe FDT walk done | the pre-MMU FDT discovery walk (`configure_mmio_from_dtb`) |
+| `2a/6: console/gic bases read` | `console::current` + `gic::current` returned | reading the discovered console/GIC bases |
+| `2b/6: device gigapage mask configured` | `identity_device_mask` built + `configure_device_gigapages` stored it | device-mask construction / the atomic mask store |
+| `2c/6: ram gigapage mask configured` | `identity_ram_mask` built + `configure_ram_gigapages` stored it | RAM-mask construction / the atomic mask store |
+| `3/6: identity map built, enabling mmu` | Device + RAM gigapage masks built | identity-map mask construction |
+| `4/6: mmu on` (or `mmu enable FAILED`) | translation is live | **the MMU enable itself** — a mis-typed identity map (the metal Pi 4B hang) |
+| `4a/6: pcie discovery recorded (post-mmu)` | `keyboard_service::record_discovery` returned | recording the PCIe windows — a `SpinLock` `compare_exchange` (an atomic RMW), deferred to post-MMU because it is UNPREDICTABLE on MMU-off memory |
+| `5/6: post-mmu …discovered` | post-MMU `/memory`/timer/PSCI walk done | the full-tree FDT walk that needs the MMU |
+| `6/6: entering kernel core` (or `handover REJECTED`) | hand-off assembled | memory-map build / `BootInfo` assembly |
+
+Each beacon writes the UART **only** — never the video console, whose
+render lock is UNPREDICTABLE on MMU-off memory and could itself wedge the
+boot a beacon exists to trace. The transmit is bounded (`putchar` /
+`tx_wait`), so a beacon at a not-yet-discovered or wrong base (beacon 1/6
+runs before the FDT walk sets the real Pi base, so on metal it targets the
+pre-discovery `virt` default and is silent there) can never spin forever;
+beacon 2/6 onward use the discovered base and recover the transmitter on
+their first ready poll. An entirely silent serial line therefore points at
+"before `boot()` or inside the pre-discovery FDT walk", and the last tag a
+capture shows pins the wedge to the step that follows it.
+
 ## Board-discovered console
 
 The console MMIO base and register model are **discovered from the
@@ -825,14 +861,28 @@ keyboard service, `plans/PI.md` P10):
   Device memory once translation is on. PID 1's address space — sized from
   `configured_identity_gigapages` — therefore also covers them.
 - **The `DriverHost` halves** (`kernel/rustos-kernel::keyboard_service`):
-  an `IdentityMmioMapper` mints a `RegisterWindow` at the window's own
-  CPU-physical address (`phys == virt`) after checking `CAP_MMIO_MAP` and
-  that the window lies wholly within the controller block or the outbound
-  window — it edits no live page table, since the boot path already mapped
-  those gigapages (§5.4 / §2.16). A `FrameDmaHost` carves the 16 KiB xHCI
-  region with `FrameAllocator::alloc_order`, translates the frame to its
-  device-visible address through the inbound viewport, and rejects anything
-  reaching past the aperture top (§5.4). `GenericTimerDelay` busy-waits on
+  an `IdentityMmioMapper` mints a `RegisterWindow` after checking
+  `CAP_MMIO_MAP` and resolving the request to a region the boot path
+  already identity-mapped as Device memory — it edits no live page table
+  (§5.4 / §2.16). It is **bridge-aware**: a request inside the controller
+  register block is CPU-physical and maps identity, while a VL805 BAR — read
+  from PCI configuration space as a *PCIe-bus* address in the outbound
+  window — is translated through the bridge's outbound `ranges`
+  (`outbound_cpu_base + (bus − outbound_pcie_base)`) to its identity-mapped
+  CPU address (the generic PCI walk knows only bus addresses; resolving them
+  is the host bridge's job, as in Linux). On the Pi 4 the SoC regs island
+  (`0xfd50_0000`) sits numerically inside the outbound PCIe window, so the
+  regs block is resolved first and a request that only partially overlaps it
+  is refused fail-closed rather than mis-translated (§5.4). A `FrameDmaHost`
+  carves the 16 KiB xHCI
+  region with `FrameAllocator::alloc_order`, bounds the frame's
+  **CPU-physical** span against the bridge's inbound CPU window
+  `[inbound_cpu_base, dma_aperture_top)`, then translates it to the
+  device-visible address through the inbound viewport (§5.4). The bound is
+  applied in CPU space, never on the translated device address: the Pi 4
+  inbound viewport lifts the device address into PCIe
+  `[0x4_0000_0000, …)`, far above the CPU top, so a device-vs-CPU-top
+  comparison would reject every valid carve. `GenericTimerDelay` busy-waits on
   `CNTPCT_EL0` (`kernel_arch::busy_delay_us`) for the link-training settle
   delays.
 - **The service kthread.** The PID 1 spawn seam calls
@@ -850,6 +900,98 @@ QEMU models no Pi USB (§0.4), so the host tests cover the discovery
 decoder and the two `DriverHost` halves' capability/bounds decisions; the
 live bring-up (a real BAR, link training, a keyboard driving the login) is
 the on-metal acceptance item.
+
+### Discovery and bring-up logging (metal diagnostics)
+
+Because the live bring-up is metal-only, it logs its progress to the
+serial sink so a silent keyboard can be diagnosed from a UART capture
+alone (the boot beacons above bound the *boot* path; these events bound
+the *USB* path). All are one-shot — never on the per-report poll loop
+(§2.16 / §19.4) — and allocation-free (§2.9):
+
+| Event id | Emitted by | Says |
+| -------- | ---------- | ---- |
+| `4100` | `boot_aarch64` (post-MMU, beacon `4a`) | the discovered `brcm,bcm2711-pcie` chipset windows — `regs_base/len`, the inbound aperture (`dma_aperture_top`, `inbound_size`, `inbound_pcie_base`), and the outbound window (`outbound_cpu_base/pcie_base/size`) — so a capture shows the hardware the chain will program. Absent on `virt` (no bridge). |
+| `4103` | `keyboard_service::spawn_if_present` | the service kthread was admitted, or was skipped because no kernel frame allocator was available (an error). Silent on `virt`. |
+| `4101` | `usb_keyboard::bring_up_keyboard` | each bring-up stage: link-training start, root-complex link trained, xHCI online, and — at `Error` level with an `err=` field — the stage that refused (PCIe link, xHCI, or root-hub enumeration). |
+| `4104` | `usb_keyboard::bring_up_keyboard` | the one-shot PCIe configuration scan run after link-up, before the controller search: a `function_count_hex` summary plus one `bdf_hex`/`vendor_hex`/`device_hex`/`class_hex` line per responding function. A healthy Pi 4 shows two (the bridge `14e4:2711` class `0604`, and the VL805 `1106:3483` class `0c03`). |
+| `4102` | `usb_keyboard::bring_up_keyboard` | the USB device enumerated on the VL805 root hub: `vendor_id_hex`, `product_id_hex`, and the assigned `xhci_slot`. |
+
+The last `4101` line a capture shows pins which stage a silent keyboard
+stalled at; the absence of `4102` after an `xHCI online` `4101` means the
+root hub enumerated no device (`err=not_found`).
+
+The `4104` scan first ran with only **one** function — the root-complex
+bridge itself (`14e4:2711`, class `0604`) at BDF 0 — and no `1106:3483`
+VL805 downstream. That localised the failure to PCIe *discovery*: the
+BCM2711 ships its root port's type-1 bridge bus-number register
+(`PCI_PRIMARY_BUS`, config offset `0x18`) at 0, so the port forwarded no
+configuration transactions to the secondary bus and the VL805 on bus 1
+never answered a read. The root-complex bring-up
+(`rustos_drv_bus_pcie_brcm::BrcmPcieRc::bring_up`) now programs that
+register (primary 0, secondary 1) so configuration reaches bus 1.
+
+Enabling that forwarding, however, exposed a second defect that **wedged
+the boot** (the capture stops right after `4101 pcie root-complex link
+trained`, before any `4104` line): the bus walk is a *flat* scan over all
+256 buses, and once the root port forwards downstream, a config read to a
+target that does not exist — any device other than `01:00.0`, or any bus
+beyond the directly-attached one — forwards a configuration TLP onto the
+link that nothing answers. The root port's `CFG_READ_UR_MODE` only
+master-aborts a request the RC itself can refuse; a *forwarded* TLP
+instead waits for a completion that never arrives, and the timeout
+manifests as a CPU external abort that hangs the boot CPU. The fix is in
+the windowed configuration accessor
+(`rustos_drv_bus_pci::mechanism_brcm`): the BCM2711 root port is a
+single-device link, so the accessor now forwards a configuration
+transaction **only** to `device 0` on the secondary bus and resolves
+every other downstream target to the PCI "no device" sentinel *without*
+issuing a transaction (mirroring Linux `brcm_pcie_map_conf`). The bridge
+subordinate is likewise kept equal to the secondary bus (no on-board
+switch to reach). With that fix the `4104` scan lists **two** functions —
+the bridge (`14e4:2711`, class `0604`) and the VL805 (`1106:3483`, class
+`0c03`) — confirming discovery is complete.
+
+Discovery then handed off to a third defect at the **xHCI controller
+bring-up** (`4101` reported `err=out_of_range`, right after the two-function
+`4104` scan): the device-shared DMA carve was bounded in the wrong address
+space. `DmaSlab::phys()` is a *device-visible* (PCIe-space) address, but
+both the kernel DMA host (`keyboard_service::FrameDmaHost`) and the USB
+wiring (`rustos_drv_bus_usb::wiring::open_discovered`) compared it against
+the *CPU-physical* inbound-aperture top (`dma_aperture_top` =
+`0x2_0000_0000`). The Pi 4 inbound viewport maps PCIe
+`[0x4_0000_0000, 0x6_0000_0000)` onto RAM `[0, 0x2_0000_0000)`, so every
+RAM frame's device address (≈ `0x4_xxxx_xxxx`) trivially exceeds the
+CPU-physical top and the carve was refused before the controller was
+touched. Fixed by bounding each side in its own address space:
+`FrameDmaHost` now checks the frame's CPU-physical span against the CPU
+window top and translates afterwards, and `bring_up_keyboard` passes
+`open_discovered` the **device-visible** top (`inbound_pcie_base +
+inbound_size` = `0x6_0000_0000`) to match `DmaSlab::phys()`. The redundant
+`PcieBringup.dma_aperture_top` field (derivable from the windows) was
+removed (§2.2).
+
+That uncovered a fourth defect at the same `4101` xHCI stage, now
+`err=length_out_of_range`, right after the two-function `4104` scan: the
+register BAR could not be **mapped**. The VL805's BAR base read from PCI
+configuration space is a *PCIe-bus* address — firmware assigns it inside
+the outbound window (≈ `0xc000_0000`) — but `IdentityMmioMapper` only
+permitted *CPU-physical* addresses, comparing the bus address against the
+outbound **CPU** base (`0x6_0000_0000`). The bus address (≈ 3.2 GiB) is
+nowhere near the CPU base (24 GiB), so `map_window` returned
+`InvalidRegion` (surfaced as `LengthOutOfRange`) before the controller was
+touched. Fixed by making the mapper bridge-aware: it now applies the
+bridge's outbound `ranges` translation
+(`outbound_cpu_base + (bus − outbound_pcie_base)`) to reach the
+identity-mapped CPU address — exactly the bus→CPU resolution Linux's host
+bridge performs. The controller register block stays CPU-physical/identity
+and is resolved first; because the Pi 4 regs island numerically falls
+inside the outbound PCIe window, a request that only partially overlaps the
+regs block is refused fail-closed rather than mis-translated (§5.4).
+Host-proven by `keyboard_service::mapper_translates_a_bar_through_the_outbound_viewport`.
+If the chain still stalls after this, the cause is the live controller
+protocol (a real BAR answering a plausible `CAPLENGTH`, link training, or
+the VL805 firmware the bootloader normally pre-loads).
 
 ## Per-CPU storage (`TPIDR_EL1`)
 

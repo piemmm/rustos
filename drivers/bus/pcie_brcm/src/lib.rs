@@ -382,6 +382,11 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
             regs::RC_CFG_PRIV1_ID_VAL3_CLASS_CODE_MASK,
         )?;
 
+        // Name the downstream bus so the root port forwards configuration
+        // transactions to it; the BCM2711 ships the bus-number register
+        // at 0, which leaves the VL805 (bus 1) unreachable until set.
+        self.program_bridge_bus_numbers()?;
+
         self.program_outbound_window(windows)?;
 
         // PCIe→SCB endian mode for the inbound BAR path: little-endian.
@@ -409,6 +414,37 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
         } else {
             Err(DriverError::DeviceFault)
         }
+    }
+
+    /// Program the root port's type-1 bridge bus-number register so it
+    /// forwards configuration transactions downstream.
+    ///
+    /// The BCM2711 ships the register at 0 (primary/secondary/subordinate
+    /// all 0), so the root port forwards nothing and the VL805 on bus 1
+    /// never answers a configuration read. Naming the secondary
+    /// ([`regs::RC_SECONDARY_BUS`]) and subordinate
+    /// ([`regs::RC_SUBORDINATE_BUS`], kept equal — the root port is a
+    /// single-device link with no on-board switch) buses opens that path;
+    /// this mirrors the bus-number assignment a full PCI enumerator would
+    /// perform, which the windowed `mech_brcm` accessor does not, so the
+    /// root-complex bring-up establishes the routing itself. The accessor
+    /// in turn forwards configuration only to the single device on the
+    /// secondary bus, so no transaction is ever issued to an absent
+    /// downstream target (`rustos_drv_bus_pci::mechanism_brcm`).
+    fn program_bridge_bus_numbers(&mut self) -> Result<(), DriverError> {
+        let cur = self.regs.read32(regs::RC_CFG_PRIMARY_BUS)?;
+        let mut value = regs::replace_bits(cur, 0, regs::PRIMARY_BUS_PRIMARY_MASK);
+        value = regs::replace_bits(
+            value,
+            u32::from(regs::RC_SECONDARY_BUS),
+            regs::PRIMARY_BUS_SECONDARY_MASK,
+        );
+        value = regs::replace_bits(
+            value,
+            u32::from(regs::RC_SUBORDINATE_BUS),
+            regs::PRIMARY_BUS_SUBORDINATE_MASK,
+        );
+        self.regs.write32(regs::RC_CFG_PRIMARY_BUS, value)
     }
 
     fn program_outbound_window(&mut self, windows: &PcieWindows) -> Result<(), DriverError> {

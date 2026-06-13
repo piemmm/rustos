@@ -39,6 +39,7 @@
 //! training, a real BAR answering a plausible `CAPLENGTH`, and a keyboard
 //! driving the login are the on-metal acceptance items.
 
+use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::input::KeyInput;
@@ -51,6 +52,174 @@ use rustos_drv_bus_pcie_brcm::{self as pcie_brcm, Delay, PcieWindows};
 use rustos_drv_bus_usb::device::UsbDevice;
 use rustos_drv_input_usb_hid::{BootKeyboard, ConsoleSink};
 use rustos_kernel_core::InputFocus;
+use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use rustos_util::fmt::format_hex_u64;
+
+/// Audit event: a progress or failure milestone of the in-kernel VL805
+/// USB-keyboard bring-up chain. Logged at each stage (PCIe link training,
+/// xHCI controller bring-up, root-hub enumeration) so a metal capture
+/// shows exactly *which* stage a silent keyboard stalls at, rather than
+/// the bring-up failing silently (the issue's "what is discovered on
+/// USB"). Bin-crate id alongside the boot pipeline's `4097`/`4100`; part
+/// of the audit contract, not renumbered (`AGENTS.md` §5.4.4).
+const USB_KEYBOARD_BRINGUP: EventId = EventId(4101);
+
+/// Audit event: the bring-up chain enumerated a USB device on the VL805
+/// root hub. Carries the device's vendor/product id and assigned xHCI
+/// slot, so a capture shows the keyboard the chain actually found (or, by
+/// its absence, that none was). Bin-crate id; part of the audit contract
+/// (`AGENTS.md` §5.4.4).
+const USB_KEYBOARD_DEVICE: EventId = EventId(4102);
+
+/// Audit event: a function the bring-up's one-shot PCIe configuration
+/// scan saw responding on the BCM2711 root complex (and a leading
+/// summary count). On the Pi 4 a healthy bus shows two: the root complex
+/// itself (`14e4:2711`, class `0604`) and the VL805 USB host behind it
+/// (`1106:3483`, class `0c03`). A scan that reports *no* downstream
+/// function localises a silent keyboard to "the VL805 is not answering
+/// configuration reads" — distinct from "enumerated but xHCI did not come
+/// up" — which is the missing half of the issue's "what is discovered on
+/// USB". Bin-crate id alongside the boot pipeline's `4097`/`4100`/`4101`;
+/// part of the audit contract, not renumbered (`AGENTS.md` §5.4.4).
+const USB_KEYBOARD_PCI_SCAN: EventId = EventId(4104);
+
+/// Stable, allocation-free name for a [`DriverError`], for logging the
+/// stage a bring-up failed at without rendering a bare number
+/// (`AGENTS.md` §2.9 — the log path never allocates).
+const fn driver_error_name(err: DriverError) -> &'static str {
+    match err {
+        DriverError::BufferTooSmall => "buffer_too_small",
+        DriverError::BadMagic => "bad_magic",
+        DriverError::AbiVersionUnsupported => "abi_version_unsupported",
+        DriverError::LengthOutOfRange => "length_out_of_range",
+        DriverError::OutOfRange => "out_of_range",
+        DriverError::PermissionDenied => "permission_denied",
+        DriverError::NotFound => "not_found",
+        DriverError::SignatureInvalid => "signature_invalid",
+        DriverError::Unsupported => "unsupported",
+        DriverError::DeviceFault => "device_fault",
+        DriverError::Busy => "busy",
+        DriverError::NotImplemented => "not_implemented",
+        DriverError::NoSpace => "no_space",
+        // `DriverError` is `#[non_exhaustive]`: a future variant logs as
+        // `unknown` rather than failing the build (`AGENTS.md` §2.9).
+        _ => "unknown",
+    }
+}
+
+/// Log a bring-up stage milestone with no extra fields (`Info`).
+fn log_stage(sink: &dyn Sink, message: &'static str) {
+    log(
+        sink,
+        &Event {
+            level: Level::Info,
+            id: USB_KEYBOARD_BRINGUP,
+            message,
+            fields: &[],
+        },
+    );
+}
+
+/// Log a bring-up stage *failure* with the failing [`DriverError`]
+/// (`Error`), so a metal capture pins which stage refused and why.
+fn log_stage_err(sink: &dyn Sink, message: &'static str, err: DriverError) {
+    log(
+        sink,
+        &Event {
+            level: Level::Error,
+            id: USB_KEYBOARD_BRINGUP,
+            message,
+            fields: &[Field {
+                key: "err",
+                value: driver_error_name(err),
+            }],
+        },
+    );
+}
+
+/// Upper bound on functions the one-shot diagnostic scan reports.
+///
+/// A defence bound (`AGENTS.md` §24.4), not a capacity: the Pi 4 root
+/// complex carries exactly two functions (the bridge and the VL805), so
+/// this comfortably covers a healthy bus while bounding the log a
+/// malfunctioning controller could otherwise drive.
+const SCAN_REPORT_LIMIT: usize = 32;
+
+/// Enumerate the PCIe configuration space once and log every responding
+/// function, so a metal capture shows whether the VL805 is answering
+/// configuration reads at all before the bring-up tries to claim it.
+///
+/// This is purely diagnostic: it runs once at bring-up, never on the
+/// per-report poll path (`AGENTS.md` §2.16 / §19.4), renders its fields
+/// on the stack with no allocation (`AGENTS.md` §2.9), and an
+/// enumeration error is itself logged rather than propagated — the
+/// authoritative controller search is `open_discovered`, which the
+/// caller runs next and whose `NotFound` is the real failure
+/// (`AGENTS.md` §5.4).
+fn log_bus_scan(sink: &dyn Sink, bus: &dyn Bus) {
+    let mut devices = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; SCAN_REPORT_LIMIT];
+    let found = match bus.enumerate(&mut devices) {
+        Ok(n) => n,
+        // The bus filled the buffer before reporting the overflow; report
+        // the populated prefix rather than dropping the whole scan.
+        Err(DriverError::BufferTooSmall) => devices.len(),
+        Err(err) => {
+            log_stage_err(sink, "usb-keyboard: pcie configuration scan faulted", err);
+            return;
+        }
+    };
+    let mut count_buf = [0u8; 16];
+    log(
+        sink,
+        &Event {
+            level: Level::Info,
+            id: USB_KEYBOARD_PCI_SCAN,
+            message: "usb-keyboard: pcie configuration scan complete",
+            fields: &[Field {
+                key: "function_count_hex",
+                value: format_hex_u64(found as u64, &mut count_buf),
+            }],
+        },
+    );
+    for device in &devices[..found] {
+        let mut bdf_buf = [0u8; 16];
+        let mut vendor_buf = [0u8; 16];
+        let mut device_buf = [0u8; 16];
+        let mut class_buf = [0u8; 16];
+        log(
+            sink,
+            &Event {
+                level: Level::Info,
+                id: USB_KEYBOARD_PCI_SCAN,
+                message: "usb-keyboard: pcie function discovered",
+                fields: &[
+                    Field {
+                        key: "bdf_hex",
+                        value: format_hex_u64(device.address, &mut bdf_buf),
+                    },
+                    Field {
+                        key: "vendor_hex",
+                        value: format_hex_u64(u64::from(device.vendor), &mut vendor_buf),
+                    },
+                    Field {
+                        key: "device_hex",
+                        value: format_hex_u64(u64::from(device.device), &mut device_buf),
+                    },
+                    Field {
+                        key: "class_hex",
+                        value: format_hex_u64(u64::from(device.class), &mut class_buf),
+                    },
+                ],
+            },
+        );
+    }
+}
 
 /// The enumerated boot keyboard the bring-up chain yields: a
 /// [`BootKeyboard`] decoding reports out of the started [`UsbDevice`]
@@ -65,12 +234,12 @@ pub struct PcieBringup {
     /// translated `reg` MMIO window).
     pub regs_phys: u64,
     /// The inbound (`dma-ranges`) and outbound (`ranges`) address windows
-    /// the root complex is programmed with.
+    /// the root complex is programmed with. The device-visible exclusive
+    /// upper bound the xHCI DMA carve must lie below
+    /// (`inbound_pcie_base + inbound_size`) is derived from these in
+    /// [`bring_up_keyboard`], so it is not stored separately (`AGENTS.md`
+    /// §2.2 — one definition).
     pub windows: PcieWindows,
-    /// Exclusive upper bound of the CPU-physical window devices behind the
-    /// bridge may reach: the xHCI DMA carve must lie wholly below it
-    /// (`AGENTS.md` §5.4).
-    pub dma_aperture_top: u64,
 }
 
 /// Why a `brcm,bcm2711-pcie` [`HwNode`] could not be turned into a
@@ -96,10 +265,10 @@ pub enum BringupError {
 /// * the controller register window — the first [`Mmio`](HwResourceKind::Mmio)
 ///   resource, whose base is [`PcieBringup::regs_phys`];
 /// * the inbound viewport — the [`Dma`](HwResourceKind::Dma) resource,
-///   whose `base` is the exclusive DMA-reachability top
-///   ([`PcieBringup::dma_aperture_top`]), `length` the viewport size, and
-///   `translated_base` the PCIe-space base the inbound BAR is programmed
-///   at; and
+///   whose `length` is the viewport size and `translated_base` the
+///   PCIe-space base the inbound BAR is programmed at (the device-visible
+///   DMA-reachability top `translated_base + length` is derived from these
+///   in [`bring_up_keyboard`]); and
 /// * the outbound window — the [`BusWindow`](HwResourceKind::BusWindow)
 ///   resource (`base` CPU aperture, `length` size, `translated_base` the
 ///   PCIe-space base it maps to).
@@ -118,7 +287,6 @@ pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError
 
     Ok(PcieBringup {
         regs_phys: regs.base(),
-        dma_aperture_top: inbound.base(),
         windows: PcieWindows {
             inbound_pcie_base: inbound.translated_base(),
             inbound_size: inbound.length(),
@@ -250,18 +418,132 @@ impl ConsoleSink for ArbiterConsoleSink<'_> {
 /// Requires [`CapabilityId::MMIO_MAP`] (the register windows and the BAR)
 /// and the host's DMA capability (the xHCI DMA carve), both re-checked
 /// kernel-side at each map/allocation (`AGENTS.md` §5.4).
+///
+/// # Logging
+///
+/// Each stage (PCIe link training, the full PCIe configuration scan, xHCI
+/// controller bring-up, root-hub enumeration) is logged to `log` on
+/// success and on failure: the configuration scan lists every responding
+/// function (so a capture shows whether the VL805 answers at all), and
+/// the enumerated device's vendor/product id and xHCI slot are logged
+/// when it is found, so a metal capture localises a silent keyboard to
+/// the stage that stalled (the issue's "what is discovered on USB"). The
+/// logging is one-shot bring-up diagnostics — never on the per-report
+/// poll path (`AGENTS.md` §2.16 / §19.4).
 pub fn bring_up_keyboard(
     host: &dyn DriverHost,
     bringup: &PcieBringup,
     delay: &dyn Delay,
+    sink: &dyn Sink,
 ) -> Result<KeyboardChain, DriverError> {
-    let rc = pcie_brcm::wiring::open_discovered(host, bringup.regs_phys, &bringup.windows, delay)?;
+    log_stage(
+        sink,
+        "usb-keyboard: training brcm,bcm2711-pcie root-complex link",
+    );
+    let rc = match pcie_brcm::wiring::open_discovered(
+        host,
+        bringup.regs_phys,
+        &bringup.windows,
+        delay,
+    ) {
+        Ok(rc) => rc,
+        Err(err) => {
+            log_stage_err(
+                sink,
+                "usb-keyboard: pcie root-complex link bring-up failed",
+                err,
+            );
+            return Err(err);
+        }
+    };
+    log_stage(sink, "usb-keyboard: pcie root-complex link trained");
     // Recover the trained controller's register window and reach the VL805
-    // through the BCM2711 windowed config accessor built over it.
-    let bus = rustos_drv_bus_pci::mechanism_brcm(rc.into_regs());
-    let mut usb =
-        rustos_drv_bus_usb::wiring::open_discovered(host, &bus, bringup.dma_aperture_top)?;
-    usb.enumerate_first_connected()?;
+    // through the BCM2711 windowed config accessor built over it. The
+    // accessor forwards configuration only to the single device on the
+    // secondary bus, so the flat enumeration below never emits a TLP to an
+    // absent downstream target (which would CPU-abort and wedge the boot).
+    let bus = rustos_drv_bus_pci::mechanism_brcm(rc.into_regs(), pcie_brcm::regs::RC_SECONDARY_BUS);
+    // One-shot diagnostic: log every function the trained link exposes
+    // before the controller search runs, so a metal capture distinguishes
+    // "the VL805 never answered configuration reads" (no downstream
+    // function listed) from "enumerated but xHCI did not come up". The
+    // authoritative search is `open_discovered` below; this only reports.
+    log_bus_scan(sink, &bus);
+    // The xHCI DMA carve is bounded against the bridge's inbound aperture
+    // in the *device-visible* (PCIe) address space — the space the
+    // controller's DMA descriptors carry, and the space `DmaSlab::phys`
+    // returns. That exclusive top is `inbound_pcie_base + inbound_size`
+    // (e.g. the Pi 4 maps PCIe `[0x4_0000_0000, 0x6_0000_0000)` onto RAM);
+    // it is *not* the CPU-physical aperture top (`AGENTS.md` §5.4 — the
+    // bound must match the address space it guards). An overflow here is a
+    // malformed discovery, refused fail-closed.
+    let Some(dma_aperture_top) = bringup
+        .windows
+        .inbound_pcie_base
+        .checked_add(bringup.windows.inbound_size)
+    else {
+        log_stage_err(
+            sink,
+            "usb-keyboard: inbound DMA aperture top overflows the address space",
+            DriverError::OutOfRange,
+        );
+        return Err(DriverError::OutOfRange);
+    };
+    let mut usb = match rustos_drv_bus_usb::wiring::open_discovered(host, &bus, dma_aperture_top) {
+        Ok(usb) => usb,
+        Err(err) => {
+            log_stage_err(
+                sink,
+                "usb-keyboard: vl805 xhci controller bring-up failed",
+                err,
+            );
+            return Err(err);
+        }
+    };
+    log_stage(
+        sink,
+        "usb-keyboard: vl805 xhci controller online, enumerating root hub",
+    );
+    let descriptor = match usb.enumerate_first_connected() {
+        Ok(descriptor) => descriptor,
+        Err(err) => {
+            log_stage_err(
+                sink,
+                "usb-keyboard: no usb device enumerated on the root hub",
+                err,
+            );
+            return Err(err);
+        }
+    };
+    // Read the assigned slot before `usb` is moved into the keyboard.
+    let slot = usb.slot();
+    // Allocation-free hex rendering on the bring-up stack (one-shot, not on
+    // the poll path): show the keyboard the chain actually found.
+    let mut vid_buf = [0u8; 16];
+    let mut pid_buf = [0u8; 16];
+    let mut slot_buf = [0u8; 16];
+    log(
+        sink,
+        &Event {
+            level: Level::Info,
+            id: USB_KEYBOARD_DEVICE,
+            message: "usb-keyboard: enumerated usb device on the vl805 root hub",
+            fields: &[
+                Field {
+                    key: "vendor_id_hex",
+                    value: format_hex_u64(u64::from(descriptor.vendor_id), &mut vid_buf),
+                },
+                Field {
+                    key: "product_id_hex",
+                    value: format_hex_u64(u64::from(descriptor.product_id), &mut pid_buf),
+                },
+                Field {
+                    key: "xhci_slot",
+                    value: format_hex_u64(u64::from(slot), &mut slot_buf),
+                },
+            ],
+        },
+    );
     Ok(BootKeyboard::new(usb))
 }
 
@@ -270,6 +552,8 @@ mod tests {
     use super::*;
 
     use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
     use core::ptr::NonNull;
 
     use rustos_abi::driver::dma::PoolId;
@@ -277,6 +561,46 @@ mod tests {
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
     use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
+
+    /// A [`Sink`] that records the `(level, id)` of every event it
+    /// receives, so a test can assert the bring-up emitted its staged
+    /// diagnostics (`AGENTS.md` §23.4 — the new logging is covered).
+    /// Single-threaded `RefCell` is sufficient under `cargo test`.
+    struct RecordingSink {
+        events: RefCell<Vec<(Level, u32)>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                events: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// Number of recorded events whose `EventId` equals `id`.
+        fn count(&self, id: EventId) -> usize {
+            self.events
+                .borrow()
+                .iter()
+                .filter(|(_, recorded)| *recorded == id.0)
+                .count()
+        }
+
+        /// Number of recorded events at [`Level::Error`].
+        fn errors(&self) -> usize {
+            self.events
+                .borrow()
+                .iter()
+                .filter(|(level, _)| *level == Level::Error)
+                .count()
+        }
+    }
+
+    impl Sink for RecordingSink {
+        fn write_event(&self, event: &Event<'_>) {
+            self.events.borrow_mut().push((event.level, event.id.0));
+        }
+    }
 
     /// The Pi 4 discovered values: controller `reg`, inbound `dma-ranges`
     /// (PCIe base 0, 3 GiB), outbound `ranges` (CPU `0x6_0000_0000` → PCIe
@@ -306,7 +630,6 @@ mod tests {
     fn bringup_inputs_are_assembled_from_the_node() {
         let bringup = pcie_bringup_from_node(&pcie_node()).expect("all resources present");
         assert_eq!(bringup.regs_phys, REGS_PHYS);
-        assert_eq!(bringup.dma_aperture_top, APERTURE_TOP);
         assert_eq!(bringup.windows.inbound_pcie_base, 0);
         assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
         assert_eq!(bringup.windows.outbound_cpu_base, OUTBOUND_CPU);
@@ -335,7 +658,13 @@ mod tests {
         .unwrap();
         let bringup = pcie_bringup_from_node(&node).expect("resources present");
         assert_eq!(bringup.windows.inbound_pcie_base, 0x4000_0000);
-        assert_eq!(bringup.dma_aperture_top, APERTURE_TOP);
+        assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
+        // The device-visible DMA top `bring_up_keyboard` derives from these
+        // is `inbound_pcie_base + inbound_size`, distinct from the CPU top.
+        assert_eq!(
+            bringup.windows.inbound_pcie_base + bringup.windows.inbound_size,
+            0x4000_0000 + APERTURE_TOP,
+        );
     }
 
     #[test]
@@ -490,12 +819,20 @@ mod tests {
         let dma = MockDmaHost;
         let host = ChainHost::new(caps(&[CapabilityId::MEM_DMA]), &mapper, &dma);
         let bringup = pcie_bringup_from_node(&pcie_node()).unwrap();
+        let sink = RecordingSink::new();
         // `.err()` drops the unenumerated keyboard (which is neither
         // `Debug` nor `PartialEq`) and compares only the error.
         assert_eq!(
-            bring_up_keyboard(&host, &bringup, &NoDelay).err(),
+            bring_up_keyboard(&host, &bringup, &NoDelay, &sink).err(),
             Some(DriverError::PermissionDenied)
         );
+        // The bring-up logged the failing stage as an `Error` event under
+        // the bring-up id, so a metal capture localises the wedge
+        // (`AGENTS.md` §23.4 — the staged logging is covered). `Error`
+        // events clear the default `Info` threshold regardless of any
+        // concurrent test's level, so this is deterministic.
+        assert!(sink.errors() >= 1);
+        assert!(sink.count(USB_KEYBOARD_BRINGUP) >= 1);
     }
 
     #[test]
@@ -514,9 +851,110 @@ mod tests {
             &dma,
         );
         let bringup = pcie_bringup_from_node(&pcie_node()).unwrap();
+        let sink = RecordingSink::new();
         assert_eq!(
-            bring_up_keyboard(&host, &bringup, &NoDelay).err(),
+            bring_up_keyboard(&host, &bringup, &NoDelay, &sink).err(),
             Some(DriverError::DeviceFault)
         );
+        // The chain logged the link-training start and then the
+        // root-complex failure, so the staged diagnostics fired before the
+        // metal boundary refused (`AGENTS.md` §23.4).
+        assert!(sink.errors() >= 1);
+        assert!(sink.count(USB_KEYBOARD_BRINGUP) >= 1);
+    }
+
+    /// A [`Bus`] returning a fixed device list, modelling the Pi 4's
+    /// trained root complex (the bridge plus the VL805) so the scan
+    /// diagnostic can be exercised without a live controller.
+    struct MockBus {
+        devices: Vec<BusDevice>,
+    }
+
+    impl Bus for MockBus {
+        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+            let n = self.devices.len().min(out.len());
+            out[..n].copy_from_slice(&self.devices[..n]);
+            if out.len() < self.devices.len() {
+                Err(DriverError::BufferTooSmall)
+            } else {
+                Ok(n)
+            }
+        }
+    }
+
+    fn bus_device(address: u64, vendor: u32, device: u32, class: u16) -> BusDevice {
+        BusDevice {
+            vendor,
+            device,
+            class,
+            reserved0: 0,
+            address,
+        }
+    }
+
+    #[test]
+    fn bus_scan_logs_a_summary_and_one_event_per_function() {
+        // The healthy Pi 4 shape: the root complex (14e4:2711, bridge) and
+        // the VL805 USB host behind it (1106:3483, USB class 0x0c03).
+        let bus = MockBus {
+            devices: alloc::vec![
+                bus_device(0x0000, 0x14e4, 0x2711, 0x0604),
+                bus_device(0x0100, 0x1106, 0x3483, 0x0c03),
+            ],
+        };
+        let sink = RecordingSink::new();
+        log_bus_scan(&sink, &bus);
+        // One summary event plus one per discovered function, all under the
+        // scan id and none at `Error` (`AGENTS.md` §23.4 — the diagnostic
+        // is covered).
+        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), 3);
+        assert_eq!(sink.errors(), 0);
+    }
+
+    #[test]
+    fn bus_scan_reports_an_empty_bus_without_faulting() {
+        // The failure shape the issue points at: the link trained but no
+        // function answers configuration reads. The scan still emits its
+        // summary (function count zero) and logs no error — the real
+        // `NotFound` comes from the controller search that follows.
+        let bus = MockBus {
+            devices: Vec::new(),
+        };
+        let sink = RecordingSink::new();
+        log_bus_scan(&sink, &bus);
+        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), 1);
+        assert_eq!(sink.errors(), 0);
+    }
+
+    #[test]
+    fn bus_scan_caps_an_oversized_bus_at_the_report_limit() {
+        // A malfunctioning bus reporting more functions than the bound is
+        // truncated to `SCAN_REPORT_LIMIT` (plus the summary), never an
+        // unbounded log (`AGENTS.md` §24.4), and never an error.
+        let devices = (0..(SCAN_REPORT_LIMIT + 8) as u64)
+            .map(|i| bus_device(i, 0x1234, 0x5678, 0x0c03))
+            .collect();
+        let bus = MockBus { devices };
+        let sink = RecordingSink::new();
+        log_bus_scan(&sink, &bus);
+        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), SCAN_REPORT_LIMIT + 1);
+        assert_eq!(sink.errors(), 0);
+    }
+
+    #[test]
+    fn bus_scan_logs_an_error_when_enumeration_faults() {
+        // A transport that faults enumeration is logged as an error rather
+        // than panicking or being swallowed (`AGENTS.md` §2.9).
+        struct FaultingBus;
+        impl Bus for FaultingBus {
+            fn enumerate(&self, _out: &mut [BusDevice]) -> Result<usize, DriverError> {
+                Err(DriverError::DeviceFault)
+            }
+        }
+        let sink = RecordingSink::new();
+        log_bus_scan(&sink, &FaultingBus);
+        assert_eq!(sink.errors(), 1);
+        assert_eq!(sink.count(USB_KEYBOARD_BRINGUP), 1);
+        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), 0);
     }
 }

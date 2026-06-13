@@ -189,6 +189,27 @@ fn bring_up_trains_the_link_and_programs_the_windows() {
 }
 
 #[test]
+fn bring_up_names_the_downstream_bus_so_config_is_forwarded() {
+    // Without this the root port forwards nothing and the VL805 on bus 1
+    // is invisible to enumeration (the observed metal symptom: only the
+    // bridge at BDF 0 answers configuration reads).
+    let regs0 = MockRegs::new(true, 1);
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let m = rc.regs();
+    let bus_reg = m.mem[regs::RC_CFG_PRIMARY_BUS / 4];
+    let primary = bus_reg & regs::PRIMARY_BUS_PRIMARY_MASK;
+    let secondary = (bus_reg & regs::PRIMARY_BUS_SECONDARY_MASK)
+        >> regs::PRIMARY_BUS_SECONDARY_MASK.trailing_zeros();
+    let subordinate = (bus_reg & regs::PRIMARY_BUS_SUBORDINATE_MASK)
+        >> regs::PRIMARY_BUS_SUBORDINATE_MASK.trailing_zeros();
+    assert_eq!(primary, 0);
+    assert_eq!(secondary, u32::from(regs::RC_SECONDARY_BUS));
+    assert_eq!(subordinate, u32::from(regs::RC_SUBORDINATE_BUS));
+    // The register is actually written (the bring-up touched it).
+    assert!(m.write_index(regs::RC_CFG_PRIMARY_BUS).is_some());
+}
+
+#[test]
 fn bring_up_resets_and_asserts_perst_before_powering_the_serdes() {
     let regs0 = MockRegs::new(true, 0);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");

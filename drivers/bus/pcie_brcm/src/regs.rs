@@ -102,6 +102,44 @@ pub const PCIE_STATUS_DL_ACTIVE_MASK: u32 = 0x20;
 /// Physical link up.
 pub const PCIE_STATUS_PHYLINKUP_MASK: u32 = 0x10;
 
+// --- Bridge bus-number register (standard config header) ------------------
+
+/// `PCI_PRIMARY_BUS` (config-header byte offset `0x18`) in the root
+/// complex's own type-1 configuration header, which the brcm RC exposes
+/// at the controller register block's offset 0 (bus 0 reads/writes land
+/// directly there — the same direct access `mech_brcm` uses for bus 0).
+///
+/// Until this register names the downstream bus, the root complex does
+/// not forward configuration transactions to it, so the VL805 at
+/// `01:00.0` is invisible to enumeration — the BCM2711 ships it as 0.
+pub const RC_CFG_PRIMARY_BUS: usize = 0x18;
+/// Primary-bus-number field within [`RC_CFG_PRIMARY_BUS`] (`[7:0]`): the
+/// bus on the upstream side of the root port (always 0 here).
+pub const PRIMARY_BUS_PRIMARY_MASK: u32 = 0x0000_00ff;
+/// Secondary-bus-number field within [`RC_CFG_PRIMARY_BUS`] (`[15:8]`):
+/// the bus directly behind the root port (the VL805 lives on bus 1).
+pub const PRIMARY_BUS_SECONDARY_MASK: u32 = 0x0000_ff00;
+/// Subordinate-bus-number field within [`RC_CFG_PRIMARY_BUS`]
+/// (`[23:16]`): the highest bus number reachable behind the root port.
+pub const PRIMARY_BUS_SUBORDINATE_MASK: u32 = 0x00ff_0000;
+
+/// Bus directly behind the root port: the directly-attached VL805 USB
+/// host enumerates here.
+pub const RC_SECONDARY_BUS: u8 = 1;
+
+/// Highest bus number the root port forwards configuration to.
+///
+/// The BCM2711 root port is a single-device link, so the only device
+/// downstream is the directly-attached VL805 on [`RC_SECONDARY_BUS`];
+/// the subordinate therefore equals the secondary. Forwarding wider
+/// would not reach more hardware (there is no on-board PCIe switch) and
+/// would let the root port forward configuration to buses that no device
+/// answers — a transaction the windowed accessor already refuses to
+/// issue (`rustos_drv_bus_pci::mechanism_brcm`), but the bridge bound is
+/// kept honest to the topology too (`AGENTS.md` §2.3 — no speculative
+/// width for a switch this platform does not have).
+pub const RC_SUBORDINATE_BUS: u8 = RC_SECONDARY_BUS;
+
 // --- Root-complex private configuration -----------------------------------
 
 /// `RC_CFG_PRIV1_LINK_CAPABILITY`: carries the advertised ASPM support.

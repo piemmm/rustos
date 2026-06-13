@@ -59,61 +59,101 @@ pub fn service_caps() -> CapabilitySet {
 /// ([`PoolId::MOCK`] = 0 is reserved for the in-process mock host).
 const KEYBOARD_DMA_POOL: PoolId = PoolId::from_raw(0x5742); // "WB"
 
-/// A capability-gated [`MmioMapper`] that maps a register window at its own
-/// CPU-physical address, valid because the boot path identity-maps the PCIe
-/// controller and outbound-MMIO gigapages as Device memory (see the module
-/// docs).
+/// A capability-gated, bridge-aware [`MmioMapper`] for a device behind the
+/// Pi 4's PCIe root complex.
 ///
-/// It admits a `map_window` only when the caller holds
-/// [`CapabilityId::MMIO_MAP`] **and** the requested `[base, base+len)` lies
-/// wholly within one of the two discovered, identity-mapped regions — the
-/// controller register block or the outbound MMIO window. Any other request
-/// fails closed (`AGENTS.md` §5.4 / §2.9), so the mapper can never hand out
-/// a window the identity map does not back.
+/// The boot path identity-maps the PCIe controller block and the outbound
+/// MMIO gigapages as Device memory (see the module docs), so a CPU-physical
+/// address inside either is reachable directly. It admits a `map_window`
+/// only when the caller holds [`CapabilityId::MMIO_MAP`] **and** the
+/// requested `[base, base+len)` resolves to one of two regions, failing
+/// closed otherwise (`AGENTS.md` §5.4 / §2.9):
+///
+/// * the controller register block `[regs_base, regs_base+regs_len)` — a
+///   CPU-physical address, mapped identity; or
+/// * a BAR inside the bridge's **outbound PCIe-bus** window
+///   `[outbound_pcie_base, outbound_pcie_base+outbound_size)` — the address
+///   a device's BAR decodes (and the value PCI configuration space holds).
+///   The mapper applies the bridge's outbound `ranges` translation
+///   (`outbound_cpu_base + (bus - outbound_pcie_base)`) to reach the
+///   identity-mapped CPU address. Without this translation the VL805's
+///   firmware-assigned BAR (a PCIe-bus address ≈ `0xc000_0000`) is rejected
+///   even though the window the bridge maps it onto is backed.
+///
+/// The generic PCI driver knows only bus addresses (what the BAR register
+/// holds); resolving them to a CPU mapping is the host bridge's job, so it
+/// lives here in the platform mapper (mirroring how Linux's host bridge
+/// applies `ranges`), never in the architecture-neutral PCI walk.
 pub struct IdentityMmioMapper {
     caps: CapabilitySet,
     regs_base: u64,
     regs_len: u64,
-    outbound_base: u64,
-    outbound_len: u64,
+    outbound_cpu_base: u64,
+    outbound_pcie_base: u64,
+    outbound_size: u64,
 }
 
 impl IdentityMmioMapper {
     /// Build a mapper permitting the controller register block
-    /// `[regs_base, regs_base+regs_len)` and the outbound MMIO window
-    /// `[outbound_base, outbound_base+outbound_len)`, under `caps`.
+    /// `[regs_base, regs_base+regs_len)` (CPU-physical, identity) and the
+    /// bridge's outbound window — CPU base `outbound_cpu_base`, PCIe-bus
+    /// base `outbound_pcie_base`, size `outbound_size` — under `caps`.
     #[must_use]
     pub fn new(
         caps: CapabilitySet,
         regs_base: u64,
         regs_len: u64,
-        outbound_base: u64,
-        outbound_len: u64,
+        outbound_cpu_base: u64,
+        outbound_pcie_base: u64,
+        outbound_size: u64,
     ) -> Self {
         Self {
             caps,
             regs_base,
             regs_len,
-            outbound_base,
-            outbound_len,
+            outbound_cpu_base,
+            outbound_pcie_base,
+            outbound_size,
         }
     }
 
-    /// Whether `[phys, phys+len)` lies wholly within one of the two
-    /// permitted regions. Overflow in either bound fails the check
-    /// (`AGENTS.md` §2.9), never wraps.
+    /// Resolve `[phys, phys+len)` to the identity-mapped **CPU-physical**
+    /// base the window is opened over, or `None` if it lies in neither
+    /// permitted region. Every bound is overflow-checked and never wraps
+    /// (`AGENTS.md` §2.9 / §5.4 — fail closed).
+    ///
+    /// A request fully inside the controller register block is CPU-physical
+    /// and maps identity; a request fully inside the outbound PCIe-bus
+    /// window is a BAR address and is translated through the bridge's
+    /// outbound viewport to its CPU address.
+    ///
+    /// The two regions live in *different* address spaces that collapse to
+    /// one `u64` here, and on the Pi 4 they overlap numerically — the
+    /// `SoC`'s controller-register island (`0xfd50_0000…`) falls inside the
+    /// outbound PCIe-bus window (`0xc000_0000…0x1_0000_0000`). The regs
+    /// block is resolved first (so the exact register window always maps
+    /// identity), and a request that lands in the outbound window but
+    /// *overlaps* the regs island without being contained by it is
+    /// ambiguous and refused rather than mis-translated (`AGENTS.md` §5.4).
     #[must_use]
-    fn permits(&self, phys: u64, len: usize) -> bool {
-        let within = |base: u64, span: u64| -> bool {
-            let Some(region_end) = base.checked_add(span) else {
-                return false;
-            };
-            let Some(req_end) = phys.checked_add(len as u64) else {
-                return false;
-            };
-            phys >= base && req_end <= region_end
-        };
-        within(self.regs_base, self.regs_len) || within(self.outbound_base, self.outbound_len)
+    fn resolve_cpu(&self, phys: u64, len: usize) -> Option<u64> {
+        let req_end = phys.checked_add(len as u64)?;
+        let regs_end = self.regs_base.checked_add(self.regs_len)?;
+        if phys >= self.regs_base && req_end <= regs_end {
+            return Some(phys);
+        }
+        let outbound_end = self.outbound_pcie_base.checked_add(self.outbound_size)?;
+        if phys >= self.outbound_pcie_base && req_end <= outbound_end {
+            // Refuse a BAR window that straddles the numerically-overlapping
+            // controller-register island: its address space is ambiguous,
+            // so fail closed instead of translating it as a bus address.
+            if phys < regs_end && req_end > self.regs_base {
+                return None;
+            }
+            let offset = phys - self.outbound_pcie_base;
+            return self.outbound_cpu_base.checked_add(offset);
+        }
+        None
     }
 }
 
@@ -123,18 +163,24 @@ impl MmioMapper for IdentityMmioMapper {
         if !self.caps.contains(CapabilityId::MMIO_MAP) {
             return Err(MmioMapError::CapabilityMissing);
         }
-        if len == 0 || !self.permits(phys_base, len) {
+        if len == 0 {
             return Err(MmioMapError::InvalidRegion);
         }
-        let addr = usize::try_from(phys_base).map_err(|_| MmioMapError::InvalidRegion)?;
+        let cpu_base = self
+            .resolve_cpu(phys_base, len)
+            .ok_or(MmioMapError::InvalidRegion)?;
+        let addr = usize::try_from(cpu_base).map_err(|_| MmioMapError::InvalidRegion)?;
         let base = NonNull::new(addr as *mut u8).ok_or(MmioMapError::InvalidRegion)?;
-        // SAFETY: `permits` confirmed `[phys_base, phys_base+len)` lies
+        // SAFETY: `resolve_cpu` confirmed `[cpu_base, cpu_base+len)` lies
         // within a region the boot path identity-mapped as Device memory
-        // (the PCIe controller block or the outbound MMIO window), so the
-        // CPU-virtual address equals `phys_base` and the whole window is a
-        // valid, exclusively-owned MMIO mapping for the driver's lifetime
+        // (the PCIe controller block, or the outbound MMIO window a BAR's
+        // bus address was translated into), so the CPU-virtual address
+        // equals `cpu_base` and the whole window is a valid,
+        // exclusively-owned MMIO mapping for the driver's lifetime
         // (`AGENTS.md` §4 — reclaimed when the kernel tears the service
-        // down). No other live reference aliases device MMIO.
+        // down). The window records the device-visible base `phys_base`
+        // (what the controller's siblings program), not `cpu_base`. No
+        // other live reference aliases device MMIO.
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
     }
 }
@@ -143,14 +189,19 @@ impl MmioMapper for IdentityMmioMapper {
 /// kernel frame allocator, within the bridge's inbound aperture.
 ///
 /// The allocated block is identity-mapped RAM, so the CPU pointer is the
-/// frame's own physical address. The device-visible (PCIe-space) address is
-/// the frame's physical address translated through the bridge's inbound
-/// viewport (`inbound_pcie_base + (phys - inbound_cpu_base)`), and it is
-/// rejected unless it lies wholly below the inbound aperture top
-/// (`AGENTS.md` §5.4 — a device must never be handed an address outside the
-/// window the bridge grants it). The region is held for the controller's
-/// lifetime (a permanent device DMA mapping, `AGENTS.md` §4), so it is
-/// allocated once and never freed.
+/// frame's own physical address. That CPU-physical frame is rejected unless
+/// its whole span lies inside the bridge's inbound CPU window
+/// `[inbound_cpu_base, aperture_top)`; only then is it translated to the
+/// device-visible (PCIe-space) address the controller DMAs through
+/// (`inbound_pcie_base + (phys - inbound_cpu_base)`). The bound is checked
+/// in **CPU-physical** space, not on the translated device address: the
+/// inbound viewport offsets the device address far above the CPU window
+/// (the Pi 4 maps PCIe `[0x4_0000_0000, …)` onto CPU `[0, …)`), so a
+/// device-vs-CPU-top comparison would reject every valid carve
+/// (`AGENTS.md` §5.4 — fail closed, a device is never handed an address
+/// outside the window the bridge grants it). The region is held for the
+/// controller's lifetime (a permanent device DMA mapping, `AGENTS.md` §4),
+/// so it is allocated once and never freed.
 pub struct FrameDmaHost {
     caps: CapabilitySet,
     frames: &'static FrameAllocator,
@@ -162,7 +213,9 @@ pub struct FrameDmaHost {
 impl FrameDmaHost {
     /// Build a DMA host over the kernel frame allocator `frames`, with the
     /// bridge's inbound viewport (`inbound_cpu_base` → `inbound_pcie_base`)
-    /// and the exclusive aperture top `aperture_top`, under `caps`.
+    /// and the exclusive **CPU-physical** aperture top `aperture_top` (the
+    /// top of the inbound CPU window `[inbound_cpu_base, aperture_top)`),
+    /// under `caps`.
     #[must_use]
     pub fn new(
         caps: CapabilitySet,
@@ -182,23 +235,29 @@ impl FrameDmaHost {
 
     /// Translate a CPU-physical frame base into the device-visible
     /// (PCIe-space) address a device behind the bridge uses, rejecting any
-    /// address (or `size` span) that falls outside the inbound aperture
-    /// (`AGENTS.md` §5.4 — fail closed, never wrap).
+    /// frame whose CPU-physical span falls outside the bridge's inbound CPU
+    /// window `[inbound_cpu_base, aperture_top)` (`AGENTS.md` §5.4 — fail
+    /// closed, never wrap).
+    ///
+    /// The reachability bound is applied to the **CPU-physical** span
+    /// (`[phys, phys + size)`), not to the translated device address: the
+    /// inbound viewport lifts the device address into a PCIe-space window
+    /// (`inbound_pcie_base`) that sits far above the CPU window top, so
+    /// bounding the device address against the CPU top would reject every
+    /// valid carve (the boot-wedge-after-discovery defect this guards).
     fn device_addr(&self, phys: u64, size: usize) -> Result<u64, DriverError> {
         let offset = phys
             .checked_sub(self.inbound_cpu_base)
             .ok_or(DriverError::OutOfRange)?;
-        let device = self
-            .inbound_pcie_base
-            .checked_add(offset)
-            .ok_or(DriverError::OutOfRange)?;
-        let end = device
+        let cpu_end = phys
             .checked_add(size as u64)
             .ok_or(DriverError::OutOfRange)?;
-        if end > self.aperture_top {
+        if cpu_end > self.aperture_top {
             return Err(DriverError::OutOfRange);
         }
-        Ok(device)
+        self.inbound_pcie_base
+            .checked_add(offset)
+            .ok_or(DriverError::OutOfRange)
     }
 }
 
@@ -256,13 +315,24 @@ mod metal {
 
     use rustos_arch_aarch64::kernel_arch::busy_delay_us;
     use rustos_arch_aarch64::platform::PcieDiscovery;
+    use rustos_arch_aarch64::SERIAL_SINK;
     use rustos_drv_bus_pcie_brcm::{Delay, PcieWindows};
     use rustos_drv_input_usb_hid::{pump_once, KeyboardConsole};
     use rustos_kernel_core::{InitSpawnCtx, YieldHandle};
+    use rustos_log::{log, Event, EventId, Level};
     use rustos_sync::SpinLock;
 
     use crate::arch_wrapper_aarch64::INPUT_FOCUS;
     use crate::usb_keyboard::{bring_up_keyboard, ArbiterConsoleSink, ChainHost, PcieBringup};
+
+    /// Audit event: the USB-keyboard service kthread's lifecycle (started,
+    /// or skipped because a prerequisite was absent). Logged once at the
+    /// PID 1 spawn seam so a metal capture shows whether the service was
+    /// even admitted before its bring-up diagnostics
+    /// ([`crate::usb_keyboard`], ids `4101`/`4102`) run. Bin-crate id
+    /// alongside the boot pipeline; part of the audit contract
+    /// (`AGENTS.md` §5.4.4).
+    const KEYBOARD_SERVICE: EventId = EventId(4103);
 
     /// A [`Delay`] backed by the architectural physical counter
     /// (`CNTPCT_EL0`), for the BCM2711 PCIe link-training settle waits.
@@ -285,6 +355,13 @@ mod metal {
 
     /// Record the PCIe windows the boot path discovered, for the init seam
     /// to consume. Called once on the boot CPU (`boot_aarch64`).
+    ///
+    /// MUST be called **after** the MMU is enabled: the `SpinLock` below
+    /// uses an exclusive `compare_exchange` (an atomic read-modify-write),
+    /// which is UNPREDICTABLE on the MMU-off Device-typed memory the boot
+    /// CPU runs on (`plans/PI.md` P6c-2). The windows are read pre-MMU (a
+    /// `Copy` value) but recording them is deferred until translation is
+    /// live so this store never wedges the boot.
     pub fn record_discovery(discovery: PcieDiscovery) {
         *DISCOVERED.lock() = Some(discovery);
     }
@@ -308,10 +385,25 @@ mod metal {
     /// (`AGENTS.md` §4).
     #[must_use]
     pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
+        // No discovered bridge is the QEMU `virt` shape, not an error: stay
+        // silent and start nothing (`AGENTS.md` §18.4).
         let Some(discovery) = *DISCOVERED.lock() else {
             return false;
         };
+        // A discovered bridge with no `'static` frame allocator *is* a
+        // surprise worth logging: the keyboard cannot be brought up, so the
+        // video login parks with no keyboard. Fail closed and say why
+        // (`AGENTS.md` §2.9).
         let Some(frames) = ctx.static_frames() else {
+            log(
+                &SERIAL_SINK,
+                &Event {
+                    level: Level::Error,
+                    id: KEYBOARD_SERVICE,
+                    message: "usb-keyboard service not started: no kernel frame allocator",
+                    fields: &[],
+                },
+            );
             return false;
         };
 
@@ -321,6 +413,7 @@ mod metal {
             discovery.regs_phys,
             discovery.regs_len,
             discovery.outbound_cpu_base,
+            discovery.outbound_pcie_base,
             discovery.outbound_size,
         )));
         let inbound_cpu_base = discovery
@@ -342,7 +435,6 @@ mod metal {
                 outbound_pcie_base: discovery.outbound_pcie_base,
                 outbound_size: discovery.outbound_size,
             },
-            dma_aperture_top: discovery.dma_aperture_top,
         };
 
         let body = move |yielder: &mut dyn YieldHandle| {
@@ -351,8 +443,10 @@ mod metal {
             // Bring the VL805 up once. A failure (no link, no device, a
             // refused map) ends the service fail-closed: the video login
             // parks with no keyboard rather than the kernel hanging
-            // (`AGENTS.md` §2.9). The chain logs its own progress.
-            let mut keyboard = match bring_up_keyboard(&host, &bringup, &delay) {
+            // (`AGENTS.md` §2.9). The chain logs its own staged progress
+            // (pcie link, xhci, enumeration) to the serial sink, so a metal
+            // capture pins which stage a silent keyboard stalled at.
+            let mut keyboard = match bring_up_keyboard(&host, &bringup, &delay, &SERIAL_SINK) {
                 Ok(keyboard) => keyboard,
                 Err(_) => return,
             };
@@ -368,7 +462,21 @@ mod metal {
             }
         };
 
-        ctx.spawn_kernel_service(Box::new(body))
+        let started = ctx.spawn_kernel_service(Box::new(body));
+        log(
+            &SERIAL_SINK,
+            &Event {
+                level: if started { Level::Info } else { Level::Error },
+                id: KEYBOARD_SERVICE,
+                message: if started {
+                    "usb-keyboard service kthread admitted (bring-up runs on first dispatch)"
+                } else {
+                    "usb-keyboard service kthread could not be admitted"
+                },
+                fields: &[],
+            },
+        );
+        started
     }
 }
 
@@ -387,15 +495,24 @@ mod tests {
     /// The Pi 4 discovered windows (mirroring the `usb_keyboard` and
     /// `platform::pcie_bringup` fixtures): controller regs at
     /// `0xfd50_0000` (len `0x9310`), inbound aperture top `0xc000_0000`,
-    /// outbound MMIO window CPU `0x6_0000_0000` size `1 GiB`.
+    /// outbound MMIO window mapping CPU `0x6_0000_0000` onto PCIe-bus
+    /// `0xc000_0000`, size `1 GiB`.
     const REGS_BASE: u64 = 0xfd50_0000;
     const REGS_LEN: u64 = 0x9310;
-    const OUTBOUND_BASE: u64 = 0x6_0000_0000;
-    const OUTBOUND_LEN: u64 = 0x4000_0000;
+    const OUTBOUND_CPU_BASE: u64 = 0x6_0000_0000;
+    const OUTBOUND_PCIE_BASE: u64 = 0xc000_0000;
+    const OUTBOUND_SIZE: u64 = 0x4000_0000;
     const APERTURE_TOP: u64 = 0xc000_0000;
 
     fn mapper(caps: CapabilitySet) -> IdentityMmioMapper {
-        IdentityMmioMapper::new(caps, REGS_BASE, REGS_LEN, OUTBOUND_BASE, OUTBOUND_LEN)
+        IdentityMmioMapper::new(
+            caps,
+            REGS_BASE,
+            REGS_LEN,
+            OUTBOUND_CPU_BASE,
+            OUTBOUND_PCIE_BASE,
+            OUTBOUND_SIZE,
+        )
     }
 
     fn with_caps(ids: &[CapabilityId]) -> CapabilitySet {
@@ -418,9 +535,17 @@ mod tests {
     #[test]
     fn mapper_admits_only_the_two_discovered_windows() {
         let m = mapper(with_caps(&[CapabilityId::MMIO_MAP]));
-        // Inside the controller register block and the outbound window.
-        assert!(m.map_window(REGS_BASE, 0x1000).is_ok());
-        assert!(m.map_window(OUTBOUND_BASE + 0x1_0000, 0x1000).is_ok());
+        // The controller register block is CPU-physical and maps identity.
+        let regs = m.map_window(REGS_BASE, 0x1000).expect("regs block");
+        assert_eq!(regs.phys_base(), REGS_BASE);
+        // A BAR inside the outbound *PCIe-bus* window is admitted (it is
+        // translated to its CPU address below); the CPU base `0x6_…` is
+        // *not* itself a valid request — only the bus address is.
+        assert!(m.map_window(OUTBOUND_PCIE_BASE + 0x1_0000, 0x1000).is_ok());
+        assert_eq!(
+            m.map_window(OUTBOUND_CPU_BASE, 0x1000).err(),
+            Some(MmioMapError::InvalidRegion)
+        );
         // Zero length, a window straddling the end of a region, an
         // out-of-range base, and an overflowing span all fail closed.
         assert_eq!(
@@ -437,8 +562,44 @@ mod tests {
             Some(MmioMapError::InvalidRegion)
         );
         assert_eq!(
-            m.map_window(OUTBOUND_BASE, usize::MAX).err(),
+            m.map_window(OUTBOUND_PCIE_BASE, usize::MAX).err(),
             Some(MmioMapError::InvalidRegion)
+        );
+    }
+
+    #[test]
+    fn mapper_translates_a_bar_through_the_outbound_viewport() {
+        // The boot-wedge-after-discovery defect: the VL805's BAR base read
+        // from PCIe config space is a *bus* address inside the outbound
+        // PCIe window (firmware assigns it ≈ `0xc000_0000`), not a CPU
+        // address. The mapper must apply the bridge's outbound `ranges`
+        // translation (`outbound_cpu_base + (bus - outbound_pcie_base)`)
+        // and open the window over the identity-mapped CPU address — the
+        // old mapper compared the bus address against the CPU window and
+        // rejected every valid BAR with `InvalidRegion` (→ `LengthOutOfRange`).
+        let m = mapper(with_caps(&[CapabilityId::MMIO_MAP]));
+        // A BAR at the bus base maps to the CPU base.
+        let at_base = m.map_window(OUTBOUND_PCIE_BASE, 0x1000).expect("bus base");
+        // The window records the device-visible (bus) base it was asked for.
+        assert_eq!(at_base.phys_base(), OUTBOUND_PCIE_BASE);
+        assert_eq!(
+            m.resolve_cpu(OUTBOUND_PCIE_BASE, 0x1000),
+            Some(OUTBOUND_CPU_BASE)
+        );
+        // A BAR offset into the window translates by the same offset.
+        assert_eq!(
+            m.resolve_cpu(OUTBOUND_PCIE_BASE + 0x12_3000, 0x1000),
+            Some(OUTBOUND_CPU_BASE + 0x12_3000)
+        );
+        // The last admissible byte (a window flush against the top) still
+        // resolves; one byte past the top fails closed.
+        assert_eq!(
+            m.resolve_cpu(OUTBOUND_PCIE_BASE + OUTBOUND_SIZE - 0x1000, 0x1000),
+            Some(OUTBOUND_CPU_BASE + OUTBOUND_SIZE - 0x1000)
+        );
+        assert_eq!(
+            m.resolve_cpu(OUTBOUND_PCIE_BASE + OUTBOUND_SIZE - 0x800, 0x1000),
+            None
         );
     }
 
@@ -513,6 +674,38 @@ mod tests {
         );
         assert_eq!(
             shifted.device_addr(0x1000, 0x1000),
+            Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn dma_host_admits_a_low_frame_through_a_high_pcie_viewport() {
+        // The real Pi 4 shape (the boot-wedge-after-discovery defect): the
+        // inbound viewport lifts CPU `[0, 0x2_0000_0000)` onto PCIe
+        // `[0x4_0000_0000, 0x6_0000_0000)`, so the device-visible address of
+        // any RAM frame is far *above* the CPU-physical aperture top. A
+        // low-RAM frame must still be admitted — bounding the device address
+        // against the CPU top (the old bug) rejected every valid carve and
+        // failed the xHCI bring-up with `OutOfRange`.
+        const PI4_PCIE_BASE: u64 = 0x4_0000_0000;
+        const PI4_CPU_TOP: u64 = 0x2_0000_0000;
+        let host = FrameDmaHost::new(
+            with_caps(&[CapabilityId::MEM_DMA]),
+            frame_allocator(),
+            0,
+            PI4_PCIE_BASE,
+            PI4_CPU_TOP,
+        );
+        // A frame in low RAM translates to a device address above the CPU
+        // top yet inside the inbound window — accepted.
+        assert_eq!(
+            host.device_addr(0x3000_0000, 0x4000),
+            Ok(PI4_PCIE_BASE + 0x3000_0000)
+        );
+        // A frame whose CPU span overruns the CPU aperture top is still
+        // rejected, fail-closed.
+        assert_eq!(
+            host.device_addr(PI4_CPU_TOP - 0x800, 0x1000),
             Err(DriverError::OutOfRange)
         );
     }

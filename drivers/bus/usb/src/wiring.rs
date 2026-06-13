@@ -68,11 +68,17 @@ const MAX_ENUMERATION: usize = 32;
 ///
 /// `bus` is the PCI bus driver built over the discovered ECAM-access
 /// window (`rustos_drv_bus_pci::mechanism_ecam`). `dma_aperture_top` is
-/// the *exclusive* upper bound of the CPU-physical window the bridge
-/// lets devices behind it reach (the `dma-ranges` aperture the
-/// hardware tree discovered, `AGENTS.md` §18.1): the carved DMA region
-/// must lie entirely below it or the controller could not reach its
-/// own rings.
+/// the *exclusive* upper bound, in the **device-visible** (PCIe-space)
+/// address space, of the inbound window the bridge lets devices behind
+/// it reach (`inbound_pcie_base + inbound_size`, derived from the
+/// `dma-ranges` aperture the hardware tree discovered, `AGENTS.md`
+/// §18.1): the carved region's device-visible address
+/// ([`DmaSlab::phys`](rustos_abi::driver::dma::DmaSlab::phys), the
+/// address the controller's DMA descriptors carry) must lie entirely
+/// below it or the controller could not reach its own rings. It is
+/// **not** the CPU-physical aperture top — on the Pi 4 the inbound
+/// viewport lifts the device address far above the CPU window
+/// (`AGENTS.md` §5.4 — the bound must match the address space it guards).
 ///
 /// On success the returned [`UsbDevice`] owns the mapped register
 /// window and DMA region with the controller halted, reset, and
