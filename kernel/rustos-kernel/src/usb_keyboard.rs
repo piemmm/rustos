@@ -13,8 +13,11 @@
 //!    windowed config accessor built on the same register window;
 //! 3. [`rustos_drv_bus_usb`] maps the controller's BAR, carves its
 //!    device-shared DMA region, and brings the xHCI controller up; and
-//! 4. [`rustos_drv_input_usb_hid`] decodes the boot keyboard's reports and
-//!    turns each key into the console (tty) bytes a terminal sends.
+//! 4. [`rustos_drv_input_usb_hid`] decodes the boot keyboard's reports into
+//!    device-resolved [`KeyInput`] key-edge records and hands each to the
+//!    kernel input-focus arbiter (via [`ArbiterConsoleSink`]), which decides
+//!    by who holds focus whether to encode a press to the text console's tty
+//!    bytes or deliver the whole record to the desktop (`AGENTS.md` §17.4).
 //!
 //! Each of those crates is a separate driver and may not name another
 //! (`AGENTS.md` §17.4 — `deps-check` forbids driver→driver edges). The
