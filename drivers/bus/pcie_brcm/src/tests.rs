@@ -309,3 +309,17 @@ fn open_discovered_reaches_the_root_port_check_over_an_inert_window() {
         Some(DriverError::DeviceFault)
     );
 }
+
+#[test]
+fn bind_table_matches_the_pi4_pcie_node() {
+    use rustos_abi::HwMatchKey;
+    // Exactly one key: the BCM2711 PCIe root-complex `compatible`, at the
+    // declared priority. It matches a discovered node carrying that key
+    // and nothing else (e.g. the EMMC2 node).
+    assert_eq!(BIND_KEYS.len(), 1);
+    assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
+    let pcie = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
+    assert!(BIND_KEYS[0].key.matches(&pcie));
+    let emmc = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits");
+    assert!(!BIND_KEYS[0].key.matches(&emmc));
+}

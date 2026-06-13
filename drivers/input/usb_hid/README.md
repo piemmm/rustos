@@ -54,6 +54,17 @@ poll the keyboard, feed each event, and inject the bytes through a
 the video console's index (`plans/PI.md` P11), host-tested with a
 recording sink. Key repeat remains a higher-layer concern.
 
+## Autoload bind table
+
+`BIND_KEYS` declares two class-wildcard entries — an HID **boot
+keyboard** (`0x030101`) and an HID **boot mouse** (`0x030102`), each
+binding any vendor/product at that class (`HwMatchKey::matches`) — so any
+HID boot device enumerated behind a USB host autoloads this driver
+without its device id being hard-coded (`AGENTS.md` §2.2 / §18.3). It is
+the single source of truth a signed-manifest bind table is authored from;
+`devmgr` resolves the discovered HID node against it once the USB
+enumeration emits that node into the tree (`PLAN.md` Stage 4.HW item 5).
+
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.

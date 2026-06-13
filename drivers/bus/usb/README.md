@@ -57,6 +57,17 @@ metal acceptance item. QEMU models no Pi USB timing, so the emulation
 artefact is the host test suite and metal acceptance stays a checklist
 (`plans/PI.md` §0.4 watch-out).
 
+## Autoload bind table
+
+`BIND_KEYS` (one entry) declares this driver binds **any** xHCI host by
+PCI class alone — class `0x0C0330` with a vendor/device wildcard
+(`HwMatchKey::matches`), so the Pi 4's VL805 and any other xHCI
+controller autoload it without the device id being hard-coded
+(`AGENTS.md` §2.2 / §18.3). It is the single source of truth a
+signed-manifest bind table is authored from; `devmgr` resolves the
+discovered VL805 node against it once the bus enumeration emits that
+node into the tree (`PLAN.md` Stage 4.HW item 5).
+
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.

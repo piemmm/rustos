@@ -1319,3 +1319,20 @@ fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
     assert_eq!(events[1].value, 1);
     assert_eq!(keyboard.poll(&mut events), Ok(0));
 }
+
+#[test]
+fn bind_table_class_matches_any_xhci_controller() {
+    use rustos_abi::HwMatchKey;
+    // One class-wildcard key: the VL805 (and any other xHCI host) binds
+    // by class alone, whatever its vendor/device id.
+    assert_eq!(BIND_KEYS.len(), 1);
+    assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
+    let vl805 = HwMatchKey::pci(0x1106, 0x3483, XHCI_PCI_CLASS);
+    let other = HwMatchKey::pci(0x8086, 0x1111, XHCI_PCI_CLASS);
+    assert!(BIND_KEYS[0].key.matches(&vl805));
+    assert!(BIND_KEYS[0].key.matches(&other));
+    // A USB controller of a different prog-if (EHCI, `0x0C0320`) is not
+    // an xHCI host and must not bind.
+    let ehci = HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_20);
+    assert!(!BIND_KEYS[0].key.matches(&ehci));
+}

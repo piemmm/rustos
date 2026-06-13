@@ -29,10 +29,27 @@ The table is covered by the manifest signature and validated
 fail-closed at the load gate, so a malformed entry never reaches the
 matcher.
 
-A bind-table entry matches a node when its `HwMatchKey` equals one of
-the node's match keys — same kind, and for `Compatible` keys the same
-string, for numeric keys the same vendor/product/class triple. The
-resolution across drivers is deterministic (`AGENTS.md` §18.3):
+A bind-table entry matches a node when its `HwMatchKey` matches one of
+the node's match keys (`HwMatchKey::matches`) — same kind first, then:
+
+* a `Compatible` key matches byte-for-byte;
+* a `Virtio` key matches on device id;
+* a `Pci` / `Usb` key matches on the class code, and on each of
+  `vendor` / `product` either *exactly* or as a **wildcard** when the
+  **bind** key leaves that field `0` — so a generic class driver (an
+  xHCI host, an HID boot keyboard) binds without hard-coding a device
+  id, while a vendor-specific driver still names an exact id and, with a
+  higher `priority`, outranks the generic one. Widening is only ever
+  requested by the bind key (which is signed); a discovered node can
+  never force a broader match (fail closed, `AGENTS.md` §5.4).
+
+Drivers declare their canonical bind tables as a `pub const BIND_KEYS`
+in the driver crate (e.g. `rustos_drv_bus_pcie_brcm::BIND_KEYS`,
+`rustos_drv_bus_usb::BIND_KEYS`, `rustos_drv_input_usb_hid::BIND_KEYS`) —
+the single source of truth the signed-manifest bind table is authored
+from (`AGENTS.md` §18.3).
+
+The resolution across drivers is deterministic (`AGENTS.md` §18.3):
 
 * the candidate holding the **strictly highest** matched priority
   binds the node;
@@ -120,4 +137,11 @@ discovery](../platform/aarch64.md#platform-discovery-hardware-tree)).
 
 ## Remaining Stage 4.HW work
 
-The hotplug/removal runtime path is tracked in `PLAN.md` Stage 4.HW.
+The hotplug/removal runtime path, the runtime attachment of
+bus-enumerated children (the VL805 and its HID device) into the tree,
+and the production driver-candidate catalogue that feeds
+`DeviceManager::autoload` at boot are tracked in `PLAN.md` Stage 4.HW.
+The Pi-4 USB-keyboard chain's bind tables already live in the driver
+crates (above); migrating the chain off the `kernel/rustos-kernel`
+composition scaffold onto this autoload path is the remaining work of
+Stage 4.HW item 5.

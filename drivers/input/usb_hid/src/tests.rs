@@ -362,3 +362,20 @@ fn unload_then_reload_decodes_again() {
     assert_eq!(kbd.poll(&mut out), Ok(1));
     assert_eq!(out[0], key(0x05, 1));
 }
+
+#[test]
+fn bind_table_class_matches_any_hid_boot_device() {
+    use rustos_abi::HwMatchKey;
+    // Two class-wildcard keys: an HID boot keyboard and an HID boot
+    // mouse, each binding any vendor/product at that class.
+    assert_eq!(BIND_KEYS.len(), 2);
+    assert!(BIND_KEYS.iter().all(|k| k.priority == BIND_PRIORITY));
+    let kbd = HwMatchKey::usb(0x046D, 0xC52B, HID_BOOT_KEYBOARD_CLASS);
+    let mouse = HwMatchKey::usb(0x045E, 0x0040, HID_BOOT_MOUSE_CLASS);
+    assert!(BIND_KEYS.iter().any(|k| k.key.matches(&kbd)));
+    assert!(BIND_KEYS.iter().any(|k| k.key.matches(&mouse)));
+    // A non-boot HID interface (report protocol, sub-class 0x00) does
+    // not match the boot-protocol bind table.
+    let report_kbd = HwMatchKey::usb(0x046D, 0xC52B, 0x03_00_01);
+    assert!(!BIND_KEYS.iter().any(|k| k.key.matches(&report_kbd)));
+}

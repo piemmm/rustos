@@ -68,7 +68,7 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::input::{InputEvent, InputEventKind};
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 
 pub mod console;
 pub mod keyboard;
@@ -96,6 +96,40 @@ pub const AXIS_X: u16 = 0;
 /// `code` value for the Y axis in the platform-neutral pointer /
 /// scroll encoding.
 pub const AXIS_Y: u16 = 1;
+
+/// The 24-bit USB class code of an HID **boot keyboard** interface:
+/// class `0x03` (HID), sub-class `0x01` (boot), protocol `0x01`
+/// (keyboard) — see [`HwMatchKey::usb`].
+const HID_BOOT_KEYBOARD_CLASS: u32 = 0x03_01_01;
+
+/// The 24-bit USB class code of an HID **boot mouse** interface:
+/// class `0x03` (HID), sub-class `0x01` (boot), protocol `0x02` (mouse).
+const HID_BOOT_MOUSE_CLASS: u32 = 0x03_01_02;
+
+/// The §18.3 bind priority [`BIND_KEYS`] carries.
+///
+/// This driver binds the HID boot classes regardless of vendor/product
+/// (the wildcard match of [`HwMatchKey::matches`]), so it ranks below a
+/// vendor-specific HID driver naming an exact device id, per §18.3.
+const BIND_PRIORITY: u16 = 5;
+
+/// This driver's hardware bind table (`AGENTS.md` §18.3).
+///
+/// It binds any HID **boot-protocol** keyboard or mouse interface by
+/// class alone (vendor/product wildcard), so any such device enumerated
+/// behind a USB host autoloads this driver without its device id being
+/// hard-coded (`AGENTS.md` §2.2 / §18.3). This `const` is the single
+/// source of truth the driver's signed-manifest bind table is authored
+/// from and the data `devmgr` resolves a discovered HID node against once
+/// the USB enumeration emits it into the hardware tree (PLAN Stage 4.HW
+/// increment 5).
+pub const BIND_KEYS: &[DriverBindKey] = &[
+    DriverBindKey::new(
+        BIND_PRIORITY,
+        HwMatchKey::usb(0, 0, HID_BOOT_KEYBOARD_CLASS),
+    ),
+    DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, HID_BOOT_MOUSE_CLASS)),
+];
 
 /// Byte length of the report buffer a [`poll`](rustos_abi::driver::input::Input::poll)
 /// hands to [`ReportSource::next_report`].

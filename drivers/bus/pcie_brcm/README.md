@@ -66,6 +66,14 @@ window the root complex is also programmed with is passed in `PcieWindows`
 by the composition (its discovery into the hardware tree is a follow-up,
 tracked in `plans/PI.md`).
 
+## Autoload bind table
+
+`BIND_KEYS` (one entry) declares this driver binds the `brcm,bcm2711-pcie`
+device-tree `compatible` (`AGENTS.md` §18.3) — the single source of truth a
+signed-manifest bind table is authored from, and the data `devmgr`
+resolves the discovered PCIe-bridge node against (`PLAN.md` Stage 4.HW
+item 5).
+
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.

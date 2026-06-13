@@ -40,7 +40,9 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, RegisterWindow};
+use rustos_abi::{
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+};
 
 pub mod device;
 pub mod regs;
@@ -70,6 +72,35 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// Highest doorbell target value (§5.6: endpoint IDs 1..=31 for device
 /// doorbells; 0 is the command-ring target on doorbell 0).
 const DOORBELL_TARGET_MAX: u32 = 31;
+
+/// The 24-bit PCI class code of an xHCI USB host controller:
+/// base class `0x0C` (serial bus), sub-class `0x03` (USB), prog-if
+/// `0x30` (xHCI) — the prog-if is what distinguishes xHCI from the older
+/// OHCI/UHCI/EHCI host classes, so it must be part of the bind key.
+const XHCI_PCI_CLASS: u32 = 0x0C_03_30;
+
+/// The §18.3 bind priority [`BIND_KEYS`] carries.
+///
+/// This driver binds *any* xHCI controller by class alone (vendor/device
+/// wildcard, see [`HwMatchKey::matches`]), so it ranks below a
+/// vendor-specific driver that names an exact device id, per §18.3.
+const BIND_PRIORITY: u16 = 5;
+
+/// This driver's hardware bind table (`AGENTS.md` §18.3).
+///
+/// A generic xHCI host driver: it binds any PCI function of the xHCI
+/// class `0x0C_03_30` (`XHCI_PCI_CLASS`) regardless of vendor/device (the
+/// wildcard match of [`HwMatchKey::matches`]), so the Pi 4's VL805 — and any other xHCI
+/// controller — autoloads it without the device id being hard-coded
+/// (`AGENTS.md` §2.2 / §18.3). This `const` is the single source of truth
+/// the driver's signed-manifest bind table is authored from and the data
+/// `devmgr` resolves a discovered VL805 node against once the bus-driver
+/// enumeration emits it into the hardware tree (PLAN Stage 4.HW
+/// increment 5).
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    BIND_PRIORITY,
+    HwMatchKey::pci(0, 0, XHCI_PCI_CLASS),
+)];
 
 /// Driver entry point (`AGENTS.md` §8).
 ///

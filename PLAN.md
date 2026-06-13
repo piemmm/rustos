@@ -553,24 +553,46 @@ order (one fully-gated increment each):
    `docs/src/platform/aarch64.md`,
    `docs/src/drivers/hardware-detection.md`.
 5. **Migrate the Pi USB-keyboard bring-up chain onto autoload; delete the
-   in-kernel composition module — next priority.** The
+   in-kernel composition module — in progress.** The
    `kernel/rustos-kernel::usb_keyboard` module is a P10 in-kernel bring-up
    *scaffold*: the one place §17.4 lets the image binary name the four
    driver crates of the Pi 4 chain (`pcie_brcm` → `pci::mechanism_brcm`
    → `bus_usb` → `input_usb_hid`). It does not scale — answering "more
    boards" by hand-writing one composition module per board is the
    §2.2/§2.3 sprawl this stage exists to prevent. The steady state is the
-   data-driven §18 path increments 1–4 already deliver: the
-   `brcm,bcm2711-pcie` / VL805 / HID nodes are discovered into the
-   `hwtree`, and `devmgr` autoloads the matching drivers against their
-   signed bind tables, so adding a board becomes match **data**, not a new
-   composition module. When that generic path drives the USB-keyboard
-   chain, **delete** `usb_keyboard.rs` (§2.14) and update §3 / this stage.
-   This rides the still-open DriverSpawner-over-IPC gap (increment 1) — the
-   keyboard's long-term home is a `devmgr`-autoloaded userland keyboard
-   *service*, since the report pump is continuous. Do this immediately
-   after the current `plans/PI.md` P11 input-focus-arbiter work, before
-   further per-board glue accretes.
+   data-driven §18 path: every chain node is discovered into the `hwtree`
+   and `devmgr` autoloads the matching driver against its signed bind
+   table, so adding a board becomes match **data**, not a new composition
+   module. Staged sub-increments (one fully-gated landing each):
+   - **5a — driver-declared bind tables + class-wildcard matching — done.**
+     Each chain driver crate owns its canonical bind table as a
+     `pub const BIND_KEYS` (`rustos_drv_bus_pcie_brcm` → compatible
+     `brcm,bcm2711-pcie`; `rustos_drv_bus_usb` → xHCI PCI class
+     `0x0C0330`, vendor/device wildcard; `rustos_drv_input_usb_hid` → HID
+     boot keyboard `0x030101` + mouse `0x030102`, vendor/product wildcard)
+     — the single source of truth a signed manifest's bind table is
+     authored from (§18.3). `HwMatchKey`'s constructors are now `const`
+     (so a bind table is a `const`), and `HwMatchKey::matches` adds the
+     PCI/USB class-with-optional-vendor/device wildcard the matcher
+     (`rustos_devmgr`) resolves against, so a generic class driver binds
+     without hard-coding a device id while a vendor-specific driver still
+     outranks it by priority. abi-v1 unfrozen: no `#[repr(C)]` layout
+     changed, so no C-header drift. Docs:
+     `docs/src/drivers/hardware-detection.md`.
+   - **5b — runtime hardware-tree child attachment.** Let the bus drivers
+     (`pci` enumerate, `bus_usb` enumerate) emit their enumerated children
+     (the VL805 under the PCIe bridge; the HID device under the VL805) as
+     `HwNode`s parented into a growable tree, so the downstream chain nodes
+     exist for matching (§18.2). Host-provable.
+   - **5c — production driver-candidate catalogue + `devmgr` autoload
+     wiring** over the static + runtime tree, driving the chain through the
+     driver-host load gate. Rides the still-open DriverSpawner-over-IPC gap
+     (increment 1 — the `DriverHost` DMA/MMIO surface reachable over IPC).
+   - **5d — userland keyboard service** hosting the continuous report
+     pump, autoloaded by `devmgr`, feeding the input-focus arbiter via
+     `key_inject`.
+   - **5e — delete `usb_keyboard.rs`** (§2.14) and update §3 / this stage
+     once the generic path drives the chain end to end.
 
 ---
 

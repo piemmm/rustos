@@ -47,7 +47,9 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, RegisterWindow};
+use rustos_abi::{
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+};
 
 pub mod regs;
 pub mod wiring;
@@ -71,6 +73,37 @@ pub const DEFAULT_LINK_POLLS: u32 = 20;
 
 /// Microseconds between link-up polls (5 ms).
 const LINK_POLL_INTERVAL_US: u32 = 5_000;
+
+/// The §18.3 bind priority [`BIND_KEYS`] carries.
+///
+/// An exact `compatible`-string match is highly specific (one device
+/// family), so it ranks above a generic class-wildcard driver (e.g. the
+/// xHCI host bound by class alone, `rustos_drv_bus_usb::BIND_KEYS`) should
+/// they ever contend for one node — they do not here, but the ordering is
+/// the deliberate §18.3 contract.
+const BIND_PRIORITY: u16 = 10;
+
+/// This driver's hardware bind table (`AGENTS.md` §18.3).
+///
+/// It binds the BCM2711 PCIe root complex, matched by its device-tree
+/// `compatible` string `brcm,bcm2711-pcie` — the node
+/// `kernel/arch/aarch64::platform` discovers on a Raspberry Pi 4
+/// (`plans/PI.md` P10). This `const` is the single source of truth the
+/// driver's signed-manifest bind table is authored from, and the data
+/// `devmgr` resolves a discovered node against (PLAN Stage 4.HW
+/// increment 5); the driver declares its own match data rather than the
+/// match being hard-coded in a per-board composition module (`AGENTS.md`
+/// §2.2 / §18.3).
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    BIND_PRIORITY,
+    match HwMatchKey::compatible(b"brcm,bcm2711-pcie") {
+        Ok(key) => key,
+        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
+        // too-long literal would be a compile-time const-eval error here,
+        // never a runtime panic (`AGENTS.md` §2.9).
+        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+    },
+)];
 
 /// Low 32 bits of a 64-bit address, as a `u32`.
 #[must_use]

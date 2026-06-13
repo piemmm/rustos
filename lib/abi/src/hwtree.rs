@@ -182,17 +182,30 @@ impl HwMatchKey {
 
     /// A `compatible`-string match key (device tree or platform MMIO).
     ///
+    /// `const`, so a driver can declare its bind table as a `const`
+    /// (`AGENTS.md` §18.3): an over-long literal is then a *compile-time*
+    /// error in const context, never a runtime panic (`AGENTS.md` §2.9).
+    ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] if `compatible` exceeds
     /// [`HW_COMPATIBLE_MAX`]; the string is never truncated.
-    pub fn compatible(compatible: &[u8]) -> Result<Self, Errno> {
+    pub const fn compatible(compatible: &[u8]) -> Result<Self, Errno> {
         if compatible.len() > HW_COMPATIBLE_MAX {
             return Err(Errno::LengthOutOfRange);
         }
         let mut buf = [0u8; HW_COMPATIBLE_MAX];
-        buf[..compatible.len()].copy_from_slice(compatible);
-        let compatible_len = u8::try_from(compatible.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        // `copy_from_slice` / `u8::try_from` are not `const`; copy
+        // byte-wise and count into a `u8`. The loop runs at most
+        // `HW_COMPATIBLE_MAX` (64) times (bounded above), so `compatible_len`
+        // cannot overflow and no width-narrowing cast is needed.
+        let mut compatible_len: u8 = 0;
+        let mut i = 0;
+        while i < compatible.len() {
+            buf[i] = compatible[i];
+            i += 1;
+            compatible_len += 1;
+        }
         Ok(Self {
             kind: HwMatchKind::Compatible.as_u16(),
             compatible_len,
@@ -204,24 +217,35 @@ impl HwMatchKey {
     }
 
     /// A PCI `vendor:device:class` match key.
+    ///
+    /// `class` is the 24-bit PCI class code
+    /// `(base_class << 16) | (sub_class << 8) | prog_if` (e.g. an xHCI
+    /// USB host is `0x0C_03_30`). A zero `vendor` and/or `device` in a
+    /// *bind-table* key is a wildcard — see [`HwMatchKey::matches`].
     #[must_use]
-    pub fn pci(vendor: u16, device: u16, class: u32) -> Self {
+    pub const fn pci(vendor: u16, device: u16, class: u32) -> Self {
         Self::numeric(HwMatchKind::Pci, vendor, device, class)
     }
 
     /// A USB `vid:pid:class` match key.
+    ///
+    /// `class` is the 24-bit USB code
+    /// `(class << 16) | (sub_class << 8) | protocol` of the matched
+    /// (boot) interface (e.g. an HID boot keyboard is `0x03_01_01`, a
+    /// boot mouse `0x03_01_02`). A zero `vendor` and/or `product` in a
+    /// *bind-table* key is a wildcard — see [`HwMatchKey::matches`].
     #[must_use]
-    pub fn usb(vendor: u16, product: u16, class: u32) -> Self {
+    pub const fn usb(vendor: u16, product: u16, class: u32) -> Self {
         Self::numeric(HwMatchKind::Usb, vendor, product, class)
     }
 
     /// A virtio device-id match key.
     #[must_use]
-    pub fn virtio(device_id: u32) -> Self {
+    pub const fn virtio(device_id: u32) -> Self {
         Self::numeric(HwMatchKind::Virtio, 0, 0, device_id)
     }
 
-    fn numeric(kind: HwMatchKind, vendor: u16, product: u16, class: u32) -> Self {
+    const fn numeric(kind: HwMatchKind, vendor: u16, product: u16, class: u32) -> Self {
         Self {
             kind: kind.as_u16(),
             compatible_len: 0,
@@ -229,6 +253,45 @@ impl HwMatchKey {
             product,
             class,
             compatible: [0u8; HW_COMPATIBLE_MAX],
+        }
+    }
+
+    /// Does `self`, read as a driver **bind-table** key, match `device`,
+    /// a concrete key emitted on a discovered hardware-tree node
+    /// (`AGENTS.md` §18.3)?
+    ///
+    /// Equal kinds are required first. Then:
+    ///
+    /// * [`Compatible`](HwMatchKind::Compatible): the `compatible` bytes
+    ///   must be byte-for-byte equal.
+    /// * [`Pci`](HwMatchKind::Pci) / [`Usb`](HwMatchKind::Usb): the
+    ///   `class` codes must be equal, and each of `vendor` / `product`
+    ///   must either be `0` in the bind key (a **wildcard**, so a generic
+    ///   class driver — an xHCI host, an HID boot device — binds without
+    ///   hard-coding a vendor/device id) or equal the device's value.
+    /// * [`Virtio`](HwMatchKind::Virtio): the device ids (`class`) must
+    ///   be equal.
+    ///
+    /// Widening is only ever requested by the *bind* key (which comes
+    /// from a signed manifest, `AGENTS.md` §9); a discovered node can
+    /// never force a broader match. An unrecognised kind matches nothing
+    /// (fail closed, `AGENTS.md` §2.9 / §5.4).
+    #[must_use]
+    pub fn matches(&self, device: &HwMatchKey) -> bool {
+        let Some(kind) = self.kind() else {
+            return false;
+        };
+        if Some(kind) != device.kind() {
+            return false;
+        }
+        match kind {
+            HwMatchKind::Compatible => self.compatible_bytes() == device.compatible_bytes(),
+            HwMatchKind::Virtio => self.class == device.class,
+            HwMatchKind::Pci | HwMatchKind::Usb => {
+                self.class == device.class
+                    && (self.vendor == 0 || self.vendor == device.vendor)
+                    && (self.product == 0 || self.product == device.product)
+            }
         }
     }
 
@@ -845,6 +908,52 @@ mod tests {
         let mut bytes = HwMatchKey::pci(1, 2, 3).to_le_bytes();
         put_u16(&mut bytes, 0, 99);
         assert_eq!(HwMatchKey::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn bind_key_matches_exactly_and_by_wildcard() {
+        // A fully-specified PCI bind key matches only its exact device.
+        let exact = HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330);
+        let vl805 = HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330);
+        let other_vendor = HwMatchKey::pci(0x8086, 0x3483, 0x0C_0330);
+        assert!(exact.matches(&vl805));
+        assert!(!exact.matches(&other_vendor));
+
+        // A class-wildcard bind key (vendor/device 0) binds any xHCI host,
+        // whatever its vendor/device, but not a different class.
+        let any_xhci = HwMatchKey::pci(0, 0, 0x0C_0330);
+        assert!(any_xhci.matches(&vl805));
+        assert!(any_xhci.matches(&other_vendor));
+        assert!(!any_xhci.matches(&HwMatchKey::pci(0x1106, 0x3483, 0x0C_0300)));
+
+        // The wildcard is one-directional: a concrete *device* key never
+        // widens — a device advertising vendor 0 does not match a bind key
+        // demanding a specific vendor.
+        assert!(!exact.matches(&HwMatchKey::pci(0, 0, 0x0C_0330)));
+    }
+
+    #[test]
+    fn bind_key_match_respects_kind_and_compatible_bytes() {
+        // Different kinds never match, even with equal numeric payloads.
+        let pci = HwMatchKey::pci(0, 0, 7);
+        let usb = HwMatchKey::usb(0, 0, 7);
+        assert!(!pci.matches(&usb));
+        assert!(!usb.matches(&pci));
+
+        // Compatible keys match byte-for-byte only.
+        let a = HwMatchKey::compatible(b"brcm,bcm2711-pcie").unwrap();
+        let same = HwMatchKey::compatible(b"brcm,bcm2711-pcie").unwrap();
+        let diff = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").unwrap();
+        assert!(a.matches(&same));
+        assert!(!a.matches(&diff));
+
+        // Virtio keys match on device id; a USB HID boot pair is selected
+        // per-protocol.
+        assert!(HwMatchKey::virtio(2).matches(&HwMatchKey::virtio(2)));
+        assert!(!HwMatchKey::virtio(2).matches(&HwMatchKey::virtio(1)));
+        let kbd = HwMatchKey::usb(0, 0, 0x03_01_01);
+        assert!(kbd.matches(&HwMatchKey::usb(0x046D, 0xC52B, 0x03_01_01)));
+        assert!(!kbd.matches(&HwMatchKey::usb(0x046D, 0xC52B, 0x03_01_02)));
     }
 
     #[test]

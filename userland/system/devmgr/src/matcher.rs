@@ -3,8 +3,11 @@
 //! Matching is pure data comparison: a hardware-tree node carries the
 //! match keys its discoverer emitted ([`HwNode::match_keys`]), a driver
 //! candidate carries the bind table its signed manifest declared, and a
-//! bind-table entry matches a node when its [`HwMatchKey`] equals one of
-//! the node's keys. When several drivers match the same node the highest
+//! bind-table entry matches a node when its [`HwMatchKey`] matches one of
+//! the node's keys ([`HwMatchKey::matches`] — exact for `compatible`/virtio,
+//! and class-with-optional-vendor/device-wildcard for PCI/USB, so a generic
+//! class driver binds without hard-coding a device id). When several drivers
+//! match the same node the highest
 //! matched bind priority wins; an unbroken tie across *different*
 //! drivers is a packaging defect and the node is refused a binding —
 //! never a coin-flip (`AGENTS.md` §2.1, §18.3).
@@ -57,7 +60,7 @@ pub enum MatchResolution {
 pub fn best_bind_priority(node_keys: &[HwMatchKey], bind_keys: &[DriverBindKey]) -> Option<u16> {
     let mut best: Option<u16> = None;
     for bind in bind_keys {
-        if node_keys.contains(&bind.key) {
+        if node_keys.iter().any(|node| bind.key.matches(node)) {
             best = Some(match best {
                 Some(current) if current >= bind.priority => current,
                 _ => bind.priority,
@@ -161,6 +164,29 @@ mod tests {
                 priority: 1
             }
         );
+    }
+
+    #[test]
+    fn class_wildcard_candidate_binds_a_concrete_device() {
+        // A generic xHCI driver declares a class-wildcard bind key
+        // (vendor/device 0); a concrete VL805 node (vendor 0x1106, device
+        // 0x3483, class 0x0C0330) binds it, while a different-class node
+        // (an AHCI controller, class 0x010601) does not.
+        let xhci = [DriverBindKey::new(3, HwMatchKey::pci(0, 0, 0x0C_0330))];
+        let candidates = [DriverCandidate {
+            path: "/System/Drivers/bus_usb.rxe",
+            bind_keys: &xhci,
+        }];
+        let vl805 = [HwMatchKey::pci(0x1106, 0x3483, 0x0C_0330)];
+        assert_eq!(
+            resolve(&vl805, &candidates),
+            MatchResolution::Winner {
+                candidate: 0,
+                priority: 3
+            }
+        );
+        let ahci = [HwMatchKey::pci(0x8086, 0x2922, 0x01_0601)];
+        assert_eq!(resolve(&ahci, &candidates), MatchResolution::Unmatched);
     }
 
     #[test]
