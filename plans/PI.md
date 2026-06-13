@@ -2150,20 +2150,56 @@ BCM2711 root-complex bring-up over a mapped window and fails closed
 `DeviceFault` on the inert mock — the metal boundary), plus the usb
 `enumerate_first_connected_*` tests.
 
-**Remaining — the aarch64 boot-path invocation only:** call the engine
-from the production aarch64 boot path — discover the `brcm,bcm2711-pcie`
-node, assemble the concrete in-kernel `DriverHost` (a `KernelMmioMapper`
-+ per-driver DMA host, the aarch64 analogue of `run_with_driver_host`),
-supply a generic-timer-backed `pcie_brcm::Delay`, call
-`bring_up_keyboard`, and loop `usb_hid::pump_once` with a
-`QueueConsoleSink`. The architecturally-correct long-term home is a
-`devmgr`-autoloaded userland keyboard *service* (the pump is continuous,
-not a one-shot boot step); that rides the still-open DriverSpawner-over-
-IPC gap (Stage 4.HW increment 1). QEMU models no Pi USB (§0.4), so this
-carries a metal checklist, not a vertical. Then the DWC2 OTG path if
-needed; then the WM/taskbar/session on the HVS path and the on-metal
-acceptance (a real controller's BAR answering a plausible `CAPLENGTH`,
-and a USB keyboard driving the login).
+**Landed — the aarch64 boot-path invocation** (host-proven up to the
+metal boundary; the live bring-up is a metal-acceptance item, §0.4). The
+production aarch64 boot path now starts the chain as an **in-kernel
+keyboard service kthread**:
+
+- `kernel/arch/aarch64::platform::pcie_bringup` resolves the
+  `brcm,bcm2711-pcie` node's three windows (controller `reg`, inbound
+  `dma-ranges` aperture, outbound `ranges`) with a single early-returning
+  `scan_translated` walk, **pre-MMU-safe** (it reads only the matched
+  node's own properties, like the console/GIC/video walks); a tree with no
+  such node yields `None` (the `virt` shape, §18.4).
+- `boot_aarch64` runs it pre-MMU, folds the controller-register and
+  outbound-window gigapages into the identity **Device** mask
+  (`identity_device_mask`) so both are identity-mapped Device memory before
+  the MMU comes on, and stashes the discovery for the spawn seam
+  (`keyboard_service::record_discovery`).
+- `kernel/rustos-kernel::keyboard_service` supplies the concrete
+  `DriverHost` halves: an `IdentityMmioMapper` (capability-gated; admits a
+  window only inside the controller block or outbound window, returns a
+  `phys == virt` `RegisterWindow` — no live page-table edit, since the boot
+  path already mapped those gigapages, §5.4/§2.16) and a `FrameDmaHost`
+  (capability-gated; carves the 16 KiB xHCI region with
+  `FrameAllocator::alloc_order`, translates the frame to its device-visible
+  address through the inbound viewport, and rejects anything outside the
+  aperture, §5.4). A `GenericTimerDelay` over `kernel_arch::busy_delay_us`
+  (`CNTPCT_EL0`) drives the link-training settle waits.
+- The PID 1 spawn seam (`init_spawn`) calls
+  `keyboard_service::spawn_if_present(ctx)` **before** `admit_init` drives
+  the dispatch loop, so the service kthread is admitted onto the boot CPU's
+  run queue and runs alongside PID 1. The body runs `bring_up_keyboard`
+  once, then loops `usb_hid::pump_once` into the input-focus arbiter
+  (`ArbiterConsoleSink`), yielding between polls (§2.1). A bring-up failure
+  ends the service fail-closed (the video login parks with no keyboard,
+  §2.9); with no discovered bridge (the `virt` shape) nothing is started.
+- The seam is the new `kernel/core` `InitSpawnCtx::spawn_kernel_service`
+  (admits a `spawn_kthread` whose body drives an object-safe `YieldHandle`,
+  so it need not name the port's context-switch type) + `static_frames`
+  (the leaked `'static` allocator the DMA region is held from for the
+  driver's lifetime, §4).
+
+Host-proven: the `platform::pcie_bringup` decoder tests, the
+`keyboard_service` mapper/DMA host capability+bounds tests, and the
+kernel-core `spawn_kernel_service` admission test; the freestanding
+aarch64 kernel builds with the full wiring. **Remaining — metal only:** a
+real VL805 BAR answering a plausible `CAPLENGTH`, the link training, and a
+USB keyboard driving the video-console login (the §0.4 on-metal checklist).
+The architecturally-correct long-term home is still a `devmgr`-autoloaded
+userland keyboard *service* (rides the DriverSpawner-over-IPC gap, Stage
+4.HW increment 1); the in-kernel service is the interim. Then the DWC2 OTG
+path if needed; then the WM/taskbar/session on the HVS path.
 
 **Migrating the chain onto `hwtree` + `devmgr` autoload, then deleting the
 composition module — in progress (`PLAN.md` Stage 4.HW item 5).**

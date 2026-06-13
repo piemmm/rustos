@@ -369,6 +369,61 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
     }
 }
 
+/// Object-safe cooperative-yield handle handed to an in-kernel service
+/// body so it can suspend without naming the port's concrete
+/// [`ContextSwitch`] type.
+///
+/// [`Yielder`] is generic over the arch context-switch type `C`, which a
+/// type-erased [`InitSpawnCtx::spawn_kernel_service`](crate::InitSpawnCtx::spawn_kernel_service)
+/// boundary cannot spell (`AGENTS.md` §17.4). A service body is therefore
+/// written against `&mut dyn YieldHandle`; the core wraps the concrete
+/// [`Yielder`] in [`YielderHandle`] so the erasure is a thin delegating
+/// shim with exactly one yield definition (`AGENTS.md` §2.2).
+pub trait YieldHandle {
+    /// Cooperatively yield the CPU, resuming here on the next dispatch
+    /// (see [`Yielder::yield_now`]).
+    fn yield_now(&mut self);
+
+    /// Park until an external wake re-enqueues this task, then resume
+    /// here (see [`Yielder::park`]).
+    fn park(&mut self);
+}
+
+/// The [`YieldHandle`] adapter over a borrowed concrete [`Yielder`].
+///
+/// Constructed by the core when it drives a service body spawned through
+/// [`InitSpawnCtx::spawn_kernel_service`](crate::InitSpawnCtx::spawn_kernel_service),
+/// so the body sees an object-safe handle while the actual suspension goes
+/// through the one [`Yielder`] definition.
+pub struct YielderHandle<'a, C: ContextSwitch + Copy> {
+    yielder: &'a mut Yielder<C>,
+}
+
+impl<'a, C: ContextSwitch + Copy> YielderHandle<'a, C> {
+    /// Wrap a borrowed [`Yielder`] as an object-safe [`YieldHandle`].
+    #[must_use]
+    pub fn new(yielder: &'a mut Yielder<C>) -> Self {
+        Self { yielder }
+    }
+}
+
+impl<C: ContextSwitch + Copy> YieldHandle for YielderHandle<'_, C> {
+    fn yield_now(&mut self) {
+        self.yielder.yield_now();
+    }
+
+    fn park(&mut self) {
+        self.yielder.park();
+    }
+}
+
+/// The boxed body of a kernel-only service kthread spawned through
+/// [`InitSpawnCtx::spawn_kernel_service`](crate::InitSpawnCtx::spawn_kernel_service):
+/// a `Send` coroutine that drives the object-safe [`YieldHandle`] to
+/// suspend cooperatively (`plans/SPAWN.md` SP1). A type alias so the
+/// object-safe boundary's signature stays readable (`AGENTS.md` §2.11).
+pub type KernelServiceBody = Box<dyn FnMut(&mut dyn YieldHandle) + Send>;
+
 /// Upper bound on the number of CPUs the per-CPU EL0 resume table is
 /// sized for.
 ///

@@ -163,6 +163,60 @@ pub trait InitSpawnCtx {
         pre_resume: Box<dyn FnMut(u64) + Send>,
         enter: Box<dyn FnMut() + Send>,
     );
+
+    /// Admit a resumable **kernel-only** service kthread that runs
+    /// alongside PID 1 on the boot CPU's run queue, returning whether it
+    /// was admitted.
+    ///
+    /// This is the in-kernel counterpart of [`admit_init`](Self::admit_init):
+    /// where that admits a user (EL0) task, this admits a pure-kernel
+    /// coroutine (`plans/SPAWN.md` SP1, [`crate::spawn_kthread`]). Its sole
+    /// production use is the aarch64 USB-keyboard service
+    /// (`plans/PI.md` P10/P11): a driver loop that brings the VL805 chain up
+    /// once and then polls it forever, injecting decoded key presses into
+    /// the input-focus arbiter. Because the bring-up is slow (PCIe link
+    /// training) and the poll is continuous, it cannot run on the boot path
+    /// before user mode — it must be a scheduled task that yields between
+    /// polls so PID 1 also runs.
+    ///
+    /// `body` is the service work: it owns its driver resources (mapped
+    /// register windows, the DMA region, the keyboard chain — all `'static`
+    /// because kernel state is never freed) and uses the object-safe
+    /// [`crate::YieldHandle`] to suspend cooperatively, so it need not name
+    /// the port's concrete context-switch type (`AGENTS.md` §17.4 / §2.2).
+    /// A body that returns ends the service; a continuous service never
+    /// returns.
+    ///
+    /// The default implementation admits nothing and returns `false`
+    /// (`AGENTS.md` §2.9 — a context that wires no scheduler offers no
+    /// service rather than pretending to). The production
+    /// `KernelInitSpawner` admits the body as a [`crate::spawn_kthread`]
+    /// task on the boot CPU; this adds **no** ambient authority — the body
+    /// holds only the capabilities and resources the seam built into it
+    /// (`AGENTS.md` §4).
+    fn spawn_kernel_service(&self, body: crate::kthread::KernelServiceBody) -> bool {
+        let _ = body;
+        false
+    }
+
+    /// The kernel's live physical-frame allocator as a `'static` borrow,
+    /// when one is wired.
+    ///
+    /// A service spawned through [`spawn_kernel_service`](Self::spawn_kernel_service)
+    /// holds its driver's DMA region for the whole lifetime of the running
+    /// kernel (`AGENTS.md` §4 — a device's DMA mapping lives for the driver
+    /// load), so it needs a `'static` allocator, not the call-scoped borrow
+    /// [`frames`](Self::frames) hands out. Mirrors
+    /// [`SpawnCtx::page_table_allocator`].
+    ///
+    /// The default returns [`None`] — a context with no `'static` allocator
+    /// (a host test double) makes a service spawner fall back / fail closed
+    /// (`AGENTS.md` §2.9) rather than allocating from a borrow it cannot
+    /// keep. The production `KernelInitSpawner` returns the leaked-`'static`
+    /// kernel allocator.
+    fn static_frames(&self) -> Option<&'static FrameAllocator> {
+        None
+    }
 }
 
 /// Why a [`spawn_and_enter`] call did not transfer control to a new program.

@@ -803,6 +803,54 @@ and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
 with its `dma-ranges` and outbound `ranges`, fail-closed cases) and
 exercised by the port's `passes_arch_hal_conformance_suite`.
 
+## USB-keyboard service (video-console keyboard backing, P10)
+
+The video console's read half is fed by a directly attached USB keyboard
+on the Pi 4: the VL805 xHCI controller behind the BCM2711 PCIe root
+complex. The boot path brings that chain up as an **in-kernel keyboard
+service kthread** (the interim before the `devmgr`-autoloaded userland
+keyboard service, `plans/PI.md` P10):
+
+- **Discovery (pre-MMU).** `platform::pcie_bringup` resolves the
+  `brcm,bcm2711-pcie` node's three windows — the controller `reg`, the
+  inbound `dma-ranges` aperture, and the outbound `ranges` window — with a
+  single early-returning `scan_translated` walk that reads only the matched
+  node's own properties, so it is safe with the MMU still off (like the
+  console/GIC/video walks). A tree with no such node (the QEMU `virt`
+  shape) yields `None` and no service is started (§18.4).
+- **Identity Device mapping.** `boot_aarch64` folds the discovered
+  controller-register and outbound-MMIO-window gigapages into the identity
+  `Device` mask (`identity_device_mask`) **before** enabling the MMU, so
+  the controller block and the enumerated VL805 BAR are identity-mapped
+  Device memory once translation is on. PID 1's address space — sized from
+  `configured_identity_gigapages` — therefore also covers them.
+- **The `DriverHost` halves** (`kernel/rustos-kernel::keyboard_service`):
+  an `IdentityMmioMapper` mints a `RegisterWindow` at the window's own
+  CPU-physical address (`phys == virt`) after checking `CAP_MMIO_MAP` and
+  that the window lies wholly within the controller block or the outbound
+  window — it edits no live page table, since the boot path already mapped
+  those gigapages (§5.4 / §2.16). A `FrameDmaHost` carves the 16 KiB xHCI
+  region with `FrameAllocator::alloc_order`, translates the frame to its
+  device-visible address through the inbound viewport, and rejects anything
+  reaching past the aperture top (§5.4). `GenericTimerDelay` busy-waits on
+  `CNTPCT_EL0` (`kernel_arch::busy_delay_us`) for the link-training settle
+  delays.
+- **The service kthread.** The PID 1 spawn seam calls
+  `keyboard_service::spawn_if_present` *before* it drives the dispatch
+  loop, via the `kernel/core` `InitSpawnCtx::spawn_kernel_service` seam
+  (which admits a `spawn_kthread` whose body drives an object-safe
+  `YieldHandle`). The body runs the `usb_keyboard::bring_up_keyboard` chain
+  once (`pcie_brcm` link train → `mechanism_brcm` → `bus_usb` → enumerate),
+  then loops `usb_hid::pump_once`, feeding decoded key presses to the
+  input-focus arbiter (`ArbiterConsoleSink`) and yielding between polls so
+  PID 1 keeps running. A bring-up failure ends the service fail-closed (the
+  video login simply parks with no keyboard, §2.9).
+
+QEMU models no Pi USB (§0.4), so the host tests cover the discovery
+decoder and the two `DriverHost` halves' capability/bounds decisions; the
+live bring-up (a real BAR, link training, a keyboard driving the login) is
+the on-metal acceptance item.
+
 ## Per-CPU storage (`TPIDR_EL1`)
 
 The aarch64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`

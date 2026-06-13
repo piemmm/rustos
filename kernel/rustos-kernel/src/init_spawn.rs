@@ -282,6 +282,17 @@ impl InitSpawn for Aarch64InitSpawn {
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
+        // Start the in-kernel USB-keyboard service before driving the
+        // dispatch loop. `admit_init` below diverges into the scheduler's
+        // dispatch loop (which never returns), so the service kthread must
+        // be admitted onto the boot CPU's run queue *first*; the loop then
+        // dispatches it alongside PID 1, where it brings the VL805 up and
+        // polls the keyboard into the input-focus arbiter (`plans/PI.md`
+        // P10). With no discovered `brcm,bcm2711-pcie` bridge (the QEMU
+        // `virt` shape) this starts nothing and PID 1 runs unchanged
+        // (`AGENTS.md` §18.4).
+        let _keyboard_started = crate::keyboard_service::spawn_if_present(ctx);
+
         // Register PID 1's caps + address space, publish it as the current
         // task, and dispatch it — `admit_init` diverges into EL0 on success.
         // SAFETY: the image was built into and `space` switched to active

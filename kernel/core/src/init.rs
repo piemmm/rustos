@@ -319,7 +319,11 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
 /// naming the concrete scheduler or arch types itself (`AGENTS.md` §17.2 /
 /// §17.4 — the generics stay on this side of the object-safe boundary).
 struct KernelInitSpawner<'a, A: KernelArch> {
-    frames: &'a FrameAllocator,
+    // `'static` because `kernel_main` builds this over the leaked
+    // `KernelState`, and a kernel service spawned through
+    // `spawn_kernel_service` must hold a DMA region for the running
+    // kernel's whole lifetime (`InitSpawnCtx::static_frames`).
+    frames: &'static FrameAllocator,
     audit: &'static (dyn Sink + Sync),
     scheduler: &'a Scheduler<A>,
     caps: &'a RwLock<CapTable>,
@@ -436,6 +440,27 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
                 Ok(_) | Err(_) => break,
             }
         }
+    }
+
+    fn spawn_kernel_service(&self, mut body: crate::kthread::KernelServiceBody) -> bool {
+        // Admit the service as a kernel-only resumable kthread on the boot
+        // CPU's run queue (`plans/SPAWN.md` SP1). It must be admitted
+        // **before** `admit_init` drives the dispatch loop, so the loop
+        // dispatches it alongside PID 1. The work shim wraps the
+        // dispatcher-side concrete `Yielder<A::Cs>` in the object-safe
+        // `YielderHandle`, so the arch seam's `body` never names the port's
+        // context-switch type (`AGENTS.md` §17.4 / §2.2).
+        let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
+        let cs = self.arch.context_switch();
+        let work = move |yielder: &mut crate::kthread::Yielder<A::Cs>| {
+            let mut handle = crate::kthread::YielderHandle::new(yielder);
+            body(&mut handle);
+        };
+        crate::kthread::spawn_kthread(self.scheduler, cs, cpu, Priority::Normal, work).is_ok()
+    }
+
+    fn static_frames(&self) -> Option<&'static FrameAllocator> {
+        Some(self.frames)
     }
 }
 
@@ -876,6 +901,37 @@ mod tests {
             Ok(_) => panic!("empty memory map must fail mem phase"),
             Err(err) => assert_eq!(err.phase(), Phase::Mem),
         }
+    }
+
+    #[test]
+    fn spawn_kernel_service_admits_a_kthread_on_the_boot_cpu() {
+        // The aarch64 keyboard service rides this seam (`plans/PI.md`
+        // P10/P11): a kernel-only kthread admitted alongside PID 1 so the
+        // dispatch loop runs it. Building a live `KernelState` through
+        // `run_phases` and a `KernelInitSpawner` over it lets us assert the
+        // service is admitted onto the boot CPU's scheduler.
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let state = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let ctx = KernelInitSpawner {
+            frames: &state.frame_allocator,
+            audit: audit_sink,
+            scheduler: &state.scheduler,
+            caps: &state.caps,
+            aspaces: &state.aspaces,
+            arch: state.arch.as_ref(),
+        };
+
+        let before = state.scheduler.live_task_count();
+        // A trivial body; admission registers the kthread on the run queue
+        // without running it (the work runs on the next `step`).
+        assert!(ctx.spawn_kernel_service(Box::new(|_yielder| {})));
+        assert_eq!(state.scheduler.live_task_count(), before + 1);
+        // A second service is admitted independently.
+        assert!(ctx.spawn_kernel_service(Box::new(|_yielder| {})));
+        assert_eq!(state.scheduler.live_task_count(), before + 2);
     }
 
     #[test]

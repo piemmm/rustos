@@ -563,7 +563,14 @@ order (one fully-gated increment each):
    data-driven §18 path: every chain node is discovered into the `hwtree`
    and `devmgr` autoloads the matching driver against its signed bind
    table, so adding a board becomes match **data**, not a new composition
-   module. Staged sub-increments (one fully-gated landing each):
+   module. The scaffold is now **live**: the aarch64 boot path invokes it
+   as an in-kernel keyboard *service kthread* (`plans/PI.md` P10 — the new
+   `kernel/rustos-kernel::keyboard_service`, the `kernel/core`
+   `InitSpawnCtx::spawn_kernel_service`/`static_frames` seam, and
+   `platform::pcie_bringup`), so a metal Pi 4 can drive the video-console
+   login from a USB keyboard today; the autoload migration below is the
+   steady state that retires the hand-written composition. Staged
+   sub-increments (one fully-gated landing each):
    - **5a — driver-declared bind tables + class-wildcard matching — done.**
      Each chain driver crate owns its canonical bind table as a
      `pub const BIND_KEYS` (`rustos_drv_bus_pcie_brcm` → compatible

@@ -103,6 +103,7 @@ pub mod dispatch_core;
 // target and its host unit tests run on the CI host; the aarch64 boot
 // path supplies the concrete `DriverHost` and generic-timer `Delay` that
 // drive it on metal (`plans/PI.md` P10 "Remaining").
+pub mod keyboard_service;
 pub mod usb_keyboard;
 
 #[cfg(kernel_isa = "x86_64")]

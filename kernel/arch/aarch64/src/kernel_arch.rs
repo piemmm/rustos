@@ -574,6 +574,39 @@ pub fn timer_frequency_hz(fdt: &crate::fdt::Fdt<'_>) -> u64 {
     crate::fdt::effective_timer_hz(crate::fdt::timer_clock_frequency(fdt), read_cntfrq())
 }
 
+/// Busy-wait at least `us` microseconds against the architectural
+/// physical counter `CNTPCT_EL0`.
+///
+/// The timed-wait primitive the in-kernel driver bring-up needs
+/// (`plans/PI.md` P10 — e.g. the BCM2711 PCIe root complex's reset/
+/// link-training settle delays). It spins on `CNTPCT_EL0` measured
+/// against `CNTFRQ_EL0` rather than estimating cycle counts, so it is
+/// correct at any core/timer frequency (`AGENTS.md` §2.16 — measured, not
+/// guessed). A zero counter frequency (no usable timer) returns at once
+/// rather than spinning forever; this fails *open* on the cosmetic delay
+/// only — the bring-up's own progress waits stay bounded and fail closed
+/// (`AGENTS.md` §2.1).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn busy_delay_us(us: u32) {
+    let freq = read_cntfrq();
+    if freq == 0 {
+        return;
+    }
+    // ticks = us * freq / 1_000_000, saturating so a large request cannot
+    // overflow the multiply (it simply waits the saturated span).
+    let ticks = u64::from(us).saturating_mul(freq) / 1_000_000;
+    let start = read_cntpct();
+    while read_cntpct().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Host stub for [`busy_delay_us`]: a no-op, because wall-clock delays are
+/// meaningless under `cargo test` (mirrors the host `read_cntpct`
+/// substitute). Never linked into a kernel image.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn busy_delay_us(_us: u32) {}
+
 /// Enable Advanced SIMD / floating-point at EL1 (`CPACR_EL1.FPEN = 0b11`,
 /// do-not-trap), followed by an `isb` so the change is in effect before
 /// the next instruction.

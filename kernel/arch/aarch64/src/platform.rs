@@ -37,8 +37,8 @@
 //! through the reader, not as a tree node.
 
 use crate::fdt::{
-    bus_level, dma_ranges_aperture, outbound_mmio_window, reg_entry_count, translated_reg,
-    BusLevel, Fdt, MAX_WALK_DEPTH,
+    bus_level, dma_ranges_aperture, outbound_mmio_window, reg_entry_count, scan_translated,
+    translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH,
 };
 use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -132,6 +132,92 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
 
         Ok(())
     }
+}
+
+/// The BCM2711 PCIe root-complex address windows the in-kernel USB
+/// keyboard bring-up needs (`plans/PI.md` P10), read from the
+/// `brcm,bcm2711-pcie` node — never compiled-in (§18.5).
+///
+/// The same three windows the [`FdtDiscovery`] walk emits on the bridge's
+/// hardware-tree node (the controller `reg`, the inbound `dma-ranges`
+/// aperture, the outbound `ranges` window), but resolved by a single
+/// early-returning [`scan_translated`] walk so the boot path can read them
+/// **before the MMU is enabled** — early enough to fold the controller and
+/// outbound-window gigapages into the identity map's Device mask
+/// (`plans/PI.md` P4/P5 MMU-off watch-out; a whole-tree scan faults there).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PcieDiscovery {
+    /// CPU-physical base of the PCIe controller register block (the
+    /// translated `reg[0]`).
+    pub regs_phys: u64,
+    /// Byte length of the controller register block.
+    pub regs_len: u64,
+    /// Exclusive upper bound of the CPU-physical window devices behind the
+    /// bridge may DMA through (the inbound aperture's top): a DMA carve
+    /// must lie wholly below it (`AGENTS.md` §5.4).
+    pub dma_aperture_top: u64,
+    /// Byte length of the inbound aperture.
+    pub inbound_size: u64,
+    /// PCIe-space base the inbound viewport is programmed at.
+    pub inbound_pcie_base: u64,
+    /// CPU-physical base of the outbound MMIO window (the bridge forwards
+    /// it to PCIe memory space — the enumerated BARs live here).
+    pub outbound_cpu_base: u64,
+    /// PCIe-space base the outbound window maps to.
+    pub outbound_pcie_base: u64,
+    /// Byte length of the outbound MMIO window.
+    pub outbound_size: u64,
+}
+
+/// Discover the BCM2711 PCIe root complex's three address windows from the
+/// firmware device tree at `fdt`, for the in-kernel USB-keyboard bring-up
+/// (`plans/PI.md` P10).
+///
+/// Uses the early-returning [`scan_translated`] walk, reading only the
+/// matched `brcm,bcm2711-pcie` node's own `reg`/`ranges`/`dma-ranges`
+/// against its ancestors' cell counts, so it is safe to call **with the
+/// MMU still off** (`plans/PI.md` P4/P5 watch-out — a whole-tree scan
+/// widens the byte loads and faults there).
+///
+/// Returns `None` when the tree describes no `brcm,bcm2711-pcie` node, or
+/// when any of the three windows is absent or undecodable — fail closed
+/// (`AGENTS.md` §2.9), never a board constant (§18.5). The QEMU `virt`
+/// tree carries no such node, so it simply yields `None` and the keyboard
+/// bring-up is skipped (`AGENTS.md` §18.4).
+#[must_use]
+pub fn pcie_bringup(fdt: &Fdt<'_>) -> Option<PcieDiscovery> {
+    scan_translated(fdt, |node, levels, depth| {
+        let compatible = node.property("compatible")?;
+        if !compatible.iter_strings().any(|s| s == PCIE_COMPATIBLE) {
+            // Not the PCIe bridge: keep walking.
+            return None;
+        }
+        let level = bus_level(node);
+        let parent_addr_cells = depth
+            .checked_sub(1)
+            .and_then(|i| levels.get(i))
+            .map_or(2, |l| l.addr_cells);
+        // The controller register block (first `reg` entry), translated
+        // through the ancestor buses' `ranges` (untranslatable → `None`,
+        // never read raw — the real Pi tree is bus-nested under `/scb`).
+        let (regs_phys, regs_len) = translated_reg(node, depth, levels, 0)?;
+        // The inbound-DMA aperture from `dma-ranges`.
+        let (dma_aperture_top, inbound_size, inbound_pcie_base) =
+            dma_ranges_aperture(node, level.addr_cells, parent_addr_cells, level.size_cells)?;
+        // The outbound MMIO window from `ranges`.
+        let (outbound_cpu_base, outbound_pcie_base, outbound_size) =
+            outbound_mmio_window(node, level.addr_cells, parent_addr_cells, level.size_cells)?;
+        Some(PcieDiscovery {
+            regs_phys,
+            regs_len,
+            dma_aperture_top,
+            inbound_size,
+            inbound_pcie_base,
+            outbound_cpu_base,
+            outbound_pcie_base,
+            outbound_size,
+        })
+    })
 }
 
 /// Build the hardware-tree node for one device-tree node, or `None` when
@@ -318,7 +404,7 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
 
 #[cfg(test)]
 mod tests {
-    use super::FdtDiscovery;
+    use super::{pcie_bringup, FdtDiscovery};
     use crate::fdt::Fdt;
     use rustos_abi::{HwDeviceClass, HwNode, HwResourceKind};
     use rustos_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -595,6 +681,33 @@ mod tests {
             .filter(|r| r.kind() == Some(HwResourceKind::BusWindow))
             .map(|r| (r.base(), r.length(), r.translated_base()))
             .collect()
+    }
+
+    #[test]
+    fn pcie_bringup_reads_all_three_windows_off_the_bridge() {
+        // The pre-MMU bring-up discovery resolves the same three windows
+        // the full `discover` walk emits on the bridge node, by a single
+        // early-returning `scan_translated` pass (`plans/PI.md` P10).
+        let blob = scb_pcie_tree();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let pcie = pcie_bringup(&fdt).expect("the pcie bridge is discovered");
+        assert_eq!(pcie.regs_phys, 0xfd50_0000);
+        assert_eq!(pcie.regs_len, 0x9310);
+        assert_eq!(pcie.dma_aperture_top, 0xc000_0000);
+        assert_eq!(pcie.inbound_size, 0xc000_0000);
+        assert_eq!(pcie.inbound_pcie_base, 0);
+        assert_eq!(pcie.outbound_cpu_base, 0x6_0000_0000);
+        assert_eq!(pcie.outbound_pcie_base, 0xc000_0000);
+        assert_eq!(pcie.outbound_size, 0x4000_0000);
+    }
+
+    #[test]
+    fn pcie_bringup_is_none_when_no_bridge_is_present() {
+        // The QEMU `virt`-shaped tree (no `brcm,bcm2711-pcie` node) yields
+        // no bring-up, so the keyboard service is skipped (§18.4 / §2.9).
+        let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(pcie_bringup(&fdt), None);
     }
 
     #[test]

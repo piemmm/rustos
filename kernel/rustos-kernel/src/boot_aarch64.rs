@@ -55,8 +55,8 @@ use rustos_arch_aarch64::paging::{
     ram_gigapages, AddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, syscall_entry, uart_init,
-    video, Aarch64Arch, Aarch64ArchStorage,
+    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, syscall_entry,
+    uart_init, video, Aarch64Arch, Aarch64ArchStorage,
 };
 use rustos_arch_api::SchedulerArch;
 use rustos_fdt::Fdt;
@@ -253,17 +253,39 @@ pub fn boot(
     // never assumed). With no video console the console base stands in
     // as a harmless duplicate input.
     let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
+    // The BCM2711 PCIe root complex's controller register block and its
+    // outbound MMIO window (where the enumerated VL805 BAR lives) are MMIO
+    // the in-kernel USB-keyboard service maps at their identity address
+    // (`crate::keyboard_service`), so their gigapages must be typed Device
+    // like the UART/GIC. Derived from the discovered `brcm,bcm2711-pcie`
+    // node, never assumed; with no such node (the QEMU `virt` shape) the
+    // console base stands in as a harmless duplicate input (§18.4 / §18.5).
+    let (pcie_regs, pcie_outbound) = early
+        .pcie
+        .map_or((console_base as u64, console_base as u64), |p| {
+            (p.regs_phys, p.outbound_cpu_base)
+        });
     let device_mask = identity_device_mask(
         &[
             console_base as u64,
             gicd_base as u64,
             gicc_base as u64,
             video_doorbell,
+            pcie_regs,
+            pcie_outbound,
         ],
         kernel_start_addr(),
         kernel_end_addr(),
     );
     configure_device_gigapages(device_mask);
+    // Hand the discovered PCIe windows to the PID 1 spawn seam, which
+    // starts the USB-keyboard service kthread once the scheduler is up
+    // (`plans/PI.md` P10). Recorded here, pre-MMU, while the discovery is
+    // in hand; a board with no bridge records nothing and the service is
+    // never started (§18.4).
+    if let Some(pcie) = early.pcie {
+        crate::keyboard_service::record_discovery(pcie);
+    }
     // RAM gigapage mask from the facts in hand pre-MMU: the kernel
     // image's own extent, the firmware DTB blob, and the firmware
     // scan-out surface. Every other non-Device gigapage stays *invalid*
@@ -613,6 +635,12 @@ struct EarlyDiscovered {
     /// `0` when no readable tree was found — the blob's RAM extent must
     /// stay in the identity map for the post-MMU walks.
     dtb_len: u64,
+    /// The BCM2711 PCIe root-complex windows, when the tree describes a
+    /// `brcm,bcm2711-pcie` bridge (`plans/PI.md` P10): the controller
+    /// register block and outbound MMIO window must be folded into the
+    /// identity Device mask, and the bring-up consumes all three windows.
+    /// `None` on a board with no bridge (the QEMU `virt` shape, §18.4).
+    pcie: Option<platform::PcieDiscovery>,
 }
 
 /// Point the console and the GICv2 driver at the bases the firmware tree
@@ -635,6 +663,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
         gic: false,
         video: None,
         dtb_len: 0,
+        pcie: None,
     };
     if dtb == 0 {
         return out;
@@ -657,6 +686,13 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     uart_init::init_from_fdt(&fdt);
     out.gic = gic::configure_from_fdt(&fdt).is_some();
     out.video = video::configure_from_fdt(&fdt);
+    // Discover the BCM2711 PCIe bridge's windows for the in-kernel
+    // USB-keyboard service (`plans/PI.md` P10). The early-returning
+    // `scan_translated` walk is MMU-off-safe (it reads only the matched
+    // node's own properties), exactly like the console/GIC/video walks
+    // above; the QEMU `virt` tree carries no such node, so this is `None`
+    // there and the keyboard service is never started (§18.4 / §2.9).
+    out.pcie = platform::pcie_bringup(&fdt);
     out
 }
 
