@@ -414,10 +414,28 @@ fn mmio_exchange_stages_rings_and_reads_back() {
 }
 
 #[test]
+fn mmio_exchange_waits_on_the_property_mailbox_status_before_writing() {
+    let mut regs = ready_regs();
+    set_reg_word(&mut regs, REG_MBOX0_STATUS, STATUS_FULL);
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let mut mailbox = MmioMailbox::new(
+        window_over(&mut regs.0, 0),
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        8,
+    )
+    .expect("construct");
+
+    let mut message = request().encode().expect("encode");
+    assert_eq!(mailbox.exchange(&mut message), Err(MailboxError::Timeout));
+    assert_eq!(reg_word(&regs, REG_MBOX1_WRITE), 0);
+}
+
+#[test]
 fn mmio_exchange_times_out_when_the_firmware_never_answers() {
-    // Write side jammed: MBOX1 reports FULL forever.
+    // Write side jammed: the property mailbox reports FULL forever.
     let mut full = ready_regs();
-    set_reg_word(&mut full, REG_MBOX1_STATUS, STATUS_FULL);
+    set_reg_word(&mut full, REG_MBOX0_STATUS, STATUS_FULL);
     let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
     let mut mailbox = MmioMailbox::new(
         window_over(&mut full.0, 0),
@@ -560,6 +578,154 @@ fn size_decode_rejects_implausible_geometry() {
     assert!(decode_display_size_response(&max)
         .expect("decode")
         .is_attached());
+}
+
+// --- VL805 xHCI firmware reload ------------------------------------------
+
+/// The VL805's hardwired PCI device address on the Pi 4 (bus 1, slot 0,
+/// func 0), as the firmware expects it.
+const TEST_VL805_DEV_ADDR: u32 = 0x10_0000;
+
+#[test]
+fn xhci_reset_lays_out_the_dev_addr_tag() {
+    let words = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    // 7 used words: 2 header + a 4-word tag ([tag, value-len, request,
+    // value]) + 1 end marker.
+    assert_eq!(words[0], 7 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(
+        words[2..6],
+        [TAG_NOTIFY_XHCI_RESET, 4, 0, TEST_VL805_DEV_ADDR]
+    );
+    assert_eq!(words[6], 0, "end tag");
+}
+
+#[test]
+fn xhci_reset_round_trips_through_a_healthy_firmware() {
+    // A healthy firmware echoes the set-tag and stamps the OK header;
+    // the notify call accepts it and surfaces the firmware's response
+    // value word (the echoed `dev_addr`), which the metal bring-up logs
+    // to confirm the firmware processed the request (`AGENTS.md` §15.7).
+    let mut firmware = MockFirmware::healthy();
+    assert_eq!(
+        notify_xhci_reset(&mut firmware, TEST_VL805_DEV_ADDR).expect("reset accepted"),
+        TEST_VL805_DEV_ADDR
+    );
+}
+
+#[test]
+fn xhci_reset_decode_fails_closed_on_a_bad_header() {
+    // A genuine healthy response: OK header *and* the tag's response bit
+    // stamped (the mock answers exactly as the firmware does).
+    let mut ok = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    MockFirmware::healthy().respond(&mut ok);
+    // The honoured tag's response value word (the echoed `dev_addr`) is
+    // surfaced for the bring-up diagnostic.
+    assert_eq!(decode_xhci_reset_response(&ok), Ok(TEST_VL805_DEV_ADDR));
+
+    let mut err = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    err[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_xhci_reset_response(&err),
+        Err(MailboxError::FirmwareError)
+    );
+
+    let mut unknown = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    unknown[1] = 0x1234_5678;
+    assert_eq!(
+        decode_xhci_reset_response(&unknown),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn xhci_reset_decode_rejects_an_unhonoured_tag() {
+    // The wedge this guards: a firmware build that does not act on the
+    // tag still stamps the OK *header* but leaves the tag's own response
+    // code clear (no response bit). An OK header alone must NOT be read
+    // as a successful reload — the decode requires the per-tag response
+    // bit and fails closed otherwise (`AGENTS.md` §5.4), so the metal
+    // bring-up reports `Failed` rather than a false `Reloaded`.
+    let mut unhonoured = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    unhonoured[1] = CODE_RESPONSE_OK; // header OK, tag code word still 0.
+    assert_eq!(
+        decode_xhci_reset_response(&unhonoured),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+// --- Property-buffer cache-coherency seam --------------------------------
+
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// `1` after `coh_flush` runs, `2` after `coh_invalidate` runs — but
+/// only if flush ran first, so a final value of `2` proves the
+/// clean-before / invalidate-after ordering `exchange` must keep.
+static COH_ORDER: AtomicU32 = AtomicU32::new(0);
+/// The CPU base each hook was handed (must be the buffer's `phys_base`).
+static COH_FLUSH_BASE: AtomicU64 = AtomicU64::new(0);
+static COH_INVALIDATE_BASE: AtomicU64 = AtomicU64::new(0);
+/// The byte length each hook was handed (must be one property message).
+static COH_FLUSH_LEN: AtomicU32 = AtomicU32::new(0);
+
+fn coh_flush(base: u64, len: usize) {
+    COH_FLUSH_BASE.store(base, Ordering::SeqCst);
+    COH_FLUSH_LEN.store(
+        u32::try_from(len).expect("property length fits u32"),
+        Ordering::SeqCst,
+    );
+    let _ = COH_ORDER.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+fn coh_invalidate(base: u64, _len: usize) {
+    COH_INVALIDATE_BASE.store(base, Ordering::SeqCst);
+    // Reaches `2` only if `coh_flush` already moved it to `1`.
+    let _ = COH_ORDER.compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+#[test]
+fn mmio_exchange_runs_the_coherency_hooks_clean_then_invalidate() {
+    // A unique buffer phys so the hooks' base argument is checkable.
+    const BUFFER_PHYS: u64 = 0x3_4B08_0000;
+    let mut regs = ready_regs();
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    {
+        let mut mailbox = MmioMailbox::with_coherency(
+            window_over(&mut regs.0, 0),
+            window_over(&mut buffer.0, BUFFER_PHYS),
+            TEST_BUFFER_BUS,
+            8,
+            BufferCoherency::new(coh_flush, coh_invalidate),
+        )
+        .expect("construct");
+        let mut message = request().encode().expect("encode");
+        mailbox.exchange(&mut message).expect("exchange");
+    }
+    // Flush ran (after staging), then invalidate ran (before read-back).
+    assert_eq!(COH_ORDER.load(Ordering::SeqCst), 2, "clean-then-invalidate");
+    assert_eq!(COH_FLUSH_BASE.load(Ordering::SeqCst), BUFFER_PHYS);
+    assert_eq!(COH_INVALIDATE_BASE.load(Ordering::SeqCst), BUFFER_PHYS);
+    assert_eq!(
+        COH_FLUSH_LEN.load(Ordering::SeqCst),
+        u32::try_from(PROPERTY_LEN_BYTES).expect("property length fits u32")
+    );
+}
+
+#[test]
+fn mmio_new_defaults_to_no_coherency_maintenance() {
+    // The default constructor installs no-op hooks: a round trip over an
+    // already-coherent (caches-off) buffer still succeeds.
+    let mut regs = ready_regs();
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let mut mailbox = MmioMailbox::new(
+        window_over(&mut regs.0, 0),
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        8,
+    )
+    .expect("construct");
+    let mut message = request().encode().expect("encode");
+    mailbox.exchange(&mut message).expect("exchange");
 }
 
 #[test]

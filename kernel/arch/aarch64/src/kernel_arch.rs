@@ -514,8 +514,15 @@ impl SecondaryBringup for Aarch64Arch {
 
 /// Read the architectural physical counter `CNTPCT_EL0` (the monotonic
 /// tick source on the `virt` board).
+///
+/// Exposed (alongside the already-public [`read_cntfrq`]) so the in-kernel
+/// driver bring-up can bracket a phase and report the *counter-measured*
+/// elapsed span — the measurement that, against an external wall clock,
+/// localises an over-long settle to a timer-rate mismatch versus a genuine
+/// spin (`AGENTS.md` §15.7 / §2.16 — measure, don't guess). It reads one
+/// architectural register with no side effects and grants no authority.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub(crate) fn read_cntpct() -> u64 {
+pub fn read_cntpct() -> u64 {
     let ticks: u64;
     // SAFETY: `CNTPCT_EL0` is the unprivileged physical counter; reading
     // it has no side effects and is accessible at EL1 (and at EL0/EL1
@@ -537,7 +544,7 @@ pub(crate) fn read_cntpct() -> u64 {
 /// read identically across two adjacent calls. Mirrors the gating in
 /// the x86_64 and riscv64 backends.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub(crate) fn read_cntpct() -> u64 {
+pub fn read_cntpct() -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed) + 1
@@ -606,6 +613,78 @@ pub fn busy_delay_us(us: u32) {
 /// substitute). Never linked into a kernel image.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn busy_delay_us(_us: u32) {}
+
+/// Clean+invalidate `[start, start + len)` from the data cache to the point
+/// of coherency.
+///
+/// Post-MMU firmware/DMA exchanges use this before handing cacheable kernel
+/// RAM to a device-side reader/writer, then again before the CPU consumes the
+/// device's response. A zero-length range is a no-op.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn clean_invalidate_dcache_range(start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let ctr: u64;
+    // SAFETY: reading the cache-type register is always permitted at EL1 and
+    // has no side effects.
+    unsafe {
+        core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+    }
+    let line = crate::paging::dcache_line_bytes(ctr) as usize;
+    let end = start.saturating_add(len);
+    let mut addr = start & !(line - 1);
+    while addr < end {
+        // SAFETY: `dc civac` performs cache maintenance for the line
+        // containing `addr`; it modifies no memory contents and the caller
+        // supplied a kernel-owned range.
+        unsafe {
+            core::arch::asm!("dc civac, {0}", in(reg) addr, options(nostack, preserves_flags));
+        }
+        addr += line;
+    }
+    // SAFETY: barrier-only instruction completing the maintenance before the
+    // firmware/device observes or the CPU re-reads the range.
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+    }
+}
+
+/// Host-test twin of [`clean_invalidate_dcache_range`].
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn clean_invalidate_dcache_range(_start: usize, _len: usize) {}
+
+/// Milliseconds derived from the architectural physical counter, for the
+/// per-line log timestamp the serial sink prefixes (`[t=<ms>]`).
+///
+/// The epoch is the counter's own (firmware-seeded) zero, left
+/// unspecified; only *differences* between two timestamps are meaningful,
+/// which is exactly what a serial capture needs to read off the real wall
+/// time spent between two log lines (`AGENTS.md` §15.7 / §2.16 — measure,
+/// don't guess). It scales `CNTPCT_EL0` by the rate `CNTFRQ_EL0` reports —
+/// the same counter and rate [`busy_delay_us`] spins against — so a gap a
+/// capture shows between two lines is the same wall time those lines'
+/// work actually took. A zero `CNTFRQ_EL0` (no usable timer) reports `0`
+/// rather than dividing by it (`AGENTS.md` §2.9).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn uptime_ms() -> u64 {
+    let freq = read_cntfrq();
+    if freq == 0 {
+        0
+    } else {
+        read_cntpct().saturating_mul(1_000) / freq
+    }
+}
+
+/// Host substitute for [`uptime_ms`]: the strictly-increasing host
+/// [`read_cntpct`] counter, so a hosted build observes a monotonic
+/// timestamp without a real timer. Never linked into a kernel image.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[must_use]
+pub fn uptime_ms() -> u64 {
+    read_cntpct()
+}
 
 /// Enable Advanced SIMD / floating-point at EL1 (`CPACR_EL1.FPEN = 0b11`,
 /// do-not-trap), followed by an `isb` so the change is in effect before
@@ -697,6 +776,17 @@ mod tests {
         let arch = Aarch64Arch::new(&S, 0, 0);
         // Must not panic; `max(1)` guards the divide.
         let _ = arch.monotonic_ns();
+    }
+
+    #[test]
+    fn uptime_ms_is_monotonic_on_host() {
+        // The host `uptime_ms` is the strictly-increasing `read_cntpct`
+        // substitute, so two successive reads never go backwards — the
+        // property the serial timestamp prefix relies on (gaps between
+        // lines are non-negative).
+        let a = uptime_ms();
+        let b = uptime_ms();
+        assert!(b >= a, "log timestamp must be monotonically non-decreasing");
     }
 
     #[test]

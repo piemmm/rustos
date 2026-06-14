@@ -921,6 +921,7 @@ dependencies = [
  "rustos-log",
  "rustos-sync",
  "rustos-util",
+ "rustos-vcmailbox",
 ]
 
 [[package]]

@@ -77,10 +77,20 @@ pub const MISC_CPU_2_PCIE_MEM_WIN0_LO: usize = 0x400c;
 pub const MISC_CPU_2_PCIE_MEM_WIN0_HI: usize = 0x4010;
 /// `CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`: CPU-side base and limit, in MiB,
 /// packed into one register.
+///
+/// This is a BCM2711 **proprietary** register. The low MiB bits of the
+/// window **limit** live in bits `[31:20]` and the low MiB bits of the
+/// **base** in bits `[15:4]`, matching Linux's `pcie-brcmstb`. Defining
+/// the two halves the wrong way round programs an inverted, base-above-
+/// limit window that decodes nothing, so every CPU→PCIe memory access
+/// master-aborts (the metal `0xdead_dead` BAR read while configuration
+/// reads — a different controller path — still succeed).
 pub const MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT: usize = 0x4070;
-/// CPU-base field (in MiB) within [`MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`].
+/// CPU-base field (low MiB bits) within
+/// [`MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`]: bits `[15:4]`.
 pub const MEM_WIN0_BASE_LIMIT_BASE_MASK: u32 = 0xfff0;
-/// CPU-limit field (in MiB) within [`MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`].
+/// CPU-limit field (low MiB bits) within
+/// [`MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`]: bits `[31:20]`.
 pub const MEM_WIN0_BASE_LIMIT_LIMIT_MASK: u32 = 0xfff0_0000;
 /// `CPU_2_PCIE_MEM_WIN0_BASE_HI`: high bits of the CPU-side base.
 pub const MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI: usize = 0x4080;
@@ -122,6 +132,68 @@ pub const PRIMARY_BUS_SECONDARY_MASK: u32 = 0x0000_ff00;
 /// Subordinate-bus-number field within [`RC_CFG_PRIMARY_BUS`]
 /// (`[23:16]`): the highest bus number reachable behind the root port.
 pub const PRIMARY_BUS_SUBORDINATE_MASK: u32 = 0x00ff_0000;
+
+/// `PCI_MEMORY_BASE`/`PCI_MEMORY_LIMIT` (config-header byte offset
+/// `0x20`) in the root complex's own type-1 configuration header, exposed
+/// at the controller register block's offset `0x20` (the same direct bus-0
+/// access [`RC_CFG_PRIMARY_BUS`] uses).
+///
+/// A PCI-PCI bridge forwards a memory transaction downstream only when the
+/// address falls inside `[Memory Base, Memory Limit]`. The BCM2711 ships
+/// this register at 0 (base `0`, limit `0` → an empty, base-above-limit
+/// window), so the root port master-aborts every CPU memory access to the
+/// VL805's BAR (the metal symptom: config reads succeed but BAR reads
+/// return the `0xdead_dead` abort poison) until the window is named.
+/// Programming it mirrors the bridge-window assignment a full PCI
+/// enumerator would perform (Linux's `pci_setup_bridge`), which the
+/// windowed `mech_brcm` accessor does not.
+pub const RC_CFG_MEMORY_BASE_LIMIT: usize = 0x20;
+/// Memory-base field within [`RC_CFG_MEMORY_BASE_LIMIT`] (`[15:4]`): holds
+/// address bits `[31:20]` of the window base; bits `[3:0]` are read-only 0.
+pub const MEMORY_BASE_LIMIT_BASE_MASK: u32 = 0x0000_fff0;
+/// Memory-limit field within [`RC_CFG_MEMORY_BASE_LIMIT`] (`[31:20]`):
+/// holds address bits `[31:20]` of the window limit; the decoded limit's
+/// low 20 bits are taken as all-ones.
+pub const MEMORY_BASE_LIMIT_LIMIT_MASK: u32 = 0xfff0_0000;
+/// The granularity of the bridge memory window's base/limit fields: the
+/// register encodes only address bits `[31:20]`, i.e. 1 MiB units.
+pub const MEMORY_WINDOW_GRANULE_SHIFT: u32 = 20;
+
+/// `PCI_COMMAND`/`PCI_STATUS` (config-header byte offset `0x04`) in the
+/// root complex's own type-1 configuration header, exposed at the
+/// controller register block's offset `0x04` (the same direct bus-0
+/// access [`RC_CFG_PRIMARY_BUS`] / [`RC_CFG_MEMORY_BASE_LIMIT`] use).
+///
+/// A textbook PCI-PCI bridge forwards a CPU memory transaction to its
+/// secondary side only when its **own** Command register has Memory Space
+/// Enable set, and forwards a downstream device's DMA upstream only with
+/// Bus Master Enable set, so a full PCI enumerator enables both bits on
+/// every bridge (Linux's `pci_enable_bridges`); the windowed `mech_brcm`
+/// accessor does not, so the root-complex bring-up does it here.
+///
+/// On the BCM2711's *integrated* root complex Memory Space Enable latches
+/// only against a **live link**: an earlier bring-up wrote this during the
+/// config phase (with `PERST#` still asserted) and the metal `4110`
+/// read-back caught it not sticking (`0x0000`), while the adjacent bus
+/// numbers ([`RC_CFG_PRIMARY_BUS`]) and Memory Base/Limit
+/// ([`RC_CFG_MEMORY_BASE_LIMIT`]) writes — same direct bus-0 path — did
+/// stick, so the offset is right and the difference is timing. The
+/// bring-up therefore enables it **after** `train_link`/`link_up` (Linux's
+/// `pci_enable_bridge` does the same — `enabling device (0000 -> 0002)` is
+/// logged only once the link is up). The low 16 bits are the Command
+/// register; the high 16 bits are the write-1-to-clear Status register,
+/// left untouched by writing 0 there.
+pub const RC_CFG_COMMAND: usize = 0x04;
+/// Memory-Space-Enable bit within [`RC_CFG_COMMAND`] (`[1]`): the bridge
+/// forwards CPU memory transactions downstream only when it is set.
+pub const COMMAND_MEMORY_SPACE_MASK: u32 = 0x0000_0002;
+/// Bus-Master-Enable bit within [`RC_CFG_COMMAND`] (`[2]`): the bridge
+/// forwards a downstream device's DMA upstream only when it is set.
+pub const COMMAND_BUS_MASTER_MASK: u32 = 0x0000_0004;
+/// The write-1-to-clear Status register occupies the high 16 bits of the
+/// [`RC_CFG_COMMAND`] dword; masking it off before writing leaves those
+/// latched status bits untouched (writing 0 to a `RW1C` bit is a no-op).
+pub const COMMAND_STATUS_MASK: u32 = 0xffff_0000;
 
 /// Bus directly behind the root port: the directly-attached VL805 USB
 /// host enumerates here.

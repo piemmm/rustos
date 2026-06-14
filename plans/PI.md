@@ -390,7 +390,60 @@ selects it over `CNTFRQ_EL0` when present and non-zero, else falls back to
 the register (a zero override is treated as absent — never a 0 Hz timer,
 §2.9). The freestanding `kernel_arch::timer_frequency_hz(&fdt)` composes
 the two; `boot_aarch64` seeds the `Aarch64Arch` clock/preempt interval
-from it and logs `timer_hz_from_tree`. `timer_clock_frequency` matches the
+from it and logs `timer_hz_from_tree` plus the resolved rate itself as
+`timer_hz_hex`. That rate also drives every `kernel_arch::busy_delay_us`
+settle the in-kernel bring-up uses. The metal capture read
+`timer_hz_from_tree=false timer_hz_hex=0x337_f980` — exactly the Pi 4's
+54 MHz crystal — so `CNTFRQ_EL0` is correctly programmed and a
+mis-programmed-rate over-wait is **ruled out** as the cause of the P10
+multi-second USB bring-up pause. The `4116` "bring-up delay timing
+measurement" (`keyboard_service` brackets the whole chain with
+`kernel_arch::read_cntpct` and tallies its `GenericTimerDelay`'s requested
+microseconds) read `requested_us_hex≈356 ms` (259 delay calls) yet
+`counter_elapsed_us_hex≈14.3 s` at the correct 54 MHz — so ≈14 s of real
+time elapsed with only ≈356 ms in `busy_delay_us`: the counter is sound and
+the seconds are code-side, but `4116` alone cannot split *where* they go.
+Two diagnostics localise it: `SerialSink` prefixes every line with a
+monotonic `CNTPCT_EL0`-derived `[t=<ms>ms]` stamp (`kernel_arch::uptime_ms`,
+so a capture reads the real wall time between any two lines), and `build.rs`
+emits `KERNEL_BUILD_ID` (git short hash + `+dirty` + `SOURCE_DATE_EPOCH`-aware
+build epoch, §19.3), logged as `build_id` on the `4097` line so a capture
+proves which build is running. The timestamped capture (with `build_id`
+confirming the current image) was **decisive** and corrected the earlier
+un-timestamped guess: the caps-readiness wait (`4108`→`4109`) is only
+~0.35 s — the `wait_for_caps_ready` *elapsed-wall-time* bound
+(`CAPS_READY_BUDGET_US`≈256 ms via `Delay::now_us`, retained as a §2.16
+defence) works, and `4109 polls_hex=0x100` is 256 *fast* reads (the BCM2711
+master-abort returns the `dead_dead` poison in ~1.3 ms, not the ~54 ms first
+inferred) — so the caps loop is **not** the pause. The ~14 s is almost
+entirely inside `BrcmPcieRc::bring_up`: ~11.2 s between the RC-register-window
+map (`4105 phys_base=fd50_0000`) and `4101 link trained`, with no log line
+between, while bring_up's coded delays total only ~hundreds of ms and its
+reads target the RC's own (fast) register block. The `4117` per-phase split
+(`BringUpTiming` from the `Delay` clock, host-tested) then pinned the ~11 s
+to the reset phase, then the reset sub-spans pinned it to the **first access
+to the MISC register block** (`0x4xxx`). Early experiments that powered the SerDes or read link status before
+cycling the bridge reset stalled identically — *every* early MISC
+access master-aborts — refuting the SerDes-IDDQ theory. The
+real gate is the controller reset — the BCM2711 holds the core off until the
+always-accessible RGR1 bridge `sw_init` reset (`0x9210`) is cycled, which is
+why the **same** `MISC_PCIE_STATUS` read costs ~8 µs in the config phase (the
+reset having run by then) yet ~10.8 s before it. U-Boot/Linux `pcie-brcmstb`
+never touch a MISC register before cycling the bridge reset.
+**Fixed (host-proven; confirmed gone on metal):**
+`BrcmPcieRc::reset_controller` cycles **only** the always-accessible RGR1
+bridge `sw_init` reset (`0x9210`) — bringing the core and its MISC block
+online — then lets the core and MISC block settle; the
+`4117` capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to
+microseconds and the ~14 s pause is gone. The gentlest no-touch-probe
+bring-up does **not** re-assert a fundamental reset or toggle the SerDes
+`IDDQ` (either could drop the VL805 firmware the previous boot stage
+loaded over the power-on link); `PERST#` is left as the handoff left it
+and `train_link` deasserts it (the single `PERST#`-deassert edge that
+re-triggers any `VideoCore` VL805 firmware reload
+(see the firmware item below). (The Pi UART is the SoC's
+own PL011/mini-UART — no path to the PCIe/VL805 — so logging cannot perturb
+the controller.) `timer_clock_frequency` matches the
 timer node through the shared `Fdt::nodes` early-returning walk (the same
 byte-safe traversal `gic::configure_from_fdt` uses, §2.2) — **not** the
 whole-tree `Fdt::property`/`walk` scan, which faults under the verticals'
@@ -1894,7 +1947,7 @@ remains (pending hardware).
   `tools/mkimage/firmware.lock` pins the upstream HTTPS `source`
   directory plus name + byte length + SHA-256 of `start4.elf` /
   `fixup4.dat` / `bcm2711-rpi-4-b.dtb` / `overlays/disable-bt.dtbo`
-  at upstream release `1.20240529`
+  at upstream release `1.20260521`
   (provenance + licence documented in the manifest); verification fails
   closed on any mismatch. `cargo xtask image` fetches any blob missing
   from its `target/pi-firmware/` cache from the pinned source and gates
@@ -2073,7 +2126,7 @@ seam; `wiring::open_discovered` maps the controller window under
 `CAP_MMIO_MAP`. **No `lib/abi`/C-header change.** Host-proven: pci
 `mech_brcm` tests (root-bus direct read, downstream index/data,
 out-of-range/no-device, beyond-window fail-closed) + pcie_brcm tests (full
-reset→SerDes→window→link sequence, reset-before-SerDes ordering, ibar
+reset→SerDes→window→link sequence, bridge-reset-before-MISC ordering, ibar
 encoding, fail-closed link-down + not-root-port, the wiring cap/mapper/
 inert-window paths). Docs: `docs/src/drivers/bus.md`, the crate README.
 
@@ -2238,29 +2291,282 @@ keyboard service kthread**:
   redundant, address-space-ambiguous `PcieBringup.dma_aperture_top` field
   (derivable from `windows`) was removed (§2.2/§2.14). Host-proven by
   `keyboard_service::dma_host_admits_a_low_frame_through_a_high_pcie_viewport`.
-- **xHCI register BAR mapping — PCIe-bus vs CPU address space (fixed).**
-  With the DMA carve admitted, the `4101` xHCI bring-up then failed
-  `err=length_out_of_range`: the register BAR could not be mapped. A VL805
-  BAR read from PCI configuration space is a *PCIe-bus* address (firmware
-  assigns it inside the outbound window, ≈ `0xc000_0000`), but
-  `keyboard_service::IdentityMmioMapper` only permitted *CPU-physical*
-  addresses and compared the bus address against the outbound **CPU** base
-  (`0x6_0000_0000`); `map_window` returned `InvalidRegion`
-  (→ `LengthOutOfRange`) before the controller was touched. Fixed by making
-  the mapper bridge-aware: it applies the outbound `ranges` translation
+- **xHCI register BAR mapping — bridge-aware translation + unassigned-BAR
+  assignment (fixed).** `keyboard_service::IdentityMmioMapper` is
+  bridge-aware: it applies the outbound `ranges` translation
   (`outbound_cpu_base + (bus − outbound_pcie_base)`) to reach the
   identity-mapped CPU address (the generic PCI walk only knows bus addresses;
-  resolving them is the host bridge's job, mirroring Linux). The controller
-  regs block stays CPU-physical/identity and is resolved first; since the
-  Pi 4 regs island (`0xfd50_0000`) numerically sits inside the outbound PCIe
-  window, a request that only partially overlaps the regs block is refused
-  fail-closed rather than mis-translated (§5.4). `IdentityMmioMapper::new`
-  now takes `outbound_pcie_base`. Host-proven by
+  resolving them is the host bridge's job, mirroring Linux), the controller
+  regs block stays CPU-physical/identity and is resolved first, and a request
+  only partially overlapping the numerically-overlapping Pi 4 regs island
+  (`0xfd50_0000`) is refused fail-closed (§5.4). `IdentityMmioMapper::new`
+  takes `outbound_pcie_base`; `with_diag(&SERIAL_SINK)` logs each map decision
+  one-shot (`EventId(4105)`, off the poll path) so a metal capture shows the
+  refused base. That capture localised the real cause: the VL805's BAR0
+  address bits read **zero** — the BAR is sized/typed but *unassigned*
+  (firmware programs BARs, but resetting and re-enumerating the root complex
+  leaves the downstream function unassigned), so mapping it targets address 0.
+  Assigning resources from the bridge's outbound window is the PCI core's job
+  (mirroring Linux); added `PciBus::assign_bar(bdf, bar_index, window_base,
+  window_size)` (implemented on `Pci<C>`): it probes BAR size/type and, when
+  the address bits are zero, writes the lowest size-aligned PCIe-bus address
+  in the window (both dwords for a 64-bit BAR, control bits preserved); an
+  already-based BAR is left untouched (no-op under QEMU/firmware-assigned).
+  `usb::wiring::open_discovered` takes the outbound window and calls
+  `assign_bar` before `map_bar_window`. Host-proven by
+  `pci::assign_bar_places_an_unassigned_64bit_bar_in_the_window` (+ idempotent
+  / oversize / I/O / absent cases), `usb::open_discovered_enables_mastering_
+  and_reaches_the_controller` (asserts the window reaches `assign_bar`), and
   `keyboard_service::mapper_translates_a_bar_through_the_outbound_viewport`.
-  Metal verification: the next capture should pass the `4101` xHCI stage; if
-  it still stalls, the cause is the live controller protocol (a real BAR
-  answering a plausible `CAPLENGTH`, link training, or the
-  bootloader-pre-loaded VL805 firmware).
+- **VL805 firmware fallback (current).** `open_controller` follows Linux's
+  safe order: configure the PCIe bridge and assign/map BAR0 first, read the
+  VL805 firmware version at config `0x50`, skip any reload when it is already
+  non-zero, and issue exactly one `NOTIFY_XHCI_RESET` only when the bounded
+  version wait stays `0`. The mailbox uses the shared `lib/vcmailbox`
+  protocol over the boot-discovered VideoCore doorbell and a cache-maintained
+  static property buffer; `4108` records the fallback outcome and `4113` the
+  diagnostic response value. Host-proven by
+  `open_controller_reloads_firmware_when_version_stays_zero`,
+  `firmware_reload_is_skipped_when_version_is_already_loaded`, and the
+  `lib/vcmailbox` encode/decode/coherency tests. Live keyboard enumeration is
+  the remaining on-metal acceptance item (QEMU models no Pi PCIe/USB, §0.4).
+- **BAR still `dead_dead` after the reload = bridge memory window never
+  forwarded; fixed by programming it during root-complex bring-up.** A
+  later metal capture showed the reorder + readiness poll necessary but not
+  sufficient: `4108 Reloaded` and `4109 … ready_hex=0` with the capability
+  header *still* uniform `dead_dead` after the full budget. The cause was
+  not the reload but a missing bring-up step: a PCI-PCI bridge forwards a
+  *memory* transaction downstream only when the address lies inside its
+  **Memory Base/Limit** window (type-1 config offset `0x20`), and the
+  BCM2711 ships it empty (base `0`, limit `0`). The bring-up had programmed
+  the bridge *bus-number* register (so *config* reads reached the VL805 —
+  the `4104` scan saw `1106:3483`) and the controller's CPU→PCIe outbound
+  *translation* (`MEM_WIN0`), but never the bridge memory window, so the
+  root port master-aborted every CPU access to the VL805's BAR. The fix is
+  `BrcmPcieRc::program_bridge_mem_window` (run right after the bus-number
+  programming): it sets the bridge Memory Base/Limit to cover the discovered
+  outbound PCIe range (`[outbound_pcie_base, +outbound_size)`), the range
+  BARs are assigned within, mirroring Linux's `pci_setup_bridge` (which the
+  windowed `mech_brcm` accessor does not perform). The register encodes only
+  address bits `[31:20]` and the non-prefetchable window decodes below 4 GiB,
+  so a window reaching the 4 GiB line fails closed (§5.4); the BCM2711's
+  outbound base `0xc000_0000` is well below it. Host-proven:
+  `bring_up_opens_the_bridge_memory_window_so_bar_reads_are_forwarded`
+  asserts the window covers `0xc000_0000..0x1_0000_0000`. Metal acceptance
+  item: a healthy capture should now read a real `CAPLENGTH` at `4107`/`4109
+  ready_hex=1`; a `4109 ready_hex=0` with `dead_dead` after this fix would
+  localise the fault past the bridge window to the reload step itself
+  (mailbox sequence / `dev_addr` / board firmware). QEMU models no Pi PCIe
+  (§0.4).
+- **`4110` configuration read-back — measuring which write stuck after the
+  bridge-window fix.** A capture *after* the bridge-window fix still showed
+  `4108 Reloaded`, `4109 ready_hex=0` and `4107` uniform `dead_dead`. At that
+  point the whole controller/bridge programming chain is present in code
+  (bridge bus numbers, bridge Memory Base/Limit, CPU→PCIe outbound
+  translation, VL805 BAR assignment, VL805 command-register memory-space +
+  bus-master), yet the mapped BAR aborts while *config* reads still succeed.
+  Rather than guess again (§15.7), `open_controller` now reads each
+  programmed register *back* (one-shot `EventId(4110)`, after BAR assign +
+  command enable, before `Xhci::open`): bridge `0x18`/`0x20`/`0x04` and VL805
+  `0x04`/`0x10`/`0x14`. Served by a new read-only `PciBus::read_config(bdf,
+  offset)` (lib/abi, implemented on `Pci<C>`, reaches both the bus-0 bridge
+  and the VL805 via `mech_brcm`); fail-closed (a faulting read renders the
+  all-ones sentinel, never propagated, §2.9), one-shot (never on the poll
+  path, §2.16/§19.4). Host-proven: `read_config_returns_the_dword_at_the_byte_offset`
+  (abi), `config_readback_dumps_each_register_once` +
+  `config_readback_renders_a_sentinel_for_a_faulting_read` (usb_keyboard).
+  QEMU models no Pi PCIe/USB (§0.4).
+- **Enable the root-port bridge Command register *after* the link is up
+  (done; landed on metal but not the fix).** `BrcmPcieRc::program_bridge_command` sets Memory Space +
+  Bus Master in the root port's Command register (config `0x04`, the standard
+  `pci_enable_bridge` enable). The `4110` capture showed it read back `0x0000`
+  while the adjacent bus-number (`0x18`) and Memory Base/Limit (`0x20`) writes
+  — same direct bus-0 path — stuck, so the offset is right and the difference
+  is *timing*: the integrated RC latches Memory Space Enable only against a
+  **live link**, and the earlier bring-up wrote it during the config phase
+  with `PERST#` still asserted. The user's working Linux enables the root port
+  only after the link trains (`pcieport 0000:00:00.0: enabling device
+  (0000 -> 0002)`). Fix: `bring_up` now calls `program_bridge_command`
+  **last**, after `train_link` + the fail-closed `link_up()` confirmation, so
+  MEM-space/bus-master latch against the trained link. This is the unifying
+  explanation for the triple symptom — `VideoCore` reaches the VL805 over the
+  same configured bus to load firmware ("VideoCore expects from us a
+  configured PCI bus"), so an un-latched bridge command master-aborts *both*
+  our BAR reads *and* the firmware-load writes, leaving `dead_dead`,
+  `fw_version=0`, and `response=0` together. Host-proven:
+  `bring_up_enables_memory_space_and_bus_master_on_the_bridge` (asserts the
+  command write follows the final `PERST#`-deassert). **Metal outcome:** the
+  later capture confirmed `bridge_command_status_hex` now reads back `0x6`
+  (the latch fix works) — but the VL805 BAR is *still* `dead_dead` and
+  `vl805_fw_version_hex` *still* `0` both before and after the reload, so the
+  bridge command was a real defect but not the firmware-load fix. QEMU models
+  no Pi PCIe/USB (§0.4).
+- **Gate readiness on the VL805 firmware version, not the aborting BAR
+  (done; the gate is the correct signal — firmware-load is the metal-only
+  residual).** `open_controller` gates readiness on `wait_for_firmware_loaded`:
+  it polls the VL805 **XHCI MCU firmware version** (config `0x50`, the
+  *working* register Linux's `rpi_firmware_init_vl805` checks) for a non-zero
+  build id, bounded by `FW_LOADED_BUDGET_US` (~2 s wall time) — strictly more
+  correct than the old gate, which polled the master-aborting BAR. The
+  `NOTIFY_XHCI_RESET` reload is demoted to fire **only** if the version stays
+  `0` (a redundant reload of an already-(re)loading VL805 can kill it,
+  raspberrypi/firmware #1380), then the BAR caps wait (`4109`) runs once the
+  firmware is loaded. Logged one-shot as `EventId(4118)`
+  (`polls_hex`/`fw_version_hex`/`ready_hex`). Host-proven:
+  `open_controller_reloads_the_firmware_as_a_fallback_when_version_stays_zero`
+  (the reload fires + two `4118` records when `0x50` stays `0`) and
+  `open_controller_skips_the_firmware_reload_when_mapping_fails`.
+  **Decisive metal + working-Linux datapoint (this confirms the gate and
+  closes the host-side investigation):** the `4118` capture shows
+  `fw_version_hex=0` through the full ~2 s budget, a no-op `NOTIFY_XHCI_RESET`,
+  and a second `4118` still `0`. On the *same* board the user's working Linux
+  reads `setpci -s 01:00.0 50.l = 0x000138c0` (a real firmware build id
+  `VideoCore` writes on load), `10.l = 0xc000000c` (BAR0 based at `0xc000_0000`,
+  **prefetchable**), `04.w = 0x0546` (mem-space + bus-master). So `0x50` *is*
+  the genuine firmware-version register on this board, and our `0` /
+  non-prefetchable `BAR0=0xc0000004` / `dead_dead` are all consistent symptoms
+  of a genuinely firmware-less VL805 — i.e. the `4118` gate observes exactly the
+  right thing and is **not** a red herring. Every host-verifiable PCI element
+  (outbound window decode, bridge command/bus-numbers/mem-window, BAR address,
+  and the `NOTIFY_XHCI_RESET` message: tag `0x30058`, dev_addr `0x10_0000`) is
+  proven byte-identical to Linux's. The sole residual is that our
+  `NOTIFY_XHCI_RESET` is *honoured* (tag response bit set) yet a no-op
+  (firmware version never advances), where Linux's identical flow loads the
+  blob — a `VideoCore`/board-firmware-state matter that produces no further
+  signal on the (now-proven-correct) PCI side and cannot be reproduced or
+  verified without the hardware (QEMU models no Pi PCIe/USB, §0.4).
+- **Inbound-window lead (`4119`, raspberrypi/firmware #1617) — REFUTED by
+  metal; firmware-handoff root cause confirmed.** The maintainer report (#1617)
+  suggested `VideoCore` loads the VL805 firmware over PCIe **through an inbound
+  DMA window**, so a mismatched inbound translation could make
+  `NOTIFY_XHCI_RESET` honoured-but-no-op. The `4119` metal capture
+  (`BrcmPcieRc::inbound_window_readback`) **refuted** this: it reads
+  `rc_bar2_hi=0x4` (PCIe base `0x4_0000_0000`), `rc_bar2_lo` size field `0x12`
+  (8 GiB), `RC_BAR1`/`RC_BAR3` disabled — **byte-identical** to working Linux's
+  `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. With every prior capture, **all**
+  PCIe/outbound/inbound/config elements are now proven to match Linux. The
+  one-shot `EventId(4119)` log is retained as a permanent bring-up diagnostic
+  (host-proven: `inbound_window_readback_reports_the_programmed_viewport` in
+  pcie_brcm, `inbound_window_readback_logs_one_4119_record` in usb_keyboard).
+  - **Confirmed root cause (firmware handoff, not the PCI path).** RustOS's own
+    aarch64 boot/arch code never writes `RGR1_SW_INIT_1` (only
+    `pcie_brcm::reset_controller` does, *after* sampling `entry_rgr1_sw_init`),
+    so the metal `entry_rgr1_sw_init=0x3` (PERST + bridge `sw_init` asserted) is
+    genuinely `start4.elf`'s handoff state: PCIe is held in fundamental reset
+    before any RustOS instruction runs, so the VL805 MCU firmware is already
+    dropped at OS entry. U-Boot's `bcm2711_notify_vl805_reset`
+    (`arch/arm/mach-bcm283x/msg.c`) is **byte-identical** to our mailbox
+    (`NOTIFY_XHCI_RESET`, `dev_addr=0x100000`, `udelay(200)`) and guarded by a
+    `done`-once static; its comment — "after a PCI reset, VL805's firmware may
+    be loaded directly from an EEPROM or, if not present, by VideoCore" — with
+    #1380 ("loading twice kills the VL805") establishes VideoCore loads the blob
+    **exactly once**. On this board VideoCore loads it at power-on; after our
+    PERST-handoff drops it, our `NOTIFY_XHCI_RESET` is a no-op (`response=0`,
+    old firmware) or now an outright failure (`4108` ERROR with the working
+    card's `start4.elf`/`fixup4.dat` copied) — VideoCore refusing the second
+    load. Linux works because it inherits a VL805 whose power-on firmware
+    `start4.elf` (or U-Boot) left resident; its `reset-raspberrypi` reads config
+    `0x50` first and **skips** the reload (the user's working Linux loads no
+    VL805 firmware at runtime, and `setpci 0x50 = 0x000138c0`).
+  - **Path forward — the no-touch probe (implemented; `AGENTS.md` §15.7).**
+    The user declined the U-Boot chain-load route, so the gentlest possible
+    bring-up is the chosen decisive experiment: `reset_controller` only
+    **releases** the bridge `sw_init` the previous boot stage left asserted
+    and does **not** re-assert a fundamental reset or toggle the SerDes
+    `IDDQ`, leaving any resident VL805 firmware untouched; `train_link`
+    deasserts the already-asserted `PERST#` (the single firmware-(re)load
+    edge), and the `NOTIFY_XHCI_RESET` reload stays a fallback issued only
+    when config `0x50` (the `4118` firmware-version gate) stays `0`.
+    Host-proven by `pcie_brcm::reset_releases_sw_init_without_re_asserting_a_fundamental_reset`
+    and `bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle`.
+    Decisive metal measurement: `4110`/`4114` `vl805_fw_version_hex` going
+    non-zero (with a live `CAPLENGTH` at `4107`/`4109`) proves `start4.elf`
+    left the firmware resident and our earlier reset was destroying it (the
+    in-tree fix is then complete); still `0`/`dead_dead` proves the
+    bare-metal handoff genuinely never loads it, leaving a boot-chain /
+    firmware matter (chain-load via U-Boot, whose `xhci_pci_init` loads the
+    VL805 firmware once after PCIe config, or a `start4.elf`/`config.txt`
+    change keeping PCIe up across the handoff) as the only remaining path.
+    Metal-only either way (QEMU models no Pi PCIe/USB, §0.4).
+- **`4111` outbound-window read-back — measure the memory path (§15.7).**
+  Rather than guess, `bring_up_keyboard` now logs one-shot `EventId(4111)`
+  before consuming the trained window: `BrcmPcieRc::outbound_window_readback`
+  reads `MEM_WIN0_LO/HI`, `BASE_LIMIT`, `BASE_HI`, `LIMIT_HI` and
+  `MISC_PCIE_STATUS` back (fail-closed per-field sentinel, §2.9). The metal
+  capture **pinned the root cause**: `mem_win0_base_limit=0x00003ff0`, which
+  under the BCM2711 field order decodes to CPU base `0x6_3ff00000` *above*
+  limit `0x6_00000000` — an inverted, empty window (see the root-cause bullet
+  below). Host-proven:
+  `outbound_window_readback_reports_the_programmed_window` (pcie_brcm) +
+  `outbound_window_readback_logs_one_4111_record` (usb_keyboard).
+- **Resolved (superseded) — reset the controller before touching MISC,
+  unconditionally.** `0xdead_dead` is the **BCM2711 root complex's master-abort
+  poison** (distinct from RustOS's all-ones `0xffff_ffff` sentinel) — returned
+  when a CPU access reaches the RC but no target decodes the address. An
+  earlier design read `MISC_PCIE_STATUS` at entry and *skipped* the reset when
+  the link was already up, to preserve the bootloader-loaded VL805 firmware.
+  The metal captures killed that twice over: the entry status read is itself a
+  MISC-block access that master-aborts ~10.8 s **before** the reset (so it
+  cannot report the link state — it *is* the bring-up pause, see P4), and
+  `entry_link_up` read `0` on every capture because the bootloader hands the
+  link off **down** (the standard Linux flow), so the skip path never engaged.
+  The skip-reset path, `entry_link_up`, and the `4112` log are therefore
+  removed (§2.14), and `BrcmPcieRc::bring_up` unconditionally resets, matching
+  U-Boot/Linux `pcie-brcmstb`: cycle the always-accessible RGR1 bridge
+  `sw_init` reset (+ `PERST#`) **before** any MISC access, then clear the
+  SerDes IDDQ, program the windows, deassert `PERST#`, poll for link-up, ending
+  fail-closed (§2.9/§5.4). The firmware the reset drops is reloaded over the
+  freshly-trained link via `NOTIFY_XHCI_RESET` (the working Linux flow on this
+  board). Host-proven:
+  `bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle` +
+  `bring_up_trains_the_link_and_programs_the_windows`. The pause vanishing on
+  metal is an on-metal acceptance item (QEMU models no Pi PCIe/USB, §0.4).
+- **Firmware reload sequenced after the VL805's BAR is based (done).** The
+  reload fires from `open_controller`, after `map_controller` bases the BAR +
+  sets memory/bus-master decode and before the caps wait/`Xhci::open`
+  (non-fatal, §2.9/§18.4) — `dev_addr=0x10_0000` and the property message
+  match U-Boot's `bcm2711_notify_vl805_reset` exactly. Its outcome/response
+  (`4108`/`4113`) and a post-reload config + cap re-read (`EventId(4114)`,
+  `log_post_reload_state`) are logged one-shot. Host-proven:
+  `open_controller_reloads_the_firmware_after_the_bar_is_based` and
+  `open_controller_skips_the_firmware_reload_when_mapping_fails`.
+- **Resolved — the persistent `dead_dead` was an inverted outbound window
+  (the firmware-load was a red herring).** With the reload sequenced
+  correctly the metal `4114` still showed the VL805 fully present and
+  correctly programmed after the reload (`1106:3483`, BAR0 based at
+  `0xc000_0000`, mem-space + bus-master enabled) yet the caps stayed
+  `dead_dead`; that, plus USB working under Linux **and RISC OS** on the same
+  card/firmware, redirected the search from the firmware to the **outbound
+  (CPU→PCIe) translation window** (the path config reads do not exercise). The
+  bug was in `rustos_drv_bus_pcie_brcm::regs`: the BCM2711 *proprietary*
+  `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` (`0x4070`) packs the **limit** in bits
+  `[31:20]` and the **base** in `[15:4]`, matching Linux's
+  `pcie-brcmstb`, but `MEM_WIN0_BASE_LIMIT_BASE_MASK`/`..._LIMIT_MASK` were
+  defined with the halves transposed, so `program_outbound_window` wrote the
+  base into the limit's half and vice-versa. For the Pi 4 window that yielded
+  the metal `4111` value `0x00003ff0` = base `0x6_3ff00000` *above* limit
+  `0x6_00000000`: an inverted, empty window decoding nothing, so every BAR
+  read master-aborted to `dead_dead` regardless of firmware. The fix swaps the
+  two mask constants; the expected Pi read-back is
+  `mem_win0_base_limit=0x3ff00000` with `base_hi=limit_hi=0x6`.
+  Host-proven by
+  `outbound_window_decodes_a_non_empty_range_covering_the_cpu_window`
+  (decodes the full CPU base/limit with the *hardware* field positions,
+  independent of the named constants; fails before the swap with
+  `base 0x6_3ff00000 > limit 0x6_00000000`, passes after). The live VL805
+  answering a plausible `CAPLENGTH` remains the on-metal acceptance item (§0.4
+  — QEMU models no Pi PCIe/USB).
+- **Firmware-load instrument — the VL805 `0x50` version register.** The
+  `4110`/`4114` config read-backs now also dump `vl805_fw_version_hex` (the
+  VL805 XHCI MCU firmware version at PCI config offset `0x50`), the register
+  Linux's `rpi_firmware_init_vl805` reads to confirm a load (`0` until
+  loaded, a non-zero build id once `VideoCore` loads the blob). It is read
+  over configuration space, which works on metal even while the BAR aborts,
+  so a metal capture now distinguishes "firmware never loaded" (`0x50`=0,
+  a board/firmware matter outside RustOS code) from "loaded but the BAR
+  window still does not decode" (`0x50`≠0) directly, instead of inferring it
+  from the `dead_dead` BAR. Host-proven by
+  `config_readback_dumps_each_register_once`.
 - The seam is the new `kernel/core` `InitSpawnCtx::spawn_kernel_service`
   (admits a `spawn_kthread` whose body drives an object-safe `YieldHandle`,
   so it need not name the port's context-switch type) + `static_frames`
@@ -2270,9 +2576,14 @@ keyboard service kthread**:
 Host-proven: the `platform::pcie_bringup` decoder tests, the
 `keyboard_service` mapper/DMA host capability+bounds tests, and the
 kernel-core `spawn_kernel_service` admission test; the freestanding
-aarch64 kernel builds with the full wiring. **Remaining — metal only:** a
-real VL805 BAR answering a plausible `CAPLENGTH`, the link training, and a
-USB keyboard driving the video-console login (the §0.4 on-metal checklist).
+aarch64 kernel builds with the full wiring. The VL805 BAR now answers a
+plausible `CAPLENGTH` on metal; the current fix moves `Xhci::open` past the
+halted pre-reset `USBSTS=0x805` (`HCH|HSE|CNR`) and reset-stuck
+`USBSTS=0x815` (`HCH|HSE|PCD|CNR`) states by clearing only stale
+write-1-to-clear status latches before `HCRST`, then enforcing `CNR` after
+reset. Host-proven by `open_resets_a_halted_controller_with_pre_reset_cnr_and_hse`.
+**Remaining — metal only:** xHCI reset/start completing on the real VL805 and
+a USB keyboard driving the video-console login (the §0.4 on-metal checklist).
 The architecturally-correct long-term home is still a `devmgr`-autoloaded
 userland keyboard *service* (rides the DriverSpawner-over-IPC gap, Stage
 4.HW increment 1); the in-kernel service is the interim. Then the DWC2 OTG

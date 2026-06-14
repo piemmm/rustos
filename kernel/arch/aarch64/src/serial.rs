@@ -6,8 +6,14 @@
 //! serial scraper expect —
 //!
 //! ```text
-//! [<level>] id=<id> <message> <key>=<value> ...
+//! [t=<ms>ms] [<level>] id=<id> <message> <key>=<value> ...
 //! ```
+//!
+//! The leading `[t=<ms>ms]` is a monotonic, `CNTPCT_EL0`-derived
+//! millisecond timestamp (epoch unspecified — only differences matter)
+//! so a serial capture reads off the real wall time between two lines.
+//! Consumers match on the `id=<id>` token, never the line start, so the
+//! prefix does not disturb them (`AGENTS.md` §15.7 / §2.16).
 //!
 //! # Two consoles: the display and the UART (`plans/PI.md` P7b / P11)
 //!
@@ -299,9 +305,16 @@ impl Sink for SerialSink {
         // Ignore write errors: `ConsoleWriter` is infallible (the MMIO
         // store returns no status). The logging path must not panic
         // (`AGENTS.md` §2.9).
+        // Prefix each line with a monotonic millisecond timestamp
+        // (`CNTPCT_EL0`-derived) so a serial capture reads off the real
+        // wall time between two lines — the instrument that localises a
+        // multi-second bring-up gap to the exact stage it occurs in
+        // (`AGENTS.md` §15.7 / §2.16 — measure, don't guess). The epoch is
+        // unspecified; only differences matter.
         let _ = write!(
             w,
-            "[{}] id={} {}",
+            "[t={}ms] [{}] id={} {}",
+            crate::kernel_arch::uptime_ms(),
             level_str(event.level),
             event.id.0,
             event.message

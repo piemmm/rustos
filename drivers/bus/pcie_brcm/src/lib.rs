@@ -153,14 +153,28 @@ impl PcieRegs for RegisterWindow {
     }
 }
 
-/// A microsecond busy-delay seam.
+/// A microsecond timing seam: a busy-delay plus a monotonic clock.
 ///
 /// The link bring-up has hard timing requirements a register poll
-/// cannot express; the kernel composition supplies a generic-timer
-/// implementation, host tests a no-op.
+/// cannot express, and a readiness poll must be bounded by real elapsed
+/// time; the kernel composition supplies a generic-timer implementation
+/// (`CNTPCT_EL0`/`CNTFRQ_EL0`), host tests a deterministic stand-in.
 pub trait Delay {
     /// Block for at least `us` microseconds.
     fn delay_us(&self, us: u32);
+
+    /// A monotonically non-decreasing microsecond timestamp from the same
+    /// time source `delay_us` blocks against.
+    ///
+    /// It lets a caller bound a poll loop by *elapsed wall time* rather
+    /// than a fixed iteration count, so a single read that itself blocks
+    /// — e.g. a PCIe master-abort completion timeout, which on the BCM2711
+    /// stalls each access to an un-decoded BAR for tens of milliseconds —
+    /// cannot inflate the loop's real duration far past its intended
+    /// budget (`AGENTS.md` §2.16 — a poll-count budget silently assumes
+    /// cheap reads). The epoch is unspecified; only differences are
+    /// meaningful.
+    fn now_us(&self) -> u64;
 }
 
 /// Driver entry point (`AGENTS.md` §8).
@@ -204,6 +218,138 @@ pub struct PcieWindows {
     pub outbound_size: u64,
 }
 
+/// A read-back of the controller's outbound (CPU→PCIe) memory-window
+/// registers and link status, produced by
+/// [`BrcmPcieRc::outbound_window_readback`] for a bring-up diagnostic.
+///
+/// Each field is the raw 32-bit register as it reads back on metal, or
+/// the all-ones sentinel if the read faulted (`AGENTS.md` §2.9). The
+/// caller (the kernel image-assembly binary) logs them; the driver does
+/// not depend on a logging facility.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OutboundWindowReadback {
+    /// Low 32 bits of the PCIe-space base the window maps to
+    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_LO`]).
+    pub mem_win0_lo: u32,
+    /// High 32 bits of that PCIe-space base
+    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_HI`]).
+    pub mem_win0_hi: u32,
+    /// CPU-side base and limit, in MiB, packed into one register
+    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`]).
+    pub mem_win0_base_limit: u32,
+    /// High bits of the CPU-side base
+    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI`]).
+    pub mem_win0_base_hi: u32,
+    /// High bits of the CPU-side limit
+    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI`]).
+    pub mem_win0_limit_hi: u32,
+    /// Link/role status ([`regs::MISC_PCIE_STATUS`]): root-port,
+    /// data-link-active and phy-link-up bits.
+    pub pcie_status: u32,
+}
+
+/// A read-back of the controller's **inbound** (PCIe→system-memory)
+/// viewport registers, produced by
+/// [`BrcmPcieRc::inbound_window_readback`] for a bring-up diagnostic.
+///
+/// On the Raspberry Pi 4 the `VideoCore` co-processor loads the VL805's
+/// xHCI firmware over PCIe **through an inbound DMA window** (the "xHCI
+/// firmware window"): if that inbound translation is reprogrammed away
+/// from what `VideoCore` set up at power-on, a `NOTIFY_XHCI_RESET`
+/// firmware (re)load is *honoured* yet a no-op and the controller never
+/// decodes (raspberrypi/firmware #1617). `bring_up` programs the inbound
+/// viewport in `RC_BAR2` and disables the unused `RC_BAR1`/`RC_BAR3`
+/// inbound windows, so capturing these as they actually read back lets a
+/// metal run compare our inbound translation with the working-Linux
+/// `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`.
+///
+/// Each field is the raw 32-bit register as it reads back on metal, or
+/// the all-ones sentinel if the read faulted (`AGENTS.md` §2.9). The
+/// caller logs them; the driver does not depend on a logging facility.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct InboundWindowReadback {
+    /// `RC_BAR1_CONFIG_LO` ([`regs::MISC_RC_BAR1_CONFIG_LO`]): the
+    /// PCIe→GISB inbound window, disabled by bring-up (size field 0).
+    pub rc_bar1_lo: u32,
+    /// Low 32 bits of the active PCIe→system-memory inbound viewport
+    /// ([`regs::MISC_RC_BAR2_CONFIG_LO`]): offset bits plus the encoded
+    /// size in the low field.
+    pub rc_bar2_lo: u32,
+    /// High 32 bits of that inbound viewport offset
+    /// ([`regs::MISC_RC_BAR2_CONFIG_HI`]).
+    pub rc_bar2_hi: u32,
+    /// `RC_BAR3_CONFIG_LO` ([`regs::MISC_RC_BAR3_CONFIG_LO`]): the
+    /// PCIe→SCB inbound window, disabled by bring-up (size field 0).
+    pub rc_bar3_lo: u32,
+    /// Link/role status ([`regs::MISC_PCIE_STATUS`]) for correlation.
+    pub pcie_status: u32,
+}
+
+/// Wall-time breakdown of one `BrcmPcieRc` bring-up, in microseconds,
+/// produced from the [`Delay`] clock and exposed by
+/// [`BrcmPcieRc::bring_up_timing`] for a bring-up diagnostic.
+///
+/// The metal symptom was a multi-second `bring_up` whose coded delays
+/// (the reset settles plus the ≤ 100 ms link-training wait) total only a
+/// few hundred milliseconds — so the time was spent in the register work
+/// itself. Splitting the reset phase pinned the ~10.8 s on the **first
+/// access to the MISC register block** (`0x4xxx`): at OS entry the
+/// controller core is held off, and a MISC read/write does not complete
+/// until the always-accessible RGR1 bridge `sw_init` reset (`0x9210`) has
+/// been cycled — so any MISC access before that reset stalls ~10.8 s on
+/// the `SoC` bus completion timeout (the *same* [`regs::MISC_PCIE_STATUS`]
+/// read costs microseconds once the controller is out of reset, as the
+/// configuration phase confirms). So `BrcmPcieRc`'s reset step releases
+/// the bridge `sw_init` reset **before** touching MISC, matching U-Boot's /
+/// Linux's `pcie-brcmstb`; the split is retained so a metal capture pins
+/// any residual stall to the exact MMIO group (`AGENTS.md` §15.7 —
+/// measure, don't guess). The four `*_us` spans sum to the whole
+/// `bring_up`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct BringUpTiming {
+    /// Microseconds spent **releasing** the bridge `sw_init` reset on
+    /// [`regs::RGR1_SW_INIT_1`] (`0x9210`, the always-accessible reset
+    /// block). Run **first**, before any MISC access, so the controller
+    /// core (and its MISC block) is out of reset before the MISC block is
+    /// touched. The gentlest no-touch-probe bring-up does **not** re-assert
+    /// `sw_init`/`PERST#`: the previous boot stage left both asserted with
+    /// the VL805 firmware already loaded, so `PERST#` is left as-is and
+    /// deasserted later in `train_link` (the single firmware-(re)load
+    /// edge).
+    pub reset_swinit_us: u64,
+    /// Microseconds spent letting the controller core / MISC block settle
+    /// after the `sw_init` de-reset, before the configuration phase issues
+    /// its first MISC access. No SerDes `IDDQ` toggle is performed (the
+    /// SerDes is already powered by the previous boot stage's power-on
+    /// bring-up); a multi-second value here would mean a MISC access still
+    /// stalls even with the controller out of reset.
+    pub reset_settle_us: u64,
+    /// Microseconds in the configuration-programming phase: the
+    /// `MISC_*` control/inbound-window writes and the type-1 bridge
+    /// configuration-space reads/writes (bus numbers, Memory Base/Limit,
+    /// Command, link capability, class, endian, outbound window) — issued
+    /// before the link is awaited, with no coded delay of their own.
+    pub config_us: u64,
+    /// Microseconds in the link-wait phase: the 100 ms `PERST#`-deassert
+    /// settle plus the bounded link-up poll loop.
+    pub linkwait_us: u64,
+    /// Link-up polls actually performed in the link-wait phase (`0` when
+    /// the link came up on the first check).
+    pub link_polls: u32,
+    /// Raw [`regs::RGR1_SW_INIT_1`] value sampled at `bring_up` entry,
+    /// **before** the reset cycles it. The always-accessible RGR1 reset
+    /// block is readable immediately (no link or MISC needed), so this
+    /// captures the downstream-reset state the previous boot stage left
+    /// behind: a set `RGR1_SW_INIT_1_PERST_MASK` bit means `PERST#` was
+    /// already asserted at OS entry (the handoff held the VL805 in
+    /// fundamental reset, dropping its bootloader-loaded firmware before
+    /// any RustOS code ran — a `VideoCore` reload would then be the only
+    /// way to restore it), while a clear bit means the firmware should
+    /// still be resident and must not be dropped (`AGENTS.md` §15.7 —
+    /// measure, don't guess).
+    pub entry_rgr1_sw_init: u32,
+}
+
 /// Encode an inbound-viewport size into the 5-bit `RC_BARn` size field.
 ///
 /// Returns `0` (the "disabled" encoding) for a size outside the
@@ -233,6 +379,9 @@ fn encode_ibar_size(size: u64) -> u32 {
 /// accessor over it.
 pub struct BrcmPcieRc<R: PcieRegs> {
     regs: R,
+    /// Per-phase wall-time breakdown of the bring-up — see
+    /// [`BrcmPcieRc::bring_up_timing`].
+    bring_up_timing: BringUpTiming,
 }
 
 impl<R: PcieRegs> BrcmPcieRc<R> {
@@ -267,7 +416,10 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
         windows: &PcieWindows,
         link_polls: u32,
     ) -> Result<Self, DriverError> {
-        let mut dev = Self { regs };
+        let mut dev = Self {
+            regs,
+            bring_up_timing: BringUpTiming::default(),
+        };
         dev.bring_up(delay, windows, link_polls)?;
         Ok(dev)
     }
@@ -284,6 +436,85 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
         &self.regs
     }
 
+    /// The per-phase wall-time breakdown of the bring-up that produced
+    /// this root complex (reset / configuration-programming / link-wait,
+    /// in microseconds, plus the link polls performed).
+    ///
+    /// Measured from the [`Delay`] clock across the three disjoint phases
+    /// of the bring-up; the keyboard composition logs it so a metal
+    /// capture localises a multi-second bring-up to the exact phase that
+    /// stalls rather than guessing (`AGENTS.md` §15.7).
+    #[must_use]
+    pub fn bring_up_timing(&self) -> BringUpTiming {
+        self.bring_up_timing
+    }
+
+    /// Read the outbound (CPU→PCIe) memory-window registers and the link
+    /// status back, for a bring-up diagnostic.
+    ///
+    /// The metal symptom is that the VL805's mapped BAR returns the
+    /// BCM2711 `0xdead_dead` master-abort poison even though
+    /// *configuration* reads succeed and every PCI-config register
+    /// (bus numbers, Memory Base/Limit, the device's BAR and command) reads
+    /// back what bring-up wrote. Configuration and memory take different
+    /// paths through the controller — configuration through the internal
+    /// `EXT_CFG` window, memory through this CPU→PCIe outbound translation
+    /// window (`program_outbound_window`) — so a
+    /// memory access that aborts while configuration works isolates the
+    /// fault to the outbound path. This reads the window registers
+    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_LO`] and friends) and
+    /// [`regs::MISC_PCIE_STATUS`] back so a metal capture shows whether the
+    /// translation window holds the programmed CPU/PCIe bases and whether
+    /// the data link is actually up, rather than guessing the next change
+    /// (`AGENTS.md` §15.7).
+    ///
+    /// Read-only and fail-closed: a faulting register read renders the
+    /// all-ones sentinel and is never propagated — the read-back is
+    /// diagnostic, not a bring-up step (`AGENTS.md` §2.9).
+    #[must_use]
+    pub fn outbound_window_readback(&mut self) -> OutboundWindowReadback {
+        OutboundWindowReadback {
+            mem_win0_lo: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_LO),
+            mem_win0_hi: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_HI),
+            mem_win0_base_limit: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT),
+            mem_win0_base_hi: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI),
+            mem_win0_limit_hi: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI),
+            pcie_status: self.read_or_sentinel(regs::MISC_PCIE_STATUS),
+        }
+    }
+
+    /// Read back the **inbound** (PCIe→system-memory) viewport registers
+    /// as they actually stand after bring-up, for a metal diagnostic.
+    ///
+    /// On the Raspberry Pi 4 the `VideoCore` VL805 firmware (re)load runs
+    /// over an inbound DMA window; a mismatch between the inbound
+    /// translation we program (`RC_BAR2`, with `RC_BAR1`/`RC_BAR3`
+    /// disabled) and what `VideoCore` expects makes the
+    /// `NOTIFY_XHCI_RESET` reload honoured-but-no-op
+    /// (raspberrypi/firmware #1617). Capturing these lets a metal run
+    /// compare against the working-Linux inbound translation rather than
+    /// guessing the next change (`AGENTS.md` §15.7).
+    ///
+    /// Read-only and fail-closed: a faulting register read renders the
+    /// all-ones sentinel and is never propagated — the read-back is
+    /// diagnostic, not a bring-up step (`AGENTS.md` §2.9).
+    #[must_use]
+    pub fn inbound_window_readback(&mut self) -> InboundWindowReadback {
+        InboundWindowReadback {
+            rc_bar1_lo: self.read_or_sentinel(regs::MISC_RC_BAR1_CONFIG_LO),
+            rc_bar2_lo: self.read_or_sentinel(regs::MISC_RC_BAR2_CONFIG_LO),
+            rc_bar2_hi: self.read_or_sentinel(regs::MISC_RC_BAR2_CONFIG_HI),
+            rc_bar3_lo: self.read_or_sentinel(regs::MISC_RC_BAR3_CONFIG_LO),
+            pcie_status: self.read_or_sentinel(regs::MISC_PCIE_STATUS),
+        }
+    }
+
+    /// Read a register, rendering a faulting read as the all-ones
+    /// sentinel (`AGENTS.md` §2.9 — the diagnostic read never propagates).
+    fn read_or_sentinel(&mut self, offset: usize) -> u32 {
+        self.regs.read32(offset).unwrap_or(0xFFFF_FFFF)
+    }
+
     /// Read-modify-write the bits selected by `mask` at `offset`.
     fn modify(&mut self, offset: usize, value: u32, mask: u32) -> Result<(), DriverError> {
         let cur = self.regs.read32(offset)?;
@@ -297,34 +528,101 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
             && status & regs::PCIE_STATUS_PHYLINKUP_MASK != 0)
     }
 
+    /// Bring the controller core online and power the SerDes up **without
+    /// fundamentally resetting the downstream device**, returning the
+    /// wall-time split `(swinit_us, serdes_us)` measured from the [`Delay`]
+    /// clock.
+    ///
+    /// The order matters and matches U-Boot's / Linux's `pcie-brcmstb`:
+    /// the always-accessible [`regs::RGR1_SW_INIT_1`] bridge `sw_init`
+    /// reset register (`0x9210`) is released **first**, and only then is
+    /// the MISC register block (`0x4xxx`) touched. At OS entry the
+    /// controller core is held off and a MISC read/write does not complete
+    /// until the bridge reset is released; touching MISC first stalls the
+    /// access ~10.8 s on the `SoC` bus completion timeout (measured on
+    /// metal — the same accesses cost microseconds once the controller is
+    /// out of reset, as the configuration phase confirms).
+    ///
+    /// **No-touch probe (gentlest bring-up).** The previous boot stage
+    /// (`start4.elf`) hands off with the bridge `sw_init` reset *and*
+    /// `PERST#` already asserted (metal `entry_rgr1_sw_init = 0x3`), having
+    /// already trained the link and loaded the VL805 xHCI firmware over it
+    /// at power-on. Re-asserting a fundamental reset (`sw_init`/`PERST#`)
+    /// or re-toggling the SerDes `IDDQ` is therefore redundant and risks
+    /// dropping that resident firmware — the failure this probe isolates
+    /// (`AGENTS.md` §15.7). So this does the minimum: it **releases** the
+    /// already-asserted bridge `sw_init` (bringing the core and its MISC
+    /// block out of reset) and lets the block settle. It does **not**
+    /// re-assert `sw_init`/`PERST#` and does **not** touch the SerDes.
+    /// `PERST#` is left as the handoff left it; [`Self::train_link`]
+    /// deasserts it, producing the single `PERST#`-deassert edge rather
+    /// than a fresh fundamental-reset cycle.
+    fn reset_controller(&mut self, delay: &dyn Delay) -> Result<(u64, u64), DriverError> {
+        let t_start = delay.now_us();
+
+        // Gentlest bring-up (no-touch probe): the previous boot stage left
+        // the bridge `sw_init` reset and `PERST#` asserted with the VL805
+        // firmware already loaded over the power-on link, so we only
+        // RELEASE the bridge `sw_init` — bringing the core and its MISC
+        // block out of reset — without re-asserting a fundamental reset or
+        // toggling the SerDes, either of which could drop that resident
+        // firmware. `train_link` later deasserts the already-asserted
+        // `PERST#` (the single firmware-(re)load edge).
+        self.modify(
+            regs::RGR1_SW_INIT_1,
+            0,
+            regs::RGR1_SW_INIT_1_INIT_GENERIC_MASK,
+        )?;
+        let t_after_swinit = delay.now_us();
+
+        // Let the core / MISC block settle after the de-reset before the
+        // configuration phase issues its first MISC access. No SerDes IDDQ
+        // toggle: the SerDes is already powered by the power-on bring-up.
+        delay.delay_us(200);
+        let t_after_settle = delay.now_us();
+
+        Ok((
+            t_after_swinit.wrapping_sub(t_start),
+            t_after_settle.wrapping_sub(t_after_swinit),
+        ))
+    }
+
     fn bring_up(
         &mut self,
         delay: &dyn Delay,
         windows: &PcieWindows,
         link_polls: u32,
     ) -> Result<(), DriverError> {
-        // Hold the bridge in reset and assert PERST# (some firmware
-        // leaves it deasserted), then release the bridge reset.
-        self.modify(
-            regs::RGR1_SW_INIT_1,
-            1,
-            regs::RGR1_SW_INIT_1_INIT_GENERIC_MASK,
-        )?;
-        self.modify(regs::RGR1_SW_INIT_1, 1, regs::RGR1_SW_INIT_1_PERST_MASK)?;
-        delay.delay_us(200);
-        self.modify(
-            regs::RGR1_SW_INIT_1,
-            0,
-            regs::RGR1_SW_INIT_1_INIT_GENERIC_MASK,
-        )?;
-
-        // Power the SerDes up (clear IDDQ) and let it stabilise.
-        self.modify(
-            regs::MISC_HARD_PCIE_HARD_DEBUG,
-            0,
-            regs::HARD_DEBUG_SERDES_IDDQ_MASK,
-        )?;
-        delay.delay_us(200);
+        // Bring the controller core out of reset before any MISC access
+        // (`reset_controller`), matching U-Boot's / Linux's `pcie-brcmstb`:
+        // the BCM2711 holds the controller core off at OS entry, so the
+        // bridge `sw_init` reset (on the always-accessible RGR1 register)
+        // must be released before the MISC register block is readable —
+        // otherwise the first MISC access stalls ~10.8 s on the `SoC` bus
+        // completion timeout. This is the gentlest no-touch-probe bring-up:
+        // `reset_controller` only *releases* the bridge `sw_init` the
+        // previous boot stage left asserted (it does **not** re-assert a
+        // fundamental reset or toggle the SerDes, either of which could drop
+        // the VL805 firmware `start4.elf` loaded over the power-on link), and
+        // `train_link` below deasserts the already-asserted `PERST#` —
+        // producing the single `PERST#`-deassert edge rather than a fresh
+        // fundamental-reset cycle.
+        //
+        // The phase marks below split the bring-up's wall time into reset
+        // (further split by `reset_controller` into the bridge `sw_init`
+        // release and the post-de-reset MISC settle sub-spans),
+        // configuration-programming, and link-wait, recorded in
+        // `self.bring_up_timing` so a metal capture localises any residual
+        // stall to the exact MMIO group (`AGENTS.md` §15.7 — measure, don't
+        // guess). They read the same monotonic clock the settles block
+        // against, so the spans are real wall time.
+        // Sample the always-accessible RGR1 reset register *before* the
+        // reset touches it, so the `4117` diagnostic shows whether the
+        // previous boot stage left `PERST#` asserted (VL805 firmware
+        // already dropped at OS entry) or deasserted (`AGENTS.md` §15.7).
+        let entry_rgr1_sw_init = self.regs.read32(regs::RGR1_SW_INIT_1)?;
+        let (reset_swinit_us, reset_settle_us) = self.reset_controller(delay)?;
+        let t_after_reset = delay.now_us();
 
         // Misc control: enable SCB access + UR config reads, set the
         // BCM2711 burst encoding (0 = 128 bytes), RCB MPS + 64-byte mode.
@@ -387,6 +685,8 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
         // at 0, which leaves the VL805 (bus 1) unreachable until set.
         self.program_bridge_bus_numbers()?;
 
+        self.program_bridge_mem_window(windows)?;
+
         self.program_outbound_window(windows)?;
 
         // PCIe→SCB endian mode for the inbound BAR path: little-endian.
@@ -395,25 +695,60 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
             regs::RC_CFG_VENDOR_REG1_LITTLE_ENDIAN,
             regs::RC_CFG_VENDOR_REG1_ENDIAN_MODE_BAR2_MASK,
         )?;
+        let t_after_config = delay.now_us();
 
-        // Deassert PERST# and wait the 100 ms link-training settle
-        // before polling for link-up.
+        let polls_used = self.train_link(delay, link_polls)?;
+        let t_after_link = delay.now_us();
+        // Record the per-phase wall-time split for the bring-up diagnostic
+        // (`bring_up_timing`); `wrapping_sub` is exact for a monotonic
+        // clock and never panics on a host stub whose epoch differs
+        // (`AGENTS.md` §2.9).
+        self.bring_up_timing = BringUpTiming {
+            reset_swinit_us,
+            reset_settle_us,
+            config_us: t_after_config.wrapping_sub(t_after_reset),
+            linkwait_us: t_after_link.wrapping_sub(t_after_config),
+            link_polls: polls_used,
+            entry_rgr1_sw_init,
+        };
+        // Training just completed: confirm the link is live before
+        // declaring the root complex up, failing closed otherwise
+        // (`AGENTS.md` §5.4 / §2.9).
+        if !self.link_up()? {
+            return Err(DriverError::DeviceFault);
+        }
+        // Enable Memory Space + Bus Master on the root-port bridge now the
+        // link is trained, mirroring Linux's `pci_enable_bridge` (which
+        // enables the device only once the link is up). Done last so the
+        // enable latches against a live link rather than while `PERST#` is
+        // still asserted: writing it during the config phase did not stick
+        // on the integrated RC (the metal `4110` symptom — the bridge
+        // command read back `0x0000`, leaving the VL805 BAR master-aborting
+        // to `0xdead_dead` despite a correct bus-number + Memory Base/Limit
+        // window).
+        self.program_bridge_command()?;
+        Ok(())
+    }
+
+    /// Deassert `PERST#`, wait the 100 ms link-training settle, then poll
+    /// for link-up, returning the number of polls performed.
+    ///
+    /// Bounded by `link_polls` (`AGENTS.md` §2.1 — a link that never trains
+    /// fails closed in the caller rather than hanging); the poll count is
+    /// reported into the bring-up timing diagnostic
+    /// ([`bring_up_timing`](Self::bring_up_timing)).
+    fn train_link(&mut self, delay: &dyn Delay, link_polls: u32) -> Result<u32, DriverError> {
         self.modify(regs::RGR1_SW_INIT_1, 0, regs::RGR1_SW_INIT_1_PERST_MASK)?;
         delay.delay_us(100_000);
-
-        let mut polls = 0;
-        while polls < link_polls {
+        let mut polls_used = 0;
+        while polls_used < link_polls {
             if self.link_up()? {
-                return Ok(());
+                break;
             }
             delay.delay_us(LINK_POLL_INTERVAL_US);
-            polls += 1;
+            polls_used += 1;
         }
-        if self.link_up()? {
-            Ok(())
-        } else {
-            Err(DriverError::DeviceFault)
-        }
+        Ok(polls_used)
     }
 
     /// Program the root port's type-1 bridge bus-number register so it
@@ -445,6 +780,79 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
             regs::PRIMARY_BUS_SUBORDINATE_MASK,
         );
         self.regs.write32(regs::RC_CFG_PRIMARY_BUS, value)
+    }
+
+    /// Program the root port's type-1 bridge memory window so it forwards
+    /// CPU memory transactions to the outbound PCIe window downstream.
+    ///
+    /// [`program_outbound_window`](Self::program_outbound_window) sets the
+    /// controller's CPU→PCIe address *translation*, and
+    /// [`program_bridge_bus_numbers`](Self::program_bridge_bus_numbers)
+    /// opens *configuration* forwarding, but a PCI-PCI bridge forwards a
+    /// *memory* transaction downstream only when the (translated) PCIe
+    /// address falls inside its Memory Base/Limit window
+    /// ([`regs::RC_CFG_MEMORY_BASE_LIMIT`]). The BCM2711 ships that
+    /// register at 0 — an empty window — so the root port master-aborts
+    /// every access to the VL805's BAR (the metal symptom: config reads
+    /// succeed yet BAR reads return the `0xdead_dead` abort poison) until
+    /// it is named. This mirrors the bridge-window assignment a full PCI
+    /// enumerator would perform (Linux's `pci_setup_bridge`), which the
+    /// windowed `mech_brcm` accessor does not.
+    ///
+    /// The window is set to the host bridge's outbound PCIe range
+    /// `[outbound_pcie_base, outbound_pcie_base + outbound_size)`, the same
+    /// range BARs are assigned within. The non-prefetchable Memory
+    /// Base/Limit register only decodes addresses below 4 GiB, so a window
+    /// reaching at or above the 4 GiB line fails closed (`AGENTS.md` §5.4);
+    /// the BCM2711's outbound window sits at `0xc000_0000`, well below it.
+    fn program_bridge_mem_window(&mut self, windows: &PcieWindows) -> Result<(), DriverError> {
+        let base = windows.outbound_pcie_base;
+        let end = base
+            .checked_add(windows.outbound_size)
+            .ok_or(DriverError::OutOfRange)?;
+        if windows.outbound_size == 0 || end > 0x1_0000_0000 {
+            return Err(DriverError::OutOfRange);
+        }
+        let limit = end - 1;
+
+        let base_field = low32(base >> regs::MEMORY_WINDOW_GRANULE_SHIFT);
+        let limit_field = low32(limit >> regs::MEMORY_WINDOW_GRANULE_SHIFT);
+        let cur = self.regs.read32(regs::RC_CFG_MEMORY_BASE_LIMIT)?;
+        let mut value = regs::replace_bits(cur, base_field, regs::MEMORY_BASE_LIMIT_BASE_MASK);
+        value = regs::replace_bits(value, limit_field, regs::MEMORY_BASE_LIMIT_LIMIT_MASK);
+        self.regs.write32(regs::RC_CFG_MEMORY_BASE_LIMIT, value)
+    }
+
+    /// Enable Memory Space + Bus Master in the root port's own Command
+    /// register, the standard PCI-PCI bridge enable a full enumerator
+    /// performs (Linux's `pci_enable_bridges`), which the windowed
+    /// `mech_brcm` accessor does not.
+    ///
+    /// A PCI-PCI bridge forwards a downstream memory transaction only when
+    /// Memory Space Enable is set in its Command register (Bus Master
+    /// Enable likewise gates upstream DMA), in addition to the bus numbers
+    /// ([`program_bridge_bus_numbers`](Self::program_bridge_bus_numbers))
+    /// and the Memory Base/Limit window
+    /// ([`program_bridge_mem_window`](Self::program_bridge_mem_window)).
+    /// [`bring_up`](Self::bring_up) issues this **after the link is
+    /// trained**, mirroring Linux, which enables the device (`pcieport
+    /// 0000:00:00.0: enabling device (0000 -> 0002)`) only once the link is
+    /// up: the integrated RC latches Memory Space Enable against a live
+    /// link, so an earlier write (with `PERST#` still asserted) does not
+    /// stick — the metal symptom that left the VL805 BAR master-aborting
+    /// (`0xdead_dead`) despite a correct bus-number + Memory Base/Limit
+    /// window (the `4110` read-back showing the bridge command at `0x0000`).
+    ///
+    /// The high 16 bits of the dword are the write-1-to-clear Status
+    /// register; they are masked off before the write so the
+    /// read-modify-write does not clear any latched status bit (writing 0
+    /// to a `RW1C` bit is a no-op).
+    fn program_bridge_command(&mut self) -> Result<(), DriverError> {
+        let cur = self.regs.read32(regs::RC_CFG_COMMAND)?;
+        let value = (cur & !regs::COMMAND_STATUS_MASK)
+            | regs::COMMAND_MEMORY_SPACE_MASK
+            | regs::COMMAND_BUS_MASTER_MASK;
+        self.regs.write32(regs::RC_CFG_COMMAND, value)
     }
 
     fn program_outbound_window(&mut self, windows: &PcieWindows) -> Result<(), DriverError> {

@@ -83,6 +83,62 @@ pub trait PciBus: Bus {
     ///   be completed by the bus transport.
     fn enable_bus_master(&self, bdf: u64) -> Result<(), DriverError>;
 
+    /// Assign a memory base to the BAR at `bar_index` on function
+    /// `bdf` if it is currently **unassigned**, placing it inside the
+    /// PCIe-bus window `[window_base, window_base + window_size)` and
+    /// returning the resolved PCIe-bus base.
+    ///
+    /// Firmware normally programs a function's BARs, but when the OS
+    /// resets and re-enumerates the host bridge (the BCM2711 PCIe
+    /// bring-up) a downstream function's BAR address bits read zero: the
+    /// BAR is sized and typed but carries no base, so mapping it would
+    /// target physical address 0 and be refused. Assigning resources
+    /// from the bridge's outbound window is the PCI core's job. A BAR
+    /// that already carries a non-zero base is left untouched and its
+    /// base returned (firmware's assignment is respected); the call is
+    /// then a no-op that leaves configuration space unchanged. A
+    /// DMA-driving driver calls this once before
+    /// [`map_bar_window`](Self::map_bar_window).
+    ///
+    /// The returned base is a **PCIe-bus** address; the host bridge's
+    /// [`MmioMapper`] translates it to CPU-physical at map time.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — `bar_index` is out of range, or no
+    ///   memory BAR is implemented at that slot.
+    /// * [`DriverError::Unsupported`] — the BAR is an I/O-port BAR, or
+    ///   the function is not a type-0 header.
+    /// * [`DriverError::OutOfRange`] — the BAR's size-aligned placement
+    ///   does not fit inside the window, or a 32-bit BAR would land
+    ///   above the 4 GiB line (fail closed, `AGENTS.md` §5.4).
+    fn assign_bar(
+        &self,
+        bdf: u64,
+        bar_index: u8,
+        window_base: u64,
+        window_size: u64,
+    ) -> Result<u64, DriverError>;
+
+    /// Read the configuration-space dword at byte `offset` of function
+    /// `bdf`.
+    ///
+    /// `offset` is a **byte** offset into the function's 256-byte
+    /// configuration header and is taken modulo-4 (the dword the byte
+    /// falls in); the returned value is the little-endian dword exactly
+    /// as configuration space holds it. This is a read-only window onto
+    /// a function's own configuration the bus driver already reaches by
+    /// holding its [`DriverHandle`](crate::driver::DriverHandle), used to
+    /// confirm a write took effect (a just-assigned BAR, an enabled
+    /// command register, a programmed bridge window) — a diagnostic
+    /// read, not a side-effecting one.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the configuration read cannot
+    ///   be completed by the bus transport.
+    fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, DriverError>;
+
     /// Describe the function at `bdf` as a discovered child
     /// [`HwNode`] to attach beneath the bus's own
     /// hardware-tree node (`AGENTS.md` §18.1 / §18.3).
@@ -201,6 +257,35 @@ mod tests {
             Ok(())
         }
 
+        fn assign_bar(
+            &self,
+            _bdf: u64,
+            bar_index: u8,
+            window_base: u64,
+            window_size: u64,
+        ) -> Result<u64, DriverError> {
+            if bar_index != 0 || self.bar_size == 0 {
+                return Err(DriverError::NotFound);
+            }
+            // Already-based BAR: respected unchanged.
+            if self.bar_base != 0 {
+                return Ok(self.bar_base);
+            }
+            if self.bar_size > window_size {
+                return Err(DriverError::OutOfRange);
+            }
+            Ok(window_base)
+        }
+
+        fn read_config(&self, _bdf: u64, offset: u16) -> Result<u32, DriverError> {
+            // BAR0 at byte offset 0x10 reads back the assigned base;
+            // every other offset reads zero (enough for the trait test).
+            match offset & !0x3 {
+                0x10 => Ok((self.bar_base & 0xFFFF_FFFF) as u32),
+                _ => Ok(0),
+            }
+        }
+
         fn describe_function(
             &self,
             _bdf: u64,
@@ -239,6 +324,17 @@ mod tests {
         assert_eq!(window.len(), 0x40);
         assert_eq!(mapper.last.get(), Some((0x6000_0000, 0x40)));
         assert!(bus.master_enabled.get());
+    }
+
+    #[test]
+    fn read_config_returns_the_dword_at_the_byte_offset() {
+        let bus = bus();
+        let dyn_bus: &dyn PciBus = &bus;
+        // BAR0 byte offset 0x10 reads back the (low 32 bits of the)
+        // assigned base; the byte offset is taken to its dword.
+        assert_eq!(dyn_bus.read_config(0x0001_0000, 0x10), Ok(0x6000_0000));
+        assert_eq!(dyn_bus.read_config(0x0001_0000, 0x12), Ok(0x6000_0000));
+        assert_eq!(dyn_bus.read_config(0x0001_0000, 0x04), Ok(0));
     }
 
     #[test]

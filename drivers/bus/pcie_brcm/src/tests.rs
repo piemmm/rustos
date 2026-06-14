@@ -32,9 +32,44 @@ const PI_WINDOWS: PcieWindows = PcieWindows {
 };
 
 /// A no-op delay: host tests assert register effects, not real time.
+/// The link bring-up bounds its polls by iteration count and never reads
+/// `now_us`, so a fixed clock is sufficient here.
 struct NoDelay;
 impl Delay for NoDelay {
     fn delay_us(&self, _us: u32) {}
+
+    fn now_us(&self) -> u64 {
+        0
+    }
+}
+
+/// A monotonic clock that advances by a fixed `step` on every `now_us`
+/// read, so the bring-up's four phase marks read four strictly-increasing
+/// timestamps and each phase span is a positive, known value — the
+/// property the `bring_up_timing` per-phase split (the metal-stall
+/// localiser, `AGENTS.md` §15.7) relies on. `delay_us` is a no-op; the
+/// split measures elapsed time between marks, not the (host-meaningless)
+/// real delay.
+struct SteppingDelay {
+    now: core::cell::Cell<u64>,
+    step: u64,
+}
+impl SteppingDelay {
+    fn new(step: u64) -> Self {
+        Self {
+            now: core::cell::Cell::new(0),
+            step,
+        }
+    }
+}
+impl Delay for SteppingDelay {
+    fn delay_us(&self, _us: u32) {}
+
+    fn now_us(&self) -> u64 {
+        let v = self.now.get();
+        self.now.set(v + self.step);
+        v
+    }
 }
 
 /// A register-file mock standing in for the controller window.
@@ -181,7 +216,12 @@ fn bring_up_trains_the_link_and_programs_the_windows() {
     assert_eq!(m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_LO / 4], 0xc000_0000);
     assert_eq!(m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_HI / 4], 0);
     // CPU base 0x6000 MiB: low field holds bits [11:0] (0), high field
-    // holds the rest (6).
+    // holds the rest (6). The low field is zero for this Pi window; a
+    // non-zero low-half read-back here would be the inverted-window bug.
+    assert_eq!(
+        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT / 4] & regs::MEM_WIN0_BASE_LIMIT_BASE_MASK,
+        0
+    );
     assert_eq!(
         m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI / 4] & regs::MEM_WIN0_BASE_HI_BASE_MASK,
         6
@@ -210,17 +250,236 @@ fn bring_up_names_the_downstream_bus_so_config_is_forwarded() {
 }
 
 #[test]
-fn bring_up_resets_and_asserts_perst_before_powering_the_serdes() {
-    let regs0 = MockRegs::new(true, 0);
+fn bring_up_opens_the_bridge_memory_window_so_bar_reads_are_forwarded() {
+    // Without this the root port forwards no memory transaction downstream
+    // and the VL805's BAR reads return the `0xdead_dead` abort poison even
+    // though config reads succeed (the observed metal symptom).
+    let regs0 = MockRegs::new(true, 1);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
     let m = rc.regs();
-    // The first writes touch the reset register (bridge held + PERST
-    // asserted) and they precede the first SerDes (HARD_DEBUG) write.
-    let first_swinit = m.write_index(regs::RGR1_SW_INIT_1).expect("reset write");
-    let first_serdes = m
-        .write_index(regs::MISC_HARD_PCIE_HARD_DEBUG)
-        .expect("serdes write");
-    assert!(first_swinit < first_serdes);
+    let win = m.mem[regs::RC_CFG_MEMORY_BASE_LIMIT / 4];
+    let base = (win & regs::MEMORY_BASE_LIMIT_BASE_MASK)
+        >> regs::MEMORY_BASE_LIMIT_BASE_MASK.trailing_zeros();
+    let limit = (win & regs::MEMORY_BASE_LIMIT_LIMIT_MASK)
+        >> regs::MEMORY_BASE_LIMIT_LIMIT_MASK.trailing_zeros();
+    // Base/limit hold address bits [31:20]; the window must cover the
+    // outbound PCIe range [0xc000_0000, 0x1_0000_0000).
+    let base_addr = u64::from(base) << regs::MEMORY_WINDOW_GRANULE_SHIFT;
+    let limit_addr = (u64::from(limit) << regs::MEMORY_WINDOW_GRANULE_SHIFT)
+        | ((1 << regs::MEMORY_WINDOW_GRANULE_SHIFT) - 1);
+    assert_eq!(base_addr, PI_WINDOWS.outbound_pcie_base);
+    assert_eq!(
+        limit_addr,
+        PI_WINDOWS.outbound_pcie_base + PI_WINDOWS.outbound_size - 1
+    );
+    // The BAR base the kernel assigns (the lowest address in the window)
+    // is inside the forwarded window.
+    assert!(
+        base_addr <= PI_WINDOWS.outbound_pcie_base && PI_WINDOWS.outbound_pcie_base <= limit_addr
+    );
+    assert!(m.write_index(regs::RC_CFG_MEMORY_BASE_LIMIT).is_some());
+}
+
+#[test]
+fn bring_up_enables_memory_space_and_bus_master_on_the_bridge() {
+    // Without this the root port forwards no memory transaction downstream
+    // even with the bus numbers and Memory Base/Limit window named, so the
+    // VL805's BAR reads return the `0xdead_dead` abort poison while config
+    // reads succeed (the observed metal symptom: the bridge's `0x04` reads
+    // back `0x0000`).
+    let regs0 = MockRegs::new(true, 1);
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let m = rc.regs();
+    let command = m.mem[regs::RC_CFG_COMMAND / 4];
+    assert_ne!(command & regs::COMMAND_MEMORY_SPACE_MASK, 0);
+    assert_ne!(command & regs::COMMAND_BUS_MASTER_MASK, 0);
+    // The write-1-to-clear Status word is left at 0 (no latched status bit
+    // is disturbed by the read-modify-write).
+    assert_eq!(command & regs::COMMAND_STATUS_MASK, 0);
+    assert!(m.write_index(regs::RC_CFG_COMMAND).is_some());
+
+    // The enable is issued *after* the link is trained — i.e. after the
+    // final `PERST#`-deassert write to RGR1_SW_INIT_1 — mirroring Linux's
+    // `pci_enable_bridge` (enable the device once the link is up). Writing
+    // Memory Space Enable while `PERST#` was still asserted did not stick on
+    // the integrated RC (the metal `4110` read-back showed `0x0000`).
+    let command_at = m
+        .write_index(regs::RC_CFG_COMMAND)
+        .expect("command write recorded");
+    let perst_deassert_at = m
+        .writes
+        .iter()
+        .rposition(|(offset, _)| *offset == regs::RGR1_SW_INIT_1)
+        .expect("PERST# deassert write recorded");
+    assert!(
+        command_at > perst_deassert_at,
+        "bridge command enabled at write #{command_at} before the PERST# \
+         deassert at write #{perst_deassert_at}"
+    );
+}
+
+#[test]
+fn outbound_window_readback_reports_the_programmed_window() {
+    // The read-back is the metal diagnostic for the BAR master-abort:
+    // config reads succeed yet the mapped BAR aborts, isolating the fault
+    // to the outbound (CPU→PCIe) translation path, so the read-back must
+    // surface exactly what `program_outbound_window` wrote and the live
+    // link status.
+    let regs0 = MockRegs::new(true, 1);
+    let mut rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let rb = rc.outbound_window_readback();
+    // The PCIe-space base the window maps to: low/high dwords of
+    // 0xc000_0000.
+    assert_eq!(rb.mem_win0_lo, low32(PI_WINDOWS.outbound_pcie_base));
+    assert_eq!(rb.mem_win0_hi, high32(PI_WINDOWS.outbound_pcie_base));
+    // The CPU base 0x6_0000_0000 is 0x6000 MiB; the low base field only
+    // holds bits [4..16) of the MiB count, so the high 0x6 lands in
+    // BASE_HI (and the limit's high bits in LIMIT_HI). The base/limit dword
+    // itself must carry the limit low field in its high half: `0x3ff00000`
+    // for the Pi's 1 GiB window.
+    assert_eq!(rb.mem_win0_base_limit, 0x3ff0_0000);
+    let cpu_base_mb = PI_WINDOWS.outbound_cpu_base / 0x10_0000;
+    let high_shift = regs::MEM_WIN0_BASE_LIMIT_BASE_MASK.count_ones();
+    assert_eq!(rb.mem_win0_base_hi, low32(cpu_base_mb >> high_shift));
+    let cpu_limit_mb = (PI_WINDOWS.outbound_cpu_base + PI_WINDOWS.outbound_size - 1) / 0x10_0000;
+    assert_eq!(rb.mem_win0_limit_hi, low32(cpu_limit_mb >> high_shift));
+    // The link reads up: root-port + data-link-active + phy-link-up.
+    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_PORT_MASK, 0);
+    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_DL_ACTIVE_MASK, 0);
+    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_PHYLINKUP_MASK, 0);
+}
+
+#[test]
+fn inbound_window_readback_reports_the_programmed_viewport() {
+    // The read-back is the metal diagnostic for the honoured-but-no-op
+    // VideoCore VL805-firmware reload: that load runs over an inbound DMA
+    // window, so a mismatch between our inbound translation and what
+    // VideoCore expects makes the reload a no-op (raspberrypi/firmware
+    // #1617). The read-back must surface exactly what bring-up wrote to
+    // the active inbound viewport (`RC_BAR2`, encoded size in the low
+    // field) and that the unused `RC_BAR1`/`RC_BAR3` windows are disabled.
+    let regs0 = MockRegs::new(true, 1);
+    let mut rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let rb = rc.inbound_window_readback();
+    // Active inbound viewport: offset 0 (PI_WINDOWS.inbound_pcie_base),
+    // size field 0x11 (4 GiB) in the low register.
+    assert_eq!(rb.rc_bar2_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0x11);
+    assert_eq!(rb.rc_bar2_hi, high32(PI_WINDOWS.inbound_pcie_base));
+    // The unused inbound windows read back disabled (size field cleared).
+    assert_eq!(rb.rc_bar1_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0);
+    assert_eq!(rb.rc_bar3_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0);
+    // The link reads up for correlation.
+    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_DL_ACTIVE_MASK, 0);
+}
+
+#[test]
+fn outbound_window_decodes_a_non_empty_range_covering_the_cpu_window() {
+    // Regression for the metal `0xdead_dead` BAR master-abort: the BCM2711
+    // *proprietary* outbound `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` register
+    // holds the window **limit** in bits [31:20] and the **base** in bits
+    // [15:4]. Defining the two field masks the wrong way round programs an
+    // inverted (base-above-limit) window that decodes nothing, so every
+    // CPU→PCIe memory access master-aborts (`0xdead_dead`) while config
+    // reads — a different controller path — succeed. Decode the full CPU
+    // base/limit with the *hardware* field positions (literal masks, not
+    // the named constants, so a re-swap of the constants is still caught)
+    // and assert the window is non-empty and covers the outbound CPU range.
+    // Mirrors Linux's `pcie-brcmstb`.
+    const HW_LIMIT_MASK: u32 = 0xfff0_0000; // limit low MiB bits: [31:20]
+    const HW_BASE_MASK: u32 = 0x0000_fff0; // base low MiB bits: [15:4]
+
+    let regs0 = MockRegs::new(true, 1);
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let m = rc.regs();
+
+    let base_limit = m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT / 4];
+    let base_hi =
+        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI / 4] & regs::MEM_WIN0_BASE_HI_BASE_MASK;
+    let limit_hi =
+        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI / 4] & regs::MEM_WIN0_LIMIT_HI_LIMIT_MASK;
+
+    // Each low field is 12 bits wide; the rest of the MiB count is in the
+    // companion *_HI register.
+    let base_mb = (u64::from(base_hi) << 12)
+        | u64::from((base_limit & HW_BASE_MASK) >> HW_BASE_MASK.trailing_zeros());
+    let limit_mb = (u64::from(limit_hi) << 12)
+        | u64::from((base_limit & HW_LIMIT_MASK) >> HW_LIMIT_MASK.trailing_zeros());
+
+    let base_addr = base_mb << regs::MEMORY_WINDOW_GRANULE_SHIFT;
+    let limit_addr = (limit_mb << regs::MEMORY_WINDOW_GRANULE_SHIFT)
+        | ((1u64 << regs::MEMORY_WINDOW_GRANULE_SHIFT) - 1);
+
+    // Non-empty: base must not sit above the limit (the inverted-window bug).
+    assert!(
+        base_addr <= limit_addr,
+        "outbound window inverted: base {base_addr:#x} > limit {limit_addr:#x}"
+    );
+    // Covers exactly the CPU-side outbound range, so a CPU access at
+    // `outbound_cpu_base` translates to the VL805's BAR rather than aborting.
+    assert_eq!(base_addr, PI_WINDOWS.outbound_cpu_base);
+    assert_eq!(
+        limit_addr,
+        PI_WINDOWS.outbound_cpu_base + PI_WINDOWS.outbound_size - 1
+    );
+}
+
+#[test]
+fn bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle() {
+    let regs0 = MockRegs::new(true, 1);
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let m = rc.regs();
+    // The always-accessible RGR1 bridge `sw_init` reset (0x9210) is
+    // released FIRST, before the first MISC-block write (MISC_MISC_CTRL),
+    // so the controller core is out of reset and the MISC access does not
+    // stall on the SoC bus completion timeout (the ~10.8 s metal
+    // master-abort). This matches U-Boot/Linux `pcie-brcmstb`.
+    let first_rgr1 = m.write_index(regs::RGR1_SW_INIT_1).expect("reset write");
+    let first_misc = m
+        .write_index(regs::MISC_MISC_CTRL)
+        .expect("misc ctrl write");
+    assert!(first_rgr1 < first_misc);
+    // The gentlest no-touch-probe bring-up never toggles the SerDes IDDQ
+    // (MISC_HARD_PCIE_HARD_DEBUG): the SerDes is already powered by the
+    // previous boot stage, and re-toggling it could drop the resident
+    // VL805 firmware.
+    assert_eq!(m.write_index(regs::MISC_HARD_PCIE_HARD_DEBUG), None);
+}
+
+#[test]
+fn reset_releases_sw_init_without_re_asserting_a_fundamental_reset() {
+    // Simulate the `start4.elf` handoff: the previous boot stage leaves the
+    // bridge `sw_init` reset AND `PERST#` asserted (metal
+    // `entry_rgr1_sw_init = 0x3`), with the VL805 firmware already loaded
+    // over the power-on link. The gentlest no-touch-probe bring-up must NOT
+    // re-assert a fundamental reset (which can drop that firmware): it only
+    // *releases* the bridge `sw_init`, and `train_link` deasserts the
+    // already-asserted `PERST#` — the single firmware-(re)load edge.
+    let swinit = regs::RGR1_SW_INIT_1_INIT_GENERIC_MASK;
+    let perst = regs::RGR1_SW_INIT_1_PERST_MASK;
+    let mut regs0 = MockRegs::new(true, 1);
+    regs0.mem[regs::RGR1_SW_INIT_1 / 4] = swinit | perst;
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let m = rc.regs();
+    let rgr1_writes: Vec<u32> = m
+        .writes
+        .iter()
+        .filter(|(offset, _)| *offset == regs::RGR1_SW_INIT_1)
+        .map(|(_, value)| *value)
+        .collect();
+    // The bridge `sw_init` reset is only RELEASED, never re-asserted: no
+    // RGR1 write sets the INIT_GENERIC bit (a re-assert would be a fresh
+    // fundamental reset that can drop the resident VL805 firmware).
+    assert!(
+        rgr1_writes.iter().all(|v| v & swinit == 0),
+        "bring-up re-asserted the bridge sw_init reset (a fundamental reset that can drop the VL805 firmware)"
+    );
+    // `train_link` deasserts the already-asserted `PERST#` as the final
+    // RGR1 write, producing the single firmware-(re)load edge.
+    assert_eq!(
+        rgr1_writes.last().map(|v| v & perst),
+        Some(0),
+        "PERST# left asserted; the deassert edge was never produced"
+    );
 }
 
 #[test]
@@ -242,6 +501,55 @@ fn bring_up_fails_closed_when_not_a_root_port() {
         BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).err(),
         Some(DriverError::DeviceFault)
     );
+}
+
+#[test]
+fn bring_up_timing_reports_each_phase_and_the_poll_count() {
+    // The link is down at entry and trains after a couple of polls, so the
+    // full reset → config → link-wait path runs. The phase marks read the
+    // `SteppingDelay` clock in order, so each phase span is the positive
+    // step and the poll loop records how many polls it took — the
+    // per-phase split a metal capture needs to localise a multi-second
+    // bring-up (`AGENTS.md` §15.7 / §23.4).
+    let regs0 = MockRegs::new(true, 4);
+    let delay = SteppingDelay::new(1_000);
+    let rc = BrcmPcieRc::open_with_polls(regs0, &delay, &PI_WINDOWS, 20).expect("link trains");
+    let t = rc.bring_up_timing();
+    assert_eq!(t.reset_swinit_us, 1_000, "reset bridge sw_init sub-span");
+    assert_eq!(
+        t.reset_settle_us, 1_000,
+        "reset post-de-reset MISC settle sub-span"
+    );
+    assert_eq!(t.config_us, 1_000, "config phase span");
+    assert_eq!(t.linkwait_us, 1_000, "link-wait phase span");
+    // The link was down at entry, so the bounded poll loop ran at least
+    // once before the mock asserted link-up.
+    assert!(t.link_polls >= 1, "polls = {}", t.link_polls);
+    // The entry RGR1 sample is taken before the reset writes the register,
+    // so it reflects the mock's reset state (0 — no PERST# pre-asserted),
+    // proving the field is sampled at entry rather than a later write. On
+    // metal a set `RGR1_SW_INIT_1_PERST_MASK` bit here would surface that
+    // the previous boot stage already dropped the VL805 firmware
+    // (`AGENTS.md` §15.7).
+    assert_eq!(
+        t.entry_rgr1_sw_init & regs::RGR1_SW_INIT_1_PERST_MASK,
+        0,
+        "entry RGR1 sampled before the reset writes it"
+    );
+}
+
+#[test]
+fn bring_up_timing_records_zero_polls_when_the_link_is_up_on_first_check() {
+    // The link is reported up by the first link-wait poll (`link_after ==
+    // 0`), so the bounded poll loop breaks immediately with no polls
+    // recorded; the phase marks are still read, so the link-wait span
+    // remains the clock step (the PERST-deassert settle).
+    let regs0 = MockRegs::new(true, 0);
+    let delay = SteppingDelay::new(1_000);
+    let rc = BrcmPcieRc::open(regs0, &delay, &PI_WINDOWS).expect("link trains");
+    let t = rc.bring_up_timing();
+    assert_eq!(t.link_polls, 0);
+    assert_eq!(t.linkwait_us, 1_000);
 }
 
 // --- Wiring (driver-host composition) -------------------------------------

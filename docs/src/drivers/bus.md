@@ -201,8 +201,29 @@ proven host-side (`AGENTS.md` §2.2):
 
 ### Bring-up sequence
 
-Hold the bridge in reset and assert `PERST#`; release the bridge
-reset; clear the SerDes `IDDQ` power-down and let it settle; program
+Release the controller's bridge reset **before** touching any MISC
+register: the BCM2711 holds the controller core off at OS entry, and a
+MISC-block (`0x4xxx`) access does not complete until the always-accessible
+RGR1 bridge `sw_init` reset (`0x9210`) is released — touching MISC first
+master-aborts on the SoC bus completion timeout (~10.8 s on metal),
+which is what the multi-second bring-up pause turned out to be. So,
+matching U-Boot/Linux `pcie-brcmstb`: release the bridge `sw_init` reset,
+bringing the core and its MISC block online, then let it settle. This is
+the gentlest **no-touch-probe** bring-up: the previous boot stage
+(`start4.elf`) hands off with the bridge `sw_init` reset **and** `PERST#`
+already asserted and the VL805 firmware loaded over the power-on link, so
+the driver does **not** re-assert a fundamental reset or toggle the SerDes
+`IDDQ` — either of which could drop that resident firmware — and the
+link-up step deasserts the already-asserted `PERST#`, producing the single
+deassert edge. On the Pi 4 the VL805's xHCI firmware is loaded by the
+bootloader EEPROM (via VideoCore), and on such a board VideoCore (re)loads
+the blob on the **`PERST#` deassert edge** — the same edge Linux's
+`pcie-brcmstb` drives, after which Linux issues no runtime VL805 reload.
+So this driver produces that single deassert edge (rather than a fresh
+fundamental reset), and the keyboard composition deliberately does **not**
+issue a runtime `NOTIFY_XHCI_RESET` reload if the VL805's firmware version
+(config `0x50`) stays `0` after the link trains — issuing a redundant reload
+can be destructive on Pi firmware. Then program
 `MISC_CTRL` (SCB access, UR config reads, 128-byte burst, RCB modes);
 program the inbound (PCIe→system-memory) viewport `RC_BAR2` from the
 discovered `dma-ranges` (the size encoded by `encode_ibar_size`, the
@@ -212,12 +233,35 @@ with `DeviceFault` otherwise); advertise ASPM L0s+L1 and present the
 root complex as a PCI-PCI bridge; program the bridge bus-number register
 (primary 0, secondary/subordinate = the single downstream bus) so the
 port forwards configuration to the directly-attached VL805; program the
-outbound (CPU→PCIe) MMIO window from the discovered `ranges`; deassert
-`PERST#`; then poll
-`MISC_PCIE_STATUS` for data-link-active + phy-link-up, bounded by
-`DEFAULT_LINK_POLLS` (100 ms) and failing closed if the link never
-trains. All windows are device-tree-discovered, never compiled-in
+bridge Memory Base/Limit window (config offset `0x20`, covering the
+outbound PCIe range) so the port forwards *memory* transactions to the
+VL805's BAR — the BCM2711 ships that register empty, so without it BAR
+reads master-abort to the `0xdead_dead` poison even though config reads
+succeed (mirroring Linux's `pci_setup_bridge`, which the windowed
+`mech_brcm` accessor does not perform); program the outbound (CPU→PCIe)
+MMIO window from the discovered `ranges`. Finally deassert `PERST#` and
+poll `MISC_PCIE_STATUS` for data-link-active + phy-link-up, bounded by
+`DEFAULT_LINK_POLLS` (100 ms), and confirm the link with a fail-closed
+`link_up()` (`DeviceFault` otherwise). **Only then** enable Memory Space
++ Bus Master in the bridge's *own* Command register (config offset
+`0x04`) — the standard PCI-PCI bridge enable a full enumerator performs
+(Linux's `pci_enable_bridge`), which the windowed `mech_brcm` accessor
+does not. This is issued *after* the link is up, mirroring Linux, which
+enables the device (`pcieport 0000:00:00.0: enabling device
+(0000 -> 0002)`) only once the link trains: the integrated RC latches
+Memory Space Enable against a live link, so an earlier write (with
+`PERST#` still asserted) does not stick — the metal `4110` symptom that
+read the bridge command back as `0x0000` and left the VL805 BAR
+master-aborting to `0xdead_dead`. All windows are device-tree-discovered, never compiled-in
 (`AGENTS.md` §18.1).
+
+`inbound_window_readback` reads the inbound (PCIe→system-memory) viewport
+registers back (`RC_BAR1_LO`, `RC_BAR2_LO`/`HI`, `RC_BAR3_LO`) for a
+read-only, fail-closed metal diagnostic (`outbound_window_readback` is its
+outbound twin). On the Pi 4 the boot firmware's VL805 handoff may depend on
+this inbound DMA window; the read-back lets a metal run compare it with
+working Linux's `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`
+(`AGENTS.md` §15.7).
 
 ### Composition
 
@@ -302,13 +346,25 @@ and metal acceptance stays a checklist.
 Every controller access goes through the crate's `XhciHost` seam —
 implemented for the kernel-minted `RegisterWindow` on metal, and for a
 register-level mock in tests (the `emmc2` `SdhciHost` shape, `AGENTS.md`
-§2.2). `Xhci::open` runs the xHCI §4.2 prologue: validate the
-capability block (`CAPLENGTH`/`HCIVERSION` plausibility, non-zero
+§2.2). `Xhci::open` validates the capability block
+(`CAPLENGTH`/`HCIVERSION` plausibility, non-zero
 `MaxSlots`/`MaxPorts`/`DBOFF`/`RTSOFF` — the absent-controller
-all-ones read fails here), wait for Controller-Not-Ready to clear,
-halt a running controller, then issue the self-clearing Host
-Controller Reset. Every wait is poll-budget-bounded and fails closed
-with `DeviceFault` (`AGENTS.md` §2.1); the controller is left halted.
+all-ones read fails here), halts a running controller, then issues the
+self-clearing Host Controller Reset. Before asserting `HCRST`, it clears
+only the stale write-1-to-clear `USBSTS` latches RustOS has observed on
+firmware handoff (`HSE|PCD`); `Controller Not Ready` is enforced after
+that reset, not treated as an unrecoverable pre-reset state. A halted
+controller handed over with stale `CNR|HSE|PCD` may need those latches
+cleared before the reset completes, while a post-reset `CNR` still fails
+closed. Every wait is poll-budget-bounded and fails closed with
+`DeviceFault` (`AGENTS.md` §2.1); the controller is left halted.
+The same logic is exposed through `Xhci::open_diagnostic`, which keeps
+the fail-closed `DriverError` but also names the refused stage
+(`capability`, `halted_before_reset`, `reset_self_clear`, or
+`controller_ready_after_reset`) and carries the last readable
+`USBCMD`/`USBSTS` snapshot. The Pi keyboard bring-up logs those fields on a
+metal `4101` open failure so the next capture identifies the exact stuck
+reset condition instead of collapsing every timeout to a bare `device_fault`.
 `Xhci::start` then programs the DMA structures and runs it: `CONFIG`
 (all reported slots enabled), `DCBAAP`, `CRCR` (consumer cycle state
 1), interrupter 0's single-entry event ring segment table over
@@ -606,9 +662,30 @@ supertrait of `Bus`) is that seam:
 - `enable_bus_master(bdf)` sets the function's Memory Space + Bus
   Master Enable bits (PCI Local Bus 3.0 §6.2.2) so the controller may
   issue the upstream DMA its rings live in.
+- `assign_bar(bdf, bar_index, window_base, window_size)` assigns the
+  BAR a base when firmware left it **unassigned** (address bits zero),
+  placing it at the lowest size-aligned PCIe-bus address inside the host
+  bridge's outbound window and returning that base. Firmware normally
+  programs BARs, but resetting and re-enumerating a root complex (the
+  BCM2711 PCIe bring-up) leaves a downstream function unassigned, so a
+  map would target physical address 0; assigning resources from the
+  bridge's window is the PCI core's job, mirroring Linux. It probes the
+  BAR's size/type, writes both dwords for a 64-bit BAR (control bits
+  preserved), and leaves an already-based BAR untouched (a no-op under
+  QEMU or a firmware-assigned BAR). It fails closed (`OutOfRange`) if the
+  size-aligned placement does not fit the window, and refuses I/O-port
+  BARs (`Unsupported`).
+- `read_config(bdf, offset)` reads a configuration-space dword back
+  (the byte `offset` taken to its dword), a read-only diagnostic that
+  touches no state. It confirms a prior write took effect — a
+  just-assigned BAR, an enabled command register, a programmed bridge
+  window — so a metal capture can tell a configuration write that did
+  not stick apart from a device that does not decode despite correct
+  programming (`AGENTS.md` §15.7). It reaches both the root-port bridge
+  (bus 0) and a downstream function through the same windowed accessor.
 
 `Pci<C>` implements `PciBus` by forwarding to the inherent
-`map_bar_window` / `enable_bus_master`; `route_msix` calls the same
+`map_bar_window` / `enable_bus_master` / `assign_bar` / `read_config`; `route_msix` calls the same
 `enable_bus_master`, so the activation has one definition
 (`AGENTS.md` §2.2). A device-class driver reaches the bus only through
 `&dyn PciBus`, never naming the concrete `drivers/bus/pci` crate
@@ -617,17 +694,25 @@ supertrait of `Bus`) is that seam:
 The xHCI driver consumes it in `rustos_drv_bus_usb::wiring`. A
 `devmgr`/host composition maps the discovered `brcm,bcm2711-pcie`
 ECAM-access window, builds the bus over it (`mechanism_ecam`), and
-hands the `&dyn PciBus` plus the discovered inbound-DMA aperture top to
-`open_discovered(host, bus, dma_aperture_top)`. That function checks
-`CAP_MMIO_MAP`, enumerates for the USB-class function (`0x0C03`), carves
-the device-shared DMA region from the host's DMA facility and verifies
-it lies wholly **below** the aperture the bridge lets devices reach
-(fail-closed `OutOfRange`, `AGENTS.md` §5.4), enables bus mastering,
-maps BAR0, and brings the controller up through `Xhci::open` +
-`UsbDevice::start`. QEMU models no Pi USB timing (`AGENTS.md` §0.4), so
-the host tests prove the composition and its fail-closed paths up to
-the controller hand-off; the live controller bring-up is the on-metal
-acceptance item.
+hands the `&dyn PciBus` plus the discovered inbound-DMA aperture top and
+the outbound PCIe window to
+`open_discovered(host, bus, dma_aperture_top, outbound_window)`. That
+function checks `CAP_MMIO_MAP`, enumerates for the USB-class function
+(`0x0C03`), carves the device-shared DMA region from the host's DMA
+facility and verifies it lies wholly **below** the aperture the bridge
+lets devices reach (fail-closed `OutOfRange`, `AGENTS.md` §5.4), assigns
+BAR0 inside the outbound window if firmware left it unassigned
+(`assign_bar`), enables bus mastering, and maps BAR0 — these map-prefix
+steps are factored into the public `map_controller`, returning the
+mapped `MappedXhci { window, dma }` — and then brings the controller up
+through `Xhci::open` + `UsbDevice::start`. The split lets the in-kernel
+keyboard service read the controller's capability block and log its
+carve + geometry (the `4106` diagnostic) between the map and the
+bring-up, and report a mapping / open / start failure distinctly,
+without re-mapping the BAR (one window per device, `AGENTS.md` §2.2).
+QEMU models no Pi USB timing (`AGENTS.md` §0.4), so the host tests prove
+the composition and its fail-closed paths up to the controller hand-off;
+the live controller bring-up is the on-metal acceptance item.
 
 ### Child-node emission into the hardware tree
 

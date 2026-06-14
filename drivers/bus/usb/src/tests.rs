@@ -134,6 +134,17 @@ struct MockXhci {
     hcrst_stuck: bool,
     /// When set, `USBSTS` reports Controller Not Ready forever.
     cnr_stuck: bool,
+    /// When set, `USBSTS` reports a latched Host System Error until a
+    /// host-controller reset clears it.
+    hse_latched: bool,
+    /// When set, `USBSTS` reports a latched Port Change Detect until a
+    /// write-1-to-clear status write clears it.
+    pcd_latched: bool,
+    /// When set, a status write is only made visible by the next
+    /// `USBSTS` read, modelling a posted bridge write that must be
+    /// flushed before the reset command.
+    status_write_needs_read_flush: bool,
+    pending_status_clear: u32,
     doorbells: Vec<(usize, u32)>,
     /// `PORTSC` reads report Port Reset in progress for this many
     /// reads after a reset write (models the self-clearing bit).
@@ -192,6 +203,10 @@ impl MockXhci {
             hcrst_reads: 0,
             hcrst_stuck: false,
             cnr_stuck: false,
+            hse_latched: false,
+            pcd_latched: false,
+            status_write_needs_read_flush: false,
+            pending_status_clear: 0,
             doorbells: Vec::new(),
             port_reset_reads: 0,
             port_reset_port: 0,
@@ -551,6 +566,13 @@ impl XhciHost for MockXhci {
             return Ok(self.usbcmd);
         }
         if offset == Self::op(regs::USBSTS) {
+            if self.pending_status_clear & regs::USBSTS_HSE != 0 {
+                self.hse_latched = false;
+            }
+            if self.pending_status_clear & regs::USBSTS_PCD != 0 {
+                self.pcd_latched = false;
+            }
+            self.pending_status_clear = 0;
             let mut status = 0;
             if self.cnr_stuck || self.cnr_reads > 0 {
                 self.cnr_reads = self.cnr_reads.saturating_sub(1);
@@ -558,6 +580,12 @@ impl XhciHost for MockXhci {
             }
             if self.usbcmd & regs::USBCMD_RUN == 0 {
                 status |= regs::USBSTS_HCH;
+            }
+            if self.hse_latched {
+                status |= regs::USBSTS_HSE;
+            }
+            if self.pcd_latched {
+                status |= regs::USBSTS_PCD;
             }
             return Ok(status);
         }
@@ -592,6 +620,22 @@ impl XhciHost for MockXhci {
                 // A real reset clears the operational state and the
                 // self-clearing bit a few reads later.
                 self.hcrst_reads = 3;
+                self.hcrst_stuck |= self.hse_latched || self.pcd_latched;
+                self.cnr_reads = 0;
+            }
+            return Ok(());
+        }
+        if offset == Self::op(regs::USBSTS) {
+            let clear = value & (regs::USBSTS_HSE | regs::USBSTS_PCD);
+            if self.status_write_needs_read_flush {
+                self.pending_status_clear |= clear;
+            } else {
+                if clear & regs::USBSTS_HSE != 0 {
+                    self.hse_latched = false;
+                }
+                if clear & regs::USBSTS_PCD != 0 {
+                    self.pcd_latched = false;
+                }
             }
             return Ok(());
         }
@@ -711,6 +755,36 @@ fn open_waits_for_controller_ready() {
 }
 
 #[test]
+fn open_resets_a_halted_controller_with_pre_reset_cnr_and_hse() {
+    let mut mock = MockXhci::new();
+    mock.cnr_reads = 128;
+    mock.hse_latched = true;
+    mock.pcd_latched = true;
+    let mut xhci = Xhci::open_with_budget(mock, 16).expect("reset clears stale pre-reset status");
+
+    let status = xhci.host.read32(MockXhci::op(regs::USBSTS)).unwrap();
+    assert_eq!(
+        status & (regs::USBSTS_CNR | regs::USBSTS_HSE | regs::USBSTS_PCD),
+        0
+    );
+}
+
+#[test]
+fn open_flushes_pre_reset_status_clear_before_hcrst() {
+    let mut mock = MockXhci::new();
+    mock.hse_latched = true;
+    mock.pcd_latched = true;
+    mock.status_write_needs_read_flush = true;
+
+    let mut xhci = Xhci::open_with_budget(mock, 16).expect("status clear is flushed before reset");
+    let usbcmd = xhci.host.read32(MockXhci::op(regs::USBCMD)).unwrap();
+    let usbsts = xhci.host.read32(MockXhci::op(regs::USBSTS)).unwrap();
+
+    assert_eq!(usbcmd & regs::USBCMD_HCRST, 0);
+    assert_eq!(usbsts & (regs::USBSTS_HSE | regs::USBSTS_PCD), 0);
+}
+
+#[test]
 fn open_halts_a_running_controller_and_resets() {
     let mut mock = MockXhci::new();
     mock.usbcmd = regs::USBCMD_RUN;
@@ -774,6 +848,20 @@ fn open_fails_closed_when_reset_sticks() {
         Xhci::open_with_budget(mock, 16).err(),
         Some(DriverError::DeviceFault)
     );
+}
+
+#[test]
+fn open_diagnostic_reports_the_stuck_reset_stage() {
+    let mut mock = MockXhci::new();
+    mock.hcrst_stuck = true;
+    let Err(err) = Xhci::open_diagnostic_with_budget(mock, 16) else {
+        panic!("reset must time out")
+    };
+
+    assert_eq!(err.error, DriverError::DeviceFault);
+    assert_eq!(err.stage, XhciOpenStage::ResetSelfClear);
+    assert_eq!(err.registers.usbcmd, Some(regs::USBCMD_HCRST));
+    assert_eq!(err.registers.usbsts, Some(regs::USBSTS_HCH));
 }
 
 #[test]

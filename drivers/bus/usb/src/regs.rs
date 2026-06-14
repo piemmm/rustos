@@ -76,8 +76,19 @@ pub const USBCMD_HCRST: u32 = 1 << 1;
 /// `USBSTS` `HCHalted`: set while the controller is halted.
 pub const USBSTS_HCH: u32 = 1 << 0;
 
-/// `USBSTS` Controller Not Ready: registers must not be written while
-/// set (§4.2 bring-up step 1).
+/// `USBSTS` Host System Error: a write-1-to-clear latched controller
+/// error (§5.4.2). The host-controller reset path may observe this when
+/// firmware left a stale error before RustOS takes ownership.
+pub const USBSTS_HSE: u32 = 1 << 2;
+
+/// `USBSTS` Port Change Detect: a write-1-to-clear latched port-change
+/// status bit (§5.4.2). Firmware handoff can leave it set before RustOS
+/// resets the controller.
+pub const USBSTS_PCD: u32 = 1 << 4;
+
+/// `USBSTS` Controller Not Ready: the controller is not ready for normal
+/// operational programming. The open path enforces it after the
+/// host-controller reset so a stale pre-reset status can be cleared first.
 pub const USBSTS_CNR: u32 = 1 << 11;
 
 /// First `PORTSC` register — operational base + `0x400` (§5.4.8).

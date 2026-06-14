@@ -5,7 +5,7 @@
 //! host-provable `xHCI` layers: the register vocabulary ([`regs`]), the
 //! TRB vocabulary ([`trb`]), the ring state machines ([`ring`]), and
 //! the controller bring-up sequence ([`Xhci::open`] — `xHCI` 1.2 §4.2:
-//! wait ready, halt, reset). Device enumeration (slots, control
+//! halt, reset, wait ready). Device enumeration (slots, control
 //! transfers, HID endpoint wiring to `drivers/input/usb_hid`) builds on
 //! these layers in the next P10 increments.
 //!
@@ -265,6 +265,53 @@ pub struct Xhci<H: XhciHost> {
     csz: bool,
 }
 
+/// Stage of [`Xhci::open_diagnostic`] that refused the controller.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum XhciOpenStage {
+    /// The capability block was malformed or unreadable.
+    Capability,
+    /// `USBSTS.HCHalted` did not assert after `Run/Stop` was cleared.
+    HaltedBeforeReset,
+    /// `USBCMD.HCRST` did not self-clear.
+    ResetSelfClear,
+    /// `USBSTS.CNR` stayed set after reset completion.
+    ControllerReadyAfterReset,
+}
+
+impl XhciOpenStage {
+    /// Stable diagnostic name for the failing stage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capability => "capability",
+            Self::HaltedBeforeReset => "halted_before_reset",
+            Self::ResetSelfClear => "reset_self_clear",
+            Self::ControllerReadyAfterReset => "controller_ready_after_reset",
+        }
+    }
+}
+
+/// Operational-register snapshot captured when [`Xhci::open_diagnostic`]
+/// fails.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct XhciOpenRegisters {
+    /// Last `USBCMD` value read at the failing stage, if readable.
+    pub usbcmd: Option<u32>,
+    /// Last `USBSTS` value read at the failing stage, if readable.
+    pub usbsts: Option<u32>,
+}
+
+/// Rich failure returned by [`Xhci::open_diagnostic`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct XhciOpenError {
+    /// Driver ABI error for the refusal.
+    pub error: DriverError,
+    /// The exact open stage that failed.
+    pub stage: XhciOpenStage,
+    /// Register values observed at the failing stage.
+    pub registers: XhciOpenRegisters,
+}
+
 impl<H: XhciHost> Xhci<H> {
     /// Bring the controller to the halted, reset state with the
     /// default poll budget.
@@ -287,27 +334,74 @@ impl<H: XhciHost> Xhci<H> {
     ///   `MaxSlots`/`MaxPorts`, zero `DBOFF`/`RTSOFF`) — the absent-
     ///   or broken-controller signatures — or if ready/halt/reset
     ///   never completes within `budget` polls.
-    pub fn open_with_budget(mut host: H, budget: u32) -> Result<Self, DriverError> {
-        let cap = host.read32(regs::CAPLENGTH_HCIVERSION)?;
+    pub fn open_with_budget(host: H, budget: u32) -> Result<Self, DriverError> {
+        Self::open_diagnostic_with_budget(host, budget).map_err(|err| err.error)
+    }
+
+    /// [`Xhci::open`] with a diagnostic error that names the failing
+    /// reset stage and includes the operational-register values observed
+    /// there.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_with_budget`], but wrapped in [`XhciOpenError`].
+    pub fn open_diagnostic(host: H) -> Result<Self, XhciOpenError> {
+        Self::open_diagnostic_with_budget(host, DEFAULT_POLL_BUDGET)
+    }
+
+    /// [`Xhci::open_diagnostic`] with an explicit poll budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_with_budget`], but wrapped in [`XhciOpenError`].
+    pub fn open_diagnostic_with_budget(mut host: H, budget: u32) -> Result<Self, XhciOpenError> {
+        let cap = host
+            .read32(regs::CAPLENGTH_HCIVERSION)
+            .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;
         let caplength = regs::caplength(cap);
         let hci_version = regs::hciversion(cap);
         if caplength < regs::CAPLENGTH_MIN
             || hci_version < regs::HCIVERSION_MIN
             || hci_version == u16::MAX
         {
-            return Err(DriverError::DeviceFault);
+            return Err(Self::open_error(
+                DriverError::DeviceFault,
+                XhciOpenStage::Capability,
+                None,
+                None,
+            ));
         }
-        let structural = host.read32(regs::HCSPARAMS1)?;
+        let structural = host
+            .read32(regs::HCSPARAMS1)
+            .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;
         let max_slots = regs::hcsparams1_max_slots(structural);
         let max_ports = regs::hcsparams1_max_ports(structural);
         if max_slots == 0 || max_ports == 0 {
-            return Err(DriverError::DeviceFault);
+            return Err(Self::open_error(
+                DriverError::DeviceFault,
+                XhciOpenStage::Capability,
+                None,
+                None,
+            ));
         }
-        let capability = host.read32(regs::HCCPARAMS1)?;
-        let db_off = host.read32(regs::DBOFF)? & regs::DBOFF_MASK;
-        let rt_off = host.read32(regs::RTSOFF)? & regs::RTSOFF_MASK;
+        let capability = host
+            .read32(regs::HCCPARAMS1)
+            .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;
+        let db_off = host
+            .read32(regs::DBOFF)
+            .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?
+            & regs::DBOFF_MASK;
+        let rt_off = host
+            .read32(regs::RTSOFF)
+            .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?
+            & regs::RTSOFF_MASK;
         if db_off == 0 || rt_off == 0 {
-            return Err(DriverError::DeviceFault);
+            return Err(Self::open_error(
+                DriverError::DeviceFault,
+                XhciOpenStage::Capability,
+                None,
+                None,
+            ));
         }
         let op_base = caplength as usize;
 
@@ -323,21 +417,70 @@ impl<H: XhciHost> Xhci<H> {
             csz: regs::hccparams1_csz(capability),
         };
 
-        // §4.2: wait until Controller Not Ready clears before touching
-        // the operational registers.
-        xhci.wait_status(regs::USBSTS_CNR, false, budget)?;
         // Halt a running controller before resetting it (§5.4.1.1).
-        let usbcmd = xhci.read_op(regs::USBCMD)?;
+        let usbcmd = xhci
+            .read_op(regs::USBCMD)
+            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset))?;
         if usbcmd & regs::USBCMD_RUN != 0 {
-            xhci.write_op(regs::USBCMD, usbcmd & !regs::USBCMD_RUN)?;
+            xhci.write_op(regs::USBCMD, usbcmd & !regs::USBCMD_RUN)
+                .map_err(|err| {
+                    xhci.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset)
+                })?;
         }
-        xhci.wait_status(regs::USBSTS_HCH, true, budget)?;
+        if let Err(err) = xhci.wait_status(regs::USBSTS_HCH, true, budget) {
+            return Err(xhci.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset));
+        }
+        let latched_status = xhci
+            .read_op(regs::USBSTS)
+            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?
+            & (regs::USBSTS_HSE | regs::USBSTS_PCD);
+        if latched_status != 0 {
+            xhci.write_op(regs::USBSTS, latched_status)
+                .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
+            // Read back the status register so a posted bridge write cannot
+            // leave stale error bits visible when the reset command arrives.
+            xhci.read_op(regs::USBSTS)
+                .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
+        }
         // Host Controller Reset: self-clearing on completion, after
         // which CNR must also clear before further programming.
-        xhci.write_op(regs::USBCMD, regs::USBCMD_HCRST)?;
-        xhci.wait_op_clear(regs::USBCMD, regs::USBCMD_HCRST, budget)?;
-        xhci.wait_status(regs::USBSTS_CNR, false, budget)?;
+        xhci.write_op(regs::USBCMD, regs::USBCMD_HCRST)
+            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
+        if let Err(err) = xhci.wait_op_clear(regs::USBCMD, regs::USBCMD_HCRST, budget) {
+            return Err(xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear));
+        }
+        if let Err(err) = xhci.wait_status(regs::USBSTS_CNR, false, budget) {
+            return Err(
+                xhci.open_error_with_snapshot(err, XhciOpenStage::ControllerReadyAfterReset)
+            );
+        }
         Ok(xhci)
+    }
+
+    const fn open_error(
+        error: DriverError,
+        stage: XhciOpenStage,
+        usbcmd: Option<u32>,
+        usbsts: Option<u32>,
+    ) -> XhciOpenError {
+        XhciOpenError {
+            error,
+            stage,
+            registers: XhciOpenRegisters { usbcmd, usbsts },
+        }
+    }
+
+    fn open_error_with_snapshot(
+        &mut self,
+        error: DriverError,
+        stage: XhciOpenStage,
+    ) -> XhciOpenError {
+        Self::open_error(
+            error,
+            stage,
+            self.read_op(regs::USBCMD).ok(),
+            self.read_op(regs::USBSTS).ok(),
+        )
     }
 
     fn read_op(&mut self, offset: usize) -> Result<u32, DriverError> {
@@ -406,6 +549,19 @@ impl<H: XhciHost> Xhci<H> {
     #[must_use]
     pub const fn runtime_base(&self) -> usize {
         self.rt_base
+    }
+
+    /// Byte offset of the operational register block within the window
+    /// (`CAPLENGTH` — the length of the capability registers).
+    #[must_use]
+    pub const fn caplength(&self) -> usize {
+        self.op_base
+    }
+
+    /// Byte offset of the doorbell array within the window (`DBOFF`).
+    #[must_use]
+    pub const fn doorbell_base(&self) -> usize {
+        self.db_base
     }
 
     fn write_ir0(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {

@@ -80,6 +80,16 @@ const MAX_ENUMERATION: usize = 32;
 /// viewport lifts the device address far above the CPU window
 /// (`AGENTS.md` §5.4 — the bound must match the address space it guards).
 ///
+/// `outbound_window` is the host bridge's outbound (CPU→PCIe) window
+/// as a `(pcie_base, size)` pair, in the **PCIe-bus** address space the
+/// downstream function's BARs decode (`AGENTS.md` §18.1). Firmware
+/// normally assigns the controller's BAR, but when the OS resets and
+/// re-enumerates the root complex the VL805's BAR0 address bits read
+/// zero (unassigned); [`PciBus::assign_bar`] places it at a
+/// size-aligned address inside this window before the BAR is mapped, so
+/// the bridge can translate it to CPU-physical. An already-assigned BAR
+/// is left untouched.
+///
 /// On success the returned [`UsbDevice`] owns the mapped register
 /// window and DMA region with the controller halted, reset, and
 /// running; the caller scans the root-hub ports and calls
@@ -94,9 +104,10 @@ const MAX_ENUMERATION: usize = 32;
 /// * [`DriverError::NotFound`] if the bus carries no USB-class
 ///   function.
 /// * [`DriverError::OutOfRange`] if the carved DMA region does not lie
-///   below `dma_aperture_top` (fail closed, `AGENTS.md` §5.4), plus any
-///   error of [`PciBus::map_bar_window`], the DMA allocation,
-///   [`Xhci::open`], or [`UsbDevice::start`].
+///   below `dma_aperture_top`, or the BAR cannot be assigned inside
+///   `outbound_window` (fail closed, `AGENTS.md` §5.4), plus any error
+///   of [`PciBus::assign_bar`], [`PciBus::map_bar_window`], the DMA
+///   allocation, [`Xhci::open`], or [`UsbDevice::start`].
 ///
 /// # Capabilities
 ///
@@ -108,7 +119,57 @@ pub fn open_discovered(
     host: &dyn DriverHost,
     bus: &dyn PciBus,
     dma_aperture_top: u64,
+    outbound_window: (u64, u64),
 ) -> Result<UsbDevice<RegisterWindow, DmaSlab>, DriverError> {
+    let mapped = map_controller(host, bus, dma_aperture_top, outbound_window)?;
+    let xhci = Xhci::open(mapped.window)?;
+    UsbDevice::start(xhci, mapped.dma, DEFAULT_POLL_BUDGET)
+}
+
+/// The discovered xHCI controller's mapped register BAR and its carved,
+/// in-aperture device-shared DMA region — the inputs [`Xhci::open`] and
+/// [`UsbDevice::start`] consume.
+///
+/// Produced by [`map_controller`] so a composing host (the in-kernel
+/// keyboard service) can read the controller's capability block and log
+/// its geometry between the map and the bring-up without re-mapping the
+/// BAR (`AGENTS.md` §2.2 — one window per device).
+pub struct MappedXhci {
+    /// The controller's mapped register BAR window.
+    pub window: RegisterWindow,
+    /// The carved, zeroed, in-aperture device-shared DMA region.
+    pub dma: DmaSlab,
+}
+
+/// Locate the VL805 on `bus`, carve its DMA region, assign and map its
+/// register BAR, and enable bus mastering — every step up to (but not
+/// including) the controller bring-up.
+///
+/// This is the prefix [`open_discovered`] runs before [`Xhci::open`].
+/// It is split out so the caller can inspect the result (read the
+/// capability block, log the carve and geometry) before handing it to
+/// [`Xhci::open`] + [`UsbDevice::start`]; the bring-up is a thin
+/// composition over it ([`open_discovered`]).
+///
+/// See [`open_discovered`] for the meaning of `dma_aperture_top` and
+/// `outbound_window`.
+///
+/// # Errors
+///
+/// As [`open_discovered`], for every step it performs (capability and
+/// facility checks, controller discovery, the DMA carve and its
+/// aperture bound, BAR assignment, and the BAR map).
+///
+/// # Capabilities
+///
+/// Requires [`CapabilityId::MMIO_MAP`]; the DMA carve is gated on the
+/// host's own DMA capability at allocation time.
+pub fn map_controller(
+    host: &dyn DriverHost,
+    bus: &dyn PciBus,
+    dma_aperture_top: u64,
+    outbound_window: (u64, u64),
+) -> Result<MappedXhci, DriverError> {
     if !host.has_capability(CapabilityId::MMIO_MAP) {
         return Err(DriverError::PermissionDenied);
     }
@@ -131,14 +192,22 @@ pub fn open_discovered(
         return Err(DriverError::OutOfRange);
     }
 
+    // Firmware normally assigns the controller's BAR, but after the OS
+    // resets and re-enumerates the root complex the VL805's BAR0 reads
+    // unassigned (address bits zero); mapping it would target physical
+    // address 0 and be refused. Place it inside the bridge's outbound
+    // PCIe window first (a no-op if firmware already based it), so the
+    // map resolves to a real CPU address (`AGENTS.md` §5.4).
+    let (outbound_base, outbound_size) = outbound_window;
+    bus.assign_bar(bdf, XHCI_BAR_INDEX, outbound_base, outbound_size)?;
+
     // The controller issues upstream DMA into the region above, so its
     // Bus Master Enable bit must be set before it runs (firmware leaves
     // it clear, `AGENTS.md` — PCI Local Bus 3.0 §6.2.2).
     bus.enable_bus_master(bdf)?;
     let window = bus.map_bar_window(bdf, XHCI_BAR_INDEX, mapper)?;
 
-    let xhci = Xhci::open(window)?;
-    UsbDevice::start(xhci, dma, DEFAULT_POLL_BUDGET)
+    Ok(MappedXhci { window, dma })
 }
 
 /// Locate the bus-local address of the first USB-class function on

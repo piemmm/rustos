@@ -560,6 +560,138 @@ fn map_bar_window_propagates_capability_denial() {
     );
 }
 
+// ---- BAR assignment ------------------------------------------------------
+
+/// A single function whose 64-bit memory BAR0 is **unassigned** — its
+/// address bits read zero, exactly as the VL805's BAR0 does after the
+/// OS resets and re-enumerates the BCM2711 root complex. Dword 4 carries
+/// only the memory-type bits, dword 5 (the high half) is zero, and the
+/// 4 KiB size probe yields the writable mask.
+fn vl805_like_fixture() -> MockConfigSpace {
+    let func = MockFunction {
+        bus: 0,
+        device: 0,
+        function: 0,
+        regs: vec![
+            id(0x1106, 0x3483),
+            class(0x0C03),
+            header(0x00),
+            // BAR0 (dword 4): 64-bit memory (bits[2:1]=10), address zero.
+            (4, 0x0000_0004),
+            (5, 0x0000_0000),
+        ],
+        sizing: vec![
+            // 4 KiB region: low-half mask, high half fully writable.
+            (4, 0xFFFF_F004),
+            (5, 0xFFFF_FFFF),
+        ],
+    };
+    MockConfigSpace::new(vec![func])
+}
+
+fn vl805_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+}
+
+#[test]
+fn assign_bar_places_an_unassigned_64bit_bar_in_the_window() {
+    let cfg = vl805_like_fixture();
+    let state = cfg.shared_state();
+    let pci = Pci::new(cfg);
+    let base = pci
+        .assign_bar(vl805_bdf(), 0, 0xC000_0000, 0x4000_0000)
+        .expect("the unassigned BAR is placed in the window");
+    // Placed at the lowest size-aligned PCIe-bus address in the window.
+    assert_eq!(base, 0xC000_0000);
+    let writes = state.borrow();
+    // The size-aligned base is written to the BAR's low dword with the
+    // memory-type control bits preserved, and zero to its high dword.
+    let last_lo = writes
+        .writes
+        .iter()
+        .rev()
+        .find(|(a, _)| a.register == 4)
+        .map(|(_, v)| *v);
+    let last_hi = writes
+        .writes
+        .iter()
+        .rev()
+        .find(|(a, _)| a.register == 5)
+        .map(|(_, v)| *v);
+    assert_eq!(last_lo, Some(0xC000_0004));
+    assert_eq!(last_hi, Some(0x0000_0000));
+}
+
+#[test]
+fn assign_bar_leaves_an_already_based_bar_untouched() {
+    // The q35 virtio function's BAR1 is firmware-based at 0xFEBF_0000.
+    let cfg = q35_fixture();
+    let state = cfg.shared_state();
+    let pci = Pci::new(cfg);
+    let base = pci
+        .assign_bar(virtio_bdf(), 1, 0xC000_0000, 0x4000_0000)
+        .expect("an already-based BAR is respected");
+    assert_eq!(base, 0xFEBF_0000);
+    // Only the transparent size probe + restore touched the BAR: the
+    // last writes to its dwords are the original values, never a new
+    // base (configuration space is byte-for-byte unchanged).
+    let writes = state.borrow();
+    let last_lo = writes
+        .writes
+        .iter()
+        .rev()
+        .find(|(a, _)| a.register == 5)
+        .map(|(_, v)| *v);
+    let last_hi = writes
+        .writes
+        .iter()
+        .rev()
+        .find(|(a, _)| a.register == 6)
+        .map(|(_, v)| *v);
+    assert_eq!(last_lo, Some(0xFEBF_0004));
+    assert_eq!(last_hi, Some(0x0000_0000));
+}
+
+#[test]
+fn assign_bar_refuses_a_bar_that_does_not_fit_the_window() {
+    let pci = Pci::new(vl805_like_fixture());
+    // The window is smaller than the 4 KiB BAR: fail closed rather than
+    // place the BAR partially outside it (`AGENTS.md` §5.4).
+    assert_eq!(
+        pci.assign_bar(vl805_bdf(), 0, 0xC000_0000, 0x800)
+            .unwrap_err(),
+        DriverError::OutOfRange
+    );
+}
+
+#[test]
+fn assign_bar_refuses_an_io_bar() {
+    let pci = Pci::new(q35_fixture());
+    // BAR0 of the virtio function is an I/O-port BAR.
+    assert_eq!(
+        pci.assign_bar(virtio_bdf(), 0, 0xC000_0000, 0x4000_0000)
+            .unwrap_err(),
+        DriverError::Unsupported
+    );
+}
+
+#[test]
+fn assign_bar_reports_not_found_for_an_absent_bar() {
+    let pci = Pci::new(q35_fixture());
+    // BAR5 is unused on the virtio function.
+    assert_eq!(
+        pci.assign_bar(virtio_bdf(), 5, 0xC000_0000, 0x4000_0000)
+            .unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
 // ---- virtio-1.x capability fixture ---------------------------------------
 
 /// Encode one dword of a virtio vendor-specific capability header.

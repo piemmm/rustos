@@ -40,6 +40,8 @@ use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::{CapabilityId, DriverError, MmioMapError, MmioMapper, RegisterWindow};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{FrameAllocator, PAGE_SIZE};
+use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use rustos_util::fmt::format_hex_u64;
 
 /// The capabilities the in-kernel keyboard bus-driver task holds: map the
 /// PCIe controller register block and the VL805 BAR
@@ -58,6 +60,39 @@ pub fn service_caps() -> CapabilitySet {
 /// Non-reserved [`PoolId`] tagging the keyboard service's DMA region
 /// ([`PoolId::MOCK`] = 0 is reserved for the in-process mock host).
 const KEYBOARD_DMA_POOL: PoolId = PoolId::from_raw(0x5742); // "WB"
+
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+const MAILBOX_PROPERTY_BYTES: usize = 32 * core::mem::size_of::<u32>();
+
+#[repr(align(16))]
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+struct MailboxPropertyBuffer(core::cell::UnsafeCell<[u8; MAILBOX_PROPERTY_BYTES]>);
+
+// SAFETY: the keyboard service owns this static property buffer for its
+// one-shot firmware fallback. The service reads the discovered doorbell once
+// before spawning and only the spawned kthread touches the buffer.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+unsafe impl Sync for MailboxPropertyBuffer {}
+
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static MAILBOX_PROPERTY_BUFFER: MailboxPropertyBuffer =
+    MailboxPropertyBuffer(core::cell::UnsafeCell::new([0; MAILBOX_PROPERTY_BYTES]));
+
+/// Audit event: an [`IdentityMmioMapper`] map-window decision (the
+/// security-relevant accept/deny of `AGENTS.md` §5.4.4). Logged once per
+/// bring-up map — the controller register block and the VL805 BAR, never
+/// on the poll path (`AGENTS.md` §2.16) — so a metal capture shows the
+/// exact `[base, len)` the PCI driver asked the bridge to map and whether
+/// it resolved to a backed CPU address. A BAR base outside the discovered
+/// outbound window resolves to the `ffff_ffff_ffff_ffff` sentinel and is
+/// the missing register fact behind a `length_out_of_range` xHCI bring-up.
+/// Bin-crate id alongside the boot pipeline's `4100`/`4101`/`4104`; part
+/// of the audit contract (`AGENTS.md` §5.4.4).
+const MMIO_MAP_DECISION: EventId = EventId(4105);
+
+/// The `resolved_cpu_hex` value logged for a refused map: no CPU address
+/// resolved, so the window lies outside every region the bridge maps.
+const MMIO_MAP_REJECTED: u64 = u64::MAX;
 
 /// A capability-gated, bridge-aware [`MmioMapper`] for a device behind the
 /// Pi 4's PCIe root complex.
@@ -91,6 +126,12 @@ pub struct IdentityMmioMapper {
     outbound_cpu_base: u64,
     outbound_pcie_base: u64,
     outbound_size: u64,
+    /// Optional one-shot diagnostic sink for the map decision
+    /// ([`MMIO_MAP_DECISION`]). `None` on the host (the security-logic
+    /// tests assert the resolution directly); the metal service attaches
+    /// the serial sink via [`Self::with_diag`] so a Pi capture shows the
+    /// BAR base the bridge was asked to map.
+    diag: Option<&'static (dyn Sink + Sync)>,
 }
 
 impl IdentityMmioMapper {
@@ -114,7 +155,82 @@ impl IdentityMmioMapper {
             outbound_cpu_base,
             outbound_pcie_base,
             outbound_size,
+            diag: None,
         }
+    }
+
+    /// Attach a `'static` diagnostic sink so every [`Self::map_window`]
+    /// decision is logged once (`MMIO_MAP_DECISION`). The metal service
+    /// passes the serial sink; the resolution itself is unchanged, so this
+    /// adds observability without widening authority (`AGENTS.md` §5.4.4).
+    #[must_use]
+    pub fn with_diag(mut self, sink: &'static (dyn Sink + Sync)) -> Self {
+        self.diag = Some(sink);
+        self
+    }
+
+    /// Log one map-window decision through the attached diagnostic sink, if
+    /// any. A no-op when no sink is attached (the host build) — the
+    /// resolution is identical either way (`AGENTS.md` §2.16 — one-shot,
+    /// off the poll path).
+    fn log_decision(&self, phys_base: u64, len: usize, resolved: Option<u64>) {
+        let Some(sink) = self.diag else {
+            return;
+        };
+        let regs_end = self.regs_base.saturating_add(self.regs_len);
+        let outbound_end = self.outbound_pcie_base.saturating_add(self.outbound_size);
+        let mut phys_buf = [0u8; 16];
+        let mut len_buf = [0u8; 16];
+        let mut resolved_buf = [0u8; 16];
+        let mut regs_base_buf = [0u8; 16];
+        let mut regs_end_buf = [0u8; 16];
+        let mut outbound_base_buf = [0u8; 16];
+        let mut outbound_end_buf = [0u8; 16];
+        log(
+            sink,
+            &Event {
+                level: if resolved.is_some() {
+                    Level::Info
+                } else {
+                    Level::Error
+                },
+                id: MMIO_MAP_DECISION,
+                message: "usb-keyboard: mmio map decision",
+                fields: &[
+                    Field {
+                        key: "phys_base_hex",
+                        value: format_hex_u64(phys_base, &mut phys_buf),
+                    },
+                    Field {
+                        key: "len_hex",
+                        value: format_hex_u64(len as u64, &mut len_buf),
+                    },
+                    Field {
+                        key: "resolved_cpu_hex",
+                        value: format_hex_u64(
+                            resolved.unwrap_or(MMIO_MAP_REJECTED),
+                            &mut resolved_buf,
+                        ),
+                    },
+                    Field {
+                        key: "regs_base_hex",
+                        value: format_hex_u64(self.regs_base, &mut regs_base_buf),
+                    },
+                    Field {
+                        key: "regs_end_hex",
+                        value: format_hex_u64(regs_end, &mut regs_end_buf),
+                    },
+                    Field {
+                        key: "outbound_pcie_base_hex",
+                        value: format_hex_u64(self.outbound_pcie_base, &mut outbound_base_buf),
+                    },
+                    Field {
+                        key: "outbound_pcie_end_hex",
+                        value: format_hex_u64(outbound_end, &mut outbound_end_buf),
+                    },
+                ],
+            },
+        );
     }
 
     /// Resolve `[phys, phys+len)` to the identity-mapped **CPU-physical**
@@ -166,9 +282,9 @@ impl MmioMapper for IdentityMmioMapper {
         if len == 0 {
             return Err(MmioMapError::InvalidRegion);
         }
-        let cpu_base = self
-            .resolve_cpu(phys_base, len)
-            .ok_or(MmioMapError::InvalidRegion)?;
+        let resolved = self.resolve_cpu(phys_base, len);
+        self.log_decision(phys_base, len, resolved);
+        let cpu_base = resolved.ok_or(MmioMapError::InvalidRegion)?;
         let addr = usize::try_from(cpu_base).map_err(|_| MmioMapError::InvalidRegion)?;
         let base = NonNull::new(addr as *mut u8).ok_or(MmioMapError::InvalidRegion)?;
         // SAFETY: `resolve_cpu` confirmed `[cpu_base, cpu_base+len)` lies
@@ -309,21 +425,38 @@ impl VirtioHost for FrameDmaHost {
 // (`AGENTS.md` §17.4 — the arch dependency is target-only).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 mod metal {
-    use super::{service_caps, FrameDmaHost, IdentityMmioMapper};
+    use super::{
+        service_caps, FrameDmaHost, IdentityMmioMapper, MAILBOX_PROPERTY_BUFFER,
+        MAILBOX_PROPERTY_BYTES,
+    };
 
     use alloc::boxed::Box;
 
-    use rustos_arch_aarch64::kernel_arch::busy_delay_us;
+    use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use rustos_abi::RegisterWindow;
+    use rustos_arch_aarch64::kernel_arch::{
+        busy_delay_us, clean_invalidate_dcache_range, read_cntfrq, read_cntpct,
+    };
     use rustos_arch_aarch64::platform::PcieDiscovery;
     use rustos_arch_aarch64::SERIAL_SINK;
     use rustos_drv_bus_pcie_brcm::{Delay, PcieWindows};
     use rustos_drv_input_usb_hid::{pump_once, KeyboardConsole};
     use rustos_kernel_core::{InitSpawnCtx, YieldHandle};
-    use rustos_log::{log, Event, EventId, Level};
+    use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_sync::SpinLock;
+    use rustos_util::fmt::format_hex_u64;
+    use rustos_vcmailbox::{
+        notify_xhci_reset, BufferCoherency, MailboxError, MmioMailbox, DEFAULT_BUS_ALIAS,
+        DEFAULT_POLL_BUDGET, MAILBOX_REGS_LEN_BYTES,
+    };
 
     use crate::arch_wrapper_aarch64::INPUT_FOCUS;
-    use crate::usb_keyboard::{bring_up_keyboard, ArbiterConsoleSink, ChainHost, PcieBringup};
+    use crate::usb_keyboard::{
+        bring_up_keyboard, ArbiterConsoleSink, ChainHost, FirmwareReset, FirmwareResetFailure,
+        FirmwareResetOutcome, PcieBringup, VL805_FIRMWARE_DEV_ADDR,
+    };
 
     /// Audit event: the USB-keyboard service kthread's lifecycle (started,
     /// or skipped because a prerequisite was absent). Logged once at the
@@ -334,14 +467,210 @@ mod metal {
     /// (`AGENTS.md` §5.4.4).
     const KEYBOARD_SERVICE: EventId = EventId(4103);
 
+    static MAILBOX_DOORBELL: SpinLock<Option<u64>> = SpinLock::new(None);
+
+    /// Record the boot-discovered `VideoCore` mailbox doorbell base for the
+    /// optional VL805 firmware fallback. Called once by the boot CPU after the
+    /// MMU is live, matching [`record_discovery`]'s `SpinLock` constraint.
+    #[doc = "Record the boot-discovered VideoCore mailbox doorbell base."]
+    pub fn record_mailbox_doorbell(doorbell_base: u64) {
+        *MAILBOX_DOORBELL.lock() = Some(doorbell_base);
+    }
+
+    struct VideoCoreFirmwareReset {
+        doorbell_base: Option<u64>,
+    }
+
+    impl VideoCoreFirmwareReset {
+        const fn failed(reason: FirmwareResetFailure) -> FirmwareResetOutcome {
+            FirmwareResetOutcome::Failed { reason }
+        }
+
+        const fn mailbox_failure(err: MailboxError) -> FirmwareResetFailure {
+            match err {
+                MailboxError::Window => FirmwareResetFailure::Window,
+                MailboxError::Timeout => FirmwareResetFailure::Timeout,
+                MailboxError::FirmwareError => FirmwareResetFailure::FirmwareError,
+                MailboxError::MalformedResponse => FirmwareResetFailure::MalformedResponse,
+                MailboxError::BadAperture => FirmwareResetFailure::BadAperture,
+                MailboxError::BadGeometry => FirmwareResetFailure::BadGeometry,
+                _ => FirmwareResetFailure::Unknown,
+            }
+        }
+
+        fn buffer_bus_addr(buffer_phys: u64) -> Option<u32> {
+            if buffer_phys >= u64::from(DEFAULT_BUS_ALIAS) {
+                return None;
+            }
+            Some(DEFAULT_BUS_ALIAS | buffer_phys as u32)
+        }
+    }
+
+    impl FirmwareReset for VideoCoreFirmwareReset {
+        fn reload(&self) -> FirmwareResetOutcome {
+            let Some(doorbell_base) = self.doorbell_base else {
+                return FirmwareResetOutcome::NotAvailable;
+            };
+            let Some(buffer_ptr) = NonNull::new(MAILBOX_PROPERTY_BUFFER.0.get().cast::<u8>())
+            else {
+                return Self::failed(FirmwareResetFailure::BadGeometry);
+            };
+            let buffer_phys = buffer_ptr.as_ptr() as u64;
+            let Some(buffer_bus) = Self::buffer_bus_addr(buffer_phys) else {
+                return Self::failed(FirmwareResetFailure::BadAperture);
+            };
+            let Some(doorbell_ptr) = NonNull::new(doorbell_base as usize as *mut u8) else {
+                return Self::failed(FirmwareResetFailure::BadGeometry);
+            };
+            // SAFETY: `doorbell_base` was discovered from the firmware FDT,
+            // folded into the Device identity map before MMU enable, and its
+            // advertised length was checked by the video mailbox discovery;
+            // the property exchange accesses it only through checked dword
+            // register operations during this one-shot fallback.
+            let regs = unsafe {
+                RegisterWindow::from_mapping(doorbell_base, doorbell_ptr, MAILBOX_REGS_LEN_BYTES)
+            };
+            // SAFETY: `MAILBOX_PROPERTY_BUFFER` is a 16-byte-aligned static
+            // owned by this one service for the single firmware-reload
+            // fallback. The `MmioMailbox` bounds every access to the 128-byte
+            // property message, and the coherency hooks publish/invalidate it
+            // around the firmware DMA exchange.
+            let buffer = unsafe {
+                RegisterWindow::from_mapping(buffer_phys, buffer_ptr, MAILBOX_PROPERTY_BYTES)
+            };
+            let coherency = BufferCoherency::new(
+                |base, len| clean_invalidate_dcache_range(base as usize, len),
+                |base, len| clean_invalidate_dcache_range(base as usize, len),
+            );
+            let Ok(mut mailbox) = MmioMailbox::with_coherency(
+                regs,
+                buffer,
+                buffer_bus,
+                DEFAULT_POLL_BUDGET,
+                coherency,
+            ) else {
+                return Self::failed(FirmwareResetFailure::BadGeometry);
+            };
+            match notify_xhci_reset(&mut mailbox, VL805_FIRMWARE_DEV_ADDR) {
+                Ok(response_value) => FirmwareResetOutcome::Reloaded { response_value },
+                Err(err) => Self::failed(Self::mailbox_failure(err)),
+            }
+        }
+    }
+
     /// A [`Delay`] backed by the architectural physical counter
     /// (`CNTPCT_EL0`), for the BCM2711 PCIe link-training settle waits.
-    struct GenericTimerDelay;
+    ///
+    /// It also accumulates how long the bring-up *asked* to wait
+    /// (`requested_us`, over `calls` invocations) so the `4116` timing
+    /// measurement can compare what the code requested against the
+    /// counter-measured elapsed span and the operator's wall clock — the
+    /// datapoint that localises a multi-second bring-up pause to a
+    /// timer-rate mismatch rather than a genuine spin (`AGENTS.md`
+    /// §15.7 / §2.16 — measure, don't guess). The counters are diagnostic
+    /// only and never gate behaviour.
+    struct GenericTimerDelay {
+        requested_us: AtomicU64,
+        calls: AtomicU64,
+    }
+
+    impl GenericTimerDelay {
+        const fn new() -> Self {
+            Self {
+                requested_us: AtomicU64::new(0),
+                calls: AtomicU64::new(0),
+            }
+        }
+
+        /// The total microseconds requested and the call count observed so
+        /// far (`Relaxed` is sufficient — single-kthread diagnostic totals,
+        /// not a synchronisation point).
+        fn totals(&self) -> (u64, u64) {
+            (
+                self.requested_us.load(Ordering::Relaxed),
+                self.calls.load(Ordering::Relaxed),
+            )
+        }
+    }
 
     impl Delay for GenericTimerDelay {
         fn delay_us(&self, us: u32) {
+            self.requested_us
+                .fetch_add(u64::from(us), Ordering::Relaxed);
+            self.calls.fetch_add(1, Ordering::Relaxed);
             busy_delay_us(us);
         }
+
+        fn now_us(&self) -> u64 {
+            // Scale the architectural counter to microseconds with the
+            // same rate `busy_delay_us` spins against, so a readiness poll
+            // bounded by `now_us` measures the same wall time a delay
+            // produces. A zero `CNTFRQ_EL0` would be a firmware fault
+            // (`AGENTS.md` §2.9 — never divide by it); report 0 so the
+            // caller's elapsed span stays non-negative and the bound trips
+            // immediately rather than spinning.
+            let freq = read_cntfrq();
+            if freq == 0 {
+                0
+            } else {
+                read_cntpct().saturating_mul(1_000_000) / freq
+            }
+        }
+    }
+
+    /// Audit event: the bring-up timing measurement. Logged once, right
+    /// after the VL805 bring-up chain returns, so a metal capture pins the
+    /// multi-second pause between the controller map (`4105`) and the
+    /// trained-link (`4101`) lines to its cause. `requested_us_hex` is the
+    /// total the code *asked* [`GenericTimerDelay`] to wait across the whole
+    /// chain (bounded by the bring-up's settle/poll budgets to a few
+    /// hundred milliseconds); `counter_elapsed_us_hex` is the same span as
+    /// measured by `CNTPCT_EL0` against `CNTFRQ_EL0` (`timer_hz_hex`).
+    ///
+    /// When both read a few hundred milliseconds yet the operator's wall
+    /// clock shows ~10 s, the architectural counter is running far slower
+    /// than `CNTFRQ_EL0` advertises, so every `busy_delay_us` over-waits
+    /// proportionally — the timer-rate fault. When `counter_elapsed_us_hex`
+    /// itself reads ~10 s, the code genuinely spun that long (a delay
+    /// fed an outsized value, fixable in code). One-shot at bring-up, never
+    /// on the poll path (`AGENTS.md` §2.16 / §19.4); part of the audit
+    /// contract (`AGENTS.md` §5.4.4).
+    const BRINGUP_TIMING: EventId = EventId(4116);
+
+    /// Log the bring-up timing measurement (`4116`): the requested vs
+    /// counter-measured elapsed span and the resolved counter rate, all
+    /// rendered allocation-free on the stack (`AGENTS.md` §2.9).
+    fn log_bringup_timing(requested_us: u64, delay_calls: u64, counter_elapsed_us: u64) {
+        let mut requested_buf = [0u8; 16];
+        let mut calls_buf = [0u8; 16];
+        let mut elapsed_buf = [0u8; 16];
+        let mut hz_buf = [0u8; 16];
+        log(
+            &SERIAL_SINK,
+            &Event {
+                level: Level::Info,
+                id: BRINGUP_TIMING,
+                message: "usb-keyboard: bring-up delay timing measurement",
+                fields: &[
+                    Field {
+                        key: "requested_us_hex",
+                        value: format_hex_u64(requested_us, &mut requested_buf),
+                    },
+                    Field {
+                        key: "delay_calls_hex",
+                        value: format_hex_u64(delay_calls, &mut calls_buf),
+                    },
+                    Field {
+                        key: "counter_elapsed_us_hex",
+                        value: format_hex_u64(counter_elapsed_us, &mut elapsed_buf),
+                    },
+                    Field {
+                        key: "timer_hz_hex",
+                        value: format_hex_u64(read_cntfrq(), &mut hz_buf),
+                    },
+                ],
+            },
+        );
     }
 
     /// The PCIe windows the boot path discovered (pre-MMU), handed to the
@@ -408,14 +737,21 @@ mod metal {
         };
 
         let caps = service_caps();
-        let mapper: &'static IdentityMmioMapper = Box::leak(Box::new(IdentityMmioMapper::new(
-            caps,
-            discovery.regs_phys,
-            discovery.regs_len,
-            discovery.outbound_cpu_base,
-            discovery.outbound_pcie_base,
-            discovery.outbound_size,
-        )));
+        // Attach the serial sink so each map decision (the controller regs
+        // block, the VL805 BAR) is logged once on metal: a refused BAR
+        // (the `length_out_of_range` xHCI bring-up) shows the exact base it
+        // asked for against the discovered window (`AGENTS.md` §5.4.4).
+        let mapper: &'static IdentityMmioMapper = Box::leak(Box::new(
+            IdentityMmioMapper::new(
+                caps,
+                discovery.regs_phys,
+                discovery.regs_len,
+                discovery.outbound_cpu_base,
+                discovery.outbound_pcie_base,
+                discovery.outbound_size,
+            )
+            .with_diag(&SERIAL_SINK),
+        ));
         let inbound_cpu_base = discovery
             .dma_aperture_top
             .saturating_sub(discovery.inbound_size);
@@ -439,14 +775,35 @@ mod metal {
 
         let body = move |yielder: &mut dyn YieldHandle| {
             let host = ChainHost::new(caps, mapper, dma);
-            let delay = GenericTimerDelay;
+            let firmware_reset = VideoCoreFirmwareReset {
+                doorbell_base: *MAILBOX_DOORBELL.lock(),
+            };
+            let delay = GenericTimerDelay::new();
             // Bring the VL805 up once. A failure (no link, no device, a
             // refused map) ends the service fail-closed: the video login
             // parks with no keyboard rather than the kernel hanging
             // (`AGENTS.md` §2.9). The chain logs its own staged progress
             // (pcie link, xhci, enumeration) to the serial sink, so a metal
             // capture pins which stage a silent keyboard stalled at.
-            let mut keyboard = match bring_up_keyboard(&host, &bringup, &delay, &SERIAL_SINK) {
+            //
+            // Bracket the chain with `CNTPCT_EL0` and compare against the
+            // delay's own requested-microsecond tally: a multi-second
+            // operator-visible pause whose `requested_us`/`counter_elapsed_us`
+            // are only a few hundred milliseconds is a timer-rate fault
+            // (every `busy_delay_us` over-waits), not a code-side spin
+            // (`4116`, `AGENTS.md` §15.7).
+            let start_ticks = read_cntpct();
+            let result = bring_up_keyboard(&host, &bringup, &firmware_reset, &delay, &SERIAL_SINK);
+            let elapsed_ticks = read_cntpct().wrapping_sub(start_ticks);
+            let freq = read_cntfrq();
+            let counter_elapsed_us = if freq == 0 {
+                0
+            } else {
+                elapsed_ticks.saturating_mul(1_000_000) / freq
+            };
+            let (requested_us, delay_calls) = delay.totals();
+            log_bringup_timing(requested_us, delay_calls, counter_elapsed_us);
+            let mut keyboard = match result {
                 Ok(keyboard) => keyboard,
                 Err(_) => return,
             };
@@ -481,7 +838,7 @@ mod metal {
 }
 
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub use metal::{record_discovery, spawn_if_present};
+pub use metal::{record_discovery, record_mailbox_doorbell, spawn_if_present};
 
 #[cfg(test)]
 mod tests {
@@ -601,6 +958,57 @@ mod tests {
             m.resolve_cpu(OUTBOUND_PCIE_BASE + OUTBOUND_SIZE - 0x800, 0x1000),
             None
         );
+    }
+
+    /// A `'static`, `Sync` sink capturing the last event's id and whether
+    /// it was an error, so the diagnostic test can assert the map decision
+    /// was logged. Atomics make it `Sync` without interior `RefCell`
+    /// (which the `&'static (dyn Sink + Sync)` bound `with_diag` requires
+    /// would reject).
+    struct DiagSink {
+        last_id: core::sync::atomic::AtomicU32,
+        last_was_error: core::sync::atomic::AtomicBool,
+    }
+
+    impl Sink for DiagSink {
+        fn write_event(&self, event: &Event<'_>) {
+            use core::sync::atomic::Ordering;
+            self.last_id.store(event.id.0, Ordering::Relaxed);
+            self.last_was_error
+                .store(event.level == Level::Error, Ordering::Relaxed);
+        }
+    }
+
+    static DIAG_SINK: DiagSink = DiagSink {
+        last_id: core::sync::atomic::AtomicU32::new(0),
+        last_was_error: core::sync::atomic::AtomicBool::new(false),
+    };
+
+    #[test]
+    fn mapper_diagnostics_log_the_map_decision() {
+        use core::sync::atomic::Ordering;
+        let m = mapper(with_caps(&[CapabilityId::MMIO_MAP])).with_diag(&DIAG_SINK);
+        // A BAR base in the outbound *CPU* window (a 64-bit BAR a firmware
+        // programmed with the CPU-domain address rather than the bus
+        // address) is outside the accepted PCIe-bus window and is refused —
+        // exactly the `length_out_of_range` xHCI bring-up shape. The
+        // decision is logged at `Error` so a metal capture shows the base.
+        assert_eq!(
+            m.map_window(OUTBOUND_CPU_BASE, 0x1000).err(),
+            Some(MmioMapError::InvalidRegion)
+        );
+        assert_eq!(
+            DIAG_SINK.last_id.load(Ordering::Relaxed),
+            MMIO_MAP_DECISION.0
+        );
+        assert!(DIAG_SINK.last_was_error.load(Ordering::Relaxed));
+        // An admitted map logs the same id at `Info` (not `Error`).
+        let _ = m.map_window(REGS_BASE, 0x1000).expect("regs block");
+        assert_eq!(
+            DIAG_SINK.last_id.load(Ordering::Relaxed),
+            MMIO_MAP_DECISION.0
+        );
+        assert!(!DIAG_SINK.last_was_error.load(Ordering::Relaxed));
     }
 
     fn frame_allocator() -> &'static FrameAllocator {

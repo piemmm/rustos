@@ -118,6 +118,13 @@ const TAG_SET_PIXEL_ORDER: u32 = 0x0004_8006;
 const TAG_ALLOCATE: u32 = 0x0004_0001;
 /// Tag: get the pitch (bytes per scanline).
 const TAG_GET_PITCH: u32 = 0x0004_0008;
+/// Tag: notify the `VideoCore` to (re)load the VL805 xHCI controller's
+/// firmware after a PCIe reset (request: the VL805 PCI device address;
+/// no response value). The BCM2711 PCIe root-complex bring-up asserts
+/// `PERST#`, which resets the VL805; on a board without the SPI EEPROM
+/// (Pi 4 rev 1.4 and later) that drops its firmware, and only the
+/// `VideoCore` can reload it (`plans/PI.md` P10).
+const TAG_NOTIFY_XHCI_RESET: u32 = 0x0003_0058;
 
 /// Firmware pixel-order value for BGR ([`DisplayFormat::Bgra8888`]).
 const PIXEL_ORDER_BGR: u32 = 0;
@@ -606,6 +613,89 @@ pub fn query_display_size(
     decode_display_size_response(&message)
 }
 
+// --- VL805 xHCI firmware reload ------------------------------------------
+
+/// Encode the [`TAG_NOTIFY_XHCI_RESET`] property message carrying the
+/// VL805's `dev_addr`.
+fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(&mut words, at, TAG_NOTIFY_XHCI_RESET, &[dev_addr]);
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Validate the firmware's answer to an xHCI-reset notification and
+/// return the **response value word** the firmware wrote back.
+///
+/// An OK top-level header code is necessary but **not** sufficient: a
+/// firmware build that does not recognise (or cannot honour) the tag
+/// still stamps the OK header while leaving the tag's own response code
+/// untouched, so trusting the header alone would report a reset that
+/// never happened. The firmware sets the per-tag response bit only when
+/// it actually processed the tag, so this additionally requires that bit
+/// (via [`find_tag`], which enforces it). Fails closed on a firmware
+/// error, a malformed header, or an unhonoured tag (`AGENTS.md` §5.4 —
+/// the firmware is external input; an unverified ack is a defect, not a
+/// success).
+///
+/// The returned word is the first value word the firmware wrote into the
+/// tag's value buffer (a healthy firmware echoes the `dev_addr` it was
+/// asked to act on), or `0` when the firmware returned no value words —
+/// it is diagnostic only (logged at bring-up), never gating: an honoured
+/// tag is a success regardless of the value.
+fn decode_xhci_reset_response(words: &[u32; PROPERTY_WORDS]) -> Result<u32, MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    let value = find_tag(words, TAG_NOTIFY_XHCI_RESET)?;
+    Ok(value.words.first().copied().unwrap_or(0))
+}
+
+/// Ask the `VideoCore` to (re)load the VL805 xHCI controller's firmware
+/// after a PCIe reset.
+///
+/// On the Raspberry Pi 4 the USB-A ports hang off a VL805 xHCI
+/// controller behind the BCM2711 PCIe root complex. The previous boot
+/// stage hands off with the root complex held in `PERST#` reset, which
+/// dropped the VL805's firmware before the OS ran; on a board without
+/// the SPI EEPROM (Pi 4 rev 1.4 and later) it has no firmware of its
+/// own, so its registers read an uninitialised pattern and `Xhci::open`
+/// fails.
+/// The `VideoCore` co-processor holds the firmware blob and reloads it
+/// on this property tag — but only once the PCIe bus is already
+/// configured (the controller enumerated and its BAR based), so the
+/// caller runs this *after* the bus is up and *before* xHCI bring-up
+/// (`plans/PI.md` P10).
+///
+/// `dev_addr` is the VL805's PCI address encoded as the firmware expects
+/// it: `bus << 20 | slot << 15 | func << 12` (`0x10_0000` for the
+/// hardwired Pi 4 VL805 on bus 1).
+///
+/// Returns the firmware's response value word for the honoured tag — a
+/// healthy firmware echoes the `dev_addr` it acted on, or `0` if it wrote
+/// no value. The value is diagnostic only (logged at bring-up to confirm
+/// the firmware processed the request), never gating: an honoured tag is
+/// a success regardless.
+///
+/// # Errors
+///
+/// Any [`MailboxError`] from the transport, or
+/// [`MailboxError::FirmwareError`] if the firmware rejects the request.
+pub fn notify_xhci_reset(
+    transport: &mut dyn MailboxTransport,
+    dev_addr: u32,
+) -> Result<u32, MailboxError> {
+    let mut message = encode_xhci_reset(dev_addr);
+    transport.exchange(&mut message)?;
+    decode_xhci_reset_response(&message)
+}
+
 // --- MMIO doorbell transport ----------------------------------------------
 
 /// Byte length of the mailbox doorbell register block.
@@ -615,10 +705,8 @@ pub const MAILBOX_REGS_LEN_BYTES: usize = 0x40;
 const REG_MBOX0_READ: usize = 0x00;
 /// Mailbox 0 status register.
 const REG_MBOX0_STATUS: usize = 0x18;
-/// Mailbox 1 (ARM→VC) write register.
+/// Mailbox write register for ARM→VC posts.
 const REG_MBOX1_WRITE: usize = 0x20;
-/// Mailbox 1 status register.
-const REG_MBOX1_STATUS: usize = 0x38;
 
 /// Status bit: the mailbox is empty (nothing to read).
 const STATUS_EMPTY: u32 = 1 << 30;
@@ -638,6 +726,59 @@ const CHANNEL_MASK: u32 = 0xF;
 /// rather than spinning forever (`AGENTS.md` §2.1).
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 
+/// Cache-maintenance hooks for the property buffer when the transport
+/// runs over **cacheable** memory.
+///
+/// The boot framebuffer path runs with the data caches off, where the
+/// buffer is already coherent with the firmware, and uses
+/// [`BufferCoherency::none`]. A post-MMU caller whose property buffer is
+/// Normal write-back memory supplies real hooks so the firmware sees the
+/// staged request and the ARM re-reads the firmware's response rather
+/// than a stale cached copy (`AGENTS.md` §23.2 — SMP/coherency
+/// correctness). Each hook receives the buffer's CPU base and byte
+/// length.
+#[derive(Copy, Clone)]
+pub struct BufferCoherency {
+    /// Clean `[base, base + len)` to the point of coherency after the
+    /// request is staged, so the firmware's DMA reads the staged words.
+    flush: Option<fn(u64, usize)>,
+    /// Invalidate `[base, base + len)` before the response is read, so
+    /// the ARM re-reads the firmware's writes from memory.
+    invalidate: Option<fn(u64, usize)>,
+}
+
+impl BufferCoherency {
+    /// No maintenance: the buffer is already coherent (caches off).
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            flush: None,
+            invalidate: None,
+        }
+    }
+
+    /// Clean-before / invalidate-after hooks for a cacheable buffer.
+    #[must_use]
+    pub const fn new(flush: fn(u64, usize), invalidate: fn(u64, usize)) -> Self {
+        Self {
+            flush: Some(flush),
+            invalidate: Some(invalidate),
+        }
+    }
+
+    fn flush(self, base: u64, len: usize) {
+        if let Some(flush) = self.flush {
+            flush(base, len);
+        }
+    }
+
+    fn invalidate(self, base: u64, len: usize) {
+        if let Some(invalidate) = self.invalidate {
+            invalidate(base, len);
+        }
+    }
+}
+
 /// The metal mailbox transport: the doorbell register block plus a
 /// DMA-visible property buffer, both reached through capability-gated
 /// [`RegisterWindow`]s (`AGENTS.md` §4 — no ambient authority).
@@ -646,6 +787,7 @@ pub struct MmioMailbox {
     buffer: RegisterWindow,
     buffer_bus_addr: u32,
     poll_budget: u32,
+    coherency: BufferCoherency,
 }
 
 impl MmioMailbox {
@@ -667,6 +809,30 @@ impl MmioMailbox {
         buffer_bus_addr: u32,
         poll_budget: u32,
     ) -> Result<Self, MailboxError> {
+        Self::with_coherency(
+            regs,
+            buffer,
+            buffer_bus_addr,
+            poll_budget,
+            BufferCoherency::none(),
+        )
+    }
+
+    /// As [`MmioMailbox::new`] but with explicit property-buffer cache
+    /// maintenance for a transport running over cacheable memory
+    /// (post-MMU); the boot path uses [`MmioMailbox::new`] (caches off,
+    /// already coherent).
+    ///
+    /// # Errors
+    ///
+    /// As [`MmioMailbox::new`].
+    pub fn with_coherency(
+        regs: RegisterWindow,
+        buffer: RegisterWindow,
+        buffer_bus_addr: u32,
+        poll_budget: u32,
+        coherency: BufferCoherency,
+    ) -> Result<Self, MailboxError> {
         if regs.len() < MAILBOX_REGS_LEN_BYTES || buffer.len() < PROPERTY_LEN_BYTES {
             return Err(MailboxError::Window);
         }
@@ -685,6 +851,7 @@ impl MmioMailbox {
             buffer,
             buffer_bus_addr,
             poll_budget,
+            coherency,
         })
     }
 
@@ -712,10 +879,15 @@ impl MailboxTransport for MmioMailbox {
                 .write_u32(i * 4, word)
                 .map_err(|_| MailboxError::Window)?;
         }
+        // Push the staged words to memory so the firmware's DMA reads
+        // them rather than a copy stranded in the ARM data cache (a
+        // no-op when the buffer is already coherent, e.g. caches off).
+        self.coherency
+            .flush(self.buffer.phys_base(), PROPERTY_LEN_BYTES);
 
         // Ring the doorbell: wait for write room, then post the
         // buffer's bus address tagged with the property channel.
-        self.wait_clear(REG_MBOX1_STATUS, STATUS_FULL)?;
+        self.wait_clear(REG_MBOX0_STATUS, STATUS_FULL)?;
         self.regs
             .write_u32(REG_MBOX1_WRITE, self.buffer_bus_addr | CHANNEL_PROPERTY)
             .map_err(|_| MailboxError::Window)?;
@@ -743,6 +915,11 @@ impl MailboxTransport for MmioMailbox {
             }
             core::hint::spin_loop();
         }
+
+        // Drop any stale cached copy so the read-back observes the
+        // firmware's writes from memory, not the request we staged.
+        self.coherency
+            .invalidate(self.buffer.phys_base(), PROPERTY_LEN_BYTES);
 
         // Read the firmware-mutated message back.
         for (i, word) in message.iter_mut().enumerate() {

@@ -353,6 +353,169 @@ impl<C: ConfigSpace> Pci<C> {
         self.config.write32(cmd_addr, command);
     }
 
+    /// Read the configuration-space dword at byte `offset` of function
+    /// `bdf`.
+    ///
+    /// `offset` is a byte offset into the 256-byte configuration header;
+    /// it is resolved to the dword it falls in (the low two bits are
+    /// ignored) and the little-endian dword is returned exactly as
+    /// configuration space holds it. A read-only diagnostic accessor —
+    /// it touches no state and confirms a prior write took effect (a
+    /// just-assigned BAR, an enabled command register, a programmed
+    /// bridge window). The in-tree [`ConfigSpace`] backends are
+    /// infallible, so this never errors; the
+    /// [`PciBus`](rustos_abi::driver::pci::PciBus) trait method reserves
+    /// the error arm for a future fallible transport.
+    #[must_use]
+    pub fn read_config(&self, bdf: u64, offset: u16) -> u32 {
+        // The byte offset's dword register index (offset >> 2), masked
+        // to the 8-bit register field — a 256-byte header has 64 dwords,
+        // so the cast is lossless.
+        let register = ((offset >> 2) & 0xFF) as u8;
+        self.config
+            .read32(addr_with_reg(unpack_bdf(bdf, 0), register))
+    }
+
+    /// Assign a memory base to the BAR at `bar_index` on function
+    /// `bdf` if it is currently **unassigned**, placing it inside the
+    /// PCIe-bus window `[window_base, window_base + window_size)`.
+    ///
+    /// Firmware normally programs a function's BARs, but when the OS
+    /// resets and re-enumerates the root complex (the BCM2711 PCIe
+    /// bring-up) a downstream function's BAR address bits read zero: the
+    /// BAR is sized and typed but carries no base, so a map of it would
+    /// target physical address 0 and be refused. Assigning resources
+    /// from the host bridge's outbound window is the PCI core's job,
+    /// mirroring Linux's PCI resource assignment. This probes the BAR's
+    /// size and type, and:
+    ///
+    /// * if the BAR already carries a non-zero base, leaves it untouched
+    ///   and returns that base (idempotent — firmware's assignment is
+    ///   respected);
+    /// * otherwise places the BAR at the lowest size-aligned address in
+    ///   the window, writes it (both dwords for a 64-bit BAR), and
+    ///   returns the assigned base.
+    ///
+    /// The returned base is a **PCIe-bus** address (what the function's
+    /// BAR decodes); the host bridge's [`MmioMapper`] translates it to a
+    /// CPU-physical address when [`map_bar_window`](Self::map_bar_window)
+    /// maps the window. This only ensures the BAR has a base to map; the
+    /// caller maps it afterwards.
+    ///
+    /// The size probe is transparent — the original BAR value is written
+    /// back before this returns, so a no-op (already-assigned) call
+    /// leaves configuration space byte-for-byte unchanged.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — `bar_index` is out of range, or no
+    ///   memory BAR is implemented at that slot (the size probe reads
+    ///   back zero).
+    /// * [`DriverError::Unsupported`] — the BAR is an I/O-port BAR
+    ///   (reached through port I/O, not a mapped window), or the
+    ///   function is not a type-0 header.
+    /// * [`DriverError::OutOfRange`] — the BAR's size-aligned placement
+    ///   does not fit inside the window, or a 32-bit BAR would land
+    ///   above the 4 GiB line (fail closed, `AGENTS.md` §5.4).
+    pub fn assign_bar(
+        &self,
+        bdf: u64,
+        bar_index: u8,
+        window_base: u64,
+        window_size: u64,
+    ) -> Result<u64, DriverError> {
+        if usize::from(bar_index) >= MAX_BARS {
+            return Err(DriverError::NotFound);
+        }
+        let addr = unpack_bdf(bdf, 0);
+        let header_type_byte = low_u8(self.config.read32(addr_with_reg(addr, 3)) >> 16);
+        if header_type_byte & 0x7F != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        let bar_reg = 4 + bar_index; // BAR0 lives at dword 4.
+        let lo = self.config.read32(addr_with_reg(addr, bar_reg));
+        // An I/O-port BAR is reached through port I/O, never a mapped
+        // memory window; refuse to assign it a memory base.
+        if lo & 0x1 != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        let is_64 = (lo >> 1) & 0x3 == 0x2;
+        let high = if is_64 {
+            self.config.read32(addr_with_reg(addr, bar_reg + 1))
+        } else {
+            0
+        };
+        let current = (u64::from(high) << 32) | u64::from(lo & 0xFFFF_FFF0);
+
+        // Size probe: write all-ones to the address bits, read the
+        // writable mask back, restore the original value(s).
+        self.config
+            .write32(addr_with_reg(addr, bar_reg), 0xFFFF_FFFF);
+        let probe_lo = self.config.read32(addr_with_reg(addr, bar_reg));
+        let probe_high = if is_64 {
+            self.config
+                .write32(addr_with_reg(addr, bar_reg + 1), 0xFFFF_FFFF);
+            let p = self.config.read32(addr_with_reg(addr, bar_reg + 1));
+            self.config.write32(addr_with_reg(addr, bar_reg + 1), high);
+            p
+        } else {
+            0
+        };
+        self.config.write32(addr_with_reg(addr, bar_reg), lo);
+
+        let mask = (u64::from(probe_high) << 32) | u64::from(probe_lo & 0xFFFF_FFF0);
+        if mask == 0 {
+            // No memory BAR implemented at this slot.
+            return Err(DriverError::NotFound);
+        }
+        // Size is the span of the cleared low (writable) address bits.
+        // For a 32-bit BAR only the low dword is writable, so confine
+        // the complement to 32 bits before deriving the size.
+        let size = if is_64 {
+            (!mask).wrapping_add(1)
+        } else {
+            ((!mask) & 0xFFFF_FFFF).wrapping_add(1)
+        };
+        if size == 0 {
+            return Err(DriverError::NotFound);
+        }
+
+        // A BAR firmware already based is left exactly as found.
+        if current != 0 {
+            return Ok(current);
+        }
+
+        // Place the BAR at the lowest size-aligned address in the
+        // window; refuse fail-closed if it does not fit.
+        let align_mask = size - 1;
+        let aligned = window_base
+            .checked_add(align_mask)
+            .map(|v| v & !align_mask)
+            .ok_or(DriverError::OutOfRange)?;
+        let end = aligned.checked_add(size).ok_or(DriverError::OutOfRange)?;
+        let window_end = window_base
+            .checked_add(window_size)
+            .ok_or(DriverError::OutOfRange)?;
+        if aligned < window_base || end > window_end {
+            return Err(DriverError::OutOfRange);
+        }
+        // A 32-bit BAR can only decode a 32-bit address.
+        if !is_64 && end > 0x1_0000_0000 {
+            return Err(DriverError::OutOfRange);
+        }
+
+        // Preserve the BAR's low control bits (memory type + prefetch);
+        // write the size-aligned base over the address bits.
+        let control = lo & 0xF;
+        let new_lo = (low_dword(aligned) & 0xFFFF_FFF0) | control;
+        self.config.write32(addr_with_reg(addr, bar_reg), new_lo);
+        if is_64 {
+            self.config
+                .write32(addr_with_reg(addr, bar_reg + 1), high_dword(aligned));
+        }
+        Ok(aligned)
+    }
+
     /// Resolve the virtio-1.x configuration structure of kind
     /// `cfg_type` on function `bdf` and ask the kernel `mapper` to map
     /// it, returning the resulting [`RegisterWindow`].
@@ -709,6 +872,22 @@ fn low_u8(v: u32) -> u8 {
 fn low_u16(v: u32) -> u16 {
     // Masking to 16 bits then casting is lossless by construction.
     (v & 0xFFFF) as u16
+}
+
+/// Low 32 bits of a 64-bit BAR base (the value written to the BAR's
+/// own dword).
+#[inline]
+const fn low_dword(value: u64) -> u32 {
+    let bytes = value.to_le_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// High 32 bits of a 64-bit BAR base (the value written to the BAR's
+/// upper dword).
+#[inline]
+const fn high_dword(value: u64) -> u32 {
+    let bytes = value.to_le_bytes();
+    u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
 }
 
 /// Map a PCI base class code (PCI Local Bus 3.0 Appendix D) to the

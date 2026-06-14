@@ -97,6 +97,7 @@ rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0
 rustos-drv-bus-pci = { path = "../../drivers/bus/pci", version = "=0.0.0" }
 rustos-drv-bus-usb = { path = "../../drivers/bus/usb", version = "=0.0.0" }
 rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
+rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 
 # --- Per-architecture boot dependencies ----------------------------
 #

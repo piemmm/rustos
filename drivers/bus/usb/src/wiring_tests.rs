@@ -25,12 +25,15 @@ use rustos_abi::{
     MmioMapper, PciBus, RegisterWindow,
 };
 
-use super::{open_discovered, USB_CONTROLLER_CLASS};
+use super::{map_controller, open_discovered, USB_CONTROLLER_CLASS};
 
 /// Device-visible base the DMA host hands out for an in-aperture carve.
 const DMA_PHYS_IN_APERTURE: u64 = 0x1000_0000;
 /// Inbound-DMA aperture top comfortably above the in-aperture carve.
 const APERTURE_TOP: u64 = 0xC000_0000;
+/// Outbound (CPU→PCIe) window the controller's BAR is assigned from,
+/// in the PCIe-bus address space — `(pcie_base, size)`.
+const OUTBOUND_WINDOW: (u64, u64) = (0x6000_0000, 0x1000_0000);
 
 /// Leak a `len`-byte, 4-byte-aligned buffer and return a pointer to it.
 ///
@@ -93,6 +96,10 @@ struct MockPciBus {
     class: u16,
     address: u64,
     master_enabled: Cell<bool>,
+    /// The `(window_base, window_size)` the last `assign_bar` was asked
+    /// to place the BAR inside, so a test can assert the bring-up routed
+    /// the outbound window through to BAR assignment.
+    assigned: Cell<Option<(u64, u64)>>,
 }
 
 impl MockPciBus {
@@ -101,6 +108,7 @@ impl MockPciBus {
             class: USB_CONTROLLER_CLASS,
             address: 0x0001_0000,
             master_enabled: Cell::new(false),
+            assigned: Cell::new(None),
         }
     }
 }
@@ -139,6 +147,24 @@ impl PciBus for MockPciBus {
     fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
         self.master_enabled.set(true);
         Ok(())
+    }
+
+    fn assign_bar(
+        &self,
+        _bdf: u64,
+        bar_index: u8,
+        window_base: u64,
+        window_size: u64,
+    ) -> Result<u64, DriverError> {
+        if bar_index != 0 {
+            return Err(DriverError::NotFound);
+        }
+        self.assigned.set(Some((window_base, window_size)));
+        Ok(window_base)
+    }
+
+    fn read_config(&self, _bdf: u64, _offset: u16) -> Result<u32, DriverError> {
+        Ok(0)
     }
 
     fn describe_function(
@@ -206,7 +232,7 @@ fn open_discovered_requires_the_mmio_capability() {
     };
     let bus = MockPciBus::usb();
     assert_eq!(
-        open_discovered(&host, &bus, APERTURE_TOP).err(),
+        open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).err(),
         Some(DriverError::PermissionDenied)
     );
     assert!(!bus.master_enabled.get());
@@ -224,7 +250,7 @@ fn open_discovered_requires_a_mapper() {
     };
     let bus = MockPciBus::usb();
     assert_eq!(
-        open_discovered(&host, &bus, APERTURE_TOP).err(),
+        open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -238,7 +264,7 @@ fn open_discovered_requires_a_dma_host() {
     };
     let bus = MockPciBus::usb();
     assert_eq!(
-        open_discovered(&host, &bus, APERTURE_TOP).err(),
+        open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -250,9 +276,10 @@ fn open_discovered_rejects_a_bus_without_a_usb_controller() {
         class: 0x0200, // Ethernet, not a USB controller.
         address: 0x0001_0000,
         master_enabled: Cell::new(false),
+        assigned: Cell::new(None),
     };
     assert_eq!(
-        open_discovered(&host, &bus, APERTURE_TOP).err(),
+        open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).err(),
         Some(DriverError::NotFound)
     );
     // The bus carried no USB function, so no device was activated.
@@ -267,7 +294,7 @@ fn open_discovered_rejects_a_dma_carve_above_the_aperture() {
     let host = host_with(APERTURE_TOP);
     let bus = MockPciBus::usb();
     assert_eq!(
-        open_discovered(&host, &bus, APERTURE_TOP).err(),
+        open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).err(),
         Some(DriverError::OutOfRange)
     );
     assert!(!bus.master_enabled.get());
@@ -285,9 +312,31 @@ fn open_discovered_propagates_a_dma_allocation_failure() {
     };
     let bus = MockPciBus::usb();
     assert_eq!(
-        open_discovered(&host, &bus, APERTURE_TOP).err(),
+        open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).err(),
         Some(DriverError::LengthOutOfRange)
     );
+}
+
+#[test]
+fn map_controller_maps_the_bar_window_and_carves_dma() {
+    // The map prefix `open_discovered` runs before the controller
+    // bring-up: it must discover the USB function, route the outbound
+    // window through to BAR assignment, enable bus mastering, and map
+    // the BAR — returning the mapped window and the carved DMA region
+    // for the caller to inspect (the geometry diagnostic) before
+    // `Xhci::open`.
+    let host = host_with(DMA_PHYS_IN_APERTURE);
+    let bus = MockPciBus::usb();
+    let mapped =
+        map_controller(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW).expect("map prefix succeeds");
+    // The mock BAR window is 0x1000 bytes (the metal VL805 BAR0 size).
+    assert_eq!(mapped.window.len(), 0x1000);
+    // The carve is the device-shared working set at the in-aperture
+    // device-visible base, wholly below the aperture top.
+    assert_eq!(mapped.dma.phys(), DMA_PHYS_IN_APERTURE);
+    assert!(mapped.dma.phys() + mapped.dma.len() as u64 <= APERTURE_TOP);
+    assert!(bus.master_enabled.get());
+    assert_eq!(bus.assigned.get(), Some(OUTBOUND_WINDOW));
 }
 
 #[test]
@@ -299,10 +348,18 @@ fn open_discovered_enables_mastering_and_reaches_the_controller() {
     // the composition reached the controller hand-off.
     let host = host_with(DMA_PHYS_IN_APERTURE);
     let bus = MockPciBus::usb();
-    let result = open_discovered(&host, &bus, APERTURE_TOP);
+    let result = open_discovered(&host, &bus, APERTURE_TOP, OUTBOUND_WINDOW);
     assert_eq!(result.err(), Some(DriverError::DeviceFault));
     assert!(
         bus.master_enabled.get(),
         "bus mastering must be enabled before the controller runs"
+    );
+    // The bridge's outbound window was routed through to BAR assignment
+    // before the map (the metal `length_out_of_range` fix), so a BAR the
+    // firmware left unassigned gets a base inside it.
+    assert_eq!(
+        bus.assigned.get(),
+        Some(OUTBOUND_WINDOW),
+        "the outbound window must reach assign_bar before the BAR is mapped"
     );
 }

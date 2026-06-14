@@ -281,6 +281,20 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
         Ok(())
     }
 
+    fn assign_bar(
+        &self,
+        bdf: u64,
+        bar_index: u8,
+        window_base: u64,
+        window_size: u64,
+    ) -> Result<u64, DriverError> {
+        Pci::assign_bar(self, bdf, bar_index, window_base, window_size)
+    }
+
+    fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, DriverError> {
+        Ok(Pci::read_config(self, bdf, offset))
+    }
+
     fn describe_function(
         &self,
         bdf: u64,

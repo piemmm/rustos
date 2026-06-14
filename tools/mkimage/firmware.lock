@@ -6,7 +6,7 @@
 # build inputs from a caller-supplied directory and refuses — fail closed —
 # any file whose byte length or SHA-256 does not match this manifest.
 #
-# Provenance: https://github.com/raspberrypi/firmware, release 1.20240529,
+# Provenance: https://github.com/raspberrypi/firmware, release 1.20260521,
 # files under `boot/`. The `source` directive below pins the upstream
 # directory: `cargo xtask image` fetches any blob missing from its cache
 # as `<source>/<name>` and verifies it against this manifest before use;
@@ -24,8 +24,8 @@
 #
 # Format: one `source <https url>` directive, then
 # <name> <byte length> <sha256 hex>, one file per line.
-source https://github.com/raspberrypi/firmware/raw/1.20240529/boot
-start4.elf 2257216 451e4320cd2390c28e5c0e79e6e5a704f98fa11670ba57d840d16bcae5aeec2e
-fixup4.dat 5436 21e37b0402974a64779c23621787a37de4706877b78931c94e964db864e8565d
-bcm2711-rpi-4-b.dtb 55804 5bc13e0f663531c374cbf4645e511708e40a0774fc7771ae869c5504dc9e39b3
+source https://github.com/raspberrypi/firmware/raw/1.20260521/boot
+start4.elf 2305632 3484b5ddc0f655e0e562680b7e2462ec21177763cc2d884b37d31e53b800bb02
+fixup4.dat 5499 c571fe712649b66409a4834b06af39dcef8dca6727e3abc10c6043f02028b5e5
+bcm2711-rpi-4-b.dtb 56407 75761b73c284e26623e4d1624bff13e67bce2ae620880efd81d6571a3739fcfb
 overlays/disable-bt.dtbo 1073 ea69d22dedc607fee75eec57d8a4cc0f0eab93cd75393e61a64c49fbac912d02
