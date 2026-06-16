@@ -20,6 +20,16 @@
 //! kernel does not *hunt* for a device; it binds a driver because that
 //! driver's bind table matched a discovered node, and leaves an unmatched
 //! node unbound and logged (`AGENTS.md` §18.4).
+//!
+//! This compiled-in list is the **bootstrap floor** candidate source
+//! (`AGENTS.md` §18.6): the only drivers compiled into the kernel are those
+//! that must exist before the signed driver store under `/System/Drivers/`
+//! is reachable — the general driver set is discovered at runtime from that
+//! store, never frozen here. The floor binds by discovery-match through the
+//! same shared policy and shrinks toward the store, never grows. The
+//! `usb_hid` entry is **not** bootstrap-floor (a plain HID leaf driver) and
+//! is staged to move out to a `devmgr`-autoloaded user-space driver
+//! (PLAN Stage 4.HW item 5, chunks 5d→5e); it stays only until that lands.
 
 use rustos_abi::{DriverBindKey, HwMatchKey};
 use rustos_devmatch::{resolve, DriverCandidate, MatchResolution};

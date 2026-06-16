@@ -1320,8 +1320,16 @@ kernel internals; they consume `lib/abi` only.
 
 RustOS detects the hardware actually present at boot and autoloads the
 matching drivers; it does not ship a hand-maintained, per-image static
-device list. This section is binding and as non-negotiable as §2. It
-builds on the driver rules (§8), the capability model (§5), the Arch
+device list. **Neither does it ship a compiled-in list of which drivers
+exist** — the *set* of loadable drivers is discovered at runtime from the
+installed signed driver bundles, not frozen in a kernel array. You cannot
+enumerate at build time every bus, vendor, or interface a future machine
+will present, so adding support for new hardware is dropping a signed
+bundle into the driver store, never a kernel recompile (§18.6). The sole
+compiled-in exception is the irreducible bootstrap floor that must exist
+before the driver store is reachable, and even it binds by discovery-match,
+not by assumption (§18.6). This section is binding and as non-negotiable as
+§2. It builds on the driver rules (§8), the capability model (§5), the Arch
 HAL (§17.2), and the headless guarantee (§17.3).
 
 ### 18.1 The hardware tree
@@ -1371,6 +1379,12 @@ HAL (§17.2), and the headless guarantee (§17.3).
   driver-host load gate. From a clean install the classes that must
   autoload include at least: input (keyboard, mouse), display, network,
   storage, and the I/O buses they depend on.
+- The candidate set the manager matches against is built by **scanning the
+  installed signed driver bundles** under `/System/Drivers/` at runtime and
+  reading each bundle's manifest bind table — never a compiled-in list of
+  which drivers exist (§18.5, §18.6). The only candidates resolved before the
+  store is reachable are the bootstrap floor (§18.6), matched in-kernel
+  through the same shared policy.
 - Autoload is capability-gated and fails closed (§5.4): the device
   manager loads drivers under `CAP_DRV_LOAD` (and `CAP_DRV_KERNEL` for
   in-kernel drivers, §8), and a loaded driver receives only the resource
@@ -1400,12 +1414,61 @@ HAL (§17.2), and the headless guarantee (§17.3).
 ### 18.5 Forbidden
 
 - A hard-coded, per-image static device list standing in for detection.
+- A compiled-in list of *which drivers the system can load* standing in for
+  the discovered driver store (§18.6). Only the bootstrap floor may be
+  compiled in, and only with a per-entry justification that it sits below
+  the store. A plain leaf driver (e.g. a HID keyboard) in that list is a
+  defect: it belongs in the store, discovered and loaded into user space.
 - Architecture-conditional hardware probing (`cfg(target_arch …)`)
   outside `kernel/arch/<target>/` (§17.2).
 - A driver granting itself authority it can reach without its matched
   node's capability request (§4 — no ambient authority).
 - "Probe by poking every address blindly": discovery uses the platform's
   enumerable sources (hardware tree, bus enumeration) only.
+
+### 18.6 Bootstrap floor vs. the discovered driver store
+
+The set of drivers RustOS can load is split into exactly two tiers. The
+boundary between them is a stated invariant, not an accident of what is
+currently compiled in.
+
+- **Discovered tier (the rule).** Almost every driver lives as an installed,
+  signed bundle under `/System/Drivers/` and is discovered at runtime: the
+  device manager (§18.3) scans the store, reads each bundle's manifest bind
+  table, and matches it against the live hardware tree. This is what makes a
+  machine with an interface that did not exist at build time work — ship a
+  signed bundle, no kernel change. A driver in this tier runs in user space
+  by default (§4) and receives only the resource capabilities its matched
+  node requested (§4, §18.3).
+- **Bootstrap floor (the only compiled-in exception).** Discovering drivers
+  by reading their manifests from `/System/Drivers/` first requires reaching
+  that storage, which needs a storage driver, a bus driver, and the root
+  complex up — none of which can themselves be discovered from a store that
+  is not yet reachable. The smallest set that carries the kernel from CPU
+  reset to "I can read the volume that holds the driver store" — the
+  root-complex / bus bring-up and the storage path — may therefore be
+  compiled in and hosted in-kernel under §4/§8 (`kind = InKernel`, gated by
+  `CAP_DRV_KERNEL`). Every floor entry carries a per-entry justification that
+  it genuinely sits *below* the store; an entry that does not meet that bar
+  is a defect (§18.5) and belongs in the discovered tier.
+- **Both tiers bind by discovery-match, never by assumption.** A floor entry
+  binds because a *discovered* hardware-tree node matched its bind table
+  (§18.3) — not because an address was assumed (§18.5). The two tiers differ
+  only in *where the candidate list comes from* — a tiny compiled-in floor
+  vs. the scanned store — never in *how* matching works: both resolve through
+  the one shared match policy (`lib/devmatch`, §2.2), so the in-kernel floor
+  match and the user-space `devmgr` match can never diverge.
+- **Both tiers are signed and capability-gated.** "A module matches this id"
+  is necessary but never sufficient to load it: every driver — floor or
+  discovered — is signature-verified against the install's driver-signing
+  trust anchor (§8, §9) *and* admitted through the capability-gated, fail-
+  closed §8 load gate (§5.4, §23.1). Discovery of *which* driver to load is
+  never "load whatever claims to handle this id".
+- **The floor shrinks toward the store, never grows.** The compiled-in floor
+  is kept to the irreducible minimum; the steady-state goal is to push every
+  driver that does not strictly belong below the store out into the
+  discovered tier (in user space, §4). Growing the floor to avoid the
+  discovery path is the §18.5 defect this section exists to prevent.
 
 ---
 

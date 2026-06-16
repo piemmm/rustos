@@ -420,7 +420,11 @@ device list.
   table**, and autoloads matching drivers through the §8 driver-host
   load gate under `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`. Deterministic match
   resolution; fail-closed; every match/load/skip/failure logged through
-  `lib/log` with a stable event ID.
+  `lib/log` with a stable event ID. The candidate set is **scanned from
+  the installed signed bundles** under `/System/Drivers/` at runtime, never
+  a compiled-in driver list (§18.6); only the bootstrap floor that must
+  exist before the store is reachable is compiled in, matched in-kernel
+  through the same shared `lib/devmatch` policy.
 - Driver-manifest **bind table** (§8, §9): drivers declare the match keys
   they bind to. Wire it into the existing signed-manifest path.
 - Runtime path: hotplug/removal updates the tree and triggers
@@ -563,7 +567,24 @@ order (one fully-gated increment each):
    data-driven §18 path: every chain node is discovered into the `hwtree`
    and `devmgr` autoloads the matching driver against its signed bind
    table, so adding a board becomes match **data**, not a new composition
-   module. The scaffold is now **live**: the aarch64 boot path invokes it
+   module.
+
+   **Two-tier driver-set invariant (`AGENTS.md` §18.6).** The *set* of
+   drivers the system can load is discovered at runtime by scanning the
+   installed signed bundles under `/System/Drivers/`, never frozen in a
+   kernel array — no build can enumerate every future bus/vendor/interface,
+   so new hardware support is a dropped-in signed bundle, not a recompile.
+   The only compiled-in exception is the irreducible **bootstrap floor**
+   (root-complex/bus bring-up + the storage path) that must exist before the
+   store is reachable. The current `kernel/rustos-kernel::driver_catalog`
+   (`IN_KERNEL_DRIVERS`) is the in-kernel candidate list, but it is **over-
+   broad**: `usb_hid` is a plain HID leaf driver, not bootstrap-floor, and
+   must move out to the discovered tier (chunks 5d–5e). Both tiers bind by
+   discovery-match through the one shared `lib/devmatch` policy and are
+   signed + capability-gated alike; the floor only shrinks toward the store
+   (§18.5/§18.6), it never grows.
+
+   The scaffold is now **live**: the aarch64 boot path invokes it
    as an in-kernel keyboard *service kthread* (`plans/PI.md` P10 — the new
    `kernel/rustos-kernel::keyboard_service`, the `kernel/core`
    `InitSpawnCtx::spawn_kernel_service`/`static_frames` seam, and
@@ -770,9 +791,10 @@ order (one fully-gated increment each):
        pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
        input-focus arbiter via `key_inject`. The "drivers in userland"
        steady state.
-     - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14) and
-       update §3 / this stage once the generic path drives the chain end to
-       end on metal.
+     - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
+       evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
+       compiled-in list is the bootstrap floor only (§18.6), and update §3 /
+       this stage once the generic path drives the chain end to end on metal.
 
 ---
 
@@ -1841,3 +1863,16 @@ can see *why* a rule exists without diffing the charter's history.
   one implementation only when it is genuinely that implementation's own (an
   arch-specific register layout, a runtime-discovered per-board MMIO base), not
   a value that merely coincides today. Documentation only.
+
+- **2026-06-16 — Driver *set* is discovered, not compiled in (two tiers).**
+  Added §18.6 and tightened the §18 intro / §18.3 / §18.5: the set of loadable
+  drivers is discovered at runtime by scanning the installed signed bundles
+  under `/System/Drivers/`, since no build can enumerate every future bus/
+  vendor/interface — adding hardware support is dropping a signed bundle, not a
+  kernel recompile. The only compiled-in exception is the irreducible bootstrap
+  floor (root-complex/bus bring-up + the storage path) that must exist before
+  the store is reachable; it is per-entry justified, still binds by discovery-
+  match through the one shared `lib/devmatch` policy, and is signed + capability-
+  gated like every driver. A plain leaf driver in that floor (e.g. a HID
+  keyboard) is a defect — it belongs in the discovered tier in user space.
+  Documentation only.
