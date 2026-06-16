@@ -3106,13 +3106,34 @@ table, so a new board is match **data**, not new code. Sub-increments
     (operator, §0.9):** re-flash, confirm the on-screen `Username:` prompt
     still takes keystrokes (parity), supply the UART log with the `4112`
     bound record.
-  - **5c-ii** route the in-kernel bring-up through an in-kernel
-    `DriverLoader` that admits each matched chain driver via
-    `run_with_driver_host` (binding the crates' `register()` under full
-    signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gating against the
-    manifest bind tables), and **re-match the enumerated HID child node**
-    (`UsbDevice::describe_device`, 5b-ii) against the catalogue before the
-    report pump (the growable-tree re-autoload step).
+  - **5c-ii — done:** the in-kernel chain bring-up is admitted through the
+    signed-manifest `drvhost::Host::load` gate, not a bare `register()`
+    call. `build.rs` (`emit_signed_driver_manifests`) bakes a signed
+    `DriverManifest` for each chain driver — `kind = InKernel`, stamped with
+    the kernel's `SYSCALL_TABLE_HASH`, requesting `CAP_DRV_LOAD`, carrying
+    the driver crate's own `BIND_KEYS` — Ed25519-signed with the build's
+    deterministic driver-signing key (`KERNEL_DRIVER_SIGNING_SEED`), and
+    embeds the matching public key as the kernel's sole driver trust anchor.
+    `kernel/rustos-kernel::driver_loader::ChainDriverLoader::admit` runs the
+    full `Host::load` pipeline (trust-anchor + signature verification,
+    syscall-hash match, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates, bind-table
+    validation, in-process `register()` hand-off). The chain `register()`s
+    are admission-only (§8 capability check), so the gate uses a plain
+    `Host` with no MMIO/DMA host; the real register-window mapping + DMA
+    carve still run over the keyboard service's own capability-gated
+    `ChainHost` after admission. `keyboard_service::spawn_if_present` admits
+    `pcie_brcm` + `bus_usb` before bring-up (fail closed → no service), and
+    the service body **re-matches the enumerated HID child** against the
+    catalogue (`bring_up_keyboard` now returns the keyboard + the
+    `UsbDevice::describe_device` `HwNode`) and admits `usb_hid` before the
+    report pump (fail closed → no input). Audited at `EventId(4132)`.
+    `rustos-drvhost` is now an aarch64 dependency. Host-tested
+    (`driver_loader` 5 tests: all three baked images verify, the
+    `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` / unknown-path refusals fail closed);
+    the freestanding aarch64 kernel builds clean. **Metal checkpoint
+    (operator, §0.9):** re-flash, confirm the `Username:` prompt still takes
+    keystrokes (parity), and supply the UART log showing the `4132` admitted
+    records for `pcie_brcm`, `bus_usb`, and `usb_hid`.
   - **5d-0** the `DriverHost` DMA/MMIO surface reachable **over IPC** (the
     standing gap, Stage 4.HW increment 1's remainder).
   - **5d** the continuous keyboard *service* in **user space**, autoloaded

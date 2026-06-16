@@ -422,7 +422,12 @@ mod metal {
         MmioMailbox, TimeoutStage, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET, MAILBOX_REGS_LEN_BYTES,
     };
 
+    use rustos_abi::{CapabilityId, HwNode};
+    use rustos_caps::CapabilitySet;
+
     use crate::arch_wrapper_aarch64::INPUT_FOCUS;
+    use crate::driver_catalog;
+    use crate::driver_loader::KernelDriverLoader;
     use crate::usb_keyboard::{
         bring_up_keyboard, ArbiterConsoleSink, ChainHost, FirmwareReset, FirmwareResetFailure,
         FirmwareResetOutcome, KeyboardPumpDiagnostics, PcieBringup, VL805_FIRMWARE_DEV_ADDR,
@@ -440,6 +445,16 @@ mod metal {
     /// driver path, an unmatched node is left unbound (`AGENTS.md` §18.4),
     /// and a packaging tie or an unrepresentable identity fails closed.
     const KEYBOARD_AUTOLOAD: EventId = EventId(4112);
+
+    /// Audit event: the signed driver-load gate decision for an in-kernel
+    /// driver (`plans/PI.md` P10 5c-ii). Each driver is *admitted*
+    /// through `drvhost::Host::load` — Ed25519 signature verification
+    /// against the build's embedded key plus the `CAP_DRV_LOAD` /
+    /// `CAP_DRV_KERNEL` gates — before it operates; a refused admission
+    /// fails closed (`AGENTS.md` §5.4 / §23.1). The detailed reject reason
+    /// is logged by the host itself (its sink is this serial sink); this
+    /// event records the higher-level start/skip decision keyed by path.
+    const KEYBOARD_LOAD_GATE: EventId = EventId(4132);
 
     /// Audit event: diagnostics from the VL805 firmware-reload mailbox
     /// exchange ([`ExchangeStats`]), logged after the `NOTIFY_XHCI_RESET`
@@ -864,12 +879,12 @@ mod metal {
             );
             return None;
         };
-        match crate::driver_catalog::resolve_chain(&[key]) {
+        match crate::driver_catalog::resolve_driver(&[key]) {
             MatchResolution::Winner {
                 candidate,
                 priority,
             } => {
-                let path = crate::driver_catalog::chain_candidates()[candidate].path;
+                let path = crate::driver_catalog::driver_candidates()[candidate].path;
                 let mut pbuf = [0u8; 16];
                 log(
                     &SERIAL_SINK,
@@ -924,15 +939,121 @@ mod metal {
         }
     }
 
+    /// The capability set the in-kernel driver loader presents when
+    /// admitting a driver: `CAP_DRV_LOAD` (the universal load gate) plus
+    /// `CAP_DRV_KERNEL` (every in-kernel manifest is `kind = InKernel`).
+    /// Each driver is granted only the intersection of this set with its
+    /// manifest's request (`AGENTS.md` §5.2).
+    fn loader_caps() -> CapabilitySet {
+        let mut caps = CapabilitySet::empty();
+        caps.insert(CapabilityId::DRV_LOAD);
+        caps.insert(CapabilityId::DRV_KERNEL);
+        caps
+    }
+
+    /// Log one in-kernel driver's admission outcome at [`KEYBOARD_LOAD_GATE`].
+    fn log_admission(level: Level, path: &str, message: &'static str) {
+        log(
+            &SERIAL_SINK,
+            &Event {
+                level,
+                id: KEYBOARD_LOAD_GATE,
+                message,
+                fields: &[Field {
+                    key: "driver",
+                    value: path,
+                }],
+            },
+        );
+    }
+
+    /// Admit the two head bus drivers (`pcie_brcm`, `bus_usb`) through the
+    /// signed `drvhost::Host::load` gate before the chain is brought up.
+    ///
+    /// Returns whether **both** were admitted. Fails closed (`AGENTS.md`
+    /// §5.4 / §23.1): if either is refused — bad signature, syscall-hash
+    /// mismatch, missing capability — the chain is not brought up. The
+    /// host logs the detailed reject reason itself (its sink is the serial
+    /// sink); this records the higher-level decision keyed by path.
+    fn admit_bus_drivers(loader: &KernelDriverLoader<'_>) -> bool {
+        let caps = loader_caps();
+        for path in [driver_catalog::PCIE_BRCM_PATH, driver_catalog::BUS_USB_PATH] {
+            if loader.admit(path, &caps).is_ok() {
+                log_admission(
+                    Level::Info,
+                    path,
+                    "usb-keyboard: in-kernel driver admitted through the signed load gate",
+                );
+            } else {
+                log_admission(
+                    Level::Error,
+                    path,
+                    "usb-keyboard: in-kernel driver refused at the signed load gate; not starting",
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Re-match the enumerated HID child node against the driver catalogue
+    /// and admit the winning HID driver through the signed gate before the
+    /// report pump feeds the input arbiter (`plans/PI.md` P10 5c-ii — the
+    /// §18 growable-runtime-tree re-autoload step).
+    ///
+    /// Returns whether the HID driver was admitted. Fails closed: an
+    /// unmatched child, a packaging tie, or a refused admission means no
+    /// key edge is ever injected — an unadmitted device must not drive
+    /// input (`AGENTS.md` §5.4 / §23.1).
+    fn admit_hid_child(loader: &KernelDriverLoader<'_>, hid_node: &HwNode) -> bool {
+        let path = match driver_catalog::resolve_driver(hid_node.match_keys()) {
+            MatchResolution::Winner { candidate, .. } => {
+                driver_catalog::driver_candidates()[candidate].path
+            }
+            MatchResolution::Unmatched => {
+                log_admission(
+                    Level::Error,
+                    "(enumerated-hid)",
+                    "usb-keyboard: enumerated HID child matched no driver; not pumping",
+                );
+                return false;
+            }
+            MatchResolution::Tie { .. } => {
+                log_admission(
+                    Level::Error,
+                    "(enumerated-hid)",
+                    "usb-keyboard: enumerated HID child tie (packaging defect); not pumping",
+                );
+                return false;
+            }
+        };
+        if loader.admit(path, &loader_caps()).is_ok() {
+            log_admission(
+                Level::Info,
+                path,
+                "usb-keyboard: HID driver admitted through the signed load gate",
+            );
+            true
+        } else {
+            log_admission(
+                Level::Error,
+                path,
+                "usb-keyboard: HID driver refused at the signed load gate; not pumping",
+            );
+            false
+        }
+    }
+
     /// Spawn the USB-keyboard service kthread if the boot path discovered a
     /// PCIe bridge **and** the driver-candidate catalogue binds a driver to
     /// it, returning whether it was started. With no bridge (the `virt`
     /// shape), an unmatched/tied discovered node
-    /// ([`resolve_discovered_bridge`]), or no `'static` frame allocator it
-    /// starts nothing and returns `false`, failing closed (`AGENTS.md`
-    /// §18.4 / §2.9). The capability-gated mapper and DMA host are leaked to
-    /// `'static`; the body runs the bring-up once then polls forever,
-    /// yielding between polls so PID 1 also runs.
+    /// ([`resolve_discovered_bridge`]), no `'static` frame allocator, or a
+    /// in-kernel driver refused at the signed load gate it starts nothing
+    /// and returns `false`, failing closed (`AGENTS.md` §18.4 / §2.9 / §5.4).
+    /// The capability-gated mapper and DMA host are leaked to `'static`;
+    /// the body runs the bring-up once then polls forever, yielding between
+    /// polls so PID 1 also runs.
     #[must_use]
     pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
         // No discovered bridge is the QEMU `virt` shape, not an error: stay
@@ -943,11 +1064,31 @@ mod metal {
         // §18 data-driven gate (`plans/PI.md` P10 5c): bring the chain up
         // only because the driver-candidate catalogue *binds* a driver to
         // the discovered node — not because a bridge address exists. An
-        // unmatched node (no chain driver claims it), a packaging tie, or an
+        // unmatched node (no in-kernel driver claims it), a packaging tie, or an
         // unrepresentable identity leaves the node unbound, logged, and the
         // service unstarted (`AGENTS.md` §18.4 / §2.9). The catalogue binds
         // `brcm,bcm2711-pcie` to `pcie_brcm`, so on the Pi 4 this proceeds.
         if resolve_discovered_bridge().is_none() {
+            return false;
+        }
+        // §8 / §9 load gate (`plans/PI.md` P10 5c-ii): admit the head bus
+        // drivers (`pcie_brcm`, `bus_usb`) through the signed
+        // `drvhost::Host::load` path — Ed25519 signature verification
+        // against the build's embedded key plus the `CAP_DRV_LOAD` /
+        // `CAP_DRV_KERNEL` gates — *before* the chain touches hardware, not
+        // a bare `register()` call. A refused admission fails closed: the
+        // chain is not brought up (`AGENTS.md` §5.4 / §23.1). The HID driver
+        // is admitted later, once enumeration discovers the device
+        // (`admit_hid_child`).
+        let Some(loader) = KernelDriverLoader::new(&SERIAL_SINK) else {
+            log_admission(
+                Level::Error,
+                "(trust-anchor)",
+                "usb-keyboard: driver trust anchor unavailable; not starting",
+            );
+            return false;
+        };
+        if !admit_bus_drivers(&loader) {
             return false;
         }
         // A discovered bridge with no `'static` frame allocator is worth
@@ -1026,10 +1167,24 @@ mod metal {
             };
             let (requested_us, delay_calls) = delay.totals();
             log_bringup_timing(requested_us, delay_calls, counter_elapsed_us);
-            let mut keyboard = match result {
-                Ok(keyboard) => keyboard,
+            let brought_up = match result {
+                Ok(brought_up) => brought_up,
                 Err(_) => return,
             };
+            // §18 re-autoload (`plans/PI.md` P10 5c-ii): re-match the
+            // enumerated HID child against the driver catalogue and admit
+            // the winning HID driver through the signed gate before any
+            // key edge reaches the input arbiter. Fail closed: an
+            // unmatched/refused child means the keyboard is not pumped
+            // (`AGENTS.md` §5.4 / §23.1 — an unadmitted device must not
+            // drive input).
+            let Some(loader) = KernelDriverLoader::new(&SERIAL_SINK) else {
+                return;
+            };
+            if !admit_hid_child(&loader, &brought_up.hid_node) {
+                return;
+            }
+            let mut keyboard = brought_up.keyboard;
             let mut console = KeyboardConsole::new();
             let mut sink = ArbiterConsoleSink::new(&INPUT_FOCUS);
             let mut diagnostics = KeyboardPumpDiagnostics::new();

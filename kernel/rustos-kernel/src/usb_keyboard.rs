@@ -1900,6 +1900,27 @@ fn open_controller(
 /// (the xHCI controller over its mapped register window + DMA region).
 pub type KeyboardChain = BootKeyboard<UsbDevice<RegisterWindow, DmaSlab>>;
 
+/// The outcome of a successful [`bring_up_keyboard`]: the polled
+/// [`KeyboardChain`] plus the enumerated HID device described as a
+/// discovered [`HwNode`] ([`UsbDevice::describe_device`]), so the caller
+/// can re-match it against the driver catalogue and admit the HID driver
+/// through the signed load gate before feeding input (`plans/PI.md` P10
+/// 5c-ii — the §18 growable-runtime-tree re-autoload step).
+pub struct BroughtUpKeyboard {
+    /// The boot keyboard, polled with `pump_once` in the service loop.
+    pub keyboard: KeyboardChain,
+    /// The enumerated HID device as a discovered child node, carrying the
+    /// `vid:pid` + interface-class match key read during enumeration
+    /// (`AGENTS.md` §18.5 — never fabricated).
+    pub hid_node: HwNode,
+}
+
+/// Synthetic hardware-tree ids for the [`BroughtUpKeyboard::hid_node`].
+/// The node↔driver match resolves on the node's match keys, not its ids
+/// (`AGENTS.md` §18.3), so these are tree-local placeholders.
+const HID_NODE_PARENT_ID: u32 = 1;
+const HID_NODE_ID: u32 = 2;
+
 /// The discovered inputs the VL805 bring-up needs, all read from the
 /// `brcm,bcm2711-pcie` [`HwNode`] (`AGENTS.md` §18.1) — never compiled-in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -2092,7 +2113,7 @@ pub fn bring_up_keyboard(
     firmware_reset: &dyn FirmwareReset,
     delay: &dyn Delay,
     sink: &dyn Sink,
-) -> Result<KeyboardChain, DriverError> {
+) -> Result<BroughtUpKeyboard, DriverError> {
     log_stage(
         sink,
         "usb-keyboard: training brcm,bcm2711-pcie root-complex link",
@@ -2187,6 +2208,35 @@ pub fn bring_up_keyboard(
     };
     // Read the assigned slot before `usb` is moved into the keyboard.
     let slot = usb.slot();
+    log_enumerated_root_device(sink, descriptor, slot);
+    if descriptor.is_hub() {
+        // The device on the root hub is the Pi 4B's onboard 2109:3431 hub,
+        // not the keyboard — the keyboard hangs off a downstream port. Walk
+        // the hub's downstream ports (the `4127` diagnostic shows which
+        // port the keyboard is on and at what speed), then address it
+        // through the hub on a second xHCI slot with a Route String + TT
+        // slot context (`plans/PI.md`, `AGENTS.md` §15.7). On success `usb`
+        // is left pointed at the keyboard's slot so `BootKeyboard` drains
+        // its reports; a fault fails closed (the keyboard stays unreached)
+        // rather than aborting the service (`AGENTS.md` §2.9).
+        log_hub_ports(sink, &mut usb, delay);
+        address_downstream_keyboard(sink, &mut usb, delay);
+    }
+    let hid_node = describe_enumerated_hid(&usb, sink)?;
+    Ok(BroughtUpKeyboard {
+        keyboard: BootKeyboard::new(usb),
+        hid_node,
+    })
+}
+
+/// Log the `vid:pid` and assigned xHCI slot of the device enumerated on
+/// the VL805 root hub ([`USB_KEYBOARD_DEVICE`]) — a one-shot bring-up
+/// diagnostic, never on the poll path.
+fn log_enumerated_root_device(
+    sink: &dyn Sink,
+    descriptor: rustos_drv_bus_usb::device::DeviceDescriptor,
+    slot: u8,
+) {
     let mut vid_buf = [0u8; 16];
     let mut pid_buf = [0u8; 16];
     let mut slot_buf = [0u8; 16];
@@ -2212,20 +2262,33 @@ pub fn bring_up_keyboard(
             ],
         },
     );
-    if descriptor.is_hub() {
-        // The device on the root hub is the Pi 4B's onboard 2109:3431 hub,
-        // not the keyboard — the keyboard hangs off a downstream port. Walk
-        // the hub's downstream ports (the `4127` diagnostic shows which
-        // port the keyboard is on and at what speed), then address it
-        // through the hub on a second xHCI slot with a Route String + TT
-        // slot context (`plans/PI.md`, `AGENTS.md` §15.7). On success `usb`
-        // is left pointed at the keyboard's slot so `BootKeyboard` drains
-        // its reports; a fault fails closed (the keyboard stays unreached)
-        // rather than aborting the service (`AGENTS.md` §2.9).
-        log_hub_ports(sink, &mut usb, delay);
-        address_downstream_keyboard(sink, &mut usb, delay);
-    }
-    Ok(BootKeyboard::new(usb))
+}
+
+/// Describe the enumerated HID device as a discovered child [`HwNode`] for
+/// the §18 re-match step (`plans/PI.md` P10 5c-ii), reading the `vid:pid` +
+/// interface class captured during enumeration (never fabricated,
+/// `AGENTS.md` §18.5), so the service can re-match it against the driver
+/// catalogue and admit the HID driver through the signed load gate before
+/// feeding the input arbiter.
+///
+/// # Errors
+///
+/// Surfaces [`UsbDevice::describe_device`]'s error fail-closed (logged),
+/// most notably [`DriverError::NotFound`] if no HID interface was
+/// enumerated.
+fn describe_enumerated_hid(
+    usb: &UsbDevice<RegisterWindow, DmaSlab>,
+    sink: &dyn Sink,
+) -> Result<HwNode, DriverError> {
+    usb.describe_device(HID_NODE_PARENT_ID, HID_NODE_ID)
+        .map_err(|err| {
+            log_stage_err(
+                sink,
+                "usb-keyboard: describing the enumerated HID device for re-match failed",
+                err,
+            );
+            err
+        })
 }
 
 #[cfg(test)]

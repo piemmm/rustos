@@ -650,16 +650,24 @@ order (one fully-gated increment each):
        gate wired. **Metal checkpoint (operator, §0.9):** re-flash, confirm
        the on-screen `Username:` prompt still takes keystrokes (parity), and
        supply the UART debug log showing the `4112` bound record.
-     - **5c-ii — load through the drvhost `Host::load` gate.** Route the
-       in-kernel bring-up through an **in-kernel `DriverLoader`** that
-       admits each matched chain driver via `run_with_driver_host` —
-       binding the statically-linked crates' `register()` under full
-       signature verification + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gating
-       against the manifest bind tables — and **re-matches the enumerated
-       HID child node** (`UsbDevice::describe_device`, 5b-ii) against the
-       catalogue before starting the report pump (the growable-runtime-tree
-       re-autoload step). Still the in-kernel address space; the
-       `DriverSpawner` is the in-process register for now. Host-tested.
+     - **5c-ii — load through the drvhost `Host::load` gate — done.** The
+       in-kernel chain bring-up is admitted through the signed-manifest
+       `drvhost::Host::load` gate, not a bare `register()` call. `build.rs`
+       bakes an Ed25519-signed `DriverManifest` per chain driver (kind
+       `InKernel`, the kernel's `SYSCALL_TABLE_HASH`, `CAP_DRV_LOAD`, the
+       crate's own `BIND_KEYS`) and embeds the build's driver-signing public
+       key as the kernel's trust anchor; `driver_loader::ChainDriverLoader`
+       runs the full load pipeline (signature + `CAP_DRV_LOAD` /
+       `CAP_DRV_KERNEL` gates, bind-table validation, in-process `register()`
+       hand-off). `keyboard_service::spawn_if_present` admits `pcie_brcm` +
+       `bus_usb` before bring-up and re-matches the enumerated HID child
+       (`bring_up_keyboard` now yields the keyboard + its
+       `UsbDevice::describe_device` `HwNode`) to admit `usb_hid` before the
+       report pump — fail closed at each step (`AGENTS.md` §5.4). The chain
+       `register()`s are admission-only, so the gate uses a plain `Host`; the
+       real MMIO/DMA runs over the service's own capability-gated `ChainHost`.
+       `rustos-drvhost` is now an aarch64 dependency; audited at
+       `EventId(4132)`. Host-tested (`driver_loader`); aarch64 kernel builds.
      - **5d-0 — the `DriverHost` DMA/MMIO surface reachable over IPC** (the
        standing gap, increment 1's remainder): a user-space driver maps its
        register windows and carves its DMA region over capability-gated
@@ -1701,3 +1709,33 @@ can see *why* a rule exists without diffing the charter's history.
   fail-closed (widening those is a §2.17 regression). Implemented as the PLAN
   §24 stage; the audited sweep of offending constants is now complete.
   Documentation only.
+
+- **2026-06-16 — Ban "for now"; finish the dependency or escalate.** Added
+  §2.19: a knowingly partial/temporary "for now" solution is forbidden — if the
+  proper solution depends on unfinished prerequisite work, that prerequisite is
+  done in the same change, and if doing it conflicts with another rule/design/
+  requirement the User is told to decide (§15.7), never resolved with a self-
+  chosen compromise. Reinforced as §15.13 (agent instruction). The positive
+  form of §2.1/§2.17/§2.18: deferring *correctness* is a defect. Documentation
+  only.
+
+- **2026-06-16 — Generic/multi-arch code is platform-neutral.** Added §2.20:
+  shared `lib/*`, arch-neutral `kernel/*`, the driver host and core driver
+  *frameworks*, and `userland/*` must carry no board/SoC reference (Raspberry
+  Pi, BCM, specific UART/GIC/MMIO base, `cfg(board)`); platform specifics live
+  only in `kernel/arch/<target>/` (plus the §1 boot-stub carve-out) and reach
+  every other layer at runtime via §18 discovery, with a carve-out for a
+  concrete device's own driver/support crate reached only through the §18.3
+  match path. Makes §17.2/§17.4 absolute for generated code; reinforced as
+  §15.14. Documentation only.
+
+- **2026-06-16 — Driver path namespace is class/bus-type, never vendor.**
+  Clarified §8 (and mirrored in §16.2): every directory level above the leaf —
+  the source `drivers/<class>/` path and the installed
+  `/System/Drivers/<class>[_<subtype>]/` path — is named only by device class
+  or bus type; a vendor/product name is permitted *only* as the leaf
+  *directory* that holds the driver file(s) for that one part (the §2.20
+  carve-out applied to naming). So
+  `/System/Drivers/bus_usb/broadcom_chip_1234/<driver>` is correct, while
+  `/System/Drivers/broadcom_usb/broadusb1234` (vendor as a namespace segment)
+  is a defect. Documentation only.

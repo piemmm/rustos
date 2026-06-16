@@ -106,16 +106,31 @@ pub mod dispatch_core;
 pub mod keyboard_service;
 pub mod usb_keyboard;
 
-// The in-kernel production driver-candidate catalogue (`plans/PI.md` P10
-// 5c / PLAN Stage 4.HW item 5): pairs each chain driver's canonical
-// `BIND_KEYS` with its `/System/Drivers/` image path and resolves a
-// discovered hardware node against them through the shared `lib/devmatch`
-// policy — the data-driven replacement for hand-sequenced bring-up. Like
-// `usb_keyboard`, it is architecture-neutral (it names only `lib/abi`
-// match keys and the chain crates' published bind tables), so it is
-// un-gated and its host unit tests run on the CI host; the aarch64 boot
-// path consumes it to gate the live VL805 bring-up on a match.
+// The in-kernel driver registry (`plans/PI.md` P10 5c / PLAN Stage 4.HW
+// item 5): the single source of truth pairing each in-kernel driver's
+// canonical `BIND_KEYS`, `/System/Drivers/` image path, build-signed
+// manifest image, and `register()` entry, and resolving a discovered
+// hardware node against them through the shared `lib/devmatch` policy — the
+// data-driven replacement for hand-sequenced bring-up. It carries each
+// driver's `register()` entry (a `rustos-drvhost` type) and `include!`s the
+// signed manifest images `build.rs` bakes, so it is gated on the two
+// instruction sets where `rustos-drvhost` is a dependency of this crate —
+// `x86_64` (the CI host, where its unit tests run) and `aarch64` (the
+// Raspberry Pi 4 boot path that consumes it to gate the live VL805 bring-up
+// on a match).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_catalog;
+
+// The in-kernel signed-driver-load gate (`plans/PI.md` P10 5c-ii): admits
+// any driver in the `driver_catalog` registry through `drvhost::Host::load`
+// (Ed25519 signature against the build's embedded driver-signing key + the
+// `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates), generic over hardware. Gated on
+// the two instruction sets where `rustos-drvhost` is a dependency of this
+// crate — `x86_64` (the CI host, where its unit tests run) and `aarch64`
+// (the Raspberry Pi 4 boot path that consumes it); riscv64 does not link
+// `drvhost` and never reaches this path.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod driver_loader;
 
 #[cfg(kernel_isa = "x86_64")]
 pub mod arch_wrapper;
