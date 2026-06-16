@@ -791,6 +791,28 @@ order (one fully-gated increment each):
        pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
        input-focus arbiter via `key_inject`. The "drivers in userland"
        steady state.
+       - **5d-1 — the rt-backed `DriverHost` (`lib/drvrt`) — done
+         (host-proven).** `rustos_drvrt::RtDriverHost` is the user-space
+         analogue of the in-kernel keyboard service's `IdentityMmioMapper` +
+         frame-allocator DMA host: it implements `DriverHost` + `MmioMapper` +
+         `VirtioHost` over a fixed table of kernel-issued device-resource
+         grants (`GrantedResource` = handle + `HwResource`). `map_window`
+         resolves a requested `(phys,len)` to the covering grant, maps that
+         grant's window once via the `mmio_map` syscall (cached), and
+         translates an outbound `BusWindow` BAR pcie→cpu (§18.1);
+         `alloc_dma_zeroed` carves the device-shared region via `dma_alloc`
+         and mints a `DmaSlab` (optional caller-supplied non-coherent
+         `SlabCoherencyFn`, never synthesised here — §2.20). Syscalls sit
+         behind the host-testable `GrantSyscalls` seam (production
+         `RtGrantSyscalls` → `rustos_rt`, §2.2); adds no authority, every
+         check kernel-side, fail-closed (§4/§5.4/§2.9), allocation-free
+         (`MAX_GRANTS`). 18 host tests; §3 + `SUMMARY.md` + `docs/src/lib/
+         drvrt.md`. No production consumer yet (that is 5d-2), so no
+         metal/virt step.
+       - **5d-2 (next)** the `devmgr`-spawned keyboard driver *process*
+         building an `RtDriverHost` from its minted grants and running the
+         `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + pump over it; needs the
+         production driver-spawn grant minter + a `-M virt` vertical.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

@@ -1,0 +1,331 @@
+//! [`RtDriverHost`] — the rt-backed [`DriverHost`] a user-space driver links.
+
+use core::cell::Cell;
+use core::ptr::NonNull;
+
+use rustos_abi::driver::dma::{DmaSlab, PoolId, SlabCoherencyFn};
+use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::hwtree::{HwResource, HwResourceKind};
+use rustos_abi::{
+    CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
+    RegisterWindow,
+};
+use rustos_caps::CapabilitySet;
+
+use crate::syscalls::GrantSyscalls;
+
+/// Maximum number of device-resource grants a driver process holds.
+///
+/// A §24.4 validation bound, not a scalable capacity: a single matched
+/// hardware-tree node requests only a handful of resources (a register
+/// window, an outbound bus window, a DMA constraint, an IRQ line), so a
+/// table this small covers every real driver. A grant list longer than this
+/// is a packaging defect and is refused fail-closed at construction
+/// (`AGENTS.md` §2.9 / §18.3).
+pub const MAX_GRANTS: usize = 8;
+
+/// One kernel-issued device-resource grant the host can map: the unforgeable
+/// handle plus the [`HwResource`] it names.
+///
+/// A driver process receives these at spawn (the kernel mints one per
+/// resource its matched node requested, `AGENTS.md` §18.3) and builds the
+/// host's grant table from them. The [`HwResource`] descriptor lets the host
+/// resolve a driver's requested `(phys_base, len)` window to the grant that
+/// covers it and translate an outbound bus address to the mapped window's
+/// offset, without the driver ever naming a raw physical address (§4).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GrantedResource {
+    /// The unforgeable, kernel-issued grant handle the `mmio_map` / `dma_alloc`
+    /// syscalls resolve owner-checked against the calling task.
+    pub handle: u64,
+    /// The resource the handle names (a register window, an outbound bus
+    /// window, or a DMA constraint).
+    pub resource: HwResource,
+}
+
+impl GrantedResource {
+    /// Pair a kernel-issued grant `handle` with the [`HwResource`] it names.
+    #[must_use]
+    pub fn new(handle: u64, resource: HwResource) -> Self {
+        Self { handle, resource }
+    }
+}
+
+/// A grant the host can map, plus the lazily-cached base virtual address the
+/// kernel returned when it was first mapped.
+struct GrantSlot {
+    handle: u64,
+    resource: HwResource,
+    /// The base user VA of this grant's mapped window, or `0` while it has
+    /// not yet been mapped. A real mapping never bases at VA `0` (it is a
+    /// user address above the image bias), so `0` is an unambiguous
+    /// "unmapped" sentinel and the window is mapped at most once
+    /// (`AGENTS.md` §2.16 — no repeated syscall for the same window).
+    mapped_va: Cell<u64>,
+}
+
+/// The user-space driver host: maps kernel-issued device-resource grants over
+/// the `mmio_map` / `dma_alloc` syscalls.
+///
+/// Implements [`DriverHost`] (the entry surface a driver's `register`
+/// consumes), [`MmioMapper`] (register-window mapping), and [`VirtioHost`]
+/// (the DMA-buffer carve a bus driver allocates its device-shared structures
+/// from) over one small table of grants. See the crate-level docs for the
+/// design and the "not a privileged path" contract.
+pub struct RtDriverHost<S: GrantSyscalls> {
+    caps: CapabilitySet,
+    syscalls: S,
+    grants: [Option<GrantSlot>; MAX_GRANTS],
+    dma_pool: PoolId,
+    next_slot: Cell<usize>,
+    coherency: Option<SlabCoherencyFn>,
+}
+
+impl<S: GrantSyscalls> RtDriverHost<S> {
+    /// Build a host over the load-time capability set `caps`, the syscall seam
+    /// `syscalls`, and the kernel-issued `grants`.
+    ///
+    /// `coherency` is the cache-maintenance shim for a **non-coherent** DMA
+    /// interconnect (e.g. the BCM2711 PCIe master, which does not snoop the
+    /// CPU caches); pass `None` on a coherent interconnect (and for the QEMU
+    /// `virt` stand-in), where the kernel's coherent carve needs no CPU-side
+    /// maintenance. The shim is supplied by the (architecture-aware) driver
+    /// process, never synthesised here, so this crate stays platform-neutral
+    /// (`AGENTS.md` §2.20).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] if `grants` holds more than
+    /// [`MAX_GRANTS`] entries (a packaging defect, refused fail-closed,
+    /// `AGENTS.md` §2.9 / §24.4).
+    pub fn new(
+        caps: CapabilitySet,
+        syscalls: S,
+        grants: &[GrantedResource],
+        coherency: Option<SlabCoherencyFn>,
+    ) -> Result<Self, DriverError> {
+        if grants.len() > MAX_GRANTS {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let mut slots: [Option<GrantSlot>; MAX_GRANTS] = core::array::from_fn(|_| None);
+        for (slot, granted) in slots.iter_mut().zip(grants.iter()) {
+            *slot = Some(GrantSlot {
+                handle: granted.handle,
+                resource: granted.resource,
+                mapped_va: Cell::new(0),
+            });
+        }
+        Ok(Self {
+            caps,
+            syscalls,
+            grants: slots,
+            dma_pool: PoolId::fresh(),
+            next_slot: Cell::new(0),
+            coherency,
+        })
+    }
+
+    /// Find the grant covering the mappable window `[req_base, req_base + len)`
+    /// and the request's offset into that grant's mapped window.
+    ///
+    /// Only [`HwResourceKind::Mmio`] (CPU/identity space) and
+    /// [`HwResourceKind::BusWindow`] (outbound PCIe-bus space) grants are
+    /// mappable register windows. A [`BusWindow`](HwResourceKind::BusWindow)
+    /// is addressed in PCIe-bus space (its [`translated_base`]), so a BAR the
+    /// driver names by its bus address resolves to the same offset into the
+    /// CPU window the kernel mapped — the bridge's bus→CPU translation
+    /// (`AGENTS.md` §18.1), performed once here rather than in the
+    /// architecture-neutral PCI walk.
+    ///
+    /// Returns the matching slot and the in-window byte `offset`, or `None`
+    /// if no grant covers the whole request (fail closed, `AGENTS.md` §5.4).
+    ///
+    /// [`translated_base`]: HwResource::translated_base
+    fn resolve(&self, req_base: u64, len: usize) -> Option<(&GrantSlot, u64)> {
+        let req_end = req_base.checked_add(len as u64)?;
+        for slot in self.grants.iter().flatten() {
+            let window_start = match slot.resource.kind() {
+                Some(HwResourceKind::Mmio) => slot.resource.base(),
+                Some(HwResourceKind::BusWindow) => slot.resource.translated_base(),
+                // A DMA constraint, IRQ line, or port range is not a mappable
+                // register window (`AGENTS.md` §5.4 — validate the kind).
+                _ => continue,
+            };
+            let window_end = window_start.checked_add(slot.resource.length())?;
+            if req_base >= window_start && req_end <= window_end {
+                return Some((slot, req_base - window_start));
+            }
+        }
+        None
+    }
+
+    /// Map `slot`'s whole granted window through the `mmio_map` syscall the
+    /// first time it is needed and cache its base VA; reuse the cached base on
+    /// later requests into the same window.
+    fn ensure_mapped(&self, slot: &GrantSlot) -> Result<u64, MmioMapError> {
+        let cached = slot.mapped_va.get();
+        if cached != 0 {
+            return Ok(cached);
+        }
+        let ret = self.syscalls.mmio_map(slot.handle);
+        if ret <= 0 {
+            return Err(mmio_error(ret));
+        }
+        #[allow(clippy::cast_sign_loss)] // `ret > 0` checked above; it is a user VA.
+        let va = ret as u64;
+        slot.mapped_va.set(va);
+        Ok(va)
+    }
+
+    /// The DMA-constraint grant, if the driver was granted one.
+    fn dma_grant(&self) -> Option<&GrantSlot> {
+        self.grants
+            .iter()
+            .flatten()
+            .find(|slot| slot.resource.kind() == Some(HwResourceKind::Dma))
+    }
+}
+
+impl<S: GrantSyscalls> MmioMapper for RtDriverHost<S> {
+    fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
+        // Capability before state (`AGENTS.md` §5.4); the kernel re-checks.
+        if !self.caps.contains(CapabilityId::MMIO_MAP) {
+            return Err(MmioMapError::CapabilityMissing);
+        }
+        if len == 0 {
+            return Err(MmioMapError::InvalidRegion);
+        }
+        let (slot, offset) = self
+            .resolve(phys_base, len)
+            .ok_or(MmioMapError::InvalidRegion)?;
+        let base_va = self.ensure_mapped(slot)?;
+        let window_va = base_va
+            .checked_add(offset)
+            .ok_or(MmioMapError::InvalidRegion)?;
+        let addr = usize::try_from(window_va).map_err(|_| MmioMapError::InvalidRegion)?;
+        let base = NonNull::new(addr as *mut u8).ok_or(MmioMapError::InvalidRegion)?;
+        // SAFETY: `ensure_mapped` obtained `base_va` from the `mmio_map`
+        // syscall, which mapped exactly `slot`'s granted window
+        // (caching-disabled, user-accessible, never executable, §19.2) into
+        // this process's own address space and kept it valid for the
+        // process's lifetime (longer than the returned window). `resolve`
+        // proved `[phys_base, phys_base + len)` lies wholly inside that
+        // window, so `window_va = base_va + offset` and the `len` bytes from
+        // it are in-bounds, ≥ 4-byte aligned (the kernel maps page-aligned and
+        // a real device offset is register-aligned), and exclusively owned by
+        // this window. `phys_base` is the device-visible base the window
+        // records (`AGENTS.md` §5.4 — the kernel validated the grant).
+        Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
+    }
+}
+
+impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
+        // Capability before state (`AGENTS.md` §5.4); the kernel re-checks.
+        if !self.caps.contains(CapabilityId::MEM_DMA) {
+            return Err(DriverError::PermissionDenied);
+        }
+        if size == 0 {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let grant = self.dma_grant().ok_or(DriverError::Unsupported)?;
+        let mut device: u64 = 0;
+        let ret = self.syscalls.dma_alloc(grant.handle, size, &mut device);
+        if ret <= 0 {
+            return Err(dma_error(ret));
+        }
+        #[allow(clippy::cast_sign_loss)] // `ret > 0` checked above; it is a user VA.
+        let cpu_va = ret as u64;
+        let addr = usize::try_from(cpu_va).map_err(|_| DriverError::OutOfRange)?;
+        let ptr = NonNull::new(addr as *mut u8).ok_or(DriverError::DeviceFault)?;
+        let slot = self.next_slot.get();
+        self.next_slot.set(slot.wrapping_add(1));
+        // SAFETY: `dma_alloc` carved exactly `size` bytes of zeroed,
+        // physically-contiguous, coherent, `RW` (non-executable),
+        // guard-bracketed memory mapped into this process's own address space,
+        // and kept it valid for the process's lifetime (longer than the
+        // returned slab — there is no userland free, the kernel reclaims it on
+        // exit via `LiveSpace::Drop`, `AGENTS.md` §4). `ptr` is its non-null,
+        // page-aligned CPU base and `device` its device-visible base; the
+        // region is exclusively this slab's (a fresh carve per call), so no
+        // other live reference aliases it. The slab's drop is a no-op
+        // (`from_leaked`): the kernel owns reclamation.
+        let slab = unsafe { DmaSlab::from_leaked(device, ptr, size, self.dma_pool, slot) };
+        Ok(match self.coherency {
+            Some(coherency) => slab.with_coherency(coherency),
+            None => slab,
+        })
+    }
+
+    fn notify_wait(&self, _queue_index: u16) {
+        // This host serves a polling / interrupt-driven driver (the xHCI
+        // keyboard path polls; an interrupt-driven driver parks on `irq_wait`
+        // directly). It deliberately provides no virtio queue-completion wait,
+        // exactly like the in-kernel frame-allocator DMA host: a driver that
+        // needs queue notifications uses the IRQ syscalls, never a spin here
+        // (`AGENTS.md` §2.1). `bus_usb` never calls this.
+    }
+}
+
+impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
+    fn has_capability(&self, cap: CapabilityId) -> bool {
+        self.caps.contains(cap)
+    }
+
+    fn kind(&self) -> DriverKind {
+        DriverKind::UserSpace
+    }
+
+    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
+        Some(self)
+    }
+
+    fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
+        Some(self)
+    }
+}
+
+/// Map a non-positive `mmio_map` result to a [`MmioMapError`].
+///
+/// `ret` is `≤ 0`: a negative value is `-errno`, and `0` is an impossible base
+/// VA the kernel never returns for a real mapping (treated as a platform
+/// failure). The capability was already checked locally, so a kernel
+/// `PermissionDenied` here still maps to [`MmioMapError::CapabilityMissing`]
+/// (the authoritative kernel verdict); a bad/forged grant or out-of-range
+/// window maps to [`MmioMapError::InvalidRegion`]; anything else is an
+/// [`MmioMapError::Unsupported`] platform refusal (`AGENTS.md` §2.9).
+fn mmio_error(ret: i64) -> MmioMapError {
+    match decode_errno(ret) {
+        Some(Errno::PermissionDenied) => MmioMapError::CapabilityMissing,
+        Some(Errno::OutOfRange | Errno::LengthOutOfRange | Errno::NotFound | Errno::BadAddress) => {
+            MmioMapError::InvalidRegion
+        }
+        _ => MmioMapError::Unsupported,
+    }
+}
+
+/// Map a non-positive `dma_alloc` result to a [`DriverError`].
+///
+/// `ret` is `≤ 0`. A kernel `PermissionDenied` maps to
+/// [`DriverError::PermissionDenied`]; an exhausted pool / over-limit / oversize
+/// carve maps to [`DriverError::LengthOutOfRange`] (the documented
+/// [`VirtioHost::alloc_dma_zeroed`] exhaustion error); anything else (an inert
+/// facility, an unknown code, a `0` base) is [`DriverError::Unsupported`]
+/// (`AGENTS.md` §2.9).
+fn dma_error(ret: i64) -> DriverError {
+    match decode_errno(ret) {
+        Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
+        Some(Errno::LengthOutOfRange | Errno::OutOfMemory | Errno::OutOfRange) => {
+            DriverError::LengthOutOfRange
+        }
+        _ => DriverError::Unsupported,
+    }
+}
+
+/// Recover the [`Errno`] a negative `abi-v1` result register encodes (`-errno`),
+/// or `None` for a non-negative `ret` or an unknown discriminant.
+fn decode_errno(ret: i64) -> Option<Errno> {
+    let code = ret.checked_neg()?;
+    let code = i32::try_from(code).ok()?;
+    Errno::from_i32(code)
+}

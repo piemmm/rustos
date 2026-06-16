@@ -396,6 +396,10 @@ rustos/
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table
 │   │                    #   match policy (§18.3): the one definition shared by
 │   │                    #   userland devmgr and the kernel driver catalogue (§2.2).
+│   ├── drvrt/           # User-space driver runtime host (plans/PI.md P10 5d):
+│   │                    #   the rt-backed DriverHost a driver process links,
+│   │                    #   mapping kernel-issued device-resource grants over the
+│   │                    #   mmio_map/dma_alloc syscalls (§4, §5.4, §2.2).
 │   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
 │   ├── font/            # Shared text rasterisation: monospace bitmap font +

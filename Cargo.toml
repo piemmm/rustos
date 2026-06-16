@@ -42,6 +42,7 @@ members = [
     "lib/curses",
     "lib/cursor",
     "lib/devmatch",
+    "lib/drvrt",
     "lib/fdt",
     "lib/font",
     "lib/geometry",

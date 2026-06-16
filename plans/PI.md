@@ -3275,7 +3275,40 @@ table, so a new board is match **data**, not new code. Sub-increments
     `rustos_rt::dma_alloc` + `ros_sys_dma_alloc`; C header regenerated.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
-  - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the
+    - **5d-1 — the rt-backed `DriverHost` (`lib/drvrt`) — DONE
+      (host-proven).** The user-space analogue of the in-kernel keyboard
+      service's `IdentityMmioMapper` + frame-allocator DMA host: a driver
+      process can no longer reach the kernel frame allocator / identity map,
+      so `rustos_drvrt::RtDriverHost` implements `DriverHost` + `MmioMapper` +
+      `VirtioHost` over a fixed table of kernel-issued device-resource grants
+      (`GrantedResource` = handle + `HwResource`). `map_window` resolves a
+      requested `(phys,len)` to the covering grant, maps that grant's whole
+      window **once** with the `mmio_map` syscall (cached, §2.16), and
+      translates an outbound `BusWindow` BAR's PCIe-bus address to the mapped
+      CPU window (§18.1); `alloc_dma_zeroed` carves the device-shared region
+      with `dma_alloc` against the DMA grant and mints a `DmaSlab` (device
+      base from the grant, optional caller-supplied non-coherent
+      `SlabCoherencyFn` — the shim is never synthesised in this
+      platform-neutral crate, §2.20). The two syscalls sit behind the
+      host-testable `GrantSyscalls` seam (production `RtGrantSyscalls` forwards
+      to `rustos_rt`, §2.2); the host adds no authority — every capability +
+      bound is re-checked kernel-side and a forged/foreign handle fails closed
+      (§4/§5.4/§2.9). Allocation-free (`MAX_GRANTS` array) so it works before
+      the SP5b heap. 18 host tests (window resolve, sub-offset, BAR
+      translation, map-once, every fail-closed path, DMA carve + coherency,
+      multi-grant resolution); registered in §3 + `SUMMARY.md`; docs
+      `docs/src/lib/drvrt.md`. **No metal/virt step** (no production
+      grant-minter/driver-process consumer yet — that is 5d-2).
+    - **5d-2 (next)** the user-space keyboard driver *process*: a
+      `devmgr`-spawned `rxe` that builds an `RtDriverHost` from the grants the
+      kernel minted for its matched node, runs the `pcie_brcm`→`bus_usb`→
+      `usb_hid` bring-up + report pump over it, and injects key edges via
+      `key_inject`. Needs the production driver-spawn **grant minter** (kernel
+      mints one grant per the matched node's `HwResource`s and hands the
+      handles to the process) + a `-M virt` vertical (a virtio device stands
+      in for the metal controller). **Metal checkpoint.**
+  - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
+    `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,

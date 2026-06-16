@@ -804,6 +804,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drvrt"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-fdt"
 version = "0.0.0"
 dependencies = [
