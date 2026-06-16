@@ -2257,7 +2257,10 @@ next-reschedule poison-canary detection. The pieces:
   handed to `kernel/core` through the `InitSpawnCtx::admit_init` `stack`
   parameter (a `Box<dyn KernelStack + Send>`, so the concrete stack source
   never leaks into the object-safe boundary, §17.4) and admitted via
-  `spawn_user_kthread_with_stack`.
+  `spawn_user_kthread_with_stack_live` — `init` also passes a retained
+  `LiveSpace` through the seam's `live` parameter so its `mem_map` /
+  `mmio_map` mutate its own address space (see *Architecture → Memory* §7e,
+  `plans/PI.md` 5d-0-ii (b′)-2).
 - **The runtime `spawn` syscall (G3b-2-ii):** `spawn_producer` does the
   same, on the child's *own* `arch` root — which it builds but **never
   switches to** (the spawning caller keeps its own `TTBR0_EL1`), so
@@ -2265,8 +2268,10 @@ next-reschedule poison-canary detection. The pieces:
   identity window, disturb no live access, and need no TLB maintenance.
   `kernel/core` grew the matching `SpawnCtx::admit_process` `stack`
   parameter (mirroring `admit_init`), routing the child through
-  `spawn_user_kthread_with_stack`. So the session and anything it launches
-  now run on an arena-backed, hardware-guarded kernel stack too.
+  `spawn_user_kthread_with_stack_live` with a retained `LiveSpace` (the
+  `live` parameter). So the session and anything it launches now run on an
+  arena-backed, hardware-guarded kernel stack too, and map their own
+  `mem_map` / `mmio_map` regions into their own retained space.
 - If no arena region is available, or the split/unmap could not be
   applied, either seam falls back to a software-canary `BoxStack` — neither
   ever runs on an unguarded stack (fail closed, `AGENTS.md` §2.9 / §2.17).

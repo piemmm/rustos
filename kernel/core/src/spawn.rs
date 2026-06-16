@@ -35,8 +35,8 @@ use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
 use rustos_arch_api::{EnterUser, UserEntry};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_mem::{
-    build_process_image, AddressSpace, Frame, FrameAllocator, PageTable, PhysMap, SpawnError,
-    UserAddressSpace, UserStack,
+    build_process_image, AddressSpace, Frame, FrameAllocator, LiveUserSpace, PageTable, PhysMap,
+    SpawnError, UserAddressSpace, UserStack,
 };
 use rustos_log::{Event, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
@@ -144,6 +144,17 @@ pub trait InitSpawnCtx {
     /// runtime stores it in PID 1's control block and frees it when the task
     /// exits.
     ///
+    /// `live` is PID 1's **retained live, mutable** user address space
+    /// (`plans/PI.md` 5d-0-ii (b′)): when [`Some`], the runtime owns it in
+    /// PID 1's control block and publishes it on the per-CPU live-space slot
+    /// while PID 1 is switched in, so PID 1's `mem_map` / `mmio_map`
+    /// syscalls mutate its own address space through
+    /// [`crate::kthread::with_current_live_space`]. The seam builds it from
+    /// the *same* arch [`AddressSpace`] it froze into `space`, so the
+    /// snapshot and the live space describe one set of mappings. A seam that
+    /// retains no live space passes [`None`] and PID 1's `mem_map` /
+    /// `mmio_map` fail closed (`AGENTS.md` §2.9).
+    ///
     /// # Safety
     ///
     /// The seam must have built PID 1's image into the **active** address
@@ -153,7 +164,10 @@ pub trait InitSpawnCtx {
     /// address space resolves, and `physmap` must back them, so the copy
     /// path reads exactly the memory the program sees. `stack` must be a
     /// region exclusive to PID 1 that stays mapped (its guard page aside)
-    /// and valid for as long as the task lives.
+    /// and valid for as long as the task lives. When `live` is [`Some`] it
+    /// must wrap the same arch address space `space` was frozen from, so the
+    /// live mutations and the frozen copy view stay consistent.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn admit_init(
         &self,
         caps: CapabilitySet,
@@ -161,6 +175,7 @@ pub trait InitSpawnCtx {
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
+        live: Option<Box<dyn LiveUserSpace + Send>>,
         enter: Box<dyn FnMut() + Send>,
     );
 
@@ -614,6 +629,17 @@ pub trait SpawnCtx {
     /// guard-page fault-form; `AGENTS.md` §4 / §2.17). The runtime stores it
     /// in the child's control block and frees it when the task exits.
     ///
+    /// `live` is the child's **retained live, mutable** user address space
+    /// (`plans/PI.md` 5d-0-ii (b′)), the runtime-spawn analogue of the
+    /// parameter [`InitSpawnCtx::admit_init`] takes: when [`Some`], the
+    /// runtime owns it in the child's control block and publishes it on the
+    /// per-CPU live-space slot while the child is switched in, so the
+    /// child's `mem_map` / `mmio_map` syscalls mutate its own address space
+    /// through [`crate::kthread::with_current_live_space`]. The producer
+    /// builds it from the *same* arch address space it froze into `space`. A
+    /// producer that retains no live space passes [`None`] and the child's
+    /// `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
+    ///
     /// This does **not** enter user mode or step the scheduler: it returns
     /// the new PID and the caller resumes. Every failure reclaims what it
     /// built and returns an [`AdmitError`] (`AGENTS.md` §2.9).
@@ -626,6 +652,9 @@ pub trait SpawnCtx {
     /// activate that space's root before the task is first entered.
     /// `stack` must be a region exclusive to the child that stays mapped
     /// (its guard page aside) and valid for as long as the task lives.
+    /// When `live` is [`Some`] it must wrap the same arch address space
+    /// `space` was frozen from.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn admit_process(
         &self,
         caps: CapabilitySet,
@@ -633,6 +662,7 @@ pub trait SpawnCtx {
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
+        live: Option<Box<dyn LiveUserSpace + Send>>,
         enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError>;
 }

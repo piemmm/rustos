@@ -3207,17 +3207,36 @@ table, so a new board is match **data**, not new code. Sub-increments
       the remaining `SP5b` follow-on (fail-closed `NotImplemented` until
       then — never a guessed base). 8 host tests. fmt + clippy `-D warnings`
       clean; no `lib/abi`/C-header change.
-    **Remaining (next landings, staged) — 5d-0-ii (b′)-2:** wire the retention
-    into production, **aarch64 first** (§0.8): thread the optional live space
-    through the `admit_init`/`admit_process` seam (all three ports — siblings
-    pass `None`), have the aarch64 `spawn_producer`/`init_spawn` build a
-    `LiveSpace` from the just-built space (freeze a snapshot for the copy path
-    *and* retain the live one) and admit via `spawn_user_kthread_with_stack_live`,
-    install `LiveMemMap`/`LiveMmioMap` at boot, and add the `-M virt` vertical
-    where the kernel mints a virtio-mmio window grant a spawned program maps
-    through `mmio_map`; then (c) the DMA half (a `dma_alloc`-equivalent bounded
-    by the grant's `addr_limit`). A live VL805 path stays a §0.4
-    metal-acceptance item.
+    **5d-0-ii (b′)-2 — retention wired into production (aarch64) — LANDED.**
+    The optional live space is threaded through the `admit_init` /
+    `admit_process` seam as `Option<Box<dyn LiveUserSpace + Send>>` (all three
+    ports + the in-core test double — x86_64 / riscv64 pass `None`). The
+    aarch64 `init_spawn` and `spawn_producer` freeze a snapshot for the copy
+    path **and** build a `LiveSpace` from the *same* arch space (device-window
+    region 1 GiB above the image bias; anonymous frames from the `'static`
+    kernel allocator), admitting through `spawn_user_kthread_with_stack_live`
+    so the runtime publishes it on the per-CPU slot. `kernel_main` installs
+    `LiveMemMap` / `LiveMmioMap` for **every** port (arch-generic, no `cfg`):
+    a task with no retained space (the sibling ports today) fails `mem_map` /
+    `mmio_map` closed exactly as the `NULL_*` defaults did. The Arch-HAL
+    `PageTableFrames` gained a `Sync` supertrait so a port's `AddressSpace`
+    (which retains the frame source) is `Send` and can be the boxed
+    `LiveUserSpace` (every implementor was already `Sync`). **Arch fix:**
+    `kernel/arch/aarch64::leaf_attrs_for` mapped any `DEVICE` page EL1-only,
+    so a user-space driver's `mmio_map` window permission-faulted at EL0; a new
+    `el0_device_leaf_attrs` (`AP_RW_EL0`, Device, PXN|UXN) is selected for
+    `DEVICE | USER` (regression-tested). Proven on `-M virt` by the
+    `mmio_map_qemu_aarch64` vertical: the kernel retains a `LiveSpace`, admits
+    the EL0 fixture via `spawn_user_kthread_with_stack_live`, mints a grant for
+    the first virtio-MMIO transport, and the program maps it through `mmio_map`
+    + reads the `MagicValue` register (`0x74726976`) back. New `rustos_rt::mmio_map`
+    wrapper; no `lib/abi`/C-header change. The registry-backed grant
+    owner-check (§5.4) is host-proven in `kernel/core`.
+    **Remaining (next landing, staged) — 5d-0-ii (c):** the DMA half (a
+    `dma_alloc`-equivalent bounded by the grant's `addr_limit`) and the
+    non-`FIXED` per-task user-VA `mem_map` placement allocator (`SP5b`
+    follow-on; fail-closed `NotImplemented` until then). A live VL805 path
+    stays a §0.4 metal-acceptance item.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the

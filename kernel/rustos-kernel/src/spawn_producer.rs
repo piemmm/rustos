@@ -42,8 +42,8 @@ use rustos_kernel_core::{
     SpawnCallerError, SpawnCtx, SpawnRequest,
 };
 use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysAddr, PhysMap,
-    UserAddressSpace, UserStack,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
+    PhysAddr, PhysMap, UserAddressSpace, UserStack, VirtAddr,
 };
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_sync::Once;
@@ -95,6 +95,17 @@ const USER_STACK_PAGES: u64 = 288;
 /// User virtual address the startup-vector block is written at (3 MiB up,
 /// well clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = SHELL_USER_BIAS + 0x30_0000;
+
+/// Base of a spawned child's device-window virtual region
+/// (`plans/PI.md` 5d-0-ii (b′)): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
+/// guard-bracketed window out of `[MMIO_WINDOW_BASE, MMIO_WINDOW_BASE +
+/// MMIO_WINDOW_PAGES·4 KiB)`. Placed 1 GiB above the image bias — far clear
+/// of the program image, stack, and startup block — mirroring the PID-1
+/// layout (`init_spawn.rs`).
+const MMIO_WINDOW_BASE: u64 = SHELL_USER_BIAS + 0x4000_0000;
+/// Pages backing the device-window region (1 MiB) (`AGENTS.md` §24.1).
+const MMIO_WINDOW_PAGES: usize = 256;
 
 /// Per-process stack-canary seed handed to a spawned child (`AGENTS.md`
 /// §19.2). Any value; the kernel RNG-seeded canary is a later stage.
@@ -411,6 +422,30 @@ impl Aarch64ProcessSpawn {
         // its own user memory. Freezing *after* `spawn_image` captures every
         // mapped page — segments, stack, and the startup-vector block.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+
+        // Retain the live, mutable arch space behind the object-safe
+        // `LiveUserSpace` boundary so the child's `mem_map` / `mmio_map`
+        // syscalls mutate *its own* address space (`plans/PI.md`
+        // 5d-0-ii (b′)). The `LiveSpace` composes the audited anonymous-map
+        // mechanism (over the kernel's `'static` frame allocator) and the
+        // guarded device-window allocator (over the `[MMIO_WINDOW_BASE, …)`
+        // region); it carries the *same* arch space the snapshot above was
+        // frozen from. A build context with no `'static` allocator, or a
+        // window the allocator rejects, retains no live space and the child's
+        // `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
+        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
+            Some(static_frames) => LiveSpace::new(
+                space,
+                DirectPhysMap::identity((identity_gib as u64) << 30),
+                static_frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                MMIO_WINDOW_PAGES,
+            )
+            .ok()
+            .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),
+            None => None,
+        };
+
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
         // Register the child's caps + frozen address space and admit it Ready,
@@ -420,7 +455,8 @@ impl Aarch64ProcessSpawn {
         // root before it is first entered, and `kernel_stack` is a region
         // exclusive to this child that stays mapped (its unmapped guard page
         // aside) for the task's lifetime — the `admit_process` contract.
-        unsafe { ctx.admit_process(caps, frozen, physmap, kernel_stack, pre_resume, enter) }
+        // `live` retains the same arch space `frozen` was taken from.
+        unsafe { ctx.admit_process(caps, frozen, physmap, kernel_stack, pre_resume, live, enter) }
             .map_err(admit_errno)
     }
 }

@@ -296,6 +296,10 @@ impl InitSpawn for RiscvInitSpawn {
         // above, and the trap path is installed, per the
         // `InitSpawnCtx::admit_init` contract; `frozen` faithfully describes
         // the active mappings and `physmap` backs them.
+        // The riscv64 port does not yet retain a live, mutable address space
+        // for `mem_map` / `mmio_map` (that is the aarch64-first chunk
+        // `plans/PI.md` 5d-0-ii (b′)-2); pass `None` so PID 1's `mem_map` /
+        // `mmio_map` fail closed here (`AGENTS.md` §2.9).
         unsafe {
             ctx.admit_init(
                 init_caps(),
@@ -303,6 +307,7 @@ impl InitSpawn for RiscvInitSpawn {
                 physmap,
                 kernel_stack,
                 pre_resume,
+                None,
                 enter,
             );
         }

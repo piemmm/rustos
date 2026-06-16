@@ -67,7 +67,17 @@ pub struct TableFrame {
 /// infallible-or-`None`: a source that cannot satisfy a request returns
 /// [`None`] so the port fails closed with deterministic OOM rather than
 /// panicking (`AGENTS.md` §4).
-pub trait PageTableFrames {
+///
+/// The shared-and-internally-synchronised contract is expressed as a
+/// [`Sync`] supertrait: a source is reached concurrently through a
+/// `&'static dyn PageTableFrames` (every CPU's spawn path shares the one
+/// kernel source), so it must be safe to share across threads. Making it
+/// `Sync` also makes a `&'static dyn PageTableFrames` [`Send`], which lets
+/// a port's `AddressSpace` (which retains the source) be the `Send`
+/// `LiveUserSpace` a task carries across CPUs (`plans/PI.md` 5d-0-ii (b′)).
+/// Every implementor (each port's `PageTablePool`, the kernel
+/// `FrameTableSource`) is already `Sync`.
+pub trait PageTableFrames: Sync {
     /// Allocate one zeroed, naturally-aligned 4 KiB page-table frame.
     ///
     /// Returns [`None`] when the source is exhausted. Every returned

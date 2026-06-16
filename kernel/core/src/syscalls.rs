@@ -1709,6 +1709,7 @@ where
         self.audit
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn admit_process(
         &self,
         caps: CapabilitySet,
@@ -1716,6 +1717,7 @@ where
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
+        live: Option<Box<dyn rustos_kernel_mem::LiveUserSpace + Send>>,
         mut enter: Box<dyn FnMut() + Send>,
     ) -> Result<u64, AdmitError> {
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -1735,16 +1737,33 @@ where
             enter();
         };
         let cs = self.arch.context_switch();
-        let task_id = crate::kthread::spawn_user_kthread_with_stack(
-            self.sched,
-            cs,
-            stack,
-            cpu,
-            Priority::Normal,
-            pre_resume,
-            work,
-        )
-        .map_err(|_| AdmitError::SchedulerFull)?;
+        // When the producer retained a live, mutable address space, admit the
+        // child with it so its `mem_map` / `mmio_map` syscalls mutate its own
+        // space through the per-CPU live-space slot (`plans/PI.md`
+        // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
+        // fail closed (`AGENTS.md` §2.9).
+        let admitted = match live {
+            Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
+                self.sched,
+                cs,
+                stack,
+                cpu,
+                Priority::Normal,
+                pre_resume,
+                live,
+                work,
+            ),
+            None => crate::kthread::spawn_user_kthread_with_stack(
+                self.sched,
+                cs,
+                stack,
+                cpu,
+                Priority::Normal,
+                pre_resume,
+                work,
+            ),
+        };
+        let task_id = admitted.map_err(|_| AdmitError::SchedulerFull)?;
 
         // Register the child's caps under the *same* numeric id the
         // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
@@ -1924,6 +1943,8 @@ where
         spawn_service: &'static (dyn ProcessSpawn + 'static),
         process_wait: &'static (dyn ProcessWait + 'static),
         input_focus: &'static InputFocus,
+        mem_map: &'static (dyn MemMap + 'static),
+        mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -1942,7 +1963,9 @@ where
             .with_page_table_frames(page_table_frames)
             .with_spawn(programs, spawn_service)
             .with_process_wait(process_wait)
-            .with_input_focus(input_focus),
+            .with_input_focus(input_focus)
+            .with_mem_map(mem_map)
+            .with_mmio_map_facility(mmio_map_facility),
             sched,
             caps,
             arch,
@@ -4509,9 +4532,13 @@ mod tests {
             // SAFETY: the host test never dispatches the admitted task, so
             // the (inert) `enter`/`pre_resume` closures never run and the
             // frozen host space need only answer `translate`; it faithfully
-            // describes the one page mapped above.
-            unsafe { ctx.admit_process(child_caps, frozen, physmap, stack, pre_resume, enter) }
-                .map_err(|_| Errno::NoSpace)
+            // describes the one page mapped above. The host double retains no
+            // live space (`None`), so the child's `mem_map`/`mmio_map` would
+            // fail closed — unexercised here.
+            unsafe {
+                ctx.admit_process(child_caps, frozen, physmap, stack, pre_resume, None, enter)
+            }
+            .map_err(|_| Errno::NoSpace)
         }
     }
 

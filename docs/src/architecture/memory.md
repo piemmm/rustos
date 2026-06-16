@@ -661,11 +661,22 @@ table (`plans/PI.md` 5d-0-ii (b′)).
   with the non-`FIXED` per-task user-VA placement allocator the staged
   follow-on (fail-closed `NotImplemented` until then, never a guessed base).
 
-Wiring the retention into each architecture's spawn path (threading the live
-space through the `admit_init` / `admit_process` seam, building a `LiveSpace`
-in the aarch64 spawn producer, installing the producers at boot, and the
-`-M virt` vertical) is the staged production follow-on, aarch64 first
-(`plans/PI.md` 5d-0-ii (b′)-2).
+The retention is wired into the **aarch64** spawn path (`plans/PI.md`
+5d-0-ii (b′)-2): the live space threads through the `admit_init` /
+`admit_process` seam as `Option<Box<dyn LiveUserSpace + Send>>` (the x86_64 /
+riscv64 ports pass `None` until their turn), the aarch64 `init_spawn` /
+`spawn_producer` freeze a snapshot for the copy path **and** retain a
+`LiveSpace` built from the same arch space, admitting through
+`spawn_user_kthread_with_stack_live`, and `kernel_main` installs `LiveMemMap` /
+`LiveMmioMap` for every port (a port that retains no live space simply fails
+those syscalls closed). A device window a user-space driver maps through
+`mmio_map` is given the EL0-accessible device leaf
+(`kernel/arch/aarch64::el0_device_leaf_attrs`, `AP_RW_EL0`) so the driver can
+read its own register without a permission fault (§5.2). The aarch64
+`mmio_map_qemu_aarch64` `-M virt` vertical proves the chain end to end (a
+spawned EL0 program maps a minted virtio-MMIO window grant and reads its
+`MagicValue` register). The DMA half and the non-`FIXED` `mem_map` placement
+allocator are the remaining staged follow-on.
 
 ## 8. Testing strategy
 

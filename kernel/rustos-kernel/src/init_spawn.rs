@@ -41,7 +41,10 @@ use rustos_caps::CapabilitySet;
 use rustos_kernel_core::{
     spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnRequest,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, PhysMap, UserAddressSpace, UserStack};
+use rustos_kernel_mem::{
+    AddressSpace, DirectPhysMap, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, UserStack,
+    VirtAddr,
+};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
@@ -59,6 +62,17 @@ const USER_STACK_PAGES: u64 = 288;
 /// User virtual address the startup-vector block is written at (3 MiB up,
 /// well clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = INIT_USER_BIAS + 0x30_0000;
+
+/// Base of PID 1's device-window virtual region (`plans/PI.md` 5d-0-ii (b′)):
+/// the [`LiveSpace`]'s [`rustos_kernel_mem::MmioWindowMap`] hands each
+/// `mmio_map` a guard-bracketed window out of `[MMIO_WINDOW_BASE,
+/// MMIO_WINDOW_BASE + MMIO_WINDOW_PAGES·4 KiB)`. Placed 1 GiB above the image
+/// bias — far clear of the program image, stack, and startup block — and
+/// well below the 64 GiB user/identity ceiling the spawn-window check guards.
+const MMIO_WINDOW_BASE: u64 = INIT_USER_BIAS + 0x4000_0000;
+/// Pages backing the device-window region (1 MiB): generous headroom over the
+/// few device windows a driver task maps (`AGENTS.md` §24.1).
+const MMIO_WINDOW_PAGES: usize = 256;
 
 /// Per-process stack-canary seed handed to `init` (`AGENTS.md` §19.2). Any
 /// value; the kernel RNG-seeded canary is a later stage.
@@ -278,8 +292,33 @@ impl InitSpawn for Aarch64InitSpawn {
         // map that backs it, so PID 1's `stream_write` can copy its banner
         // out of user memory (`plans/PI.md` P6c-3 follow-up). Freezing
         // *after* `spawn_image` captures every mapped page — segments,
-        // stack, and the startup-vector block.
+        // stack, and the startup-vector block. `freeze` only borrows, so
+        // the live arch `space` is still owned below.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+
+        // Retain the live, mutable arch space behind the object-safe
+        // `LiveUserSpace` boundary so PID 1's `mem_map` / `mmio_map`
+        // syscalls mutate *its own* address space (`plans/PI.md`
+        // 5d-0-ii (b′)). The `LiveSpace` composes the audited anonymous-map
+        // mechanism (over the kernel's `'static` frame allocator, drawn from
+        // `static_frames`) and the guarded device-window allocator (over the
+        // `[MMIO_WINDOW_BASE, …)` region); it carries the *same* arch space
+        // the snapshot above was frozen from. A context with no `'static`
+        // allocator, or a window the allocator rejects, retains no live space
+        // and PID 1's `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
+        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
+            Some(static_frames) => LiveSpace::new(
+                space,
+                DirectPhysMap::identity((identity_gib as u64) << 30),
+                static_frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                MMIO_WINDOW_PAGES,
+            )
+            .ok()
+            .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),
+            None => None,
+        };
+
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
         // Start the in-kernel USB-keyboard service before driving the
@@ -306,6 +345,7 @@ impl InitSpawn for Aarch64InitSpawn {
                 physmap,
                 kernel_stack,
                 pre_resume,
+                live,
                 enter,
             );
         }

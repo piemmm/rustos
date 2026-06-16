@@ -334,6 +334,10 @@ impl InitSpawn for X86_64InitSpawn {
         // `InitSpawnCtx::admit_init` contract; `frozen` faithfully describes
         // the active mappings, `physmap` backs them, and `kernel_stack` is a
         // region exclusive to PID 1 that stays mapped for the task's lifetime.
+        // The x86_64 port does not yet retain a live, mutable address space
+        // for `mem_map` / `mmio_map` (that is the aarch64-first chunk
+        // `plans/PI.md` 5d-0-ii (b′)-2); pass `None` so PID 1's `mem_map` /
+        // `mmio_map` fail closed here (`AGENTS.md` §2.9).
         unsafe {
             ctx.admit_init(
                 init_caps(),
@@ -341,6 +345,7 @@ impl InitSpawn for X86_64InitSpawn {
                 physmap,
                 kernel_stack,
                 pre_resume,
+                None,
                 enter,
             );
         }

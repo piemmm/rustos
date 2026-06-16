@@ -1818,6 +1818,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-mmio-map"
+version = "0.0.0"
+dependencies = [
+ "rustos-rt",
+]
+
+[[package]]
+name = "rustos-test-mmio-map-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-arch-api",
+ "rustos-bumpalloc",
+ "rustos-fdt",
+ "rustos-itest-harness",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-util",
+]
+
+[[package]]
 name = "rustos-test-posix-fs-suite"
 version = "0.0.0"
 dependencies = [

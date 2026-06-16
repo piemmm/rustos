@@ -380,6 +380,10 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // The child receives exactly its registered program's declared
         // capability set (`AGENTS.md` §5.2, §16.5) — never the spawning
         // caller's authority (`AGENTS.md` §4).
+        // The riscv64 port does not yet retain a live, mutable address space
+        // for `mem_map` / `mmio_map` (the aarch64-first chunk
+        // `plans/PI.md` 5d-0-ii (b′)-2); pass `None` so the child's
+        // `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
         unsafe {
             ctx.admit_process(
                 program.capability_set(),
@@ -387,6 +391,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
                 physmap,
                 kernel_stack,
                 pre_resume,
+                None,
                 enter,
             )
         }

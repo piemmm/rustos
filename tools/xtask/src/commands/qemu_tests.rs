@@ -1442,6 +1442,42 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
+    // the first proof that an EL0 driver maps a **granted device MMIO window**
+    // at runtime via `abi-v1` `mmio_map` over the per-task **retained live
+    // address space**, on the `virt` board. It reads the GICv2 base + timer
+    // rate from the embedded `virt` DTB (P3/P4), brings up the EL1 vectors +
+    // GICv2, and builds **one** hardware-isolated EL0 address space from the
+    // pure-Rust `rustos-test-mmio-map` fixture (built PIE + converted to `rxe`
+    // by `build.rs`) through the capability-checked, audited
+    // `kernel_core::spawn_image`. It wraps that space in the production
+    // `kernel_mem::LiveSpace` and admits the program through the production
+    // `kernel_core::spawn_user_kthread_with_stack_live`, so the retained space
+    // is published on the per-CPU live-space slot while the program runs
+    // (exactly the production aarch64 spawn path). It mints the task a grant
+    // for the first `virt` virtio-MMIO transport window and routes the
+    // program's `mmio_map` `svc` through `with_current_live_space` +
+    // `LiveSpace::map_device_window`; the program reads the device's
+    // `MagicValue` register (`0x74726976`) back through the mapped, caching-
+    // disabled window and exits 0, which the dispatch callback reports as PASS.
+    // A refused map, the wrong register value, an unexpected syscall, or no
+    // exit trips a distinct finisher or times out (fail-loud, `AGENTS.md` §7).
+    // The registry-backed grant owner-check (§5.4) is host-proven in
+    // `kernel/core`. Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-mmio-map-qemu-aarch64",
+        binary: "rustos-test-mmio-map-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the riscv64 `mem_map`/
     // `mem_unmap` vertical — the riscv64 sibling of the aarch64 vertical above,
     // proving a U-mode process obtains and releases anonymous `RW` memory at

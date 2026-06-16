@@ -99,6 +99,9 @@ const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 /// `mem_unmap` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
+/// `mmio_map` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
+
 /// `wait` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
@@ -523,6 +526,34 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
     // the `(base, len)` range against the caller's own address space before
     // unmapping it (`AGENTS.md` §5.4). No user pointer is dereferenced.
     let ret = unsafe { raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Map a **granted** device MMIO window into the calling driver's own
+/// address space (`SyscallNumber::MMIO_MAP`, `plans/PI.md` P10 chunk 5d-0).
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant handle —
+/// never a raw physical address (`AGENTS.md` §4): the kernel resolves it
+/// **owner-checked against the calling task**, confirms it names a memory
+/// window, and maps only that region — caching disabled, never executable
+/// (`AGENTS.md` §5.4 / §18.3 / §19.2). A forged or another driver's handle
+/// resolves to nothing and is refused. The call carries `CAP_MMIO_MAP`
+/// (enforced by the kernel before any state is touched).
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the base virtual address of
+/// the newly mapped window, and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
+/// raw signed value so the caller decides how to react; it adds no authority
+/// and hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mmio_map-result encoding (base ≥ 0, else -errno).
+pub fn mmio_map(handle: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). `mmio_map`
+    // dereferences no user pointer; it resolves the grant handle and maps the
+    // window into the caller's own space, returning its base.
+    let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 

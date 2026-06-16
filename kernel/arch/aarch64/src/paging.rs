@@ -271,6 +271,27 @@ pub const fn device_leaf_attrs(block: bool) -> u64 {
     }
 }
 
+/// Lower attributes for an **EL0-accessible** Device-memory page leaf:
+/// read/write at EL1 and EL0 (`AP_RW_EL0`), execute-never at both ELs
+/// (`PXN | UXN`), Device-nGnRE memory type (MAIR index 1). Used for a
+/// device MMIO window a **user-space driver** maps into its own address
+/// space through the `mmio_map` syscall (`plans/PI.md` P10 chunk 5d-0):
+/// the kernel-only [`device_leaf_attrs`] leaves the page `AP_RW_EL1`, so an
+/// EL0 driver reading its own mapped register would take a permission fault
+/// — this is the EL0 counterpart, the Device-memory analogue of
+/// [`el0_data_leaf_attrs`]. The output is a page descriptor
+/// (`TABLE_OR_PAGE`); device windows are always mapped at 4 KiB granularity.
+#[must_use]
+pub const fn el0_device_leaf_attrs() -> u64 {
+    attrs::VALID
+        | attrs::TABLE_OR_PAGE
+        | attrs::AF
+        | attrs::AP_RW_EL0
+        | attrs::ATTR_IDX_DEVICE
+        | attrs::PXN
+        | attrs::UXN
+}
+
 /// Number of `u64` words in a gigapage mask covering all
 /// [`ENTRIES_PER_TABLE`] L1 slots (one bit per 1 GiB identity gigapage).
 pub const GIGAPAGE_MASK_WORDS: usize = ENTRIES_PER_TABLE / 64;
@@ -1126,11 +1147,19 @@ impl AddressSpace {
     /// ([`el0_code_leaf_attrs`]); a writable user page is execute-never
     /// ([`el0_data_leaf_attrs`]); a read-only user page is execute-never
     /// ([`el0_rodata_leaf_attrs`]). A kernel page uses the EL1 RW,
-    /// EL0-execute-never [`normal_leaf_attrs`]; a Device page uses
-    /// [`device_leaf_attrs`].
+    /// EL0-execute-never [`normal_leaf_attrs`]; a kernel Device page uses
+    /// [`device_leaf_attrs`], and an **EL0** Device page (a user-space
+    /// driver's `mmio_map` window, `DEVICE | USER`) uses the EL0-accessible
+    /// [`el0_device_leaf_attrs`] — otherwise the driver would take a
+    /// permission fault reading its own mapped register (`plans/PI.md` P10
+    /// chunk 5d-0).
     fn leaf_attrs_for(flags: PageFlags) -> u64 {
         if flags.contains(PageFlags::DEVICE) {
-            device_leaf_attrs(false)
+            if flags.contains(PageFlags::USER) {
+                el0_device_leaf_attrs()
+            } else {
+                device_leaf_attrs(false)
+            }
         } else if flags.contains(PageFlags::USER) {
             if flags.contains(PageFlags::EXEC) {
                 el0_code_leaf_attrs()

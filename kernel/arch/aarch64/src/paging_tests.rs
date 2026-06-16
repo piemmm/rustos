@@ -226,6 +226,41 @@ fn el0_leaf_attrs_encode_unprivileged_access() {
 }
 
 #[test]
+fn el0_device_leaf_is_unprivileged_device_memory() {
+    const AP_MASK: u64 = 0b11 << 6;
+    // EL0-accessible device window (a user-space driver's `mmio_map` window,
+    // `plans/PI.md` P10 chunk 5d-0): read/write at EL0 (AP=0b01), Device MAIR
+    // index, execute-never at both ELs, a page descriptor with the access
+    // flag set. The kernel-only `device_leaf_attrs` differs only in the AP
+    // field (EL1-only), which is exactly the permission-fault regression this
+    // fixes — an EL0 driver reading its own mapped register.
+    let dev = el0_device_leaf_attrs();
+    assert_eq!(dev & AP_MASK, attrs::AP_RW_EL0);
+    assert_eq!(dev & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
+    assert_ne!(dev & attrs::PXN, 0);
+    assert_ne!(dev & attrs::UXN, 0);
+    assert_eq!(dev & 0b11, 0b11);
+    assert_ne!(dev & attrs::AF, 0);
+    assert_eq!(device_leaf_attrs(false) & AP_MASK, attrs::AP_RW_EL1);
+}
+
+#[test]
+fn leaf_attrs_for_device_user_is_el0_accessible() {
+    // A `DEVICE | USER` mapping (the `mmio_map` window) must be EL0-accessible,
+    // not the kernel-only device leaf — otherwise the driver permission-faults
+    // reading its own register (`plans/PI.md` P10 chunk 5d-0). A `DEVICE`-only
+    // (kernel) mapping stays EL1-only.
+    assert_eq!(
+        AddressSpace::leaf_attrs_for(PageFlags::DEVICE | PageFlags::USER | PageFlags::WRITE),
+        el0_device_leaf_attrs()
+    );
+    assert_eq!(
+        AddressSpace::leaf_attrs_for(PageFlags::DEVICE | PageFlags::WRITE),
+        device_leaf_attrs(false)
+    );
+}
+
+#[test]
 fn map_4k_with_attrs_uses_the_supplied_leaf_attrs() {
     static POOL: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");

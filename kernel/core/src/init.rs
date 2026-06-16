@@ -340,6 +340,7 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         self.audit
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn admit_init(
         &self,
         caps: CapabilitySet,
@@ -347,6 +348,7 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
         physmap: Box<dyn PhysMap + Send + Sync>,
         stack: Box<dyn crate::kthread::KernelStack + Send>,
         pre_resume: Box<dyn FnMut(u64) + Send>,
+        live: Option<Box<dyn rustos_kernel_mem::LiveUserSpace + Send>>,
         mut enter: Box<dyn FnMut() + Send>,
     ) {
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
@@ -366,15 +368,33 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
             enter();
         };
         let cs = self.arch.context_switch();
-        let Ok(task_id) = crate::kthread::spawn_user_kthread_with_stack(
-            self.scheduler,
-            cs,
-            stack,
-            cpu,
-            Priority::Normal,
-            pre_resume,
-            work,
-        ) else {
+        // When the seam retained a live, mutable address space, admit PID 1
+        // with it so its `mem_map` / `mmio_map` syscalls mutate its own
+        // space through the per-CPU live-space slot (`plans/PI.md`
+        // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
+        // fail closed (`AGENTS.md` §2.9).
+        let admitted = match live {
+            Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
+                self.scheduler,
+                cs,
+                stack,
+                cpu,
+                Priority::Normal,
+                pre_resume,
+                live,
+                work,
+            ),
+            None => crate::kthread::spawn_user_kthread_with_stack(
+                self.scheduler,
+                cs,
+                stack,
+                cpu,
+                Priority::Normal,
+                pre_resume,
+                work,
+            ),
+        };
+        let Ok(task_id) = admitted else {
             // The home queue could not admit the task — fail closed: return
             // so the seam (and then `kernel_main`) halts the CPU.
             return;
@@ -628,6 +648,25 @@ fn run_phases<A: KernelArch>(
         Box::leak(wrapped.into_boxed_slice())
     };
 
+    // Build the production `mem_map` / `mmio_map` producers over the
+    // per-task retained live address space (`plans/PI.md` 5d-0-ii (b′)).
+    // Each routes a syscall to the calling task's *own* live space through
+    // the per-CPU live-space slot, reading the current CPU from the same
+    // `'static` arch handle the process-wait producer uses — so a task that
+    // retains a live space (the aarch64 ports) gets a working `mem_map` /
+    // `mmio_map`, and one that does not (the x86_64 / riscv64 ports today,
+    // or any task admitted with no live space) fails closed with
+    // `NotImplemented` exactly as the `NULL_*` defaults did. Both are
+    // `Box::leak`'d for the same one-shot-publish reason as the hook
+    // (`AGENTS.md` §2.1), and the producer is arch-generic, so this wiring
+    // names no concrete port (`AGENTS.md` §17.4).
+    let mem_map: &'static (dyn crate::memmap::MemMap + 'static) = Box::leak(Box::new(
+        crate::live_producer::LiveMemMap::new(state.arch.as_ref()),
+    ));
+    let mmio_map_facility: &'static (dyn crate::devres::MmioMapFacility + 'static) = Box::leak(
+        Box::new(crate::live_producer::LiveMmioMap::new(state.arch.as_ref())),
+    );
+
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
     // the same reason as `KernelState`: its borrows reference
@@ -655,6 +694,8 @@ fn run_phases<A: KernelArch>(
             spawn_service,
             process_wait,
             input_focus,
+            mem_map,
+            mmio_map_facility,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)

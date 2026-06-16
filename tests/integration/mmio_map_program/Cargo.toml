@@ -1,0 +1,25 @@
+[package]
+name = "rustos-test-mmio-map"
+description = "PI P10 chunk 5d-0-ii (b′) fixture: a minimal, separately-linked pure-Rust EL0 program that maps a granted device MMIO window with mmio_map and reads its first register, proving the kernel mapped a real, caching-disabled device window into the program's own address space. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-mmio-map"
+path = "src/main.rs"
+
+# The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
+# pure-Rust userland runtime `rustos-rt` (for `mmio_map`) — never the C ABI
+# (`crt0` + `abi-sys`), which exists solely for non-Rust programs
+# (`AGENTS.md` §16.4). Only on the three native Tier-1 targets
+# (`target_os = "none"`); on the host it is an inert stub so `cargo build
+# --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }

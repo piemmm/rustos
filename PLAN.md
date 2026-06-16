@@ -706,15 +706,32 @@ order (one fully-gated increment each):
        (`KernelMmioMapper`'s in-kernel mapper) is now a thin wrapper
        delegating to it (§2.2, no consumer churn); host-tested (8
        borrowed-space + 15 existing `MmioMap` tests); no ABI/C-header change.
-       Still staged: the per-port `MmioMapFacility` *producer* needs
-       **production per-task live-address-space retention** (the spawn seams
-       hand the registry a *frozen* read-only snapshot today, so `mem_map`
-       and `mmio_map` both fail closed at their NULL producers — retaining
-       the live *mutable* `AddressSpace<P>` per task and wiring the producer
-       is the SP5b-class follow-on this rides, per port); (c) the DMA half
-       bounded by the grant's `addr_limit`; (d) the `-M virt` vertical
-       minting a virtio-mmio window grant for a spawned program that maps it
-       through `mmio_map`.
+       **5d-0-ii (b′) — live-address-space retention + production producers
+       — landed (aarch64).** `kernel/mem::live` (`LiveUserSpace` object-safe
+       `Send` trait + generic `LiveSpace<P, M>`) retains a task's live
+       *mutable* `AddressSpace<P>`; `kernel/core::kthread` owns it per task
+       and publishes a pointer on a per-CPU `USER_LIVE_SPACE` slot (cleared on
+       switch-back, exactly as `USER_RESUME`), reached by
+       `with_current_live_space` from the task's own syscall path — never a
+       shared lock over a live page table. The `kernel/core::live_producer`
+       `LiveMemMap`/`LiveMmioMap` are the `MemMap`/`MmioMapFacility`
+       producers (arch-generic, `&'static A`, fail closed when no space is
+       retained). The retention is wired into production: the
+       `admit_init`/`admit_process` seam carries an
+       `Option<Box<dyn LiveUserSpace + Send>>` (x86_64/riscv64 pass `None`),
+       the aarch64 `init_spawn`/`spawn_producer` freeze a snapshot **and**
+       retain a `LiveSpace`, admitting via
+       `spawn_user_kthread_with_stack_live`, and `kernel_main` installs the
+       producers for every port. The Arch-HAL `PageTableFrames` gained a
+       `Sync` supertrait (every impl already `Sync`) so a port's
+       `AddressSpace` is `Send`; aarch64 grew `el0_device_leaf_attrs`
+       (`AP_RW_EL0`) so a user-space driver's `mmio_map` window is
+       EL0-readable. Proven by the `mmio_map_qemu_aarch64` `-M virt` vertical
+       (a spawned EL0 program maps a minted virtio-mmio grant via `mmio_map`
+       and reads the device `MagicValue`); new `rustos_rt::mmio_map`; no
+       ABI/C-header change. Still staged — **(c)** the DMA half bounded by the
+       grant's `addr_limit`, and the non-`FIXED` per-task user-VA `mem_map`
+       placement allocator (fail-closed `NotImplemented` until then).
      - **5d — userland keyboard service** hosting the continuous report
        pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
        input-focus arbiter via `key_inject`. The "drivers in userland"
@@ -1780,3 +1797,13 @@ can see *why* a rule exists without diffing the charter's history.
   `/System/Drivers/bus_usb/broadcom_chip_1234/<driver>` is correct, while
   `/System/Drivers/broadcom_usb/broadusb1234` (vendor as a namespace segment)
   is a defect. Documentation only.
+
+- **2026-06-16 — No-duplication binds constants, not just logic.** Extended
+  §2.2: a value that is the same across sibling files by definition (shared
+  layout offset, stack size, address bias, capability set, magic number, table)
+  is defined once and imported, never copy-pasted — prompted by the user-stack/
+  MMIO-window/canary constants duplicated across `init_spawn.rs`,
+  `init_spawn_riscv64.rs`, and `init_spawn_x86_64.rs`. A constant lives beside
+  one implementation only when it is genuinely that implementation's own (an
+  arch-specific register layout, a runtime-discovered per-board MMIO base), not
+  a value that merely coincides today. Documentation only.
