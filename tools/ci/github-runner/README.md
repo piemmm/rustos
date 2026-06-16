@@ -12,13 +12,15 @@ There are two CI workloads, and they want different runners:
 | Workload | Workflow | Runner | Why |
 |----------|----------|--------|-----|
 | Per-push gate (`cargo xtask ci`) | `.github/workflows/ci.yml` | self-hosted `[self-hosted, linux]` | Runs the full `cargo xtask ci` pipeline (each test once) plus the `>= 120 s` per-PR parallel soak gate on a machine we own. |
-| Continuous 12 h soak blocks (§19.6 fuzz, §19.7 proptest, §7 repeated tests) | `.github/workflows/soak.yml` | self-hosted `[self-hosted, linux, soak]` | A 12 h block exceeds the GitHub-hosted per-job time cap; it must run on a machine we own, and on its own label so it never blocks `ci`. |
+| Nightly 01:00–07:00 London soak window (§19.6 fuzz, §19.7 proptest, §7 repeated tests) | `.github/workflows/soak.yml` | self-hosted `[self-hosted, linux, soak]` | A six-hour window exceeds the GitHub-hosted per-job time cap; it must run on a machine we own, and on its own label so it never blocks `ci`. |
 
 `soak.yml` runs `tools/ci/soak.sh all`, which fans every fuzz harness, proptest
 model, and the §7 repeated-test matrix out into parallel `--soak` processes
-sharing one 12 h wall clock, then re-dispatches itself so blocks chain back to
-back. That is the same script a standalone cron/systemd/launchd builder runs,
-so this runner and a standalone builder produce equivalent results.
+sharing one wall clock budgeted to stop at 07:00 London. The schedule is a
+fixed nightly window — it starts at 01:00 Europe/London and finishes at 07:00
+Europe/London — rather than continuous back-to-back blocks. That is the same
+script a standalone cron/systemd/launchd builder runs, so this runner and a
+standalone builder produce equivalent results.
 
 ## Labels and concurrent runs on one host
 
