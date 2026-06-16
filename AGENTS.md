@@ -52,6 +52,20 @@ These are absolute. They override any local convenience.
    global mutable static, retry-until-it-works, or commented-out test.
 2. **No code duplication, ever.** If you find yourself writing similar code
    twice, extract a crate in `lib/` (see §6). Duplication is a review blocker.
+   **This binds constants and other data as much as logic.** A value that is
+   the same across two or more places by definition — a shared layout offset,
+   stack size, address bias, capability set, magic number, table, or any other
+   constant that must stay identical — is defined **once** and imported,
+   never copy-pasted into sibling files. Two sibling implementations carrying
+   their own private copy of a constant that will always be equal (for example
+   the user-stack/MMIO-window/canary constants duplicated across
+   `init_spawn.rs`, `init_spawn_riscv64.rs`, and `init_spawn_x86_64.rs`) is the
+   duplication this rule forbids: hoist the shared value into the one place
+   both depend on (a common module or a `lib/*` crate) so a change to it cannot
+   silently diverge. A constant lives beside one implementation only when it is
+   *genuinely* that implementation's own (an architecture-specific register
+   layout, a per-board MMIO base discovered at runtime), not a value that
+   merely happens to coincide today.
    *Carve-out:* Parallel implementations of the same trait — two
    schedulers, two architecture backends, two filesystems, two window
    managers — are not duplication; they are the deliberate shape of
