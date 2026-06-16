@@ -343,6 +343,28 @@ impl SyscallNumber {
     /// an unattached channel denies rather than leaking to a device
     /// (`AGENTS.md` §4, §5.4, §20).
     pub const KEYBOARD_READ: Self = Self(25);
+    /// Map a granted device MMIO register window into the calling
+    /// driver's own address space (`AGENTS.md` §4 / §18.3; `plans/PI.md`
+    /// P10 chunk 5d-0 — the `DriverHost` MMIO/DMA surface reachable over
+    /// IPC).
+    ///
+    /// Argument: `handle: u64` — an unforgeable, kernel-issued
+    /// device-resource grant handle the driver received for the matched
+    /// hardware-tree node it binds (one handle per [`crate::hwtree::HwResource`]
+    /// the node requested). The kernel resolves the handle **against the
+    /// calling task** (handle forgery is rejected exactly as
+    /// [`SyscallNumber::IRQ_WAIT`] re-checks its binding, `AGENTS.md` §5.4),
+    /// confirms the grant names a memory window
+    /// ([`crate::hwtree::HwResourceKind::Mmio`] / `BusWindow`), and maps
+    /// **only** that granted region — caching disabled — into the caller's
+    /// own hardware-isolated address space, returning its base user virtual
+    /// address. A driver can therefore never synthesise a pointer to
+    /// arbitrary physical memory: it maps a region the kernel chose to
+    /// grant it, and nothing more (§4 — no ambient authority). Gated by
+    /// [`crate::CapabilityId::MMIO_MAP`]; an unknown or non-owned handle, a
+    /// grant of the wrong kind, or a build with no map facility wired fails
+    /// closed (`AGENTS.md` §2.9).
+    pub const MMIO_MAP: Self = Self(26);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -444,6 +466,7 @@ mod tests {
         assert_eq!(SyscallNumber::DISPLAY_ACQUIRE.as_u16(), 23);
         assert_eq!(SyscallNumber::DISPLAY_RELEASE.as_u16(), 24);
         assert_eq!(SyscallNumber::KEYBOARD_READ.as_u16(), 25);
+        assert_eq!(SyscallNumber::MMIO_MAP.as_u16(), 26);
     }
 
     #[test]

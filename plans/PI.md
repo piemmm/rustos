@@ -3135,7 +3135,31 @@ table, so a new board is match **data**, not new code. Sub-increments
     keystrokes (parity), and supply the UART log showing the `4132` admitted
     records for `pcie_brcm`, `bus_usb`, and `usb_hid`.
   - **5d-0** the `DriverHost` DMA/MMIO surface reachable **over IPC** (the
-    standing gap, Stage 4.HW increment 1's remainder).
+    standing gap, Stage 4.HW increment 1's remainder). The arch-neutral
+    **security foundation is landed**: a new `abi-v1` syscall **`mmio_map`**
+    (no. 26, gated on `CAP_MMIO_MAP`, audited) maps a *granted* device MMIO
+    window into the calling driver's own address space. A driver passes an
+    unforgeable, kernel-issued device-resource grant **handle** (never a raw
+    phys address); the kernel-core handler resolves it **against the calling
+    task** through the `kernel/core::devres::ResourceGrants` seam (owner-
+    checked forgery defence, §5.4), validates the grant names a memory
+    window (`devres::mappable_window` — `Mmio`/`BusWindow`), and maps only
+    that region through the architecture `devres::MmioMapFacility` producer
+    (§18.3 — a driver reaches only the resources its matched node requested;
+    §4 — no ambient authority). Both seams fail closed to NULL defaults
+    (`NULL_RESOURCE_GRANTS` → `NotFound`, `NULL_MMIO_MAP_FACILITY` →
+    `NotImplemented`), exactly as `mem_map` shipped its core handler before
+    its arch producer. Host-tested (devres 6 + handler 5 + dispatch
+    reachability), C header regenerated, abi-check/drift green. **Remaining
+    (next landings, staged):** (a) the grant-issuing path that mints a
+    driver's per-node resource handles at autoload/spawn and a concrete
+    `ResourceGrants` table reclaimed on exit; (b) the architecture
+    `MmioMapFacility` producer (`kernel/mem` live-mapping of device phys into
+    a running user aspace, the SP5b-class machinery, per port); (c) the DMA
+    half (a `dma_alloc`-equivalent bounded by the grant's `addr_limit`); and
+    (d) the `-M virt` vertical where a user program maps a virtio-mmio
+    register window through a granted handle. A live VL805 path stays a §0.4
+    metal-acceptance item.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the

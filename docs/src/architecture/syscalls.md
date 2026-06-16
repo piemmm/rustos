@@ -75,7 +75,11 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
 |  20 | `console_count`| —                                       | `u64` (count) | `CAP_CONSOLE_WRITE` | no    |
 |  21 | `stream_echo`  | `u32 fd`, `u32 enabled`                 | `errno` | `CAP_CONSOLE_READ`      | no      |
-|  22 | `console_input`| `u32 console`, `user_ptr`, `len`        | `u64` (bytes) | `CAP_INPUT_INJECT` | no      |
+|  22 | `key_inject`   | `user_ptr` (record), `len`              | `u64` (bytes) | `CAP_INPUT_INJECT` | no    |
+|  23 | `display_acquire` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
+|  24 | `display_release` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
+|  25 | `keyboard_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_INPUT_READ`  | no      |
+|  26 | `mmio_map`     | `Handle handle`                         | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
 
 ### Capability matrix
 
@@ -91,7 +95,10 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_PROC_SPAWN`   | `spawn`                    |
 | `CAP_CONSOLE_READ` | `stream_read`, `stream_echo` |
 | `CAP_USERS_READ`   | `users_db_read`            |
-| `CAP_INPUT_INJECT` | `console_input`            |
+| `CAP_INPUT_INJECT` | `key_inject`               |
+| `CAP_DISPLAY`      | `display_acquire`, `display_release` |
+| `CAP_INPUT_READ`   | `keyboard_read`            |
+| `CAP_MMIO_MAP`     | `mmio_map`                 |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -99,6 +106,30 @@ modes are documented in
 
 A future syscall that needs e.g. `CAP_DRV_LOAD` lands as a new entry in
 the table and a new row here; existing rows never move.
+
+`mmio_map` (no. 26) maps a **granted** device MMIO register window into the
+calling driver's own address space (`plans/PI.md` P10 chunk 5d-0 — the
+`DriverHost` MMIO/DMA surface reachable over IPC). A user-space driver does
+not pass a raw physical address: its `handle` argument is an unforgeable,
+kernel-issued device-resource grant it received for the hardware-tree node
+it binds (one grant per `rustos_abi::hwtree::HwResource` the node requested,
+`AGENTS.md` §18.3). The handler resolves the handle **against the calling
+task** through the `kernel/core::devres::ResourceGrants` seam — a handle
+minted for another task, or an unknown handle, resolves to nothing and is
+refused with `NotFound`, exactly the forgery defence `irq_wait` applies to
+its binding (`AGENTS.md` §5.4) — confirms the grant names a memory window
+(`HwResourceKind::Mmio` / `BusWindow`, else `OutOfRange`), and maps **only**
+that region — caching disabled — through the architecture
+`kernel/core::devres::MmioMapFacility` producer, returning its base user
+virtual address. A driver therefore never reaches physical memory the
+kernel did not grant it (`AGENTS.md` §4 — no ambient authority). It is
+gated on `CAP_MMIO_MAP` and **audited** (a low-volume, security-relevant
+grant of direct hardware access). Both seams default to fail-closed NULL
+producers (`NULL_RESOURCE_GRANTS` → `NotFound`, `NULL_MMIO_MAP_FACILITY` →
+`NotImplemented`); the grant-issuing spawn path and the `kernel/mem`
+live-mapping producer are installed by the following 5d-0 landings, so
+in a kernel without them every `mmio_map` denies rather than mapping
+(`AGENTS.md` §2.9).
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with
@@ -344,6 +375,7 @@ re-validates arguments — the dispatcher does that first.
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
 | `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`, which also resets the line-discipline column) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF and rubbing out the previous character (column-bounded `BS SP BS`) on a Backspace/Delete | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
+| `mmio_map`      | resolves `handle` against the caller (`ResourceGrants::lookup(caller.task_id, handle)`, owner-checked, default `NULL_RESOURCE_GRANTS`), validates the granted resource is a memory window (`devres::mappable_window` — `Mmio` / `BusWindow`, non-zero, non-overflowing), then maps **only** that `(phys_base, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window or malformed grant → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

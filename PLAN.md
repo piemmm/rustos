@@ -671,9 +671,26 @@ order (one fully-gated increment each):
      - **5d-0 — the `DriverHost` DMA/MMIO surface reachable over IPC** (the
        standing gap, increment 1's remainder): a user-space driver maps its
        register windows and carves its DMA region over capability-gated
-       IPC, with every check staying kernel-side (§5.4). Likely its own
-       multi-step landing; host-provable plus a `-M virt` vertical where a
-       virtio device stands in for the metal controller.
+       IPC, with every check staying kernel-side (§5.4). A multi-step
+       landing; host-provable plus a `-M virt` vertical where a virtio
+       device stands in for the metal controller. **Security foundation
+       landed:** the `mmio_map` `abi-v1` syscall (no. 26, `CAP_MMIO_MAP`,
+       audited) maps a *granted* device window into the calling driver's own
+       address space — the driver names an unforgeable, kernel-issued
+       device-resource **grant handle** (never a raw phys, §4), the
+       kernel-core handler resolves it owner-checked against the calling task
+       via the `kernel/core::devres::ResourceGrants` seam (§5.4 forgery
+       defence), validates it names a memory window (`mappable_window`), and
+       maps only that region through the architecture `devres::MmioMapFacility`
+       producer (§18.3). Both seams default to fail-closed NULL producers
+       (`NotFound` / `NotImplemented`), mirroring how `mem_map` shipped its
+       handler before SP5b. Host-tested (devres + handler + dispatch
+       reachability); C header regenerated; abi-check/drift green. Still
+       staged: (a) grant issuance at autoload/spawn + a concrete reclaimed
+       grant table; (b) the per-port `MmioMapFacility` live-mapping producer
+       (SP5b-class); (c) the DMA half bounded by the grant's `addr_limit`;
+       (d) the `-M virt` vertical mapping a virtio-mmio window through a
+       granted handle.
      - **5d — userland keyboard service** hosting the continuous report
        pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
        input-focus arbiter via `key_inject`. The "drivers in userland"

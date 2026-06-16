@@ -89,6 +89,7 @@ const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
+const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -447,6 +448,27 @@ pub extern "C" fn sys_keyboard_read(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `mmio_map`: map a granted device MMIO register window into the calling
+/// driver's own address space (`SyscallNumber::MMIO_MAP`, `AGENTS.md` §4 /
+/// §18.3, `plans/PI.md` P10 chunk 5d-0). Returns the base virtual address of
+/// the mapping, or a `ROS_E_*` code reinterpreted into the result.
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant the driver
+/// received for the hardware-tree node it binds — never a raw physical
+/// address. The kernel resolves it against the calling task, confirms it
+/// names a memory window, and maps only that region (caching disabled); a
+/// forged/non-owned handle, a wrong-kind grant, or a build with no map
+/// facility wired fails closed (`AGENTS.md` §2.9 / §5.4). Gated kernel-side
+/// on `ROS_CAP_MMIO_MAP`.
+#[must_use]
+#[export_name = "ros_sys_mmio_map"]
+pub extern "C" fn sys_mmio_map(handle: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel resolves the grant handle against the caller and returns the
+    // mapped base virtual address.
+    unsafe { raw_syscall(NUM_MMIO_MAP, [handle, 0, 0, 0, 0, 0]) }
+}
+
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
 /// calling process's own address space, honouring `flags`
 /// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
@@ -590,6 +612,7 @@ mod tests {
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
         (NUM_DISPLAY_RELEASE, "display_release", 0),
         (NUM_KEYBOARD_READ, "keyboard_read", 2),
+        (NUM_MMIO_MAP, "mmio_map", 1),
     ];
 
     #[test]
@@ -665,6 +688,16 @@ mod tests {
         });
         assert_eq!(number, NUM_CAP_QUERY);
         assert_eq!(args[0], 0xBEEF);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mmio_map_marshals_the_grant_handle() {
+        let (number, args) = capture(0x9000_0000, || {
+            assert_eq!(sys_mmio_map(0x2A), 0x9000_0000);
+        });
+        assert_eq!(number, NUM_MMIO_MAP);
+        assert_eq!(args[0], 0x2A);
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
     }
 

@@ -49,6 +49,7 @@ extern "C" {
 #define ROS_SYS_DISPLAY_ACQUIRE 23u
 #define ROS_SYS_DISPLAY_RELEASE 24u
 #define ROS_SYS_KEYBOARD_READ 25u
+#define ROS_SYS_MMIO_MAP 26u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -77,6 +78,7 @@ uint64_t ros_sys_key_inject(void * a0, uintptr_t a1);
 int32_t ros_sys_display_acquire(void);
 int32_t ros_sys_display_release(void);
 uint64_t ros_sys_keyboard_read(void * a0, uintptr_t a1);
+uint64_t ros_sys_mmio_map(uint64_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -499,6 +499,29 @@ pub trait SyscallHandlers {
     fn keyboard_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Map a granted device MMIO register window into the calling driver's
+    /// own address space (`AGENTS.md` §4 / §18.3; `plans/PI.md` P10 chunk
+    /// 5d-0).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MMIO_MAP`]. `handle` is an unforgeable, kernel-issued
+    /// device-resource grant the driver received for the hardware-tree node
+    /// it binds; the implementation resolves it **against the calling task**
+    /// (rejecting forgery exactly as `irq_wait` re-checks its binding,
+    /// `AGENTS.md` §5.4), confirms the grant names a memory window, maps
+    /// only that region — caching disabled — into the caller's own address
+    /// space, and returns its base user virtual address. A driver therefore
+    /// never reaches physical memory the kernel did not grant it (§4 — no
+    /// ambient authority).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with neither a
+    /// grant table nor a map facility wired has nothing to map. The real
+    /// handler is installed in `kernel/core`.
+    fn mmio_map(&self, _caller: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -705,6 +728,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 self.handlers.keyboard_read(caller, args.0[0], len)
             }
+            // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
+            // handler resolves it against the calling task and the grant
+            // table (forgery + ownership are checked there, `AGENTS.md`
+            // §5.4).
+            SyscallNumber::MMIO_MAP => self.handlers.mmio_map(caller, args.0[0]),
             _ => Err(Errno::NotFound),
         }
     }
@@ -1135,6 +1163,14 @@ mod tests {
             // keyboard channel here.
             Ok(len as u64)
         }
+
+        fn mmio_map(&self, _c: &CallerContext<'_>, handle: u64) -> SyscallResult {
+            self.record("mmio_map");
+            // Echo the handle back so the reachability test can assert the
+            // dispatcher decoded the `Handle` argument without wiring a
+            // real grant table / map facility here.
+            Ok(handle)
+        }
     }
 
     #[test]
@@ -1158,6 +1194,7 @@ mod tests {
                 CapabilityId::INPUT_INJECT,
                 CapabilityId::DISPLAY,
                 CapabilityId::INPUT_READ,
+                CapabilityId::MMIO_MAP,
             ],
             &sink,
         );

@@ -201,6 +201,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn mmio_map(&self, _c: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

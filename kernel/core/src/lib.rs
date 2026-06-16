@@ -74,6 +74,7 @@ pub mod aspace;
 pub mod audit;
 pub mod bootinfo;
 pub mod console;
+pub mod devres;
 pub mod dispatch_slot;
 pub mod fs;
 pub mod init;
@@ -104,6 +105,10 @@ pub use console::{
     BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead, ConsoleWrite,
     NullConsole, NullConsoleInput, NullConsoleRead, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES,
     NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
+};
+pub use devres::{
+    mappable_window, EmptyResourceGrants, MmioMapFacility, NullMmioMapFacility, ResourceGrants,
+    NULL_MMIO_MAP_FACILITY, NULL_RESOURCE_GRANTS,
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,

@@ -640,6 +640,33 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::INPUT_READ),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::MMIO_MAP,
+        name: "mmio_map",
+        arg_count: 1,
+        args: [
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the mapped base virtual address (or, by the
+        // shared register convention, a negated errno) back to the
+        // driver, exactly like `mem_map`.
+        ret: AbiType::U64,
+        // Mapping a device's register block is privileged, never ambient
+        // (`AGENTS.md` §4): only a driver granted the matched node's MMIO
+        // resource holds `CAP_MMIO_MAP`, and the kernel additionally maps
+        // only the region named by the unforgeable grant handle the driver
+        // owns (§18.3). It IS audited per call (`AGENTS.md` §5.4.4) —
+        // handing a principal direct access to hardware registers is a
+        // security-relevant grant and is low-volume (once per window at
+        // driver init), so the record cannot drown the log.
+        required_capability: Some(CapabilityId::MMIO_MAP),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
