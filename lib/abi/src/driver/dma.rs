@@ -67,6 +67,19 @@ impl PoolId {
     }
 }
 
+/// Cache-maintenance shim a [`DmaSlab`] invokes to keep a **non-coherent**
+/// DMA master and the CPU caches in sync (`AGENTS.md` §4).
+///
+/// `base` is the CPU-virtual address of the affected sub-range and `len`
+/// its byte length. The shim must clean **and** invalidate that range to
+/// the point of coherency (a `dc civac`-class operation plus a barrier),
+/// so that bytes the CPU just wrote are visible to the device and bytes
+/// the device just wrote are visible to the CPU. It performs cache
+/// maintenance only — it never dereferences the range — so it is a safe
+/// `fn`. A slab minted without one (coherent interconnect, or the
+/// in-process mock host) skips maintenance entirely.
+pub type SlabCoherencyFn = fn(base: *const u8, len: usize);
+
 /// Type-erased free shim called from [`DmaSlab::drop`].
 ///
 /// * `pool` is the opaque pointer the slab was built with;
@@ -104,6 +117,7 @@ pub struct DmaSlab {
     slot: usize,
     pool_ptr: *const (),
     free_fn: Option<SlabFreeFn>,
+    coherency: Option<SlabCoherencyFn>,
 }
 
 // SAFETY: A `DmaSlab` is a tagged pointer to a disjoint range of
@@ -149,6 +163,7 @@ impl DmaSlab {
             slot,
             pool_ptr: core::ptr::null(),
             free_fn: None,
+            coherency: None,
         }
     }
 
@@ -183,7 +198,54 @@ impl DmaSlab {
             slot,
             pool_ptr,
             free_fn: Some(free_fn),
+            coherency: None,
         }
+    }
+
+    /// Attach a [`SlabCoherencyFn`] for a **non-coherent** DMA master.
+    ///
+    /// On an interconnect where the device does not snoop the CPU caches
+    /// (e.g. the BCM2711 PCIe root complex), the host wires the arch cache
+    /// clean/invalidate primitive here so [`Self::sync_range`] can bracket
+    /// every CPU-side publish/consume. Without it [`Self::sync_range`] is a
+    /// no-op, the correct behaviour for a coherent interconnect or the
+    /// in-process mock host (`AGENTS.md` §4).
+    #[must_use]
+    pub fn with_coherency(mut self, coherency: SlabCoherencyFn) -> Self {
+        self.coherency = Some(coherency);
+        self
+    }
+
+    /// Clean **and** invalidate the byte range `[offset, offset + len)` to
+    /// the point of coherency through the attached [`SlabCoherencyFn`].
+    ///
+    /// The owner of DMA publication ordering on a non-coherent
+    /// interconnect calls this **after** writing bytes the device will
+    /// read (so they reach memory before the doorbell) and **before**
+    /// reading bytes the device wrote (so the CPU does not see a stale
+    /// cached copy). It is a no-op when no shim is attached, when `len` is
+    /// zero, or — failing closed (`AGENTS.md` §5.4) — when the range falls
+    /// outside the region.
+    pub fn sync_range(&self, offset: usize, len: usize) {
+        let Some(maintain) = self.coherency else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        let Some(end) = offset.checked_add(len) else {
+            return;
+        };
+        if end > self.len {
+            return;
+        }
+        // SAFETY: `ptr` points at exactly `self.len` valid bytes by the
+        // construction invariants, and `offset + len <= self.len`, so
+        // `ptr + offset` addresses exactly `len` in-bounds bytes. The shim
+        // performs cache maintenance over that range only; it never reads
+        // or writes the bytes, so no aliasing rule is involved.
+        let base = unsafe { self.ptr.as_ptr().add(offset).cast_const() };
+        maintain(base, len);
     }
 
     /// Device-visible base address of this region.

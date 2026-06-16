@@ -14,7 +14,7 @@
 
 use crate::{
     MailboxError, MailboxTransport, CODE_RESPONSE_OK, PROPERTY_WORDS, TAG_ALLOCATE,
-    TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_RESPONSE_BIT,
+    TAG_GET_FIRMWARE_REVISION, TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_RESPONSE_BIT,
 };
 
 /// A mock firmware answering property messages with configured values.
@@ -30,6 +30,9 @@ pub struct MockFirmware {
     pub display_w: u32,
     /// Display height the display-size tag answers with.
     pub display_h: u32,
+    /// Revision word the firmware-revision (liveness probe) tag answers
+    /// with.
+    pub firmware_revision: u32,
 }
 
 impl MockFirmware {
@@ -44,6 +47,7 @@ impl MockFirmware {
             fb_pitch: 2560,
             display_w: 1920,
             display_h: 1080,
+            firmware_revision: 0x0123_4567,
         }
     }
 
@@ -72,6 +76,10 @@ impl MockFirmware {
                     message[at + 3] = self.display_w;
                     message[at + 4] = self.display_h;
                     8
+                }
+                TAG_GET_FIRMWARE_REVISION => {
+                    message[at + 3] = self.firmware_revision;
+                    4
                 }
                 // Set-tags echo their request values unchanged.
                 _ => message[at + 1],

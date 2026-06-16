@@ -64,7 +64,7 @@ they are threaded from `FdtDiscovery` (P3) rather than the `virt` constants.
 
 The Pi firmware (`start4.elf`, with `fixup4.dat`) loads the kernel image
 `kernel8.img` to physical **`0x8_0000`** (the AArch64 64-bit load address) and
-enters it in **AArch64 EL2** with the Linux aarch64 hand-off convention
+enters it in **AArch64 EL2** with the aarch64 boot hand-off convention
 (`x0` = physical address of the firmware-supplied DTB; `x1`/`x2`/`x3` zero).
 On current firmware all four cores are released to the kernel entry unless an
 `armstub8.bin` spin-table stub is supplied; the boot stub must therefore park
@@ -185,7 +185,7 @@ finisher constants) builds on the host so its unit tests run under
 
 `qemu-system-aarch64 -M virt -kernel <elf>` loads the ELF at its link
 address (`0x4020_0000`, 2 MiB above the `virt` RAM base) and enters its
-entry point. The `_start` trampoline (`boot.s`) follows the Linux aarch64
+entry point. The `_start` trampoline (`boot.s`) follows the aarch64
 boot protocol's `x0 = DTB` register convention, which real firmware (and
 the Pi GPU firmware) populates; note that QEMU's `-kernel <ELF>` path
 itself passes `x0 = 0` (it treats the image as bare firmware), so the
@@ -579,9 +579,9 @@ controller core off at OS entry, and a MISC-block access does not
 complete until the always-accessible RGR1 bridge `sw_init` reset
 (`0x9210`) has been cycled — which is exactly why the **same**
 `MISC_PCIE_STATUS` read costs ~8 µs in the configuration phase (the reset
-having run by then) yet ~10.8 s before it. U-Boot's and Linux's
-`pcie-brcmstb` never touch a MISC register before cycling the bridge
-`sw_init` reset, and only *then* clear the SerDes IDDQ.
+having run by then) yet ~10.8 s before it. The BCM2711 PCIe bring-up
+sequence never touches a MISC register before cycling the bridge
+`sw_init` reset, and only *then* clears the SerDes IDDQ.
 
 **Fix:** `BrcmPcieRc::reset_controller` releases the bridge `sw_init`
 reset on the always-accessible `0x9210`, bringing the core and its MISC
@@ -593,13 +593,17 @@ microseconds). The gentlest **no-touch-probe** bring-up (below) does
 ### The VL805 firmware: leave the boot firmware's state alone
 
 The keyboard path treats VL805 firmware as boot-firmware-owned. The user's
-working-Linux capture on the same board/SD/firmware shows the board loads
-the VL805 firmware before the OS, USB works in the pre-boot firmware menu
-and early Linux, and Linux issues no runtime VL805 reload (only the unrelated
-"ASPM: VL805 fixup"). The RustOS path therefore avoids any explicit
-`NOTIFY_XHCI_RESET` request: redundant reloads can be destructive on Pi
-firmware, and the latest metal capture showed the request acknowledged but
-leaving config `0x50` at `0` with the BAR still returning `dead_dead`.
+known-good capture on the same board/SD/firmware shows the board loads
+the VL805 firmware before the OS, USB works in the pre-boot firmware menu,
+and no runtime VL805 reload is needed. The RustOS path therefore keeps the boot firmware's
+PCIe/VL805 state intact wherever it can — `reset_controller` only releases the
+reset the previous stage left asserted (below), never re-asserting a
+fundamental reset that could drop resident firmware. A `NOTIFY_XHCI_RESET`
+reload is still issued as a **best-effort** fallback when config `0x50` reads
+`0`, but the latest metal capture showed that request timing out
+(`4108`/`4121`) and leaving `0x50` at `0` with the BAR still `dead_dead` — so
+its outcome no longer gates the bring-up (see the firmware-version gate,
+`4123`, below).
 
 The bring-up uses the gentlest no-touch sequence:
 
@@ -610,10 +614,15 @@ The bring-up uses the gentlest no-touch sequence:
   test guards the release-only, no-re-assert sequence.
 - `open_controller` waits for the VL805's **XHCI MCU firmware version**
   (config `0x50`) to read non-zero (`4118`), using configuration space — the
-  same register Linux's `rpi_firmware_init_vl805` checks — rather than the
-  master-aborting BAR. If the version stays `0`, RustOS does not attempt a
-  reload; the BAR wait (`4109`) and `Xhci::open` fail closed while retaining
-  the diagnostic state.
+  same register the vendor firmware-init sequence checks — rather than the
+  master-aborting BAR. If the version stays `0`, the best-effort
+  `NOTIFY_XHCI_RESET` reload is issued once; either way the bring-up records
+  the firmware-version gate decision (`4123`) and **proceeds** to the BAR wait
+  (`4109`) and `Xhci::open` — the authoritative xHCI liveness signal and the
+  real fail-closed gate. Config `0x50` is a VL805 vendor convenience, not the
+  controller's readiness signal, so a `0` there (or a dropped reload) no
+  longer aborts the bring-up before the controller's own capability block is
+  probed.
 
 The `UART` does **not** touch the VL805: the Pi 4 debug serial is the
 BCM2711's own PL011 / mini-UART on GPIO14/15, an on-SoC peripheral with
@@ -623,44 +632,124 @@ controller or account for the pause.
 This is host-proven (the driver/usb_keyboard tests assert the release-only
 `PERST#` sequence and the no-touch firmware path), but the live keyboard
 enumerating on metal is an on-metal acceptance item (no `raspi4b` in QEMU —
-QEMU models no Pi PCIe/USB). A healthy capture shows config `0x50` non-zero
-and a plausible `CAPLENGTH`; a `0` firmware version with `dead_dead` caps
-means the boot chain did not leave firmware resident and the kernel failed
-closed without attempting a destructive reload.
+QEMU models no Pi PCIe/USB). A healthy capture shows a live
+`CAPLENGTH`/`HCIVERSION` at the BAR (`4109 ready_hex=1`, `4107`) and the
+keyboard enumerating, whether or not config `0x50` ever read non-zero; a BAR
+that stays `dead_dead` (`4109 ready_hex=0`) means the controller never decoded
+and the bring-up fails closed at `Xhci::open`.
 
-**Inbound-window lead (raspberrypi/firmware #1617) — refuted; firmware
-handoff confirmed.** A maintainer report (#1617) suggested `VideoCore`
-loads the VL805 firmware over PCIe **through an inbound DMA window**, so the
-`4119` event
+**Inbound-window lead (raspberrypi/firmware #1617, then #1495).** A
+maintainer report (#1617) suggested `VideoCore` loads the VL805 firmware
+over PCIe **through an inbound DMA window**, so the `4119` event
 (`BrcmPcieRc::inbound_window_readback`: `rc_bar1_lo`, `rc_bar2_lo`/`hi`,
-`rc_bar3_lo`) **refuted** this on metal: it reads `rc_bar2_hi=0x4` (PCIe
+`rc_bar3_lo`) read the **post-program** window: `rc_bar2_hi=0x4` (PCIe
 base `0x4_0000_0000`), `rc_bar2_lo` size field `0x12` (8 GiB), `RC_BAR1`/
-`RC_BAR3` disabled — byte-identical to working Linux's
-`IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. With every prior capture, all
-PCIe / outbound / inbound / config elements are now proven to match Linux;
-the `4119` log is retained as a permanent bring-up diagnostic.
+`RC_BAR3` disabled — byte-identical to the known-good *runtime*
+`IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. But matching that *runtime*
+window does not prove the window matches what `VideoCore` assumes at the
+**firmware-load** moment: pftf/RPi4 issue #1495 establishes that the
+`NOTIFY_XHCI_RESET` load *assumes* a particular `RC_BAR2` state instead of
+reading it back, so a window bring-up reprograms away from what `start4.elf`
+set at power-on makes the reload honoured-but-no-op (or, with newer
+co-processor firmware, makes the mailbox exchange itself time out — the
+`4108 … reason=timeout` symptom). Two changes pursue this lead: a one-shot
+`4120` capture of the inbound window **as the previous boot stage left it**
+(`BrcmPcieRc::entry_inbound_window`, sampled before bring-up touches
+`RC_BAR2`), so a metal run compares the firmware's own window against the
+post-program `4119` read-back; and bring-up now **preserves a
+firmware-configured `RC_BAR2`** (a non-zero size field) rather than
+overwriting it, honouring `VideoCore`'s assumed state for the load.
+Decisive metal datapoints: `4120` differing from `4119` would confirm our
+reprogramming diverged (and the preserve path now closes that gap), while
+`4120`/`4119` identical with `4118 fw_version=0` still pins the residual on
+the firmware handoff below.
 
 The residual is therefore **outside the PCI path**, in the firmware
 handoff. RustOS's own aarch64 boot/arch code never writes
 `RGR1_SW_INIT_1` (only `pcie_brcm::reset_controller` does, *after*
 sampling `entry_rgr1_sw_init`), so the metal `entry_rgr1_sw_init=0x3`
-(PERST + bridge `sw_init` asserted) is `start4.elf`'s handoff state. Linux
-works because it inherits or obtains resident firmware before its xHCI path
-and then reads config `0x50` first and **skips** any runtime reload (the
-user's working Linux loads no VL805 firmware at runtime;
-`setpci 0x50 = 0x000138c0`). The chosen in-tree experiment (`AGENTS.md` §15.7; the user declined the
-U-Boot chain-load route) is the **gentlest possible no-touch-probe**
+(PERST + bridge `sw_init` asserted) is `start4.elf`'s handoff state. A
+working boot chain inherits or obtains resident firmware before its xHCI path
+and reads config `0x50` first, **skipping** any runtime reload (on the
+user's working setup the VL805 firmware is already resident,
+`0x50 = 0x000138c0`). The chosen in-tree experiment (`AGENTS.md` §15.7; the user declined the
+chain-load route) is the **gentlest possible no-touch-probe**
 bring-up: `reset_controller` only *releases* the bridge `sw_init` the
 previous boot stage left asserted and does **not** re-assert a fundamental
 reset or toggle the SerDes `IDDQ`, so any resident VL805 firmware is left
 untouched; `train_link` deasserts the already-asserted `PERST#` (the single
 firmware-(re)load edge), and the `NOTIFY_XHCI_RESET` reload is a fallback
 issued only when the `4118` firmware-version gate (config `0x50`) stays `0`.
-Decisive metal outcome: `4110`/`4114` `vl805_fw_version_hex` going non-zero
-(with a live `CAPLENGTH`) proves `start4.elf` left the firmware resident and
-our earlier reset was destroying it (the in-tree fix is then complete);
+That fallback now first issues a **runtime mailbox liveness probe** (a
+benign `GET_FIRMWARE_REVISION` read over the same post-MMU transport,
+logged as `4122`) before the reload, because the bare `4108 reason=timeout`
+cannot tell a broken post-MMU mailbox path from `VideoCore` silently
+dropping only the xHCI tag: `4122 probe_outcome=ok` with a non-zero
+`firmware_revision_hex` proves the transport works and pins a following
+`4121 timeout_stage=response` on the firmware dropping the tag, whereas
+`4122 probe_outcome=timeout` pins it on the mailbox environment itself
+(`AGENTS.md` §15.7). The mailbox property framing itself has been audited
+against the VideoCore protocol (raspberrypi.stackexchange.com #133040): every
+tag's value-buffer length word is sized to `max(request, response)` words, so
+the classic "`0`-byte buffer, firmware cannot reply" defect cannot occur, and
+`find_tag` reads the per-tag response bounded by that buffer and fails closed
+on a reply that claims more — confirming the `4122 ok` / `4121 response`
+timeout is the firmware dropping the tag, not a response-length/sizing fault.
+A read-only post-reload `4124` capture then showed `bridge_secondary_status=0`
+(no Received Master/Target Abort), so `VideoCore`'s firmware-load is **not**
+master-aborting on the root-port bridge — the downstream VL805 path is
+reachable, not a bus-config dead end. That left one untested variable in the
+`4121 timeout_stage=response`: **how long we actually waited.** The reload
+busy-polled `DEFAULT_POLL_BUDGET` (1,000,000) iterations, which on metal was
+only the ≈400 ms `4122`→`4121` gap — well under the **full second** the
+vendor bring-up allows the same property call. `NOTIFY_XHCI_RESET`
+is a long operation (`VideoCore` fetches the VL805 blob and pushes it over
+PCIe), so a `response`-stage timeout at ≈400 ms is as consistent with "not
+finished yet" as with "dropped". The reload mailbox therefore now uses a
+dedicated `FIRMWARE_RELOAD_POLL_BUDGET` (ten times the quick-read budget,
+≈4 s of metal wall time, comfortably above that 1 s) and `4121` reports the
+`CNTPCT_EL0`-measured `wait_elapsed_us_hex` so the iteration→time mapping is
+observed, not assumed (`AGENTS.md` §15.7). The follow-up metal capture
+**confirmed** this fix: `4121 timeout_stage=none`, `last_status=1`,
+`wait_elapsed_us≈0x16266` (≈90 ms), and `4108` now logs the reload as
+*reloaded* (success) — the prior give-up was indeed premature.
+
+**Inbound SCB window unsized — `MISC_CTRL.SCB0_SIZE` (current lever).** With
+the reload now completing yet `fw_version` still `0` and the controller still
+stuck in `CNR` (`4101 stage=reset_self_clear usbsts=0x815`), the residual is
+`VideoCore`'s firmware-load running without landing the blob. Comparing our
+`pcie_brcm` `bring_up` against the **known-working** BCM2711 PCIe bring-up
+sequence found the one concrete divergence: both
+program `MISC_CTRL.SCB0_SIZE = ilog2(round_pow2(region)) - 15` (bits
+`[31:27]`, mask `0xf800_0000`) to size the inbound SCB (PCIe→system-memory)
+decode window to the DMA region, **unconditionally** on the BCM2711 — while our
+`bring_up` set every other `MISC_CTRL` bit but left `SCB0_SIZE` at its reset
+default. An undersized inbound decoder silently drops a PCIe→memory DMA past
+that small window while config reads, enumeration, BAR assignment and the
+outbound (CPU→PCIe) path all still succeed — exactly the observed signature
+(the `4124` snapshot showed **no** master-abort, so the drop is on the
+inbound/SCB side, not the root port). `VideoCore`'s `NOTIFY_XHCI_RESET`
+firmware-load reaches system memory through this inbound window, so the
+unprogrammed `SCB0_SIZE` is a grounded reason the reload completes yet the
+firmware never becomes resident. `bring_up` now programs `SCB0_SIZE`
+(`encode_scb_size`, `0x11` for the Pi's 4 GiB viewport, matching the `RC_BAR2`
+size encoding) and the inbound read-back (`4119`/`4120`) gains a `misc_ctrl_hex`
+field so a metal capture confirms it. Decisive metal datapoint: `fw_version`
+(`4118`/`4114` `0x50`) going non-zero — or the keyboard enumerating — proves
+the undersized inbound window was the blocker and the in-tree path is complete;
+still `0` with `misc_ctrl_hex` showing `SCB0_SIZE` (bits `[31:27]`) = `0x11`
+pins the residual on the boot-chain firmware handoff below.
+Because the reload outcome no longer aborts the bring-up, the metal log now
+always reaches the BAR capability-block readback (`4123` then
+`4109`/`4107`/`4114`/`4106`) — the authoritative datapoint the old
+abort-at-`4108` path never captured. Decisive metal outcome: a live
+`CAPLENGTH`/`HCIVERSION` at the BAR (`4109 ready_hex=1`) with the keyboard
+enumerating proves the controller's firmware is resident regardless of config
+`0x50`, and the in-tree path is then complete; `4110`/`4114`
+`vl805_fw_version_hex` going non-zero (with a live `CAPLENGTH`) likewise proves
+`start4.elf` left the firmware resident and our earlier reset was destroying it;
 still `0`/`dead_dead` proves the bare-metal handoff never loads it, leaving
-a boot-chain / firmware matter (chain-load via U-Boot, whose `xhci_pci_init`
+a boot-chain / firmware matter (a chain-loader that
 loads the VL805 firmware once after PCIe config, or keeping PCIe up across
 the handoff) as the only remaining path. Metal-only either way (QEMU models
 no Pi PCIe/USB).
@@ -736,7 +825,7 @@ system-register/assembly/MMIO operations to the freestanding target.
   off but the walker reads them back *cacheable* the instant translation
   enables, and a stale firmware-era line over the pool would shadow the
   real descriptors on real silicon (cache-less QEMU cannot show it —
-  the same residue hazard Linux's `head.S` invalidates its idmap tables
+  the same residue hazard early boot code invalidates its idmap tables
   for). The pool's own allocation counter is translation-aware
   (`PageTablePool::alloc`): with the MMU off it advances by a plain
   load + store, never an atomic read-modify-write, because LDXR/STXR
@@ -1021,7 +1110,7 @@ keyboard service, `plans/PI.md` P10):
   window — is translated through the bridge's outbound `ranges`
   (`outbound_cpu_base + (bus − outbound_pcie_base)`) to its identity-mapped
   CPU address (the generic PCI walk knows only bus addresses; resolving them
-  is the host bridge's job, as in Linux). On the Pi 4 the SoC regs island
+  is the host bridge's job). On the Pi 4 the SoC regs island
   (`0xfd50_0000`) sits numerically inside the outbound PCIe window, so the
   regs block is resolved first and a request that only partially overlaps it
   is refused fail-closed rather than mis-translated (§5.4). A `FrameDmaHost`
@@ -1057,8 +1146,11 @@ the on-metal acceptance item.
 Because the live bring-up is metal-only, it logs its progress to the
 serial sink so a silent keyboard can be diagnosed from a UART capture
 alone (the boot beacons above bound the *boot* path; these events bound
-the *USB* path). All are one-shot — never on the per-report poll loop
-(§2.16 / §19.4) — and allocation-free (§2.9):
+the *USB* path). All are allocation-free (§2.9). The bring-up events are
+one-shot; the three poll-loop events (`4129`/`4130`/`4131`) run *on* the
+forever poll loop but are **bounded** (a one-shot first report, an
+on-change capped error, and a capped heartbeat), so the log stays finite
+(§2.16 / §19.4):
 
 | Event id | Emitted by | Says |
 | -------- | ---------- | ---- |
@@ -1068,21 +1160,361 @@ the *USB* path). All are one-shot — never on the per-report poll loop
 | `4104` | `usb_keyboard::bring_up_keyboard` | the one-shot PCIe configuration scan run after link-up, before the controller search: a `function_count_hex` summary plus one `bdf_hex`/`vendor_hex`/`device_hex`/`class_hex` line per responding function. A healthy Pi 4 shows two (the bridge `14e4:2711` class `0604`, and the VL805 `1106:3483` class `0c03`). |
 | `4102` | `usb_keyboard::bring_up_keyboard` | the USB device enumerated on the VL805 root hub: `vendor_id_hex`, `product_id_hex`, and the assigned `xhci_slot`. |
 | `4105` | `keyboard_service::IdentityMmioMapper` | one map-window decision: `phys_base_hex`/`len_hex` (the address the PCI driver asked the bridge to map — for the BAR, the value the VL805's BAR register holds), `resolved_cpu_hex` (the backed CPU address, or the `ffff_ffff_ffff_ffff` sentinel when refused), and the accepted-window bounds (`regs_base/end`, `outbound_pcie_base/end`). Logged at `Error` when refused. Two lines on a healthy bring-up: the controller regs block (identity) and the VL805 BAR (bus→CPU translated). |
-| `4106` | `usb_keyboard::bring_up_keyboard` | the carve + capability-block geometry, in two lines, between the BAR map and the controller program. First: the device-shared DMA carve (`dma_phys_hex` device-visible base, `dma_len_hex`, `dma_end_hex`, the `dma_aperture_top_hex` it must lie below) and the mapped `bar_window_len_hex`. Second (after `Xhci::open` succeeds): `caplength_hex`, `hci_version_hex`, the `doorbell_off_hex`/`runtime_off_hex` register offsets, and `max_slots_hex`/`max_ports_hex`. So an `out_of_range` bring-up is pinned to a concrete value (a DMA address the controller cannot reach, or a register offset past the BAR window). |
+| `4106` | `usb_keyboard::bring_up_keyboard` | the carve + capability-block geometry, in two lines, between the BAR map and the controller program. First: the device-shared DMA carve (`dma_phys_hex` device-visible base, `dma_len_hex`, `dma_end_hex`, the `dma_aperture_top_hex` it must lie below) and the mapped `bar_window_len_hex`. Second (after `Xhci::open` succeeds): `caplength_hex`, `hci_version_hex`, the `doorbell_off_hex`/`runtime_off_hex` register offsets, `max_slots_hex`/`max_ports_hex`, and `max_scratchpad_hex` (the `HCSPARAMS2` Max Scratchpad Buffers count `UsbDevice::start` reserves and points `DCBAA[0]` at — `0x1f` on the VL805; `0` would mean the controller claims it needs none). So an `out_of_range` bring-up is pinned to a concrete value (a DMA address the controller cannot reach, or a register offset past the BAR window). |
 | `4107` | `usb_keyboard::bring_up_keyboard` | the raw capability-register dwords read straight off the mapped BAR, one-shot, *before* `Xhci::open` interprets them: `caplength_hciversion_hex` (the `0x00` dword), `hcsparams1_hex`, `hccparams1_hex`, `dboff_hex`, `rtsoff_hex`. The `4106` geometry second line never prints when `Xhci::open` fails, so this is the only view of what the BAR actually returns. A *uniform* `dead_dead` across every offset (the value the metal capture showed) is the BCM2711 root complex's **master-abort poison**: the CPU access reaches the RC but nothing decodes the BAR's PCIe address. The root cause was an **inverted outbound (CPU→PCIe) translation window** — the `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` base/limit fields were programmed in the wrong register halves, so the window covered nothing and every BAR read aborted regardless of firmware (see the root-cause section below). |
-| `4108` | reserved | reserved for older images' VL805 firmware-reload probe. The current no-touch path does not emit this id; RustOS leaves the boot firmware's VL805 state alone and relies on `4118`/`4109`/`4114` to report whether firmware is resident and whether the BAR decodes. |
+| `4108` | `usb_keyboard::open_controller` | the outcome of the optional VL805 firmware-reload (`NOTIFY_XHCI_RESET`) fallback, issued only when the `4118` firmware-version gate (config `0x50`) stays `0` after the link trains: `skipped because no videocore mailbox is available` (`NotAvailable`), the honoured reload (`Reloaded`, with `4113` carrying the response value), or — at `Error` level — `reload via the videocore mailbox failed reason=<window\|timeout\|firmware_error\|malformed_response\|bad_aperture\|bad_geometry\|unknown>`. A `reason=timeout` is expanded by the `4121` record below, which says *where* the mailbox exchange timed out. |
 | `4109` | `usb_keyboard::bring_up_keyboard` | the bounded wait for the controller to present its capability block on its BAR, run **after** the firmware-version gate (`4118`), before `Xhci::open`. Carries `polls_hex` (how many reads of the `CAPLENGTH`/`HCIVERSION` header it took), `caplength_hciversion_hex` (the final header dword observed), and `ready_hex` (`1` if it came live, `0` if the budget expired). The wait is bounded by **elapsed wall time** (`CAPS_READY_BUDGET_US` ≈256 ms via `Delay::now_us`), **not** a poll count — so a single read that ever blocks cannot inflate the loop past its budget, a §2.16 defence regardless of read cost. `ready_hex=0` with `caplength_hciversion_hex` still `dead_dead` means the controller never decoded and the bring-up fails closed at `Xhci::open`. Always `Info` — the not-ready report is diagnostic, not an error. |
-| `4110` | `usb_keyboard::open_controller` | a one-shot configuration-space read-back after the BAR is assigned, the root-port bridge enabled (post-link, see below), and the VL805 command enabled, before `Xhci::open`, served by the read-only `PciBus::read_config`: `bridge_bus_numbers_hex` (`0x18`), `bridge_mem_base_limit_hex` (`0x20`) and `bridge_command_status_hex` (`0x04`) for the root port, and `vl805_command_status_hex` (`0x04`), `vl805_bar0_hex` (`0x10`) and `vl805_bar1_hex` (`0x14`) and `vl805_fw_version_hex` (the VL805 XHCI MCU firmware version at config `0x50`, non-zero once the firmware is loaded, `0` if not) for the controller. Shows which write actually stuck on metal — a register reading back `0`/all-ones where a programmed value was expected pins a configuration write that did not take; every register reading back what bring-up wrote while `4107`/`4109` still abort pins the fault past the PCI programming (the link or the VL805's xHCI core not coming up after the reset). A faulting read renders the all-ones sentinel; always `Info`. The metal capture showed every register reading back as written **except the root-port bridge's own command** (`bridge_command_status_hex` low 16 = `0x0000`): that write was issued *before* `train_link` deasserted `PERST#`, and the integrated RC latches Memory Space Enable only against a live link, so it did not stick. The bring-up now enables the bridge command **after** the link is up (mirroring Linux's post-link-up `pci_enable_bridge`), which gates the CPU→VL805-BAR memory path that both our reads and `VideoCore`'s firmware-load writes traverse — so a healthy capture reads `bridge_command_status_hex` back with bits `0x6` set (see the bridge-command section below). |
+| `4110` | `usb_keyboard::open_controller` | a one-shot configuration-space read-back after the BAR is assigned, the root-port bridge enabled (post-link, see below), and the VL805 command enabled, before `Xhci::open`, served by the read-only `PciBus::read_config`: `bridge_bus_numbers_hex` (`0x18`), `bridge_mem_base_limit_hex` (`0x20`) and `bridge_command_status_hex` (`0x04`) for the root port, and `vl805_command_status_hex` (`0x04`), `vl805_bar0_hex` (`0x10`) and `vl805_bar1_hex` (`0x14`) and `vl805_fw_version_hex` (the VL805 XHCI MCU firmware version at config `0x50`, non-zero once the firmware is loaded, `0` if not) for the controller. Shows which write actually stuck on metal — a register reading back `0`/all-ones where a programmed value was expected pins a configuration write that did not take; every register reading back what bring-up wrote while `4107`/`4109` still abort pins the fault past the PCI programming (the link or the VL805's xHCI core not coming up after the reset). A faulting read renders the all-ones sentinel; always `Info`. The metal capture showed every register reading back as written **except the root-port bridge's own command** (`bridge_command_status_hex` low 16 = `0x0000`): that write was issued *before* `train_link` deasserted `PERST#`, and the integrated RC latches Memory Space Enable only against a live link, so it did not stick. The bring-up now enables the bridge command **after** the link is up (a post-link-up PCI-PCI bridge enable), which gates the CPU→VL805-BAR memory path that both our reads and `VideoCore`'s firmware-load writes traverse — so a healthy capture reads `bridge_command_status_hex` back with bits `0x6` set (see the bridge-command section below). |
 | `4111` | `usb_keyboard::bring_up_keyboard` | a one-shot read-back of the controller's outbound (CPU→PCIe) memory-translation registers and link status, off the trained register block before the windowed config accessor is built (`BrcmPcieRc::outbound_window_readback`): `mem_win0_lo_hex`/`mem_win0_hi_hex` (the PCIe-space base the window maps to), `mem_win0_base_limit_hex` + `mem_win0_base_hi_hex`/`mem_win0_limit_hi_hex` (the CPU-side base/limit, MiB-encoded), and `pcie_status_hex` (root-port/data-link-active/phy-link-up bits). This event **pinned the root cause**: the metal capture read `mem_win0_base_limit_hex=0x3ff00000`, which under the BCM2711's field order decodes to CPU base `0x6_3ff00000` **above** limit `0x6_00000000` — an inverted, empty window. The `BASE`/`LIMIT` field masks were defined swapped (see the root-cause section), so the window decoded nothing and every BAR read master-aborted to `dead_dead`. A faulting read renders the all-ones sentinel; always `Info`. |
-| `4119` | `usb_keyboard::bring_up_keyboard` | a one-shot read-back of the controller's **inbound** (PCIe→system-memory) viewport registers off the trained register block (`BrcmPcieRc::inbound_window_readback`): `rc_bar1_lo_hex` and `rc_bar3_lo_hex` (the unused PCIe→GISB / PCIe→SCB inbound windows, which bring-up disables by clearing their size field), `rc_bar2_lo_hex`/`rc_bar2_hi_hex` (the active PCIe→system-memory viewport — offset bits plus the encoded size in the low field), and `pcie_status_hex` for correlation. On the Pi 4 the boot firmware's VL805 handoff may depend on this inbound DMA window; the event lets a metal run compare our inbound translation with working Linux's `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` rather than guessing the next change (`AGENTS.md` §15.7). A faulting read renders the all-ones sentinel; always `Info`. |
-| `4114` | `usb_keyboard::open_controller` | a one-shot re-read of the VL805's configuration space and capability header **after** the firmware-version wait (`4118`) and bounded BAR-readiness settle (`4109`), served by the read-only `PciBus::read_config` plus a raw BAR read: `vl805_vendor_device_hex` (`0x00`), `vl805_command_status_hex` (`0x04`), `vl805_bar0_hex` (`0x10`), `vl805_bar1_hex` (`0x14`), `vl805_fw_version_hex` (the VL805 XHCI MCU firmware version at config `0x50`), and `caplength_hciversion_hex` (the BAR's `0x00` dword). A non-zero firmware version proves firmware is resident; `0` with `dead_dead` caps means the kernel leaves the boot firmware's VL805 state alone and fails closed. A faulting read renders the all-ones sentinel; always `Info`. |
-| `4118` | `usb_keyboard::open_controller` | the bounded wait for the VL805's **XHCI MCU firmware version** (config `0x50`) to read non-zero after the link trains — the readiness signal Linux's `rpi_firmware_init_vl805` checks, read over the *working* configuration path (the `4104` scan reads config fine) rather than the master-aborting BAR. Carries `polls_hex`, `fw_version_hex` (the final `0x50` dword) and `ready_hex` (`1` once non-zero, `0` if the budget expired). Bounded by `FW_LOADED_BUDGET_US` (~2 s) of elapsed wall time. `ready_hex=1` means firmware is resident (a still-`dead_dead` BAR is then a decode fault); `ready_hex=0` with `fw_version_hex=0` means the boot chain did not leave firmware resident and RustOS proceeds to fail closed without issuing a reload. Always `Info`. |
+| `4119` | `usb_keyboard::bring_up_keyboard` | a one-shot read-back of the controller's **inbound** (PCIe→system-memory) viewport registers off the trained register block (`BrcmPcieRc::inbound_window_readback`): `rc_bar1_lo_hex` and `rc_bar3_lo_hex` (the unused PCIe→GISB / PCIe→SCB inbound windows, which bring-up disables by clearing their size field), `rc_bar2_lo_hex`/`rc_bar2_hi_hex` (the active PCIe→system-memory viewport — offset bits plus the encoded size in the low field), `misc_ctrl_hex` (the inbound-path `MISC_MISC_CTRL`, whose `SCB0_SIZE` field in bits `[31:27]` sizes the inbound SCB→memory decode window — bring-up now programs it to match the `RC_BAR2` size, e.g. `0x11`, so VideoCore's VL805 firmware-load DMA is not silently dropped by an undersized inbound window), and `pcie_status_hex` for correlation. On the Pi 4 the boot firmware's VL805 handoff may depend on this inbound DMA window; the event lets a metal run compare our inbound translation with the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` rather than guessing the next change (`AGENTS.md` §15.7). A faulting read renders the all-ones sentinel; always `Info`. |
+| `4120` | `usb_keyboard::bring_up_keyboard` | the same inbound-viewport registers as `4119`, but captured **as the previous boot stage (`start4.elf`) left them**, before bring-up programs `RC_BAR2` (`BrcmPcieRc::entry_inbound_window`). raspberrypi/firmware #1495: `VideoCore`'s `NOTIFY_XHCI_RESET` firmware load *assumes* the `RC_BAR2` state it set at power-on, so comparing this `4120` capture with the post-program `4119` read-back tells a metal run whether bring-up diverged from that state (bring-up now **preserves** a firmware-configured `RC_BAR2` rather than overwriting it). A faulting read renders the all-ones sentinel; always `Info`. |
+| `4121` | `keyboard_service::VideoCoreFirmwareReset` | one-shot diagnostics from the VL805 firmware-reload mailbox exchange (`MmioMailbox::last_exchange_stats`), logged after the `NOTIFY_XHCI_RESET` call whether it succeeded or failed: `timeout_stage` (`post_room` = the firmware never accepted the request; `response` = it accepted but never replied; `none` = no timeout), `posted_word_hex` (the buffer bus address on the property channel), `post_room_polls_hex`/`response_reads_hex`, `foreign_channel_reads_hex`, `last_status_hex`, plus `wait_elapsed_us_hex` (the `CNTPCT_EL0`-measured **wall time** the reload exchange actually took) and `poll_budget_hex` (the iteration budget it was allowed — `FIRMWARE_RELOAD_POLL_BUDGET`, ten times the quick-read `DEFAULT_POLL_BUDGET`). A bare `4108 reason=timeout` cannot tell a doorbell/transport fault from `VideoCore` silently dropping the tag, nor a wait *cut short* from a genuinely dropped reply; these localise both. `NOTIFY_XHCI_RESET` is a long operation — `VideoCore` fetches the VL805 firmware blob and pushes it over PCIe — and the vendor bring-up waits a full second on it, whereas the earlier metal capture's `DEFAULT_POLL_BUDGET` busy-poll completed in only ≈400 ms (the `4122`→`4121` gap), so the budget was raised to give ≈4 s of wall time. A `response`-stage timeout whose `wait_elapsed_us_hex` already exceeds ~1 s is a genuinely dropped tag; one well under it would have been a premature give-up (`AGENTS.md` §15.7 — measure, don't guess). Always `Info`. |
+| `4122` | `keyboard_service::VideoCoreFirmwareReset` | one-shot diagnostics from the **runtime mailbox liveness probe** (`query_firmware_revision`, `GET_FIRMWARE_REVISION` tag `0x1`), issued over the same post-MMU transport **immediately before** the `4121` reload. The revision tag reads a constant and mutates no device state, so it isolates the one variable `4108`/`4121` cannot: whether the mailbox path itself works. Fields: `probe_outcome` (`ok`, or a mailbox-error name `window`/`timeout`/`firmware_error`/…), `firmware_revision_hex` (the revision word, `0` on failure), and the same five `ExchangeStats` fields as `4121` (`timeout_stage`, `posted_word_hex`, `post_room_polls_hex`, `response_reads_hex`, `foreign_channel_reads_hex`). `probe_outcome=ok` with a non-zero `firmware_revision_hex` proves the doorbell mapping, buffer bus address and cache coherency are sound — so a following `4121 timeout_stage=response` pins the fault on `VideoCore` dropping the xHCI tag (the firmware handoff); `probe_outcome=timeout` instead pins it on the runtime mailbox environment, before the reload ever ran (`AGENTS.md` §15.7). Always `Info`. |
+| `4114` | `usb_keyboard::open_controller` | a one-shot re-read of the VL805's configuration space and capability header **after** the firmware-version wait (`4118`) and bounded BAR-readiness settle (`4109`), served by the read-only `PciBus::read_config` plus a raw BAR read: `vl805_vendor_device_hex` (`0x00`), `vl805_command_status_hex` (`0x04`), `vl805_bar0_hex` (`0x10`), `vl805_bar1_hex` (`0x14`), `vl805_fw_version_hex` (the VL805 XHCI MCU firmware version at config `0x50`), and `caplength_hciversion_hex` (the BAR's `0x00` dword). A non-zero firmware version proves firmware is resident; `0` with a live `caplength_hciversion_hex` proves the controller's capability block decodes regardless (config `0x50` is a vendor convenience, not the readiness signal), while `0` with `dead_dead` caps means the controller never decoded and the bring-up fails closed at `Xhci::open`. A faulting read renders the all-ones sentinel; always `Info`. |
+| `4118` | `usb_keyboard::open_controller` | the bounded wait for the VL805's **XHCI MCU firmware version** (config `0x50`) to read non-zero after the link trains — the readiness signal the vendor firmware-init sequence checks, read over the *working* configuration path (the `4104` scan reads config fine) rather than the master-aborting BAR. Carries `polls_hex`, `fw_version_hex` (the final `0x50` dword) and `ready_hex` (`1` once non-zero, `0` if the budget expired). Bounded by `FW_LOADED_BUDGET_US` (~2 s) of elapsed wall time. `ready_hex=1` means firmware is resident (a still-`dead_dead` BAR is then a decode fault); `ready_hex=0` with `fw_version_hex=0` triggers a best-effort `NOTIFY_XHCI_RESET` reload but no longer aborts — the bring-up records the firmware-version gate (`4123`) and proceeds to probe the controller's own BAR capability block. Always `Info`. |
+| `4123` | `usb_keyboard::open_controller` | the **firmware-version gate decision**, logged once right after the best-effort firmware-version wait + `NOTIFY_XHCI_RESET` reload. `firmware_loaded_hex` is `1` when config `0x50` read non-zero (or the reload made it so), `0` otherwise. The config-space `0x50` register is a VL805 vendor convenience, **not** the xHCI controller's readiness signal (xHCI 1.2 §5.3): the metal capture (`4118`/`4121`/`4122`) shows it staying `0` while `VideoCore` drops the working mailbox's `NOTIFY_XHCI_RESET` tag, yet on a board whose boot firmware left the controller's MCU firmware resident the controller's own capability block can be live regardless. So `firmware_loaded_hex=0` no longer aborts the bring-up — the decision is recorded here and the bring-up proceeds to `wait_for_caps_ready` (`4109`) + `Xhci::open`, the real fail-closed gate (`AGENTS.md` §2.9 — the authoritative signal decides; §15.7). Always `Info`. |
+| `4124` | `usb_keyboard::open_controller` | a one-shot, **read-only** snapshot of the PCIe root-port and VL805 error/status registers taken **immediately after** the `NOTIFY_XHCI_RESET` firmware reload (right after the `4123` gate), served by `PciBus::read_config`: `bridge_command_status_hex` (root-port config `0x04`), `bridge_secondary_status_hex` (root-port config `0x1C` — the **Secondary Status** is its high half, bits `[31:16]`), and `vl805_command_status_hex` (VL805 config `0x04`). Our reload message is uses the vendor reset tag (`0x0003_0058`, `dev_addr=0x10_0000`) and `VideoCore` answers the `4122` liveness probe over the same transport, yet drops the reload reply (`4121 timeout_stage=response`) — so this isolates whether `VideoCore`'s firmware-load even *reached* the VL805 over PCIe. A **Received Master Abort** (bit `13`) or Received Target Abort (bit `12`) set in `bridge_secondary_status_hex` after the reload means the downstream VL805 path is unreachable, pinning the dropped reply on a PCIe root-complex bus-configuration mismatch rather than the mailbox. The abort bits are write-1-to-clear and this issues **no** config write, so they may carry over from the earlier BAR master-aborts — read it as a post-reload snapshot, not a cleared-then-reload delta (`AGENTS.md` §15.7 — measure, don't guess). A faulting read renders the all-ones sentinel; always `Info`. |
 | `4116` | `keyboard_service::spawn_if_present` | a one-shot **bring-up delay timing measurement**, logged once right after the VL805 bring-up chain returns. `requested_us_hex` is the total the code *asked* its `GenericTimerDelay` to wait across the whole chain (over `delay_calls_hex` calls); `counter_elapsed_us_hex` is the same span measured by `CNTPCT_EL0` against `CNTFRQ_EL0` (also echoed as `timer_hz_hex`). The metal capture read `requested_us_hex=0x57030` (≈356 ms / `0x103`=259 calls) yet `counter_elapsed_us_hex≈14.3 s` at the correct `timer_hz_hex=0x337_f980` — so ≈14 s of *real* time elapsed with only ≈356 ms of it in `busy_delay_us`: the counter is sound, the seconds are code-side. `4116` cannot split *where* in the chain they go; the per-line `[t=<ms>ms]` timestamps and `4117` do. The earlier guess that the ≈14 s was the 256 caps-readiness polls (`4109`) was **wrong**: a timestamped capture showed the caps wait is only ~0.35 s (the wall-time `wait_for_caps_ready` bound works; the master-abort returns the poison fast, not ~54 ms) and ~11 s of the pause is inside `BrcmPcieRc::bring_up` (`4117`). Always `Info`. |
-| `4117` | `usb_keyboard::bring_up_keyboard` | a one-shot per-phase wall-time split of the PCIe root-complex `bring_up`, logged right after the link-trained line: `reset_swinit_us_hex` (releasing the always-accessible `RGR1_SW_INIT_1` `0x9210` bridge `sw_init` reset the previous boot stage left asserted, run **first**; `train_link` deasserts the already-asserted `PERST#`, and that deassert edge re-triggers the `VideoCore` VL805 firmware reload), `reset_settle_us_hex` (the post-de-reset MISC settle — the gentlest no-touch-probe bring-up does **not** toggle the SerDes IDDQ or re-assert a fundamental reset, either of which could drop the resident VL805 firmware), `config_us_hex`, `linkwait_us_hex`, `link_polls_hex`, and `entry_rgr1_sw_init_hex`. The BCM2711 holds the controller core off until the RGR1 bridge `sw_init` reset is cycled, so the bring-up releases that reset **before** any MISC access (matching U-Boot/Linux `pcie-brcmstb`); the metal capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to microseconds (the ~11 s pause is gone). `entry_rgr1_sw_init_hex` is the raw `RGR1_SW_INIT_1` register sampled at bring-up entry **before** the reset cycles it (the always-accessible RGR1 block needs no link/MISC). The metal capture read `0x3` (both `PERST#` bit 0 and the bridge `sw_init` bit set), i.e. the previous boot stage handed off with PCIe held in fundamental reset — RustOS never writes this register outside its own reset, so it is the firmware handoff state, not something RustOS asserted, and is the same cold-reset state Linux's `pcie-brcmstb` brings up (so **not** itself the fault). The persistent `dead_dead`/`vl805_fw_version_hex=0` is instead explained by the root-port bridge command not latching Memory Space Enable when written pre-link (see the bridge-command section) — which blocks both our BAR reads and `VideoCore`'s firmware-load writes over the same bus — now enabled after link-up. The `*_us` spans sum to the whole bring-up; `BringUpTiming` and both the release-before-MISC ordering and the no-re-assert / `PERST#`-deassert-edge invariant are host-tested in `rustos_drv_bus_pcie_brcm` (`AGENTS.md` §15.7). Always `Info`. |
+| `4117` | `usb_keyboard::bring_up_keyboard` | a one-shot per-phase wall-time split of the PCIe root-complex `bring_up`, logged right after the link-trained line: `reset_swinit_us_hex` (releasing the always-accessible `RGR1_SW_INIT_1` `0x9210` bridge `sw_init` reset the previous boot stage left asserted, run **first**; `train_link` deasserts the already-asserted `PERST#`, and that deassert edge re-triggers the `VideoCore` VL805 firmware reload), `reset_settle_us_hex` (the post-de-reset MISC settle — the gentlest no-touch-probe bring-up does **not** toggle the SerDes IDDQ or re-assert a fundamental reset, either of which could drop the resident VL805 firmware), `config_us_hex`, `linkwait_us_hex`, `link_polls_hex`, and `entry_rgr1_sw_init_hex`. The BCM2711 holds the controller core off until the RGR1 bridge `sw_init` reset is cycled, so the bring-up releases that reset **before** any MISC access (matching the BCM2711 PCIe bring-up sequence); the metal capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to microseconds (the ~11 s pause is gone). `entry_rgr1_sw_init_hex` is the raw `RGR1_SW_INIT_1` register sampled at bring-up entry **before** the reset cycles it (the always-accessible RGR1 block needs no link/MISC). The metal capture read `0x3` (both `PERST#` bit 0 and the bridge `sw_init` bit set), i.e. the previous boot stage handed off with PCIe held in fundamental reset — RustOS never writes this register outside its own reset, so it is the firmware handoff state, not something RustOS asserted, and is the same cold-reset state the BCM2711 bring-up handles (so **not** itself the fault). The persistent `dead_dead`/`vl805_fw_version_hex=0` is instead explained by the root-port bridge command not latching Memory Space Enable when written pre-link (see the bridge-command section) — which blocks both our BAR reads and `VideoCore`'s firmware-load writes over the same bus — now enabled after link-up. The `*_us` spans sum to the whole bring-up; `BringUpTiming` and both the release-before-MISC ordering and the no-re-assert / `PERST#`-deassert-edge invariant are host-tested in `rustos_drv_bus_pcie_brcm` (`AGENTS.md` §15.7). Always `Info`. |
+| `4125` | `usb_keyboard::bring_up_keyboard` | one record per root-hub port, logged when the **online** controller's root-hub scan (`UsbDevice::enumerate_first_connected`) failed. Carries `port_hex` (1-based), the raw `portsc_hex`, and its decoded `ccs_hex` (Current Connect Status), `pp_hex` (Port Power), `ped_hex` (Port Enabled) and `speed_hex` (protocol speed id). The scan now asserts Port Power on every port before reading connect status — the Host Controller Reset in `Xhci::open` clears `PORTSC`, and a port-power-controlled controller (`HCCPARAMS1` PPC = 1, the VL805) reports a powered-off port as disconnected (xHCI 1.2 §4.19.1.1) — then debounce-polls for Current Connect Status, so this capture reflects the post-power state. The metal capture now reads port 1 `ccs=1 pp=1 ped=1 speed=3` (a connected, enabled high-speed device) with the rest powered but empty, so the fault has moved *into* `enumerate_hid` (see `4126`). `pp_hex=0` would mean the power write did not stick. A faulting port read renders the all-ones sentinel rather than being skipped; always `Info`. |
+| `4126` | `usb_keyboard::bring_up_keyboard` | the **enumeration step the root-hub bring-up last entered**, logged once when `UsbDevice::enumerate_first_connected` returns an error — the breadcrumb that localises a fault now that the controller is online and a port reports a device (`4125`) yet the scan still fails `device_fault`. `stage_hex` is the `rustos_drv_bus_usb::device::EnumStage` discriminant the driver records as `enumerate_hid` progresses (`0` Scan, `2` EnableSlot, `3` AddressDevice, `4` GetDeviceDescriptor, `5` GetConfigDescriptor, `6` ConfigureEndpoint, `7` SetConfiguration, `8` SetProtocol, `9` ArmReport, `10` Configured); `completion_hex` is the raw xHCI completion code of the last event that step observed (`0` none seen — a timeout; `1` Success; `4` UsbTransactionError; `5` TrbError; `6` Stall; `13` ShortPacket; or a controller-specific code verbatim). `stage_hex=0` means no connected port was entered (an empty hub / `not_found`); a later `stage_hex` with `completion_hex=0` is a stuck controller (the step's event never arrived), while a non-zero `completion_hex` is the device or controller answering with that error code — so the next metal capture pins exactly which xHCI operation faults and why, rather than guessing (`AGENTS.md` §15.7). One-shot at bring-up, read-only; always `Info`. |
+| `4127` | `usb_keyboard::bring_up_keyboard` | one record per **downstream port of a USB hub** found on the root hub, logged when the device that enumerated (`4102`) is itself a hub (`DeviceDescriptor::is_hub`, `bDeviceClass = 0x09`) rather than the keyboard. The Pi 4B's onboard `2109:3431` VIA Labs hub sits between the VL805 root hub and the USB-A ports, so the keyboard enumerates *downstream* of it. After the hub is configured, the bring-up reads its `bNbrPorts` (class `GET_DESCRIPTOR(hub)`), asserts Port Power on every downstream port (class `SET_FEATURE(PORT_POWER)` — a port-power-controlled hub reports a device disconnected until powered), waits `HUB_POWER_ON_GOOD_US` (~100 ms), then reads each port's class `GET_STATUS`. Fields: `num_ports_hex` (`bNbrPorts`), `port_hex` (1-based), the raw `wstatus_hex` (`wPortStatus`), `completion_hex` (the per-port `GET_STATUS` transfer's raw xHCI completion code — `1` success, `6` STALL, `4` transaction error, `0` none/timed out), decoded `connected_hex` (Current Connect Status) and `speed_hex` (xHCI protocol speed id — `1` full, `2` low, `3` high). The port reporting `connected_hex=1` is where the keyboard is attached and at what speed — the datapoint the downstream-addressing step (a second xHCI slot with a route string + TT) needs. A faulting per-port read renders the all-ones `wstatus` sentinel while `completion_hex` carries why it faulted, so a metal capture distinguishes a STALL from a timeout rather than reading the sentinel-decoded `connected`/`speed` as real (`AGENTS.md` §15.7); the latest capture read every port as the sentinel, so each per-port `GET_STATUS` faulted. A hub-descriptor or power-on fault aborts the scan (logged as `Error`), and the hub-descriptor-read failure additionally carries `completion_hex`; otherwise always `Info`. |
+| `4128` | `usb_keyboard::address_downstream_keyboard` | the HID keyboard addressed *downstream* of the hub on a second xHCI slot (or the reason it could not be), once a `4127` port reports `connected_hex=1`. Carries the keyboard's `vendor_id_hex`/`product_id_hex`, its assigned `xhci_slot`, the `hub_port_hex` it hangs off, and `speed_hex`. Before addressing, `enumerate_downstream_hid` marks the parent hub as a hub in its slot context (Hub bit + Number of Ports + TT Think Time) so the controller schedules the device's split transactions; a fault localises to the downstream Address Device. One-shot at bring-up; `Info` on success, `Error` with an `err=` field otherwise. |
+| `4129` | `usb_keyboard::KeyboardPumpDiagnostics` | **one-shot**, the first time the poll loop drains a non-zero event count after bring-up: the addressed keyboard's interrupt-IN endpoint is actually completing transfers and decoded edges are reaching the input arbiter. Carries `polls_hex`/`events_hex`. Its *absence* in a capture while `4131` keeps climbing localises a silent keyboard to "addressed but the controller never completes the interrupt endpoint", distinct from `4130`. `Info`. |
+| `4130` | `usb_keyboard::KeyboardPumpDiagnostics` | the poll loop's `pump_once` returned an error, logged when the error *kind* changes (capped at `MAX_ERROR_LOGS` = 16 so a wedged controller faulting every poll cannot flood the log). Carries the `err` name (e.g. `device_fault` — an unexpected event type or a slot/endpoint mismatch in `UsbDevice::next_report`), `polls_hex`, and `errors_hex`, so a capture names *why* the report path faults rather than the loop silently swallowing it. `Error`. |
+| `4131` | `usb_keyboard::KeyboardPumpDiagnostics` | a periodic liveness heartbeat of the keyboard poll loop, emitted every `HEARTBEAT_POLLS` (1024) polls and capped at `MAX_HEARTBEATS` (32) total so the log is finite though the loop runs forever. Carries cumulative `polls_hex`/`events_hex`/`errors_hex`: a capture where polls climb while events and errors stay zero proves the loop is alive and polling but the keyboard delivers no reports — the exact signal a "typing produces nothing" symptom needs. `Info`. |
 
 The last `4101` line a capture shows pins which stage a silent keyboard
 stalled at; the absence of `4102` after an `xHCI online` `4101` means the
-root hub enumerated no device (`err=not_found`).
+root hub bring-up failed, and the `4125` records then show every root-hub
+port's `PORTSC` (whether power stuck and whether any port reports a device
+attached) while the single `4126` record names the enumeration step the
+bring-up last entered and the xHCI completion code it saw there — together
+they distinguish an empty hub (`err=not_found`, `4126 stage=0`) from a
+device that is present but faults part-way through enumeration.
+
+**Keyboard poll-loop diagnostics (`4129`/`4130`/`4131`).** Once
+`4128` confirms the downstream keyboard is addressed, the keyboard
+service polls it forever (`pump_once` → decode → `ArbiterConsoleSink`).
+That loop historically discarded its result, so a capture where the
+keyboard was addressed yet typing produced nothing could not say whether
+reports were arriving, whether `next_report` was faulting, or whether the
+loop was even running. `KeyboardPumpDiagnostics` folds each poll result
+into bounded audit events: a one-shot `4129` the first time a report
+drains (keystrokes are flowing), an on-change `4130` carrying the
+`DriverError` name when `pump_once` faults (capped at 16), and a capped
+`4131` heartbeat (every 1024 polls, ≤ 32 total) carrying cumulative
+`polls`/`events`/`errors`. The three readings split the failure cleanly:
+`4129` present ⇒ the path works; `4130 err=device_fault` recurring ⇒
+`next_report` rejects the controller's interrupt-IN events (a slot/EP or
+event-type mismatch); `4131` polls climbing with `events=0 errors=0` ⇒
+the loop is alive but the controller never completes the interrupt
+endpoint (the addressed keyboard delivers no report). Host-proven by the
+`usb_keyboard` tests `pump_diagnostics_logs_the_first_report_only_once`,
+`pump_diagnostics_logs_a_pump_error_on_change_and_caps_it`, and
+`pump_diagnostics_emits_a_bounded_heartbeat`; metal-only beyond that
+(§0.4).
+
+**Interrupt-endpoint Max ESIT Payload — the no-report fix.** The metal
+capture then read exactly the `4131` branch: the heartbeat climbed
+(`polls` `0x400` → `0x8000`) with `events=0 errors=0`, no `4129` and no
+`4130`. The loop was alive and polling, `next_report` never faulted, yet
+the addressed full-speed keyboard delivered no interrupt report. Root
+cause: the interrupt-IN endpoint context (`ep_ctx_dwords`) left **Max
+ESIT Payload** zero (§6.2.3.8 dword 4 bits 16:31). The xHCI periodic
+scheduler reserves no bus bandwidth for a periodic endpoint whose Max
+ESIT Payload is zero (§4.14.2), so the controller scheduled the
+keyboard's split transactions through the hub's TT *never* — Address
+Device and Configure Endpoint both succeed (hence `4128`), but the
+endpoint is serviced never. The fix programs Max ESIT Payload = the max
+packet size for any periodic (non-zero-Interval) endpoint; a control
+endpoint leaves the field reserved-zero. Host-proven by
+`the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload`
+(and the existing report-drain tests, which the faithful mock now gates
+on a non-zero payload — all fail before the fix and pass after);
+metal-only beyond that (§0.4).
+
+**Interrupt endpoint read from the descriptor — the no-report fix that
+held.** The Max ESIT Payload fix did not change the metal symptom: the
+re-flash again read the `4131` branch, heartbeat climbing
+(`polls 0x400` → `0x8000`) with `events=0 errors=0`, no `4129`/`4130`,
+the addressed Keychron (`3434:0e21`, slot 2) silent. The remaining
+assumption was the *endpoint itself*: the driver hard-coded the
+interrupt-IN endpoint as endpoint 1 (DCI 3, with a fixed interval and
+8-byte packet) and never read the keyboard's endpoint descriptor. A
+keyboard whose interrupt-IN endpoint is not endpoint 1 then has its
+Configure Endpoint, doorbell, and `next_report` all aimed at the wrong
+DCI, so the controller schedules the real endpoint never — Address
+Device and Configure Endpoint succeed (hence `4128`, the hub marked, a
+non-zero Max ESIT Payload), yet no report flows. `InterfaceInfo::decode`
+now walks past the matched interface to its first interrupt-IN endpoint
+and captures its DCI (`2 × endpoint_number + 1`), `wMaxPacketSize`, and
+`bInterval`; `finish_enumeration` configures/doorbells/drains that DCI
+(stored as `UsbDevice::int_dci`), and `interrupt_interval` derives the
+endpoint-context Interval from `bInterval` and the device speed (xHCI
+Table 6-12) instead of a fixed exponent. A HID interface that reports no
+interrupt-IN endpoint fails closed (`BadMagic`, §2.9). Host-proven by
+`downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint` (a
+mock keyboard whose interrupt endpoint is endpoint 2 → DCI 5: the
+Configure Endpoint must name DCI 5 and the report drains on it — fails
+before the fix, passes after). **Metal: confirmed** — the re-flash drove
+the on-screen `Username:`/`Password:` prompt from the USB keyboard
+(`4129` drained the first report, `4131` then climbed with the keystroke
+count, `errors=0`), completing the Pi 4B USB-HID keyboard path
+end-to-end.
+
+**Root-hub port power (`PORTSC.PP`) — the post-firmware lever.** Once the
+inbound `SCB0_SIZE` fix let `VideoCore` land the VL805 firmware blob, the
+metal capture advanced decisively: `4118 fw_version=0x138c0 ready=1`,
+`4108` *reloaded*, `4123 firmware_loaded=1`, and `Xhci::open` brought the
+controller fully **online** (`4101 … enumerating root hub`, `4106`
+`max_ports=5`). The residual moved to root-hub enumeration: `4101 no usb
+device enumerated on the root hub err=device_fault`. The cause was that
+the scan read each port's Current Connect Status **once**, immediately
+after Run, with no Port Power asserted and no connect debounce — but the
+Host Controller Reset in `Xhci::open` clears every `PORTSC`, and the VL805
+is port-power-controlled (`HCCPARAMS1` PPC = 1), so a powered-off port
+reports disconnected no matter what is plugged in (xHCI 1.2 §4.19.1.1).
+`UsbDevice::enumerate_first_connected` now asserts `PORTSC.PP`
+(`Xhci::set_port_power`, masking the write-1-to-clear bits) on every
+reported port, then debounce-polls `1..=max_ports` (bounded by the
+engine's budget, fail-closed `NotFound` on a genuinely empty hub) for the
+first port to report a device. The `4125` per-port diagnostic captures
+the post-power `PORTSC` for the next metal run. Host-proven by the
+`drivers/bus/usb` tests `set_port_power_asserts_pp_and_rejects_a_bad_port`,
+`enumerate_first_connected_powers_every_root_port`, and
+`enumerate_first_connected_connects_a_port_only_after_power` (a mock
+modelling a device that reports connected only once its port is powered).
+Metal-only beyond that (QEMU models no Pi PCIe/USB, §0.4).
+
+**Enumeration fault localisation (`EnumStage` / `4126`).** The port-power
+fix put a connected device on the root hub (`4125` port 1
+`ccs=1 pp=1 ped=1 speed=3`) with the other four ports powered but empty,
+yet `UsbDevice::enumerate_first_connected` still returned `device_fault`
+*inside* `enumerate_hid`. The single coarse `DriverError::DeviceFault`
+could not pin that down, so the driver keeps a breadcrumb:
+`UsbDevice::enum_stage` records the `EnumStage` it last entered, and
+`UsbDevice::last_completion_code` the raw xHCI completion code of the last
+event that step observed (reset to `0` — "none/timeout" — at the start of
+each command/control transfer). On the failure path `bring_up_keyboard`
+logs both as `4126` (`stage_hex` + `completion_hex`) before the `4125`
+port dump. Host-proven by the `drivers/bus/usb` tests
+`enumerate_hid_records_the_configured_stage_on_success` and
+`enumerate_hid_stage_breadcrumb_localises_a_class_stall`.
+
+**Non-coherent DMA cache maintenance.** The metal `4126` capture read
+`stage_hex=2` (Enable Slot) with `completion_hex=0`: the *very first*
+command issued to the online controller never produced a Command
+Completion event. The controller is alive (its capability block reads
+live over MMIO) and a device is attached, so the controller is not
+processing the command ring at all. One contributor is a **cache
+coherency** gap: the BCM2711 PCIe root complex is **not** I/O-coherent
+(it does not snoop the CPU caches — this is why the VideoCore mailbox
+buffer and the HVS framebuffer already perform explicit cache
+maintenance), yet the xHCI device-shared DMA region is plain cacheable,
+identity-mapped RAM whose `DmaRegion for DmaSlab` read/write did **no**
+maintenance, so a command-ring TRB the CPU wrote could sit in a dirty
+cache line the controller never saw (and symmetrically the CPU could read
+a stale event ring). `DmaSlab` therefore gained an optional
+`SlabCoherencyFn` (`with_coherency`) and a `sync_range(offset, len)` that
+cleans **and** invalidates the touched range to the point of coherency;
+the USB driver's `DmaRegion` impl invalidates **before** every read and
+cleans **after** every write, and the kernel host
+(`keyboard_service::FrameDmaHost`) wires the aarch64
+`clean_invalidate_dcache_range` (`dc civac` + `dsb`) into every slab it
+mints (a slab minted without a shim — coherent interconnect / host test —
+skips maintenance). Host-proven by
+`dma_slab_sync_range_brackets_only_in_bounds_ranges_through_the_hook`
+(lib/virtio) and
+`dma_slab_region_brackets_writes_and_reads_with_cache_maintenance`
+(drivers/bus/usb). Necessary, but on its own **not sufficient**: a rebuilt
+image carrying the maintenance still captured `4126 stage_hex=2
+completion_hex=0`, so the controller had a second reason not to consume
+the command ring.
+
+**Scratchpad buffers.** That residual was the missing
+xHCI **scratchpad buffers**. `HCSPARAMS2` carries a *Max Scratchpad
+Buffers* field: page-sized buffers system software must reserve and point
+`DCBAA[0]` at before the controller can run (xHCI §4.20). The VL805
+datasheet reports `HCSPARAMS2 = 0xFC00_0031` — **31** scratchpad buffers
+(`SPR = 1`) — but the driver read neither `HCSPARAMS2` nor `PAGESIZE` and
+allocated none, so `DCBAA[0]` stayed zero and the controller had nowhere
+to save state: it accepts Run/Stop and reports live capability registers,
+yet executes no command, producing exactly the `stage=2 completion=0`
+signature. `Xhci::open` now reads `HCSPARAMS2`/`PAGESIZE` (exposed as
+`max_scratchpad_buffers()` / `page_size()`, surfaced in the `4106`
+geometry line as `max_scratchpad_hex`), `device::Layout` reserves a
+page-aligned scratchpad pointer array plus that many page-aligned buffers
+(failing closed if the carve cannot hold them or a scratchpad-requiring
+controller reports no page size / an unaligned base), and
+`UsbDevice::start` fills the array with each buffer's device-visible base
+and points `DCBAA[0]` at it. The device-shared DMA carve
+(`wiring::XHCI_DMA_BYTES`) grew from 16 KiB to **256 KiB** to hold 31 ×
+4 KiB scratchpad pages plus the rings/contexts. Host-proven by
+`start_reserves_scratchpad_and_programs_dcbaa0` (a mock that, like the
+VL805, withholds every command completion until `DCBAA[0]` is programmed —
+enumeration then runs end to end), `start_stalls_without_scratchpad_on_a_controller_that_needs_it`
+(fail-closed when the region is too small), and the
+`hcsparams2_decodes_the_vl805_scratchpad_count` / `pagesize_decodes_the_lowest_supported_page`
+register-decode tests. **Metal-confirmed:** the capture read `4106
+max_scratchpad_hex=0x1f` (the count is read) and `4126` advanced from
+`stage_hex=2` all the way to `stage_hex=8 completion_hex=6` — the command
+ring now runs and the device addresses, reads its descriptors, and
+configures; the missing scratchpad was the blocker.
+
+**`SET_PROTOCOL(boot)` STALL tolerated.** With the
+scratchpad reserved, enumeration reached the *final* step and stopped
+there: `4126 stage_hex=8 completion_hex=6` — the HID `SET_PROTOCOL(boot)`
+class request (`EnumStage::SetProtocol`) answered **STALL** (completion
+code `6`). `SET_PROTOCOL` is mandatory only for boot-subclass devices
+(HID 1.11 §7.2.6); a device that does not implement it STALLs the request,
+and that is a *protocol* stall — per USB 2.0 §8.5.3.4 the default control
+endpoint resumes on the next SETUP, so the device stays usable in its
+default protocol (this is exactly what USB HID class drivers do: a stalled
+`SET_PROTOCOL` is ignored). The driver previously treated *any* non-Success
+control completion as a `device_fault`, so the optional request's STALL
+aborted an otherwise fully enumerable keyboard. `enumerate_hid` now issues
+`SET_PROTOCOL(boot)` through a new `control_optional` helper that absorbs a
+STALL completion (the raw code is still preserved in `last_completion`),
+continues to prime the interrupt-IN ring, and reaches `EnumStage::Configured`;
+every *other* completion still fails closed (`AGENTS.md` §2.9 / §5.4). It
+is issued as the last EP0 transfer of enumeration and EP0 is not used
+again, so a halted control endpoint after the STALL is immaterial.
+Host-proven by `enumerate_hid_tolerates_a_stalled_set_protocol` (a mock
+that STALLs the class request now enumerates to `Configured` with
+`last_completion = Stall` and no protocol selected) and
+`enumerate_hid_fails_closed_on_a_non_stall_class_fault` (a genuine
+non-STALL class fault still aborts at the `SetProtocol` breadcrumb).
+**Metal-confirmed:** the capture now logs `4102 vendor=2109 product=3431`
+— enumeration runs end to end. The tolerated STALL *was* the last
+enumeration blocker; what enumerates, however, is not the keyboard (see
+the hub-topology lever below).
+
+**Hub topology — the current lever.** The `4102` device is `2109:3431` —
+the Pi 4B's **onboard VIA Labs USB hub**, which sits between the VL805
+root hub and the four USB-A ports. The keyboard is plugged into a USB-A
+port, so it enumerates *downstream* of that hub, not on a root-hub port;
+the bring-up enumerated and configured the hub itself, but a hub
+delivers no HID reports, so login still sees no keystrokes. The device's
+`bDeviceClass` is `0x09` (`DeviceDescriptor::is_hub`), so reaching the
+keyboard requires walking the hub. When the enumerated device is a hub the
+bring-up reads its `bNbrPorts` (class `GET_DESCRIPTOR(hub)`), asserts Port
+Power on every downstream port (class `SET_FEATURE(PORT_POWER)`), waits the
+power-on-good window, and logs each downstream port's hub-class
+`GET_STATUS` as `4127` (`UsbDevice::hub_num_ports` / `power_hub_port` /
+`hub_port_status`, issued over the hub's already-addressed default control
+endpoint). Each `4127` record carries `completion_hex` (the per-port
+`GET_STATUS` transfer's raw xHCI completion code) so the record whose
+`connected_hex=1` pins which downstream port the keyboard is on and at
+what `speed_hex` — *provided the read succeeded* (`completion_hex=1`); a
+faulting read instead renders the all-ones `wstatus` sentinel and the
+`completion_hex` says why.
+
+**EP0 halted by `SET_PROTOCOL` on the hub — fixed.** The metal capture
+then read `4101 reading the hub descriptor failed err=device_fault`: the
+class `GET_DESCRIPTOR(hub)` faulted even though the device-descriptor and
+configuration-descriptor reads on the same EP0 had succeeded. Root cause:
+`enumerate_hid` issued the HID `SET_PROTOCOL(boot)` to *every* enumerated
+device, including the hub. A hub is not a HID device, so it STALLs that
+class request — and an xHCI STALL **halts** the control endpoint (xHCI
+§4.10.2.4): the controller runs no further TRBs on EP0 until software
+resets it. `control_optional` *tolerated* the STALL (its safety rested on
+"the request is the last EP0 transfer of enumeration"), but that invariant
+breaks for a hub, whose bring-up reuses EP0 for the hub-descriptor read —
+which then ran on a halted endpoint and faulted. Fixed by issuing
+`SET_PROTOCOL(boot)` **only** to a HID interface
+(`InterfaceInfo::is_hid`, `bInterfaceClass == 0x03`); a hub's interface
+(class `0x09`) never receives it, so its EP0 is never STALL-halted and the
+hub-descriptor read runs cleanly. A keyboard plugged directly into the
+root hub is unaffected — its HID interface still gets `SET_PROTOCOL(boot)`,
+and it remains the last EP0 transfer. The `4127` "reading the hub
+descriptor failed" log now also carries `completion_hex` (the failed
+transfer's raw xHCI completion code) so a future fault distinguishes a
+STALL (`6`) from a transaction error (`4`) or a missing completion (`0`).
+Host-proven by the `drivers/bus/usb` tests
+`enumerate_hid_flags_a_hub_via_the_device_class`,
+`enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor` (the mock now
+STALLs the hub's `SET_PROTOCOL` and models the EP0 halt, so it fails before
+the gating fix and passes after),
+`hub_discovery_finds_the_downstream_device`,
+`hub_port_reads_disconnected_until_powered`, and
+`hub_num_ports_fails_closed_on_a_forged_descriptor`.
+
+**Per-port `GET_STATUS` faults — the current lever.** With the EP0 fix the
+hub-descriptor read succeeds (`4127 num_ports=4`) and Port Power is
+asserted on every downstream port, but the metal capture then read every
+port's `wstatus_hex=0xffff` (the all-ones sentinel) with
+`completion_hex=0` — each per-port class `GET_STATUS` (USB 2.0 §11.24.2.7)
+faulted (`hub_port_status` failed closed and the loop rendered the
+sentinel). The sentinel-decoded `connected=1 speed=2` are therefore
+artifacts, not real reads, so we still cannot tell which downstream port
+holds the keyboard.
+
+The `completion_hex=0` was **not** the timeout it appeared to be: the four
+`4127` records are spaced at the same ~250 ms serial-logging cadence as
+the non-faulting `4125` lines, i.e. each `GET_STATUS` failed *fast*, not
+after spending the million-iteration poll budget — so an event almost
+certainly *did* arrive. The fault was a diagnostic gap.
+`UsbDevice::control`/`command` recorded `last_completion` only *after*
+`await_event_for` returned `Ok`, but `await_event_for` returns `Err`
+**before that** when the event it observes is for an unexpected TRB
+address *or* carries a completion code the driver's `CompletionCode` enum
+does not model (its fail-closed `completion_code()` decode rejects xHCI
+codes outside {1,2,3,4,5,6,13}). Those paths left `last_completion` at the
+`0` "no event" sentinel, so a real-but-rejected code was mislabelled as a
+timeout. `await_event_for` now records
+`self.last_completion = event.completion_code_raw()` the moment it
+observes any command/transfer event — before the address match and before
+the decode — so `completion_hex` is truthful: a genuine `0` now means no
+event was seen at all, while a non-zero value (including a reserved /
+controller-specific code) names what the hub actually answered
+(`AGENTS.md` §15.7). The now-redundant post-`await` assignments in
+`control`/`command` were dropped (§2.2/§2.14). Host-proven by
+`faulting_hub_port_status_records_the_completion_code` (a STALLed
+`GET_STATUS`, code `6`) and the new
+`faulting_hub_port_status_records_an_undecodable_completion_code` (a
+`GET_STATUS` answered with the unmodelled xHCI code `7`, Resource Error:
+the read fails closed on the decode yet `last_completion_code()` now
+retains `7` — it read `0` before the fix).
+
+With `completion_hex` truthful, the next metal capture named the fault:
+ports 1–2 read `completion_hex=0x0d` (xHCI ShortPacket, the IN data
+stage) and ports 3–4 `completion_hex=0`, **all** still failing closed
+(`wstatus=0xffff`). Every *other* EP0 control transfer — the device,
+configuration, and hub descriptors, `SET_ADDRESS`/`SET_CONFIGURATION`,
+and `SET_FEATURE(PORT_POWER)` — succeeds on this same EP0, so only the
+class `GET_STATUS` fails. `control` already tolerates a ShortPacket data
+stage (it is expected for a variable-length IN), so the `0x0d` is the
+*data* stage being recorded, then the **status-stage** event never
+satisfying the wait: `await_event_for` returns `Err` *fast* (the
+~250 ms logging cadence, not the million-iteration budget), so a real
+event arrives that the wait rejects — not a timeout.
+
+**Localising the reject — the current lever.** The remaining gap was
+that `await_event_for` discarded *why* it rejected (an unexpected TRB
+type vs. a TRB-address mismatch vs. an undecodable completion code vs. a
+true budget timeout) and *what* event it saw. It now records both: a
+`last_reject` reason (`1` unexpected type, `2` address mismatch, `3`
+undecodable code, `4` budget timeout) and the rejected event's raw
+TRB-type (`last_event_type`), reset per transfer alongside
+`last_completion` and exposed via `UsbDevice::last_reject_reason` /
+`last_event_type`. Behaviour is unchanged (the same fail-closed `Err`,
+`AGENTS.md` §2.9); only the diagnostic is richer. Each `4127` record now
+carries `evtype_hex` + `reject_hex` so the next capture pins which:
+`reject_hex=1` with a non-`0x20` `evtype_hex` is an asynchronous
+controller event reaching the status-stage wait (the likely cause of the
+fast reject), `reject_hex=4` would be a genuine timeout. Host-proven by
+`faulting_hub_port_status_records_an_unexpected_event_type` (a
+`GET_STATUS` answered by a `NoOp`-type event: the wait fails closed,
+`last_reject_reason()=1`, `last_event_type()=8`, and
+`last_completion_code()` stays a truthful `0`).
+
+**Still to do (the next lever):** once a port reports a real
+`connected_hex=1`/`speed_hex`, actually *addressing* the downstream
+device needs a second xHCI slot whose slot context carries the **Route
+String** (the downstream hub port) and, for a low/full-speed device
+behind this high-speed hub, the **TT** hub-slot/port fields — a larger
+change deferred until that capture. Metal-only beyond the host tests.
 
 The `4104` scan first ran with only **one** function — the root-complex
 bridge itself (`14e4:2711`, class `0604`) at BDF 0 — and no `1106:3483`
@@ -1109,7 +1541,7 @@ the windowed configuration accessor
 single-device link, so the accessor now forwards a configuration
 transaction **only** to `device 0` on the secondary bus and resolves
 every other downstream target to the PCI "no device" sentinel *without*
-issuing a transaction (mirroring Linux `brcm_pcie_map_conf`). The bridge
+issuing a transaction (it never forwards to an absent target). The bridge
 subordinate is likewise kept equal to the secondary bus (no on-board
 switch to reach). With that fix the `4104` scan lists **two** functions —
 the bridge (`14e4:2711`, class `0604`) and the VL805 (`1106:3483`, class
@@ -1146,7 +1578,7 @@ nowhere near the CPU base (24 GiB), so `map_window` returned
 touched. Fixed by making the mapper bridge-aware: it now applies the
 bridge's outbound `ranges` translation
 (`outbound_cpu_base + (bus − outbound_pcie_base)`) to reach the
-identity-mapped CPU address — exactly the bus→CPU resolution Linux's host
+identity-mapped CPU address — exactly the bus→CPU resolution a host
 bridge performs. The controller register block stays CPU-physical/identity
 and is resolved first; because the Pi 4 regs island numerically falls
 inside the outbound PCIe window, a request that only partially overlaps the
@@ -1160,7 +1592,7 @@ is sized and typed (a 64-bit memory BAR) but carries no base. Firmware
 normally assigns a function's BARs, but resetting and re-enumerating the
 root complex leaves the downstream function unassigned, so mapping it
 targets physical address 0 and is refused. Assigning resources from the
-host bridge's outbound window is the PCI core's job (mirroring Linux's PCI
+host bridge's outbound window is the PCI core's job (the standard PCI
 resource assignment), and nothing was doing it. Fixed by adding
 [`PciBus::assign_bar`]: the USB bring-up now calls it before mapping the
 BAR — it probes the BAR's size and type, and if the address bits read zero
@@ -1222,26 +1654,33 @@ correctly (the CPU access reaches the BCM2711 root complex) while the
 VL805 itself does not decode. On a Raspberry Pi 4 the VL805's firmware is
 loaded by the **bootloader EEPROM** (via the `VideoCore`), and on such a
 board `VideoCore` (re)loads it on the **`PERST#` deassert edge** — the
-same edge Linux's `pcie-brcmstb` drives, after which Linux issues no
+same edge the bring-up drives, after which no
 runtime VL805 reload. The root-complex bring-up therefore drives a proper
 `PERST#` cycle (assert in `reset_controller`, deassert in `train_link`) so
 that edge fires (see "Drive the `PERST#` cycle" below).
 
-`open_controller` first waits for the firmware-version register (`0x50`) to
-read non-zero (`4118`), then waits for the controller's capability block to
-come live (`4109`). The BAR poll checks for a *live* value (a sane
-`CAPLENGTH` ≥ `0x20` and a plausible `HCIVERSION`, not the `dead_dead`/UR/zero
-patterns) up to a bounded ~256 ms budget before `Xhci::open` interprets the
-registers, turning "the controller just needed time" into a clean bring-up
-while a controller that never decodes still fails closed at `open` (§2.1
-bounded / §2.9 fail closed).
+`open_controller` waits for the firmware-version register (`0x50`) to read
+non-zero (`4118`) as a best-effort, diagnostic signal, then — **regardless of
+its outcome** — records the firmware-version gate (`4123`) and waits for the
+controller's capability block to come live (`4109`). The BAR poll checks for a
+*live* value (a sane `CAPLENGTH` ≥ `0x20` and a plausible `HCIVERSION`, not the
+`dead_dead`/UR/zero patterns) up to a bounded ~256 ms budget before
+`Xhci::open` interprets the registers, turning "the controller just needed
+time" into a clean bring-up while a controller that never decodes still fails
+closed at `open` (§2.1 bounded / §2.9 fail closed). The config-space `0x50`
+register is a VL805 vendor convenience, **not** the controller's readiness
+signal — the capability block on the BAR is — so a `0` there does not abort
+the bring-up before that block is probed.
 
-There is no runtime `FirmwareReset` hook in the keyboard path. RustOS does
-not issue `NOTIFY_XHCI_RESET`; the shared `rustos_vcmailbox` property client
-still encodes that mailbox for other diagnostics/protocol tests, but the Pi
-keyboard service does not call it. A metal capture that keeps `0x50 == 0` and
-BAR reads at `dead_dead` after the no-touch sequence is therefore a
-boot-firmware handoff issue, not a kernel-side reload failure.
+The keyboard service wires a runtime `FirmwareReset`
+(`keyboard_service::VideoCoreFirmwareReset`): when config `0x50` reads `0`,
+`open_controller` issues exactly one `NOTIFY_XHCI_RESET` over
+`rustos_vcmailbox` as a **best-effort** fallback (`4108`/`4121`/`4122`). Its
+outcome no longer gates the bring-up. A metal capture that keeps `0x50 == 0`,
+drops the reload, *and* keeps BAR reads at `dead_dead` (`4109 ready_hex=0`)
+after the no-touch sequence is a boot-firmware handoff issue and fails closed
+at `Xhci::open`; whereas a live BAR capability block (`4109 ready_hex=1`) lets
+the keyboard enumerate regardless of `0x50`.
 
 ### The bridge memory window — why the BAR still read `dead_dead`
 
@@ -1259,7 +1698,7 @@ register (so *configuration* reads reached the VL805 — hence the `4104`
 scan saw `1106:3483`) and the controller's CPU→PCIe outbound *translation*
 (`MEM_WIN0`), but never the bridge memory window, so the root port
 master-aborted every CPU access to the VL805's BAR even though config
-reads succeeded. A full PCI enumerator (Linux's `pci_setup_bridge`) sets
+reads succeeded. A full PCI enumerator sets
 this; the windowed `mech_brcm` accessor does not.
 
 The fix is `BrcmPcieRc::program_bridge_mem_window`, run during bring-up
@@ -1282,7 +1721,7 @@ decodes, and the `4107` dwords that follow read a real `CAPLENGTH`.
 
 A PCI-PCI bridge forwards a downstream *memory* transaction only when
 Memory Space Enable is set in its own Command register (config offset
-`0x04`); a full enumerator does this in `pci_enable_bridge`. Earlier
+`0x04`); a full enumerator does this once the link is up. Earlier
 bring-up issued `BrcmPcieRc::program_bridge_command` during the
 configuration phase — **before** `train_link` deasserts `PERST#` — and the
 `4110` read-back caught it not sticking:
@@ -1301,9 +1740,8 @@ bus-number (`0x18`) and Memory Base/Limit (`0x20`) writes — the same
 direct bus-0 path — stuck. The register offset is therefore right; what
 differs is *timing*: the integrated RC latches Memory Space Enable only
 against a **live link**, so a write issued while `PERST#` is still
-asserted is lost. The user's working Linux on this exact board enables the
-root port only once the link trains — `pcieport 0000:00:00.0: enabling
-device (0000 -> 0002)` — i.e. *after* link-up.
+asserted is lost. A working boot chain on this exact board enables the
+root port only once the link trains — i.e. *after* link-up.
 
 The fix mirrors that: `BrcmPcieRc::bring_up` now calls
 `program_bridge_command` **last**, after `train_link` and the fail-closed
@@ -1315,8 +1753,8 @@ asserts the command write follows the final `PERST#`-deassert write to
 
 This is the unifying explanation for the otherwise-puzzling triple
 symptom. `VideoCore` reaches the VL805 over the **same configured PCI bus**
-to load its firmware (Linux's `rpi_firmware_init_vl805` notes "VideoCore
-expects from us a configured PCI bus"), and that path runs through the
+to load its firmware (`VideoCore`
+expects a configured PCI bus), and that path runs through the
 root-port bridge's memory window. With Memory Space Enable not latched,
 *both* our CPU reads of the BAR *and* `VideoCore`'s `NOTIFY_XHCI_RESET`
 firmware-load writes to the BAR master-abort — so the BAR reads
@@ -1350,7 +1788,7 @@ the limit `0x6_00000000`, an inverted and empty window (see the root-cause
 section below). With the outbound translation window decoding nothing,
 every CPU access to the BAR master-aborted to `dead_dead` regardless of
 firmware. That the same `dead_dead` reproduced on a **known-good board
-whose USB works under Linux and RISC OS** confirmed the fault was *not* the
+whose USB works under other operating systems** confirmed the fault was *not* the
 board and *not* the firmware — it was systematic in this kernel, in a
 register we program.
 
@@ -1361,13 +1799,12 @@ distinct from RustOS's own all-ones `0xffff_ffff` diagnostic sentinel):
 the RC returns it when a CPU memory access reaches the RC but no downstream
 target decodes the PCIe address. On this Pi 4 the VL805's xHCI firmware is
 loaded by the **bootloader EEPROM** (via `VideoCore`): the keyboard works
-in the pre-boot firmware menu and early Linux, and Linux issues **no**
-runtime VL805 reload (its dmesg shows only the unrelated "ASPM: VL805
-fixup"). On such a bootloader-EEPROM board `VideoCore` (re)loads the VL805
-blob on the **`PERST#` deassert edge** — the same edge Linux's
-`pcie-brcmstb` drives. The decisive metal datum was the VL805 **XHCI MCU
-firmware version** (config `0x50`, the register Linux's
-`rpi_firmware_init_vl805` checks): it read `0`, and two sequences failed
+in the pre-boot firmware menu, and no
+runtime VL805 reload is needed. On such a bootloader-EEPROM board `VideoCore` (re)loads the VL805
+blob on the **`PERST#` deassert edge** — the only edge the
+bring-up drives. The decisive metal datum was the VL805 **XHCI MCU
+firmware version** (config `0x50`, the vendor firmware-version
+register): it read `0`, and two sequences failed
 identically — "assert `PERST#` **and** issue `NOTIFY_XHCI_RESET`
 unconditionally" (the redundant second load that raspberrypi/firmware #1380
 reports can kill the VL805) and "never assert `PERST#`, reload as a
@@ -1391,7 +1828,7 @@ fundamental reset) and do not unconditionally reload:
   and `bring_up_trains_the_link_and_programs_the_windows`.
 - `open_controller` waits for the VL805's XHCI MCU firmware version
   (config `0x50`, [`wait_for_firmware_loaded`], `4118`) to read non-zero
-  **first** — the signal Linux's `rpi_firmware_init_vl805` checks, read
+  **first** — the signal the vendor firmware-init sequence checks, read
   over the configuration path that works on metal while the BAR aborts. A
   non-zero version skips any reload, so RustOS never double-loads resident
   firmware. If the bounded wait stays `0`, the service issues exactly one
@@ -1439,7 +1876,7 @@ without trusting a controller that is still not ready after reset.
 The diagnostics showed the VL805 fully present (`1106:3483`, BAR0 based at
 `0xc000_0000`, memory-space + bus-master enabled) while the capability block
 stayed `dead_dead`. `4114` re-reading the function as correctly programmed,
-plus the keyboard working under Linux and RISC OS on the same board/card/
+plus the keyboard working under other operating systems on the same board/card/
 firmware, redirected the search to the **outbound (CPU→PCIe) translation
 window** — the one path config reads (which take the RC's internal `EXT_CFG`
 route) do not exercise.
@@ -1447,7 +1884,7 @@ route) do not exercise.
 The defect was in `rustos_drv_bus_pcie_brcm::regs`: the BCM2711
 **proprietary** `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` register (`0x4070`)
 packs the window **limit** in bits `[31:20]` and the **base** in bits
-`[15:4]`, matching Linux's `pcie-brcmstb`. But
+`[15:4]`. But
 `MEM_WIN0_BASE_LIMIT_BASE_MASK`/`..._LIMIT_MASK` were defined with the two
 halves transposed (`0xfff0_0000` / `0xfff0`), so
 `program_outbound_window` wrote the base into the limit's half and
@@ -1455,8 +1892,7 @@ vice-versa. For the Pi 4 window (CPU `0x6_0000_0000`, 1 GiB) that produced
 the metal `4111` value `0x00003ff0`, decoding to base `0x6_3ff00000`
 **above** limit `0x6_00000000`: an inverted, empty window that decoded no
 address, so every CPU access to the VL805's BAR master-aborted to
-`dead_dead` regardless of the firmware state. The field positions now match
-Linux's `pcie-brcmstb`; the expected Pi read-back is
+`dead_dead` regardless of the firmware state. The field positions are now correct; the expected Pi read-back is
 `mem_win0_base_limit_hex=0x3ff00000` with `base_hi=limit_hi=0x6`.
 
 The fix swaps the two mask constants so the base lands in `[31:20]` and the

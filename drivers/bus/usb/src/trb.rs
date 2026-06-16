@@ -110,6 +110,19 @@ impl Trb {
         TrbType::from_raw((self.control >> TYPE_SHIFT) & TYPE_MASK)
     }
 
+    /// Raw TRB Type field (control bits 15:10), **undecoded**.
+    ///
+    /// Unlike [`Self::trb_type`], this never fails closed on a type the
+    /// driver does not model — so a diagnostic can report the verbatim
+    /// type of an unexpected event (e.g. an asynchronous controller
+    /// event) the consumer rejected, rather than collapsing it to an
+    /// error (`AGENTS.md` §15.7 — measure, don't guess). `0` doubles as
+    /// "no event observed".
+    #[must_use]
+    pub const fn trb_type_raw(&self) -> u8 {
+        ((self.control >> TYPE_SHIFT) & TYPE_MASK) as u8
+    }
+
     /// Completion code of an event TRB (status bits 31:24, §6.4.2).
     ///
     /// # Errors
@@ -118,6 +131,19 @@ impl Trb {
     /// models.
     pub const fn completion_code(&self) -> Result<CompletionCode, DriverError> {
         CompletionCode::from_raw(self.status >> 24)
+    }
+
+    /// Raw completion-code byte of an event TRB (status bits 31:24),
+    /// **undecoded**.
+    ///
+    /// Unlike [`Self::completion_code`], this never fails closed on a
+    /// code the driver does not model — so a diagnostic can report a
+    /// controller-specific or reserved fault code verbatim instead of
+    /// collapsing it to an error (`AGENTS.md` §15.7 — measure, don't
+    /// guess). `0` (xHCI "Invalid") doubles as "no event observed".
+    #[must_use]
+    pub const fn completion_code_raw(&self) -> u8 {
+        (self.status >> 24) as u8
     }
 
     /// Slot ID of an event TRB (control bits 31:24, §6.4.2).

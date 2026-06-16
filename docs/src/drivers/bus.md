@@ -118,9 +118,8 @@ bus-number register) and resolves every other downstream target to the
 hygiene: once the root port forwards downstream, a config read to a
 non-existent target forwards a TLP that nothing answers, and the
 completion timeout becomes a CPU external abort — a flat 256-bus walk
-over forwarded config would wedge the boot CPU. The gate mirrors Linux
-`brcm_pcie_map_conf` returning `NULL` for a non-zero slot on a non-root
-bus.
+over forwarded config would wedge the boot CPU. The gate resolves a
+non-zero slot on a non-root bus to the sentinel without forwarding.
 
 ### Enumeration walk
 
@@ -207,8 +206,8 @@ MISC-block (`0x4xxx`) access does not complete until the always-accessible
 RGR1 bridge `sw_init` reset (`0x9210`) is released — touching MISC first
 master-aborts on the SoC bus completion timeout (~10.8 s on metal),
 which is what the multi-second bring-up pause turned out to be. So,
-matching U-Boot/Linux `pcie-brcmstb`: release the bridge `sw_init` reset,
-bringing the core and its MISC block online, then let it settle. This is
+following the BCM2711 PCIe bring-up sequence: release the bridge `sw_init`
+reset, bringing the core and its MISC block online, then let it settle. This is
 the gentlest **no-touch-probe** bring-up: the previous boot stage
 (`start4.elf`) hands off with the bridge `sw_init` reset **and** `PERST#`
 already asserted and the VL805 firmware loaded over the power-on link, so
@@ -217,8 +216,8 @@ the driver does **not** re-assert a fundamental reset or toggle the SerDes
 link-up step deasserts the already-asserted `PERST#`, producing the single
 deassert edge. On the Pi 4 the VL805's xHCI firmware is loaded by the
 bootloader EEPROM (via VideoCore), and on such a board VideoCore (re)loads
-the blob on the **`PERST#` deassert edge** — the same edge Linux's
-`pcie-brcmstb` drives, after which Linux issues no runtime VL805 reload.
+the blob on the **`PERST#` deassert edge** — the only edge the bring-up
+drives, after which no runtime VL805 reload is issued.
 So this driver produces that single deassert edge (rather than a fresh
 fundamental reset), and the keyboard composition deliberately does **not**
 issue a runtime `NOTIFY_XHCI_RESET` reload if the VL805's firmware version
@@ -237,18 +236,17 @@ bridge Memory Base/Limit window (config offset `0x20`, covering the
 outbound PCIe range) so the port forwards *memory* transactions to the
 VL805's BAR — the BCM2711 ships that register empty, so without it BAR
 reads master-abort to the `0xdead_dead` poison even though config reads
-succeed (mirroring Linux's `pci_setup_bridge`, which the windowed
-`mech_brcm` accessor does not perform); program the outbound (CPU→PCIe)
+succeed (the bridge-window assignment a full PCI enumerator performs, which
+the windowed `mech_brcm` accessor does not); program the outbound (CPU→PCIe)
 MMIO window from the discovered `ranges`. Finally deassert `PERST#` and
 poll `MISC_PCIE_STATUS` for data-link-active + phy-link-up, bounded by
 `DEFAULT_LINK_POLLS` (100 ms), and confirm the link with a fail-closed
 `link_up()` (`DeviceFault` otherwise). **Only then** enable Memory Space
 + Bus Master in the bridge's *own* Command register (config offset
-`0x04`) — the standard PCI-PCI bridge enable a full enumerator performs
-(Linux's `pci_enable_bridge`), which the windowed `mech_brcm` accessor
-does not. This is issued *after* the link is up, mirroring Linux, which
-enables the device (`pcieport 0000:00:00.0: enabling device
-(0000 -> 0002)`) only once the link trains: the integrated RC latches
+`0x04`) — the standard PCI-PCI bridge enable a full enumerator performs,
+which the windowed `mech_brcm` accessor
+does not. This is issued *after* the link is up, because a PCI-PCI bridge
+is enabled only once the link trains: the integrated RC latches
 Memory Space Enable against a live link, so an earlier write (with
 `PERST#` still asserted) does not stick — the metal `4110` symptom that
 read the bridge command back as `0x0000` and left the VL805 BAR
@@ -260,7 +258,7 @@ registers back (`RC_BAR1_LO`, `RC_BAR2_LO`/`HI`, `RC_BAR3_LO`) for a
 read-only, fail-closed metal diagnostic (`outbound_window_readback` is its
 outbound twin). On the Pi 4 the boot firmware's VL805 handoff may depend on
 this inbound DMA window; the read-back lets a metal run compare it with
-working Linux's `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`
+the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`
 (`AGENTS.md` §15.7).
 
 ### Composition
@@ -409,15 +407,92 @@ buffers), refusing a region that is misaligned or too small.
 `UsbDevice::start` zeroes the region, publishes the ERST entry and
 the rings' Link TRBs, and starts the controller through `Xhci::start`.
 `UsbDevice::enumerate_hid(port)` then brings the device on a root-hub
-port to the configured boot-protocol state (§4.3): port reset when the
-port is not yet enabled, Enable Slot (validating the returned slot
-ID), Address Device (input control context `A0 | A1`, slot context,
-EP0 context with the speed-derived max packet size),
-`GET_DESCRIPTOR(device)` (decoded fail-closed — a forged length, type,
-or zero-configuration descriptor is `BadMagic`), Configure Endpoint
-for the interrupt-IN endpoint (DCI 3), `SET_CONFIGURATION(1)`,
-`SET_PROTOCOL(boot)`, and finally a primed interrupt-IN ring. Control
-transfers carry the SETUP payload as immediate data, set
+port to the configured state (§4.3): port reset when the port is not
+yet enabled, Enable Slot (validating the returned slot ID), Address
+Device (input control context `A0 | A1`, slot context, EP0 context
+with the speed-derived max packet size), `GET_DESCRIPTOR(device)`
+(decoded fail-closed — a forged length, type, or zero-configuration
+descriptor is `BadMagic`), `GET_DESCRIPTOR(configuration)` (the first
+interface descriptor's class triple and `bConfigurationValue` /
+`bInterfaceNumber` drive the steps below — never assumed), and
+`SET_CONFIGURATION`.
+
+The interrupt-IN endpoint (DCI 3) is configured (Configure Endpoint),
+primed, and doorbelled — and `SET_PROTOCOL(boot)` issued — **only for a
+HID interface**. A hub reports interface class `0x09`, not HID: it
+keeps only its control endpoint, because this engine reads a hub's
+downstream ports over EP0 hub-class `GET_STATUS`, never its interrupt
+status-change endpoint. Arming that endpoint for a hub would make the
+hub deliver asynchronous status-change reports that interleave with —
+and fault — those EP0 control transfers (a transfer event whose
+interrupt-TRB pointer is not in the control wait's watch list →
+`REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal symptom was
+the hub's per-port `GET_STATUS` reads returning the all-ones sentinel).
+
+A device *downstream* of an enumerated hub (the Pi 4B keyboard hangs
+off the onboard `2109:3431` VIA hub) is reached on a **second xHCI
+slot**. `UsbDevice::enumerate_downstream_hid(down_port, speed)` keeps
+the hub addressed on its slot and gives the downstream device its own
+EP0 ring and output context (the layout reserves both;
+`control`/`address_device`/`next_report` follow the active slot through
+`ep0_ring_off`/`output_ctx_off`), then Enable Slot + Address Device
+with a slot context carrying the **Route String** (the hub's downstream
+port, §8.9) and — for a full/low-speed device behind the high-speed hub
+— the **transaction-translator** Hub Slot ID and Port Number (§6.2.2),
+so the controller splits its transactions through the hub's TT. The
+post-Address sequence (descriptors → Configure Endpoint →
+`SET_CONFIGURATION` → `SET_PROTOCOL(boot)` → primed report ring) is the
+shared `finish_enumeration`, identical to a root-port device — only the
+topology in the slot context differs. The caller owns the wall-clock
+power-on-good and reset-recovery delays: it powers the port, resets it
+(`SET_FEATURE(PORT_RESET)`), waits, and confirms the port enabled with
+the speed read from `GET_STATUS` before addressing.
+
+Before addressing anything behind it, `enumerate_downstream_hid` first
+**marks the hub as a hub** in its own slot context
+(`configure_hub_slot`): it reads the hub descriptor (`bNbrPorts` and the
+`wHubCharacteristics` TT Think Time, `read_hub_topology`), copies the
+controller's live output slot context, sets the **Hub** bit, **Number of
+Ports**, and **TT Think Time** (single-TT, so the Multi-TT bit stays
+clear), and issues a Configure Endpoint over the hub's slot that names
+only the slot context (Add flag `A0`). Without this the controller never
+schedules the split transactions a full/low-speed device behind the hub
+needs, so the keyboard is addressed (Address Device succeeds) but its
+interrupt-IN endpoint never completes and it delivers no report — the
+metal symptom where the keyboard enumerated but typing produced nothing
+(xHCI §6.2.2).
+
+The interrupt-IN endpoint context also carries a non-zero **Max ESIT
+Payload** (`ep_ctx_dwords`, §6.2.3.8 dword 4 bits 16:31 = the max packet
+size for a boot HID endpoint). The xHCI periodic scheduler reserves no
+bus bandwidth for a periodic endpoint whose Max ESIT Payload is zero
+(§4.14.2), so the controller would service it never — fatal precisely
+for a full/low-speed interrupt endpoint behind the hub's TT, where the
+scheduler must budget the split transactions. With the hub marked but
+the payload left zero, Address Device and Configure Endpoint both
+succeed, yet the keyboard delivers no report and the poll loop spins
+with zero events — the metal symptom where the addressed keyboard never
+typed. A control endpoint (Interval `0`) leaves the field reserved-zero.
+
+The interrupt-IN endpoint itself is **read from the configuration
+descriptor, never assumed** (`InterfaceInfo::decode`). The driver walks
+past the matched interface descriptor to its first interrupt-IN endpoint
+and takes its Device Context Index (`2 × endpoint_number + 1`),
+`wMaxPacketSize`, and `bInterval`; `finish_enumeration` then configures,
+doorbells, and (via `next_report`) drains *that* DCI, and
+`interrupt_interval` encodes the endpoint-context Interval from the
+descriptor's `bInterval` and the device speed (high/SuperSpeed
+`bInterval − 1`; full/low-speed frames → the `fls(bInterval × 8) − 1`
+microframe exponent, clamped 3..=10, xHCI Table 6-12). Hard-coding the
+endpoint as endpoint 1 (DCI 3) left the controller polling — and the
+doorbell ringing — the wrong endpoint for a keyboard whose interrupt-IN
+endpoint sat elsewhere, so it scheduled the real endpoint never: the
+keyboard was addressed (`4128`) with the hub marked and a non-zero Max
+ESIT Payload, yet typing produced nothing and the poll loop spun with
+zero events. A HID interface that reports no interrupt-IN endpoint is a
+forged/corrupt descriptor and fails closed (`BadMagic`, §2.9).
+
+Control transfers carry the SETUP payload as immediate data, set
 Interrupt-on-Short-Packet on the IN data stage, and watch only the
 addresses of their own in-flight TRBs: a completion for a TRB never
 issued, an undecodable completion code, an unexpected event type, or a
@@ -669,7 +744,7 @@ supertrait of `Bus`) is that seam:
   programs BARs, but resetting and re-enumerating a root complex (the
   BCM2711 PCIe bring-up) leaves a downstream function unassigned, so a
   map would target physical address 0; assigning resources from the
-  bridge's window is the PCI core's job, mirroring Linux. It probes the
+  bridge's window is the PCI core's job. It probes the
   BAR's size/type, writes both dwords for a 64-bit BAR (control bits
   preserved), and leaves an already-based BAR untouched (a no-op under
   QEMU or a firmware-assigned BAR). It fails closed (`OutOfRange`) if the

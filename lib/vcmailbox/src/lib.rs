@@ -345,6 +345,20 @@ struct TagValue<'a> {
 /// Find `tag` in the response `words` and return its value slice,
 /// enforcing the per-tag protocol invariants (response bit present,
 /// response length sane and within the declared value buffer).
+///
+/// On the `VideoCore` property protocol each tag carries a value-buffer
+/// length (`words[at + 1]` — the space the ARM side provisioned) and a
+/// request/response code word (`words[at + 2]`); on reply the firmware
+/// sets the response bit and writes the byte length it *wanted* to send
+/// into that word, which may legally exceed the value buffer, in which
+/// case it actually wrote only `min(buffer_length, response_length)`
+/// bytes. Every message this crate emits provisions each tag's value
+/// buffer to `max(request, response)` words (see `push_tag` callers), so
+/// the firmware never needs to truncate a reply for our fixed-layout
+/// tags. A reply that nonetheless claims a length greater than the
+/// buffer is therefore a firmware fault for these tags, not the benign
+/// truncation case, so it is failed closed rather than clamped
+/// (`AGENTS.md` §5.4 — the firmware is external input).
 fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, MailboxError> {
     let mut at = 2;
     loop {
@@ -370,6 +384,11 @@ fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, Mai
                 return Err(MailboxError::MalformedResponse);
             }
             let resp_bytes = code & !TAG_RESPONSE_BIT;
+            // `resp_bytes > buf_bytes` is the firmware signalling it
+            // wanted to send more than we provisioned; we always size
+            // every tag's value buffer to `max(request, response)`, so
+            // for our fixed-layout tags this is a fault, not the benign
+            // truncation case — fail closed (see the doc comment).
             if resp_bytes % 4 != 0 || resp_bytes > buf_bytes {
                 return Err(MailboxError::MalformedResponse);
             }
@@ -613,6 +632,72 @@ pub fn query_display_size(
     decode_display_size_response(&message)
 }
 
+// --- Mailbox liveness probe ------------------------------------------------
+
+/// Tag: get the `VideoCore` firmware revision (request: none; response:
+/// one revision word). The most benign property call there is — it
+/// reads a constant and mutates no hardware state — which makes it the
+/// right *liveness probe* for the runtime mailbox path.
+const TAG_GET_FIRMWARE_REVISION: u32 = 0x0000_0001;
+
+/// Encode the firmware-revision query property message (one get tag,
+/// one response word).
+#[must_use]
+pub fn encode_firmware_revision_query() -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(&mut words, at, TAG_GET_FIRMWARE_REVISION, &[0]);
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Decode and validate the firmware's answer to
+/// [`encode_firmware_revision_query`], returning the revision word.
+///
+/// # Errors
+///
+/// * [`MailboxError::FirmwareError`] — the firmware rejected the
+///   request or returned an unknown header code.
+/// * [`MailboxError::MalformedResponse`] — a protocol violation, or the
+///   firmware did not set the per-tag response bit (an unhonoured tag).
+pub fn decode_firmware_revision_response(
+    words: &[u32; PROPERTY_WORDS],
+) -> Result<u32, MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    tag_word(words, TAG_GET_FIRMWARE_REVISION)
+}
+
+/// Probe the runtime mailbox by asking the `VideoCore` for its firmware
+/// revision over `transport`.
+///
+/// This is a *liveness probe*, not a feature: the firmware-revision tag
+/// reads a constant and touches no device state, so issuing it
+/// immediately before a heavier property call (e.g.
+/// [`notify_xhci_reset`]) localises a failure of that call. If the probe
+/// itself fails or times out, the runtime mailbox path (doorbell
+/// mapping, buffer bus address, cache coherency) is broken and the
+/// heavier call never had a chance; if the probe succeeds but the
+/// heavier call times out, the transport is sound and the firmware is
+/// specifically dropping that tag (`AGENTS.md` §15.7 — measure, don't
+/// guess).
+///
+/// # Errors
+///
+/// Any [`MailboxError`] from the transport or
+/// [`decode_firmware_revision_response`].
+pub fn query_firmware_revision(transport: &mut dyn MailboxTransport) -> Result<u32, MailboxError> {
+    let mut message = encode_firmware_revision_query();
+    transport.exchange(&mut message)?;
+    decode_firmware_revision_response(&message)
+}
+
 // --- VL805 xHCI firmware reload ------------------------------------------
 
 /// Encode the [`TAG_NOTIFY_XHCI_RESET`] property message carrying the
@@ -779,6 +864,54 @@ impl BufferCoherency {
     }
 }
 
+/// Which doorbell wait a timed-out [`MmioMailbox::exchange`] gave up in,
+/// recorded in [`ExchangeStats`] so a metal capture localises a
+/// [`MailboxError::Timeout`] without re-running (`AGENTS.md` §15.7).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum TimeoutStage {
+    /// The exchange did not time out.
+    #[default]
+    None,
+    /// Timed out waiting for write room before the request could be
+    /// posted (the firmware never drained the inbox).
+    PostRoom,
+    /// The request was posted, but no completion ever arrived on the
+    /// property channel within the budget (the firmware never replied —
+    /// e.g. it silently dropped the tag).
+    Response,
+}
+
+/// Diagnostics from the most recent [`MmioMailbox::exchange`], retained
+/// regardless of success or failure so the caller can log *why* a
+/// property call behaved as it did.
+///
+/// The decisive datapoint for a [`MailboxError::Timeout`] is
+/// [`Self::timeout_stage`]: `PostRoom` means the firmware never even
+/// accepted the request, while `Response` means it accepted it but never
+/// replied — two very different faults that the bare `Timeout` error
+/// cannot tell apart (`AGENTS.md` §15.7 — measure, don't guess). The
+/// other fields pin the posted bus-address word, the last status
+/// register value observed, and how many foreign-channel completions
+/// were drained before ours (or would have been).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExchangeStats {
+    /// The exact word posted to the write register (the buffer bus
+    /// address OR-ed with the property channel nibble).
+    pub posted_word: u32,
+    /// Polls spent waiting for write room before posting.
+    pub post_room_polls: u32,
+    /// Completion reads taken while waiting for our channel's reply
+    /// (each either ours or a drained foreign-channel post).
+    pub response_reads: u32,
+    /// Of those, how many were completions for a *different* channel,
+    /// drained and ignored.
+    pub foreign_channel_reads: u32,
+    /// The last value read from the mailbox status register.
+    pub last_status: u32,
+    /// Which wait the exchange timed out in, or [`TimeoutStage::None`].
+    pub timeout_stage: TimeoutStage,
+}
+
 /// The metal mailbox transport: the doorbell register block plus a
 /// DMA-visible property buffer, both reached through capability-gated
 /// [`RegisterWindow`]s (`AGENTS.md` §4 — no ambient authority).
@@ -788,6 +921,7 @@ pub struct MmioMailbox {
     buffer_bus_addr: u32,
     poll_budget: u32,
     coherency: BufferCoherency,
+    last_exchange: ExchangeStats,
 }
 
 impl MmioMailbox {
@@ -852,18 +986,34 @@ impl MmioMailbox {
             buffer_bus_addr,
             poll_budget,
             coherency,
+            last_exchange: ExchangeStats::default(),
         })
     }
 
-    /// Poll `status_reg` until `busy_bit` clears, within the budget.
-    fn wait_clear(&self, status_reg: usize, busy_bit: u32) -> Result<(), MailboxError> {
-        for _ in 0..self.poll_budget {
+    /// Diagnostics from the most recent [`MmioMailbox::exchange`] (a
+    /// fresh default before the first call), retained on both success
+    /// and failure so the caller can log a timed-out exchange's stage
+    /// and counts without re-running it (`AGENTS.md` §15.7).
+    #[must_use]
+    pub fn last_exchange_stats(&self) -> ExchangeStats {
+        self.last_exchange
+    }
+
+    /// Poll `status_reg` until `busy_bit` clears, within the budget,
+    /// returning `(polls, last_status)` on success.
+    ///
+    /// A faulting register read fails closed with
+    /// [`MailboxError::Window`]; exhausting the budget fails with
+    /// [`MailboxError::Timeout`]. The caller records the returned counts
+    /// (and the timeout stage) into [`ExchangeStats`].
+    fn wait_clear(&self, status_reg: usize, busy_bit: u32) -> Result<(u32, u32), MailboxError> {
+        for poll in 0..self.poll_budget {
             let status = self
                 .regs
                 .read_u32(status_reg)
                 .map_err(|_| MailboxError::Window)?;
             if status & busy_bit == 0 {
-                return Ok(());
+                return Ok((poll, status));
             }
             core::hint::spin_loop();
         }
@@ -871,8 +1021,15 @@ impl MmioMailbox {
     }
 }
 
-impl MailboxTransport for MmioMailbox {
-    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+impl MmioMailbox {
+    /// The instrumented body of [`MmioMailbox::exchange`], threading
+    /// diagnostics into `stats` so the public method records them on
+    /// every return path (`AGENTS.md` §15.7).
+    fn run_exchange(
+        &mut self,
+        message: &mut [u32; PROPERTY_WORDS],
+        stats: &mut ExchangeStats,
+    ) -> Result<(), MailboxError> {
         // Stage the request into the DMA-visible property buffer.
         for (i, &word) in message.iter().enumerate() {
             self.buffer
@@ -887,20 +1044,39 @@ impl MailboxTransport for MmioMailbox {
 
         // Ring the doorbell: wait for write room, then post the
         // buffer's bus address tagged with the property channel.
-        self.wait_clear(REG_MBOX0_STATUS, STATUS_FULL)?;
+        let (post_polls, post_status) =
+            self.wait_clear(REG_MBOX0_STATUS, STATUS_FULL)
+                .map_err(|e| {
+                    if e == MailboxError::Timeout {
+                        stats.timeout_stage = TimeoutStage::PostRoom;
+                    }
+                    e
+                })?;
+        stats.post_room_polls = post_polls;
+        stats.last_status = post_status;
+        let posted = self.buffer_bus_addr | CHANNEL_PROPERTY;
+        stats.posted_word = posted;
         self.regs
-            .write_u32(REG_MBOX1_WRITE, self.buffer_bus_addr | CHANNEL_PROPERTY)
+            .write_u32(REG_MBOX1_WRITE, posted)
             .map_err(|_| MailboxError::Window)?;
 
         // Wait for the firmware's completion post on our channel,
         // discarding traffic for other channels within the budget.
-        let mut polls = 0;
         loop {
-            if polls >= self.poll_budget {
+            if stats.response_reads >= self.poll_budget {
+                stats.timeout_stage = TimeoutStage::Response;
                 return Err(MailboxError::Timeout);
             }
-            polls += 1;
-            self.wait_clear(REG_MBOX0_STATUS, STATUS_EMPTY)?;
+            stats.response_reads += 1;
+            let (_, empty_status) =
+                self.wait_clear(REG_MBOX0_STATUS, STATUS_EMPTY)
+                    .map_err(|e| {
+                        if e == MailboxError::Timeout {
+                            stats.timeout_stage = TimeoutStage::Response;
+                        }
+                        e
+                    })?;
+            stats.last_status = empty_status;
             let word = self
                 .regs
                 .read_u32(REG_MBOX0_READ)
@@ -913,6 +1089,7 @@ impl MailboxTransport for MmioMailbox {
                 }
                 break;
             }
+            stats.foreign_channel_reads += 1;
             core::hint::spin_loop();
         }
 
@@ -929,5 +1106,14 @@ impl MailboxTransport for MmioMailbox {
                 .map_err(|_| MailboxError::Window)?;
         }
         Ok(())
+    }
+}
+
+impl MailboxTransport for MmioMailbox {
+    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+        let mut stats = ExchangeStats::default();
+        let result = self.run_exchange(message, &mut stats);
+        self.last_exchange = stats;
+        result
     }
 }

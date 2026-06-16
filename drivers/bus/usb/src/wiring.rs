@@ -45,16 +45,21 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// Bytes carved for the controller's device-shared DMA structures.
 ///
 /// The xHCI engine lays the DCBAA, command/event/transfer rings,
-/// contexts, and report buffers out of this one region
-/// ([`UsbDevice::start`]); 16 KiB comfortably covers the worst case
-/// (a 255-slot controller needs under 7 KiB). This is a fixed
-/// protocol working set for one device, not a scalable capacity
-/// (`AGENTS.md` §24.4).
-pub const XHCI_DMA_BYTES: usize = 16 * 1024;
+/// contexts, report buffers, and the controller's scratchpad buffers
+/// out of this one region ([`UsbDevice::start`]). The rings/contexts of
+/// a 255-slot controller need under 8 KiB; the dominant term is the
+/// scratchpad — the controller's `HCSPARAMS2` Max Scratchpad Buffers
+/// page-sized buffers (the VL805 requires **31**, i.e. 31 × 4 KiB =
+/// 124 KiB; xHCI §4.20). 256 KiB covers that worst case with headroom.
+/// The exact count is read from the controller and laid out by
+/// [`UsbDevice::start`], which fails closed if the carve cannot hold it,
+/// so this is a fixed protocol working set for one device, not a
+/// scalable capacity (`AGENTS.md` §24.4).
+pub const XHCI_DMA_BYTES: usize = 256 * 1024;
 
-// A 255-slot controller's device-shared structures need under 7 KiB;
-// the carve must comfortably exceed that for every reported slot count.
-const _: () = assert!(XHCI_DMA_BYTES >= 8 * 1024);
+// Worst case (255 slots + 31 scratchpad pages at 4 KiB) is ~132 KiB;
+// the carve must comfortably exceed that for every reported geometry.
+const _: () = assert!(XHCI_DMA_BYTES >= 160 * 1024);
 
 /// Upper bound on functions scanned while locating the USB controller.
 ///

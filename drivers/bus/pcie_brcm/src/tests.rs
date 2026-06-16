@@ -169,6 +169,23 @@ fn encode_ibar_size_covers_the_documented_ranges() {
 }
 
 #[test]
+fn encode_scb_size_sizes_the_inbound_scb_window_to_the_region() {
+    // The inbound SCB decode window is `ilog2(round_pow2(size)) - 15`;
+    // for the same DMA region
+    // it equals the `RC_BAR2` size encoding (no 4 KiB‥32 KiB special
+    // case), so the inbound decoder covers exactly what the viewport
+    // exposes and VideoCore's VL805 firmware-load DMA is not dropped.
+    assert_eq!(encode_scb_size(0xc000_0000), 0x11); // 3 GiB → 4 GiB → log2 32
+    assert_eq!(encode_scb_size(0x1_0000_0000), 0x11); // 4 GiB exact
+    assert_eq!(encode_scb_size(8u64 << 30), 0x12); // 8 GiB → log2 33
+    assert_eq!(encode_scb_size(0x1_0000), 1); // 64 KiB (smallest valid)
+                                              // Out of range / degenerate → 0 (smallest encoding), failing closed.
+    assert_eq!(encode_scb_size(0), 0);
+    assert_eq!(encode_scb_size(0x8000), 0); // 32 KiB, below 64 KiB
+    assert_eq!(encode_scb_size(128u64 << 30), 0); // 128 GiB, above 64 GiB
+}
+
+#[test]
 fn bring_up_trains_the_link_and_programs_the_windows() {
     let regs0 = MockRegs::new(true, 1);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
@@ -186,6 +203,13 @@ fn bring_up_trains_the_link_and_programs_the_windows() {
     assert_ne!(ctrl & regs::MISC_CTRL_RCB_MPS_MODE_MASK, 0);
     assert_ne!(ctrl & regs::MISC_CTRL_RCB_64B_MODE_MASK, 0);
     assert_eq!(ctrl & regs::MISC_CTRL_MAX_BURST_SIZE_MASK, 0);
+    // The inbound SCB decode window is sized to the inbound region
+    // (`SCB0_SIZE`), matching the `RC_BAR2` size encoding (0x11 for the
+    // Pi's 4 GiB viewport) so VideoCore's VL805 firmware-load DMA is not
+    // silently dropped by an undersized inbound decoder.
+    let scb0 =
+        (ctrl & regs::MISC_CTRL_SCB0_SIZE_MASK) >> regs::MISC_CTRL_SCB0_SIZE_MASK.trailing_zeros();
+    assert_eq!(scb0, 0x11);
 
     // Inbound viewport: offset 0, size field 0x11 (4 GiB).
     let bar2_lo = m.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4];
@@ -225,6 +249,64 @@ fn bring_up_trains_the_link_and_programs_the_windows() {
     assert_eq!(
         m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI / 4] & regs::MEM_WIN0_BASE_HI_BASE_MASK,
         6
+    );
+}
+
+#[test]
+fn entry_inbound_window_reports_the_state_before_bring_up_programs_it() {
+    // An all-zero mock hands off an unconfigured inbound window, so the
+    // entry capture reads size 0 while the post-program read-back carries
+    // the discovered 0x11 size field — the two `4120`/`4119` captures a
+    // metal run compares (raspberrypi/firmware #1495).
+    let regs0 = MockRegs::new(true, 1);
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+    let entry = rc.entry_inbound_window();
+    assert_eq!(entry.rc_bar2_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0);
+    let m = rc.regs();
+    assert_eq!(
+        m.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        0x11
+    );
+}
+
+#[test]
+fn bring_up_preserves_a_firmware_configured_inbound_window() {
+    // raspberrypi/firmware #1495: `VideoCore`'s `NOTIFY_XHCI_RESET`
+    // firmware load assumes the `RC_BAR2` state the boot firmware set at
+    // power-on. When the previous boot stage left the inbound window
+    // configured (a non-zero size field), bring-up must leave it exactly
+    // as the firmware set it rather than overwriting it.
+    let mut regs0 = MockRegs::new(true, 1);
+    // Seed a distinctive firmware-configured window: a recognisable base
+    // plus the 8 GiB size encoding, high half at PCIe 0x4_0000_0000.
+    let seeded_lo = 0xABCD_0000 | 0x12;
+    let seeded_hi = 0x4;
+    regs0.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4] = seeded_lo;
+    regs0.mem[regs::MISC_RC_BAR2_CONFIG_HI / 4] = seeded_hi;
+
+    let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
+
+    // The entry capture reflects the firmware's window verbatim.
+    let entry = rc.entry_inbound_window();
+    assert_eq!(entry.rc_bar2_lo, seeded_lo);
+    assert_eq!(entry.rc_bar2_hi, seeded_hi);
+
+    let m = rc.regs();
+    // The window is untouched: still the firmware's value, and bring-up
+    // recorded no write to either `RC_BAR2` register.
+    assert_eq!(m.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4], seeded_lo);
+    assert_eq!(m.mem[regs::MISC_RC_BAR2_CONFIG_HI / 4], seeded_hi);
+    assert!(m.write_index(regs::MISC_RC_BAR2_CONFIG_LO).is_none());
+    assert!(m.write_index(regs::MISC_RC_BAR2_CONFIG_HI).is_none());
+    // The unused inbound windows are still disabled (those are not the
+    // system-memory viewport `VideoCore` assumes).
+    assert_eq!(
+        m.mem[regs::MISC_RC_BAR1_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        0
+    );
+    assert_eq!(
+        m.mem[regs::MISC_RC_BAR3_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        0
     );
 }
 
@@ -299,8 +381,8 @@ fn bring_up_enables_memory_space_and_bus_master_on_the_bridge() {
     assert!(m.write_index(regs::RC_CFG_COMMAND).is_some());
 
     // The enable is issued *after* the link is trained — i.e. after the
-    // final `PERST#`-deassert write to RGR1_SW_INIT_1 — mirroring Linux's
-    // `pci_enable_bridge` (enable the device once the link is up). Writing
+    // final `PERST#`-deassert write to RGR1_SW_INIT_1 — as a PCI-PCI
+    // bridge enable does (the device is enabled once the link is up). Writing
     // Memory Space Enable while `PERST#` was still asserted did not stick on
     // the integrated RC (the metal `4110` read-back showed `0x0000`).
     let command_at = m
@@ -368,6 +450,12 @@ fn inbound_window_readback_reports_the_programmed_viewport() {
     // The unused inbound windows read back disabled (size field cleared).
     assert_eq!(rb.rc_bar1_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0);
     assert_eq!(rb.rc_bar3_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0);
+    // The read-back surfaces the programmed inbound SCB window size
+    // (`SCB0_SIZE`), so a metal capture confirms the inbound decoder was
+    // sized to match the viewport (0x11) rather than left undersized.
+    let scb0 = (rb.misc_ctrl & regs::MISC_CTRL_SCB0_SIZE_MASK)
+        >> regs::MISC_CTRL_SCB0_SIZE_MASK.trailing_zeros();
+    assert_eq!(scb0, 0x11);
     // The link reads up for correlation.
     assert_ne!(rb.pcie_status & regs::PCIE_STATUS_DL_ACTIVE_MASK, 0);
 }
@@ -384,7 +472,6 @@ fn outbound_window_decodes_a_non_empty_range_covering_the_cpu_window() {
     // base/limit with the *hardware* field positions (literal masks, not
     // the named constants, so a re-swap of the constants is still caught)
     // and assert the window is non-empty and covers the outbound CPU range.
-    // Mirrors Linux's `pcie-brcmstb`.
     const HW_LIMIT_MASK: u32 = 0xfff0_0000; // limit low MiB bits: [31:20]
     const HW_BASE_MASK: u32 = 0x0000_fff0; // base low MiB bits: [15:4]
 
@@ -432,7 +519,7 @@ fn bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle() 
     // released FIRST, before the first MISC-block write (MISC_MISC_CTRL),
     // so the controller core is out of reset and the MISC access does not
     // stall on the SoC bus completion timeout (the ~10.8 s metal
-    // master-abort). This matches U-Boot/Linux `pcie-brcmstb`.
+    // master-abort). This follows the BCM2711 PCIe bring-up sequence.
     let first_rgr1 = m.write_index(regs::RGR1_SW_INIT_1).expect("reset write");
     let first_misc = m
         .write_index(regs::MISC_MISC_CTRL)

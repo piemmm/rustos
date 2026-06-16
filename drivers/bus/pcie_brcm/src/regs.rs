@@ -50,6 +50,21 @@ pub const MISC_CTRL_MAX_BURST_SIZE_MASK: u32 = 0x30_0000;
 pub const MISC_CTRL_RCB_MPS_MODE_MASK: u32 = 0x400;
 /// Read-completion-boundary 64-byte mode bit.
 pub const MISC_CTRL_RCB_64B_MODE_MASK: u32 = 0x80;
+/// `SCB0_SIZE`: the five-bit size of the inbound SCB (PCIe→system-memory)
+/// decode window, in `MISC_MISC_CTRL` bits `[31:27]`, encoded as
+/// `ilog2(region_size) - 15`.
+///
+/// This sizes the inbound decoder to the DMA region the inbound `RC_BAR2`
+/// viewport exposes. It must be programmed **unconditionally** on
+/// the BCM2711; left at its reset default the inbound decoder is
+/// undersized, so a PCIe→system-memory DMA past that small window is
+/// silently dropped while config reads, enumeration, BAR assignment and
+/// the outbound (CPU→PCIe) path all still succeed. On the Raspberry Pi 4
+/// `VideoCore`'s `NOTIFY_XHCI_RESET` VL805 xHCI-firmware load reaches
+/// system memory through this inbound window, so an unprogrammed
+/// `SCB0_SIZE` lets the mailbox reload complete yet leaves the firmware
+/// version at `0` and the controller stuck in `CNR` (`AGENTS.md` §15.7).
+pub const MISC_CTRL_SCB0_SIZE_MASK: u32 = 0xf800_0000;
 
 // --- Inbound (RC) BAR windows ---------------------------------------------
 
@@ -80,7 +95,7 @@ pub const MISC_CPU_2_PCIE_MEM_WIN0_HI: usize = 0x4010;
 ///
 /// This is a BCM2711 **proprietary** register. The low MiB bits of the
 /// window **limit** live in bits `[31:20]` and the low MiB bits of the
-/// **base** in bits `[15:4]`, matching Linux's `pcie-brcmstb`. Defining
+/// **base** in bits `[15:4]`. Defining
 /// the two halves the wrong way round programs an inverted, base-above-
 /// limit window that decodes nothing, so every CPU→PCIe memory access
 /// master-aborts (the metal `0xdead_dead` BAR read while configuration
@@ -145,7 +160,7 @@ pub const PRIMARY_BUS_SUBORDINATE_MASK: u32 = 0x00ff_0000;
 /// VL805's BAR (the metal symptom: config reads succeed but BAR reads
 /// return the `0xdead_dead` abort poison) until the window is named.
 /// Programming it mirrors the bridge-window assignment a full PCI
-/// enumerator would perform (Linux's `pci_setup_bridge`), which the
+/// enumerator would perform, which the
 /// windowed `mech_brcm` accessor does not.
 pub const RC_CFG_MEMORY_BASE_LIMIT: usize = 0x20;
 /// Memory-base field within [`RC_CFG_MEMORY_BASE_LIMIT`] (`[15:4]`): holds
@@ -168,7 +183,7 @@ pub const MEMORY_WINDOW_GRANULE_SHIFT: u32 = 20;
 /// secondary side only when its **own** Command register has Memory Space
 /// Enable set, and forwards a downstream device's DMA upstream only with
 /// Bus Master Enable set, so a full PCI enumerator enables both bits on
-/// every bridge (Linux's `pci_enable_bridges`); the windowed `mech_brcm`
+/// every bridge; the windowed `mech_brcm`
 /// accessor does not, so the root-complex bring-up does it here.
 ///
 /// On the BCM2711's *integrated* root complex Memory Space Enable latches
@@ -178,9 +193,8 @@ pub const MEMORY_WINDOW_GRANULE_SHIFT: u32 = 20;
 /// numbers ([`RC_CFG_PRIMARY_BUS`]) and Memory Base/Limit
 /// ([`RC_CFG_MEMORY_BASE_LIMIT`]) writes — same direct bus-0 path — did
 /// stick, so the offset is right and the difference is timing. The
-/// bring-up therefore enables it **after** `train_link`/`link_up` (Linux's
-/// `pci_enable_bridge` does the same — `enabling device (0000 -> 0002)` is
-/// logged only once the link is up). The low 16 bits are the Command
+/// bring-up therefore enables it **after** `train_link`/`link_up` (a
+/// PCI-PCI bridge is enabled only once the link is up). The low 16 bits are the Command
 /// register; the high 16 bits are the write-1-to-clear Status register,
 /// left untouched by writing 0 there.
 pub const RC_CFG_COMMAND: usize = 0x04;

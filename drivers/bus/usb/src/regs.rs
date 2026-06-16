@@ -18,6 +18,11 @@ pub const CAPLENGTH_HCIVERSION: usize = 0x00;
 /// `HCSPARAMS1` — structural parameters 1 (§5.3.3).
 pub const HCSPARAMS1: usize = 0x04;
 
+/// `HCSPARAMS2` — structural parameters 2 (§5.3.4). Carries the
+/// Max Scratchpad Buffers field the controller requires software to
+/// reserve before it can run (the VL805 reports 31).
+pub const HCSPARAMS2: usize = 0x08;
+
 /// `HCCPARAMS1` — capability parameters 1 (§5.3.6).
 pub const HCCPARAMS1: usize = 0x10;
 
@@ -50,6 +55,12 @@ pub const USBCMD: usize = 0x00;
 
 /// `USBSTS` — operational base + `0x04` (§5.4.2).
 pub const USBSTS: usize = 0x04;
+
+/// `PAGESIZE` — operational base + `0x08` (§5.4.3). A bitmap: if bit
+/// `n` is set the controller supports a page size of `2^(n+12)`; the
+/// scratchpad buffers software reserves are each one such page and
+/// page-aligned. The lowest set bit is the page size in use.
+pub const PAGESIZE: usize = 0x08;
 
 /// `CRCR` — command ring control, operational base + `0x18` (§5.4.5).
 /// 64 bits: low dword first, high dword at `+4`.
@@ -155,6 +166,31 @@ pub const fn hcsparams1_max_slots(raw: u32) -> u8 {
 #[must_use]
 pub const fn hcsparams1_max_ports(raw: u32) -> u8 {
     raw.to_le_bytes()[3]
+}
+
+/// `HCSPARAMS2` Max Scratchpad Buffers (§5.3.4): the count of
+/// page-sized scratchpad buffers software must reserve for the
+/// controller's private state, split across a high field (bits 25:21)
+/// and a low field (bits 31:27). The VL805 reports 31; a controller
+/// reporting `0` needs none.
+#[must_use]
+pub const fn hcsparams2_max_scratchpad(raw: u32) -> u32 {
+    let hi = (raw >> 21) & 0x1F;
+    let lo = (raw >> 27) & 0x1F;
+    (hi << 5) | lo
+}
+
+/// The page size (in bytes) the controller's `PAGESIZE` register
+/// reports (§5.4.3): `2^(n+12)` for the lowest set bit `n` of the low
+/// 16 bits. Returns `0` when no bit is set (a malformed register), so
+/// the caller fails closed rather than assuming a size.
+#[must_use]
+pub const fn pagesize_bytes(raw: u32) -> usize {
+    let supported = raw & 0xFFFF;
+    if supported == 0 {
+        return 0;
+    }
+    1usize << (supported.trailing_zeros() as usize + 12)
 }
 
 /// `HCCPARAMS1` AC64 (bit 0): the controller addresses 64-bit DMA.

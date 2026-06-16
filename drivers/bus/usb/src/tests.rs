@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::device::{
-    DeviceDescriptor, DmaRegion, InterfaceInfo, UsbDevice, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
+    hub_port_connected, hub_port_enabled, hub_port_speed, DeviceDescriptor, DmaRegion, EnumStage,
+    InterfaceInfo, UsbDevice, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -83,6 +84,56 @@ impl DmaRegion for MockDma {
     }
 }
 
+/// File-scope recorder for the [`DmaSlab`] coherency hook (a bare `fn`
+/// pointer, so the observed call count and length are published through
+/// atomics). Used by a single test so no cross-test race is possible
+/// (`AGENTS.md` §7 — no flaky tests).
+mod slab_coherency_test_state {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    pub(super) static CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static LAST_LEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// A `rustos_abi::driver::dma::SlabCoherencyFn`.
+    pub(super) fn record(_base: *const u8, len: usize) {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        LAST_LEN.store(len, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn dma_slab_region_brackets_writes_and_reads_with_cache_maintenance() {
+    use core::ptr::NonNull;
+    use core::sync::atomic::Ordering;
+    use rustos_abi::driver::dma::{DmaSlab, PoolId};
+    use slab_coherency_test_state as rec;
+
+    // A leaked 64-byte buffer behind a `DmaSlab` carrying the recording
+    // coherency hook — the metal shape where the BCM2711 PCIe master does
+    // not snoop the CPU caches, so the `DmaRegion` impl must bracket every
+    // ring publish / event consume with cache maintenance (`AGENTS.md` §4).
+    let storage = alloc::vec![0u8; 64].into_boxed_slice();
+    let phys = storage.as_ptr() as u64;
+    let leaked: &'static mut [u8] = alloc::boxed::Box::leak(storage);
+    let ptr = NonNull::new(leaked.as_mut_ptr()).expect("box leak is non-null");
+    // SAFETY: the buffer is leaked (`'static`), exactly 64 bytes, and
+    // nothing else references it.
+    let mut slab =
+        unsafe { DmaSlab::from_leaked(phys, ptr, 64, PoolId::MOCK, 0) }.with_coherency(rec::record);
+
+    // A write cleans the published range to memory *after* the CPU copy,
+    // so a non-coherent master reads fresh bytes once the doorbell rings.
+    DmaRegion::write(&mut slab, 8, &[0xAB; 4]).expect("write");
+    assert_eq!(rec::CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(rec::LAST_LEN.load(Ordering::SeqCst), 4);
+
+    // A read invalidates the CPU's view of the range *before* the copy,
+    // so a master's freshly written bytes are read from memory.
+    let mut buf = [0u8; 2];
+    DmaRegion::read(&mut slab, 16, &mut buf).expect("read");
+    assert_eq!(rec::CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(rec::LAST_LEN.load(Ordering::SeqCst), 2);
+}
+
 /// The 18-byte device descriptor fixture the model answers
 /// `GET_DESCRIPTOR(device)` with (a generic boot keyboard).
 const MOCK_DESCRIPTOR: [u8; 18] = [
@@ -95,15 +146,46 @@ const MOCK_DESCRIPTOR: [u8; 18] = [
 /// (`bConfigurationValue` = 1) followed by one 9-byte interface
 /// descriptor of the HID boot-keyboard class (`0x03_01_01`,
 /// `bInterfaceNumber` = 0).
-const MOCK_CONFIG_DESCRIPTOR: [u8; 18] = [
-    // Configuration: bLength=9, type=2, wTotalLength=18, 1 interface,
+const MOCK_CONFIG_DESCRIPTOR: [u8; 25] = [
+    // Configuration: bLength=9, type=2, wTotalLength=25, 1 interface,
     // bConfigurationValue=1, iConfiguration=0, bmAttributes=0xA0,
     // bMaxPower=50.
-    0x09, 0x02, 0x12, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
     // Interface: bLength=9, type=4, bInterfaceNumber=0, alt=0,
     // 1 endpoint, class=0x03 (HID), sub=0x01 (boot), protocol=0x01
     // (keyboard), iInterface=0.
-    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00,
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
+    // Endpoint: bLength=7, type=5, bEndpointAddress=0x81 (EP1 IN ->
+    // DCI 3), bmAttributes=0x03 (interrupt), wMaxPacketSize=8,
+    // bInterval=10 (frames, full-speed boot keyboard).
+    0x07, 0x05, 0x81, 0x03, 0x08, 0x00, 0x0A,
+];
+
+/// As [`MOCK_CONFIG_DESCRIPTOR`], but the boot keyboard's interrupt-IN
+/// endpoint is **endpoint 2** (`bEndpointAddress = 0x82` -> DCI 5), not
+/// endpoint 1. The driver must read the endpoint descriptor and
+/// configure / doorbell / drain DCI 5; the metal no-report bug was
+/// hard-coding DCI 3.
+const MOCK_CONFIG_DESCRIPTOR_EP2: [u8; 25] = [
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
+    // Endpoint: bEndpointAddress=0x82 (EP2 IN -> DCI 5).
+    0x07, 0x05, 0x82, 0x03, 0x08, 0x00, 0x0A,
+];
+
+/// Device descriptor fixture for a USB **hub** (`bDeviceClass = 0x09`),
+/// `idVendor:idProduct = 2109:3431` — the Pi 4B's onboard VIA Labs hub.
+const MOCK_HUB_DESCRIPTOR: [u8; 18] = [
+    18, 0x01, 0x00, 0x02, 0x09, 0x00, 0x00, 0x40, 0x09, 0x21, 0x31, 0x34, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x01,
+];
+
+/// Configuration descriptor fixture for the hub: one interface of the
+/// hub class (`0x09_00_00`) with one interrupt status-change endpoint.
+const MOCK_HUB_CONFIG_DESCRIPTOR: [u8; 18] = [
+    0x09, 0x02, 0x12, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    // Interface: class=0x09 (hub), sub=0x00, protocol=0x00.
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x00,
 ];
 
 /// Register-level xHCI model: the capability block, `USBCMD`/`USBSTS`
@@ -182,11 +264,117 @@ struct MockXhci {
     /// Pending IN data stage: TRB address, buffer, length, ISP.
     pending_data: Option<(u64, u64, u32, bool)>,
     pending_reports: VecDeque<Vec<u8>>,
-    /// When set, class requests (`SET_PROTOCOL`) answer STALL.
+    /// When set, class requests (`SET_PROTOCOL`) answer STALL — the
+    /// optional-request case `control_optional` tolerates.
     stall_class_requests: bool,
+    /// When set, class requests (`SET_PROTOCOL`) answer a non-STALL
+    /// transaction error — a genuine fault `control_optional` must
+    /// still surface (`AGENTS.md` §2.9).
+    fault_class_requests: bool,
     /// When set, report completions forge a residual above the TRB
     /// length (a hostile controller claim).
     forge_report_residual: bool,
+    /// A root-hub port (0-based) whose device only reports Current
+    /// Connect Status once software writes Port Power — modelling a
+    /// port-power-controlled controller (the VL805, `HCCPARAMS1`
+    /// PPC = 1), where an unpowered port reads disconnected.
+    latent_device_port: Option<usize>,
+    /// `HCSPARAMS2` value the mock reports (the split Max Scratchpad
+    /// Buffers fields). `0` (default) needs no scratchpad; a non-zero
+    /// count models the VL805, which executes **no** command until
+    /// software points `DCBAA[0]` at a programmed scratchpad array
+    /// (xHCI §4.20).
+    hcsparams2: u32,
+    /// `PAGESIZE` value the mock reports (`1` → 4 KiB scratchpad pages).
+    pagesize: u32,
+    /// When non-zero, the attached device is a USB **hub** reporting
+    /// this many downstream ports; its device/config descriptors switch
+    /// to the hub fixtures (class `0x09`), mirroring the Pi 4B's onboard
+    /// `2109:3431` VIA Labs hub.
+    hub_ports: u8,
+    /// The 1-based downstream hub port a device is attached to (`0` =
+    /// none), with that device's `wPortStatus` value.
+    hub_downstream_port: u8,
+    hub_downstream_status: u16,
+    /// Bitmask of downstream hub ports software has powered (bit `n-1`
+    /// for port `n`); a downstream port reports a connected device only
+    /// once powered, modelling a port-power-controlled hub.
+    hub_powered: u32,
+    /// When set, the class `GET_DESCRIPTOR(hub)` reply carries a wrong
+    /// `bDescriptorType` — a forged/corrupt descriptor the driver must
+    /// reject fail-closed (`AGENTS.md` §5.4 / §2.9).
+    forge_hub_descriptor: bool,
+    /// Whether the default control endpoint is halted. A control
+    /// transfer that STALLs halts EP0 in xHCI (§4.8.3 / §4.10.2.4): the
+    /// controller runs no further TRBs on it until software resets the
+    /// endpoint, so a subsequent control transfer faults. This models
+    /// that, catching code that reuses EP0 after a tolerated STALL.
+    ep0_halted: bool,
+    /// When set, every downstream-port class `GET_STATUS` (USB 2.0
+    /// §11.24.2.7) STALLs — modelling the metal failure where the
+    /// hub-descriptor read succeeds but each per-port status read
+    /// faults, so the bring-up diagnostic must surface the completion
+    /// code (`AGENTS.md` §15.7).
+    fault_hub_port_status: bool,
+    /// When non-zero, every downstream-port class `GET_STATUS` posts a
+    /// transfer event carrying this *raw* completion-code byte — used to
+    /// model a controller-specific/reserved code the driver does not
+    /// decode (the metal `completion_hex=0` was a code the diagnostic
+    /// failed to record, not a true timeout, `AGENTS.md` §15.7).
+    fault_hub_port_status_raw: u8,
+    /// When non-zero, every downstream-port class `GET_STATUS` posts an
+    /// event carrying this *raw TRB-type* (rather than a Transfer
+    /// Event) — modelling an unexpected asynchronous controller event
+    /// reaching the wait, which `await_event_for` rejects fast without
+    /// recording a completion code (the metal `completion_hex=0` +
+    /// fast-failure signature, `AGENTS.md` §15.7).
+    fault_hub_port_status_evtype: u8,
+    /// Bitmask of downstream hub ports software has reset (bit `n-1` for
+    /// port `n`) via a class `SET_FEATURE(PORT_RESET)`; a reset port
+    /// reports `PORT_STATUS_ENABLE` in its `wPortStatus`, the gate a
+    /// downstream device must pass before it is addressed.
+    hub_reset: u32,
+    /// Set once an Address Device with a non-zero Route String has been
+    /// processed: the active addressed device is now the **downstream**
+    /// HID device (the keyboard behind the hub), so descriptor reads
+    /// answer with the HID fixtures and the HID class requests succeed.
+    downstream_active: bool,
+    /// The downstream hub port the addressed device's Route String named,
+    /// captured for the test to assert against.
+    downstream_route_port: u8,
+    /// Set once a Configure Endpoint that names only the slot context
+    /// (Add flag `A0`) with the **Hub** bit set is processed: the parent
+    /// hub has been marked a hub in its slot context, so the controller
+    /// will schedule the split transactions a downstream device needs.
+    /// Real hardware delivers no downstream interrupt transfer until
+    /// this is done — the metal bug where the keyboard was addressed but
+    /// never typed — so the mock gates [`Self::process_int_ring`] on it.
+    hub_marked_as_hub: bool,
+    /// The **Number of Ports** the hub-marking Configure Endpoint carried
+    /// in the slot context (§6.2.2 dword 1), captured for assertions.
+    hub_ctx_num_ports: u8,
+    /// The **TT Think Time** the hub-marking Configure Endpoint carried
+    /// in the slot context (§6.2.2 dword 2), captured for assertions.
+    hub_ctx_tt_think_time: u8,
+    /// The **Max ESIT Payload** the interrupt-IN Configure Endpoint
+    /// carried in the endpoint context (§6.2.3.8 dword 4 bits 16:31).
+    /// The xHCI periodic scheduler reserves no bandwidth for a periodic
+    /// endpoint whose Max ESIT Payload is zero (§4.14.2), so real
+    /// hardware delivers no interrupt transfer — the metal bug where the
+    /// addressed keyboard never typed. The mock gates
+    /// [`Self::process_int_ring`] on it being non-zero.
+    int_max_esit: u32,
+    /// The configuration-descriptor fixture answered for the keyboard
+    /// (the non-hub device). A test can point this at a fixture whose
+    /// interrupt endpoint is not endpoint 1 to prove the driver reads
+    /// the endpoint's real DCI rather than assuming it.
+    keyboard_config: &'static [u8],
+    /// Device Context Index the interrupt-IN Configure Endpoint named,
+    /// derived from its Add Context flags (§6.2.3) rather than assumed.
+    /// The mock posts interrupt Transfer Events with it, so a keyboard
+    /// whose interrupt endpoint is not endpoint 1 is serviced honestly
+    /// (the metal no-report bug was the driver hard-coding DCI 3).
+    int_dci: u8,
 }
 
 impl MockXhci {
@@ -237,8 +425,45 @@ impl MockXhci {
             pending_data: None,
             pending_reports: VecDeque::new(),
             stall_class_requests: false,
+            fault_class_requests: false,
             forge_report_residual: false,
+            latent_device_port: None,
+            hcsparams2: 0,
+            pagesize: 0,
+            hub_ports: 0,
+            hub_downstream_port: 0,
+            hub_downstream_status: 0,
+            hub_powered: 0,
+            forge_hub_descriptor: false,
+            ep0_halted: false,
+            fault_hub_port_status: false,
+            fault_hub_port_status_raw: 0,
+            fault_hub_port_status_evtype: 0,
+            hub_reset: 0,
+            downstream_active: false,
+            downstream_route_port: 0,
+            hub_marked_as_hub: false,
+            hub_ctx_num_ports: 0,
+            hub_ctx_tt_think_time: 0,
+            int_max_esit: 0,
+            keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
+            int_dci: 3,
         }
+    }
+
+    /// A mock with the device model attached as a USB **hub** on
+    /// root-hub port 1 (a high-speed device, enabled), reporting `ports`
+    /// downstream ports with a high-speed device on downstream port
+    /// `downstream`. The downstream port reports a connected device only
+    /// once software powers it — mirroring the Pi 4B's onboard
+    /// `2109:3431` hub and its keyboard.
+    fn with_hub(mem: &SharedMem, ports: u8, downstream: u8) -> Self {
+        let mut mock = Self::with_device(mem);
+        mock.hub_ports = ports;
+        mock.hub_downstream_port = downstream;
+        // Current Connect Status (bit 0) | High-Speed Device (bit 10).
+        mock.hub_downstream_status = (1 << 0) | (1 << 10);
+        mock
     }
 
     /// A mock with the device model attached and a high-speed HID
@@ -249,6 +474,34 @@ impl MockXhci {
         mock.portsc[0] =
             regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (3 << regs::PORTSC_SPEED_SHIFT);
         mock
+    }
+
+    /// As [`Self::with_device`], but the controller requires `count`
+    /// page-sized scratchpad buffers (the VL805 needs 31) and reports a
+    /// 4 KiB page size — and, modelling the real hardware, posts **no**
+    /// command completion until software programs `DCBAA[0]`
+    /// ([`Self::scratchpad_unprogrammed`]).
+    fn with_device_scratchpad(mem: &SharedMem, count: u32) -> Self {
+        let mut mock = Self::with_device(mem);
+        // Split the count into the HCSPARAMS2 low (bits 31:27) and high
+        // (bits 25:21) fields, matching `hcsparams2_max_scratchpad`.
+        let lo = count & 0x1F;
+        let hi = (count >> 5) & 0x1F;
+        mock.hcsparams2 = (lo << 27) | (hi << 21);
+        mock.pagesize = 1;
+        mock
+    }
+
+    /// `true` while a scratchpad-requiring controller's `DCBAA[0]` (the
+    /// scratchpad buffer array pointer) is still zero — it executes no
+    /// command until software programs it (xHCI §4.20).
+    fn scratchpad_unprogrammed(&self) -> bool {
+        let dcbaa = Self::qword(self.dcbaap);
+        if dcbaa == 0 {
+            return true;
+        }
+        let entry = self.read_dwords(dcbaa, 2);
+        entry[0] == 0 && entry[1] == 0
     }
 
     fn op(offset: usize) -> usize {
@@ -333,12 +586,33 @@ impl MockXhci {
     }
 
     fn post_transfer_event(&mut self, trb_addr: u64, code: CompletionCode, dci: u8, residual: u32) {
+        self.post_transfer_event_raw(trb_addr, code.as_u8(), dci, residual);
+    }
+
+    /// Post a transfer event carrying a *raw* completion-code byte — so
+    /// a test can model a controller-specific or reserved code the
+    /// driver's [`CompletionCode`] enum does not model (e.g. xHCI code
+    /// `7`, Resource Error), which `await_event_for`'s decode rejects.
+    fn post_transfer_event_raw(&mut self, trb_addr: u64, code: u8, dci: u8, residual: u32) {
         self.post_event(Trb {
             parameter: trb_addr,
-            status: (u32::from(code.as_u8()) << 24) | residual,
+            status: (u32::from(code) << 24) | residual,
             control: (u32::from(TrbType::TransferEvent.as_u8()) << 10)
                 | (u32::from(dci) << 16)
                 | trb::control_slot(self.active_slot),
+        });
+    }
+
+    /// Post an event carrying an arbitrary *raw* TRB-type (control bits
+    /// 15:10) at `trb_addr` — so a test can model an unexpected
+    /// asynchronous controller event reaching a transfer/command wait,
+    /// which `await_event_for` rejects as an unhandled type
+    /// (`AGENTS.md` §15.7).
+    fn post_event_raw_type(&mut self, trb_addr: u64, type_raw: u8) {
+        self.post_event(Trb {
+            parameter: trb_addr,
+            status: u32::from(CompletionCode::Success.as_u8()) << 24,
+            control: (u32::from(type_raw) << 10) | trb::control_slot(self.active_slot),
         });
     }
 
@@ -365,6 +639,12 @@ impl MockXhci {
     }
 
     fn process_command_ring(&mut self) {
+        // A controller that requires scratchpad buffers does not execute
+        // any command until software points `DCBAA[0]` at the scratchpad
+        // array (xHCI §4.20) — the VL805's metal `stage=2 completion=0`.
+        if regs::hcsparams2_max_scratchpad(self.hcsparams2) > 0 && self.scratchpad_unprogrammed() {
+            return;
+        }
         let base = Self::qword(self.crcr) & !0x3F;
         loop {
             let (mut index, mut cycle) = (self.cmd_index, self.cmd_cycle);
@@ -411,6 +691,37 @@ impl MockXhci {
         if control[1] & 0b11 != 0b11 {
             return CompletionCode::TrbError;
         }
+        // Slot context (the context after the input control context):
+        // dword 0 Route String (bits 0:19) + Speed (bits 20:23), dword 2
+        // TT Hub Slot ID (bits 0:7) + TT Port Number (bits 8:15).
+        let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 3);
+        let route_string = slot_ctx[0] & 0x000F_FFFF;
+        let speed = (slot_ctx[0] >> 20) & 0xF;
+        let tt_hub_slot = (slot_ctx[2] & 0xFF) as u8;
+        let tt_port = ((slot_ctx[2] >> 8) & 0xFF) as u8;
+        if route_string != 0 {
+            // A device downstream of the hub: validate the Route String
+            // and, for a full/low-speed device behind the high-speed hub,
+            // the transaction-translator coordinates the driver must
+            // program (xHCI §6.2.2 / §8.9). A wrong topology faults
+            // Address Device, so the host test proves the driver
+            // programmed them — the hub occupies slot 1.
+            let route_port = (route_string & 0xF) as u8;
+            if route_port != self.hub_downstream_port {
+                return CompletionCode::TrbError;
+            }
+            let needs_tt = speed == 1 || speed == 2;
+            let (want_hub, want_port) = if needs_tt {
+                (1u8, self.hub_downstream_port)
+            } else {
+                (0, 0)
+            };
+            if tt_hub_slot != want_hub || tt_port != want_port {
+                return CompletionCode::TrbError;
+            }
+            self.downstream_active = true;
+            self.downstream_route_port = route_port;
+        }
         self.ep0_base = self.ep_ctx_dequeue(input_ctx + 2 * MOCK_CTX_SIZE as u64);
         self.ep0_index = 0;
         self.ep0_cycle = true;
@@ -420,15 +731,49 @@ impl MockXhci {
 
     fn handle_configure_endpoint(&mut self, input_ctx: u64) -> CompletionCode {
         let control = self.read_dwords(input_ctx, 2);
-        // Add flags must name the slot context and the interrupt-IN
-        // endpoint (A0 | A3).
-        if control[1] & 0b1001 != 0b1001 {
+        let add = control[1];
+        // A Configure Endpoint that adds any endpoint (an A(dci) flag
+        // beyond the slot-context A0) is the HID endpoint setup; one that
+        // names only the slot context (A0 alone) is the hub-topology
+        // update that marks the parent hub as a hub.
+        let endpoint_adds = add & !0b1;
+        if endpoint_adds != 0 {
+            // A HID endpoint Configure Endpoint names the slot context
+            // (A0) and exactly one endpoint (A(dci)). The DCI is read
+            // from the add flags rather than assumed, so a keyboard whose
+            // interrupt endpoint is not endpoint 1 is configured at its
+            // real DCI (the metal no-report bug was hard-coding DCI 3).
+            if add & 0b1 == 0 || endpoint_adds & (endpoint_adds - 1) != 0 {
+                return CompletionCode::TrbError;
+            }
+            let dci = endpoint_adds.trailing_zeros();
+            self.int_dci = u8::try_from(dci).expect("DCI fits a byte");
+            let ep_ctx_off = input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64;
+            let int_ctx = self.read_dwords(ep_ctx_off, 5);
+            // Max ESIT Payload Lo (§6.2.3.8 dword 4 bits 16:31): the
+            // periodic scheduler reserves no bandwidth when it is zero.
+            self.int_max_esit = (int_ctx[4] >> 16) & 0xFFFF;
+            self.int_base = self.ep_ctx_dequeue(ep_ctx_off);
+            self.int_index = 0;
+            self.int_cycle = true;
+            self.configured = true;
+            return CompletionCode::Success;
+        }
+        // Hub-topology update (xHCI §6.2.2): the slot context add flag
+        // must be set and its Hub bit (dword 0 bit 26) raised — the
+        // controller would not route or split transactions to a
+        // downstream device otherwise, which is the metal bug where a
+        // keyboard behind the hub was addressed but never reported.
+        if add & 0b1 == 0 {
             return CompletionCode::TrbError;
         }
-        self.int_base = self.ep_ctx_dequeue(input_ctx + 4 * MOCK_CTX_SIZE as u64);
-        self.int_index = 0;
-        self.int_cycle = true;
-        self.configured = true;
+        let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 3);
+        if slot_ctx[0] & (1 << 26) == 0 {
+            return CompletionCode::TrbError;
+        }
+        self.hub_marked_as_hub = true;
+        self.hub_ctx_num_ports = ((slot_ctx[1] >> 24) & 0xFF) as u8;
+        self.hub_ctx_tt_think_time = ((slot_ctx[2] >> 16) & 0b11) as u8;
         CompletionCode::Success
     }
 
@@ -459,47 +804,164 @@ impl MockXhci {
         }
     }
 
+    /// Write `source` into the assembled IN data stage and post a
+    /// short-packet event when the device under-fills the TRB — the
+    /// shared `GET_DESCRIPTOR` / `GET_STATUS` reply path. Returns
+    /// `false` (after posting a `TrbError`) when no data stage was
+    /// assembled.
+    fn deliver_in_data(
+        &mut self,
+        data: Option<(u64, u64, u32, bool)>,
+        source: &[u8],
+        requested_len: usize,
+        status_addr: u64,
+    ) -> bool {
+        let Some((data_addr, buffer, len, isp)) = data else {
+            self.post_transfer_event(status_addr, CompletionCode::TrbError, 1, 0);
+            return false;
+        };
+        let requested = usize::min(len as usize, requested_len);
+        let supplied = usize::min(requested, source.len());
+        self.write_mem(buffer, &source[..supplied]);
+        let residual = len - u32::try_from(supplied).expect("reply fits");
+        if residual > 0 && isp {
+            self.post_transfer_event(data_addr, CompletionCode::ShortPacket, 1, residual);
+        }
+        true
+    }
+
+    /// The `GET_DESCRIPTOR(device | configuration)` fixture to answer with:
+    /// the hub fixtures (class `0x09`) while the addressed device is the
+    /// hub, the HID keyboard fixtures once a downstream device has been
+    /// addressed (a non-zero Route String set `downstream_active`).
+    fn descriptor_fixture(&self, desc_type: u8) -> &'static [u8] {
+        let is_hub_device = self.hub_ports > 0 && !self.downstream_active;
+        match (desc_type, is_hub_device) {
+            (0x01, false) => &MOCK_DESCRIPTOR,
+            (0x01, true) => &MOCK_HUB_DESCRIPTOR,
+            (_, false) => self.keyboard_config,
+            (_, true) => &MOCK_HUB_CONFIG_DESCRIPTOR,
+        }
+    }
+
     /// Execute the assembled control TD, posting its transfer events.
     fn execute_control(&mut self, status_addr: u64) {
         let Some(setup) = self.pending_setup.take() else {
             self.post_transfer_event(status_addr, CompletionCode::TrbError, 1, 0);
             return;
         };
+        // A halted EP0 runs no further transfers until reset (xHCI
+        // §4.10.2.4); model that as a transaction error rather than a
+        // valid completion.
+        if self.ep0_halted {
+            self.pending_data.take();
+            self.post_transfer_event(status_addr, CompletionCode::UsbTransactionError, 1, 0);
+            return;
+        }
         let data = self.pending_data.take();
+        let w_length = usize::from(u16::from_le_bytes([setup[6], setup[7]]));
         match (setup[0], setup[1]) {
-            // GET_DESCRIPTOR(device | configuration)
+            // GET_DESCRIPTOR(device | configuration); a hub answers with
+            // the hub fixtures (class 0x09), a keyboard with the HID ones.
             (0x80, 0x06) if setup[3] == 0x01 || setup[3] == 0x02 => {
-                let Some((data_addr, buffer, len, isp)) = data else {
-                    self.post_transfer_event(status_addr, CompletionCode::TrbError, 1, 0);
+                let source = self.descriptor_fixture(setup[3]);
+                if !self.deliver_in_data(data, source, w_length, status_addr) {
                     return;
-                };
-                let source: &[u8] = if setup[3] == 0x01 {
-                    &MOCK_DESCRIPTOR
+                }
+            }
+            // Class GET_DESCRIPTOR(hub) (USB 2.0 §11.24.2.5): bDescLength,
+            // bDescriptorType=0x29, bNbrPorts, then a minimal tail.
+            (0xA0, 0x06) if setup[3] == 0x29 => {
+                let desc_type = if self.forge_hub_descriptor {
+                    0x00
                 } else {
-                    &MOCK_CONFIG_DESCRIPTOR
+                    0x29
                 };
-                let requested = usize::min(
-                    len as usize,
-                    usize::from(u16::from_le_bytes([setup[6], setup[7]])),
-                );
-                let supplied = usize::min(requested, source.len());
-                self.write_mem(buffer, &source[..supplied]);
-                let residual = len - u32::try_from(supplied).expect("descriptor fits");
-                if residual > 0 && isp {
-                    self.post_transfer_event(data_addr, CompletionCode::ShortPacket, 1, residual);
+                let hub_desc = [9u8, desc_type, self.hub_ports, 0x00, 0x00, 0x32, 0x00, 0xFF];
+                if !self.deliver_in_data(data, &hub_desc, w_length, status_addr) {
+                    return;
+                }
+            }
+            // Class SET_FEATURE on a downstream port (USB 2.0 §11.24.2.13):
+            // PORT_POWER (8) marks the 1-based port powered.
+            (0x23, 0x03) => {
+                if setup[4] >= 1 {
+                    let bit = 1 << (u32::from(setup[4]) - 1);
+                    match setup[2] {
+                        // PORT_POWER (8): mark the 1-based port powered.
+                        8 => self.hub_powered |= bit,
+                        // PORT_RESET (4): mark it reset, so its next
+                        // GET_STATUS reports the port enabled.
+                        4 => self.hub_reset |= bit,
+                        _ => {}
+                    }
+                }
+            }
+            // Class GET_STATUS on a downstream port (USB 2.0 §11.24.2.7):
+            // the connected downstream port reports its status once
+            // powered, every other port reads disconnected.
+            (0xA3, 0x00) => {
+                if self.fault_hub_port_status {
+                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+                    return;
+                }
+                if self.fault_hub_port_status_raw != 0 {
+                    self.post_transfer_event_raw(status_addr, self.fault_hub_port_status_raw, 1, 0);
+                    return;
+                }
+                if self.fault_hub_port_status_evtype != 0 {
+                    self.post_event_raw_type(status_addr, self.fault_hub_port_status_evtype);
+                    return;
+                }
+                let port = setup[4];
+                let bit = if port >= 1 {
+                    1 << (u32::from(port) - 1)
+                } else {
+                    0
+                };
+                let powered = port >= 1 && self.hub_powered & bit != 0;
+                let w_status = if powered && port == self.hub_downstream_port {
+                    // Once the port has been reset it reports enabled
+                    // (PORT_STATUS_ENABLE, bit 1) in addition to its
+                    // connect/speed bits.
+                    let enabled = if self.hub_reset & bit != 0 { 1 << 1 } else { 0 };
+                    self.hub_downstream_status | enabled
+                } else {
+                    0
+                };
+                let bytes = w_status.to_le_bytes();
+                let reply = [bytes[0], bytes[1], 0, 0];
+                if !self.deliver_in_data(data, &reply, w_length, status_addr) {
+                    return;
                 }
             }
             // SET_CONFIGURATION
             (0x00, 0x09) => self.configuration = Some(setup[2]),
             // SET_PROTOCOL (HID class)
             (0x21, 0x0B) => {
-                if self.stall_class_requests {
+                if self.fault_class_requests {
+                    self.post_transfer_event(
+                        status_addr,
+                        CompletionCode::UsbTransactionError,
+                        1,
+                        0,
+                    );
+                    return;
+                }
+                // A hub is not a HID device, so it STALLs this HID class
+                // request — and a STALL halts EP0, exactly the metal
+                // failure that breaks a following hub-descriptor read. The
+                // downstream device *is* a HID keyboard, so once it is
+                // addressed the request succeeds.
+                if self.stall_class_requests || (self.hub_ports > 0 && !self.downstream_active) {
+                    self.ep0_halted = true;
                     self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
                     return;
                 }
                 self.protocol = Some(setup[2]);
             }
             _ => {
+                self.ep0_halted = true;
                 self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
                 return;
             }
@@ -508,6 +970,24 @@ impl MockXhci {
     }
 
     fn process_int_ring(&mut self) {
+        // A device addressed downstream of the hub receives interrupt
+        // transfers only once the controller has been told its parent is
+        // a hub (the Hub bit in the hub's slot context, set by a
+        // Configure Endpoint). Real hardware never schedules the split
+        // transactions otherwise, so the mock delivers no report — the
+        // metal bug where the keyboard was addressed but never typed.
+        if self.downstream_active && !self.hub_marked_as_hub {
+            return;
+        }
+        // The periodic scheduler reserves no bandwidth for an interrupt
+        // endpoint whose Max ESIT Payload is zero (§4.14.2), so the
+        // controller services it never and the device delivers no report
+        // — the metal bug where the addressed keyboard never typed. A
+        // configured interrupt endpoint always carries a non-zero payload
+        // once `ep_ctx_dwords` programs it.
+        if self.configured && self.int_max_esit == 0 {
+            return;
+        }
         while let Some(report) = self.pending_reports.front().cloned() {
             let (mut index, mut cycle) = (self.int_index, self.int_cycle);
             let base = self.int_base;
@@ -531,7 +1011,7 @@ impl MockXhci {
             } else {
                 CompletionCode::Success
             };
-            self.post_transfer_event(addr, code, 3, residual);
+            self.post_transfer_event(addr, code, self.int_dci, residual);
         }
     }
 }
@@ -547,8 +1027,14 @@ impl XhciHost for MockXhci {
         if offset == regs::HCSPARAMS1 {
             return Ok(self.hcsparams1);
         }
+        if offset == regs::HCSPARAMS2 {
+            return Ok(self.hcsparams2);
+        }
         if offset == regs::HCCPARAMS1 {
             return Ok(self.hccparams1);
+        }
+        if offset == Self::op(regs::PAGESIZE) {
+            return Ok(self.pagesize);
         }
         if offset == regs::DBOFF {
             return Ok(self.dboff);
@@ -682,6 +1168,17 @@ impl XhciHost for MockXhci {
         let portsc_base = Self::op(regs::PORTSC_BASE);
         for port in 0..self.portsc.len() {
             if offset == portsc_base + port * regs::PORTSC_STRIDE {
+                if value & regs::PORTSC_PP != 0 {
+                    // Port Power latches sticky, as on a controller whose
+                    // ports software powers on (xHCI 1.2 §5.4.8).
+                    self.portsc[port] |= regs::PORTSC_PP;
+                    // A port-power-controlled controller (PPC = 1) only
+                    // reports a device once the port is powered: a latent
+                    // device asserts Current Connect Status here.
+                    if self.latent_device_port == Some(port) {
+                        self.portsc[port] |= regs::PORTSC_CCS | (3 << regs::PORTSC_SPEED_SHIFT);
+                    }
+                }
                 if value & regs::PORTSC_PR != 0 {
                     // A reset re-enables a connected port; PR reads as
                     // in-progress for a couple of polls.
@@ -1240,6 +1737,80 @@ fn usb_device_start_rejects_bad_regions() {
 }
 
 #[test]
+fn hcsparams2_decodes_the_vl805_scratchpad_count() {
+    // VL805 datasheet HCSPARAMS2 default `FC000031h` → 31 scratchpad
+    // buffers (low field bits 31:27 = 0x1F, high field bits 25:21 = 0).
+    assert_eq!(regs::hcsparams2_max_scratchpad(0xFC00_0031), 31);
+    // A high-field-only value combines into the 10-bit count.
+    assert_eq!(regs::hcsparams2_max_scratchpad(1 << 21), 32);
+    // No scratchpad required.
+    assert_eq!(regs::hcsparams2_max_scratchpad(0), 0);
+}
+
+#[test]
+fn pagesize_decodes_the_lowest_supported_page() {
+    // Bit 0 → 4 KiB (the VL805's page); a higher bit → its `2^(n+12)`.
+    assert_eq!(regs::pagesize_bytes(1), 4096);
+    assert_eq!(regs::pagesize_bytes(1 << 4), 1 << 16);
+    // An unset register reports no size, so the caller fails closed.
+    assert_eq!(regs::pagesize_bytes(0), 0);
+}
+
+#[test]
+fn start_reserves_scratchpad_and_programs_dcbaa0() {
+    // A VL805-shaped controller: 31 page-sized scratchpad buffers, and
+    // no command completes until software points `DCBAA[0]` at the
+    // scratchpad array (xHCI §4.20). Before this fix the very first
+    // Enable Slot produced no completion event (the Pi 4 metal
+    // `4126 stage=2 completion=0`); now `start` reserves the buffers, so
+    // the command ring runs and enumeration completes.
+    let mem: SharedMem = Rc::new(RefCell::new(alloc::vec![0u8; 256 * 1024]));
+    let xhci = Xhci::open(MockXhci::with_device_scratchpad(&mem, 31)).expect("bring-up succeeds");
+    assert_eq!(xhci.max_scratchpad_buffers(), 31);
+    assert_eq!(xhci.page_size(), 4096);
+    let dma = MockDma {
+        mem: Rc::clone(&mem),
+        phys: MOCK_DMA_BASE,
+    };
+    let mut device = UsbDevice::start(xhci, dma, 4096).expect("engine starts with scratchpad");
+
+    // `DCBAA[0]` now points at a non-zero scratchpad pointer array...
+    let dcbaa_base = MockXhci::qword(device.host_mut().dcbaap);
+    let array = device.host_mut().read_dwords(dcbaa_base, 2);
+    let array_ptr = (u64::from(array[1]) << 32) | u64::from(array[0]);
+    assert_ne!(array_ptr, 0, "DCBAA[0] points at the scratchpad array");
+    // ...whose first entry is a non-zero, page-aligned scratchpad buffer.
+    let entry = device.host_mut().read_dwords(array_ptr, 2);
+    let page0 = (u64::from(entry[1]) << 32) | u64::from(entry[0]);
+    assert_ne!(page0, 0, "scratchpad array entry 0 points at a buffer");
+    assert_eq!(page0 % 4096, 0, "scratchpad buffers are page-aligned");
+
+    // And a command actually completes now: enumeration runs end to end.
+    let descriptor = device
+        .enumerate_hid(1)
+        .expect("enumeration completes once the scratchpad is reserved");
+    assert_eq!(descriptor.vendor_id, 0x046D);
+}
+
+#[test]
+fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
+    // The same VL805-shaped controller, but the engine is denied a region
+    // large enough to reserve the 31 scratchpad pages: `start` fails
+    // closed (`LengthOutOfRange`) rather than running a controller whose
+    // `DCBAA[0]` it could not program (`AGENTS.md` §5.4 / §2.9).
+    let small: SharedMem = Rc::new(RefCell::new(alloc::vec![0u8; 0x4000]));
+    let xhci = Xhci::open(MockXhci::with_device_scratchpad(&small, 31)).expect("bring-up succeeds");
+    let dma = MockDma {
+        mem: Rc::clone(&small),
+        phys: MOCK_DMA_BASE,
+    };
+    assert_eq!(
+        UsbDevice::start(xhci, dma, 4096).err(),
+        Some(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
 fn enumerate_hid_full_chain() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
@@ -1320,12 +1891,696 @@ fn enumerate_first_connected_fails_closed_on_an_empty_root_hub() {
 }
 
 #[test]
-fn enumerate_hid_fails_closed_on_a_stalled_class_request() {
+fn set_port_power_asserts_pp_and_rejects_a_bad_port() {
+    // A port-power-controlled controller reports a port unpowered after
+    // the open-time Host Controller Reset; `set_port_power` asserts `PP`
+    // (xHCI 1.2 §4.19.1.1 / §5.4.8).
+    let mut mock = MockXhci::new();
+    mock.portsc[0] = 0;
+    let mut xhci = Xhci::open(mock).expect("bring-up succeeds");
+    assert_eq!(xhci.port_status(1).unwrap().raw() & regs::PORTSC_PP, 0);
+    xhci.set_port_power(1).expect("port 1 powers on");
+    assert_ne!(xhci.port_status(1).unwrap().raw() & regs::PORTSC_PP, 0);
+    // Idempotent on an already-powered port; out-of-range fails closed.
+    xhci.set_port_power(1)
+        .expect("powering an on port is a no-op");
+    assert_eq!(xhci.set_port_power(0), Err(DriverError::OutOfRange));
+    assert_eq!(xhci.set_port_power(99), Err(DriverError::OutOfRange));
+}
+
+#[test]
+fn enumerate_first_connected_powers_every_root_port() {
+    // The scan must power on every reported port before reading connect
+    // status, or a port-power-controlled controller hides attached
+    // devices. Start with all ports unpowered (the post-reset shape) and
+    // confirm each carries `PP` afterwards.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    for port in 0..mock.portsc.len() {
+        mock.portsc[port] &= !regs::PORTSC_PP;
+    }
+    let mut device = started_device(mock, &mem);
+    device
+        .enumerate_first_connected()
+        .expect("port 1 is connected once powered");
+    let mock = device.host_mut();
+    for port in 0..mock.portsc.len() {
+        assert_ne!(
+            mock.portsc[port] & regs::PORTSC_PP,
+            0,
+            "root-hub port {port} was powered on"
+        );
+    }
+}
+
+#[test]
+fn enumerate_first_connected_connects_a_port_only_after_power() {
+    // Model the VL805: the device reports no Current Connect Status until
+    // software powers the port. A scan that read connect status without
+    // first asserting `PP` (the old behaviour) would find nothing; the
+    // power-then-debounce scan brings the device up.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.portsc[0] = 0;
+    mock.latent_device_port = Some(0);
+    let mut device = started_device(mock, &mem);
+    let descriptor = device
+        .enumerate_first_connected()
+        .expect("the device appears once its port is powered");
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert_eq!(device.slot(), 1);
+    assert!(device.host_mut().configured);
+}
+
+#[test]
+fn root_port_status_raw_reports_each_port_and_rejects_a_bad_port() {
+    // The diagnostic accessor walks every reported port and fails closed
+    // on an out-of-range port (`AGENTS.md` §15.7 / §5.4).
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    assert_eq!(device.root_port_count(), 4);
+    let raw = device.root_port_status_raw(1).expect("port 1 reads");
+    assert_ne!(raw & regs::PORTSC_CCS, 0, "port 1 has the connected device");
+    assert_eq!(device.root_port_status_raw(0), Err(DriverError::OutOfRange));
+    assert_eq!(
+        device.root_port_status_raw(99),
+        Err(DriverError::OutOfRange)
+    );
+}
+
+#[test]
+fn enumerate_hid_tolerates_a_stalled_set_protocol() {
+    // `SET_PROTOCOL(boot)` is optional (HID 1.11 §7.2.6): a device that
+    // does not implement it STALLs, which is a protocol stall the
+    // default control endpoint recovers from. The Pi 4 VL805 keyboard
+    // does exactly this (metal `4126 stage=8 completion=6`); the engine
+    // must absorb it and finish enumeration rather than aborting an
+    // otherwise-usable keyboard, leaving the device in its default
+    // protocol (the mock therefore never records a selected protocol).
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
     mock.stall_class_requests = true;
     let mut device = started_device(mock, &mem);
+    let descriptor = device
+        .enumerate_hid(1)
+        .expect("a stalled SET_PROTOCOL is tolerated");
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert_eq!(device.enum_stage(), EnumStage::Configured);
+    // The STALL was observed (the diagnostic preserves it) but absorbed.
+    assert_eq!(
+        device.last_completion_code(),
+        CompletionCode::StallError.as_u8()
+    );
+    assert_eq!(
+        device.host_mut().protocol,
+        None,
+        "the stalled request selected no protocol"
+    );
+}
+
+#[test]
+fn enumerate_hid_records_the_configured_stage_on_success() {
+    // A clean enumeration walks the breadcrumb to `Configured`, and the
+    // last completion observed is the SET_PROTOCOL status stage's
+    // Success — the fault-localising diagnostic reads a healthy run.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    assert_eq!(device.enum_stage(), EnumStage::Scan);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    assert_eq!(device.enum_stage(), EnumStage::Configured);
+    assert_eq!(
+        device.last_completion_code(),
+        CompletionCode::Success.as_u8()
+    );
+}
+
+#[test]
+fn enumerate_hid_fails_closed_on_a_non_stall_class_fault() {
+    // A STALL on the optional SET_PROTOCOL is tolerated, but a *genuine*
+    // class-request fault (here a USB transaction error) is not optional
+    // — it still fails closed (`AGENTS.md` §2.9), leaving the breadcrumb
+    // at exactly that step with the raw completion code so a metal
+    // capture pins the faulting xHCI operation (`AGENTS.md` §15.7).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.fault_class_requests = true;
+    let mut device = started_device(mock, &mem);
     assert_eq!(device.enumerate_hid(1), Err(DriverError::DeviceFault));
+    assert_eq!(device.enum_stage(), EnumStage::SetProtocol);
+    assert_eq!(
+        device.last_completion_code(),
+        CompletionCode::UsbTransactionError.as_u8()
+    );
+}
+
+#[test]
+fn enumerate_hid_flags_a_hub_via_the_device_class() {
+    // The Pi 4B's onboard 2109:3431 VIA Labs hub enumerates on root-hub
+    // port 1; the keyboard hangs off it, so the bring-up must recognise
+    // the enumerated device is a hub (bDeviceClass 0x09) rather than
+    // treating it as the keyboard (metal `4102 vendor=2109 product=3431`).
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
+    let descriptor = device.enumerate_hid(1).expect("the hub enumerates");
+    assert_eq!(descriptor.vendor_id, 0x2109);
+    assert_eq!(descriptor.product_id, 0x3431);
+    assert!(descriptor.is_hub(), "device class 0x09 is recognised");
+}
+
+#[test]
+fn enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor() {
+    // A hub is not a HID device: issuing the HID `SET_PROTOCOL(boot)` to
+    // it STALLs, and an xHCI STALL halts the control endpoint, so a
+    // following hub-descriptor read on EP0 faults (the metal `reading
+    // the hub descriptor failed err=device_fault`). The bring-up must
+    // therefore not send `SET_PROTOCOL` to a non-HID interface; this
+    // asserts the hub never selects a protocol, EP0 stays unhalted, and
+    // the hub-descriptor read succeeds. It fails before that gate.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    assert_eq!(
+        device.host_mut().protocol,
+        None,
+        "a hub is not sent the HID SET_PROTOCOL request"
+    );
+    assert!(
+        !device.host_mut().ep0_halted,
+        "EP0 is never STALL-halted enumerating a hub"
+    );
+    assert_eq!(
+        device
+            .hub_num_ports()
+            .expect("hub descriptor read succeeds"),
+        4,
+        "the hub-descriptor read runs on a usable EP0"
+    );
+}
+
+#[test]
+fn hub_discovery_finds_the_downstream_device() {
+    // After the hub enumerates, reading its descriptor reports the
+    // downstream port count, and — once every downstream port is
+    // powered — GET_STATUS reports the keyboard's port connected at its
+    // speed, while an unpopulated port reads disconnected.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    assert_eq!(device.hub_num_ports().expect("hub descriptor read"), 4);
+    for port in 1..=4 {
+        device
+            .power_hub_port(port)
+            .expect("power the downstream port");
+    }
+    let status = device.hub_port_status(2).expect("downstream port status");
+    assert!(
+        hub_port_connected(status),
+        "the keyboard's port is connected"
+    );
+    assert_eq!(
+        hub_port_speed(status),
+        3,
+        "the downstream device is high-speed"
+    );
+
+    let empty = device.hub_port_status(1).expect("downstream port status");
+    assert!(
+        !hub_port_connected(empty),
+        "an unpopulated downstream port reads disconnected"
+    );
+}
+
+#[test]
+fn hub_port_reads_disconnected_until_powered() {
+    // A port-power-controlled hub reports a downstream port
+    // disconnected until software sets PORT_POWER (USB 2.0 §11.11), so
+    // an unpowered scan finds nothing — mirroring the root-hub path.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    let before = device.hub_port_status(2).expect("downstream port status");
+    assert!(
+        !hub_port_connected(before),
+        "the downstream port reads disconnected before power"
+    );
+    device.power_hub_port(2).expect("power the downstream port");
+    let after = device.hub_port_status(2).expect("downstream port status");
+    assert!(
+        hub_port_connected(after),
+        "the downstream port connects once powered"
+    );
+}
+
+#[test]
+fn enumerating_a_hub_does_not_arm_its_interrupt_endpoint() {
+    // A hub has an interrupt status-change endpoint, but this engine
+    // never reads it — a hub's downstream ports are polled over EP0
+    // hub-class GET_STATUS. Arming it (as the keyboard path does) makes
+    // a real hub deliver asynchronous status-change reports that
+    // interleave with — and fail — those EP0 control transfers: the
+    // controller posts a transfer event for the interrupt TRB, whose
+    // pointer is not in the control wait's watch list, so the wait
+    // rejects it (REJECT_ADDRESS_MISMATCH) and the faulted transfer
+    // leaves the ring wedged (the metal `4127` all-ones `0xffff` reads
+    // with `completion=0xd`/`reject=2` on the first ports and no event
+    // at all on the rest). Model the hub with a status-change report
+    // queued on its interrupt endpoint: because the bring-up never
+    // configures or doorbells that endpoint for a hub, the report is
+    // never delivered, no async event contaminates EP0, and every
+    // hub-class read still succeeds. Fails before the fix (the first
+    // hub-class read trips the mismatch); passes after.
+    //
+    // The interrupt-IN endpoint's doorbell value is `DCI_INTERRUPT_IN`
+    // (3, a private const); the control/command doorbells use 1/0.
+    const DCI_INTERRUPT_IN_DB: u32 = 3;
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.pending_reports.push_back(alloc::vec![0x02]);
+    let mut device = started_device(mock, &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    assert!(
+        !device
+            .host_mut()
+            .doorbells
+            .iter()
+            .any(|&(_, value)| value == DCI_INTERRUPT_IN_DB),
+        "a hub's interrupt-IN endpoint is never doorbelled"
+    );
+
+    assert_eq!(
+        device
+            .hub_num_ports()
+            .expect("hub descriptor read succeeds"),
+        4,
+    );
+    for port in 1..=4 {
+        device
+            .power_hub_port(port)
+            .expect("power the downstream port");
+    }
+    let status = device
+        .hub_port_status(2)
+        .expect("downstream port status read succeeds despite the queued report");
+    assert!(
+        hub_port_connected(status),
+        "the keyboard's downstream port is connected"
+    );
+}
+
+#[test]
+fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
+    // The Pi 4B metal case: the onboard 2109:3431 hub enumerates on slot
+    // 1, and a *full-speed* keyboard hangs off a downstream port (the
+    // metal `4127` capture: connected, no speed bit → full speed). Reach
+    // it on a second xHCI slot whose slot context carries the Route
+    // String (the downstream port) and — because a full-speed device
+    // behind a high-speed hub must split its transactions — the TT Hub
+    // Slot ID (the hub's slot) and TT Port Number (xHCI §6.2.2 / §8.9).
+    // The mock faults Address Device unless those are programmed exactly,
+    // so reaching the keyboard descriptor proves the driver built them.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // A full-speed downstream device: Current Connect Status only, no
+    // High-Speed bit (the metal `wstatus 0x0101` after power: connect +
+    // power, no speed bit).
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+
+    let hub = device.enumerate_hid(1).expect("the hub enumerates");
+    assert!(hub.is_hub(), "the device on the root hub is the VIA hub");
+    let hub_slot = device.slot();
+
+    // Bring the keyboard's downstream port up: power, reset, confirm
+    // enabled (the caller owns these wall-clock delays on metal).
+    device.power_hub_port(4).expect("power the downstream port");
+    assert!(
+        hub_port_connected(device.hub_port_status(4).expect("status")),
+        "the keyboard's port is connected once powered"
+    );
+    device.reset_hub_port(4).expect("reset the downstream port");
+    let status = device.hub_port_status(4).expect("status after reset");
+    assert!(
+        hub_port_enabled(status),
+        "the downstream port is enabled after reset"
+    );
+    let speed = hub_port_speed(status);
+    assert_eq!(speed, 1, "the keyboard reports full speed behind the hub");
+
+    let keyboard = device
+        .enumerate_downstream_hid(4, speed)
+        .expect("the keyboard behind the hub is addressed and configured");
+    assert!(
+        !keyboard.is_hub(),
+        "the downstream device is the HID keyboard, not another hub"
+    );
+    assert_eq!(keyboard.vendor_id, 0x046D);
+    assert_eq!(keyboard.product_id, 0xC077);
+
+    // The keyboard occupies a *second* slot, distinct from the hub's,
+    // and the engine is now pointed at it.
+    let kbd_slot = device.slot();
+    assert_ne!(kbd_slot, hub_slot, "the keyboard gets its own slot");
+    assert_eq!(kbd_slot, 2);
+
+    // The mock validated and recorded the Route String it was addressed
+    // with — the hub's downstream port.
+    assert_eq!(device.host_mut().downstream_route_port, 4);
+
+    // The keyboard's HID interface is captured for the hardware-tree
+    // child node, and its boot report ring drains.
+    let node = device
+        .describe_device(0, 1)
+        .expect("the keyboard describes a child node");
+    assert_eq!(node.class(), Some(rustos_abi::HwDeviceClass::Input));
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
+}
+
+#[test]
+fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
+    // The metal regression: the keyboard behind the onboard hub was
+    // addressed (`4128`) but never delivered a report, because the hub's
+    // slot context was left with the Hub bit clear, so the controller
+    // never scheduled the full-speed keyboard's split transactions. The
+    // fix issues a Configure Endpoint over the hub's slot that sets the
+    // Hub bit, Number of Ports, and TT Think Time before addressing the
+    // device behind it. The mock requires the Hub bit on that command and
+    // delivers no downstream interrupt report until it is set, so this
+    // test fails before the fix (no report) and passes after.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // A full-speed downstream keyboard (the metal case): its interrupt
+    // transfers must be split through the hub's TT.
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+
+    device.enumerate_hid(1).expect("the hub enumerates");
+    device.power_hub_port(4).expect("power the downstream port");
+    device.reset_hub_port(4).expect("reset the downstream port");
+    let status = device.hub_port_status(4).expect("status after reset");
+    device
+        .enumerate_downstream_hid(4, hub_port_speed(status))
+        .expect("the keyboard behind the hub is addressed");
+
+    // The parent hub was marked a hub with its real port count, the
+    // precondition for the controller to route/split to the keyboard.
+    assert!(
+        device.host_mut().hub_marked_as_hub,
+        "the hub's slot context gets the Hub bit before the downstream device is addressed"
+    );
+    assert_eq!(
+        device.host_mut().hub_ctx_num_ports,
+        4,
+        "the hub's downstream port count reaches the slot context"
+    );
+
+    // With the hub marked, a queued report now drains — keystrokes flow.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available once the hub is marked");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04);
+}
+
+#[test]
+fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
+    // The metal regression: the full-speed keyboard behind the onboard
+    // hub was addressed (`4128`) and the hub marked, yet typing produced
+    // nothing and the poll-loop heartbeat (`4131`) climbed with
+    // `events=0` — the controller serviced the interrupt endpoint never.
+    // Root cause: the endpoint context left Max ESIT Payload zero
+    // (§6.2.3.8 dword 4 bits 16:31), so the periodic scheduler reserved
+    // no bandwidth for the split transactions (§4.14.2). The fix
+    // programs Max ESIT Payload = the max packet size for a periodic
+    // endpoint. The mock now delivers no interrupt report while it is
+    // zero, so this test fails before the fix (no report drains, and the
+    // payload assertion fails) and passes after.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0; // full-speed downstream device
+    let mut device = started_device(mock, &mem);
+
+    device.enumerate_hid(1).expect("the hub enumerates");
+    device.power_hub_port(4).expect("power the downstream port");
+    device.reset_hub_port(4).expect("reset the downstream port");
+    let status = device.hub_port_status(4).expect("status after reset");
+    device
+        .enumerate_downstream_hid(4, hub_port_speed(status))
+        .expect("the keyboard behind the hub is addressed");
+
+    assert_ne!(
+        device.host_mut().int_max_esit,
+        0,
+        "the interrupt-IN endpoint context carries a non-zero Max ESIT \
+         Payload so the periodic scheduler reserves bandwidth for it"
+    );
+
+    // And, with bandwidth reserved, a queued report actually drains.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available once the endpoint has bandwidth");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04);
+}
+
+#[test]
+fn downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint() {
+    // The metal regression after every prior fix: the keyboard behind
+    // the onboard hub was addressed (`4128`) and the hub marked, the
+    // interrupt endpoint carried a non-zero Max ESIT Payload, yet typing
+    // produced nothing and the poll loop spun with `events=0`. Root
+    // cause: the driver hard-coded the interrupt endpoint as endpoint 1
+    // (DCI 3); a keyboard whose interrupt-IN endpoint is elsewhere left
+    // the controller polling — and the doorbell ringing — the wrong DCI,
+    // so it scheduled the real endpoint never.
+    //
+    // This keyboard reports its interrupt-IN endpoint as **endpoint 2**
+    // (DCI 5). The fix reads the endpoint descriptor and configures,
+    // doorbells, and drains DCI 5. The mock derives the configured DCI
+    // from the Configure Endpoint add flags and posts interrupt events
+    // with it, so before the fix the report would arrive on DCI 3 (which
+    // the driver no longer expects) — the report does not drain — and
+    // after the fix it drains on DCI 5.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    mock.hub_downstream_status = 1 << 0; // full-speed downstream device
+    mock.keyboard_config = &MOCK_CONFIG_DESCRIPTOR_EP2;
+    let mut device = started_device(mock, &mem);
+
+    device.enumerate_hid(1).expect("the hub enumerates");
+    device.power_hub_port(4).expect("power the downstream port");
+    device.reset_hub_port(4).expect("reset the downstream port");
+    let status = device.hub_port_status(4).expect("status after reset");
+    let keyboard = device
+        .enumerate_downstream_hid(4, hub_port_speed(status))
+        .expect("the keyboard behind the hub is addressed on its real endpoint");
+    assert!(!keyboard.is_hub());
+
+    // The Configure Endpoint named DCI 5 (endpoint 2 IN), read from the
+    // endpoint descriptor — not the assumed DCI 3.
+    assert_eq!(
+        device.host_mut().int_dci,
+        5,
+        "the interrupt endpoint is configured at the descriptor-reported DCI 5"
+    );
+
+    // A queued report drains: the controller services DCI 5 and the
+    // driver accepts the Transfer Event for that endpoint id.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available on the endpoint the keyboard actually uses");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
+}
+
+#[test]
+fn enumerate_downstream_hid_omits_the_tt_for_a_high_speed_device() {
+    // A high-speed device behind a high-speed hub needs no transaction
+    // translator: its slot context's TT fields stay zero (xHCI §6.2.2).
+    // The mock faults Address Device if a TT is programmed for a
+    // high-speed device, so success proves the driver omits it.
+    let mem = shared_mem();
+    // `with_hub` defaults the downstream device to high speed.
+    let mock = MockXhci::with_hub(&mem, 4, 3);
+    let mut device = started_device(mock, &mem);
+
+    device.enumerate_hid(1).expect("the hub enumerates");
+    device.power_hub_port(3).expect("power the downstream port");
+    device.reset_hub_port(3).expect("reset the downstream port");
+    let status = device.hub_port_status(3).expect("status after reset");
+    assert_eq!(hub_port_speed(status), 3, "high-speed downstream device");
+
+    let keyboard = device
+        .enumerate_downstream_hid(3, hub_port_speed(status))
+        .expect("a high-speed downstream HID device is addressed without a TT");
+    assert!(!keyboard.is_hub());
+    assert_eq!(device.host_mut().downstream_route_port, 3);
+}
+
+#[test]
+fn enumerate_downstream_hid_before_a_hub_is_addressed_fails_closed() {
+    // Addressing a downstream device requires a hub already addressed on
+    // the active slot (its slot is the route's root and its TT hub).
+    // Without one the call fails closed rather than addressing a device
+    // at a guessed topology (`AGENTS.md` §5.4 / §2.9).
+    let mem = shared_mem();
+    let mock = MockXhci::with_hub(&mem, 4, 4);
+    let mut device = started_device(mock, &mem);
+    assert_eq!(
+        device.enumerate_downstream_hid(4, 1),
+        Err(DriverError::DeviceFault),
+    );
+}
+
+#[test]
+fn hub_num_ports_fails_closed_on_a_forged_descriptor() {
+    // A hub descriptor with the wrong bDescriptorType is forged/corrupt
+    // and rejected fail-closed (`AGENTS.md` §5.4 / §2.9).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.forge_hub_descriptor = true;
+    let mut device = started_device(mock, &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+    assert_eq!(device.hub_num_ports(), Err(DriverError::BadMagic));
+}
+
+#[test]
+fn faulting_hub_port_status_records_the_completion_code() {
+    // The metal capture reached `4127` for every downstream port but
+    // each `wstatus` read as the all-ones sentinel — the per-port class
+    // `GET_STATUS` faulted while the hub-descriptor read and Port-Power
+    // writes succeeded. The bring-up diagnostic surfaces the raw xHCI
+    // completion code so a metal capture can tell *why* (`AGENTS.md`
+    // §15.7); this pins that a faulting `GET_STATUS` fails closed and
+    // leaves `last_completion_code()` at the failing code rather than a
+    // stale success.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.fault_hub_port_status = true;
+    let mut device = started_device(mock, &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    assert_eq!(
+        device.hub_port_status(2),
+        Err(DriverError::DeviceFault),
+        "a STALLed GET_STATUS fails closed"
+    );
+    assert_eq!(
+        device.last_completion_code(),
+        CompletionCode::StallError.as_u8(),
+        "the failing completion code is preserved for the diagnostic"
+    );
+}
+
+#[test]
+fn faulting_hub_port_status_records_an_undecodable_completion_code() {
+    // The metal capture reported `completion_hex=0` for every per-port
+    // `GET_STATUS` — but the fast (logging-cadence) failure means an
+    // event *did* arrive; `0` is the diagnostic mislabelling a
+    // real-but-rejected code as a timeout. `await_event_for` previously
+    // returned before the caller recorded the code whenever the event
+    // carried a completion code this driver does not model (its
+    // fail-closed `completion_code()` decode), leaving
+    // `last_completion_code()` at the `0` "no event" sentinel. The fix
+    // records the raw code as the event is observed, so a reserved /
+    // controller-specific code (here xHCI `7`, Resource Error) survives
+    // for the metal capture (`AGENTS.md` §15.7). This fails before the
+    // fix (code lost to `0`) and passes after.
+    const RESOURCE_ERROR: u8 = 7;
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.fault_hub_port_status_raw = RESOURCE_ERROR;
+    let mut device = started_device(mock, &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    assert_eq!(
+        device.hub_port_status(2),
+        Err(DriverError::OutOfRange),
+        "an undecodable GET_STATUS completion fails closed on the decode"
+    );
+    assert_eq!(
+        device.last_completion_code(),
+        RESOURCE_ERROR,
+        "the raw, undecodable completion code is preserved for the diagnostic"
+    );
+}
+
+#[test]
+fn faulting_hub_port_status_records_an_unexpected_event_type() {
+    // The next metal capture read `completion_hex=0` on two ports with
+    // the *fast* failure cadence — i.e. an event arrived but it was not
+    // a completion the wait expected. `await_event_for` rejects an event
+    // whose TRB-type it does not handle (an asynchronous controller
+    // event interleaved with the awaited transfer) via its `_` arm,
+    // which records no completion code — so `completion_hex=0` alone
+    // cannot tell that from a genuine poll-budget timeout. The reject
+    // now records `last_reject_reason()=1` (unexpected type) and the raw
+    // type in `last_event_type()`, while `last_completion_code()` stays
+    // `0` truthfully (no completion code was carried), distinguishing
+    // the two (`AGENTS.md` §15.7). Fails before the fix (no such
+    // accessors / reason lost); passes after.
+    let unexpected = TrbType::NoOp.as_u8();
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 2);
+    mock.fault_hub_port_status_evtype = unexpected;
+    let mut device = started_device(mock, &mem);
+    device.enumerate_hid(1).expect("the hub enumerates");
+
+    assert_eq!(
+        device.hub_port_status(2),
+        Err(DriverError::DeviceFault),
+        "an unexpected event type fails the GET_STATUS wait closed"
+    );
+    assert_eq!(
+        device.last_reject_reason(),
+        1,
+        "the reject reason names an unexpected event type"
+    );
+    assert_eq!(
+        device.last_event_type(),
+        unexpected,
+        "the rejected event's raw TRB-type is preserved for the diagnostic"
+    );
+    assert_eq!(
+        device.last_completion_code(),
+        0,
+        "no completion code was carried — truthfully 0, not a timeout label"
+    );
 }
 
 #[test]

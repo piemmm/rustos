@@ -166,6 +166,13 @@ impl PortStatus {
         Self(raw)
     }
 
+    /// The raw `PORTSC` dword this view wraps, for one-shot diagnostics
+    /// (a metal capture of every root-hub port's status, §15.7).
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
     /// A device is attached ([`regs::PORTSC_CCS`]).
     #[must_use]
     pub const fn connected(self) -> bool {
@@ -261,6 +268,8 @@ pub struct Xhci<H: XhciHost> {
     hci_version: u16,
     max_slots: u8,
     max_ports: u8,
+    max_scratchpad: u32,
+    page_size: usize,
     ac64: bool,
     csz: bool,
 }
@@ -384,6 +393,15 @@ impl<H: XhciHost> Xhci<H> {
                 None,
             ));
         }
+        // Max Scratchpad Buffers: page-sized buffers the controller
+        // requires software to reserve and point `DCBAA[0]` at before it
+        // can run any command (xHCI §4.20). The VL805 reports 31; missing
+        // them leaves the very first command without a completion event
+        // (the Pi 4 `stage=2 completion=0` metal symptom).
+        let structural2 = host
+            .read32(regs::HCSPARAMS2)
+            .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;
+        let max_scratchpad = regs::hcsparams2_max_scratchpad(structural2);
         let capability = host
             .read32(regs::HCCPARAMS1)
             .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;
@@ -413,48 +431,75 @@ impl<H: XhciHost> Xhci<H> {
             hci_version,
             max_slots,
             max_ports,
+            max_scratchpad,
+            // Resolved from the operational `PAGESIZE` register below, once
+            // the operational base (`CAPLENGTH`) is known.
+            page_size: 0,
             ac64: regs::hccparams1_ac64(capability),
             csz: regs::hccparams1_csz(capability),
         };
+        // The scratchpad buffers are each one controller page and
+        // page-aligned (§5.4.3); read the size now so [`Self::start`] can
+        // lay them out. A malformed register (no supported size) fails
+        // closed at the capability stage rather than assuming 4 KiB.
+        let page_raw = xhci
+            .read_op(regs::PAGESIZE)
+            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::Capability))?;
+        xhci.page_size = regs::pagesize_bytes(page_raw);
+        if max_scratchpad > 0 && xhci.page_size == 0 {
+            return Err(
+                xhci.open_error_with_snapshot(DriverError::DeviceFault, XhciOpenStage::Capability)
+            );
+        }
 
+        xhci.reset_to_ready(budget)?;
+        Ok(xhci)
+    }
+
+    /// Run the §4.2 initialisation prologue on a freshly-parsed
+    /// controller: halt a running controller, clear any latched
+    /// Host System Error / Port Change status firmware left, issue the
+    /// Host Controller Reset, and wait for it to self-clear and for
+    /// Controller Not Ready to clear before any further programming.
+    fn reset_to_ready(&mut self, budget: u32) -> Result<(), XhciOpenError> {
         // Halt a running controller before resetting it (§5.4.1.1).
-        let usbcmd = xhci
+        let usbcmd = self
             .read_op(regs::USBCMD)
-            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset))?;
+            .map_err(|err| self.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset))?;
         if usbcmd & regs::USBCMD_RUN != 0 {
-            xhci.write_op(regs::USBCMD, usbcmd & !regs::USBCMD_RUN)
+            self.write_op(regs::USBCMD, usbcmd & !regs::USBCMD_RUN)
                 .map_err(|err| {
-                    xhci.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset)
+                    self.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset)
                 })?;
         }
-        if let Err(err) = xhci.wait_status(regs::USBSTS_HCH, true, budget) {
-            return Err(xhci.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset));
+        if let Err(err) = self.wait_status(regs::USBSTS_HCH, true, budget) {
+            return Err(self.open_error_with_snapshot(err, XhciOpenStage::HaltedBeforeReset));
         }
-        let latched_status = xhci
+        let latched_status = self
             .read_op(regs::USBSTS)
-            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?
+            .map_err(|err| self.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?
             & (regs::USBSTS_HSE | regs::USBSTS_PCD);
         if latched_status != 0 {
-            xhci.write_op(regs::USBSTS, latched_status)
-                .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
+            self.write_op(regs::USBSTS, latched_status)
+                .map_err(|err| self.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
             // Read back the status register so a posted bridge write cannot
             // leave stale error bits visible when the reset command arrives.
-            xhci.read_op(regs::USBSTS)
-                .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
+            self.read_op(regs::USBSTS)
+                .map_err(|err| self.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
         }
         // Host Controller Reset: self-clearing on completion, after
         // which CNR must also clear before further programming.
-        xhci.write_op(regs::USBCMD, regs::USBCMD_HCRST)
-            .map_err(|err| xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
-        if let Err(err) = xhci.wait_op_clear(regs::USBCMD, regs::USBCMD_HCRST, budget) {
-            return Err(xhci.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear));
+        self.write_op(regs::USBCMD, regs::USBCMD_HCRST)
+            .map_err(|err| self.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear))?;
+        if let Err(err) = self.wait_op_clear(regs::USBCMD, regs::USBCMD_HCRST, budget) {
+            return Err(self.open_error_with_snapshot(err, XhciOpenStage::ResetSelfClear));
         }
-        if let Err(err) = xhci.wait_status(regs::USBSTS_CNR, false, budget) {
+        if let Err(err) = self.wait_status(regs::USBSTS_CNR, false, budget) {
             return Err(
-                xhci.open_error_with_snapshot(err, XhciOpenStage::ControllerReadyAfterReset)
+                self.open_error_with_snapshot(err, XhciOpenStage::ControllerReadyAfterReset)
             );
         }
-        Ok(xhci)
+        Ok(())
     }
 
     const fn open_error(
@@ -529,6 +574,23 @@ impl<H: XhciHost> Xhci<H> {
     #[must_use]
     pub const fn max_ports(&self) -> u8 {
         self.max_ports
+    }
+
+    /// Page-sized scratchpad buffers the controller requires software to
+    /// reserve (`HCSPARAMS2` Max Scratchpad Buffers; `0` when none are
+    /// needed). [`device::UsbDevice::start`] reserves this many pages and
+    /// points `DCBAA[0]` at their pointer array (xHCI §4.20).
+    #[must_use]
+    pub const fn max_scratchpad_buffers(&self) -> u32 {
+        self.max_scratchpad
+    }
+
+    /// The controller page size in bytes the scratchpad buffers are sized
+    /// and aligned to (`PAGESIZE`, §5.4.3; `0` only when no scratchpad is
+    /// required and the register was unreadable).
+    #[must_use]
+    pub const fn page_size(&self) -> usize {
+        self.page_size
     }
 
     /// `true` if the controller addresses 64-bit DMA (`HCCPARAMS1`
@@ -659,6 +721,38 @@ impl<H: XhciHost> Xhci<H> {
         let offset = regs::PORTSC_BASE + (port as usize - 1) * regs::PORTSC_STRIDE;
         let raw = self.read_op(offset)?;
         Ok(PortStatus::from_raw(raw))
+    }
+
+    /// Assert Port Power ([`regs::PORTSC_PP`]) on root-hub `port`.
+    ///
+    /// The Host Controller Reset issued in [`Self::open`] clears every
+    /// `PORTSC`, and a port-power-controlled controller (`HCCPARAMS1`
+    /// PPC = 1 — the Pi 4's VL805) reports `PP` = 0 and never asserts
+    /// Current Connect Status until software powers the port on
+    /// (xHCI 1.2 §4.19.1.1 / §5.4.8). Without this an attached device
+    /// is invisible to [`Self::port_status`]. The read-modify-write
+    /// masks the write-1-to-clear bits ([`regs::PORTSC_RW1C_MASK`]) so
+    /// no pending change bit is consumed (as [`Self::reset_port`]).
+    /// Writing `PP` to an already-powered or non-controlled port is a
+    /// no-op the hardware ignores, so this is safe to call on every
+    /// reported port.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `port` is zero or above
+    ///   [`Self::max_ports`].
+    /// * [`DriverError::DeviceFault`] if the register window rejects
+    ///   the access.
+    pub fn set_port_power(&mut self, port: u8) -> Result<(), DriverError> {
+        if port == 0 || port > self.max_ports {
+            return Err(DriverError::OutOfRange);
+        }
+        let offset = regs::PORTSC_BASE + (usize::from(port) - 1) * regs::PORTSC_STRIDE;
+        let raw = self.read_op(offset)?;
+        if raw & regs::PORTSC_PP == 0 {
+            self.write_op(offset, (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_PP)?;
+        }
+        Ok(())
     }
 
     /// Ring a doorbell (§5.6): `index` 0 with `target` 0 notifies the

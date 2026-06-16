@@ -477,6 +477,64 @@ fn mmio_exchange_times_out_when_the_firmware_never_answers() {
 }
 
 #[test]
+fn mmio_exchange_stats_localise_the_timeout_stage() {
+    // Write side jammed (FULL forever): the exchange never gets to post,
+    // so the recorded stage is `PostRoom` and no word was posted.
+    let mut full = ready_regs();
+    set_reg_word(&mut full, REG_MBOX0_STATUS, STATUS_FULL);
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let mut mailbox = MmioMailbox::new(
+        window_over(&mut full.0, 0),
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        8,
+    )
+    .expect("construct");
+    let mut message = request().encode().expect("encode");
+    assert_eq!(mailbox.exchange(&mut message), Err(MailboxError::Timeout));
+    let stats = mailbox.last_exchange_stats();
+    assert_eq!(stats.timeout_stage, TimeoutStage::PostRoom);
+    assert_eq!(stats.posted_word, 0);
+
+    // Read side silent (EMPTY forever): the request posts, but no
+    // completion ever arrives, so the recorded stage is `Response` and the
+    // posted word is the buffer bus address on the property channel.
+    let mut empty = ready_regs();
+    set_reg_word(&mut empty, REG_MBOX0_STATUS, STATUS_EMPTY);
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let mut mailbox = MmioMailbox::new(
+        window_over(&mut empty.0, 0),
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        8,
+    )
+    .expect("construct");
+    let mut message = request().encode().expect("encode");
+    assert_eq!(mailbox.exchange(&mut message), Err(MailboxError::Timeout));
+    let stats = mailbox.last_exchange_stats();
+    assert_eq!(stats.timeout_stage, TimeoutStage::Response);
+    assert_eq!(stats.posted_word, TEST_BUFFER_BUS | CHANNEL_PROPERTY);
+
+    // Success path (RAM echoes our own completion): no timeout stage, and
+    // the posted word is recorded for the diagnostic.
+    let mut regs = ready_regs();
+    let mut buffer = Aligned([0u8; PROPERTY_LEN_BYTES]);
+    let mut mailbox = MmioMailbox::new(
+        window_over(&mut regs.0, 0),
+        window_over(&mut buffer.0, 0),
+        TEST_BUFFER_BUS,
+        8,
+    )
+    .expect("construct");
+    let mut message = request().encode().expect("encode");
+    mailbox.exchange(&mut message).expect("exchange");
+    let stats = mailbox.last_exchange_stats();
+    assert_eq!(stats.timeout_stage, TimeoutStage::None);
+    assert_eq!(stats.posted_word, TEST_BUFFER_BUS | CHANNEL_PROPERTY);
+    assert_eq!(stats.foreign_channel_reads, 0);
+}
+
+#[test]
 fn mmio_exchange_rejects_a_foreign_property_completion() {
     let mut regs = ready_regs();
     set_reg_word(
@@ -650,6 +708,70 @@ fn xhci_reset_decode_rejects_an_unhonoured_tag() {
     unhonoured[1] = CODE_RESPONSE_OK; // header OK, tag code word still 0.
     assert_eq!(
         decode_xhci_reset_response(&unhonoured),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+// --- Mailbox liveness probe ----------------------------------------------
+
+#[test]
+fn firmware_revision_query_lays_out_the_get_tag() {
+    let words = encode_firmware_revision_query();
+    // 7 used words: 2 header + a 4-word get tag ([tag, value-len,
+    // request, response-word slot]) + 1 end marker.
+    assert_eq!(words[0], 7 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    // tag, response-buffer byte length (one word), request code, and the
+    // zeroed slot the firmware writes the revision into.
+    assert_eq!(words[2..6], [TAG_GET_FIRMWARE_REVISION, 4, 0, 0]);
+    assert_eq!(words[6], 0, "end tag");
+}
+
+#[test]
+fn firmware_revision_round_trips_through_a_healthy_firmware() {
+    // The liveness probe reads the firmware's configured revision word
+    // over the transport; a non-zero value proves the runtime mailbox
+    // path is sound before the heavier xHCI-reset call (`AGENTS.md`
+    // §15.7).
+    let mut firmware = MockFirmware::healthy();
+    assert_eq!(
+        query_firmware_revision(&mut firmware).expect("revision read"),
+        firmware.firmware_revision
+    );
+}
+
+#[test]
+fn firmware_revision_decode_fails_closed() {
+    // A genuine healthy response decodes to the revision word.
+    let mut ok = encode_firmware_revision_query();
+    MockFirmware::healthy().respond(&mut ok);
+    assert_eq!(
+        decode_firmware_revision_response(&ok),
+        Ok(MockFirmware::healthy().firmware_revision)
+    );
+
+    // Firmware top-level error.
+    let mut err = encode_firmware_revision_query();
+    err[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_firmware_revision_response(&err),
+        Err(MailboxError::FirmwareError)
+    );
+
+    // Unknown header code is a protocol breach, not a verdict.
+    let mut unknown = encode_firmware_revision_query();
+    unknown[1] = 0x1234_5678;
+    assert_eq!(
+        decode_firmware_revision_response(&unknown),
+        Err(MailboxError::MalformedResponse)
+    );
+
+    // An OK header with the per-tag response bit clear (an unhonoured
+    // tag) must not be read as a successful probe.
+    let mut unhonoured = encode_firmware_revision_query();
+    unhonoured[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_firmware_revision_response(&unhonoured),
         Err(MailboxError::MalformedResponse)
     );
 }

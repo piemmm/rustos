@@ -212,6 +212,53 @@ mod tests {
         unsafe { DmaSlab::from_leaked(phys, ptr, len, pool_id, slot) }
     }
 
+    /// File-scope recorder for the [`DmaSlab::sync_range`] hook. A
+    /// [`super::super::SlabCoherencyFn`] is a bare `fn` pointer (no
+    /// capture), so the observed `(base, len)` is published through atomics.
+    /// Used by a single test (`dma_slab_sync_range_*`) so no cross-test race
+    /// on these statics is possible (`AGENTS.md` §7 — no flaky tests).
+    mod coherency_test_state {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        pub(super) static CALLS: AtomicUsize = AtomicUsize::new(0);
+        pub(super) static LAST_BASE: AtomicUsize = AtomicUsize::new(0);
+        pub(super) static LAST_LEN: AtomicUsize = AtomicUsize::new(0);
+
+        /// A [`super::super::SlabCoherencyFn`]: record the maintained range.
+        pub(super) fn record(base: *const u8, len: usize) {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            LAST_BASE.store(base as usize, Ordering::SeqCst);
+            LAST_LEN.store(len, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn dma_slab_sync_range_brackets_only_in_bounds_ranges_through_the_hook() {
+        use coherency_test_state as rec;
+        use core::sync::atomic::Ordering;
+
+        let slab = leaked_slab(64, PoolId::MOCK, 0, 0).with_coherency(rec::record);
+        let base = slab.as_bytes().as_ptr() as usize;
+
+        // An in-bounds range is maintained at the right address and length.
+        slab.sync_range(16, 8);
+        assert_eq!(rec::CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(rec::LAST_BASE.load(Ordering::SeqCst), base + 16);
+        assert_eq!(rec::LAST_LEN.load(Ordering::SeqCst), 8);
+
+        // A zero-length request and an out-of-range request both fail closed
+        // to a no-op (`AGENTS.md` §5.4): the hook is not invoked again.
+        slab.sync_range(0, 0);
+        slab.sync_range(60, 8);
+        slab.sync_range(usize::MAX, 1);
+        assert_eq!(rec::CALLS.load(Ordering::SeqCst), 1);
+
+        // A slab minted without a coherency shim never calls the hook
+        // (coherent interconnect / mock host).
+        let plain = leaked_slab(64, PoolId::MOCK, 1, 0);
+        plain.sync_range(0, 16);
+        assert_eq!(rec::CALLS.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn dma_slab_round_trip() {
         let mut slab = leaked_slab(16, PoolId::MOCK, 0, 0);
