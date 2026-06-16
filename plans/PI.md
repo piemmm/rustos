@@ -3162,15 +3162,33 @@ table, so a new board is match **data**, not new code. Sub-increments
     `NULL_RESOURCE_GRANTS` / `with_resource_grants` seam from the security
     foundation was deleted in place (§2.13 / §2.14). Host-tested (the grant
     store's 6 unit tests + the 5 `mmio_map` handler tests minting real
-    grants); no `lib/abi`/C-header change. **Remaining (next landings,
-    staged):** (b) the architecture `MmioMapFacility` producer (`kernel/mem`
-    live-mapping of device phys into a running user aspace, the SP5b-class
-    machinery — no production live-aspace mapper exists yet, the dependency
-    this rides — per port); (c) the DMA half (a `dma_alloc`-equivalent
-    bounded by the grant's `addr_limit`); and (d) the `-M virt` vertical
-    where the kernel mints a virtio-mmio window grant for a spawned program
-    that maps it through `mmio_map`. A live VL805 path stays a §0.4
-    metal-acceptance item.
+    grants); no `lib/abi`/C-header change. **5d-0-ii (b) — the guarded
+    borrowed-space MMIO mapper mechanism — LANDED.**
+    `kernel/mem::mmio::MmioWindowMap` is the per-task guarded MMIO
+    virtual-window allocator (bounded window + slot bitmap + per-region
+    guard/data accounting) that maps a device window into a **borrowed**
+    `&mut AddressSpace<P>` — caching disabled (`NO_CACHE`), never executable
+    (W^X, §19.2), unmapped guard pages bracketing every window (§4), and an
+    all-or-nothing fail-closed unwind on a part-way page-table failure
+    (§2.9). It is the device-window analogue of `kernel/mem::anon`'s
+    `map_anonymous` and the mechanism the production `MmioMapFacility` will
+    drive against a task's retained live address space. The existing owned
+    `MmioMap` (the in-kernel driver-host register-window mapper consumed by
+    `KernelMmioMapper`) is now a thin wrapper delegating to `MmioWindowMap`,
+    so the guarded logic has one definition (§2.2) with no consumer churn.
+    Host-tested (8 borrowed-space tests + the 15 existing `MmioMap` tests
+    still green); no `lib/abi`/C-header change. **Remaining (next landings,
+    staged):** the per-port `MmioMapFacility` *producer* still needs
+    **production per-task live-address-space retention** — today the spawn
+    seams (`admit_init`/`admit_process`) hand the registry a *frozen*
+    (read-only) `UserAddressSpace` snapshot, so production `mem_map` and
+    `mmio_map` both fail closed at their NULL producers; retaining the live
+    *mutable* `AddressSpace<P>` per task (and driving the facility through
+    `MmioWindowMap`) is the SP5b-class follow-on this rides, per port; then
+    (c) the DMA half (a `dma_alloc`-equivalent bounded by the grant's
+    `addr_limit`); and (d) the `-M virt` vertical where the kernel mints a
+    virtio-mmio window grant for a spawned program that maps it through
+    `mmio_map`. A live VL805 path stays a §0.4 metal-acceptance item.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the

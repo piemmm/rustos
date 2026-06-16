@@ -141,44 +141,46 @@ struct Record {
     data_pages: usize,
 }
 
-/// Per-process MMIO register-window mapper.
+/// Per-task guard-bracketed MMIO virtual-window allocator, **independent of
+/// the address space it maps into**.
 ///
-/// Generic over [`PageTable`] so the same code is exercised by
-/// `crate::HostPageTable` in unit tests and driven by the
-/// architecture page-table types in production. The `'a` lifetime
-/// bounds the borrow of the direct physical map the mapper resolves
-/// register pointers through.
-pub struct MmioMap<'a, P: PageTable> {
-    address_space: AddressSpace<P>,
+/// This owns only the per-task bookkeeping a sequence of MMIO mappings needs
+/// — the virtual window the mappings live in, the slot occupancy bitmap, and
+/// the per-region guard/data accounting — and never an [`AddressSpace`]. Every
+/// page-table mutation is performed against a **borrowed** `&mut
+/// AddressSpace<P>` the caller passes in, so the same guarded mapping logic
+/// serves two consumers without duplication (`AGENTS.md` §2.2):
+///
+/// * [`MmioMap`], which bundles a `MmioWindowMap` with an address space it
+///   *owns* (the in-kernel driver-host register-window mapper); and
+/// * the `mmio_map` syscall facility (`plans/PI.md` P10 chunk 5d-0), which maps
+///   a granted device window into the **caller's own running** address space —
+///   a space the facility borrows but does not own.
+///
+/// It is the device-window analogue of [`crate::anon::map_anonymous`]: an
+/// architecture-neutral mechanism over a borrowed live `AddressSpace<P>`, with
+/// the capability posture, the choice of virtual window, and the lifecycle
+/// owned by the higher-level caller (`AGENTS.md` §17.4). Unlike the anonymous
+/// mapper it allocates **no** frames — the physical address is fixed by the
+/// hardware (a PCI BAR, a virtio-MMIO slot) — and it brackets every window with
+/// unmapped guard pages so a driver that walks off a register block faults
+/// instead of poking a neighbouring device (`AGENTS.md` §4).
+pub struct MmioWindowMap {
     base: VirtAddr,
     capacity_pages: usize,
     slot_used: Vec<bool>,
     regions: BTreeMap<u64, Record>,
-    /// Direct physical map used to reach a region's device registers
-    /// from the CPU. In production this is the boot identity map; in
-    /// host tests a `SimPhysMap` standing in for the
-    /// device's register block.
-    phys: &'a dyn PhysMap,
 }
 
-impl<'a, P: PageTable> MmioMap<'a, P> {
-    /// Construct a mapper managing the virtual range
+impl MmioWindowMap {
+    /// Construct an allocator managing the virtual range
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
-    ///
-    /// `phys` is the kernel's direct physical map; the mapper resolves
-    /// every register window through it so a `RegisterWindow` points
-    /// at the device's own registers.
     ///
     /// # Errors
     ///
     /// [`MmioError::InvalidMapConfig`] if `capacity_pages == 0`,
     /// `base` is not page-aligned, or the window size overflows.
-    pub fn new(
-        address_space: AddressSpace<P>,
-        base: VirtAddr,
-        capacity_pages: usize,
-        phys: &'a dyn PhysMap,
-    ) -> Result<Self, MmioError> {
+    pub fn new(base: VirtAddr, capacity_pages: usize) -> Result<Self, MmioError> {
         if capacity_pages == 0 || !base.is_page_aligned() {
             return Err(MmioError::InvalidMapConfig);
         }
@@ -188,17 +190,22 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
             .checked_mul(PAGE_SIZE)
             .ok_or(MmioError::InvalidMapConfig)?;
         Ok(Self {
-            address_space,
             base,
             capacity_pages,
             slot_used: vec![false; capacity_pages],
             regions: BTreeMap::new(),
-            phys,
         })
     }
 
-    /// Map `len` bytes of device physical memory beginning at
-    /// `phys_base`, returning a guard-bracketed [`MmioRegion`].
+    /// Map `len` bytes of device physical memory beginning at `phys_base`
+    /// into the borrowed `space`, returning a guard-bracketed [`MmioRegion`].
+    ///
+    /// The window is mapped `READ | WRITE | NO_CACHE | USER` — caching
+    /// disabled (these are device registers, not RAM) and **never** executable
+    /// (`AGENTS.md` §19.2, W^X for a register window). The map is
+    /// all-or-nothing: a page-table failure part-way unwinds every page this
+    /// call mapped before returning, leaving `space` unchanged (`AGENTS.md`
+    /// §2.9).
     ///
     /// # Errors
     ///
@@ -208,7 +215,12 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
     ///   enough exists.
     /// * [`MmioError::PageTable`] — propagated from the
     ///   [`AddressSpace`] when a mapping operation fails.
-    pub fn map(&mut self, phys_base: u64, len: usize) -> Result<MmioRegion, MmioError> {
+    pub fn map_into<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<MmioRegion, MmioError> {
         if len == 0 {
             return Err(MmioError::InvalidRegion);
         }
@@ -247,16 +259,16 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
             let page = match Page::from_addr(virt) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.rollback_partial_map(first_data_slot, i);
+                    self.rollback_partial_map(space, first_data_slot, i);
                     return Err(MmioError::PageTable(e));
                 }
             };
-            if let Err(e) = self.address_space.map(
+            if let Err(e) = space.map(
                 page,
                 frame,
                 MapFlags::READ | MapFlags::WRITE | MapFlags::NO_CACHE | MapFlags::USER,
             ) {
-                self.rollback_partial_map(first_data_slot, i);
+                self.rollback_partial_map(space, first_data_slot, i);
                 return Err(MmioError::PageTable(e));
             }
         }
@@ -284,15 +296,20 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
         })
     }
 
-    /// Tear down a mapping previously returned by [`Self::map`].
+    /// Tear down a mapping previously returned by [`Self::map_into`] from the
+    /// borrowed `space`.
     ///
     /// # Errors
     ///
     /// * [`MmioError::UnknownRegion`] — `region` is not a live
-    ///   mapping of this mapper (covers double-unmap).
+    ///   mapping of this allocator (covers double-unmap).
     /// * [`MmioError::PageTable`] — propagated from
     ///   [`AddressSpace::unmap`].
-    pub fn unmap(&mut self, region: MmioRegion) -> Result<(), MmioError> {
+    pub fn unmap_from<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        region: MmioRegion,
+    ) -> Result<(), MmioError> {
         let record = self
             .regions
             .remove(&region.virt.as_u64())
@@ -304,7 +321,7 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
         for i in 0..data_pages {
             let virt = self.virt_of_slot(first_data_slot + i);
             let page = Page::from_addr(virt)?;
-            let _ = self.address_space.unmap(page)?;
+            let _ = space.unmap(page)?;
         }
 
         for s in record.leading_guard_slot..=trailing_guard_slot {
@@ -313,30 +330,30 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
         Ok(())
     }
 
-    /// Raw, non-null base pointer to the first register of `region`.
+    /// Raw, non-null base pointer to the first register of `region`, resolved
+    /// through the direct physical map `phys`.
     ///
-    /// The pointer is valid for reads and writes of `region.len()`
-    /// bytes until the region is released via [`Self::unmap`]. The
-    /// caller (the kernel-host `MmioMapper` impl) mints a
-    /// `RegisterWindow` carrying this pointer and must ensure the
-    /// window is dropped before `unmap` is called for the same
-    /// region.
+    /// The pointer is valid for reads and writes of `region.len()` bytes until
+    /// the region is released via [`Self::unmap_from`].
     ///
     /// # Errors
     ///
     /// * [`MmioError::UnknownRegion`] if `region` does not name a live
-    ///   mapping of this mapper.
+    ///   mapping of this allocator.
     /// * [`MmioError::DirectMap`] if the region's registers fall
     ///   outside the direct physical map.
-    pub fn region_base(&self, region: &MmioRegion) -> Result<NonNull<u8>, MmioError> {
+    pub fn region_base(
+        &self,
+        region: &MmioRegion,
+        phys: &dyn PhysMap,
+    ) -> Result<NonNull<u8>, MmioError> {
         if !self.regions.contains_key(&region.virt.as_u64()) {
             return Err(MmioError::UnknownRegion);
         }
         // The register block is reachable at its device physical base
         // through the direct map; the within-page offset is already
         // baked into `region.phys`.
-        self.phys
-            .translate(PhysAddr::new(region.phys), region.len)
+        phys.translate(PhysAddr::new(region.phys), region.len)
             .ok_or(MmioError::DirectMap)
     }
 
@@ -346,17 +363,10 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
         self.regions.len()
     }
 
-    /// Total pages in the mapper's virtual window.
+    /// Total pages in the allocator's virtual window.
     #[must_use]
     pub fn capacity_pages(&self) -> usize {
         self.capacity_pages
-    }
-
-    /// Number of currently-mapped pages in the underlying address
-    /// space (data pages only; guard slots are never mapped).
-    #[must_use]
-    pub fn mapped_pages(&self) -> usize {
-        self.address_space.mapped_pages()
     }
 
     // -----------------------------------------------------------------
@@ -388,13 +398,134 @@ impl<'a, P: PageTable> MmioMap<'a, P> {
         None
     }
 
-    fn rollback_partial_map(&mut self, first_data_slot: usize, mapped_so_far: usize) {
+    fn rollback_partial_map<P: PageTable>(
+        &self,
+        space: &mut AddressSpace<P>,
+        first_data_slot: usize,
+        mapped_so_far: usize,
+    ) {
         for i in 0..mapped_so_far {
             let virt = self.virt_of_slot(first_data_slot + i);
             if let Ok(page) = Page::from_addr(virt) {
-                let _ = self.address_space.unmap(page);
+                let _ = space.unmap(page);
             }
         }
+    }
+}
+
+/// Per-process MMIO register-window mapper.
+///
+/// Bundles a [`MmioWindowMap`] with the [`AddressSpace`] it *owns*, so the
+/// in-kernel driver host can map a device's register block into a driver's
+/// address space and hand back a `RegisterWindow`. The guarded mapping
+/// mechanism lives in [`MmioWindowMap`] (shared with the `mmio_map` syscall
+/// facility, `AGENTS.md` §2.2); this type is the thin owning adapter.
+///
+/// Generic over [`PageTable`] so the same code is exercised by
+/// `crate::HostPageTable` in unit tests and driven by the
+/// architecture page-table types in production. The `'a` lifetime
+/// bounds the borrow of the direct physical map the mapper resolves
+/// register pointers through.
+pub struct MmioMap<'a, P: PageTable> {
+    address_space: AddressSpace<P>,
+    window: MmioWindowMap,
+    /// Direct physical map used to reach a region's device registers
+    /// from the CPU. In production this is the boot identity map; in
+    /// host tests a `SimPhysMap` standing in for the
+    /// device's register block.
+    phys: &'a dyn PhysMap,
+}
+
+impl<'a, P: PageTable> MmioMap<'a, P> {
+    /// Construct a mapper managing the virtual range
+    /// `[base, base + capacity_pages * PAGE_SIZE)`.
+    ///
+    /// `phys` is the kernel's direct physical map; the mapper resolves
+    /// every register window through it so a `RegisterWindow` points
+    /// at the device's own registers.
+    ///
+    /// # Errors
+    ///
+    /// [`MmioError::InvalidMapConfig`] if `capacity_pages == 0`,
+    /// `base` is not page-aligned, or the window size overflows.
+    pub fn new(
+        address_space: AddressSpace<P>,
+        base: VirtAddr,
+        capacity_pages: usize,
+        phys: &'a dyn PhysMap,
+    ) -> Result<Self, MmioError> {
+        let window = MmioWindowMap::new(base, capacity_pages)?;
+        Ok(Self {
+            address_space,
+            window,
+            phys,
+        })
+    }
+
+    /// Map `len` bytes of device physical memory beginning at
+    /// `phys_base`, returning a guard-bracketed [`MmioRegion`].
+    ///
+    /// # Errors
+    ///
+    /// * [`MmioError::InvalidRegion`] — `len == 0`, or
+    ///   `phys_base + page_offset + len` overflows.
+    /// * [`MmioError::NoVirtualSpace`] — no run of free slots large
+    ///   enough exists.
+    /// * [`MmioError::PageTable`] — propagated from the
+    ///   [`AddressSpace`] when a mapping operation fails.
+    pub fn map(&mut self, phys_base: u64, len: usize) -> Result<MmioRegion, MmioError> {
+        self.window
+            .map_into(&mut self.address_space, phys_base, len)
+    }
+
+    /// Tear down a mapping previously returned by [`Self::map`].
+    ///
+    /// # Errors
+    ///
+    /// * [`MmioError::UnknownRegion`] — `region` is not a live
+    ///   mapping of this mapper (covers double-unmap).
+    /// * [`MmioError::PageTable`] — propagated from
+    ///   [`AddressSpace::unmap`].
+    pub fn unmap(&mut self, region: MmioRegion) -> Result<(), MmioError> {
+        self.window.unmap_from(&mut self.address_space, region)
+    }
+
+    /// Raw, non-null base pointer to the first register of `region`.
+    ///
+    /// The pointer is valid for reads and writes of `region.len()`
+    /// bytes until the region is released via [`Self::unmap`]. The
+    /// caller (the kernel-host `MmioMapper` impl) mints a
+    /// `RegisterWindow` carrying this pointer and must ensure the
+    /// window is dropped before `unmap` is called for the same
+    /// region.
+    ///
+    /// # Errors
+    ///
+    /// * [`MmioError::UnknownRegion`] if `region` does not name a live
+    ///   mapping of this mapper.
+    /// * [`MmioError::DirectMap`] if the region's registers fall
+    ///   outside the direct physical map.
+    pub fn region_base(&self, region: &MmioRegion) -> Result<NonNull<u8>, MmioError> {
+        self.window.region_base(region, self.phys)
+    }
+
+    /// Number of live mappings.
+    #[must_use]
+    pub fn live(&self) -> usize {
+        self.window.live()
+    }
+
+    /// Total pages in the mapper's virtual window.
+    #[must_use]
+    pub fn capacity_pages(&self) -> usize {
+        self.window.capacity_pages()
+    }
+
+    /// Number of currently-mapped pages in the underlying address
+    /// space (data pages only; guard slots are never mapped).
+    #[must_use]
+    pub fn mapped_pages(&self) -> usize {
+        self.address_space.mapped_pages()
     }
 }
 

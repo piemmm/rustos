@@ -694,10 +694,25 @@ order (one fully-gated increment each):
        `devres::ResourceGrants` trait / `NULL_RESOURCE_GRANTS` seam from the
        security foundation was deleted in place (§2.13 / §2.14). Host-tested
        (the grant store + the 5 `mmio_map` handler tests minting real grants);
-       no ABI/C-header change. Still staged: (b) the per-port
-       `MmioMapFacility` live-mapping producer (SP5b-class — no production
-       live-aspace mapper exists yet, the dependency this rides); (c) the DMA
-       half bounded by the grant's `addr_limit`; (d) the `-M virt` vertical
+       no ABI/C-header change. **5d-0-ii (b) — the guarded borrowed-space
+       MMIO mapper mechanism — landed:** `kernel/mem::mmio::MmioWindowMap` is
+       the per-task guarded MMIO virtual-window allocator (bounded window +
+       slot bitmap + per-region guard/data accounting) that maps a device
+       window into a **borrowed** `&mut AddressSpace<P>` — `NO_CACHE`, never
+       executable (W^X §19.2), unmapped guard pages bracketing every window
+       (§4), all-or-nothing fail-closed unwind (§2.9) — the device-window
+       analogue of `kernel/mem::anon::map_anonymous` and the mechanism the
+       production `MmioMapFacility` drives. The owned `MmioMap`
+       (`KernelMmioMapper`'s in-kernel mapper) is now a thin wrapper
+       delegating to it (§2.2, no consumer churn); host-tested (8
+       borrowed-space + 15 existing `MmioMap` tests); no ABI/C-header change.
+       Still staged: the per-port `MmioMapFacility` *producer* needs
+       **production per-task live-address-space retention** (the spawn seams
+       hand the registry a *frozen* read-only snapshot today, so `mem_map`
+       and `mmio_map` both fail closed at their NULL producers — retaining
+       the live *mutable* `AddressSpace<P>` per task and wiring the producer
+       is the SP5b-class follow-on this rides, per port); (c) the DMA half
+       bounded by the grant's `addr_limit`; (d) the `-M virt` vertical
        minting a virtio-mmio window grant for a spawned program that maps it
        through `mmio_map`.
      - **5d — userland keyboard service** hosting the continuous report

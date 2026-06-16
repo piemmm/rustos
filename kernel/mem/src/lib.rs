@@ -71,7 +71,7 @@ pub use dma::{DmaBuffer, DmaError, DmaPool};
 pub use error::AllocError;
 pub use frame::{Frame, FrameAllocator, FrameCount, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
 pub use loader::{map_flags_for, map_image, LoadError};
-pub use mmio::{MmioError, MmioMap, MmioRegion};
+pub use mmio::{MmioError, MmioMap, MmioRegion, MmioWindowMap};
 pub use pagetables::FrameTableSource;
 pub use phys::{DirectPhysMap, PhysMap};
 pub use sensitive::SensitiveBuffer;

@@ -362,18 +362,31 @@ subject of Stage 4.D Item 0.
 ### 5.2 MMIO register-window mapper
 
 Device drivers also need their *register block* mapped — a PCI memory
-BAR or a virtio-MMIO transport slot. `kernel/mem::mmio::MmioMap`
-provides this. Unlike [`DmaPool`][DmaPool] it does **not** allocate
-frames: the physical address is fixed by the hardware, so the mapper
-maps the *device's own* frames into a per-process `AddressSpace<P>`
-with caching disabled (`MapFlags::NO_CACHE`) and the same unmapped
-guard-page bracketing the DMA pool uses. `MmioMap::map(phys_base, len)`
-returns an `MmioRegion`; `region_base` resolves the region's device
-physical base through the direct physical map (`PhysMap`) into the base
-pointer the kernel-side mapper (`KernelMmioMapper`, in `kernel/virtio`)
-turns into an
-[ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off), so
-the window addresses the device's real registers.
+BAR or a virtio-MMIO transport slot. The guarded-mapping mechanism is
+`kernel/mem::mmio::MmioWindowMap`: the per-task bookkeeping (a bounded
+virtual window, a slot bitmap, and the per-region guard/data accounting)
+that maps a device window into a **borrowed** `&mut AddressSpace<P>`.
+Unlike [`DmaPool`][DmaPool] it allocates **no** frames — the physical
+address is fixed by the hardware, so it maps the *device's own* frames
+with caching disabled (`MapFlags::NO_CACHE`), never executable (W^X,
+`AGENTS.md` §19.2), and the same unmapped guard-page bracketing the DMA
+pool uses; a part-way page-table failure unwinds every page it added
+(all-or-nothing, `AGENTS.md` §2.9). `MmioWindowMap::map_into(space,
+phys_base, len)` returns an `MmioRegion`; `region_base(region, phys)`
+resolves the region's device physical base through the direct physical
+map (`PhysMap`) into a base pointer. It is the device-window analogue of
+[`map_anonymous`](#7c-anonymous-user-memory-mem_map--mem_unmap):
+an architecture-neutral mechanism over a borrowed live address space,
+shared without duplication (`AGENTS.md` §2.2) by two consumers — the
+owning adapter `MmioMap`, which bundles `MmioWindowMap` with an
+`AddressSpace<P>` it owns so the kernel-side mapper (`KernelMmioMapper`,
+in `kernel/virtio`) turns an `MmioRegion` into an
+[ABI `RegisterWindow`](../drivers/bus.md#register-window-hand-off) for
+the in-kernel driver host, and the `mmio_map` syscall facility (`plans/PI.md`
+P10 chunk 5d-0), which maps a granted device window into the caller's
+*own running* address space (the production wiring of that facility, over
+a retained live address space, is staged with the arch-level live-space
+retention).
 
 The mapper is **capability-agnostic**; the gate is
 `kernel/sec::mmio`, whose `map_mmio` / `unmap_mmio` verify

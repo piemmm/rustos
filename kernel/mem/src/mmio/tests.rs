@@ -267,3 +267,190 @@ fn display_renders_each_variant() {
     assert!(!format!("{}", MmioError::InvalidMapConfig).is_empty());
     assert!(!format!("{}", MmioError::PageTable(PageTableError::NotMapped)).is_empty());
 }
+
+// -------------------------------------------------------------------------
+// `MmioWindowMap`: the guarded MMIO mapper over a *borrowed* `&mut
+// AddressSpace<P>` (the mechanism the `mmio_map` syscall facility drives
+// against a caller's retained live space, `plans/PI.md` P10 chunk 5d-0).
+// These prove the borrowed-space API independently of the owning `MmioMap`
+// wrapper, which the tests above already cover.
+// -------------------------------------------------------------------------
+
+/// A fresh, empty user address space to lend the window mapper.
+fn borrowed_space() -> AddressSpace<HostPageTable> {
+    AddressSpace::new(HostPageTable::new())
+}
+
+/// A window mapper anchored at the same fixed base the `fresh` helper uses.
+fn window(capacity_pages: usize) -> MmioWindowMap {
+    MmioWindowMap::new(VirtAddr::new(0x4000_0000), capacity_pages).expect("window constructs")
+}
+
+#[test]
+fn window_map_new_rejects_invalid_config() {
+    assert_eq!(
+        MmioWindowMap::new(VirtAddr::new(0x4000_0000), 0).err(),
+        Some(MmioError::InvalidMapConfig)
+    );
+    assert_eq!(
+        MmioWindowMap::new(VirtAddr::new(0x4000_0001), 4).err(),
+        Some(MmioError::InvalidMapConfig)
+    );
+}
+
+#[test]
+fn window_map_into_borrowed_space_round_trips_and_leaves_space_to_caller() {
+    let phys = sim();
+    let mut space = borrowed_space();
+    let mut win = window(16);
+
+    let region = win
+        .map_into(&mut space, 0xFEBD_0000, 0x1000)
+        .expect("page-aligned BAR maps into the borrowed space");
+    assert_eq!(region.phys(), 0xFEBD_0000);
+    assert_eq!(win.live(), 1);
+    // One data page is mapped into the *caller's* space; the caller still
+    // owns `space` and can observe the mapping itself.
+    assert_eq!(space.mapped_pages(), 1);
+
+    // The pointer `region_base` hands out addresses the device's own frame
+    // through the direct map, so a register round-trips.
+    let base = win.region_base(&region, &phys).expect("live region");
+    // SAFETY: `base` covers `region.len()` bytes of the simulated register
+    // block the test owns; writing/reading 4 bytes at offset 0x10 is inside it.
+    unsafe {
+        for (i, b) in 0xCAFE_F00Du32.to_le_bytes().iter().enumerate() {
+            base.as_ptr().add(0x10 + i).write(*b);
+        }
+        let mut got = [0u8; 4];
+        for (i, b) in got.iter_mut().enumerate() {
+            *b = base.as_ptr().add(0x10 + i).read();
+        }
+        assert_eq!(u32::from_le_bytes(got), 0xCAFE_F00D);
+    }
+}
+
+#[test]
+fn window_map_brackets_unmapped_guard_pages_in_the_borrowed_space() {
+    // The guard pages bracketing the window are never mapped in the borrowed
+    // space, so a register-block over-run faults instead of reaching a
+    // neighbouring device (`AGENTS.md` §4).
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    let region = win.map_into(&mut space, 0xFEBD_0000, 0x1000).expect("maps");
+    let data_virt = region.virt().as_u64() & !0xFFF;
+    let leading = VirtAddr::new(data_virt - PAGE_SIZE as u64);
+    let trailing = VirtAddr::new(data_virt + PAGE_SIZE as u64);
+    assert!(space.translate(Page::from_addr(leading).unwrap()).is_none());
+    assert!(space
+        .translate(Page::from_addr(trailing).unwrap())
+        .is_none());
+    // The data page carries the device flags: uncached, never executable.
+    let data_page = Page::from_addr(VirtAddr::new(data_virt)).unwrap();
+    let (_, flags) = space.translate(data_page).expect("data page mapped");
+    assert!(flags.contains(MapFlags::NO_CACHE));
+    assert!(flags.contains(MapFlags::READ));
+    assert!(flags.contains(MapFlags::WRITE));
+    assert!(flags.contains(MapFlags::USER));
+    assert!(!flags.contains(MapFlags::EXEC));
+}
+
+#[test]
+fn window_unmap_from_releases_slots_and_pages_for_reuse() {
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    let region = win.map_into(&mut space, 0xFEBD_0000, 0x1000).expect("maps");
+    assert_eq!(space.mapped_pages(), 1);
+
+    win.unmap_from(&mut space, region).expect("clean unmap");
+    assert_eq!(win.live(), 0);
+    assert_eq!(space.mapped_pages(), 0);
+
+    // The freed slots can be reused for another window.
+    let again = win
+        .map_into(&mut space, 0xFEC0_0000, 0x1000)
+        .expect("reuse after unmap");
+    assert_eq!(win.live(), 1);
+    let _ = again;
+}
+
+#[test]
+fn window_unmap_from_unknown_region_is_rejected() {
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    let region = win.map_into(&mut space, 0xFEBD_0000, 0x1000).expect("maps");
+    win.unmap_from(&mut space, region).expect("first unmap");
+    // A second unmap of the same region is a double-free.
+    assert_eq!(
+        win.unmap_from(&mut space, region),
+        Err(MmioError::UnknownRegion)
+    );
+}
+
+#[test]
+fn window_region_base_of_unmapped_region_is_unknown() {
+    let phys = sim();
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    let region = win.map_into(&mut space, 0xFEBD_0000, 0x1000).expect("maps");
+    win.unmap_from(&mut space, region).expect("unmap");
+    assert_eq!(
+        win.region_base(&region, &phys).err(),
+        Some(MmioError::UnknownRegion)
+    );
+}
+
+#[test]
+fn window_map_into_rejects_zero_overflow_and_exhaustion() {
+    let mut space = borrowed_space();
+    let mut win = window(4);
+    assert_eq!(
+        win.map_into(&mut space, 0xFEBD_0000, 0),
+        Err(MmioError::InvalidRegion)
+    );
+    assert_eq!(
+        win.map_into(&mut space, u64::MAX - 1, 0x10),
+        Err(MmioError::InvalidRegion)
+    );
+    // Capacity 4 pages: a 0x1000 region needs 1 data + 2 guard = 3 slots; a
+    // second identical request cannot fit.
+    let _a = win
+        .map_into(&mut space, 0xFEBD_0000, 0x1000)
+        .expect("first fits");
+    assert_eq!(
+        win.map_into(&mut space, 0xFEBE_0000, 0x1000),
+        Err(MmioError::NoVirtualSpace)
+    );
+}
+
+#[test]
+fn window_map_into_fails_closed_and_unwinds_on_page_table_conflict() {
+    // Pre-map the page the mapper would use for the first data slot so the
+    // borrowed space rejects the mapping mid-way; the mapper must unwind every
+    // page it added, leaving the space exactly as it found it (`AGENTS.md`
+    // §2.9 — all-or-nothing).
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    // A 2-page window's data lands at slots 1 and 2 (slot 0 is the leading
+    // guard). Pre-map slot 2's page so the *second* data page collides: the
+    // first data page maps, then the second fails, forcing a real unwind of
+    // the page this call already added.
+    let second_data_va = VirtAddr::new(0x4000_0000 + 2 * PAGE_SIZE as u64);
+    space
+        .map(
+            Page::from_addr(second_data_va).unwrap(),
+            crate::frame::Frame(0x1234),
+            MapFlags::READ | MapFlags::USER,
+        )
+        .expect("pre-map a conflicting page");
+    let before = space.mapped_pages();
+
+    let err = win
+        .map_into(&mut space, 0xFEBD_0000, 0x2000)
+        .expect_err("conflicting second data page fails the map");
+    assert!(matches!(err, MmioError::PageTable(_)));
+    // No new mapping survived; the pre-existing page is untouched and the
+    // mapper recorded no live region.
+    assert_eq!(space.mapped_pages(), before);
+    assert_eq!(win.live(), 0);
+}
