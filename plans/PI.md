@@ -3177,18 +3177,47 @@ table, so a new board is match **data**, not new code. Sub-increments
     `KernelMmioMapper`) is now a thin wrapper delegating to `MmioWindowMap`,
     so the guarded logic has one definition (§2.2) with no consumer churn.
     Host-tested (8 borrowed-space tests + the 15 existing `MmioMap` tests
-    still green); no `lib/abi`/C-header change. **Remaining (next landings,
-    staged):** the per-port `MmioMapFacility` *producer* still needs
-    **production per-task live-address-space retention** — today the spawn
-    seams (`admit_init`/`admit_process`) hand the registry a *frozen*
-    (read-only) `UserAddressSpace` snapshot, so production `mem_map` and
-    `mmio_map` both fail closed at their NULL producers; retaining the live
-    *mutable* `AddressSpace<P>` per task (and driving the facility through
-    `MmioWindowMap`) is the SP5b-class follow-on this rides, per port; then
-    (c) the DMA half (a `dma_alloc`-equivalent bounded by the grant's
-    `addr_limit`); and (d) the `-M virt` vertical where the kernel mints a
-    virtio-mmio window grant for a spawned program that maps it through
-    `mmio_map`. A live VL805 path stays a §0.4 metal-acceptance item.
+    still green); no `lib/abi`/C-header change. **5d-0-ii (b′)-1 — the
+    arch-neutral live-address-space retention mechanism + production
+    producers — LANDED (host-proven).** A task's *live, mutable*
+    `AddressSpace<P>` is now retainable and reachable from its own syscall
+    path, closing the immutable-`FrozenAddressSpace` gap the producers needed:
+    - `kernel/mem::live` (`LiveUserSpace` object-safe `Send` trait +
+      generic `LiveSpace<P, M>`) erases the live space behind one boundary
+      (so `kernel/core` names no concrete `P`, §17.4), composing the audited
+      `map_anonymous`/`unmap_anonymous` + `MmioWindowMap` with no second
+      mapping path (§2.2); `LiveSpaceError` unions their errors. 7 host tests.
+    - `kernel/core::kthread` retains the boxed space in the task's
+      `ThreadControl` and **publishes a per-CPU pointer to it** in a new
+      `USER_LIVE_SPACE` table — published before switch-in, cleared on
+      switch-back, exactly as the existing `USER_RESUME` handle — so the
+      access is exclusive to the one CPU running the (trapped) task; the
+      `with_current_live_space(cpu, f)` accessor and the
+      `spawn_user_kthread_with_stack_live` admission entry expose it. No
+      live page table is ever stored behind a shared lock (the documented
+      `!Send`/`!Sync` reason a frozen snapshot was used remains intact).
+    - `kernel/core::live_producer` (`LiveMemMap<A>` / `LiveMmioMap<A>`,
+      holding `&'static A` like `KernelProcessWait`) are the production
+      `MemMap` / `MmioMapFacility` producers: they read `arch.current_cpu()`,
+      route through `with_current_live_space`, fold `LiveSpaceError`→`Errno`,
+      and fail closed (`NotImplemented`) when the running task has no retained
+      space. `mmio_map` is fully served (the device window's placement is the
+      guarded `MmioWindowMap`); anonymous `mem_map` is served for `FIXED`
+      placement, with the non-`FIXED` per-task user-VA placement allocator
+      the remaining `SP5b` follow-on (fail-closed `NotImplemented` until
+      then — never a guessed base). 8 host tests. fmt + clippy `-D warnings`
+      clean; no `lib/abi`/C-header change.
+    **Remaining (next landings, staged) — 5d-0-ii (b′)-2:** wire the retention
+    into production, **aarch64 first** (§0.8): thread the optional live space
+    through the `admit_init`/`admit_process` seam (all three ports — siblings
+    pass `None`), have the aarch64 `spawn_producer`/`init_spawn` build a
+    `LiveSpace` from the just-built space (freeze a snapshot for the copy path
+    *and* retain the live one) and admit via `spawn_user_kthread_with_stack_live`,
+    install `LiveMemMap`/`LiveMmioMap` at boot, and add the `-M virt` vertical
+    where the kernel mints a virtio-mmio window grant a spawned program maps
+    through `mmio_map`; then (c) the DMA half (a `dma_alloc`-equivalent bounded
+    by the grant's `addr_limit`). A live VL805 path stays a §0.4
+    metal-acceptance item.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the

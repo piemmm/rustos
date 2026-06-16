@@ -80,6 +80,7 @@ pub mod fs;
 pub mod init;
 pub mod input_focus;
 pub mod kthread;
+pub mod live_producer;
 pub mod memmap;
 pub mod panic;
 pub mod procwait;
@@ -118,9 +119,11 @@ pub use init::{kernel_main, InitError, Phase};
 pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
 pub use kthread::{
     reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,
-    spawn_user_kthread_with_stack, BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder,
-    YielderHandle, KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
+    spawn_user_kthread_with_stack, spawn_user_kthread_with_stack_live, with_current_live_space,
+    BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder, YielderHandle,
+    KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
 };
+pub use live_producer::{LiveMemMap, LiveMmioMap};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use procwait::{

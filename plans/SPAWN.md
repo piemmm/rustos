@@ -403,8 +403,18 @@ space producer, **and** the aarch64 `-M virt` EL0 vertical that wires the
 producer through the `kernel/core` `MemMap` seam are all proven. The
 sibling riscv64 **and x86_64** `-M virt`/OVMF verticals are now landed too
 (the x86_64 one also closed a production ring-3 fault-delivery gap — boot
-now installs the dedicated `#PF` entry and `TSS.RSP0`); production per-task
-live-space retention is the remaining follow-on (tracked beyond SP5).
+now installs the dedicated `#PF` entry and `TSS.RSP0`). The arch-neutral
+**live-address-space retention mechanism** the production `mem_map` producer
+and the `mmio_map` facility mutate a running task's own space through is now
+landed (`plans/PI.md` 5d-0-ii (b′)-1): `kernel/mem::live`
+(`LiveUserSpace`/`LiveSpace`), the per-CPU `USER_LIVE_SPACE` publication +
+`with_current_live_space` accessor + `spawn_user_kthread_with_stack_live`
+admission entry in `kernel/core::kthread`, and the `LiveMemMap`/`LiveMmioMap`
+producers (`kernel/core::live_producer`) — all host-proven. The remaining
+follow-on is wiring it into production per arch (the `admit_*` seam threading
+the live space, the aarch64 `spawn_producer`/`init_spawn` building a
+`LiveSpace`, the boot install, the `-M virt` vertical) plus the non-`FIXED`
+per-task user-VA placement allocator (`plans/PI.md` 5d-0-ii (b′)-2).
 
 The natural follow-on abi-v1 process-runtime capability, scheduled here
 after the spawn tranche because it has the same precondition: a process

@@ -574,8 +574,10 @@ design note, `AGENTS.md` §15.2):
   frames available.
 
 The immutable-`FrozenAddressSpace` snapshot the post-spawn registry stores
-(§3b) is read-only; SP5b closes the gap with a single live-space mutation
-path rather than a second parallel address-space model (`AGENTS.md` §2.2).
+(§3b) is read-only; the production `mem_map` / `mmio_map` producers instead
+mutate a task's **retained live** address space, the single live-space
+mutation path (§7e) rather than a second parallel address-space model
+(`AGENTS.md` §2.2).
 
 ## 7d. Userland heap allocator (`rustos-rt`)
 
@@ -615,6 +617,55 @@ Box-allocates, grows a `Vec` across several pages, reallocates after freeing,
 verifies every value, and exits 0, with the program's allocator-issued
 `mem_map` / `mem_unmap` `svc`s routed through the live `MemMap` producer
 (`plans/PI.md` P6e-3b prerequisite).
+
+## 7e. Retained live address space (`live`) and the production producers
+
+The post-spawn registry holds a read-only `FrozenAddressSpace` snapshot (§3b)
+for the user-memory copy path, but `mem_map` / `mmio_map` must mutate the
+*running* space — grow a process's heap, or map a driver's granted device
+window into its own space. A live arch `AddressSpace<P>` cannot sit behind
+the registry's `Send + Sync` shared lock (the production page-table backend
+is `!Send`/`!Sync`), so the live space is retained **per task and reached
+only by the CPU currently running it**, never a global lock over a live page
+table (`plans/PI.md` 5d-0-ii (b′)).
+
+- **`kernel/mem::live` — the object-safe boundary.** `LiveUserSpace` is a
+  `Send` object-safe trait (`map_anonymous` / `unmap_anonymous` /
+  `map_device_window`); the generic `LiveSpace<P, M>` implements it by
+  composing the audited `map_anonymous` / `unmap_anonymous` (§7c) and the
+  `MmioWindowMap` device-window allocator (§5.2) — there is exactly one
+  mapping path for each (`AGENTS.md` §2.2). Erasing the space behind the
+  trait keeps `kernel/core` free of any concrete page-table backend `P`
+  (`AGENTS.md` §17.4). `LiveSpaceError` unions the two mechanisms' errors.
+- **Per-task ownership + per-CPU publication.** `kernel/core::kthread` owns
+  the boxed live space in the task's `ThreadControl` (so it — and its
+  page-table frames — is reclaimed when the task exits). A new per-CPU
+  `USER_LIVE_SPACE` table publishes a pointer to it immediately before the
+  task is switched in and clears it the instant the task switches back —
+  the exact lifecycle as the `USER_RESUME` reschedule handle — so the slot
+  is populated only while that CPU runs the (now trapped) task. The
+  `with_current_live_space(cpu, f)` accessor hands a producer an exclusive
+  `&mut dyn LiveUserSpace` that cannot alias: the task is suspended in its
+  own syscall trap for the whole call, and a task runs on at most one CPU
+  (`AGENTS.md` §4 — the access is genuinely exclusive). The
+  `spawn_user_kthread_with_stack_live` admission entry carries the space.
+- **The production producers.** `kernel/core::live_producer` provides
+  `LiveMemMap<A>` (`MemMap`) and `LiveMmioMap<A>` (`MmioMapFacility`); each
+  holds a `&'static A` (mirroring `KernelProcessWait`), reads
+  `arch.current_cpu()`, routes through `with_current_live_space`, folds
+  `LiveSpaceError` onto a stable `Errno`, and **fails closed**
+  (`NotImplemented`) when the running task has no retained space
+  (`AGENTS.md` §2.9 / §5.4 — it never touches another task's memory).
+  `mmio_map` is fully served (the guarded `MmioWindowMap` chooses the user
+  virtual window); anonymous `mem_map` is served for `FIXED` placement,
+  with the non-`FIXED` per-task user-VA placement allocator the staged
+  follow-on (fail-closed `NotImplemented` until then, never a guessed base).
+
+Wiring the retention into each architecture's spawn path (threading the live
+space through the `admit_init` / `admit_process` seam, building a `LiveSpace`
+in the aarch64 spawn producer, installing the producers at boot, and the
+`-M virt` vertical) is the staged production follow-on, aarch64 first
+(`plans/PI.md` 5d-0-ii (b′)-2).
 
 ## 8. Testing strategy
 
