@@ -657,9 +657,10 @@ table (`plans/PI.md` 5d-0-ii (b′)).
   (`NotImplemented`) when the running task has no retained space
   (`AGENTS.md` §2.9 / §5.4 — it never touches another task's memory).
   `mmio_map` is fully served (the guarded `MmioWindowMap` chooses the user
-  virtual window); anonymous `mem_map` is served for `FIXED` placement,
-  with the non-`FIXED` per-task user-VA placement allocator the staged
-  follow-on (fail-closed `NotImplemented` until then, never a guessed base).
+  virtual window); anonymous `mem_map` is fully served for both `FIXED`
+  placement (the caller names `addr_hint`) and **non-`FIXED`** placement
+  (the kernel chooses the base out of the per-task heap window via
+  `LiveSpace::map_anonymous_placed`, §7f) — never a guessed base.
 
 The retention is wired into the **aarch64** spawn path (`plans/PI.md`
 5d-0-ii (b′)-2): the live space threads through the `admit_init` /
@@ -674,9 +675,41 @@ those syscalls closed). A device window a user-space driver maps through
 (`kernel/arch/aarch64::el0_device_leaf_attrs`, `AP_RW_EL0`) so the driver can
 read its own register without a permission fault (§5.2). The aarch64
 `mmio_map_qemu_aarch64` `-M virt` vertical proves the chain end to end (a
-spawned EL0 program maps a minted virtio-MMIO window grant and reads its
-`MagicValue` register). The DMA half and the non-`FIXED` `mem_map` placement
-allocator are the remaining staged follow-on.
+spawned EL0 program maps a minted virtio-MMIO window grant, reads its
+`MagicValue` register, **and** round-trips a non-`FIXED` `mem_map`: map →
+write a sentinel → read it back → `mem_unmap`). The `dma_alloc` DMA half is
+the remaining staged 5d-0-ii (c) follow-on.
+
+## 7f. Non-`FIXED` `mem_map` placement allocator (`anon_window`)
+
+A non-`FIXED` `mem_map` asks the kernel to choose the base. That placement
+decision is `kernel/mem::AnonWindowMap`: a per-task user-virtual-address
+allocator over one configured heap window, driven against a borrowed live
+`AddressSpace<P>` by `LiveSpace::map_anonymous_placed` (`plans/PI.md`
+5d-0-ii (c)).
+
+- **Placement only.** It allocates and releases page-aligned virtual ranges;
+  the actual mapping is the audited `map_anonymous` (§7c) — one mapping path
+  (`AGENTS.md` §2.2). `LiveSpace::map_anonymous_placed` reserves a base, maps
+  it, and releases the reservation on a mapping failure (so a failed call
+  consumes no address space); `unmap_anonymous` validates the placement
+  record and releases its range, failing closed on a wrong base/extent before
+  any teardown (§5.4).
+- **Bump cursor + free-list, §24.1-scalable.** A bump cursor serves fresh
+  ranges and a free-list of released holes (first-fit, split on a partial
+  match) serves reuse, so the allocator's own memory is bounded by the
+  live-plus-freed region count, never the page count of the window. The
+  window is *address space*, not a physical resource: it is sized generously
+  (the aarch64 spawn layout places it 2 GiB above the image bias,
+  `spawn_layout::ANON_WINDOW_OFFSET`/`PAGES`) and costs no RAM until the
+  frame allocator backs a mapping — and that backing fails closed as a
+  deterministic OOM (§4), so a per-page bitmap that would cap the window or
+  waste memory on a large machine is deliberately avoided.
+- **Tested.** `AnonWindowMap` host-unit tests (bump/no-overlap, exhaustion,
+  release+reuse, fail-closed release), `LiveSpace` placement tests (real
+  `HostPageTable` map + zero-on-map + reuse + fail-closed wrong-extent
+  unmap), the `LiveMemMap` routing test, and the extended
+  `mmio_map_qemu_aarch64` `-M virt` vertical's `mem_map` round-trip.
 
 ## 8. Testing strategy
 

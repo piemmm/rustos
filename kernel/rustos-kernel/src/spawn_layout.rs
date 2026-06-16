@@ -46,6 +46,26 @@ pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
 #[cfg(kernel_isa = "aarch64")]
 pub const MMIO_WINDOW_PAGES: usize = 256;
 
+/// Offset of the non-`FIXED` anonymous-heap virtual window above the image
+/// bias (`plans/PI.md` 5d-0-ii (c)): placed 2 GiB above the bias — above the
+/// device window (1 GiB up) and far clear of the program image, stack, and
+/// startup block — and well below the 64 GiB user/identity ceiling the
+/// spawn-window check guards. The `mem_map` placement allocator hands each
+/// non-`FIXED` request a base out of `[bias + ANON_WINDOW_OFFSET, … +
+/// ANON_WINDOW_PAGES·4 KiB)`. Gated to the aarch64 port (the only port that
+/// retains a live space today) for the same reason as [`MMIO_WINDOW_OFFSET`].
+#[cfg(kernel_isa = "aarch64")]
+pub const ANON_WINDOW_OFFSET: u64 = 0x8000_0000;
+
+/// Pages backing the anonymous-heap window (1 GiB of *address space*). The
+/// window costs no RAM until the frame allocator backs a mapping (which
+/// fails closed as a deterministic OOM, `AGENTS.md` §4 / §24.1), so it is
+/// sized generously for a userland heap; the placement allocator's own
+/// memory is bounded by the live-region count, not the page count. Gated to
+/// the aarch64 port for the same reason as [`ANON_WINDOW_OFFSET`].
+#[cfg(kernel_isa = "aarch64")]
+pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
+
 /// Per-process stack-canary seed handed to PID 1 `init` (`AGENTS.md`
 /// §19.2). Any value; the kernel RNG-seeded canary is a later stage.
 pub const INIT_CANARY: u64 = 0x1117_A5ED_C0DE_0001;

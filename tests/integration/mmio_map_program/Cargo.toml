@@ -23,3 +23,6 @@ path = "src/main.rs"
 # --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
 rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# `rustos-abi` for `MapFlags` (the non-`FIXED` `mem_map` placement the
+# fixture exercises, `plans/PI.md` 5d-0-ii (c)). `no_std`, no allocation.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }

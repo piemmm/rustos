@@ -37,6 +37,7 @@
 //! (`AGENTS.md` §17.4).
 
 use crate::anon::{map_anonymous, unmap_anonymous, AnonError};
+use crate::anon_window::AnonWindowMap;
 use crate::frame::FrameAllocator;
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
@@ -93,6 +94,24 @@ pub trait LiveUserSpace: Send {
     /// overflow, OOM, …).
     fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError>;
 
+    /// Map `page_count` fresh, zeroed `RW|USER` pages at a **kernel-chosen**
+    /// base — the non-`FIXED` `mem_map` placement (`plans/PI.md` 5d-0-ii (c))
+    /// — returning the base virtual address the space placed them at.
+    ///
+    /// The placement is drawn from this task's anonymous heap window so a
+    /// second non-`FIXED` request never overlaps the first, the program
+    /// image, its stack, or a granted device window. The pages obey the same
+    /// W^X / zero-on-map / all-or-nothing contract as [`Self::map_anonymous`];
+    /// the reserved range is released back to the window on a mapping failure
+    /// so a failed call consumes no address space (`AGENTS.md` §2.9).
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the heap
+    /// window or the frame allocator is exhausted (deterministic OOM, §4),
+    /// or the precise placement/map error otherwise.
+    fn map_anonymous_placed(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
+
     /// Release the `page_count`-page region based at `base_va`, zeroing
     /// every frame before it is returned to the allocator (`AGENTS.md` §4 —
     /// zero on free). The whole range is validated mapped before any page is
@@ -135,41 +154,56 @@ pub trait LiveUserSpace: Send {
 ///   and on free;
 /// * `frames` — the kernel [`FrameAllocator`] anonymous pages are drawn from
 ///   and returned to;
-/// * `mmio` — the per-task guarded device-window virtual-address allocator.
+/// * `mmio` — the per-task guarded device-window virtual-address allocator;
+/// * `anon` — the per-task placement allocator that chooses the base for a
+///   non-`FIXED` anonymous mapping out of this task's heap window.
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
     physmap: M,
     frames: &'static FrameAllocator,
     mmio: MmioWindowMap,
+    anon: AnonWindowMap,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     /// Retain `space` as a live, mutable user address space.
     ///
     /// `physmap` is the kernel direct map (used to zero anonymous frames),
-    /// `frames` the allocator anonymous pages come from, and
+    /// `frames` the allocator anonymous pages come from,
     /// `[mmio_window_base, mmio_window_base + mmio_window_pages * PAGE_SIZE)`
     /// the virtual range device windows are mapped into (guard-bracketed by
-    /// [`MmioWindowMap`]). The window must lie in the task's own free user
-    /// virtual space, clear of its image, stack, and anonymous heap.
+    /// [`MmioWindowMap`]), and
+    /// `[anon_window_base, anon_window_base + anon_window_pages * PAGE_SIZE)`
+    /// the range non-`FIXED` anonymous mappings are placed into
+    /// ([`AnonWindowMap`]). Both windows must lie in the task's own free user
+    /// virtual space, clear of each other, its image, and its stack.
     ///
     /// # Errors
     ///
-    /// [`MmioError::InvalidMapConfig`] if `mmio_window_pages == 0`,
-    /// `mmio_window_base` is not page-aligned, or the window size overflows.
+    /// [`MmioError::InvalidMapConfig`] if either window is misconfigured
+    /// (zero pages, a base that is not page-aligned, or a size that
+    /// overflows the address space).
     pub fn new(
         space: AddressSpace<P>,
         physmap: M,
         frames: &'static FrameAllocator,
         mmio_window_base: VirtAddr,
         mmio_window_pages: usize,
+        anon_window_base: VirtAddr,
+        anon_window_pages: usize,
     ) -> Result<Self, MmioError> {
         let mmio = MmioWindowMap::new(mmio_window_base, mmio_window_pages)?;
+        // An anonymous-heap-window config error is the same class of fault as
+        // an MMIO-window one; fold it onto `InvalidMapConfig` so the spawn
+        // producer has one constructor error to handle (`AGENTS.md` §2.9).
+        let anon = AnonWindowMap::new(anon_window_base, anon_window_pages)
+            .map_err(|_| MmioError::InvalidMapConfig)?;
         Ok(Self {
             space,
             physmap,
             frames,
             mmio,
+            anon,
         })
     }
 
@@ -208,7 +242,44 @@ where
         Ok(base_va)
     }
 
+    fn map_anonymous_placed(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+        // Choose a base out of this task's heap window first; no page table is
+        // touched until the placement succeeds.
+        let base_va = self.anon.allocate(page_count)?;
+        let frames = self.frames;
+        match map_anonymous(
+            &mut self.space,
+            &self.physmap,
+            base_va,
+            page_count,
+            || frames.alloc().ok(),
+            |frame| {
+                let _ = frames.free(frame);
+            },
+        ) {
+            Ok(()) => Ok(base_va),
+            Err(err) => {
+                // The mapping failed (frame exhaustion, …): give the reserved
+                // range back so a failed call consumes no address space
+                // (`AGENTS.md` §2.9). The range was just minted, so the
+                // release matches and cannot fail; ignore its result rather
+                // than panic on a path that already failed closed.
+                let _ = self.anon.release(base_va, page_count);
+                Err(err.into())
+            }
+        }
+    }
+
     fn unmap_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<(), LiveSpaceError> {
+        // A base inside the heap window is a non-`FIXED` placement: it must
+        // match a live record exactly before any teardown, so a bad
+        // (base, len) for an in-window address fails closed without unmapping
+        // a neighbour's pages (`AGENTS.md` §5.4). A `FIXED` base (outside the
+        // window) skips this and is torn down by extent as before.
+        let placed = self.anon.owns(base_va);
+        if placed {
+            self.anon.validate(base_va, page_count)?;
+        }
         let frames = self.frames;
         unmap_anonymous(
             &mut self.space,
@@ -219,6 +290,10 @@ where
                 let _ = frames.free(frame);
             },
         )?;
+        if placed {
+            // Validated above, so the release matches; ignore its result.
+            let _ = self.anon.release(base_va, page_count);
+        }
         Ok(())
     }
 
@@ -272,6 +347,12 @@ mod tests {
     const MMIO_WINDOW_BASE: u64 = 0x8000_0000;
     const MMIO_WINDOW_PAGES: usize = 64;
 
+    /// The user virtual window non-`FIXED` anonymous mappings are placed into
+    /// — distinct from both the `FIXED` bases the tests choose (low, 0x4000)
+    /// and the device window above.
+    const ANON_WINDOW_BASE: u64 = 0xC000_0000;
+    const ANON_WINDOW_PAGES: usize = 64;
+
     fn live() -> LiveSpace<HostPageTable, SimPhysMap> {
         LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
@@ -279,6 +360,8 @@ mod tests {
             leaked_frames(),
             VirtAddr::new(MMIO_WINDOW_BASE),
             MMIO_WINDOW_PAGES,
+            VirtAddr::new(ANON_WINDOW_BASE),
+            ANON_WINDOW_PAGES,
         )
         .expect("a page-aligned, non-zero window is valid")
     }
@@ -359,6 +442,68 @@ mod tests {
             live.map_device_window(0xFE98_0000, 0),
             Err(LiveSpaceError::Mmio(_))
         ));
+    }
+
+    #[test]
+    fn map_anonymous_placed_chooses_a_base_in_the_heap_window_and_zeroes_it() {
+        let mut live = live();
+        let base = live
+            .map_anonymous_placed(2)
+            .expect("the heap window has room");
+        assert!(
+            base >= ANON_WINDOW_BASE
+                && base < ANON_WINDOW_BASE + (ANON_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
+            "a placed base lies inside the heap window"
+        );
+        assert_eq!(live.space().mapped_pages(), 2);
+
+        // The placed pages are readable user memory and read back as zero.
+        let sim = sim();
+        let mut buf = vec![0xAAu8; 2 * PAGE_SIZE];
+        copy_in(live.space(), &sim, VirtAddr::new(base), &mut buf).expect("readable user range");
+        assert!(buf.iter().all(|&b| b == 0), "placed pages are zeroed");
+    }
+
+    #[test]
+    fn map_anonymous_placed_does_not_overlap_a_prior_placement() {
+        let mut live = live();
+        let a = live.map_anonymous_placed(3).expect("room");
+        let b = live.map_anonymous_placed(2).expect("room");
+        assert_ne!(a, b);
+        assert!(
+            b >= a + 3 * PAGE_SIZE as u64,
+            "the second placement bumps past the first"
+        );
+        assert_eq!(live.space().mapped_pages(), 5);
+    }
+
+    #[test]
+    fn unmap_releases_a_placement_for_reuse() {
+        let mut live = live();
+        let a = live.map_anonymous_placed(4).expect("room");
+        live.unmap_anonymous(a, 4).expect("placed region unmaps");
+        assert_eq!(live.space().mapped_pages(), 0);
+        // The freed heap range is reused by the next placement (the bump
+        // cursor did not simply advance past it).
+        let b = live.map_anonymous_placed(4).expect("room");
+        assert_eq!(b, a, "the freed placement base is reused");
+    }
+
+    #[test]
+    fn unmap_of_a_placed_base_with_a_wrong_extent_fails_closed() {
+        let mut live = live();
+        let a = live.map_anonymous_placed(3).expect("room");
+        // A wrong page count for an in-window (placed) base is refused before
+        // any teardown (`AGENTS.md` §5.4) — no partial unmap, region intact.
+        assert_eq!(
+            live.unmap_anonymous(a, 2),
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        );
+        assert_eq!(live.space().mapped_pages(), 3, "no partial teardown");
+        // The matching unmap still succeeds afterwards.
+        live.unmap_anonymous(a, 3)
+            .expect("the matching unmap succeeds");
+        assert_eq!(live.space().mapped_pages(), 0);
     }
 
     /// The retained live space must be `Send` (it is owned by the kernel

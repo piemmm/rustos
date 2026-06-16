@@ -81,6 +81,20 @@ mod program {
     /// Exit code: the mapped device register did not read back the expected
     /// magic (the window does not point at the granted device MMIO).
     const FAIL_MAGIC: i32 = 12;
+    /// Exit code: the non-`FIXED` `mem_map` returned an error — the kernel's
+    /// placement allocator refused to choose a base (`plans/PI.md`
+    /// 5d-0-ii (c)).
+    const FAIL_MEM_MAP: i32 = 13;
+    /// Exit code: a value written into the placed region did not read back —
+    /// the placed anonymous pages are not genuine, writable RAM.
+    const FAIL_MEM_RW: i32 = 14;
+    /// Exit code: `mem_unmap` of the placed region returned an error.
+    const FAIL_MEM_UNMAP: i32 = 15;
+
+    /// Bytes the non-`FIXED` `mem_map` round-trip requests (two pages).
+    const MEM_MAP_LEN: usize = 2 * 4096;
+    /// A recognisable sentinel written into the placed region and read back.
+    const MEM_SENTINEL: u64 = 0x5055_4D50_5F4F_4B21;
 
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to `default` on an empty string, a non-digit byte, or
@@ -138,12 +152,40 @@ mod program {
         //    grant and installed the mapping).
         let got = unsafe { reg.read_volatile() };
 
-        // 3. PASS only if the register reads the expected device magic.
-        if got == MAGIC {
-            0
-        } else {
-            FAIL_MAGIC
+        // 3. The register must read the expected device magic.
+        if got != MAGIC {
+            return FAIL_MAGIC;
         }
+
+        // 4. Exercise the non-`FIXED` `mem_map` placement allocator
+        //    (`plans/PI.md` 5d-0-ii (c)): ask the kernel to choose a base for
+        //    two anonymous pages, prove they are genuine writable RAM by
+        //    round-tripping a sentinel, then release them.
+        let placed = rustos_rt::mem_map(MEM_MAP_LEN, rustos_abi::MapFlags::empty(), 0);
+        if placed < 0 {
+            return FAIL_MEM_MAP;
+        }
+        #[allow(clippy::cast_sign_loss)] // `placed >= 0` checked above; it is a user VA.
+        let cell = placed as u64 as *mut u64;
+        // SAFETY: `mem_map` returned the base of `MEM_MAP_LEN` bytes of mapped,
+        //    zeroed, USER-writable anonymous memory in this process's own
+        //    address space, so `cell` is a valid, writable, in-bounds pointer
+        //    (`AGENTS.md` §5.4 — the kernel installed the mapping). The write
+        //    is `volatile` so it is not elided before the read-back.
+        let read_back = unsafe {
+            cell.write_volatile(MEM_SENTINEL);
+            cell.read_volatile()
+        };
+        if read_back != MEM_SENTINEL {
+            return FAIL_MEM_RW;
+        }
+        if rustos_rt::mem_unmap(placed as u64, MEM_MAP_LEN) < 0 {
+            return FAIL_MEM_UNMAP;
+        }
+
+        // PASS: the granted window mapped and read its magic, and a placed
+        // anonymous region round-tripped and released.
+        0
     }
 
     rustos_rt::entry!(main);

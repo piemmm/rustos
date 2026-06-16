@@ -729,9 +729,26 @@ order (one fully-gated increment each):
        EL0-readable. Proven by the `mmio_map_qemu_aarch64` `-M virt` vertical
        (a spawned EL0 program maps a minted virtio-mmio grant via `mmio_map`
        and reads the device `MagicValue`); new `rustos_rt::mmio_map`; no
-       ABI/C-header change. Still staged — **(c)** the DMA half bounded by the
-       grant's `addr_limit`, and the non-`FIXED` per-task user-VA `mem_map`
-       placement allocator (fail-closed `NotImplemented` until then).
+       ABI/C-header change. **5d-0-ii (c) — non-`FIXED` `mem_map` placement
+       allocator — landed.** `kernel/mem::AnonWindowMap` (bump cursor +
+       free-list, §24.1-scalable — a large VA window costs no RAM until the
+       frame allocator backs a mapping, which fails closed as deterministic
+       OOM) chooses the base for a non-`FIXED` anonymous mapping out of a
+       per-task heap window; `LiveSpace` composes it with the audited
+       `map_anonymous`/`unmap_anonymous` (one mapping path, §2.2), exposing
+       `map_anonymous_placed` and releasing the placement record on unmap
+       (fail-closed validate before any teardown). `LiveMemMap::map` routes
+       non-`FIXED` requests there (FIXED still uses `addr_hint`); the aarch64
+       `init_spawn`/`spawn_producer` thread a `spawn_layout::ANON_WINDOW`
+       (2 GiB above the image bias). Proven by `kernel/mem` + `kernel/core`
+       host tests and the extended `mmio_map_qemu_aarch64` `-M virt` vertical
+       (the EL0 program now also round-trips a placed `mem_map`: map → write →
+       read-back → `mem_unmap`); no ABI/C-header change. Still staged —
+       **(c) DMA half:** a `dma_alloc`-equivalent that carves a driver's DMA
+       region bounded by the grant's `addr_limit` over the same retained-live-
+       space + owner-checked-grant machinery (device-visible address =
+       CPU-physical for the coherent/`virt` case; the BCM2711 inbound-viewport
+       translation rides the metal VL805 acceptance item).
      - **5d — userland keyboard service** hosting the continuous report
        pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
        input-focus arbiter via `key_inject`. The "drivers in userland"

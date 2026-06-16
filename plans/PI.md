@@ -3232,11 +3232,32 @@ table, so a new board is match **data**, not new code. Sub-increments
     + reads the `MagicValue` register (`0x74726976`) back. New `rustos_rt::mmio_map`
     wrapper; no `lib/abi`/C-header change. The registry-backed grant
     owner-check (§5.4) is host-proven in `kernel/core`.
-    **Remaining (next landing, staged) — 5d-0-ii (c):** the DMA half (a
-    `dma_alloc`-equivalent bounded by the grant's `addr_limit`) and the
-    non-`FIXED` per-task user-VA `mem_map` placement allocator (`SP5b`
-    follow-on; fail-closed `NotImplemented` until then). A live VL805 path
-    stays a §0.4 metal-acceptance item.
+    **5d-0-ii (c) — non-`FIXED` `mem_map` placement allocator — LANDED.**
+    `kernel/mem::AnonWindowMap` (a per-task user-VA placement allocator: bump
+    cursor + free-list of released holes, so a large heap window costs no RAM
+    until the frame allocator backs a mapping — §24.1; the placement window is
+    address space, the physical backing fails closed as deterministic OOM)
+    chooses the base for a non-`FIXED` anonymous mapping. `LiveSpace` carries
+    one (`map_anonymous_placed`), composing it with the already-audited
+    `map_anonymous`/`unmap_anonymous` (no second mapping path, §2.2);
+    `unmap_anonymous` validates + releases the placement record before any
+    teardown (fail closed on a wrong base/extent, §5.4). `LiveMemMap::map`
+    routes non-`FIXED` requests there while `FIXED` still names `addr_hint`;
+    the aarch64 `init_spawn`/`spawn_producer` thread the shared
+    `spawn_layout::ANON_WINDOW_OFFSET`/`PAGES` (2 GiB above the image bias,
+    above the device window). Host-tested (`AnonWindowMap` 7 + `LiveSpace`
+    placement 4 + `LiveMemMap` routing 2) and proven on `-M virt` by the
+    extended `mmio_map_qemu_aarch64` vertical (the EL0 program maps its granted
+    window **and** round-trips a placed `mem_map`: map → write sentinel →
+    read-back → `mem_unmap`). No `lib/abi`/C-header change.
+    **Remaining (next landing, staged) — 5d-0-ii (c) DMA half:** a
+    `dma_alloc`-equivalent that carves a driver's DMA region bounded by the
+    grant's `addr_limit` over the same retained-live-space + owner-checked-grant
+    machinery (`with_current_live_space`, `Dma`-kind grant, `CAP_MEM_DMA`),
+    returning the driver a CPU-VA + the device-visible address. The
+    device-visible address is CPU-physical for the coherent/`virt` case (a
+    virtio device stands in); the BCM2711 inbound-viewport (`dma_translated`)
+    translation rides the live VL805 §0.4 metal-acceptance item.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the

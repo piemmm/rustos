@@ -49,6 +49,7 @@
 extern crate alloc;
 
 pub mod anon;
+pub mod anon_window;
 pub mod bootinfo;
 pub mod dma;
 pub mod error;
@@ -67,6 +68,7 @@ pub mod uaccess;
 pub mod vmm;
 
 pub use anon::{map_anonymous, page_count_for, unmap_anonymous, AnonError, ANON_FLAGS};
+pub use anon_window::AnonWindowMap;
 pub use bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 pub use dma::{DmaBuffer, DmaError, DmaPool};
 pub use error::AllocError;

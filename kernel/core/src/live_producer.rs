@@ -103,18 +103,19 @@ where
 {
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno> {
         let page_count = page_count_for(len).map_err(anon_errno)?;
-        // Non-`FIXED` placement (the kernel choosing the base) needs a
-        // per-task user-VA allocator — the staged SP5b follow-on. Until it
-        // lands, a `FIXED` request is required: fail closed rather than
-        // guess a base that might collide with the image, stack, or a
-        // device window (`AGENTS.md` §2.9 — never a silent wrong placement).
-        if !flags.is_fixed() {
-            return Err(Errno::NotImplemented);
-        }
         let cpu = self.arch.current_cpu();
-        with_current_live_space(cpu, |space| space.map_anonymous(addr_hint, page_count))
-            .ok_or(Errno::NotImplemented)?
-            .map_err(live_errno)
+        // `FIXED` names its own base (`addr_hint`); a non-`FIXED` request asks
+        // the live space's per-task heap-window allocator to choose one out of
+        // this task's own free user-VA — never a base guessed here that might
+        // collide with the image, stack, or a granted device window
+        // (`AGENTS.md` §2.9 / `plans/PI.md` 5d-0-ii (c)).
+        if flags.is_fixed() {
+            with_current_live_space(cpu, |space| space.map_anonymous(addr_hint, page_count))
+        } else {
+            with_current_live_space(cpu, |space| space.map_anonymous_placed(page_count))
+        }
+        .ok_or(Errno::NotImplemented)?
+        .map_err(live_errno)
     }
 
     fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
@@ -182,10 +183,15 @@ mod tests {
     #[derive(Default)]
     struct FakeLive {
         anon_maps: Vec<(u64, u64)>,
+        anon_placed: Vec<u64>,
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
         next: Option<LiveSpaceError>,
     }
+
+    /// The base a placed (non-`FIXED`) map reports back from the fake, so the
+    /// producer test can assert the returned value flows through unchanged.
+    const PLACED_BASE: u64 = 0xC000_0000;
 
     impl LiveUserSpace for FakeLive {
         fn map_anonymous(&mut self, base_va: u64, page_count: u64) -> Result<u64, LiveSpaceError> {
@@ -193,6 +199,14 @@ mod tests {
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(base_va),
+            }
+        }
+
+        fn map_anonymous_placed(&mut self, page_count: u64) -> Result<u64, LiveSpaceError> {
+            self.anon_placed.push(page_count);
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(PLACED_BASE),
             }
         }
 
@@ -271,20 +285,32 @@ mod tests {
     }
 
     #[test]
-    fn mem_map_non_fixed_is_not_implemented() {
+    fn mem_map_non_fixed_routes_to_the_placement_allocator() {
         let (fake, ptr) = leak_fake();
         let _guard = publish_live_space_for_test(3, fake);
 
         let producer = LiveMemMap::new(arch_at(3));
+        // A non-`FIXED` request asks the live space to choose the base; the
+        // `addr_hint` is ignored, and the placed base flows back unchanged.
+        let got = producer.map(2 * PAGE, MapFlags::empty(), 0xDEAD_0000);
+        assert_eq!(got, Ok(PLACED_BASE));
+        // The producer routed to `map_anonymous_placed` (page count only),
+        // never the `FIXED` `map_anonymous`.
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.anon_placed, std::vec![2]);
+        assert!(recorded.anon_maps.is_empty());
+    }
+
+    #[test]
+    fn mem_map_with_no_published_space_fails_closed_for_a_non_fixed_request() {
+        // No live space published on this CPU: a non-`FIXED` placement must
+        // also fail closed rather than fabricating a base.
+        let producer = LiveMemMap::new(arch_at(9));
         assert_eq!(
             producer.map(PAGE, MapFlags::empty(), 0),
             Err(Errno::NotImplemented)
         );
-        // The producer never touched the live space for a placement it
-        // cannot honour.
-        // SAFETY: see above.
-        let recorded = unsafe { &*ptr };
-        assert!(recorded.anon_maps.is_empty());
     }
 
     #[test]

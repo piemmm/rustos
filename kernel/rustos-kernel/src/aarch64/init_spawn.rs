@@ -64,6 +64,11 @@ const USER_BLOCK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
 /// `mmio_map` a guard-bracketed window out of `[MMIO_WINDOW_BASE,
 /// MMIO_WINDOW_BASE + MMIO_WINDOW_PAGES·4 KiB)`.
 const MMIO_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
+/// Base of PID 1's non-`FIXED` anonymous-heap virtual region (`plans/PI.md`
+/// 5d-0-ii (c)): the [`LiveSpace`]'s [`rustos_kernel_mem::AnonWindowMap`]
+/// places each non-`FIXED` `mem_map` out of `[ANON_WINDOW_BASE,
+/// ANON_WINDOW_BASE + ANON_WINDOW_PAGES·4 KiB)`.
+const ANON_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
 
 /// Page-table pool backing the spawn address space's stage-1 hierarchy.
 ///
@@ -300,6 +305,8 @@ impl InitSpawn for Aarch64InitSpawn {
                 static_frames,
                 VirtAddr::new(MMIO_WINDOW_BASE),
                 spawn_layout::MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                spawn_layout::ANON_WINDOW_PAGES,
             )
             .ok()
             .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),

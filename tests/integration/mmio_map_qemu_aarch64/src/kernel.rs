@@ -32,8 +32,8 @@ use rustos_kernel_core::{
     SpawnRequest, Yielder,
 };
 use rustos_kernel_mem::{
-    AddressSpace, BootMemoryMap, DirectPhysMap, Frame, FrameAllocator, LiveSpace, LiveUserSpace,
-    MemoryRegion, PhysAddr, RegionKind, UserStack, VirtAddr,
+    page_count_for, AddressSpace, BootMemoryMap, DirectPhysMap, Frame, FrameAllocator, LiveSpace,
+    LiveUserSpace, MemoryRegion, PhysAddr, RegionKind, UserStack, VirtAddr,
 };
 use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -70,6 +70,16 @@ const MMIO_WINDOW_BASE: u64 = USER_BIAS + 0x4000_0000;
 /// Pages backing the device-window region (256 KiB).
 const MMIO_WINDOW_PAGES: usize = 64;
 
+/// Base of the program's non-`FIXED` anonymous-heap virtual region: the
+/// retained [`LiveSpace`]'s [`rustos_kernel_mem::AnonWindowMap`] places each
+/// non-`FIXED` `mem_map` out of this range. 2 GiB above [`USER_BIAS`] —
+/// above the device window and clear of the image/stack — mirroring the
+/// production aarch64 spawn layout (`spawn_layout::ANON_WINDOW_OFFSET`).
+const ANON_WINDOW_BASE: u64 = USER_BIAS + 0x8000_0000;
+/// Pages backing the anonymous-heap window (this vertical maps only a couple
+/// of pages out of it; the window is address space, backed on demand).
+const ANON_WINDOW_PAGES: usize = 64;
+
 /// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
@@ -88,6 +98,8 @@ const TEST_FAIL: EventId = EventId(4293);
 const TEST_MMIO_ENTER: EventId = EventId(4294);
 const TEST_MMIO_MAPPED: EventId = EventId(4295);
 const TEST_FAULT: EventId = EventId(4296);
+const TEST_MEM_MAPPED: EventId = EventId(4297);
+const TEST_MEM_UNMAPPED: EventId = EventId(4298);
 
 /// Failure finisher codes, distinct per failure site.
 const FAIL_ZERO_FREQ: u16 = 1;
@@ -110,6 +122,12 @@ const FAIL_EXIT_BASE: u16 = 100;
 
 /// `true` once an `mmio_map` call returned a mapped base to the program.
 static MAP_OK: AtomicBool = AtomicBool::new(false);
+
+/// `true` once a non-`FIXED` `mem_map` round-trip (map → write → read-back →
+/// `mem_unmap`) completed for the program — the placement-allocator proof
+/// (`plans/PI.md` 5d-0-ii (c)). The program's `mem_unmap` sets it; PASS
+/// requires both this and [`MAP_OK`].
+static MEM_OK: AtomicBool = AtomicBool::new(false);
 
 /// Fault handler: any EL0 fault here is unexpected (the program only maps a
 /// window and reads a register), so report it as a failure rather than hang
@@ -272,13 +290,56 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             note(TEST_MMIO_MAPPED, "mmio_map test: granted window mapped");
         }
         encode(result)
+    } else if raw == SyscallNumber::MEM_MAP.as_u16() {
+        // Non-`FIXED` `mem_map`: the program asks the kernel to place the
+        // region, so route to the retained live space's placement allocator
+        // (`plans/PI.md` 5d-0-ii (c)) — the production `LiveMemMap` non-`FIXED`
+        // path. `args[0]` is the byte length; the flags/hint are ignored here
+        // (the fixture only issues non-`FIXED` requests).
+        let len = args[0] as usize;
+        let result = match page_count_for(len) {
+            Ok(pages) => {
+                match with_current_live_space(BOOT_CPU, |space| space.map_anonymous_placed(pages)) {
+                    Some(Ok(base)) => {
+                        note(TEST_MEM_MAPPED, "mem_map test: placed anonymous region");
+                        Ok(base)
+                    }
+                    Some(Err(_)) => Err(Errno::OutOfMemory),
+                    None => Err(Errno::NotImplemented),
+                }
+            }
+            Err(_) => Err(Errno::LengthOutOfRange),
+        };
+        encode(result)
+    } else if raw == SyscallNumber::MEM_UNMAP.as_u16() {
+        // Release the placed region. `args[0]` is the base, `args[1]` the byte
+        // length. The placement record is validated + released inside
+        // `unmap_anonymous` (fail closed on a wrong base/extent, §5.4).
+        let base = args[0];
+        let len = args[1] as usize;
+        let result = match page_count_for(len) {
+            Ok(pages) => {
+                match with_current_live_space(BOOT_CPU, |space| space.unmap_anonymous(base, pages))
+                {
+                    Some(Ok(())) => {
+                        MEM_OK.store(true, Ordering::SeqCst);
+                        note(TEST_MEM_UNMAPPED, "mem_map test: placed region released");
+                        Ok(0)
+                    }
+                    Some(Err(_)) => Err(Errno::NotFound),
+                    None => Err(Errno::NotImplemented),
+                }
+            }
+            Err(_) => Err(Errno::LengthOutOfRange),
+        };
+        encode(result)
     } else if raw == SyscallNumber::EXIT.as_u16() {
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as u16;
-        if code == 0 && MAP_OK.load(Ordering::SeqCst) {
+        if code == 0 && MAP_OK.load(Ordering::SeqCst) && MEM_OK.load(Ordering::SeqCst) {
             note(
                 TEST_PASS,
-                "mmio_map test: EL0 mapped the granted window and read the device magic",
+                "mmio_map test: EL0 mapped the granted window, read the device magic, and round-tripped a placed mem_map",
             );
             qemu_exit::exit_success();
         }
@@ -297,14 +358,16 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 }
 
 /// A `'static` frame allocator over a dedicated window, supplied to the
-/// retained [`LiveSpace`] for anonymous-map frames. This vertical exercises
-/// only `mmio_map` (device windows, which draw page tables from the arch
-/// space's own pool), so the allocator is never drawn from; it exists to
-/// satisfy [`LiveSpace::new`] with a faithful `'static` handle.
-#[repr(C, align(4096))]
-struct AnonPool([u8; paging::PAGE_SIZE * 8]);
+/// retained [`LiveSpace`] for anonymous-map frames. The non-`FIXED`
+/// `mem_map` round-trip the program performs draws its couple of pages from
+/// here (the `mmio_map` device-window path draws page tables from the arch
+/// space's own pool instead), so the pool only needs a handful of frames.
+const ANON_POOL_PAGES: usize = 16;
 
-static mut ANON_POOL: AnonPool = AnonPool([0; paging::PAGE_SIZE * 8]);
+#[repr(C, align(4096))]
+struct AnonPool([u8; paging::PAGE_SIZE * ANON_POOL_PAGES]);
+
+static mut ANON_POOL: AnonPool = AnonPool([0; paging::PAGE_SIZE * ANON_POOL_PAGES]);
 
 /// Build a leaked `'static` [`FrameAllocator`] over [`ANON_POOL`].
 fn leaked_anon_frames() -> &'static FrameAllocator {
@@ -313,7 +376,7 @@ fn leaked_anon_frames() -> &'static FrameAllocator {
     map.push(MemoryRegion {
         kind: RegionKind::Usable,
         start: PhysAddr::new(base),
-        length: (paging::PAGE_SIZE * 8) as u64,
+        length: (paging::PAGE_SIZE * ANON_POOL_PAGES) as u64,
     });
     let alloc = FrameAllocator::new(&map).expect("anon pool builds an allocator");
     Box::leak(Box::new(alloc))
@@ -392,16 +455,18 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
 
     // Retain the *same* arch space live behind the production `LiveSpace`, so
-    // the program's `mmio_map` maps into exactly the active address space
-    // (`plans/PI.md` 5d-0-ii (b′)). The device-window region sits 1 GiB above
-    // the image bias; the anonymous allocator is unused here (mmio_map draws
-    // page tables from the arch pool).
+    // the program's `mmio_map` and non-`FIXED` `mem_map` mutate exactly the
+    // active address space (`plans/PI.md` 5d-0-ii (b′)/(c)). The device-window
+    // region sits 1 GiB above the image bias and the anonymous-heap window
+    // 2 GiB above; the anonymous frame allocator backs the placed `mem_map`.
     let Ok(live) = LiveSpace::new(
         space,
         DirectPhysMap::identity((IDENTITY_GIB as u64) << 30),
         leaked_anon_frames(),
         VirtAddr::new(MMIO_WINDOW_BASE),
         MMIO_WINDOW_PAGES,
+        VirtAddr::new(ANON_WINDOW_BASE),
+        ANON_WINDOW_PAGES,
     ) else {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     };

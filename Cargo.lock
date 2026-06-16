@@ -1821,6 +1821,7 @@ dependencies = [
 name = "rustos-test-mmio-map"
 version = "0.0.0"
 dependencies = [
+ "rustos-abi",
  "rustos-rt",
 ]
 
