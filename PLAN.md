@@ -628,23 +628,37 @@ order (one fully-gated increment each):
      Security and correctness are the floor: every load capability-gated
      **and** signature-verified, every input validated, fail closed (§5.4 /
      §23.1).
-     - **5c-i — discovery-driven in-kernel bring-up.** Add the production
-       **driver-candidate catalogue** for the chain (authored from each
-       driver's `BIND_KEYS`) and rework `keyboard_service` so the bring-up
-       is **driven by `devmgr` matching** against the discovered/runtime
-       tree, not hand-sequenced: discovered `brcm,bcm2711-pcie` node →
-       match → bring up the PCIe RC + xHCI bus driver → the bus driver
-       enumerates and emits the HID child `HwNode` (5b-ii) into a growable
-       runtime tree → re-run autoload → match `usb_hid` → start the report
-       pump. The load mechanism stays an **in-kernel `DriverLoader`**
-       binding the statically-linked driver crates' `register()` (the
-       DriverHost-over-IPC gap is not yet closed). Unmatched nodes left
-       unbound + logged (§18.4); host-tested.
+     - **5c-i — match-driven bring-up decision — done.** The match policy
+       (`resolve` / `best_bind_priority` / `DriverCandidate` /
+       `MatchResolution`) was lifted out of `devmgr` into the shared
+       **`lib/devmatch`** crate, so the kernel reaches the *one* §18.3
+       definition without a kernel→userland edge (§2.2 / §17.4; `devmgr`
+       re-exports it unchanged). The production **driver-candidate
+       catalogue** (`kernel/rustos-kernel::driver_catalog`) pairs each chain
+       driver's canonical `BIND_KEYS` (`pcie_brcm` / `bus_usb` / `usb_hid`)
+       with its `/System/Drivers/` image path — authored from the crates'
+       tables, never re-typed (§2.2) — and `resolve_chain` resolves a
+       discovered node against it. `keyboard_service` no longer brings the
+       bus up because a bridge address exists; `resolve_discovered_bridge`
+       resolves the discovered `brcm,bcm2711-pcie` identity
+       (`platform::PCIE_COMPATIBLE`, the discovery contract — never a
+       fabricated key, §18.5) against the catalogue and proceeds **only on a
+       bound `Winner`** (audit `EventId(4112)`), leaving an unmatched/tied
+       node unbound + logged and the service unstarted (§18.4 / §2.9).
+       Host-tested (catalogue ↔ emitted VL805/HID/pcie nodes, unmatched and
+       fail-closed paths); the freestanding aarch64 kernel builds with the
+       gate wired. **Metal checkpoint (operator, §0.9):** re-flash, confirm
+       the on-screen `Username:` prompt still takes keystrokes (parity), and
+       supply the UART debug log showing the `4112` bound record.
      - **5c-ii — load through the drvhost `Host::load` gate.** Route the
-       in-kernel load through `run_with_driver_host` so the bus/HID drivers
-       are admitted with full signature verification + `CAP_DRV_LOAD` /
-       `CAP_DRV_KERNEL` gating against the manifest bind tables, not a bare
-       `register()` call. Still the in-kernel address space; the
+       in-kernel bring-up through an **in-kernel `DriverLoader`** that
+       admits each matched chain driver via `run_with_driver_host` —
+       binding the statically-linked crates' `register()` under full
+       signature verification + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gating
+       against the manifest bind tables — and **re-matches the enumerated
+       HID child node** (`UsbDevice::describe_device`, 5b-ii) against the
+       catalogue before starting the report pump (the growable-runtime-tree
+       re-autoload step). Still the in-kernel address space; the
        `DriverSpawner` is the in-process register for now. Host-tested.
      - **5d-0 — the `DriverHost` DMA/MMIO surface reachable over IPC** (the
        standing gap, increment 1's remainder): a user-space driver maps its

@@ -22,8 +22,9 @@ use rustos_caps::CapabilitySet;
 use rustos_log::{log as log_event, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::{format_hex_u64, format_i32};
 
+use rustos_devmatch::{resolve, DriverCandidate, MatchResolution};
+
 use crate::events;
-use crate::matcher::{resolve, DriverCandidate, MatchResolution};
 
 /// Load mechanism behind the device manager (`AGENTS.md` §8).
 ///

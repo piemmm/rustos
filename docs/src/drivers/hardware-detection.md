@@ -62,6 +62,15 @@ The resolution across drivers is deterministic (`AGENTS.md` §18.3):
   an error and never a panic (`AGENTS.md` §18.4). A headless image
   simply leaves its display node unbound and proceeds to text login.
 
+This resolution policy (`resolve`, `best_bind_priority`, `DriverCandidate`,
+`MatchResolution`) lives in the shared **`lib/devmatch`** crate, the single
+§18.3 definition. `rustos-devmgr` re-exports it unchanged, and the kernel's
+interim in-kernel driver-candidate catalogue
+(`kernel/rustos-kernel::driver_catalog`, see [Remaining
+work](#remaining-stage-4hw-work)) resolves against the same crate — the
+kernel cannot depend on the `userland/*` device manager (`AGENTS.md` §17.4),
+so the policy is shared, never duplicated (§2.2).
+
 ## Public surface
 
 ```rust
@@ -137,11 +146,16 @@ discovery](../platform/aarch64.md#platform-discovery-hardware-tree)).
 
 ## Remaining Stage 4.HW work
 
-The hotplug/removal runtime path, the runtime attachment of
-bus-enumerated children (the VL805 and its HID device) into the tree,
-and the production driver-candidate catalogue that feeds
-`DeviceManager::autoload` at boot are tracked in `PLAN.md` Stage 4.HW.
 The Pi-4 USB-keyboard chain's bind tables already live in the driver
-crates (above); migrating the chain off the `kernel/rustos-kernel`
-composition scaffold onto this autoload path is the remaining work of
-Stage 4.HW item 5.
+crates (above), and the in-kernel **driver-candidate catalogue**
+(`kernel/rustos-kernel::driver_catalog`) now pairs each with its
+`/System/Drivers/` path and resolves the discovered `brcm,bcm2711-pcie`
+node against them through `lib/devmatch`: the chain's bring-up is **gated
+on a catalogue match** (`keyboard_service::resolve_discovered_bridge`,
+audit `EventId(4112)`) rather than running because a bridge address was
+found (Stage 4.HW item 5 / `plans/PI.md` P10 5c-i). The remaining work,
+tracked in `PLAN.md` Stage 4.HW, is the hotplug/removal runtime path,
+routing the in-kernel load through the signed-manifest `Host::load` gate
+with the enumerated-HID-child re-match (5c-ii), and ultimately the
+user-space keyboard service autoloaded by `DeviceManager::autoload` over
+the driver-host-IPC surface (5d).

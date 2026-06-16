@@ -72,7 +72,15 @@ const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 /// (`AGENTS.md` §18.1 — a capability-grant request, never an ambient
 /// handle); the aperture is read from the node's `dma-ranges`, never a
 /// board constant (§18.5).
-const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
+///
+/// Public because it is the **discovery-contract identity** of the bridge
+/// node: the in-kernel driver-candidate catalogue
+/// (`kernel/rustos-kernel::driver_catalog`, PLAN Stage 4.HW item 5)
+/// reconstructs the discovered node's `compatible` match key from this same
+/// constant — the string the device tree advertised and [`pcie_bringup`]
+/// verified — so the USB bring-up is gated by a match against the discovered
+/// identity, never a fabricated key (`AGENTS.md` §18.5).
+pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 
 /// Builds the hardware tree from a borrowed flattened device tree.
 pub struct FdtDiscovery<'a> {

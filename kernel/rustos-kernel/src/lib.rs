@@ -106,6 +106,17 @@ pub mod dispatch_core;
 pub mod keyboard_service;
 pub mod usb_keyboard;
 
+// The in-kernel production driver-candidate catalogue (`plans/PI.md` P10
+// 5c / PLAN Stage 4.HW item 5): pairs each chain driver's canonical
+// `BIND_KEYS` with its `/System/Drivers/` image path and resolves a
+// discovered hardware node against them through the shared `lib/devmatch`
+// policy — the data-driven replacement for hand-sequenced bring-up. Like
+// `usb_keyboard`, it is architecture-neutral (it names only `lib/abi`
+// match keys and the chain crates' published bind tables), so it is
+// un-gated and its host unit tests run on the CI host; the aarch64 boot
+// path consumes it to gate the live VL805 bring-up on a match.
+pub mod driver_catalog;
+
 #[cfg(kernel_isa = "x86_64")]
 pub mod arch_wrapper;
 #[cfg(kernel_isa = "x86_64")]

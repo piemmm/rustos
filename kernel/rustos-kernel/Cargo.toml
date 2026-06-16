@@ -59,6 +59,11 @@ rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The `virtio_boot` wiring config names `Ed25519PublicKey` for the
 # driver-host trust-anchor list (`drvhost::HostConfig::trusted_signers`).
 rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# The deterministic node ↔ bind-table match policy (`AGENTS.md` §18.3),
+# shared with the user-space `devmgr` (`AGENTS.md` §2.2 / §17.4): the
+# in-kernel `driver_catalog` resolves a discovered hardware node against
+# the chain drivers' bind tables through the one definition.
+rustos-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-kernel-core = { path = "../core", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }

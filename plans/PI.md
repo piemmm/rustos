@@ -77,6 +77,26 @@ say — the standing task direction supersedes that language. Changing a
    update `PLAN.md` + this file, refresh `.junie/next-pi-prompt.md`, then
    start the next.
 
+9. **Metal re-verification is guaranteed, not speculative (operator
+   commitment, binding).** The operator re-verifies every applicable
+   stage on a real Raspberry Pi 4B as the work proceeds and supplies the
+   UART/debug-log (or photo) acceptance artefact between chunks. The
+   metal-acceptance step *will* be checked every time it applies — it is
+   never assumed, skipped, or treated as optional. Therefore design
+   decisions are made for the **most correct, properly-designed,
+   senior-review-clean** outcome (`AGENTS.md` §2.6 / §23): security and
+   correctness are the floor (§2.1 / §5.4 / §23.1), performance is
+   first-class (§2.16), and drivers are generic, modular hardware
+   interfaces — from PCI/PCIe bridges down to the individual USB-HID
+   interface (keyboard, mouse, storage, scanner, printer, …) and other
+   PCI devices (storage, serial, parallel/printer ports, …) — never a
+   Pi-4-only special case (the work must equally serve `x86_64`,
+   `riscv64`, and other boards: §0.2 / §17.2 / §18). Do **not** trade
+   design quality for a smaller blast radius on the assumption metal
+   verification is optional: it is not. A chunk touching a live,
+   metal-confirmed path lands host-tested **plus** a metal checklist —
+   never a hack to dodge a check (§2.1).
+
 ---
 
 ## 1. Baseline — where the aarch64 port stands today
@@ -3067,13 +3087,32 @@ table, so a new board is match **data**, not new code. Sub-increments
   the live VL805 path is a §0.4 metal-acceptance item, so each touching
   chunk lands host tests + a metal checklist and the operator supplies the
   UART log between chunks):
-  - **5c-i** the production driver-candidate catalogue + `keyboard_service`
-    reworked so the chain bring-up is driven by `devmgr` matching the
-    discovered/runtime tree (in-kernel `DriverLoader` binding the chain
-    crates' `register()`; the DriverHost-over-IPC gap not yet closed).
-  - **5c-ii** route that in-kernel load through the drvhost `Host::load`
-    gate (`run_with_driver_host`) — full signature + `CAP_DRV_LOAD` /
-    `CAP_DRV_KERNEL` gating against the manifest bind tables.
+  - **5c-i — done:** the match policy moved out of `devmgr` into the shared
+    **`lib/devmatch`** crate (`resolve`/`best_bind_priority`/
+    `DriverCandidate`/`MatchResolution`), the single §18.3 definition the
+    kernel reaches without a kernel→userland edge (§2.2 / §17.4; `devmgr`
+    re-exports it). The in-kernel production driver-candidate catalogue
+    (`kernel/rustos-kernel::driver_catalog`) pairs each chain driver's
+    canonical `BIND_KEYS` with its `/System/Drivers/` path (authored from
+    the crates' tables, never re-typed), and `keyboard_service` gates the
+    bring-up on it: `resolve_discovered_bridge` resolves the discovered
+    `brcm,bcm2711-pcie` identity (`platform::PCIE_COMPATIBLE` — the
+    discovery contract, never a fabricated key, §18.5) against the catalogue
+    and proceeds **only on a bound `Winner`** (audit `EventId(4112)`),
+    leaving an unmatched/tied node unbound + logged and the service
+    unstarted (§18.4 / §2.9). The kernel no longer hunts: it brings the bus
+    up because a driver's bind table matched a discovered node. Host-tested;
+    the freestanding aarch64 kernel builds with the gate. **Metal checkpoint
+    (operator, §0.9):** re-flash, confirm the on-screen `Username:` prompt
+    still takes keystrokes (parity), supply the UART log with the `4112`
+    bound record.
+  - **5c-ii** route the in-kernel bring-up through an in-kernel
+    `DriverLoader` that admits each matched chain driver via
+    `run_with_driver_host` (binding the crates' `register()` under full
+    signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gating against the
+    manifest bind tables), and **re-match the enumerated HID child node**
+    (`UsbDevice::describe_device`, 5b-ii) against the catalogue before the
+    report pump (the growable-tree re-autoload step).
   - **5d-0** the `DriverHost` DMA/MMIO surface reachable **over IPC** (the
     standing gap, Stage 4.HW increment 1's remainder).
   - **5d** the continuous keyboard *service* in **user space**, autoloaded

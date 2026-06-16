@@ -408,8 +408,9 @@ mod metal {
     use rustos_arch_aarch64::kernel_arch::{
         busy_delay_us, clean_invalidate_dcache_range, read_cntfrq, read_cntpct,
     };
-    use rustos_arch_aarch64::platform::PcieDiscovery;
+    use rustos_arch_aarch64::platform::{PcieDiscovery, PCIE_COMPATIBLE};
     use rustos_arch_aarch64::SERIAL_SINK;
+    use rustos_devmatch::MatchResolution;
     use rustos_drv_bus_pcie_brcm::{Delay, PcieWindows};
     use rustos_drv_input_usb_hid::{pump_once, KeyboardConsole};
     use rustos_kernel_core::{InitSpawnCtx, YieldHandle};
@@ -431,6 +432,14 @@ mod metal {
     /// or skipped because a prerequisite was absent), logged once at the
     /// PID 1 spawn seam before its bring-up diagnostics run.
     const KEYBOARD_SERVICE: EventId = EventId(4103);
+
+    /// Audit event: the §18.3 autoload decision for the discovered PCIe
+    /// root complex (`AGENTS.md` §5.4.4). The bring-up runs because the
+    /// driver-candidate catalogue *bound* a driver to the discovered node,
+    /// never because a bridge address exists: a bound node logs the winning
+    /// driver path, an unmatched node is left unbound (`AGENTS.md` §18.4),
+    /// and a packaging tie or an unrepresentable identity fails closed.
+    const KEYBOARD_AUTOLOAD: EventId = EventId(4112);
 
     /// Audit event: diagnostics from the VL805 firmware-reload mailbox
     /// exchange ([`ExchangeStats`]), logged after the `NOTIFY_XHCI_RESET`
@@ -829,12 +838,101 @@ mod metal {
         *DISCOVERED.lock() = Some(discovery);
     }
 
+    /// Resolve the discovered PCIe root complex against the in-kernel
+    /// driver-candidate catalogue ([`crate::driver_catalog`]), returning the
+    /// winning driver's image path when a driver binds the node.
+    ///
+    /// This is the §18 data-driven gate (`plans/PI.md` P10 5c): the bring-up
+    /// proceeds because a driver's bind table matched the discovered node's
+    /// identity, **not** because a bridge address was found — the kernel no
+    /// longer hunts for a keyboard (`AGENTS.md` §18.5). Every outcome is
+    /// audited as [`KEYBOARD_AUTOLOAD`]: a bound node logs the winning
+    /// driver path, an unmatched node is left unbound and logged (§18.4),
+    /// and a packaging tie or an identity that does not fit a match key
+    /// fails closed (`AGENTS.md` §2.9 / §5.4).
+    fn resolve_discovered_bridge() -> Option<&'static str> {
+        let Some(key) = crate::driver_catalog::bridge_compatible_key(PCIE_COMPATIBLE) else {
+            log(
+                &SERIAL_SINK,
+                &Event {
+                    level: Level::Error,
+                    id: KEYBOARD_AUTOLOAD,
+                    message:
+                        "usb-keyboard autoload: discovered pcie identity unrepresentable; unbound",
+                    fields: &[],
+                },
+            );
+            return None;
+        };
+        match crate::driver_catalog::resolve_chain(&[key]) {
+            MatchResolution::Winner {
+                candidate,
+                priority,
+            } => {
+                let path = crate::driver_catalog::chain_candidates()[candidate].path;
+                let mut pbuf = [0u8; 16];
+                log(
+                    &SERIAL_SINK,
+                    &Event {
+                        level: Level::Info,
+                        id: KEYBOARD_AUTOLOAD,
+                        message: "usb-keyboard autoload: discovered pcie node bound to driver",
+                        fields: &[
+                            Field {
+                                key: "driver",
+                                value: path,
+                            },
+                            Field {
+                                key: "priority_hex",
+                                value: format_hex_u64(u64::from(priority), &mut pbuf),
+                            },
+                        ],
+                    },
+                );
+                Some(path)
+            }
+            MatchResolution::Unmatched => {
+                log(
+                    &SERIAL_SINK,
+                    &Event {
+                        level: Level::Info,
+                        id: KEYBOARD_AUTOLOAD,
+                        message: "usb-keyboard autoload: discovered pcie node unmatched; unbound",
+                        fields: &[],
+                    },
+                );
+                None
+            }
+            MatchResolution::Tie { priority } => {
+                let mut pbuf = [0u8; 16];
+                log(
+                    &SERIAL_SINK,
+                    &Event {
+                        level: Level::Error,
+                        id: KEYBOARD_AUTOLOAD,
+                        message:
+                            "usb-keyboard autoload: discovered pcie node tie (packaging defect); \
+                             failing closed",
+                        fields: &[Field {
+                            key: "priority_hex",
+                            value: format_hex_u64(u64::from(priority), &mut pbuf),
+                        }],
+                    },
+                );
+                None
+            }
+        }
+    }
+
     /// Spawn the USB-keyboard service kthread if the boot path discovered a
-    /// PCIe bridge, returning whether it was started. With no bridge (the
-    /// `virt` shape) or no `'static` frame allocator it starts nothing and
-    /// returns `false`, failing closed. The capability-gated mapper and DMA
-    /// host are leaked to `'static`; the body runs the bring-up once then
-    /// polls forever, yielding between polls so PID 1 also runs.
+    /// PCIe bridge **and** the driver-candidate catalogue binds a driver to
+    /// it, returning whether it was started. With no bridge (the `virt`
+    /// shape), an unmatched/tied discovered node
+    /// ([`resolve_discovered_bridge`]), or no `'static` frame allocator it
+    /// starts nothing and returns `false`, failing closed (`AGENTS.md`
+    /// §18.4 / §2.9). The capability-gated mapper and DMA host are leaked to
+    /// `'static`; the body runs the bring-up once then polls forever,
+    /// yielding between polls so PID 1 also runs.
     #[must_use]
     pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
         // No discovered bridge is the QEMU `virt` shape, not an error: stay
@@ -842,6 +940,16 @@ mod metal {
         let Some(discovery) = *DISCOVERED.lock() else {
             return false;
         };
+        // §18 data-driven gate (`plans/PI.md` P10 5c): bring the chain up
+        // only because the driver-candidate catalogue *binds* a driver to
+        // the discovered node — not because a bridge address exists. An
+        // unmatched node (no chain driver claims it), a packaging tie, or an
+        // unrepresentable identity leaves the node unbound, logged, and the
+        // service unstarted (`AGENTS.md` §18.4 / §2.9). The catalogue binds
+        // `brcm,bcm2711-pcie` to `pcie_brcm`, so on the Pi 4 this proceeds.
+        if resolve_discovered_bridge().is_none() {
+            return false;
+        }
         // A discovered bridge with no `'static` frame allocator is worth
         // logging: the keyboard cannot be brought up. Fail closed.
         let Some(frames) = ctx.static_frames() else {

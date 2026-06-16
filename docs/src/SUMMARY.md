@@ -41,6 +41,7 @@
   - [`rustos-collections`](./lib/collections.md)
   - [`rustos-crypto`](./lib/crypto.md)
   - [`rustos-curses`](./lib/curses.md)
+  - [`rustos-devmatch`](./lib/devmatch.md)
   - [`rustos-keymap`](./lib/keymap.md)
   - [`rustos-log`](./lib/log.md)
   - [`rustos-rng`](./lib/rng.md)

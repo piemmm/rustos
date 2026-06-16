@@ -1,0 +1,15 @@
+[package]
+name = "rustos-devmatch"
+description = "RustOS deterministic hardware-node ↔ driver bind-table match resolution (`AGENTS.md` §18.3): the single match-policy definition shared by the user-space device manager and the kernel's interim in-kernel driver-candidate catalogue (§2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }

@@ -49,10 +49,12 @@ extern crate alloc;
 
 pub mod events;
 pub mod manager;
-pub mod matcher;
 
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
-pub use matcher::{best_bind_priority, resolve, DriverCandidate, MatchResolution};
+// The deterministic match policy is the shared `lib/devmatch` definition
+// (`AGENTS.md` §2.2): re-exported here so existing consumers and the
+// crate's public surface are unchanged.
+pub use rustos_devmatch::{best_bind_priority, resolve, DriverCandidate, MatchResolution};
 
 // Re-export the `lib/log` items integration tests must implement to
 // observe audit records, mirroring `rustos-drvhost`'s surface so

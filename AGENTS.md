@@ -316,6 +316,9 @@ rustos/
 │   │                    #   /System/Libraries/ class, fail closed (§2.9).
 │   ├── cursor/          # Shared pointer cursors rasterised onto a raster
 │   │                    #   Surface, keyed by the theme's CursorKind (§10, §17.4).
+│   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table
+│   │                    #   match policy (§18.3): the one definition shared by
+│   │                    #   userland devmgr and the kernel driver catalogue (§2.2).
 │   ├── fdt/             # Shared FDT/DTB reader: the one device-tree parser the
 │   │                    #   aarch64+riscv64 ports build §18.2 discovery on (§2.2).
 │   ├── font/            # Shared text rasterisation: monospace bitmap font +
