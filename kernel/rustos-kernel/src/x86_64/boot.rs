@@ -704,7 +704,7 @@ fn try_boot(
     // so PID 1 `init` can launch the user's session concurrently — the
     // cross-port sibling of the aarch64 `boot_aarch64` wiring.
     .with_spawn(
-        &crate::x86_64::spawn_producer::X86_64_PROGRAM_REGISTRY,
+        &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::x86_64::spawn_producer::X86_64_PROCESS_SPAWN,
     );
     boot_info

@@ -150,13 +150,16 @@ pub mod aarch64;
 #[cfg(kernel_isa = "riscv64")]
 pub mod riscv64;
 
-// The user-space layout constants (stack/MMIO-window offsets and page
-// counts, canary seeds) every port's PID 1 spawn seam and runtime spawn
-// producer share by definition — they describe one user-space layout, not a
-// per-architecture register layout — defined once here rather than
-// copy-pasted into each `init_spawn` / `spawn_producer` sibling
-// (`AGENTS.md` §2.2). Gated to exactly the configurations whose consumers
-// compile, so it is never dead code (`AGENTS.md` §2.3).
+// The data every port's PID 1 spawn seam and runtime spawn producer share
+// by definition — the user-space layout constants (stack/MMIO-window offsets
+// and page counts, canary seeds), the embedded-program registry the `spawn`
+// syscall resolves (paths, capability sets, argument vectors), the
+// `CAP_PROC_SPAWN` `SpawnAuthority`, and PID 1 `init`'s own grant + argument
+// vector. These describe one user-space contract, not a per-architecture
+// register layout, so they are defined once here rather than copy-pasted into
+// each `init_spawn` / `spawn_producer` sibling (`AGENTS.md` §2.2). Gated to
+// exactly the configurations whose consumers compile, so it is never dead
+// code (`AGENTS.md` §2.3).
 #[cfg(all(
     freestanding,
     any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")

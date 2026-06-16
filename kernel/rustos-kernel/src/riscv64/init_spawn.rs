@@ -39,14 +39,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::boxed::Box;
 
 use rustos_abi::rxe::LoadImage;
-use rustos_abi::{CapabilityId, CapabilityQuery};
 use rustos_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use rustos_arch_api::EnterUser;
 use rustos_arch_riscv64::paging::{
     activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
 use rustos_arch_riscv64::userentry::UserMode;
-use rustos_caps::CapabilitySet;
 use rustos_kernel_core::{
     spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnRequest,
 };
@@ -91,41 +89,12 @@ static INIT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 /// Set once PID 1 has been spawned so a re-entry cannot re-run the path.
 static INIT_SPAWNED: AtomicBool = AtomicBool::new(false);
 
-/// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege
-/// [`spawn_image`] requires to authorise spawning PID 1 (`AGENTS.md`
-/// §5.4). It does not widen `init`'s own authority, which is its `rxe`
-/// manifest's request intersected with its user's grants (`AGENTS.md`
-/// §16.5).
-struct SpawnAuthority;
-
-impl CapabilityQuery for SpawnAuthority {
-    fn holds(&self, cap: CapabilityId) -> bool {
-        cap == CapabilityId::PROC_SPAWN
-    }
-}
-
 /// The riscv64 PID 1 spawn seam installed into the
 /// [`rustos_kernel_core::BootInfo`] hand-off by `boot_riscv64::try_boot`.
 pub struct RiscvInitSpawn;
 
 /// The single, `'static` [`RiscvInitSpawn`] the boot path borrows.
 pub static RISCV_INIT_SPAWN: RiscvInitSpawn = RiscvInitSpawn;
-
-/// `init`'s effective capability set: `CAP_CONSOLE_WRITE`, so PID 1 can
-/// write its startup banner through the `stream_write` syscall, plus
-/// `CAP_PROC_SPAWN`, so it can launch the user's session program through
-/// the `spawn` syscall (`plans/SPAWN.md` `SP3b`). The boot path passes
-/// this as both the user grant and the manifest request, so the
-/// intersection the kernel derives is the same set — `init` is granted no
-/// more (`AGENTS.md` §5.2). Spawning is not ambient authority: the child
-/// PID 1 launches receives only *its own* manifest∩user-grant set, never
-/// `init`'s (`AGENTS.md` §4, §16.5).
-fn init_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::CONSOLE_WRITE);
-    caps.insert(CapabilityId::PROC_SPAWN);
-    caps
-}
 
 impl InitSpawn for RiscvInitSpawn {
     fn spawn_init(&self, ctx: &dyn InitSpawnCtx) {
@@ -214,7 +183,7 @@ impl InitSpawn for RiscvInitSpawn {
                 page_count: spawn_layout::USER_STACK_PAGES,
             },
             start_block_base: USER_BLOCK_BASE,
-            args: &[b"init"],
+            args: spawn_layout::INIT_ARGS,
             env: &[],
             canary: spawn_layout::INIT_CANARY,
         };
@@ -232,7 +201,7 @@ impl InitSpawn for RiscvInitSpawn {
         let frames = ctx.frames();
         let Ok(entry) = (unsafe {
             spawn_image(
-                &SpawnAuthority,
+                &spawn_layout::SpawnAuthority,
                 ctx.audit(),
                 &mut space,
                 &physmap,
@@ -294,7 +263,7 @@ impl InitSpawn for RiscvInitSpawn {
         // `mmio_map` fail closed here (`AGENTS.md` §2.9).
         unsafe {
             ctx.admit_init(
-                init_caps(),
+                spawn_layout::init_caps(),
                 frozen,
                 physmap,
                 kernel_stack,

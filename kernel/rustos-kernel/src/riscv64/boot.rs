@@ -605,7 +605,7 @@ pub fn try_boot(
     // a fresh, hardware-isolated child Sv39 space, so PID 1 `init` can
     // launch the user's session.
     .with_spawn(
-        &crate::riscv64::spawn_producer::RISCV_PROGRAM_REGISTRY,
+        &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::riscv64::spawn_producer::RISCV_PROCESS_SPAWN,
     );
     boot_info

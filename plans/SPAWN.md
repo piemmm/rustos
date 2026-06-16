@@ -350,8 +350,10 @@ spawning caller keeps running — the build writes through the identity
 `physmap`, so the child space need not be active), parses the `rxe` against
 `SYSCALL_TABLE_HASH`, calls `spawn_image` (re-asserts `CAP_PROC_SPAWN`,
 audits), freezes, builds the `pre_resume`/`enter` closures, and calls
-`ctx.admit_process`. `boot_aarch64` wires `.with_spawn(&AARCH64_PROGRAM_REGISTRY,
-&AARCH64_PROCESS_SPAWN)`; `kernel_core` threads `programs`/`spawn_service` +
+`ctx.admit_process`. `boot_aarch64` wires `.with_spawn(&spawn_layout::PROGRAM_REGISTRY,
+&AARCH64_PROCESS_SPAWN)` (the registry is the one shared `spawn_layout`
+definition every port installs, §2.2); `kernel_core` threads
+`programs`/`spawn_service` +
 `&state.frame_allocator` through `BootInfo::with_spawn` → `run_phases` →
 `KernelDispatchHook::new` → `with_frames`/`with_spawn`. The kernel `build.rs`
 was generalised to build **both** `init` and the `Shell` session program

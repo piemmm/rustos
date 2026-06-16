@@ -1515,7 +1515,7 @@ copy is added on the syscall hot path (§2.16).
   `ProcessSpawn` producer — `kernel/rustos-kernel/src/x86_64/spawn_producer.rs`,
   the cross-port sibling of the aarch64 `spawn_producer.rs` — is wired through
   `BootInfo::with_spawn` (in `boot::try_boot`, beside the X3a `with_init` seam)
-  with the embedded `X86_64_PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
+  with the shared embedded `spawn_layout::PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
   already bakes for x86_64). On `init`'s `CAP_PROC_SPAWN`-gated `spawn` for
   `/Apps/Shell.app/Run`, it draws the child's page tables from the kernel's
   live `FrameAllocator` through a boot-cached `kernel/mem` `FrameTableSource`

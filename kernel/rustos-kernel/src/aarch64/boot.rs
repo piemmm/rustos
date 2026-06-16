@@ -743,7 +743,7 @@ fn enter_kernel_core(
     // the registry and drives the producer to build a fresh, isolated child
     // address space, so PID 1 `init` can launch the user's session.
     .with_spawn(
-        &crate::aarch64::spawn_producer::AARCH64_PROGRAM_REGISTRY,
+        &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN,
     );
     if boot_info.validate().is_err() {
