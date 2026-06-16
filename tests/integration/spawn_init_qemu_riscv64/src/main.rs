@@ -63,7 +63,7 @@ mod kernel {
 
     use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::boot_riscv64;
+    use rustos_kernel::riscv64::boot as boot_riscv64;
     use rustos_log::{Event, EventId, Sink};
 
     /// Static boot heap.

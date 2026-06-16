@@ -63,13 +63,13 @@ use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{Event, EventId, Field, Level, Sink};
 
-use crate::arch_wrapper::BinArch;
-use crate::dispatch::{production_dispatch, DISPATCH_SLOT};
-use crate::init_spawn_x86_64::X86_64_INIT_SPAWN;
-use crate::ioapic_controller::IoApicController;
 use crate::mem_map::carve_guard_arena_from_map;
-use crate::serial_sink::COM1_CONSOLES;
 use crate::stack_arena::{IdentityBlockStore, KTHREAD_STACK_ARENA};
+use crate::x86_64::arch_wrapper::BinArch;
+use crate::x86_64::dispatch::{production_dispatch, DISPATCH_SLOT};
+use crate::x86_64::init_spawn::X86_64_INIT_SPAWN;
+use crate::x86_64::ioapic_controller::IoApicController;
+use crate::x86_64::serial_sink::COM1_CONSOLES;
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
 /// `NXE` lets the W^X No-Execute leaf bit the process-image builder sets on
@@ -660,14 +660,14 @@ fn try_boot(
     // (which `kernel_main` consumes and stores). `Arc::as_ptr` returns
     // a stable pointer for the lifetime of any clone of the `Arc`.
     unsafe {
-        crate::panic_ctx::publish_arch(Arc::as_ptr(&arch_arc));
+        crate::x86_64::panic_ctx::publish_arch(Arc::as_ptr(&arch_arc));
     }
     // Publish a clone of the firmware memory map into the bin-crate's
     // set-once slot before it is moved into the `kernel_core` hand-off,
     // so a driver-bring-up observer can build a per-device DMA
     // `FrameAllocator` from the same firmware description without
     // re-borrowing the `pub(crate)` `KernelState` (AGENTS.md §2.1).
-    crate::arch_wrapper::publish_memory_map(&memory_map);
+    crate::x86_64::arch_wrapper::publish_memory_map(&memory_map);
 
     let scheduler_config = SchedulerConfig::defaults_for(1);
     let boot_info: BootInfo<'static, BinArch> = BootInfo::new(
@@ -704,8 +704,8 @@ fn try_boot(
     // so PID 1 `init` can launch the user's session concurrently — the
     // cross-port sibling of the aarch64 `boot_aarch64` wiring.
     .with_spawn(
-        &crate::spawn_producer_x86_64::X86_64_PROGRAM_REGISTRY,
-        &crate::spawn_producer_x86_64::X86_64_PROCESS_SPAWN,
+        &crate::x86_64::spawn_producer::X86_64_PROGRAM_REGISTRY,
+        &crate::x86_64::spawn_producer::X86_64_PROCESS_SPAWN,
     );
     boot_info
         .validate()
@@ -940,7 +940,7 @@ fn discover_and_program_io_apics(
     // [`IoApicController::read_pin_low`] without re-borrowing the
     // `pub(crate)` `KernelState`. AGENTS.md §2.1 — one-shot publish;
     // the slot accepts the same pointer the `IrqRouting` carries.
-    crate::ioapic_controller::publish_typed(controller_static);
+    crate::x86_64::ioapic_controller::publish_typed(controller_static);
 
     // Step 4. For every pin: allocate the next vector from the
     // reserved range, install the per-CPU IDT entry, publish the

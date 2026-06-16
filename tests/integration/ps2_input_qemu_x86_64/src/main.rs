@@ -64,9 +64,9 @@ mod kernel {
     use rustos_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use rustos_kernel::arch_wrapper::published_irq_table;
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::ioapic_controller::published_typed;
+    use rustos_kernel::x86_64::arch_wrapper::published_irq_table;
+    use rustos_kernel::x86_64::ioapic_controller::published_typed;
     use rustos_kernel::{
         boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
     };

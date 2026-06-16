@@ -194,7 +194,7 @@ extern "C" {
 /// vector and the `sscratch == 0` S-mode invariant the vector relies on,
 /// so a synchronous trap (a `ecall`, a page fault) is taken to the
 /// handler, but leaves `sie`/`sstatus.SIE` untouched. The production
-/// boot pipeline (`rustos_kernel::boot_riscv64`, `plans/PI.md` RV-P2)
+/// boot pipeline (`rustos_kernel::riscv64::boot`, `plans/PI.md` RV-P2)
 /// uses it to catch a fault during the paged bring-up and to route the
 /// `ecall` syscall path, mirroring the aarch64 port's vector-only
 /// `exceptions::init_vectors`. A consumer that also wants to take

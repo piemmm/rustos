@@ -425,7 +425,7 @@ mod metal {
     use rustos_abi::{CapabilityId, HwNode};
     use rustos_caps::CapabilitySet;
 
-    use crate::arch_wrapper_aarch64::INPUT_FOCUS;
+    use crate::aarch64::arch_wrapper::INPUT_FOCUS;
     use crate::driver_catalog;
     use crate::driver_loader::KernelDriverLoader;
     use crate::usb_keyboard::{

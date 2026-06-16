@@ -120,7 +120,7 @@ publication point for the hook the eventual production callback (f5)
 will read from the slot, not the trampoline.
 
 The slot itself is `pub static DISPATCH_SLOT: DispatchCallbackSlot`
-in `kernel/rustos-kernel/src/dispatch.rs`: a normal `static` (not
+in `kernel/rustos-kernel/src/x86_64/dispatch.rs`: a normal `static` (not
 `static mut`) whose set-once publication is protected by an internal
 [`OnceCell`](./sync.md). The QEMU integration test
 `rustos-test-kernel-arch-boot` reuses the same slot through

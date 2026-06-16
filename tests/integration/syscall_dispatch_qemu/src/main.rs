@@ -413,7 +413,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::panic_ctx`.
+    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
     ///
     /// A panic anywhere in the boot path (including inside the
     /// synthesised quartet) routes through `SERIAL_SINK` for the

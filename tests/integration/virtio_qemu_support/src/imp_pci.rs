@@ -15,7 +15,7 @@ use rustos_arch_x86_64::smp::bsp_lapic_id;
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_pci::mechanism_one;
 use rustos_drv_bus_virtio::PciTransport;
-use rustos_kernel::arch_wrapper::{published_irq_table, published_memory_map};
+use rustos_kernel::x86_64::arch_wrapper::{published_irq_table, published_memory_map};
 use rustos_kernel::SERIAL_SINK;
 use rustos_kernel::{KernelVirtioFactory, KernelVirtioFactoryConfig};
 use rustos_kernel_irq::{IrqWaitAbort, IrqWaiter};

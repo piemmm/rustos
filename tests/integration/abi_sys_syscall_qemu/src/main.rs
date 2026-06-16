@@ -197,7 +197,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::panic_ctx`.
+    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
     #[panic_handler]
     fn rustos_test_abi_sys_syscall_qemu_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)

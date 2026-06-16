@@ -39,7 +39,7 @@ use std::process::Command;
 
 /// Virtual base the stub program image is mapped at. This is the production
 /// aarch64 spawn producer's image bias
-/// (`rustos_kernel::spawn_producer::USER_IMAGE_BIAS`, 64 GiB): `spawn_with`
+/// (`rustos_kernel::aarch64::spawn_producer::USER_IMAGE_BIAS`, 64 GiB): `spawn_with`
 /// passes that bias to `build_process_image`, so the `rxe`'s baked
 /// relocations must target the same value. The test kernel asserts the two
 /// constants agree at runtime and fails closed on a mismatch

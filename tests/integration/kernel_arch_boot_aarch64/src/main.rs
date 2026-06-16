@@ -7,7 +7,7 @@
 //! `kernel_core::kernel_main` emits `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) once every init phase (Log → Mem → Sec → Sched →
 //! Irq → Syscall → Ipc) has succeeded. This binary drives the real
-//! aarch64 boot pipeline — `rustos_kernel::boot_aarch64::boot` — end to
+//! aarch64 boot pipeline — `rustos_kernel::aarch64::boot::boot` — end to
 //! end on the `virt` board:
 //!
 //! 1. The arch crate's `boot.s` trampoline drops to EL1, establishes a
@@ -53,7 +53,7 @@ mod kernel {
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
-    use rustos_kernel::boot_aarch64;
+    use rustos_kernel::aarch64::boot as boot_aarch64;
     use rustos_log::{Event, EventId, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build

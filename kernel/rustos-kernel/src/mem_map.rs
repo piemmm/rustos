@@ -2,7 +2,7 @@
 //! [`BootMemoryMap`] the live allocator hand-off consumes
 //! (`plans/PI.md` P6c-1).
 //!
-//! The aarch64 boot path (`boot_aarch64`) discovers the board's RAM
+//! The aarch64 boot path (`aarch64::boot`) discovers the board's RAM
 //! window from the device tree — never a fabricated static list
 //! (`AGENTS.md` §18.2). This module turns that `(base, size)` pair and
 //! the linker-provided end of the kernel image into the two-region
@@ -16,11 +16,11 @@
 //!
 //! The arithmetic is deliberately free of the architecture crates so it is
 //! exercised by host unit tests under `cargo test` (`AGENTS.md` §7): the
-//! `boot_aarch64` / `boot` modules that call it link the bare-metal-only
+//! `aarch64::boot` / `x86_64::boot` modules that call it link the bare-metal-only
 //! ports and cannot be host-compiled, so the correctness-critical bounds
 //! checks would otherwise never run on the CI host. The module compiles on
-//! the bare-metal production builds (where `boot_aarch64` / `boot` /
-//! `boot_riscv64` consume it) and on any host `cargo test` build (where the
+//! the bare-metal production builds (where `aarch64::boot` / `x86_64::boot` /
+//! `riscv64::boot` consume it) and on any host `cargo test` build (where the
 //! tests below consume it), and on no other configuration, so it is never
 //! dead code (`AGENTS.md` §2.3). The single-window [`build_memory_map`]
 //! (aarch64) and the map-carve [`carve_guard_arena_from_map`] (x86_64 +
@@ -306,8 +306,8 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 /// This is the x86_64 + riscv64 counterpart of the aarch64 single-window
 /// [`build_memory_map`]: that port discovers one `/memory` window and lays
 /// the whole map out itself, whereas x86_64 receives a multi-region
-/// firmware map (`boot::build_memory_map`) — and riscv64 builds its own
-/// two-region map (`boot_riscv64::build_boot_memory_map`) — and each only
+/// firmware map (`x86_64::boot::build_memory_map`) — and riscv64 builds its own
+/// two-region map (`riscv64::boot::build_boot_memory_map`) — and each only
 /// needs to carve the arena out of it. The arena is sized by the same §24.2
 /// policy ([`stack_arena_bytes`], a whole multiple of [`GUARD_ARENA_ALIGN`])
 /// from `ram_bytes` — the discovered RAM the caller passes (both boot paths
@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn firmware_carve_serves_the_riscv64_virt_window() {
-        // The riscv64 boot path's two-region map (`boot_riscv64`): the
+        // The riscv64 boot path's two-region map (`riscv64::boot`): the
         // kernel image reserved at the `virt` board's RAM base
         // (0x8000_0000, GiB 2) and the remainder usable. The carve places
         // the policy-sized arena just above the kernel image, wholly below

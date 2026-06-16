@@ -3,7 +3,7 @@
 //!
 //! Stage 4.D Item 2-tail.2. The kernel binary builds one
 //! [`IoApicController`] per boot during its post-MADT wiring phase
-//! (see `crate::boot::try_boot`, bare-metal only). The controller owns every
+//! (see `crate::x86_64::boot::try_boot`, bare-metal only). The controller owns every
 //! IO-APIC the firmware advertises through MADT and exposes a single
 //! [`IrqController::mask`] method that the kernel-neutral
 //! [`rustos_kernel_irq::IrqTable::fire`] path invokes *before* it
@@ -55,13 +55,13 @@ use rustos_sync::spinlock::SpinLock;
 
 /// Set-once typed publication of the production
 /// `IoApicController<VolatileIoApicMmio>` constructed by
-/// [`crate::boot::try_boot`].
+/// [`crate::x86_64::boot::try_boot`].
 ///
 /// Bare-metal only because the `VolatileIoApicMmio` type used in the
 /// slot's `'static` reference is itself gated to `target_os = "none"`
 /// — host tests have no IO-APIC MMIO window to publish.
 ///
-/// Published alongside the [`crate::arch_wrapper`] controller slot
+/// Published alongside the [`crate::x86_64::arch_wrapper`] controller slot
 /// (which carries the same controller as a `dyn IrqController` trait
 /// object). The typed slot exposes [`IoApicController::program_pin`]
 /// and [`IoApicController::read_pin_low`] — methods that are *not*
@@ -82,7 +82,7 @@ static PUBLISHED_TYPED: rustos_sync::once::OnceCell<
 
 /// Publish the production controller into [`PUBLISHED_TYPED`].
 ///
-/// Called once during [`crate::boot::try_boot`]'s
+/// Called once during [`crate::x86_64::boot::try_boot`]'s
 /// `discover_and_program_io_apics` step. A second publish is silently
 /// ignored — production code reaches this path exactly once.
 #[cfg(freestanding)]

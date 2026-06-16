@@ -6,7 +6,7 @@
 //! driver, but it names no concrete kernel subsystem (`AGENTS.md`
 //! §17.2 / §17.4). The riscv64 boot pipeline that *does* name
 //! `kernel/{core,mem,sec}` and `kernel/sched/api` lives in the
-//! production `rustos-kernel` crate (`rustos_kernel::boot_riscv64`),
+//! production `rustos-kernel` crate (`rustos_kernel::riscv64::boot`),
 //! mirroring how x86_64 / aarch64 keep their `BinArch` wrapper and
 //! `BootInfo` assembly there. This crate is the test-side wrapper that
 //! consumes that one pipeline (`AGENTS.md` §2.2): it re-exports the
@@ -22,7 +22,7 @@
 //! | ------------ | -------------------------------------------------------------------- |
 //! | [`plic_irq`] | [`PlicIrqController`] — the `kernel/irq` `IrqController` bridge.      |
 //! | `publish`    | Set-once firmware-map / DTB observers for the device verticals (freestanding). |
-//! | `boot`       | Thin wrapper: publish, then delegate to `rustos_kernel::boot_riscv64` (freestanding). |
+//! | `boot`       | Thin wrapper: publish, then delegate to `rustos_kernel::riscv64::boot` (freestanding). |
 //!
 //! [`plic_irq`] is host-buildable so its mask-before-wake regression
 //! test runs under `cargo test`; `boot` / `publish` are gated to the

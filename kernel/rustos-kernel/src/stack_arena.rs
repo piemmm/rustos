@@ -709,9 +709,10 @@ impl ArenaShrink for RetainShrink {
 }
 
 /// The single, `'static` guard-stack arena the boot path installs
-/// (`boot_aarch64` / `boot` / `boot_riscv64`) and the spawn seams draw from
-/// (`init_spawn` / `init_spawn_x86_64` / `init_spawn_riscv64`,
-/// `spawn_producer` / `spawn_producer_x86_64` / `spawn_producer_riscv64`).
+/// (`aarch64::boot` / `x86_64::boot` / `riscv64::boot`) and the spawn seams
+/// draw from (`aarch64::init_spawn` / `x86_64::init_spawn` /
+/// `riscv64::init_spawn`, `aarch64::spawn_producer` / `x86_64::spawn_producer`
+/// / `riscv64::spawn_producer`).
 ///
 /// Only the bare-metal builds instantiate it; the host-test
 /// build exercises the allocator through locally constructed [`StackArena`]s,

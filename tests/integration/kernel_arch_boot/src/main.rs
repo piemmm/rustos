@@ -101,7 +101,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::panic_ctx`.
+    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
     ///
     /// Note: the bridge logs through `SERIAL_SINK`, not through our
     /// `AUDIT_SINK`, so a panic before `BootCompleted` does *not*

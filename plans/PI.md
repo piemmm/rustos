@@ -786,7 +786,7 @@ on its own before the next.
     end-of-input. This completes the **bootstrap backing** — it feeds
     fd 0's backing object (P6e-3a), it is **not** called directly by the
     shell. The receive-bit decoders are host-unit-tested (2 new
-    `console` tests + 1 `arch_wrapper_aarch64` adapter test); the
+    `console` tests + 1 `aarch64::arch_wrapper` adapter test); the
     freestanding aarch64 kernel builds clean.
   - **P6e-3a — standard-stream ABI + fd table `[x]`.** The two console
     syscalls were evolved **in place** (§2.13) into fd-keyed stream ops:
@@ -1183,7 +1183,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
       arena (G3b-2)").
     - **G3b-2-iii — x86_64 PID 1 + runtime `spawn` paths `[x]`.** The
       x86_64 cross-port sibling of G3b-2-i/-ii: both production seams
-      (`init_spawn_x86_64`, `spawn_producer_x86_64`) now run on
+      (`x86_64::init_spawn`, `x86_64::spawn_producer`) now run on
       arena-backed, hardware-guarded kernel stacks instead of the
       software-canary `BoxStack`. The boot path carves the arena out of the
       *firmware* memory map — `mem_map::carve_guard_arena_from_map(map,
@@ -1210,7 +1210,7 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
       stack through the arena (G3b-2)").
     - **G3b-2-iv — riscv64 PID 1 + runtime `spawn` paths `[x]`.** The
       riscv64 cross-port sibling of G3b-2-iii: both production seams
-      (`init_spawn_riscv64`, `spawn_producer_riscv64`) now run on
+      (`riscv64::init_spawn`, `riscv64::spawn_producer`) now run on
       arena-backed, hardware-guarded kernel stacks instead of the
       software-canary `BoxStack`. `boot_riscv64::try_boot` carves the arena
       out of its FDT-derived two-region map with the same shared
@@ -1304,8 +1304,8 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     `fault` observer confirms the cause + faulting address → PASS; a body that
     returns without faulting drains the `step` loop and fails loudly (§2.9).
     **Verified green under QEMU on `-M virt` on this host.** This proves the
-    *mechanism*; the production `init_spawn_riscv64` /
-    `spawn_producer_riscv64` kernel stacks now run on the boot-reserved
+    *mechanism*; the production `riscv64::init_spawn` /
+    `riscv64::spawn_producer` kernel stacks now run on the boot-reserved
     arena (G3b-2-iv). **No ABI change.** Doc:
     `docs/src/platform/riscv64.md` ("Proving the overrun fault-form
     (G3c)").
@@ -1362,8 +1362,8 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     observer confirms `is_not_present` + `!is_user` + `CR2` in the guard page)
     → PASS; a body that returns without faulting drains the `step` loop and
     fails loudly (§2.9). **Verified green under QEMU on this host.** This
-    proves the *mechanism*; the production `init_spawn_x86_64` /
-    `spawn_producer_x86_64` kernel stacks now run on the boot-reserved arena
+    proves the *mechanism*; the production `x86_64::init_spawn` /
+    `x86_64::spawn_producer` kernel stacks now run on the boot-reserved arena
     (G3b-2-iii). **No ABI change.** Doc:
     `docs/src/platform/x86_64.md` ("Proving the overrun fault-form (G3c)").
 
@@ -1492,7 +1492,7 @@ copy is added on the syscall hot path (§2.16).
   `kernel_main` + `InitSpawn` path (not a test-driven ad-hoc scheduler like
   X1/X2), the cross-port sibling of the aarch64 P6c-3 milestone. Three pieces,
   all wired into `BootInfo`:
-  - `init_spawn_x86_64::X86_64InitSpawn` (`with_init`): builds `init`'s ring-3
+  - `x86_64::init_spawn::X86_64InitSpawn` (`with_init`): builds `init`'s ring-3
     image through the audited `spawn_image` and admits it as a resumable user
     kthread (`admit_init`); `pre_resume` reloads CR3 (`activate_user_root`) +
     repoints the entry stack (`set_kernel_rsp0`); `BoxStack` kernel stack
@@ -1512,7 +1512,7 @@ copy is added on the syscall hot path (§2.16).
     (PASS on `ProcessSpawned` + an audited `SyscallInvoked`). **No ABI change.**
 
 - **X3b — x86_64 `spawn` concurrent producer `[x]`.** The real x86_64
-  `ProcessSpawn` producer — `kernel/rustos-kernel/src/spawn_producer_x86_64.rs`,
+  `ProcessSpawn` producer — `kernel/rustos-kernel/src/x86_64/spawn_producer.rs`,
   the cross-port sibling of the aarch64 `spawn_producer.rs` — is wired through
   `BootInfo::with_spawn` (in `boot::try_boot`, beside the X3a `with_init` seam)
   with the embedded `X86_64_PROGRAM_REGISTRY` (the `Shell` `rxe` `build.rs`
@@ -1738,8 +1738,8 @@ riscv64, mirroring the aarch64 P-stage arc.
   `trap::install_trap_vector` (the vector-only half factored out of
   `init_traps`, so the boot installs the vector **without** enabling
   asynchronous interrupts — `sie`/`sstatus.SIE` stay clear). The
-  production `ecall` dispatch callback `dispatch_riscv64::production_dispatch`
-  (the riscv64 sibling of `dispatch`/`dispatch_aarch64` over the shared
+  production `ecall` dispatch callback `riscv64::dispatch::production_dispatch`
+  (the riscv64 sibling of `x86_64::dispatch`/`aarch64::dispatch` over the shared
   `dispatch_core`) is installed before any user thread can run; a pool that
   cannot satisfy the identity map fails closed. Because the map is identity
   (physical == virtual) and full-window, every board address — kernel
@@ -1750,8 +1750,8 @@ riscv64, mirroring the aarch64 P-stage arc.
   virtio-blk/net + framebuffer verticals (device bring-up MMU-on). **No ABI
   change.** Doc: `docs/src/platform/riscv64.md` ("Kernel boot pipeline").
 - **RV-P3 — user-mode drop + kthread-spawning seam `[x]`.** The riscv64
-  `InitSpawn`/`ProcessSpawn` production seams (`init_spawn_riscv64` /
-  `spawn_producer_riscv64`, the aarch64 `init_spawn`/`spawn_producer`
+  `InitSpawn`/`ProcessSpawn` production seams (`riscv64::init_spawn` /
+  `riscv64::spawn_producer`, the aarch64 `init_spawn`/`spawn_producer`
   analogue) are installed by `boot_riscv64::try_boot` via
   `BootInfo::with_init`/`with_spawn`, alongside the SBI-console
   `with_console` backing (`RiscvUartConsole` over the new verbatim

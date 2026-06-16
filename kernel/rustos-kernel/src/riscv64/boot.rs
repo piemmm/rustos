@@ -15,7 +15,7 @@
 //!    scheduler atomics run on Normal cacheable memory and a fault
 //!    during bring-up is taken to a handler — the riscv64 analogue of
 //!    the aarch64 P6c-2 step. Install the production `ecall` dispatch
-//!    callback ([`crate::dispatch_riscv64::production_dispatch`]) before
+//!    callback ([`crate::riscv64::dispatch::production_dispatch`]) before
 //!    any user thread can run.
 //! 2. Parse the flattened device tree (`a1`) for the first `/memory`
 //!    node and the `/cpus` `timebase-frequency`.
@@ -73,7 +73,7 @@ use rustos_kernel_sched_api::SchedulerConfig;
 use rustos_kernel_sec::IdentityTableBuilder;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 
-use crate::dispatch_riscv64::{production_dispatch, DISPATCH_SLOT};
+use crate::riscv64::dispatch::{production_dispatch, DISPATCH_SLOT};
 
 /// Logical CPU id of the boot hart for the single-hart slice.
 const BOOT_CPU: CpuId = 0;
@@ -598,15 +598,15 @@ pub fn try_boot(
     // Install the PID 1 spawn seam (`plans/PI.md` RV-P3): once every init
     // phase has succeeded and `kernel_main` emits `BootCompleted`, the core
     // invokes it to build `init`'s U-mode image and drop into user mode.
-    .with_init(&crate::init_spawn_riscv64::RISCV_INIT_SPAWN)
+    .with_init(&crate::riscv64::init_spawn::RISCV_INIT_SPAWN)
     // Install the runtime `spawn` producer + embedded-program registry
     // (`plans/PI.md` RV-P3 / `plans/SPAWN.md` SP3b): the `spawn` syscall
     // resolves a path against the registry and drives the producer to build
     // a fresh, hardware-isolated child Sv39 space, so PID 1 `init` can
     // launch the user's session.
     .with_spawn(
-        &crate::spawn_producer_riscv64::RISCV_PROGRAM_REGISTRY,
-        &crate::spawn_producer_riscv64::RISCV_PROCESS_SPAWN,
+        &crate::riscv64::spawn_producer::RISCV_PROGRAM_REGISTRY,
+        &crate::riscv64::spawn_producer::RISCV_PROCESS_SPAWN,
     );
     boot_info
         .validate()

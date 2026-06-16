@@ -1,27 +1,26 @@
-//! Production syscall-dispatch callback for the riscv64 (QEMU `virt` /
-//! SiFive) `rustos-kernel` binary — the riscv64 sibling of
-//! [`crate::dispatch`] (x86_64) and [`crate::dispatch_aarch64`]
-//! (`plans/PI.md` RV-P2).
+//! Production syscall-dispatch callback for the aarch64 (Raspberry Pi 4)
+//! `rustos-kernel` binary — the aarch64 sibling of
+//! [`crate::x86_64::dispatch`] (`plans/PI.md` P6c-2).
 //!
-//! The riscv64 `ecall` trap path shipped by
-//! [`rustos_arch_riscv64::syscall_entry`] forwards each syscall to a
+//! The aarch64 `svc` trampoline shipped by
+//! [`rustos_arch_aarch64::syscall_entry`] forwards each syscall to a
 //! bare `extern "C"` callback of the
-//! [`rustos_arch_riscv64::syscall_entry::SyscallDispatchFn`] type
-//! (identical in shape to the x86_64 and aarch64 typedefs — one ABI,
+//! [`rustos_arch_aarch64::syscall_entry::SyscallDispatchFn`] type
+//! (identical in shape to the x86_64 and riscv64 typedefs — one ABI,
 //! `AGENTS.md` §2.2). [`production_dispatch`] is that callback: it reads
-//! the argument frame, forwards through the resident `DispatchHook`
-//! published into [`DISPATCH_SLOT`] by `kernel_core::kernel_main`, and
-//! encodes the result back into `a0`.
+//! the per-CPU argument frame, forwards through the resident
+//! `DispatchHook` published into [`DISPATCH_SLOT`] by
+//! `kernel_core::kernel_main`, and encodes the result back into `x0`.
 //!
 //! The arch-neutral lookup → narrow → forward → encode logic lives in
 //! [`crate::dispatch_core`] and is unit-tested there once; this module
-//! supplies only the two riscv64-specific facts — the
+//! supplies only the two aarch64-specific facts — the
 //! `SyscallDispatchFn` coercion and the bottom-typed
-//! [`rustos_arch_riscv64::halt_current_hart`] fail-closed halt
+//! [`rustos_arch_aarch64::halt_current_cpu`] fail-closed halt
 //! (`AGENTS.md` §5.4.5).
 
 use rustos_abi::SYSCALL_MAX_ARGS;
-use rustos_arch_riscv64::syscall_entry::SyscallDispatchFn;
+use rustos_arch_aarch64::syscall_entry::SyscallDispatchFn;
 use rustos_kernel_core::DispatchCallbackSlot;
 
 use crate::dispatch_core::{dispatch_via_slot, read_raw_args};
@@ -32,24 +31,24 @@ use crate::dispatch_core::{dispatch_via_slot, read_raw_args};
 /// `kernel_core::kernel_main` calls
 /// [`DispatchCallbackSlot::install_dispatcher`] exactly once during the
 /// `Syscall` init phase; [`production_dispatch`] reads through
-/// [`DispatchCallbackSlot::get`] on every `ecall`. Set-once via the
+/// [`DispatchCallbackSlot::get`] on every `svc`. Set-once via the
 /// internal `OnceCell` (`AGENTS.md` §2.1).
 pub static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 
 /// Production dispatch callback installed before user space is entered.
 ///
-/// Reads the argument frame, looks up the resident `DispatchHook`
-/// through [`DISPATCH_SLOT`], and forwards. The two fail-closed branches
-/// (empty slot; `NoCallerContext`) halt the hart forever — `AGENTS.md`
-/// §5.4.5.
+/// Reads the per-CPU argument frame, looks up the resident
+/// `DispatchHook` through [`DISPATCH_SLOT`], and forwards. The two
+/// fail-closed branches (empty slot; `NoCallerContext`) halt the CPU
+/// forever — `AGENTS.md` §5.4.5.
 ///
 /// The `extern "C"` signature is locked at compile time by
 /// [`_DISPATCH_SIGNATURE_PINNED`] below.
 //
 // The function must remain a safe `extern "C" fn` because that is the
 // type the arch port's `SyscallDispatchFn` typedef expects
-// (`AGENTS.md` §15.2). It is only ever invoked from the `ecall` trap
-// handler, which carries the SAFETY contract documented on
+// (`AGENTS.md` §15.2). It is only ever invoked from the `svc`
+// trampoline, which carries the SAFETY contract documented on
 // `SyscallDispatchFn` and re-asserted on the [`read_raw_args`] call
 // site. `AGENTS.md` §15.10 — every `#[allow]` carries a justification.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -58,8 +57,8 @@ pub extern "C" fn production_dispatch(
     number: u64,
     args_ptr: *const [u64; SYSCALL_MAX_ARGS],
 ) -> u64 {
-    // SAFETY: the trap handler lays out the frame on the kernel stack
-    // and only invokes us with a valid pointer; the array lives at least
+    // SAFETY: the trampoline lays out the frame on the kernel stack and
+    // only invokes us with a valid pointer; the array lives at least
     // until we return.
     let args = unsafe { read_raw_args(args_ptr) };
     match dispatch_via_slot(&DISPATCH_SLOT, number, args) {
@@ -68,7 +67,7 @@ pub extern "C" fn production_dispatch(
     }
 }
 
-/// Halt the hart forever (the riscv64 fail-closed branch).
+/// Halt the CPU forever (the aarch64 fail-closed branch).
 ///
 /// Wrapped behind a non-test indirection so host tests can replace the
 /// production park (which would otherwise wedge the test thread) with a
@@ -76,19 +75,19 @@ pub extern "C" fn production_dispatch(
 /// halts are bottom-typed; the test variant carries the same `!`.
 #[cfg(freestanding)]
 fn halt_fail_closed() -> ! {
-    rustos_arch_riscv64::halt_current_hart()
+    rustos_arch_aarch64::halt_current_cpu()
 }
 
-/// Host-test stand-in for [`rustos_arch_riscv64::halt_current_hart`].
+/// Host-test stand-in for [`rustos_arch_aarch64::halt_current_cpu`].
 #[cfg(not(freestanding))]
 fn halt_fail_closed() -> ! {
-    panic!("kernel halted (riscv64 production_dispatch fail-closed branch)")
+    panic!("kernel halted (aarch64 production_dispatch fail-closed branch)")
 }
 
 // SAFETY-INVARIANT: [`production_dispatch`] is a valid
 // [`SyscallDispatchFn`]. The compile-time coercion below fails to
 // type-check if the ABI, parameter list, or return type ever drifts
-// (`AGENTS.md` §2.4), matching the x86_64 and aarch64 dispatch modules.
+// (`AGENTS.md` §2.4), matching the x86_64 dispatch module.
 const _DISPATCH_SIGNATURE_PINNED: SyscallDispatchFn = production_dispatch;
 
 #[cfg(test)]

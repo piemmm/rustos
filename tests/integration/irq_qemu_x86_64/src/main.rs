@@ -11,9 +11,9 @@
 //! `arch.halt()` and drives a real hardware-interrupt round-trip:
 //!
 //! 1. Read the published `rustos_kernel_irq::IrqTable` via
-//!    `rustos_kernel::arch_wrapper::published_irq_table` and the
+//!    `rustos_kernel::x86_64::arch_wrapper::published_irq_table` and the
 //!    typed `IoApicController` via
-//!    `rustos_kernel::ioapic_controller::published_typed`.
+//!    `rustos_kernel::x86_64::ioapic_controller::published_typed`.
 //! 2. Look up the IDT vector assigned to **GSI 2** (the legacy
 //!    IRQ-0 line under QEMU's PC/Q35 default `InterruptSourceOverride`
 //!    `source = 0 → gsi = 2`) through
@@ -81,9 +81,9 @@ mod kernel {
     use rustos_abi::IrqHandle;
     use rustos_arch_x86_64::irq as arch_irq;
     use rustos_arch_x86_64::qemu_exit;
-    use rustos_kernel::arch_wrapper::published_irq_table;
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::ioapic_controller::published_typed;
+    use rustos_kernel::x86_64::arch_wrapper::published_irq_table;
+    use rustos_kernel::x86_64::ioapic_controller::published_typed;
     use rustos_kernel::{
         boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
     };
@@ -411,7 +411,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::panic_ctx`.
+    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
     #[panic_handler]
     fn rustos_test_irq_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)

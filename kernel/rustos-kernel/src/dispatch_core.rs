@@ -1,6 +1,6 @@
 //! Architecture-neutral syscall-dispatch helpers shared by every
-//! per-architecture dispatch callback (`crate::dispatch` on x86_64,
-//! `crate::dispatch_aarch64` on aarch64).
+//! per-architecture dispatch callback (`crate::x86_64::dispatch` on
+//! x86_64, `crate::aarch64::dispatch` on aarch64).
 //!
 //! The per-architecture modules differ only in two arch-specific facts:
 //! the `SyscallDispatchFn` typedef the arch port's syscall trampoline

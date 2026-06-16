@@ -47,7 +47,7 @@ Boot sequence:
    enabled yet) so the `kernel_core` allocator/scheduler atomics run on
    Normal cacheable memory and a fault during bring-up is taken to a
    handler. The production `ecall` dispatch callback
-   (`dispatch_riscv64::production_dispatch`) is installed before any user
+   (`riscv64::dispatch::production_dispatch`) is installed before any user
    thread can run. A pool that cannot satisfy the identity map fails
    closed (the boot parks rather than running `kernel_main` unpaged).
 4. **Boot pipeline (`rustos_kernel::boot_riscv64::boot`).** Builds a
@@ -109,7 +109,7 @@ three things on the `BootInfo` hand-off:
   fail-closed `NULL_CONSOLE_READ`: the SBI legacy console exposes no
   non-blocking input drain, so fd 0 reads fail closed this slice (a real
   input backing is a later increment).
-- **PID 1 spawn seam (`with_init`).** `init_spawn_riscv64::RiscvInitSpawn`
+- **PID 1 spawn seam (`with_init`).** `riscv64::init_spawn::RiscvInitSpawn`
   builds the embedded `init` (`Run`) program's image in its own Sv39
   address space (`IDENTITY_GIB = 4`, user bias 64 GiB), switches to it,
   and dispatches it into U-mode through the capability-checked, audited
@@ -125,7 +125,7 @@ three things on the `BootInfo` hand-off:
   heap-backed software-canary `BoxStack`, never an unguarded raw stack
   (§2.9).
 - **Runtime `spawn` producer (`with_spawn`).**
-  `spawn_producer_riscv64::RiscvProcessSpawn` + the embedded program
+  `riscv64::spawn_producer::RiscvProcessSpawn` + the embedded program
   registry mapping `/System/Services/login` (the P11 session `init`
   launches) and `/Apps/Shell.app/Run` (the shell login spawns) to their
   baked `rxe`s, each entry carrying its program's declared capability set
@@ -900,7 +900,7 @@ wired the same way (G3b-2): `boot_riscv64::try_boot` carves a
 2 MiB-aligned guard arena out of the discovered memory map (§24.2 policy,
 bounded to the spawn seams' 4 GiB identity window), installs it into the
 shared `rustos-kernel` kthread-stack allocator, and audits the decision
-(`EventId(4098)`); the `init_spawn_riscv64` / `spawn_producer_riscv64`
+(`EventId(4098)`); the `riscv64::init_spawn` / `riscv64::spawn_producer`
 seams then draw PID 1's and every spawned child's kernel stack from that
 arena and split+unmap each stack's guard page in the owning task's own
 Sv39 root. A machine whose map cannot host an arena falls back to

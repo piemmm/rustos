@@ -1,7 +1,7 @@
 //! SBI-console-backed [`rustos_log::Sink`] for the freestanding riscv64
 //! kernel.
 //!
-//! Mirrors the x86_64 COM1 sink (`rustos_kernel::serial_sink`): one
+//! Mirrors the x86_64 COM1 sink (`rustos_kernel::x86_64::serial_sink`): one
 //! formatted line per event, in the canonical format the `kernel/core`
 //! audit consumers and the QEMU serial scraper expect —
 //!

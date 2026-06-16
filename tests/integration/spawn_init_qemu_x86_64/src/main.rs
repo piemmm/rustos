@@ -120,7 +120,7 @@ mod kernel {
 
     static AUDIT_SINK: SpawnInitExitSink = SpawnInitExitSink;
 
-    /// Forward to the shared bridge in `rustos_kernel::panic_ctx`. The bridge
+    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`. The bridge
     /// logs through `SERIAL_SINK`, not `AUDIT_SINK`, so a panic before PASS
     /// does not trip the QEMU-exit short-circuit — it halts, the run times
     /// out, and the harness reports `Outcome::Timeout` (fail-loud, §7).

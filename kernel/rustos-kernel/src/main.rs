@@ -51,7 +51,7 @@ mod kernel {
 
     // --- Panic handler --------------------------------------------
 
-    /// Forward to the shared bridge in `rustos_kernel::panic_ctx`.
+    /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`.
     /// See `panic_ctx.rs` for the full handler contract.
     #[panic_handler]
     fn rustos_kernel_panic(info: &PanicInfo<'_>) -> ! {
@@ -80,7 +80,7 @@ mod kernel {
 //     Pi 4) -------------------------------------------------------
 //
 // `plans/PI.md` Stage P1. A thin wrapper around
-// [`rustos_kernel::boot_aarch64::boot`]: it supplies the
+// [`rustos_kernel::aarch64::boot::boot`]: it supplies the
 // `#[global_allocator]`, the `#[panic_handler]`, and the
 // `extern "C" fn kernel_main(dtb)` symbol the aarch64 boot trampoline
 // (`rustos_arch_aarch64`'s `boot.s` → `entry.rs`) calls, then hands off
@@ -90,7 +90,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use rustos_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
-    use rustos_kernel::boot_aarch64;
+    use rustos_kernel::aarch64::boot;
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::BumpAllocator;
 
@@ -129,7 +129,7 @@ mod kernel {
     /// (see `tests/integration/kernel_arch_boot_aarch64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(dtb: u64) -> ! {
-        boot_aarch64::boot(dtb, &SERIAL_SINK, &SERIAL_SINK)
+        boot::boot(dtb, &SERIAL_SINK, &SERIAL_SINK)
     }
 }
 
@@ -137,7 +137,7 @@ mod kernel {
 //     `virt` / SiFive) -------------------------------------------------
 //
 // `plans/PI.md` RV-P1. A thin wrapper around
-// [`rustos_kernel::boot_riscv64::boot`]: it supplies the
+// [`rustos_kernel::riscv64::boot::boot`]: it supplies the
 // `#[global_allocator]`, the `#[panic_handler]`, and the
 // `extern "C" fn kernel_main(hartid, dtb)` symbol the riscv64 boot
 // trampoline (`rustos_arch_riscv64`'s `boot.s` → `entry.rs`) calls, then
@@ -147,8 +147,8 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use rustos_arch_riscv64::{handle_panic_via_serial, SERIAL_SINK};
-    use rustos_kernel::boot_riscv64;
     use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::riscv64::boot;
     use rustos_kernel::BumpAllocator;
 
     /// Static boot heap for the bump allocator.
@@ -191,7 +191,7 @@ mod kernel {
     /// `tests/integration/kernel_arch_boot_riscv64`).
     #[no_mangle]
     pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
-        boot_riscv64::boot(hartid, dtb, &SERIAL_SINK, &SERIAL_SINK)
+        boot::boot(hartid, dtb, &SERIAL_SINK, &SERIAL_SINK)
     }
 }
 

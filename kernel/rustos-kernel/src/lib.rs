@@ -20,12 +20,10 @@
 //! | --------------- | --------------------------------------------------------------------------------- |
 //! | [`bumpalloc`]   | Forward-only bump allocator + the `GlobalAlloc` impl shared by every bin.         |
 //! | `dispatch_core` | Arch-neutral syscall-dispatch helpers shared by every port (host-tested).         |
-//! | `arch_wrapper`  | `BinArch` — the in-crate `KernelArch` wrapper around `X86_64Arch` (x86_64).        |
-//! | `dispatch`      | Fail-closed syscall-dispatch callback (x86_64).                                   |
-//! | `arch_wrapper_aarch64` | `Aarch64BinArch` `KernelArch` wrapper + `UartConsole` (aarch64).            |
-//! | `dispatch_aarch64` | Fail-closed syscall-dispatch callback (aarch64).                              |
-//! | `boot`          | x86_64 `boot(multiboot_info, log_sink, audit_sink)` entry point (bare-metal only).|
-//! | `boot_aarch64`  | aarch64 `boot(dtb, log_sink, audit_sink)` entry point (bare-metal only; `plans/PI.md` P1).|
+//! | `spawn_layout`  | Shared user-space layout constants for every port's spawn seam/producer (§2.2).   |
+//! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `virtio_boot`, `driver_host`, `panic_ctx`, `serial_sink`. |
+//! | `aarch64`       | The aarch64 (Raspberry Pi 4) port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` P1). |
+//! | `riscv64`       | The riscv64 (QEMU `virt` / SiFive) port: `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` RV-P1). |
 //! | `mem_map`       | aarch64 `/memory` → `BootMemoryMap` builder (host-tested; `plans/PI.md` P6c-1).    |
 //!
 //! # Why this is a library, not a `[[bin]]`
@@ -132,134 +130,38 @@ pub mod driver_catalog;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_loader;
 
+// The architecture ports. Each subtree gathers exactly one instruction
+// set's `KernelArch` wrapper, fail-closed dispatch callback, production
+// boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus
+// the x86_64 IO-APIC controller, virtio bring-up, and `DriverHost`
+// composition), gated on the matching `kernel_isa` build-script name — the
+// single `AGENTS.md` §17.2 selection point lives in `build.rs`, never an
+// inline `target_arch` predicate. Code shared across the ports stays at the
+// crate root (`dispatch_core`, `mem_map`, `stack_arena`, `spawn_layout`,
+// the driver registry, …) rather than being duplicated into a port
+// (`AGENTS.md` §2.2). Each port's bare-metal-only modules are further gated
+// on `freestanding` inside its root module.
 #[cfg(kernel_isa = "x86_64")]
-pub mod arch_wrapper;
-#[cfg(kernel_isa = "x86_64")]
-pub mod dispatch;
+pub mod x86_64;
 
-// The aarch64 (Raspberry Pi 4) `KernelArch` wrapper + console device and
-// the fail-closed `svc` dispatch callback (`plans/PI.md` P6c-2). Gated on
-// the aarch64 instruction set so they link the aarch64 port; their unit
-// tests run under an aarch64-host `cargo test`, exactly as the x86_64
-// `arch_wrapper`/`dispatch` modules' tests run on the x86_64 CI host.
 #[cfg(kernel_isa = "aarch64")]
-pub mod arch_wrapper_aarch64;
-#[cfg(kernel_isa = "aarch64")]
-pub mod dispatch_aarch64;
+pub mod aarch64;
 
-// The riscv64 (QEMU `virt` / SiFive) fail-closed `ecall` dispatch callback
-// (`plans/PI.md` RV-P2): the riscv64 sibling of `dispatch`/`dispatch_aarch64`,
-// installed before user space can be entered so the production paged boot
-// routes each syscall through the resident `DispatchHook`. Gated on the
-// riscv64 instruction set so it links the riscv64 port; the arch-neutral
-// dispatch logic it wraps is unit-tested once in `dispatch_core`.
 #[cfg(kernel_isa = "riscv64")]
-pub mod dispatch_riscv64;
-#[cfg(kernel_isa = "x86_64")]
-pub mod ioapic_controller;
-#[cfg(kernel_isa = "x86_64")]
-pub mod virtio_boot;
+pub mod riscv64;
 
-// The in-kernel `DriverHost` composition (`plans/PI.md` P10): assembles a
-// `drvhost::Host` that serves a loaded driver both an MMIO mapper and a
-// per-driver DMA host, so a non-virtio, DMA-driving bus driver (the VL805
-// xHCI behind the BCM2711 PCIe root complex) can map its own register
-// windows and carve its DMA region through the capability-gated kernel
-// facilities. The helper itself is generic over the page-table backend;
-// it is gated on `kernel_isa = "x86_64"` (as `virtio_boot` is) because
-// `rustos-drvhost` / `rustos-kernel-virtio` are target-conditional
-// dependencies of this crate today — the host-only `cargo test`/clippy run
-// (x86_64) exercises and proves it, and the aarch64 metal boot invocation
-// that consumes it lands with its own dependency additions and gate
-// extension (`plans/PI.md` P10 "Remaining").
-#[cfg(kernel_isa = "x86_64")]
-pub mod driver_host;
-
-#[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub mod boot;
-
-// The x86_64 PID 1 (`init`) spawn seam (`plans/PI.md` X3a): the
-// `rustos_kernel_core::InitSpawn` implementation `boot` installs into the
-// `BootInfo` hand-off so `kernel_main` drops into ring 3 after boot
-// completes — the cross-port sibling of the aarch64 `init_spawn`.
-// Freestanding+x86_64-only: it links the x86_64 port's page-table /
-// `EnterUser` / `set_kernel_rsp0` primitives and `include!`s the build-time
-// `init` `rxe` blob.
-#[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub mod init_spawn_x86_64;
-
-// The x86_64 runtime `spawn` producer + embedded-program registry
-// (`plans/PI.md` X3b): the `rustos_kernel_core::ProcessSpawn` implementation
-// `boot` installs into the `BootInfo` hand-off so the `spawn` syscall can
-// build a fresh, hardware-isolated child PML4 and admit it Ready, so PID 1
-// `init` can launch the user's session — the cross-port sibling of the
-// aarch64 `spawn_producer`. Freestanding+x86_64-only: it links the x86_64
-// port's page-table / `EnterUser` / `set_kernel_rsp0` primitives and
-// `include!`s the build-time `Shell` `rxe` blob.
-#[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub mod panic_ctx;
-#[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub mod serial_sink;
-#[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub mod spawn_producer_x86_64;
-
-// The aarch64 (Raspberry Pi 4) production boot path (`plans/PI.md` P1).
-// Freestanding-only: it links the aarch64 port's console / FP-enable /
-// park primitives, which exist only on the bare-metal aarch64 target.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub mod boot_aarch64;
-
-// The riscv64 (QEMU `virt` / SiFive) production boot path (`plans/PI.md`
-// RV-P1): boot the BSP to `kernel_core::kernel_main` →
-// `AuditEvent::BootCompleted` over the device-tree-discovered RAM window
-// and timer rate. Freestanding-only: it links the riscv64 port's
-// `halt_current_hart` / SBI console primitives, which exist only on the
-// bare-metal riscv64 target. The riscv64 QEMU verticals
-// (`tests/integration/riscv64_boot` and the bins it backs) consume this
-// very pipeline, so there is exactly one riscv64 boot orchestration
-// (`AGENTS.md` §2.2).
-#[cfg(all(freestanding, kernel_isa = "riscv64"))]
-pub mod boot_riscv64;
-
-// The riscv64 PID 1 (`init`) spawn seam (`plans/PI.md` RV-P3): the
-// `rustos_kernel_core::InitSpawn` implementation `boot_riscv64` installs into
-// the `BootInfo` hand-off so `kernel_main` drops into U-mode after boot
-// completes — the cross-port sibling of the aarch64 `init_spawn` / x86_64
-// `init_spawn_x86_64`. Freestanding+riscv64-only: it links the riscv64 port's
-// Sv39 page-table / `EnterUser` primitives and `include!`s the build-time
-// `init` `rxe` blob.
-#[cfg(all(freestanding, kernel_isa = "riscv64"))]
-pub mod init_spawn_riscv64;
-
-// The riscv64 runtime `spawn` producer + embedded-program registry
-// (`plans/PI.md` RV-P3 / `plans/SPAWN.md` SP3b): the
-// `rustos_kernel_core::ProcessSpawn` implementation `boot_riscv64` installs into
-// the `BootInfo` hand-off so the `spawn` syscall can build a fresh,
-// hardware-isolated child Sv39 space and admit it Ready, so PID 1 `init` can
-// launch the user's session. Freestanding+riscv64-only: it links the riscv64
-// port's page-table / `EnterUser` primitives and `include!`s the build-time
-// `Shell` `rxe` blob.
-#[cfg(all(freestanding, kernel_isa = "riscv64"))]
-pub mod spawn_producer_riscv64;
-
-// The aarch64 PID 1 (`init`) spawn seam (`plans/PI.md` P6c-3): the
-// `rustos_kernel_core::InitSpawn` implementation `boot_aarch64` installs
-// into the `BootInfo` hand-off so `kernel_main` drops into user mode after
-// boot completes. Freestanding+aarch64-only: it links the aarch64 port's
-// page-table / `EnterUser` primitives and `include!`s the build-time `init`
-// `rxe` blob.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub mod init_spawn;
-
-// The aarch64 runtime `spawn` producer + embedded-program registry
-// (`plans/SPAWN.md` SP3b): the `rustos_kernel_core::ProcessSpawn`
-// implementation `boot_aarch64` installs into the `BootInfo` hand-off so the
-// `spawn` syscall can build a fresh, hardware-isolated child address space
-// and admit it Ready. Freestanding+aarch64-only: it links the aarch64 port's
-// page-table / `EnterUser` primitives and `include!`s the build-time `Shell`
-// `rxe` blob.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub mod spawn_producer;
+// The user-space layout constants (stack/MMIO-window offsets and page
+// counts, canary seeds) every port's PID 1 spawn seam and runtime spawn
+// producer share by definition — they describe one user-space layout, not a
+// per-architecture register layout — defined once here rather than
+// copy-pasted into each `init_spawn` / `spawn_producer` sibling
+// (`AGENTS.md` §2.2). Gated to exactly the configurations whose consumers
+// compile, so it is never dead code (`AGENTS.md` §2.3).
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+))]
+mod spawn_layout;
 
 // The boot memory-map arithmetic (`plans/PI.md` P6c-1, G3b-2): the aarch64
 // `/memory` → `BootMemoryMap` window translation and the shared
@@ -267,7 +169,7 @@ pub mod spawn_producer;
 // guard arena. The arithmetic is free of the bare-metal-only ports, so it
 // compiles — and its bounds-check unit tests run — on the CI host under
 // `cargo test` as well as on each production build that consumes it
-// (`boot_aarch64`, `boot`, `boot_riscv64`). Gated to exactly those
+// (`aarch64::boot`, `x86_64::boot`, `riscv64::boot`). Gated to exactly those
 // configurations so it is never dead code (`AGENTS.md` §2.3); the per-port
 // carve helpers are further gated to the port(s) that use them.
 #[cfg(any(
@@ -283,8 +185,8 @@ mod mem_map;
 // forward-only bump allocator that hands kthread kernel stacks out of the
 // boot-reserved guard arena (`mem_map`) so a stack's guard page can be
 // unmapped in the owning task's root and an overrun faults in hardware
-// (`init_spawn` on aarch64, `init_spawn_x86_64` on x86_64,
-// `init_spawn_riscv64` on riscv64). Its bump arithmetic is free of the
+// (`aarch64::init_spawn` on aarch64, `x86_64::init_spawn` on x86_64,
+// `riscv64::init_spawn` on riscv64). Its bump arithmetic is free of the
 // bare-metal ports, so it compiles — and its unit tests run — on the CI
 // host as well as on the bare-metal production builds that consume it, and
 // on no other configuration, so it is never dead code (`AGENTS.md` §2.3).
@@ -305,16 +207,16 @@ mod build_support;
 
 pub use bumpalloc::BumpAllocator;
 
-#[cfg(kernel_isa = "x86_64")]
-pub use arch_wrapper::BinArch;
 #[cfg(kernel_isa = "aarch64")]
-pub use arch_wrapper_aarch64::{Aarch64BinArch, UartConsole, UART_CONSOLE};
+pub use aarch64::arch_wrapper::{Aarch64BinArch, UartConsole, UART_CONSOLE};
 #[cfg(kernel_isa = "x86_64")]
-pub use dispatch::{production_dispatch, DISPATCH_SLOT};
+pub use x86_64::arch_wrapper::BinArch;
 #[cfg(kernel_isa = "x86_64")]
-pub use driver_host::{run_with_driver_host, DriverHostConfig};
+pub use x86_64::dispatch::{production_dispatch, DISPATCH_SLOT};
 #[cfg(kernel_isa = "x86_64")]
-pub use virtio_boot::{provision_and_run, VirtioBootConfig};
+pub use x86_64::driver_host::{run_with_driver_host, DriverHostConfig};
+#[cfg(kernel_isa = "x86_64")]
+pub use x86_64::virtio_boot::{provision_and_run, VirtioBootConfig};
 // The architecture-neutral virtio factory and provisioning walks now
 // live in `rustos-kernel-virtio` so every architecture port can reuse
 // them (`AGENTS.md` §2.2); re-exported here to keep this crate's public
@@ -325,14 +227,14 @@ pub use rustos_kernel_virtio::{
     MAX_SLOTS,
 };
 
-#[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub use boot::{boot, BootError};
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
-pub use boot_riscv64::{
+pub use riscv64::boot::{
     boot, build_boot_memory_map, try_boot, BootError, RiscvBinArch, RiscvUartConsole,
     RISCV_UART_CONSOLE,
 };
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub use panic_ctx::handle_panic_via_kernel_core;
+pub use x86_64::boot::{boot, BootError};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub use serial_sink::{Com1Console, SerialSink, COM1_CONSOLE, SERIAL_SINK};
+pub use x86_64::panic_ctx::handle_panic_via_kernel_core;
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub use x86_64::serial_sink::{Com1Console, SerialSink, COM1_CONSOLE, SERIAL_SINK};

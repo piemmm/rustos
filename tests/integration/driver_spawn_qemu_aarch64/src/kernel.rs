@@ -21,9 +21,9 @@ use rustos_arch_api::CpuId;
 use rustos_bumpalloc::BumpAllocator;
 use rustos_caps::CapabilitySet;
 use rustos_fdt::Fdt;
-use rustos_kernel::arch_wrapper_aarch64::{Aarch64BinArch, UART_ONLY_CONSOLES};
+use rustos_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
+use rustos_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
-use rustos_kernel::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
     BootReserve, DispatchCallbackSlot, EmbeddedProgram, KernelDispatchHook, KernelSpawnCtx,

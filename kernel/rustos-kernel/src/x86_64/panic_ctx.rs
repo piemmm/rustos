@@ -13,7 +13,7 @@
 //!
 //! [`rustos_kernel_core::handle_panic`] needs a `PanicContext` carrying
 //! a `&BinArch` for `current_cpu` and an `audit_sink`. The arch handle
-//! does not exist until after [`crate::boot::boot`] has parsed the
+//! does not exist until after [`crate::x86_64::boot::boot`] has parsed the
 //! ACPI MADT, so we cannot place it in a plain `static`. Instead the
 //! bin's `boot()` call publishes `Arc::as_ptr(&arc)` into the
 //! lib-exported [`PANIC_ARCH_PTR`] (an [`AtomicPtr`]) before any code
@@ -38,10 +38,10 @@ use rustos_arch_x86_64::kernel_arch::halt as arch_halt;
 use rustos_arch_x86_64::serial::{Serial, COM1_BASE};
 use rustos_kernel_core::{handle_panic, PanicContext};
 
-use crate::arch_wrapper::BinArch;
-use crate::serial_sink::SERIAL_SINK;
+use crate::x86_64::arch_wrapper::BinArch;
+use crate::x86_64::serial_sink::SERIAL_SINK;
 
-/// `AtomicPtr<BinArch>` published by [`crate::boot::boot`] once the
+/// `AtomicPtr<BinArch>` published by [`crate::x86_64::boot::boot`] once the
 /// architecture handle is constructed.
 ///
 /// The pointer is `Arc::as_ptr(&arc)`, which is stable for the
@@ -52,7 +52,7 @@ pub static PANIC_ARCH_PTR: AtomicPtr<BinArch> = AtomicPtr::new(core::ptr::null_m
 
 /// Publish `arch` into [`PANIC_ARCH_PTR`].
 ///
-/// Called by [`crate::boot::boot`] immediately after constructing the
+/// Called by [`crate::x86_64::boot::boot`] immediately after constructing the
 /// `Arc<BinArch>` (and before installing the syscall dispatch
 /// callback / arming the LAPIC timer).
 ///

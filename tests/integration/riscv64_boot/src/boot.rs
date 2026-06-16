@@ -1,14 +1,14 @@
 //! Thin downstream boot wrapper for the riscv64 QEMU verticals.
 //!
 //! The riscv64 boot pipeline itself now lives in the production
-//! `rustos-kernel` crate (`rustos_kernel::boot_riscv64`), so there is
+//! `rustos-kernel` crate (`rustos_kernel::riscv64::boot`), so there is
 //! exactly one riscv64 boot orchestration in the workspace (`AGENTS.md`
 //! §2.2) — the same one the production `rustos-kernel` binary runs. This
 //! module re-exports the production [`RiscvBinArch`] / [`BootError`] /
 //! [`try_boot`] and adds the single test-only affordance the verticals
 //! need on top of it: publishing the firmware [`BootMemoryMap`] + DTB
 //! pointer to the device-bring-up observers ([`crate::publish`]) before
-//! delegating to the production [`boot`](rustos_kernel::boot_riscv64::boot),
+//! delegating to the production [`boot`](rustos_kernel::riscv64::boot::boot),
 //! which moves the map into the `kernel_core` hand-off.
 //!
 //! Keeping the publish affordance here (not in the production pipeline)
@@ -18,7 +18,7 @@
 
 use rustos_log::Sink;
 
-pub use rustos_kernel::boot_riscv64::{try_boot, BootError, RiscvBinArch};
+pub use rustos_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
 
 /// Boot the riscv64 `virt`-board vertical and forward to the production
 /// kernel pipeline.
@@ -27,7 +27,7 @@ pub use rustos_kernel::boot_riscv64::{try_boot, BootError, RiscvBinArch};
 /// and the DTB pointer for the virtio-MMIO / framebuffer device-bring-up
 /// observers ([`crate::publish`]) — which need them after the pipeline
 /// has moved the map into the `kernel_core` hand-off — then delegates to
-/// [`rustos_kernel::boot_riscv64::boot`].
+/// [`rustos_kernel::riscv64::boot::boot`].
 ///
 /// `log_sink` / `audit_sink` are the `&'static` sinks the consuming
 /// vertical installs; its audit sink flips the `SiFive` Test device on
@@ -48,9 +48,9 @@ pub fn boot(
     // failure here is non-fatal — the production boot recomputes the
     // same map and fails closed on the identical cause (`AGENTS.md`
     // §2.9); the observers then simply see no published map.
-    if let Ok(map) = rustos_kernel::boot_riscv64::build_boot_memory_map(dtb) {
+    if let Ok(map) = rustos_kernel::riscv64::boot::build_boot_memory_map(dtb) {
         crate::publish::publish_memory_map(&map);
     }
     crate::publish::publish_dtb(dtb);
-    rustos_kernel::boot_riscv64::boot(hartid, dtb, log_sink, audit_sink)
+    rustos_kernel::riscv64::boot::boot(hartid, dtb, log_sink, audit_sink)
 }
