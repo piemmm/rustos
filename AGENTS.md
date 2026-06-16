@@ -671,6 +671,27 @@ an update to this section.
 ## 8. Drivers
 
 - A driver is a crate under `drivers/<class>/<name>/`.
+- **The driver *path namespace* names a device class or bus type — never a
+  vendor or product.** Every directory level above the leaf — the source
+  `drivers/<class>/[<subclass>/]` path (§3) and the installed
+  `/System/Drivers/<class>[_<subtype>]/` path (§16.2) — is named only by what
+  the device *is* (`bus`, `bus/usb`, `display`, `input`, `storage`, `network`,
+  …), so a vendor-neutral consumer can find every driver of a class without
+  knowing who made the part. A vendor or product name (`broadcom`, `brcm`,
+  `rpi`, `intel`, …) as a path-namespace segment is a defect — e.g.
+  `/System/Drivers/broadcom_usb/...` is wrong; `/System/Drivers/bus_usb/...`
+  is right.
+- **A vendor or chip name is permitted *only* as the leaf directory** of a
+  driver whose entire purpose is that one specific part — the driver's own
+  crate/bundle directory, which holds the driver file(s) inside it (e.g. the
+  source crate `drivers/bus/pcie_brcm/`, `drivers/display/rpi_hvs/`, and the
+  installed `/System/Drivers/bus_usb/broadcom_chip_1234/<driver>`). The
+  vendor/chip name is the *directory* that contains the driver module, never a
+  segment of the class/bus namespace above it. The leaf names the concrete
+  hardware it binds to (§18.3); the namespace above it stays vendor-neutral.
+  This is the §2.20 carve-out for a device's own driver crate, applied to
+  naming: knowing the part at the leaf is the driver's job, leaking the vendor
+  into the shared path space is not.
 - It implements the trait(s) defined in `lib/abi/src/driver/<class>.rs`.
 - It exposes a single `pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError>`
   entry point. Nothing else is public.
@@ -1028,6 +1049,14 @@ defect.
 `/System/Logs` and `/System/Settings` are the only writable paths
 beneath `/System`. They are mounted `nosuid,nodev,noexec` and are
 capability-gated (`CAP_LOG_WRITE`, `CAP_SETTINGS_WRITE`).
+
+Drivers under `/System/Drivers/` are grouped by device class or bus type,
+never by vendor (§8): the namespace is `/System/Drivers/<class>[_<subtype>]/`
+(e.g. `bus_usb/`, `display/`, `storage/`) and a vendor or product name appears
+**only** as the leaf *directory* that holds the driver file(s) — so
+`/System/Drivers/bus_usb/broadcom_chip_1234/<driver>` is correct, while
+`/System/Drivers/broadcom_usb/broadusb1234` (vendor as a namespace segment) is a
+defect.
 
 ### 16.3 `/Users`, `/Apps`, `/Storage`
 
