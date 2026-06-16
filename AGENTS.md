@@ -234,6 +234,69 @@ These are absolute. They override any local convenience.
       requirement until the fix lands, so no bug is ever closed untested.
     - This never overrides §2.5 or §2.6; a change that ships a known defect of
       any kind is a review blocker (§23).
+19. **No "for now". Do the work properly, or surface the conflict — never
+    defer.** Never ship a lesser solution justified as temporary: "for now",
+    "good enough for now", "works for now", "fine for the moment",
+    "placeholder until …", "stub until …", "wire it up properly later", or any
+    phrasing that knowingly does a thing *wrong* or *partially* while deferring
+    the correct work. The word "now" in this rule is literal: the proper
+    solution lands **in this change**, not in a promised follow-up. This
+    generalises §2.1's ban on `// works for now` and is the positive form of
+    §2.17/§2.18: deferring *correctness* is the same defect as deferring a
+    security fix or any other defect.
+    - **If the proper solution depends on other work that is not yet done,
+      that dependency is part of this change — do it.** You do not get to stub,
+      fake, or "for now" your way past a missing prerequisite. Either complete
+      the prerequisite and then build correctly on top of it, or, if the
+      prerequisite is genuinely too large for this change, **stop and ask**
+      (§15.7) — never silently substitute a temporary hack.
+    - **If completing that dependency conflicts with something else** — another
+      rule in this charter, an in-flight design, an explicit requirement you
+      cannot reconcile, or two requirements that contradict — you MUST **stop
+      and inform the User so they can decide** (§15.7). You may not resolve the
+      conflict yourself by picking a "for now" compromise, weakening one side,
+      or guessing which requirement wins.
+    - "Temporary", "interim", and "we'll revisit" are not exits. There is no
+      "for now" tier of quality below the §2.6 senior-developer bar; work is
+      either correct or it is not done.
+20. **Generic, multi-architecture, and shared code is platform-neutral —
+    absolutely no board or SoC coupling.** Any code that is meant to work
+    across architectures or to be shared — every `lib/*` crate that is not a
+    single device's support code, every architecture-neutral `kernel/*`
+    subsystem (i.e. everything under `kernel/` except `kernel/arch/<target>/`),
+    the driver host and every core driver *framework*, the syscall/IPC/ABI
+    surface, and all of `userland/*` — MUST be generic. It MUST NOT contain a
+    reference, name, comment, constant, magic address, register layout, quirk,
+    or `cfg` tied to a specific platform, board, or SoC (for example Raspberry
+    Pi 3/4/5, BCM2711/BCM2837/BCM2712, a specific UART/GIC/timer base, or a
+    specific vendor part). A driver *core framework* that mentions a board is a
+    defect that "should simply not exist" — even if it compiles and tests pass.
+    - **Platform specifics have exactly one home: `kernel/arch/<target>/`**
+      (plus the §1 boot-stub / linker-script / load-address carve-out, fixed
+      before any tree is parsed). Every other layer learns about the hardware
+      *at runtime*, by discovery — the §18.1 hardware tree normalised from the
+      device tree (`lib/fdt`) / ACPI / host query — never from a compile-time
+      board constant or a `cfg(board = …)` / `cfg(target_arch = …)` fork
+      outside the §17.2 allow-list. MMIO bases, IRQ lines, and DMA constraints
+      are *discovered values threaded from the tree*, not literals baked into a
+      shared or kernel-neutral crate.
+    - **A driver binds to hardware through discovery, never by naming a
+      board.** A concrete driver matches its device via the manifest bind-table
+      match keys (§18.3) and receives only the resource capabilities its
+      matched node requests (§4, §18.1). The generic framework *above* the
+      driver stays platform-neutral and never special-cases a board.
+    - **Carve-out — a device's own driver/support crate may know its device.**
+      A crate whose entire purpose is one piece of hardware (e.g.
+      `drivers/display/rpi_hvs`, `drivers/bus/pcie_brcm`, `lib/vcmailbox`)
+      legitimately targets that hardware; that is its job. But it is *reached
+      only through the discovery/match path* (§18.3) and never leaks its board
+      into a shared, generic, or arch-neutral path — and it lives in its own
+      device-specific crate, never inside a core framework.
+    - This makes §17.2 / §17.4 absolute for generated code: platform
+      neutrality is not "preferred", it is mandatory. If a clean generic
+      solution seems impossible without naming a platform, the HAL (§17.2) is
+      incomplete — extend it under `kernel/arch/api/` and stop and ask (§15.7);
+      do not work around it in shared or kernel-neutral code.
 
 ---
 
@@ -878,6 +941,25 @@ You are not exempt from any rule above. In addition:
     backwards-compatibility and no dead code (§23.3, §2.13, §2.14), and
     tests/docs/process (§23.4) — and state the verdict (§23.5). A green
     compile and green tests do not make a change done.
+13. **Never say "for now". Finish it or escalate (§2.19).** Do not deliver a
+    knowingly partial, stubbed, or "temporary" solution and call the work done.
+    If the correct solution depends on prerequisite work that is not yet done,
+    do that prerequisite as part of the same change. If finishing it properly
+    conflicts with another rule, an in-flight design, or an irreconcilable
+    requirement, **stop and ask the User to decide** (§15.7) — never pick the
+    "for now" compromise yourself, and never bury the deferral in a comment or
+    omit it from the completion report.
+14. **Write platform-neutral code; never tie generic code to a board (§2.20).**
+    Anything you write that is meant to be shared or multi-architecture — a
+    `lib/*` crate, an arch-neutral `kernel/*` subsystem, the driver host or a
+    core driver framework, or `userland/*` — must contain no Raspberry Pi /
+    BCM / specific-SoC / specific-MMIO-base reference, name, constant, or `cfg`.
+    Platform specifics belong **only** in `kernel/arch/<target>/` (and the §1
+    boot-stub carve-out), reached at runtime through discovery (§18.1, §18.2);
+    a concrete device's own driver/support crate may know its device but is
+    reached only via the discovery/match path (§18.3) and never inside a
+    generic framework. If you cannot write it generically, the HAL is
+    incomplete — extend `kernel/arch/api/` and stop and ask (§15.7).
 
 ---
 
