@@ -102,6 +102,9 @@ const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 /// `mmio_map` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 
+/// `dma_alloc` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
+
 /// `wait` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
@@ -554,6 +557,43 @@ pub fn mmio_map(handle: u64) -> i64 {
     // dereferences no user pointer; it resolves the grant handle and maps the
     // window into the caller's own space, returning its base.
     let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Allocate a coherent DMA buffer for the calling driver, bounded by a
+/// granted device DMA constraint (`SyscallNumber::DMA_ALLOC`, `plans/PI.md`
+/// P10 chunk 5d-0).
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant handle —
+/// never a raw physical address (`AGENTS.md` §4): the kernel resolves it
+/// **owner-checked against the calling task**, confirms it names a DMA
+/// constraint, carves a physically-contiguous, zeroed, coherent buffer of
+/// `len` bytes whose physical extent lies within the grant's addressing
+/// limit (`AGENTS.md` §5.4 / §18.3), maps it `RW`, non-executable,
+/// guard-bracketed into the caller's own address space, writes the buffer's
+/// **device-visible** base address to `device_out`, and returns the base
+/// **user virtual address** the driver's CPU accesses go through. The call
+/// carries `CAP_MEM_DMA` (enforced by the kernel before any state is
+/// touched).
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the buffer's base virtual
+/// address, and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`) — `device_out` is left
+/// untouched on a negative result. The wrapper surfaces that raw signed
+/// value so the caller decides how to react; it adds no authority and hides
+/// no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 dma_alloc-result encoding (base ≥ 0, else -errno).
+pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
+    let ptr = (device_out as *mut u64) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). `device_out`
+    // is a live exclusive `&mut u64` for the duration of the call, so the
+    // pointer denotes writable memory the kernel may fill with the
+    // device-visible base; the kernel validates it against the caller's own
+    // address space before writing.
+    let ret = unsafe { raw_syscall(NUM_DMA_ALLOC, [handle, len as u64, ptr, 0, 0, 0]) };
     ret as i64
 }
 

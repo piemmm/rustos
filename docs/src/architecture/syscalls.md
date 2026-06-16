@@ -80,6 +80,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  24 | `display_release` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
 |  25 | `keyboard_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_INPUT_READ`  | no      |
 |  26 | `mmio_map`     | `Handle handle`                         | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
+|  27 | `dma_alloc`    | `Handle handle`, `len`, `user_ptr` (device_out) | `u64` (base vaddr) | `CAP_MEM_DMA` | yes |
 
 ### Capability matrix
 
@@ -99,6 +100,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`            |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
+| `CAP_MEM_DMA`      | `dma_alloc`                |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -134,6 +136,34 @@ NULL producer (`NULL_MMIO_MAP_FACILITY` → `NotImplemented`); the
 grant-issuing driver-spawn path and the `kernel/mem` live-mapping producer
 are installed by the following 5d-0 landings, so in a kernel without them
 every `mmio_map` denies rather than mapping (`AGENTS.md` §2.9).
+
+`dma_alloc` (no. 27) carves a **coherent DMA buffer** into the calling
+driver's own address space, bounded by a granted device DMA constraint
+(`plans/PI.md` P10 chunk 5d-0). Like `mmio_map` it takes an unforgeable,
+kernel-issued device-resource grant `handle` (here a
+`HwResourceKind::Dma` constraint) and resolves it **owner-checked against
+the calling task** through the same per-task grant table (a forged or
+foreign handle → `NotFound`, `AGENTS.md` §5.4). It then validates the
+constraint (`kernel/core::devres::dma_constraint`), refuses a zero-length
+or over-the-grant-maximum request (`LengthOutOfRange` / `OutOfRange`) and a
+translating inbound viewport (`NotImplemented` — the bus-bridge programming
+rides the metal VL805 acceptance item, §18.1), and carves a
+physically-contiguous, zeroed, coherent block — mapped `RW`,
+non-executable, guard-bracketed — into the caller's own live address space
+through the architecture `kernel/core::devres::DmaAllocFacility` producer,
+bounded so the block lies wholly below the grant's addressing limit
+(`AGENTS.md` §4 / §18.3). It returns the buffer's base user virtual address
+and writes the **device-visible** base (the CPU-physical base for the
+coherent / QEMU `virt` case) to the `device_out` user pointer through the
+validated copy-out boundary, exactly as `wait` writes its status. The
+backing frames are zeroed and returned to the allocator when the task's
+live space is dropped on exit (`LiveSpace::drop` — zero-on-free, §4). It is
+gated on **`CAP_MEM_DMA`** and **audited** (a low-volume, security-relevant
+grant of hardware-reachable memory); the carve mechanism defaults to a
+fail-closed NULL producer (`NULL_DMA_ALLOC_FACILITY` → `NotImplemented`),
+so a kernel without the `kernel/mem` live producer denies rather than
+carving (`AGENTS.md` §2.9). The first-party Rust wrapper is
+`rustos_rt::dma_alloc`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with
@@ -380,6 +410,7 @@ re-validates arguments — the dispatcher does that first.
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
 | `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`, which also resets the line-discipline column) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF and rubbing out the previous character (column-bounded `BS SP BS`) on a Backspace/Delete | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
 | `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window (`devres::mappable_window` — `Mmio` / `BusWindow`, non-zero, non-overflowing), then maps **only** that `(phys_base, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window or malformed grant → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
+| `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len` and a translating inbound viewport, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`) and copies the device-visible base out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit → `OutOfRange`. Translating viewport → `NotImplemented`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

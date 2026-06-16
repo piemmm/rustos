@@ -90,6 +90,7 @@ const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
+const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -469,6 +470,36 @@ pub extern "C" fn sys_mmio_map(handle: u64) -> u64 {
     unsafe { raw_syscall(NUM_MMIO_MAP, [handle, 0, 0, 0, 0, 0]) }
 }
 
+/// `dma_alloc`: carve a coherent DMA buffer for the calling driver, bounded
+/// by a granted device DMA constraint (`SyscallNumber::DMA_ALLOC`,
+/// `AGENTS.md` §4 / §18.3, `plans/PI.md` P10 chunk 5d-0). Writes the
+/// buffer's device-visible base address to `device_out` and returns the base
+/// virtual address of the mapping, or a `ROS_E_*` code reinterpreted into the
+/// result.
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant the driver
+/// received for the hardware-tree node it binds — never a raw physical
+/// address. The kernel resolves it against the calling task, confirms it
+/// names a DMA constraint, carves a physically-contiguous, zeroed, coherent
+/// region of `len` bytes whose physical extent lies within the grant's
+/// addressing limit, and maps it `RW`, non-executable, into the caller's own
+/// address space; a forged/non-owned handle, a wrong-kind grant, an
+/// over-limit request, or a build with no DMA facility wired fails closed
+/// (`AGENTS.md` §2.9 / §5.4). Gated kernel-side on `ROS_CAP_MEM_DMA`.
+#[must_use]
+#[export_name = "ros_sys_dma_alloc"]
+pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `device_out`
+    // pointer against the caller's address space before writing the
+    // device-visible base to it (`AGENTS.md` §5.4).
+    unsafe {
+        raw_syscall(
+            NUM_DMA_ALLOC,
+            [handle, len as u64, ptr_arg(device_out), 0, 0, 0],
+        )
+    }
+}
+
 /// `mem_map`: map `len` bytes of fresh anonymous `RW` memory into the
 /// calling process's own address space, honouring `flags`
 /// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
@@ -613,6 +644,7 @@ mod tests {
         (NUM_DISPLAY_RELEASE, "display_release", 0),
         (NUM_KEYBOARD_READ, "keyboard_read", 2),
         (NUM_MMIO_MAP, "mmio_map", 1),
+        (NUM_DMA_ALLOC, "dma_alloc", 3),
     ];
 
     #[test]
@@ -699,6 +731,20 @@ mod tests {
         assert_eq!(number, NUM_MMIO_MAP);
         assert_eq!(args[0], 0x2A);
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn dma_alloc_marshals_handle_len_and_device_out_pointer() {
+        let mut device = 0u64;
+        let ptr = core::ptr::addr_of_mut!(device).cast::<c_void>();
+        let (number, args) = capture(0xD000_2000, || {
+            assert_eq!(sys_dma_alloc(0x2A, 0x2000, ptr), 0xD000_2000);
+        });
+        assert_eq!(number, NUM_DMA_ALLOC);
+        assert_eq!(args[0], 0x2A);
+        assert_eq!(args[1], 0x2000);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

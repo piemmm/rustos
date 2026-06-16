@@ -3250,14 +3250,29 @@ table, so a new board is match **data**, not new code. Sub-increments
     extended `mmio_map_qemu_aarch64` vertical (the EL0 program maps its granted
     window **and** round-trips a placed `mem_map`: map → write sentinel →
     read-back → `mem_unmap`). No `lib/abi`/C-header change.
-    **Remaining (next landing, staged) — 5d-0-ii (c) DMA half:** a
-    `dma_alloc`-equivalent that carves a driver's DMA region bounded by the
-    grant's `addr_limit` over the same retained-live-space + owner-checked-grant
-    machinery (`with_current_live_space`, `Dma`-kind grant, `CAP_MEM_DMA`),
-    returning the driver a CPU-VA + the device-visible address. The
-    device-visible address is CPU-physical for the coherent/`virt` case (a
-    virtio device stands in); the BCM2711 inbound-viewport (`dma_translated`)
-    translation rides the live VL805 §0.4 metal-acceptance item.
+    **5d-0-ii (c) DMA half — LANDED.** New `abi-v1` syscall **`dma_alloc`**
+    (no. 27, `CAP_MEM_DMA`, audited) carves a driver's DMA buffer bounded by
+    the grant's `addr_limit` over the same retained-live-space +
+    owner-checked-grant machinery (`with_current_live_space`, `Dma`-kind
+    grant): it resolves the grant owner-checked, validates it via
+    `kernel/core::devres::dma_constraint` (rejecting zero/over-max length and
+    — until the metal VL805 item — a translating inbound viewport), carves a
+    physically-contiguous, zeroed, coherent `RW` buffer below the grant's
+    `addr_limit` through the `devres::DmaAllocFacility` producer, returns the
+    CPU-VA, and copies the device-visible base (CPU-physical for the
+    coherent/`virt` case) out to a user pointer. The guarded carve has one
+    definition — `kernel/mem`'s borrowed `DmaWindowMap`, with the in-kernel
+    `DmaPool` re-expressed as its owning wrapper (§2.2); `LiveSpace` gained
+    `alloc_dma` + a DMA window and reclaims (zeroes + frees) every live DMA
+    block on `Drop` at task exit (§4). `LiveDmaAlloc` is installed for every
+    port in `kernel_main`; the aarch64 `init_spawn`/`spawn_producer` thread
+    the shared `spawn_layout::DMA_WINDOW_OFFSET`/`PAGES` (3 GiB above the
+    image bias). Host-tested (`kernel/mem` carve / addr-limit / Drop-reclaim,
+    `devres` constraint, the `dma_alloc` handler, the `LiveDmaAlloc`
+    producer, `abi-sys` marshalling) and proven on `-M virt` by the extended
+    `mmio_map_qemu_aarch64` vertical (the EL0 program now also carves a
+    `dma_alloc` buffer and round-trips a sentinel through it). New
+    `rustos_rt::dma_alloc` + `ros_sys_dma_alloc`; C header regenerated.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the

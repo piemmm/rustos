@@ -365,6 +365,33 @@ impl SyscallNumber {
     /// grant of the wrong kind, or a build with no map facility wired fails
     /// closed (`AGENTS.md` §2.9).
     pub const MMIO_MAP: Self = Self(26);
+    /// Allocate a DMA-coherent buffer for the calling driver, bounded by a
+    /// granted device DMA constraint (`AGENTS.md` §4 / §18.3; `plans/PI.md`
+    /// P10 chunk 5d-0 — the `DriverHost` MMIO/DMA surface reachable over
+    /// IPC).
+    ///
+    /// Arguments: `handle: u64` — an unforgeable, kernel-issued
+    /// device-resource grant handle the driver received for the matched
+    /// hardware-tree node it binds (a [`crate::hwtree::HwResourceKind::Dma`]
+    /// constraint); `len: usize` — the number of bytes to allocate; and
+    /// `device_out: *mut u64` — a user pointer the kernel writes the
+    /// buffer's **device-visible** base address to on success. The kernel
+    /// resolves the handle **against the calling task** (rejecting forgery
+    /// exactly as [`SyscallNumber::MMIO_MAP`] does, `AGENTS.md` §5.4),
+    /// confirms it names a DMA constraint, carves a physically contiguous,
+    /// zeroed, coherent (caching-disabled) region whose physical extent lies
+    /// within the grant's addressing limit (`AGENTS.md` §4 — a device never
+    /// reaches memory the kernel did not grant it), maps it `RW`,
+    /// non-executable, guard-bracketed into the caller's own address space,
+    /// writes the device-visible base to `device_out`, and returns the base
+    /// **user virtual address** the driver's CPU accesses go through. For a
+    /// coherent bus (and the QEMU `virt` stand-in) the device-visible
+    /// address is the CPU-physical base; a translating inbound viewport
+    /// (`dma_translated`) maps it onto the far-side bus address. Gated by
+    /// [`crate::CapabilityId::MEM_DMA`]; an unknown or non-owned handle, a
+    /// grant of the wrong kind, a region exceeding the grant's limit, or a
+    /// build with no DMA facility wired fails closed (`AGENTS.md` §2.9).
+    pub const DMA_ALLOC: Self = Self(27);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

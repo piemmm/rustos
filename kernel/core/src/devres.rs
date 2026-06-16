@@ -70,6 +70,70 @@ pub trait MmioMapFacility: Sync {
     fn map_window(&self, phys_base: u64, len: usize) -> Result<u64, Errno>;
 }
 
+/// A DMA buffer the [`DmaAllocFacility`] carved for a driver.
+///
+/// `cpu_va` is the base user virtual address the driver's CPU accesses go
+/// through; `device_addr` is the **device-visible** base the driver
+/// programs into the hardware. For a coherent bus (and the QEMU `virt`
+/// stand-in) `device_addr` is the CPU-physical base; a translating inbound
+/// viewport maps it onto the far-side bus address (`AGENTS.md` §18.1).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DmaCarve {
+    /// Base user virtual address of the mapped, guard-bracketed buffer.
+    pub cpu_va: u64,
+    /// Device-visible base address the driver hands to the hardware.
+    pub device_addr: u64,
+}
+
+/// The kernel-side producer that carves a coherent DMA buffer into the
+/// caller's own live address space (`plans/PI.md` P10 chunk 5d-0).
+///
+/// Implemented by the architecture-port-installed producer, mirroring
+/// [`MmioMapFacility`]: the handler has already resolved + owner-checked the
+/// grant and validated its kind/constraint (`AGENTS.md` §5.4 / §18.3); this
+/// trait performs only the carve mechanism — a physically-contiguous,
+/// zeroed, coherent block mapped `RW`, non-executable, guard-bracketed into
+/// the **caller's own** address space, bounded by `addr_limit`.
+///
+/// Implementations must be [`Sync`], shared by the per-CPU handlers exactly
+/// like [`MmioMapFacility`].
+pub trait DmaAllocFacility: Sync {
+    /// Carve `len` bytes of physically-contiguous, zeroed, coherent DMA
+    /// memory into the caller's own address space, bounded so the backing
+    /// block lies wholly below `addr_limit` when it is non-zero (the granted
+    /// device addressing constraint, `AGENTS.md` §18.3; `0` declares no
+    /// constraint). Return the buffer's CPU virtual base and its
+    /// physically-contiguous base.
+    ///
+    /// The handler guarantees `len` is non-zero before calling this.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`Errno`] — [`Errno::OutOfMemory`] when no
+    /// contiguous block or page-table frame is available (deterministic OOM,
+    /// `AGENTS.md` §4 / §2.9), [`Errno::OutOfRange`] when the request
+    /// exceeds the addressing limit or the maximum contiguous block, or
+    /// another stable code the platform reports. The default producer
+    /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
+    fn alloc(&self, len: usize, addr_limit: u64) -> Result<DmaCarve, Errno>;
+}
+
+/// The DMA-alloc facility installed before any real one exists.
+///
+/// Every carve fails closed with [`Errno::NotImplemented`] — the fail-closed
+/// default `AGENTS.md` §2.9 / §5.4 require. Mirrors [`NullMmioMapFacility`].
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullDmaAllocFacility;
+
+impl DmaAllocFacility for NullDmaAllocFacility {
+    fn alloc(&self, _len: usize, _addr_limit: u64) -> Result<DmaCarve, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullDmaAllocFacility`] the syscall handler defaults to.
+pub static NULL_DMA_ALLOC_FACILITY: NullDmaAllocFacility = NullDmaAllocFacility;
+
 /// The MMIO-map facility installed before any real one exists.
 ///
 /// Every map fails closed with [`Errno::NotImplemented`] — the fail-closed
@@ -137,6 +201,53 @@ pub fn mappable_window(resource: &HwResource) -> Result<(u64, usize), Errno> {
     Ok((base, len))
 }
 
+/// The validated shape of a granted DMA constraint the `dma_alloc` handler
+/// bounds a carve by.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DmaConstraint {
+    /// Exclusive CPU-side addressing upper bound a device behind this grant
+    /// may reach (`0` declares no constraint).
+    pub addr_limit: u64,
+    /// Maximum buffer extent in bytes the grant permits (`0` declares no
+    /// declared maximum).
+    pub max_len: u64,
+    /// Far-side (bus/PCIe-space) base of a translating inbound viewport, or
+    /// `0` for an untranslated (coherent) constraint.
+    pub translated_base: u64,
+}
+
+/// Validate that a granted [`HwResource`] is a DMA constraint `dma_alloc`
+/// can bound a carve by, returning its [`DmaConstraint`].
+///
+/// This is the input-validation half of the `dma_alloc` handler, kept here
+/// as a pure function so it is exercised directly by unit tests
+/// (`AGENTS.md` §5.4.3 — validate every input):
+///
+/// * the resource must be a [`HwResourceKind::Dma`] constraint — any other
+///   kind (a register window, an IRQ line, a port range), or an unknown wire
+///   discriminant, is refused with [`Errno::OutOfRange`];
+/// * the `base`/`length` are the CPU-side exclusive addressing limit and the
+///   maximum buffer extent, and `translated_base` the far-side viewport base
+///   (`0` for an untranslated, coherent constraint).
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] — the resource is not a DMA constraint, or its wire
+/// discriminant is unknown.
+pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
+    match resource.kind() {
+        Some(HwResourceKind::Dma) => {}
+        // A known-but-non-DMA kind, or an unknown discriminant, is the wrong
+        // shape for `dma_alloc`; refuse rather than carving against it.
+        _ => return Err(Errno::OutOfRange),
+    }
+    Ok(DmaConstraint {
+        addr_limit: resource.base(),
+        max_len: resource.length(),
+        translated_base: resource.translated_base(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +305,70 @@ mod tests {
         assert_eq!(
             mappable_window(&HwResource::mmio(u64::MAX - 0x10, 0x1000)),
             Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn null_dma_facility_fails_closed() {
+        assert_eq!(
+            NULL_DMA_ALLOC_FACILITY.alloc(0x1000, 0),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            NullDmaAllocFacility.alloc(0x1000, 0x4000_0000),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    #[test]
+    fn dma_constraint_accepts_a_dma_grant() {
+        // An untranslated constraint: the limit + extent are recovered and
+        // there is no far-side viewport base.
+        let plain = HwResource::dma(0x4000_0000, 0x1_0000);
+        assert_eq!(
+            dma_constraint(&plain),
+            Ok(DmaConstraint {
+                addr_limit: 0x4000_0000,
+                max_len: 0x1_0000,
+                translated_base: 0,
+            })
+        );
+
+        // A translating inbound viewport carries the far-side bus base.
+        let translated = HwResource::dma_translated(0xC000_0000, 0x10_0000, 0x4_0000_0000);
+        assert_eq!(
+            dma_constraint(&translated),
+            Ok(DmaConstraint {
+                addr_limit: 0xC000_0000,
+                max_len: 0x10_0000,
+                translated_base: 0x4_0000_0000,
+            })
+        );
+    }
+
+    #[test]
+    fn dma_constraint_rejects_non_dma_kinds() {
+        // An MMIO window, a bus window, an IRQ line, and a port range are not
+        // DMA constraints `dma_alloc` can carve against.
+        assert_eq!(
+            dma_constraint(&HwResource::mmio(0xFE00_0000, 0x1000)),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            dma_constraint(&HwResource::bus_window(
+                0x6000_0000,
+                0x400_0000,
+                0xF800_0000
+            )),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            dma_constraint(&HwResource::irq(33, 1)),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            dma_constraint(&HwResource::port(0x3F8, 8)),
+            Err(Errno::OutOfRange)
         );
     }
 }

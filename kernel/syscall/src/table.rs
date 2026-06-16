@@ -522,6 +522,38 @@ pub trait SyscallHandlers {
     fn mmio_map(&self, _caller: &CallerContext<'_>, _handle: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Allocate a DMA-coherent buffer for the calling driver, bounded by a
+    /// granted device DMA constraint (`AGENTS.md` §4 / §18.3; `plans/PI.md`
+    /// P10 chunk 5d-0).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MEM_DMA`]. `handle` is an unforgeable, kernel-issued
+    /// device-resource grant the driver received for the hardware-tree node
+    /// it binds; the implementation resolves it **against the calling task**
+    /// (rejecting forgery exactly as [`Self::mmio_map`], `AGENTS.md` §5.4),
+    /// confirms the grant names a DMA constraint, carves a physically
+    /// contiguous, zeroed, coherent region of `len` bytes whose physical
+    /// extent lies within the grant's addressing limit (`AGENTS.md` §4),
+    /// maps it `RW`, non-executable, into the caller's own address space,
+    /// writes the buffer's device-visible base to the user pointer
+    /// `device_out`, and returns its base user virtual address. A driver
+    /// therefore reaches no memory the kernel did not grant it (§4 — no
+    /// ambient authority).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with neither a
+    /// grant table nor a DMA facility wired has nothing to allocate. The
+    /// real handler is installed in `kernel/core`.
+    fn dma_alloc(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _len: usize,
+        _device_out: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -733,6 +765,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             // table (forgery + ownership are checked there, `AGENTS.md`
             // §5.4).
             SyscallNumber::MMIO_MAP => self.handlers.mmio_map(caller, args.0[0]),
+            SyscallNumber::DMA_ALLOC => {
+                // `validate_arg` accepts args[0] as an opaque `Handle` u64
+                // (resolved against the calling task + grant table in the
+                // handler, `AGENTS.md` §5.4); args[1] is the byte length and
+                // args[2] is the non-null `device_out` `UserPtr` the handler
+                // writes the device-visible base to.
+                let len = decode_len(args.0[1])?;
+                self.handlers.dma_alloc(caller, args.0[0], len, args.0[2])
+            }
             _ => Err(Errno::NotFound),
         }
     }
@@ -1171,6 +1212,20 @@ mod tests {
             // real grant table / map facility here.
             Ok(handle)
         }
+
+        fn dma_alloc(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            _len: usize,
+            _device_out: u64,
+        ) -> SyscallResult {
+            self.record("dma_alloc");
+            // Echo the handle back so the reachability test can assert the
+            // dispatcher decoded the arguments without wiring a real grant
+            // table / DMA facility here.
+            Ok(handle)
+        }
     }
 
     #[test]
@@ -1195,6 +1250,7 @@ mod tests {
                 CapabilityId::DISPLAY,
                 CapabilityId::INPUT_READ,
                 CapabilityId::MMIO_MAP,
+                CapabilityId::MEM_DMA,
             ],
             &sink,
         );

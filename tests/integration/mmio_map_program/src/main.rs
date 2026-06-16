@@ -90,11 +90,26 @@ mod program {
     const FAIL_MEM_RW: i32 = 14;
     /// Exit code: `mem_unmap` of the placed region returned an error.
     const FAIL_MEM_UNMAP: i32 = 15;
+    /// Exit code: `dma_alloc` returned an error — the kernel refused to carve
+    /// a coherent DMA buffer (`plans/PI.md` 5d-0-ii (c) DMA half).
+    const FAIL_DMA_ALLOC: i32 = 16;
+    /// Exit code: a value written into the DMA buffer did not read back — the
+    /// carved coherent region is not genuine, writable RAM.
+    const FAIL_DMA_RW: i32 = 17;
 
     /// Bytes the non-`FIXED` `mem_map` round-trip requests (two pages).
     const MEM_MAP_LEN: usize = 2 * 4096;
     /// A recognisable sentinel written into the placed region and read back.
     const MEM_SENTINEL: u64 = 0x5055_4D50_5F4F_4B21;
+
+    /// The device-resource grant handle the program carves its DMA buffer
+    /// against. The mmio window is grant `1`; this is the second grant the
+    /// vertical mints for the task (handles are monotonic from `1`).
+    const DMA_GRANT_HANDLE: u64 = 2;
+    /// Bytes the DMA-buffer round-trip requests (two pages).
+    const DMA_ALLOC_LEN: usize = 2 * 4096;
+    /// A recognisable sentinel written into the DMA buffer and read back.
+    const DMA_SENTINEL: u64 = 0x444D_4100_5F4F_4B21;
 
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to `default` on an empty string, a non-digit byte, or
@@ -183,8 +198,36 @@ mod program {
             return FAIL_MEM_UNMAP;
         }
 
-        // PASS: the granted window mapped and read its magic, and a placed
-        // anonymous region round-tripped and released.
+        // 5. Exercise the `dma_alloc` carve (`plans/PI.md` 5d-0-ii (c) DMA
+        //    half): carve a coherent DMA buffer against the granted DMA
+        //    constraint and prove it is genuine writable RAM by round-tripping
+        //    a sentinel through its CPU virtual base. `device` receives the
+        //    device-visible base (unused here — the device-address copy-out is
+        //    host-proven; this vertical proves the carve mechanism on metal).
+        let mut device: u64 = 0;
+        let dma = rustos_rt::dma_alloc(DMA_GRANT_HANDLE, DMA_ALLOC_LEN, &mut device);
+        if dma < 0 {
+            return FAIL_DMA_ALLOC;
+        }
+        #[allow(clippy::cast_sign_loss)] // `dma >= 0` checked above; it is a user VA.
+        let dma_cell = dma as u64 as *mut u64;
+        // SAFETY: `dma_alloc` returned the base of `DMA_ALLOC_LEN` bytes of
+        //    mapped, zeroed, USER-writable coherent DMA memory in this
+        //    process's own address space, so `dma_cell` is a valid, writable,
+        //    in-bounds pointer (`AGENTS.md` §5.4 — the kernel installed the
+        //    mapping). The write is `volatile` so it is not elided before the
+        //    read-back.
+        let dma_read_back = unsafe {
+            dma_cell.write_volatile(DMA_SENTINEL);
+            dma_cell.read_volatile()
+        };
+        if dma_read_back != DMA_SENTINEL {
+            return FAIL_DMA_RW;
+        }
+
+        // PASS: the granted window mapped and read its magic, a placed
+        // anonymous region round-tripped and released, and a coherent DMA
+        // buffer carved and round-tripped.
         0
     }
 

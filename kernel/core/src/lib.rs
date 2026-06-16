@@ -107,7 +107,10 @@ pub use console::{
     NullConsole, NullConsoleInput, NullConsoleRead, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES,
     NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
-pub use devres::{mappable_window, MmioMapFacility, NullMmioMapFacility, NULL_MMIO_MAP_FACILITY};
+pub use devres::{
+    dma_constraint, mappable_window, DmaAllocFacility, DmaCarve, DmaConstraint, MmioMapFacility,
+    NullDmaAllocFacility, NullMmioMapFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
+};
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
 };
@@ -123,7 +126,7 @@ pub use kthread::{
     BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder, YielderHandle,
     KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
 };
-pub use live_producer::{LiveMemMap, LiveMmioMap};
+pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use procwait::{

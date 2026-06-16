@@ -38,6 +38,7 @@
 
 use crate::anon::{map_anonymous, unmap_anonymous, AnonError};
 use crate::anon_window::AnonWindowMap;
+use crate::dma::{DmaError, DmaWindowMap};
 use crate::frame::FrameAllocator;
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
@@ -56,6 +57,9 @@ pub enum LiveSpaceError {
     Anon(AnonError),
     /// A device-window map failed (no virtual slot, page-table refusal, …).
     Mmio(MmioError),
+    /// A DMA carve failed (no contiguous block, addressing-limit exceeded,
+    /// no virtual slot, …).
+    Dma(DmaError),
 }
 
 impl From<AnonError> for LiveSpaceError {
@@ -68,6 +72,27 @@ impl From<MmioError> for LiveSpaceError {
     fn from(err: MmioError) -> Self {
         Self::Mmio(err)
     }
+}
+
+impl From<DmaError> for LiveSpaceError {
+    fn from(err: DmaError) -> Self {
+        Self::Dma(err)
+    }
+}
+
+/// A live DMA buffer the [`LiveUserSpace::alloc_dma`] carve returns.
+///
+/// `cpu_va` is the base **user virtual address** the driver's CPU accesses
+/// go through; `phys_base` is the physically-contiguous base of the backing
+/// frames — the value the `kernel/core` producer turns into the
+/// device-visible address (CPU-physical for a coherent bus, or translated
+/// through an inbound viewport, `AGENTS.md` §18.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaMapping {
+    /// Base user virtual address of the mapped, guard-bracketed buffer.
+    pub cpu_va: u64,
+    /// Physically-contiguous base address of the backing frames.
+    pub phys_base: u64,
 }
 
 /// The object-safe, mutating view of a task's retained live address space.
@@ -138,6 +163,31 @@ pub trait LiveUserSpace: Send {
     /// [`MmioError`] (no free virtual slot,
     /// page-table refusal, …).
     fn map_device_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
+
+    /// Carve a physically-contiguous, zeroed, coherent DMA buffer of `len`
+    /// bytes into this space, returning its CPU virtual base and its
+    /// physically-contiguous base ([`DmaMapping`]).
+    ///
+    /// The block is mapped `RW|USER`, never executable (`AGENTS.md` §19.2),
+    /// guard-bracketed (`AGENTS.md` §4), and zeroed before it is user-visible
+    /// (`AGENTS.md` §4). When `addr_limit` is non-zero the contiguous block
+    /// is bounded to lie wholly below it (the granted device addressing
+    /// constraint, §18.3); a block that would exceed the limit is returned to
+    /// the allocator and the request refused fail-closed (`AGENTS.md` §2.9 /
+    /// §5.4). `addr_limit == 0` declares no constraint.
+    ///
+    /// The producer has already resolved and validated the grant the buffer
+    /// is bounded by (owner-checked, kind, length — `AGENTS.md` §5.4 /
+    /// §18.3); this only performs the carve + page-table mechanism, and the
+    /// buffer is reclaimed (frames zeroed and freed) when the live space is
+    /// dropped on task teardown.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Dma`] carrying the precise [`DmaError`]
+    /// (zero length, exceeds the max buddy order, no contiguous block,
+    /// addressing-limit exceeded, no virtual slot, …).
+    fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError>;
 }
 
 /// The generic concrete live address space retained per task.
@@ -156,13 +206,16 @@ pub trait LiveUserSpace: Send {
 ///   and returned to;
 /// * `mmio` — the per-task guarded device-window virtual-address allocator;
 /// * `anon` — the per-task placement allocator that chooses the base for a
-///   non-`FIXED` anonymous mapping out of this task's heap window.
+///   non-`FIXED` anonymous mapping out of this task's heap window;
+/// * `dma` — the per-task guarded DMA-buffer allocator that carves a
+///   physically-contiguous coherent buffer out of this task's DMA window.
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
     physmap: M,
     frames: &'static FrameAllocator,
     mmio: MmioWindowMap,
     anon: AnonWindowMap,
+    dma: DmaWindowMap,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
@@ -175,14 +228,25 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     /// [`MmioWindowMap`]), and
     /// `[anon_window_base, anon_window_base + anon_window_pages * PAGE_SIZE)`
     /// the range non-`FIXED` anonymous mappings are placed into
-    /// ([`AnonWindowMap`]). Both windows must lie in the task's own free user
-    /// virtual space, clear of each other, its image, and its stack.
+    /// ([`AnonWindowMap`]), and
+    /// `[dma_window_base, dma_window_base + dma_window_pages * PAGE_SIZE)` the
+    /// range guarded DMA buffers are carved into ([`DmaWindowMap`]). All
+    /// three windows must lie in the task's own free user virtual space,
+    /// clear of each other, its image, and its stack.
     ///
     /// # Errors
     ///
-    /// [`MmioError::InvalidMapConfig`] if either window is misconfigured
+    /// [`MmioError::InvalidMapConfig`] if any window is misconfigured
     /// (zero pages, a base that is not page-aligned, or a size that
     /// overflows the address space).
+    // Each argument is a *distinct* piece of the retained space the
+    // architecture spawn producer threads explicitly — the live arch space,
+    // the direct map, the frame allocator, and the three guarded windows'
+    // `(base, pages)` pairs. Bundling the windows behind a one-use config
+    // wrapper purely to satisfy the arg-count lint would be the §2.3 wrapper
+    // type `AGENTS.md` forbids; the explicit list is the clearer shape,
+    // mirroring `KernelSyscallHandlers::new` (`AGENTS.md` §2.1).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         space: AddressSpace<P>,
         physmap: M,
@@ -191,6 +255,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         mmio_window_pages: usize,
         anon_window_base: VirtAddr,
         anon_window_pages: usize,
+        dma_window_base: VirtAddr,
+        dma_window_pages: usize,
     ) -> Result<Self, MmioError> {
         let mmio = MmioWindowMap::new(mmio_window_base, mmio_window_pages)?;
         // An anonymous-heap-window config error is the same class of fault as
@@ -198,12 +264,17 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         // producer has one constructor error to handle (`AGENTS.md` §2.9).
         let anon = AnonWindowMap::new(anon_window_base, anon_window_pages)
             .map_err(|_| MmioError::InvalidMapConfig)?;
+        // A DMA-window config error is likewise folded onto `InvalidMapConfig`
+        // (the [`DmaWindowMap`] constructor returns its own `DmaError`).
+        let dma = DmaWindowMap::new(dma_window_base, dma_window_pages)
+            .map_err(|_| MmioError::InvalidMapConfig)?;
         Ok(Self {
             space,
             physmap,
             frames,
             mmio,
             anon,
+            dma,
         })
     }
 
@@ -301,6 +372,31 @@ where
         let region = self.mmio.map_into(&mut self.space, phys_base, len)?;
         Ok(region.virt().as_u64())
     }
+
+    fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError> {
+        let buf =
+            self.dma
+                .alloc_into(&mut self.space, self.frames, &self.physmap, len, addr_limit)?;
+        Ok(DmaMapping {
+            cpu_va: buf.virt().as_u64(),
+            phys_base: buf.phys().as_u64(),
+        })
+    }
+}
+
+impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
+    fn drop(&mut self) {
+        // Reclaim every live DMA buffer when the task's live space is torn
+        // down: each backing block is zeroed (zero-on-free, `AGENTS.md` §4)
+        // and returned to the frame allocator, so a driver task's exit never
+        // leaks the physical frames its DMA buffers held or leaves their
+        // (possibly secret-bearing) contents recoverable. Anonymous and
+        // device-window mappings live and die with the page-table frames of
+        // the `space` being dropped; the DMA frames come from the shared
+        // global allocator and so must be returned explicitly here.
+        self.dma
+            .drain_into(&mut self.space, self.frames, &self.physmap);
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +404,7 @@ mod tests {
     use super::{LiveSpace, LiveSpaceError, LiveUserSpace};
     use crate::anon::AnonError;
     use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
+    use crate::dma::DmaError;
     use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
     use crate::phys::SimPhysMap;
     use crate::uaccess::copy_in;
@@ -353,6 +450,11 @@ mod tests {
     const ANON_WINDOW_BASE: u64 = 0xC000_0000;
     const ANON_WINDOW_PAGES: usize = 64;
 
+    /// The user virtual window guarded DMA buffers are carved into — distinct
+    /// from the device, anon, and `FIXED` regions above.
+    const DMA_WINDOW_BASE: u64 = 0x1_0000_0000;
+    const DMA_WINDOW_PAGES: usize = 64;
+
     fn live() -> LiveSpace<HostPageTable, SimPhysMap> {
         LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
@@ -362,6 +464,8 @@ mod tests {
             MMIO_WINDOW_PAGES,
             VirtAddr::new(ANON_WINDOW_BASE),
             ANON_WINDOW_PAGES,
+            VirtAddr::new(DMA_WINDOW_BASE),
+            DMA_WINDOW_PAGES,
         )
         .expect("a page-aligned, non-zero window is valid")
     }
@@ -504,6 +608,92 @@ mod tests {
         live.unmap_anonymous(a, 3)
             .expect("the matching unmap succeeds");
         assert_eq!(live.space().mapped_pages(), 0);
+    }
+
+    #[test]
+    fn alloc_dma_maps_a_zeroed_coherent_buffer_in_the_dma_window() {
+        let mut live = live();
+        let mapping = live
+            .alloc_dma(2 * PAGE_SIZE, 0)
+            .expect("a free block exists");
+        // The CPU VA lies inside the configured DMA window, past the leading
+        // guard page.
+        assert!(
+            mapping.cpu_va > DMA_WINDOW_BASE
+                && mapping.cpu_va < DMA_WINDOW_BASE + (DMA_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
+            "DMA VA lies inside the configured window, past the leading guard"
+        );
+        // The backing block is physically contiguous RAM drawn from the
+        // allocator's window.
+        assert!(mapping.phys_base >= SIM_BASE, "phys base is real RAM");
+        // The buffer reads back as zero through the CPU mapping (no stale
+        // bytes are ever user-visible, `AGENTS.md` §4).
+        let sim = sim();
+        let mut buf = vec![0xAAu8; 2 * PAGE_SIZE];
+        copy_in(live.space(), &sim, VirtAddr::new(mapping.cpu_va), &mut buf)
+            .expect("readable user range");
+        assert!(buf.iter().all(|&b| b == 0), "DMA buffer is zeroed");
+    }
+
+    #[test]
+    fn alloc_dma_rejects_a_block_above_the_addressing_limit() {
+        let mut live = live();
+        // An addressing limit below the allocator's RAM window cannot be
+        // satisfied by any block, so the carve is refused fail-closed and no
+        // pages are mapped (`AGENTS.md` §5.4 / §2.9).
+        assert_eq!(
+            live.alloc_dma(PAGE_SIZE, SIM_BASE),
+            Err(LiveSpaceError::Dma(DmaError::AddrLimitExceeded))
+        );
+        assert_eq!(
+            live.space().mapped_pages(),
+            0,
+            "no buffer mapped on refusal"
+        );
+    }
+
+    #[test]
+    fn alloc_dma_rejects_zero_length() {
+        let mut live = live();
+        assert_eq!(
+            live.alloc_dma(0, 0),
+            Err(LiveSpaceError::Dma(DmaError::ZeroSize))
+        );
+    }
+
+    #[test]
+    fn dropping_the_live_space_reclaims_every_dma_block() {
+        // Build the live space over a `'static` allocator we keep a handle to,
+        // so we can observe the frame count before, during, and after the
+        // space (and its DMA buffers) are torn down.
+        let frames = leaked_frames();
+        let before = frames.free_frames();
+        {
+            let mut live = LiveSpace::new(
+                AddressSpace::new(HostPageTable::new()),
+                sim(),
+                frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                DMA_WINDOW_PAGES,
+            )
+            .expect("windows are valid");
+            live.alloc_dma(2 * PAGE_SIZE, 0)
+                .expect("a free block exists");
+            assert!(
+                frames.free_frames() < before,
+                "the DMA carve consumed frames"
+            );
+        }
+        // Dropping the live space reclaimed the DMA block's frames.
+        assert_eq!(
+            frames.free_frames(),
+            before,
+            "every DMA frame is returned to the allocator on teardown"
+        );
     }
 
     /// The retained live space must be `Send` (it is owned by the kernel

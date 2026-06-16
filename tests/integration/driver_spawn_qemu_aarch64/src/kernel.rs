@@ -27,8 +27,8 @@ use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
 use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
     BootReserve, DispatchCallbackSlot, EmbeddedProgram, KernelDispatchHook, KernelSpawnCtx,
-    ProgramRegistry, RandomReserve, NULL_INPUT_FOCUS, NULL_MEM_MAP, NULL_MMIO_MAP_FACILITY,
-    NULL_PROCESS_WAIT,
+    ProgramRegistry, RandomReserve, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
+    NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT,
 };
 use rustos_kernel_ipc::{EndpointId, Port, PortRegistry};
 use rustos_kernel_irq::{IrqTable, UnsupportedController};
@@ -440,10 +440,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             // input; the arbiter stays fail-closed (`AGENTS.md` §2.9).
             &NULL_INPUT_FOCUS,
             // This test exercises the driver-spawn / IPC path, not
-            // `mem_map` / `mmio_map`; those producers stay fail-closed
-            // (`AGENTS.md` §2.9).
+            // `mem_map` / `mmio_map` / `dma_alloc`; those producers stay
+            // fail-closed (`AGENTS.md` §2.9).
             &NULL_MEM_MAP,
             &NULL_MMIO_MAP_FACILITY,
+            &NULL_DMA_ALLOC_FACILITY,
         )));
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);

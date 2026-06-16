@@ -182,6 +182,25 @@ pub const ANON_WINDOW_OFFSET: u64 = 0x8000_0000;
 #[cfg(kernel_isa = "aarch64")]
 pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
 
+/// Offset of the guarded DMA-buffer virtual window above the image bias
+/// (`plans/PI.md` 5d-0-ii (c) DMA half): placed 3 GiB above the bias — above
+/// the anonymous-heap window (which spans `[2 GiB, 3 GiB)`) and far clear of
+/// the program image, stack, and startup block — and well below the 64 GiB
+/// user/identity ceiling the spawn-window check guards. The `dma_alloc`
+/// carve hands each request a guard-bracketed buffer out of `[bias +
+/// DMA_WINDOW_OFFSET, … + DMA_WINDOW_PAGES·4 KiB)`. Gated to the aarch64
+/// port (the only port that retains a live space today) for the same reason
+/// as [`MMIO_WINDOW_OFFSET`].
+#[cfg(kernel_isa = "aarch64")]
+pub const DMA_WINDOW_OFFSET: u64 = 0xC000_0000;
+
+/// Pages backing the DMA-buffer window (1 MiB): generous headroom over the
+/// few small coherent buffers a driver task carves (`AGENTS.md` §24.1; a DMA
+/// buffer is bounded to the [`rustos_kernel_mem::MAX_ORDER`] 8 MiB block).
+/// Gated to the aarch64 port for the same reason as [`DMA_WINDOW_OFFSET`].
+#[cfg(kernel_isa = "aarch64")]
+pub const DMA_WINDOW_PAGES: usize = 256;
+
 /// Per-process stack-canary seed handed to PID 1 `init` (`AGENTS.md`
 /// §19.2). Any value; the kernel RNG-seeded canary is a later stage.
 pub const INIT_CANARY: u64 = 0x1117_A5ED_C0DE_0001;

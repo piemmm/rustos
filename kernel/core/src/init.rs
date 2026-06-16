@@ -648,24 +648,16 @@ fn run_phases<A: KernelArch>(
         Box::leak(wrapped.into_boxed_slice())
     };
 
-    // Build the production `mem_map` / `mmio_map` producers over the
-    // per-task retained live address space (`plans/PI.md` 5d-0-ii (b′)).
-    // Each routes a syscall to the calling task's *own* live space through
-    // the per-CPU live-space slot, reading the current CPU from the same
-    // `'static` arch handle the process-wait producer uses — so a task that
-    // retains a live space (the aarch64 ports) gets a working `mem_map` /
-    // `mmio_map`, and one that does not (the x86_64 / riscv64 ports today,
-    // or any task admitted with no live space) fails closed with
-    // `NotImplemented` exactly as the `NULL_*` defaults did. Both are
-    // `Box::leak`'d for the same one-shot-publish reason as the hook
-    // (`AGENTS.md` §2.1), and the producer is arch-generic, so this wiring
-    // names no concrete port (`AGENTS.md` §17.4).
-    let mem_map: &'static (dyn crate::memmap::MemMap + 'static) = Box::leak(Box::new(
-        crate::live_producer::LiveMemMap::new(state.arch.as_ref()),
-    ));
-    let mmio_map_facility: &'static (dyn crate::devres::MmioMapFacility + 'static) = Box::leak(
-        Box::new(crate::live_producer::LiveMmioMap::new(state.arch.as_ref())),
-    );
+    // Build the production `mem_map` / `mmio_map` / `dma_alloc` producers over
+    // the per-task retained live address space (`plans/PI.md` 5d-0-ii (b′)/(c)):
+    // each routes a syscall to the calling task's *own* live space via the
+    // per-CPU slot, reading the current CPU from the same `'static` arch handle
+    // the process-wait producer uses, so a task that retains a live space (the
+    // aarch64 ports) gets a working producer and one that does not fails closed
+    // with `NotImplemented` exactly as the `NULL_*` defaults did. All are
+    // `Box::leak`'d for the same one-shot-publish reason as the hook, arch-
+    // generic so this names no concrete port (`AGENTS.md` §2.1 / §17.4).
+    let (mem_map, mmio_map_facility, dma_alloc_facility) = live_producers(state.arch.as_ref());
 
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
@@ -696,6 +688,7 @@ fn run_phases<A: KernelArch>(
             input_focus,
             mem_map,
             mmio_map_facility,
+            dma_alloc_facility,
         )));
     dispatcher_callback_slot
         .install_dispatcher(hook)
@@ -713,6 +706,29 @@ fn run_phases<A: KernelArch>(
     phase_ready(log_sink, Phase::Ipc);
 
     Ok(state)
+}
+
+/// Build and `Box::leak` the production `mem_map` / `mmio_map` / `dma_alloc`
+/// producers over the per-task retained live address space
+/// (`plans/PI.md` 5d-0-ii (b′)/(c)).
+///
+/// Each is arch-generic (it reads the current CPU from the `'static` `arch`
+/// handle and routes to the calling task's own live space, `AGENTS.md`
+/// §17.4) and `Box::leak`'d for the one-shot-publish reason `KernelState`
+/// is (`AGENTS.md` §2.1). Factored out of [`run_phases`] so the three
+/// long-typed bindings live in one place.
+fn live_producers<A: KernelArch>(
+    arch: &'static A,
+) -> (
+    &'static (dyn crate::memmap::MemMap + 'static),
+    &'static (dyn crate::devres::MmioMapFacility + 'static),
+    &'static (dyn crate::devres::DmaAllocFacility + 'static),
+) {
+    (
+        Box::leak(Box::new(crate::live_producer::LiveMemMap::new(arch))),
+        Box::leak(Box::new(crate::live_producer::LiveMmioMap::new(arch))),
+        Box::leak(Box::new(crate::live_producer::LiveDmaAlloc::new(arch))),
+    )
 }
 
 /// In-memory record of the live kernel subsystems built by

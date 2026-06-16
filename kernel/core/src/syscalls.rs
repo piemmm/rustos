@@ -101,7 +101,10 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
-use crate::devres::{mappable_window, MmioMapFacility, NULL_MMIO_MAP_FACILITY};
+use crate::devres::{
+    dma_constraint, mappable_window, DmaAllocFacility, MmioMapFacility, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY,
+};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
@@ -257,6 +260,14 @@ where
     /// producer through [`Self::with_mmio_map_facility`]. Held as a `'static`
     /// borrow, exactly like the console device and the `mem_map` producer.
     mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
+    /// The architecture DMA-alloc producer the `dma_alloc` syscall drives to
+    /// carve a coherent DMA buffer into the caller's own live address space
+    /// (`plans/PI.md` P10 chunk 5d-0). Defaults to
+    /// [`NULL_DMA_ALLOC_FACILITY`] (fail closed with [`Errno::NotImplemented`],
+    /// `AGENTS.md` §2.9); the boot path installs the concrete `kernel/mem`
+    /// producer through [`Self::with_dma_alloc_facility`]. Held as a `'static`
+    /// borrow, exactly like the MMIO-map producer.
+    dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -341,6 +352,13 @@ where
             // `NotImplemented` with no map facility) — never mapping an
             // ungranted or arbitrary region (`AGENTS.md` §2.9 / §5.4).
             mmio_map_facility: &NULL_MMIO_MAP_FACILITY,
+            // The DMA-alloc facility is unwired until the boot path installs
+            // the `kernel/mem` carve producer (`plans/PI.md` P10 chunk 5d-0):
+            // `dma_alloc` fails closed (`NotFound` for an ungranted handle,
+            // resolved against the per-task grant table in `aspaces`;
+            // `NotImplemented` with no DMA facility) — never carving against
+            // an ungranted constraint (`AGENTS.md` §2.9 / §5.4).
+            dma_alloc_facility: &NULL_DMA_ALLOC_FACILITY,
         }
     }
 
@@ -482,6 +500,23 @@ where
         mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
     ) -> Self {
         self.mmio_map_facility = mmio_map_facility;
+        self
+    }
+
+    /// Install the architecture DMA-alloc producer the `dma_alloc` syscall
+    /// drives, consuming and returning `self` (`plans/PI.md` P10 chunk
+    /// 5d-0).
+    ///
+    /// Until this is called the handler holds [`NULL_DMA_ALLOC_FACILITY`],
+    /// so `dma_alloc` fails closed with [`Errno::NotImplemented`]
+    /// (`AGENTS.md` §2.9). The producer must be `'static`: it lives for the
+    /// lifetime of the running kernel, exactly like the MMIO-map producer.
+    #[must_use]
+    pub const fn with_dma_alloc_facility(
+        mut self,
+        dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
+    ) -> Self {
+        self.dma_alloc_facility = dma_alloc_facility;
         self
     }
 
@@ -1452,6 +1487,69 @@ where
         self.mmio_map_facility.map_window(phys_base, len)
     }
 
+    fn dma_alloc(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        len: usize,
+        device_out: u64,
+    ) -> SyscallResult {
+        // §5.4 step 2 (capability) was enforced by the dispatcher: the
+        // `dma_alloc` spec carries `CAP_MEM_DMA`. Step 3 (validate every
+        // input) is here. Resolve `handle` to a granted resource **for the
+        // calling task** (`caller.task_id` is kernel-trusted), so a forged or
+        // another driver's handle resolves to nothing and is refused
+        // (`AGENTS.md` §5.4; §18.3 — a driver reaches only the resources its
+        // matched node requested), exactly as `mmio_map`.
+        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+            return Err(Errno::NotFound);
+        };
+        // The grant must name a DMA constraint; reject any other kind before
+        // carving (`AGENTS.md` §5.4 — fail closed).
+        let constraint = dma_constraint(&resource)?;
+        // A zero-length buffer names nothing; reject it before any carve.
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        // The buffer must fit the grant's declared maximum extent, when one
+        // is declared (`max_len == 0` means no declared maximum). Reject an
+        // over-large request before carving (§5.4).
+        if constraint.max_len != 0 && (len as u64) > constraint.max_len {
+            return Err(Errno::OutOfRange);
+        }
+        // A translating inbound viewport (`dma_translated`) needs the bus
+        // bridge programmed before a device-visible address can be derived;
+        // that bring-up rides the live metal VL805 acceptance item
+        // (`plans/PI.md` 5d-0-ii (c), §18.1). Until then only an
+        // untranslated (coherent) constraint is served — fail closed rather
+        // than handing back an unprogrammed translation (`AGENTS.md` §2.9).
+        if constraint.translated_base != 0 {
+            return Err(Errno::NotImplemented);
+        }
+        // Mechanism: the installed producer carves a physically-contiguous,
+        // zeroed, coherent block bounded by the grant's `addr_limit` into the
+        // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
+        // fails closed with `NotImplemented` (`AGENTS.md` §2.9); frame
+        // exhaustion surfaces as `OutOfMemory` (deterministic OOM, §4).
+        let carve = self.dma_alloc_facility.alloc(len, constraint.addr_limit)?;
+        // Hand the device-visible base back through the `device_out` user
+        // pointer via the validated `copy_to_user` boundary (`AGENTS.md`
+        // §5.4), exactly as `wait` writes the reaped status — a faulting
+        // `device_out` collapses onto the same fail-closed `BadAddress` an
+        // actual fault produces (§19.1). The buffer stays mapped; it is
+        // reclaimed when the task's live space is dropped on exit
+        // (`LiveSpace::drop`), so a driver that passes a bad pointer self-DoSes
+        // a buffer at worst — it never widens authority.
+        let device_bytes = carve.device_addr.to_ne_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(device_out), &device_bytes)
+        }) {
+            Some(Ok(())) => Ok(carve.cpu_va),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
     fn mem_unmap(&self, _caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
         // The dispatcher already validated `base` and that `len` fits in
         // `usize`. A zero-length range names nothing; reject it before
@@ -1945,6 +2043,7 @@ where
         input_focus: &'static InputFocus,
         mem_map: &'static (dyn MemMap + 'static),
         mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
+        dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
     ) -> Self {
         Self {
             handlers: KernelSyscallHandlers::new(
@@ -1965,7 +2064,8 @@ where
             .with_process_wait(process_wait)
             .with_input_focus(input_focus)
             .with_mem_map(mem_map)
-            .with_mmio_map_facility(mmio_map_facility),
+            .with_mmio_map_facility(mmio_map_facility)
+            .with_dma_alloc_facility(dma_alloc_facility),
             sched,
             caps,
             arch,
@@ -6038,6 +6138,285 @@ mod tests {
         assert_eq!(h.mmio_map(&ctx, handle), Err(Errno::OutOfRange));
         // The wrong-kind grant was refused before the mechanism ran.
         assert!(facility.last.lock().is_none());
+    }
+
+    /// A DMA-alloc facility that records the `(len, addr_limit)` it was
+    /// handed and returns a configured carve, so the `dma_alloc` handler
+    /// tests can assert the validated request reached the mechanism without
+    /// a real `kernel/mem` carve path.
+    struct RecordingDmaFacility {
+        last: rustos_sync::SpinLock<Option<(usize, u64)>>,
+        ret: Result<crate::devres::DmaCarve, Errno>,
+    }
+    impl crate::devres::DmaAllocFacility for RecordingDmaFacility {
+        fn alloc(&self, len: usize, addr_limit: u64) -> Result<crate::devres::DmaCarve, Errno> {
+            *self.last.lock() = Some((len, addr_limit));
+            self.ret
+        }
+    }
+
+    /// With no grant minted for the caller, `dma_alloc` resolves nothing and
+    /// fails closed with `NotFound` — a driver can never carve against an
+    /// ungranted constraint (`AGENTS.md` §2.9 / §4 / §18.3).
+    #[test]
+    fn dma_alloc_without_grant_is_not_found() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.dma_alloc(&ctx, 7, 0x1000, 0x1234), Err(Errno::NotFound));
+    }
+
+    /// The DMA grant is owner-bound: a handle minted for another task, or an
+    /// unknown handle value, resolves to nothing and is refused
+    /// (`AGENTS.md` §5.4 — handle forgery rejected as in `mmio_map`).
+    #[test]
+    fn dma_alloc_forged_or_foreign_handle_is_not_found() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: rustos_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x4000_0000,
+            }),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        // Right owner, wrong handle → NotFound.
+        let owner = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        assert_eq!(
+            h.dma_alloc(&owner, handle + 1, 0x1000, 0x1234),
+            Err(Errno::NotFound)
+        );
+        // Right handle value, wrong (foreign) task → NotFound.
+        let foreign = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+        assert_eq!(
+            h.dma_alloc(&foreign, handle, 0x1000, 0x1234),
+            Err(Errno::NotFound)
+        );
+        // Neither refusal touched the carve mechanism.
+        assert!(facility.last.lock().is_none());
+    }
+
+    /// A grant of a non-DMA kind (an MMIO window) is refused with
+    /// `OutOfRange` before the carve mechanism is reached: `dma_alloc`
+    /// carves against DMA constraints only (`AGENTS.md` §5.4).
+    #[test]
+    fn dma_alloc_non_dma_grant_is_out_of_range() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: rustos_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x4000_0000,
+            }),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::OutOfRange)
+        );
+        assert!(facility.last.lock().is_none());
+    }
+
+    /// A translating inbound-viewport DMA grant (`dma_translated`) is refused
+    /// with `NotImplemented` before the carve: the bus-bridge programming
+    /// rides the metal VL805 acceptance item, so the kernel fails closed
+    /// rather than handing back an unprogrammed translation
+    /// (`AGENTS.md` §2.9; `plans/PI.md` 5d-0-ii (c)).
+    #[test]
+    fn dma_alloc_translated_grant_is_not_implemented() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma_translated(0xC000_0000, 0x1_0000, 0x4_0000_0000),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: rustos_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x4000_0000,
+            }),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::NotImplemented)
+        );
+        assert!(facility.last.lock().is_none());
+    }
+
+    /// A zero-length request and an over-the-grant-maximum request are both
+    /// refused before the carve (`AGENTS.md` §5.4 — validate every input).
+    #[test]
+    fn dma_alloc_rejects_zero_and_over_max_length() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // The grant declares a 0x1_0000-byte maximum extent.
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: rustos_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x4000_0000,
+            }),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0, 0x1234),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1_0001, 0x1234),
+            Err(Errno::OutOfRange)
+        );
+        assert!(facility.last.lock().is_none());
+    }
+
+    /// A valid, owned, untranslated DMA grant whose mechanism is unwired
+    /// holds `NULL_DMA_ALLOC_FACILITY` and fails closed with `NotImplemented`
+    /// (`AGENTS.md` §2.9) — proving the lookup + validation passed and the
+    /// missing producer denies rather than fabricating a buffer.
+    #[test]
+    fn dma_alloc_with_grant_but_no_facility_is_not_implemented() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// The validated request reaches the carve mechanism with the grant's
+    /// `addr_limit` (not any caller-supplied bound): with the facility
+    /// returning a carve but no caller address space registered for the
+    /// device-address copy-out, the handler fails closed with `BadAddress`
+    /// (the same fault `wait`'s copy-out produces) — proving the request
+    /// flowed all the way to the mechanism with the granted limit.
+    #[test]
+    fn dma_alloc_reaches_the_mechanism_with_the_granted_limit() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: rustos_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x4000_0000,
+            }),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+
+        // No address space is registered for task 2, so the device-address
+        // copy-out fails closed with `BadAddress` (`AGENTS.md` §5.4 / §19.1).
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::BadAddress)
+        );
+        // The carve nonetheless ran with the request length and the grant's
+        // addressing limit — never a caller-supplied bound (§18.3).
+        assert_eq!(*facility.last.lock(), Some((0x1000, 0x4000_0000)));
     }
 
     /// A `ProcessWait` producer that records the last `(parent, pid)` it was

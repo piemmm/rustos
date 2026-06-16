@@ -340,7 +340,23 @@ A future syscall wrapper maps gate failures to `Errno` via
 [`AuditEvent::DmaAllocated`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
 [`AuditEvent::DmaAllocDenied`]: ../../rustos_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
 [DmaPool]: ../../rustos_kernel_mem/dma/struct.DmaPool.html
+[DmaWindowMap]: ../../rustos_kernel_mem/dma/struct.DmaWindowMap.html
 [CapabilityId::MEM_DMA]: ../../rustos_abi/capability/struct.CapabilityId.html#associatedconstant.MEM_DMA
+
+The guarded carve itself lives in the borrowed-space
+[`DmaWindowMap`][DmaWindowMap] (its virtual-window base, slot bitmap, and
+live-allocation records); [`DmaPool`][DmaPool] is the thin owning adapter
+over a space it owns outright, exactly as `MmioMap` wraps `MmioWindowMap`
+(§5.2) — there is one carve definition (`AGENTS.md` §2.2). The retained
+per-task live address space (`LiveSpace`, §7e, the `dma_alloc` syscall
+path) drives the *same* `DmaWindowMap` against the
+space it owns and lends, adding an `addr_limit` bound (the granted device
+DMA constraint, §18.3): a contiguous block that would reach at or above the
+limit is returned to the allocator and the carve refused
+(`DmaError::AddrLimitExceeded`). `LiveSpace` reclaims (zeroes and frees)
+every live DMA block when it is dropped on task exit, so a driver's exit
+leaks no frames and leaves no secret-bearing buffer recoverable
+(`AGENTS.md` §4).
 
 ### 5.1 Slab hand-off to user-space drivers
 

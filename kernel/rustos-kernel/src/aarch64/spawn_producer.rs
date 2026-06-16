@@ -80,6 +80,11 @@ const MMIO_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET
 /// [`rustos_kernel_mem::AnonWindowMap`] places each non-`FIXED` `mem_map`
 /// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + ANON_WINDOW_PAGES·4 KiB)`.
 const ANON_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
+/// Base of a spawned child's guarded DMA-buffer virtual region
+/// (`plans/PI.md` 5d-0-ii (c) DMA half): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
+/// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
+const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -366,6 +371,8 @@ impl Aarch64ProcessSpawn {
                 spawn_layout::MMIO_WINDOW_PAGES,
                 VirtAddr::new(ANON_WINDOW_BASE),
                 spawn_layout::ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                spawn_layout::DMA_WINDOW_PAGES,
             )
             .ok()
             .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),

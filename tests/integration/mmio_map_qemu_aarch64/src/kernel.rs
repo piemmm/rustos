@@ -80,6 +80,15 @@ const ANON_WINDOW_BASE: u64 = USER_BIAS + 0x8000_0000;
 /// of pages out of it; the window is address space, backed on demand).
 const ANON_WINDOW_PAGES: usize = 64;
 
+/// Base of the program's guarded DMA-buffer virtual region: the retained
+/// [`LiveSpace`]'s [`rustos_kernel_mem::DmaWindowMap`] carves each
+/// `dma_alloc` buffer out of this range. 3 GiB above [`USER_BIAS`] — above
+/// the anonymous-heap window and clear of the image/stack — mirroring the
+/// production aarch64 spawn layout (`spawn_layout::DMA_WINDOW_OFFSET`).
+const DMA_WINDOW_BASE: u64 = USER_BIAS + 0xC000_0000;
+/// Pages backing the DMA-buffer window (256 KiB).
+const DMA_WINDOW_PAGES: usize = 64;
+
 /// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
@@ -100,6 +109,7 @@ const TEST_MMIO_MAPPED: EventId = EventId(4295);
 const TEST_FAULT: EventId = EventId(4296);
 const TEST_MEM_MAPPED: EventId = EventId(4297);
 const TEST_MEM_UNMAPPED: EventId = EventId(4298);
+const TEST_DMA_MAPPED: EventId = EventId(4299);
 
 /// Failure finisher codes, distinct per failure site.
 const FAIL_ZERO_FREQ: u16 = 1;
@@ -128,6 +138,16 @@ static MAP_OK: AtomicBool = AtomicBool::new(false);
 /// (`plans/PI.md` 5d-0-ii (c)). The program's `mem_unmap` sets it; PASS
 /// requires both this and [`MAP_OK`].
 static MEM_OK: AtomicBool = AtomicBool::new(false);
+
+/// `true` once a `dma_alloc` carve returned a coherent buffer to the program
+/// — the DMA-carve proof (`plans/PI.md` 5d-0-ii (c) DMA half). Set when the
+/// dispatch services the program's `dma_alloc`; PASS requires it too.
+static DMA_OK: AtomicBool = AtomicBool::new(false);
+
+/// The device-resource grant handle the program carves its DMA buffer
+/// against (the second grant the vertical mints for the task). Must match
+/// the fixture program's `DMA_GRANT_HANDLE`.
+const DMA_GRANT_HANDLE: u64 = 2;
 
 /// Fault handler: any EL0 fault here is unexpected (the program only maps a
 /// window and reads a register), so report it as a failure rather than hang
@@ -333,13 +353,43 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Err(_) => Err(Errno::LengthOutOfRange),
         };
         encode(result)
+    } else if raw == SyscallNumber::DMA_ALLOC.as_u16() {
+        // Carve a coherent DMA buffer into the program's retained live space
+        // via the production `LiveSpace::alloc_dma` (`plans/PI.md` 5d-0-ii (c)
+        // DMA half). The registry-backed grant owner-check is host-proven in
+        // kernel/core; this stand-in accepts only the minted DMA handle and
+        // fails closed otherwise (§5.4). The device-visible-base copy-out is
+        // host-proven, so this returns only the CPU VA. `args[0]` is the grant
+        // handle, `args[1]` the byte length; no addressing limit is declared
+        // for the `virt` coherent stand-in.
+        if args[0] != DMA_GRANT_HANDLE {
+            return encode(Err(Errno::NotFound));
+        }
+        let len = args[1] as usize;
+        let result = match with_current_live_space(BOOT_CPU, |space| space.alloc_dma(len, 0)) {
+            Some(Ok(mapping)) => {
+                DMA_OK.store(true, Ordering::SeqCst);
+                note(
+                    TEST_DMA_MAPPED,
+                    "dma_alloc test: coherent DMA buffer carved",
+                );
+                Ok(mapping.cpu_va)
+            }
+            Some(Err(_)) => Err(Errno::OutOfMemory),
+            None => Err(Errno::NotImplemented),
+        };
+        encode(result)
     } else if raw == SyscallNumber::EXIT.as_u16() {
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as u16;
-        if code == 0 && MAP_OK.load(Ordering::SeqCst) && MEM_OK.load(Ordering::SeqCst) {
+        if code == 0
+            && MAP_OK.load(Ordering::SeqCst)
+            && MEM_OK.load(Ordering::SeqCst)
+            && DMA_OK.load(Ordering::SeqCst)
+        {
             note(
                 TEST_PASS,
-                "mmio_map test: EL0 mapped the granted window, read the device magic, and round-tripped a placed mem_map",
+                "mmio_map test: EL0 mapped the granted window, read the device magic, round-tripped a placed mem_map, and carved a coherent dma_alloc buffer",
             );
             qemu_exit::exit_success();
         }
@@ -467,6 +517,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         MMIO_WINDOW_PAGES,
         VirtAddr::new(ANON_WINDOW_BASE),
         ANON_WINDOW_PAGES,
+        VirtAddr::new(DMA_WINDOW_BASE),
+        DMA_WINDOW_PAGES,
     ) else {
         qemu_exit::exit_failure(FAIL_LIVE_BUILD);
     };

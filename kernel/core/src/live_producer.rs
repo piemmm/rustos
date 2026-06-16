@@ -25,10 +25,10 @@
 //! (`AGENTS.md` §2.9 / §5.4).
 
 use rustos_abi::{Errno, MapFlags};
-use rustos_kernel_mem::{page_count_for, AnonError, LiveSpaceError, MmioError};
+use rustos_kernel_mem::{page_count_for, AnonError, DmaError, LiveSpaceError, MmioError};
 use rustos_kernel_sched_api::SchedulerArch;
 
-use crate::devres::MmioMapFacility;
+use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility};
 use crate::kthread::with_current_live_space;
 use crate::memmap::MemMap;
 
@@ -64,11 +64,30 @@ fn mmio_errno(err: MmioError) -> Errno {
     }
 }
 
+/// Fold a [`DmaError`] onto a stable [`Errno`]: a contiguous-block or
+/// page-table-frame exhaustion is [`Errno::OutOfMemory`] (deterministic OOM,
+/// §4); a request beyond the max buddy order or the granted addressing limit
+/// is [`Errno::OutOfRange`]; a zero-length request is
+/// [`Errno::LengthOutOfRange`]; and a not-reachable frame or page-table
+/// refusal is [`Errno::BadAddress`] (fail closed, `AGENTS.md` §2.9).
+fn dma_errno(err: DmaError) -> Errno {
+    match err {
+        DmaError::Alloc(_) => Errno::OutOfMemory,
+        DmaError::ZeroSize => Errno::LengthOutOfRange,
+        DmaError::SizeUnsupported | DmaError::AddrLimitExceeded => Errno::OutOfRange,
+        // `PageTable`, `DirectMap`, `UnknownBuffer`, `InvalidPoolConfig`, and
+        // any future (`#[non_exhaustive]`) variant fail closed to a generic
+        // bad-address error (`AGENTS.md` §2.9).
+        _ => Errno::BadAddress,
+    }
+}
+
 /// Fold a [`LiveSpaceError`] onto a stable [`Errno`].
 fn live_errno(err: LiveSpaceError) -> Errno {
     match err {
         LiveSpaceError::Anon(anon) => anon_errno(anon),
         LiveSpaceError::Mmio(mmio) => mmio_errno(mmio),
+        LiveSpaceError::Dma(dma) => dma_errno(dma),
         // `LiveSpaceError` is `#[non_exhaustive]`; fail closed.
         _ => Errno::BadAddress,
     }
@@ -162,6 +181,50 @@ where
     }
 }
 
+/// The production DMA-alloc facility: carves a coherent, guard-bracketed DMA
+/// buffer into the calling driver task's own live address space
+/// (`plans/PI.md` P10 chunk 5d-0). The handler has already resolved and
+/// owner-checked the grant and validated its DMA constraint (`AGENTS.md`
+/// §5.4 / §18.3); this performs only the carve mechanism, bounded by the
+/// grant's `addr_limit`.
+pub struct LiveDmaAlloc<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    arch: &'static A,
+}
+
+impl<A> LiveDmaAlloc<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    /// Build the producer over the `'static` arch handle.
+    #[must_use]
+    pub const fn new(arch: &'static A) -> Self {
+        Self { arch }
+    }
+}
+
+impl<A> DmaAllocFacility for LiveDmaAlloc<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    fn alloc(&self, len: usize, addr_limit: u64) -> Result<DmaCarve, Errno> {
+        let cpu = self.arch.current_cpu();
+        // The coherent (and QEMU `virt`) device-visible address is the
+        // CPU-physical base; a translating inbound viewport is refused
+        // earlier in the handler (it rides the metal item), so here the
+        // device address is exactly the carved physical base (§18.1).
+        with_current_live_space(cpu, |space| space.alloc_dma(len, addr_limit))
+            .ok_or(Errno::NotImplemented)?
+            .map(|mapping| DmaCarve {
+                cpu_va: mapping.cpu_va,
+                device_addr: mapping.phys_base,
+            })
+            .map_err(live_errno)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,7 +233,7 @@ mod tests {
     use std::boxed::Box;
     use std::vec::Vec;
 
-    use rustos_kernel_mem::LiveUserSpace;
+    use rustos_kernel_mem::{DmaMapping, LiveUserSpace};
 
     use crate::kthread::publish_live_space_for_test;
     use crate::test_arch::TestArch;
@@ -186,8 +249,13 @@ mod tests {
         anon_placed: Vec<u64>,
         anon_unmaps: Vec<(u64, u64)>,
         device_maps: Vec<(u64, usize)>,
+        dma_allocs: Vec<(usize, u64)>,
         next: Option<LiveSpaceError>,
     }
+
+    /// The physical base a DMA carve reports back from the fake, so the
+    /// producer test can assert the device address flows through unchanged.
+    const DMA_PHYS: u64 = 0x4001_0000;
 
     /// The base a placed (non-`FIXED`) map reports back from the fake, so the
     /// producer test can assert the returned value flows through unchanged.
@@ -223,6 +291,17 @@ mod tests {
             match self.next.take() {
                 Some(err) => Err(err),
                 None => Ok(0x9000_1000),
+            }
+        }
+
+        fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError> {
+            self.dma_allocs.push((len, addr_limit));
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(DmaMapping {
+                    cpu_va: 0xD000_2000,
+                    phys_base: DMA_PHYS,
+                }),
             }
         }
     }
@@ -374,5 +453,44 @@ mod tests {
             producer.map_window(0xFE98_0000, 0x4000),
             Err(Errno::OutOfMemory)
         );
+    }
+
+    #[test]
+    fn dma_alloc_routes_a_carve_to_the_current_live_space() {
+        let (fake, ptr) = leak_fake();
+        let _guard = publish_live_space_for_test(10, fake);
+
+        let producer = LiveDmaAlloc::new(arch_at(10));
+        let carve = producer.alloc(2 * PAGE, 0x4000_0000);
+        // The CPU VA and the physical-base-as-device-address flow back from
+        // the live space unchanged.
+        assert_eq!(
+            carve,
+            Ok(DmaCarve {
+                cpu_va: 0xD000_2000,
+                device_addr: DMA_PHYS,
+            })
+        );
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.dma_allocs, std::vec![(2 * PAGE, 0x4000_0000)]);
+    }
+
+    #[test]
+    fn dma_alloc_with_no_published_space_fails_closed() {
+        let producer = LiveDmaAlloc::new(arch_at(11));
+        assert_eq!(producer.alloc(PAGE, 0), Err(Errno::NotImplemented));
+    }
+
+    #[test]
+    fn dma_alloc_folds_an_addressing_limit_error_to_out_of_range() {
+        let (fake, _ptr) = leak_fake_with(FakeLive {
+            next: Some(LiveSpaceError::Dma(DmaError::AddrLimitExceeded)),
+            ..FakeLive::default()
+        });
+        let _guard = publish_live_space_for_test(12, fake);
+
+        let producer = LiveDmaAlloc::new(arch_at(12));
+        assert_eq!(producer.alloc(PAGE, 0x1000), Err(Errno::OutOfRange));
     }
 }

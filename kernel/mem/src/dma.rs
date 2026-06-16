@@ -119,6 +119,13 @@ pub enum DmaError {
     /// would be indistinguishable from a one-byte allocation and is
     /// almost always a bug at the call site.
     ZeroSize,
+    /// The contiguous physical block the allocator would hand out lies
+    /// (wholly or partly) at or above the device's addressing limit —
+    /// the grant's DMA constraint (`AGENTS.md` §4 / §18.3). The block is
+    /// returned to the allocator and the request refused fail-closed
+    /// rather than handing a device a buffer it cannot reach (or, worse,
+    /// one outside the region the kernel granted it).
+    AddrLimitExceeded,
 }
 
 impl From<AllocError> for DmaError {
@@ -143,6 +150,9 @@ impl fmt::Display for DmaError {
             Self::InvalidPoolConfig => f.write_str("dma pool config invalid"),
             Self::SizeUnsupported => f.write_str("dma request exceeds max buddy order"),
             Self::ZeroSize => f.write_str("zero-sized dma allocation is not permitted"),
+            Self::AddrLimitExceeded => {
+                f.write_str("dma buffer exceeds the granted device addressing limit")
+            }
         }
     }
 }
@@ -196,19 +206,18 @@ impl DmaBuffer {
     }
 }
 
-/// Per-process DMA pool.
+/// Borrowed-space DMA window allocator — the §2.2 single definition of the
+/// guarded, contiguous, zeroed DMA carve.
 ///
-/// `DmaPool<P>` is generic over a [`PageTable`] implementation so
-/// it can be exercised by `crate::HostPageTable` in unit tests and
-/// driven by the architecture page-table types from `kernel/arch/*` in
-/// production.
-///
-/// One pool is intended to live per process that holds
-/// `CapabilityId::MEM_DMA`; the capability check itself lives in
-/// `kernel/sec::dma` so this crate stays free of the `rustos-abi`
-/// dependency.
-pub struct DmaPool<'a, P: PageTable> {
-    address_space: AddressSpace<P>,
+/// Owns only the *bookkeeping* (its virtual window base, the slot bitmap,
+/// and the live-allocation records); the [`AddressSpace`], the
+/// [`FrameAllocator`], and the [`PhysMap`] are **borrowed** per call. This
+/// is the device-RAM analogue of [`crate::mmio::MmioWindowMap`]: it lets a
+/// retained live address space ([`crate::live::LiveSpace`]) carve a DMA
+/// buffer into a space it owns and lends, while the owning [`DmaPool`]
+/// wrapper drives the same core over a space it owns outright — so the
+/// carve logic has exactly one home (`AGENTS.md` §2.2).
+pub struct DmaWindowMap {
     base: VirtAddr,
     capacity_pages: usize,
     /// Slot bookkeeping: `slot_used[i] == true` iff page `i` of the
@@ -219,6 +228,24 @@ pub struct DmaPool<'a, P: PageTable> {
     /// page, i.e. the byte after the leading guard). `BTreeMap` rather
     /// than `HashMap` because this crate is `no_std`.
     allocations: BTreeMap<u64, Record>,
+}
+
+/// Per-process DMA pool.
+///
+/// `DmaPool<P>` is generic over a [`PageTable`] implementation so
+/// it can be exercised by `crate::HostPageTable` in unit tests and
+/// driven by the architecture page-table types from `kernel/arch/*` in
+/// production.
+///
+/// One pool is intended to live per process that holds
+/// `CapabilityId::MEM_DMA`; the capability check itself lives in
+/// `kernel/sec::dma` so this crate stays free of the `rustos-abi`
+/// dependency. The guarded carve mechanism lives in [`DmaWindowMap`]
+/// (shared with the `dma_alloc` syscall facility, `AGENTS.md` §2.2); this
+/// type is the thin owning adapter over a space it owns outright.
+pub struct DmaPool<'a, P: PageTable> {
+    address_space: AddressSpace<P>,
+    window: DmaWindowMap,
     /// Direct physical map used to reach a buffer's frames from the
     /// CPU. The same frames the device DMAs to are the bytes the
     /// driver reads/writes, so there is no disconnected copy: in
@@ -250,6 +277,381 @@ struct Record {
     start_frame: Frame,
 }
 
+impl DmaWindowMap {
+    /// Construct a window allocator managing the virtual range
+    /// `[base, base + capacity_pages * PAGE_SIZE)`.
+    ///
+    /// # Errors
+    ///
+    /// * [`DmaError::InvalidPoolConfig`] if `capacity_pages == 0`,
+    ///   `base` is not page-aligned, or the window size overflows.
+    pub fn new(base: VirtAddr, capacity_pages: usize) -> Result<Self, DmaError> {
+        if capacity_pages == 0 || !base.is_page_aligned() {
+            return Err(DmaError::InvalidPoolConfig);
+        }
+        // Reject a window whose byte span would overflow the slot
+        // offset arithmetic in `virt_of_slot` before committing state.
+        capacity_pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(DmaError::InvalidPoolConfig)?;
+        Ok(Self {
+            base,
+            capacity_pages,
+            slot_used: vec![false; capacity_pages],
+            allocations: BTreeMap::new(),
+        })
+    }
+
+    /// Allocate a contiguous DMA region of at least `requested` bytes
+    /// into the borrowed `space`, drawing contiguous frames from `frames`
+    /// and reaching them through `phys`.
+    ///
+    /// When `addr_limit` is non-zero the contiguous block must lie wholly
+    /// below it (the granted device addressing constraint, `AGENTS.md` §4 /
+    /// §18.3); a block that would reach at or above the limit is returned to
+    /// the allocator and the request refused with
+    /// [`DmaError::AddrLimitExceeded`]. `addr_limit == 0` means "no
+    /// constraint declared" (the in-kernel pool path).
+    pub fn alloc_into<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        phys: &dyn PhysMap,
+        requested: usize,
+        addr_limit: u64,
+    ) -> Result<DmaBuffer, DmaError> {
+        self.alloc_inner(space, frames, phys, requested, addr_limit)
+    }
+
+    /// Free a previously-allocated DMA buffer from the borrowed `space`,
+    /// zeroing every byte (zero-on-free, `AGENTS.md` §4) before the frames
+    /// return to `frames`.
+    ///
+    /// # Errors
+    ///
+    /// As [`DmaPool::free`].
+    pub fn free_from<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        phys: &dyn PhysMap,
+        buf: DmaBuffer,
+    ) -> Result<(), DmaError> {
+        self.free_inner(space, frames, phys, buf)
+    }
+
+    /// Look up `buf`'s live record and return its `(physical base, byte
+    /// length)`. Returns [`DmaError::UnknownBuffer`] if the buffer is not
+    /// live in this window.
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::UnknownBuffer`] if `buf` is not a live allocation.
+    pub fn live_frames(&self, buf: &DmaBuffer) -> Result<(PhysAddr, usize), DmaError> {
+        let record = self
+            .allocations
+            .get(&buf.virt.as_u64())
+            .ok_or(DmaError::UnknownBuffer)?;
+        Ok((record.start_frame.start(), record.data_pages * PAGE_SIZE))
+    }
+
+    /// Number of live allocations.
+    #[must_use]
+    pub fn live(&self) -> usize {
+        self.allocations.len()
+    }
+
+    /// Total pages in the window.
+    #[must_use]
+    pub fn capacity_pages(&self) -> usize {
+        self.capacity_pages
+    }
+
+    /// Reclaim **every** live DMA buffer from the borrowed `space`, zeroing
+    /// each backing block (zero-on-free, `AGENTS.md` §4) before its frames
+    /// return to `frames`.
+    ///
+    /// Best-effort teardown for [`crate::live::LiveSpace`]'s `Drop`: a driver
+    /// task's exit must not leak the physical frames its DMA buffers held or
+    /// leave their (possibly secret-bearing) contents recoverable. A
+    /// per-buffer error on this path has no better recovery than dropping it
+    /// (`AGENTS.md` §2.9 — never a panic).
+    pub fn drain_into<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        phys: &dyn PhysMap,
+    ) {
+        // Collect the live keys first so the free loop does not iterate the
+        // map while `free_from` removes from it.
+        let keys: Vec<u64> = self.allocations.keys().copied().collect();
+        for virt in keys {
+            let Some(record) = self.allocations.get(&virt) else {
+                continue;
+            };
+            let buf = DmaBuffer {
+                virt: VirtAddr::new(virt),
+                phys: record.start_frame.start(),
+                len: record.data_pages * PAGE_SIZE,
+            };
+            let _ = self.free_from(space, frames, phys, buf);
+        }
+    }
+
+    /// The borrowed-space carve shared by [`Self::alloc_into`] and
+    /// [`DmaPool::alloc`] (the §2.2 single definition).
+    fn alloc_inner<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        phys: &dyn PhysMap,
+        requested: usize,
+        addr_limit: u64,
+    ) -> Result<DmaBuffer, DmaError> {
+        if requested == 0 {
+            return Err(DmaError::ZeroSize);
+        }
+        // Round up to a page count.
+        let needed_pages = requested.div_ceil(PAGE_SIZE);
+        // Round needed_pages up to the next power of two so we can
+        // satisfy it with a single buddy-order allocation.
+        let order = needed_pages.next_power_of_two().trailing_zeros();
+        if order > MAX_ORDER {
+            return Err(DmaError::SizeUnsupported);
+        }
+        let data_pages = 1usize << order;
+        // We need `data_pages + 2` consecutive free slots (leading
+        // guard + data + trailing guard).
+        let block_pages = data_pages.checked_add(2).ok_or(DmaError::SizeUnsupported)?;
+        let leading_guard_slot = self
+            .find_free_run(block_pages)
+            .ok_or(DmaError::Alloc(AllocError::OutOfMemory))?;
+        let first_data_slot = leading_guard_slot + 1;
+        let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
+
+        // Reserve frames *before* mutating the slot bitmap so a frame
+        // OOM leaves the pool's state untouched.
+        let start_frame = frames.alloc_order(order)?;
+
+        // Enforce the granted device addressing limit (`AGENTS.md` §4 /
+        // §18.3): the whole contiguous block must lie below `addr_limit`
+        // (when one is declared), or the device could be handed a buffer
+        // it cannot reach — or one outside the region the kernel granted
+        // it. A block that exceeds the limit is returned immediately and
+        // the request refused fail-closed (`AGENTS.md` §2.9 / §5.4). The
+        // block was just minted, so the free matches and cannot fail.
+        if addr_limit != 0 {
+            let data_len = (data_pages as u64) * PAGE_SIZE as u64;
+            let block_end = start_frame.start().as_u64().checked_add(data_len);
+            if block_end.map_or(true, |end| end > addr_limit) {
+                let _ = frames.free_order(start_frame, order);
+                return Err(DmaError::AddrLimitExceeded);
+            }
+        }
+
+        // Map every data page. If any map fails, roll back the ones
+        // we already mapped and return the frames to the allocator.
+        for i in 0..data_pages {
+            let virt = self.virt_of_slot(first_data_slot + i);
+            let frame = Frame(start_frame.0 + i);
+            let page = match Page::from_addr(virt) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.rollback_partial_map(
+                        space,
+                        frames,
+                        first_data_slot,
+                        i,
+                        start_frame,
+                        order,
+                    );
+                    return Err(DmaError::PageTable(e));
+                }
+            };
+            if let Err(e) = space.map(
+                page,
+                frame,
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            ) {
+                self.rollback_partial_map(space, frames, first_data_slot, i, start_frame, order);
+                return Err(DmaError::PageTable(e));
+            }
+        }
+
+        // Zero the data region through the direct map so the caller
+        // observes a clean buffer. The frames are mapped above and not
+        // yet reachable by any other allocation, so a failure to reach
+        // them is a platform-config bug: roll back and fail closed.
+        let data_len = data_pages * PAGE_SIZE;
+        // SAFETY: when `translate` succeeds it returns a pointer to
+        // `data_len` bytes of the frames just mapped; no other live
+        // allocation covers them (the slot run was free), so the slice
+        // aliases nothing.
+        let data = phys
+            .translate(start_frame.start(), data_len)
+            .and_then(|ptr| unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) });
+        let Some(data) = data else {
+            self.rollback_partial_map(
+                space,
+                frames,
+                first_data_slot,
+                data_pages,
+                start_frame,
+                order,
+            );
+            return Err(DmaError::DirectMap);
+        };
+        for b in data.iter_mut() {
+            *b = 0;
+        }
+
+        // Mark every slot — guard and data alike — as used so no
+        // future allocation can overlap them.
+        for s in leading_guard_slot..=trailing_guard_slot {
+            self.slot_used[s] = true;
+        }
+
+        let virt = self.virt_of_slot(first_data_slot);
+        let phys_base = start_frame.start();
+        let len = data_pages * PAGE_SIZE;
+        self.allocations.insert(
+            virt.as_u64(),
+            Record {
+                leading_guard_slot,
+                data_pages,
+                order,
+                start_frame,
+            },
+        );
+        Ok(DmaBuffer {
+            virt,
+            phys: phys_base,
+            len,
+        })
+    }
+
+    /// Free a previously-allocated DMA buffer.
+    ///
+    /// Every byte of the data region is zeroed (via the audited
+    /// `zeroize` crate's volatile clear) *before* the backing frames
+    /// are returned to the [`FrameAllocator`], so neither a later
+    /// allocation nor a forensic dump of free memory can recover the
+    /// credentials the buffer once held (`AGENTS.md` §4). The clear
+    /// runs through the direct map, i.e. on the same physical frames
+    /// the device used.
+    ///
+    /// # Errors
+    ///
+    /// * [`DmaError::UnknownBuffer`] — the buffer's `virt` is not the
+    ///   start of a live allocation in this pool (covers double-free
+    ///   and cross-pool free).
+    /// * [`DmaError::DirectMap`] — the buffer's frames are outside the
+    ///   direct physical map, so the zero-on-free clear cannot run
+    ///   (a platform-config bug).
+    /// * [`DmaError::PageTable`] — propagated from
+    ///   [`AddressSpace::unmap`] (e.g. if a higher-level test removed
+    ///   a mapping out of band).
+    fn free_inner<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        phys: &dyn PhysMap,
+        buf: DmaBuffer,
+    ) -> Result<(), DmaError> {
+        let record = self
+            .allocations
+            .remove(&buf.virt.as_u64())
+            .ok_or(DmaError::UnknownBuffer)?;
+        let data_pages = record.data_pages;
+        let first_data_slot = record.leading_guard_slot + 1;
+        let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
+
+        // 1. Zero the data region (zero-on-free) on the real frames,
+        //    before they are unmapped or returned to the allocator.
+        let data_len = data_pages * PAGE_SIZE;
+        let ptr = phys
+            .translate(record.start_frame.start(), data_len)
+            .ok_or(DmaError::DirectMap)?;
+        // SAFETY: the frames are still mapped and reserved (the slot
+        // bitmap is cleared only below), so the pointer is exclusively
+        // owned for `data_len` bytes. `zeroize` performs a volatile
+        // write the compiler cannot elide.
+        unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) }
+            .ok_or(DmaError::DirectMap)?
+            .zeroize();
+
+        // 2. Unmap data pages.
+        for i in 0..data_pages {
+            let virt = self.virt_of_slot(first_data_slot + i);
+            let page = Page::from_addr(virt)?;
+            // `unmap` returns the frame that was mapped; we already
+            // know it from `record.start_frame + i` so we discard the
+            // returned value.
+            let _ = space.unmap(page)?;
+        }
+
+        // 3. Return frames in one buddy-order operation.
+        frames
+            .free_order(record.start_frame, record.order)
+            .map_err(DmaError::Alloc)?;
+
+        // 4. Mark guard and data slots free again.
+        for s in record.leading_guard_slot..=trailing_guard_slot {
+            self.slot_used[s] = false;
+        }
+        Ok(())
+    }
+
+    fn virt_of_slot(&self, slot: usize) -> VirtAddr {
+        VirtAddr::new(self.base.as_u64() + ((slot as u64) << PAGE_SHIFT))
+    }
+
+    /// First slot index of a run of `len` consecutive *unused* slots,
+    /// or `None` if no such run exists.
+    fn find_free_run(&self, len: usize) -> Option<usize> {
+        if len == 0 || len > self.capacity_pages {
+            return None;
+        }
+        let mut start = 0;
+        while start + len <= self.capacity_pages {
+            let mut ok = true;
+            for i in 0..len {
+                if self.slot_used[start + i] {
+                    start = start + i + 1;
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some(start);
+            }
+        }
+        None
+    }
+
+    fn rollback_partial_map<P: PageTable>(
+        &self,
+        space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
+        first_data_slot: usize,
+        mapped_so_far: usize,
+        start_frame: Frame,
+        order: u32,
+    ) {
+        // Best-effort: unmap any pages we already mapped. We
+        // deliberately discard inner errors — we're already on the
+        // error path, and the alternative (panicking) is forbidden
+        // by `AGENTS.md` §2.9.
+        for i in 0..mapped_so_far {
+            let virt = self.virt_of_slot(first_data_slot + i);
+            if let Ok(page) = Page::from_addr(virt) {
+                let _ = space.unmap(page);
+            }
+        }
+        let _ = frames.free_order(start_frame, order);
+    }
+}
+
 impl<'a, P: PageTable> DmaPool<'a, P> {
     /// Construct a new pool managing the virtual range
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
@@ -275,20 +677,10 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
         frames: &'a FrameAllocator,
         phys: &'a dyn PhysMap,
     ) -> Result<Self, DmaError> {
-        if capacity_pages == 0 || !base.is_page_aligned() {
-            return Err(DmaError::InvalidPoolConfig);
-        }
-        // Reject a window whose byte span would overflow the slot
-        // offset arithmetic in `virt_of_slot` before committing state.
-        capacity_pages
-            .checked_mul(PAGE_SIZE)
-            .ok_or(DmaError::InvalidPoolConfig)?;
+        let window = DmaWindowMap::new(base, capacity_pages)?;
         Ok(Self {
             address_space,
-            base,
-            capacity_pages,
-            slot_used: vec![false; capacity_pages],
-            allocations: BTreeMap::new(),
+            window,
             phys,
             frames,
         })
@@ -297,7 +689,9 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// Allocate a contiguous DMA region of at least `requested` bytes.
     ///
     /// The returned buffer's `len` is `requested` rounded up to the
-    /// next power-of-two multiple of [`PAGE_SIZE`].
+    /// next power-of-two multiple of [`PAGE_SIZE`]. The in-kernel pool
+    /// declares no device addressing constraint (the carve is bounded
+    /// by the pool's own window), so it passes `addr_limit == 0`.
     ///
     /// # Errors
     ///
@@ -310,93 +704,13 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// * [`DmaError::PageTable`] — propagated from the
     ///   [`AddressSpace`] when a mapping operation fails.
     pub fn alloc(&mut self, requested: usize) -> Result<DmaBuffer, DmaError> {
-        if requested == 0 {
-            return Err(DmaError::ZeroSize);
-        }
-        // Round up to a page count.
-        let needed_pages = requested.div_ceil(PAGE_SIZE);
-        // Round needed_pages up to the next power of two so we can
-        // satisfy it with a single buddy-order allocation.
-        let order = needed_pages.next_power_of_two().trailing_zeros();
-        if order > MAX_ORDER {
-            return Err(DmaError::SizeUnsupported);
-        }
-        let data_pages = 1usize << order;
-        // We need `data_pages + 2` consecutive free slots (leading
-        // guard + data + trailing guard).
-        let block_pages = data_pages.checked_add(2).ok_or(DmaError::SizeUnsupported)?;
-        let leading_guard_slot = self
-            .find_free_run(block_pages)
-            .ok_or(DmaError::Alloc(AllocError::OutOfMemory))?;
-        let first_data_slot = leading_guard_slot + 1;
-        let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
-
-        // Reserve frames *before* mutating the slot bitmap so a frame
-        // OOM leaves the pool's state untouched.
-        let start_frame = self.frames.alloc_order(order)?;
-
-        // Map every data page. If any map fails, roll back the ones
-        // we already mapped and return the frames to the allocator.
-        for i in 0..data_pages {
-            let virt = self.virt_of_slot(first_data_slot + i);
-            let frame = Frame(start_frame.0 + i);
-            let page = match Page::from_addr(virt) {
-                Ok(p) => p,
-                Err(e) => {
-                    self.rollback_partial_map(first_data_slot, i, start_frame, order);
-                    return Err(DmaError::PageTable(e));
-                }
-            };
-            if let Err(e) = self.address_space.map(
-                page,
-                frame,
-                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
-            ) {
-                self.rollback_partial_map(first_data_slot, i, start_frame, order);
-                return Err(DmaError::PageTable(e));
-            }
-        }
-
-        // Zero the data region through the direct map so the caller
-        // observes a clean buffer. The frames are mapped above and not
-        // yet reachable by any other allocation, so a failure to reach
-        // them is a platform-config bug: roll back and fail closed.
-        let data_len = data_pages * PAGE_SIZE;
-        // SAFETY: when `translate` succeeds it returns a pointer to
-        // `data_len` bytes of the frames just mapped; no other live
-        // allocation covers them (the slot run was free), so the slice
-        // aliases nothing.
-        let data = self
-            .phys
-            .translate(start_frame.start(), data_len)
-            .and_then(|ptr| unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) });
-        let Some(data) = data else {
-            self.rollback_partial_map(first_data_slot, data_pages, start_frame, order);
-            return Err(DmaError::DirectMap);
-        };
-        for b in data.iter_mut() {
-            *b = 0;
-        }
-
-        // Mark every slot — guard and data alike — as used so no
-        // future allocation can overlap them.
-        for s in leading_guard_slot..=trailing_guard_slot {
-            self.slot_used[s] = true;
-        }
-
-        let virt = self.virt_of_slot(first_data_slot);
-        let phys = start_frame.start();
-        let len = data_pages * PAGE_SIZE;
-        self.allocations.insert(
-            virt.as_u64(),
-            Record {
-                leading_guard_slot,
-                data_pages,
-                order,
-                start_frame,
-            },
-        );
-        Ok(DmaBuffer { virt, phys, len })
+        self.window.alloc_into(
+            &mut self.address_space,
+            self.frames,
+            self.phys,
+            requested,
+            0,
+        )
     }
 
     /// Free a previously-allocated DMA buffer.
@@ -421,49 +735,8 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     ///   [`AddressSpace::unmap`] (e.g. if a higher-level test removed
     ///   a mapping out of band).
     pub fn free(&mut self, buf: DmaBuffer) -> Result<(), DmaError> {
-        let record = self
-            .allocations
-            .remove(&buf.virt.as_u64())
-            .ok_or(DmaError::UnknownBuffer)?;
-        let data_pages = record.data_pages;
-        let first_data_slot = record.leading_guard_slot + 1;
-        let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
-
-        // 1. Zero the data region (zero-on-free) on the real frames,
-        //    before they are unmapped or returned to the allocator.
-        let data_len = data_pages * PAGE_SIZE;
-        let ptr = self
-            .phys
-            .translate(record.start_frame.start(), data_len)
-            .ok_or(DmaError::DirectMap)?;
-        // SAFETY: the frames are still mapped and reserved (the slot
-        // bitmap is cleared only below), so the pointer is exclusively
-        // owned for `data_len` bytes. `zeroize` performs a volatile
-        // write the compiler cannot elide.
-        unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) }
-            .ok_or(DmaError::DirectMap)?
-            .zeroize();
-
-        // 2. Unmap data pages.
-        for i in 0..data_pages {
-            let virt = self.virt_of_slot(first_data_slot + i);
-            let page = Page::from_addr(virt)?;
-            // `unmap` returns the frame that was mapped; we already
-            // know it from `record.start_frame + i` so we discard the
-            // returned value.
-            let _ = self.address_space.unmap(page)?;
-        }
-
-        // 3. Return frames in one buddy-order operation.
-        self.frames
-            .free_order(record.start_frame, record.order)
-            .map_err(DmaError::Alloc)?;
-
-        // 4. Mark guard and data slots free again.
-        for s in record.leading_guard_slot..=trailing_guard_slot {
-            self.slot_used[s] = false;
-        }
-        Ok(())
+        self.window
+            .free_from(&mut self.address_space, self.frames, self.phys, buf)
     }
 
     /// Borrow the data bytes of `buf` mutably.
@@ -478,7 +751,7 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// * [`DmaError::DirectMap`] if the frames are outside the direct
     ///   physical map.
     pub fn bytes_mut(&mut self, buf: DmaBuffer) -> Result<&mut [u8], DmaError> {
-        let (phys, len) = self.live_frames(&buf)?;
+        let (phys, len) = self.window.live_frames(&buf)?;
         let ptr = self.phys.translate(phys, len).ok_or(DmaError::DirectMap)?;
         // SAFETY: `translate` returned a pointer to `len` bytes of this
         // buffer's frames; the slot bitmap proves no other live
@@ -511,7 +784,7 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// [`DmaError::UnknownBuffer`] if `buf` does not name a live
     /// allocation of this pool.
     pub fn slot_base(&self, buf: &DmaBuffer) -> Result<NonNull<u8>, DmaError> {
-        let (phys, len) = self.live_frames(buf)?;
+        let (phys, len) = self.window.live_frames(buf)?;
         // The pointer names the buffer's physical frames through the
         // direct map. The slot bitmap proves no other live allocation
         // covers `[ptr, ptr + len)`, and every write through it is
@@ -526,7 +799,7 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     ///
     /// See [`Self::bytes_mut`].
     pub fn bytes(&self, buf: DmaBuffer) -> Result<&[u8], DmaError> {
-        let (phys, len) = self.live_frames(&buf)?;
+        let (phys, len) = self.window.live_frames(&buf)?;
         let ptr = self.phys.translate(phys, len).ok_or(DmaError::DirectMap)?;
         // SAFETY: as `bytes_mut`, but the shared borrow of `self`
         // yields a shared slice; the pool holds the single live record
@@ -538,75 +811,13 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// Number of live allocations.
     #[must_use]
     pub fn live(&self) -> usize {
-        self.allocations.len()
+        self.window.live()
     }
 
     /// Total pages in the pool's virtual window.
     #[must_use]
     pub fn capacity_pages(&self) -> usize {
-        self.capacity_pages
-    }
-
-    // -----------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------
-
-    /// Look up `buf`'s live record and return its `(physical base,
-    /// byte length)`. Returns [`DmaError::UnknownBuffer`] if the
-    /// buffer is not live in this pool.
-    fn live_frames(&self, buf: &DmaBuffer) -> Result<(PhysAddr, usize), DmaError> {
-        let record = self
-            .allocations
-            .get(&buf.virt.as_u64())
-            .ok_or(DmaError::UnknownBuffer)?;
-        Ok((record.start_frame.start(), record.data_pages * PAGE_SIZE))
-    }
-
-    fn virt_of_slot(&self, slot: usize) -> VirtAddr {
-        VirtAddr::new(self.base.as_u64() + ((slot as u64) << PAGE_SHIFT))
-    }
-
-    /// First slot index of a run of `len` consecutive *unused* slots,
-    /// or `None` if no such run exists.
-    fn find_free_run(&self, len: usize) -> Option<usize> {
-        if len == 0 || len > self.capacity_pages {
-            return None;
-        }
-        let mut start = 0;
-        while start + len <= self.capacity_pages {
-            let mut ok = true;
-            for i in 0..len {
-                if self.slot_used[start + i] {
-                    start = start + i + 1;
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                return Some(start);
-            }
-        }
-        None
-    }
-
-    fn rollback_partial_map(
-        &mut self,
-        first_data_slot: usize,
-        mapped_so_far: usize,
-        start_frame: Frame,
-        order: u32,
-    ) {
-        // Best-effort: unmap any pages we already mapped. We
-        // deliberately discard inner errors — we're already on the
-        // error path, and the alternative (panicking) is forbidden
-        // by `AGENTS.md` §2.9.
-        for i in 0..mapped_so_far {
-            let virt = self.virt_of_slot(first_data_slot + i);
-            if let Ok(page) = Page::from_addr(virt) {
-                let _ = self.address_space.unmap(page);
-            }
-        }
-        let _ = self.frames.free_order(start_frame, order);
+        self.window.capacity_pages()
     }
 }
 
