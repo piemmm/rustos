@@ -619,15 +619,46 @@ order (one fully-gated increment each):
        method only — no `#[repr(C)]`/C-header drift. Host-proven (the
        `InterfaceInfo::decode` fail-closed cases, the emitted-node match, the
        pre-enumeration refusal).
-   - **5c — production driver-candidate catalogue + `devmgr` autoload
-     wiring** over the static + runtime tree, driving the chain through the
-     driver-host load gate. Rides the still-open DriverSpawner-over-IPC gap
-     (increment 1 — the `DriverHost` DMA/MMIO surface reachable over IPC).
-   - **5d — userland keyboard service** hosting the continuous report
-     pump, autoloaded by `devmgr`, feeding the input-focus arbiter via
-     `key_inject`.
-   - **5e — delete `usb_keyboard.rs`** (§2.14) and update §3 / this stage
-     once the generic path drives the chain end to end.
+     The remaining sub-increments turn the bring-up *around* — from a
+     hand-composed module that hunts for the keyboard to data-driven
+     discovery + `devmgr` autoload — one fully-gated landing each. A live
+     VL805 path is a §0.4 metal-acceptance item (no Pi-board QEMU vertical),
+     so each chunk touching it lands host tests **plus** a metal checklist;
+     the operator supplies the UART/debug log before the next chunk starts.
+     Security and correctness are the floor: every load capability-gated
+     **and** signature-verified, every input validated, fail closed (§5.4 /
+     §23.1).
+     - **5c-i — discovery-driven in-kernel bring-up.** Add the production
+       **driver-candidate catalogue** for the chain (authored from each
+       driver's `BIND_KEYS`) and rework `keyboard_service` so the bring-up
+       is **driven by `devmgr` matching** against the discovered/runtime
+       tree, not hand-sequenced: discovered `brcm,bcm2711-pcie` node →
+       match → bring up the PCIe RC + xHCI bus driver → the bus driver
+       enumerates and emits the HID child `HwNode` (5b-ii) into a growable
+       runtime tree → re-run autoload → match `usb_hid` → start the report
+       pump. The load mechanism stays an **in-kernel `DriverLoader`**
+       binding the statically-linked driver crates' `register()` (the
+       DriverHost-over-IPC gap is not yet closed). Unmatched nodes left
+       unbound + logged (§18.4); host-tested.
+     - **5c-ii — load through the drvhost `Host::load` gate.** Route the
+       in-kernel load through `run_with_driver_host` so the bus/HID drivers
+       are admitted with full signature verification + `CAP_DRV_LOAD` /
+       `CAP_DRV_KERNEL` gating against the manifest bind tables, not a bare
+       `register()` call. Still the in-kernel address space; the
+       `DriverSpawner` is the in-process register for now. Host-tested.
+     - **5d-0 — the `DriverHost` DMA/MMIO surface reachable over IPC** (the
+       standing gap, increment 1's remainder): a user-space driver maps its
+       register windows and carves its DMA region over capability-gated
+       IPC, with every check staying kernel-side (§5.4). Likely its own
+       multi-step landing; host-provable plus a `-M virt` vertical where a
+       virtio device stands in for the metal controller.
+     - **5d — userland keyboard service** hosting the continuous report
+       pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
+       input-focus arbiter via `key_inject`. The "drivers in userland"
+       steady state.
+     - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14) and
+       update §3 / this stage once the generic path drives the chain end to
+       end on metal.
 
 ---
 

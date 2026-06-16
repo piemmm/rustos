@@ -3061,11 +3061,25 @@ table, so a new board is match **data**, not new code. Sub-increments
   fabricated, §18.5), and `UsbDevice::describe_device(parent, node)` returns an
   `Input` `HwNode` with one `HwMatchKey::usb` of `vid:pid` + that class (a new
   method only — no C-header drift), host-proven that the `usb_hid::BIND_KEYS`
-  keyboard key resolves against it. Then **5c** the production
-  driver-candidate catalogue + `devmgr` autoload wiring
-  (rides DriverSpawner-over-IPC, Stage 4.HW increment 1); **5d** the
-  continuous keyboard *service*; **5e** delete `usb_keyboard.rs` (§2.14) once
-  the generic path drives the chain.
+  keyboard key resolves against it. The remaining sub-increments turn the
+  bring-up *around* — from a module that hunts for the keyboard to
+  data-driven discovery + `devmgr` autoload (one fully-gated landing each;
+  the live VL805 path is a §0.4 metal-acceptance item, so each touching
+  chunk lands host tests + a metal checklist and the operator supplies the
+  UART log between chunks):
+  - **5c-i** the production driver-candidate catalogue + `keyboard_service`
+    reworked so the chain bring-up is driven by `devmgr` matching the
+    discovered/runtime tree (in-kernel `DriverLoader` binding the chain
+    crates' `register()`; the DriverHost-over-IPC gap not yet closed).
+  - **5c-ii** route that in-kernel load through the drvhost `Host::load`
+    gate (`run_with_driver_host`) — full signature + `CAP_DRV_LOAD` /
+    `CAP_DRV_KERNEL` gating against the manifest bind tables.
+  - **5d-0** the `DriverHost` DMA/MMIO surface reachable **over IPC** (the
+    standing gap, Stage 4.HW increment 1's remainder).
+  - **5d** the continuous keyboard *service* in **user space**, autoloaded
+    by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
+  - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) once the
+    generic path drives the chain end to end on metal.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
