@@ -3141,24 +3141,35 @@ table, so a new board is match **data**, not new code. Sub-increments
     window into the calling driver's own address space. A driver passes an
     unforgeable, kernel-issued device-resource grant **handle** (never a raw
     phys address); the kernel-core handler resolves it **against the calling
-    task** through the `kernel/core::devres::ResourceGrants` seam (owner-
-    checked forgery defence, §5.4), validates the grant names a memory
-    window (`devres::mappable_window` — `Mmio`/`BusWindow`), and maps only
-    that region through the architecture `devres::MmioMapFacility` producer
+    task** through the per-task device-resource grant table (owner-checked
+    forgery defence, §5.4), validates the grant names a memory window
+    (`devres::mappable_window` — `Mmio`/`BusWindow`), and maps only that
+    region through the architecture `devres::MmioMapFacility` producer
     (§18.3 — a driver reaches only the resources its matched node requested;
-    §4 — no ambient authority). Both seams fail closed to NULL defaults
-    (`NULL_RESOURCE_GRANTS` → `NotFound`, `NULL_MMIO_MAP_FACILITY` →
-    `NotImplemented`), exactly as `mem_map` shipped its core handler before
-    its arch producer. Host-tested (devres 6 + handler 5 + dispatch
-    reachability), C header regenerated, abi-check/drift green. **Remaining
-    (next landings, staged):** (a) the grant-issuing path that mints a
-    driver's per-node resource handles at autoload/spawn and a concrete
-    `ResourceGrants` table reclaimed on exit; (b) the architecture
-    `MmioMapFacility` producer (`kernel/mem` live-mapping of device phys into
-    a running user aspace, the SP5b-class machinery, per port); (c) the DMA
-    half (a `dma_alloc`-equivalent bounded by the grant's `addr_limit`); and
-    (d) the `-M virt` vertical where a user program maps a virtio-mmio
-    register window through a granted handle. A live VL805 path stays a §0.4
+    §4 — no ambient authority). The map facility fails closed to its NULL
+    default (`NULL_MMIO_MAP_FACILITY` → `NotImplemented`), exactly as
+    `mem_map` shipped its core handler before its arch producer. **5d-0-ii
+    (a) — the concrete grant table — LANDED.** The per-task device-resource
+    grants live in `kernel/core::aspace::AddressSpaceRegistry` alongside the
+    task's streams and limits (the same per-process lifecycle, so a parallel
+    per-task registry + lock is avoided, §2.2): `mint_grant(task, resource)`
+    issues a per-task, monotonic, never-reused handle from `1` (handle `0`
+    reserved-invalid); `grant(task, handle)` resolves it owner-checked (a
+    foreign task or unknown handle → `None`, the forgery defence the handler
+    relies on); and `withdraw` reclaims every grant when the task exits. The
+    `mmio_map` handler now resolves through `aspaces`, and the placeholder
+    `devres::ResourceGrants` trait / `EmptyResourceGrants` /
+    `NULL_RESOURCE_GRANTS` / `with_resource_grants` seam from the security
+    foundation was deleted in place (§2.13 / §2.14). Host-tested (the grant
+    store's 6 unit tests + the 5 `mmio_map` handler tests minting real
+    grants); no `lib/abi`/C-header change. **Remaining (next landings,
+    staged):** (b) the architecture `MmioMapFacility` producer (`kernel/mem`
+    live-mapping of device phys into a running user aspace, the SP5b-class
+    machinery — no production live-aspace mapper exists yet, the dependency
+    this rides — per port); (c) the DMA half (a `dma_alloc`-equivalent
+    bounded by the grant's `addr_limit`); and (d) the `-M virt` vertical
+    where the kernel mints a virtio-mmio window grant for a spawned program
+    that maps it through `mmio_map`. A live VL805 path stays a §0.4
     metal-acceptance item.
   - **5d** the continuous keyboard *service* in **user space**, autoloaded
     by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.

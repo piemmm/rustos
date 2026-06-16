@@ -46,6 +46,7 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::{DescriptorTable, LimitKind, ResourceLimit};
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
@@ -101,6 +102,36 @@ pub struct AddressSpaceRegistry {
     /// entry resolves to the [`LimitSet::DEFAULT`] policy via
     /// [`Self::limits`].
     limits: BTreeMap<TaskId, LimitSet>,
+    /// Each live task's device-resource grants (`AGENTS.md` §4 / §18.3 —
+    /// the unforgeable, kernel-issued handles a driver task may map with
+    /// `mmio_map`). Co-located with the address space for the same reason
+    /// as [`Self::streams`] and [`Self::limits`]: a grant shares the exact
+    /// per-process lifecycle — minted when a driver is admitted, reclaimed
+    /// when the task exits — and is keyed by the same [`TaskId`], so a
+    /// parallel registry + lock would be near-duplicate plumbing
+    /// (`AGENTS.md` §2.2 / §2.3). A task with no entry owns no grants, so
+    /// [`Self::grant`] resolves to `None` — fail closed (§5.4): a task can
+    /// map only the windows it was actually granted.
+    grants: BTreeMap<TaskId, TaskGrants>,
+}
+
+/// One task's device-resource grants: the handles it may pass to
+/// `mmio_map`, each naming exactly one granted [`HwResource`].
+///
+/// Handles are minted per task, monotonically from `1` (handle `0` is the
+/// reserved invalid value and is never issued), and are never reused
+/// within a task's lifetime — so a stale handle from a reclaimed grant
+/// can never alias a later one. The whole record is dropped when the task
+/// is [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`TaskId`]
+/// starts from an empty grant set and cannot inherit a dead task's windows
+/// (`AGENTS.md` §5.4 — fail closed).
+#[derive(Default)]
+struct TaskGrants {
+    /// The next handle value to issue. Starts at `1`; only ever increases,
+    /// so handles are unique for the task's whole lifetime.
+    next_handle: u64,
+    /// The granted resource behind each issued handle.
+    by_handle: BTreeMap<u64, HwResource>,
 }
 
 impl AddressSpaceRegistry {
@@ -111,6 +142,7 @@ impl AddressSpaceRegistry {
             tasks: BTreeMap::new(),
             streams: BTreeMap::new(),
             limits: BTreeMap::new(),
+            grants: BTreeMap::new(),
         }
     }
 
@@ -144,7 +176,49 @@ impl AddressSpaceRegistry {
     pub fn withdraw(&mut self, task: TaskId) -> bool {
         let had_streams = self.streams.remove(&task).is_some();
         let had_limits = self.limits.remove(&task).is_some();
-        self.tasks.remove(&task).is_some() || had_streams || had_limits
+        let had_grants = self.grants.remove(&task).is_some();
+        self.tasks.remove(&task).is_some() || had_streams || had_limits || had_grants
+    }
+
+    /// Mint a device-resource grant for `task`, returning the unforgeable,
+    /// kernel-issued handle the task passes to `mmio_map` to reach exactly
+    /// `resource` and nothing else (`AGENTS.md` §4 — resources are
+    /// capability-grant requests, never ambient handles; §18.3 — a driver
+    /// reaches only the resources its matched node requested).
+    ///
+    /// Called by the driver-admission path when a node's requested
+    /// resources are granted to the driver task it loads. The returned
+    /// handle is unique for `task`'s whole lifetime (monotonic from `1`),
+    /// so it never aliases a previously reclaimed grant, and is meaningful
+    /// only when presented by `task` itself: [`Self::grant`] is keyed by
+    /// the kernel-trusted caller id, so another task passing the same
+    /// numeric value resolves to nothing (handle forgery is refused,
+    /// §5.4).
+    pub fn mint_grant(&mut self, task: TaskId, resource: HwResource) -> u64 {
+        let entry = self.grants.entry(task).or_default();
+        // Handle 0 is the reserved invalid value; the first minted handle
+        // is 1. `next_handle` only ever increases within a task's life, so
+        // a handle is never reused even after its grant is reclaimed.
+        entry.next_handle += 1;
+        let handle = entry.next_handle;
+        entry.by_handle.insert(handle, resource);
+        handle
+    }
+
+    /// Resolve the device-resource grant identified by `handle` for the
+    /// owning `task`, or `None` (fail closed, `AGENTS.md` §5.4).
+    ///
+    /// Returns the granted [`HwResource`] iff `handle` was minted for
+    /// `task`; `None` for an unknown handle, the reserved `0` handle, a
+    /// handle minted for a *different* task (forgery — a driver cannot
+    /// reach another driver's window by guessing a handle value), or a
+    /// grant since reclaimed on exit. The `task` argument is the
+    /// kernel-trusted caller id, never a caller-supplied value, so it is
+    /// the security spine of the `mmio_map` handler (§5.4 — no
+    /// trusted-caller shortcut; §18.3).
+    #[must_use]
+    pub fn grant(&self, task: TaskId, handle: u64) -> Option<HwResource> {
+        self.grants.get(&task)?.by_handle.get(&handle).copied()
     }
 
     /// Establish `task`'s standard-stream descriptor table (`AGENTS.md`
@@ -418,5 +492,85 @@ mod tests {
         // the slot was present and resets it to the default policy.
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.limits(TaskId(4)), LimitSet::DEFAULT);
+    }
+
+    // --- device-resource grants (`AGENTS.md` §4 / §18.3) ----------------
+
+    /// A register window resource used across the grant tests.
+    fn window() -> HwResource {
+        HwResource::mmio(0xFE98_0000, 0x4000)
+    }
+
+    #[test]
+    fn unminted_grant_resolves_to_none() {
+        let reg = AddressSpaceRegistry::new();
+        // A task with no grants can map nothing, and handle 0 (the reserved
+        // invalid value) is never a live grant.
+        assert_eq!(reg.grant(TaskId(9), 1), None);
+        assert_eq!(reg.grant(TaskId(9), 0), None);
+    }
+
+    #[test]
+    fn mint_then_grant_returns_the_resource_for_its_owner() {
+        let mut reg = AddressSpaceRegistry::new();
+        let handle = reg.mint_grant(TaskId(2), window());
+        // The first minted handle is 1 (handle 0 stays reserved-invalid).
+        assert_eq!(handle, 1);
+        assert_eq!(reg.grant(TaskId(2), handle), Some(window()));
+        // The reserved handle still resolves to nothing for the owner.
+        assert_eq!(reg.grant(TaskId(2), 0), None);
+    }
+
+    #[test]
+    fn handles_are_unique_per_task_and_name_distinct_resources() {
+        let mut reg = AddressSpaceRegistry::new();
+        let a = HwResource::mmio(0xFE98_0000, 0x4000);
+        let b = HwResource::bus_window(0x6000_0000, 0x40_0000, 0xF800_0000);
+        let h_a = reg.mint_grant(TaskId(2), a);
+        let h_b = reg.mint_grant(TaskId(2), b);
+        assert_ne!(h_a, h_b, "each grant gets its own handle");
+        assert_eq!(reg.grant(TaskId(2), h_a), Some(a));
+        assert_eq!(reg.grant(TaskId(2), h_b), Some(b));
+    }
+
+    #[test]
+    fn grant_is_owner_bound_against_handle_forgery() {
+        let mut reg = AddressSpaceRegistry::new();
+        let handle = reg.mint_grant(TaskId(2), window());
+        // The owner resolves its grant; an unknown handle value does not.
+        assert_eq!(reg.grant(TaskId(2), handle), Some(window()));
+        assert_eq!(reg.grant(TaskId(2), handle + 1), None);
+        // A *different* task passing the same numeric handle reaches
+        // nothing — a driver cannot map another driver's window by reusing
+        // its handle value (`AGENTS.md` §5.4).
+        assert_eq!(reg.grant(TaskId(3), handle), None);
+    }
+
+    #[test]
+    fn withdraw_reclaims_every_grant() {
+        let mut reg = AddressSpaceRegistry::new();
+        let handle = reg.mint_grant(TaskId(4), window());
+        assert_eq!(reg.grant(TaskId(4), handle), Some(window()));
+        // Withdrawing a task with grants but no address space still reports
+        // the slot was present and clears the grants (§4 — reclaimed on
+        // exit).
+        assert!(reg.withdraw(TaskId(4)));
+        assert_eq!(reg.grant(TaskId(4), handle), None);
+    }
+
+    #[test]
+    fn reused_task_id_starts_from_an_empty_grant_set() {
+        let mut reg = AddressSpaceRegistry::new();
+        let old = reg.mint_grant(TaskId(5), window());
+        assert!(reg.withdraw(TaskId(5)));
+        // A new task reusing the id mints from handle 1 again and never
+        // inherits the dead task's grant.
+        let fresh = reg.mint_grant(TaskId(5), HwResource::mmio(0x3F20_0000, 0x1000));
+        assert_eq!(fresh, 1);
+        assert_eq!(old, 1);
+        assert_eq!(
+            reg.grant(TaskId(5), fresh),
+            Some(HwResource::mmio(0x3F20_0000, 0x1000))
+        );
     }
 }

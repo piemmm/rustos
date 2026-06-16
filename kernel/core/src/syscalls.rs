@@ -101,9 +101,7 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
-use crate::devres::{
-    mappable_window, MmioMapFacility, ResourceGrants, NULL_MMIO_MAP_FACILITY, NULL_RESOURCE_GRANTS,
-};
+use crate::devres::{mappable_window, MmioMapFacility, NULL_MMIO_MAP_FACILITY};
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
@@ -251,15 +249,6 @@ where
     /// Held as a `'static` borrow because the arbiter lives for the
     /// lifetime of the running kernel, exactly like the console device.
     input_focus: &'static InputFocus,
-    /// The per-task device-resource grant table the `mmio_map` syscall
-    /// resolves a driver's grant handle against (`AGENTS.md` §18.3; the
-    /// resolution is owner-checked against `caller.task_id`, never a
-    /// caller-supplied value, §5.4). Defaults to [`NULL_RESOURCE_GRANTS`]
-    /// (every lookup fails closed with [`Errno::NotFound`], `AGENTS.md`
-    /// §2.9); the boot/spawn path that mints a driver's grants installs the
-    /// real table through [`Self::with_resource_grants`]. Held as a
-    /// `'static` borrow, exactly like the console device.
-    resource_grants: &'static (dyn ResourceGrants + 'static),
     /// The architecture MMIO-map producer the `mmio_map` syscall drives to
     /// map a granted device window into the caller's own live address space
     /// (`plans/PI.md` P10 chunk 5d-0). Defaults to
@@ -345,14 +334,12 @@ where
             // closed (`NotImplemented` / no input) through the shared
             // `NULL_INPUT_FOCUS` (`AGENTS.md` §2.9 / §5.4).
             input_focus: &NULL_INPUT_FOCUS,
-            // Device-resource grants + the MMIO-map facility are unwired
-            // until the driver-spawn path mints grants and the boot path
-            // installs the `kernel/mem` map producer (`plans/PI.md` P10
-            // chunk 5d-0): `mmio_map` fails closed (`NotFound` for an
-            // ungranted handle, `NotImplemented` with no map facility) —
-            // never mapping an ungranted or arbitrary region (`AGENTS.md`
-            // §2.9 / §5.4).
-            resource_grants: &NULL_RESOURCE_GRANTS,
+            // The MMIO-map facility is unwired until the boot path installs
+            // the `kernel/mem` map producer (`plans/PI.md` P10 chunk 5d-0):
+            // `mmio_map` fails closed (`NotFound` for an ungranted handle,
+            // resolved against the per-task grant table in `aspaces`;
+            // `NotImplemented` with no map facility) — never mapping an
+            // ungranted or arbitrary region (`AGENTS.md` §2.9 / §5.4).
             mmio_map_facility: &NULL_MMIO_MAP_FACILITY,
         }
     }
@@ -478,24 +465,6 @@ where
     #[must_use]
     pub const fn with_mem_map(mut self, mem_map: &'static (dyn MemMap + 'static)) -> Self {
         self.mem_map = mem_map;
-        self
-    }
-
-    /// Install the per-task device-resource grant table the `mmio_map`
-    /// syscall resolves a driver's grant handle against (`AGENTS.md`
-    /// §18.3), consuming and returning `self`.
-    ///
-    /// Until this is called the handler holds [`NULL_RESOURCE_GRANTS`], so
-    /// every `mmio_map` fails closed with [`Errno::NotFound`] — no driver
-    /// can map a window the kernel has not granted it (`AGENTS.md` §2.9 /
-    /// §4). The table must be `'static`: it lives for the lifetime of the
-    /// running kernel, exactly like the console device.
-    #[must_use]
-    pub const fn with_resource_grants(
-        mut self,
-        resource_grants: &'static (dyn ResourceGrants + 'static),
-    ) -> Self {
-        self.resource_grants = resource_grants;
         self
     }
 
@@ -1462,8 +1431,11 @@ where
         // (`caller.task_id` is kernel-trusted, never caller-supplied), so a
         // forged or another driver's handle resolves to nothing and is
         // refused (`AGENTS.md` §5.4 — no trusted-caller shortcut; §18.3 — a
-        // driver reaches only the resources its matched node requested).
-        let Some(resource) = self.resource_grants.lookup(caller.task_id, handle) else {
+        // driver reaches only the resources its matched node requested). The
+        // per-task grant table lives in the address-space registry (minted
+        // when a driver is admitted, reclaimed when the task is withdrawn on
+        // exit), so the read guard is held only for the lookup.
+        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
             return Err(Errno::NotFound);
         };
         // The grant must name a memory window of this driver's, and its
@@ -5839,28 +5811,6 @@ mod tests {
         assert_eq!(*producer.last_unmap.lock(), Some((0x10_0000, 0x1000)));
     }
 
-    /// A device-resource grant table that hands out exactly one grant, and
-    /// only to its configured owner task + handle, so the `mmio_map`
-    /// handler tests can prove the owner check (`AGENTS.md` §5.4) without a
-    /// real per-process grant table.
-    struct FixtureGrants {
-        owner: SecTaskId,
-        handle: u64,
-        resource: rustos_abi::hwtree::HwResource,
-    }
-    impl crate::devres::ResourceGrants for FixtureGrants {
-        fn lookup(&self, task: SecTaskId, handle: u64) -> Option<rustos_abi::hwtree::HwResource> {
-            // Resolve only for the exact (owner, handle) pair: a foreign
-            // task or an unknown handle resolves to nothing — the forgery
-            // defence the handler relies on.
-            if task == self.owner && handle == self.handle {
-                Some(self.resource)
-            } else {
-                None
-            }
-        }
-    }
-
     /// An MMIO-map facility that records the `(phys_base, len)` it was
     /// handed and returns a fabricated base, so the handler tests can
     /// assert the validated window reached the mechanism without a real
@@ -5902,10 +5852,9 @@ mod tests {
         )
     }
 
-    /// With no grant table wired the handler holds `NULL_RESOURCE_GRANTS`,
-    /// so any handle resolves to nothing and `mmio_map` fails closed with
-    /// `NotFound` — a driver can never map an ungranted region
-    /// (`AGENTS.md` §2.9 / §4 / §18.3).
+    /// With no grant minted for the caller the per-task grant table resolves
+    /// nothing, so any handle fails closed with `NotFound` — a driver can
+    /// never map an ungranted region (`AGENTS.md` §2.9 / §4 / §18.3).
     #[test]
     fn mmio_map_without_grant_is_not_found() {
         let sink = make_sink();
@@ -5935,11 +5884,11 @@ mod tests {
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
 
-        let grants: &'static FixtureGrants = Box::leak(Box::new(FixtureGrants {
-            owner: SecTaskId(2),
-            handle: 7,
-            resource: rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
-        }));
+        // Mint one grant for task 2, capturing its kernel-issued handle.
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
@@ -5947,7 +5896,6 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_resource_grants(grants)
         .with_mmio_map_facility(facility);
 
         // Right owner, wrong handle → NotFound.
@@ -5955,7 +5903,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        assert_eq!(h.mmio_map(&owner, 9), Err(Errno::NotFound));
+        assert_eq!(h.mmio_map(&owner, handle + 1), Err(Errno::NotFound));
 
         // Right handle value, wrong (foreign) task → NotFound: a driver
         // cannot reach another driver's window by reusing its handle.
@@ -5963,7 +5911,7 @@ mod tests {
             task_id: SecTaskId(3),
             caps: &caps,
         };
-        assert_eq!(h.mmio_map(&foreign, 7), Err(Errno::NotFound));
+        assert_eq!(h.mmio_map(&foreign, handle), Err(Errno::NotFound));
 
         // Neither refusal touched the mapping mechanism.
         assert!(facility.last.lock().is_none());
@@ -5985,11 +5933,10 @@ mod tests {
             caps: &caps,
         };
 
-        let grants: &'static FixtureGrants = Box::leak(Box::new(FixtureGrants {
-            owner: SecTaskId(2),
-            handle: 7,
-            resource: rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
-        }));
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
@@ -5997,10 +5944,9 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_resource_grants(grants)
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, 7), Ok(0x9000_0000));
+        assert_eq!(h.mmio_map(&ctx, handle), Ok(0x9000_0000));
         // Exactly the granted window reached the mechanism — base and
         // length both from the grant, not from any caller-supplied value.
         assert_eq!(*facility.last.lock(), Some((0xFE98_0000, 0x4000)));
@@ -6022,17 +5968,15 @@ mod tests {
             caps: &caps,
         };
 
-        let grants: &'static FixtureGrants = Box::leak(Box::new(FixtureGrants {
-            owner: SecTaskId(2),
-            handle: 7,
-            resource: rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
-        }));
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_resource_grants(grants);
+        );
 
-        assert_eq!(h.mmio_map(&ctx, 7), Err(Errno::NotImplemented));
+        assert_eq!(h.mmio_map(&ctx, handle), Err(Errno::NotImplemented));
     }
 
     /// A grant of a non-window kind (a DMA constraint) is refused with
@@ -6051,11 +5995,10 @@ mod tests {
             caps: &caps,
         };
 
-        let grants: &'static FixtureGrants = Box::leak(Box::new(FixtureGrants {
-            owner: SecTaskId(2),
-            handle: 7,
-            resource: rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0),
-        }));
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0),
+        );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: rustos_sync::SpinLock::new(None),
             ret: Ok(0x9000_0000),
@@ -6063,10 +6006,9 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_resource_grants(grants)
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, 7), Err(Errno::OutOfRange));
+        assert_eq!(h.mmio_map(&ctx, handle), Err(Errno::OutOfRange));
         // The wrong-kind grant was refused before the mechanism ran.
         assert!(facility.last.lock().is_none());
     }

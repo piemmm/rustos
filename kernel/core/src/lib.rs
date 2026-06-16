@@ -106,10 +106,7 @@ pub use console::{
     NullConsole, NullConsoleInput, NullConsoleRead, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES,
     NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
-pub use devres::{
-    mappable_window, EmptyResourceGrants, MmioMapFacility, NullMmioMapFacility, ResourceGrants,
-    NULL_MMIO_MAP_FACILITY, NULL_RESOURCE_GRANTS,
-};
+pub use devres::{mappable_window, MmioMapFacility, NullMmioMapFacility, NULL_MMIO_MAP_FACILITY};
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
 };

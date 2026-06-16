@@ -679,18 +679,27 @@ order (one fully-gated increment each):
        address space — the driver names an unforgeable, kernel-issued
        device-resource **grant handle** (never a raw phys, §4), the
        kernel-core handler resolves it owner-checked against the calling task
-       via the `kernel/core::devres::ResourceGrants` seam (§5.4 forgery
-       defence), validates it names a memory window (`mappable_window`), and
-       maps only that region through the architecture `devres::MmioMapFacility`
-       producer (§18.3). Both seams default to fail-closed NULL producers
-       (`NotFound` / `NotImplemented`), mirroring how `mem_map` shipped its
-       handler before SP5b. Host-tested (devres + handler + dispatch
-       reachability); C header regenerated; abi-check/drift green. Still
-       staged: (a) grant issuance at autoload/spawn + a concrete reclaimed
-       grant table; (b) the per-port `MmioMapFacility` live-mapping producer
-       (SP5b-class); (c) the DMA half bounded by the grant's `addr_limit`;
-       (d) the `-M virt` vertical mapping a virtio-mmio window through a
-       granted handle.
+       through the per-task grant table (§5.4 forgery defence), validates it
+       names a memory window (`devres::mappable_window`), and maps only that
+       region through the architecture `devres::MmioMapFacility` producer
+       (§18.3). The map facility defaults to a fail-closed NULL producer
+       (`NotImplemented`), mirroring how `mem_map` shipped its handler before
+       SP5b. **5d-0-ii (a) — the concrete grant table — landed:** the
+       per-task device-resource grants live in
+       `kernel/core::aspace::AddressSpaceRegistry` alongside the task's
+       streams and limits (`mint_grant` issues a per-task, monotonic,
+       never-reused handle from `1`; `grant` resolves it owner-checked;
+       `withdraw` reclaims every grant when the task exits — co-located so a
+       parallel per-task registry is avoided, §2.2). The placeholder
+       `devres::ResourceGrants` trait / `NULL_RESOURCE_GRANTS` seam from the
+       security foundation was deleted in place (§2.13 / §2.14). Host-tested
+       (the grant store + the 5 `mmio_map` handler tests minting real grants);
+       no ABI/C-header change. Still staged: (b) the per-port
+       `MmioMapFacility` live-mapping producer (SP5b-class — no production
+       live-aspace mapper exists yet, the dependency this rides); (c) the DMA
+       half bounded by the grant's `addr_limit`; (d) the `-M virt` vertical
+       minting a virtio-mmio window grant for a spawned program that maps it
+       through `mmio_map`.
      - **5d — userland keyboard service** hosting the continuous report
        pump, autoloaded by `devmgr` over the 5d-0 surface, feeding the
        input-focus arbiter via `key_inject`. The "drivers in userland"

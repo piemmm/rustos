@@ -1,27 +1,23 @@
-//! Device-resource grants and the MMIO-map facility seam the `mmio_map`
-//! (`abi-v1` number 26) syscall drives (`plans/PI.md` P10 chunk 5d-0 — the
-//! `DriverHost` MMIO/DMA surface reachable over IPC).
+//! The MMIO-map facility seam the `mmio_map` (`abi-v1` number 26) syscall
+//! drives (`plans/PI.md` P10 chunk 5d-0 — the `DriverHost` MMIO/DMA surface
+//! reachable over IPC).
 //!
 //! A user-space driver does not map raw physical memory. It maps a
 //! **granted** device resource: when the device manager autoloads a driver
-//! for a hardware-tree node (`AGENTS.md` §18.3) the kernel issues the
-//! driver one unforgeable handle per [`HwResource`] that node requested —
-//! and *no more* (§4 — no ambient authority). The `mmio_map` syscall takes
-//! such a handle, the kernel resolves it **against the calling task**
-//! (handle forgery is rejected exactly as `irq_wait` re-checks its binding,
-//! §5.4), confirms the grant names a memory window, and maps only that
-//! region into the caller's own address space.
+//! for a hardware-tree node (`AGENTS.md` §18.3) the kernel mints the driver
+//! one unforgeable handle per [`HwResource`] that node requested — and *no
+//! more* (§4 — no ambient authority). The `mmio_map` syscall takes such a
+//! handle and the kernel resolves it **against the calling task** through
+//! the per-task grant table that lives in
+//! [`AddressSpaceRegistry`](crate::aspace::AddressSpaceRegistry) (minted at
+//! driver admission, reclaimed when the task is withdrawn on exit — the same
+//! per-process lifecycle as the task's streams and limits, so handle forgery
+//! is rejected exactly as `irq_wait` re-checks its binding, §5.4). This
+//! module owns the two pieces of the handler that are *not* that table:
 //!
-//! This module owns the two object-safe boundaries the `mmio_map` handler
-//! composes, mirroring [`crate::memmap::MemMap`] and the
-//! [`rustos_kernel_irq::IrqTable`] precedents:
-//!
-//! * [`ResourceGrants`] — the *policy* half: resolve a `(task, handle)`
-//!   pair to the granted [`HwResource`], or `None` (fail closed). The
-//!   concrete per-process grant table — minted at driver spawn and reclaimed
-//!   on exit — is installed by a later landing; until then the handler holds
-//!   [`NULL_RESOURCE_GRANTS`], so every `mmio_map` resolves to
-//!   [`Errno::NotFound`] rather than mapping anything.
+//! * [`mappable_window`] — the input-validation half: confirm a resolved
+//!   grant names a memory window `mmio_map` can map and return its
+//!   `(phys_base, len)`, or a fail-closed [`Errno`] (`AGENTS.md` §5.4).
 //! * [`MmioMapFacility`] — the *mechanism* half: map a validated physical
 //!   window into the caller's live address space. Naming a port's concrete
 //!   page table and direct physical map is irreducibly architecture-specific
@@ -31,56 +27,13 @@
 //!   handler holds [`NULL_MMIO_MAP_FACILITY`], which fails closed with
 //!   [`Errno::NotImplemented`] (`AGENTS.md` §2.9).
 //!
-//! Splitting policy from mechanism keeps the capability/grant decision in
-//! the syscall handler (where `AGENTS.md` §5.4 demands it) and the
-//! page-table knowledge out of `kernel/core` (`AGENTS.md` §17.4).
+//! Keeping the grant *policy* in the per-task registry (where the
+//! capability/grant decision belongs, `AGENTS.md` §5.4) and the page-table
+//! *mechanism* behind this trait keeps page-table knowledge out of
+//! `kernel/core` (`AGENTS.md` §17.4).
 
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::Errno;
-use rustos_kernel_sec::TaskId;
-
-/// The per-task device-resource grant lookup the `mmio_map` handler
-/// consults (`AGENTS.md` §18.3 — a driver reaches only the resources its
-/// matched node requested).
-///
-/// Implementations must be [`Sync`]: the single installed table is shared
-/// by the per-CPU syscall handlers, exactly like [`crate::memmap::MemMap`]
-/// and the address-space registry.
-pub trait ResourceGrants: Sync {
-    /// Resolve the device-resource grant identified by `handle` for the
-    /// owning `task`.
-    ///
-    /// Returns the granted [`HwResource`] iff `handle` was minted for
-    /// `task`; `None` for an unknown handle, a handle minted for a
-    /// *different* task (forgery — `AGENTS.md` §5.4), or a grant that has
-    /// since been reclaimed. The owner argument is the kernel-trusted
-    /// caller task id, never a caller-supplied value, so a driver cannot
-    /// reach another driver's window by guessing a handle value.
-    fn lookup(&self, task: TaskId, handle: u64) -> Option<HwResource>;
-}
-
-/// The grant table installed before any real one exists.
-///
-/// Every lookup returns `None` — the fail-closed default `AGENTS.md` §2.9 /
-/// §5.4 require: a `mmio_map` issued before the boot/spawn path mints a
-/// driver's grants resolves to [`Errno::NotFound`] rather than mapping an
-/// ungranted region.
-#[derive(Debug, Default, Copy, Clone)]
-pub struct EmptyResourceGrants;
-
-impl ResourceGrants for EmptyResourceGrants {
-    fn lookup(&self, _task: TaskId, _handle: u64) -> Option<HwResource> {
-        None
-    }
-}
-
-/// The shared [`EmptyResourceGrants`] the syscall handler defaults to.
-///
-/// An *immutable* static (the type carries no interior mutability), so it
-/// is not the global mutable state `AGENTS.md` §2.1 forbids; the boot path
-/// replaces the handler's borrow with a real per-process table through
-/// `KernelSyscallHandlers::with_resource_grants` once grant issuance lands.
-pub static NULL_RESOURCE_GRANTS: EmptyResourceGrants = EmptyResourceGrants;
 
 /// The kernel-side producer that maps a validated device window into the
 /// caller's own live address space.
@@ -187,13 +140,6 @@ pub fn mappable_window(resource: &HwResource) -> Result<(u64, usize), Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn null_resource_grants_resolve_to_none() {
-        assert_eq!(NULL_RESOURCE_GRANTS.lookup(TaskId(7), 1), None);
-        // Even handle 0 (the reserved invalid value) resolves to nothing.
-        assert_eq!(EmptyResourceGrants.lookup(TaskId(0), 0), None);
-    }
 
     #[test]
     fn null_facility_fails_closed() {
