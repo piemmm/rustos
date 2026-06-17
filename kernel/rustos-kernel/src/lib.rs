@@ -145,6 +145,17 @@ pub mod driver_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_spawn_loader;
 
+// The VFS-backed `drvhost::ImageSource` adapter (`plans/PI.md` P10 5d-2-ii):
+// reads the bytes of each `/System/Drivers/` bundle off the mounted root
+// volume through the kernel-core `DriverImageReader`, so the user-space
+// store scan (`drvhost::store::scan_store`) can parse and bind-decode it.
+// The bin crate is the one layer that may name `drvhost` (`AGENTS.md`
+// §17.4), so this thin delegating adapter lives here; gated, like the other
+// `drvhost`-consuming modules, on the two instruction sets where
+// `rustos-drvhost` is a dependency of this crate.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod driver_store_source;
+
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production
 // boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus

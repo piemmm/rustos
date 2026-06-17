@@ -262,6 +262,33 @@ manifest, or whose bind table fails to decode is **skipped and logged**,
 never fatal: one bad bundle cannot block the rest of the boot
 (`AGENTS.md` §18.4 / §5.4).
 
+#### Reading the bundle bytes off the root volume
+
+In production the bundle bytes live on the mounted root volume under
+`/System/Drivers/`. The kernel finds *which* paths exist with
+`rustos_kernel_core::enumerate_driver_store` (a §5.3-checked VFS walk
+under the uid-0 bootstrap identity), and reads the bytes of a chosen
+bundle with `rustos_kernel_core::DriverImageReader`: it builds the
+root-backed VFS **once** (`AGENTS.md` §2.16), then per call validates
+that the path lies strictly within `/System/Drivers/`, bounds the file
+against `MAX_DRIVER_IMAGE_LEN` (a 16 MiB §24.4 validation cap) *before*
+reading a byte, reads the whole file, and **appends** it to the caller's
+buffer — failing closed and leaving the buffer untouched on any refusal
+(`AGENTS.md` §5.4 / §2.9). Every read runs under the uid-0, no-capability
+bootstrap identity: a bundle is reachable only because its stored §5.3
+record makes it readable to that identity, never through an ambient
+bypass (`AGENTS.md` §5.1).
+
+The `ImageSource` trait lives in `drvhost` (userland), and the §17.4
+layering forbids `kernel/core` from depending on it, so the bin crate —
+the one layer that may name `drvhost` — supplies the thin adapter
+`rustos_kernel::driver_store_source::VfsImageSource`. It holds the
+`DriverImageReader` plus the root-volume filesystem driver (behind a
+`RefCell`, because `ImageSource::read` is `&self` while the driver needs
+`&mut`; the scan is single-threaded and pulls one bundle at a time, so
+the borrow never overlaps) and simply delegates each `read` to the
+kernel-core reader. It adds no authority of its own.
+
 ### Audit sink
 
 Every state transition emits one structured `rustos_log::Event` with a

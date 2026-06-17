@@ -976,13 +976,28 @@ order (one fully-gated increment each):
            `drivers`/`skipped` counts). Host-proven (7 `driver_store` tests via a
            tree mock fs); no `lib/abi`/C-header change. Docs:
            `docs/src/architecture/kernel.md` (audit catalogue).
+         - **VFS-backed `ImageSource` (the bundle-byte reader) — done
+           (host-proven).** The enumeration yields the bundle *paths*; this reads
+           their *bytes*. `rustos_kernel_core::driver_store::DriverImageReader`
+           builds the shared root-backed VFS once (§2.16); `read_image` reads one
+           bundle off the mounted root under the uid-0 bootstrap identity —
+           path-within-`/System/Drivers/`, `MAX_DRIVER_IMAGE_LEN` (16 MiB §24.4)
+           bound *before* reading, full read, **appends** to the caller buffer,
+           fail-closed/`buf`-untouched on refusal (§5.4/§2.9), `DriverImageError`
+           →`Errno`. Since §17.4 forbids a `kernel/core`→drvhost edge, the bin
+           crate supplies the thin delegating adapter
+           `rustos_kernel::driver_store_source::VfsImageSource` (reader + the
+           root-volume driver behind a `RefCell` for the `&self`-vs-`&mut`
+           bridge), adding no authority. Host-proven (11 reader + 4 adapter
+           tests); no `lib/abi`/C-header change. Docs: `docs/src/drivers/host.md`
+           ("Reading the bundle bytes off the root volume").
          - **Remaining (next):** the production boot wiring that runs
            `DeviceManager::autoload` against the discovered tree (kernel/core
-           hosts it — it owns the scheduler) with the keyboard candidate, the
-           VFS-backed `ImageSource` adapter that reads each enumerated path for
-           `store::scan_store` (the enumeration above supplies the paths),
-           `tools/mkimage` laying the signed `usb_kbd` bundle into the store,
-           spawning the binary into user space, and the metal checkpoint.
+           hosts it — it owns the scheduler) with the keyboard candidate,
+           scanning the store via `store::scan_store` over the `VfsImageSource`
+           and `enumerate_driver_store` paths above, `tools/mkimage` laying the
+           signed `usb_kbd` bundle into the store, spawning the binary into user
+           space, and the metal checkpoint.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

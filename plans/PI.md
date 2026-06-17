@@ -3515,14 +3515,36 @@ table, so a new board is match **data**, not new code. Sub-increments
         depth/count bounds, empty store). No `lib/abi`/C-header change. Docs:
         `docs/src/architecture/kernel.md` (audit catalogue). No metal step (no
         production consumer yet — the boot wiring below is next).
+      - **VFS-backed `ImageSource` (the bundle-byte reader) — done
+        (host-proven).** The enumeration above yields the bundle *paths*; this
+        reads their *bytes*. `rustos_kernel_core::driver_store::DriverImageReader`
+        builds the shared root-backed VFS once (§2.16) and `read_image(fs, path,
+        buf)` reads one bundle off the mounted root under the uid-0 bootstrap
+        identity: it validates the path lies strictly within `/System/Drivers/`,
+        bounds the file against `MAX_DRIVER_IMAGE_LEN` (16 MiB §24.4) *before*
+        any read, reads the whole file, and **appends** it to `buf` (the
+        `ImageSource` contract), failing closed and leaving `buf` untouched on
+        any refusal (§5.4/§2.9); `DriverImageError`→`Errno`. The `ImageSource`
+        trait is `drvhost`'s (userland) and §17.4 forbids a `kernel/core`→drvhost
+        edge, so the bin crate (the one layer that may name `drvhost`) supplies
+        the thin delegating adapter `rustos_kernel::driver_store_source::VfsImageSource`
+        — `DriverImageReader` + the root-volume driver behind a `RefCell` (the
+        `&self` `read` vs `&mut` driver bridge; the scan is single-threaded, one
+        bundle at a time), adding no authority. Host-proven (11 kernel-core
+        reader tests: byte-for-byte, append, empty, out-of-store, missing,
+        directory, oversize-before-read, gated-unreadable, short-read unwind,
+        errno map; 4 bin-crate adapter tests: delegate+append, multi-bundle one
+        borrow, missing→`NotFound`, out-of-store→`PermissionDenied`). No
+        `lib/abi`/C-header change. Docs: `docs/src/drivers/host.md` ("Reading
+        the bundle bytes off the root volume"). No metal step (no production
+        consumer yet — the boot wiring below is next).
       - **Remaining (next):** the production boot wiring that runs
         `DeviceManager::autoload` against the discovered hardware tree (driven
         by the bin crate — the one layer that may name `devmgr`+`drvhost` —
-        spawning the winning user-space driver through the kernel/core
-        `spawn_with` seam above so §17.1 holds), the **VFS-backed `ImageSource`
-        adapter** that reads each enumerated path so `rustos_drvhost::store::scan_store`
-        can fetch bundle bytes from the mounted root (the enumeration above
-        supplies the paths), and `tools/mkimage` laying the signed `usb_kbd`
+        scanning the store with `store::scan_store` over the `VfsImageSource`
+        above against the `enumerate_driver_store` paths, then spawning the
+        winning user-space driver through the kernel/core `spawn_with` seam so
+        §17.1 holds), and `tools/mkimage` laying the signed `usb_kbd`
         bundle into `/System/Drivers/`. That landing flips
         `init_spawn`'s `keyboard_service::spawn_if_present` call to the autoload
         path and folds in **5e** (deleting the in-kernel scaffold) in the same

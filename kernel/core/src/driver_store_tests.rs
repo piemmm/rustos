@@ -12,8 +12,13 @@ use rustos_abi::driver::filesystem::{
 };
 use rustos_abi::driver::DriverError;
 
-use crate::driver_store::{enumerate_driver_store, MAX_STORE_DEPTH, MAX_STORE_DRIVERS};
+use crate::driver_store::{
+    enumerate_driver_store, DriverImageError, DriverImageReader, MAX_DRIVER_IMAGE_LEN,
+    MAX_STORE_DEPTH, MAX_STORE_DRIVERS,
+};
+use crate::fs::VfsError;
 use crate::test_sink::TestSink;
+use rustos_abi::Errno;
 
 const ROOT_ID: u64 = 1;
 
@@ -22,6 +27,12 @@ struct MockNode {
     kind: NodeKind,
     /// Child `(name, node-id)` pairs, in stable enumeration order.
     children: Vec<(String, u64)>,
+    /// File contents (empty for directories); also the reported size
+    /// unless [`MockNode::reported_size`] overrides it.
+    content: Vec<u8>,
+    /// An explicit `stat` size overriding `content.len()` (models a
+    /// short-read driver whose stated size exceeds its readable bytes).
+    reported_size: Option<u64>,
     /// The §5.3 record the driver reports for the node.
     security: NodeSecurity,
 }
@@ -31,6 +42,8 @@ impl MockNode {
         Self {
             kind: NodeKind::Directory,
             children: Vec::new(),
+            content: Vec::new(),
+            reported_size: None,
             // Searchable + readable by the uid-0 boot identity.
             security: NodeSecurity::new(0o755, 0, 0),
         }
@@ -40,6 +53,8 @@ impl MockNode {
         Self {
             kind: NodeKind::RegularFile,
             children: Vec::new(),
+            content: Vec::new(),
+            reported_size: None,
             security: NodeSecurity::new(0o644, 0, 0),
         }
     }
@@ -103,15 +118,31 @@ impl MockStore {
 
     /// Add a regular file at an absolute path, creating intermediate dirs.
     fn add_file(&mut self, path: &str) {
+        self.add_file_with(path, &[]);
+    }
+
+    /// Add a regular file with `content` at an absolute path, returning its
+    /// node id so a test can adjust its security record or size.
+    fn add_file_with(&mut self, path: &str, content: &[u8]) -> u64 {
         let comps: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         let (name, dirs) = comps.split_last().expect("non-empty path");
         let parent = self.ensure_dirs(dirs);
-        let id = self.alloc(MockNode::file());
+        let mut node = MockNode::file();
+        node.content = content.to_vec();
+        let id = self.alloc(node);
         self.nodes
             .get_mut(&parent)
             .expect("parent exists")
             .children
             .push(((*name).to_string(), id));
+        id
+    }
+
+    /// Overwrite the size a node reports without changing its bytes — used
+    /// to model a driver whose `stat` size and `read` byte count disagree
+    /// (a short read).
+    fn set_reported_size(&mut self, id: u64, size: u64) {
+        self.nodes.get_mut(&id).expect("node exists").reported_size = Some(size);
     }
 
     /// Add a directory at an absolute path (creating intermediates),
@@ -135,7 +166,7 @@ impl FilesystemRead for MockStore {
         let n = self.nodes.get(&node.raw()).ok_or(DriverError::NotFound)?;
         Ok(NodeInfo {
             kind: n.kind,
-            size: 0,
+            size: n.reported_size.unwrap_or(n.content.len() as u64),
         })
     }
 
@@ -147,15 +178,21 @@ impl FilesystemRead for MockStore {
         }
     }
 
-    fn read_at(
-        &mut self,
-        _file: NodeId,
-        _offset: u64,
-        _buf: &mut [u8],
-    ) -> Result<usize, DriverError> {
+    fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
         // The enumeration never reads file bytes (`AGENTS.md` §18.6 — the
-        // load gate does); this is unreachable from the walk.
-        Err(DriverError::Unsupported)
+        // load gate does), but `DriverImageReader::read_image` does, so the
+        // mock serves the node's content from `offset`.
+        let n = self.nodes.get(&file.raw()).ok_or(DriverError::NotFound)?;
+        let Ok(offset) = usize::try_from(offset) else {
+            return Ok(0);
+        };
+        if offset >= n.content.len() {
+            return Ok(0);
+        }
+        let avail = &n.content[offset..];
+        let take = avail.len().min(buf.len());
+        buf[..take].copy_from_slice(&avail[..take]);
+        Ok(take)
     }
 
     fn read_dir(
@@ -331,4 +368,192 @@ fn an_empty_store_directory_yields_nothing() {
 
     assert!(drivers.is_empty());
     assert_eq!(scanned_record(&sink), (0, 0));
+}
+
+// --- DriverImageReader -------------------------------------------------
+
+#[test]
+fn read_image_returns_a_bundle_byte_for_byte() {
+    let mut fs = MockStore::new();
+    let bytes = b"\x7fELF-ish driver bundle";
+    fs.add_file_with("/System/Drivers/usb_kbd", bytes);
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    reader
+        .read_image(&mut fs, "/System/Drivers/usb_kbd", &mut buf)
+        .expect("a readable in-store file");
+
+    assert_eq!(buf.as_slice(), bytes.as_slice());
+}
+
+#[test]
+fn read_image_appends_rather_than_overwrites() {
+    // The `ImageSource` contract appends to a (pre-cleared, pre-sized)
+    // buffer; prove a non-empty prefix is preserved.
+    let mut fs = MockStore::new();
+    fs.add_file_with("/System/Drivers/bus_usb", b"BODY");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = alloc::vec![0xAAu8, 0xBB];
+    reader
+        .read_image(&mut fs, "/System/Drivers/bus_usb", &mut buf)
+        .expect("a readable in-store file");
+
+    assert_eq!(buf, alloc::vec![0xAA, 0xBB, b'B', b'O', b'D', b'Y']);
+}
+
+#[test]
+fn read_image_reads_an_empty_bundle_as_zero_bytes() {
+    // An empty file is read as zero bytes (the load gate rejects it as
+    // truncated later, `AGENTS.md` §18.6 — not the reader's job).
+    let mut fs = MockStore::new();
+    fs.add_file_with("/System/Drivers/empty", &[]);
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    reader
+        .read_image(&mut fs, "/System/Drivers/empty", &mut buf)
+        .expect("an empty in-store file reads cleanly");
+
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn read_image_refuses_a_path_outside_the_store() {
+    let mut fs = MockStore::new();
+    fs.add_file_with("/System/Security/Users", b"secret");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    // A path outside `/System/Drivers/` is refused before any fs access
+    // (`AGENTS.md` §5.4): the reader only ever reads driver bundles.
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Security/Users", &mut buf),
+        Err(DriverImageError::OutsideStore)
+    );
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn read_image_refuses_the_store_directory_itself() {
+    let mut fs = MockStore::new();
+    fs.add_dir("/System/Drivers");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    // The store directory is not strictly *below* the store.
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Drivers", &mut buf),
+        Err(DriverImageError::OutsideStore)
+    );
+    // A sibling whose name merely shares the prefix is also refused.
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/DriversExtra/x", &mut buf),
+        Err(DriverImageError::OutsideStore)
+    );
+}
+
+#[test]
+fn read_image_reports_a_missing_bundle_as_not_found() {
+    let mut fs = MockStore::new();
+    fs.add_dir("/System/Drivers");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Drivers/absent", &mut buf),
+        Err(DriverImageError::Vfs(VfsError::NotFound))
+    );
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn read_image_refuses_a_directory() {
+    let mut fs = MockStore::new();
+    fs.add_dir("/System/Drivers/display");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Drivers/display", &mut buf),
+        Err(DriverImageError::NotAFile)
+    );
+}
+
+#[test]
+fn read_image_refuses_an_oversized_bundle_before_reading() {
+    let mut fs = MockStore::new();
+    // A file whose *stated* size exceeds the validation bound: refused
+    // before a single byte (and before any large allocation), §24.4.
+    let id = fs.add_file_with("/System/Drivers/huge", b"small actual body");
+    fs.set_reported_size(id, MAX_DRIVER_IMAGE_LEN as u64 + 1);
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Drivers/huge", &mut buf),
+        Err(DriverImageError::TooLarge)
+    );
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn read_image_refuses_a_bundle_the_boot_identity_may_not_read() {
+    let mut fs = MockStore::new();
+    let id = fs.add_file_with("/System/Drivers/guarded", b"body");
+    // Owned by another user, no group/other read: the uid-0 boot identity
+    // is refused (no §5.1 bypass).
+    fs.set_security(id, NodeSecurity::new(0o600, 7, 7));
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Drivers/guarded", &mut buf),
+        Err(DriverImageError::Vfs(VfsError::PermissionDenied))
+    );
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn read_image_unwinds_the_buffer_on_a_short_read() {
+    let mut fs = MockStore::new();
+    // `stat` claims more bytes than `read_at` can serve (a short read);
+    // the partial bytes are discarded and `buf` is left at entry length.
+    let id = fs.add_file_with("/System/Drivers/torn", b"only four");
+    fs.set_reported_size(id, 9999);
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = alloc::vec![0x11u8];
+    assert_eq!(
+        reader.read_image(&mut fs, "/System/Drivers/torn", &mut buf),
+        Err(DriverImageError::ShortRead)
+    );
+    // The prefix survives; nothing partial is left behind (§2.9).
+    assert_eq!(buf, alloc::vec![0x11u8]);
+}
+
+#[test]
+fn driver_image_error_errno_mapping_is_stable() {
+    assert_eq!(
+        DriverImageError::OutsideStore.to_errno(),
+        Errno::PermissionDenied
+    );
+    assert_eq!(DriverImageError::NotAFile.to_errno(), Errno::OutOfRange);
+    assert_eq!(
+        DriverImageError::TooLarge.to_errno(),
+        Errno::LengthOutOfRange
+    );
+    assert_eq!(
+        DriverImageError::ShortRead.to_errno(),
+        Errno::NotImplemented
+    );
+    assert_eq!(
+        DriverImageError::Vfs(VfsError::NotFound).to_errno(),
+        Errno::NotFound
+    );
+    assert_eq!(
+        DriverImageError::Vfs(VfsError::PermissionDenied).to_errno(),
+        Errno::PermissionDenied
+    );
 }

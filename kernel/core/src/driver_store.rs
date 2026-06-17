@@ -50,13 +50,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
+use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{Field, Level, Sink};
 use rustos_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{Credentials, Path, Vfs};
+use crate::fs::{Credentials, Path, Vfs, VfsError};
 
 /// Absolute path of the signed-driver store on the root volume
 /// (`AGENTS.md` §16.2 — drivers live under `/System/Drivers/`).
@@ -104,12 +105,7 @@ where
     match crate::fs::root_backed_vfs() {
         Ok(vfs) => {
             let caps = CapabilitySet::empty();
-            let cred = Credentials {
-                uid: UserId(0),
-                gid: GroupId(0),
-                supplementary_gids: &[],
-                caps: &caps,
-            };
+            let cred = bootstrap_credentials(&caps);
             walk_dir(
                 &vfs,
                 &cred,
@@ -215,6 +211,196 @@ fn walk_dir<F>(
                 }
             },
             Err(_) => *skipped += 1,
+        }
+    }
+}
+
+/// The kernel's bootstrap filesystem identity — `uid 0`, `gid 0`, **no**
+/// capabilities (`AGENTS.md` §5.1).
+///
+/// Defined once so the store enumeration and the [`DriverImageReader`]
+/// read share the exact same credential rather than each carrying its own
+/// copy (`AGENTS.md` §2.2). The identity carries no ambient power: store
+/// paths are reachable only because their stored §5.3 records make them
+/// searchable/readable to it, never because the kernel bypasses the check.
+fn bootstrap_credentials(caps: &CapabilitySet) -> Credentials<'_> {
+    Credentials {
+        uid: UserId(0),
+        gid: GroupId(0),
+        supplementary_gids: &[],
+        caps,
+    }
+}
+
+/// Maximum size, in bytes, of a single driver-bundle image the boot reader
+/// will load into memory.
+///
+/// A fail-closed validation bound (`AGENTS.md` §24.4 — a defence against a
+/// malformed or hostile on-disk bundle, not a scalable capacity): a store
+/// entry larger than this is refused rather than allowed to exhaust the
+/// boot heap. A legitimate `.rxe` driver bundle (manifest + program) sits
+/// far below this ceiling.
+pub const MAX_DRIVER_IMAGE_LEN: usize = 16 * 1024 * 1024;
+
+/// Why a [`DriverImageReader::read_image`] read refused.
+///
+/// Every variant is a fail-closed refusal (`AGENTS.md` §5.4 / §2.9). The
+/// precise reason is retained for in-kernel logging; [`Self::to_errno`]
+/// maps it to the stable [`Errno`] the user-space scan
+/// (`rustos_drvhost::store::scan_store`) records as the bundle's skip
+/// reason.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DriverImageError {
+    /// The path does not lie strictly within [`DRIVER_STORE_PATH`]. The
+    /// reader only ever reads driver bundles, never an arbitrary file
+    /// (`AGENTS.md` §5.4 — validate every input).
+    OutsideStore,
+    /// The path names a directory (or other non-file), not a regular file.
+    NotAFile,
+    /// The file is larger than [`MAX_DRIVER_IMAGE_LEN`].
+    TooLarge,
+    /// The driver reported a different byte count than its stated size
+    /// between `stat` and `read` (a short read); the partial bytes are
+    /// discarded.
+    ShortRead,
+    /// The backing root-volume VFS refused the operation (not found,
+    /// permission denied, driver I/O fault, …).
+    Vfs(VfsError),
+}
+
+impl DriverImageError {
+    /// Map to the stable user/kernel [`Errno`].
+    #[must_use]
+    pub const fn to_errno(self) -> Errno {
+        match self {
+            // A read aimed outside the sanctioned store is denied, not
+            // merely "not found": treat it as a permission refusal.
+            Self::OutsideStore => Errno::PermissionDenied,
+            Self::NotAFile => Errno::OutOfRange,
+            Self::TooLarge => Errno::LengthOutOfRange,
+            // A short read is an I/O-shaped failure; `abi-v1` has no
+            // dedicated `EIO`, so it collapses onto `NotImplemented` as
+            // `VfsError::Io` does.
+            Self::ShortRead => Errno::NotImplemented,
+            Self::Vfs(err) => err.to_errno(),
+        }
+    }
+}
+
+impl From<VfsError> for DriverImageError {
+    fn from(err: VfsError) -> Self {
+        Self::Vfs(err)
+    }
+}
+
+/// `true` iff `path` names a node strictly *below* [`DRIVER_STORE_PATH`]
+/// (the store directory itself, or any path outside it, is rejected).
+fn path_within_store(path: &str) -> bool {
+    match path.strip_prefix(DRIVER_STORE_PATH) {
+        Some(rest) => rest.starts_with('/') && rest.len() > 1,
+        None => false,
+    }
+}
+
+/// Reads driver-bundle images off the mounted root volume's
+/// `/System/Drivers/` store (`AGENTS.md` §18.3 / §18.6).
+///
+/// [`enumerate_driver_store`] finds *which* bundle paths exist; this reader
+/// fetches the *bytes* of a chosen bundle, so the user-space scan
+/// (`rustos_drvhost::store::scan_store`) can parse and bind-decode it. The
+/// reader is the byte-fetching half the scan's `ImageSource` seam needs;
+/// the bin crate's `ImageSource` adapter (the one layer that may name
+/// `drvhost`, `AGENTS.md` §17.4) delegates to it.
+///
+/// The root-backed VFS is built **once** at [`open`](Self::open) and reused
+/// across every read (`AGENTS.md` §2.16 — no per-read VFS construction),
+/// mirroring [`enumerate_driver_store`]'s single walk.
+///
+/// Like that walk and [`crate::users::load_users_db`], every read runs
+/// under the kernel's bootstrap identity (`uid 0`, no capabilities,
+/// `AGENTS.md` §5.1): a bundle is reachable only because its stored §5.3
+/// record makes it readable to that identity, never through an ambient
+/// bypass.
+pub struct DriverImageReader {
+    vfs: Vfs,
+}
+
+impl DriverImageReader {
+    /// Build a reader whose root mount is backed by the mounted root
+    /// volume's driver, sharing the one root-backed-VFS builder
+    /// (`AGENTS.md` §2.2).
+    ///
+    /// # Errors
+    ///
+    /// The [`VfsError`] from the shared root-mount builder if the private
+    /// root mount cannot be constructed.
+    pub fn open() -> Result<Self, VfsError> {
+        Ok(Self {
+            vfs: crate::fs::root_backed_vfs()?,
+        })
+    }
+
+    /// Read the bundle image at `path` from the mounted root volume,
+    /// **appending** its bytes to `buf`.
+    ///
+    /// `path` must be an absolute path strictly below [`DRIVER_STORE_PATH`]
+    /// (typically one [`enumerate_driver_store`] returned). The read is
+    /// bounded against [`MAX_DRIVER_IMAGE_LEN`] before a single byte is
+    /// read (`AGENTS.md` §5.4.3) and fails closed on any refusal, leaving
+    /// `buf` unchanged from its entry length on error (`AGENTS.md` §2.9).
+    ///
+    /// Appending (rather than overwriting) matches the
+    /// `rustos_drvhost::ImageSource` contract the bin-crate adapter
+    /// fulfils.
+    ///
+    /// # Errors
+    ///
+    /// The [`DriverImageError`] naming the first check that refused.
+    pub fn read_image<F>(
+        &self,
+        fs: &mut F,
+        path: &str,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), DriverImageError>
+    where
+        F: FilesystemRead + FilesystemSecurity + ?Sized,
+    {
+        if !path_within_store(path) {
+            return Err(DriverImageError::OutsideStore);
+        }
+
+        let caps = CapabilitySet::empty();
+        let cred = bootstrap_credentials(&caps);
+        let parsed = Path::parse(path)?;
+
+        // Bound the bundle against the validation maximum before reading a
+        // single byte (`AGENTS.md` §5.4.3 / §24.4).
+        let info = self.vfs.stat_via_secured(&cred, &parsed, fs)?;
+        if info.kind != NodeKind::RegularFile {
+            return Err(DriverImageError::NotAFile);
+        }
+        if info.size > MAX_DRIVER_IMAGE_LEN as u64 {
+            return Err(DriverImageError::TooLarge);
+        }
+        let size = usize::try_from(info.size).map_err(|_| DriverImageError::TooLarge)?;
+
+        // Append into `buf`; unwind the reservation on any short read or
+        // driver refusal so the buffer is unchanged on error (§2.9).
+        let start = buf.len();
+        buf.resize(start + size, 0);
+        match self
+            .vfs
+            .read_via_secured(&cred, &parsed, fs, 0, &mut buf[start..])
+        {
+            Ok(read) if read == size => Ok(()),
+            Ok(_) => {
+                buf.truncate(start);
+                Err(DriverImageError::ShortRead)
+            }
+            Err(err) => {
+                buf.truncate(start);
+                Err(DriverImageError::from(err))
+            }
         }
     }
 }
