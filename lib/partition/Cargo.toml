@@ -1,0 +1,21 @@
+[package]
+name = "rustos-partition"
+description = "RustOS shared, scheme-neutral partition-table model (MBR encode + fail-closed parse, GPT fail-closed parse) and a bounds-checked partition-window Block adapter: the one definition the mkimage image author and the kernel root-mount reader share across MBR and GPT disks on every architecture (AGENTS.md §2.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

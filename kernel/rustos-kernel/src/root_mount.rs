@@ -50,12 +50,20 @@
 //! boot path neither re-threads the descriptor buffer nor reconciles two
 //! error taxonomies itself, `AGENTS.md` §2.2).
 //!
-//! The remaining board-specific bring-up that *produces* the [`Block`]
-//! devices and the typed passphrase — the hardware-tree root-device
-//! discovery, the in-kernel block `DriverHost`, and the console
-//! passphrase prompt — sits above this seam in the boot path and is wired
-//! in the following increment (`plans/PI.md` P11 Chunk B-2); `virtio-blk`
-//! proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
+//! [`mount_root_disk_and_load_users`] sits one layer above that seam: it
+//! takes the **single** whole-disk [`Block`] device a board brings up,
+//! parses its partition table (MBR or GPT — scheme- and
+//! architecture-neutral, the same definition `tools/mkimage` writes,
+//! `AGENTS.md` §2.2 / §2.20), locates the FAT boot and `RustFS` root
+//! partitions by role, and threads bounds-checked windows onto each into
+//! the composition above.
+//!
+//! The remaining board-specific bring-up that *produces* the whole-disk
+//! [`Block`] device and the typed passphrase — the hardware-tree
+//! root-device discovery, the in-kernel block `DriverHost`, and the
+//! console passphrase prompt — sits above this seam in the boot path and
+//! is wired in the following increment (`plans/PI.md` P11 Chunk B-2);
+//! `virtio-blk` proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
 
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::filesystem::{FilesystemRead, NodeKind};
@@ -66,6 +74,7 @@ use rustos_drv_fs_rustfs::{
 };
 use rustos_kernel_core::{load_users_db_source, HeldUsersDbSource, UsersLoadError};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
 use zeroize::Zeroizing;
 
 /// Audit event: the encrypted root volume was unlocked under the
@@ -115,6 +124,21 @@ pub enum RootMountError {
     /// or validated; [`load_users_db_source`] has already audited the
     /// precise cause.
     Users(UsersLoadError),
+    /// The disk's partition table could not be parsed: no recognised
+    /// scheme, a malformed or forged MBR/GPT table, or a device read
+    /// fault. The table is untrusted on-disk input, validated fail-closed
+    /// before any partition is trusted (`AGENTS.md` §5.4 / §19.5).
+    PartitionTable(PartitionError),
+    /// The disk carries no FAT boot partition (the partition holding the
+    /// `root.unlock` descriptor), so the encrypted root cannot be
+    /// unlocked. No database is served (`AGENTS.md` §2.9).
+    NoBootPartition,
+    /// The disk carries no `RustFS` root partition to mount.
+    NoRootPartition,
+    /// A parsed partition extent does not fit the device geometry, so its
+    /// bounds-checked window could not be built (`AGENTS.md` §24.4 — a
+    /// fixed extent, validated against the device before any access).
+    PartitionWindow(DriverError),
 }
 
 impl RootMountError {
@@ -128,6 +152,10 @@ impl RootMountError {
             Self::Mount(DriverError::BadMagic) => "not_a_rustfs_volume",
             Self::Mount(_) => "mount_failed",
             Self::Users(err) => err.cause(),
+            Self::PartitionTable(_) => "partition_table_invalid",
+            Self::NoBootPartition => "no_boot_partition",
+            Self::NoRootPartition => "no_root_partition",
+            Self::PartitionWindow(_) => "partition_out_of_range",
         }
     }
 }
@@ -260,10 +288,110 @@ where
     unlock_root_and_load_users(&descriptor, passphrase, root_block, audit)
 }
 
+/// Bring up the users database from a single partitioned disk: parse its
+/// partition table, locate the FAT boot and `RustFS` root partitions, and
+/// run the unlock + load composition over a bounds-checked window onto
+/// each (`plans/PI.md` P11 Chunk B-2).
+///
+/// This is the entry the boot path uses when the board brings up **one**
+/// block device carrying the whole disk — the common case: an SD card, a
+/// USB stick, or a single `virt` virtio-blk image. It is scheme- **and**
+/// architecture-neutral: `disk` may be an MBR or a GPT disk
+/// ([`parse_partition_table`] detects which), so the same code reads a
+/// Raspberry Pi MBR image and a UEFI x86_64 GPT disk without a board
+/// `cfg` (`AGENTS.md` §17 / §2.20). The partitions are located by **role**
+/// (`FatBoot` / `RustFsRoot`), not by a hard-coded index, and the on-disk
+/// definition is the one `tools/mkimage` writes (`AGENTS.md` §2.2).
+///
+/// The two partitions are opened **in sequence** over a borrowed `disk`
+/// (one device, never two simultaneous mutable windows, via the
+/// `impl Block for &mut B` forwarding): the FAT boot window is built, the
+/// descriptor read, the window dropped to reclaim the disk, then the
+/// `RustFS` root window is built for the mount. The untrusted on-disk
+/// table is validated fail-closed before any partition is trusted
+/// (`AGENTS.md` §5.4 / §19.5), and a disk missing either partition serves
+/// no database (`AGENTS.md` §2.9).
+///
+/// * `disk` — the whole-disk [`Block`] device the board brought up.
+/// * `passphrase` — the bytes the operator typed at the console; used
+///   only to derive the volume key, never logged or retained.
+/// * `audit` — the sink every decision is logged through (`AGENTS.md`
+///   §19.4).
+///
+/// # Errors
+///
+/// A [`RootMountError`] naming the first check that refused
+/// ([`RootMountError::PartitionTable`], [`RootMountError::NoBootPartition`],
+/// [`RootMountError::NoRootPartition`], [`RootMountError::PartitionWindow`],
+/// or the downstream descriptor/mount/users errors). Every error path
+/// yields no database and is audited (`AGENTS.md` §5.4.5).
+pub fn mount_root_disk_and_load_users<Disk: Block>(
+    mut disk: Disk,
+    passphrase: &[u8],
+    audit: &dyn Sink,
+) -> Result<HeldUsersDbSource, RootMountError> {
+    // 1. Parse the untrusted partition table fail-closed (MBR or GPT).
+    let table = match parse_partition_table(&mut disk) {
+        Ok(table) => table,
+        Err(err) => {
+            let error = RootMountError::PartitionTable(err);
+            reject(audit, error);
+            return Err(error);
+        }
+    };
+
+    // 2. Locate the two partitions RustOS needs by role, not by index.
+    let Some(boot_extent) = table.first_of_type(PartitionType::FatBoot) else {
+        let error = RootMountError::NoBootPartition;
+        reject(audit, error);
+        return Err(error);
+    };
+    let Some(root_extent) = table.first_of_type(PartitionType::RustFsRoot) else {
+        let error = RootMountError::NoRootPartition;
+        reject(audit, error);
+        return Err(error);
+    };
+
+    // 3. Read the descriptor off a window onto the FAT boot partition,
+    //    then drop the window to reclaim the disk for the root window
+    //    (one device, two sequential windows).
+    let descriptor = {
+        let boot = match PartitionBlock::from_partition(&mut disk, &boot_extent) {
+            Ok(boot) => boot,
+            Err(err) => {
+                let error = RootMountError::PartitionWindow(err);
+                reject(audit, error);
+                return Err(error);
+            }
+        };
+        match read_root_unlock_descriptor(boot) {
+            Ok(descriptor) => descriptor,
+            Err(err) => {
+                let error = RootMountError::DescriptorRead(err);
+                reject(audit, error);
+                return Err(error);
+            }
+        }
+    };
+
+    // 4. Open a window onto the RustFS root partition and run the unlock +
+    //    users-load composition over it.
+    let root = match PartitionBlock::from_partition(&mut disk, &root_extent) {
+        Ok(root) => root,
+        Err(err) => {
+            let error = RootMountError::PartitionWindow(err);
+            reject(audit, error);
+            return Err(error);
+        }
+    };
+    unlock_root_and_load_users(&descriptor, passphrase, root, audit)
+}
+
 /// Emit the [`ROOT_MOUNT_REJECTED`] record for a refused unlock, naming
 /// the failing `stage` with a secret-free cause string. The database load
-/// stage audits itself, so this helper only ever reports a descriptor
-/// read, descriptor decode, or mount refusal.
+/// stage audits itself, so this helper reports a partition-table parse,
+/// partition lookup/window, descriptor read, descriptor decode, or mount
+/// refusal.
 fn reject(audit: &dyn Sink, error: RootMountError) {
     log(
         audit,
@@ -351,6 +479,7 @@ mod tests {
     use rustos_drv_fs_rustfs::{EntropySource, UNLOCK_MIN_ITERATIONS};
     use rustos_kernel_core::UsersDbSource;
     use rustos_log::{Event as LogEvent, Sink as LogSink};
+    use rustos_partition::{mbr, Partition};
     use rustos_test_rustfs_image as image;
     use rustos_users::UsersDb;
 
@@ -753,6 +882,127 @@ mod tests {
             .expect_err("a wrong passphrase must be refused");
 
         assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
+        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    // --- mount_root_disk_and_load_users (the single-disk split) --------
+
+    /// LBA of the boot partition within the assembled whole disk (1 MiB
+    /// alignment, the universal SD-card convention `tools/mkimage` uses).
+    const DISK_BOOT_LBA: u64 = 2048;
+
+    /// LBA of the `RustFS` root partition: directly after the boot
+    /// partition.
+    const DISK_ROOT_LBA: u64 = DISK_BOOT_LBA + FAT_BOOT_SECTORS;
+
+    /// Assemble a single whole-disk MBR image of the shape `tools/mkimage`
+    /// writes — an MBR table in sector 0, the FAT boot partition at
+    /// [`DISK_BOOT_LBA`], the `RustFS` root partition at [`DISK_ROOT_LBA`]
+    /// — through the *same* `rustos_partition::mbr::encode` the image
+    /// author uses, so author and reader cannot drift (`AGENTS.md` §2.2).
+    /// Returns a 512-byte-sector whole-disk [`Block`].
+    fn assemble_whole_disk(boot: &FatVecBlock, root_bytes: &[u8]) -> FatVecBlock {
+        let root_sectors = u64::try_from(root_bytes.len() / FAT_SECTOR_BYTES).expect("fits");
+        let total_sectors = DISK_ROOT_LBA + root_sectors;
+        let mut store =
+            alloc::vec![0u8; usize::try_from(total_sectors).expect("fits") * FAT_SECTOR_BYTES];
+
+        let table = mbr::encode(&[
+            Partition {
+                ty: PartitionType::FatBoot,
+                start_lba: DISK_BOOT_LBA,
+                block_count: FAT_BOOT_SECTORS,
+            },
+            Partition {
+                ty: PartitionType::RustFsRoot,
+                start_lba: DISK_ROOT_LBA,
+                block_count: root_sectors,
+            },
+        ])
+        .expect("the whole-disk MBR encodes");
+        store[..FAT_SECTOR_BYTES].copy_from_slice(&table);
+
+        let boot_at = usize::try_from(DISK_BOOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
+        store[boot_at..boot_at + boot.store.len()].copy_from_slice(&boot.store);
+        let root_at = usize::try_from(DISK_ROOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
+        store[root_at..root_at + root_bytes.len()].copy_from_slice(root_bytes);
+
+        FatVecBlock { store }
+    }
+
+    #[test]
+    fn a_partitioned_disk_splits_unlocks_and_loads_end_to_end() {
+        // The single-disk boot entry: one whole-disk device carrying an
+        // MBR boot+root layout is split by role into bounds-checked
+        // windows, the descriptor is read off the FAT boot window, and the
+        // encrypted root window mounts under the passphrase to yield the
+        // usable users database (`plans/PI.md` P11 Chunk B-2).
+        let (descriptor_bytes, key) = provision();
+        let boot = author_boot_partition(&descriptor_bytes);
+        let root_bytes =
+            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let disk = assemble_whole_disk(&boot, &root_bytes);
+        let sink = RecordingSink::new();
+
+        let source = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+            .expect("the disk splits and the root unlocks end to end");
+
+        let text = source.text().expect("a loaded holder serves its text");
+        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+            .expect("the served database parses");
+        db.authenticate(
+            image::USERS_FIXTURE_USERNAME,
+            image::USERS_FIXTURE_PASSWORD.as_bytes(),
+        )
+        .expect("the planted account authenticates");
+        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_disk_with_no_partition_table_serves_no_database() {
+        // §2.9 / §5.4: a device with no recognised partition scheme (a
+        // blank disk, no MBR signature, no GPT header) is refused whole;
+        // the encrypted root is never touched and no database is served.
+        let disk = FatVecBlock::new(64);
+        let sink = RecordingSink::new();
+
+        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+            .expect_err("a disk with no table must be refused");
+
+        assert!(matches!(err, RootMountError::PartitionTable(_)), "{err:?}");
+        assert_eq!(err.cause(), "partition_table_invalid");
+        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_disk_without_a_root_partition_serves_no_database() {
+        // §2.9: a valid table that carries a FAT boot partition but no
+        // RustFS root partition is fail-closed NoRootPartition — the
+        // encrypted root cannot be located, so none is mounted.
+        let (descriptor_bytes, _key) = provision();
+        let boot = author_boot_partition(&descriptor_bytes);
+        let total_sectors = DISK_BOOT_LBA + FAT_BOOT_SECTORS;
+        let mut store =
+            alloc::vec![0u8; usize::try_from(total_sectors).expect("fits") * FAT_SECTOR_BYTES];
+        let table = mbr::encode(&[Partition {
+            ty: PartitionType::FatBoot,
+            start_lba: DISK_BOOT_LBA,
+            block_count: FAT_BOOT_SECTORS,
+        }])
+        .expect("the boot-only MBR encodes");
+        store[..FAT_SECTOR_BYTES].copy_from_slice(&table);
+        let boot_at = usize::try_from(DISK_BOOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
+        store[boot_at..boot_at + boot.store.len()].copy_from_slice(&boot.store);
+        let disk = FatVecBlock { store };
+        let sink = RecordingSink::new();
+
+        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+            .expect_err("a disk with no root partition must be refused");
+
+        assert_eq!(err, RootMountError::NoRootPartition);
+        assert_eq!(err.cause(), "no_root_partition");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
     }

@@ -419,6 +419,12 @@ rustos/
 │   │                    #   console (tty) byte encoder a keyboard driver's
 │   │                    #   console_input producer uses, over lib/vt (§2.2).
 │   ├── log/             # Structured logging.
+│   ├── partition/       # Shared, scheme-neutral partition-table layer: MBR
+│   │                    #   encode + fail-closed MBR/GPT parse and a
+│   │                    #   bounds-checked PartitionBlock window, the one
+│   │                    #   definition the mkimage author and the kernel
+│   │                    #   root-mount reader share across MBR/GPT on every
+│   │                    #   arch (§2.2, §5.4, §24.4).
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha

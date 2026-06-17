@@ -2016,13 +2016,16 @@ remains (pending hardware).
   `$RUSTOS_PI_FIRMWARE`; otherwise the pinned blobs are fetched
   automatically. The standalone `rustos-mkimage rpi` CLI mirrors the
   same flags (with `--firmware` required — no network I/O in mkimage).
-- 38 host tests: MBR encode/validation, ELF→flat layout + every refusal,
-  manifest parse/verify fail-closed (incl. the committed manifest),
-  boot/root partition round-trips re-mounted through the real drivers,
-  the `root.unlock` descriptor planted on FAT re-deriving the exact
-  volume key, a wrong-passphrase mount refusal (no separate oracle, §5.4),
-  and full-image assembly with both partitions mounted from their MBR
-  offsets. Docs: `docs/src/install/raspberry_pi.md`.
+- Host tests: ELF→flat layout + every refusal, manifest parse/verify
+  fail-closed (incl. the committed manifest), boot/root partition
+  round-trips re-mounted through the real drivers, the `root.unlock`
+  descriptor planted on FAT re-deriving the exact volume key, a
+  wrong-passphrase mount refusal (no separate oracle, §5.4), and
+  full-image assembly with both partitions mounted from their MBR offsets.
+  The MBR table is encoded through the shared scheme-neutral `lib/partition`
+  layer — the one definition the kernel root-mount reader parses back, so
+  author and reader cannot drift (§2.2); its MBR/GPT encode/parse tests
+  live in that crate. Docs: `docs/src/install/raspberry_pi.md`.
 
 **Remaining — metal:** boot the emitted image on a real Pi 4 per the
 flashing/first-boot doc and record the UART-log checklist (the P7/P8
@@ -4031,6 +4034,27 @@ two users — or the same user twice — can be logged in concurrently.
        (end-to-end success authenticating the planted `root`/`root`; a
        missing descriptor refused with no unlock; a wrong passphrase refused
        fail-closed). No `lib/abi`/C-header change.
+     - **Chunk B-2 single-disk partition split — LANDED (host-proven).**
+       `rustos_kernel::root_mount::mount_root_disk_and_load_users` is the
+       entry for the common case: **one** whole-disk `Block` device. It
+       parses the partition table through the shared, scheme-neutral
+       `lib/partition` layer — MBR encode (the image author) + fail-closed
+       MBR/GPT parse (the boot reader), the one on-disk definition
+       `tools/mkimage` writes (§2.2), so it reads a Pi MBR card **and** a
+       UEFI x86_64 GPT disk with no board `cfg` (§2.20). It locates the FAT
+       boot and `RustFS` root partitions **by role** (not by index), opens a
+       bounds-checked `PartitionBlock` window onto each **in sequence** (one
+       device, two windows, via the new `impl Block for &mut B` forwarding in
+       `lib/abi`), reads the descriptor off the boot window, then mounts the
+       root window. A malformed/forged table, a missing FAT boot or `RustFS`
+       root partition, or an out-of-range extent is audited (`4134`) and
+       returned (`RootMountError::PartitionTable`/`NoBootPartition`/
+       `NoRootPartition`/`PartitionWindow`); no database is served (§2.9 /
+       §5.4). Host-proven by 3 tests (whole-disk MBR split → unlock → load
+       authenticating the planted account; no-table and no-root-partition
+       refusals) plus the `lib/partition` MBR/GPT parse + fuzz suite. No
+       `lib/abi` ABI change (the `&mut B` `Block` impl is a forwarding impl,
+       not a new method — no C-header regen).
      - **Chunk B-2 root-storage bind gate — LANDED (host-proven).**
        `rustos_kernel::root_storage` resolves which **discovered**
        hardware-tree node carries the bootstrap root block device, and which
@@ -4058,11 +4082,12 @@ two users — or the same user twice — can be logged in concurrently.
      - **Chunk B-2 board bring-up — still staged: the rest of the storage
        bring-up that wires the mount:** consume the bind gate's
        `RootBlockBinding`, bring up the bound block + filesystem driver with
-       an in-kernel DMA/MMIO host, read `root.unlock` (B-1) off the FAT boot
-       partition, prompt for the passphrase on the console (the in-kernel
-       keyboard scaffold already feeds the console on metal; UART on
-       `virt`), call `mount_root_and_load_users`, leak + `with_users_db`.
-       virtio-blk proves it on `-M virt`; the EMMC2 metal mount rides P8.
+       an in-kernel DMA/MMIO host to obtain the whole-disk `Block` device,
+       prompt for the passphrase on the console (the in-kernel keyboard
+       scaffold already feeds the console on metal; UART on `virt`), then
+       call `mount_root_disk_and_load_users` (the split + descriptor read +
+       unlock + load is done), leak + `with_users_db`. virtio-blk proves it
+       on `-M virt`; the EMMC2 metal mount rides P8.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves

@@ -129,6 +129,14 @@ rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0
 # architecture-neutral, so it is a common dependency and its host tests run
 # on the CI host.
 rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
+# The shared, scheme-neutral partition layer (`AGENTS.md` §2.2): the boot
+# path splits the single whole-disk block device into its FAT boot and
+# `RustFS` root partitions through `parse_partition_table` + the
+# bounds-checked `PartitionBlock` window — the same MBR/GPT definition
+# `tools/mkimage` writes the image with, so author and reader cannot drift.
+# Scheme- and architecture-neutral (MBR on the Pi, GPT on UEFI x86_64), so
+# it is a common dependency and its host tests run on the CI host.
+rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
 # The bootstrap-floor storage path (`AGENTS.md` §18.6): the block drivers
 # that must be up before the signed driver store under `/System/Drivers/`
 # is reachable. They are compiled in (not discovered from the store) and

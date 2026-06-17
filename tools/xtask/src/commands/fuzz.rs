@@ -106,6 +106,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/fdt device-tree reader (untrusted firmware/bootloader DTB bytes)",
     },
     Target {
+        package: "rustos-partition",
+        test: "fuzz_partition",
+        description: "lib/partition MBR + GPT table parsers (untrusted on-disk partition bytes)",
+    },
+    Target {
         package: "rustos-curses",
         test: "fuzz_curses_input",
         description: "lib/curses input decoder (untrusted key/mouse/paste bytes)",

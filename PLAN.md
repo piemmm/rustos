@@ -1227,7 +1227,17 @@ spec §18.
   Chunk B-2 — host-proven): given the two brought-up block devices and the
   typed passphrase it reads the descriptor and, on success, runs the unlock
   composition, auditing and fail-closing a descriptor that cannot be read
-  (`RootMountError::DescriptorRead`). Root-device *discovery* is wired: the
+  (`RootMountError::DescriptorRead`). The single-disk entry above it is wired
+  (`rustos_kernel::root_mount::mount_root_disk_and_load_users` — host-proven):
+  given **one** whole-disk block device it parses the partition table through
+  the shared, scheme-neutral `lib/partition` layer (MBR encode + fail-closed
+  MBR/GPT parse, the one on-disk definition `tools/mkimage` writes, §2.2 /
+  §2.20 — works for a Pi MBR card and a UEFI x86_64 GPT disk on any arch),
+  locates the FAT boot and `RustFS` root partitions by role, opens a
+  bounds-checked `PartitionBlock` window onto each in sequence (one device,
+  two windows via `impl Block for &mut B`), and runs the composition —
+  fail-closing a malformed/forged table or a missing partition. Root-device
+  *discovery* is wired: the
   root-storage bind gate (`rustos_kernel::root_storage`, audited `4135`
   `ROOT_STORAGE_AUTOLOAD`) resolves which discovered hardware-tree node
   carries the bootstrap root block device against the in-kernel floor

@@ -334,6 +334,59 @@ pub trait Block {
     }
 }
 
+/// A `&mut B` is itself a [`Block`], forwarding every method to the
+/// borrowed device.
+///
+/// This lets a caller layer a transient adapter (e.g. a
+/// `rustos_partition::PartitionBlock` window) over a *borrowed* device,
+/// use it, drop it, then reuse the underlying device — without giving up
+/// ownership. The boot path relies on it to open the FAT boot partition
+/// and the encrypted root partition of one disk in sequence (one disk,
+/// two windows, no second device handle).
+impl<B: Block + ?Sized> Block for &mut B {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        (**self).geometry()
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        (**self).read_blocks(lba, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        (**self).write_blocks(lba, buf)
+    }
+
+    fn read_blocks_with_class(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8],
+        class: BufferClass,
+    ) -> Result<(), DriverError> {
+        (**self).read_blocks_with_class(lba, buf, class)
+    }
+
+    fn write_blocks_with_class(
+        &mut self,
+        lba: u64,
+        buf: &[u8],
+        class: BufferClass,
+    ) -> Result<(), DriverError> {
+        (**self).write_blocks_with_class(lba, buf, class)
+    }
+
+    fn discard_capability(&self) -> Result<DiscardCapability, DriverError> {
+        (**self).discard_capability()
+    }
+
+    fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), DriverError> {
+        (**self).discard(lba, blocks)
+    }
+
+    fn device_health(&self) -> Result<DeviceHealth, DriverError> {
+        (**self).device_health()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +457,32 @@ mod tests {
         let mut readback = [0u8; 64];
         assert!(dev.read_blocks(2, &mut readback).is_ok());
         assert_eq!(readback, payload);
+    }
+
+    #[test]
+    fn mut_reference_forwards_as_a_block() {
+        // A `&mut B` is itself a `Block`: a generic consumer (mirroring a
+        // `PartitionBlock<&mut Disk>` window) takes the borrow by value
+        // and drives it through the forwarding impl; afterwards the owned
+        // device is reclaimed and sees the write.
+        fn write_through<B: Block>(mut dev: B) {
+            assert_eq!(dev.geometry().unwrap().block_count, 16);
+            let payload = [0xa5u8; 64];
+            assert!(dev.write_blocks(3, &payload).is_ok());
+        }
+
+        let mut dev = MockBlock {
+            geo: BlockGeometry {
+                block_size: 64,
+                block_count: 16,
+            },
+            store: [0u8; 1024],
+        };
+        write_through(&mut dev);
+
+        let mut readback = [0u8; 64];
+        assert!(dev.read_blocks(3, &mut readback).is_ok());
+        assert_eq!(readback, [0xa5u8; 64]);
     }
 
     #[test]

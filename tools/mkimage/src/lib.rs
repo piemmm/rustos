@@ -45,7 +45,6 @@ pub mod device;
 pub mod elfflat;
 pub mod fatboot;
 pub mod firmware;
-pub mod mbr;
 pub mod rootfs;
 
 pub use rustos_drv_fs_rustfs::{
@@ -55,9 +54,10 @@ pub use rustos_drv_fs_rustfs::{
 
 use device::SECTOR_BYTES;
 use firmware::FirmwareFile;
-use mbr::{PartitionExtent, PART_TYPE_FAT32_LBA, PART_TYPE_RUSTFS};
 use rustos_abi::{CapabilityId, DriverError};
 use rustos_caps::CapabilitySet;
+use rustos_partition::mbr::{self, MbrError};
+use rustos_partition::{Partition, PartitionType};
 use rustos_users::{AccountState, Gid, Identity, Salt, Uid, UserRecord, UsersDb};
 
 /// First sector of the FAT32 boot partition (1 MiB alignment, the
@@ -91,8 +91,8 @@ pub enum MkimageError {
     Firmware(String),
     /// The kernel ELF cannot be flattened into `kernel8.img`.
     KernelElf(&'static str),
-    /// The requested partition table is invalid.
-    PartitionTable(&'static str),
+    /// The requested MBR partition table is invalid.
+    Partition(MbrError),
     /// Authoring the FAT32 boot partition failed.
     BootPartition(DriverError),
     /// Authoring the `RustFS` root partition failed.
@@ -111,13 +111,19 @@ impl fmt::Display for MkimageError {
             Self::Manifest(msg) => write!(f, "firmware manifest: {msg}"),
             Self::Firmware(msg) => write!(f, "firmware input: {msg}"),
             Self::KernelElf(msg) => write!(f, "kernel ELF: {msg}"),
-            Self::PartitionTable(msg) => write!(f, "partition table: {msg}"),
+            Self::Partition(err) => write!(f, "partition table: {err:?}"),
             Self::BootPartition(err) => write!(f, "boot partition: driver error {err:?}"),
             Self::RootPartition(err) => write!(f, "root partition: driver error {err:?}"),
             Self::Entropy(msg) => write!(f, "host entropy: {msg}"),
             Self::Unlock(err) => write!(f, "unlock descriptor: driver error {err:?}"),
             Self::UsersDb(msg) => write!(f, "users database: {msg}"),
         }
+    }
+}
+
+impl From<MbrError> for MkimageError {
+    fn from(err: MbrError) -> Self {
+        Self::Partition(err)
     }
 }
 
@@ -301,16 +307,16 @@ pub fn build_rpi_image(
         users_db.as_deref(),
     )?;
 
-    let mbr_sector = mbr::encode_mbr(&[
-        PartitionExtent {
-            type_byte: PART_TYPE_FAT32_LBA,
-            start_lba: BOOT_PART_LBA,
-            sectors: BOOT_PART_SECTORS,
+    let mbr_sector = mbr::encode(&[
+        Partition {
+            ty: PartitionType::FatBoot,
+            start_lba: u64::from(BOOT_PART_LBA),
+            block_count: u64::from(BOOT_PART_SECTORS),
         },
-        PartitionExtent {
-            type_byte: PART_TYPE_RUSTFS,
-            start_lba: ROOT_PART_LBA,
-            sectors: ROOT_PART_SECTORS,
+        Partition {
+            ty: PartitionType::RustFsRoot,
+            start_lba: u64::from(ROOT_PART_LBA),
+            block_count: u64::from(ROOT_PART_SECTORS),
         },
     ])?;
 

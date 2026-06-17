@@ -963,6 +963,7 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-kernel-virtio",
  "rustos-log",
+ "rustos-partition",
  "rustos-sync",
  "rustos-test-rustfs-image",
  "rustos-usb",
@@ -1157,6 +1158,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
+ "rustos-partition",
  "rustos-users",
 ]
 
@@ -1177,6 +1179,14 @@ dependencies = [
 
 [[package]]
 name = "rustos-net-icmp"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-fuzzseed",
+]
+
+[[package]]
+name = "rustos-partition"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
