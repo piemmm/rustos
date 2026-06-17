@@ -48,6 +48,30 @@ QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
 DMA, IRQ routing, bus-handle hand-off).
 
+### Discovery and the bootstrap floor
+
+Both shipped block drivers publish a canonical `BIND_KEYS` table
+(`AGENTS.md` §18.3) so a discovered hardware-tree node binds them by
+match, never by a kernel guess (§18.5):
+
+| Driver       | `BIND_KEYS` match key                         | Discovered node source                          |
+|--------------|-----------------------------------------------|-------------------------------------------------|
+| virtio-blk   | virtio device id `2` (`HwMatchKey::virtio(2)`)| a probed virtio node (PCI or MMIO transport)    |
+| EMMC2        | `compatible = "brcm,bcm2711-emmc2"`           | the aarch64 `FdtDiscovery` Storage node         |
+
+The block drivers are part of the **bootstrap floor** (`AGENTS.md`
+§18.6): the storage path must be up before the signed driver store under
+`/System/Drivers/` is reachable, so the volume that holds the store can be
+read. They are therefore compiled in and registered in the kernel binary's
+`driver_catalog::IN_KERNEL_DRIVERS` floor registry (virtio-blk for the QEMU
+`virt` / x86_64 root, EMMC2 for the Raspberry Pi 4 SD card), each paired
+with the driver crate's own `BIND_KEYS` and a build-signed manifest. The
+floor binds by discovery-match through the same shared `lib/devmatch`
+policy the user-space `devmgr` uses — the in-kernel match and the
+user-space match can never diverge (§2.2) — and is signature-verified and
+capability-gated alike (§18.6). The floor only ever shrinks toward the
+store, never grows.
+
 ### Raspberry Pi 4 EMMC2 (SDHCI)
 
 `rustos-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2

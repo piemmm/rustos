@@ -576,13 +576,19 @@ order (one fully-gated increment each):
    so new hardware support is a dropped-in signed bundle, not a recompile.
    The only compiled-in exception is the irreducible **bootstrap floor**
    (root-complex/bus bring-up + the storage path) that must exist before the
-   store is reachable. The current `kernel/rustos-kernel::driver_catalog`
-   (`IN_KERNEL_DRIVERS`) is the in-kernel candidate list, but it is **over-
-   broad**: `usb_hid` is a plain HID leaf driver, not bootstrap-floor, and
-   must move out to the discovered tier (chunks 5d–5e). Both tiers bind by
-   discovery-match through the one shared `lib/devmatch` policy and are
-   signed + capability-gated alike; the floor only shrinks toward the store
-   (§18.5/§18.6), it never grows.
+   store is reachable. The `kernel/rustos-kernel::driver_catalog`
+   (`IN_KERNEL_DRIVERS`) is the in-kernel candidate list. Its legitimate
+   floor is the **storage path** — the block drivers that read the volume
+   holding the store: `rustos_drv_storage_virtio_blk` (virtio device id 2,
+   the QEMU `virt` / x86_64 root) and `rustos_drv_storage_emmc2`
+   (`brcm,bcm2711-emmc2`, the Raspberry Pi 4 SD card), each registered with
+   the driver crate's own `pub const BIND_KEYS` and a build-signed manifest
+   (done) — plus the **bus chain** that reaches it. It is still **over-
+   broad** in one place: `usb_hid` is a plain HID leaf driver, not
+   bootstrap-floor, and must move out to the discovered tier (chunks 5d–5e).
+   Both tiers bind by discovery-match through the one shared `lib/devmatch`
+   policy and are signed + capability-gated alike; the floor only shrinks
+   toward the store (§18.5/§18.6), it never grows.
 
    The scaffold is now **live**: the aarch64 boot path invokes it
    as an in-kernel keyboard *service kthread* (`plans/PI.md` P10 — the new

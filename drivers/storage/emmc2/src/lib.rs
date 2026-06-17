@@ -39,7 +39,9 @@
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
 use rustos_abi::driver::mmio::WindowError;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, RegisterWindow};
+use rustos_abi::{
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+};
 
 pub mod command;
 pub mod regs;
@@ -55,6 +57,30 @@ use command::{ResponseKind, SdCommand, BLOCK_SIZE, BLOCK_WORDS};
 /// The bytes spell `"SDP"` (SD PIO) with a version nibble, matching the
 /// other drivers' marker convention.
 const REGISTER_HANDLE_MARKER: u64 = 0x5344_5000_0000_0001;
+
+/// The §18.3 bind priority [`BIND_KEYS`] carries.
+///
+/// An exact `compatible`-string match: it ranks at the exact-match tier
+/// (`AGENTS.md` §18.3 — higher matched priority binds; an unbroken tie is
+/// a packaging defect).
+const BIND_PRIORITY: u16 = 10;
+
+/// This driver's hardware bind table (`AGENTS.md` §18.3): the BCM2711
+/// EMMC2 SD host, matched by the device-tree `compatible` string
+/// `brcm,bcm2711-emmc2` the aarch64 `FdtDiscovery` emits on the Storage
+/// node (`wiring`). The single source of truth the signed-manifest bind
+/// table is authored from and a discovered node is resolved against
+/// (`AGENTS.md` §2.2 / §18.3).
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    BIND_PRIORITY,
+    match HwMatchKey::compatible(b"brcm,bcm2711-emmc2") {
+        Ok(key) => key,
+        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
+        // too-long literal would be a compile-time const-eval error here,
+        // never a runtime panic (`AGENTS.md` §2.9).
+        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+    },
+)];
 
 /// Upper bound on register polls while waiting for a controller event.
 ///

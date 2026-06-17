@@ -566,3 +566,22 @@ fn open_discovered_without_mapper_is_unsupported() {
         Some(DriverError::Unsupported)
     );
 }
+
+#[test]
+fn bind_table_matches_the_bcm2711_emmc2_node() {
+    use rustos_abi::HwMatchKey;
+
+    // One entry at the declared exact-match priority, matching a
+    // discovered node carrying the EMMC2 `compatible` string the
+    // aarch64 `FdtDiscovery` emits (`AGENTS.md` §18.3).
+    assert_eq!(BIND_KEYS.len(), 1);
+    assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
+    let emmc2 = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits");
+    assert!(BIND_KEYS[0].key.matches(&emmc2));
+
+    // The sibling BCM2711 PCIe root-complex node and an unrelated node
+    // both fail the match — the caller leaves them unbound rather than
+    // guessing (`AGENTS.md` §18.4 / §2.9).
+    let pcie = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
+    assert!(!BIND_KEYS[0].key.matches(&pcie));
+}

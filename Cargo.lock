@@ -949,6 +949,8 @@ dependencies = [
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
  "rustos-drv-input-usb-hid",
+ "rustos-drv-storage-emmc2",
+ "rustos-drv-storage-virtio-blk",
  "rustos-drvhost",
  "rustos-fdt",
  "rustos-hid",

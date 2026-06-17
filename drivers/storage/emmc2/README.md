@@ -52,9 +52,17 @@ rather than mis-addressed (`AGENTS.md` §5.4).
 
 The aarch64 `FdtDiscovery` walk emits the `brcm,bcm2711-emmc2` node into
 `rustos_abi::hwtree` (Storage class, translated MMIO window) from a
-Pi-shaped device tree; `devmgr` matches the node against this driver's
-bind table (`AGENTS.md` §18.3) and the host calls `wiring::open_discovered`
-with the discovered register-window base.
+Pi-shaped device tree. The driver publishes a canonical `BIND_KEYS` table
+(`AGENTS.md` §18.3) with one entry matching `compatible =
+"brcm,bcm2711-emmc2"`; the discovered node is resolved against it and the
+host calls `wiring::open_discovered` with the discovered register-window
+base. As part of the storage **bootstrap floor** (`AGENTS.md` §18.6) — the
+Pi 4's root volume must be readable before the signed driver store is
+reachable — the driver is registered in the kernel binary's
+`driver_catalog::IN_KERNEL_DRIVERS` floor registry against a build-signed
+manifest carrying this same `BIND_KEYS`, and binds by discovery-match
+through the same shared `lib/devmatch` policy the user-space `devmgr` uses
+(§2.2).
 
 ## Required capabilities
 
@@ -88,6 +96,8 @@ budget (`DEFAULT_POLL_BUDGET`). Exceeding it fails closed with
 - Command-error (read and write) and stalled-controller fail-closed
   (`DeviceFault`).
 - The `wiring` capability / mapper gate.
+- The `BIND_KEYS` table matches the `brcm,bcm2711-emmc2` node and rejects
+  the sibling `brcm,bcm2711-pcie` node (`AGENTS.md` §18.3).
 
 ## Metal acceptance (pending hardware)
 

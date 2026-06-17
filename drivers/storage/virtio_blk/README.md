@@ -29,6 +29,19 @@ The "mock-transport only" status reflects the prerequisites the
 routing, bus-handle hand-off). Once those land the same `VirtioBlk`
 type binds to a `PciBackend` / `MmioBackend` without modification.
 
+## Discovery (bind table)
+
+The driver publishes a canonical `BIND_KEYS` table (`AGENTS.md` §18.3)
+with one entry matching the virtio block device id
+(`HwMatchKey::virtio(2)`). A discovered virtio node whose probed device
+id is `virtio-blk` binds this driver by match — never a kernel guess
+(§18.5) — and the key carries no transport detail, so the same driver
+binds the device over either the PCI or the MMIO transport. As part of
+the storage **bootstrap floor** (`AGENTS.md` §18.6), the driver is
+registered in the kernel binary's `driver_catalog::IN_KERNEL_DRIVERS`
+floor registry against a build-signed manifest carrying this same
+`BIND_KEYS`.
+
 ## Required capabilities
 
 - `CAP_DRV_LOAD` at `register` time.
@@ -56,8 +69,10 @@ zeroed; that scrubbing remains the caller's responsibility.
 - Multi-sector read concatenation.
 - `BufferClass::Sensitive` round-trip.
 - `register` capability gate.
+- The `BIND_KEYS` table matches a `virtio-blk` node and rejects a
+  different virtio device / a non-virtio node (`AGENTS.md` §18.3).
 
-8/8 host-side tests pass; per-arch QEMU integration is tracked under
+All host-side tests pass; per-arch QEMU integration is tracked under
 item 4 of `.junie/next-session-prompt.md` (it depends on the kernel
 DMA + IRQ work in items 1–2).
 

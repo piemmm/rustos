@@ -26,10 +26,15 @@
 //! that must exist before the signed driver store under `/System/Drivers/`
 //! is reachable — the general driver set is discovered at runtime from that
 //! store, never frozen here. The floor binds by discovery-match through the
-//! same shared policy and shrinks toward the store, never grows. The
-//! `usb_hid` entry is **not** bootstrap-floor (a plain HID leaf driver) and
-//! is staged to move out to a `devmgr`-autoloaded user-space driver
-//! (PLAN Stage 4.HW item 5, chunks 5d→5e); it stays only until that lands.
+//! same shared policy and shrinks toward the store, never grows.
+//!
+//! The legitimate floor here is the **storage path** — the block drivers
+//! that read the volume holding the store ([`VIRTIO_BLK_PATH`] for the
+//! QEMU `virt` / x86_64 root, [`EMMC2_PATH`] for the Raspberry Pi 4 SD
+//! card) — and the **bus chain** that reaches it. The `usb_hid` entry is
+//! **not** bootstrap-floor (a plain HID leaf driver) and is staged to move
+//! out to a `devmgr`-autoloaded user-space driver (PLAN Stage 4.HW item 5,
+//! chunks 5d→5e); it stays only until that lands.
 
 use rustos_abi::{DriverBindKey, HwMatchKey};
 use rustos_devmatch::{resolve, DriverCandidate, MatchResolution};
@@ -57,6 +62,23 @@ pub const BUS_USB_PATH: &str = "/System/Drivers/bus_usb";
 /// (`drivers/input/usb_hid`).
 pub const USB_HID_PATH: &str = "/System/Drivers/usb_hid";
 
+/// Logical image path of the virtio-blk block driver
+/// (`drivers/storage/virtio_blk`).
+///
+/// A vendor-neutral block device, so no vendor segment appears in the
+/// path: the class (`storage`) names what the device *is*, never who made
+/// it (`AGENTS.md` §8 / §16.2).
+pub const VIRTIO_BLK_PATH: &str = "/System/Drivers/storage/virtio_blk";
+
+/// Logical image path of the BCM2711 EMMC2 SD-host block driver
+/// (`drivers/storage/emmc2`).
+///
+/// The vendor / chip name (`brcm` / `bcm2711_emmc2`) appears only at the
+/// leaf — the directory that holds this one device's driver — while the
+/// class namespace above it (`storage`) stays vendor-neutral
+/// (`AGENTS.md` §8 / §16.2).
+pub const EMMC2_PATH: &str = "/System/Drivers/storage/brcm/bcm2711_emmc2";
+
 /// One in-kernel driver: every view of it the kernel needs, in a single
 /// entry so they cannot drift (`AGENTS.md` §2.2).
 pub struct InKernelDriver {
@@ -74,7 +96,7 @@ pub struct InKernelDriver {
 }
 
 /// The number of drivers the kernel hosts in-kernel.
-pub const IN_KERNEL_DRIVER_COUNT: usize = 3;
+pub const IN_KERNEL_DRIVER_COUNT: usize = 5;
 
 /// The in-kernel driver registry — the single source of truth (`AGENTS.md`
 /// §2.2). Adding hardware support the kernel must host in-kernel is one
@@ -98,6 +120,24 @@ pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
         bind_keys: rustos_drv_input_usb_hid::BIND_KEYS,
         image: USB_HID_IMAGE,
         register: rustos_drv_input_usb_hid::register,
+    },
+    // The bootstrap-floor storage path (`AGENTS.md` §18.6): a block driver
+    // must be up before the signed driver store under `/System/Drivers/`
+    // is reachable, so the root volume can be read. virtio-blk backs the
+    // QEMU `virt` / x86_64 root; EMMC2 backs the Raspberry Pi 4 SD card.
+    // Both genuinely sit *below* the store and so are floor, not
+    // discovered-tier, drivers.
+    InKernelDriver {
+        path: VIRTIO_BLK_PATH,
+        bind_keys: rustos_drv_storage_virtio_blk::BIND_KEYS,
+        image: VIRTIO_BLK_IMAGE,
+        register: rustos_drv_storage_virtio_blk::register,
+    },
+    InKernelDriver {
+        path: EMMC2_PATH,
+        bind_keys: rustos_drv_storage_emmc2::BIND_KEYS,
+        image: EMMC2_IMAGE,
+        register: rustos_drv_storage_emmc2::register,
     },
 ];
 
@@ -201,6 +241,22 @@ mod tests {
     }
 
     #[test]
+    fn discovered_storage_nodes_bind_the_block_drivers() {
+        // The bootstrap-floor storage path (`AGENTS.md` §18.6): a discovered
+        // virtio node whose probed device id is `virtio-blk` (2) binds the
+        // virtio-blk driver, and the device-tree `brcm,bcm2711-emmc2` node
+        // binds the EMMC2 driver — each by the driver's own §18.3 bind key,
+        // not a kernel guess.
+        let virtio_blk = [HwMatchKey::virtio(2)];
+        assert_eq!(
+            winner_path(resolve_driver(&virtio_blk)),
+            Some(VIRTIO_BLK_PATH)
+        );
+        let emmc2 = [HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits")];
+        assert_eq!(winner_path(resolve_driver(&emmc2)), Some(EMMC2_PATH));
+    }
+
+    #[test]
     fn an_unrelated_device_is_left_unmatched() {
         // An AHCI storage controller matches no in-kernel driver: the caller
         // leaves it unbound and logged (`AGENTS.md` §18.4), never a guess.
@@ -228,6 +284,14 @@ mod tests {
         assert_eq!(
             IN_KERNEL_DRIVERS[2].bind_keys,
             rustos_drv_input_usb_hid::BIND_KEYS
+        );
+        assert_eq!(
+            IN_KERNEL_DRIVERS[3].bind_keys,
+            rustos_drv_storage_virtio_blk::BIND_KEYS
+        );
+        assert_eq!(
+            IN_KERNEL_DRIVERS[4].bind_keys,
+            rustos_drv_storage_emmc2::BIND_KEYS
         );
     }
 

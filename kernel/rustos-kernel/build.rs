@@ -222,6 +222,14 @@ fn emit_signed_driver_manifests() {
             const_name: "USB_HID_IMAGE",
             bind_keys: rustos_drv_input_usb_hid::BIND_KEYS,
         },
+        DriverImage {
+            const_name: "VIRTIO_BLK_IMAGE",
+            bind_keys: rustos_drv_storage_virtio_blk::BIND_KEYS,
+        },
+        DriverImage {
+            const_name: "EMMC2_IMAGE",
+            bind_keys: rustos_drv_storage_emmc2::BIND_KEYS,
+        },
     ];
 
     let mut out = String::new();

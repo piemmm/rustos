@@ -1899,6 +1899,22 @@ pending metal; everything host-provable is landed and tested — done.
 Pi-shaped tree with no per-device code, and `devmgr` binds the driver
 against its `compatible` string (§18.3).
 
+**Landed — the storage path is a discovery-matched bootstrap floor
+(§18.6).** Both block drivers now publish a canonical `pub const
+BIND_KEYS` (`rustos_drv_storage_emmc2` → compatible
+`brcm,bcm2711-emmc2`; `rustos_drv_storage_virtio_blk` → virtio device id
+2) — the single §18.3 source the signed manifest's bind table is authored
+from. As the storage path that must be up before the signed driver store
+is reachable, both are registered in the kernel binary's
+`driver_catalog::IN_KERNEL_DRIVERS` floor registry (`build.rs` bakes each
+an Ed25519-signed `InKernel` manifest carrying that same `BIND_KEYS`), so
+the kernel binds the root block device because a discovered node matched a
+driver's bind table — through the one shared `lib/devmatch` policy
+`devmgr` uses (§2.2) — never a hand-wired probe (§18.5). Host-proven
+(`driver_catalog` storage-node binding + signed-gate admission; the two
+crates' bind-table tests). The boot path that *resolves* the discovered
+root block node against this floor and mounts it rides Chunk B-2 below.
+
 **Landed — the PIO block driver (read + write).** `drivers/storage/emmc2`
 (`rustos-drv-storage-emmc2`) is an Arasan / SDHCI-5.1 PIO block driver
 implementing `rustos_abi::driver::block::Block`:

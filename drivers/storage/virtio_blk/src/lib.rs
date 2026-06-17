@@ -36,13 +36,44 @@ extern crate alloc;
 use core::convert::TryFrom;
 use rustos_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use rustos_abi::driver::BufferClass;
-use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use rustos_virtio::{
     BounceBuffer, ChainSegment, Direction, SplitQueue, Status, Transport, VirtioError, VirtioHost,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_4250_0000_0001; // "VBKP"
+
+/// The virtio device id of a block device (virtio 1.1 §5.2 — `virtio-blk`
+/// is device type 2). This driver's [`BIND_KEYS`] match key is built from
+/// it, so a discovered virtio node whose probed device id is 2 binds this
+/// driver and nothing else.
+pub const VIRTIO_BLK_DEVICE_ID: u32 = 2;
+
+/// The §18.3 bind priority [`BIND_KEYS`] carries.
+///
+/// A virtio device-id match is *exact* (the discovered node's probed
+/// device id either is `virtio-blk` or it is not — there is no wildcard,
+/// see [`HwMatchKey::matches`]), so it ranks at the exact-match tier
+/// alongside the other concrete-identity floor drivers (`AGENTS.md`
+/// §18.3 — higher matched priority binds; an unbroken tie is a packaging
+/// defect).
+const BIND_PRIORITY: u16 = 10;
+
+/// This driver's hardware bind table (`AGENTS.md` §18.3): a virtio block
+/// device, matched by its virtio device id ([`VIRTIO_BLK_DEVICE_ID`]).
+///
+/// The single source of truth the signed-manifest bind table is authored
+/// from and the device manager (or the in-kernel bootstrap-floor
+/// catalogue) resolves a discovered node against (`AGENTS.md` §2.2 /
+/// §18.3). The match key carries no transport (PCI vs MMIO) detail: the
+/// same driver binds a virtio-blk device however it is attached, because
+/// the bus-agnostic [`rustos_virtio::Transport`] abstracts the transport
+/// (`AGENTS.md` §2.2 / §17.4).
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    BIND_PRIORITY,
+    HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID),
+)];
 
 /// Driver entry point (`AGENTS.md` §8).
 ///
