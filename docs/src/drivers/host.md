@@ -289,6 +289,33 @@ the one layer that may name `drvhost` — supplies the thin adapter
 the borrow never overlaps) and simply delegates each `read` to the
 kernel-core reader. It adds no authority of its own.
 
+#### Autoloading by discovery
+
+`rustos_kernel::driver_autoload::autoload_drivers` is the one boot-wiring
+composition that turns the discovered hardware tree and the installed
+signed store into running user-space drivers — the "drivers in user space
+by discovery" steady state (`AGENTS.md` §4 / §18). It adds no policy of its
+own; it threads the building blocks above together:
+
+1. `drvhost::store::scan_store` reads each `/System/Drivers/` bundle path
+   (from `enumerate_driver_store`) through the `VfsImageSource` and decodes
+   its manifest bind table fail-closed — a **match** step only (§18.6).
+2. `devmgr::DeviceManager::autoload` resolves every tree node against those
+   candidates through the shared `lib/devmatch` policy (§18.3), leaving an
+   unmatched node unbound and logged (§18.4).
+3. Each winning node's driver is loaded through
+   `rustos_kernel::driver_spawn_loader::SpawnDriverLoader`, which runs the
+   signed `Host::load` gate and **spawns** the verified payload into its own
+   process, minting it one device-resource grant per `HwResource` the
+   matched node requested — and nothing more (§18.3 / §4).
+
+A candidate that fails the signed gate fails *that node* closed and the
+walk continues, so one bad bundle never blocks the boot (§5.4 / §23.1). The
+function lives in the kernel binary — the one layer that may name both
+`devmgr` and `drvhost` (§17.4) — and is the staged production entry the boot
+path drives once the root volume that backs the store is mounted in
+production (`plans/PI.md` P10 5d-2-ii "Remaining").
+
 ### Audit sink
 
 Every state transition emits one structured `rustos_log::Event` with a

@@ -156,6 +156,19 @@ pub mod driver_spawn_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_store_source;
 
+// The production driver-autoload boot wiring (`plans/PI.md` P10 5d-2-ii):
+// composes the signed-store scan (`drvhost::store::scan_store` over the
+// `/System/Drivers/` bundle paths), the `devmgr` match walk, and the
+// process-spawning `driver_spawn_loader` into the one entry the boot path
+// drives to autoload user-space drivers by discovery (`AGENTS.md` §4 / §18).
+// It names both `rustos_devmgr` and `rustos_drvhost`, so it is gated, like
+// the other `drvhost`/`devmgr`-consuming modules, on the two instruction
+// sets where those crates are dependencies of this crate — `x86_64` (the CI
+// host, where its unit tests run) and `aarch64` (the Raspberry Pi 4 boot
+// path that will drive it once the production root volume is mounted).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod driver_autoload;
+
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production
 // boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus

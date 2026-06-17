@@ -991,13 +991,32 @@ order (one fully-gated increment each):
            bridge), adding no authority. Host-proven (11 reader + 4 adapter
            tests); no `lib/abi`/C-header change. Docs: `docs/src/drivers/host.md`
            ("Reading the bundle bytes off the root volume").
-         - **Remaining (next):** the production boot wiring that runs
-           `DeviceManager::autoload` against the discovered tree (kernel/core
-           hosts it — it owns the scheduler) with the keyboard candidate,
-           scanning the store via `store::scan_store` over the `VfsImageSource`
-           and `enumerate_driver_store` paths above, `tools/mkimage` laying the
-           signed `usb_kbd` bundle into the store, spawning the binary into user
-           space, and the metal checkpoint.
+         - **Boot-wiring composition — done (host-proven).**
+           `rustos_kernel::driver_autoload::autoload_drivers` is the single
+           production composition: it scans the store
+           (`drvhost::store::scan_store` over the `VfsImageSource` and the
+           `enumerate_driver_store` paths — a match-only step, §18.6), runs
+           `devmgr::DeviceManager::autoload`, and loads each winner through
+           `driver_spawn_loader::SpawnDriverLoader` (signed gate → process
+           spawn with exactly the matched node's resource grants, §18.3),
+           taking the spawn mechanism behind the `DriverProcessSpawn` seam so it
+           stays scheduler-agnostic (§17.1). Host-proven (5 tests: signed-match
+           spawn with the node's resources, untrusted-signature/missing-cap
+           fail-closed, unmatched unbound, empty-store). Docs:
+           `docs/src/drivers/host.md` ("Autoloading by discovery").
+         - **Remaining — gated on the production root mount.**
+           `autoload_drivers` cannot run in production until the root volume
+           backing `/System/Drivers/` is mounted at boot (the P11 root-mount
+           increment; the production `boot_aarch64` does not yet mount the root,
+           the metal `users_db_read err=12` residual). These land **with** that
+           work: the kernel/core scheduler-agnostic `spawn_driver_process` seam
+           + the bin-crate production `DriverProcessSpawn`; the `-M virt`
+           autoload vertical (rustfs root with a signed `usb_kbd` bundle →
+           `autoload_drivers` → spawn → keystroke); `tools/mkimage` laying the
+           signed `usb_kbd` bundle into the store (signed against the finalised
+           production trust anchor, a seed shared with the kernel build §2.2);
+           and **5e/(d)** below. Flipping is blocked on the root mount so it
+           never regresses the working metal keyboard (§2.17).
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

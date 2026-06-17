@@ -3538,20 +3538,53 @@ table, so a new board is match **data**, not new code. Sub-increments
         `lib/abi`/C-header change. Docs: `docs/src/drivers/host.md` ("Reading
         the bundle bytes off the root volume"). No metal step (no production
         consumer yet — the boot wiring below is next).
-      - **Remaining (next):** the production boot wiring that runs
-        `DeviceManager::autoload` against the discovered hardware tree (driven
-        by the bin crate — the one layer that may name `devmgr`+`drvhost` —
-        scanning the store with `store::scan_store` over the `VfsImageSource`
-        above against the `enumerate_driver_store` paths, then spawning the
-        winning user-space driver through the kernel/core `spawn_with` seam so
-        §17.1 holds), and `tools/mkimage` laying the signed `usb_kbd`
-        bundle into `/System/Drivers/`. That landing flips
-        `init_spawn`'s `keyboard_service::spawn_if_present` call to the autoload
-        path and folds in **5e** (deleting the in-kernel scaffold) in the same
-        change, gated on the §0.9 metal checkpoint (re-flash, confirm the prompt
-        still takes keystrokes through the autoloaded user-space driver). Until
-        then the scaffold stays the metal driver and stays wired — keeping the
-        tree free of dead code (§2.14).
+      - **Boot-wiring composition — done (host-proven).**
+        `rustos_kernel::driver_autoload::autoload_drivers(tree, store_paths,
+        image_source, trusted, spawn, args, caller_caps, sink)` is the single
+        production composition that turns the discovered hardware tree + the
+        installed signed store into autoloaded user-space drivers: it scans the
+        store (`drvhost::store::scan_store` over the `VfsImageSource` against
+        the `enumerate_driver_store` paths — a match-only step, §18.6), runs
+        `devmgr::DeviceManager::autoload` over the candidates, and loads each
+        winner through `driver_spawn_loader::SpawnDriverLoader` (signed
+        `Host::load` gate → process spawn with exactly the matched node's
+        resource grants, §18.3). It adds no policy; it lives in the bin crate
+        (the one layer that may name both `devmgr` and `drvhost`, §17.4) and
+        takes the spawn mechanism behind the `DriverProcessSpawn` seam so it
+        stays scheduler-agnostic (§17.1). Host-proven (5 `driver_autoload`
+        tests: a signed match spawns with exactly the node's two resources, an
+        untrusted signature fails the node closed and never spawns, a caller
+        without `CAP_DRV_LOAD` loads nothing, an unmatched node is left unbound,
+        an empty store binds nothing). No `lib/abi`/C-header change. Docs:
+        `docs/src/drivers/host.md` ("Autoloading by discovery").
+      - **Remaining — gated on the production root mount.** `autoload_drivers`
+        cannot run in production until the root volume that backs
+        `/System/Drivers/` is mounted at boot, which is the P11 root-mount
+        increment (the production `boot_aarch64` does **not** yet mount the
+        root — the metal `users_db_read err=12` residual is exactly this). The
+        following therefore land **with** that root-mount work, not before it:
+        - the kernel/core scheduler-agnostic driver-spawn seam (a new
+          `InitSpawnCtx::spawn_driver_process` that builds a `KernelSpawnCtx`
+          and calls `ProcessSpawn::spawn_with`, so the bin crate spawns a
+          driver without naming the concrete scheduler, §17.1) + the bin-crate
+          production `DriverProcessSpawn` that delegates to it;
+        - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
+          holding a signed `usb_kbd` bundle → `enumerate_driver_store` →
+          `autoload_drivers` → spawn `usb_kbd` → prove a keystroke reaches the
+          arbiter), enrolled in `qemu_tests`;
+        - `tools/mkimage` laying the signed `usb_kbd` bundle into
+          `/System/Drivers/`, signed with the kernel's driver-signing trust
+          anchor (a seed shared in one place with the kernel build, §2.2) —
+          deferred with (d) so the bundle is signed against the *finalised*
+          production anchor rather than a placeholder (§2.19);
+        - **5e / (d):** flip `init_spawn`'s `keyboard_service::spawn_if_present`
+          to `autoload_drivers` and delete the in-kernel scaffold + evict
+          `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS`, in the same change
+          (§2.14), gated on the §0.9 metal checkpoint (re-flash, confirm the
+          prompt still takes keystrokes through the autoloaded user-space
+          driver). Until then the scaffold stays the metal driver and stays
+          wired — so flipping is **blocked** on the root mount and never
+          regresses the working metal keyboard (§2.17).
       - **Userland clock + `Delay` prerequisite — done (host-proven).**
         `rustos_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
         the raw `u64` nanosecond reading, no coarsening of its own) and
