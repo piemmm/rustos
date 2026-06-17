@@ -38,6 +38,7 @@ use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::spawn::{
     InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
 };
+use crate::users::{UsersDbSource, NULL_USERS_DB};
 
 /// Architecture-neutral hook the kernel core needs from a Stage 3
 /// arch port.
@@ -455,6 +456,26 @@ where
     /// console list.
     pub input_focus: &'static InputFocus,
 
+    /// The users-database holder the `users_db_read` syscall (no. 19,
+    /// `CAP_USERS_READ`) serves to the login session (`AGENTS.md` §5.1,
+    /// `plans/PI.md` P11).
+    ///
+    /// Defaults to [`NULL_USERS_DB`], whose [`UsersDbSource::text`] fails
+    /// closed with [`rustos_abi::Errno::NotImplemented`]: a boot path that
+    /// has not mounted the root volume leaves this default and
+    /// `users_db_read` announces an inert interface — login then runs its
+    /// deny-all authenticator and refuses every attempt rather than
+    /// inventing accounts (`AGENTS.md` §2.9 / §5.4.5). A boot path that
+    /// mounts the root volume runs the audited
+    /// [`crate::load_users_db_source`] read and installs the resulting
+    /// `Box::leak`'d [`crate::HeldUsersDbSource`] through
+    /// [`Self::with_users_db`]; `kernel_main` then threads it into the
+    /// production dispatch hook. Held as a `'static` borrow because the
+    /// holder lives for the lifetime of the running kernel, exactly like
+    /// the console list (`AGENTS.md` §2.1 — the install is a one-shot
+    /// move, not a global mutable static).
+    pub users_db: &'static (dyn UsersDbSource + 'static),
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -517,6 +538,11 @@ where
             // `key_inject` / `keyboard_read` fail closed through
             // `NULL_INPUT_FOCUS` (`AGENTS.md` §2.9 / §5.4).
             input_focus: &NULL_INPUT_FOCUS,
+            // Users database unwired until a boot path mounts the root
+            // volume and installs the loaded holder through
+            // `with_users_db` (`plans/PI.md` P11): `users_db_read` fails
+            // closed through `NULL_USERS_DB` (`AGENTS.md` §2.9 / §5.4.5).
+            users_db: &NULL_USERS_DB,
             _marker: core::marker::PhantomData,
         }
     }
@@ -599,6 +625,25 @@ where
     #[must_use]
     pub fn with_input_focus(mut self, input_focus: &'static InputFocus) -> Self {
         self.input_focus = input_focus;
+        self
+    }
+
+    /// Install the loaded users-database holder the `users_db_read`
+    /// syscall serves, consuming and returning `self` (`plans/PI.md`
+    /// P11).
+    ///
+    /// Called by a boot path that mounted the root volume and ran the
+    /// audited [`crate::load_users_db_source`] read, handing the
+    /// `Box::leak`'d [`crate::HeldUsersDbSource`] here. Until this is
+    /// called the handover holds [`NULL_USERS_DB`] and `users_db_read`
+    /// fails closed, so login refuses every attempt rather than inventing
+    /// accounts (`AGENTS.md` §5.4.5). The holder must be `'static`: the
+    /// boot path leaks it alongside the kernel state, which lives for the
+    /// lifetime of the running kernel (`AGENTS.md` §2.1 — the install is a
+    /// one-shot move, not a global mutable static).
+    #[must_use]
+    pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
+        self.users_db = users_db;
         self
     }
 
@@ -758,6 +803,30 @@ mod tests {
         let mut b = fresh_boot_info();
         b.command_line = buf;
         assert_eq!(b.validate(), Err(BootInfoError::CommandLineTooLong));
+    }
+
+    #[test]
+    fn users_db_defaults_to_fail_closed_and_with_users_db_installs_a_holder() {
+        use rustos_abi::Errno;
+
+        // A test users-db source serving fixed bytes, leaked to `'static`
+        // exactly as a production boot leaks its `HeldUsersDbSource`.
+        struct FixedUsersDb;
+        impl UsersDbSource for FixedUsersDb {
+            fn text(&self) -> Result<&[u8], Errno> {
+                Ok(b"rustos-users-v1\n")
+            }
+        }
+
+        // Default handover: `users_db_read` is inert (`AGENTS.md` §2.9).
+        let b = fresh_boot_info();
+        assert_eq!(b.users_db.text(), Err(Errno::NotImplemented));
+
+        // After install the handover serves the holder's bytes.
+        let held: &'static FixedUsersDb =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(FixedUsersDb));
+        let b = fresh_boot_info().with_users_db(held);
+        assert_eq!(b.users_db.text(), Ok(&b"rustos-users-v1\n"[..]));
     }
 
     #[test]

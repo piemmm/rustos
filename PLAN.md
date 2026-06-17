@@ -1157,7 +1157,15 @@ spec §18.
   (`rustos_kernel_core::users::load_users_db`) loads the database off the
   mounted root volume through the §5.3-checked VFS delegation, audited
   and fail-closed (proven on `-M virt` by the `users_db_qemu_aarch64`
-  vertical). The login `Run` binary ships at `/System/Services/login`
+  vertical). The kernel-neutral *install* seam is wired:
+  `load_users_db_source` shares that read/parse/audit path (§2.2) but
+  retains the canonical `users-v1` text in a `HeldUsersDbSource` (zeroed
+  on drop §4, redacted `Debug`), and `BootInfo::with_users_db` installs
+  the `Box::leak`'d holder so `run_phases` threads it into the production
+  `KernelDispatchHook` (default fail-closed `NULL_USERS_DB`); the board
+  storage bring-up that mounts the root and supplies the driver it reads
+  from is staged in `plans/PI.md` P11. The login `Run` binary ships at
+  `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held
   database through the `CAP_USERS_READ`-gated `users_db_read` syscall
   (`abi-v1` no. 19), wires `UsersAuthenticator` (or a deny-all

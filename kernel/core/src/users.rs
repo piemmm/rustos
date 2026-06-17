@@ -29,6 +29,7 @@
 //! bypassed.
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use rustos_abi::Errno;
@@ -92,6 +93,70 @@ impl UsersDbSource for NullUsersDbSource {
 /// [`crate::console::NULL_CONSOLE`]).
 pub static NULL_USERS_DB: NullUsersDbSource = NullUsersDbSource;
 
+/// A [`UsersDbSource`] that owns the validated `users-v1` text read off
+/// the mounted root volume (`plans/PI.md` P11).
+///
+/// Built by [`load_users_db_source`] on a successful boot read, then
+/// installed into the dispatch hook through
+/// `KernelSyscallHandlers::with_users_db` so the `users_db_read` syscall
+/// serves its bytes to a `CAP_USERS_READ` caller. Holding the *text*
+/// rather than a re-serialisation keeps one canonical byte representation
+/// end to end (`AGENTS.md` §2.2), exactly as [`UsersDbSource::text`]
+/// requires.
+///
+/// The held bytes are the salted credential records of the user database;
+/// they are zeroed when the source is dropped (`AGENTS.md` §4 —
+/// zero-on-free for credential-bearing memory). A production boot
+/// `Box::leak`s the holder so it lives for the kernel's lifetime and the
+/// `Drop` never fires; the guarantee still holds for any non-leaked use
+/// (tests, a future re-load path).
+pub struct HeldUsersDbSource {
+    /// Validated `users-v1` text, exactly as read off the root volume.
+    text: Vec<u8>,
+}
+
+impl HeldUsersDbSource {
+    /// Wrap already-validated `users-v1` `text`.
+    ///
+    /// Private to this module: the only constructor is the audited
+    /// [`load_users_db_source`] read, so a holder cannot exist without
+    /// the bytes having passed the §5.3 permission check and the
+    /// fail-closed `users-v1` parse.
+    fn new(text: Vec<u8>) -> Self {
+        Self { text }
+    }
+}
+
+impl UsersDbSource for HeldUsersDbSource {
+    fn text(&self) -> Result<&[u8], Errno> {
+        // A holder only exists for a successfully loaded database, so the
+        // text is always present — unlike [`NullUsersDbSource`], which
+        // marks the inert "no database" interface.
+        Ok(&self.text)
+    }
+}
+
+impl core::fmt::Debug for HeldUsersDbSource {
+    /// Redacted: the held bytes are salted credential records and must
+    /// never reach a log or panic message (`AGENTS.md` §4 / §19.4). Only
+    /// the length is printed, which carries no secret.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HeldUsersDbSource")
+            .field("len", &self.text.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HeldUsersDbSource {
+    fn drop(&mut self) {
+        // The database carries salted credential records; zero the held
+        // bytes before the backing allocation is released (`AGENTS.md`
+        // §4). Filling with zero keeps the buffer valid for the `Vec`'s
+        // own deallocation.
+        self.text.fill(0);
+    }
+}
+
 /// Why [`load_users_db`] yielded no database.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UsersLoadError {
@@ -141,8 +206,13 @@ impl From<VfsError> for UsersLoadError {
 /// On success the [`AuditEvent::UsersDbLoaded`] record carries the
 /// account count; on failure the [`AuditEvent::UsersDbRejected`] record
 /// carries the [`cause`](UsersLoadError::cause) and no database exists
-/// (`AGENTS.md` §5.4.5). The intermediate read buffer is zeroed before
-/// release — the database carries credential records (`AGENTS.md` §4).
+/// (`AGENTS.md` §5.4.5). The read buffer is zeroed before release — the
+/// database carries credential records (`AGENTS.md` §4).
+///
+/// Returns the parsed [`UsersDb`]. A boot path that must *serve* the
+/// database to the `users_db_read` syscall holds the canonical text
+/// instead — see [`load_users_db_source`], which shares this read and
+/// audit path (`AGENTS.md` §2.2).
 ///
 /// # Errors
 ///
@@ -151,51 +221,125 @@ pub fn load_users_db<F>(fs: &mut F, audit: &dyn Sink) -> Result<UsersDb, UsersLo
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    match load_inner(fs) {
-        Ok(db) => {
-            let mut count_buf = [0u8; 12];
-            let records = format_usize(db.records().len(), &mut count_buf);
-            emit(
-                audit,
-                Level::Info,
-                AuditEvent::UsersDbLoaded,
-                &[
-                    Field {
-                        key: "path",
-                        value: USERS_DB_PATH,
-                    },
-                    Field {
-                        key: "records",
-                        value: records,
-                    },
-                ],
-            );
-            Ok(db)
+    let parsed = match read_users_bytes(fs) {
+        // This caller does not retain the bytes, so the buffer is zeroed
+        // after the parse — it held credential records (`AGENTS.md` §4).
+        Ok(mut buf) => {
+            let parsed = parse_users_text(&buf);
+            buf.fill(0);
+            parsed
         }
+        Err(err) => Err(err),
+    };
+    match &parsed {
+        Ok(db) => audit_load(audit, Some(db.records().len()), None),
+        Err(err) => audit_load(audit, None, Some(*err)),
+    }
+    parsed
+}
+
+/// Read `/System/Security/Users` and retain its validated text as a
+/// [`HeldUsersDbSource`] the `users_db_read` syscall can serve
+/// (`plans/PI.md` P11).
+///
+/// Shares the §5.3-checked read, the fail-closed parse, and the audit
+/// records with [`load_users_db`] (`AGENTS.md` §2.2). On success the
+/// returned holder owns the exact `users-v1` bytes (zeroed when dropped,
+/// `AGENTS.md` §4); the boot path `Box::leak`s it and installs it through
+/// `KernelSyscallHandlers::with_users_db`. On any refusal **no** holder
+/// is produced and the read buffer is zeroed, so a system whose database
+/// cannot be read serves none rather than inventing accounts (`AGENTS.md`
+/// §5.4.5).
+///
+/// # Errors
+///
+/// The [`UsersLoadError`] naming the first check that refused.
+pub fn load_users_db_source<F>(
+    fs: &mut F,
+    audit: &dyn Sink,
+) -> Result<HeldUsersDbSource, UsersLoadError>
+where
+    F: FilesystemRead + FilesystemSecurity + ?Sized,
+{
+    let mut buf = match read_users_bytes(fs) {
+        Ok(buf) => buf,
         Err(err) => {
-            emit(
-                audit,
-                Level::Error,
-                AuditEvent::UsersDbRejected,
-                &[
-                    Field {
-                        key: "path",
-                        value: USERS_DB_PATH,
-                    },
-                    Field {
-                        key: "cause",
-                        value: err.cause(),
-                    },
-                ],
-            );
+            audit_load(audit, None, Some(err));
+            return Err(err);
+        }
+    };
+    match parse_users_text(&buf) {
+        // The bytes validated: hand them to the holder (which owns and
+        // serves them), so the text is *not* zeroed here.
+        Ok(db) => {
+            let records = db.records().len();
+            audit_load(audit, Some(records), None);
+            Ok(HeldUsersDbSource::new(buf))
+        }
+        // A refused parse retains nothing; zero the buffer before release
+        // (`AGENTS.md` §4).
+        Err(err) => {
+            buf.fill(0);
+            audit_load(audit, None, Some(err));
             Err(err)
         }
     }
 }
 
-/// The unaudited body of [`load_users_db`]: every `?` is reported by
-/// the caller's single rejection record.
-fn load_inner<F>(fs: &mut F) -> Result<UsersDb, UsersLoadError>
+/// Emit the single shared load outcome record: [`AuditEvent::UsersDbLoaded`]
+/// with the account count on success, else [`AuditEvent::UsersDbRejected`]
+/// with the refusal cause (`AGENTS.md` §5.4.4). Exactly one of `records`
+/// (loaded) or `err` (rejected) is `Some`; a `records` of `Some` wins so
+/// the two read entry points emit byte-identical records (`AGENTS.md`
+/// §2.2).
+fn audit_load(audit: &dyn Sink, records: Option<usize>, err: Option<UsersLoadError>) {
+    if let Some(records) = records {
+        let mut count_buf = [0u8; 12];
+        let records = format_usize(records, &mut count_buf);
+        emit(
+            audit,
+            Level::Info,
+            AuditEvent::UsersDbLoaded,
+            &[
+                Field {
+                    key: "path",
+                    value: USERS_DB_PATH,
+                },
+                Field {
+                    key: "records",
+                    value: records,
+                },
+            ],
+        );
+    } else if let Some(err) = err {
+        emit(
+            audit,
+            Level::Error,
+            AuditEvent::UsersDbRejected,
+            &[
+                Field {
+                    key: "path",
+                    value: USERS_DB_PATH,
+                },
+                Field {
+                    key: "cause",
+                    value: err.cause(),
+                },
+            ],
+        );
+    }
+}
+
+/// Read the exact-size, fully-read bytes of `/System/Security/Users` off
+/// the mounted root volume under the kernel's capability-less `uid 0`
+/// bootstrap identity, applying the §5.3 permission check and the
+/// `AGENTS.md` §5.4.3 size bound *before* a single byte is read.
+///
+/// The returned buffer carries credential records; the caller either zeros
+/// it after use ([`load_users_db`]) or hands it to a holder that owns and
+/// zeroes it ([`load_users_db_source`]). The bytes are not parsed here —
+/// [`parse_users_text`] is the shared validation step (`AGENTS.md` §2.2).
+fn read_users_bytes<F>(fs: &mut F) -> Result<Vec<u8>, UsersLoadError>
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
@@ -226,18 +370,23 @@ where
 
     let mut buf = vec![0u8; size];
     let read = vfs.read_via_secured(&cred, &path, fs, 0, &mut buf)?;
-    let result = if read == size {
-        match core::str::from_utf8(&buf) {
-            Ok(text) => UsersDb::parse(text).map_err(UsersLoadError::Parse),
-            Err(_) => Err(UsersLoadError::NotUtf8),
-        }
-    } else {
-        Err(UsersLoadError::ShortRead)
-    };
-    // The buffer held credential records; zero it before release
-    // (`AGENTS.md` §4).
-    buf.fill(0);
-    result
+    if read != size {
+        // A truncated database is never parsed (`AGENTS.md` §2.9); zero the
+        // partial read before release (`AGENTS.md` §4).
+        buf.fill(0);
+        return Err(UsersLoadError::ShortRead);
+    }
+    Ok(buf)
+}
+
+/// Validate `buf` as UTF-8 and parse it with the fail-closed `users-v1`
+/// parser. The single validation step shared by [`load_users_db`] and
+/// [`load_users_db_source`] (`AGENTS.md` §2.2).
+fn parse_users_text(buf: &[u8]) -> Result<UsersDb, UsersLoadError> {
+    match core::str::from_utf8(buf) {
+        Ok(text) => UsersDb::parse(text).map_err(UsersLoadError::Parse),
+        Err(_) => Err(UsersLoadError::NotUtf8),
+    }
 }
 
 #[cfg(test)]

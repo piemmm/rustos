@@ -16,7 +16,7 @@ use rustos_users::{
 
 use crate::fs::VfsError;
 use crate::test_sink::TestSink;
-use crate::users::{load_users_db, UsersLoadError};
+use crate::users::{load_users_db, load_users_db_source, UsersDbSource, UsersLoadError};
 
 const ROOT: u64 = 1;
 const SYSTEM: u64 = 2;
@@ -167,6 +167,82 @@ fn a_valid_database_loads_and_is_audited() {
         .fields
         .iter()
         .any(|(k, v)| k == "records" && v == "1"));
+}
+
+#[test]
+fn the_source_load_holds_the_exact_text_and_authenticates() {
+    // `load_users_db_source` shares the read/parse/audit path with
+    // `load_users_db` but retains the canonical `users-v1` text so the
+    // `users_db_read` syscall serves the exact bytes (`AGENTS.md` §2.2).
+    let sink = TestSink::new();
+    let text = valid_db_text();
+    let mut fs = MockRoot::with_text(&text);
+
+    let source = load_users_db_source(&mut fs, &sink).expect("valid database loads");
+
+    // The held bytes are byte-for-byte the database text on disk — not a
+    // re-serialisation (`AGENTS.md` §2.2).
+    assert_eq!(source.text().expect("held text"), text.as_bytes());
+
+    // The served text re-parses and authenticates the planted account,
+    // proving the login path can use it.
+    let served = core::str::from_utf8(source.text().expect("held text")).expect("utf8");
+    let db = UsersDb::parse(served).expect("served text re-parses");
+    assert_eq!(db.records().len(), 1);
+    db.authenticate("ada", b"correct horse")
+        .expect("planted account authenticates");
+    assert!(
+        db.authenticate("ada", b"wrong").is_err(),
+        "a wrong password must be refused"
+    );
+
+    // The success audit record matches `load_users_db`'s exactly.
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id.0, 4040);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "records" && v == "1"));
+}
+
+#[test]
+fn the_source_load_fails_closed_with_no_holder_on_a_missing_database() {
+    // A missing database yields no holder and the same `4041` rejection
+    // record `load_users_db` emits — login then refuses every attempt
+    // rather than inventing accounts (`AGENTS.md` §5.4.5).
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    fs.present = false;
+
+    let err = load_users_db_source(&mut fs, &sink).expect_err("missing file refused");
+    assert_eq!(err, UsersLoadError::Vfs(VfsError::NotFound));
+
+    let events = sink.snapshot();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id.0, 4041);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "cause" && v == "not_found"));
+}
+
+#[test]
+fn the_source_load_fails_closed_on_an_invalid_database() {
+    // A structurally invalid database is refused by the shared parser and
+    // produces no holder (`AGENTS.md` §2.9).
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text("not-the-users-header\n");
+
+    let err = load_users_db_source(&mut fs, &sink).expect_err("bad header refused");
+    assert_eq!(err, UsersLoadError::Parse(ParseError::Header));
+
+    let events = sink.snapshot();
+    assert_eq!(events[0].id.0, 4041);
+    assert!(events[0]
+        .fields
+        .iter()
+        .any(|(k, v)| k == "cause" && v == "parse_rejected"));
 }
 
 #[test]

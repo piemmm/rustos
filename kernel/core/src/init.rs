@@ -516,6 +516,7 @@ fn run_phases<A: KernelArch>(
         programs,
         spawn_service,
         input_focus,
+        users_db,
         ..
     } = boot;
 
@@ -664,8 +665,8 @@ fn run_phases<A: KernelArch>(
     // the same reason as `KernelState`: its borrows reference
     // `KernelState` fields and must therefore be `'static`.
     phase_started(log_sink, Phase::Syscall);
-    let hook: &'static KernelDispatchHook<'static, A> =
-        Box::leak(Box::new(KernelDispatchHook::new(
+    let hook: &'static KernelDispatchHook<'static, A> = Box::leak(Box::new(
+        KernelDispatchHook::new(
             &state.scheduler,
             &state.caps,
             state.arch.as_ref(),
@@ -689,7 +690,13 @@ fn run_phases<A: KernelArch>(
             mem_map,
             mmio_map_facility,
             dma_alloc_facility,
-        )));
+        )
+        // Serve the users database the boot path loaded off the mounted
+        // root volume (`plans/PI.md` P11); the default `NULL_USERS_DB`
+        // keeps `users_db_read` fail-closed when no root volume was
+        // mounted (`AGENTS.md` §5.4.5).
+        .with_users_db(users_db),
+    ));
     dispatcher_callback_slot
         .install_dispatcher(hook)
         .map_err(InitError::DispatcherAlreadyInstalled)?;

@@ -3876,9 +3876,32 @@ two users — or the same user twice — can be logged in concurrently.
    - **Boot mount.** The production boot reads the descriptor from the
      boot partition, prompts for the passphrase on the console, derives
      the key, mounts the discovered root volume (EMMC2 on metal /
-     virtio-blk on `virt`), runs `load_users_db`, and installs the held
-     text via `with_users_db` (kernel-side `load_users_db` exists;
-     EMMC2 metal mount rides P8).
+     virtio-blk on `virt`), runs the kernel-side read, and installs the
+     held text into the production dispatch hook.
+     - **Kernel-neutral install seam — LANDED.** The architecture-neutral
+       half of this — the §17.4 boundary between the install *policy* and
+       the board storage bring-up that *produces* the mounted driver — is
+       wired: `rustos_kernel_core::users::load_users_db_source` reads
+       `/System/Security/Users` off a mounted root FS driver (sharing the
+       §5.3-checked read, the fail-closed parse, and the `USERS_DB_*`
+       audit with `load_users_db`, §2.2) and returns a
+       `HeldUsersDbSource` owning the canonical `users-v1` text (zeroed on
+       drop §4, redacted `Debug`). A boot path `Box::leak`s the holder and
+       installs it through the new `BootInfo::with_users_db`;
+       `kernel_main` threads it into the `KernelDispatchHook` so
+       `users_db_read` serves it. The default stays the fail-closed
+       `NULL_USERS_DB` (login refuses every attempt) until a boot path
+       calls `with_users_db`. Host-proven (kernel/core: 3
+       `load_users_db_source` cases + the `BootInfo::with_users_db`
+       builder). No `lib/abi`/C-header change (`BootInfo` is a kernel/core
+       handover type, not FFI).
+     - **Still staged — the board storage bring-up that supplies the
+       driver:** discover the root block device from the hwtree, bring up
+       the block + filesystem driver with an in-kernel DMA/MMIO host, read
+       `root.unlock` from the FAT boot partition, prompt for the
+       passphrase, derive the key, `RustFs::open`, run
+       `load_users_db_source`, leak + `with_users_db`. virtio-blk on
+       `virt`; the EMMC2 metal mount rides P8.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves

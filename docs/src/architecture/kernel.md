@@ -215,6 +215,26 @@ leaves the system with **no** database, so every login refuses
 end to end on the QEMU `virt` board against a real (emulated) virtio-blk
 users-root volume.
 
+A boot path that mounts the root volume installs the loaded database into
+the production dispatch hook through one kernel-neutral seam (the §17.4
+boundary between the architecture-neutral install policy and the
+board-specific storage bring-up that *produces* the mounted driver).
+`rustos_kernel_core::users::load_users_db_source` shares that exact read,
+parse, and `USERS_DB_*` audit path with `load_users_db` (`AGENTS.md` §2.2)
+but retains the validated `users-v1` *text* in a `HeldUsersDbSource` — the
+canonical bytes the `users_db_read` syscall serves verbatim, never a
+re-serialisation. The boot path `Box::leak`s that holder and hands it to
+`BootInfo::with_users_db`; `kernel_main` threads it into the
+`KernelDispatchHook` so `users_db_read` serves it to a `CAP_USERS_READ`
+caller. The held bytes are salted credential records: the holder zeroes
+them on drop (`AGENTS.md` §4) and its `Debug` is redacted (length only).
+Until a boot path calls `with_users_db`, the handover keeps the
+fail-closed `NULL_USERS_DB` default and `users_db_read` returns
+`NotImplemented`, so login refuses every attempt rather than inventing
+accounts (`AGENTS.md` §5.4.5). The aarch64 production storage bring-up that
+mounts the encrypted root and supplies the driver `load_users_db_source`
+reads from is staged next (`plans/PI.md` P11 — the production boot-mount).
+
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store
 (`rustos_kernel_core::driver_store::enumerate_driver_store`, `AGENTS.md`
