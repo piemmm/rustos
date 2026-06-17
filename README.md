@@ -32,6 +32,7 @@ for filesystems, the block below.
 | Context switch | ✓ | ✓ | ✓ | — |
 | Interrupts + timer | ✓ | ✓ | ✓ | ✓ |
 | SMP bring-up | ✓ | ✓ | ✓ | ✓ |
+| Cache-aware scheduling (LLC-aware) | ▢ | ▢ | ▢ | — |
 | Cross-CPU TLB shootdown | ✓ | ✓ | ✓ | — |
 | Syscall entry | ✓ | ✓ | ✓ | ✓ |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |

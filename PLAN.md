@@ -2036,6 +2036,86 @@ wasm32 (no trap instruction).
 
 ---
 
+## Cache-Aware Scheduling (LLC-aware task aggregation)
+
+**Status: planned.** A scheduler *performance* feature (§2.16): co-locate the
+threads of a process that share data onto the same Last-Level-Cache (LLC)
+domain so they hit a warm shared cache instead of bouncing cache lines across
+LLCs. On a machine with more than one LLC the cross-LLC miss penalty is real
+and measurable; upstream Linux's cache-aware load balancing (merged for
+Linux 7.2) reports double-digit gains on multi-LLC parts (e.g. AMD Zen
+CCX/CCD, Intel multi-tile / sub-NUMA, and clustered ARM/RISC-V server SoCs).
+RustOS supports such parts, so this is worth carrying — but only as a measured,
+default-safe improvement, never a guess (§2.16: measure, do not guess).
+
+**Design decisions (binding):**
+
+- **It is a `SchedulerPolicy` concern, not a kernel-wide one (§17.1).**
+  Cache-aware aggregation is a load-balancing *policy* behaviour. It is
+  expressed through the existing `kernel/sched/api` contract (a per-policy
+  capability surfaced on `SchedulerPolicy` / driven through `SchedulerArch`),
+  implemented by each concrete sibling policy that opts in
+  (`kernel/sched/eevdf`, `kernel/sched/mlfq`), and exercised by the shared
+  `kernel/sched/api/tests` conformance suite. No crate outside `kernel/sched/*`
+  / `kernel/core` learns a concrete policy or that this feature exists.
+- **Topology is discovered, never compiled in (§2.20, §18).** LLC/cache
+  topology — which CPUs share which LLC, and the LLC size — is added to the
+  architecture-neutral hardware tree (`lib/abi/src/hwtree.rs`) and populated by
+  each `kernel/arch/<target>` discoverer from its native source (x86_64 ACPI
+  PPTT + CPUID cache leaves, aarch64/riscv64 device-tree `cache`/`next-level-
+  cache` nodes via `lib/fdt`). The scheduler reads the normalised topology
+  threaded through `SchedulerArch` (alongside the existing `CoreClass`); it
+  never names a board, an SoC, or an MMIO base. wasm32 has no LLC topology and
+  the feature is a no-op there.
+- **`abi-v1` is *not* frozen** (the standing task direction supersedes the
+  `AGENTS.md`/`PLAN.md` "frozen" language). Extending `hwtree` and any sched
+  ABI is done **in place** (§2.13) — no `v2`-beside-`v1`, no shim — and the
+  generated C header is regenerated (`cargo xtask c-header --write`, drift
+  guard in `ci`).
+- **Default-safe, regression-guarded (§2.16).** Aggregation runs on the load
+  balancer (amortised, off the hot pick/wake path), gated by a working-set
+  vs LLC-size check so a process whose footprint exceeds the LLC, or that
+  spawns many non-sharing threads, is *not* over-aggregated (the v3→v4
+  regression class upstream fixed). Two independently toggleable behaviours,
+  mirroring the upstream split:
+    - cache-aware **load balancing** — the cheaper path, eligible to default on;
+    - cache-aware **wakeup** placement — more expensive, default off.
+  A measured regression on any benchmark is a defect, fixed or the feature
+  left off by default until it is not (§2.16, §2.18) — never shipped as a
+  "for now" win (§2.19).
+- **Security/correctness unchanged.** Placement is a hint only: it never
+  weakens isolation, capability checks, fairness, or the no-starvation bound
+  the conformance suite asserts (§17.1, §5.4). Fail closed — absent or partial
+  topology falls back to the existing placement, never to a crash (§2.9).
+
+**Deliverables:**
+- `lib/abi/src/hwtree.rs`: LLC/cache-domain topology nodes (CPU→LLC mapping +
+  LLC size), versioned/hashed like the rest of the tree (§18.1); C header
+  regenerated.
+- Per-arch discovery populating it (`kernel/arch/{x86_64,aarch64,riscv64}`);
+  wasm32 reports none.
+- `kernel/sched/api`: the per-policy aggregation hook + the topology-reading
+  surface on `SchedulerArch`; conformance cases (aggregation honoured,
+  working-set guard respected, no fairness/starvation regression, ≥ 4-core SMP
+  with ≥ 2 LLCs).
+- `kernel/sched/eevdf` (and `mlfq` where it applies) implementing the hook.
+- A `sysinfo` (§16.6) read-only view of the discovered LLC topology behind the
+  existing privileged hardware query — no `/proc`/`/sys` (§16.1).
+
+**Tests:** host-side policy/conformance tests modelling a multi-LLC machine
+(aggregation, working-set guard, fairness preserved); a QEMU vertical with an
+emulated multi-LLC topology; a benchmark/measurement establishing the
+default-on/off decision per behaviour (§2.16).
+
+**Docs:** `docs/src/architecture/scheduler.md` (the aggregation model + the two
+toggles + the working-set guard) and the `kernel/sched/*` rustdoc. The
+`README.md` feature matrix carries the "Cache-aware scheduling (LLC-aware)"
+row as planned (`▢` on the three bare-metal targets, `—` on wasm32); its
+per-target marks are promoted in the same change that lands each port's
+discovery + policy support (§13).
+
+---
+
 ## Assignment Notes for Task Dispatchers
 
 When handing a stage to an implementing agent, the task brief **must**:
