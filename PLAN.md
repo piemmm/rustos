@@ -1188,10 +1188,17 @@ spec §18.
   descriptor, the typed passphrase, and the encrypted root block device it
   derives the volume key (PBKDF2, zeroed-on-drop), mounts the root
   (`RustFs::open`, wrong-passphrase fail-closed), and runs
-  `load_users_db_source`. The board storage bring-up that *supplies* those
-  three inputs and wires the boot path (root-device discovery, in-kernel
-  block DriverHost, FAT read, console passphrase prompt) is staged in
-  `plans/PI.md` P11 Chunk B. The login `Run` binary ships at
+  `load_users_db_source`. The FAT `root.unlock` reader that recovers the
+  first of those three inputs is wired
+  (`rustos_kernel::root_mount::read_root_unlock_descriptor`, `plans/PI.md`
+  P11 Chunk B-1 — host-proven): it reads the fixed-length descriptor off the
+  FAT boot partition through the same real FAT32 driver that authored it
+  (one on-disk definition, §2.2; the shared `ROOT_UNLOCK_NAME` constant) and
+  fails closed on a missing/truncated/over-long file before any read. The
+  remaining board storage bring-up that *supplies* the block devices + typed
+  passphrase and wires the boot path (root-device discovery, in-kernel block
+  DriverHost, console passphrase prompt) is staged in `plans/PI.md` P11
+  Chunk B-2. The login `Run` binary ships at
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held
   database through the `CAP_USERS_READ`-gated `users_db_read` syscall

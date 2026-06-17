@@ -119,6 +119,16 @@ rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 # composition is architecture-neutral, so it is a common dependency and its
 # host tests run on the CI host.
 rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }
+# The FAT boot partition holds the plaintext `root.unlock` key-derivation
+# descriptor the boot path reads *before* the encrypted root is mounted
+# (`AGENTS.md` §11, `plans/PI.md` P11 Chunk B). `root_mount` reads it back
+# through the same real FAT32 driver that authored it (`tools/mkimage`), so
+# author and reader share one on-disk definition (`AGENTS.md` §2.2).
+# `rustos-kernel` (`Layer::Tooling`) is the one crate permitted to name a
+# filesystem driver across strata (`AGENTS.md` §17.4 / §8); the read is
+# architecture-neutral, so it is a common dependency and its host tests run
+# on the CI host.
+rustos-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
 # Zero-on-drop for the passphrase-derived `VolumeKey` on the boot stack
 # (`AGENTS.md` §4 — secret hygiene). The same audited crate `kernel/mem`
 # delegates its sensitive-region zeroing to (`AGENTS.md` §6 / §2.12 — no

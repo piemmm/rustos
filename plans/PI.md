@@ -3958,10 +3958,28 @@ two users — or the same user twice — can be logged in concurrently.
        test authors a real volume under a passphrase-derived key through the
        one on-disk-layout source of truth (§2.2). No `lib/abi`/C-header
        change.
-     - **Chunk B — still staged: the board storage bring-up that supplies
-       the three inputs and wires the boot path:** discover the root block
-       device from the hwtree, bring up the block + filesystem driver with
-       an in-kernel DMA/MMIO host, read `root.unlock` from the FAT boot
+     - **Chunk B-1 — the FAT `root.unlock` reader — LANDED (host-proven).**
+       `rustos_kernel::root_mount::read_root_unlock_descriptor` reads the
+       plaintext `root.unlock` key-derivation descriptor off the FAT boot
+       partition through the **same** real FAT32 driver `tools/mkimage`
+       authored it with — one on-disk definition for writer and reader
+       (§2.2). The file name is now the shared
+       `rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME` constant (hoisted from
+       `tools/mkimage::fatboot`, which re-exports it; §2.2 / §2.14). The
+       descriptor is a fixed-length record, so the read is strictly bounded
+       and fail-closed (§5.4 / §24.4): the entry's size is checked to be
+       **exactly** `UNLOCK_DESCRIPTOR_LEN` *before* a byte is read (both a
+       truncated and an over-long file refused), and the bytes are still
+       re-validated by `UnlockDescriptor::decode` inside
+       `unlock_root_and_load_users` (§5.4.3). Host-proven by 6 reader tests
+       (read-back + decode, end-to-end feed into `unlock_root_and_load_users`,
+       missing → `NotFound`, truncated/over-long → `OutOfRange`, unformatted
+       partition refused) over a FAT volume authored through the real FAT32
+       driver. No `lib/abi`/C-header change.
+     - **Chunk B-2 — still staged: the board storage bring-up that supplies
+       the inputs and wires the boot path:** discover the root block device
+       from the hwtree, bring up the block + filesystem driver with an
+       in-kernel DMA/MMIO host, read `root.unlock` (B-1) off the FAT boot
        partition, prompt for the passphrase on the console (the in-kernel
        keyboard scaffold already feeds the console on metal; UART on
        `virt`), call `unlock_root_and_load_users`, leak + `with_users_db`.

@@ -249,12 +249,24 @@ plaintext fallback (§4 / §5.4); then runs `load_users_db_source`. Every
 refusal is audited (the bin-crate ids `4133` `ROOT_MOUNT_UNLOCKED` /
 `4134` `ROOT_MOUNT_REJECTED`, in the shared `4_000` range; no passphrase,
 key, or volume byte is ever logged, §19.4) and yields **no** database, so a
-root that cannot be unlocked serves none (§5.4.5). The board-specific
-bring-up that *supplies* the three inputs — hardware-tree root-device
-discovery, the in-kernel block DriverHost, the FAT read, and the console
-passphrase prompt — is wired into the boot path next
-(`plans/PI.md` P11 Chunk B): `virtio-blk` proves it on `-M virt`, EMMC2 on
-metal (`plans/PI.md` §0.4 / P8).
+root that cannot be unlocked serves none (§5.4.5).
+
+The first of those three inputs — the plaintext `root.unlock`
+key-derivation descriptor — is recovered off the FAT boot partition by
+`rustos_kernel::root_mount::read_root_unlock_descriptor`, which mounts the
+partition through the **same** real FAT32 driver `tools/mkimage` authored
+it with (one on-disk definition for writer and reader, `AGENTS.md` §2.2;
+the file name is the shared `rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME`
+constant). The descriptor is a fixed-length record, so the read is strictly
+bounded and fail-closed (§5.4 / §24.4): the entry's size is checked to be
+exactly `UNLOCK_DESCRIPTOR_LEN` *before* a byte is read — rejecting both a
+truncated and an over-long file — and the bytes are still re-validated by
+`UnlockDescriptor::decode` before they drive any key derivation (§5.4.3).
+The remaining board-specific bring-up that *supplies* the block devices and
+the typed passphrase — hardware-tree root-device discovery, the in-kernel
+block DriverHost, and the console passphrase prompt — is wired into the
+boot path next (`plans/PI.md` P11 Chunk B): `virtio-blk` proves it on
+`-M virt`, EMMC2 on metal (`plans/PI.md` §0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store

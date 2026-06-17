@@ -38,17 +38,25 @@
 //!
 //! Every refusal is audited and yields **no** database, so a system whose
 //! root cannot be unlocked or whose database cannot be read serves none
-//! rather than inventing accounts (`AGENTS.md` §5.4.5). The board-specific
-//! discovery and bring-up that *produce* the descriptor bytes, the
-//! passphrase, and the [`Block`] device — the hardware-tree root-device
-//! discovery, the in-kernel block `DriverHost`, the FAT read, and the
-//! console passphrase prompt — sit above this seam in the boot path and
-//! are wired in the following increment (`plans/PI.md` P11 Chunk B);
-//! `virtio-blk` proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
+//! rather than inventing accounts (`AGENTS.md` §5.4.5).
+//!
+//! [`read_root_unlock_descriptor`] reads the first of those three inputs —
+//! the plaintext `root.unlock` descriptor — back off the FAT boot
+//! partition through the same real FAT32 driver that authored it. The
+//! remaining board-specific bring-up that *produces* the [`Block`]
+//! devices and the typed passphrase — the hardware-tree root-device
+//! discovery, the in-kernel block `DriverHost`, and the console
+//! passphrase prompt — sits above this seam in the boot path and is wired
+//! in the following increment (`plans/PI.md` P11 Chunk B); `virtio-blk`
+//! proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
 
 use rustos_abi::driver::block::Block;
+use rustos_abi::driver::filesystem::{FilesystemRead, NodeKind};
 use rustos_abi::DriverError;
-use rustos_drv_fs_rustfs::{RustFs, UnlockDescriptor, VolumeKey};
+use rustos_drv_fs_fat32::Fat32;
+use rustos_drv_fs_rustfs::{
+    RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, UNLOCK_DESCRIPTOR_LEN,
+};
 use rustos_kernel_core::{load_users_db_source, HeldUsersDbSource, UsersLoadError};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use zeroize::Zeroizing;
@@ -150,8 +158,7 @@ pub fn unlock_root_and_load_users<B: Block>(
     //    most sensitive transient on the boot stack: hold it in a
     //    zero-on-drop wrapper so it is wiped the instant it leaves scope,
     //    whether the mount succeeds or fails (`AGENTS.md` §4).
-    let volume_key: Zeroizing<VolumeKey> =
-        Zeroizing::new(descriptor.derive_volume_key(passphrase));
+    let volume_key: Zeroizing<VolumeKey> = Zeroizing::new(descriptor.derive_volume_key(passphrase));
 
     // 3. Mount the encrypted root. A wrong passphrase fails to unwrap the
     //    master key and is refused fail-closed — no plaintext fallback,
@@ -199,6 +206,65 @@ fn reject(audit: &dyn Sink, error: RootMountError) {
     );
 }
 
+/// Read the plaintext `root.unlock` key-derivation descriptor off the FAT
+/// boot partition.
+///
+/// The boot path recovers this descriptor *before* anything is decrypted
+/// and hands its bytes — together with the passphrase the operator types
+/// at the console — to [`unlock_root_and_load_users`]. Reading it through
+/// the same real FAT32 driver that `tools/mkimage` / the §11 installer
+/// authored it with keeps one on-disk definition for both ends
+/// (`AGENTS.md` §2.2); the file name is the shared
+/// [`ROOT_UNLOCK_NAME`] constant.
+///
+/// The descriptor is a fixed-length record ([`UNLOCK_DESCRIPTOR_LEN`]
+/// bytes), so the read is strictly bounded and fail-closed (`AGENTS.md`
+/// §5.4 / §24.4): the entry's size is checked to be **exactly** that
+/// length *before* a byte is read — rejecting both a truncated and an
+/// over-long file — and the bytes are read into a fixed on-stack buffer.
+/// The returned bytes are still untrusted: [`UnlockDescriptor::decode`]
+/// (inside [`unlock_root_and_load_users`]) validates every field before
+/// they drive any key derivation (`AGENTS.md` §5.4.3).
+///
+/// * `boot_partition` — the FAT boot-partition [`Block`] device the board
+///   brought up (the GPU-firmware-readable partition on a Pi SD card).
+///
+/// # Errors
+///
+/// A [`DriverError`] from the first check that refused: the partition does
+/// not mount as FAT32, [`ROOT_UNLOCK_NAME`] is absent
+/// ([`DriverError::NotFound`]), the entry is not a regular file
+/// ([`DriverError::Unsupported`]), its size is not exactly
+/// [`UNLOCK_DESCRIPTOR_LEN`] ([`DriverError::OutOfRange`]), or the device
+/// read faulted. No partial descriptor is ever returned (`AGENTS.md`
+/// §2.9).
+pub fn read_root_unlock_descriptor<B: Block>(
+    boot_partition: B,
+) -> Result<[u8; UNLOCK_DESCRIPTOR_LEN], DriverError> {
+    let mut fs = Fat32::open(boot_partition)?;
+    let root = fs.root();
+    let node = fs.lookup(root, ROOT_UNLOCK_NAME.as_bytes())?;
+
+    // Validate shape and size *before* reading: a fixed-length record, so
+    // anything that is not exactly one is refused rather than partially
+    // read (`AGENTS.md` §5.4 / §24.4 — a format bound, not a capacity).
+    let info = fs.node_info(node)?;
+    if info.kind != NodeKind::RegularFile {
+        return Err(DriverError::Unsupported);
+    }
+    let size = usize::try_from(info.size).map_err(|_| DriverError::OutOfRange)?;
+    if size != UNLOCK_DESCRIPTOR_LEN {
+        return Err(DriverError::OutOfRange);
+    }
+
+    let mut descriptor = [0u8; UNLOCK_DESCRIPTOR_LEN];
+    let read = fs.read_at(node, 0, &mut descriptor)?;
+    if read != UNLOCK_DESCRIPTOR_LEN {
+        return Err(DriverError::DeviceFault);
+    }
+    Ok(descriptor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,7 +273,9 @@ mod tests {
 
     use alloc::vec::Vec;
 
-    use rustos_drv_fs_rustfs::{EntropySource, UNLOCK_DESCRIPTOR_LEN, UNLOCK_MIN_ITERATIONS};
+    use rustos_abi::driver::block::BlockGeometry;
+    use rustos_abi::driver::filesystem::FilesystemWrite;
+    use rustos_drv_fs_rustfs::{EntropySource, UNLOCK_MIN_ITERATIONS};
     use rustos_kernel_core::UsersDbSource;
     use rustos_log::{Event as LogEvent, Sink as LogSink};
     use rustos_test_rustfs_image as image;
@@ -372,5 +440,178 @@ mod tests {
         assert!(matches!(err, RootMountError::Mount(_)), "{err:?}");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    // --- read_root_unlock_descriptor ----------------------------------
+
+    /// 512-byte sector size — the FAT boot partition's geometry.
+    const FAT_SECTOR_BYTES: usize = 512;
+
+    /// 64 MiB, the production boot-partition size `tools/mkimage` formats
+    /// (`fatboot.rs`). A valid FAT32 volume needs far more than the small
+    /// rustfs fixture's 2048 sectors, so this `Block` double is sized for a
+    /// real FAT32 format rather than reusing `image::VecBlock` (whose fixed
+    /// geometry is the rustfs fixture's).
+    const FAT_BOOT_SECTORS: u64 = 131_072;
+
+    /// In-memory FAT boot-partition [`Block`] double: a `Vec<u8>` addressed
+    /// in [`FAT_SECTOR_BYTES`]-byte sectors, exactly as the board's
+    /// SD/virtio-blk device presents the partition. Sized from its backing
+    /// length so a real FAT32 volume formats on it.
+    struct FatVecBlock {
+        store: Vec<u8>,
+    }
+
+    impl FatVecBlock {
+        fn new(sectors: u64) -> Self {
+            let len = usize::try_from(sectors).expect("sector count fits usize") * FAT_SECTOR_BYTES;
+            Self {
+                store: alloc::vec![0u8; len],
+            }
+        }
+
+        fn span(&self, lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
+            if len == 0 || len % FAT_SECTOR_BYTES != 0 {
+                return Err(DriverError::BufferTooSmall);
+            }
+            let start = usize::try_from(lba)
+                .ok()
+                .and_then(|l| l.checked_mul(FAT_SECTOR_BYTES))
+                .ok_or(DriverError::LengthOutOfRange)?;
+            let end = start
+                .checked_add(len)
+                .ok_or(DriverError::LengthOutOfRange)?;
+            if end > self.store.len() {
+                return Err(DriverError::LengthOutOfRange);
+            }
+            Ok((start, end))
+        }
+    }
+
+    impl Block for FatVecBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(BlockGeometry {
+                block_size: u32::try_from(FAT_SECTOR_BYTES).expect("sector size fits u32"),
+                block_count: u64::try_from(self.store.len() / FAT_SECTOR_BYTES)
+                    .expect("sector count fits u64"),
+            })
+        }
+
+        fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            let (start, end) = self.span(lba, buf.len())?;
+            buf.copy_from_slice(&self.store[start..end]);
+            Ok(())
+        }
+
+        fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+            let (start, end) = self.span(lba, buf.len())?;
+            self.store[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    /// Author a FAT boot partition through the real FAT32 driver and plant
+    /// `payload` under [`ROOT_UNLOCK_NAME`] — the exact write `tools/mkimage`
+    /// performs (`AGENTS.md` §2.2). Returns the mounted-and-flushed device,
+    /// ready to hand straight to [`read_root_unlock_descriptor`].
+    fn author_boot_partition(payload: &[u8]) -> FatVecBlock {
+        let mut fs = Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS)).expect("FAT32 formats");
+        let root = fs.root();
+        fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)
+            .expect("the descriptor file is created");
+        let written = fs
+            .write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, payload)
+            .expect("the descriptor bytes are written");
+        assert_eq!(written, payload.len(), "the whole descriptor is written");
+        fs.flush().expect("the partition flushes");
+        fs.into_block()
+    }
+
+    /// An empty FAT boot partition carrying no `root.unlock` file.
+    fn empty_boot_partition() -> FatVecBlock {
+        let mut fs = Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS)).expect("FAT32 formats");
+        fs.flush().expect("the partition flushes");
+        fs.into_block()
+    }
+
+    #[test]
+    fn reads_back_the_exact_planted_descriptor() {
+        // The on-FAT descriptor round-trips byte-for-byte through the real
+        // driver and decodes to the same descriptor it was provisioned as
+        // (`AGENTS.md` §2.2 — author and reader share one definition).
+        let (descriptor_bytes, _key) = provision();
+        let block = author_boot_partition(&descriptor_bytes);
+
+        let read = read_root_unlock_descriptor(block).expect("the planted descriptor reads back");
+        assert_eq!(read, descriptor_bytes);
+        // The bytes are a genuinely well-formed descriptor.
+        UnlockDescriptor::decode(&read).expect("the read descriptor decodes");
+    }
+
+    #[test]
+    fn the_reader_feeds_the_unlock_composition_end_to_end() {
+        // The reader's output is exactly what `unlock_root_and_load_users`
+        // consumes: read the descriptor off FAT, then unlock the encrypted
+        // root with the matching passphrase and load the database.
+        let (descriptor_bytes, key) = provision();
+        let boot = author_boot_partition(&descriptor_bytes);
+        let read = read_root_unlock_descriptor(boot).expect("descriptor reads back");
+
+        let root_bytes =
+            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let root = image::VecBlock::from_bytes(root_bytes);
+        let sink = RecordingSink::new();
+        let source = unlock_root_and_load_users(&read, PASSPHRASE, root, &sink)
+            .expect("the FAT-read descriptor unlocks the root");
+        assert!(source.text().is_ok(), "a database is served");
+    }
+
+    #[test]
+    fn a_missing_descriptor_is_not_found() {
+        // §2.9: no `root.unlock` on the partition is a fail-closed
+        // NotFound, never a fabricated descriptor.
+        let block = empty_boot_partition();
+        assert_eq!(
+            read_root_unlock_descriptor(block),
+            Err(DriverError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_truncated_descriptor_is_refused() {
+        // §5.4 / §24.4: a short file is rejected on its size *before* any
+        // read, never zero-padded up to the record length.
+        let (descriptor_bytes, _key) = provision();
+        let block = author_boot_partition(&descriptor_bytes[..UNLOCK_DESCRIPTOR_LEN - 1]);
+        assert_eq!(
+            read_root_unlock_descriptor(block),
+            Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn an_over_long_descriptor_is_refused() {
+        // §5.4 / §24.4: a file longer than the fixed record — extra bytes a
+        // tampered partition might append — is refused, not truncated to
+        // the prefix.
+        let (descriptor_bytes, _key) = provision();
+        let mut padded = descriptor_bytes.to_vec();
+        padded.push(0);
+        let block = author_boot_partition(&padded);
+        assert_eq!(
+            read_root_unlock_descriptor(block),
+            Err(DriverError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn an_unformatted_partition_does_not_mount() {
+        // §2.9: a device that is not a FAT volume (a zeroed image) fails
+        // the mount closed rather than being misread.
+        let block = FatVecBlock::new(FAT_BOOT_SECTORS);
+        assert!(
+            read_root_unlock_descriptor(block).is_err(),
+            "an unformatted partition must not mount"
+        );
     }
 }

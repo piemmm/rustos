@@ -946,6 +946,7 @@ dependencies = [
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",
  "rustos-drv-bus-virtio",
+ "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
  "rustos-drv-input-usb-hid",
  "rustos-drvhost",

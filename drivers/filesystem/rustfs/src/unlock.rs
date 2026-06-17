@@ -103,6 +103,17 @@ const KDF_PBKDF2_SHA256: u8 = 1;
 /// field cannot smuggle data past a future reader).
 pub const UNLOCK_DESCRIPTOR_LEN: usize = 4 + 1 + 3 + 4 + UNLOCK_SALT_LEN;
 
+/// File name the encoded [`UnlockDescriptor`] is stored under on the
+/// plaintext boot partition (the FAT boot partition of a Pi SD image).
+///
+/// This is the on-storage contract between the *writer* — `tools/mkimage`
+/// and the §11 installer, which plant the descriptor here — and the
+/// *reader*, the boot path that reads it back *before* anything is
+/// decrypted to turn the operator passphrase into the volume key. It lives
+/// beside [`UnlockDescriptor`] so both ends share one definition rather
+/// than each carrying a private copy of the literal (`AGENTS.md` §2.2).
+pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
+
 /// The plaintext key-derivation descriptor stored beside an encrypted
 /// volume (on a Pi SD image, in a file on the FAT boot partition).
 ///

@@ -31,7 +31,11 @@ pub const CONFIG_TXT_NAME: &str = "config.txt";
 /// then opens the root. It carries no secret — only the public KDF
 /// parameters (see
 /// [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor)).
-pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
+///
+/// The literal is defined once beside the descriptor it names; the writer
+/// here and the boot-path reader import the same constant so the contract
+/// cannot drift (`AGENTS.md` §2.2).
+pub use rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME;
 
 /// Render the `config.txt` the Pi firmware boots RustOS with.
 ///
