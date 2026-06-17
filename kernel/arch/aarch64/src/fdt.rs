@@ -524,12 +524,85 @@ pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) 
     }
 }
 
+/// First cell of a GIC `interrupts` specifier: the interrupt *type*.
+///
+/// The Arm GIC device-tree binding (Linux
+/// `Documentation/devicetree/bindings/interrupt-controller/arm,gic.yaml`)
+/// encodes each interrupt as a three-cell tuple `<type number flags>`.
+/// `type` is [`GIC_TYPE_SPI`] (shared peripheral) or [`GIC_TYPE_PPI`]
+/// (private peripheral); any other value is not a GICv2 interrupt this
+/// port understands and is refused (`AGENTS.md` §2.9 — fail closed).
+pub const GIC_TYPE_SPI: u32 = 0;
+
+/// First cell of a GIC `interrupts` specifier naming a private-peripheral
+/// interrupt (PPI). See [`GIC_TYPE_SPI`].
+pub const GIC_TYPE_PPI: u32 = 1;
+
+/// Lowest GICv2 INTID a device-tree PPI maps to.
+///
+/// PPIs occupy INTIDs `16..32` (the SGIs below them are software-only and
+/// have no device-tree `interrupts` form), so a binding's PPI `number` is
+/// offset by this base. The SPI base is [`crate::gic::MIN_SPI_INTID`] —
+/// the one definition both this decoder and the GICv2 routing share
+/// (`AGENTS.md` §2.2).
+pub const GIC_PPI_INTID_BASE: u32 = 16;
+
+/// Map a GIC `interrupts` specifier `(kind, number)` pair to its global
+/// GICv2 INTID.
+///
+/// `kind` is the first `interrupts` cell ([`GIC_TYPE_SPI`] /
+/// [`GIC_TYPE_PPI`]) and `number` the second. An SPI is offset by
+/// [`crate::gic::MIN_SPI_INTID`] (32) and a PPI by [`GIC_PPI_INTID_BASE`]
+/// (16), matching the kernel Arm GIC binding. Returns `None` — never a
+/// guessed line (`AGENTS.md` §2.9 / §5.4.5) — when:
+///
+/// * `kind` is neither SPI nor PPI (e.g. a GICv3-only extended-SPI
+///   binding this GICv2 port does not drive),
+/// * the offset addition overflows, or
+/// * the resulting INTID exceeds [`crate::gic::MAX_INTID`] (an SPI
+///   `number` the controller cannot address).
+#[must_use]
+pub fn gic_intid_from_cells(kind: u32, number: u32) -> Option<u32> {
+    let intid = match kind {
+        GIC_TYPE_SPI => number.checked_add(crate::gic::MIN_SPI_INTID)?,
+        GIC_TYPE_PPI => number.checked_add(GIC_PPI_INTID_BASE)?,
+        _ => return None,
+    };
+    (intid <= crate::gic::MAX_INTID).then_some(intid)
+}
+
+/// Decode the first GIC interrupt the device `node`'s `interrupts`
+/// property names into its global GICv2 INTID.
+///
+/// Reads the `<type number flags>` triple through the `lib/fdt` cell
+/// reader ([`Node::property`] + `read_be_u32`) — never a raw byte poke
+/// (`AGENTS.md` §18.5: discovery uses the enumerable source only) — and
+/// maps it through [`gic_intid_from_cells`]. Returns `None` when the node
+/// has no `interrupts` property, the property is shorter than the two
+/// cells the decode needs, or the specifier is not a GICv2 SPI/PPI this
+/// port can route. The caller (the device-IRQ bring-up in
+/// [`crate::platform`] / the kernel binary) then leaves the device
+/// unbound rather than guessing a line (`AGENTS.md` §18.4).
+///
+/// Only the first interrupt of a multi-interrupt device is decoded; a
+/// device that raises several lines is served as further specifiers are
+/// needed (no speculative multi-line surface, `AGENTS.md` §2.4).
+#[must_use]
+pub fn gic_device_intid(node: &Node<'_>) -> Option<u32> {
+    let interrupts = node.property("interrupts")?;
+    let kind = interrupts.read_be_u32(0).ok()?;
+    let number = interrupts.read_be_u32(4).ok()?;
+    gic_intid_from_cells(kind, number)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        dma_ranges_aperture, effective_timer_hz, outbound_mmio_window, psci_method,
-        timer_clock_frequency, Fdt, PsciMethod,
+        dma_ranges_aperture, effective_timer_hz, gic_device_intid, gic_intid_from_cells,
+        outbound_mmio_window, psci_method, timer_clock_frequency, Fdt, PsciMethod, GIC_TYPE_PPI,
+        GIC_TYPE_SPI,
     };
+    use crate::gic::{MAX_INTID, MIN_SPI_INTID};
     use rustos_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
 
     /// Build a single-node tree whose `pcie` node carries `dma-ranges`,
@@ -870,5 +943,115 @@ mod tests {
         assert_eq!(effective_timer_hz(None, 62_500_000), 62_500_000);
         // A zero override is treated as absent (never a 0 Hz timer).
         assert_eq!(effective_timer_hz(Some(0), 62_500_000), 62_500_000);
+    }
+
+    /// Build a minimal tree with one device node carrying an `interrupts`
+    /// triple `<type number flags>`, then hand that node to `f`.
+    fn with_device_interrupts(triple: &[u8], f: impl FnOnce(&super::Node<'_>)) {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("virtio_mmio@a000000");
+        b.prop_str("compatible", "virtio,mmio");
+        if !triple.is_empty() {
+            b.prop("interrupts", triple);
+        }
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let node = fdt
+            .nodes()
+            .filter_map(Result::ok)
+            .find(|n| n.name() == b"virtio_mmio@a000000")
+            .expect("device node");
+        f(&node);
+    }
+
+    /// Encode a GIC `<type number flags>` interrupt triple as three
+    /// big-endian cells, the way a device tree stores it.
+    fn interrupts_triple(kind: u32, number: u32, flags: u32) -> std::vec::Vec<u8> {
+        let mut v = std::vec::Vec::new();
+        v.extend_from_slice(&kind.to_be_bytes());
+        v.extend_from_slice(&number.to_be_bytes());
+        v.extend_from_slice(&flags.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn spi_cells_offset_by_the_shared_min_spi_base() {
+        // An SPI `number` maps to INTID `number + MIN_SPI_INTID`. SPI 2 is
+        // the `virt` board's PL031 RTC (INTID 34), the device the IRQ
+        // vertical arms — proving the decoder agrees with the routing.
+        assert_eq!(gic_intid_from_cells(GIC_TYPE_SPI, 0), Some(MIN_SPI_INTID));
+        assert_eq!(
+            gic_intid_from_cells(GIC_TYPE_SPI, 2),
+            Some(MIN_SPI_INTID + 2)
+        );
+    }
+
+    #[test]
+    fn ppi_cells_offset_by_the_ppi_base() {
+        // A PPI `number` maps to INTID `number + 16`; the generic-timer
+        // PPI on `virt` is PPI 14 → INTID 30.
+        assert_eq!(gic_intid_from_cells(GIC_TYPE_PPI, 0), Some(16));
+        assert_eq!(gic_intid_from_cells(GIC_TYPE_PPI, 14), Some(30));
+    }
+
+    #[test]
+    fn unknown_interrupt_type_is_refused() {
+        // A type cell that is neither SPI (0) nor PPI (1) — e.g. a
+        // GICv3-only extended-SPI binding — yields no INTID (fail closed).
+        assert_eq!(gic_intid_from_cells(2, 5), None);
+        assert_eq!(gic_intid_from_cells(0xFFFF_FFFF, 0), None);
+    }
+
+    #[test]
+    fn spi_number_above_the_controller_ceiling_is_refused() {
+        // An SPI `number` whose INTID would exceed `MAX_INTID` is rejected
+        // rather than silently routed to an unaddressable line.
+        let over = MAX_INTID - MIN_SPI_INTID + 1;
+        assert_eq!(gic_intid_from_cells(GIC_TYPE_SPI, over), None);
+        // The exact ceiling is accepted.
+        assert_eq!(
+            gic_intid_from_cells(GIC_TYPE_SPI, MAX_INTID - MIN_SPI_INTID),
+            Some(MAX_INTID)
+        );
+    }
+
+    #[test]
+    fn cell_offset_addition_cannot_overflow() {
+        // A hostile `number` near `u32::MAX` must not wrap the addition
+        // (`AGENTS.md` §24.4 — a validation bound, fail closed).
+        assert_eq!(gic_intid_from_cells(GIC_TYPE_SPI, u32::MAX), None);
+        assert_eq!(gic_intid_from_cells(GIC_TYPE_PPI, u32::MAX), None);
+    }
+
+    #[test]
+    fn device_node_spi_is_decoded_from_its_interrupts_property() {
+        // SPI 2, level-high (flags 4) — the `virt` RTC specifier shape.
+        let triple = interrupts_triple(GIC_TYPE_SPI, 2, 4);
+        with_device_interrupts(&triple, |node| {
+            assert_eq!(gic_device_intid(node), Some(MIN_SPI_INTID + 2));
+        });
+    }
+
+    #[test]
+    fn device_node_without_interrupts_yields_none() {
+        with_device_interrupts(&[], |node| {
+            assert_eq!(gic_device_intid(node), None);
+        });
+    }
+
+    #[test]
+    fn device_node_with_a_truncated_interrupts_property_yields_none() {
+        // Only the first cell present: the decode needs two cells, so a
+        // short property is refused, never read past its end.
+        let mut short = std::vec::Vec::new();
+        short.extend_from_slice(&GIC_TYPE_SPI.to_be_bytes());
+        with_device_interrupts(&short, |node| {
+            assert_eq!(gic_device_intid(node), None);
+        });
     }
 }

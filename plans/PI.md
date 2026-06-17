@@ -4144,9 +4144,29 @@ two users — or the same user twice — can be logged in concurrently.
        `root_mount` host tests also split, so the in-memory split tests and
        the live (emulated) board exercise one on-disk layout (§2.2). No
        `lib/abi`/C-header change.
-     - **Chunk B-2 board bring-up — staged, with a confirmed build recipe:
-       the live in-kernel unlock kthread.** Everything the kthread *calls* is
-       landed (above): the `root_storage` bind gate (`RootBlockBinding`,
+     - **INCREMENT (1) — production aarch64 device-IRQ subsystem — LANDED
+       (host-proven + `-M virt` vertical).** The prerequisite that lets a
+       kthread block on a device interrupt is complete:
+       `kernel/rustos-kernel::aarch64::gic_irq::GicIrqController` bridges the
+       arch `GicController` to `rustos_kernel_irq::IrqController`,
+       `Aarch64BinArch::irq_routing`/`install_irq_dispatch` wire the GICv2
+       routing + the EL1-vector `set_device_irq_dispatch` seam into the
+       kernel/core `irq` phase (additive, no SPI bound until INCREMENT (2), so
+       the metal boot is unaffected, §2.17); `kernel/arch/aarch64::fdt::
+       gic_device_intid` decodes a device node's `interrupts` triple into a
+       GICv2 INTID (SPI=number+`MIN_SPI_INTID`, no board constant, §2.20); and
+       `rustos_kernel_core::KthreadIrqWaiter` is the cooperative
+       `rustos_kernel_irq::IrqWaiter` an in-kernel service kthread drives
+       (yields via the `YieldHandle`, mirrors `SyscallIrqWaiter`). Proven by
+       `tests/integration/irq_kthread_qemu_aarch64`: a discovered RTC SPI wakes
+       a `spawn_kthread` service parked in `block_until_ready` under the live
+       eevdf scheduler, with the post-fire mask-before-wake check. Host tests:
+       `KthreadIrqWaiter` (5), `gic_device_intid`/`gic_intid_from_cells` (9).
+       No `lib/abi`/C-header change.
+     - **INCREMENT (2) — Chunk B-2 board bring-up — staged, with a confirmed
+       build recipe: the live in-kernel unlock kthread.** Everything the
+       kthread *calls* is now landed: the device-IRQ subsystem above
+       (INCREMENT (1)), the `root_storage` bind gate (`RootBlockBinding`,
        `4135`), the `unlock_root_disk_interactively` policy + bounded retry,
        the set-once `LATE_USERS_DB` + its dispatch-hook wiring, and the `-M
        virt` proof of the policy over a real virtio-blk encrypted-root disk.
@@ -4177,12 +4197,13 @@ two users — or the same user twice — can be logged in concurrently.
          `KernelVirtioHost` (its `notify_wait` drives `block_until_ready` over
          the bound `IrqHandle` + an injected `IrqWaiter`).
        - The waiter must **cooperatively yield to the scheduler**, not `wfi`
-         the whole CPU (PID 1 + the keyboard kthread share it): implement
-         `IrqWaiter::yield_now` as `reschedule_current(arch.current_cpu(),
-         RescheduleAction::Yield)` (both `pub` from `rustos_kernel_core`),
-         mirroring `BlockingConsoleRead`. (The `-M virt` harness's `WfiWaiter`
-         parks the CPU because it is a single-purpose vertical — do NOT copy
-         that into the shared-CPU production kthread.)
+         the whole CPU (PID 1 + the keyboard kthread share it). Use the
+         landed `rustos_kernel_core::KthreadIrqWaiter` (INCREMENT (1)): it
+         wraps the `&mut dyn YieldHandle` the `spawn_kernel_service` body
+         receives plus a monotonic-clock closure and yields (re-enqueues),
+         exactly the shared-CPU-safe behaviour required. (The `-M virt`
+         harness's `WfiWaiter` parks the CPU because it is a single-purpose
+         vertical — do NOT copy that into the shared-CPU production kthread.)
 
        Build recipe (one focused pass; mirror `keyboard_service`'s metal
        module shape and the `tests/integration/virtio_qemu_support`
@@ -4199,10 +4220,11 @@ two users — or the same user twice — can be logged in concurrently.
           (§18.4).
        2. **New module `kernel/rustos-kernel/src/unlock_service.rs`** with a
           host-compiled, host-tested, device-independent core (consumed by the
-          metal glue, so non-speculative): the binding stash; the
-          cooperative `SchedulerYieldWaiter<A: SchedulerArch>` implementing
-          `rustos_kernel_irq::IrqWaiter` over `reschedule_current` (host-tested
-          with `TestArch` + a host `IrqTable`). The metal bring-up lives in a
+          metal glue, so non-speculative): the binding stash. The cooperative
+          IRQ waiter is already landed — reuse `rustos_kernel_core::
+          KthreadIrqWaiter` over the `spawn_kernel_service` body's
+          `&mut dyn YieldHandle` (INCREMENT (1)); do **not** roll a new one.
+          The metal bring-up lives in a
           `#[cfg(all(freestanding, kernel_isa = "aarch64"))] mod metal` with
           `pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool`.
        3. **Metal `spawn_if_present` body** (`virt` virtio-blk path; EMMC2 is
@@ -4213,11 +4235,13 @@ two users — or the same user twice — can be logged in concurrently.
           keyboard discovery), not an embedded blob: `virtio_mmio_bus_from_dtb`
           → `MmioMap` + `KernelMmioMapper` (`CAP_MMIO_MAP`) →
           `provision_virtio_mmio(&bus, 2, &mapper, MmioTransport::new)` →
-          resolve the slot's GICv2 SPI from the DTB (`device_spi_number`
-          pattern) → `IrqTable` + bind + a `GicController` bridge + EL1
-          `set_device_irq_dispatch` + `gic::route_spi` + unmask →
-          `DmaPool` + `KernelVirtioHost::new(pool, &caller, sink, PoolId::fresh,
-          table, handle, &SchedulerYieldWaiter)` → admit the virtio-blk driver
+          resolve the slot's GICv2 SPI from the DTB with the landed
+          `fdt::gic_device_intid` (INCREMENT (1)) → `IrqTable` + bind + the
+          landed `gic_irq::GicIrqController` + EL1 `set_device_irq_dispatch`
+          (already installed by `install_irq_dispatch`) + `gic::route_spi` +
+          unmask → `DmaPool` + `KernelVirtioHost::new(pool, &caller, sink,
+          PoolId::fresh, table, handle, &waiter)` (the `KthreadIrqWaiter`) →
+          admit the virtio-blk driver
           through the signed §8 `drvhost::Host::load` gate (not a bare
           `register()`) → `VirtioBlk::open(transport, &vhost)` to get the
           whole-disk `Block`.

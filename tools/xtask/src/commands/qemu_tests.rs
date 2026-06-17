@@ -2343,6 +2343,41 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // P11 Chunk B-2 INCREMENT (1) (`plans/PI.md`): the aarch64 device-SPI
+    // -> parked-kthread vertical, the proof that the production aarch64
+    // device-IRQ subsystem can wake an in-kernel service kthread (the
+    // prerequisite for INCREMENT (2)'s root-unlock kthread). Where
+    // `rustos-test-irq-qemu-aarch64` proves the device-IRQ *delivery* path
+    // against a hard-coded INTID and a `wfi` poll loop, this vertical proves
+    // the two INCREMENT (1) pieces that path serves: (1) DTB SPI discovery
+    // (`fdt::gic_device_intid` decodes the PL031 RTC node's `interrupts`
+    // triple into its GICv2 INTID from the embedded `virt` tree — no board
+    // constant), and (2) the kthread-cooperative
+    // `rustos_kernel_core::KthreadIrqWaiter`, driven by a real in-kernel
+    // service kthread (`spawn_kthread`) through the shared
+    // `block_until_ready` loop on the live `rustos-kernel-sched-eevdf`
+    // `Scheduler`. The kthread parks on the bound RTC SPI, yielding each
+    // cooperative `step`; when the RTC fires the EL1 GICv2 path masks the
+    // line and sets the ready flag, the kthread observes `WaitOutcome::Ready`
+    // and exits, and the kernel asserts the GIC line re-reads masked
+    // (mask-before-wake, `docs/src/security/irq.md`) before the semihosting
+    // PASS. A regression that fails to discover, deliver, wake, or mask never
+    // reaches PASS, so the run times out (fail-loud, `AGENTS.md` §7). Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work
+    // aarch64 tests.
+    QemuTest {
+        package: "rustos-test-irq-kthread-qemu-aarch64",
+        binary: "rustos-test-irq-kthread-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
     // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
     // completing the `input` row of the §1 QEMU matrix for aarch64.

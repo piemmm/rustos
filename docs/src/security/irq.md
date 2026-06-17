@@ -212,7 +212,7 @@ scheduler or architecture dependency:
   returns `Ok` to re-loop, or `Err(IrqWaitAbort)` to abort (e.g. the
   task can no longer be scheduled).
 
-Two implementations exist:
+Three implementations exist:
 
 * **`irq_wait` syscall handler** (`kernel/core::syscalls`): wraps
   `KernelArch::monotonic_ns(arch.current_cpu())` and
@@ -222,6 +222,18 @@ Two implementations exist:
   `Errno::NotFound`, and fails closed to `Errno::OutOfRange` on any
   other scheduler error. The loop always terminates because the
   per-CPU monotonic clock is strictly monotonic.
+* **`KthreadIrqWaiter`** (`kernel/core::kthread_irq`): the waiter an
+  in-kernel **service kthread** drives — it has no syscall frame or
+  `Scheduler` borrow, so it suspends through the object-safe
+  `YieldHandle` the core hands its body. It wraps that handle (in a
+  `RefCell`, because `IrqWaiter::yield_now` is `&self` while
+  `YieldHandle::yield_now` is `&mut self`) plus a monotonic-clock
+  closure, and like the syscall path it *yields* (re-enqueues,
+  staying runnable) rather than parks, so there is no lost-wakeup
+  window. This is the path the P11 root-unlock kthread takes to drive
+  interrupt-driven block I/O before login; it is proven end-to-end by
+  the `tests/integration/irq_kthread_qemu_aarch64` vertical, where a
+  device SPI wakes a parked kthread under the live scheduler.
 * **`KernelVirtioHost::notify_wait`** (`kernel/virtio`): waits on
   the device's pre-bound
   `IrqHandle` against the owning task (`caller.task()`) with an
@@ -251,7 +263,7 @@ phase:
 | Architecture | Production controller                                                                                  | Status today |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
 | `x86_64`     | `kernel/rustos-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
-| `aarch64`    | `tests/integration/irq_qemu_aarch64::GicBridge` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Implemented and QEMU-validated** (Stage W3-B). The GICv2 SPI target-routing (`gic::route_spi` → `GICD_ITARGETSR`), the device-IRQ dispatch hook, and the `GicBridge` (incl. mask-before-wake through `IrqTable`) are host-tested; `tests/integration/irq_qemu_aarch64` drives a live PL031-RTC SPI (INTID 34) end-to-end and asserts both `WaitStep::Ready` and the post-fire masked enable bit. The boot path does not yet arm device IRQs; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
+| `aarch64`    | `kernel/rustos-kernel::aarch64::gic_irq::GicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Wired into the boot path and QEMU-validated** (P11 Chunk B-2 INCREMENT (1)). `Aarch64BinArch::irq_routing` returns the GICv2-backed routing and `install_irq_dispatch` publishes the `IrqTable` into the EL1 vector seam, so the kernel/core `irq` phase builds the table against the real controller. Device SPIs are discovered from the device tree (`kernel/arch/aarch64::fdt::gic_device_intid` decodes a node's `interrupts` triple → INTID, no board constant) and a parked **kthread** is woken through `KthreadIrqWaiter`; proven end-to-end by `tests/integration/irq_kthread_qemu_aarch64` (RTC SPI → parked kthread → `WaitOutcome::Ready` + post-fire masked bit) alongside the delivery-path vertical `tests/integration/irq_qemu_aarch64`. The boot path does not yet *bind/route* a device SPI — that arrives with INCREMENT (2)'s root-unlock kthread; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `riscv64`    | `tests/integration/riscv64_boot::PlicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/riscv64::plic::PlicController`, whose inherent `mask` writes the source's PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the `scause` decode, the one-shot dispatch slot, and the `PlicIrqController` bridge (incl. mask-before-wake through `IrqTable`) are unit-tested; the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. The arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 

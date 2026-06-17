@@ -81,6 +81,7 @@ pub mod fs;
 pub mod init;
 pub mod input_focus;
 pub mod kthread;
+pub mod kthread_irq;
 pub mod live_producer;
 pub mod memmap;
 pub mod panic;
@@ -131,6 +132,7 @@ pub use kthread::{
     BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder, YielderHandle,
     KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
 };
+pub use kthread_irq::KthreadIrqWaiter;
 pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
