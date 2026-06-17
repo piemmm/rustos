@@ -101,6 +101,11 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
 rustos-drv-bus-pci = { path = "../../drivers/bus/pci", version = "=0.0.0" }
 rustos-drv-bus-usb = { path = "../../drivers/bus/usb", version = "=0.0.0" }
+# The bus-agnostic xHCI protocol engine (`lib/usb`): `usb_keyboard.rs`
+# names `rustos_usb::{Xhci, device::UsbDevice}` directly, alongside the
+# `drivers/bus/usb` wiring that composes the PCI bring-up over it
+# (`AGENTS.md` §2.2 / §17.4 — the protocol is a `lib/*` crate).
+rustos-usb = { path = "../../lib/usb", version = "=0.0.0" }
 rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
 rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 

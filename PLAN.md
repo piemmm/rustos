@@ -862,13 +862,34 @@ order (one fully-gated increment each):
          substituted after signing — closing an unsigned-code-execution hole the
          spawned-driver path would otherwise rely on (empty-payload in-kernel
          images are unaffected; regression test `tampered_payload_refused`).
-       - **5d-2-ii (b-2) (next)** the real user-space keyboard driver *process*:
-         a `devmgr`-autoloaded `rxe` that builds `RtDriverHost::from_grants_query`
-         and runs the `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + report pump over
-         its grants, injecting key edges via `key_inject`; plus the production
-         boot wiring that runs `DeviceManager::autoload` against the discovered
-         tree (kernel/core owns the scheduler, so it hosts the autoload step) and
-         the metal checkpoint.
+       - **5d-2-ii (b-2-i) — `lib/usb` extraction (the arch-neutral USB stack) —
+         done (host-proven + whole gate).** The §17.4 layering forbids a
+         `drivers/*` or `userland/*` crate from depending on another `drivers/*`
+         crate, so an arch-neutral user-space keyboard driver could not compose
+         `drivers/bus/usb` (xHCI) with `drivers/input/usb_hid` (HID decode) while
+         the xHCI protocol lived inside the bus driver. The bus-agnostic xHCI
+         protocol — the `XhciHost` register seam, the `Xhci` controller engine,
+         the TRB/ring vocabulary, and the single-device HID `UsbDevice`
+         enumeration engine — therefore moved into a new `lib/usb` (`rustos-usb`)
+         crate (`lib/abi`-only, `no_std`, Tier-1-portable), the USB analogue of
+         `lib/virtio` ↔ `drivers/bus/virtio` (§2.2/§6/§17.4). `drivers/bus/usb`
+         keeps only the §8 `register` entry, the §18.3 `BIND_KEYS` table, and the
+         PCI BAR/DMA `wiring` over `rustos_usb`; the kernel scaffold and `wiring`
+         repoint to `rustos_usb::{Xhci, device::*, regs}`. The 81 USB tests split
+         with the code (71 protocol in `lib/usb` + 10 driver `register`/bind/
+         wiring), and the whole gate is green. Now a future keyboard-driver
+         *process* (and any other host-controller/HID driver) can build on
+         `lib/usb` without a driver→driver edge.
+       - **5d-2-ii (b-2-ii) (next)** the real user-space keyboard driver
+         *process*: a `devmgr`-autoloaded `rxe` that builds
+         `RtDriverHost::from_grants_query`, runs the generic `bus_usb`→`usb_hid`
+         bring-up + report pump over `lib/usb` (and its granted xHCI BAR + DMA;
+         the board PCIe root-complex bring-up + BAR assignment stay in the
+         separate board bus driver, keeping the keyboard driver arch-neutral),
+         injecting key edges via `key_inject`; plus the production boot wiring
+         that runs `DeviceManager::autoload` against the discovered tree
+         (kernel/core owns the scheduler, so it hosts the autoload step) and the
+         metal checkpoint.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

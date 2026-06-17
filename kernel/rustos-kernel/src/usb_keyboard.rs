@@ -39,11 +39,11 @@ use rustos_drv_bus_pcie_brcm::{
     self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback, OutboundWindowReadback,
     PcieWindows,
 };
-use rustos_drv_bus_usb::device::UsbDevice;
-use rustos_drv_bus_usb::{Xhci, XhciOpenError, DEFAULT_POLL_BUDGET};
 use rustos_drv_input_usb_hid::{BootKeyboard, ConsoleSink};
 use rustos_kernel_core::InputFocus;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
+use rustos_usb::device::UsbDevice;
+use rustos_usb::{Xhci, XhciOpenError, DEFAULT_POLL_BUDGET};
 use rustos_util::fmt::format_hex_u64;
 
 /// Audit event: a progress/failure milestone of the VL805 USB-keyboard
@@ -790,7 +790,7 @@ fn caps_block_is_live(header: u64) -> bool {
 /// is wall time, not a poll count, because each un-decoded BAR read
 /// master-aborts and stalls tens of ms on the BCM2711.
 fn wait_for_caps_ready(window: &RegisterWindow, delay: &dyn Delay, sink: &dyn Sink) -> bool {
-    use rustos_drv_bus_usb::regs;
+    use rustos_usb::regs;
 
     let start_us = delay.now_us();
     let mut polls = 0u32;
@@ -1007,7 +1007,7 @@ fn log_firmware_gate(sink: &dyn Sink, firmware_loaded: bool) {
 /// any port sees a device (`ccs_hex`). A faulting read renders the
 /// all-ones sentinel.
 fn log_root_ports(sink: &dyn Sink, usb: &mut UsbDevice<RegisterWindow, DmaSlab>) {
-    use rustos_drv_bus_usb::regs;
+    use rustos_usb::regs;
 
     let count = usb.root_port_count();
     for port in 1..=count {
@@ -1070,7 +1070,7 @@ fn log_root_ports(sink: &dyn Sink, usb: &mut UsbDevice<RegisterWindow, DmaSlab>)
 /// power-on fault aborts the diagnostic (logged); a faulting per-port
 /// read renders the all-ones sentinel rather than aborting.
 fn log_hub_ports(sink: &dyn Sink, usb: &mut UsbDevice<RegisterWindow, DmaSlab>, delay: &dyn Delay) {
-    use rustos_drv_bus_usb::device::{hub_port_connected, hub_port_speed};
+    use rustos_usb::device::{hub_port_connected, hub_port_speed};
 
     let num_ports = match usb.hub_num_ports() {
         Ok(ports) => ports,
@@ -1195,7 +1195,7 @@ fn address_downstream_keyboard(
     usb: &mut UsbDevice<RegisterWindow, DmaSlab>,
     delay: &dyn Delay,
 ) {
-    use rustos_drv_bus_usb::device::{hub_port_connected, hub_port_enabled, hub_port_speed};
+    use rustos_usb::device::{hub_port_connected, hub_port_enabled, hub_port_speed};
 
     let num_ports = match usb.hub_num_ports() {
         Ok(ports) => ports,
@@ -1297,7 +1297,7 @@ fn address_downstream_keyboard(
 /// `vid:pid`, xHCI slot, hub port, and speed.
 fn log_downstream_keyboard(
     sink: &dyn Sink,
-    descriptor: rustos_drv_bus_usb::device::DeviceDescriptor,
+    descriptor: rustos_usb::device::DeviceDescriptor,
     slot: u8,
     hub_port: u8,
     speed: u8,
@@ -1374,7 +1374,7 @@ fn log_enum_stage(sink: &dyn Sink, usb: &UsbDevice<RegisterWindow, DmaSlab>) {
 /// the BAR decodes and the exact `CAPLENGTH` byte behind an `out_of_range`
 /// refusal. Read-only.
 fn log_raw_caps(sink: &dyn Sink, window: &RegisterWindow) {
-    use rustos_drv_bus_usb::regs;
+    use rustos_usb::regs;
 
     let mut header_buf = [0u8; 16];
     let mut structural_buf = [0u8; 16];
@@ -1754,7 +1754,7 @@ fn log_bridge_error_status(sink: &dyn Sink, bus: &dyn PciBus) {
 /// the firmware is resident, `0` means leave the controller untouched.
 /// Read-only.
 fn log_post_reload_state(sink: &dyn Sink, bus: &dyn PciBus, window: &RegisterWindow) {
-    use rustos_drv_bus_usb::regs;
+    use rustos_usb::regs;
 
     let vl805_bdf = vl805_bdf();
     let mut id_buf = [0u8; 16];
@@ -2234,7 +2234,7 @@ pub fn bring_up_keyboard(
 /// diagnostic, never on the poll path.
 fn log_enumerated_root_device(
     sink: &dyn Sink,
-    descriptor: rustos_drv_bus_usb::device::DeviceDescriptor,
+    descriptor: rustos_usb::device::DeviceDescriptor,
     slot: u8,
 ) {
     let mut vid_buf = [0u8; 16];

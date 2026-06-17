@@ -29,8 +29,8 @@ use rustos_abi::driver::bus::BusDevice;
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, PciBus, RegisterWindow};
 
-use crate::device::UsbDevice;
-use crate::{Xhci, DEFAULT_POLL_BUDGET};
+use rustos_usb::device::UsbDevice;
+use rustos_usb::{Xhci, DEFAULT_POLL_BUDGET};
 
 /// PCI base-class + sub-class identifying a USB host controller
 /// (PCI Local Bus 3.0 Appendix D: base `0x0C` Serial Bus Controller,

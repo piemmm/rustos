@@ -1,0 +1,28 @@
+[package]
+name = "rustos-usb"
+description = "RustOS bus-agnostic xHCI USB host-controller protocol: the XhciHost register seam, the Xhci controller engine, the TRB/ring vocabulary, and the single-device HID enumeration engine, shared by the USB bus driver and an arch-neutral user-space keyboard driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Bus-agnostic xHCI protocol shared by `drivers/bus/usb` (the concrete
+# PCI host-controller driver) and the arch-neutral user-space keyboard
+# driver. It lives in `lib/` because more than one crate consumes it
+# (`AGENTS.md` §2.2 / §6 / §17.4 — `drivers/* → lib/*` only) and depends
+# only on the stable ABI types in `lib/abi`, so it builds for every
+# Tier-1 target. This is the USB analogue of `lib/virtio`.
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# End-to-end seam proof: the boot-protocol decoders polling reports
+# straight off this crate's interrupt-IN transfer ring. Test scaffolding
+# only (a `[dev-dependencies]` edge, excluded from the §17.4 layering
+# graph) — `usb_hid` does not depend on this crate, so there is no cycle.
+rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }

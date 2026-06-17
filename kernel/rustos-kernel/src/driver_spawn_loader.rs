@@ -238,7 +238,11 @@ mod tests {
 
     /// One recorded `spawn_driver` call: the payload bytes, the granted
     /// capability set, and the node's resource grants the gate forwarded.
-    type RecordedSpawn = (alloc::vec::Vec<u8>, CapabilitySet, alloc::vec::Vec<HwResource>);
+    type RecordedSpawn = (
+        alloc::vec::Vec<u8>,
+        CapabilitySet,
+        alloc::vec::Vec<HwResource>,
+    );
 
     /// Records every `spawn_driver` call so a test can assert exactly what
     /// the gate handed the spawn mechanism.

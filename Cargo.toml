@@ -58,6 +58,7 @@ members = [
     "lib/sync",
     "lib/termcap",
     "lib/theme",
+    "lib/usb",
     "lib/users",
     "lib/util",
     "lib/vcmailbox",

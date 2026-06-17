@@ -333,11 +333,17 @@ transports.
 ## xHCI driver — `drivers/bus/usb`
 
 The Pi 4 reaches its USB-A ports through a VL805 PCIe xHCI controller
-(`plans/PI.md` P10). The crate carries the host-provable xHCI protocol
-layers and the single-device HID enumeration engine; the PCI BAR /
-hwtree wiring for the VL805 is the remaining P10 increment, and QEMU
-models no Pi USB timing, so the host suite is the emulation artefact
-and metal acceptance stays a checklist.
+(`plans/PI.md` P10). The bus-agnostic xHCI protocol layers and the
+single-device HID enumeration engine live in the `lib/usb`
+(`rustos-usb`) crate — the USB analogue of `lib/virtio` — so this driver
+and an arch-neutral user-space keyboard driver can both build on the same
+engine without depending on each other (`AGENTS.md` §17.4). This driver
+crate adds the §8 `register` entry, the §18.3 `BIND_KEYS` bind table, and
+the PCI BAR / hwtree `wiring` over that protocol; the live controller
+bring-up for the VL805 is the remaining P10 metal increment, and QEMU
+models no Pi USB timing, so the host suite is the emulation artefact and
+metal acceptance stays a checklist. The protocol behaviour described
+below is implemented in `lib/usb` (see `docs/src/lib/usb.md`).
 
 ### Register seam and bring-up
 

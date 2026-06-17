@@ -681,7 +681,7 @@ name = "rustos-drv-bus-usb"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-drv-input-usb-hid",
+ "rustos-usb",
 ]
 
 [[package]]
@@ -939,6 +939,7 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-sync",
+ "rustos-usb",
  "rustos-util",
  "rustos-vcmailbox",
 ]
@@ -2512,6 +2513,14 @@ dependencies = [
  "rustos-procinfo",
  "rustos-termcap",
  "rustos-vt",
+]
+
+[[package]]
+name = "rustos-usb"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-drv-input-usb-hid",
 ]
 
 [[package]]
