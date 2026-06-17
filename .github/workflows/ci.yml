@@ -17,9 +17,21 @@ name: ci
 # inputs and any failure replays from its logged seed (AGENTS.md §2.1/§15:
 # pipeline logic lives in `cargo xtask`, never in tools/ci).
 
+# SECURITY (public repo + self-hosted runner): this workflow must never run
+# untrusted code on the self-hosted runner. It therefore triggers ONLY on a
+# push to `master` of this exact repository — never on `pull_request` or
+# `pull_request_target`, so a fork's PR can never execute on the runner — and
+# every job is additionally gated (see the job `if:` below) to the owner
+# (`piemmm`) in the canonical `piemmm/rustos` repo. A fork (different
+# `github.repository`) or any other actor is refused before any step runs.
 on:
   push:
     branches: [master]
+
+# Least privilege: the read-only default token is all `cargo xtask ci` needs.
+# No job here writes to the repo, releases, packages, or other GitHub state.
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -39,6 +51,10 @@ env:
 jobs:
   xtask-ci:
     name: cargo xtask ci
+    # Fail closed: only the owner pushing to the canonical repo may execute on
+    # the self-hosted runner. Forks (a different `github.repository`) and any
+    # other actor are refused before checkout, so untrusted code never runs.
+    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
     runs-on: [self-hosted, linux]
     timeout-minutes: 240
     steps:

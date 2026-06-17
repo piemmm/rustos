@@ -37,6 +37,13 @@ name: soak
 # the `soak`-labelled runner, leaving the general `[self-hosted, linux]` runner
 # free for `ci`.
 
+# SECURITY (public repo + self-hosted runner): like `ci.yml`, this workflow
+# must never run untrusted code on the self-hosted runner. It triggers ONLY on
+# `schedule` (which always runs from the base repo's default branch, never a
+# fork) and on `workflow_dispatch` — never on `pull_request`/`pull_request_target`.
+# Every job is additionally gated (see the job `if:` below) to the owner
+# (`piemmm`) in the canonical `piemmm/rustos` repo, so a fork or any other
+# actor manually dispatching is refused before any step runs.
 on:
   schedule:
     # 01:00 London all year: 01:00 UTC in winter (GMT), 00:00 UTC in summer
@@ -82,6 +89,10 @@ env:
 jobs:
   soak:
     name: soak window (parallel)
+    # Fail closed: only the owner in the canonical repo may execute on the
+    # self-hosted runner. Refuses forks (different `github.repository`) and any
+    # non-owner actor (e.g. a collaborator's manual dispatch) before checkout.
+    if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'
     # Dedicated `soak` label so the window runs on its own runner instance and
     # never queues `ci.yml` (which uses the bare `[self-hosted, linux]`) behind
     # it; the two run concurrently on the same host (see the runner README for

@@ -22,6 +22,30 @@ Europe/London — rather than continuous back-to-back blocks. That is the same
 script a standalone cron/systemd/launchd builder runs, so this runner and a
 standalone builder produce equivalent results.
 
+## Security on a public repository
+
+A self-hosted runner executes a workflow's jobs on a machine **you** own, so it
+must never run code an untrusted party controls. With this repository public,
+the workflows are locked down so only the owner can ever reach the runner:
+
+- **No pull-request triggers.** Neither workflow uses `pull_request` or
+  `pull_request_target`. A fork's PR therefore never runs on the self-hosted
+  runner — the standard pwn vector for public-repo self-hosted runners is
+  closed by construction. `ci.yml` runs only on `push` to `master`; `soak.yml`
+  runs only on `schedule` (always the base repo's default branch, never a fork)
+  and `workflow_dispatch`.
+- **Owner-only execution.** Every job is gated with
+  `if: github.repository == 'piemmm/rustos' && github.actor == 'piemmm'`. A
+  fork (a different `github.repository`) and any other actor — including a
+  collaborator's manual dispatch — are refused before checkout, so no untrusted
+  code is fetched or run.
+- **Least-privilege token.** Both workflows set `permissions: contents: read`;
+  no job can write to the repo, releases, packages, or other GitHub state.
+
+If you fork this repository under a different owner, update the `piemmm/rustos`
+/ `piemmm` guards in `.github/workflows/*.yml` to your own owner and account
+before registering a runner — otherwise the jobs will (correctly) refuse to run.
+
 ## Labels and concurrent runs on one host
 
 `ci.yml` targets `runs-on: [self-hosted, linux]`; `soak.yml` targets
