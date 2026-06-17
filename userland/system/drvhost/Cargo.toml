@@ -15,6 +15,12 @@ workspace = true
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The single `lib/devmatch` match-candidate definition (`AGENTS.md`
+# §2.2): the signed-store scan in `store.rs` produces canonical
+# `DriverCandidate`s so the bin-crate boot wiring feeds them straight to
+# `devmgr::DeviceManager::autoload` without re-typing. `lib/*` only, so
+# §17.4 layering holds (drvhost never links a userland or kernel crate).
+rustos-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 # Home of the `VirtioHostFactory` host seam and the bus-agnostic
 # `MockHost`/`VirtioHost`. `HostConfig::virtio_host_factory` names the

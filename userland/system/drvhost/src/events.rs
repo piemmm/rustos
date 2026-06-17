@@ -41,6 +41,16 @@ pub const DRIVER_LOAD_REJECTED_BIND_KEY: EventId = EventId(7_011);
 pub const DRIVER_UNLOADED: EventId = EventId(7_020);
 /// A driver was reloaded (re-read, re-verified, re-issued handle).
 pub const DRIVER_RELOADED: EventId = EventId(7_021);
+/// A signed-store bundle was accepted as an autoload candidate: its
+/// manifest parsed and its bind table decoded fail-closed
+/// (`AGENTS.md` §18.3). This is a *match* candidate only — signature and
+/// capability verification still happen at the load gate when (and only
+/// when) the candidate wins a node (`AGENTS.md` §18.6).
+pub const DRIVER_STORE_CANDIDATE: EventId = EventId(7_030);
+/// A signed-store bundle was skipped during the scan: its manifest or
+/// bind table failed to decode, or its bytes were unreadable. Skipping
+/// one malformed bundle never aborts the scan (`AGENTS.md` §18.4 / §5.4).
+pub const DRIVER_STORE_ENTRY_SKIPPED: EventId = EventId(7_031);
 
 #[cfg(test)]
 mod tests {
@@ -62,6 +72,8 @@ mod tests {
             DRIVER_LOAD_REJECTED_BIND_KEY,
             DRIVER_UNLOADED,
             DRIVER_RELOADED,
+            DRIVER_STORE_CANDIDATE,
+            DRIVER_STORE_ENTRY_SKIPPED,
         ] {
             assert!(id.0 >= DRVHOST_RANGE_START && id.0 < DRVHOST_RANGE_END);
         }
@@ -83,6 +95,8 @@ mod tests {
             DRIVER_LOAD_REJECTED_BIND_KEY.0,
             DRIVER_UNLOADED.0,
             DRIVER_RELOADED.0,
+            DRIVER_STORE_CANDIDATE.0,
+            DRIVER_STORE_ENTRY_SKIPPED.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

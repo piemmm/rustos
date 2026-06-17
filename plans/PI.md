@@ -3474,15 +3474,37 @@ table, so a new board is match **data**, not new code. Sub-increments
         arch-inherent `spawn_with` is now that trait method (one definition,
         §2.2), and the `driver_spawn_qemu_aarch64` `-M virt` vertical drives the
         chain through it. No `lib/abi`/C-header change.
+      - **Signed-store candidate scan — done (host-proven).** The §18.3 store
+        scan that turns the installed `/System/Drivers/` bundles into autoload
+        candidates is landed as `rustos_drvhost::store`
+        (`userland/system/drvhost/src/store.rs`): `scan_store(source, paths,
+        sink) -> DriverStore` reads each enumerated bundle through the existing
+        `ImageSource`, parses its `.rxe` manifest with the same `ParsedImage`
+        splitter the load gate uses (no drift, §2.2), decodes its bind table
+        fail-closed, and emits an owned `ScannedDriver` whose
+        `DriverStore::candidates()` lends the canonical
+        `rustos_devmatch::DriverCandidate` slice `DeviceManager::autoload`
+        consumes. The scan is a **match** step only — it grants no authority and
+        verifies no signature; signature/syscall-hash/capability/`kind`
+        verification stay at `Host::load` when (and only when) a candidate wins
+        a node (§18.6). An unreadable/malformed/bad-bind bundle is skipped and
+        logged (`DRIVER_STORE_ENTRY_SKIPPED` 7031), never fatal (§18.4/§5.4);
+        an accepted one is audited `DRIVER_STORE_CANDIDATE` 7030. drvhost gained
+        a `lib/devmatch` dep (lib/* only, §17.4) and reuses its own `HandleBuf`
+        decimal formatter (§2.2). Host-proven (8 `store::tests`: order-preserved
+        accepts, each fail-closed skip reason, empty store, end-to-end through
+        the real `devmatch::resolve`). No `lib/abi`/C-header change. Docs:
+        `docs/src/drivers/host.md` ("Signed-store scan"). No metal step (the
+        scan has no production consumer yet — the boot wiring below is next).
       - **Remaining (next):** the production boot wiring that runs
         `DeviceManager::autoload` against the discovered hardware tree (driven
         by the bin crate — the one layer that may name `devmgr`+`drvhost` —
         spawning the winning user-space driver through the kernel/core
-        `spawn_with` seam above so §17.1 holds), the discovered signed-store
-        candidate plumbing (a VFS-backed `ImageSource` + the §18.3 store scan
-        building `DriverCandidate`s from each bundle's signed manifest) sourced
-        from the mounted root, and `tools/mkimage` laying the signed `usb_kbd`
-        bundle into `/System/Drivers/`. That landing flips
+        `spawn_with` seam above so §17.1 holds), the **VFS-backed `ImageSource`
+        + `/System/Drivers/` directory enumeration** that feeds the landed
+        `rustos_drvhost::store::scan_store` from the mounted root, and
+        `tools/mkimage` laying the signed `usb_kbd` bundle into
+        `/System/Drivers/`. That landing flips
         `init_spawn`'s `keyboard_service::spawn_if_present` call to the autoload
         path and folds in **5e** (deleting the in-kernel scaffold) in the same
         change, gated on the §0.9 metal checkpoint (re-flash, confirm the prompt

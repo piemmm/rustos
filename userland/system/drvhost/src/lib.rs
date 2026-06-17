@@ -47,6 +47,9 @@
 //!   buffers.
 //! * [`source`] — [`ImageSource`] trait abstracting file IO so the host
 //!   stays `no_std`.
+//! * [`store`] — the signed driver-store scan that turns the installed
+//!   `/System/Drivers/` bundles into `devmgr` autoload candidates
+//!   (`AGENTS.md` §18.3 / §18.6).
 //! * [`spawner`] — [`DriverSpawner`] trait that completes a verified
 //!   image's registration in its own protection domain.
 //! * [`host`] — the [`Host`] state machine implementing `load` / `unload`
@@ -55,8 +58,9 @@
 //! # Layering
 //!
 //! The crate is `no_std` (`AGENTS.md` §6) and pulls only the audited
-//! `rustos-abi`, `rustos-caps`, `rustos-crypto`, `rustos-log`, and
-//! `rustos-virtio` crates — all under `lib/*`, so the host never links a
+//! `rustos-abi`, `rustos-caps`, `rustos-crypto`, `rustos-devmatch`,
+//! `rustos-log`, and `rustos-virtio` crates — all under `lib/*`, so the
+//! host never links a
 //! kernel or driver crate (`AGENTS.md` §17.4). The `VirtioHostFactory`
 //! seam consumed by [`HostConfig`] lives in `rustos_virtio`.
 //! It exposes no `unsafe` across its crate boundary — the one in-tree
@@ -82,6 +86,7 @@ pub mod host;
 pub mod image;
 pub mod source;
 pub mod spawner;
+pub mod store;
 pub mod zeroize;
 
 pub use error::HostError;
@@ -89,6 +94,13 @@ pub use host::{Host, HostConfig, LoadedSnapshot};
 pub use image::ParsedImage;
 pub use source::ImageSource;
 pub use spawner::{DriverEntry, DriverSpawner, SpawnContext, SpawnRegisterError};
+pub use store::{scan_store, DriverStore, ScannedDriver};
+
+// Re-export the canonical match-candidate type the store scan produces
+// (the single `lib/devmatch` definition, `AGENTS.md` §2.2) so the
+// bin-crate boot wiring can name a candidate without a separate
+// `rustos-devmatch` dependency.
+pub use rustos_devmatch::DriverCandidate;
 
 // Re-export the `lib/abi` types that appear in the host's public surface
 // so callers do not need to take a transitive dependency on `rustos-abi`

@@ -942,10 +942,29 @@ order (one fully-gated increment each):
            `lib/abi`/C-header change. AGENTS.md §3 + SUMMARY.md gained `lib/hid`.
            Docs: `docs/src/lib/hid.md`, `docs/src/drivers/input.md`,
            `docs/src/lib/drvrt.md`, the crate READMEs.
+         - **Signed-store candidate scan — done (host-proven).** The §18.3 /
+           §18.6 store scan that turns the installed `/System/Drivers/` bundles
+           into autoload candidates is `rustos_drvhost::store`
+           (`scan_store(source, paths, sink) -> DriverStore`): it reads each
+           enumerated bundle through the existing `ImageSource`, parses the
+           `.rxe` manifest with the same `ParsedImage` splitter the load gate
+           uses (no drift, §2.2), decodes the bind table fail-closed, and emits
+           owned `ScannedDriver`s whose `DriverStore::candidates()` lends the
+           canonical `rustos_devmatch::DriverCandidate` slice
+           `DeviceManager::autoload` consumes. A match step only — no authority,
+           no signature check (that stays at `Host::load` when a candidate wins
+           a node, §18.6); a malformed/unreadable bundle is skipped + logged
+           (events 7030 accept / 7031 skip), never fatal (§18.4/§5.4). drvhost
+           gained a `lib/devmatch` dep (lib/* only, §17.4). Host-proven (8
+           `store::tests`); no `lib/abi`/C-header change. Docs:
+           `docs/src/drivers/host.md` ("Signed-store scan").
          - **Remaining (next):** the production boot wiring that runs
            `DeviceManager::autoload` against the discovered tree (kernel/core
-           hosts it — it owns the scheduler) with the keyboard candidate,
-           spawning the binary into user space, and the metal checkpoint.
+           hosts it — it owns the scheduler) with the keyboard candidate, the
+           VFS-backed `ImageSource` + `/System/Drivers/` directory enumeration
+           feeding `store::scan_store` from the mounted root, `tools/mkimage`
+           laying the signed `usb_kbd` bundle into the store, spawning the
+           binary into user space, and the metal checkpoint.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

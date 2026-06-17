@@ -601,22 +601,24 @@ fn event_message(id: EventId) -> &'static str {
     }
 }
 
-/// Small stack buffer for rendering a [`DriverHandle`] without an
-/// allocator. A u64 fits in 20 decimal digits.
-struct HandleBuf {
+/// Small stack buffer for rendering a `u64` (a [`DriverHandle`] or a
+/// count) as decimal without an allocator. A u64 fits in 20 decimal
+/// digits. Shared with [`crate::store`] so the crate has one decimal
+/// formatter (`AGENTS.md` §2.2).
+pub(crate) struct HandleBuf {
     bytes: [u8; 20],
     len: usize,
 }
 
 impl HandleBuf {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             bytes: [0u8; 20],
             len: 0,
         }
     }
 
-    fn format(&mut self, value: u64) -> &str {
+    pub(crate) fn format(&mut self, value: u64) -> &str {
         // Render via `core::fmt::Write` into our fixed buffer. A 20-byte
         // buffer is more than enough for any u64 (max is 19 digits +
         // sign-less). On the unreachable overflow path we render "0".

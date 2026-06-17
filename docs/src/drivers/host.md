@@ -234,6 +234,34 @@ bring-up and re-matches the enumerated HID child against the driver
 catalogue to admit `usb_hid` before feeding input — fail closed at each
 step (`AGENTS.md` §5.4).
 
+### Signed-store scan
+
+RustOS ships no compiled-in list of *which* drivers exist: the
+discovered driver set is found at runtime by scanning the installed
+signed bundles under `/System/Drivers/` (`AGENTS.md` §18.6). The
+`rustos_drvhost::store` module is that scan. Given the bundle paths a
+caller enumerated (a VFS directory walk of `/System/Drivers/` in
+production; the bin-crate boot wiring is the one layer that may name
+both `drvhost` and `devmgr`, `AGENTS.md` §17.4) and an `ImageSource`,
+`scan_store(source, paths, sink) -> DriverStore` reads each bundle,
+parses its `.rxe` manifest with the same `ParsedImage` splitter the
+load gate uses (so the match data can never drift from the gate's view
+of the bytes, `AGENTS.md` §2.2), and decodes its bind table fail-closed.
+Each accepted bundle becomes an owned `ScannedDriver`, and
+`DriverStore::candidates()` lends the borrowed `DriverCandidate` slice
+that `rustos_devmgr::DeviceManager::autoload` matches against the
+hardware tree.
+
+The scan is a **match** step only and grants no authority. Building a
+candidate from a bundle's bind table is *necessary but never
+sufficient* to run it: the Ed25519 signature, syscall-hash, capability
+set, and `kind` are still verified by the load gate (`Host::load`)
+when — and only when — that candidate wins a hardware-tree node
+(`AGENTS.md` §18.6). A bundle that is unreadable, has a malformed
+manifest, or whose bind table fails to decode is **skipped and logged**,
+never fatal: one bad bundle cannot block the rest of the boot
+(`AGENTS.md` §18.4 / §5.4).
+
 ### Audit sink
 
 Every state transition emits one structured `rustos_log::Event` with a
@@ -254,6 +282,8 @@ stable `EventId` from `rustos_drvhost::events`:
 | `7011`    | load rejected — bind-table entry failed to decode    |
 | `7020`    | driver unloaded                                      |
 | `7021`    | driver reloaded                                      |
+| `7030`    | signed-store bundle accepted as autoload candidate   |
+| `7031`    | signed-store bundle skipped during scan              |
 
 The identifiers are part of the `7000..8000` range reserved for the
 driver host (`AGENTS.md` §2.5). They are pinned by an in-tree
