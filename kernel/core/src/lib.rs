@@ -147,6 +147,6 @@ pub use spawn::{
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
 pub use users::{
-    load_users_db, load_users_db_source, HeldUsersDbSource, NullUsersDbSource, UsersDbSource,
-    UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
+    load_users_db, load_users_db_source, HeldUsersDbSource, LateUsersDb, NullUsersDbSource,
+    UsersDbAlreadyInstalled, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
 };

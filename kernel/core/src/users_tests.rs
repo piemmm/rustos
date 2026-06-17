@@ -16,7 +16,11 @@ use rustos_users::{
 
 use crate::fs::VfsError;
 use crate::test_sink::TestSink;
-use crate::users::{load_users_db, load_users_db_source, UsersDbSource, UsersLoadError};
+use crate::users::{
+    load_users_db, load_users_db_source, LateUsersDb, UsersDbAlreadyInstalled, UsersDbSource,
+    UsersLoadError,
+};
+use rustos_abi::Errno;
 
 const ROOT: u64 = 1;
 const SYSTEM: u64 = 2;
@@ -349,4 +353,59 @@ fn a_capability_gated_database_is_refused_for_the_capability_less_boot_read() {
         .fields
         .iter()
         .any(|(k, v)| k == "cause" && v == "permission_denied"));
+}
+
+/// Build a `HeldUsersDbSource` over the planted valid database, sharing
+/// the real load path so the held bytes are exactly what a boot read
+/// produces.
+fn held_source() -> crate::users::HeldUsersDbSource {
+    let sink = TestSink::new();
+    let mut fs = MockRoot::with_text(&valid_db_text());
+    load_users_db_source(&mut fs, &sink).expect("valid database loads")
+}
+
+#[test]
+fn the_late_users_db_fails_closed_until_a_database_is_installed() {
+    // Before the in-kernel unlock step installs the mounted database the
+    // cell is empty and `users_db_read` (which calls `text()`) fails
+    // closed exactly as `NULL_USERS_DB` does (`AGENTS.md` §2.9 / §5.4.5).
+    let late = LateUsersDb::new();
+    assert!(!late.is_installed());
+    assert_eq!(late.text(), Err(Errno::NotImplemented));
+}
+
+#[test]
+fn the_late_users_db_serves_the_installed_text() {
+    // Once the unlock step publishes the loaded database the next read
+    // serves its exact bytes, so login can authenticate against it.
+    let late = LateUsersDb::new();
+    let text = valid_db_text();
+    late.install(held_source()).expect("first install succeeds");
+    assert!(late.is_installed());
+    assert_eq!(late.text().expect("served text"), text.as_bytes());
+
+    let served = core::str::from_utf8(late.text().expect("served text")).expect("utf8");
+    let db = UsersDb::parse(served).expect("served text re-parses");
+    db.authenticate("ada", b"correct horse")
+        .expect("planted account authenticates against the served database");
+}
+
+#[test]
+fn the_late_users_db_is_set_once_and_refuses_replacement() {
+    // The credential database is immutable after the first install: a
+    // second install is refused and the originally-served bytes are
+    // unchanged, so no later code path can swap the live database
+    // (`AGENTS.md` §5.4).
+    let late = LateUsersDb::new();
+    let original = valid_db_text();
+    late.install(held_source()).expect("first install succeeds");
+
+    assert_eq!(
+        late.install(held_source()),
+        Err(UsersDbAlreadyInstalled),
+        "a second install must be refused"
+    );
+    // The originally-installed database still serves; the rejected
+    // duplicate was dropped (and its bytes zeroed) inside `install`.
+    assert_eq!(late.text().expect("served text"), original.as_bytes());
 }

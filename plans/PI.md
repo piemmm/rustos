@@ -4079,15 +4079,56 @@ two users — or the same user twice — can be logged in concurrently.
        core hand-off) and audited `4135` `ROOT_STORAGE_AUTOLOAD`. Host-proven
        (8 `root_storage` tests + the `driver_catalog` block-flag test);
        aarch64 kernel builds freestanding. No `lib/abi`/C-header change.
-     - **Chunk B-2 board bring-up — still staged: the rest of the storage
-       bring-up that wires the mount:** consume the bind gate's
-       `RootBlockBinding`, bring up the bound block + filesystem driver with
-       an in-kernel DMA/MMIO host to obtain the whole-disk `Block` device,
-       prompt for the passphrase on the console (the in-kernel keyboard
-       scaffold already feeds the console on metal; UART on `virt`), then
-       call `mount_root_disk_and_load_users` (the split + descriptor read +
-       unlock + load is done), leak + `with_users_db`. virtio-blk proves it
-       on `-M virt`; the EMMC2 metal mount rides P8.
+     - **Chunk B-2 late-bound users-db cell — LANDED (host-proven).**
+       `rustos_kernel_core::LateUsersDb` (`kernel/core/src/users.rs`) is the
+       set-once `UsersDbSource` the post-boot unlock step publishes the
+       mounted database into. The encrypted root is unlocked only **after**
+       the console keyboard is live (the operator types the passphrase, §11),
+       which is past where `BootInfo::with_users_db` is consumed — so the
+       dispatch hook holds a `&'static LateUsersDb` from boot and reads
+       `text()` on every `users_db_read`, and the unlock step installs the
+       loaded database into the same cell once it exists. It is a
+       `OnceCell<HeldUsersDbSource>` that fails closed (`Errno::NotImplemented`,
+       like `NULL_USERS_DB`) until `install` succeeds (§5.4.5), is **immutable
+       after the first install** (set-once; a later install returns
+       `UsersDbAlreadyInstalled`, so no post-unlock path can swap the live
+       credential database, §5.4), zeroes the rejected duplicate's and its own
+       credential bytes (§4), and exposes **no syscall surface** (`install` is
+       internal kernel code, not an ABI method). Host-proven by 3 `users_tests`
+       (fails-closed-until-installed; serves-installed-text + re-parse +
+       authenticate; set-once-refuses-replacement). No `lib/abi`/C-header
+       change.
+     - **Chunk B-2 board bring-up — still staged: the in-kernel unlock
+       kthread that wires the live mount (FULL CONFIRMED DESIGN, agreed with
+       the User).** The unlock cannot be a synchronous pre-boot step: the
+       in-kernel keyboard scaffold (`keyboard_service::spawn_if_present`) only
+       *admits* the keyboard as a **kthread** that feeds the
+       `ConsoleInputQueue` once the scheduler dispatch loop runs (concurrently
+       with PID 1), so a blocking console read before that would deadlock. The
+       unlock is therefore itself a **scheduler kthread** (mirror
+       `keyboard_service`'s admit-a-kthread shape), admitted in the init seam
+       right after the keyboard scaffold, before `login` authenticates. It:
+       (1) resolves the bound root block device from the already-landed
+       `root_storage` bind gate's `RootBlockBinding` (`4135`) — headless /
+       no-disk is a **no-op**, the `LateUsersDb` stays fail-closed (§18.4);
+       (2) brings the bound block driver up over an in-kernel DMA/MMIO host
+       (`kernel/virtio::{provision_virtio_mmio, KernelMmioMapper,
+       KernelVirtioHost, KernelVirtioFactory}` + `drivers/bus/mmio::
+       virtio_mmio_bus_from_dtb` on `virt`; `drivers/storage/emmc2::Emmc2::open`
+       on the Pi, EMMC2 metal rides P8) through the signed, capability-gated
+       §8 load gate — never a hand-wired probe — to obtain the whole-disk
+       `Block`; (3) prompts on the **primary console only** (index 0) and does
+       a blocking console read that drains the same `ConsoleInputQueue` the
+       keyboard kthread feeds (park on the scheduler, never busy-spin §2.1) —
+       needs a small in-kernel console read/write seam; (4) runs
+       `mount_root_disk_and_load_users` (split + descriptor read + unlock +
+       load is done); (5) builds the `HeldUsersDbSource` and
+       `LateUsersDb::install`s it; (6) allows **5 attempts on a wrong
+       passphrase, then halts (reboot required)**, never looping (§2.1), and
+       on give-up leaves the DB uninstalled (fail closed, §5.4.5). virtio-blk
+       proves it on `-M virt` (passphrase over UART); the EMMC2 metal mount
+       rides P8 + the §0.9 operator metal checkpoint (do not regress the
+       metal-confirmed boot, §2.17).
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves

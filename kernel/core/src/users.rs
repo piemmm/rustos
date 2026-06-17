@@ -36,6 +36,7 @@ use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, UserId};
 use rustos_log::{Field, Level, Sink};
+use rustos_sync::OnceCell;
 use rustos_users::{ParseError, UsersDb, MAX_DB_LEN};
 use rustos_util::fmt::format_usize;
 
@@ -154,6 +155,105 @@ impl Drop for HeldUsersDbSource {
         // §4). Filling with zero keeps the buffer valid for the `Vec`'s
         // own deallocation.
         self.text.fill(0);
+    }
+}
+
+/// A database install was refused because one is already installed.
+///
+/// Returned by [`LateUsersDb::install`] when a database has already been
+/// published into the cell. The cell is immutable after the first
+/// successful install, so the live credential database cannot be replaced
+/// by any later code path (`AGENTS.md` §5.4).
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+pub struct UsersDbAlreadyInstalled;
+
+/// A set-once [`UsersDbSource`] the boot path installs the mounted root
+/// volume's database into after it has unlocked and read it (option A,
+/// in-kernel unlock — `plans/PI.md` P11 Chunk B-2).
+///
+/// The encrypted root is unlocked only *after* the console keyboard is
+/// live (the operator types the passphrase, §11), which is past the point
+/// where [`BootInfo::with_users_db`](crate::BootInfo::with_users_db) is
+/// consumed. The dispatch hook therefore holds a `&'static LateUsersDb`
+/// from boot and reads [`text`](UsersDbSource::text) on every
+/// `users_db_read`; the trusted unlock step publishes the loaded database
+/// into the same cell once it exists, and the next `users_db_read` serves
+/// it.
+///
+/// Security properties (`AGENTS.md` §5.4):
+///
+/// * **Fail closed by default.** Until [`install`](Self::install)
+///   succeeds the cell is empty and every read returns
+///   [`Errno::NotImplemented`], identical to [`NullUsersDbSource`] — a
+///   build that never mounts a root, or one whose unlock fails, refuses
+///   every login rather than inventing accounts (`AGENTS.md` §5.4.5).
+/// * **Immutable after install.** [`install`](Self::install) is
+///   set-once: the first call publishes the database and every later
+///   call is refused, so no code path that runs after the trusted boot
+///   unlock can swap the live credential database.
+/// * **No user-reachable surface.** [`install`](Self::install) is
+///   internal kernel code the unlock step calls; it is never exposed as a
+///   syscall, so it adds no attack surface to the ABI.
+///
+/// `Sync` (through [`OnceCell`]) so the single `&'static` instance is
+/// shared by the per-CPU syscall handlers, exactly like
+/// [`NullUsersDbSource`].
+pub struct LateUsersDb {
+    held: OnceCell<HeldUsersDbSource>,
+}
+
+impl LateUsersDb {
+    /// Construct an empty cell. `const` so a boot path can place it in a
+    /// `static` and hand `&LATE_USERS_DB` to
+    /// [`BootInfo::with_users_db`](crate::BootInfo::with_users_db).
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            held: OnceCell::new(),
+        }
+    }
+
+    /// Publish the mounted database exactly once.
+    ///
+    /// On success the cell serves `source`'s text for the rest of the
+    /// kernel's lifetime. The rejected `source` of a refused install is
+    /// dropped here (zeroing its credential bytes, `AGENTS.md` §4) rather
+    /// than handed back, so a caller cannot leak it.
+    ///
+    /// # Errors
+    ///
+    /// [`UsersDbAlreadyInstalled`] if a database is already installed —
+    /// the cell is immutable after the first successful install
+    /// (`AGENTS.md` §5.4).
+    pub fn install(&self, source: HeldUsersDbSource) -> Result<(), UsersDbAlreadyInstalled> {
+        // `OnceCell::set` hands the rejected value back in its error; drop
+        // it (zeroing the duplicate credential bytes) instead of
+        // surfacing it.
+        self.held.set(source).map_err(|_| UsersDbAlreadyInstalled)
+    }
+
+    /// Whether a database has been installed.
+    #[must_use]
+    pub fn is_installed(&self) -> bool {
+        self.held.is_initialised()
+    }
+}
+
+impl Default for LateUsersDb {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UsersDbSource for LateUsersDb {
+    fn text(&self) -> Result<&[u8], Errno> {
+        // Empty (not yet unlocked) or poisoned both fail closed exactly
+        // as [`NullUsersDbSource`] does (`AGENTS.md` §2.9 / §5.4.5); only
+        // a published database serves its bytes.
+        match self.held.get() {
+            Ok(Some(held)) => held.text(),
+            _ => Err(Errno::NotImplemented),
+        }
     }
 }
 
