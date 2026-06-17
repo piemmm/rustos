@@ -4098,6 +4098,27 @@ two users — or the same user twice — can be logged in concurrently.
        (fails-closed-until-installed; serves-installed-text + re-parse +
        authenticate; set-once-refuses-replacement). No `lib/abi`/C-header
        change.
+     - **Chunk B-2 interactive unlock policy — LANDED (host-proven).**
+       `rustos_kernel::root_mount::unlock_root_disk_interactively` is the
+       device-independent prompt + retry + install policy the in-kernel
+       unlock kthread runs once the board has brought up the root block
+       device and the console keyboard is live. Generic over the `Block`
+       disk and taking the console halves as the object-safe
+       `rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, it names no
+       arch or device type (§17.4). Each attempt prompts `Root passphrase:`,
+       reads one line into a zeroized, fixed-length on-stack buffer
+       (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
+       memory beyond the attempt, §4 / §19.4; Backspace edits, an over-long
+       line is a refused attempt not a truncated secret, §5.4.3), and runs
+       `mount_root_disk_and_load_users`. Success publishes the loaded
+       database into the set-once `LateUsersDb` (`4136`); a wrong passphrase
+       (`Mount(PermissionDenied)`) is audited (`4137`) and retried up to
+       `MAX_UNLOCK_ATTEMPTS` (5, User-chosen) — bounded, never looping
+       (§2.1); a structural failure or a console read fault gives up at once
+       (`4138`), leaving the cell empty so every login is refused until
+       reboot (§2.9 / §5.4.5). Host-proven by 6 `root_mount` tests over a
+       mock console + the same MBR + encrypted-`RustFS` disk fixture
+       `tools/mkimage` writes (§2.2). No `lib/abi`/C-header change.
      - **Chunk B-2 board bring-up — still staged: the in-kernel unlock
        kthread that wires the live mount (FULL CONFIRMED DESIGN, agreed with
        the User).** The unlock cannot be a synchronous pre-boot step: the
@@ -4120,15 +4141,17 @@ two users — or the same user twice — can be logged in concurrently.
        `Block`; (3) prompts on the **primary console only** (index 0) and does
        a blocking console read that drains the same `ConsoleInputQueue` the
        keyboard kthread feeds (park on the scheduler, never busy-spin §2.1) —
-       needs a small in-kernel console read/write seam; (4) runs
-       `mount_root_disk_and_load_users` (split + descriptor read + unlock +
-       load is done); (5) builds the `HeldUsersDbSource` and
-       `LateUsersDb::install`s it; (6) allows **5 attempts on a wrong
-       passphrase, then halts (reboot required)**, never looping (§2.1), and
-       on give-up leaves the DB uninstalled (fail closed, §5.4.5). virtio-blk
-       proves it on `-M virt` (passphrase over UART); the EMMC2 metal mount
-       rides P8 + the §0.9 operator metal checkpoint (do not regress the
-       metal-confirmed boot, §2.17).
+       needs a small in-kernel console read/write seam to drive
+       `unlock_root_disk_interactively`; (4) that landed policy then prompts,
+       reads the passphrase, runs `mount_root_disk_and_load_users`, and on
+       success `LateUsersDb::install`s the loaded database, with the bounded
+       5-attempt retry + fail-closed give-up already host-proven. The
+       remaining work is the board-specific block bring-up that *supplies*
+       the `Block`, the console read/write seam, and the init-seam wiring
+       that admits the kthread + hands the dispatch hook the
+       `&'static LateUsersDb`. virtio-blk proves it on `-M virt` (passphrase
+       over UART); the EMMC2 metal mount rides P8 + the §0.9 operator metal
+       checkpoint (do not regress the metal-confirmed boot, §2.17).
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves

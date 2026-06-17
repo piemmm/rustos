@@ -72,7 +72,9 @@ use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::{
     RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, UNLOCK_DESCRIPTOR_LEN,
 };
-use rustos_kernel_core::{load_users_db_source, HeldUsersDbSource, UsersLoadError};
+use rustos_kernel_core::{
+    load_users_db_source, ConsoleRead, ConsoleWrite, HeldUsersDbSource, LateUsersDb, UsersLoadError,
+};
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
 use zeroize::Zeroizing;
@@ -385,6 +387,307 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         }
     };
     unlock_root_and_load_users(&descriptor, passphrase, root, audit)
+}
+
+/// Audit event: the operator's typed passphrase unlocked the root and the
+/// loaded database was published into the late credential cell — login can
+/// now authenticate (`AGENTS.md` §19.4). No secret is logged.
+const ROOT_UNLOCK_INSTALLED: EventId = EventId(4136);
+
+/// Audit event: a wrong passphrase was refused; the unlock will prompt
+/// again because the bounded attempt budget is not yet exhausted
+/// (`AGENTS.md` §2.1 — never loop forever). No passphrase byte is logged.
+const ROOT_UNLOCK_RETRY: EventId = EventId(4137);
+
+/// Audit event: the interactive unlock gave up fail-closed — the attempt
+/// budget was exhausted, the console could not be read, the disk's
+/// structure was wrong, or the late cell was already populated. No
+/// database is installed and the operator must reboot (`AGENTS.md` §2.9 /
+/// §5.4.5). The `cause` field names which check refused, secret-free.
+const ROOT_UNLOCK_GAVE_UP: EventId = EventId(4138);
+
+/// Maximum passphrase attempts the interactive unlock allows before it
+/// gives up and the system must be rebooted.
+///
+/// A bounded budget, not an infinite prompt loop (`AGENTS.md` §2.1):
+/// after this many wrong passphrases the unlock fails closed and the late
+/// credential cell stays empty, so every login is refused until the next
+/// boot (`AGENTS.md` §5.4.5). The value is the User-chosen policy for the
+/// `plans/PI.md` P11 Chunk B-2 root mount.
+pub const MAX_UNLOCK_ATTEMPTS: u32 = 5;
+
+/// Longest passphrase, in bytes, the console prompt accepts.
+///
+/// A line longer than this is refused as the current attempt (and counts
+/// against [`MAX_UNLOCK_ATTEMPTS`]) rather than silently truncated to a
+/// shorter — and wrong — secret (`AGENTS.md` §5.4.3). It is a fixed input
+/// bound, not a scalable capacity (`AGENTS.md` §24.4): a passphrase is
+/// operator-typed, so a generous fixed ceiling is correct and the read
+/// buffer is a zeroized on-stack array of exactly this size.
+pub const MAX_PASSPHRASE_LEN: usize = 256;
+
+/// The result of [`unlock_root_disk_interactively`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UnlockOutcome {
+    /// The root unlocked under a typed passphrase and the loaded database
+    /// was installed into the late credential cell. Login can authenticate.
+    Installed,
+    /// The unlock gave up fail-closed: no database was installed, so every
+    /// login is refused until the next boot (`AGENTS.md` §5.4.5). The
+    /// caller (the unlock kthread) must not retry — the operator reboots.
+    GaveUp,
+}
+
+/// Why a single passphrase line could not be read off the console.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PassphraseReadError {
+    /// The console input device failed or could not deliver a line (a
+    /// device error, or no input source at all). The unlock fails closed
+    /// rather than treating it as an empty passphrase (`AGENTS.md` §2.9).
+    Console,
+    /// The line exceeded [`MAX_PASSPHRASE_LEN`] before a terminator; the
+    /// remainder was drained to the newline so the next read starts clean.
+    /// Treated as a wrong attempt, never a truncated secret.
+    TooLong,
+}
+
+/// Prompt for the root passphrase, read it off the console, unlock the
+/// root disk under it, and publish the loaded database into `late_db` —
+/// retrying a wrong passphrase up to [`MAX_UNLOCK_ATTEMPTS`] times before
+/// giving up fail-closed (`plans/PI.md` P11 Chunk B-2).
+///
+/// This is the device-independent unlock *policy* the in-kernel unlock
+/// kthread runs once the board has brought up the root block device and
+/// the console keyboard is live. It is generic over the [`Block`] disk and
+/// takes the console write/read halves as object-safe seams
+/// ([`ConsoleWrite`] / [`ConsoleRead`]), so it names no architecture or
+/// device type (`AGENTS.md` §17.4) and is host-tested with a mock console
+/// over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage`
+/// writes (`AGENTS.md` §2.2). The kthread passes the **blocking** console
+/// read ([`BlockingConsoleRead`](rustos_kernel_core::BlockingConsoleRead))
+/// so an empty poll parks the task on the scheduler rather than
+/// busy-spinning (`AGENTS.md` §2.1); this function only moves bytes.
+///
+/// Each attempt:
+///
+/// 1. Writes the `Root passphrase:` prompt to `console` (best effort — a
+///    write error does not by itself abort the attempt).
+/// 2. Reads one line into a zeroized, fixed-length on-stack buffer
+///    ([`MAX_PASSPHRASE_LEN`]); the passphrase is never heap-allocated,
+///    logged, or retained past the attempt (`AGENTS.md` §4 / §19.4).
+/// 3. Runs [`mount_root_disk_and_load_users`] under the typed bytes.
+///
+/// On success the loaded [`HeldUsersDbSource`] is published into `late_db`
+/// through [`LateUsersDb::install`] (set-once) and the function returns
+/// [`UnlockOutcome::Installed`]. A wrong passphrase
+/// ([`RootMountError::Mount`]`(`[`DriverError::PermissionDenied`]`)`) is
+/// audited and retried until the budget is spent. Any other error is
+/// structural (no partition table, no boot/root partition, an unreadable
+/// or invalid descriptor, a corrupt database): retrying cannot help, so
+/// the unlock gives up immediately. A console read error also gives up.
+/// Every give-up path leaves `late_db` empty — login stays fail-closed
+/// (`AGENTS.md` §5.4.5).
+///
+/// * `disk` — the whole-disk [`Block`] device the board brought up.
+/// * `console` — the primary console's byte sink for the prompt.
+/// * `input` — the primary console's (blocking) byte source.
+/// * `late_db` — the set-once cell the loaded database is published into.
+/// * `audit` — the sink every decision is logged through (`AGENTS.md`
+///   §19.4); no passphrase, key, or volume byte is ever logged.
+pub fn unlock_root_disk_interactively<Disk: Block>(
+    disk: Disk,
+    console: &dyn ConsoleWrite,
+    input: &dyn ConsoleRead,
+    late_db: &LateUsersDb,
+    audit: &dyn Sink,
+) -> UnlockOutcome {
+    // The disk is borrowed mutably for each attempt through the
+    // `impl Block for &mut B` forwarding, so one device is reused across
+    // retries without re-acquiring it (`AGENTS.md` §2.2).
+    let mut disk = disk;
+
+    let mut attempt = 0u32;
+    while attempt < MAX_UNLOCK_ATTEMPTS {
+        attempt += 1;
+
+        write_all(console, b"\r\nRoot passphrase: ");
+
+        // A zeroized, fixed-length buffer: the typed secret never reaches
+        // the heap and is wiped when this attempt's buffer drops
+        // (`AGENTS.md` §4).
+        let mut passphrase = Zeroizing::new([0u8; MAX_PASSPHRASE_LEN]);
+        let len = match read_passphrase_line(input, &mut passphrase[..]) {
+            Ok(len) => len,
+            Err(PassphraseReadError::TooLong) => {
+                // An over-long line is a wrong attempt, not a fatal console
+                // fault: count it and prompt again (if budget remains).
+                retry(audit);
+                continue;
+            }
+            Err(PassphraseReadError::Console) => {
+                // The console could not deliver a line: fail closed rather
+                // than retry against a dead input (`AGENTS.md` §2.9).
+                gave_up(audit, "console_unreadable");
+                return UnlockOutcome::GaveUp;
+            }
+        };
+
+        match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
+            Ok(source) => {
+                // The set-once install consumes the holder. A refusal means
+                // a database was already installed — the kthread runs once,
+                // so this is a logic error; fail closed and do not retry
+                // (the rejected holder is zeroed inside `install`,
+                // `AGENTS.md` §4 / §5.4).
+                if late_db.install(source).is_err() {
+                    gave_up(audit, "already_installed");
+                    return UnlockOutcome::GaveUp;
+                }
+                log(
+                    audit,
+                    &Event {
+                        level: Level::Info,
+                        id: ROOT_UNLOCK_INSTALLED,
+                        message: "root-unlock: root unlocked; users database installed",
+                        fields: &[],
+                    },
+                );
+                return UnlockOutcome::Installed;
+            }
+            Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
+                // Wrong passphrase: the master key never unwrapped. Bounded
+                // retry — never an oracle and never an infinite loop
+                // (`AGENTS.md` §2.1 / §5.4). Falls through to the next loop
+                // iteration; the budget check ends it.
+                retry(audit);
+            }
+            Err(error) => {
+                // A structural failure (no table, no partition, an
+                // unreadable/invalid descriptor, a corrupt database):
+                // re-prompting cannot fix the disk, so give up now. The
+                // mount step already audited the precise cause (`4134`);
+                // record the give-up with the same secret-free cause.
+                gave_up(audit, error.cause());
+                return UnlockOutcome::GaveUp;
+            }
+        }
+    }
+
+    // The attempt budget is spent: fail closed, leave the cell empty.
+    gave_up(audit, "attempts_exhausted");
+    UnlockOutcome::GaveUp
+}
+
+/// Write every byte of `bytes` to `console`, looping over short writes and
+/// stopping on a zero-length write or an error.
+///
+/// Best effort: the prompt is advisory, so a console that cannot accept it
+/// does not abort the unlock — the read still parks for input. Never spins
+/// on a stalled device (`AGENTS.md` §2.1).
+fn write_all(console: &dyn ConsoleWrite, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        match console.write(bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => bytes = &bytes[n.min(bytes.len())..],
+        }
+    }
+}
+
+/// Read one passphrase line from `input` into `buf`, returning its length.
+///
+/// Reads byte by byte so the read never consumes past the line terminator
+/// (`CR` or `LF`), which a one-shot prompt could not put back. A
+/// `Backspace`/`Delete` (`0x08` / `0x7f`) rubs out the previous byte, so a
+/// mistyped passphrase can be corrected without a fresh attempt. A line
+/// that fills `buf` before a terminator is drained to the newline and
+/// reported as [`PassphraseReadError::TooLong`] rather than truncated.
+///
+/// # Errors
+///
+/// [`PassphraseReadError::Console`] if the device read fails, or signals
+/// end of input before any byte of a line arrived (fail closed,
+/// `AGENTS.md` §2.9); [`PassphraseReadError::TooLong`] for an over-length
+/// line.
+fn read_passphrase_line(
+    input: &dyn ConsoleRead,
+    buf: &mut [u8],
+) -> Result<usize, PassphraseReadError> {
+    let mut len = 0usize;
+    loop {
+        let mut byte = [0u8; 1];
+        let read = input
+            .read(&mut byte)
+            .map_err(|_| PassphraseReadError::Console)?;
+        if read == 0 {
+            // End of input. A line with content is accepted as typed; an
+            // empty one means the console closed with nothing — fail closed
+            // rather than mount under an empty passphrase (`AGENTS.md`
+            // §2.9 / §5.4.5).
+            return if len == 0 {
+                Err(PassphraseReadError::Console)
+            } else {
+                Ok(len)
+            };
+        }
+        match byte[0] {
+            b'\n' | b'\r' => return Ok(len),
+            0x08 | 0x7f => len = len.saturating_sub(1),
+            b => {
+                if len == buf.len() {
+                    drain_to_newline(input);
+                    return Err(PassphraseReadError::TooLong);
+                }
+                buf[len] = b;
+                len += 1;
+            }
+        }
+    }
+}
+
+/// Drain console input up to and including the next line terminator,
+/// discarding it, so a subsequent read starts on a fresh line. Stops on a
+/// terminator, a zero-length read, or an error (never spins, `AGENTS.md`
+/// §2.1).
+fn drain_to_newline(input: &dyn ConsoleRead) {
+    loop {
+        let mut byte = [0u8; 1];
+        match input.read(&mut byte) {
+            Ok(0) | Err(_) => return,
+            Ok(_) if byte[0] == b'\n' || byte[0] == b'\r' => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Audit a wrong (or over-long) passphrase attempt that will be retried.
+/// No passphrase byte is logged (`AGENTS.md` §4 / §19.4).
+fn retry(audit: &dyn Sink) {
+    log(
+        audit,
+        &Event {
+            level: Level::Warn,
+            id: ROOT_UNLOCK_RETRY,
+            message: "root-unlock: passphrase refused; prompting again",
+            fields: &[],
+        },
+    );
+}
+
+/// Audit a fail-closed give-up of the interactive unlock, naming the
+/// secret-free `cause`. No database is installed (`AGENTS.md` §5.4.5).
+fn gave_up(audit: &dyn Sink, cause: &'static str) {
+    log(
+        audit,
+        &Event {
+            level: Level::Error,
+            id: ROOT_UNLOCK_GAVE_UP,
+            message: "root-unlock: gave up; no users database installed (reboot required)",
+            fields: &[Field {
+                key: "cause",
+                value: cause,
+            }],
+        },
+    );
 }
 
 /// Emit the [`ROOT_MOUNT_REJECTED`] record for a refused unlock, naming
@@ -1005,5 +1308,251 @@ mod tests {
         assert_eq!(err.cause(), "no_root_partition");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    // --- unlock_root_disk_interactively (the prompt + retry policy) -----
+
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use rustos_abi::Errno;
+
+    /// A console byte sink that accepts everything written to it, so the
+    /// prompt never short-writes. The interactive tests assert the audit
+    /// trail and the installed state, not the prompt bytes, so a counting
+    /// sink would add nothing (`AGENTS.md` §2.3).
+    struct AcceptConsole;
+
+    impl ConsoleWrite for AcceptConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            Ok(bytes.len())
+        }
+    }
+
+    /// A scripted console input source: yields the planted bytes one at a
+    /// time (matching the byte-by-byte line reader), reports end of input
+    /// (`Ok(0)`) once they are spent, and — if `fail_at` is set — fails the
+    /// read once the cursor reaches it, modelling a device fault. `Sync`
+    /// through an atomic cursor over immutable bytes, as [`ConsoleRead`]
+    /// requires.
+    struct ScriptInput {
+        bytes: Vec<u8>,
+        cursor: AtomicUsize,
+        fail_at: Option<usize>,
+    }
+
+    impl ScriptInput {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                cursor: AtomicUsize::new(0),
+                fail_at: None,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                bytes: Vec::new(),
+                cursor: AtomicUsize::new(0),
+                fail_at: Some(0),
+            }
+        }
+    }
+
+    impl ConsoleRead for ScriptInput {
+        fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let i = self.cursor.load(Ordering::Relaxed);
+            if self.fail_at == Some(i) {
+                return Err(Errno::NotImplemented);
+            }
+            if i >= self.bytes.len() {
+                return Ok(0);
+            }
+            buf[0] = self.bytes[i];
+            self.cursor.store(i + 1, Ordering::Relaxed);
+            Ok(1)
+        }
+    }
+
+    /// Join `lines` into a newline-terminated byte script the reader
+    /// consumes one passphrase per line.
+    fn script(lines: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for line in lines {
+            bytes.extend_from_slice(line);
+            bytes.push(b'\n');
+        }
+        bytes
+    }
+
+    /// Build the success whole-disk fixture (MBR boot+root, the root
+    /// encrypted under [`PASSPHRASE`]'s derived key) the interactive tests
+    /// unlock.
+    fn success_disk() -> FatVecBlock {
+        let (descriptor_bytes, key) = provision();
+        let boot = author_boot_partition(&descriptor_bytes);
+        let root_bytes =
+            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        assemble_whole_disk(&boot, &root_bytes)
+    }
+
+    #[test]
+    fn the_typed_passphrase_unlocks_and_installs_into_the_late_cell() {
+        // The whole interactive path: the operator types the correct
+        // passphrase at the first prompt, the disk unlocks, and the loaded
+        // database is published into the set-once cell so login can
+        // authenticate (`plans/PI.md` P11 Chunk B-2).
+        let input = ScriptInput::new(script(&[PASSPHRASE]));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome =
+            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(late.is_installed(), "the database is published");
+        let text = late
+            .text()
+            .expect("the cell now serves the loaded database");
+        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+            .expect("the served database parses");
+        db.authenticate(
+            image::USERS_FIXTURE_USERNAME,
+            image::USERS_FIXTURE_PASSWORD.as_bytes(),
+        )
+        .expect("the planted account authenticates through the installed cell");
+        assert!(
+            sink.ids().contains(&4136),
+            "install audited: {:?}",
+            sink.ids()
+        );
+        assert!(
+            !sink.ids().contains(&4137),
+            "no retry on a first-try success: {:?}",
+            sink.ids()
+        );
+    }
+
+    #[test]
+    fn wrong_passphrases_are_retried_then_the_correct_one_unlocks() {
+        // A bounded retry: two wrong passphrases are refused (each audited
+        // `4137`, no oracle) and the third, correct one unlocks and
+        // installs — the same disk is reused across attempts.
+        let input = ScriptInput::new(script(&[b"nope", b"still wrong", PASSPHRASE]));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome =
+            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(late.is_installed());
+        let retries = sink.ids().iter().filter(|&&id| id == 4137).count();
+        assert_eq!(retries, 2, "two wrong attempts retried: {:?}", sink.ids());
+        assert!(sink.ids().contains(&4136), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn the_attempt_budget_is_bounded_then_gives_up_fail_closed() {
+        // §2.1 / §5.4.5: after MAX_UNLOCK_ATTEMPTS wrong passphrases the
+        // unlock gives up rather than looping forever, and the late cell
+        // stays empty so every login is refused until reboot.
+        let lines = alloc::vec![b"wrong" as &[u8]; MAX_UNLOCK_ATTEMPTS as usize];
+        let input = ScriptInput::new(script(&lines));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome =
+            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert!(!late.is_installed(), "no database is installed on give-up");
+        let retries = sink.ids().iter().filter(|&&id| id == 4137).count();
+        assert_eq!(
+            retries,
+            MAX_UNLOCK_ATTEMPTS as usize,
+            "every attempt is a refused retry: {:?}",
+            sink.ids()
+        );
+        assert!(
+            sink.ids().contains(&4138),
+            "give-up audited: {:?}",
+            sink.ids()
+        );
+    }
+
+    #[test]
+    fn a_structural_failure_gives_up_without_retrying() {
+        // A disk with no partition table cannot be fixed by re-prompting,
+        // so the unlock gives up on the first attempt (no `4137` retry) and
+        // fails closed.
+        let input = ScriptInput::new(script(&[PASSPHRASE]));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome = unlock_root_disk_interactively(
+            FatVecBlock::new(64),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+        );
+
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert!(!late.is_installed());
+        assert!(
+            !sink.ids().contains(&4137),
+            "a structural failure is not retried: {:?}",
+            sink.ids()
+        );
+        assert!(sink.ids().contains(&4138), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn an_unreadable_console_gives_up_fail_closed() {
+        // §2.9: a console whose read faults cannot deliver a passphrase;
+        // the unlock fails closed rather than mounting under an empty or
+        // fabricated secret, and never touches the disk.
+        let input = ScriptInput::failing();
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome =
+            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert!(!late.is_installed());
+        assert!(
+            !sink.ids().contains(&4133),
+            "the disk is never unlocked: {:?}",
+            sink.ids()
+        );
+        assert!(sink.ids().contains(&4138), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn an_over_long_line_is_a_wrong_attempt_not_a_truncated_secret() {
+        // §5.4.3: a line longer than MAX_PASSPHRASE_LEN is drained and
+        // counted as a wrong attempt (audited `4137`), never silently
+        // truncated to a shorter secret; the next, correct line unlocks.
+        let over_long = alloc::vec![b'a'; MAX_PASSPHRASE_LEN + 16];
+        let input = ScriptInput::new(script(&[&over_long, PASSPHRASE]));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome =
+            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(late.is_installed());
+        let retries = sink.ids().iter().filter(|&&id| id == 4137).count();
+        assert_eq!(
+            retries,
+            1,
+            "the over-long line is one retry: {:?}",
+            sink.ids()
+        );
     }
 }

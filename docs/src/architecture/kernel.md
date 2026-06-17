@@ -292,11 +292,36 @@ volume is the root (§2.9). The gate is **resolution only** — it mounts
 nothing — so it changes no boot behaviour beyond the audit record and the
 metal-confirmed boot is unaffected (§2.17).
 
-The remaining board-specific bring-up that *supplies* the block devices and
-the typed passphrase — bringing up the bound block + filesystem driver
-through an in-kernel block DriverHost, and the console passphrase prompt —
-is wired into the boot path next (`plans/PI.md` P11 Chunk B-2): `virtio-blk`
-proves it on `-M virt`, EMMC2 on metal (`plans/PI.md` §0.4 / P8).
+`rustos_kernel::root_mount::unlock_root_disk_interactively` is the
+device-independent **interactive unlock policy** the in-kernel unlock
+kthread runs once the board has brought up the root block device and the
+console keyboard is live (`plans/PI.md` P11 Chunk B-2). It is generic over
+the `Block` disk and takes the console write/read halves as the object-safe
+`rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, so it names no
+architecture or device type (§17.4) and is host-tested with a mock console
+over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage` writes
+(§2.2). Each attempt prompts `Root passphrase:`, reads one line into a
+zeroized, fixed-length on-stack buffer (`MAX_PASSPHRASE_LEN`; the secret
+never reaches the heap, a log, or memory beyond the attempt, §4 / §19.4),
+and runs `mount_root_disk_and_load_users`. On success the loaded database
+is published into the set-once `LateUsersDb` cell (`4136`
+`ROOT_UNLOCK_INSTALLED`) so login can authenticate. A wrong passphrase
+(`Mount(PermissionDenied)`) is audited (`4137` `ROOT_UNLOCK_RETRY`, no
+oracle) and retried up to `MAX_UNLOCK_ATTEMPTS` (5, the User-chosen policy);
+the budget is bounded, never an infinite loop (§2.1). Any other error is
+structural (no table, no boot/root partition, an unreadable/invalid
+descriptor, a corrupt database) and gives up at once, as does a console
+read fault; every give-up path (`4138` `ROOT_UNLOCK_GAVE_UP`, with a
+secret-free `cause`) leaves the cell empty, so every login is refused until
+the next boot (§2.9 / §5.4.5).
+
+The remaining board-specific bring-up that *supplies* the block device and
+drives this policy — bringing up the bound block + filesystem driver
+through an in-kernel block DriverHost behind the signed §8 load gate, and
+wiring the primary-console prompt + the `&'static LateUsersDb` dispatch
+hook into the init seam — is wired into the boot path next (`plans/PI.md`
+P11 Chunk B-2): `virtio-blk` proves it on `-M virt`, EMMC2 on metal
+(`plans/PI.md` §0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store
