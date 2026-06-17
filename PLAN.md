@@ -1181,9 +1181,17 @@ spec §18.
   retains the canonical `users-v1` text in a `HeldUsersDbSource` (zeroed
   on drop §4, redacted `Debug`), and `BootInfo::with_users_db` installs
   the `Box::leak`'d holder so `run_phases` threads it into the production
-  `KernelDispatchHook` (default fail-closed `NULL_USERS_DB`); the board
-  storage bring-up that mounts the root and supplies the driver it reads
-  from is staged in `plans/PI.md` P11. The login `Run` binary ships at
+  `KernelDispatchHook` (default fail-closed `NULL_USERS_DB`). The
+  arch-neutral unlock + mount + load composition that *produces* that
+  driver is wired (`rustos_kernel::root_mount::unlock_root_and_load_users`,
+  `plans/PI.md` P11 Chunk A — host-proven): given the on-FAT `root.unlock`
+  descriptor, the typed passphrase, and the encrypted root block device it
+  derives the volume key (PBKDF2, zeroed-on-drop), mounts the root
+  (`RustFs::open`, wrong-passphrase fail-closed), and runs
+  `load_users_db_source`. The board storage bring-up that *supplies* those
+  three inputs and wires the boot path (root-device discovery, in-kernel
+  block DriverHost, FAT read, console passphrase prompt) is staged in
+  `plans/PI.md` P11 Chunk B. The login `Run` binary ships at
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held
   database through the `CAP_USERS_READ`-gated `users_db_read` syscall

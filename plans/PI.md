@@ -3933,13 +3933,39 @@ two users — or the same user twice — can be logged in concurrently.
        `load_users_db_source` cases + the `BootInfo::with_users_db`
        builder). No `lib/abi`/C-header change (`BootInfo` is a kernel/core
        handover type, not FFI).
-     - **Still staged — the board storage bring-up that supplies the
-       driver:** discover the root block device from the hwtree, bring up
-       the block + filesystem driver with an in-kernel DMA/MMIO host, read
-       `root.unlock` from the FAT boot partition, prompt for the
-       passphrase, derive the key, `RustFs::open`, run
-       `load_users_db_source`, leak + `with_users_db`. virtio-blk on
-       `virt`; the EMMC2 metal mount rides P8.
+     - **Chunk A — the arch-neutral unlock + mount + load composition —
+       LANDED (host-proven).** `rustos_kernel::root_mount::unlock_root_and_load_users`
+       (`kernel/rustos-kernel/src/root_mount.rs`) is the one composition —
+       in the `Layer::Tooling` bin crate, the only layer permitted to name
+       both the `rustfs` driver and `kernel/core` (§17.4) — that turns the
+       three artefacts a boot path recovers off storage into the served
+       `users-v1` database: the plaintext `root.unlock` descriptor, the
+       typed passphrase, and the encrypted root `Block` device. It decodes
+       the descriptor fail-closed (`UnlockDescriptor::decode`, §5.4.3),
+       derives the volume key from the passphrase (PBKDF2-HMAC-SHA256) in a
+       `Zeroizing` wrapper (§4 — wiped on drop, the audited `zeroize` crate,
+       no hand-rolled primitive), mounts the encrypted root (`RustFs::open`
+       — a wrong passphrase refused with `PermissionDenied`, no plaintext
+       fallback, no separate oracle, §4 / §5.4), then runs
+       `load_users_db_source`. Every refusal is audited (`4133`
+       `ROOT_MOUNT_UNLOCKED` / `4134` `ROOT_MOUNT_REJECTED`; no secret ever
+       logged, §19.4) and yields no database (§5.4.5). Host-proven by 4
+       tests (the correct passphrase unlocks the volume and the served text
+       parses + authenticates the planted `root`/`root`; a wrong passphrase,
+       a tampered descriptor, and a non-rustfs volume each refused
+       fail-closed). The shared `rustos_test_rustfs_image` fixture gained
+       `build_users_root_image_with_key` + `VecBlock::from_bytes` so the
+       test authors a real volume under a passphrase-derived key through the
+       one on-disk-layout source of truth (§2.2). No `lib/abi`/C-header
+       change.
+     - **Chunk B — still staged: the board storage bring-up that supplies
+       the three inputs and wires the boot path:** discover the root block
+       device from the hwtree, bring up the block + filesystem driver with
+       an in-kernel DMA/MMIO host, read `root.unlock` from the FAT boot
+       partition, prompt for the passphrase on the console (the in-kernel
+       keyboard scaffold already feeds the console on metal; UART on
+       `virt`), call `unlock_root_and_load_users`, leak + `with_users_db`.
+       virtio-blk proves it on `-M virt`; the EMMC2 metal mount rides P8.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves

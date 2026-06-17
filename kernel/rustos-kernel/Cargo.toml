@@ -110,6 +110,21 @@ rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0
 rustos-hid = { path = "../../lib/hid", version = "=0.0.0" }
 rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 
+# The production root-volume unlock + users-database load composition
+# (`src/root_mount.rs`, `plans/PI.md` P11): the boot path mounts the
+# encrypted root through the real `RustFs` driver under the
+# passphrase-derived volume key, then runs the `kernel/core` users-database
+# read. `rustos-kernel` (`Layer::Tooling`) is the one crate permitted to
+# name a filesystem driver across strata (`AGENTS.md` §17.4 / §8); the
+# composition is architecture-neutral, so it is a common dependency and its
+# host tests run on the CI host.
+rustos-drv-fs-rustfs = { path = "../../drivers/filesystem/rustfs", version = "=0.0.0" }
+# Zero-on-drop for the passphrase-derived `VolumeKey` on the boot stack
+# (`AGENTS.md` §4 — secret hygiene). The same audited crate `kernel/mem`
+# delegates its sensitive-region zeroing to (`AGENTS.md` §6 / §2.12 — no
+# hand-rolled zeroing primitive); pinned to the workspace version.
+zeroize = { version = "1.8.1", default-features = false }
+
 # --- Per-architecture boot dependencies ----------------------------
 #
 # The production kernel binary selects exactly one architecture port at
@@ -208,6 +223,15 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 # the `host-tests` feature so production builds never link it
 # (`AGENTS.md` §2.3).
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+# The `root_mount` host tests author a real users-root rustfs volume under
+# a passphrase-derived key through the shared fixture (one on-disk-layout
+# source of truth, `AGENTS.md` §2.2) and re-open it through the production
+# composition. `rustos-kernel` (`Layer::Tooling`) already names
+# tests/integration crates as build/dev glue (cf. `rustos-itest-harness`).
+rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }
+# The same test parses the served `users-v1` text and authenticates the
+# planted account, proving the served database is usable (`plans/PI.md` P11).
+rustos-users = { path = "../../lib/users", version = "=0.0.0" }
 # The `virtio_boot` wiring test signs a synthetic `.rxe` manifest with a
 # known keypair so the live `drvhost::Host` accepts it. Pinned to the
 # same version `lib/crypto` audits and `drvhost`'s fixtures use; only

@@ -140,7 +140,7 @@ pub fn users_db_text() -> Result<String, ParseError> {
 /// In-memory [`Block`] device backing the fixture build and the host
 /// round-trip tests. It addresses [`SECTOR_BYTES`]-byte sectors exactly
 /// as the guest's virtio-blk device does.
-struct VecBlock {
+pub struct VecBlock {
     store: Vec<u8>,
 }
 
@@ -151,6 +151,16 @@ impl VecBlock {
         Self {
             store: vec![0u8; len],
         }
+    }
+
+    /// Wrap an already-laid-out image (e.g. the bytes returned by
+    /// [`build_users_root_image_with_key`]) as a mountable device, so a
+    /// consumer can re-open it through the real `RustFs::open` without
+    /// re-deriving the on-disk layout (`AGENTS.md` §2.2 — one block-device
+    /// double, shared by the fixture and its consumers).
+    #[must_use]
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self { store: bytes }
     }
 
     /// Byte span `[start, end)` for `len` bytes at sector `lba`, or an
@@ -239,12 +249,30 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked — `AGENTS.md` §2.9).
 pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
+    build_users_root_image_with_key(&FIXTURE_VOLUME_KEY)
+}
+
+/// Build the users-root volume under an arbitrary `volume_key` — the same
+/// layout as [`build_users_root_image`] but keyed by the caller's key, so
+/// a consumer can exercise the production passphrase-derived-key mount
+/// path (`plans/PI.md` P11 root-mount; `kernel/rustos-kernel::root_mount`)
+/// against a real on-disk volume. [`build_users_root_image`] delegates
+/// here with [`FIXTURE_VOLUME_KEY`] (`AGENTS.md` §2.2 — one authoring
+/// path).
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from the driver; a fixture users
+/// database that violates the `users-v1` bounds surfaces as
+/// [`DriverError::Unsupported`] (a programming error in this fixture,
+/// surfaced rather than panicked — `AGENTS.md` §2.9).
+pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
     let dev = VecBlock::new(TOTAL_SECTORS);
     let mut fs = RustFs::format(
         dev,
         INODE_COUNT,
-        &FIXTURE_VOLUME_KEY,
+        volume_key,
         &mut FixtureEntropy { next: 1 },
     )?;
     let root = fs.root();

@@ -104,6 +104,20 @@ pub mod dispatch_core;
 pub mod keyboard_service;
 pub mod usb_keyboard;
 
+// The production root-volume unlock + users-database load composition
+// (`plans/PI.md` §3 P11 root-mount increment, Chunk A): turns the on-FAT
+// `root.unlock` descriptor, the typed passphrase, and the encrypted root
+// block device into the validated `users-v1` database
+// `kernel/core::load_users_db_source` serves. `rustos-kernel`
+// (`Layer::Tooling`) is the one layer permitted to name both the `rustfs`
+// driver and `kernel/core` (`AGENTS.md` §17.4). It is architecture-neutral
+// (it consumes only the `lib/abi` `Block` seam and the `rustfs`/`kernel/core`
+// APIs), so it is un-gated — it compiles on every target and its host unit
+// tests run on the CI host; the aarch64 boot path supplies the discovered
+// root block device, the FAT-read descriptor, and the console passphrase
+// in the following increment (`plans/PI.md` P11 Chunk B).
+pub mod root_mount;
+
 // The in-kernel driver registry (`plans/PI.md` P10 5c / PLAN Stage 4.HW
 // item 5): the single source of truth pairing each in-kernel driver's
 // canonical `BIND_KEYS`, `/System/Drivers/` image path, build-signed

@@ -231,9 +231,30 @@ them on drop (`AGENTS.md` §4) and its `Debug` is redacted (length only).
 Until a boot path calls `with_users_db`, the handover keeps the
 fail-closed `NULL_USERS_DB` default and `users_db_read` returns
 `NotImplemented`, so login refuses every attempt rather than inventing
-accounts (`AGENTS.md` §5.4.5). The aarch64 production storage bring-up that
-mounts the encrypted root and supplies the driver `load_users_db_source`
-reads from is staged next (`plans/PI.md` P11 — the production boot-mount).
+accounts (`AGENTS.md` §5.4.5).
+
+The composition that *produces* the mounted driver `load_users_db_source`
+reads from is `rustos_kernel::root_mount::unlock_root_and_load_users`
+(`plans/PI.md` P11, Chunk A) — the one layer permitted to name both the
+`rustfs` driver and `kernel/core` (`rustos-kernel`, `Layer::Tooling`,
+`AGENTS.md` §17.4). Given the plaintext `root.unlock` key-derivation
+descriptor read off the FAT boot partition, the passphrase the operator
+typed at the console, and the encrypted root block device, it: decodes the
+descriptor fail-closed (`UnlockDescriptor::decode`, §5.4.3); derives the
+volume key from the passphrase (PBKDF2-HMAC-SHA256), holding it in a
+`Zeroizing` wrapper so it is wiped on drop (`AGENTS.md` §4 — the audited
+`zeroize` crate, no hand-rolled primitive); mounts the encrypted root
+(`RustFs::open`), a wrong passphrase refused with `PermissionDenied` and no
+plaintext fallback (§4 / §5.4); then runs `load_users_db_source`. Every
+refusal is audited (the bin-crate ids `4133` `ROOT_MOUNT_UNLOCKED` /
+`4134` `ROOT_MOUNT_REJECTED`, in the shared `4_000` range; no passphrase,
+key, or volume byte is ever logged, §19.4) and yields **no** database, so a
+root that cannot be unlocked serves none (§5.4.5). The board-specific
+bring-up that *supplies* the three inputs — hardware-tree root-device
+discovery, the in-kernel block DriverHost, the FAT read, and the console
+passphrase prompt — is wired into the boot path next
+(`plans/PI.md` P11 Chunk B): `virtio-blk` proves it on `-M virt`, EMMC2 on
+metal (`plans/PI.md` §0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store
