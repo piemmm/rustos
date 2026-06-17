@@ -825,12 +825,26 @@ order (one fully-gated increment each):
          regenerated. Host-tested (abi round-trip/decode-reject, 5 kernel-core
          handler tests, 4 drvrt builder tests, abi-sys marshal). No
          metal/virt step (no production grant-minter / consumer yet — 5d-2-ii).
-       - **5d-2-ii (next)** the `devmgr`-spawned keyboard driver *process*
+       - **5d-2-ii (a) — the production driver-spawn grant minter — done
+         (host-proven + `-M virt`).** `KernelSpawnCtx` carries a kernel-sourced
+         `grants: &[HwResource]` (the matched node's requested resources, never
+         an untrusted caller — §4); `admit_process` mints one owner-checked,
+         monotonic grant per resource for the freshly admitted child via
+         `AddressSpaceRegistry::mint_grant`, reclaimed on exit. The ordinary
+         `spawn` syscall passes an empty slice (a user task grants no device
+         windows, §4/§5.2). Host-tested in kernel/core (mint-per-resource,
+         owner-check, `GrantedResource` serialisation, empty-grant user-spawn)
+         and proven on `-M virt` by the extended `driver_spawn_qemu_aarch64`
+         vertical (the stub, spawned through the production `KernelSpawnCtx`/
+         `spawn_with` with a granted MMIO window, enumerates it via
+         `resource_grants` and refuses to reply on any shortfall). No
+         `lib/abi`/C-header change.
+       - **5d-2-ii (b) (next)** the `devmgr`-spawned keyboard driver *process*
          building an `RtDriverHost::from_grants_query` and running the
-         `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + pump over it; needs the
-         production driver-spawn grant minter (the spawn path mints one grant
-         per the matched node's `HwResource`s via
-         `AddressSpaceRegistry::mint_grant`) + a `-M virt` vertical.
+         `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + pump over the grants the
+         minter now hands it; needs the `devmgr`-driven driver-spawn path
+         sourcing the matched node's `HwResource`s from the discovered tree
+         into `KernelSpawnCtx.grants` + a `-M virt` vertical.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

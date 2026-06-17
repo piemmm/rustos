@@ -133,10 +133,13 @@ kernel did not grant it (`AGENTS.md` §4 — no ambient authority). It is
 gated on `CAP_MMIO_MAP` and **audited** (a low-volume, security-relevant
 grant of direct hardware access). A task with no minted grant resolves to
 nothing (`NotFound`), and the mapping mechanism defaults to a fail-closed
-NULL producer (`NULL_MMIO_MAP_FACILITY` → `NotImplemented`); the
-grant-issuing driver-spawn path and the `kernel/mem` live-mapping producer
-are installed by the following 5d-0 landings, so in a kernel without them
-every `mmio_map` denies rather than mapping (`AGENTS.md` §2.9).
+NULL producer (`NULL_MMIO_MAP_FACILITY` → `NotImplemented`), so a kernel
+that installs neither the grant-minting driver-spawn path nor the
+`kernel/mem` live-mapping producer denies every `mmio_map` rather than
+mapping (`AGENTS.md` §2.9). Both are now landed: the live-mapping producer
+(`LiveMmioMap`) and the driver-spawn grant minter (the privileged
+`KernelSpawnCtx` mints one grant per the matched node's requested
+`HwResource` at admission — `plans/PI.md` P10 chunk 5d-2-ii).
 
 `dma_alloc` (no. 27) carves a **coherent DMA buffer** into the calling
 driver's own address space, bounded by a granted device DMA constraint

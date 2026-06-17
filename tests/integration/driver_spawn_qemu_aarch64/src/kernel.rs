@@ -7,6 +7,7 @@ use core::panic::PanicInfo;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::{CapabilityId, DescriptorTable, DriverRegisterReply, SYSCALL_MAX_ARGS};
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
 use rustos_arch_aarch64::paging::{
@@ -69,6 +70,17 @@ const REPLY_ENDPOINT_ARG: &[u8] = b"7";
 /// `STUB_HANDLE_RAW` (`driver_register_program/src/main.rs`); the PASS check
 /// asserts the decoded reply round-tripped it.
 const STUB_HANDLE_RAW: u64 = 0x00D8_0001;
+
+/// Base + length of the register window the driver-spawn path mints a
+/// device-resource grant for (a `virt` virtio-MMIO transport). The stub
+/// enumerates the grant through `resource_grants` and refuses to reply
+/// unless exactly one well-formed MMIO grant (handle 1, non-zero length)
+/// was delivered — so the host PASS proves the spawn minted and delivered
+/// it. The stub does not map it: the `mmio_map` mapping mechanism is proven
+/// by the `mmio_map_qemu_aarch64` vertical, and this vertical's dispatch
+/// hook holds `NULL_MMIO_MAP_FACILITY` (`AGENTS.md` §2.2 — one proof each).
+const GRANT_MMIO_BASE: u64 = 0x0a00_0000;
+const GRANT_MMIO_LEN: u64 = 0x200;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
 /// declares the handshake stalled. Sized generously for QEMU TCG.
@@ -450,10 +462,21 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
 
+    // The matched node's requested device resource the driver-spawn path
+    // mints a grant for: one register window (a `virt` virtio-MMIO
+    // transport). It originates kernel-side — the production path threads
+    // the discovered hardware-tree node's requests — and the spawn mints an
+    // unforgeable, owner-checked grant handle for it against the stub's own
+    // id, which the stub then enumerates through `resource_grants`
+    // (`AGENTS.md` §4 / §18.3). `HwResource::mmio` is not `const`, so the
+    // window is built here and borrowed by `ctx` for the spawn call.
+    let driver_grants = [HwResource::mmio(GRANT_MMIO_BASE, GRANT_MMIO_LEN)];
+
     // The kernel-side production driver spawn: the verified payload, the
-    // driver's granted capability set, and the reply endpoint id in
-    // `arg(1)`, admitted through the same `KernelSpawnCtx` path the `spawn`
-    // syscall handler uses (`AGENTS.md` §2.2).
+    // driver's granted capability set, the matched node's device-resource
+    // grants, and the reply endpoint id in `arg(1)`, admitted through the
+    // same `KernelSpawnCtx` path the `spawn` syscall handler uses
+    // (`AGENTS.md` §2.2).
     let ctx = KernelSpawnCtx::new(
         sys.frames,
         Some(sys.frames),
@@ -465,6 +488,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         SecTaskId(0),
         &NULL_PROCESS_WAIT,
         DescriptorTable::standard(),
+        &driver_grants,
     );
     if AARCH64_PROCESS_SPAWN
         .spawn_with(

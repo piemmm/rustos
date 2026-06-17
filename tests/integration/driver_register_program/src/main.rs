@@ -11,10 +11,15 @@
 //! 1. reads `arg(1)` from the validated startup vector
 //!    (`rustos_rt::arg`, published by `_start` before `main` runs);
 //! 2. parses it as the decimal reply endpoint id;
-//! 3. sends a `DriverRegisterReply::registered` record over the
+//! 3. enumerates its kernel-minted device-resource grants through the
+//!    `resource_grants` syscall and refuses to proceed unless exactly one
+//!    well-formed register-window grant was delivered (handle 1, MMIO
+//!    kind, non-zero length) — the way a user-space driver learns the
+//!    windows its matched node requested (`AGENTS.md` §18.3);
+//! 4. sends a `DriverRegisterReply::registered` record over the
 //!    production `ipc_send` syscall (kernel-side capability check +
 //!    copy-in, `AGENTS.md` §5.2 / §5.4);
-//! 4. returns 0, which `rustos-rt` routes through the `exit` syscall.
+//! 5. returns 0, which `rustos-rt` routes through the `exit` syscall.
 //!
 //! Each failure path returns a distinct non-zero diagnostic so the
 //! vertical fails loudly (`AGENTS.md` §2.9, §7): the reply never arrives
@@ -37,6 +42,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use rustos_abi::hwtree::{GrantedResource, HwResourceKind};
     use rustos_abi::{DriverHandle, DriverRegisterReply};
 
     /// Raw value of the informational [`DriverHandle`] this stub reports.
@@ -76,6 +82,31 @@ mod program {
         let Some(endpoint) = parse_u64(raw) else {
             return 11;
         };
+
+        // Verify the spawn minted and delivered this driver's device-
+        // resource grant before replying: a user-space driver reaches its
+        // windows only through the grants `resource_grants` enumerates
+        // (`AGENTS.md` §4 / §18.3). Exactly one well-formed register-window
+        // grant must arrive (handle 1, MMIO kind, non-zero length); any
+        // shortfall is a wiring defect the vertical must surface, never a
+        // silently sent reply (§2.9).
+        let mut grant_buf = [0u8; GrantedResource::WIRE_LEN];
+        let read = rustos_rt::resource_grants(&mut grant_buf);
+        if read != GrantedResource::WIRE_LEN as i64 {
+            return 14;
+        }
+        let Ok(grant) = GrantedResource::from_bytes(&grant_buf) else {
+            return 15;
+        };
+        if grant.handle != 1 {
+            return 16;
+        }
+        if grant.resource.kind() != Some(HwResourceKind::Mmio) {
+            return 17;
+        }
+        if grant.resource.length() == 0 {
+            return 18;
+        }
 
         // Build the informational success reply. `from_raw` refuses only
         // the zero sentinel, which `STUB_HANDLE_RAW` is not; surface a

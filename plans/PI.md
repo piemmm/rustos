@@ -3320,15 +3320,33 @@ table, so a new board is match **data**, not new code. Sub-increments
       handler tests, 4 drvrt `from_grants_query` tests, abi-sys marshal). **No
       metal/virt step** (no production grant-minter / driver-process consumer
       yet — that is 5d-2-ii).
-    - **5d-2-ii (next)** the user-space keyboard driver *process*: a
+    - **5d-2-ii (a) — the production driver-spawn grant minter — DONE
+      (host-proven + `-M virt`).** The privileged driver-spawn path now mints
+      the spawned driver's device-resource grants at admission: `KernelSpawnCtx`
+      carries a `grants: &[HwResource]` (the matched node's requested
+      resources, kernel-sourced — never an untrusted caller, §4), and
+      `admit_process` calls `AddressSpaceRegistry::mint_grant(child, resource)`
+      once per resource after the child is fully registered, keyed to the
+      child's own kernel-trusted id (owner-checked, monotonic handles from 1,
+      reclaimed on exit). The ordinary `spawn` syscall passes an **empty**
+      slice — a user task grants no device windows (§4/§5.2). The child reads
+      its handles back through `resource_grants` (5d-2-i). Host-tested in
+      kernel/core (mint-per-resource, owner-check, `GrantedResource`
+      serialisation, the empty-grant user-spawn case) and proven on `-M virt`
+      by the extended `driver_spawn_qemu_aarch64` vertical: the stub is spawned
+      through the production `KernelSpawnCtx`/`spawn_with` with a granted
+      MMIO window, enumerates it via `resource_grants` (handle 1, MMIO,
+      non-zero length), and refuses to reply on any shortfall — so the host
+      PASS proves the spawn minted and delivered the grant. No `lib/abi`/
+      C-header change (the grants are a kernel-side ctx field).
+    - **5d-2-ii (b) (next)** the user-space keyboard driver *process*: a
       `devmgr`-spawned `rxe` that builds an `RtDriverHost::from_grants_query`,
-      runs the `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + report pump over it,
-      and injects key edges via `key_inject`. Needs the production driver-spawn
-      **grant minter** (the spawn path mints one grant per the matched node's
-      `HwResource`s via `AddressSpaceRegistry::mint_grant` and hands the handles
-      to the process — which `resource_grants` then delivers) + a `-M virt`
-      vertical (a virtio device stands in for the metal controller). **Metal
-      checkpoint.**
+      runs the `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + report pump over the
+      grants the minter (a) now hands it, and injects key edges via
+      `key_inject`. Remaining: the `devmgr`-driven driver-spawn path that
+      sources the matched node's `HwResource`s from the discovered hardware
+      tree into `KernelSpawnCtx.grants`, plus a `-M virt` vertical (a virtio
+      device stands in for the metal controller). **Metal checkpoint.**
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.

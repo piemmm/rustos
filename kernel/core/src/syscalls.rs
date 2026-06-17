@@ -74,6 +74,7 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
     CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags, RandomFlags,
@@ -1289,6 +1290,11 @@ where
             caller.task_id,
             self.process_wait,
             child_streams,
+            // A user-driven `spawn` grants the child no device resources:
+            // device windows are minted only by the privileged driver-spawn
+            // path from the matched node's requests (`AGENTS.md` §4 — no
+            // ambient authority; §18.3).
+            &[],
         );
         self.spawn_service.spawn(program, &ctx)
     }
@@ -1778,6 +1784,24 @@ where
     /// `CONSOLE_INHERIT`, else `DescriptorTable::standard_on` a
     /// validated installed-console index (`plans/PI.md` P11).
     streams: DescriptorTable,
+    /// The device-resource grants the freshly admitted child is minted —
+    /// one unforgeable, owner-checked grant handle per [`HwResource`] the
+    /// child's matched hardware-tree node requested, so a user-space
+    /// driver can reach exactly those windows through `mmio_map` /
+    /// `dma_alloc` and learn its handles through `resource_grants`
+    /// (`AGENTS.md` §4 — resources are capability-grant requests, never
+    /// ambient handles; §18.3 — only the resources the matched node
+    /// requested).
+    ///
+    /// The resources originate **kernel-side** — from the kernel's own
+    /// discovered hardware tree, threaded by the privileged, capability-
+    /// gated driver-spawn path — never copied from an untrusted caller, so
+    /// minting a grant can never hand a task authority over a window its
+    /// matched node did not expose (`AGENTS.md` §4 — no ambient authority).
+    /// The ordinary `spawn` syscall carries an **empty** slice: a user task
+    /// cannot grant device windows to a child (§5.2 — delegation never
+    /// widens authority).
+    grants: &'a [HwResource],
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -1794,7 +1818,11 @@ where
     /// the child's page tables from; `None` fails the spawn closed
     /// (`AGENTS.md` §2.9, §24.1). `streams` is the descriptor table the
     /// child is established with — the spawner's resolved console
-    /// attachment (`AGENTS.md` §20).
+    /// attachment (`AGENTS.md` §20). `grants` is the kernel-sourced set of
+    /// device resources the child is minted a per-resource grant for — an
+    /// **empty** slice for an ordinary `spawn` (a user task grants no
+    /// device windows, `AGENTS.md` §4), the matched node's requested
+    /// [`HwResource`]s for a privileged driver-spawn (§18.3).
     #[must_use]
     // Mirrors `KernelDispatchHook::new`: the same distinct kernel-state
     // borrows threaded explicitly (`AGENTS.md` §2.1 / §4), not a one-use
@@ -1811,6 +1839,7 @@ where
         parent: SecTaskId,
         process_wait: &'static (dyn ProcessWait + 'static),
         streams: DescriptorTable,
+        grants: &'a [HwResource],
     ) -> Self {
         Self {
             frames,
@@ -1823,6 +1852,7 @@ where
             parent,
             process_wait,
             streams,
+            grants,
         }
     }
 }
@@ -1948,6 +1978,27 @@ where
         // never concurrently mutated by another path.
         let inherited = LimitSet::inherit(&self.aspaces.read().limits(self.parent));
         self.aspaces.write().set_limits(sec_id, inherited);
+
+        // Mint the child's device-resource grants (`AGENTS.md` §4 / §18.3):
+        // one unforgeable, owner-checked handle per [`HwResource`] the
+        // matched hardware-tree node requested, keyed to the child's own
+        // kernel-trusted id, so the child reaches exactly those windows
+        // through `mmio_map` / `dma_alloc` and enumerates its handles
+        // through `resource_grants` — and another task presenting the same
+        // numeric handle resolves nothing (the registry owner-check, §5.4).
+        // The resources are kernel-sourced (the privileged driver-spawn path
+        // threads the matched node's requests, never an untrusted caller),
+        // so minting can never widen authority beyond what that node exposed
+        // (§4 — no ambient authority); the ordinary `spawn` syscall carries
+        // an empty slice and mints nothing. Minted only after the child is
+        // fully admitted, under one write lock, so a `resource_grants` from
+        // the child observes the complete set.
+        if !self.grants.is_empty() {
+            let mut aspaces = self.aspaces.write();
+            for resource in self.grants {
+                aspaces.mint_grant(sec_id, *resource);
+            }
+        }
 
         // Record the parent/child link with the process-wait producer so the
         // spawning parent can later `wait` on this child and reap its exit
@@ -4761,6 +4812,91 @@ mod tests {
             "child address space registered under its pid"
         );
         assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
+        // A user-driven `spawn` grants the child no device resources: the
+        // handler passes an empty grant slice, so the child holds no
+        // resolvable handle (`AGENTS.md` §4 — no ambient authority).
+        assert_eq!(aspaces.read().grant(SecTaskId(pid), 1), None);
+    }
+
+    /// The privileged driver-spawn path mints one device-resource grant
+    /// per the matched node's requested [`HwResource`] for the freshly
+    /// admitted child, keyed to the child's own kernel-trusted id: the
+    /// child resolves each handle (the `resource_grants` / `mmio_map`
+    /// source), handles are monotonic from `1` in request order, and a
+    /// different task presenting the same numeric handle resolves nothing
+    /// — the registry owner-check (`AGENTS.md` §4 / §5.4 / §18.3).
+    #[test]
+    fn driver_spawn_mints_an_owner_checked_grant_per_requested_resource() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let frames = spawn_test_frames();
+
+        // The matched node's two requested resources: a register window and
+        // a DMA constraint. These originate kernel-side (the driver-spawn
+        // path threads the discovered node's requests), never a caller.
+        let regs = HwResource::mmio(0x0a00_0000, 0x1000);
+        let dma = HwResource::dma(0, 0x1000);
+        let requested = [regs, dma];
+
+        let ctx = KernelSpawnCtx::new(
+            &frames,
+            None,
+            sink,
+            &sched,
+            &table,
+            &aspaces,
+            arch.as_ref(),
+            SecTaskId(1),
+            &NULL_PROCESS_WAIT,
+            DescriptorTable::standard(),
+            &requested,
+        );
+
+        let program = EmbeddedProgram {
+            path: SPAWN_PATH,
+            rxe: SPAWN_RXE,
+            caps: &[],
+            args: &[],
+        };
+        // `RecordingSpawn::spawn` admits a host child through
+        // `ctx.admit_process`, returning the new PID the grants are minted
+        // against.
+        let pid = RecordingSpawn::new()
+            .spawn(&program, &ctx)
+            .expect("driver child admitted");
+        let child = SecTaskId(pid);
+
+        // One handle per requested resource, monotonic from 1, in order.
+        assert_eq!(aspaces.read().grant(child, 1), Some(regs));
+        assert_eq!(aspaces.read().grant(child, 2), Some(dma));
+        // No third grant was minted.
+        assert_eq!(aspaces.read().grant(child, 3), None);
+        // Owner-check: a different task presenting the same handle value
+        // resolves nothing — a driver cannot reach another's window by
+        // guessing a handle (`AGENTS.md` §5.4).
+        assert_eq!(aspaces.read().grant(SecTaskId(pid + 1), 1), None);
+
+        // The set serialises for delivery through `resource_grants`: two
+        // consecutive `GrantedResource` records in ascending handle order.
+        let wire = aspaces.read().grants_to_le_bytes(child);
+        assert_eq!(
+            wire.len(),
+            2 * rustos_abi::hwtree::GrantedResource::WIRE_LEN
+        );
+        let first =
+            rustos_abi::hwtree::GrantedResource::from_bytes(&wire).expect("first record decodes");
+        assert_eq!(first.handle, 1);
+        assert_eq!(first.resource, regs);
+        let second = rustos_abi::hwtree::GrantedResource::from_bytes(
+            &wire[rustos_abi::hwtree::GrantedResource::WIRE_LEN..],
+        )
+        .expect("second record decodes");
+        assert_eq!(second.handle, 2);
+        assert_eq!(second.resource, dma);
     }
 
     /// A [`ProcessSpawn`] double that records whether the [`SpawnCtx`] it
