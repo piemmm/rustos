@@ -51,8 +51,8 @@ use rustos_kernel_core::{
     SpawnCallerError, SpawnCtx, SpawnRequest,
 };
 use rustos_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, PhysMap, UserAddressSpace,
-    UserStack,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, LiveUserSpace,
+    PhysMap, UserAddressSpace, UserStack, VirtAddr,
 };
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 use rustos_sync::Once;
@@ -81,6 +81,22 @@ const IDENTITY_GIB: usize = 4;
 const USER_STACK_BASE: u64 = SHELL_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
 /// User virtual address the startup-vector block is written at.
 const USER_BLOCK_BASE: u64 = SHELL_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
+/// Base of a spawned child's device-window virtual region
+/// (`plans/PI.md` 5d-0-ii (b′)): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
+/// guard-bracketed window out of `[MMIO_WINDOW_BASE, MMIO_WINDOW_BASE +
+/// MMIO_WINDOW_PAGES·4 KiB)`.
+const MMIO_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
+/// Base of a spawned child's non-`FIXED` anonymous-heap virtual region
+/// (`plans/PI.md` 5d-0-ii (c)): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::AnonWindowMap`] places each non-`FIXED` `mem_map`
+/// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + ANON_WINDOW_PAGES·4 KiB)`.
+const ANON_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
+/// Base of a spawned child's guarded DMA-buffer virtual region
+/// (`plans/PI.md` 5d-0-ii (c) DMA half): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
+/// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
+const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -294,22 +310,51 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // its own user memory. Freezing *after* `spawn_image` captures every
         // mapped page — segments, stack, and the startup-vector block.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+
+        // Retain the live, mutable arch space behind the object-safe
+        // `LiveUserSpace` boundary so the child's `mem_map` / `mmio_map` /
+        // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
+        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 producer
+        // (`AGENTS.md` §2.2). The `LiveSpace` composes the audited
+        // anonymous-map mechanism (over the kernel's `'static` frame
+        // allocator) and the guarded device-window allocator (over the
+        // `[MMIO_WINDOW_BASE, …)` region); it carries the *same* arch space
+        // the snapshot above was frozen from, and zeroes anonymous frames
+        // through a fresh identity [`DirectPhysMap`] over the same identity
+        // window the child runs under. A build context with no `'static`
+        // allocator, or a window the allocator rejects, retains no live space
+        // and the child's `mem_map` / `mmio_map` fail closed (`AGENTS.md`
+        // §2.9).
+        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
+            Some(static_frames) => LiveSpace::new(
+                space,
+                DirectPhysMap::identity((IDENTITY_GIB as u64) << 30),
+                static_frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                spawn_layout::MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                spawn_layout::ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                spawn_layout::DMA_WINDOW_PAGES,
+            )
+            .ok()
+            .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),
+            None => None,
+        };
+
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
         // Register the child's caps + frozen address space and admit it Ready,
         // returning its PID. The spawning caller keeps running.
         // SAFETY: `frozen` faithfully describes the mappings just built into
         // `space`, `physmap` backs them, `pre_resume` activates the child's
-        // root before it is first entered, and `kernel_stack` is a region
-        // exclusive to this child that stays mapped for the task's lifetime —
+        // root before it is first entered, `kernel_stack` is a region
+        // exclusive to this child that stays mapped for the task's lifetime,
+        // and `live` retains the same arch space `frozen` was taken from —
         // the `admit_process` contract.
         // The child receives exactly its registered program's declared
         // capability set (`AGENTS.md` §5.2, §16.5) — never the spawning
         // caller's authority (`AGENTS.md` §4).
-        // The riscv64 port does not yet retain a live, mutable address space
-        // for `mem_map` / `mmio_map` (the aarch64-first chunk
-        // `plans/PI.md` 5d-0-ii (b′)-2); pass `None` so the child's
-        // `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
         unsafe {
             ctx.admit_process(
                 program.capability_set(),
@@ -317,7 +362,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
                 physmap,
                 kernel_stack,
                 pre_resume,
-                None,
+                live,
                 enter,
             )
         }

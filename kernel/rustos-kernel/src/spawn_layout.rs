@@ -148,18 +148,14 @@ pub const USER_BLOCK_OFFSET: u64 = 0x30_0000;
 /// clear of the program image, stack, and startup block — and well below
 /// the 64 GiB user/identity ceiling the spawn-window check guards.
 ///
-/// Only the aarch64 port maps a user device window today (the x86_64 and
-/// riscv64 spawn paths grant no `mmio_map` window yet), so this constant —
-/// shared by that port's `init_spawn` and `spawn_producer` (`AGENTS.md`
-/// §2.2) — is gated to `kernel_isa = "aarch64"` to stay live everywhere it
-/// is compiled (`AGENTS.md` §2.3).
-#[cfg(kernel_isa = "aarch64")]
+/// Every port retains a live address space and grants its tasks an
+/// `mmio_map` device window out of this region, so the offset — shared by
+/// each port's `init_spawn` and `spawn_producer` (`AGENTS.md` §2.2) — is
+/// one value, not a per-port copy.
 pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
 
 /// Pages backing the device-window region (1 MiB): generous headroom over
-/// the few device windows a driver task maps (`AGENTS.md` §24.1). Gated to
-/// the aarch64 port for the same reason as [`MMIO_WINDOW_OFFSET`].
-#[cfg(kernel_isa = "aarch64")]
+/// the few device windows a driver task maps (`AGENTS.md` §24.1).
 pub const MMIO_WINDOW_PAGES: usize = 256;
 
 /// Offset of the non-`FIXED` anonymous-heap virtual window above the image
@@ -168,18 +164,15 @@ pub const MMIO_WINDOW_PAGES: usize = 256;
 /// startup block — and well below the 64 GiB user/identity ceiling the
 /// spawn-window check guards. The `mem_map` placement allocator hands each
 /// non-`FIXED` request a base out of `[bias + ANON_WINDOW_OFFSET, … +
-/// ANON_WINDOW_PAGES·4 KiB)`. Gated to the aarch64 port (the only port that
-/// retains a live space today) for the same reason as [`MMIO_WINDOW_OFFSET`].
-#[cfg(kernel_isa = "aarch64")]
+/// ANON_WINDOW_PAGES·4 KiB)`. One value shared by every port for the same
+/// reason as [`MMIO_WINDOW_OFFSET`].
 pub const ANON_WINDOW_OFFSET: u64 = 0x8000_0000;
 
 /// Pages backing the anonymous-heap window (1 GiB of *address space*). The
 /// window costs no RAM until the frame allocator backs a mapping (which
 /// fails closed as a deterministic OOM, `AGENTS.md` §4 / §24.1), so it is
 /// sized generously for a userland heap; the placement allocator's own
-/// memory is bounded by the live-region count, not the page count. Gated to
-/// the aarch64 port for the same reason as [`ANON_WINDOW_OFFSET`].
-#[cfg(kernel_isa = "aarch64")]
+/// memory is bounded by the live-region count, not the page count.
 pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
 
 /// Offset of the guarded DMA-buffer virtual window above the image bias
@@ -188,17 +181,13 @@ pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
 /// the program image, stack, and startup block — and well below the 64 GiB
 /// user/identity ceiling the spawn-window check guards. The `dma_alloc`
 /// carve hands each request a guard-bracketed buffer out of `[bias +
-/// DMA_WINDOW_OFFSET, … + DMA_WINDOW_PAGES·4 KiB)`. Gated to the aarch64
-/// port (the only port that retains a live space today) for the same reason
-/// as [`MMIO_WINDOW_OFFSET`].
-#[cfg(kernel_isa = "aarch64")]
+/// DMA_WINDOW_OFFSET, … + DMA_WINDOW_PAGES·4 KiB)`. One value shared by
+/// every port for the same reason as [`MMIO_WINDOW_OFFSET`].
 pub const DMA_WINDOW_OFFSET: u64 = 0xC000_0000;
 
 /// Pages backing the DMA-buffer window (1 MiB): generous headroom over the
 /// few small coherent buffers a driver task carves (`AGENTS.md` §24.1; a DMA
 /// buffer is bounded to the [`rustos_kernel_mem::MAX_ORDER`] 8 MiB block).
-/// Gated to the aarch64 port for the same reason as [`DMA_WINDOW_OFFSET`].
-#[cfg(kernel_isa = "aarch64")]
 pub const DMA_WINDOW_PAGES: usize = 256;
 
 /// Per-process stack-canary seed handed to PID 1 `init` (`AGENTS.md`

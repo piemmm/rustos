@@ -561,7 +561,13 @@ landing):**
   the one shared stack-pivot validator `validate_kernel_rsp0`, §2.2) to the
   same already-mapped per-CPU kernel stack the syscall path uses, bringing
   x86_64 to the ring-3 fault-delivery parity the other ports already had.
-  Production per-task live-space retention still follows; wasm32's
+  Production per-task live-space retention is wired on **every** bare-metal
+  port: each port's `init_spawn` (PID 1) and `spawn_producer` (the `spawn`
+  syscall's children) retains the just-built arch space as a `LiveSpace`
+  behind the `LiveUserSpace` boundary and admits the task with it, so a
+  production EL0/ring-3/U-mode process's `mem_map` / `mmio_map` / `dma_alloc`
+  mutate its own space through the `live_producers` per-CPU slot (the shared
+  MMIO/ANON/DMA window offsets live once in `spawn_layout`, §2.2). wasm32's
   linear-memory model is an honest n/a (declared).
 
 **Done when (SP5 overall):** an EL0 process can obtain and release anonymous

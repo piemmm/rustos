@@ -73,7 +73,10 @@ use rustos_arch_x86_64::userentry::UserMode;
 use rustos_kernel_core::{
     spawn_image, BoxStack, InitSpawn, InitSpawnCtx, KernelStack, SpawnRequest,
 };
-use rustos_kernel_mem::{AddressSpace, DirectPhysMap, PhysMap, UserAddressSpace, UserStack};
+use rustos_kernel_mem::{
+    AddressSpace, DirectPhysMap, LiveSpace, LiveUserSpace, PhysMap, UserAddressSpace, UserStack,
+    VirtAddr,
+};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::spawn_layout;
@@ -108,6 +111,22 @@ const IDENTITY_GIB: usize = 4;
 const USER_STACK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
 /// User virtual address the startup-vector block is written at.
 const USER_BLOCK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
+/// Base of PID 1's device-window virtual region (`plans/PI.md`
+/// 5d-0-ii (b′)): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::MmioWindowMap`] hands each `mmio_map` a
+/// guard-bracketed window out of `[MMIO_WINDOW_BASE, MMIO_WINDOW_BASE +
+/// MMIO_WINDOW_PAGES·4 KiB)`.
+const MMIO_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::MMIO_WINDOW_OFFSET;
+/// Base of PID 1's non-`FIXED` anonymous-heap virtual region (`plans/PI.md`
+/// 5d-0-ii (c)): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::AnonWindowMap`] places each non-`FIXED` `mem_map`
+/// out of `[ANON_WINDOW_BASE, ANON_WINDOW_BASE + ANON_WINDOW_PAGES·4 KiB)`.
+const ANON_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
+/// Base of PID 1's guarded DMA-buffer virtual region (`plans/PI.md`
+/// 5d-0-ii (c) DMA half): the retained [`LiveSpace`]'s
+/// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
+/// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
+const DMA_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 
 /// Page-table pool backing PID 1's PML4 hierarchy.
 ///
@@ -287,6 +306,39 @@ impl InitSpawn for X86_64InitSpawn {
         // memory. Freezing *after* `spawn_image` captures every mapped page —
         // segments, stack, and the startup-vector block.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
+
+        // Retain the live, mutable arch space behind the object-safe
+        // `LiveUserSpace` boundary so PID 1's `mem_map` / `mmio_map` /
+        // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
+        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 seam
+        // (`AGENTS.md` §2.2). The `LiveSpace` composes the audited
+        // anonymous-map mechanism (over the kernel's `'static` frame
+        // allocator, drawn from `static_frames`) and the guarded device-window
+        // allocator (over the `[MMIO_WINDOW_BASE, …)` region); it carries the
+        // *same* arch space the snapshot above was frozen from, and zeroes
+        // anonymous frames through a fresh higher-half [`DirectPhysMap`]
+        // identical to the one the image build used (the low identity + the
+        // higher-half kernel window are both mapped under PID 1's CR3). A
+        // context with no `'static` allocator, or a window the allocator
+        // rejects, retains no live space and PID 1's `mem_map` / `mmio_map`
+        // fail closed (`AGENTS.md` §2.9).
+        let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
+            Some(static_frames) => LiveSpace::new(
+                space,
+                DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN),
+                static_frames,
+                VirtAddr::new(MMIO_WINDOW_BASE),
+                spawn_layout::MMIO_WINDOW_PAGES,
+                VirtAddr::new(ANON_WINDOW_BASE),
+                spawn_layout::ANON_WINDOW_PAGES,
+                VirtAddr::new(DMA_WINDOW_BASE),
+                spawn_layout::DMA_WINDOW_PAGES,
+            )
+            .ok()
+            .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),
+            None => None,
+        };
+
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
         // Register PID 1's caps + address space, publish it as the current
@@ -295,12 +347,9 @@ impl InitSpawn for X86_64InitSpawn {
         // SAFETY: the image was built into and `space` switched to active
         // above, and the trap path is installed, per the
         // `InitSpawnCtx::admit_init` contract; `frozen` faithfully describes
-        // the active mappings, `physmap` backs them, and `kernel_stack` is a
-        // region exclusive to PID 1 that stays mapped for the task's lifetime.
-        // The x86_64 port does not yet retain a live, mutable address space
-        // for `mem_map` / `mmio_map` (that is the aarch64-first chunk
-        // `plans/PI.md` 5d-0-ii (b′)-2); pass `None` so PID 1's `mem_map` /
-        // `mmio_map` fail closed here (`AGENTS.md` §2.9).
+        // the active mappings, `physmap` backs them, `kernel_stack` is a
+        // region exclusive to PID 1 that stays mapped for the task's lifetime,
+        // and `live` retains the same arch space `frozen` was taken from.
         unsafe {
             ctx.admit_init(
                 spawn_layout::init_caps(),
@@ -308,7 +357,7 @@ impl InitSpawn for X86_64InitSpawn {
                 physmap,
                 kernel_stack,
                 pre_resume,
-                None,
+                live,
                 enter,
             );
         }

@@ -3207,18 +3207,23 @@ table, so a new board is match **data**, not new code. Sub-increments
       the remaining `SP5b` follow-on (fail-closed `NotImplemented` until
       then — never a guessed base). 8 host tests. fmt + clippy `-D warnings`
       clean; no `lib/abi`/C-header change.
-    **5d-0-ii (b′)-2 — retention wired into production (aarch64) — LANDED.**
-    The optional live space is threaded through the `admit_init` /
-    `admit_process` seam as `Option<Box<dyn LiveUserSpace + Send>>` (all three
-    ports + the in-core test double — x86_64 / riscv64 pass `None`). The
-    aarch64 `init_spawn` and `spawn_producer` freeze a snapshot for the copy
-    path **and** build a `LiveSpace` from the *same* arch space (device-window
-    region 1 GiB above the image bias; anonymous frames from the `'static`
-    kernel allocator), admitting through `spawn_user_kthread_with_stack_live`
-    so the runtime publishes it on the per-CPU slot. `kernel_main` installs
-    `LiveMemMap` / `LiveMmioMap` for **every** port (arch-generic, no `cfg`):
-    a task with no retained space (the sibling ports today) fails `mem_map` /
-    `mmio_map` closed exactly as the `NULL_*` defaults did. The Arch-HAL
+    **5d-0-ii (b′)-2 — retention wired into production (every bare-metal
+    port) — LANDED.** The optional live space is threaded through the
+    `admit_init` / `admit_process` seam as
+    `Option<Box<dyn LiveUserSpace + Send>>`. Every bare-metal port's
+    `init_spawn` (PID 1) and `spawn_producer` (the `spawn` syscall's children)
+    freezes a snapshot for the copy path **and** builds a `LiveSpace` from the
+    *same* arch space (device-window region 1 GiB above the image bias;
+    anonymous frames from the `'static` kernel allocator), admitting through
+    `spawn_user_kthread_with_stack_live` so the runtime publishes it on the
+    per-CPU slot. The MMIO/anon/DMA window offsets are the one shared
+    `spawn_layout` definition every port derives its bases from (§2.2); the
+    per-port direct map differs (aarch64/riscv64 identity, x86_64 the
+    higher-half `KERNEL_VMA_BASE` map the image build also uses). `kernel_main`
+    installs `LiveMemMap` / `LiveMmioMap` / `LiveDmaAlloc` for **every** port
+    (arch-generic, no `cfg`): a task that retains no live space still fails
+    `mem_map` / `mmio_map` / `dma_alloc` closed exactly as the `NULL_*`
+    defaults did (wasm32's linear-memory model is an honest n/a). The Arch-HAL
     `PageTableFrames` gained a `Sync` supertrait so a port's `AddressSpace`
     (which retains the frame source) is `Send` and can be the boxed
     `LiveUserSpace` (every implementor was already `Sync`). **Arch fix:**
