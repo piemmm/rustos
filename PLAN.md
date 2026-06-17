@@ -1227,10 +1227,16 @@ spec §18.
   Chunk B-2 — host-proven): given the two brought-up block devices and the
   typed passphrase it reads the descriptor and, on success, runs the unlock
   composition, auditing and fail-closing a descriptor that cannot be read
-  (`RootMountError::DescriptorRead`). The remaining board storage bring-up
-  that *supplies* the block devices + typed passphrase and wires it into the
-  boot path (root-device discovery, in-kernel block DriverHost, console
-  passphrase prompt) is staged in `plans/PI.md` P11 Chunk B-2. The login
+  (`RootMountError::DescriptorRead`). Root-device *discovery* is wired: the
+  root-storage bind gate (`rustos_kernel::root_storage`, audited `4135`
+  `ROOT_STORAGE_AUTOLOAD`) resolves which discovered hardware-tree node
+  carries the bootstrap root block device against the in-kernel floor
+  catalogue through the same shared `lib/devmatch` policy `devmgr` uses
+  (§18.3 / §18.6) — read-only, fail-closed (no block device → unbound; >1 →
+  ambiguous), so the metal boot is unaffected. The remaining board storage
+  bring-up that *supplies* the typed passphrase and brings the bound driver
+  up (in-kernel block DriverHost over the binding, console passphrase
+  prompt) is staged in `plans/PI.md` P11 Chunk B-2. The login
   `Run` binary ships at
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held

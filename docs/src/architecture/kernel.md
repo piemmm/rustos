@@ -274,11 +274,29 @@ read off the boot partition is audited (`4134` `ROOT_MOUNT_REJECTED`) and
 returned as `RootMountError::DescriptorRead` — the encrypted root is never
 touched and no database is served (§2.9 / §5.4.5).
 
+`ROOT_STORAGE_AUTOLOAD` (the bin-crate id `4135`, in the shared `4_000`
+range) reports the **root-storage bind gate**
+(`rustos_kernel::root_storage`, `AGENTS.md` §18.3 / §18.6, `plans/PI.md`
+P11 Chunk B-2) — the storage analogue of the keyboard bind gate. As the
+aarch64 boot path enters the kernel core it walks the discovered hardware
+tree and resolves which node carries the bootstrap root block device
+against the in-kernel floor catalogue (`rustos_kernel::driver_catalog`),
+through the **same** shared `lib/devmatch` policy the user-space `devmgr`
+autoloader uses: the kernel binds a block driver because that driver's
+signed bind table matched a discovered node, never because it *hunted* for
+a disk (§18.5). The record names the bound driver path, the node id, and
+the bind priority; a tree with no block device leaves the root unbound
+(informational, §18.4), and a tree with more than one distinct block
+device fails closed as ambiguous (`Error`) rather than guessing which
+volume is the root (§2.9). The gate is **resolution only** — it mounts
+nothing — so it changes no boot behaviour beyond the audit record and the
+metal-confirmed boot is unaffected (§2.17).
+
 The remaining board-specific bring-up that *supplies* the block devices and
-the typed passphrase — hardware-tree root-device discovery, the in-kernel
-block DriverHost, and the console passphrase prompt — is wired into the
-boot path next (`plans/PI.md` P11 Chunk B-2): `virtio-blk` proves it on
-`-M virt`, EMMC2 on metal (`plans/PI.md` §0.4 / P8).
+the typed passphrase — bringing up the bound block + filesystem driver
+through an in-kernel block DriverHost, and the console passphrase prompt —
+is wired into the boot path next (`plans/PI.md` P11 Chunk B-2): `virtio-blk`
+proves it on `-M virt`, EMMC2 on metal (`plans/PI.md` §0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store

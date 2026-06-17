@@ -93,6 +93,14 @@ pub struct InKernelDriver {
     /// The statically-linked §8 `register()` entry the load gate invokes
     /// once the manifest is admitted.
     pub register: DriverEntry,
+    /// `true` for the bootstrap-floor **block** drivers — the storage path
+    /// that must be up before the signed driver store under
+    /// `/System/Drivers/` is reachable (`AGENTS.md` §18.6). The root-storage
+    /// bind gate ([`crate::root_storage`]) treats exactly these as candidates
+    /// for the root volume; the bus-chain and HID floor entries are not.
+    /// Declared here on the one registry entry so the role cannot drift from
+    /// a parallel list (`AGENTS.md` §2.2).
+    pub provides_root_block: bool,
 }
 
 /// The number of drivers the kernel hosts in-kernel.
@@ -108,18 +116,21 @@ pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
         bind_keys: rustos_drv_bus_pcie_brcm::BIND_KEYS,
         image: PCIE_BRCM_IMAGE,
         register: rustos_drv_bus_pcie_brcm::register,
+        provides_root_block: false,
     },
     InKernelDriver {
         path: BUS_USB_PATH,
         bind_keys: rustos_drv_bus_usb::BIND_KEYS,
         image: BUS_USB_IMAGE,
         register: rustos_drv_bus_usb::register,
+        provides_root_block: false,
     },
     InKernelDriver {
         path: USB_HID_PATH,
         bind_keys: rustos_drv_input_usb_hid::BIND_KEYS,
         image: USB_HID_IMAGE,
         register: rustos_drv_input_usb_hid::register,
+        provides_root_block: false,
     },
     // The bootstrap-floor storage path (`AGENTS.md` §18.6): a block driver
     // must be up before the signed driver store under `/System/Drivers/`
@@ -132,12 +143,14 @@ pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
         bind_keys: rustos_drv_storage_virtio_blk::BIND_KEYS,
         image: VIRTIO_BLK_IMAGE,
         register: rustos_drv_storage_virtio_blk::register,
+        provides_root_block: true,
     },
     InKernelDriver {
         path: EMMC2_PATH,
         bind_keys: rustos_drv_storage_emmc2::BIND_KEYS,
         image: EMMC2_IMAGE,
         register: rustos_drv_storage_emmc2::register,
+        provides_root_block: true,
     },
 ];
 
@@ -147,6 +160,18 @@ pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
 #[must_use]
 pub fn driver_for(path: &str) -> Option<&'static InKernelDriver> {
     IN_KERNEL_DRIVERS.iter().find(|driver| driver.path == path)
+}
+
+/// `true` when `path` names a bootstrap-floor **block** driver — the
+/// storage path the root volume is read through (`AGENTS.md` §18.6).
+///
+/// The single source of truth is each registry entry's
+/// [`InKernelDriver::provides_root_block`] flag, so this can never drift
+/// from a parallel path list (`AGENTS.md` §2.2). An unknown path is not a
+/// block driver (fail closed, §2.9).
+#[must_use]
+pub fn is_root_block_driver(path: &str) -> bool {
+    driver_for(path).is_some_and(|driver| driver.provides_root_block)
 }
 
 /// The registry as match candidates (`path` + `bind_keys`), index-aligned
@@ -293,6 +318,27 @@ mod tests {
             IN_KERNEL_DRIVERS[4].bind_keys,
             rustos_drv_storage_emmc2::BIND_KEYS
         );
+    }
+
+    #[test]
+    fn only_the_storage_floor_entries_provide_the_root_block() {
+        // The bootstrap-floor block drivers (`AGENTS.md` §18.6) are exactly
+        // virtio-blk and EMMC2; the bus-chain and HID entries are not the
+        // storage path and must never be treated as the root volume.
+        assert!(is_root_block_driver(VIRTIO_BLK_PATH));
+        assert!(is_root_block_driver(EMMC2_PATH));
+        assert!(!is_root_block_driver(PCIE_BRCM_PATH));
+        assert!(!is_root_block_driver(BUS_USB_PATH));
+        assert!(!is_root_block_driver(USB_HID_PATH));
+        // An unknown path is not a block driver (fail closed, §2.9).
+        assert!(!is_root_block_driver("/System/Drivers/not_in_kernel"));
+        // The flag and the helper agree for every registry entry.
+        for driver in &IN_KERNEL_DRIVERS {
+            assert_eq!(
+                is_root_block_driver(driver.path),
+                driver.provides_root_block
+            );
+        }
     }
 
     #[test]

@@ -1913,7 +1913,9 @@ driver's bind table — through the one shared `lib/devmatch` policy
 `devmgr` uses (§2.2) — never a hand-wired probe (§18.5). Host-proven
 (`driver_catalog` storage-node binding + signed-gate admission; the two
 crates' bind-table tests). The boot path that *resolves* the discovered
-root block node against this floor and mounts it rides Chunk B-2 below.
+root block node against this floor is landed (`rustos_kernel::root_storage`,
+the `4135` `ROOT_STORAGE_AUTOLOAD` bind gate — Chunk B-2 below); bringing
+the bound driver up and mounting the volume is the rest of Chunk B-2.
 
 **Landed — the PIO block driver (read + write).** `drivers/storage/emmc2`
 (`rustos-drv-storage-emmc2`) is an Arasan / SDHCI-5.1 PIO block driver
@@ -4029,10 +4031,34 @@ two users — or the same user twice — can be logged in concurrently.
        (end-to-end success authenticating the planted `root`/`root`; a
        missing descriptor refused with no unlock; a wrong passphrase refused
        fail-closed). No `lib/abi`/C-header change.
-     - **Chunk B-2 board bring-up — still staged: the storage bring-up that
-       supplies the inputs and wires the boot path:** discover the root block
-       device from the hwtree, bring up the block + filesystem driver with an
-       in-kernel DMA/MMIO host, read `root.unlock` (B-1) off the FAT boot
+     - **Chunk B-2 root-storage bind gate — LANDED (host-proven).**
+       `rustos_kernel::root_storage` resolves which **discovered**
+       hardware-tree node carries the bootstrap root block device, and which
+       floor block driver binds it, through the **same** shared `lib/devmatch`
+       policy the user-space `devmgr` autoloader uses — applied against the
+       in-kernel bootstrap-floor catalogue (`driver_catalog`, the
+       `provides_root_block` entries: virtio-blk + EMMC2). The kernel binds a
+       block driver because that driver's signed bind table matched a
+       discovered node's identity, never because it *hunted* for a disk
+       (§18.3 / §18.5 / §18.6). It is the storage analogue of the keyboard
+       bind gate (`keyboard_service`): a streaming `RootBlockSelection`
+       resolves each node off the discovery sink with no whole-tree buffer
+       (§2.16). It is **resolution only** — it mounts nothing — so the
+       metal-confirmed boot is unaffected (§2.17). Fail closed (§2.9):
+       no block device leaves the root unbound (informational, §18.4); a
+       directly-described device (EMMC2 `compatible`) binds straight from the
+       tree while a bus-probed one (virtio-blk device id) binds only once the
+       bus driver attaches the probed child (§18.2); more than one distinct
+       block device fails closed as ambiguous (root disambiguation needs an
+       explicit boot descriptor, not a guess). Wired into the aarch64 boot
+       path (`aarch64::boot::audit_root_storage_binding`, post-MMU before the
+       core hand-off) and audited `4135` `ROOT_STORAGE_AUTOLOAD`. Host-proven
+       (8 `root_storage` tests + the `driver_catalog` block-flag test);
+       aarch64 kernel builds freestanding. No `lib/abi`/C-header change.
+     - **Chunk B-2 board bring-up — still staged: the rest of the storage
+       bring-up that wires the mount:** consume the bind gate's
+       `RootBlockBinding`, bring up the bound block + filesystem driver with
+       an in-kernel DMA/MMIO host, read `root.unlock` (B-1) off the FAT boot
        partition, prompt for the passphrase on the console (the in-kernel
        keyboard scaffold already feeds the console on metal; UART on
        `virt`), call `mount_root_and_load_users`, leak + `with_users_db`.

@@ -144,6 +144,20 @@ pub mod driver_catalog;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_loader;
 
+// The root-storage bind gate (`plans/PI.md` §3 P11 root-mount increment,
+// Chunk B-2): resolves which discovered hardware-tree node carries the
+// bootstrap root block device, and which floor block driver
+// (`driver_catalog`) binds it, through the same shared `lib/devmatch`
+// policy the user-space `devmgr` autoloader uses (`AGENTS.md` §18.3 /
+// §18.6). It is the storage analogue of the keyboard bring-up's bind gate
+// and the front half the production root mount (`root_mount`) builds on.
+// Resolution only — it never reads or mounts a volume — so it is
+// architecture-neutral and host-tested on the CI host; it is gated, like
+// `driver_catalog` it depends on, on the two instruction sets where that
+// registry compiles (`x86_64` and `aarch64`).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod root_storage;
+
 // The user-space sibling of `driver_loader` (`plans/PI.md` P10 5d-2-ii):
 // admits a discovered `kind = UserSpace` driver through the same signed
 // `drvhost::Host::load` gate, then **spawns** it into its own

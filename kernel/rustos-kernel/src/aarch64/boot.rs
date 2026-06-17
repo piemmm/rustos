@@ -49,6 +49,7 @@
 
 use alloc::sync::Arc;
 
+use rustos_abi::HwNode;
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
 use rustos_arch_aarch64::paging::{
     configure_device_gigapages, configure_ram_gigapages, identity_device_mask, identity_ram_mask,
@@ -58,7 +59,7 @@ use rustos_arch_aarch64::{
     console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial,
     syscall_entry, uart_init, video, Aarch64Arch, Aarch64ArchStorage,
 };
-use rustos_arch_api::SchedulerArch;
+use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery, SchedulerArch};
 use rustos_fdt::Fdt;
 use rustos_kernel_core::{kernel_main, BootInfo};
 use rustos_kernel_sched_api::SchedulerConfig;
@@ -667,6 +668,13 @@ pub fn boot(
     if ready {
         if let Ok(layout) = layout_result {
             serial::beacon("pi-beacon 6/6: handover sound, entering kernel core");
+            // Resolve + audit which discovered storage node binds the
+            // bootstrap root block driver before entering the core
+            // (`AGENTS.md` §18.3 / §18.6) — the storage analogue of the
+            // keyboard bind gate. Read-only: it mounts nothing; the
+            // production mount path consumes the binding in the following
+            // increment (`plans/PI.md` Chunk B-2).
+            audit_root_storage_binding(dtb, log_sink);
             enter_kernel_core(arch, layout.map, log_sink, audit_sink)
         }
     }
@@ -676,6 +684,65 @@ pub fn boot(
     // bisection (`AGENTS.md` §2.9).
     serial::beacon("pi-beacon 6/6: handover REJECTED, parking (see boot log)");
     halt_current_cpu()
+}
+
+/// The discovery sink that resolves the root block device on the fly.
+///
+/// Folds each discovered node into the [`crate::root_storage::RootBlockSelection`]
+/// as the [`platform::FdtDiscovery`] walk emits it, so the bind decision is
+/// reached without buffering the whole tree (`AGENTS.md` §2.16) — the
+/// allocation-free boot-path form of
+/// [`crate::root_storage::resolve_root_block_driver`].
+struct RootStorageSink {
+    selection: crate::root_storage::RootBlockSelection,
+}
+
+impl HwNodeSink for RootStorageSink {
+    fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
+        self.selection.observe(&node);
+        Ok(())
+    }
+}
+
+/// Resolve and audit which discovered storage node binds the bootstrap
+/// root block driver (`AGENTS.md` §18.3 / §18.6), the storage analogue of
+/// the keyboard bind gate ([`crate::keyboard_service`]).
+///
+/// Read-only: it walks the firmware tree (safe with the MMU **on** — the
+/// caller enables it first; a whole-tree traversal faults MMU-off,
+/// `plans/PI.md` watch-out), resolves each node against the in-kernel
+/// bootstrap-floor catalogue, and audits the decision through `log_sink`.
+/// It mounts nothing; the production mount path ([`crate::root_mount`])
+/// consumes the binding in the following increment. A null/unreadable
+/// tree, a malformed walk, or no block device simply leaves the root
+/// unbound — never aborting the boot (`AGENTS.md` §18.4 / §2.9).
+fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
+    if dtb == 0 {
+        return;
+    }
+    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
+    // pointer (`boot.s` preserves x0). `Fdt::from_ptr` validates the magic
+    // and bounds the blob by its own `totalsize` before any further read.
+    // The full-tree discovery walk below runs with the MMU on (the caller
+    // enabled it), where a whole-tree traversal is safe; a bogus pointer
+    // fails the magic check and returns `Err` rather than faulting.
+    let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
+        return;
+    };
+    let mut sink = RootStorageSink {
+        selection: crate::root_storage::RootBlockSelection::new(),
+    };
+    if platform::FdtDiscovery::new(fdt)
+        .discover(&mut sink)
+        .is_err()
+    {
+        // A malformed tree is not fatal: leave the root unbound — the mount
+        // path fails closed without a binding (`AGENTS.md` §18.4 / §2.9).
+        return;
+    }
+    // The binding is consumed by the production mount path in the following
+    // increment; here the gate's effect is the audit record `finish` emits.
+    let _ = sink.selection.finish(log_sink);
 }
 
 /// Assemble the validated [`BootInfo`] hand-off and enter
