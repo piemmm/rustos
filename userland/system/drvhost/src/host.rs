@@ -291,6 +291,7 @@ impl<'h> Host<'h> {
             manifest: &parsed.manifest,
             payload: parsed.payload,
             host: &view,
+            granted: requested,
         };
         match self.cfg.spawner.spawn_and_register(&spawn_ctx) {
             Ok(_reported) => {
@@ -385,16 +386,29 @@ impl<'h> Host<'h> {
             self.audit_reject(events::DRIVER_LOAD_REJECTED_TRUST, path, "untrusted signer");
             return Err(HostError::UntrustedSigner);
         }
-        // Compose `header[..signed_end] || cap_body || bind_table` in a
-        // temporary buffer that is wiped before it leaves scope
-        // (`AGENTS.md` §4 — zero-on-free for any buffer that held
+        // Compose `header[..signed_end] || cap_body || bind_table ||
+        // payload` in a temporary buffer that is wiped before it leaves
+        // scope (`AGENTS.md` §4 — zero-on-free for any buffer that held
         // capability tokens).
+        //
+        // The payload is part of the signed message: for a `kind =
+        // UserSpace` driver the payload *is* the program the load gate
+        // hands the spawner to run as a fresh process, so leaving it
+        // unsigned would let an attacker who can rewrite the on-disk image
+        // (but not forge the signature) substitute arbitrary code while
+        // passing the gate — an unsigned-code-execution hole (`AGENTS.md`
+        // §8 / §2.17). Covering it closes that hole; for an in-kernel
+        // driver the payload is empty, so the coverage is a no-op.
         let mut signed_message: Vec<u8> = Vec::with_capacity(
-            parsed.signed_bytes.len() + parsed.capability_body.len() + parsed.bind_table.len(),
+            parsed.signed_bytes.len()
+                + parsed.capability_body.len()
+                + parsed.bind_table.len()
+                + parsed.payload.len(),
         );
         signed_message.extend_from_slice(parsed.signed_bytes);
         signed_message.extend_from_slice(parsed.capability_body);
         signed_message.extend_from_slice(parsed.bind_table);
+        signed_message.extend_from_slice(parsed.payload);
         let sig = Ed25519Signature::from_bytes(parsed.manifest.signature);
         let result = signer_key.verify(&signed_message, &sig);
         secure_clear(signed_message.as_mut_slice());

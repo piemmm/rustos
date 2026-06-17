@@ -70,14 +70,29 @@ location.
 `DriverSpawner::spawn_and_register(ctx) -> Result<DriverHandle,
 SpawnRegisterError>` is the seam at which a verified manifest's
 registration is completed in its own protection domain. The
-`SpawnContext` carries the verified manifest, the image payload, and
-the granted-capability `DriverHost` view. The production
-implementation (`PLAN.md` Stage 4.HW) spawns the payload into a fresh
-process (`kernel/mem::build_process_image` → spawn) and completes the
-`register()` handshake over IPC; tests and QEMU verticals register a
+`SpawnContext` carries the verified manifest, the image payload, the
+granted-capability `DriverHost` view, and the granted capability set as
+a value (`SpawnContext.granted` — what `ctx.host` answers
+`has_capability` from, surfaced so a process-spawning spawner can create
+the driver with exactly that authority and no more, `AGENTS.md` §4). The
+production implementation (`PLAN.md` Stage 4.HW) spawns the payload into
+a fresh process (`kernel/mem::build_process_image` → spawn) and completes
+the `register()` handshake over IPC; tests and QEMU verticals register a
 known entry point in-process through `ctx.host`. The seam returns the
 *outcome* of registration rather than an entry point, so the host
 never holds a pointer into the driver image.
+
+The `kernel/rustos-kernel/src/driver_spawn_loader.rs` `SpawnDriverLoader`
+is the production process-spawning loader: it implements the device
+manager's `DriverLoader` seam, so the autoload walk drives it directly,
+runs this same `Host::load` gate on the discovered `kind = UserSpace`
+image, and spawns the verified payload through the architecture
+`DriverProcessSpawn` seam — minting the new process one device-resource
+grant per `HwResource` its matched hardware-tree node requested
+(`KernelSpawnCtx.grants`, `AGENTS.md` §18.3) and nothing more. The
+`tests/integration/driver_spawn_qemu_aarch64` vertical proves that full
+devmgr → signed-gate → spawn → grant path on the `virt` board (a virtio
+node stands in for the metal controller).
 
 The IPC half of that handshake is defined: the spawned driver reads
 the reply endpoint id from its startup arguments (`rustos_rt::arg`),
@@ -108,7 +123,9 @@ The spawner is *only* invoked after every other verification gate has
 cleared (`AGENTS.md` §5.4 — fail closed): a misbehaving spawner
 cannot widen the host's authority. Those gates are, in order: image
 parse, syscall-table hash, signature (over header, capability body,
-*and* bind table), capability subset/kind checks, and a fail-closed
+bind table, *and* the payload — so a `kind = UserSpace` driver's program
+is authenticated, never substitutable after signing, `AGENTS.md` §8 /
+§2.17), capability subset/kind checks, and a fail-closed
 decode of every
 [`DriverBindKey`](../abi/driver_traits.md#driverbindkey) bind-table
 entry — a malformed table never reaches the device manager

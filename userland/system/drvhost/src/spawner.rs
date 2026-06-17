@@ -20,6 +20,7 @@
 //! binding the former resolver performed cannot reappear.
 
 use rustos_abi::{DriverError, DriverHandle, DriverHost, DriverManifest};
+use rustos_caps::CapabilitySet;
 
 /// Canonical `register` entry-point signature (`AGENTS.md` §8 / §10):
 ///
@@ -49,6 +50,17 @@ pub struct SpawnContext<'a> {
     /// and the per-driver virtio host, if one was minted. In-process
     /// implementations pass this to the driver's `register` entry.
     pub host: &'a dyn DriverHost,
+    /// The capability set the host granted this load — the manifest's
+    /// requested set intersected with the caller's (`AGENTS.md` §5.2).
+    ///
+    /// In-process register spawners read authority through
+    /// [`SpawnContext::host`]; a *process-spawning* spawner additionally
+    /// needs the granted set as a value, to create the driver's process
+    /// with exactly that authority and no more (`AGENTS.md` §4 — no
+    /// ambient authority). It is the same set [`SpawnContext::host`]
+    /// answers [`DriverHost::has_capability`] from, surfaced here so the
+    /// spawner does not have to probe every capability id to recover it.
+    pub granted: CapabilitySet,
 }
 
 /// Why a spawn-and-register hand-off failed.
@@ -139,6 +151,10 @@ mod tests {
         }
     }
 
+    fn empty_granted() -> CapabilitySet {
+        CapabilitySet::empty()
+    }
+
     #[test]
     fn in_process_spawner_reports_registered_handle() {
         let s = Single;
@@ -147,6 +163,7 @@ mod tests {
             manifest: &m,
             payload: b"",
             host: &StubHost,
+            granted: empty_granted(),
         };
         let handle = s.spawn_and_register(&ctx).expect("registration succeeds");
         assert_eq!(handle.as_u64(), 99);
@@ -160,6 +177,7 @@ mod tests {
             manifest: &m,
             payload: b"",
             host: &StubHost,
+            granted: empty_granted(),
         };
         assert_eq!(
             s.spawn_and_register(&ctx),

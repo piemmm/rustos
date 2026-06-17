@@ -103,12 +103,25 @@ The §17.4 layering keeps `rustos-devmgr` on `lib/*` only, so the load
 
 ```rust
 pub trait DriverLoader {
-    fn load(&mut self, path: &str, caller_caps: &CapabilitySet)
-        -> Result<DriverHandle, Errno>;
+    fn load(
+        &mut self,
+        path: &str,
+        resources: &[HwResource],
+        caller_caps: &CapabilitySet,
+    ) -> Result<DriverHandle, Errno>;
 }
 ```
 
-The deployment's integration point implements it over the
+The device manager forwards the **matched node's** `HwResource`
+requests (`HwNode::resources`) verbatim to the loader, so the load
+mechanism can mint the loaded driver exactly the device-resource grants
+its node exposed and nothing more (`AGENTS.md` §18.3 — a loaded driver
+receives only the resources its matched node requested). The resources
+originate kernel-side, from the discovered hardware tree, never from an
+untrusted caller (§4 — no ambient authority); the device manager only
+forwards them.
+
+The deployment's integration point implements `DriverLoader` over the
 [driver host](./host.md)'s `Host::load` pipeline (mapping `HostError`
 via `as_errno`), so every load still passes the full §8 gate —
 signature verification, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` checks, and
@@ -116,6 +129,18 @@ the spawner hand-off. The device manager never inspects or bypasses
 those checks, and it never re-parses image bytes: candidate bind
 tables arrive already decoded (fail-closed) by the gate's own
 `ParsedImage::decode_bind_table`.
+
+The production process-spawning integration point is
+`rustos_kernel::driver_spawn_loader::SpawnDriverLoader`: it runs the
+signed `Host::load` gate on the discovered `kind = UserSpace` image and
+then spawns the verified payload into its own process through the
+architecture `DriverProcessSpawn` seam, minting the new process one
+grant per `resources` entry via `KernelSpawnCtx.grants` (the kernel's
+own discovered requests, §18.3). The
+`tests/integration/driver_spawn_qemu_aarch64` vertical proves the full
+`autoload` → signed gate → spawn → grant-delivery path on the `virt`
+board (a virtio node stands in for the metal controller, since no
+Pi-board QEMU vertical exists).
 
 ## Audit surface
 

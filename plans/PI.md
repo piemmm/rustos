@@ -3339,14 +3339,30 @@ table, so a new board is match **data**, not new code. Sub-increments
       non-zero length), and refuses to reply on any shortfall — so the host
       PASS proves the spawn minted and delivered the grant. No `lib/abi`/
       C-header change (the grants are a kernel-side ctx field).
-    - **5d-2-ii (b) (next)** the user-space keyboard driver *process*: a
-      `devmgr`-spawned `rxe` that builds an `RtDriverHost::from_grants_query`,
-      runs the `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + report pump over the
-      grants the minter (a) now hands it, and injects key edges via
-      `key_inject`. Remaining: the `devmgr`-driven driver-spawn path that
-      sources the matched node's `HwResource`s from the discovered hardware
-      tree into `KernelSpawnCtx.grants`, plus a `-M virt` vertical (a virtio
-      device stands in for the metal controller). **Metal checkpoint.**
+    - **5d-2-ii (b-1) — the `devmgr`-driven driver-spawn path — done
+      (host-proven + `-M virt`).** `devmgr::DriverLoader::load` gained a
+      `resources: &[HwResource]` argument that `DeviceManager::autoload`
+      sources from the matched `HwNode::resources`, realising §18.3 (a loaded
+      driver receives only the resources its matched node requested). The
+      production loader `kernel/rustos-kernel::driver_spawn_loader::
+      SpawnDriverLoader` (impl `devmgr::DriverLoader`) runs the signed
+      `drvhost::Host::load` gate on the discovered `kind = UserSpace` image and
+      spawns the verified payload through the arch `DriverProcessSpawn` seam,
+      threading those resources into `KernelSpawnCtx.grants` (the (a) minter).
+      Host-tested with a recording spawn double; proven end to end on `-M virt`
+      by the extended `driver_spawn_qemu_aarch64` vertical (discovered virtio
+      node → `13001` node-bound → signed gate → spawn → grant read back via
+      `resource_grants` → `4302` PASS). **Security hardening (§2.17):** the
+      `drvhost` manifest signature now covers the **payload**, so a spawned
+      driver's program is authenticated (regression `tampered_payload_refused`);
+      empty-payload in-kernel images are unaffected.
+    - **5d-2-ii (b-2) (next)** the real user-space keyboard driver *process*: a
+      `devmgr`-autoloaded `rxe` that builds an `RtDriverHost::from_grants_query`,
+      runs the `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + report pump over its
+      grants, and injects key edges via `key_inject`; plus the production boot
+      wiring that runs `DeviceManager::autoload` against the discovered tree
+      (hosted in kernel/core, which owns the scheduler) and the metal
+      checkpoint.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.

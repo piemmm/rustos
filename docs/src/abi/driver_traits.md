@@ -99,8 +99,12 @@ bytes; the signature byte range is the tail of that buffer
 signature). The body that follows the header is the requested
 capability list (`capability_count` little-endian `u16` ids) followed
 by the driver's bind table (`bind_key_count`
-[`DriverBindKey`](#driverbindkey) records); both halves are covered by
-the signature.
+[`DriverBindKey`](#driverbindkey) records) and then the opaque payload
+(the program image for a `kind = UserSpace` driver, empty for an
+in-kernel one). All three — capability list, bind table, *and* payload —
+are covered by the signature, so a spawned driver's program is
+authenticated and cannot be substituted after signing (`AGENTS.md` §8 /
+§2.17).
 
 `DriverManifest::from_bytes` rejects:
 

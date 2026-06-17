@@ -921,6 +921,7 @@ dependencies = [
  "rustos-caps",
  "rustos-crypto",
  "rustos-devmatch",
+ "rustos-devmgr",
  "rustos-drv-bus-pci",
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",
@@ -1423,11 +1424,15 @@ dependencies = [
 name = "rustos-test-driver-spawn-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
+ "ed25519-dalek",
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
  "rustos-bumpalloc",
  "rustos-caps",
+ "rustos-crypto",
+ "rustos-devmgr",
+ "rustos-drvhost",
  "rustos-fdt",
  "rustos-itest-harness",
  "rustos-kernel",

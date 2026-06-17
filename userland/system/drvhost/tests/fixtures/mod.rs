@@ -85,11 +85,15 @@ pub fn build_signed_image_with_bind_keys(
     for k in bind_keys {
         bind_table.extend_from_slice(&k.to_le_bytes());
     }
+    // The signed message covers the payload too (`host::verify_signature`):
+    // for a user-space driver the payload is the program the gate spawns,
+    // so it must be authenticated (`AGENTS.md` §8 / §2.17).
     let mut signed_message =
-        Vec::with_capacity(header_no_sig.len() + cap_body.len() + bind_table.len());
+        Vec::with_capacity(header_no_sig.len() + cap_body.len() + bind_table.len() + payload.len());
     signed_message.extend_from_slice(&header_no_sig);
     signed_message.extend_from_slice(&cap_body);
     signed_message.extend_from_slice(&bind_table);
+    signed_message.extend_from_slice(payload);
     let sig = signing_key.sign(&signed_message);
     manifest.signature = sig.to_bytes();
     let mut out = Vec::with_capacity(

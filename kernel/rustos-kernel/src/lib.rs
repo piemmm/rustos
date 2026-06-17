@@ -130,6 +130,21 @@ pub mod driver_catalog;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_loader;
 
+// The user-space sibling of `driver_loader` (`plans/PI.md` P10 5d-2-ii):
+// admits a discovered `kind = UserSpace` driver through the same signed
+// `drvhost::Host::load` gate, then **spawns** it into its own
+// hardware-isolated process, minting it one device-resource grant per
+// `HwResource` its matched hardware-tree node requested (`AGENTS.md` §4 —
+// drivers in user space; §18.3 — only the resources the matched node
+// requested). It implements `rustos_devmgr::DriverLoader`, so the device
+// manager's autoload walk drives it directly; the architecture-specific
+// process creation sits behind the `DriverProcessSpawn` seam, so the gate +
+// resource-threading logic is host-tested on the CI host. Gated, like
+// `driver_loader`, on the two instruction sets where `rustos-drvhost` /
+// `rustos-devmgr` are dependencies of this crate.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod driver_spawn_loader;
+
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production
 // boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus

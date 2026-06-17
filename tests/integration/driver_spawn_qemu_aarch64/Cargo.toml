@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-driver-spawn-qemu-aarch64"
-description = "PLAN.md Stage 4.HW QEMU integration test: prove the kernel-side production driver spawner end to end on the aarch64 virt board. The build script compiles the pure-Rust driver-stub program (tests/integration/driver_register_program) PIE and converts it to an rxe blob registered under /System/Drivers/. The kernel resolves it through a ProgramRegistry, spawns it through the production parameterised Aarch64ProcessSpawn::spawn_with via the exported KernelSpawnCtx admit path (driver-class caps + the reply endpoint id in arg(1)), and drives the cooperative step loop while the production KernelDispatchHook services the stub's syscalls — so its ipc_send runs the production copy-in + capability-gated Port::send path. PASS once the host-side budget-bounded wait polls Port::recv and fail-closed-decodes the stub's DriverRegisterReply::registered record."
+description = "PLAN.md Stage 4.HW / plans/PI.md P10 5d-2-ii(b-1) QEMU integration test: prove the devmgr-driven driver-spawn path end to end on the aarch64 virt board. The build script compiles the pure-Rust driver-stub program (tests/integration/driver_register_program) PIE, converts it to an rxe blob, and wraps it as the payload of a signed kind=UserSpace DriverManifest image. The kernel builds a discovered hardware tree (a virtio node carrying an MMIO HwResource) and runs DeviceManager::autoload with a SpawnDriverLoader: the signed Host::load gate verifies the image (signature now covers the payload), then the driver is spawned through Aarch64ProcessSpawn::spawn_with via KernelSpawnCtx, minting it one device-resource grant per matched-node resource. The stub reads its grant back via resource_grants and replies over the production capability-gated ipc_send path. PASS once the host-side budget-bounded wait fail-closed-decodes the stub's DriverRegisterReply::registered record (audit 13001 node-bound + 4302)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -46,6 +46,12 @@ rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
+# The device manager (autoload policy) + the driver host (the signed load
+# gate) the `SpawnDriverLoader` bridges: this vertical proves the
+# `devmgr`-driven driver-spawn path end to end (`plans/PI.md` P10 5d-2-ii).
+rustos-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0" }
+rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
 rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
@@ -60,3 +66,10 @@ rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 [build-dependencies]
 rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
 rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+# The build script wraps the converted stub `rxe` as the payload of a signed
+# `DriverManifest` image (`AGENTS.md` §8 / §9) the `SpawnDriverLoader` gate
+# admits, signed with a deterministic Ed25519 key whose public half the test
+# trusts. Encodes the manifest from the one ABI definition (`rustos-abi`).
+# Host-only build glue (`AGENTS.md` §12).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }

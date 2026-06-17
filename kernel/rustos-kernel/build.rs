@@ -196,10 +196,12 @@ struct DriverImage {
 /// kernel's compiled-in `SYSCALL_TABLE_HASH`, requesting `CAP_DRV_LOAD`)
 /// followed by its capability body and the driver's own `BIND_KEYS`, all
 /// covered by an Ed25519 signature over
-/// `header[..signed_end] || cap_body || bind_table` — exactly the message
-/// `drvhost::Host::verify_signature` reconstructs. The payload is empty:
-/// the drivers are statically linked, so the in-process spawner invokes
-/// their `register()` directly rather than loading a program image.
+/// `header[..signed_end] || cap_body || bind_table || payload` — exactly
+/// the message `drvhost::Host::verify_signature` reconstructs. The payload
+/// is empty: the drivers are statically linked, so the in-process spawner
+/// invokes their `register()` directly rather than loading a program image,
+/// and covering an empty payload is a no-op (a user-space driver's non-empty
+/// payload, by contrast, is authenticated, `AGENTS.md` §8 / §2.17).
 fn emit_signed_driver_manifests() {
     use ed25519_dalek::SigningKey;
 

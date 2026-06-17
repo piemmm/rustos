@@ -17,6 +17,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::{DriverHandle, Errno, HwNode};
 use rustos_caps::CapabilitySet;
 use rustos_log::{log as log_event, Event, EventId, Field, Level, Sink};
@@ -36,13 +37,30 @@ use crate::events;
 /// or bypasses those checks; it only consumes the outcome.
 pub trait DriverLoader {
     /// Load the image at `path` on behalf of a caller holding
-    /// `caller_caps`.
+    /// `caller_caps`, granting the loaded driver exactly the device
+    /// resources `resources` its matched hardware-tree node requested.
+    ///
+    /// `resources` is the matched node's [`HwNode::resources`] — the
+    /// MMIO windows, IRQ lines, and DMA constraints expressed as
+    /// capability-grant *requests* (`AGENTS.md` §4 / §18.1). The load
+    /// mechanism mints the loaded driver an unforgeable, owner-checked
+    /// grant per resource and nothing more, so the driver receives only
+    /// the authority its node exposed (`AGENTS.md` §18.3 — a loaded
+    /// driver receives only the resource capabilities its matched node
+    /// requested). The resources originate kernel-side, from the
+    /// discovered hardware tree, never from an untrusted caller (§4 —
+    /// no ambient authority); the device manager only forwards them.
     ///
     /// # Errors
     ///
     /// The gate's refusal mapped onto the `abi-v1` error surface
     /// (e.g. [`Errno::PermissionDenied`] for a missing capability).
-    fn load(&mut self, path: &str, caller_caps: &CapabilitySet) -> Result<DriverHandle, Errno>;
+    fn load(
+        &mut self,
+        path: &str,
+        resources: &[HwResource],
+        caller_caps: &CapabilitySet,
+    ) -> Result<DriverHandle, Errno>;
 }
 
 /// One node successfully bound by [`DeviceManager::autoload`].
@@ -127,7 +145,7 @@ impl<'m> DeviceManager<'m> {
                     let path = candidates[candidate].path;
                     let handle = match bound_paths.get(path) {
                         Some(existing) => *existing,
-                        None => match loader.load(path, caller_caps) {
+                        None => match loader.load(path, node.resources(), caller_caps) {
                             Ok(handle) => {
                                 bound_paths.insert(path, handle);
                                 handle
@@ -231,6 +249,9 @@ mod tests {
         /// else loads with the next sequential handle.
         refused: Vec<(String, Errno)>,
         calls: Vec<String>,
+        /// Every load's `(path, resources)` pair, so a test can assert
+        /// the matched node's requested resources reach the gate.
+        resources_seen: Vec<(String, Vec<HwResource>)>,
         next: u64,
     }
 
@@ -239,14 +260,22 @@ mod tests {
             Self {
                 refused: Vec::new(),
                 calls: Vec::new(),
+                resources_seen: Vec::new(),
                 next: 1,
             }
         }
     }
 
     impl DriverLoader for MockLoader {
-        fn load(&mut self, path: &str, caller_caps: &CapabilitySet) -> Result<DriverHandle, Errno> {
+        fn load(
+            &mut self,
+            path: &str,
+            resources: &[HwResource],
+            caller_caps: &CapabilitySet,
+        ) -> Result<DriverHandle, Errno> {
             self.calls.push(path.to_string());
+            self.resources_seen
+                .push((path.to_string(), resources.to_vec()));
             if !caller_caps.contains(CapabilityId::DRV_LOAD) {
                 return Err(Errno::PermissionDenied);
             }
@@ -317,6 +346,20 @@ mod tests {
         n
     }
 
+    fn node_with_resources(
+        id: u32,
+        class: HwDeviceClass,
+        keys: &[HwMatchKey],
+        resources: &[HwResource],
+    ) -> HwNode {
+        let mut n = node(id, class, keys);
+        for resource in resources {
+            n.push_resource(*resource)
+                .expect("test node resource count fits");
+        }
+        n
+    }
+
     fn loader_caps() -> CapabilitySet {
         let mut set = CapabilitySet::empty();
         set.insert(CapabilityId::DRV_LOAD);
@@ -351,6 +394,38 @@ mod tests {
         assert_eq!(
             sink.field_of(events::NODE_BOUND.0, "path").as_deref(),
             Some("/System/Drivers/emmc2")
+        );
+    }
+
+    #[test]
+    fn matched_node_resources_are_forwarded_to_the_loader() {
+        // §18.3: a loaded driver receives only the resource capabilities
+        // its matched node requested. The device manager must forward the
+        // *matched* node's resources to the load mechanism verbatim.
+        let keys = [compat(b"brcm,bcm2711-emmc2")];
+        let candidate_keys = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
+        let candidates = [DriverCandidate {
+            path: "/System/Drivers/emmc2",
+            bind_keys: &candidate_keys,
+        }];
+        let window = HwResource::mmio(0xfe34_0000, 0x100);
+        let irq = HwResource::irq(0x7e, 1);
+        let tree = [
+            HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+            node_with_resources(2, HwDeviceClass::Storage, &keys, &[window, irq]),
+        ];
+        let sink = RecordingSink::new();
+        let mut loader = MockLoader::new();
+        let report =
+            DeviceManager::new(&sink).autoload(&tree, &candidates, &loader_caps(), &mut loader);
+        assert_eq!(report.bindings.len(), 1);
+        assert_eq!(
+            loader.resources_seen,
+            [(
+                "/System/Drivers/emmc2".to_string(),
+                alloc::vec![window, irq]
+            )],
+            "the matched node's exact resource requests reach the loader"
         );
     }
 

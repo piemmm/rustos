@@ -136,6 +136,36 @@ fn tampered_signature_refused() {
 }
 
 #[test]
+fn tampered_payload_refused() {
+    // The manifest signature covers the payload (`host::verify_signature`):
+    // for a user-space driver the payload is the program the gate spawns, so
+    // rewriting it after signing must be refused, closing the
+    // unsigned-code-execution hole (`AGENTS.md` §8 / §2.17). A flipped
+    // payload byte fails signature verification exactly as a flipped
+    // signature does.
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let mut img = build_signed_image(
+        &sk,
+        DriverKind::UserSpace,
+        SYS_HASH,
+        &[],
+        b"the-driver-program-rxe-payload",
+    );
+    // Flip a bit in the last byte — inside the payload, after the manifest
+    // header, capability body, and (empty) bind table.
+    let last = img.len() - 1;
+    img[last] ^= 0x01;
+    run_negative(
+        img,
+        full_caps(),
+        &trusted,
+        HostError::SignatureInvalid,
+        7005, // DRIVER_LOAD_REJECTED_SIGNATURE
+    );
+}
+
+#[test]
 fn untrusted_signer_refused() {
     let host_sk = test_signing_key();
     let foreign_sk = alternative_signing_key();

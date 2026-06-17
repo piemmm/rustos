@@ -35,7 +35,19 @@ struct HostLoader<'h, 'x> {
 }
 
 impl DriverLoader for HostLoader<'_, '_> {
-    fn load(&mut self, path: &str, caller_caps: &CapabilitySet) -> Result<DriverHandle, Errno> {
+    fn load(
+        &mut self,
+        path: &str,
+        _resources: &[rustos_abi::hwtree::HwResource],
+        caller_caps: &CapabilitySet,
+    ) -> Result<DriverHandle, Errno> {
+        // This adapter exercises the *verification* gate with an
+        // in-process register spawner: the verified driver runs in this
+        // host's own domain and reaches hardware through the host's own
+        // capability-gated view, so the matched node's resource grants
+        // are not minted here (they are minted by the process-spawning
+        // loader that creates a fresh driver process — `AGENTS.md`
+        // §18.3). The argument is accepted to satisfy the seam.
         self.host
             .load(path, caller_caps)
             .map_err(rustos_drvhost::HostError::as_errno)
