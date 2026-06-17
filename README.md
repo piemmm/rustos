@@ -1,4 +1,4 @@
-# RustOS - An experiment in letting an AI generate an OS.
+# RustOS (not it's final name) - An OS experiment.
 
 A security-first, multi-user, multi-core operating system written in Rust,
 targeting bare-metal x86_64, AArch64, RISC-V 64, and the browser via
