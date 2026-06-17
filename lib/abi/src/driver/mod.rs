@@ -58,6 +58,7 @@ pub mod net;
 pub mod pci;
 pub mod port_io;
 pub mod register;
+pub mod timing;
 pub mod virtio;
 pub mod virtio_mmio;
 pub mod virtio_pci;
@@ -68,6 +69,7 @@ pub use msix::{MsiMessage, MsixBus};
 pub use pci::PciBus;
 pub use port_io::{PortIo, PortIo8};
 pub use register::{DriverRegisterReply, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK};
+pub use timing::Delay;
 pub use virtio::VirtioHost;
 pub use virtio_mmio::VirtioMmioBus;
 pub use virtio_pci::{

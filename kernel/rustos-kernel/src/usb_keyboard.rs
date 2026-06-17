@@ -162,22 +162,6 @@ const USB_KEYBOARD_ROOT_PORTS: EventId = EventId(4125);
 /// answering with that error.
 const USB_KEYBOARD_ENUM_STAGE: EventId = EventId(4126);
 
-/// Audit event: one record per downstream port when the device on the
-/// root hub is itself a hub (`DeviceDescriptor::is_hub`), as on the Pi 4B
-/// where the keyboard hangs off the onboard `2109:3431` hub. After
-/// powering the port on, each record carries `num_ports_hex`, the 1-based
-/// `port_hex`, raw `wstatus_hex`/`completion_hex`, `evtype_hex`/`reject_hex`
-/// (the last event's TRB type and why the wait rejected), and decoded
-/// `connected_hex`/`speed_hex`. The port with `connected_hex=1` is where
-/// the keyboard attaches — the input to downstream addressing.
-const USB_KEYBOARD_HUB_PORTS: EventId = EventId(4127);
-
-/// Audit event: the HID keyboard addressed *downstream* of the hub on a
-/// second xHCI slot (`vid:pid`, slot, hub port, speed), reached by
-/// resetting its hub port and addressing it with a Route String + TT slot
-/// context ([`UsbDevice::enumerate_downstream_hid`]).
-const USB_KEYBOARD_DOWNSTREAM: EventId = EventId(4128);
-
 /// Audit event: the first keyboard report drained on the poll loop
 /// (one-shot, with cumulative poll/event counts). Its presence proves the
 /// interrupt-IN endpoint completes transfers; its absence while the
@@ -198,19 +182,6 @@ const USB_KEYBOARD_PUMP_ERROR: EventId = EventId(4130);
 /// Polls climbing while events/errors stay zero proves the loop is alive
 /// but the keyboard delivers no reports.
 const USB_KEYBOARD_POLL_HEARTBEAT: EventId = EventId(4131);
-
-/// Hub power-on-good settle before reading a downstream port's connect
-/// status. A USB 2.0 hub's `bPwrOn2PwrGood` is reported in 2 ms units
-/// and is commonly ≤ 100 ms (USB 2.0 §11.11); this fixed budget covers
-/// the typical worst case for the one-shot diagnostic scan rather than
-/// decoding the field, and the metal capture confirms whether it sufficed.
-const HUB_POWER_ON_GOOD_US: u32 = 100_000;
-
-/// Reset-recovery settle after a downstream-port `SET_FEATURE(PORT_RESET)`
-/// before reading the port enabled and addressing the device. USB 2.0
-/// §7.1.7.5 requires ≥ 10 ms of reset recovery; this conservative budget
-/// covers a slow hub for the one-shot downstream bring-up.
-const HUB_RESET_RECOVERY_US: u32 = 50_000;
 
 /// The Pi firmware reset controller's encoded VL805 PCI address
 /// (`bus << 20 | slot << 15 | func << 12`) for the hardwired bus-1,
@@ -1057,286 +1028,6 @@ fn log_root_ports(sink: &dyn Sink, usb: &mut UsbDevice<RegisterWindow, DmaSlab>)
             },
         );
     }
-}
-
-/// Walk a USB hub's downstream ports and log each one's hub-class status
-/// (`4127`), one record per port, when the device on the root hub is
-/// itself a hub (`DeviceDescriptor::is_hub`).
-///
-/// Reads `bNbrPorts`, powers every downstream port on, waits the
-/// power-on-good window, then reads each port's hub-class `wPortStatus`.
-/// The port with `connected_hex=1` pins where the keyboard attaches and at
-/// what speed. Read-only. A descriptor or
-/// power-on fault aborts the diagnostic (logged); a faulting per-port
-/// read renders the all-ones sentinel rather than aborting.
-fn log_hub_ports(sink: &dyn Sink, usb: &mut UsbDevice<RegisterWindow, DmaSlab>, delay: &dyn Delay) {
-    use rustos_usb::device::{hub_port_connected, hub_port_speed};
-
-    let num_ports = match usb.hub_num_ports() {
-        Ok(ports) => ports,
-        Err(err) => {
-            // Pair the error with the raw xHCI completion code: STALL
-            // (6), USB transaction error (4) or missing completion (0).
-            let mut completion_buf = [0u8; 16];
-            log(
-                sink,
-                &Event {
-                    level: Level::Error,
-                    id: USB_KEYBOARD_HUB_PORTS,
-                    message: "usb-keyboard: reading the hub descriptor failed",
-                    fields: &[
-                        Field {
-                            key: "err",
-                            value: driver_error_name(err),
-                        },
-                        Field {
-                            key: "completion_hex",
-                            value: format_hex_u64(
-                                u64::from(usb.last_completion_code()),
-                                &mut completion_buf,
-                            ),
-                        },
-                    ],
-                },
-            );
-            return;
-        }
-    };
-    for port in 1..=num_ports {
-        if let Err(err) = usb.power_hub_port(port) {
-            log_stage_err(
-                sink,
-                "usb-keyboard: powering a downstream hub port failed",
-                err,
-            );
-            return;
-        }
-    }
-    delay.delay_us(HUB_POWER_ON_GOOD_US);
-    for port in 1..=num_ports {
-        // A faulting per-port read renders the all-ones `wstatus`
-        // sentinel. `completion_hex` is the transfer's raw xHCI code;
-        // `evtype_hex`/`reject_hex` (1 unexpected type, 2 address
-        // mismatch, 3 undecodable code, 4 budget timeout) name why a wait
-        // rejected. `hub_port_status` runs through `control`, which resets
-        // these per transfer, so they reflect this port's read.
-        let status = usb.hub_port_status(port).unwrap_or(u16::MAX);
-        let completion = u64::from(usb.last_completion_code());
-        let evtype = u64::from(usb.last_event_type());
-        let reject = u64::from(usb.last_reject_reason());
-        let connected = u64::from(hub_port_connected(status));
-        let speed = u64::from(hub_port_speed(status));
-        let mut num_buf = [0u8; 16];
-        let mut port_buf = [0u8; 16];
-        let mut status_buf = [0u8; 16];
-        let mut completion_buf = [0u8; 16];
-        let mut evtype_buf = [0u8; 16];
-        let mut reject_buf = [0u8; 16];
-        let mut connected_buf = [0u8; 16];
-        let mut speed_buf = [0u8; 16];
-        log(
-            sink,
-            &Event {
-                level: Level::Info,
-                id: USB_KEYBOARD_HUB_PORTS,
-                message: "usb-keyboard: downstream hub port status after power-on",
-                fields: &[
-                    Field {
-                        key: "num_ports_hex",
-                        value: format_hex_u64(u64::from(num_ports), &mut num_buf),
-                    },
-                    Field {
-                        key: "port_hex",
-                        value: format_hex_u64(u64::from(port), &mut port_buf),
-                    },
-                    Field {
-                        key: "wstatus_hex",
-                        value: format_hex_u64(u64::from(status), &mut status_buf),
-                    },
-                    Field {
-                        key: "completion_hex",
-                        value: format_hex_u64(completion, &mut completion_buf),
-                    },
-                    Field {
-                        key: "evtype_hex",
-                        value: format_hex_u64(evtype, &mut evtype_buf),
-                    },
-                    Field {
-                        key: "reject_hex",
-                        value: format_hex_u64(reject, &mut reject_buf),
-                    },
-                    Field {
-                        key: "connected_hex",
-                        value: format_hex_u64(connected, &mut connected_buf),
-                    },
-                    Field {
-                        key: "speed_hex",
-                        value: format_hex_u64(speed, &mut speed_buf),
-                    },
-                ],
-            },
-        );
-    }
-}
-
-/// Address and configure the HID keyboard hanging off a downstream hub
-/// port, on a second xHCI slot.
-///
-/// The device on the root hub is the Pi 4B's onboard `2109:3431` hub; the
-/// keyboard is one tier below it. Finds the first connected downstream
-/// port, resets it (`SET_FEATURE(PORT_RESET)`), waits the reset-recovery
-/// window, confirms it enabled, reads its speed, and addresses the device
-/// through [`UsbDevice::enumerate_downstream_hid`] (Route String + TT slot
-/// context). On success the engine is left pointed at the keyboard's slot.
-/// Every outcome is logged under [`USB_KEYBOARD_DOWNSTREAM`]; a fault fails
-/// closed.
-fn address_downstream_keyboard(
-    sink: &dyn Sink,
-    usb: &mut UsbDevice<RegisterWindow, DmaSlab>,
-    delay: &dyn Delay,
-) {
-    use rustos_usb::device::{hub_port_connected, hub_port_enabled, hub_port_speed};
-
-    let num_ports = match usb.hub_num_ports() {
-        Ok(ports) => ports,
-        Err(err) => {
-            log_stage_err(
-                sink,
-                "usb-keyboard: reading the hub descriptor for downstream addressing failed",
-                err,
-            );
-            return;
-        }
-    };
-    // The ports were powered and allowed to settle by `log_hub_ports`;
-    // find the first one reporting a connected device.
-    let mut connected_port = 0u8;
-    for port in 1..=num_ports {
-        if let Ok(status) = usb.hub_port_status(port) {
-            if hub_port_connected(status) {
-                connected_port = port;
-                break;
-            }
-        }
-    }
-    if connected_port == 0 {
-        log(
-            sink,
-            &Event {
-                level: Level::Info,
-                id: USB_KEYBOARD_DOWNSTREAM,
-                message: "usb-keyboard: no connected downstream hub port to address",
-                fields: &[],
-            },
-        );
-        return;
-    }
-    // Reset the port so the hub enables it and establishes its speed and
-    // transaction translator, then wait the reset-recovery window.
-    if let Err(err) = usb.reset_hub_port(connected_port) {
-        log_stage_err(
-            sink,
-            "usb-keyboard: resetting the downstream port failed",
-            err,
-        );
-        return;
-    }
-    delay.delay_us(HUB_RESET_RECOVERY_US);
-    let status = match usb.hub_port_status(connected_port) {
-        Ok(status) => status,
-        Err(err) => {
-            log_stage_err(
-                sink,
-                "usb-keyboard: reading the downstream port after reset failed",
-                err,
-            );
-            return;
-        }
-    };
-    if !hub_port_enabled(status) {
-        let mut port_buf = [0u8; 16];
-        let mut status_buf = [0u8; 16];
-        log(
-            sink,
-            &Event {
-                level: Level::Error,
-                id: USB_KEYBOARD_DOWNSTREAM,
-                message: "usb-keyboard: downstream port did not enable after reset",
-                fields: &[
-                    Field {
-                        key: "port_hex",
-                        value: format_hex_u64(u64::from(connected_port), &mut port_buf),
-                    },
-                    Field {
-                        key: "wstatus_hex",
-                        value: format_hex_u64(u64::from(status), &mut status_buf),
-                    },
-                ],
-            },
-        );
-        return;
-    }
-    let speed = hub_port_speed(status);
-    match usb.enumerate_downstream_hid(connected_port, speed) {
-        Ok(descriptor) => {
-            let slot = usb.slot();
-            log_downstream_keyboard(sink, descriptor, slot, connected_port, speed);
-        }
-        Err(err) => {
-            log_stage_err(
-                sink,
-                "usb-keyboard: addressing the downstream keyboard failed",
-                err,
-            );
-            log_enum_stage(sink, usb);
-        }
-    }
-}
-
-/// Log the HID keyboard addressed downstream of the hub (`4128`): its
-/// `vid:pid`, xHCI slot, hub port, and speed.
-fn log_downstream_keyboard(
-    sink: &dyn Sink,
-    descriptor: rustos_usb::device::DeviceDescriptor,
-    slot: u8,
-    hub_port: u8,
-    speed: u8,
-) {
-    let mut vid_buf = [0u8; 16];
-    let mut pid_buf = [0u8; 16];
-    let mut slot_buf = [0u8; 16];
-    let mut port_buf = [0u8; 16];
-    let mut speed_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_DOWNSTREAM,
-            message: "usb-keyboard: addressed the hid keyboard downstream of the hub",
-            fields: &[
-                Field {
-                    key: "vendor_id_hex",
-                    value: format_hex_u64(u64::from(descriptor.vendor_id), &mut vid_buf),
-                },
-                Field {
-                    key: "product_id_hex",
-                    value: format_hex_u64(u64::from(descriptor.product_id), &mut pid_buf),
-                },
-                Field {
-                    key: "xhci_slot",
-                    value: format_hex_u64(u64::from(slot), &mut slot_buf),
-                },
-                Field {
-                    key: "hub_port_hex",
-                    value: format_hex_u64(u64::from(hub_port), &mut port_buf),
-                },
-                Field {
-                    key: "speed_hex",
-                    value: format_hex_u64(u64::from(speed), &mut speed_buf),
-                },
-            ],
-        },
-    );
 }
 
 /// Log which enumeration step the root-hub bring-up last entered (`4126`)
@@ -2189,14 +1880,21 @@ pub fn bring_up_keyboard(
     )?;
     log_stage(
         sink,
-        "usb-keyboard: vl805 xhci controller online, enumerating root hub",
+        "usb-keyboard: vl805 xhci controller online, enumerating boot keyboard",
     );
-    let descriptor = match usb.enumerate_first_connected() {
+    // Bring up the boot keyboard, transparently descending one tier through
+    // the Pi 4B's onboard 2109:3431 hub when the root-hub device is itself a
+    // hub. The arch-neutral root→hub→downstream orchestration lives once in
+    // `rustos_usb::device::UsbDevice::enumerate_boot_keyboard` (`AGENTS.md`
+    // §2.2), so the keyboard is *discovered*, never a guessed port (§18); on
+    // success `usb` is left pointed at the keyboard's slot so `BootKeyboard`
+    // drains its reports, and any fault fails closed (§2.9).
+    let descriptor = match usb.enumerate_boot_keyboard(delay) {
         Ok(descriptor) => descriptor,
         Err(err) => {
             log_stage_err(
                 sink,
-                "usb-keyboard: no usb device enumerated on the root hub",
+                "usb-keyboard: enumerating a boot keyboard failed",
                 err,
             );
             // Pin which enumeration step faulted, then dump each root-hub
@@ -2209,19 +1907,6 @@ pub fn bring_up_keyboard(
     // Read the assigned slot before `usb` is moved into the keyboard.
     let slot = usb.slot();
     log_enumerated_root_device(sink, descriptor, slot);
-    if descriptor.is_hub() {
-        // The device on the root hub is the Pi 4B's onboard 2109:3431 hub,
-        // not the keyboard — the keyboard hangs off a downstream port. Walk
-        // the hub's downstream ports (the `4127` diagnostic shows which
-        // port the keyboard is on and at what speed), then address it
-        // through the hub on a second xHCI slot with a Route String + TT
-        // slot context (`plans/PI.md`, `AGENTS.md` §15.7). On success `usb`
-        // is left pointed at the keyboard's slot so `BootKeyboard` drains
-        // its reports; a fault fails closed (the keyboard stays unreached)
-        // rather than aborting the service (`AGENTS.md` §2.9).
-        log_hub_ports(sink, &mut usb, delay);
-        address_downstream_keyboard(sink, &mut usb, delay);
-    }
     let hid_node = describe_enumerated_hid(&usb, sink)?;
     Ok(BroughtUpKeyboard {
         keyboard: BootKeyboard::new(usb),

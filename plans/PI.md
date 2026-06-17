@@ -3373,15 +3373,39 @@ table, so a new board is match **data**, not new code. Sub-increments
       whole gate green (`cargo xtask ci` incl. both Pi images, `fuzz --secs 5`,
       `soak both`, `cargo xtask test --qemu`). Docs: `docs/src/lib/usb.md`,
       `docs/src/drivers/bus.md`, the two crate READMEs, AGENTS.md §3 + SUMMARY.
+    - **5d-2-ii (b-2-ii) — generic boot-keyboard orchestration + shared
+      `Delay` seam — done (host-proven).** The arch-neutral
+      root→hub→downstream-HID bring-up sequence is now one definition,
+      `rustos_usb::device::UsbDevice::enumerate_boot_keyboard(delay)` in
+      `lib/usb` (§2.2/§18): enumerate the first connected root-hub port and,
+      when it is a hub (the Pi 4B onboard hub), power its ports, settle, find
+      the connected one, reset it, settle, and address the device behind it on
+      a second slot — discovered, never a guessed port, failing closed. Its
+      timed settles use the microsecond `Delay` seam, hoisted from
+      `drivers/bus/pcie_brcm` into `lib/abi` (`rustos_abi::Delay`) so the PCIe
+      and USB driver crates share one trait (§2.2; `pcie_brcm` re-exports it,
+      callers unchanged; a trait, so no C-header change). The in-kernel
+      `keyboard_service` scaffold's `bring_up_keyboard` now calls the shared
+      routine and its duplicated `log_hub_ports`/`address_downstream_keyboard`/
+      `log_downstream_keyboard` + the `4127`/`4128` event-ids are deleted
+      (§2.2/§2.14). Host-proven (`lib/usb` 74 tests incl.
+      `enumerate_boot_keyboard_{returns_a_directly_attached_keyboard,
+      descends_through_a_hub_to_the_keyboard,
+      fails_closed_when_a_hub_has_no_connected_downstream}`; kernel lib tests
+      green). Docs: `docs/src/lib/usb.md`, `docs/src/platform/aarch64.md`.
+      Touches the metal-confirmed scaffold bring-up (behaviour-equivalent by
+      construction) ⇒ an operator §0.9 metal re-verify (parity: the on-screen
+      `Username:` prompt still takes keystrokes).
     - **5d-2-ii (b-2-ii) (next)** the real user-space keyboard driver *process*:
       a `devmgr`-autoloaded `rxe` that builds an `RtDriverHost::from_grants_query`
-      and runs the generic `bus_usb`→`usb_hid` bring-up + report pump over
+      and runs `enumerate_boot_keyboard` + the `usb_hid` report pump over
       `lib/usb` (and its granted xHCI BAR + DMA — the board PCIe root-complex
       bring-up + BAR assignment stay in the separate board bus driver so the
-      keyboard driver is arch-neutral), injecting key edges via `key_inject`;
-      plus the production boot wiring that runs `DeviceManager::autoload`
-      against the discovered tree (hosted in kernel/core, which owns the
-      scheduler) and the metal checkpoint.
+      keyboard driver is arch-neutral; the userland `Delay` rides the
+      monotonic-clock syscall), injecting key edges via `key_inject`; plus the
+      production boot wiring that runs `DeviceManager::autoload` against the
+      discovered tree (hosted in kernel/core, which owns the scheduler) and the
+      metal checkpoint.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.

@@ -17,6 +17,7 @@ use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
 use rustos_abi::driver::input::{Input, ReportSource};
+use rustos_abi::Delay;
 use rustos_drv_input_usb_hid::BootKeyboard;
 
 /// The mock's `CAPLENGTH` (so its operational base).
@@ -2241,6 +2242,134 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
         .expect("a report is available");
     assert_eq!(len, REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
+}
+
+/// A deterministic [`Delay`] for the host tests: counts `delay_us`
+/// invocations and advances a synthetic monotonic clock, so a test asserts
+/// the hub settle windows were honoured without sleeping (`AGENTS.md` §7 —
+/// no flaky tests).
+#[derive(Default)]
+struct TestDelay {
+    calls: core::cell::Cell<u32>,
+    now: core::cell::Cell<u64>,
+}
+
+impl Delay for TestDelay {
+    fn delay_us(&self, us: u32) {
+        self.calls.set(self.calls.get() + 1);
+        self.now.set(self.now.get() + u64::from(us));
+    }
+
+    fn now_us(&self) -> u64 {
+        self.now.get()
+    }
+}
+
+#[test]
+fn enumerate_boot_keyboard_returns_a_directly_attached_keyboard() {
+    // A keyboard wired straight to a root-hub port (no intervening hub):
+    // the orchestration enumerates the first connected port and, because
+    // the device is not a hub, returns it without touching the clock.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+
+    let descriptor = device
+        .enumerate_boot_keyboard(&delay)
+        .expect("the directly-attached keyboard enumerates");
+    assert!(!descriptor.is_hub(), "the root-port device is the keyboard");
+    assert_eq!(descriptor.vendor_id, 0x046D);
+    assert_eq!(
+        delay.calls.get(),
+        0,
+        "no hub tier means no settle window is waited"
+    );
+
+    // Its boot report ring drains.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
+}
+
+#[test]
+fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
+    // The Pi 4B metal topology: the onboard hub enumerates on the root
+    // port and a full-speed keyboard hangs off a downstream port. The
+    // orchestration recognises the hub, powers its ports, waits the
+    // power-on-good window, resets the connected port, waits reset
+    // recovery, and addresses the keyboard on a second slot — without the
+    // caller naming a port (`AGENTS.md` §18 — discovered, not guessed).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // Full-speed downstream device (the metal `wstatus` case: connect, no
+    // high-speed bit), so its transactions split through the hub's TT.
+    mock.hub_downstream_status = 1 << 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    let keyboard = device
+        .enumerate_boot_keyboard(&delay)
+        .expect("the keyboard behind the onboard hub is reached");
+    assert!(
+        !keyboard.is_hub(),
+        "the downstream device is the HID keyboard, not another hub"
+    );
+    assert_eq!(keyboard.vendor_id, 0x046D);
+    assert_eq!(keyboard.product_id, 0xC077);
+    // Descended one tier: the keyboard sits on a second xHCI slot,
+    // addressed through the hub's downstream port 4.
+    assert_eq!(device.slot(), 2, "the keyboard gets its own slot");
+    assert_eq!(device.host_mut().downstream_route_port, 4);
+    // Both hardware settle windows were honoured (power-on-good then
+    // reset-recovery), each exactly once.
+    assert_eq!(delay.calls.get(), 2);
+
+    // With the hub marked and the endpoint configured, reports drain.
+    device
+        .host_mut()
+        .pending_reports
+        .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    device.host_mut().process_int_ring();
+    let mut buf = [0u8; REPORT_LEN];
+    let len = device
+        .next_report(&mut buf)
+        .expect("a report drains")
+        .expect("a report is available");
+    assert_eq!(len, REPORT_LEN);
+    assert_eq!(buf[2], 0x04);
+}
+
+#[test]
+fn enumerate_boot_keyboard_fails_closed_when_a_hub_has_no_connected_downstream() {
+    // The root device is a hub, but no downstream port ever reports a
+    // connected device. The orchestration must fail closed
+    // (`DriverError::NotFound`) rather than guess a port (`AGENTS.md`
+    // §2.9 / §5.4).
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_hub(&mem, 4, 4);
+    // No connect bit, so every downstream port reads disconnected even
+    // after it is powered.
+    mock.hub_downstream_status = 0;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    assert_eq!(
+        device.enumerate_boot_keyboard(&delay).err(),
+        Some(DriverError::NotFound),
+        "a hub with nothing attached downstream fails closed"
+    );
+    // The power-on-good window was waited once; the reset-recovery wait is
+    // never reached because no connected port is found.
+    assert_eq!(delay.calls.get(), 1);
 }
 
 #[test]

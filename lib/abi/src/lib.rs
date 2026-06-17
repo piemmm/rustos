@@ -44,7 +44,7 @@ pub use appinfo::{
 };
 pub use capability::{CapabilityId, CapabilityQuery, CAPABILITY_ID_MAX};
 pub use driver::{
-    decode_bind_keys, BufferClass, DriverBindKey, DriverError, DriverHandle, DriverHost,
+    decode_bind_keys, BufferClass, Delay, DriverBindKey, DriverError, DriverHandle, DriverHost,
     DriverKind, DriverManifest, DriverRegisterReply, MmioMapError, MmioMapper, MsiMessage, MsixBus,
     PciBus, PortIo, PortIo8, RegisterWindow, VirtioMmioBus, VirtioPciBus, WindowError,
     DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,

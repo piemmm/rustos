@@ -124,20 +124,14 @@ impl PcieRegs for RegisterWindow {
     }
 }
 
-/// A microsecond timing seam: a busy-delay plus a monotonic clock. The
-/// kernel supplies a generic-timer implementation
+/// A microsecond timing seam: a busy-delay plus a monotonic clock.
+///
+/// Re-exported from `lib/abi` (`rustos_abi::Delay`) — the single definition
+/// shared with the bus-agnostic USB stack (`lib/usb`), so the two driver
+/// crates depend on one trait rather than each declaring their own
+/// (`AGENTS.md` §2.2). The kernel supplies a generic-timer implementation
 /// (`CNTPCT_EL0`/`CNTFRQ_EL0`); host tests a deterministic stand-in.
-pub trait Delay {
-    /// Block for at least `us` microseconds.
-    fn delay_us(&self, us: u32);
-
-    /// A monotonically non-decreasing microsecond timestamp from the same
-    /// source `delay_us` blocks against, so a caller can bound a poll loop
-    /// by elapsed wall time rather than an iteration count (a single read
-    /// that itself blocks cannot then inflate the loop). The epoch is
-    /// unspecified; only differences are meaningful.
-    fn now_us(&self) -> u64;
-}
+pub use rustos_abi::Delay;
 
 /// Driver entry point (`AGENTS.md` §8).
 ///

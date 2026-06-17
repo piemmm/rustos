@@ -880,16 +880,33 @@ order (one fully-gated increment each):
          wiring), and the whole gate is green. Now a future keyboard-driver
          *process* (and any other host-controller/HID driver) can build on
          `lib/usb` without a driver→driver edge.
+       - **5d-2-ii (b-2-ii) — generic boot-keyboard orchestration + shared
+         `Delay` seam — done (host-proven).** The arch-neutral
+         root→hub→downstream-HID bring-up is now one definition,
+         `rustos_usb::device::UsbDevice::enumerate_boot_keyboard(delay)` in
+         `lib/usb` (§2.2/§18) — enumerate the first connected root-hub port and,
+         when it is a hub, power/settle/find/reset/settle and address the device
+         on a second slot, discovered and fail-closed. Its timed settles use the
+         microsecond `Delay` seam, hoisted from `drivers/bus/pcie_brcm` into
+         `lib/abi` (`rustos_abi::Delay`) so the PCIe and USB driver crates share
+         one trait (`pcie_brcm` re-exports it; a trait, so no C-header change).
+         The in-kernel `keyboard_service` scaffold's `bring_up_keyboard` now
+         calls the shared routine; its duplicated hub-descent helpers
+         (`log_hub_ports`/`address_downstream_keyboard`/`log_downstream_keyboard`)
+         and the `4127`/`4128` event-ids are deleted (§2.2/§2.14). Host-proven
+         (`lib/usb` 74 tests + the new `enumerate_boot_keyboard_*` cases; kernel
+         lib tests green). Touches the metal-confirmed scaffold bring-up
+         (behaviour-equivalent) ⇒ operator §0.9 metal parity re-verify.
        - **5d-2-ii (b-2-ii) (next)** the real user-space keyboard driver
          *process*: a `devmgr`-autoloaded `rxe` that builds
-         `RtDriverHost::from_grants_query`, runs the generic `bus_usb`→`usb_hid`
-         bring-up + report pump over `lib/usb` (and its granted xHCI BAR + DMA;
-         the board PCIe root-complex bring-up + BAR assignment stay in the
-         separate board bus driver, keeping the keyboard driver arch-neutral),
-         injecting key edges via `key_inject`; plus the production boot wiring
-         that runs `DeviceManager::autoload` against the discovered tree
-         (kernel/core owns the scheduler, so it hosts the autoload step) and the
-         metal checkpoint.
+         `RtDriverHost::from_grants_query`, runs `enumerate_boot_keyboard` +
+         the `usb_hid` report pump over `lib/usb` (and its granted xHCI BAR +
+         DMA; the board PCIe root-complex bring-up + BAR assignment stay in the
+         separate board bus driver, keeping the keyboard driver arch-neutral;
+         the userland `Delay` rides the monotonic-clock syscall), injecting key
+         edges via `key_inject`; plus the production boot wiring that runs
+         `DeviceManager::autoload` against the discovered tree (kernel/core owns
+         the scheduler, so it hosts the autoload step) and the metal checkpoint.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

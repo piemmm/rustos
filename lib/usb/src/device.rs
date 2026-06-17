@@ -22,7 +22,7 @@
 
 use rustos_abi::driver::dma::DmaSlab;
 use rustos_abi::driver::input::ReportSource;
-use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode};
+use rustos_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode};
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
@@ -102,6 +102,19 @@ const EP_TYPE_INTERRUPT_IN: u32 = 7;
 /// the default for [`UsbDevice::int_dci`] before a HID interface's
 /// interrupt endpoint is read from its descriptor.
 const DCI_CONTROL: u8 = 1;
+
+/// Hub power-on-good settle, in microseconds, before reading a downstream
+/// port's connect status. A USB 2.0 hub reports `bPwrOn2PwrGood` in 2 ms
+/// units and is commonly ≤ 100 ms (USB 2.0 §11.11); this fixed budget
+/// covers the typical worst case rather than decoding the field. A fixed
+/// protocol settle, not a scalable capacity (`AGENTS.md` §24.4).
+const HUB_POWER_ON_GOOD_US: u32 = 100_000;
+
+/// Reset-recovery settle, in microseconds, after a downstream-port
+/// `SET_FEATURE(PORT_RESET)` before reading the port enabled and
+/// addressing the device. USB 2.0 §7.1.7.5 requires ≥ 10 ms of reset
+/// recovery; this conservative budget covers a slow hub.
+const HUB_RESET_RECOVERY_US: u32 = 50_000;
 
 /// Where each structure lives inside the caller's [`DmaRegion`].
 ///
@@ -1567,6 +1580,82 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             }
         }
         Err(DriverError::NotFound)
+    }
+
+    /// Bring up a HID boot keyboard reachable through the controller,
+    /// transparently descending one tier through a USB hub.
+    ///
+    /// This is the arch-neutral bring-up orchestration a keyboard driver
+    /// runs once after [`Self::start`]: it enumerates the first connected
+    /// root-hub port ([`Self::enumerate_first_connected`]) and, if that
+    /// device is itself a hub (the Raspberry Pi 4's onboard hub is — the
+    /// keyboard hangs off a downstream port), powers the hub's downstream
+    /// ports, finds the first connected one, resets it, and addresses the
+    /// device behind it on a second xHCI slot
+    /// ([`Self::enumerate_downstream_hid`]). On success [`Self::slot`] is
+    /// the keyboard's slot and [`ReportSource::next_report`] drains its
+    /// reports; the engine holds no logging dependency, so a driver wraps
+    /// this with its own diagnostics (`AGENTS.md` §17.4 / §2.2).
+    ///
+    /// `delay` supplies the hardware-dictated settle windows (hub
+    /// power-on-good and reset-recovery); the caller owns the clock.
+    /// Only one tier of hub is descended — the boot-keyboard topology
+    /// the Pi 4 presents — rather than a recursive bus walk; a keyboard
+    /// nested two hubs deep is left unreached fail-closed rather than
+    /// guessed at (`AGENTS.md` §2.9).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no device connects on the root hub,
+    ///   or the root device is a hub with no connected downstream port
+    ///   (fail closed — never a guessed port, `AGENTS.md` §5.4 / §2.9).
+    /// * [`DriverError::DeviceFault`] if a reset downstream port does not
+    ///   report enabled (it never established a speed/TT, so addressing it
+    ///   would be a guess).
+    /// * Any error of [`Self::enumerate_first_connected`],
+    ///   [`Self::hub_num_ports`], [`Self::power_hub_port`],
+    ///   [`Self::hub_port_status`], [`Self::reset_hub_port`], or
+    ///   [`Self::enumerate_downstream_hid`].
+    pub fn enumerate_boot_keyboard(
+        &mut self,
+        delay: &dyn Delay,
+    ) -> Result<DeviceDescriptor, DriverError> {
+        let descriptor = self.enumerate_first_connected()?;
+        if !descriptor.is_hub() {
+            // The keyboard is attached directly to a root-hub port.
+            return Ok(descriptor);
+        }
+        // The root device is a hub (the Pi 4's onboard hub); the keyboard
+        // is one tier below it. Power every downstream port and let the
+        // power-on-good window elapse before reading connect status.
+        let num_ports = self.hub_num_ports()?;
+        for port in 1..=num_ports {
+            self.power_hub_port(port)?;
+        }
+        delay.delay_us(HUB_POWER_ON_GOOD_US);
+        let mut connected_port = 0u8;
+        for port in 1..=num_ports {
+            if let Ok(status) = self.hub_port_status(port) {
+                if hub_port_connected(status) {
+                    connected_port = port;
+                    break;
+                }
+            }
+        }
+        if connected_port == 0 {
+            return Err(DriverError::NotFound);
+        }
+        // Reset the port so the hub enables it and establishes its speed
+        // and transaction translator, then wait the reset-recovery window
+        // before reading the port enabled.
+        self.reset_hub_port(connected_port)?;
+        delay.delay_us(HUB_RESET_RECOVERY_US);
+        let status = self.hub_port_status(connected_port)?;
+        if !hub_port_enabled(status) {
+            return Err(DriverError::DeviceFault);
+        }
+        let speed = hub_port_speed(status);
+        self.enumerate_downstream_hid(connected_port, speed)
     }
 
     /// Number of root-hub ports the controller reports

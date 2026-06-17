@@ -37,7 +37,13 @@ build on the *same* engine without depending on each other — exactly the split
   `rustos_abi::driver::input::ReportSource` seam so the `drivers/input/usb_hid`
   decoders read reports straight off the transfer ring. The interrupt-IN
   endpoint's DCI, packet size, and interval are read from the device's endpoint
-  descriptor (never hard-coded).
+  descriptor (never hard-coded). `enumerate_boot_keyboard` is the arch-neutral
+  bring-up orchestration a keyboard driver runs once: it enumerates the first
+  connected root-hub port and, when that device is itself a hub (the Pi 4B's
+  onboard hub), powers the hub's ports, finds the connected one, resets it
+  (settle windows supplied by the `rustos_abi::Delay` seam), and addresses the
+  device behind it on a second slot — so the keyboard is discovered, never a
+  guessed port, with one definition shared by every consumer (§2.2 / §18).
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaRegion`
