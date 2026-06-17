@@ -891,6 +891,17 @@ an update to this section.
   every implemented feature whose support varies by target has one terse row,
   and the matrix is updated in the same change that adds the feature or
   changes its per-architecture state. Marks only, no prose.
+- **Review `README.md` periodically for currency.** Beyond the same-change
+  update obligation above, `README.md` (its orientation text, the
+  feature/architecture support matrix, the security & attack-vector matrix,
+  the filesystem block, and the build instructions) is reviewed periodically
+  — at minimum at every release/stage boundary (when `PLAN.md` advances a
+  stage, §14) and whenever a change touches a feature the README describes —
+  to confirm it still matches the real state of the tree. Any drift found
+  (a stale mark, a missing or removed feature, an out-of-date instruction)
+  is corrected in that same change, never deferred (§2.14, §2.18). A reviewer
+  applying the §23 gate treats a `README.md` that no longer reflects reality
+  as a defect.
 - **Planning files state the current plan and state, not history. Git is the
   changelog; `PLAN.md` and `plans/*.md` are not.** This binds `PLAN.md`, every
   `plans/*.md`, and any other planning/status/roadmap document.
