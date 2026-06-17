@@ -160,7 +160,15 @@ pub struct Aarch64ProcessSpawn;
 /// The single, `'static` [`Aarch64ProcessSpawn`] the boot path borrows.
 pub static AARCH64_PROCESS_SPAWN: Aarch64ProcessSpawn = Aarch64ProcessSpawn;
 
-impl Aarch64ProcessSpawn {
+impl ProcessSpawn for Aarch64ProcessSpawn {
+    fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
+        // The `spawn` syscall path: the child receives exactly its
+        // registered program's declared capability set and argument vector
+        // (`AGENTS.md` §5.2, §16.5) — never the spawning caller's
+        // authority (`AGENTS.md` §4).
+        self.spawn_with(program.rxe, ctx, program.capability_set(), program.args)
+    }
+
     /// Build and admit one child process from `rxe`, granting it exactly
     /// `caps` and handing it `args` as its startup-argument vector.
     ///
@@ -180,7 +188,7 @@ impl Aarch64ProcessSpawn {
     /// parse against the kernel's syscall CFI tag, `AlreadyExists` on an
     /// address-space registration conflict (`AGENTS.md` §2.9 — fail
     /// closed, never a panic).
-    pub fn spawn_with(
+    fn spawn_with(
         &self,
         rxe: &[u8],
         ctx: &dyn SpawnCtx,
@@ -391,16 +399,6 @@ impl Aarch64ProcessSpawn {
         // `live` retains the same arch space `frozen` was taken from.
         unsafe { ctx.admit_process(caps, frozen, physmap, kernel_stack, pre_resume, live, enter) }
             .map_err(admit_errno)
-    }
-}
-
-impl ProcessSpawn for Aarch64ProcessSpawn {
-    fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
-        // The `spawn` syscall path: the child receives exactly its
-        // registered program's declared capability set and argument vector
-        // (`AGENTS.md` §5.2, §16.5) — never the spawning caller's
-        // authority (`AGENTS.md` §4).
-        self.spawn_with(program.rxe, ctx, program.capability_set(), program.args)
     }
 }
 

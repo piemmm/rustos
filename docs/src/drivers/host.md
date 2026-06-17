@@ -103,11 +103,19 @@ encodes a
 treats the reported handle as informational only (it mints its own).
 
 The kernel-side spawn path behind that handshake is in place on
-aarch64: the architecture spawn producer exposes a parameterised
-`Aarch64ProcessSpawn::spawn_with(rxe, ctx, caps, args)`
-(`kernel/rustos-kernel/src/spawn_producer.rs`; the `spawn` syscall path
-delegates to it with the fixed session grant), and `kernel/core`
-exports `KernelSpawnCtx` — the same admit context the `spawn` syscall
+aarch64: the parameterised driver spawn is the `kernel/core`
+`ProcessSpawn::spawn_with(rxe, ctx, caps, args)` trait method — the
+driver-spawn analogue of `spawn(EmbeddedProgram, ctx)`, taking the
+verified image bytes, the manifest∩caller capability set, and the
+matched node's grants riding on `ctx` (§18.3). Exposing it on the trait
+lets a scheduler-agnostic caller (a generic `kernel_main` holding `&dyn
+ProcessSpawn`) spawn a driver without naming the port's spawn mechanism
+or the selected scheduler (`AGENTS.md` §17.1 / §17.4); the default fails
+closed with `Errno::NotImplemented` (§2.9). The aarch64 producer
+(`kernel/rustos-kernel/src/aarch64/spawn_producer.rs`) implements it —
+the `spawn` syscall path delegates to it with the fixed session grant —
+and `kernel/core` exports `KernelSpawnCtx`, the same admit context the
+`spawn` syscall
 handler uses (scheduler admit, capability-record insert, address-space
 + standard-stream + resource-limit registration, parent/child wait
 link) — so a kernel-side (host-driven) driver spawn drives the

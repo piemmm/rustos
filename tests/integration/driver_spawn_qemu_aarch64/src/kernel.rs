@@ -34,8 +34,8 @@ use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
 use rustos_kernel::driver_spawn_loader::{DriverProcessSpawn, SpawnDriverLoader};
 use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
-    BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelSpawnCtx, RandomReserve,
-    EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
+    BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelSpawnCtx, ProcessSpawn,
+    RandomReserve, EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
     NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT,
 };
 use rustos_kernel_ipc::{EndpointId, Port, PortRegistry};

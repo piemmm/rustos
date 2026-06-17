@@ -3459,12 +3459,36 @@ table, so a new board is match **data**, not new code. Sub-increments
         wiring lands and 5e retires it). Docs: `docs/src/lib/hid.md`,
         `docs/src/drivers/input.md`, `docs/src/lib/drvrt.md`, the crate READMEs;
         AGENTS.md §3 + SUMMARY.md gained `lib/hid`.
+      - **Scheduler-agnostic kernel/core spawn-with seam — done (host-proven).**
+        The production boot wiring is "hosted in `kernel/core`, which owns the
+        scheduler", but the bin crate must not name the concrete scheduler
+        (§17.1) and kernel/core cannot depend on `rustos_devmgr` (userland,
+        §17.4). The seam that resolves this is now landed: the kernel/core
+        [`ProcessSpawn`] trait gained `spawn_with(rxe, ctx, granted, args)` (the
+        driver-spawn analogue of `spawn(EmbeddedProgram, ctx)` — raw image bytes
+        + the manifest∩caller capability set + the node grants riding on `ctx`,
+        §18.3), so a generic caller holding `&dyn ProcessSpawn` can spawn a
+        driver into its own hardware-isolated process without naming the port's
+        spawn mechanism or the selected scheduler. The default fails closed
+        (`Errno::NotImplemented`, §2.9); the aarch64 producer's former
+        arch-inherent `spawn_with` is now that trait method (one definition,
+        §2.2), and the `driver_spawn_qemu_aarch64` `-M virt` vertical drives the
+        chain through it. No `lib/abi`/C-header change.
       - **Remaining (next):** the production boot wiring that runs
-        `DeviceManager::autoload` against the discovered hardware tree (hosted
-        in `kernel/core`, which owns the scheduler `SpawnDriverLoader` needs)
-        with the real keyboard candidate, spawning this binary into user space;
-        then the §0.9 metal checkpoint (re-flash, confirm the prompt still takes
-        keystrokes through the autoloaded user-space driver).
+        `DeviceManager::autoload` against the discovered hardware tree (driven
+        by the bin crate — the one layer that may name `devmgr`+`drvhost` —
+        spawning the winning user-space driver through the kernel/core
+        `spawn_with` seam above so §17.1 holds), the discovered signed-store
+        candidate plumbing (a VFS-backed `ImageSource` + the §18.3 store scan
+        building `DriverCandidate`s from each bundle's signed manifest) sourced
+        from the mounted root, and `tools/mkimage` laying the signed `usb_kbd`
+        bundle into `/System/Drivers/`. That landing flips
+        `init_spawn`'s `keyboard_service::spawn_if_present` call to the autoload
+        path and folds in **5e** (deleting the in-kernel scaffold) in the same
+        change, gated on the §0.9 metal checkpoint (re-flash, confirm the prompt
+        still takes keystrokes through the autoloaded user-space driver). Until
+        then the scaffold stays the metal driver and stays wired — keeping the
+        tree free of dead code (§2.14).
       - **Userland clock + `Delay` prerequisite — done (host-proven).**
         `rustos_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
         the raw `u64` nanosecond reading, no coarsening of its own) and
@@ -3479,13 +3503,6 @@ table, so a new board is match **data**, not new code. Sub-increments
         flooring, and the cooperative-wait core `spin_until_ns` — past-deadline
         returns without yielding, advancing-clock yields a bounded count). No
         `lib/abi`/C-header change (the syscall already existed).
-      - **Remaining:** the binary that builds `RtDriverHost::from_grants_query`,
-        derives its BAR + DMA-aperture from its delivered grants, runs
-        `service::bring_up_boot_keyboard` then loops `pump_once` (a `ConsoleSink`
-        over `key_inject`, the `ClockDelay` above, yielding between polls)
-        injecting key edges via `key_inject`; plus the production boot wiring
-        that runs `DeviceManager::autoload` against the discovered tree (hosted
-        in kernel/core, which owns the scheduler) and the metal checkpoint.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.

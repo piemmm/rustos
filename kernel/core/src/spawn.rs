@@ -699,6 +699,49 @@ pub trait ProcessSpawn: Sync {
     /// `rxe`, a build failure, an unrunnable context, or an admission
     /// failure — never a panic or a half-built task (`AGENTS.md` §2.9).
     fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno>;
+
+    /// Build `rxe` into a fresh isolated address space and admit it as a
+    /// runnable process granted exactly `caps` and handed `args` as its
+    /// startup-argument vector, returning its PID.
+    ///
+    /// This is the parameterised core [`spawn`](Self::spawn) builds on, and
+    /// the seam a *driver* spawn drives: where [`spawn`](Self::spawn) takes a
+    /// registered [`EmbeddedProgram`] and uses its declared capability set
+    /// and arguments, this takes the verified driver image's bytes, the
+    /// manifest∩caller capability set the load gate already derived, and the
+    /// argument vector the driver reads through `rustos_rt::arg`. The matched
+    /// hardware-tree node's device-resource grants ride on `ctx` (the
+    /// production context mints one owner-checked grant per requested
+    /// resource as the child is registered, `AGENTS.md` §18.3); this seam
+    /// never widens authority beyond `caps` plus those grants (`AGENTS.md`
+    /// §4, §5.2 — no ambient authority).
+    ///
+    /// Exposing it on the trait lets a scheduler-agnostic caller (a generic
+    /// `kernel_main` holding `&dyn ProcessSpawn`) spawn a driver into its own
+    /// hardware-isolated process without naming the port's concrete spawn
+    /// mechanism or the selected scheduler (`AGENTS.md` §17.1 / §17.4).
+    ///
+    /// The default fails closed with [`Errno::NotImplemented`] (`AGENTS.md`
+    /// §2.9): a port that has not wired a driver-spawn mechanism refuses
+    /// rather than pretending to spawn, exactly as [`NullProcessSpawn`] does
+    /// for [`spawn`](Self::spawn).
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with a stable [`Errno`] on any error — a malformed
+    /// `rxe`, a build or page-table-frame exhaustion, an unrunnable context,
+    /// or an admission failure — never a panic or a half-built task
+    /// (`AGENTS.md` §2.9).
+    fn spawn_with(
+        &self,
+        rxe: &[u8],
+        ctx: &dyn SpawnCtx,
+        caps: CapabilitySet,
+        args: &[&[u8]],
+    ) -> Result<u64, Errno> {
+        let _ = (rxe, ctx, caps, args);
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The fail-closed default [`ProcessSpawn`] producer: every build with no
@@ -738,7 +781,8 @@ mod tests {
     use rustos_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
     use rustos_abi::{ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
     use rustos_kernel_mem::{
-        AddressSpace, HostPageTable, PhysAddr, SimPhysMap, UserStack, PAGE_SIZE,
+        AddressSpace, BootMemoryMap, HostPageTable, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
+        UserStack, PAGE_SIZE,
     };
     use rustos_log::{set_max_level, Level};
 
@@ -868,5 +912,70 @@ mod tests {
         let ids = sink.event_ids();
         assert!(ids.contains(&AuditEvent::ProcessSpawnFailed.id().0));
         assert!(!ids.contains(&AuditEvent::ProcessSpawned.id().0));
+    }
+
+    /// A minimal [`SpawnCtx`] for exercising the [`ProcessSpawn::spawn_with`]
+    /// default: the default returns before touching the context, so
+    /// [`admit_process`](SpawnCtx::admit_process) is unreachable. It owns a
+    /// one-region [`FrameAllocator`] so [`frames`](SpawnCtx::frames) can hand
+    /// out a reference, and audits through a leaked [`TestSink`].
+    struct StubCtx {
+        frames: FrameAllocator,
+        sink: &'static TestSink,
+    }
+
+    impl StubCtx {
+        fn new() -> Self {
+            // A single usable region the allocator can describe; the
+            // default `spawn_with` never allocates from it.
+            static mut REGION: [u8; PAGE_SIZE * 4] = [0u8; PAGE_SIZE * 4];
+            let mut map = BootMemoryMap::new();
+            map.push(MemoryRegion {
+                start: PhysAddr::new(core::ptr::addr_of!(REGION) as u64),
+                length: (PAGE_SIZE * 4) as u64,
+                kind: RegionKind::Usable,
+            });
+            let frames = FrameAllocator::new(&map).expect("one-region allocator");
+            Self {
+                frames,
+                sink: Box::leak(Box::new(TestSink::new())),
+            }
+        }
+    }
+
+    impl SpawnCtx for StubCtx {
+        fn frames(&self) -> &FrameAllocator {
+            &self.frames
+        }
+
+        fn audit(&self) -> &(dyn Sink + Sync) {
+            self.sink
+        }
+
+        unsafe fn admit_process(
+            &self,
+            _caps: CapabilitySet,
+            _space: Box<dyn UserAddressSpace + Send + Sync>,
+            _physmap: Box<dyn PhysMap + Send + Sync>,
+            _stack: Box<dyn crate::kthread::KernelStack + Send>,
+            _pre_resume: Box<dyn FnMut(u64) + Send>,
+            _live: Option<Box<dyn LiveUserSpace + Send>>,
+            _enter: Box<dyn FnMut() + Send>,
+        ) -> Result<u64, AdmitError> {
+            unreachable!("the default spawn_with returns before admitting a process")
+        }
+    }
+
+    #[test]
+    fn spawn_with_default_fails_closed_through_a_trait_object() {
+        // A port that has not wired a driver-spawn mechanism (here the
+        // shared `NullProcessSpawn`) must refuse `spawn_with` with
+        // `NotImplemented` rather than pretending to spawn — reached through
+        // `&dyn ProcessSpawn`, the path the generic boot wiring uses
+        // (`AGENTS.md` §2.9 / §17.1).
+        let ctx = StubCtx::new();
+        let producer: &dyn ProcessSpawn = &NULL_PROCESS_SPAWN;
+        let result = producer.spawn_with(b"unused-rxe", &ctx, CapabilitySet::empty(), &[]);
+        assert_eq!(result, Err(Errno::NotImplemented));
     }
 }
