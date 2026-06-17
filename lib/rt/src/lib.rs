@@ -141,6 +141,9 @@ const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 /// `resource_grants` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 
+/// `clock_get` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -414,6 +417,92 @@ pub fn yield_now() {
     // zero; the kernel ignores its return value.
     unsafe {
         let _ = raw_syscall(NUM_YIELD, [0, 0, 0, 0, 0, 0]);
+    }
+}
+
+/// Read the kernel monotonic clock, in nanoseconds
+/// (`SyscallNumber::CLOCK_GET`, `AGENTS.md` §21).
+///
+/// Returns a monotonically non-decreasing nanosecond reading from a clock
+/// whose epoch is unspecified — only differences between readings are
+/// meaningful. It requires no capability (`clock_get` is callable by every
+/// task); a caller without [`CapabilityId::TIME_HIRES`] reads it floored to
+/// [`rustos_abi::time::COARSE_CLOCK_GRANULARITY_NS`] (one microsecond), since
+/// a sub-microsecond timer is a side-channel primitive the kernel withholds
+/// from untrusted callers (`AGENTS.md` §19.1). The wrapper performs no
+/// coarsening of its own — the value it returns is exactly what the kernel
+/// handed back.
+///
+/// [`CapabilityId::TIME_HIRES`]: rustos_abi::CapabilityId::TIME_HIRES
+#[must_use]
+pub fn clock_get() -> u64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). `clock_get`
+    // takes no arguments and no memory operand, so all six argument registers
+    // are zero; its result is the `U64` nanosecond reading.
+    unsafe { raw_syscall(NUM_CLOCK_GET, [0, 0, 0, 0, 0, 0]) }
+}
+
+/// Park, yielding the CPU, until `now()` reaches `deadline_ns`.
+///
+/// The shared core of [`ClockDelay`]'s
+/// [`delay_us`](rustos_abi::Delay::delay_us): it reads the monotonic clock
+/// through `now` and surrenders the CPU through `yield_fn` between reads, so
+/// it is a cooperative wait rather than a hard spin (`AGENTS.md` §2.1). A
+/// deadline already in the past returns immediately without yielding. The
+/// generic seams keep the loop host-testable against a deterministic clock
+/// without issuing a real trap.
+fn spin_until_ns(deadline_ns: u64, mut now: impl FnMut() -> u64, mut yield_fn: impl FnMut()) {
+    while now() < deadline_ns {
+        yield_fn();
+    }
+}
+
+/// Nanoseconds in one microsecond — the [`ClockDelay`] conversion factor.
+const NANOS_PER_MICRO: u64 = 1_000;
+
+/// The userland [`Delay`](rustos_abi::Delay) implementation: timed waits and
+/// a monotonic clock backed by the [`clock_get`] syscall.
+///
+/// A driver process (or any program) that must honour a hardware-dictated
+/// settle window — a PCIe link train, a USB hub power-on-good / reset-recovery
+/// window — hands one of these to the bring-up code that takes a
+/// [`Delay`](rustos_abi::Delay). It lives here, in the one userland runtime,
+/// so every driver process shares a single clock-backed `Delay` rather than
+/// each rolling its own over [`clock_get`] (`AGENTS.md` §2.2).
+///
+/// The wait is cooperative: [`delay_us`](rustos_abi::Delay::delay_us) yields
+/// the CPU to other runnable tasks between clock reads instead of busy-spinning
+/// (`AGENTS.md` §2.1). It carries no authority — `clock_get` needs no
+/// capability — and holds no state, so it is `Copy` and trivially shareable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClockDelay;
+
+impl ClockDelay {
+    /// A new clock-backed delay. Equivalent to [`ClockDelay::default`].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl rustos_abi::Delay for ClockDelay {
+    fn delay_us(&self, us: u32) {
+        // Compute the deadline from the clock the loop polls, saturating so a
+        // reading near `u64::MAX` can never wrap the deadline below `now`
+        // (which would return instantly); the monotonic clock realistically
+        // never approaches that, but the wait must not silently shorten
+        // (`AGENTS.md` §2.9).
+        let deadline = clock_get().saturating_add(u64::from(us).saturating_mul(NANOS_PER_MICRO));
+        spin_until_ns(deadline, clock_get, yield_now);
+    }
+
+    fn now_us(&self) -> u64 {
+        // Floor the nanosecond reading to whole microseconds, matching the
+        // microsecond resolution the `Delay` contract specifies; integer
+        // division never exceeds the true reading, so the sequence stays
+        // monotonically non-decreasing.
+        clock_get() / NANOS_PER_MICRO
     }
 }
 
@@ -1217,5 +1306,55 @@ mod tests {
         assert_eq!(i32_arg(1), 1);
         assert_eq!(i32_arg(-1), u64::MAX);
         assert_eq!(i32_arg(i32::MIN), 0xFFFF_FFFF_8000_0000);
+    }
+
+    #[test]
+    fn clock_get_issues_a_zero_arg_trap_and_returns_the_reading() {
+        let reading = 1_234_567_000u64;
+        let (number, args) = capture(reading, || {
+            assert_eq!(clock_get(), reading);
+        });
+        assert_eq!(number, NUM_CLOCK_GET);
+        // `clock_get` takes no arguments and no memory operand.
+        assert_eq!(args, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn clock_delay_now_us_floors_nanoseconds_to_microseconds() {
+        use rustos_abi::Delay;
+        // 1_999 ns floors to 1 µs — never rounds up past the true reading.
+        let (number, _) = capture(1_999, || {
+            assert_eq!(ClockDelay::new().now_us(), 1);
+        });
+        assert_eq!(number, NUM_CLOCK_GET);
+    }
+
+    #[test]
+    fn spin_until_ns_returns_immediately_for_a_past_deadline() {
+        // A deadline already reached must not yield even once (`AGENTS.md`
+        // §2.1 — no needless reschedule).
+        let mut yields = 0u32;
+        spin_until_ns(100, || 100, || yields += 1);
+        assert_eq!(yields, 0);
+        // Strictly-past as well.
+        spin_until_ns(50, || 100, || yields += 1);
+        assert_eq!(yields, 0);
+    }
+
+    #[test]
+    fn spin_until_ns_yields_until_the_clock_reaches_the_deadline() {
+        // The clock advances by 250 ns per read; the loop must yield until it
+        // is at least the 1_000 ns deadline, then stop.
+        let clock = core::cell::Cell::new(0u64);
+        let now = || {
+            let t = clock.get();
+            clock.set(t + 250);
+            t
+        };
+        let mut yields = 0u32;
+        spin_until_ns(1_000, now, || yields += 1);
+        // Reads at 0,250,500,750 are below the deadline (4 yields); the read
+        // at 1_000 stops the loop.
+        assert_eq!(yields, 4);
     }
 }

@@ -75,8 +75,13 @@ compiled, unit-tested through the trap crate's injectable seam.
 ## Stability tier
 
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
-exposed syscall-wrapper surface grows as RustOS programs need it; today it is
-the standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`,
-`AGENTS.md` §20), `spawn`, `yield_now`, `exit`, the anonymous-memory pair
-(`mem_map`, `mem_unmap`), and the `mem_map`-backed `#[global_allocator]` they
-power.
+exposed syscall-wrapper surface grows as RustOS programs need it: the
+standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`, `AGENTS.md`
+§20), `spawn` / `spawn_at` / `console_count` / `wait` / `yield_now` / `exit`,
+the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
+`#[global_allocator]` they power, the resource-limit pair (`rlimit_get`,
+`rlimit_set`), the session wrappers (`set_echo`, `users_db_read`,
+`key_inject`, `keyboard_read`, `display_acquire` / `display_release`,
+`ipc_send`), the user-space-driver wrappers (`mmio_map`, `dma_alloc`,
+`resource_grants`), and the monotonic clock (`clock_get`) plus the
+`ClockDelay` `Delay` facility (`AGENTS.md` §2.2) built on it.

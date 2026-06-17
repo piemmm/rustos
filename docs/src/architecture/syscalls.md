@@ -464,6 +464,18 @@ contract the `irq_wait` timeout loop relies on. Tightening or relaxing
 the granularity changes only that one constant (`AGENTS.md` §5.7 —
 security by default).
 
+The first-party Rust wrapper is `rustos_rt::clock_get` (the raw
+nanosecond reading, no coarsening of its own). Userland code that needs
+a *timed wait* rather than a bare reading uses `rustos_rt::ClockDelay`,
+the one userland [`Delay`](../abi/driver_traits.md) implementation
+(`delay_us` parks cooperatively via `clock_get` + `yield`, never a hard
+spin, `AGENTS.md` §2.1; `now_us` floors the reading to whole
+microseconds). It lives in the single userland runtime so every driver
+process shares one clock-backed `Delay` rather than each rolling its own
+(`AGENTS.md` §2.2) — a spawned user-space driver hands it to the bring-up
+code that honours hardware settle windows (`plans/PI.md` P10 chunk
+5d-2-ii).
+
 `ipc_send` / `ipc_recv` resolve the destination endpoint against the
 live named-port registry composed into `KernelState`
 (`ipc: RwLock<PortRegistry>`, mirroring `caps: RwLock<CapTable>`). An

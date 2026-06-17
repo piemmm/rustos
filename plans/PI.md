@@ -3417,14 +3417,29 @@ table, so a new board is match **data**, not new code. Sub-increments
       boundary, mirroring `bus_usb`'s `wiring` tests). No `lib/abi`/C-header
       change; whole gate green. Docs: `docs/src/drivers/input.md`,
       `docs/src/lib/usb.md`, both crate READMEs.
-    - **5d-2-ii (b-2-iii) (next)** the `devmgr`-autoloaded keyboard driver
-      `rxe`: a binary that builds `RtDriverHost::from_grants_query`, derives its
-      BAR + DMA-aperture from its delivered grants, runs
-      `service::bring_up_boot_keyboard` then loops `pump_once` (a `ConsoleSink`
-      over `key_inject`, a `Delay` over the `clock_get` syscall, yielding between
-      polls), injecting key edges via `key_inject`; plus the production boot
-      wiring that runs `DeviceManager::autoload` against the discovered tree
-      (hosted in kernel/core, which owns the scheduler) and the metal checkpoint.
+    - **5d-2-ii (b-2-iii) (in progress)** the `devmgr`-autoloaded keyboard
+      driver `rxe`.
+      - **Userland clock + `Delay` prerequisite — done (host-proven).**
+        `rustos_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
+        the raw `u64` nanosecond reading, no coarsening of its own) and
+        `rustos_rt::ClockDelay` — the one userland `rustos_abi::Delay`
+        implementation (`delay_us` parks cooperatively via `clock_get` +
+        `yield_now`, never a hard spin §2.1; `now_us` floors the reading to
+        whole microseconds) — live in the single userland runtime so every
+        driver process shares one clock-backed `Delay` rather than each rolling
+        its own (§2.2). This is the `Delay` the keyboard-driver binary hands to
+        `service::bring_up_boot_keyboard`. Host-proven (`rustos-rt` tests: the
+        `clock_get` trap marshalling via the `abi-trap` seam, `now_us`
+        flooring, and the cooperative-wait core `spin_until_ns` — past-deadline
+        returns without yielding, advancing-clock yields a bounded count). No
+        `lib/abi`/C-header change (the syscall already existed).
+      - **Remaining:** the binary that builds `RtDriverHost::from_grants_query`,
+        derives its BAR + DMA-aperture from its delivered grants, runs
+        `service::bring_up_boot_keyboard` then loops `pump_once` (a `ConsoleSink`
+        over `key_inject`, the `ClockDelay` above, yielding between polls)
+        injecting key edges via `key_inject`; plus the production boot wiring
+        that runs `DeviceManager::autoload` against the discovered tree (hosted
+        in kernel/core, which owns the scheduler) and the metal checkpoint.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.
