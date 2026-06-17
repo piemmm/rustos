@@ -4014,13 +4014,28 @@ two users — or the same user twice — can be logged in concurrently.
        missing → `NotFound`, truncated/over-long → `OutOfRange`, unformatted
        partition refused) over a FAT volume authored through the real FAT32
        driver. No `lib/abi`/C-header change.
-     - **Chunk B-2 — still staged: the board storage bring-up that supplies
-       the inputs and wires the boot path:** discover the root block device
-       from the hwtree, bring up the block + filesystem driver with an
+     - **Chunk B-2 boot-path entry composition — LANDED (host-proven).**
+       `rustos_kernel::root_mount::mount_root_and_load_users` is the single
+       boot-path entry that threads Chunk B-1 into Chunk A: given the two
+       brought-up `Block` devices (FAT boot partition + encrypted root) and
+       the typed passphrase it reads the `root.unlock` descriptor
+       (`read_root_unlock_descriptor`) and, on success, calls
+       `unlock_root_and_load_users` — so the boot path neither re-threads the
+       descriptor buffer nor reconciles two error taxonomies itself (§2.2). A
+       descriptor that cannot be read off the boot partition is audited
+       (`4134`) and returned as the new `RootMountError::DescriptorRead`
+       (cause `descriptor_unreadable`); the encrypted root is never touched
+       and no database is served (§2.9 / §5.4.5). Host-proven by 3 tests
+       (end-to-end success authenticating the planted `root`/`root`; a
+       missing descriptor refused with no unlock; a wrong passphrase refused
+       fail-closed). No `lib/abi`/C-header change.
+     - **Chunk B-2 board bring-up — still staged: the storage bring-up that
+       supplies the inputs and wires the boot path:** discover the root block
+       device from the hwtree, bring up the block + filesystem driver with an
        in-kernel DMA/MMIO host, read `root.unlock` (B-1) off the FAT boot
        partition, prompt for the passphrase on the console (the in-kernel
        keyboard scaffold already feeds the console on metal; UART on
-       `virt`), call `unlock_root_and_load_users`, leak + `with_users_db`.
+       `virt`), call `mount_root_and_load_users`, leak + `with_users_db`.
        virtio-blk proves it on `-M virt`; the EMMC2 metal mount rides P8.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).

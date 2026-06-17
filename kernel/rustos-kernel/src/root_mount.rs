@@ -42,12 +42,19 @@
 //!
 //! [`read_root_unlock_descriptor`] reads the first of those three inputs —
 //! the plaintext `root.unlock` descriptor — back off the FAT boot
-//! partition through the same real FAT32 driver that authored it. The
-//! remaining board-specific bring-up that *produces* the [`Block`]
+//! partition through the same real FAT32 driver that authored it, and
+//! [`mount_root_and_load_users`] is the single boot-path entry that
+//! threads it straight into the unlock composition above: given the two
+//! brought-up [`Block`] devices and the typed passphrase it reads the
+//! descriptor, unlocks the root, and returns the served database (so the
+//! boot path neither re-threads the descriptor buffer nor reconciles two
+//! error taxonomies itself, `AGENTS.md` §2.2).
+//!
+//! The remaining board-specific bring-up that *produces* the [`Block`]
 //! devices and the typed passphrase — the hardware-tree root-device
 //! discovery, the in-kernel block `DriverHost`, and the console
 //! passphrase prompt — sits above this seam in the boot path and is wired
-//! in the following increment (`plans/PI.md` P11 Chunk B); `virtio-blk`
+//! in the following increment (`plans/PI.md` P11 Chunk B-2); `virtio-blk`
 //! proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
 
 use rustos_abi::driver::block::Block;
@@ -82,6 +89,15 @@ const ROOT_MOUNT_REJECTED: EventId = EventId(4134);
 /// (`AGENTS.md` §2.9 — fail closed, never partially applied).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RootMountError {
+    /// The plaintext `root.unlock` descriptor could not be read off the
+    /// FAT boot partition: the partition did not mount as FAT32, the
+    /// [`ROOT_UNLOCK_NAME`] entry was absent ([`DriverError::NotFound`]),
+    /// it was not a regular file of exactly [`UNLOCK_DESCRIPTOR_LEN`]
+    /// bytes, or the device read faulted. The boot path recovers the
+    /// descriptor before anything is decrypted, so a missing or malformed
+    /// one yields no database rather than a fabricated default
+    /// (`AGENTS.md` §2.9).
+    DescriptorRead(DriverError),
     /// The on-FAT `root.unlock` descriptor failed to decode: bad magic,
     /// an unknown KDF id, an out-of-range iteration count, or a short
     /// buffer. The descriptor is plaintext and untrusted, so it is fully
@@ -106,6 +122,7 @@ impl RootMountError {
     #[must_use]
     pub fn cause(self) -> &'static str {
         match self {
+            Self::DescriptorRead(_) => "descriptor_unreadable",
             Self::Descriptor(_) => "descriptor_invalid",
             Self::Mount(DriverError::PermissionDenied) => "unlock_refused",
             Self::Mount(DriverError::BadMagic) => "not_a_rustfs_volume",
@@ -187,10 +204,66 @@ pub fn unlock_root_and_load_users<B: Block>(
     load_users_db_source(&mut fs, audit).map_err(RootMountError::Users)
 }
 
+/// Recover the `root.unlock` descriptor off the FAT boot partition and
+/// load the encrypted root's users database under the typed passphrase.
+///
+/// This is the single boot-path entry point for the `plans/PI.md` P11
+/// root-mount increment (Chunk B-2): once the board has brought up the
+/// two block devices and the operator has typed a passphrase at the
+/// console, the boot path calls this one function rather than threading
+/// the descriptor buffer and reconciling two error taxonomies itself
+/// (`AGENTS.md` §2.2). It composes the already-landed building blocks in
+/// order:
+///
+/// 1. [`read_root_unlock_descriptor`] reads the fixed-length plaintext
+///    descriptor off `boot_partition` (B-1). A missing, mis-sized, or
+///    unreadable descriptor is audited and returned as
+///    [`RootMountError::DescriptorRead`] — no database is served and the
+///    encrypted root is never touched (`AGENTS.md` §2.9 / §5.4.5).
+/// 2. [`unlock_root_and_load_users`] derives the volume key from
+///    `passphrase`, mounts `root_block`, and loads the validated
+///    `users-v1` database (Chunk A), auditing its own unlock/mount/read
+///    decisions.
+///
+/// * `boot_partition` — the FAT boot-partition [`Block`] device (the
+///   GPU-firmware-readable partition holding `root.unlock`).
+/// * `root_block` — the encrypted root [`Block`] device.
+/// * `passphrase` — the bytes the operator typed at the console; used
+///   only to derive the volume key, never logged or retained.
+/// * `audit` — the sink every decision is logged through (`AGENTS.md`
+///   §19.4).
+///
+/// # Errors
+///
+/// A [`RootMountError`] naming the first check that refused. Every error
+/// path yields no database and is audited; no secret is ever logged and
+/// the derived key is wiped regardless of outcome (`AGENTS.md` §4 /
+/// §5.4.5).
+pub fn mount_root_and_load_users<Boot, Root>(
+    boot_partition: Boot,
+    root_block: Root,
+    passphrase: &[u8],
+    audit: &dyn Sink,
+) -> Result<HeldUsersDbSource, RootMountError>
+where
+    Boot: Block,
+    Root: Block,
+{
+    let descriptor = match read_root_unlock_descriptor(boot_partition) {
+        Ok(descriptor) => descriptor,
+        Err(err) => {
+            let error = RootMountError::DescriptorRead(err);
+            reject(audit, error);
+            return Err(error);
+        }
+    };
+    unlock_root_and_load_users(&descriptor, passphrase, root_block, audit)
+}
+
 /// Emit the [`ROOT_MOUNT_REJECTED`] record for a refused unlock, naming
 /// the failing `stage` with a secret-free cause string. The database load
-/// stage audits itself, so this helper only ever reports a descriptor or
-/// mount refusal.
+/// stage audits itself, so this helper only ever reports a descriptor
+/// read, descriptor decode, or mount refusal.
 fn reject(audit: &dyn Sink, error: RootMountError) {
     log(
         audit,
@@ -613,5 +686,74 @@ mod tests {
             read_root_unlock_descriptor(block).is_err(),
             "an unformatted partition must not mount"
         );
+    }
+
+    // --- mount_root_and_load_users (the Chunk B-2 boot-path entry) -----
+
+    #[test]
+    fn the_boot_partition_and_passphrase_unlock_the_root_end_to_end() {
+        // The single boot-path entry: a FAT boot partition carrying the
+        // descriptor + the encrypted root + the matching passphrase yields
+        // the usable users database, with the unlock audited.
+        let (descriptor_bytes, key) = provision();
+        let boot = author_boot_partition(&descriptor_bytes);
+        let root_bytes =
+            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let root = image::VecBlock::from_bytes(root_bytes);
+        let sink = RecordingSink::new();
+
+        let source = mount_root_and_load_users(boot, root, PASSPHRASE, &sink)
+            .expect("the descriptor + passphrase unlock the root and load the database");
+
+        let text = source.text().expect("a loaded holder serves its text");
+        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+            .expect("the served database parses");
+        db.authenticate(
+            image::USERS_FIXTURE_USERNAME,
+            image::USERS_FIXTURE_PASSWORD.as_bytes(),
+        )
+        .expect("the planted account authenticates");
+        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_missing_descriptor_on_the_boot_partition_serves_no_database() {
+        // §2.9 / §5.4.5: no `root.unlock` on the boot partition is a
+        // fail-closed DescriptorRead(NotFound). The encrypted root is
+        // never touched (no unlock audit) and no database is served.
+        let (_descriptor_bytes, key) = provision();
+        let boot = empty_boot_partition();
+        let root_bytes =
+            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let root = image::VecBlock::from_bytes(root_bytes);
+        let sink = RecordingSink::new();
+
+        let err = mount_root_and_load_users(boot, root, PASSPHRASE, &sink)
+            .expect_err("a missing descriptor must be refused");
+
+        assert_eq!(err, RootMountError::DescriptorRead(DriverError::NotFound));
+        assert_eq!(err.cause(), "descriptor_unreadable");
+        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_wrong_passphrase_through_the_full_composition_is_refused() {
+        // §4 / §5.4: a readable descriptor but the wrong passphrase derives
+        // a key that never unwraps the master key, so the mount is refused
+        // and no database is served — no separate oracle.
+        let (descriptor_bytes, key) = provision();
+        let boot = author_boot_partition(&descriptor_bytes);
+        let root_bytes =
+            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
+        let root = image::VecBlock::from_bytes(root_bytes);
+        let sink = RecordingSink::new();
+
+        let err = mount_root_and_load_users(boot, root, b"wrong passphrase", &sink)
+            .expect_err("a wrong passphrase must be refused");
+
+        assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
+        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
     }
 }

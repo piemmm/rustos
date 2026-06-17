@@ -262,10 +262,22 @@ bounded and fail-closed (§5.4 / §24.4): the entry's size is checked to be
 exactly `UNLOCK_DESCRIPTOR_LEN` *before* a byte is read — rejecting both a
 truncated and an over-long file — and the bytes are still re-validated by
 `UnlockDescriptor::decode` before they drive any key derivation (§5.4.3).
+
+`rustos_kernel::root_mount::mount_root_and_load_users` is the single
+boot-path entry that ties those two halves together: given the brought-up
+FAT boot-partition and encrypted-root block devices and the typed
+passphrase, it reads the descriptor (`read_root_unlock_descriptor`) and,
+on success, threads it straight into `unlock_root_and_load_users`, so the
+boot path neither re-threads the descriptor buffer nor reconciles two
+error taxonomies itself (`AGENTS.md` §2.2). A descriptor that cannot be
+read off the boot partition is audited (`4134` `ROOT_MOUNT_REJECTED`) and
+returned as `RootMountError::DescriptorRead` — the encrypted root is never
+touched and no database is served (§2.9 / §5.4.5).
+
 The remaining board-specific bring-up that *supplies* the block devices and
 the typed passphrase — hardware-tree root-device discovery, the in-kernel
 block DriverHost, and the console passphrase prompt — is wired into the
-boot path next (`plans/PI.md` P11 Chunk B): `virtio-blk` proves it on
+boot path next (`plans/PI.md` P11 Chunk B-2): `virtio-blk` proves it on
 `-M virt`, EMMC2 on metal (`plans/PI.md` §0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the

@@ -1222,10 +1222,16 @@ spec §18.
   FAT boot partition through the same real FAT32 driver that authored it
   (one on-disk definition, §2.2; the shared `ROOT_UNLOCK_NAME` constant) and
   fails closed on a missing/truncated/over-long file before any read. The
-  remaining board storage bring-up that *supplies* the block devices + typed
-  passphrase and wires the boot path (root-device discovery, in-kernel block
-  DriverHost, console passphrase prompt) is staged in `plans/PI.md` P11
-  Chunk B-2. The login `Run` binary ships at
+  single boot-path entry that threads those two halves together is wired
+  (`rustos_kernel::root_mount::mount_root_and_load_users`, `plans/PI.md` P11
+  Chunk B-2 — host-proven): given the two brought-up block devices and the
+  typed passphrase it reads the descriptor and, on success, runs the unlock
+  composition, auditing and fail-closing a descriptor that cannot be read
+  (`RootMountError::DescriptorRead`). The remaining board storage bring-up
+  that *supplies* the block devices + typed passphrase and wires it into the
+  boot path (root-device discovery, in-kernel block DriverHost, console
+  passphrase prompt) is staged in `plans/PI.md` P11 Chunk B-2. The login
+  `Run` binary ships at
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held
   database through the `CAP_USERS_READ`-gated `users_db_read` syscall
