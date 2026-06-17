@@ -25,6 +25,9 @@ other (§17.4 — `drivers/* → lib/*` only).
   `ReportSource` seam so the `drivers/input/usb_hid` decoders read reports
   straight off the transfer ring.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies.
+- `XHCI_DMA_BYTES` — the device-shared DMA carve size for one controller
+  (rings, contexts, report buffers, scratchpad), shared by every host that
+  carves a controller's DMA region (§2.2).
 
 ## Design
 

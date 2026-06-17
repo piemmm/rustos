@@ -16,6 +16,12 @@ rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # P11). Both are `lib/*` crates the driver may depend on (§17.4).
 rustos-input = { path = "../../../lib/input", version = "=0.0.0" }
 rustos-keymap = { path = "../../../lib/keymap", version = "=0.0.0" }
+# The bus-agnostic xHCI protocol + single-device enumeration engine the
+# arch-neutral boot-keyboard `service` orchestration brings up over its
+# granted register BAR + DMA (plans/PI.md P10 5d-2-ii). A `lib/*` crate, so
+# the driver may depend on it (§17.4); the xHCI controller driver
+# (drivers/bus/usb) consumes the same crate, neither driver naming the other.
+rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 [lints]
 workspace = true

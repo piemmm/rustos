@@ -73,6 +73,7 @@ use rustos_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverH
 pub mod console;
 pub mod keyboard;
 pub mod mouse;
+pub mod service;
 
 #[cfg(test)]
 mod tests;
@@ -81,6 +82,7 @@ pub use console::{pump_once, ConsoleSink, KeyboardConsole};
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
 pub use rustos_abi::driver::input::ReportSource;
+pub use service::{bring_up_boot_keyboard, KeyboardSource};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///

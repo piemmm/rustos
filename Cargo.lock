@@ -757,6 +757,7 @@ dependencies = [
  "rustos-abi",
  "rustos-input",
  "rustos-keymap",
+ "rustos-usb",
 ]
 
 [[package]]

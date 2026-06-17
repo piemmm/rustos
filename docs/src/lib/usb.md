@@ -48,6 +48,12 @@ build on the *same* engine without depending on each other — exactly the split
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaRegion`
   seam.
+- `XHCI_DMA_BYTES` — the bytes a host carves for one controller's device-shared
+  DMA structures (rings, contexts, report buffers, scratchpad), sized for the
+  VL805's 31-page scratchpad worst case. It lives here, beside the engine that
+  lays the region out, so every host that carves it — the PCI bus driver's
+  wiring (`drivers/bus/usb`) and the arch-neutral keyboard driver
+  (`drivers/input/usb_hid`) — shares one definition (§2.2).
 
 ## Design
 

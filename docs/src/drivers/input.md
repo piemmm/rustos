@@ -204,3 +204,34 @@ and fails closed (an unknown usage or a non-press produces no bytes).
 Delivering the reports over the Pi 4's VL805 xHCI controller is the
 remaining metal step; QEMU models no Pi USB, so the decode + keymap are
 host-proven and the hardware delivery is a checklist.
+
+#### Boot-keyboard driver-process orchestration
+
+The `service` module is the composition a **user-space** USB boot-keyboard
+driver runs at start-up (`plans/PI.md` P10 chunk 5d-2-ii). It is
+arch-neutral: the board `PCIe` root-complex bring-up and BAR assignment stay
+in the separate board bus driver (`drivers/bus/pcie_brcm` +
+`drivers/bus/usb`); the keyboard driver is autoloaded against the discovered
+HID node, granted **only** the resources its matched node requested — its
+already-assigned xHCI register BAR and a DMA constraint (`AGENTS.md` §18.3) —
+and reaches them through the `DriverHost` its runtime builds over those
+grants. So the orchestration names no PCI, no BCM2711, and no board
+(`AGENTS.md` §2.20).
+
+`bring_up_boot_keyboard(host, delay, bar_base, bar_len, dma_aperture_top)`
+carves the device-shared DMA region and checks it lies wholly below the
+discovered inbound-DMA aperture **before** any register is touched (fail
+closed, `AGENTS.md` §5.4), maps the granted register BAR, brings the
+controller up (`rustos_usb::Xhci::open` + `UsbDevice::start`), and runs the
+arch-neutral root→hub→downstream-HID enumeration
+(`UsbDevice::enumerate_boot_keyboard`, which descends the Pi 4's onboard hub
+when present, `AGENTS.md` §2.2). It returns a `BootKeyboard` the driver's
+service loop drives with `pump_once`, injecting each decoded key edge through
+`key_inject`. The device-shared DMA size is the one `rustos_usb::XHCI_DMA_BYTES`
+the xHCI driver's wiring also carves (`AGENTS.md` §2.2). QEMU models no Pi USB
+timing, so the host tests prove the composition and its fail-closed paths up
+to the controller hand-off — over an inert mock window `Xhci::open` fails
+closed with `DeviceFault`, the on-metal boundary — and the live bring-up plus
+the report pump are the metal acceptance item. The `devmgr`-autoloaded driver
+binary that builds the runtime host over its delivered grants and runs this
+loop, plus the production boot autoload wiring, are the next chunk.

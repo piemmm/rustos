@@ -3396,16 +3396,35 @@ table, so a new board is match **data**, not new code. Sub-increments
       Touches the metal-confirmed scaffold bring-up (behaviour-equivalent by
       construction) ⇒ an operator §0.9 metal re-verify (parity: the on-screen
       `Username:` prompt still takes keystrokes).
-    - **5d-2-ii (b-2-ii) (next)** the real user-space keyboard driver *process*:
-      a `devmgr`-autoloaded `rxe` that builds an `RtDriverHost::from_grants_query`
-      and runs `enumerate_boot_keyboard` + the `usb_hid` report pump over
-      `lib/usb` (and its granted xHCI BAR + DMA — the board PCIe root-complex
-      bring-up + BAR assignment stay in the separate board bus driver so the
-      keyboard driver is arch-neutral; the userland `Delay` rides the
-      monotonic-clock syscall), injecting key edges via `key_inject`; plus the
-      production boot wiring that runs `DeviceManager::autoload` against the
-      discovered tree (hosted in kernel/core, which owns the scheduler) and the
-      metal checkpoint.
+    - **5d-2-ii (b-2-ii) — arch-neutral boot-keyboard orchestration — done
+      (host-proven).** `drivers/input/usb_hid::service::bring_up_boot_keyboard`
+      is the composition the user-space keyboard driver runs at start-up. Over
+      its `DriverHost` (the rt-backed host built from its kernel-issued grants)
+      it carves the device-shared DMA region and aperture-checks it *before* any
+      register is touched (fail closed, §5.4), maps its granted xHCI register
+      BAR, brings the controller up (`rustos_usb::Xhci::open` +
+      `UsbDevice::start`, carving the shared `rustos_usb::XHCI_DMA_BYTES` —
+      hoisted from `bus_usb::wiring` into `lib/usb`, §2.2), and runs the
+      arch-neutral `enumerate_boot_keyboard`, returning a `BootKeyboard` the
+      service loop drives with `pump_once`. It names no PCI/BCM2711/board
+      (§2.20): the board PCIe root-complex bring-up + BAR assignment stay in the
+      separate board bus driver, and the keyboard node is granted only its
+      already-assigned BAR + a DMA constraint (§18.3). `usb_hid` now depends on
+      `lib/usb` (a lib, §17.4). Host-proven (6 `service` tests: the cap-missing /
+      no-mapper / no-DMA-host refusals, a DMA carve above the aperture and a
+      DMA-alloc failure refused, and the all-valid path reaching the controller
+      hand-off where the inert mock window faults `DeviceFault` — the metal
+      boundary, mirroring `bus_usb`'s `wiring` tests). No `lib/abi`/C-header
+      change; whole gate green. Docs: `docs/src/drivers/input.md`,
+      `docs/src/lib/usb.md`, both crate READMEs.
+    - **5d-2-ii (b-2-iii) (next)** the `devmgr`-autoloaded keyboard driver
+      `rxe`: a binary that builds `RtDriverHost::from_grants_query`, derives its
+      BAR + DMA-aperture from its delivered grants, runs
+      `service::bring_up_boot_keyboard` then loops `pump_once` (a `ConsoleSink`
+      over `key_inject`, a `Delay` over the `clock_get` syscall, yielding between
+      polls), injecting key edges via `key_inject`; plus the production boot
+      wiring that runs `DeviceManager::autoload` against the discovered tree
+      (hosted in kernel/core, which owns the scheduler) and the metal checkpoint.
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.

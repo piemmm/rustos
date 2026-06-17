@@ -54,6 +54,27 @@ poll the keyboard, feed each event, and inject the bytes through a
 the video console's index (`plans/PI.md` P11), host-tested with a
 recording sink. Key repeat remains a higher-layer concern.
 
+### Boot-keyboard driver-process orchestration
+
+The `service` module composes the **user-space** boot-keyboard driver
+(`plans/PI.md` P10 chunk 5d-2-ii). It is arch-neutral: the board PCIe
+root-complex bring-up and BAR assignment stay in the board bus driver
+(`drivers/bus/pcie_brcm` + `drivers/bus/usb`); the keyboard driver is
+autoloaded against the discovered HID node and granted only its matched
+node's resources — its already-assigned xHCI register BAR and a DMA
+constraint (`AGENTS.md` §18.3) — reached through the `DriverHost` its
+runtime builds over those grants, so the orchestration names no PCI, no
+BCM2711, no board (`AGENTS.md` §2.20). `bring_up_boot_keyboard` carves and
+aperture-checks the DMA region before touching any register (fail closed),
+maps the granted BAR, brings the controller up (`rustos_usb::Xhci::open` +
+`UsbDevice::start`, carving the shared `rustos_usb::XHCI_DMA_BYTES`), runs
+the arch-neutral `UsbDevice::enumerate_boot_keyboard` (descending an onboard
+hub when present), and returns a `BootKeyboard` the service loop drives with
+`pump_once`. QEMU models no Pi USB, so the host tests prove the composition
+and its fail-closed paths up to the controller hand-off (an inert window
+faults `DeviceFault`, the metal boundary); the autoloaded driver binary and
+the boot wiring are the next chunk.
+
 ## Autoload bind table
 
 `BIND_KEYS` declares two class-wildcard entries — an HID **boot
@@ -104,3 +125,8 @@ in-process mock report queue:
   sequences, releases and non-key events producing nothing, unknown
   usages and undersized buffers failing closed, and the full
   decode→keymap→sink chain through `pump_once`.
+- Boot-keyboard orchestration (`service` module): the missing
+  `CAP_MMIO_MAP`, absent mapper, and absent DMA-host refusals; a DMA carve
+  above the inbound aperture and a DMA-allocation failure rejected fail
+  closed; and the all-valid path reaching the controller hand-off, where
+  the inert mock window faults `DeviceFault` (the metal boundary).

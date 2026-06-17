@@ -62,6 +62,31 @@ mod tests;
 /// than spinning forever (`AGENTS.md` §2.1).
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 
+/// Bytes a host carves for one controller's device-shared DMA structures.
+///
+/// The enumeration engine lays the DCBAA, command/event/transfer rings,
+/// device contexts, report buffers, and the controller's scratchpad
+/// buffers out of this one region ([`device::UsbDevice::start`]). The
+/// rings/contexts of a 255-slot controller need under 8 KiB; the dominant
+/// term is the scratchpad — the controller's `HCSPARAMS2` Max Scratchpad
+/// Buffers page-sized buffers (the VL805 requires **31**, i.e. 31 × 4 KiB =
+/// 124 KiB; xHCI §4.20). 256 KiB covers that worst case with headroom. The
+/// exact count is read from the controller and laid out by
+/// [`device::UsbDevice::start`], which fails closed if the carve cannot hold
+/// it, so this is a fixed protocol working set for one device, not a
+/// scalable capacity (`AGENTS.md` §24.4).
+///
+/// It lives here, beside the engine that consumes it, so every host that
+/// carves a controller's DMA region — the PCI bus driver's wiring
+/// (`drivers/bus/usb`) and the arch-neutral user-space keyboard driver
+/// (`drivers/input/usb_hid`) — depends on one definition rather than each
+/// carrying its own copy (`AGENTS.md` §2.2).
+pub const XHCI_DMA_BYTES: usize = 256 * 1024;
+
+// Worst case (255 slots + 31 scratchpad pages at 4 KiB) is ~132 KiB;
+// the carve must comfortably exceed that for every reported geometry.
+const _: () = assert!(XHCI_DMA_BYTES >= 160 * 1024);
+
 /// Highest doorbell target value (§5.6: endpoint IDs 1..=31 for device
 /// doorbells; 0 is the command-ring target on doorbell 0).
 const DOORBELL_TARGET_MAX: u32 = 31;
