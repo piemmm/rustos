@@ -30,6 +30,7 @@
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED`           | audit  | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (`AGENTS.md` §5.4 — fail closed). The `cause` field names the refusal. |
+//! | 4042 | Info  | `DRIVER_STORE_SCANNED`        | audit  | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates (`AGENTS.md` §18.3 / §18.6). The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
@@ -119,6 +120,16 @@ pub enum AuditEvent {
     /// failed its bounded fail-closed validation; no database is held
     /// and every login refuses (`AGENTS.md` §5.4).
     UsersDbRejected,
+    /// The `/System/Drivers/` signed-driver store was enumerated for
+    /// autoload candidates (`crate::driver_store`, `AGENTS.md` §18.3 /
+    /// §18.6).
+    ///
+    /// Emitted by [`crate::driver_store::enumerate_driver_store`] once
+    /// per scan with the count of bundle image paths found (`drivers`)
+    /// and the count of entries refused fail-closed during the bounded
+    /// walk (`skipped`). A missing store is not an error — it simply
+    /// yields zero drivers (`AGENTS.md` §18.4).
+    DriverStoreScanned,
 }
 
 impl AuditEvent {
@@ -139,6 +150,7 @@ impl AuditEvent {
             Self::ProcessSpawnFailed => 4032,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
+            Self::DriverStoreScanned => 4042,
         })
     }
 
@@ -161,6 +173,7 @@ impl AuditEvent {
             Self::ProcessSpawnFailed => "process spawn failed",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
+            Self::DriverStoreScanned => "driver store scanned",
         }
     }
 }

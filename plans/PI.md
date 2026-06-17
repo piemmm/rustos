@@ -3496,15 +3496,34 @@ table, so a new board is match **data**, not new code. Sub-increments
         the real `devmatch::resolve`). No `lib/abi`/C-header change. Docs:
         `docs/src/drivers/host.md` ("Signed-store scan"). No metal step (the
         scan has no production consumer yet — the boot wiring below is next).
+      - **`/System/Drivers/` store enumeration (kernel half) — done
+        (host-proven).** `rustos_kernel_core::driver_store::enumerate_driver_store`
+        is the boot-time walk that turns the on-disk store tree into the bundle
+        image-path list `scan_store` consumes. Mirroring `users::load_users_db`,
+        it builds the shared root-backed VFS (`crate::fs::root_backed_vfs` — the
+        private-root-mount handle + minimal `Vfs` builder hoisted out of
+        `users.rs`, §2.2) and walks `/System/Drivers/` through the §5.3-checked
+        per-inode delegation under the uid-0 bootstrap identity (no §5.1 bypass),
+        collecting every regular file's path. Structural path discovery only — it
+        never reads, parses, or trusts a bundle (the load gate does, §18.6); the
+        walk is bounded (`MAX_STORE_DEPTH` 8 / `MAX_STORE_DRIVERS` 256, §24.4)
+        and fail-closed: a missing store, an unreadable sub-directory, or a
+        malformed entry simply contributes fewer paths and never aborts the boot
+        (§18.4/§2.9). One audit record `DriverStoreScanned` (4042, `drivers` /
+        `skipped` counts). Host-proven (7 `driver_store` tests over a tree mock
+        fs: nested store in order, missing store, unreadable-subdir skip,
+        depth/count bounds, empty store). No `lib/abi`/C-header change. Docs:
+        `docs/src/architecture/kernel.md` (audit catalogue). No metal step (no
+        production consumer yet — the boot wiring below is next).
       - **Remaining (next):** the production boot wiring that runs
         `DeviceManager::autoload` against the discovered hardware tree (driven
         by the bin crate — the one layer that may name `devmgr`+`drvhost` —
         spawning the winning user-space driver through the kernel/core
         `spawn_with` seam above so §17.1 holds), the **VFS-backed `ImageSource`
-        + `/System/Drivers/` directory enumeration** that feeds the landed
-        `rustos_drvhost::store::scan_store` from the mounted root, and
-        `tools/mkimage` laying the signed `usb_kbd` bundle into
-        `/System/Drivers/`. That landing flips
+        adapter** that reads each enumerated path so `rustos_drvhost::store::scan_store`
+        can fetch bundle bytes from the mounted root (the enumeration above
+        supplies the paths), and `tools/mkimage` laying the signed `usb_kbd`
+        bundle into `/System/Drivers/`. That landing flips
         `init_spawn`'s `keyboard_service::spawn_if_present` call to the autoload
         path and folds in **5e** (deleting the in-kernel scaffold) in the same
         change, gated on the §0.9 metal checkpoint (re-flash, confirm the prompt

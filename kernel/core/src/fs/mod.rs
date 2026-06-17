@@ -18,7 +18,7 @@
 //!
 //! A subtree may instead be backed by a `drivers/filesystem/*` driver: the
 //! mount carries the driver's
-//! [`DriverHandle`](rustos_abi::driver::DriverHandle), and the
+//! [`DriverHandle`], and the
 //! [`Vfs::read_via`] / [`Vfs::list_via`] / [`Vfs::stat_via`] methods route
 //! resolution below the mount point to a
 //! [`rustos_abi::driver::filesystem::FilesystemRead`] driver supplied by the
@@ -61,7 +61,40 @@ pub use vfs::Vfs;
 
 use core::fmt;
 
+use rustos_abi::driver::DriverHandle;
 use rustos_abi::Errno;
+use rustos_kernel_sec::{GroupId, UserId};
+
+/// Handle for the kernel's *private root mount* — the in-memory [`Vfs`] a
+/// boot-time reader builds to delegate to the mounted root volume's
+/// driver (`AGENTS.md` §5.1).
+///
+/// The value only needs to be non-zero (the reader maps the handle to the
+/// borrowed driver itself); it spells `root` so it is legible in a log.
+/// It is defined here, once, so every boot reader that builds a
+/// root-backed [`Vfs`] shares the same handle rather than carrying its own
+/// copy (`AGENTS.md` §2.2).
+pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
+
+/// Build a minimal [`Vfs`] whose root mount is backed by the caller's root
+/// volume driver, ready for the `*_via_secured` delegation methods.
+///
+/// This is the shared shape of the real root volume — which carries the
+/// whole §16 tree from its own root directory — used by every boot-time
+/// reader that resolves a path off the mounted root before the full mount
+/// table exists (`AGENTS.md` §2.2: one definition, no per-reader copy).
+///
+/// # Errors
+///
+/// [`VfsError::Io`] if the fixed [`PRIVATE_ROOT_HANDLE`] is somehow
+/// rejected as a [`DriverHandle`] (it never is — the value is non-zero),
+/// or the underlying [`MountTable::back_root`] refusal.
+pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
+    let mut vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
+    let handle = DriverHandle::from_raw(PRIVATE_ROOT_HANDLE).map_err(|_| VfsError::Io)?;
+    vfs.mounts_mut().back_root(handle)?;
+    Ok(vfs)
+}
 
 /// An error returned by a VFS operation.
 ///

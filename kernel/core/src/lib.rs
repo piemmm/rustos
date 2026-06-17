@@ -76,6 +76,7 @@ pub mod bootinfo;
 pub mod console;
 pub mod devres;
 pub mod dispatch_slot;
+pub mod driver_store;
 pub mod fs;
 pub mod init;
 pub mod input_focus;
@@ -113,6 +114,9 @@ pub use devres::{
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
+};
+pub use driver_store::{
+    enumerate_driver_store, DRIVER_STORE_PATH, MAX_STORE_DEPTH, MAX_STORE_DRIVERS,
 };
 pub use fs::{
     Access, AclEntry, AclWho, Credentials, Metadata, Mode, MountPoint, MountTable, Path, Vfs,

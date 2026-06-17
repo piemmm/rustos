@@ -199,6 +199,7 @@ record under the `log` phase and halts.
 | 4032 | Error | `PROCESS_SPAWN_FAILED`       | audit  |
 | 4040 | Info  | `USERS_DB_LOADED`            | audit  |
 | 4041 | Error | `USERS_DB_REJECTED`          | audit  |
+| 4042 | Info  | `DRIVER_STORE_SCANNED`      | audit  |
 
 The `USERS_DB_*` pair reports the boot-time users-database load
 (`rustos_kernel_core::users::load_users_db`, `plans/PI.md` P11): given the
@@ -213,6 +214,23 @@ leaves the system with **no** database, so every login refuses
 (`AGENTS.md` §5.4.5). The `users_db_qemu_aarch64` vertical proves the path
 end to end on the QEMU `virt` board against a real (emulated) virtio-blk
 users-root volume.
+
+`DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
+`/System/Drivers/` signed-driver store
+(`rustos_kernel_core::driver_store::enumerate_driver_store`, `AGENTS.md`
+§18.3 / §18.6, `plans/PI.md` P10 Stage 4.HW item 5). Mirroring the
+users-database read, it walks the mounted root volume's `FilesystemRead` +
+`FilesystemSecurity` driver under the uid-0 bootstrap identity (no §5.1
+bypass), collecting the image path of every regular file under
+`/System/Drivers/` — the candidate paths the user-space scan
+(`rustos_drvhost::store::scan_store`) reads, bind-decodes, and hands to the
+`devmgr` autoloader. It only finds paths; it never reads, parses, or trusts
+a bundle — the load gate (`rustos_drvhost::Host::load`) verifies a bundle
+only when it wins a node (§18.6). The walk is bounded
+(`MAX_STORE_DEPTH` / `MAX_STORE_DRIVERS`, §24.4) and fail-closed: a missing
+store, an unreadable sub-directory, or a malformed entry simply contributes
+fewer paths and never aborts the boot (§18.4 / §2.9). The single record
+carries the `drivers` count found and the `skipped` count refused.
 
 The **Sink** column names the `BootInfo`-supplied channel each record
 is emitted on. Audit-class boot lifecycle events

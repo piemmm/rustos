@@ -5,7 +5,7 @@
 //! database: given the live [`FilesystemRead`] +
 //! [`FilesystemSecurity`] driver of the mounted root volume (rustfs on a
 //! real installation), it resolves [`USERS_DB_PATH`] through the VFS's
-//! §5.3-checked per-inode delegation ([`Vfs::read_via_secured`]), bounds
+//! §5.3-checked per-inode delegation ([`crate::fs::Vfs::read_via_secured`]), bounds
 //! the file against [`rustos_users::MAX_DB_LEN`] *before* reading it,
 //! and parses the bytes through the fail-closed
 //! [`rustos_users::UsersDb`] parser. The parsed database is what the
@@ -31,7 +31,6 @@
 use alloc::vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
-use rustos_abi::driver::DriverHandle;
 use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 use rustos_kernel_sec::{GroupId, UserId};
@@ -40,7 +39,7 @@ use rustos_users::{ParseError, UsersDb, MAX_DB_LEN};
 use rustos_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{Credentials, Metadata, Mode, Path, Vfs, VfsError};
+use crate::fs::{Credentials, Path, VfsError};
 
 /// Absolute path of the user database on the root volume
 /// (`AGENTS.md` §16.2).
@@ -92,11 +91,6 @@ impl UsersDbSource for NullUsersDbSource {
 /// `KernelSyscallHandlers::with_users_db` (mirrors
 /// [`crate::console::NULL_CONSOLE`]).
 pub static NULL_USERS_DB: NullUsersDbSource = NullUsersDbSource;
-
-/// `DriverHandle` the loader's private root mount carries. The loader
-/// maps the handle to the caller's borrowed driver itself, so the value
-/// only needs to be non-zero; it spells `root` for log legibility.
-const ROOT_VOLUME_HANDLE: u64 = 0x726F_6F74;
 
 /// Why [`load_users_db`] yielded no database.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -207,10 +201,8 @@ where
 {
     // A minimal VFS whose root mount is backed by the caller's driver —
     // the shape of the real root volume, which carries the whole §16
-    // tree from its own root directory.
-    let mut vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
-    let handle = DriverHandle::from_raw(ROOT_VOLUME_HANDLE).map_err(|_| VfsError::Io)?;
-    vfs.mounts_mut().back_root(handle)?;
+    // tree from its own root directory (`AGENTS.md` §2.2: shared builder).
+    let vfs = crate::fs::root_backed_vfs()?;
 
     let caps = CapabilitySet::empty();
     let cred = Credentials {
