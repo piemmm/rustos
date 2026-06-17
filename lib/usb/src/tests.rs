@@ -18,7 +18,7 @@ use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
 use rustos_abi::driver::input::{Input, ReportSource};
 use rustos_abi::Delay;
-use rustos_drv_input_usb_hid::BootKeyboard;
+use rustos_hid::BootKeyboard;
 
 /// The mock's `CAPLENGTH` (so its operational base).
 const MOCK_CAPLENGTH: u32 = 0x20;

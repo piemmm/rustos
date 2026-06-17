@@ -171,6 +171,19 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         Ok(Self::from_slots(caps, syscalls, slots, coherency))
     }
 
+    /// The [`HwResource`]s the kernel granted this driver, in delivery order.
+    ///
+    /// A driver process derives its concrete bring-up inputs — the register
+    /// BAR window and the DMA aperture bound — from the same grant set the
+    /// host maps over, rather than re-querying the kernel: the host is built
+    /// from the delivered grants once and this exposes them read-only so the
+    /// driver's start-up reads them without a second `resource_grants`
+    /// syscall (`AGENTS.md` §2.16). The grants are exactly the resources the
+    /// matched node requested — no more (`AGENTS.md` §4 / §18.3).
+    pub fn resources(&self) -> impl Iterator<Item = &HwResource> {
+        self.grants.iter().flatten().map(|slot| &slot.resource)
+    }
+
     /// Assemble a host from an already-built grant-slot array (the shared
     /// tail of [`Self::new`] and [`Self::from_grants_query`], `AGENTS.md`
     /// §2.2).

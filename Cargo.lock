@@ -755,9 +755,17 @@ name = "rustos-drv-input-usb-hid"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-input",
- "rustos-keymap",
- "rustos-usb",
+]
+
+[[package]]
+name = "rustos-drv-input-usb-kbd"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-hid",
+ "rustos-rt",
 ]
 
 [[package]]
@@ -865,6 +873,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-hid"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-input",
+ "rustos-keymap",
+ "rustos-usb",
+]
+
+[[package]]
 name = "rustos-icon"
 version = "0.0.0"
 dependencies = [
@@ -930,6 +948,7 @@ dependencies = [
  "rustos-drv-input-usb-hid",
  "rustos-drvhost",
  "rustos-fdt",
+ "rustos-hid",
  "rustos-itest-harness",
  "rustos-kernel-core",
  "rustos-kernel-irq",
@@ -2522,6 +2541,7 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-drv-input-usb-hid",
+ "rustos-hid",
 ]
 
 [[package]]

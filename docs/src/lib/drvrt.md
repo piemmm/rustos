@@ -28,6 +28,15 @@ is the production constructor that issues that syscall into a fixed
 `devmgr`-autoloaded driver uses. (`RtDriverHost::new` takes a caller-supplied
 grant slice instead, for tests and verticals.)
 
+`RtDriverHost::resources()` exposes the granted `HwResource`s read-only, so a
+driver derives its concrete bring-up inputs — its register BAR window and DMA
+aperture bound — from the same grant set the host maps over, without a second
+`resource_grants` syscall (§2.16). The USB keyboard driver process
+(`drivers/input/usb_kbd`) uses it with
+`rustos_hid::derive_keyboard_resources` to fill the
+`bar_base`/`bar_len`/`dma_aperture_top` its bring-up needs (`plans/PI.md` P10
+chunk 5d-2-ii).
+
 `rustos_drvrt::RtDriverHost` turns that grant table into the three traits a
 bus driver's `register()` consumes:
 

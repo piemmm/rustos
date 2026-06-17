@@ -1,6 +1,6 @@
 [package]
 name = "rustos-drv-input-usb-hid"
-description = "RustOS USB-HID boot-protocol input driver (keyboard + mouse)."
+description = "RustOS USB-HID boot-protocol input driver (keyboard + mouse): the §8 register entry and §18.3 bind table. The reusable decode/console/orchestration logic lives in lib/hid (§17.4 / §2.2)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,19 +9,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The §8 `DriverHost`/`DriverHandle`/`register` surface, the `CapabilityId` /
+# `DriverError` vocabulary, and the §18.3 `DriverBindKey` / `HwMatchKey` bind
+# table — the one ABI definition (§2.2). The decode/console/orchestration
+# logic the driver exposes is in `lib/hid` (§17.4), kept out of this crate so
+# the kernel scaffold and the user-space driver process share it without a
+# `drivers/*`→`drivers/*` edge.
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The decoded keyboard `Key` vocabulary the console producer resolves HID
-# usages into, and the shared terminal key map that turns each key press into
-# the console (tty) bytes injected through `console_input` (§2.2, plans/PI.md
-# P11). Both are `lib/*` crates the driver may depend on (§17.4).
-rustos-input = { path = "../../../lib/input", version = "=0.0.0" }
-rustos-keymap = { path = "../../../lib/keymap", version = "=0.0.0" }
-# The bus-agnostic xHCI protocol + single-device enumeration engine the
-# arch-neutral boot-keyboard `service` orchestration brings up over its
-# granted register BAR + DMA (plans/PI.md P10 5d-2-ii). A `lib/*` crate, so
-# the driver may depend on it (§17.4); the xHCI controller driver
-# (drivers/bus/usb) consumes the same crate, neither driver naming the other.
-rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 [lints]
 workspace = true

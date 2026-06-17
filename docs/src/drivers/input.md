@@ -147,7 +147,14 @@ xtask test --qemu`) drives the same driver and the same shared
 
 ### `rustos-drv-input-usb-hid`
 
-The USB-HID driver decodes the two **boot-protocol** report formats
+`rustos-drv-input-usb-hid` is the §8 driver identity — the `register` entry and
+the §18.3 `BIND_KEYS` bind table. The reusable decode/console/orchestration
+logic described below lives in the [`rustos-hid`](../lib/hid.md) library
+(`lib/hid`), shared by the in-kernel scaffold and the user-space keyboard
+driver process without a `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 /
+§2.2).
+
+The USB-HID logic decodes the two **boot-protocol** report formats
 (USB HID 1.11 Appendix B) — the fixed 8-byte keyboard report and the
 3-or-more-byte mouse report every USB keyboard/mouse must speak without
 a report-descriptor parse — into platform-neutral `InputEvent`s. It is
@@ -232,6 +239,41 @@ the xHCI driver's wiring also carves (`AGENTS.md` §2.2). QEMU models no Pi USB
 timing, so the host tests prove the composition and its fail-closed paths up
 to the controller hand-off — over an inert mock window `Xhci::open` fails
 closed with `DeviceFault`, the on-metal boundary — and the live bring-up plus
-the report pump are the metal acceptance item. The `devmgr`-autoloaded driver
-binary that builds the runtime host over its delivered grants and runs this
-loop, plus the production boot autoload wiring, are the next chunk.
+the report pump are the metal acceptance item.
+
+`derive_keyboard_resources` turns the device-resource grants the kernel
+delivered (its `HwResource` set) into the `bar_base`/`bar_len`/
+`dma_aperture_top` the bring-up needs: exactly one register window — an
+`Mmio` window (named by its base) or an outbound `BusWindow` (named by its
+far-side bus address) — and exactly one `Dma` constraint (its device-visible
+exclusive top: the far-side base plus extent for a translated inbound
+viewport, or its `addr_limit` for an untranslated one). It fails closed
+(`NotFound` for a missing window or constraint, `Unsupported` for an
+ambiguous double grant, `OutOfRange` for a zero-length BAR) and never guesses
+a board constant (`AGENTS.md` §2.16 / §2.20 / §5.4).
+
+#### The autoloaded driver binary (`rustos-drv-input-usb-kbd`)
+
+The keyboard driver *process* is a **separate crate**,
+`drivers/input/usb_kbd` (`rustos-drv-input-usb-kbd`, `src/main.rs`): the
+`devmgr`-autoloaded **user-space** keyboard driver, installed as a signed
+`/System/Drivers/` bundle (`AGENTS.md` §18, `plans/PI.md` P10 chunk
+5d-2-ii) — the "drivers in user space" steady state (`AGENTS.md` §4). It is a
+pure-Rust `rustos-rt` program (`AGENTS.md` §1 / §16.4) kept separate from the
+`rustos-drv-input-usb-hid` driver so the userland runtime never enters the
+kernel's dependency graph, and depends only on `lib/*` crates so the §17.4
+layering holds. `main` builds `rustos_drvrt::RtDriverHost::from_grants_query`
+over its kernel-issued grants (coherent DMA is carved kernel-side, so no
+architecture-specific cache shim is supplied — platform-neutral, `AGENTS.md`
+§2.20), derives its BAR + DMA aperture from the same grants with
+`rustos_hid::derive_keyboard_resources` (no second `resource_grants` syscall,
+`AGENTS.md` §2.16), runs `rustos_hid::bring_up_boot_keyboard`, and then polls
+the keyboard forever with `rustos_hid::pump_once`, injecting each decoded key
+edge into the kernel input-focus arbiter through the `key_inject` syscall and
+yielding between polls (`AGENTS.md` §2.1). The host adds no authority — every
+capability and bound is re-checked kernel-side (`AGENTS.md` §5.4) — and a
+bring-up failure exits with a reserved fail-closed code, leaving the console
+without a keyboard rather than wedged (`AGENTS.md` §2.9). The production boot
+wiring that runs `DeviceManager::autoload` against the discovered hardware
+tree and spawns this binary, plus the metal acceptance run, are the next
+chunk; until then the in-kernel scaffold drives the metal keyboard.

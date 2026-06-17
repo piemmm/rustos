@@ -525,3 +525,31 @@ fn from_grants_query_surfaces_a_kernel_refusal_fail_closed() {
         Some(DriverError::Unsupported)
     );
 }
+
+#[test]
+fn resources_exposes_the_granted_resources_in_delivery_order() {
+    // A driver process derives its concrete bring-up inputs (the BAR window,
+    // the DMA aperture) from the same grants the host maps over, without a
+    // second `resource_grants` syscall (`AGENTS.md` §2.16).
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
+        mock,
+        &[buswin_grant(), dma_grant()],
+        None,
+    )
+    .unwrap();
+
+    let resources: Vec<HwResource> = host.resources().copied().collect();
+    assert_eq!(
+        resources,
+        vec![buswin_grant().resource, dma_grant().resource]
+    );
+}
+
+#[test]
+fn resources_is_empty_for_an_unbound_driver() {
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
+    assert_eq!(host.resources().count(), 0);
+}

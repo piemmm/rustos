@@ -44,6 +44,7 @@
 //! controller bring-up and the report pump are the on-metal acceptance item.
 
 use rustos_abi::driver::dma::DmaSlab;
+use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{
     CapabilityId, Delay, DriverError, DriverHost, MmioMapError, MmioMapper, RegisterWindow,
 };
@@ -51,6 +52,116 @@ use rustos_usb::device::UsbDevice;
 use rustos_usb::{Xhci, DEFAULT_POLL_BUDGET, XHCI_DMA_BYTES};
 
 use crate::BootKeyboard;
+
+/// The concrete bring-up inputs a USB boot-keyboard driver process derives
+/// from its kernel-issued device-resource grants to drive
+/// [`bring_up_boot_keyboard`].
+///
+/// A `devmgr`-autoloaded driver is granted exactly the resources its matched
+/// hardware-tree node requested — its already-assigned xHCI register BAR and
+/// a DMA constraint — and no more (`AGENTS.md` §4 / §18.3). The driver does
+/// not know those addresses at build time (they depend on the board's bus
+/// layout, `AGENTS.md` §2.20); it reads them from the grants the kernel
+/// delivered through `resource_grants` and turns them into these values with
+/// [`derive_keyboard_resources`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct KeyboardResources {
+    /// Device-visible base address of the controller's assigned register BAR
+    /// window — the address the driver names the BAR by when mapping it
+    /// through its [`DriverHost`] (the host resolves the covering grant and
+    /// performs the bus→CPU translation, `AGENTS.md` §18.1).
+    pub bar_base: u64,
+    /// Length of that register window, in bytes.
+    pub bar_len: usize,
+    /// Exclusive upper bound, in the **device-visible** address space, of the
+    /// inbound DMA aperture the controller may reach — the bound
+    /// [`bring_up_boot_keyboard`] checks the carved DMA region against.
+    pub dma_aperture_top: u64,
+}
+
+/// Derive the [`KeyboardResources`] from the [`HwResource`] grants the kernel
+/// minted for this keyboard driver process (`AGENTS.md` §18.3).
+///
+/// Exactly one mappable register window — an [`HwResourceKind::Mmio`] window
+/// (CPU/identity space) or an [`HwResourceKind::BusWindow`] (outbound
+/// PCIe-bus space, addressed by its far-side [`translated_base`]) — supplies
+/// the BAR `bar_base`/`bar_len`. Exactly one [`HwResourceKind::Dma`]
+/// constraint supplies the aperture bound: its device-visible exclusive top
+/// is the far-side base plus extent for a translated inbound viewport
+/// ([`HwResource::dma_translated`]), or its `addr_limit` for an untranslated
+/// constraint ([`HwResource::dma`]). Any other resource (an IRQ line, a port
+/// range) is ignored — this driver maps only the BAR and carves only the DMA
+/// region.
+///
+/// # Errors
+///
+/// Fails closed (`AGENTS.md` §2.9 / §5.4), never guessing a missing address:
+///
+/// * [`DriverError::NotFound`] if no register-window grant or no DMA grant is
+///   present.
+/// * [`DriverError::Unsupported`] if more than one register-window grant or
+///   more than one DMA grant is present (an ambiguous delivery — a packaging
+///   defect the driver refuses rather than picking one).
+/// * [`DriverError::OutOfRange`] for a zero-length BAR, a BAR length past
+///   `usize`, or a translated DMA aperture whose far-side top overflows.
+///
+/// [`translated_base`]: HwResource::translated_base
+pub fn derive_keyboard_resources<'a, I>(resources: I) -> Result<KeyboardResources, DriverError>
+where
+    I: IntoIterator<Item = &'a HwResource>,
+{
+    let mut bar: Option<(u64, u64)> = None;
+    let mut aperture: Option<u64> = None;
+    for resource in resources {
+        match resource.kind() {
+            Some(HwResourceKind::Mmio) => {
+                if bar.is_some() {
+                    return Err(DriverError::Unsupported);
+                }
+                bar = Some((resource.base(), resource.length()));
+            }
+            Some(HwResourceKind::BusWindow) => {
+                if bar.is_some() {
+                    return Err(DriverError::Unsupported);
+                }
+                bar = Some((resource.translated_base(), resource.length()));
+            }
+            Some(HwResourceKind::Dma) => {
+                if aperture.is_some() {
+                    return Err(DriverError::Unsupported);
+                }
+                // A translated inbound viewport's device-visible window is
+                // `[translated_base, translated_base + len)`, so its exclusive
+                // top is the far-side base plus extent; an untranslated
+                // constraint's `addr_limit` (stored as `base`) is already the
+                // device-visible exclusive top (`AGENTS.md` §18.1).
+                let top = if resource.translated_base() != 0 {
+                    resource
+                        .translated_base()
+                        .checked_add(resource.length())
+                        .ok_or(DriverError::OutOfRange)?
+                } else {
+                    resource.base()
+                };
+                aperture = Some(top);
+            }
+            // An IRQ line, a port range, or an unknown kind is not part of
+            // this driver's bring-up (`AGENTS.md` §5.4 — validate the kind).
+            _ => {}
+        }
+    }
+    let (bar_base, bar_len) = bar.ok_or(DriverError::NotFound)?;
+    let bar_len = usize::try_from(bar_len).map_err(|_| DriverError::OutOfRange)?;
+    if bar_len == 0 {
+        return Err(DriverError::OutOfRange);
+    }
+    let dma_aperture_top = aperture.ok_or(DriverError::NotFound)?;
+    Ok(KeyboardResources {
+        bar_base,
+        bar_len,
+        dma_aperture_top,
+    })
+}
 
 /// The user-space keyboard driver's brought-up boot keyboard: a
 /// [`BootKeyboard`] over the controller's single-device enumeration engine,

@@ -46,6 +46,7 @@ members = [
     "lib/fdt",
     "lib/font",
     "lib/geometry",
+    "lib/hid",
     "lib/icon",
     "lib/input",
     "lib/keymap",
@@ -79,6 +80,7 @@ members = [
     # Drivers — input
     "drivers/input/ps2",
     "drivers/input/usb_hid",
+    "drivers/input/usb_kbd",
     "drivers/input/virtio_input",
 
     # Drivers — bus

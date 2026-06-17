@@ -107,6 +107,7 @@ rustos-drv-bus-usb = { path = "../../drivers/bus/usb", version = "=0.0.0" }
 # (`AGENTS.md` §2.2 / §17.4 — the protocol is a `lib/*` crate).
 rustos-usb = { path = "../../lib/usb", version = "=0.0.0" }
 rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
+rustos-hid = { path = "../../lib/hid", version = "=0.0.0" }
 rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 
 # --- Per-architecture boot dependencies ----------------------------

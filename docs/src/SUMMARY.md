@@ -43,6 +43,7 @@
   - [`rustos-curses`](./lib/curses.md)
   - [`rustos-devmatch`](./lib/devmatch.md)
   - [`rustos-drvrt`](./lib/drvrt.md)
+  - [`rustos-hid`](./lib/hid.md)
   - [`rustos-keymap`](./lib/keymap.md)
   - [`rustos-log`](./lib/log.md)
   - [`rustos-rng`](./lib/rng.md)

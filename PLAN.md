@@ -917,14 +917,35 @@ order (one fully-gated increment each):
          reaching the controller hand-off where the inert mock window faults
          `DeviceFault` — the metal boundary, mirroring `bus_usb`'s `wiring`
          tests). No `lib/abi`/C-header change; whole gate green.
-       - **5d-2-ii (b-2-iii) (next)** the `devmgr`-autoloaded keyboard driver
-         `rxe`: a binary that builds `RtDriverHost::from_grants_query`, derives
-         its BAR + DMA-aperture from its delivered grants, runs
-         `service::bring_up_boot_keyboard` then loops `pump_once` (a `ConsoleSink`
-         over `key_inject`, a `Delay` over the `clock_get` syscall, yielding
-         between polls), plus the production boot wiring that runs
-         `DeviceManager::autoload` against the discovered tree (kernel/core owns
-         the scheduler, so it hosts the autoload step) and the metal checkpoint.
+       - **5d-2-ii (b-2-iii)** the `devmgr`-autoloaded keyboard driver `rxe`.
+         - **`lib/hid` extraction + the driver binary — done (host-proven).**
+           The reusable HID logic moved into a new **`lib/hid` (`rustos-hid`)**
+           crate — the decoders, the console producer, and the xHCI boot-keyboard
+           orchestration (`bring_up_boot_keyboard`, `derive_keyboard_resources`,
+           `KeyboardResources`) — the USB analogue of `lib/usb` ↔
+           `drivers/bus/usb` (§2.2 / §6 / §17.4); `drivers/input/usb_hid` shrank
+           to the §8 `register` + `BIND_KEYS` identity. The new
+           **`drivers/input/usb_kbd` (`rustos-drv-input-usb-kbd`)** binary is the
+           user-space keyboard driver: a pure-Rust `rustos-rt` program depending
+           only on `lib/*` (hid/drvrt/rt/caps/abi — so §17.4 holds and the kernel
+           never links `rustos-rt`) that builds `RtDriverHost::from_grants_query`
+           over its kernel-issued grants (coherency `None` — kernel-coherent DMA,
+           §2.20), derives its BAR + DMA aperture from the same grants with the
+           host-tested `rustos_hid::derive_keyboard_resources` over the new
+           `RtDriverHost::resources()` accessor (no second `resource_grants`
+           syscall, §2.16), runs `bring_up_boot_keyboard`, then loops `pump_once`
+           with a `KeyInjectSink` over `key_inject` + the userland `ClockDelay`,
+           yielding between polls (§2.1). Fail-closed exit codes (§2.9); every
+           capability + bound re-checked kernel-side (§5.4). Host-proven
+           (`rustos-hid` 45, `usb_hid` 4, `drvrt` 24); usb_kbd + the aarch64
+           kernel build freestanding on all three Tier-1 targets. No
+           `lib/abi`/C-header change. AGENTS.md §3 + SUMMARY.md gained `lib/hid`.
+           Docs: `docs/src/lib/hid.md`, `docs/src/drivers/input.md`,
+           `docs/src/lib/drvrt.md`, the crate READMEs.
+         - **Remaining (next):** the production boot wiring that runs
+           `DeviceManager::autoload` against the discovered tree (kernel/core
+           hosts it — it owns the scheduler) with the keyboard candidate,
+           spawning the binary into user space, and the metal checkpoint.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

@@ -24,5 +24,8 @@ rustos-abi = { path = "../abi", version = "=0.0.0" }
 # End-to-end seam proof: the boot-protocol decoders polling reports
 # straight off this crate's interrupt-IN transfer ring. Test scaffolding
 # only (a `[dev-dependencies]` edge, excluded from the §17.4 layering
-# graph) — `usb_hid` does not depend on this crate, so there is no cycle.
+# graph) — neither crate depends on this one, so there is no cycle. The
+# decoders live in `lib/hid` (`BootKeyboard`); the §18.3 bind table lives in
+# the `usb_hid` driver (`BIND_KEYS`).
+rustos-hid = { path = "../hid", version = "=0.0.0" }
 rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }

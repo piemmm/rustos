@@ -406,6 +406,10 @@ rustos/
 │   │                    #   glyph blitter onto a raster Surface (§16.4, §17.4).
 │   ├── geometry/        # Shared screen geometry (Point/Rect) + the desktop
 │   │                    #   DPI/UI Scale (logical->physical) (§10, §17.4).
+│   ├── hid/             # Arch-neutral HID boot-protocol decode (keyboard +
+│   │                    #   mouse), the console-input producer, and the xHCI
+│   │                    #   boot-keyboard orchestration, shared by the in-kernel
+│   │                    #   scaffold and the user-space keyboard driver (§2.2/§17.4).
 │   ├── icon/            # Shared desktop icons: themeable vector glyphs
 │   │                    #   rasterised via fill_polygon onto a Surface (§10).
 │   ├── input/           # Shared pointer input-event vocabulary

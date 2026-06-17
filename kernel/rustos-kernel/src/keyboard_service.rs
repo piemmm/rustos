@@ -412,7 +412,7 @@ mod metal {
     use rustos_arch_aarch64::SERIAL_SINK;
     use rustos_devmatch::MatchResolution;
     use rustos_drv_bus_pcie_brcm::{Delay, PcieWindows};
-    use rustos_drv_input_usb_hid::{pump_once, KeyboardConsole};
+    use rustos_hid::{pump_once, KeyboardConsole};
     use rustos_kernel_core::{InitSpawnCtx, YieldHandle};
     use rustos_log::{log, Event, EventId, Field, Level};
     use rustos_sync::SpinLock;

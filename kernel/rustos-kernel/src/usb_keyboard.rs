@@ -10,7 +10,7 @@
 //! 2. [`rustos_drv_bus_pci::mechanism_brcm`] enumerates the VL805 over the
 //!    windowed config accessor;
 //! 3. [`rustos_drv_bus_usb`] maps the BAR, carves DMA, and brings xHCI up;
-//! 4. [`rustos_drv_input_usb_hid`] decodes reports into [`KeyInput`] records
+//! 4. [`rustos_hid`] decodes reports into [`KeyInput`] records
 //!    and hands each to the input-focus arbiter via [`ArbiterConsoleSink`]
 //!    (`AGENTS.md` §17.4).
 //!
@@ -39,7 +39,7 @@ use rustos_drv_bus_pcie_brcm::{
     self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback, OutboundWindowReadback,
     PcieWindows,
 };
-use rustos_drv_input_usb_hid::{BootKeyboard, ConsoleSink};
+use rustos_hid::{BootKeyboard, ConsoleSink};
 use rustos_kernel_core::InputFocus;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_usb::device::UsbDevice;
@@ -1772,7 +1772,7 @@ impl ConsoleSink for ArbiterConsoleSink<'_> {
 /// ([`rustos_drv_bus_pci::mechanism_brcm`]), bring the VL805 xHCI up
 /// ([`rustos_drv_bus_usb::wiring::open_discovered`]), and enumerate the
 /// first connected root-hub port as a boot keyboard. The returned
-/// [`KeyboardChain`] is then polled with [`rustos_drv_input_usb_hid::pump_once`]
+/// [`KeyboardChain`] is then polled with [`rustos_hid::pump_once`]
 /// in the driver's service loop, feeding each produced [`KeyInput`] record to
 /// an [`ArbiterConsoleSink`].
 ///

@@ -19,12 +19,13 @@ use core::ptr::NonNull;
 
 use rustos_abi::driver::dma::{DmaSlab, PoolId};
 use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::{
     CapabilityId, Delay, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper,
     RegisterWindow,
 };
 
-use super::bring_up_boot_keyboard;
+use super::{bring_up_boot_keyboard, derive_keyboard_resources, KeyboardResources};
 
 /// The controller's register BAR base/len the keyboard driver maps (the
 /// metal VL805 BAR0 is 4 KiB).
@@ -204,5 +205,115 @@ fn reaches_the_controller_hand_off() {
     assert_eq!(
         bring_up(&host, APERTURE_TOP).err(),
         Some(DriverError::DeviceFault)
+    );
+}
+
+#[test]
+fn derives_a_bus_window_bar_and_translated_dma_aperture() {
+    // The Pi 4 shape: the BAR is granted as an outbound PCIe-bus window
+    // (the driver names it by its far-side bus address), and the DMA
+    // constraint is a translated inbound viewport whose device-visible top is
+    // the far-side base plus extent.
+    let resources = [
+        HwResource::bus_window(0x6_0000_0000, 0x9310, 0xC000_0000),
+        HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0xC000_0000),
+    ];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()),
+        Ok(KeyboardResources {
+            bar_base: 0xC000_0000,
+            bar_len: 0x9310,
+            dma_aperture_top: 0xC000_0000 + 0x4000_0000,
+        })
+    );
+}
+
+#[test]
+fn derives_an_mmio_bar_and_untranslated_dma_aperture() {
+    // The `virt` shape: a plain identity-space register window and an
+    // untranslated DMA constraint whose `addr_limit` is the device-visible
+    // aperture top directly.
+    let resources = [
+        HwResource::mmio(0xA00_0000, 0x1000),
+        HwResource::dma(0x4000_0000, 0x10_0000),
+    ];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()),
+        Ok(KeyboardResources {
+            bar_base: 0xA00_0000,
+            bar_len: 0x1000,
+            dma_aperture_top: 0x4000_0000,
+        })
+    );
+}
+
+#[test]
+fn ignores_an_irq_grant_when_deriving() {
+    // An IRQ line the matched node also requested is not part of this
+    // driver's bring-up and must not disturb the derivation.
+    let resources = [
+        HwResource::mmio(0xA00_0000, 0x1000),
+        HwResource::irq(33, 1),
+        HwResource::dma(0x4000_0000, 0x10_0000),
+    ];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()).map(|r| r.bar_len),
+        Ok(0x1000)
+    );
+}
+
+#[test]
+fn rejects_a_missing_register_window() {
+    let resources = [HwResource::dma(0x4000_0000, 0x10_0000)];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()).err(),
+        Some(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn rejects_a_missing_dma_constraint() {
+    let resources = [HwResource::mmio(0xA00_0000, 0x1000)];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()).err(),
+        Some(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn rejects_an_ambiguous_double_register_window() {
+    let resources = [
+        HwResource::mmio(0xA00_0000, 0x1000),
+        HwResource::mmio(0xB00_0000, 0x1000),
+        HwResource::dma(0x4000_0000, 0x10_0000),
+    ];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()).err(),
+        Some(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn rejects_an_ambiguous_double_dma_constraint() {
+    let resources = [
+        HwResource::mmio(0xA00_0000, 0x1000),
+        HwResource::dma(0x4000_0000, 0x10_0000),
+        HwResource::dma(0x8000_0000, 0x10_0000),
+    ];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()).err(),
+        Some(DriverError::Unsupported)
+    );
+}
+
+#[test]
+fn rejects_a_zero_length_register_window() {
+    let resources = [
+        HwResource::mmio(0xA00_0000, 0),
+        HwResource::dma(0x4000_0000, 0x10_0000),
+    ];
+    assert_eq!(
+        derive_keyboard_resources(resources.iter()).err(),
+        Some(DriverError::OutOfRange)
     );
 }
