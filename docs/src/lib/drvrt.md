@@ -4,8 +4,8 @@
 `DriverHost` a first-party driver process links so it can run in user space
 (the `AGENTS.md` §4 microkernel goal) instead of in the kernel. It is the
 user-space counterpart of the in-kernel keyboard service's `IdentityMmioMapper`
-+ frame-allocator DMA host, built on the `mmio_map` / `dma_alloc` syscall
-surface delivered in `plans/PI.md` P10 chunk 5d-0.
++ frame-allocator DMA host, built on the `resource_grants` / `mmio_map` /
+`dma_alloc` syscall surface delivered in `plans/PI.md` P10 chunks 5d-0 / 5d-2.
 
 ## Why it exists
 
@@ -19,6 +19,14 @@ The driver maps a register window with `mmio_map(handle)` and carves a coherent
 DMA buffer with `dma_alloc(handle, len, …)`, passing those handles. Every
 capability check and every bound is enforced kernel-side, on the far side of
 the trap (§5.4).
+
+The driver process learns *which* handles it holds by calling `resource_grants`
+at start-up: the kernel serialises the task's minted grant set (handle +
+`HwResource` per record) and the host decodes it. `RtDriverHost::from_grants_query`
+is the production constructor that issues that syscall into a fixed
+`MAX_GRANTS` buffer and builds the grant table from the delivery — the path a
+`devmgr`-autoloaded driver uses. (`RtDriverHost::new` takes a caller-supplied
+grant slice instead, for tests and verticals.)
 
 `rustos_drvrt::RtDriverHost` turns that grant table into the three traits a
 bus driver's `register()` consumes:
@@ -63,11 +71,12 @@ uses.
 
 ## Testing seam
 
-The two syscalls live behind the `GrantSyscalls` trait, so the host's grant
-resolution, bus→CPU translation, map-once caching, and every fail-closed path
-are unit-tested on the host without a kernel (§7). Production driver processes
-use `RtGrantSyscalls`, which forwards to `rustos_rt`'s `mmio_map` / `dma_alloc`
-wrappers — the one syscall trap (§2.2).
+The three syscalls (`resource_grants`, `mmio_map`, `dma_alloc`) live behind the
+`GrantSyscalls` trait, so the host's grant delivery decode, grant resolution,
+bus→CPU translation, map-once caching, and every fail-closed path are
+unit-tested on the host without a kernel (§7). Production driver processes use
+`RtGrantSyscalls`, which forwards to `rustos_rt`'s `resource_grants` /
+`mmio_map` / `dma_alloc` wrappers — the one syscall trap (§2.2).
 
 ## Stability
 

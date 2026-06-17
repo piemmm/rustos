@@ -809,10 +809,28 @@ order (one fully-gated increment each):
          (`MAX_GRANTS`). 18 host tests; §3 + `SUMMARY.md` + `docs/src/lib/
          drvrt.md`. No production consumer yet (that is 5d-2), so no
          metal/virt step.
-       - **5d-2 (next)** the `devmgr`-spawned keyboard driver *process*
-         building an `RtDriverHost` from its minted grants and running the
+       - **5d-2-i — the `resource_grants` grant-delivery syscall — done
+         (host-proven).** New `abi-v1` syscall **`resource_grants`** (no. 28,
+         **no capability** — a task reads only its own grants, the §16.6/§24.3
+         own-process baseline; unaudited) serialises the calling task's minted
+         grant set from the per-task `AddressSpaceRegistry` grant table as
+         consecutive `rustos_abi::hwtree::GrantedResource` records (handle +
+         `HwResource`, `WIRE_LEN` = 40 — the one wire/owning definition,
+         re-exported by `lib/drvrt`, §2.2), copies them out fail-closed
+         (`BufferTooSmall` rather than a partial list, §2.9; `0` for an unbound
+         task, §18.4). `AddressSpaceRegistry::grants_to_le_bytes` serialises;
+         `RtDriverHost::from_grants_query` is the production constructor that
+         issues the syscall and builds the grant table. New
+         `rustos_rt::resource_grants` + `ros_sys_resource_grants`; C header
+         regenerated. Host-tested (abi round-trip/decode-reject, 5 kernel-core
+         handler tests, 4 drvrt builder tests, abi-sys marshal). No
+         metal/virt step (no production grant-minter / consumer yet — 5d-2-ii).
+       - **5d-2-ii (next)** the `devmgr`-spawned keyboard driver *process*
+         building an `RtDriverHost::from_grants_query` and running the
          `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + pump over it; needs the
-         production driver-spawn grant minter + a `-M virt` vertical.
+         production driver-spawn grant minter (the spawn path mints one grant
+         per the matched node's `HwResource`s via
+         `AddressSpaceRegistry::mint_grant`) + a `-M virt` vertical.
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

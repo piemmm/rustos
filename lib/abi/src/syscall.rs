@@ -392,6 +392,32 @@ impl SyscallNumber {
     /// grant of the wrong kind, a region exceeding the grant's limit, or a
     /// build with no DMA facility wired fails closed (`AGENTS.md` §2.9).
     pub const DMA_ALLOC: Self = Self(27);
+    /// Enumerate the device-resource grants the kernel minted for the
+    /// calling driver task, delivering the unforgeable handles the driver
+    /// passes to [`SyscallNumber::MMIO_MAP`] / [`SyscallNumber::DMA_ALLOC`]
+    /// (`AGENTS.md` §4 / §18.3 / §20; `plans/PI.md` P10 chunk 5d-2 — handing
+    /// a spawned driver process the handles for its matched node).
+    ///
+    /// Arguments: `buf: *mut u8` — a buffer the kernel fills with the
+    /// caller's grant set, serialised as consecutive
+    /// [`crate::hwtree::GrantedResource`] records (each
+    /// [`crate::hwtree::GrantedResource::WIRE_LEN`] bytes) — and `len: usize`
+    /// — its capacity in bytes. The kernel reads the grant set of the
+    /// **calling task** (the kernel-trusted caller id, never a caller-supplied
+    /// value, `AGENTS.md` §5.4), copies every record out through the
+    /// validated boundary, and returns the total number of bytes written. A
+    /// task with no grants returns `0`. A buffer too small to hold the whole
+    /// set fails closed with [`Errno::BufferTooSmall`] rather than delivering
+    /// a partial grant list (`AGENTS.md` §2.9); the driver sizes its buffer
+    /// for the matched node's resource count, bounded by
+    /// [`crate::hwtree::HwNode`]'s fixed resource maximum.
+    ///
+    /// Needs **no capability**: a task reads only its *own* minted grants,
+    /// which confers no authority over anything else (the §16.6 / §24.3
+    /// own-process-observer baseline). The handles are useless without the
+    /// `CAP_MMIO_MAP` / `CAP_MEM_DMA` the matched driver also holds, and the
+    /// kernel re-checks ownership when they are presented.
+    pub const RESOURCE_GRANTS: Self = Self(28);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

@@ -3299,14 +3299,36 @@ table, so a new board is match **data**, not new code. Sub-increments
       multi-grant resolution); registered in §3 + `SUMMARY.md`; docs
       `docs/src/lib/drvrt.md`. **No metal/virt step** (no production
       grant-minter/driver-process consumer yet — that is 5d-2).
-    - **5d-2 (next)** the user-space keyboard driver *process*: a
-      `devmgr`-spawned `rxe` that builds an `RtDriverHost` from the grants the
-      kernel minted for its matched node, runs the `pcie_brcm`→`bus_usb`→
-      `usb_hid` bring-up + report pump over it, and injects key edges via
-      `key_inject`. Needs the production driver-spawn **grant minter** (kernel
-      mints one grant per the matched node's `HwResource`s and hands the
-      handles to the process) + a `-M virt` vertical (a virtio device stands
-      in for the metal controller). **Metal checkpoint.**
+    - **5d-2-i — the `resource_grants` grant-delivery syscall — DONE
+      (host-proven).** The piece `RtDriverHost` consumes to learn *which*
+      handles it holds: new `abi-v1` syscall **`resource_grants`** (no. 28,
+      **no capability** — a task reads only its own grants, the §16.6/§24.3
+      own-process baseline; unaudited) serialises the **calling task's** minted
+      grant set from the same per-task `AddressSpaceRegistry` grant table as
+      consecutive `rustos_abi::hwtree::GrantedResource` records (handle +
+      `HwResource`, `WIRE_LEN` = 40; the one wire/owning definition, re-exported
+      by `lib/drvrt`, §2.2), copies them out through the validated boundary, and
+      returns the byte count — `0` for an unbound task (§18.4), `BufferTooSmall`
+      rather than a partial list (§2.9), `BadAddress` for an unregistered caller
+      (§19.1). `AddressSpaceRegistry::grants_to_le_bytes` does the
+      ascending-handle serialisation; `RtDriverHost::from_grants_query` is the
+      production constructor that issues the syscall into a fixed `MAX_GRANTS`
+      buffer and builds the grant table (`RtDriverHost::new` keeps the
+      caller-supplied-slice path for tests/verticals). New
+      `rustos_rt::resource_grants` + `ros_sys_resource_grants`; C header
+      regenerated. Host-tested (abi round-trip + decode-reject, 5 kernel-core
+      handler tests, 4 drvrt `from_grants_query` tests, abi-sys marshal). **No
+      metal/virt step** (no production grant-minter / driver-process consumer
+      yet — that is 5d-2-ii).
+    - **5d-2-ii (next)** the user-space keyboard driver *process*: a
+      `devmgr`-spawned `rxe` that builds an `RtDriverHost::from_grants_query`,
+      runs the `pcie_brcm`→`bus_usb`→`usb_hid` bring-up + report pump over it,
+      and injects key edges via `key_inject`. Needs the production driver-spawn
+      **grant minter** (the spawn path mints one grant per the matched node's
+      `HwResource`s via `AddressSpaceRegistry::mint_grant` and hands the handles
+      to the process — which `resource_grants` then delivers) + a `-M virt`
+      vertical (a virtio device stands in for the metal controller). **Metal
+      checkpoint.**
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
     generic path drives the chain end to end on metal.

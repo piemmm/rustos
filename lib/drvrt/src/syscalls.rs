@@ -32,6 +32,15 @@ pub trait GrantSyscalls {
     ///
     /// Mirrors [`rustos_rt::dma_alloc`].
     fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64;
+
+    /// Enumerate the device-resource grants the kernel minted for the
+    /// calling task into `buf`, returning the total number of bytes written
+    /// — consecutive [`rustos_abi::hwtree::GrantedResource`] records — when
+    /// non-negative, else `-errno`. A buffer too small for the whole set
+    /// fails closed (`AGENTS.md` §2.9).
+    ///
+    /// Mirrors [`rustos_rt::resource_grants`].
+    fn resource_grants(&self, buf: &mut [u8]) -> i64;
 }
 
 /// The production [`GrantSyscalls`]: forward to `rustos_rt`'s wrappers.
@@ -52,5 +61,10 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64 {
         rustos_rt::dma_alloc(handle, len, device_out)
+    }
+
+    #[inline]
+    fn resource_grants(&self, buf: &mut [u8]) -> i64 {
+        rustos_rt::resource_grants(buf)
     }
 }

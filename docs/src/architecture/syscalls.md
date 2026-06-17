@@ -81,6 +81,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  25 | `keyboard_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_INPUT_READ`  | no      |
 |  26 | `mmio_map`     | `Handle handle`                         | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
 |  27 | `dma_alloc`    | `Handle handle`, `len`, `user_ptr` (device_out) | `u64` (base vaddr) | `CAP_MEM_DMA` | yes |
+|  28 | `resource_grants` | `user_ptr` (buf), `len`              | `u64` (bytes) | —                 | no      |
 
 ### Capability matrix
 
@@ -164,6 +165,29 @@ fail-closed NULL producer (`NULL_DMA_ALLOC_FACILITY` → `NotImplemented`),
 so a kernel without the `kernel/mem` live producer denies rather than
 carving (`AGENTS.md` §2.9). The first-party Rust wrapper is
 `rustos_rt::dma_alloc`.
+
+`resource_grants` (no. 28) enumerates the device-resource grants the kernel
+minted for the calling driver task, delivering the unforgeable handles it
+passes to `mmio_map` / `dma_alloc` (`plans/PI.md` P10 chunk 5d-2 — handing a
+spawned driver process the handles for its matched node). The handler
+serialises the **calling task's** grant set (`caller.task_id` is
+kernel-trusted, §5.4) from the same per-task `AddressSpaceRegistry` grant
+table as consecutive `rustos_abi::hwtree::GrantedResource` records (handle +
+`HwResource`, `GrantedResource::WIRE_LEN` = 40 bytes each, in ascending
+handle order), copies them out through the validated boundary, and returns
+the total byte count — `0` for a task with no grants (an unbound driver is
+normal, §18.4). A buffer too small for the whole set is refused whole with
+`BufferTooSmall` rather than delivering a partial list (`AGENTS.md` §2.9); a
+driver sizes its buffer for the matched node's resource count. It is
+deliberately **ungated** (no row's capability): a task reads only its *own*
+grants, which confers no authority — the handles are useless without the
+`CAP_MMIO_MAP` / `CAP_MEM_DMA` the driver also holds, and the kernel
+re-checks ownership when they are presented (the §16.6 / §24.3 own-process
+baseline). It is unaudited per call — the device manager's one-time driver
+load is the audited security decision (§5.4.4 / §18.3). The first-party Rust
+wrapper is `rustos_rt::resource_grants` (the user-space driver host
+`rustos_drvrt::RtDriverHost::from_grants_query` builds its grant table from
+it); the C stub is `ros_sys_resource_grants`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

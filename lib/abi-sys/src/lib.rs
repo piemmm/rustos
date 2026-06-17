@@ -91,6 +91,7 @@ const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
+const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -449,6 +450,27 @@ pub extern "C" fn sys_keyboard_read(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `resource_grants`: enumerate the device-resource grants the kernel minted
+/// for the calling driver task into `buf` (a buffer of `len` bytes)
+/// (`SyscallNumber::RESOURCE_GRANTS`, `AGENTS.md` §4 / §18.3 / §20,
+/// `plans/PI.md` P10 chunk 5d-2). Returns the total number of bytes written
+/// — consecutive `ros_granted_resource` records — or a `ROS_E_*` code
+/// reinterpreted into the result.
+///
+/// A driver process calls this once at start-up to learn the unforgeable
+/// handles it passes to [`sys_mmio_map`] / [`sys_dma_alloc`]. It needs no
+/// capability (a task reads only its *own* grants); the kernel validates the
+/// `(buf, len)` pair against the caller's address space before writing it
+/// (`AGENTS.md` §5.4), and a buffer too small for the whole grant set fails
+/// closed (`AGENTS.md` §2.9).
+#[must_use]
+#[export_name = "ros_sys_resource_grants"]
+pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
+    // against the caller's address space before writing it (`AGENTS.md` §5.4).
+    unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
 /// `mmio_map`: map a granted device MMIO register window into the calling
 /// driver's own address space (`SyscallNumber::MMIO_MAP`, `AGENTS.md` §4 /
 /// §18.3, `plans/PI.md` P10 chunk 5d-0). Returns the base virtual address of
@@ -645,6 +667,7 @@ mod tests {
         (NUM_KEYBOARD_READ, "keyboard_read", 2),
         (NUM_MMIO_MAP, "mmio_map", 1),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
+        (NUM_RESOURCE_GRANTS, "resource_grants", 2),
     ];
 
     #[test]
@@ -918,6 +941,21 @@ mod tests {
             assert_eq!(sys_keyboard_read(ptr, len), len as u64);
         });
         assert_eq!(number, NUM_KEYBOARD_READ);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn resource_grants_marshals_pointer_and_len() {
+        let mut buf = [0u8; 40];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let len = buf.len();
+        // The kernel returns the number of bytes written (one record here).
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_resource_grants(ptr, len), len as u64);
+        });
+        assert_eq!(number, NUM_RESOURCE_GRANTS);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], len as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);

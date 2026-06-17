@@ -23,7 +23,8 @@
 //! # Layout of [`ENCODED_TABLE`]
 //!
 //! For each [`SyscallSpec`], in [`SyscallNumber`] ascending order, the
-//! encoded record is a fixed-stride 27-byte tuple:
+//! encoded record is a fixed-stride [`SYSCALL_ENCODED_RECORD_LEN`]-byte
+//! tuple (14 fixed bytes + [`SYSCALL_NAME_MAX`] name bytes):
 //!
 //! | Offset | Size | Field |
 //! |-------:|-----:|-------|
@@ -34,10 +35,10 @@
 //! |  10    |  1   | `required_capability.is_some()` (`0` or `1`) |
 //! |  11    |  2   | `required_capability` as little-endian `u16` (`0` when absent) |
 //! |  13    |  1   | `audit` (`0` or `1`) |
-//! |  14    | 13   | `name`, ASCII, right-padded with `0x00` to 13 bytes |
+//! |  14    | [`SYSCALL_NAME_MAX`] | `name`, ASCII, right-padded with `0x00` |
 //!
-//! Names exceeding 13 bytes are forbidden — the const encoder produces a
-//! compile error rather than silently truncate.
+//! Names exceeding [`SYSCALL_NAME_MAX`] bytes are forbidden — the const
+//! encoder produces a compile error rather than silently truncate.
 
 use crate::{CapabilityId, SyscallNumber};
 
@@ -694,6 +695,32 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // drown the log.
         required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::RESOURCE_GRANTS,
+        name: "resource_grants",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `users_db_read` / `keyboard_read` use.
+        ret: AbiType::U64,
+        // Reading the calling task's *own* minted device-resource grants
+        // confers no authority over anything else (the handles are useless
+        // without the `CAP_MMIO_MAP` / `CAP_MEM_DMA` the driver also holds,
+        // and the kernel re-checks ownership when they are presented), so —
+        // like the other own-process observers (`mem_map`, `rlimit_get`) — it
+        // is the unprivileged baseline (`AGENTS.md` §16.6 / §24.3) and is not
+        // audited per call: the device manager's one-time driver load IS the
+        // audited security decision (`AGENTS.md` §5.4.4 / §18.3).
+        required_capability: None,
+        audit: false,
     },
 ];
 

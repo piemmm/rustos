@@ -51,6 +51,7 @@ extern "C" {
 #define ROS_SYS_KEYBOARD_READ 25u
 #define ROS_SYS_MMIO_MAP 26u
 #define ROS_SYS_DMA_ALLOC 27u
+#define ROS_SYS_RESOURCE_GRANTS 28u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -81,6 +82,7 @@ int32_t ros_sys_display_release(void);
 uint64_t ros_sys_keyboard_read(void * a0, uintptr_t a1);
 uint64_t ros_sys_mmio_map(uint64_t a0);
 uint64_t ros_sys_dma_alloc(uint64_t a0, uintptr_t a1, void * a2);
+uint64_t ros_sys_resource_grants(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

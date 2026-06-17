@@ -138,6 +138,9 @@ const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 /// `keyboard_read` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 
+/// `resource_grants` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -367,6 +370,32 @@ pub fn keyboard_read(buf: &mut [u8]) -> i64 {
     // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
     // denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Enumerate the device-resource grants the kernel minted for the calling
+/// driver task into `buf` (`SyscallNumber::RESOURCE_GRANTS`, `AGENTS.md` §4 /
+/// §18.3 / §20, `plans/PI.md` P10 chunk 5d-2), returning the raw signed
+/// register: the total number of bytes written — consecutive
+/// [`rustos_abi::hwtree::GrantedResource`] records — when non-negative, else
+/// `-errno`.
+///
+/// A driver process calls this once at start-up to learn the unforgeable
+/// handles it passes to [`mmio_map`] / [`dma_alloc`]. It needs no capability
+/// (a task reads only its *own* grants); the kernel validates the
+/// `(buf, len)` pair against the caller's address space before writing it
+/// (`AGENTS.md` §5.4). A `buf` too small for the whole grant set fails closed
+/// with `-errno` (`BufferTooSmall`, `AGENTS.md` §2.9), so size it for the
+/// matched node's resource count; a task with no grants returns `0`.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn resource_grants(buf: &mut [u8]) -> i64 {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before writing
+    // it (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
+    // duration of the call, so the `(ptr, len)` pair denotes writable memory.
+    let ret = unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 

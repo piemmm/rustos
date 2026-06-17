@@ -554,6 +554,34 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Enumerate the device-resource grants the kernel minted for the
+    /// calling driver task, delivering its unforgeable handles
+    /// (`AGENTS.md` §4 / §18.3 / §20; `plans/PI.md` P10 chunk 5d-2).
+    ///
+    /// The dispatcher has already checked `buf` is a non-null `UserPtr`;
+    /// the call needs no capability (a task reads only its *own* grants,
+    /// which confers no authority — the §16.6 / §24.3 own-process-observer
+    /// baseline). The implementation serialises the calling task's grant
+    /// set as consecutive [`rustos_abi::hwtree::GrantedResource`] records,
+    /// copies them out through the validated boundary (`AGENTS.md` §5.4),
+    /// and returns the total byte count — `0` for a task with no grants. A
+    /// buffer too small for the whole set fails closed with
+    /// [`Errno::BufferTooSmall`] rather than delivering a partial list
+    /// (`AGENTS.md` §2.9).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no grant
+    /// table wired has nothing to enumerate. The real handler is installed
+    /// in `kernel/core`.
+    fn resource_grants(
+        &self,
+        _caller: &CallerContext<'_>,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -645,6 +673,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         outcome
     }
 
+    // This is the `abi-v1` dispatch table: a single flat `match` with exactly
+    // one arm per syscall, so its length grows by one arm with every syscall
+    // the frozen table gains. That is the intended shape — splitting it would
+    // scatter the one-to-one number→handler mapping the ABI cross-check relies
+    // on — so the `too_many_lines` heuristic does not apply here (the body is
+    // trivially uniform, not complex). `AGENTS.md` §15.10: justified allow.
+    #[allow(clippy::too_many_lines)]
     fn invoke(
         &self,
         caller: &CallerContext<'_>,
@@ -773,6 +808,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // writes the device-visible base to.
                 let len = decode_len(args.0[1])?;
                 self.handlers.dma_alloc(caller, args.0[0], len, args.0[2])
+            }
+            SyscallNumber::RESOURCE_GRANTS => {
+                // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
+                // is the buffer capacity (`AGENTS.md` §18.3 / §20).
+                let len = decode_len(args.0[1])?;
+                self.handlers.resource_grants(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1225,6 +1266,19 @@ mod tests {
             // dispatcher decoded the arguments without wiring a real grant
             // table / DMA facility here.
             Ok(handle)
+        }
+
+        fn resource_grants(
+            &self,
+            _caller: &CallerContext<'_>,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("resource_grants");
+            // Echo the buffer length back so the reachability test can assert
+            // the dispatcher decoded the arguments without wiring a real grant
+            // table here.
+            Ok(len as u64)
         }
     }
 

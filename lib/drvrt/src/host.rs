@@ -28,28 +28,14 @@ pub const MAX_GRANTS: usize = 8;
 /// handle plus the [`HwResource`] it names.
 ///
 /// A driver process receives these at spawn (the kernel mints one per
-/// resource its matched node requested, `AGENTS.md` §18.3) and builds the
-/// host's grant table from them. The [`HwResource`] descriptor lets the host
-/// resolve a driver's requested `(phys_base, len)` window to the grant that
-/// covers it and translate an outbound bus address to the mapped window's
-/// offset, without the driver ever naming a raw physical address (§4).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct GrantedResource {
-    /// The unforgeable, kernel-issued grant handle the `mmio_map` / `dma_alloc`
-    /// syscalls resolve owner-checked against the calling task.
-    pub handle: u64,
-    /// The resource the handle names (a register window, an outbound bus
-    /// window, or a DMA constraint).
-    pub resource: HwResource,
-}
-
-impl GrantedResource {
-    /// Pair a kernel-issued grant `handle` with the [`HwResource`] it names.
-    #[must_use]
-    pub fn new(handle: u64, resource: HwResource) -> Self {
-        Self { handle, resource }
-    }
-}
+/// resource its matched node requested, `AGENTS.md` §18.3) and learns them
+/// through the `resource_grants` syscall; [`RtDriverHost::from_grants_query`]
+/// builds the host's grant table from that delivery. The single wire/owning
+/// definition lives in `lib/abi` ([`rustos_abi::hwtree::GrantedResource`]) —
+/// the kernel serialises it and this host decodes it, one type for both ends
+/// (`AGENTS.md` §2.2) — and is re-exported here so a driver names it through
+/// its host crate.
+pub use rustos_abi::hwtree::GrantedResource;
 
 /// A grant the host can map, plus the lazily-cached base virtual address the
 /// kernel returned when it was first mapped.
@@ -115,14 +101,93 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
                 mapped_va: Cell::new(0),
             });
         }
-        Ok(Self {
+        Ok(Self::from_slots(caps, syscalls, slots, coherency))
+    }
+
+    /// Build a host by querying the kernel for the grants it minted for this
+    /// driver process — the production path a `devmgr`-autoloaded driver
+    /// uses at start-up (`plans/PI.md` P10 chunk 5d-2).
+    ///
+    /// Issues the `resource_grants` syscall through `syscalls` into a
+    /// fixed-capacity buffer (sized for [`MAX_GRANTS`], so the call is
+    /// allocation-free and works before the userland heap, `plans/SPAWN.md`
+    /// `SP5b`), decodes the delivered [`GrantedResource`] records, and builds
+    /// the host's grant table from them. The kernel minted one grant per
+    /// [`HwResource`] the driver's matched node requested (`AGENTS.md` §18.3),
+    /// so the table is exactly the resources this driver may map — no more
+    /// (§4).
+    ///
+    /// `coherency` is the cache-maintenance shim for a non-coherent DMA
+    /// interconnect, exactly as for [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Fails closed (`AGENTS.md` §2.9) without partially constructing a host:
+    /// [`DriverError::LengthOutOfRange`] if the kernel minted more grants than
+    /// [`MAX_GRANTS`] (a packaging defect — the delivery would not fit), and
+    /// [`DriverError::Unsupported`] for any other kernel refusal or an
+    /// impossible delivery (a byte count past the buffer, a partial record,
+    /// or a record that fails to decode).
+    pub fn from_grants_query(
+        caps: CapabilitySet,
+        syscalls: S,
+        coherency: Option<SlabCoherencyFn>,
+    ) -> Result<Self, DriverError> {
+        // Read the kernel-minted grant set into a fixed buffer sized for the
+        // host's `MAX_GRANTS` cap — allocation-free (`AGENTS.md` §2.9 / §24.4).
+        let mut buf = [0u8; MAX_GRANTS * GrantedResource::WIRE_LEN];
+        let ret = syscalls.resource_grants(&mut buf);
+        if ret < 0 {
+            // -errno: a `BufferTooSmall` means the kernel minted more than
+            // `MAX_GRANTS` grants (a packaging defect); any other code is a
+            // kernel refusal. Both fail closed (`AGENTS.md` §2.9).
+            return Err(grants_query_error(ret));
+        }
+        // `ret >= 0` (checked above); a byte count the kernel wrote into a
+        // buffer it was handed, so it fits `usize` on every target — but
+        // convert fail-closed rather than truncating (`AGENTS.md` §2.9).
+        let Ok(written) = usize::try_from(ret) else {
+            return Err(DriverError::Unsupported);
+        };
+        // The kernel writes whole records into the buffer it was handed; a
+        // length past the buffer or not a whole number of records is an
+        // impossible delivery — refuse it rather than decode garbage
+        // (`AGENTS.md` §5.4 — validate every input).
+        if written > buf.len() || written % GrantedResource::WIRE_LEN != 0 {
+            return Err(DriverError::Unsupported);
+        }
+        let count = written / GrantedResource::WIRE_LEN;
+        let mut slots: [Option<GrantSlot>; MAX_GRANTS] = core::array::from_fn(|_| None);
+        for (i, slot) in slots.iter_mut().take(count).enumerate() {
+            let off = i * GrantedResource::WIRE_LEN;
+            let granted = GrantedResource::from_bytes(&buf[off..off + GrantedResource::WIRE_LEN])
+                .map_err(|_| DriverError::Unsupported)?;
+            *slot = Some(GrantSlot {
+                handle: granted.handle,
+                resource: granted.resource,
+                mapped_va: Cell::new(0),
+            });
+        }
+        Ok(Self::from_slots(caps, syscalls, slots, coherency))
+    }
+
+    /// Assemble a host from an already-built grant-slot array (the shared
+    /// tail of [`Self::new`] and [`Self::from_grants_query`], `AGENTS.md`
+    /// §2.2).
+    fn from_slots(
+        caps: CapabilitySet,
+        syscalls: S,
+        grants: [Option<GrantSlot>; MAX_GRANTS],
+        coherency: Option<SlabCoherencyFn>,
+    ) -> Self {
+        Self {
             caps,
             syscalls,
-            grants: slots,
+            grants,
             dma_pool: PoolId::fresh(),
             next_slot: Cell::new(0),
             coherency,
-        })
+        }
     }
 
     /// Find the grant covering the mappable window `[req_base, req_base + len)`
@@ -318,6 +383,19 @@ fn dma_error(ret: i64) -> DriverError {
         Some(Errno::LengthOutOfRange | Errno::OutOfMemory | Errno::OutOfRange) => {
             DriverError::LengthOutOfRange
         }
+        _ => DriverError::Unsupported,
+    }
+}
+
+/// Map a negative `resource_grants` result to a [`DriverError`].
+///
+/// `ret` is `< 0` (`-errno`). A `BufferTooSmall` means the kernel minted more
+/// grants than the host's [`MAX_GRANTS`] cap can hold — a packaging defect
+/// surfaced as [`DriverError::LengthOutOfRange`]; anything else is a kernel
+/// refusal surfaced as [`DriverError::Unsupported`] (`AGENTS.md` §2.9).
+fn grants_query_error(ret: i64) -> DriverError {
+    match decode_errno(ret) {
+        Some(Errno::BufferTooSmall) => DriverError::LengthOutOfRange,
         _ => DriverError::Unsupported,
     }
 }

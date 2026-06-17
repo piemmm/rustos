@@ -45,8 +45,9 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
-use rustos_abi::hwtree::HwResource;
+use rustos_abi::hwtree::{GrantedResource, HwResource};
 use rustos_abi::{DescriptorTable, LimitKind, ResourceLimit};
 use rustos_kernel_mem::{PhysMap, UserAddressSpace};
 use rustos_kernel_sec::TaskId;
@@ -219,6 +220,31 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub fn grant(&self, task: TaskId, handle: u64) -> Option<HwResource> {
         self.grants.get(&task)?.by_handle.get(&handle).copied()
+    }
+
+    /// Serialise `task`'s device-resource grants as consecutive
+    /// [`GrantedResource`] records (each [`GrantedResource::WIRE_LEN`]
+    /// bytes), in ascending handle order, for delivery to the task through
+    /// the `resource_grants` syscall (`AGENTS.md` §18.3 / §20).
+    ///
+    /// Returns an empty vector for a task with no grants — a valid, empty
+    /// result, not an error (`AGENTS.md` §18.4 — an unbound node is
+    /// normal). The set is bounded by construction: handles are minted only
+    /// by the kernel's driver-admission path, one per [`HwResource`] the
+    /// matched node requested (`AGENTS.md` §4 — no ambient authority), so a
+    /// node's fixed resource maximum bounds the record count. Ascending
+    /// handle order makes the delivered sequence deterministic
+    /// ([`BTreeMap`] iterates by key).
+    #[must_use]
+    pub fn grants_to_le_bytes(&self, task: TaskId) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some(entry) = self.grants.get(&task) {
+            out.reserve(entry.by_handle.len() * GrantedResource::WIRE_LEN);
+            for (&handle, &resource) in &entry.by_handle {
+                out.extend_from_slice(&GrantedResource::new(handle, resource).to_le_bytes());
+            }
+        }
+        out
     }
 
     /// Establish `task`'s standard-stream descriptor table (`AGENTS.md`

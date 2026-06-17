@@ -42,6 +42,13 @@ struct MockSyscalls {
     backings: RefCell<Vec<Backing>>,
     mmio_calls: Rc<Cell<usize>>,
     dma_calls: Rc<Cell<usize>>,
+    /// The grant set `resource_grants` delivers (the kernel-minted grants the
+    /// driver process would learn at start-up). A test populates it before
+    /// building a host with `from_grants_query`.
+    delivered: RefCell<Vec<GrantedResource>>,
+    /// When `Some`, `resource_grants` returns this `-errno` instead of
+    /// serialising `delivered` (to model a kernel refusal).
+    grants_error: Cell<Option<Errno>>,
 }
 
 impl MockSyscalls {
@@ -50,7 +57,19 @@ impl MockSyscalls {
             backings: RefCell::new(Vec::new()),
             mmio_calls: Rc::new(Cell::new(0)),
             dma_calls: Rc::new(Cell::new(0)),
+            delivered: RefCell::new(Vec::new()),
+            grants_error: Cell::new(None),
         }
+    }
+
+    /// Add `grant` to the set `resource_grants` will deliver.
+    fn deliver(&self, grant: GrantedResource) {
+        self.delivered.borrow_mut().push(grant);
+    }
+
+    /// Make `resource_grants` fail with `-err` instead of delivering grants.
+    fn fail_grants(&self, err: Errno) {
+        self.grants_error.set(Some(err));
     }
 
     /// Register a `len`-byte backing buffer for `handle`, reporting
@@ -95,6 +114,24 @@ impl GrantSyscalls for MockSyscalls {
             Some(_) => -i64::from(Errno::OutOfMemory.as_i32()),
             None => -i64::from(Errno::NotFound.as_i32()),
         }
+    }
+
+    fn resource_grants(&self, buf: &mut [u8]) -> i64 {
+        if let Some(err) = self.grants_error.get() {
+            return -i64::from(err.as_i32());
+        }
+        let delivered = self.delivered.borrow();
+        let total = delivered.len() * GrantedResource::WIRE_LEN;
+        // Never deliver a partial set: fail closed exactly as the kernel
+        // handler does (`AGENTS.md` §2.9).
+        if total > buf.len() {
+            return -i64::from(Errno::BufferTooSmall.as_i32());
+        }
+        for (i, grant) in delivered.iter().enumerate() {
+            let off = i * GrantedResource::WIRE_LEN;
+            buf[off..off + GrantedResource::WIRE_LEN].copy_from_slice(&grant.to_le_bytes());
+        }
+        total as i64
     }
 }
 
@@ -416,5 +453,75 @@ fn resolves_the_right_grant_among_several() {
     assert_eq!(
         host.alloc_dma_zeroed(0x1000).unwrap().phys(),
         DMA_DEVICE_BASE
+    );
+}
+
+// --- `from_grants_query` (the production start-up path, `plans/PI.md` 5d-2) --
+
+#[test]
+fn from_grants_query_builds_the_table_the_kernel_delivered() {
+    // The kernel minted a register grant and a DMA grant for this driver and
+    // delivers them through `resource_grants`; the host decodes the delivery
+    // and maps/carves against exactly those grants.
+    let mock = MockSyscalls::new();
+    mock.deliver(regs_grant());
+    mock.deliver(dma_grant());
+    let base = mock.back(REGS_HANDLE, REGS_LEN as usize, 0);
+    mock.back(DMA_HANDLE, 0x4000, DMA_DEVICE_BASE);
+    let host = RtDriverHost::from_grants_query(
+        caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
+        mock,
+        None,
+    )
+    .expect("the delivered grants build a host");
+
+    let window = host.map_window(REGS_BASE, 0x10).expect("regs map");
+    assert_eq!(window.phys_base(), REGS_BASE);
+    window.write_u32(0, 0x1234_5678).expect("write");
+    let readback = unsafe { (base as *const u32).read() };
+    assert_eq!(readback, 0x1234_5678);
+    assert_eq!(
+        host.alloc_dma_zeroed(0x1000).expect("carve").phys(),
+        DMA_DEVICE_BASE
+    );
+}
+
+#[test]
+fn from_grants_query_with_no_grants_builds_a_host_that_maps_nothing() {
+    // An unbound driver (the kernel minted no grants) is a valid, empty
+    // result (`AGENTS.md` §18.4): the host builds, but any map is refused.
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::from_grants_query(caps(&[CapabilityId::MMIO_MAP]), mock, None)
+        .expect("an empty grant set still builds a host");
+    assert_eq!(
+        host.map_window(REGS_BASE, 0x10).unwrap_err(),
+        MmioMapError::InvalidRegion
+    );
+}
+
+#[test]
+fn from_grants_query_refuses_more_grants_than_the_cap() {
+    // The kernel delivering more than `MAX_GRANTS` records cannot fit the
+    // host's fixed buffer; the syscall reports `BufferTooSmall` and the host
+    // fails closed as a packaging defect (`AGENTS.md` §2.9 / §24.4).
+    let mock = MockSyscalls::new();
+    for _ in 0..=MAX_GRANTS {
+        mock.deliver(regs_grant());
+    }
+    assert_eq!(
+        RtDriverHost::from_grants_query(caps(&[]), mock, None).err(),
+        Some(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn from_grants_query_surfaces_a_kernel_refusal_fail_closed() {
+    // Any other negative result from the syscall is a kernel refusal: the
+    // host builds no grant table rather than guessing (`AGENTS.md` §2.9).
+    let mock = MockSyscalls::new();
+    mock.fail_grants(Errno::PermissionDenied);
+    assert_eq!(
+        RtDriverHost::from_grants_query(caps(&[]), mock, None).err(),
+        Some(DriverError::Unsupported)
     );
 }

@@ -618,6 +618,76 @@ impl HwResource {
     };
 }
 
+/// A kernel-issued device-resource grant delivered to a driver process:
+/// the unforgeable grant handle paired with the [`HwResource`] it names
+/// (`AGENTS.md` §4 / §18.3 / §20).
+///
+/// When the kernel autoloads a driver it mints one grant per
+/// [`HwResource`] the driver's matched hardware-tree node requested — and
+/// no more (§4 — no ambient authority) — and hands the driver process the
+/// handles. The process learns its grants through the `resource_grants`
+/// syscall ([`crate::SyscallNumber::RESOURCE_GRANTS`]), which serialises
+/// the task's grant set as a sequence of these records. The driver pairs
+/// each handle with the [`HwResource`] it names so its
+/// [`MmioMapper`](crate::MmioMapper) can resolve a requested
+/// `(phys_base, len)` window to the grant that covers it before issuing
+/// `mmio_map` / `dma_alloc` (the handle alone carries no description).
+///
+/// The wire form is the explicit little-endian byte layout
+/// [`to_le_bytes`](Self::to_le_bytes) produces — the handle followed by the
+/// [`HwResource`] encoding — not the in-memory struct layout, so the record
+/// is endianness-stable across the user/kernel boundary exactly like
+/// [`HwResource`] itself.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GrantedResource {
+    /// The unforgeable, kernel-issued grant handle the `mmio_map` /
+    /// `dma_alloc` syscalls resolve owner-checked against the calling task.
+    /// Never the reserved `0` value (the kernel mints handles from `1`).
+    pub handle: u64,
+    /// The resource the handle names (a register window, an outbound bus
+    /// window, an IRQ line, or a DMA constraint).
+    pub resource: HwResource,
+}
+
+impl GrantedResource {
+    /// Encoded size on the wire: the `u64` handle plus the [`HwResource`]
+    /// encoding.
+    pub const WIRE_LEN: usize = 8 + HwResource::WIRE_LEN;
+
+    /// Pair a kernel-issued grant `handle` with the [`HwResource`] it names.
+    #[must_use]
+    pub const fn new(handle: u64, resource: HwResource) -> Self {
+        Self { handle, resource }
+    }
+
+    /// Encode `self` little-endian: the handle at offset `0`, the
+    /// [`HwResource`] encoding immediately after.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.handle);
+        out[8..].copy_from_slice(&self.resource.to_le_bytes());
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is shorter than
+    /// [`Self::WIRE_LEN`], or any error [`HwResource::from_bytes`] returns
+    /// for the embedded resource (an unknown kind or an out-of-range
+    /// capability id).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let handle = read_u64(bytes, 0);
+        let resource = HwResource::from_bytes(&bytes[8..])?;
+        Ok(Self { handle, resource })
+    }
+}
+
 impl HwMatchKey {
     /// A zeroed slot, used to pad a node's fixed-size match-key array.
     const EMPTY: Self = Self {
@@ -1058,6 +1128,45 @@ mod tests {
         assert_eq!(HwResource::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
+    #[test]
+    fn granted_resource_round_trips() {
+        // A register-window grant: handle + the embedded HwResource decode
+        // back identically (the `resource_grants` delivery contract, §18.3).
+        let grant = GrantedResource::new(7, HwResource::mmio(0xFD50_0000, 0x9310));
+        let bytes = grant.to_le_bytes();
+        assert_eq!(bytes.len(), GrantedResource::WIRE_LEN);
+        let back = GrantedResource::from_bytes(&bytes).expect("decode");
+        assert_eq!(back, grant);
+        assert_eq!(back.handle, 7);
+        assert_eq!(
+            back.resource.required_capability(),
+            Ok(CapabilityId::MMIO_MAP)
+        );
+
+        // A translating outbound bus-window grant preserves its far-side base.
+        let win = GrantedResource::new(
+            2,
+            HwResource::bus_window(0x6_0000_0000, 0x400_0000, 0xF800_0000),
+        );
+        let back = GrantedResource::from_bytes(&win.to_le_bytes()).expect("decode");
+        assert_eq!(back, win);
+        assert_eq!(back.resource.translated_base(), 0xF800_0000);
+    }
+
+    #[test]
+    fn granted_resource_decode_rejects_short_and_bad_resource() {
+        // Too short to hold a whole record.
+        assert_eq!(
+            GrantedResource::from_bytes(&[0u8; 8]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A well-sized buffer whose embedded resource carries an unknown kind
+        // is rejected by `HwResource::from_bytes` (`AGENTS.md` §5.4).
+        let mut bytes = GrantedResource::new(1, HwResource::mmio(0, 0)).to_le_bytes();
+        put_u16(&mut bytes, 8, 9); // unknown HwResourceKind at the resource's offset
+        assert_eq!(GrantedResource::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
     fn sample_node() -> HwNode {
         let mut node = HwNode::new(7, 0, HwDeviceClass::Network);
         node.push_match_key(HwMatchKey::pci(0x1af4, 0x1000, 0x0002_0000))
@@ -1141,6 +1250,7 @@ mod tests {
         // Pinned so an accidental layout change is caught (AGENTS.md §9).
         assert_eq!(HwMatchKey::WIRE_LEN, 76);
         assert_eq!(HwResource::WIRE_LEN, 32);
+        assert_eq!(GrantedResource::WIRE_LEN, 40);
         assert_eq!(HwNode::WIRE_LEN, 572);
     }
 }

@@ -1550,6 +1550,42 @@ where
         }
     }
 
+    fn resource_grants(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // §5.4 step 2 (capability): none required — a task reads only its
+        // *own* minted grants, which confers no authority over anything else
+        // (the handles are useless without the `CAP_MMIO_MAP` / `CAP_MEM_DMA`
+        // the driver also holds, and `mmio_map` / `dma_alloc` re-check
+        // ownership when they are presented). This is the §16.6 / §24.3
+        // own-process-observer baseline. Step 3: serialise the grant set of
+        // the **calling task** (`caller.task_id` is kernel-trusted, never
+        // caller-supplied, §5.4) from the per-task grant table in the
+        // address-space registry; the read guard is held only for the
+        // serialisation.
+        let bytes = self.aspaces.read().grants_to_le_bytes(caller.task_id);
+        // Never deliver a partial grant list: a buffer that cannot hold the
+        // whole set fails closed (`AGENTS.md` §2.9), so the driver re-sizes
+        // and retries rather than binding against a truncated table.
+        if bytes.len() > len {
+            return Err(Errno::BufferTooSmall);
+        }
+        // A task with no grants is a valid, empty result — not an error
+        // (`AGENTS.md` §18.4 — an unbound node is normal); skip the copy.
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        // Copy the records out to the caller's address space through the
+        // validated `copy_to_user` boundary (`AGENTS.md` §5.4). A `None`
+        // (unregistered caller) or a fault fails closed with `BadAddress`,
+        // never leaking which case occurred (§19.1).
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
     fn mem_unmap(&self, _caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
         // The dispatcher already validated `base` and that `len` fits in
         // `usize`. A zero-length range names nothing; reject it before
@@ -6417,6 +6453,183 @@ mod tests {
         // The carve nonetheless ran with the request length and the grant's
         // addressing limit — never a caller-supplied bound (§18.3).
         assert_eq!(*facility.last.lock(), Some((0x1000, 0x4000_0000)));
+    }
+
+    // --- resource_grants (the grant-delivery syscall, `plans/PI.md` 5d-2) ---
+
+    /// Build a handler over a caller (task 2) whose address space maps a
+    /// writable user page at `0x1000` (so the grant copy-out has somewhere
+    /// to land), mirroring the `wait` copy-out tests. The five
+    /// `resource_grants` tests share this exact scaffold (`AGENTS.md` §2.2).
+    #[allow(clippy::type_complexity)]
+    fn grants_scaffold() -> (
+        Arc<TestArch>,
+        RwLock<CapTable>,
+        RwLock<PortRegistry>,
+        RwLock<AddressSpaceRegistry>,
+        RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        IrqTable,
+    ) {
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        (arch, table, ipc, aspaces, unseeded_rng(), IrqTable::new(31))
+    }
+
+    /// A task with no minted grants reads an empty set: `Ok(0)`, never an
+    /// error (`AGENTS.md` §18.4 — an unbound driver is normal). No copy is
+    /// performed.
+    #[test]
+    fn resource_grants_with_no_grants_returns_zero() {
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = grants_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.resource_grants(&ctx, 0x1000, 0x1000), Ok(0));
+    }
+
+    /// The caller's minted grants are serialised and copied out: the return
+    /// is the total byte count (one [`rustos_abi::hwtree::GrantedResource`]
+    /// record per grant), proving enumeration + the copy-out succeeded.
+    #[test]
+    fn resource_grants_returns_total_byte_count() {
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = grants_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let expected = 2 * rustos_abi::hwtree::GrantedResource::WIRE_LEN as u64;
+        assert_eq!(h.resource_grants(&ctx, 0x1000, 0x1000), Ok(expected));
+    }
+
+    /// A buffer too small for the whole grant set fails closed with
+    /// `BufferTooSmall` rather than delivering a partial list (`AGENTS.md`
+    /// §2.9). The check happens before any copy.
+    #[test]
+    fn resource_grants_buffer_too_small_fails_closed() {
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = grants_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // 8 bytes cannot hold one 40-byte record.
+        assert_eq!(
+            h.resource_grants(&ctx, 0x1000, 8),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    /// A caller with grants but no registered address space cannot receive
+    /// the copy-out and fails closed with `BadAddress`, never leaking the
+    /// missing-space case (`AGENTS.md` §5.4 / §19.1).
+    #[test]
+    fn resource_grants_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.resource_grants(&ctx, 0x1000, 0x1000),
+            Err(Errno::BadAddress)
+        );
+    }
+
+    /// Grants are owner-scoped: a task reads only its *own* grants. Task 2
+    /// holds a grant; task 3 (the registered caller here) sees an empty set
+    /// — it cannot enumerate another driver's handles (`AGENTS.md` §5.4 /
+    /// §18.3).
+    #[test]
+    fn resource_grants_is_owner_scoped() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(SecTaskId(3), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(3, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &caps,
+        };
+        // The grant belongs to task 2, not the calling task 3.
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.resource_grants(&ctx, 0x1000, 0x1000), Ok(0));
     }
 
     /// A `ProcessWait` producer that records the last `(parent, pid)` it was
