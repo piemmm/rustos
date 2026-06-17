@@ -426,6 +426,34 @@ pub const MAX_UNLOCK_ATTEMPTS: u32 = 5;
 /// buffer is a zeroized on-stack array of exactly this size.
 pub const MAX_PASSPHRASE_LEN: usize = 256;
 
+/// The one set-once credential cell the production dispatch hook reads
+/// and the in-kernel root-unlock kthread writes.
+///
+/// The encrypted root is unlocked only *after* the console keyboard is
+/// live — past the point where [`BootInfo::with_users_db`] is consumed
+/// (`plans/PI.md` P11 Chunk B-2). The boot path therefore hands the
+/// dispatch hook `&LATE_USERS_DB` at boot through
+/// [`BootInfo::with_users_db`], so `users_db_read` reads
+/// [`UsersDbSource::text`] on the same cell on every call; the trusted
+/// unlock step publishes the mounted root volume's database into it
+/// exactly once via [`LateUsersDb::install`], and the next read serves it.
+///
+/// Defined here, beside the unlock policy that installs into it, so the
+/// dispatch-hook reference and the kthread's install target are one
+/// definition rather than two that could diverge (`AGENTS.md` §2.2). It is
+/// **not** a global mutable static (`AGENTS.md` §2.1): the cell is set-once
+/// and immutable after the first install, with internal synchronisation,
+/// so the single `&'static` instance is shared safely across the per-CPU
+/// syscall handlers exactly like
+/// [`NULL_USERS_DB`](rustos_kernel_core::NULL_USERS_DB). Until an install
+/// succeeds it fails every read closed, so wiring the dispatch hook at it
+/// changes no boot behaviour over the previous `NULL_USERS_DB` default
+/// (`AGENTS.md` §5.4.5).
+///
+/// [`BootInfo::with_users_db`]: rustos_kernel_core::BootInfo::with_users_db
+/// [`UsersDbSource::text`]: rustos_kernel_core::UsersDbSource::text
+pub static LATE_USERS_DB: LateUsersDb = LateUsersDb::new();
+
 /// The result of [`unlock_root_disk_interactively`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UnlockOutcome {
@@ -783,6 +811,7 @@ mod tests {
     use rustos_kernel_core::UsersDbSource;
     use rustos_log::{Event as LogEvent, Sink as LogSink};
     use rustos_partition::{mbr, Partition};
+    use rustos_test_encrypted_root_image as disk_image;
     use rustos_test_rustfs_image as image;
     use rustos_users::UsersDb;
 
@@ -826,8 +855,10 @@ mod tests {
     }
 
     /// The passphrase the test "operator" types; the volume is provisioned
-    /// under the key derived from it.
-    const PASSPHRASE: &[u8] = b"correct horse battery staple";
+    /// under the key derived from it. Forwarded from the shared whole-disk
+    /// fixture so the in-memory split tests and the `-M virt` QEMU vertical
+    /// type one passphrase (`AGENTS.md` §2.2).
+    const PASSPHRASE: &[u8] = disk_image::PASSPHRASE;
 
     /// Provision a descriptor (low cost so the test stays fast under
     /// `cargo test`) and return its encoded bytes plus the volume key it
@@ -952,12 +983,13 @@ mod tests {
     /// 512-byte sector size — the FAT boot partition's geometry.
     const FAT_SECTOR_BYTES: usize = 512;
 
-    /// 64 MiB, the production boot-partition size `tools/mkimage` formats
-    /// (`fatboot.rs`). A valid FAT32 volume needs far more than the small
-    /// rustfs fixture's 2048 sectors, so this `Block` double is sized for a
-    /// real FAT32 format rather than reusing `image::VecBlock` (whose fixed
-    /// geometry is the rustfs fixture's).
-    const FAT_BOOT_SECTORS: u64 = 131_072;
+    /// 64 MiB, the production boot-partition size `tools/mkimage` formats.
+    /// A valid FAT32 volume needs far more than the small rustfs fixture's
+    /// 2048 sectors, so this `Block` double is sized for a real FAT32 format
+    /// rather than reusing `image::VecBlock` (whose fixed geometry is the
+    /// rustfs fixture's). Forwarded from the shared whole-disk fixture so
+    /// the boot-partition size has one definition (`AGENTS.md` §2.2).
+    const FAT_BOOT_SECTORS: u64 = disk_image::FAT_BOOT_SECTORS;
 
     /// In-memory FAT boot-partition [`Block`] double: a `Vec<u8>` addressed
     /// in [`FAT_SECTOR_BYTES`]-byte sectors, exactly as the board's
@@ -1191,74 +1223,29 @@ mod tests {
 
     // --- mount_root_disk_and_load_users (the single-disk split) --------
 
-    /// LBA of the boot partition within the assembled whole disk (1 MiB
-    /// alignment, the universal SD-card convention `tools/mkimage` uses).
-    const DISK_BOOT_LBA: u64 = 2048;
-
-    /// LBA of the `RustFS` root partition: directly after the boot
-    /// partition.
-    const DISK_ROOT_LBA: u64 = DISK_BOOT_LBA + FAT_BOOT_SECTORS;
-
-    /// Assemble a single whole-disk MBR image of the shape `tools/mkimage`
-    /// writes — an MBR table in sector 0, the FAT boot partition at
-    /// [`DISK_BOOT_LBA`], the `RustFS` root partition at [`DISK_ROOT_LBA`]
-    /// — through the *same* `rustos_partition::mbr::encode` the image
-    /// author uses, so author and reader cannot drift (`AGENTS.md` §2.2).
-    /// Returns a 512-byte-sector whole-disk [`Block`].
-    fn assemble_whole_disk(boot: &FatVecBlock, root_bytes: &[u8]) -> FatVecBlock {
-        let root_sectors = u64::try_from(root_bytes.len() / FAT_SECTOR_BYTES).expect("fits");
-        let total_sectors = DISK_ROOT_LBA + root_sectors;
-        let mut store =
-            alloc::vec![0u8; usize::try_from(total_sectors).expect("fits") * FAT_SECTOR_BYTES];
-
-        let table = mbr::encode(&[
-            Partition {
-                ty: PartitionType::FatBoot,
-                start_lba: DISK_BOOT_LBA,
-                block_count: FAT_BOOT_SECTORS,
-            },
-            Partition {
-                ty: PartitionType::RustFsRoot,
-                start_lba: DISK_ROOT_LBA,
-                block_count: root_sectors,
-            },
-        ])
-        .expect("the whole-disk MBR encodes");
-        store[..FAT_SECTOR_BYTES].copy_from_slice(&table);
-
-        let boot_at = usize::try_from(DISK_BOOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
-        store[boot_at..boot_at + boot.store.len()].copy_from_slice(&boot.store);
-        let root_at = usize::try_from(DISK_ROOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
-        store[root_at..root_at + root_bytes.len()].copy_from_slice(root_bytes);
-
-        FatVecBlock { store }
-    }
-
     #[test]
     fn a_partitioned_disk_splits_unlocks_and_loads_end_to_end() {
         // The single-disk boot entry: one whole-disk device carrying an
         // MBR boot+root layout is split by role into bounds-checked
         // windows, the descriptor is read off the FAT boot window, and the
         // encrypted root window mounts under the passphrase to yield the
-        // usable users database (`plans/PI.md` P11 Chunk B-2).
-        let (descriptor_bytes, key) = provision();
-        let boot = author_boot_partition(&descriptor_bytes);
-        let root_bytes =
-            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
-        let disk = assemble_whole_disk(&boot, &root_bytes);
+        // usable users database (`plans/PI.md` P11 Chunk B-2). The disk is
+        // the *same* whole-disk image the `-M virt` root-mount->login QEMU
+        // vertical plants on its virtio-blk backing, so the in-memory split
+        // test and the live (emulated) board exercise one on-disk layout
+        // (`AGENTS.md` §2.2).
+        let bytes = disk_image::build_image().expect("the whole-disk image assembles");
+        let disk = FatVecBlock { store: bytes };
         let sink = RecordingSink::new();
 
-        let source = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+        let source = mount_root_disk_and_load_users(disk, disk_image::PASSPHRASE, &sink)
             .expect("the disk splits and the root unlocks end to end");
 
         let text = source.text().expect("a loaded holder serves its text");
         let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
             .expect("the served database parses");
-        db.authenticate(
-            image::USERS_FIXTURE_USERNAME,
-            image::USERS_FIXTURE_PASSWORD.as_bytes(),
-        )
-        .expect("the planted account authenticates");
+        db.authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())
+            .expect("the planted account authenticates");
         assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
     }
 
@@ -1286,17 +1273,17 @@ mod tests {
         // encrypted root cannot be located, so none is mounted.
         let (descriptor_bytes, _key) = provision();
         let boot = author_boot_partition(&descriptor_bytes);
-        let total_sectors = DISK_BOOT_LBA + FAT_BOOT_SECTORS;
+        let total_sectors = disk_image::BOOT_LBA + FAT_BOOT_SECTORS;
         let mut store =
             alloc::vec![0u8; usize::try_from(total_sectors).expect("fits") * FAT_SECTOR_BYTES];
         let table = mbr::encode(&[Partition {
             ty: PartitionType::FatBoot,
-            start_lba: DISK_BOOT_LBA,
+            start_lba: disk_image::BOOT_LBA,
             block_count: FAT_BOOT_SECTORS,
         }])
         .expect("the boot-only MBR encodes");
         store[..FAT_SECTOR_BYTES].copy_from_slice(&table);
-        let boot_at = usize::try_from(DISK_BOOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
+        let boot_at = usize::try_from(disk_image::BOOT_LBA).expect("fits") * FAT_SECTOR_BYTES;
         store[boot_at..boot_at + boot.store.len()].copy_from_slice(&boot.store);
         let disk = FatVecBlock { store };
         let sink = RecordingSink::new();
@@ -1387,15 +1374,13 @@ mod tests {
         bytes
     }
 
-    /// Build the success whole-disk fixture (MBR boot+root, the root
-    /// encrypted under [`PASSPHRASE`]'s derived key) the interactive tests
-    /// unlock.
+    /// Build the success whole-disk fixture the interactive tests unlock —
+    /// the *same* MBR boot+root image (the root encrypted under
+    /// [`PASSPHRASE`]'s derived key) the `-M virt` root-mount->login QEMU
+    /// vertical plants on its virtio-blk backing (`AGENTS.md` §2.2).
     fn success_disk() -> FatVecBlock {
-        let (descriptor_bytes, key) = provision();
-        let boot = author_boot_partition(&descriptor_bytes);
-        let root_bytes =
-            image::build_users_root_image_with_key(&key).expect("users-root volume builds");
-        assemble_whole_disk(&boot, &root_bytes)
+        let bytes = disk_image::build_image().expect("the whole-disk image assembles");
+        FatVecBlock { store: bytes }
     }
 
     #[test]

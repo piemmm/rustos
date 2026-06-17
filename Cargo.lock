@@ -965,6 +965,7 @@ dependencies = [
  "rustos-log",
  "rustos-partition",
  "rustos-sync",
+ "rustos-test-encrypted-root-image",
  "rustos-test-rustfs-image",
  "rustos-usb",
  "rustos-users",
@@ -1509,6 +1510,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-encrypted-root-image"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-drv-fs-fat32",
+ "rustos-drv-fs-rustfs",
+ "rustos-partition",
+ "rustos-test-rustfs-image",
+]
+
+[[package]]
 name = "rustos-test-enter-user-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
@@ -1937,6 +1949,21 @@ dependencies = [
  "rustos-kernel-sec",
  "rustos-log",
  "rustos-sync",
+]
+
+[[package]]
+name = "rustos-test-root-unlock-login-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "rustos-abi",
+ "rustos-drv-storage-virtio-blk",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-test-encrypted-root-image",
+ "rustos-test-virtio-qemu-support",
+ "rustos-users",
 ]
 
 [[package]]
@@ -2628,6 +2655,7 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-mkimage",
  "rustos-qemu",
+ "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",
  "rustos-test-rustfs-image",
 ]

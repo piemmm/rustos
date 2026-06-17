@@ -1,0 +1,146 @@
+//! Freestanding (`aarch64-unknown-none`) half of the `plans/PI.md` P11
+//! Chunk B-2 root-mount->login integration test.
+//!
+//! The device-agnostic bring-up (boot harness, DTB MMIO walk, GICv2 + EL1
+//! IRQ wiring, static DMA pool, signed-`.rxe` load) lives in the shared
+//! `rustos-test-virtio-qemu-support` crate (`AGENTS.md` §2.2). This module
+//! supplies the unlock-specific tail: once the signed virtio-blk driver is
+//! loaded over the planted whole-disk encrypted-root image, it drives the
+//! **production** interactive unlock policy
+//! ([`unlock_root_disk_interactively`]) — typing the fixture passphrase at
+//! the prompt over a scripted console — and proves the loaded database
+//! installs into a [`LateUsersDb`] cell and authenticates the planted
+//! account while refusing a wrong password.
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::Errno;
+use rustos_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
+use rustos_kernel::root_mount::{unlock_root_disk_interactively, UnlockOutcome};
+use rustos_kernel_core::{ConsoleRead, LateUsersDb, NullConsole, UsersDbSource};
+use rustos_test_encrypted_root_image as disk_image;
+use rustos_test_virtio_qemu_support::{
+    define_mmio_boot_harness_aarch64, run_virtio_mmio_scenario, FixedSpawner, QemuEnv,
+    ScenarioConfig, ScenarioTransport,
+};
+use rustos_users::UsersDb;
+
+use crate::fixture::{DTB_BLOB, RXE_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
+
+/// Bare virtio-blk MMIO device id (the `DeviceID` register value; over
+/// MMIO this is the bare virtio device type, not the PCI `0x1040 + type`
+/// encoding).
+const VIRTIO_BLK_DEVICE_ID: u32 = 2;
+
+/// Spawner registering every verified manifest through the virtio-blk driver's
+/// `register` entry point.
+static SPAWNER: FixedSpawner = FixedSpawner::new(virtio_blk_register);
+
+/// A scripted console input source: yields the fixture
+/// [`disk_image::PASSPHRASE`] bytes followed by a single line terminator,
+/// then reports end of input — the exact bytes an operator types at the
+/// `Root passphrase:` prompt. `Sync` through an atomic cursor over the
+/// immutable passphrase, as [`ConsoleRead`] requires (its `read` takes
+/// `&self`).
+struct ScriptedPassphrase {
+    cursor: AtomicUsize,
+}
+
+impl ScriptedPassphrase {
+    const fn new() -> Self {
+        Self {
+            cursor: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ConsoleRead for ScriptedPassphrase {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let i = self.cursor.load(Ordering::Relaxed);
+        let byte = if i < disk_image::PASSPHRASE.len() {
+            disk_image::PASSPHRASE[i]
+        } else if i == disk_image::PASSPHRASE.len() {
+            b'\n'
+        } else {
+            // The passphrase line is spent; report end of input rather than
+            // looping, so a give-up path (a wrong unlock) terminates.
+            return Ok(0);
+        };
+        buf[0] = byte;
+        self.cursor.store(i + 1, Ordering::Relaxed);
+        Ok(1)
+    }
+}
+
+/// The unlock device tail: open the virtio-blk whole-disk device, drive the
+/// production interactive unlock over a scripted console, and prove the
+/// installed database authenticates the planted account.
+fn root_unlock_login(
+    env: &dyn QemuEnv,
+    transport: ScenarioTransport,
+    vhost: &dyn VirtioHost,
+) -> Result<(), &'static str> {
+    let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
+    env.log("root-unlock: virtio-blk root device open");
+
+    // A fresh set-once cell stands in for the boot-wired
+    // `rustos_kernel::root_mount::LATE_USERS_DB`: the policy under test is
+    // the same, and a local cell keeps the one-shot scenario free of global
+    // state.
+    let late = LateUsersDb::new();
+    let input = ScriptedPassphrase::new();
+
+    // `NullConsole` swallows the prompt bytes (the test asserts the unlock
+    // outcome and the installed credentials, not the prompt rendering); the
+    // scripted reader types the passphrase. The audit sink is the harness's,
+    // so the unlock's decisions land on the same channel the boot log uses.
+    let outcome =
+        unlock_root_disk_interactively(blk, &NullConsole, &input, &late, env.audit_sink());
+    if outcome != UnlockOutcome::Installed {
+        return Err("interactive unlock did not install a database");
+    }
+    env.log("root-unlock: passphrase accepted, users database installed");
+
+    // The cell now serves the loaded `users-v1` text; it must authenticate
+    // the planted account and refuse a wrong password, proving the database
+    // login reads through the dispatch hook is usable (`plans/PI.md` P11).
+    let text = late
+        .text()
+        .map_err(|_| "late cell empty after a reported install")?;
+    let db = UsersDb::parse(core::str::from_utf8(text).map_err(|_| "served db is not utf-8")?)
+        .map_err(|_| "served users database does not parse")?;
+    let record = db
+        .authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())
+        .map_err(|_| "planted account refused through the installed cell")?;
+    if record.username() != disk_image::USERNAME {
+        return Err("authenticated record names the wrong account");
+    }
+    if db
+        .authenticate(disk_image::USERNAME, b"wrong password")
+        .is_ok()
+    {
+        return Err("a wrong password must be refused");
+    }
+    env.log("root-unlock: planted account authenticates");
+    Ok(())
+}
+
+/// Drive the full virtio-blk-mmio bring-up, then the interactive root
+/// unlock + login proof, reporting the result through the ARM semihosting
+/// finisher. Never returns.
+fn run_scenario() -> ! {
+    let cfg = ScenarioConfig {
+        rxe_image: RXE_IMAGE,
+        trusted_pubkey: TRUSTED_SIGNER_PUBKEY,
+        syscall_table_hash: SYSCALL_TABLE_HASH,
+        spawner: &SPAWNER,
+        start_msg: "root-unlock: scenario start",
+    };
+    run_virtio_mmio_scenario(VIRTIO_BLK_DEVICE_ID, DTB_BLOB, &cfg, root_unlock_login)
+}
+
+define_mmio_boot_harness_aarch64!(run_scenario);

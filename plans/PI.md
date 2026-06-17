@@ -4119,8 +4119,33 @@ two users — or the same user twice — can be logged in concurrently.
        reboot (§2.9 / §5.4.5). Host-proven by 6 `root_mount` tests over a
        mock console + the same MBR + encrypted-`RustFS` disk fixture
        `tools/mkimage` writes (§2.2). No `lib/abi`/C-header change.
-     - **Chunk B-2 board bring-up — still staged: the in-kernel unlock
-       kthread that wires the live mount (FULL CONFIRMED DESIGN, agreed with
+     - **Chunk B-2 `&'static LateUsersDb` dispatch-hook wiring — LANDED
+       (whole gate green).** The shared set-once cell
+       `rustos_kernel::root_mount::LATE_USERS_DB` is the one definition the
+       dispatch hook reads and the unlock kthread installs into; the aarch64
+       boot path hands it to the hook via `BootInfo::with_users_db`, so
+       `users_db_read` reads that cell on every call. Until an install it
+       fails every read closed, identical to the previous `NULL_USERS_DB`
+       default, so login still refuses every attempt until a root is mounted
+       (§5.4.5) and the metal-confirmed boot is unaffected (§2.17). No
+       `lib/abi`/C-header change.
+     - **Chunk B-2 root-mount->login QEMU vertical — LANDED (whole gate
+       green, incl. both Pi images).** A new `-M virt`
+       `rustos-test-root-unlock-login-qemu-aarch64` vertical reuses the
+       virtio-blk-mmio bring-up, then drives the production
+       `unlock_root_disk_interactively` over a planted **whole-disk**
+       encrypted-root image (MBR + FAT boot carrying `root.unlock` + a
+       passphrase-derived encrypted `RustFS` root): it types the passphrase
+       at the prompt over a scripted console, mounts the root, installs the
+       database into a `LateUsersDb`, and proves the planted account
+       authenticates while a wrong password is refused. The disk is the
+       shared `rustos-test-encrypted-root-image` fixture (authored by the
+       real in-tree FAT32/`RustFS` drivers + `mbr::encode`), which the
+       `root_mount` host tests also split, so the in-memory split tests and
+       the live (emulated) board exercise one on-disk layout (§2.2). No
+       `lib/abi`/C-header change.
+     - **Chunk B-2 board bring-up — still staged: the live in-kernel unlock
+       kthread (FULL CONFIRMED DESIGN, agreed with
        the User).** The unlock cannot be a synchronous pre-boot step: the
        in-kernel keyboard scaffold (`keyboard_service::spawn_if_present`) only
        *admits* the keyboard as a **kthread** that feeds the
@@ -4146,16 +4171,22 @@ two users — or the same user twice — can be logged in concurrently.
        reads the passphrase, runs `mount_root_disk_and_load_users`, and on
        success `LateUsersDb::install`s the loaded database, with the bounded
        5-attempt retry + fail-closed give-up already host-proven. The
-       remaining work is the board-specific block bring-up that *supplies*
-       the `Block`, the console read/write seam, and the init-seam wiring
-       that admits the kthread + hands the dispatch hook the
-       `&'static LateUsersDb`. virtio-blk proves it on `-M virt` (passphrase
-       over UART); the EMMC2 metal mount rides P8 + the §0.9 operator metal
-       checkpoint (do not regress the metal-confirmed boot, §2.17).
+       `&'static LateUsersDb` dispatch-hook wiring and the `-M virt`
+       automatable proof of the unlock policy over a real virtio-blk
+       encrypted-root disk both **landed** (above); the remaining work is
+       the *live* board-specific block bring-up that *supplies* the `Block`
+       inside the scheduler kthread (virtio-blk over the in-kernel host with
+       its GIC/IRQ-waiter integration on `virt`, EMMC2 on the Pi), the
+       in-kernel primary-console read/write seam, and the init-seam wiring
+       that admits the kthread. That is the metal flip: it rides the §0.9
+       operator metal checkpoint and must not regress the metal-confirmed
+       boot (§2.17).
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
-   - A `-M virt` vertical mirroring `users_db_qemu_aarch64` then proves
-     `root`/`root` end to end at the prompt over the passphrase path.
+   - The `-M virt` `rustos-test-root-unlock-login-qemu-aarch64` vertical
+     proves the unlock + install + `root`/`root` authentication end to end
+     over the passphrase path (landed, above); the live UART-typed login on
+     the booted system rides the kthread flip + the §0.9 metal checkpoint.
 
 **Done when:** a metal Pi 4 and the `virt` verticals sit at `login:` on
 every text console, `root`/`root` logs in on a debug image and gets the

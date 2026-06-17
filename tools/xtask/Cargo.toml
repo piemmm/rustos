@@ -52,6 +52,13 @@ rustos-test-fat32-image = { path = "../../tests/integration/fat32_image", versio
 # and the guest's expectations share one source of truth (`AGENTS.md`
 # §2.2).
 rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }
+# `test --qemu` plants the `plans/PI.md` P11 Chunk B-2 root-mount->login
+# vertical's backing from the `rustos-test-encrypted-root-image` fixture —
+# the whole-disk MBR + FAT-boot(`root.unlock`) + encrypted-RustFS-root
+# image authored by the real in-tree drivers, the same bytes the
+# `root_mount` host tests split — so the planted layout and the guest's
+# unlock share one source of truth (`AGENTS.md` §2.2).
+rustos-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
 # The fuzz/proptest orchestrators and the in-tree harnesses share one
 # per-run seed/budget vocabulary: the orchestrator picks and logs the
 # seed, the harness reads it. Both sides use `rustos-fuzzseed` so the

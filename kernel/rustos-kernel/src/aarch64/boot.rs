@@ -812,7 +812,17 @@ fn enter_kernel_core(
     .with_spawn(
         &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN,
-    );
+    )
+    // Hand the syscall dispatch hook the shared set-once credential cell
+    // (`plans/PI.md` P11 Chunk B-2): `users_db_read` reads it on every
+    // call, and the in-kernel root-unlock kthread publishes the mounted
+    // root volume's database into the *same* cell once the operator's
+    // passphrase unlocks the encrypted root. Until that install the cell
+    // fails every read closed, identical to the previous `NULL_USERS_DB`
+    // default — so login refuses every attempt until a root is mounted
+    // (`AGENTS.md` §5.4.5), and the metal-confirmed boot is unaffected
+    // (§2.17).
+    .with_users_db(&crate::root_mount::LATE_USERS_DB);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

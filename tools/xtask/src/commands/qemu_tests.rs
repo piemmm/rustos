@@ -109,6 +109,12 @@ enum FsDisk {
     /// the `§16` tree with `/System/Security/Users` planted
     /// (`plans/PI.md` P11).
     UsersRoot,
+    /// The shared [`rustos_test_encrypted_root_image`] whole-disk image: an
+    /// MBR, a FAT boot partition carrying the `root.unlock` descriptor, and
+    /// a passphrase-derived encrypted `RustFS` root carrying
+    /// `/System/Security/Users` — the root-mount->login vertical's backing
+    /// (`plans/PI.md` P11 Chunk B-2).
+    EncryptedRootDisk,
 }
 
 const TESTS: &[QemuTest] = &[
@@ -2084,6 +2090,38 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
+    // `rustos-test-root-unlock-login-qemu-aarch64` vertical reuses the
+    // exact virtio-blk-mmio bring-up above, then drives the *production*
+    // interactive unlock policy
+    // (`rustos_kernel::root_mount::unlock_root_disk_interactively`) over a
+    // planted **whole-disk** encrypted-root image (`FsDisk::EncryptedRootDisk`
+    // — MBR + FAT boot carrying `root.unlock` + a passphrase-derived
+    // encrypted RustFS root): it reads the descriptor off the FAT boot
+    // partition, types the fixture passphrase at the prompt over a scripted
+    // console, mounts the encrypted root, installs the loaded users database
+    // into a `LateUsersDb` cell, and proves the planted account authenticates
+    // through the installed cell while a wrong password is refused — before
+    // the ARM semihosting PASS. The backing image is the shared whole-disk
+    // fixture's bytes — authored by the real in-tree drivers and split by the
+    // `root_mount` host tests — so the planted layout and the guest's unlock
+    // cannot drift (`AGENTS.md` §2.2). The root volume uses the format-floor
+    // PBKDF2 cost so the per-boot key derivation stays bounded under QEMU TCG;
+    // single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work tests.
+    QemuTest {
+        package: "rustos-test-root-unlock-login-qemu-aarch64",
+        binary: "rustos-test-root-unlock-login-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        serial: &[],
+    },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
     // MMIO analogue of the riscv64 virtio-net-mmio vertical — same
@@ -2507,6 +2545,16 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
                 format!("test --qemu ({}): build users-root image: {e:?}", t.package)
             })?,
             rustos_test_rustfs_image::TOTAL_SECTORS,
+        )),
+        FsDisk::EncryptedRootDisk => Some((
+            "encrypted-root.img",
+            rustos_test_encrypted_root_image::build_image().map_err(|e| {
+                format!(
+                    "test --qemu ({}): build encrypted-root image: {e:?}",
+                    t.package
+                )
+            })?,
+            rustos_test_encrypted_root_image::TOTAL_SECTORS,
         )),
     };
     if let Some((extension, bytes, total_sectors)) = fs_image {

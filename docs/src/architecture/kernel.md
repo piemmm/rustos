@@ -315,12 +315,22 @@ read fault; every give-up path (`4138` `ROOT_UNLOCK_GAVE_UP`, with a
 secret-free `cause`) leaves the cell empty, so every login is refused until
 the next boot (§2.9 / §5.4.5).
 
+The `&'static LateUsersDb` dispatch-hook half is wired: the boot path hands
+the syscall dispatch hook `&rustos_kernel::root_mount::LATE_USERS_DB`
+through `BootInfo::with_users_db`, so `users_db_read` reads that one
+set-once cell on every call. The trusted unlock step publishes the mounted
+root volume's database into the *same* cell via `LateUsersDb::install`
+(`4136` `ROOT_UNLOCK_INSTALLED`); until then the cell fails every read
+closed exactly like the previous `NULL_USERS_DB` default, so login refuses
+every attempt until a root is mounted (§5.4.5) and the metal-confirmed boot
+is unaffected (§2.17).
+
 The remaining board-specific bring-up that *supplies* the block device and
 drives this policy — bringing up the bound block + filesystem driver
-through an in-kernel block DriverHost behind the signed §8 load gate, and
-wiring the primary-console prompt + the `&'static LateUsersDb` dispatch
-hook into the init seam — is wired into the boot path next (`plans/PI.md`
-P11 Chunk B-2): `virtio-blk` proves it on `-M virt`, EMMC2 on metal
+through an in-kernel block DriverHost behind the signed §8 load gate and
+admitting the unlock kthread (with the primary-console prompt) into the
+init seam — is wired into the boot path next (`plans/PI.md` P11 Chunk B-2):
+`virtio-blk` proves the unlock end-to-end on `-M virt`, EMMC2 on metal
 (`plans/PI.md` §0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the

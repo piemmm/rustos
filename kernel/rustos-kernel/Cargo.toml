@@ -261,6 +261,13 @@ rustos-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tes
 # composition. `rustos-kernel` (`Layer::Tooling`) already names
 # tests/integration crates as build/dev glue (cf. `rustos-itest-harness`).
 rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", version = "=0.0.0" }
+# The single-source-of-truth whole-disk image fixture (`AGENTS.md` §2.2):
+# the `mount_root_disk_and_load_users` end-to-end test consumes the same
+# MBR + FAT-boot(`root.unlock`) + encrypted-`RustFS`-root bytes the
+# `-M virt` root-mount->login QEMU vertical plants, so the disk layout and
+# the passphrase-derived unlock live in exactly one place rather than being
+# re-assembled in this test module.
+rustos-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
 # The same test parses the served `users-v1` text and authenticates the
 # planted account, proving the served database is usable (`plans/PI.md` P11).
 rustos-users = { path = "../../lib/users", version = "=0.0.0" }
