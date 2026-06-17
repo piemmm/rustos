@@ -11,6 +11,7 @@
 
 pub mod arch_wrapper;
 pub mod dispatch;
+pub mod gic_irq;
 
 #[cfg(freestanding)]
 pub mod boot;

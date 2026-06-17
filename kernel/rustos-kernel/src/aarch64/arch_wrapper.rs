@@ -15,17 +15,21 @@
 //! [`crate::BinArch`] and the riscv64 `RiscvBinArch` (`plans/PI.md`
 //! P6c-2).
 //!
-//! The aarch64 port keeps the conservative default [`KernelArch`]
-//! interrupt-routing surface (`irq_routing` returns the unsupported
-//! routing, `install_irq_dispatch` is the no-op): reaching
-//! `AuditEvent::BootCompleted` needs no external-IRQ delivery, exactly
-//! as the riscv64 boot consumer does. Wiring the GICv2 dispatcher into
-//! this surface is a later PI stage.
+//! The aarch64 port wires the [`KernelArch`] interrupt-routing surface to
+//! the GICv2 through [`crate::aarch64::gic_irq`]: `irq_routing` returns the
+//! GICv2-backed [`rustos_kernel_core::IrqRouting`] (freestanding) and
+//! `install_irq_dispatch` publishes the kernel `IrqTable` into the arch
+//! crate's EL1 IRQ-vector seam, so a discovered device SPI can be bound and
+//! a parked task is woken when the line fires (`plans/PI.md` P11 Chunk B-2
+//! INCREMENT (1)). On a non-freestanding host build the routing stays the
+//! conservative fail-closed [`rustos_kernel_core::IrqRouting::unsupported`]
+//! default (no `VolatileGicMmio` exists off the bare-metal target).
 
 use rustos_arch_aarch64::context_hal::ContextSwitchHal;
 use rustos_arch_aarch64::{halt_current_cpu, serial, Aarch64Arch};
 use rustos_arch_api::{CpuId, SchedulerArch};
-use rustos_kernel_core::{ConsoleRead, ConsoleWrite, InputFocus, KernelArch};
+use rustos_kernel_core::{ConsoleRead, ConsoleWrite, InputFocus, IrqRouting, KernelArch};
+use rustos_kernel_irq::IrqTable;
 
 /// Local [`KernelArch`] wrapper around the arch port's
 /// [`Aarch64Arch`].
@@ -81,6 +85,30 @@ impl KernelArch for Aarch64BinArch {
 
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {
         self.arch.monotonic_ns()
+    }
+
+    fn irq_routing(&self) -> IrqRouting {
+        // The GICv2-backed routing the kernel core builds the `IrqTable`
+        // against. On the bare-metal target this names the `'static`
+        // `GIC_IRQ_CONTROLLER` over the discovered GICv2 windows; on a host
+        // build there is no `VolatileGicMmio`, so the routing stays the
+        // conservative fail-closed default (`AGENTS.md` §5.4.5).
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            crate::aarch64::gic_irq::gic_irq_routing()
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            IrqRouting::unsupported()
+        }
+    }
+
+    fn install_irq_dispatch(&self, table: &'static IrqTable) {
+        // Publish the freshly built `IrqTable` and register the production
+        // device-IRQ dispatcher with the arch crate's EL1 IRQ-vector seam,
+        // so an acknowledged non-timer GIC INTID is translated into an
+        // `IrqTable::fire` (mask-before-wake, `docs/src/security/irq.md`).
+        crate::aarch64::gic_irq::install_device_irq_dispatch(table);
     }
 }
 
