@@ -30,6 +30,7 @@
 
 use alloc::boxed::Box;
 
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::rxe::LoadImage;
 use rustos_abi::{CapabilityId, CapabilityQuery, Errno};
 use rustos_arch_api::{EnterUser, UserEntry};
@@ -231,6 +232,59 @@ pub trait InitSpawnCtx {
     /// kernel allocator.
     fn static_frames(&self) -> Option<&'static FrameAllocator> {
         None
+    }
+
+    /// Spawn a verified user-space **driver** image into its own,
+    /// hardware-isolated process and return its PID.
+    ///
+    /// This is the runtime-spawn counterpart of [`admit_init`](Self::admit_init):
+    /// where that builds and *enters* PID 1, this admits a driver process
+    /// **Ready** and returns, so the spawning boot path keeps running
+    /// (`plans/SPAWN.md` SP3). It is the seam the bin crate's driver
+    /// autoloader (`AGENTS.md` §18.3) drives to turn a discovered,
+    /// signature-verified driver bundle into a running user-space driver.
+    ///
+    /// The child is granted exactly `caps` — the manifest∩caller capability
+    /// set the signed `drvhost::Host::load` gate already derived — plus one
+    /// unforgeable, owner-checked device-resource grant per entry of
+    /// `grants` (the matched hardware-tree node's requests, §18.3), and is
+    /// handed `args` as its startup-argument vector (`rustos_rt::arg`). This
+    /// seam never widens authority beyond `caps` plus those grants
+    /// (`AGENTS.md` §4 — no ambient authority); the `grants` originate
+    /// kernel-side, from the kernel's own discovered hardware tree, never
+    /// from an untrusted caller.
+    ///
+    /// The point of routing through this object-safe boundary is §17.1: the
+    /// production implementation builds the live
+    /// [`KernelSpawnCtx`](crate::KernelSpawnCtx) over the feature-selected
+    /// scheduler, capability table, and address-space registry — types a
+    /// scheduler-agnostic caller (the bin crate) deliberately never names —
+    /// and drives `spawn`'s [`ProcessSpawn::spawn_with`]. `spawn` is the
+    /// architecture's process-spawn producer; it builds the isolated address
+    /// space and re-asserts every kernel-side check (the spawn path re-checks
+    /// `CAP_PROC_SPAWN` and re-parses the `rxe` against the kernel's syscall
+    /// CFI tag), so spawning is not a privileged bypass (`AGENTS.md` §4,
+    /// §16.5, §19.2).
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with a stable [`Errno`] on any error — a malformed
+    /// `rxe`, a build or page-table-frame exhaustion, an unrunnable context,
+    /// or an admission failure — never a panic or a half-built task
+    /// (`AGENTS.md` §2.9). The default returns [`Errno::NotImplemented`]: a
+    /// context that wires no scheduler offers no driver spawn rather than
+    /// pretending to, mirroring [`spawn_kernel_service`](Self::spawn_kernel_service)
+    /// returning `false` and [`ProcessSpawn::spawn_with`]'s own default.
+    fn spawn_driver_process(
+        &self,
+        spawn: &dyn ProcessSpawn,
+        rxe: &[u8],
+        caps: CapabilitySet,
+        grants: &[HwResource],
+        args: &[&[u8]],
+    ) -> Result<u64, Errno> {
+        let _ = (spawn, rxe, caps, grants, args);
+        Err(Errno::NotImplemented)
     }
 }
 
@@ -976,6 +1030,74 @@ mod tests {
         let ctx = StubCtx::new();
         let producer: &dyn ProcessSpawn = &NULL_PROCESS_SPAWN;
         let result = producer.spawn_with(b"unused-rxe", &ctx, CapabilitySet::empty(), &[]);
+        assert_eq!(result, Err(Errno::NotImplemented));
+    }
+
+    /// A minimal [`InitSpawnCtx`] exercising the default
+    /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process): the
+    /// default returns before touching the producer or the context, so
+    /// [`admit_init`](InitSpawnCtx::admit_init) is unreachable.
+    struct StubInitCtx {
+        frames: FrameAllocator,
+        sink: &'static TestSink,
+    }
+
+    impl StubInitCtx {
+        fn new() -> Self {
+            static mut REGION: [u8; PAGE_SIZE * 4] = [0u8; PAGE_SIZE * 4];
+            let mut map = BootMemoryMap::new();
+            map.push(MemoryRegion {
+                start: PhysAddr::new(core::ptr::addr_of!(REGION) as u64),
+                length: (PAGE_SIZE * 4) as u64,
+                kind: RegionKind::Usable,
+            });
+            let frames = FrameAllocator::new(&map).expect("one-region allocator");
+            Self {
+                frames,
+                sink: Box::leak(Box::new(TestSink::new())),
+            }
+        }
+    }
+
+    impl InitSpawnCtx for StubInitCtx {
+        fn frames(&self) -> &FrameAllocator {
+            &self.frames
+        }
+
+        fn audit(&self) -> &(dyn Sink + Sync) {
+            self.sink
+        }
+
+        unsafe fn admit_init(
+            &self,
+            _caps: CapabilitySet,
+            _space: Box<dyn UserAddressSpace + Send + Sync>,
+            _physmap: Box<dyn PhysMap + Send + Sync>,
+            _stack: Box<dyn crate::kthread::KernelStack + Send>,
+            _pre_resume: Box<dyn FnMut(u64) + Send>,
+            _live: Option<Box<dyn LiveUserSpace + Send>>,
+            _enter: Box<dyn FnMut() + Send>,
+        ) {
+            unreachable!("the default spawn_driver_process returns before admitting a process")
+        }
+    }
+
+    #[test]
+    fn spawn_driver_process_default_fails_closed_through_a_trait_object() {
+        // A context that has not wired a scheduler (here the stub) must
+        // refuse `spawn_driver_process` with `NotImplemented` rather than
+        // pretending to spawn a driver — reached through `&dyn InitSpawnCtx`,
+        // the path the bin crate's driver autoloader uses (`AGENTS.md`
+        // §2.9 / §17.1).
+        let ctx = StubInitCtx::new();
+        let init: &dyn InitSpawnCtx = &ctx;
+        let result = init.spawn_driver_process(
+            &NULL_PROCESS_SPAWN,
+            b"unused-rxe",
+            CapabilitySet::empty(),
+            &[],
+            &[],
+        );
         assert_eq!(result, Err(Errno::NotImplemented));
     }
 }

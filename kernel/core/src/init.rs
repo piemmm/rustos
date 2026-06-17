@@ -27,7 +27,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
-use rustos_abi::DescriptorTable;
+use rustos_abi::hwtree::HwResource;
+use rustos_abi::{DescriptorTable, Errno};
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::PortRegistry;
 use rustos_kernel_irq::{IrqController, IrqTable};
@@ -41,10 +42,10 @@ use crate::aspace::AddressSpaceRegistry;
 use crate::audit::{emit, AuditEvent};
 use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
-use crate::procwait::KernelProcessWait;
+use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
-use crate::spawn::InitSpawnCtx;
-use crate::syscalls::KernelDispatchHook;
+use crate::spawn::{InitSpawnCtx, ProcessSpawn};
+use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx};
 
 /// Ordered identifier of every subsystem init phase orchestrated by
 /// [`kernel_main`].
@@ -250,8 +251,12 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     }
 
     // Per-phase orchestration. On failure we halt via the arch port.
-    let state = match run_phases(boot, log_sink, audit_sink) {
-        Ok(state) => state,
+    // `run_phases` also hands back the leaked-`'static` process-wait
+    // producer so the PID-1 / driver spawn context can record a spawned
+    // task's parent/child link against the same producer the `wait`
+    // syscall drives (`plans/SPAWN.md` SP6).
+    let (state, process_wait) = match run_phases(boot, log_sink, audit_sink) {
+        Ok(booted) => booted,
         Err(err) => {
             let phase = err.phase();
             let cause = err.cause();
@@ -296,29 +301,39 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // this kernel state's scheduler / capability table / address-space
         // registry and dispatches it. Every borrow targets the leaked
         // `KernelState`, which lives for the running kernel's lifetime.
-        let ctx = KernelInitSpawner {
-            frames: &state.frame_allocator,
-            audit: audit_sink,
-            scheduler: &state.scheduler,
-            caps: &state.caps,
-            aspaces: &state.aspaces,
-            arch: state.arch.as_ref(),
-        };
+        let ctx = KernelInitSpawner::new(
+            &state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+        );
         init.spawn_init(&ctx);
     }
 
     arch_for_halt.halt();
 }
 
-/// The concrete [`InitSpawnCtx`] [`kernel_main`] hands the arch
-/// [`crate::InitSpawn`] seam to spawn PID 1 (`plans/PI.md` P6c-3).
+/// The production [`InitSpawnCtx`] [`kernel_main`] hands the arch
+/// [`crate::InitSpawn`] seam to spawn PID 1 (`plans/PI.md` P6c-3) and the
+/// bin crate's driver autoloader drives to spawn user-space drivers
+/// ([`spawn_driver_process`](InitSpawnCtx::spawn_driver_process),
+/// `plans/PI.md` P10/P11).
 ///
-/// It borrows the live kernel registries from the leaked [`KernelState`]
-/// so the seam can register the freshly built `init` task (scheduler,
-/// capability table, address-space registry) and dispatch it without ever
-/// naming the concrete scheduler or arch types itself (`AGENTS.md` §17.2 /
-/// §17.4 — the generics stay on this side of the object-safe boundary).
-struct KernelInitSpawner<'a, A: KernelArch> {
+/// It borrows the live kernel registries from the leaked `KernelState`
+/// so the seam can register a freshly built task (scheduler, capability
+/// table, address-space registry) and dispatch it without ever naming the
+/// concrete scheduler or arch types itself (`AGENTS.md` §17.2 / §17.4 —
+/// the generics stay on this side of the object-safe boundary).
+///
+/// Public and constructible through [`new`](Self::new) for the same reason
+/// [`KernelSpawnCtx`] is (`AGENTS.md` §2.2): a QEMU integration vertical
+/// drives the *production* spawn path through it rather than re-implementing
+/// the `KernelSpawnCtx` assembly. The fields stay private so the borrow set
+/// can only be supplied through [`new`](Self::new).
+pub struct KernelInitSpawner<'a, A: KernelArch> {
     // `'static` because `kernel_main` builds this over the leaked
     // `KernelState`, and a kernel service spawned through
     // `spawn_kernel_service` must hold a DMA region for the running
@@ -329,9 +344,51 @@ struct KernelInitSpawner<'a, A: KernelArch> {
     caps: &'a RwLock<CapTable>,
     aspaces: &'a RwLock<AddressSpaceRegistry>,
     arch: &'a A,
+    /// The scheduler-side process-wait producer a driver spawned through
+    /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process) is
+    /// recorded with, so the supervising task can later reap it
+    /// (`plans/SPAWN.md` SP6). `'static` because it is `Box::leak`'d over
+    /// the leaked `KernelState` like every other boot-installed producer.
+    /// PID-1 admission (`admit_init`) does not consult it; it exists for the
+    /// driver-spawn path. A boot path that wired no real producer passes the
+    /// fail-closed [`crate::NULL_PROCESS_WAIT`] (`AGENTS.md` §2.9).
+    process_wait: &'static (dyn ProcessWait + 'static),
 }
 
-impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
+impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
+    /// Bind a spawn context to the live kernel subsystems.
+    ///
+    /// `frames` is the leaked-`'static` physical-frame allocator (it doubles
+    /// as the `'static` page-table frame source for a spawned child, §24.1);
+    /// `audit` is the boot audit sink; `scheduler` / `caps` / `aspaces` /
+    /// `arch` are the live registries a freshly built task is registered
+    /// with; `process_wait` is the producer a spawned driver's parent/child
+    /// wait link is recorded with (the fail-closed
+    /// [`crate::NULL_PROCESS_WAIT`] when none is wired, `AGENTS.md` §2.9).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        frames: &'static FrameAllocator,
+        audit: &'static (dyn Sink + Sync),
+        scheduler: &'a Scheduler<A>,
+        caps: &'a RwLock<CapTable>,
+        aspaces: &'a RwLock<AddressSpaceRegistry>,
+        arch: &'a A,
+        process_wait: &'static (dyn ProcessWait + 'static),
+    ) -> Self {
+        Self {
+            frames,
+            audit,
+            scheduler,
+            caps,
+            aspaces,
+            arch,
+            process_wait,
+        }
+    }
+}
+
+impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
     fn frames(&self) -> &FrameAllocator {
         self.frames
     }
@@ -482,6 +539,52 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
     fn static_frames(&self) -> Option<&'static FrameAllocator> {
         Some(self.frames)
     }
+
+    fn spawn_driver_process(
+        &self,
+        spawn: &dyn ProcessSpawn,
+        rxe: &[u8],
+        caps: CapabilitySet,
+        grants: &[HwResource],
+        args: &[&[u8]],
+    ) -> Result<u64, Errno> {
+        // Build the production runtime-spawn context over the same live
+        // subsystems PID-1 admission uses and drive the architecture's
+        // `ProcessSpawn::spawn_with` (`plans/SPAWN.md` SP3). The bin-crate
+        // caller never names `Scheduler<A>` / `KernelSpawnCtx` — that
+        // assembly happens here, behind the object-safe `InitSpawnCtx`
+        // boundary (`AGENTS.md` §17.1 / §17.4).
+        //
+        // `frames` is `'static`, so it doubles as the `'static` page-table
+        // frame source the producer builds the child's page tables from
+        // (reclaimable RAM that scales with the machine, §24.1). The child
+        // is minted one owner-checked grant per requested resource (§18.3);
+        // the `grants` originate kernel-side (the discovered hardware tree),
+        // never from an untrusted caller (§4).
+        //
+        // The driver is recorded against the kernel boot supervisor identity
+        // (`SecTaskId(0)` — task/uid 0, the system context, §5.1): a
+        // boot-autoloaded driver has no userland parent that `wait`s on it.
+        // It is established with the fail-closed all-closed descriptor table
+        // (`DescriptorTable::closed`): a driver is not a text session, so it
+        // inherits no console and reaches no stream backing rather than being
+        // handed an ambient device (`AGENTS.md` §20 / §5.4); a driver's
+        // diagnostics flow through `lib/log`, never `stdout`.
+        let ctx = KernelSpawnCtx::new(
+            self.frames,
+            Some(self.frames),
+            self.audit,
+            self.scheduler,
+            self.caps,
+            self.aspaces,
+            self.arch,
+            SecTaskId(0),
+            self.process_wait,
+            DescriptorTable::closed(),
+            grants,
+        );
+        spawn.spawn_with(rxe, &ctx, caps, args)
+    }
 }
 
 /// Drive every init phase in [`Phase::ORDER`].
@@ -492,15 +595,28 @@ impl<A: KernelArch> InitSpawnCtx for KernelInitSpawner<'_, A> {
 /// [`AuditEvent::PhaseReady`] record. A failing phase emits neither a
 /// `Ready` nor a duplicate `Started` for downstream phases.
 ///
+/// On success it hands back both the leaked-`'static` [`KernelState`] and
+/// the leaked-`'static` process-wait producer the [`Phase::Syscall`] step
+/// built, so [`kernel_main`] can give the PID-1 / driver spawn context the
+/// *same* producer the `wait` syscall drives (`plans/SPAWN.md` SP6) rather
+/// than building a second, divergent one.
+///
 /// The function is intentionally non-public — external callers go
 /// through [`kernel_main`]. Splitting it out lets the unit tests in
 /// this module assert phase-by-phase behaviour without the trailing
 /// `arch.halt()` swallowing the test thread.
+#[allow(clippy::type_complexity)]
 fn run_phases<A: KernelArch>(
     boot: BootInfo<'_, A>,
     log_sink: &(dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
-) -> Result<&'static KernelState<A>, InitError> {
+) -> Result<
+    (
+        &'static KernelState<A>,
+        &'static (dyn ProcessWait + 'static),
+    ),
+    InitError,
+> {
     // Pre-flight: re-validate the handover before logging Phase::Log
     // started — a malformed BootInfo means we cannot even trust the
     // log_level we just installed.
@@ -712,7 +828,7 @@ fn run_phases<A: KernelArch>(
     phase_started(log_sink, Phase::Ipc);
     phase_ready(log_sink, Phase::Ipc);
 
-    Ok(state)
+    Ok((state, process_wait))
 }
 
 /// Build and `Box::leak` the production `mem_map` / `mmio_map` / `dma_alloc`
@@ -977,16 +1093,17 @@ mod tests {
         let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
-        let state = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
-        let ctx = KernelInitSpawner {
-            frames: &state.frame_allocator,
-            audit: audit_sink,
-            scheduler: &state.scheduler,
-            caps: &state.caps,
-            aspaces: &state.aspaces,
-            arch: state.arch.as_ref(),
-        };
+        let ctx = KernelInitSpawner::new(
+            &state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+        );
 
         let before = state.scheduler.live_task_count();
         // A trivial body; admission registers the kthread on the run queue
@@ -996,6 +1113,88 @@ mod tests {
         // A second service is admitted independently.
         assert!(ctx.spawn_kernel_service(Box::new(|_yielder| {})));
         assert_eq!(state.scheduler.live_task_count(), before + 2);
+    }
+
+    /// A [`ProcessSpawn`] recording the `rxe`, capability set, and argument
+    /// vector its `spawn_with` is handed, returning a fixed PID without
+    /// building anything (it never consults the `SpawnCtx`). Lets the host
+    /// suite assert [`KernelInitSpawner::spawn_driver_process`] forwards its
+    /// inputs to the architecture producer's `spawn_with`; the matched
+    /// node's grant threading is proven end-to-end by the `-M virt`
+    /// `driver_spawn_qemu_aarch64` vertical (the grants live inside the
+    /// opaque `KernelSpawnCtx`).
+    struct RecordingSpawn {
+        recorded: RwLock<Option<(alloc::vec::Vec<u8>, bool, usize)>>,
+        pid: u64,
+    }
+
+    impl ProcessSpawn for RecordingSpawn {
+        fn spawn(
+            &self,
+            _program: &crate::spawn::EmbeddedProgram,
+            _ctx: &dyn crate::spawn::SpawnCtx,
+        ) -> Result<u64, Errno> {
+            unreachable!("the driver-spawn seam drives spawn_with, not spawn")
+        }
+
+        fn spawn_with(
+            &self,
+            rxe: &[u8],
+            _ctx: &dyn crate::spawn::SpawnCtx,
+            caps: CapabilitySet,
+            args: &[&[u8]],
+        ) -> Result<u64, Errno> {
+            *self.recorded.write() = Some((
+                rxe.to_vec(),
+                caps.contains(rustos_abi::CapabilityId::DRV_LOAD),
+                args.len(),
+            ));
+            Ok(self.pid)
+        }
+    }
+
+    #[test]
+    fn spawn_driver_process_delegates_to_the_arch_producer() {
+        // The production `KernelInitSpawner` must forward a driver spawn to
+        // the architecture's `ProcessSpawn::spawn_with` with the gate-derived
+        // capability set and argument vector intact, returning the producer's
+        // PID — the path the bin crate's driver autoloader drives
+        // (`AGENTS.md` §17.1 / §18.3).
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let ctx = KernelInitSpawner::new(
+            &state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+        );
+
+        let producer = RecordingSpawn {
+            recorded: RwLock::new(None),
+            pid: 0x4242,
+        };
+        let mut caps = CapabilitySet::empty();
+        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        let rxe = b"driver-image-bytes";
+        let args: [&[u8]; 1] = [b"reply-endpoint"];
+
+        let pid = ctx
+            .spawn_driver_process(&producer, rxe, caps, &[], &args)
+            .expect("the recording producer admits the driver");
+        assert_eq!(pid, 0x4242);
+
+        let recorded = producer.recorded.read().clone();
+        let (rxe_seen, had_drv_load, arg_count) =
+            recorded.expect("spawn_with was invoked exactly once");
+        assert_eq!(rxe_seen.as_slice(), rxe);
+        assert!(had_drv_load, "the gate-derived capability set is forwarded");
+        assert_eq!(arg_count, 1);
     }
 
     #[test]

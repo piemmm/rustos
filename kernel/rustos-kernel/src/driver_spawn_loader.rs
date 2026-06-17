@@ -49,6 +49,7 @@ use rustos_devmgr::DriverLoader;
 use rustos_drvhost::{
     DriverSpawner, Host, HostConfig, HostError, ImageSource, Sink, SpawnContext, SpawnRegisterError,
 };
+use rustos_kernel_core::{InitSpawnCtx, ProcessSpawn};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 
 /// Spawn a verified user-space driver image into its own process.
@@ -81,6 +82,56 @@ pub trait DriverProcessSpawn {
         grants: &[HwResource],
         args: &[&[u8]],
     ) -> Result<u64, Errno>;
+}
+
+/// The production [`DriverProcessSpawn`]: drive a driver spawn through the
+/// kernel/core [`InitSpawnCtx::spawn_driver_process`] seam.
+///
+/// This is the bin crate's scheduler-agnostic bridge between the autoload
+/// policy ([`SpawnDriverLoader`]) and the kernel's spawn mechanism. It holds
+/// the boot-time [`InitSpawnCtx`] (`rustos_kernel_core::KernelInitSpawner`,
+/// which owns the live scheduler / capability table / address-space registry)
+/// and the architecture's [`ProcessSpawn`] producer, and forwards each
+/// `spawn_driver` straight to [`InitSpawnCtx::spawn_driver_process`]. The
+/// `KernelSpawnCtx` assembly — and therefore every mention of the
+/// feature-selected concrete scheduler — stays inside kernel/core, so this
+/// bin-crate type names neither the scheduler nor `KernelSpawnCtx`
+/// (`AGENTS.md` §17.1 / §2.2).
+///
+/// It adds no authority of its own: the child receives exactly the
+/// gate-derived capability set and the matched node's resource grants the
+/// seam mints (`AGENTS.md` §4 / §18.3).
+pub struct InitCtxDriverProcessSpawn<'a> {
+    /// The boot-time init-spawn context owning the live kernel registries
+    /// the seam builds the child's [`KernelSpawnCtx`](rustos_kernel_core::KernelSpawnCtx)
+    /// over.
+    init_ctx: &'a dyn InitSpawnCtx,
+    /// The architecture's process-spawn producer that builds the isolated
+    /// address space and re-asserts every kernel-side check.
+    producer: &'a dyn ProcessSpawn,
+}
+
+impl<'a> InitCtxDriverProcessSpawn<'a> {
+    /// Bridge driver spawns to `init_ctx`'s
+    /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process), built
+    /// over the architecture `producer`.
+    #[must_use]
+    pub fn new(init_ctx: &'a dyn InitSpawnCtx, producer: &'a dyn ProcessSpawn) -> Self {
+        Self { init_ctx, producer }
+    }
+}
+
+impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
+    fn spawn_driver(
+        &self,
+        rxe: &[u8],
+        granted: CapabilitySet,
+        grants: &[HwResource],
+        args: &[&[u8]],
+    ) -> Result<u64, Errno> {
+        self.init_ctx
+            .spawn_driver_process(self.producer, rxe, granted, grants, args)
+    }
 }
 
 /// Map a spawn-path [`Errno`] onto the [`DriverError`] the
@@ -398,5 +449,151 @@ mod tests {
             spawn_errno_as_driver_error(Errno::BadAddress),
             DriverError::DeviceFault
         );
+    }
+
+    use alloc::boxed::Box;
+
+    use rustos_drvhost::Event;
+    use rustos_kernel_core::KernelStack;
+    use rustos_kernel_mem::{
+        BootMemoryMap, FrameAllocator, LiveUserSpace, MemoryRegion, PhysAddr, PhysMap, RegionKind,
+        UserAddressSpace, PAGE_SIZE,
+    };
+
+    /// No-op audit sink for the unused [`InitSpawnCtx::audit`] accessor.
+    struct NullSink;
+    impl Sink for NullSink {
+        fn write_event(&self, _event: &Event<'_>) {}
+    }
+
+    /// One recorded [`InitSpawnCtx::spawn_driver_process`] call: the payload
+    /// bytes, whether the forwarded capability set carried `CAP_DRV_LOAD`,
+    /// the node's resource grants, and the startup-argument count.
+    type RecordedDriverProcess = (
+        alloc::vec::Vec<u8>,
+        bool,
+        alloc::vec::Vec<HwResource>,
+        usize,
+    );
+
+    /// An [`InitSpawnCtx`] that records what
+    /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process) is
+    /// handed and returns a fixed PID, so the host suite can prove
+    /// [`InitCtxDriverProcessSpawn`] forwards its inputs to the seam
+    /// unchanged. `frames`/`audit` exist only to satisfy the trait — the
+    /// recorded override never consults them — and `admit_init` is
+    /// unreachable for the same reason.
+    struct RecordingInitCtx {
+        frames: FrameAllocator,
+        sink: NullSink,
+        recorded: RefCell<Option<RecordedDriverProcess>>,
+        pid: u64,
+    }
+
+    impl RecordingInitCtx {
+        fn new(pid: u64) -> Self {
+            static mut REGION: [u8; PAGE_SIZE * 4] = [0u8; PAGE_SIZE * 4];
+            let mut map = BootMemoryMap::new();
+            map.push(MemoryRegion {
+                start: PhysAddr::new(core::ptr::addr_of!(REGION) as u64),
+                length: (PAGE_SIZE * 4) as u64,
+                kind: RegionKind::Usable,
+            });
+            Self {
+                frames: FrameAllocator::new(&map).expect("one-region allocator"),
+                sink: NullSink,
+                recorded: RefCell::new(None),
+                pid,
+            }
+        }
+    }
+
+    impl InitSpawnCtx for RecordingInitCtx {
+        fn frames(&self) -> &FrameAllocator {
+            &self.frames
+        }
+
+        fn audit(&self) -> &(dyn Sink + Sync) {
+            &self.sink
+        }
+
+        unsafe fn admit_init(
+            &self,
+            _caps: CapabilitySet,
+            _space: Box<dyn UserAddressSpace + Send + Sync>,
+            _physmap: Box<dyn PhysMap + Send + Sync>,
+            _stack: Box<dyn KernelStack + Send>,
+            _pre_resume: Box<dyn FnMut(u64) + Send>,
+            _live: Option<Box<dyn LiveUserSpace + Send>>,
+            _enter: Box<dyn FnMut() + Send>,
+        ) {
+            unreachable!("the driver-spawn adapter drives spawn_driver_process, not admit_init")
+        }
+
+        fn spawn_driver_process(
+            &self,
+            _spawn: &dyn ProcessSpawn,
+            rxe: &[u8],
+            caps: CapabilitySet,
+            grants: &[HwResource],
+            args: &[&[u8]],
+        ) -> Result<u64, Errno> {
+            *self.recorded.borrow_mut() = Some((
+                rxe.to_vec(),
+                caps.contains(CapabilityId::DRV_LOAD),
+                grants.to_vec(),
+                args.len(),
+            ));
+            Ok(self.pid)
+        }
+    }
+
+    /// A [`ProcessSpawn`] that must never be invoked: the recording
+    /// `InitSpawnCtx` overrides `spawn_driver_process` and ignores the
+    /// producer, so the adapter never reaches it.
+    struct UnusedProcessSpawn;
+    impl ProcessSpawn for UnusedProcessSpawn {
+        fn spawn(
+            &self,
+            _program: &rustos_kernel_core::EmbeddedProgram,
+            _ctx: &dyn rustos_kernel_core::SpawnCtx,
+        ) -> Result<u64, Errno> {
+            unreachable!("the recording context does not consult the producer")
+        }
+    }
+
+    #[test]
+    fn init_ctx_adapter_forwards_to_the_seam_unchanged() {
+        // `InitCtxDriverProcessSpawn` must hand the verified payload, the
+        // gate-derived capability set, the node's grants, and the argument
+        // vector straight to `InitSpawnCtx::spawn_driver_process` and return
+        // its PID — the bin crate's scheduler-agnostic bridge to the kernel
+        // spawn mechanism (`AGENTS.md` §17.1 / §18.3).
+        let init_ctx = RecordingInitCtx::new(0x7fff);
+        let producer = UnusedProcessSpawn;
+        let adapter = InitCtxDriverProcessSpawn::new(&init_ctx, &producer);
+
+        let window = HwResource::mmio(0xfe34_0000, 0x200);
+        let dma = HwResource::dma(0x3fff_ffff, 0x1000);
+        let grants = [window, dma];
+        let mut granted = CapabilitySet::empty();
+        granted.insert(CapabilityId::DRV_LOAD);
+        let args: [&[u8]; 1] = [b"reply-endpoint"];
+
+        let pid = adapter
+            .spawn_driver(b"driver-rxe", granted, &grants, &args)
+            .expect("the recording seam admits the driver");
+        assert_eq!(pid, 0x7fff);
+
+        let recorded = init_ctx.recorded.borrow();
+        let (rxe_seen, had_drv_load, grants_seen, arg_count) =
+            recorded.as_ref().expect("spawn_driver_process was invoked");
+        assert_eq!(rxe_seen.as_slice(), b"driver-rxe");
+        assert!(
+            *had_drv_load,
+            "the gate-derived capability set is forwarded"
+        );
+        assert_eq!(grants_seen.as_slice(), &[window, dma]);
+        assert_eq!(*arg_count, 1);
     }
 }

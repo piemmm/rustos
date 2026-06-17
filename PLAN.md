@@ -1004,19 +1004,40 @@ order (one fully-gated increment each):
            spawn with the node's resources, untrusted-signature/missing-cap
            fail-closed, unmatched unbound, empty-store). Docs:
            `docs/src/drivers/host.md` ("Autoloading by discovery").
+         - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
+           virt`).** `InitSpawnCtx::spawn_driver_process(spawn, rxe, caps,
+           grants, args)` (default fail-closed `NotImplemented`, §2.9) builds
+           the live `KernelSpawnCtx` inside kernel/core's now-public,
+           constructible `KernelInitSpawner` (grants minted owner-checked §18.3;
+           driver established `DescriptorTable::closed` §20; supervisor
+           `SecTaskId(0)`; the real `ProcessWait` threaded out of `run_phases`)
+           and drives the arch `ProcessSpawn::spawn_with`, so the bin crate
+           names neither the feature-selected scheduler nor `KernelSpawnCtx`
+           (§17.1). The bin-crate
+           `driver_spawn_loader::InitCtxDriverProcessSpawn` is the
+           `DriverProcessSpawn` bridge (`&dyn InitSpawnCtx` + the arch
+           `&dyn ProcessSpawn`) `SpawnDriverLoader` reaches it through.
+           Host-proven (kernel/core default-fail-closed + delegation-to-a-
+           recording-producer; bin-crate adapter forwards
+           payload/caps/grants/args unchanged), and the
+           `driver_spawn_qemu_aarch64` `-M virt` vertical now drives the chain
+           through this seam (no hand-built `KernelSpawnCtx`). No
+           `lib/abi`/C-header change.
          - **Remaining — gated on the production root mount.**
            `autoload_drivers` cannot run in production until the root volume
            backing `/System/Drivers/` is mounted at boot (the P11 root-mount
            increment; the production `boot_aarch64` does not yet mount the root,
            the metal `users_db_read err=12` residual). These land **with** that
-           work: the kernel/core scheduler-agnostic `spawn_driver_process` seam
-           + the bin-crate production `DriverProcessSpawn`; the `-M virt`
-           autoload vertical (rustfs root with a signed `usb_kbd` bundle →
-           `autoload_drivers` → spawn → keystroke); `tools/mkimage` laying the
-           signed `usb_kbd` bundle into the store (signed against the finalised
-           production trust anchor, a seed shared with the kernel build §2.2);
-           and **5e/(d)** below. Flipping is blocked on the root mount so it
-           never regresses the working metal keyboard (§2.17).
+           work: the production driver-spawn *caller* wiring from `init_spawn`
+           (the seam + `InitCtxDriverProcessSpawn` bridge above are ready; what
+           remains is handing `autoload_drivers` a live `KernelInitSpawner` once
+           the root is mounted); the `-M virt` autoload vertical (rustfs root
+           with a signed `usb_kbd` bundle → `autoload_drivers` → spawn →
+           keystroke); `tools/mkimage` laying the signed `usb_kbd` bundle into
+           the store (signed against the finalised production trust anchor, a
+           seed shared with the kernel build §2.2); and **5e/(d)** below.
+           Flipping is blocked on the root mount so it never regresses the
+           working metal keyboard (§2.17).
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /

@@ -123,7 +123,7 @@ pub use fs::{
     Access, AclEntry, AclWho, Credentials, Metadata, Mode, MountPoint, MountTable, Path, Vfs,
     VfsError,
 };
-pub use init::{kernel_main, InitError, Phase};
+pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
 pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
 pub use kthread::{
     reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_user_kthread,

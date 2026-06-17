@@ -1,6 +1,6 @@
 [package]
 name = "rustos-test-driver-spawn-qemu-aarch64"
-description = "PLAN.md Stage 4.HW / plans/PI.md P10 5d-2-ii(b-1) QEMU integration test: prove the devmgr-driven driver-spawn path end to end on the aarch64 virt board. The build script compiles the pure-Rust driver-stub program (tests/integration/driver_register_program) PIE, converts it to an rxe blob, and wraps it as the payload of a signed kind=UserSpace DriverManifest image. The kernel builds a discovered hardware tree (a virtio node carrying an MMIO HwResource) and runs DeviceManager::autoload with a SpawnDriverLoader: the signed Host::load gate verifies the image (signature now covers the payload), then the driver is spawned through Aarch64ProcessSpawn::spawn_with via KernelSpawnCtx, minting it one device-resource grant per matched-node resource. The stub reads its grant back via resource_grants and replies over the production capability-gated ipc_send path. PASS once the host-side budget-bounded wait fail-closed-decodes the stub's DriverRegisterReply::registered record (audit 13001 node-bound + 4302)."
+description = "PLAN.md Stage 4.HW / plans/PI.md P10 5d-2-ii(b-1) QEMU integration test: prove the devmgr-driven driver-spawn path end to end on the aarch64 virt board. The build script compiles the pure-Rust driver-stub program (tests/integration/driver_register_program) PIE, converts it to an rxe blob, and wraps it as the payload of a signed kind=UserSpace DriverManifest image. The kernel builds a discovered hardware tree (a virtio node carrying an MMIO HwResource) and runs DeviceManager::autoload with a SpawnDriverLoader: the signed Host::load gate verifies the image (signature now covers the payload), then the driver is spawned through the production InitSpawnCtx::spawn_driver_process seam (kernel/core KernelInitSpawner building the KernelSpawnCtx, reached via the bin-crate InitCtxDriverProcessSpawn bridge over Aarch64ProcessSpawn::spawn_with), minting it one device-resource grant per matched-node resource. The stub reads its grant back via resource_grants and replies over the production capability-gated ipc_send path. PASS once the host-side budget-bounded wait fail-closed-decodes the stub's DriverRegisterReply::registered record (audit 13001 node-bound + 4302)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,7 +23,8 @@ workspace = true
 # FrameAllocator, publishes the reply Port (send-gated on a driver-class
 # capability) into a live PortRegistry, installs the production
 # KernelDispatchHook through a DispatchCallbackSlot, spawns the stub through
-# Aarch64ProcessSpawn::spawn_with + KernelSpawnCtx, and drains the
+# the production InitSpawnCtx::spawn_driver_process seam (KernelInitSpawner +
+# InitCtxDriverProcessSpawn over Aarch64ProcessSpawn::spawn_with), and drains the
 # cooperative `step` loop polling `Port::recv` under a bounded budget. PASS
 # once the decoded DriverRegisterReply round-trips the stub's handle; any
 # shortfall writes a distinct failure finisher or times out (fail-loud,

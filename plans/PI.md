@@ -3562,17 +3562,39 @@ table, so a new board is match **data**, not new code. Sub-increments
         without `CAP_DRV_LOAD` loads nothing, an unmatched node is left unbound,
         an empty store binds nothing). No `lib/abi`/C-header change. Docs:
         `docs/src/drivers/host.md` ("Autoloading by discovery").
+      - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
+        virt`).** `InitSpawnCtx::spawn_driver_process(spawn, rxe, caps, grants,
+        args)` (default fail-closed `NotImplemented`, §2.9) is the production
+        seam a scheduler-agnostic caller drives to spawn a verified driver
+        into its own process: the kernel/core `KernelInitSpawner` impl builds
+        the live `KernelSpawnCtx` (the matched node's `grants` minted
+        owner-checked, §18.3; the driver established `DescriptorTable::closed`
+        — a driver is not a text session, §20; recorded against the kernel
+        boot supervisor `SecTaskId(0)`) and drives the architecture's
+        `ProcessSpawn::spawn_with`, so the bin crate never names the
+        feature-selected scheduler or `KernelSpawnCtx` (§17.1). `KernelInitSpawner`
+        is now public + constructible (`new`, holding the leaked-`'static`
+        `ProcessWait` `run_phases` hands back) for the same "verticals drive the
+        production path, not a copy" reason `KernelSpawnCtx` is (§2.2). The
+        bin-crate `driver_spawn_loader::InitCtxDriverProcessSpawn`
+        (`DriverProcessSpawn` over a `&dyn InitSpawnCtx` + the arch
+        `&dyn ProcessSpawn`) is the bridge `SpawnDriverLoader` reaches it
+        through. Host-proven (kernel/core: default-fail-closed +
+        delegation-to-a-recording-producer; bin crate: the adapter forwards
+        payload/caps/grants/args unchanged) and the `driver_spawn_qemu_aarch64`
+        `-M virt` vertical now drives the chain through this seam (no
+        hand-built `KernelSpawnCtx`). No `lib/abi`/C-header change.
       - **Remaining — gated on the production root mount.** `autoload_drivers`
         cannot run in production until the root volume that backs
         `/System/Drivers/` is mounted at boot, which is the P11 root-mount
         increment (the production `boot_aarch64` does **not** yet mount the
         root — the metal `users_db_read err=12` residual is exactly this). The
         following therefore land **with** that root-mount work, not before it:
-        - the kernel/core scheduler-agnostic driver-spawn seam (a new
-          `InitSpawnCtx::spawn_driver_process` that builds a `KernelSpawnCtx`
-          and calls `ProcessSpawn::spawn_with`, so the bin crate spawns a
-          driver without naming the concrete scheduler, §17.1) + the bin-crate
-          production `DriverProcessSpawn` that delegates to it;
+        - the production driver-spawn *caller* wiring: a new
+          `InitSpawnCtx`-driven `DriverProcessSpawn` reachable from
+          `init_spawn` (the seam + `InitCtxDriverProcessSpawn` bridge above are
+          ready; what remains is the boot path that hands `autoload_drivers` a
+          live `KernelInitSpawner` once the root is mounted);
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
           holding a signed `usb_kbd` bundle → `enumerate_driver_store` →
           `autoload_drivers` → spawn `usb_kbd` → prove a keystroke reaches the

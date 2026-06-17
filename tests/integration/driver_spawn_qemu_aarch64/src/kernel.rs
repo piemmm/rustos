@@ -9,8 +9,8 @@ use alloc::sync::Arc;
 
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::{
-    CapabilityId, DescriptorTable, DriverBindKey, DriverRegisterReply, Errno, HwDeviceClass,
-    HwMatchKey, HwNode, HW_NODE_ROOT, SYSCALL_MAX_ARGS,
+    CapabilityId, DriverBindKey, DriverRegisterReply, Errno, HwDeviceClass, HwMatchKey, HwNode,
+    HW_NODE_ROOT, SYSCALL_MAX_ARGS,
 };
 use rustos_arch_aarch64::kernel_arch::timer_frequency_hz;
 use rustos_arch_aarch64::paging::{
@@ -31,11 +31,11 @@ use rustos_fdt::Fdt;
 use rustos_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use rustos_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
-use rustos_kernel::driver_spawn_loader::{DriverProcessSpawn, SpawnDriverLoader};
+use rustos_kernel::driver_spawn_loader::{InitCtxDriverProcessSpawn, SpawnDriverLoader};
 use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
-    BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelSpawnCtx, ProcessSpawn,
-    RandomReserve, EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
+    BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelInitSpawner, RandomReserve,
+    EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
     NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT,
 };
 use rustos_kernel_ipc::{EndpointId, Port, PortRegistry};
@@ -246,42 +246,6 @@ impl ImageSource for StaticImageSource {
         } else {
             Err(Errno::NotFound)
         }
-    }
-}
-
-/// The aarch64 [`DriverProcessSpawn`] for this vertical: build a
-/// [`KernelSpawnCtx`] over the live subsystems and admit the verified driver
-/// payload through the production `Aarch64ProcessSpawn::spawn_with`, minting
-/// the child one grant per matched-node resource (`AGENTS.md` §18.3). It
-/// lives here, with its consumer, because it names the concrete scheduler
-/// the production binary deliberately never names (§17.1) — exactly as this
-/// vertical already names it to build the rest of the kernel state.
-struct VerticalDriverProcessSpawn<'a> {
-    sys: &'a Subsystems,
-}
-
-impl DriverProcessSpawn for VerticalDriverProcessSpawn<'_> {
-    fn spawn_driver(
-        &self,
-        rxe: &[u8],
-        granted: CapabilitySet,
-        grants: &[HwResource],
-        args: &[&[u8]],
-    ) -> Result<u64, Errno> {
-        let ctx = KernelSpawnCtx::new(
-            self.sys.frames,
-            Some(self.sys.frames),
-            &SERIAL_SINK,
-            self.sys.sched,
-            self.sys.caps,
-            self.sys.aspaces,
-            self.sys.arch,
-            SecTaskId(0),
-            &NULL_PROCESS_WAIT,
-            DescriptorTable::standard(),
-            grants,
-        );
-        AARCH64_PROCESS_SPAWN.spawn_with(rxe, &ctx, granted, args)
     }
 }
 
@@ -542,7 +506,22 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
     let trusted = [signer];
     let source = StaticImageSource;
-    let spawn = VerticalDriverProcessSpawn { sys: &sys };
+    // Drive the *production* driver-spawn seam: the kernel/core
+    // `KernelInitSpawner` owns the live registries and assembles the
+    // `KernelSpawnCtx` internally, so this vertical reaches it through the bin
+    // crate's `InitCtxDriverProcessSpawn` bridge rather than re-implementing
+    // the context assembly (`AGENTS.md` §2.2 / §17.1). `NULL_PROCESS_WAIT`:
+    // this vertical does not reap the long-lived spawned driver.
+    let init_ctx = KernelInitSpawner::new(
+        sys.frames,
+        &SERIAL_SINK,
+        sys.sched,
+        sys.caps,
+        sys.aspaces,
+        sys.arch,
+        &NULL_PROCESS_WAIT,
+    );
+    let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
     let args: [&[u8]; 2] = [b"drvstub", REPLY_ENDPOINT_ARG];
     let mut loader = SpawnDriverLoader::new(&trusted, &source, &SERIAL_SINK, &spawn, &args);
 
