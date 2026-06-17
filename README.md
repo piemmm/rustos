@@ -32,9 +32,12 @@ for filesystems, the block below.
 | Context switch | ✓ | ✓ | ✓ | — |
 | Interrupts + timer | ✓ | ✓ | ✓ | ✓ |
 | SMP bring-up | ✓ | ✓ | ✓ | ✓ |
+| Heterogeneous CPUs (big.LITTLE / hybrid) | ✓ CPUID | ✓ FDT | ▢ | — |
 | Cache-aware scheduling (LLC-aware) | ▢ | ▢ | ▢ | — |
 | Cross-CPU TLB shootdown | ✓ | ✓ | ✓ | — |
 | Syscall entry | ✓ | ✓ | ✓ | ✓ |
+| User-mode execution (ring 3 / EL0 / U-mode) | ✓ | ✓ | ✓ | — |
+| C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
