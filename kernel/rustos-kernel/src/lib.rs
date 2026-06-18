@@ -158,6 +158,20 @@ pub mod driver_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod root_storage;
 
+// The in-kernel root-unlock service (`plans/PI.md` §3 P11 root-mount
+// increment, Chunk B-2 INCREMENT (2)): the post-MMU boot stash carrying
+// the resolved `root_storage` binding + the firmware DTB pointer to the
+// init seam, the console-0 ownership gate that stops `login` stealing the
+// passphrase bytes, and (freestanding aarch64 only) the live virtio-blk
+// bring-up + unlock-policy kthread. The device-independent core is
+// architecture-neutral and host-tested on the CI host; it is gated, like
+// the `root_storage` binding it consumes, on the two instruction sets
+// where that gate compiles. The live bring-up is further gated on
+// `freestanding` + `kernel_isa = "aarch64"` (the Raspberry Pi 4 / QEMU
+// `virt` boot path).
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod unlock_service;
+
 // The user-space sibling of `driver_loader` (`plans/PI.md` P10 5d-2-ii):
 // admits a discovered `kind = UserSpace` driver through the same signed
 // `drvhost::Host::load` gate, then **spawns** it into its own

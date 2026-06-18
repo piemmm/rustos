@@ -4024,7 +4024,7 @@ mod tests {
     /// write half fails closed — the read-side test fixture for
     /// [`KernelSyscallHandlers::with_consoles`].
     fn single_read_console(
-        read: &'static (dyn crate::console::ConsoleRead + 'static),
+        read: &'static (dyn crate::console::ConsoleRead + Sync + 'static),
     ) -> &'static [ConsoleDevice] {
         Box::leak(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,

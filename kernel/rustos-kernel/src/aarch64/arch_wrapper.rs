@@ -236,24 +236,51 @@ pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
 /// `display_release` / `keyboard_read` syscall handlers.
 pub static INPUT_FOCUS: InputFocus = InputFocus::new(&VIDEO_KEYBOARD);
 
+/// The console-0 read half of the video console, gated on the in-kernel
+/// root-unlock service's ownership latch (`plans/PI.md` P11 Chunk B-2 item
+/// 5): a `stream_read` from the primary console's `login` is withheld
+/// (parked) until the unlock kthread has finished reading the root
+/// passphrase off the same queue and opened the gate, so the two never
+/// race for console-0 input. Wraps [`VIDEO_KEYBOARD`]; the injected-input
+/// (`console_input`) half stays the raw queue.
+static GATED_VIDEO_READ: crate::unlock_service::GatedConsoleRead =
+    crate::unlock_service::GatedConsoleRead::new(
+        &VIDEO_KEYBOARD,
+        &crate::unlock_service::CONSOLE0_GATE,
+    );
+
+/// The console-0 read half of the UART console, gated on the same unlock
+/// ownership latch as [`GATED_VIDEO_READ`] for the UART-only (QEMU `virt`,
+/// headless Pi) layout where the UART *is* the primary console.
+static GATED_UART_READ: crate::unlock_service::GatedConsoleRead =
+    crate::unlock_service::GatedConsoleRead::new(
+        &UART_CONSOLE,
+        &crate::unlock_service::CONSOLE0_GATE,
+    );
+
 /// The console list installed when the framebuffer boot console is
 /// active: the video console is the primary (index 0, PID 1's banner +
 /// the first login) and the UART is an independent second console with
 /// its own login session (`plans/PI.md` P11).
 pub static VIDEO_AND_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 2] = [
-    // The video console: written to the framebuffer, read from (and fed
-    // by the input-focus arbiter's text sink into) the shared keyboard
-    // type-ahead queue.
-    rustos_kernel_core::ConsoleDevice::with_input(&VIDEO_CONSOLE, &VIDEO_KEYBOARD, &VIDEO_KEYBOARD),
+    // The video console: written to the framebuffer, read (through the
+    // unlock ownership gate) from the shared keyboard type-ahead queue,
+    // and fed by the input-focus arbiter's text sink into that same queue.
+    rustos_kernel_core::ConsoleDevice::with_input(
+        &VIDEO_CONSOLE,
+        &GATED_VIDEO_READ,
+        &VIDEO_KEYBOARD,
+    ),
     rustos_kernel_core::ConsoleDevice::new(&UART_CONSOLE, &UART_CONSOLE),
 ];
 
 /// The console list installed when no display came up (QEMU `virt`, a
-/// headless Pi): the discovered UART is the only console.
+/// headless Pi): the discovered UART is the only console, so it is the
+/// primary console and its read half is gated on the unlock latch.
 pub static UART_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
     [rustos_kernel_core::ConsoleDevice::new(
         &UART_CONSOLE,
-        &UART_CONSOLE,
+        &GATED_UART_READ,
     )];
 
 #[cfg(test)]

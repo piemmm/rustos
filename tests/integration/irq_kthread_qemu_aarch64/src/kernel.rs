@@ -18,7 +18,7 @@ use rustos_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
 };
 use rustos_fdt::Fdt;
-use rustos_kernel_core::{spawn_kthread, KthreadIrqWaiter, YielderHandle};
+use rustos_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
 use rustos_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
 use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use rustos_kernel_sec::TaskId;
@@ -311,7 +311,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         Priority::Normal,
         move |yielder| {
             let mut handle_obj = YielderHandle::new(yielder);
-            let waiter = KthreadIrqWaiter::new(&mut handle_obj, || clock_arch.monotonic_ns());
+            let coop = CooperativeYield::new(&mut handle_obj);
+            let waiter = KthreadIrqWaiter::new(&coop, || clock_arch.monotonic_ns());
             match block_until_ready(table, handle, OWNER, u64::MAX, &waiter) {
                 WaitOutcome::Ready => {
                     WOKEN.store(true, Ordering::SeqCst);

@@ -302,6 +302,19 @@ impl InitSpawn for Aarch64InitSpawn {
         // (`AGENTS.md` §18.4).
         let _keyboard_started = crate::keyboard_service::spawn_if_present(ctx);
 
+        // Start the in-kernel root-unlock service alongside PID 1 and the
+        // keyboard service (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)).
+        // Admitted onto the boot CPU's run queue *before* `admit_init`
+        // diverges into the dispatch loop, the kthread brings up the bound
+        // root block device over the production device-IRQ path, prompts
+        // for the passphrase on the primary console, mounts the encrypted
+        // root, and publishes the users database into `LATE_USERS_DB` so
+        // `login` can authenticate. With no bound disk (the QEMU `virt`
+        // shape without a planted root, a headless Pi) it starts nothing,
+        // opens the console-0 gate, and PID 1 runs unchanged
+        // (`AGENTS.md` §18.4).
+        let _unlock_started = crate::unlock_service::spawn_if_present(ctx);
+
         // Register PID 1's caps + address space, publish it as the current
         // task, and dispatch it — `admit_init` diverges into EL0 on success.
         // SAFETY: the image was built into and `space` switched to active

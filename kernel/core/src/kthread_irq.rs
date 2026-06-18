@@ -45,32 +45,33 @@ use crate::kthread::YieldHandle;
 ///
 /// ```ignore
 /// let mut handle = YielderHandle::new(yielder);
-/// let waiter = KthreadIrqWaiter::new(&mut handle, || arch.monotonic_ns(cpu));
+/// let coop = CooperativeYield::new(&mut handle);
+/// let waiter = KthreadIrqWaiter::new(&coop, || arch.monotonic_ns(cpu));
 /// match block_until_ready(table, irq_handle, owner, u64::MAX, &waiter) {
 ///     WaitOutcome::Ready => { /* the device line fired */ }
 ///     other => { /* timeout / forged / aborted — fail closed */ }
 /// }
 /// ```
 ///
-/// # Interior mutability
+/// # Why a shared [`CooperativeYield`]
 ///
-/// [`IrqWaiter::yield_now`] takes `&self`, but
-/// [`YieldHandle::yield_now`]
-/// needs `&mut self` (it suspends the running coroutine). The borrowed
-/// handle is therefore wrapped in a [`RefCell`]. This is sound and
-/// panic-free: a kthread runs on at most one CPU and
-/// [`rustos_kernel_irq::block_until_ready`] calls `now_ns` and `yield_now`
-/// strictly serially, never re-entrantly, so the `borrow_mut` is never
-/// already held. It is *not* a global mutable static (`AGENTS.md` §2.1) —
-/// it lives on the kthread's own stack frame.
+/// A kthread that drives interrupt-driven block I/O **and** reads the
+/// console (the INCREMENT (2) root-unlock kthread) needs *two* things to
+/// suspend on the same `&mut dyn YieldHandle`: this waiter (inside the
+/// virtio host's `notify_wait`) and a cooperative console reader, both
+/// alive for the whole unlock call. A single `&mut` cannot be owned by
+/// two of them, so the borrowed handle is shared through a
+/// [`CooperativeYield`] cell both borrow (`&`), each suspending through
+/// it transiently. The waiter therefore holds `&CooperativeYield`, not the
+/// `&mut` itself.
 pub struct KthreadIrqWaiter<'a, C>
 where
     C: Fn() -> u64,
 {
-    /// The kthread's cooperative-yield handle (the core's
+    /// The kthread's shared cooperative-yield cell (the core's
     /// [`YielderHandle`](crate::kthread::YielderHandle) behind the
-    /// object-safe trait).
-    yielder: RefCell<&'a mut dyn YieldHandle>,
+    /// object-safe trait, wrapped for shared suspension).
+    yielder: &'a CooperativeYield<'a>,
     /// Monotonic clock, in nanoseconds, on the kthread's CPU. Closing over
     /// the arch + CPU keeps the waiter free of any architecture
     /// dependency, mirroring `SyscallIrqWaiter`'s `KernelArch` borrow.
@@ -81,13 +82,11 @@ impl<'a, C> KthreadIrqWaiter<'a, C>
 where
     C: Fn() -> u64,
 {
-    /// Adapt `yielder` and the monotonic `clock` into an [`IrqWaiter`].
+    /// Adapt the shared [`CooperativeYield`] cell and the monotonic
+    /// `clock` into an [`IrqWaiter`].
     #[must_use]
-    pub fn new(yielder: &'a mut dyn YieldHandle, clock: C) -> Self {
-        Self {
-            yielder: RefCell::new(yielder),
-            clock,
-        }
+    pub fn new(yielder: &'a CooperativeYield<'a>, clock: C) -> Self {
+        Self { yielder, clock }
     }
 }
 
@@ -106,8 +105,53 @@ where
         // can (no `exit` syscall reaps it), so the yield always succeeds —
         // there is no scheduler error to surface (`AGENTS.md` §5.4.5: the
         // failure modes that exist on the syscall path do not apply here).
-        self.yielder.borrow_mut().yield_now();
+        self.yielder.yield_now();
         Ok(())
+    }
+}
+
+/// A shared cooperative-yield cell over a kthread's single
+/// `&mut dyn YieldHandle`.
+///
+/// An in-kernel service kthread is handed exactly one
+/// [`YieldHandle`] by the core, but may need to suspend from more than one
+/// place that is alive at the same time — the [`KthreadIrqWaiter`] inside a
+/// block driver's `notify_wait` *and* a cooperative console reader during
+/// the same root-unlock call. A single `&mut` cannot be shared, so the
+/// handle is moved into this cell once and every suspending site borrows
+/// the cell (`&`), suspending through [`Self::yield_now`].
+///
+/// # Interior mutability
+///
+/// [`YieldHandle::yield_now`] needs `&mut self` (it suspends the running
+/// coroutine), but the cell is shared by `&`, so the handle is wrapped in a
+/// [`RefCell`]. This is sound and panic-free: a kthread runs on at most one
+/// CPU and the suspending sites call [`Self::yield_now`] strictly serially,
+/// never re-entrantly (each `borrow_mut` is released the instant the inner
+/// `yield_now` returns), so the borrow is never already held. It is *not* a
+/// global mutable static (`AGENTS.md` §2.1) — it lives on the kthread's own
+/// stack frame and is `!Sync` (never shared across CPUs).
+pub struct CooperativeYield<'a> {
+    yielder: RefCell<&'a mut dyn YieldHandle>,
+}
+
+impl<'a> CooperativeYield<'a> {
+    /// Move the kthread's single [`YieldHandle`] into a shareable cell.
+    #[must_use]
+    pub fn new(yielder: &'a mut dyn YieldHandle) -> Self {
+        Self {
+            yielder: RefCell::new(yielder),
+        }
+    }
+
+    /// Cooperatively yield the kthread, resuming on its next dispatch.
+    ///
+    /// The `borrow_mut` is held only for the duration of the inner
+    /// [`YieldHandle::yield_now`] call; because the kthread's suspending
+    /// sites never call this re-entrantly, the borrow is never already
+    /// held.
+    pub fn yield_now(&self) {
+        self.yielder.borrow_mut().yield_now();
     }
 }
 
@@ -171,7 +215,8 @@ mod tests {
             fire_on: None,
             hook: None,
         };
-        let waiter = KthreadIrqWaiter::new(&mut mock, || 0);
+        let coop = CooperativeYield::new(&mut mock);
+        let waiter = KthreadIrqWaiter::new(&coop, || 0);
 
         assert_eq!(
             block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
@@ -199,7 +244,8 @@ mod tests {
             fire_on: Some(3),
             hook: Some(&fire),
         };
-        let waiter = KthreadIrqWaiter::new(&mut mock, || 0);
+        let coop = CooperativeYield::new(&mut mock);
+        let waiter = KthreadIrqWaiter::new(&coop, || 0);
 
         assert_eq!(
             block_until_ready(&table, out.handle, TaskId(1), u64::MAX, &waiter),
@@ -227,7 +273,8 @@ mod tests {
             now.set(v + 100);
             v
         };
-        let waiter = KthreadIrqWaiter::new(&mut mock, clock);
+        let coop = CooperativeYield::new(&mut mock);
+        let waiter = KthreadIrqWaiter::new(&coop, clock);
 
         assert_eq!(
             block_until_ready(&table, out.handle, TaskId(1), 250, &waiter),
@@ -244,7 +291,8 @@ mod tests {
             fire_on: None,
             hook: None,
         };
-        let waiter = KthreadIrqWaiter::new(&mut mock, || 0);
+        let coop = CooperativeYield::new(&mut mock);
+        let waiter = KthreadIrqWaiter::new(&coop, || 0);
 
         assert_eq!(
             block_until_ready(
@@ -267,7 +315,8 @@ mod tests {
             fire_on: None,
             hook: None,
         };
-        let waiter = KthreadIrqWaiter::new(&mut mock, || 0xABCD_1234);
+        let coop = CooperativeYield::new(&mut mock);
+        let waiter = KthreadIrqWaiter::new(&coop, || 0xABCD_1234);
         assert_eq!(waiter.now_ns(), 0xABCD_1234);
     }
 }

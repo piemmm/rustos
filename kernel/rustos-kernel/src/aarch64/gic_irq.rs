@@ -68,6 +68,53 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
     pub const fn new(inner: GicController<M>) -> Self {
         Self { inner }
     }
+
+    /// Re-arm (unmask) `line` at the GIC distributor after a completion.
+    ///
+    /// [`IrqTable::fire`] masks the line before a waiter observes the wake
+    /// (mask-before-wake, `docs/src/security/irq.md`), so a level- or
+    /// edge-triggered device cannot re-fire while the driver drains its
+    /// completion queue. Once the driver has handled the completion the
+    /// line must be re-enabled for the *next* one, and that re-enable is an
+    /// *arch* operation ([`rustos_arch_api::IrqController::unmask`]) the
+    /// kernel-side [`rustos_kernel_irq::IrqController`] trait deliberately
+    /// does not expose (it carries only `mask`, the one operation
+    /// [`IrqTable::fire`] needs). The re-arm therefore lives here, in the
+    /// bin layer that owns the GIC (`AGENTS.md` §17.4), exactly as the
+    /// `-M virt` IRQ vertical re-arms through its `GicBridge`. It adds no
+    /// policy of its own — it delegates to the range-checked
+    /// [`GicController`] (`AGENTS.md` §2.2).
+    ///
+    /// # Errors
+    ///
+    /// Surfaces [`rustos_arch_api::IrqControlError`] verbatim — an
+    /// out-of-range line fails closed without touching the distributor
+    /// (`AGENTS.md` §5.4.5).
+    pub fn rearm(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+        use rustos_arch_api::IrqController as ArchIrqController;
+        ArchIrqController::unmask(&self.inner, line)
+    }
+}
+
+/// The `'static` [`IrqTable`] the kernel core published in
+/// [`crate::Phase::Irq`](rustos_kernel_core::Phase::Irq) through
+/// [`install_device_irq_dispatch`], or [`None`] before it is published.
+///
+/// An in-kernel service kthread (the INCREMENT (2) root-unlock kthread)
+/// that must bind and block on a device SPI binds on **this** table — the
+/// one [`production_device_irq_dispatch`] fires into — never a fresh table
+/// the EL1 vector would never reach. Reading the set-once slot is the only
+/// way to reach the live table from the kthread, since the core owns its
+/// allocation inside the leaked `KernelState` (`AGENTS.md` §2.2 — one
+/// table definition, not two that could diverge).
+///
+/// Freestanding-only: the in-kernel unlock kthread that consumes it is
+/// itself bare-metal aarch64 ([`crate::unlock_service`]); a host build has
+/// no kthread to bind a line, so the accessor is not compiled there.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+#[must_use]
+pub fn published_irq_table() -> Option<&'static IrqTable> {
+    IRQ_TABLE_SLOT.get().ok().flatten().copied()
 }
 
 impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
@@ -239,5 +286,25 @@ mod tests {
         // surfacing the arch `OutOfRange` as the kernel `MaskError`.
         let c = controller(47);
         assert_eq!(c.mask(48), Err(MaskError::OutOfRange));
+    }
+
+    #[test]
+    fn rearm_unmasks_an_in_range_line() {
+        // Re-arming a device SPI delegates to the arch controller's
+        // unmask and succeeds for an in-range line (`AGENTS.md` §17.4 —
+        // the re-arm lives in the bin layer that owns the GIC).
+        let c = controller(MAX_INTID);
+        assert_eq!(c.rearm(32), Ok(()));
+    }
+
+    #[test]
+    fn rearm_maps_an_out_of_range_line_to_out_of_range() {
+        // A line above the controller's ceiling fails closed without
+        // touching the distributor (`AGENTS.md` §5.4.5).
+        let c = controller(47);
+        assert_eq!(
+            c.rearm(48),
+            Err(rustos_arch_api::IrqControlError::OutOfRange)
+        );
     }
 }

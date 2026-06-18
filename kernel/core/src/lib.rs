@@ -132,7 +132,7 @@ pub use kthread::{
     BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder, YielderHandle,
     KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
 };
-pub use kthread_irq::KthreadIrqWaiter;
+pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
 pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};

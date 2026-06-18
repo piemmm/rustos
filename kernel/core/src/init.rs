@@ -746,7 +746,7 @@ fn run_phases<A: KernelArch>(
     let consoles: &'static [crate::console::ConsoleDevice] = {
         let mut wrapped = alloc::vec::Vec::with_capacity(consoles.len());
         for device in consoles {
-            let blocking: &'static (dyn crate::console::ConsoleRead + 'static) =
+            let blocking: &'static (dyn crate::console::ConsoleRead + Sync + 'static) =
                 Box::leak(Box::new(crate::console::BlockingConsoleRead::new(
                     state.arch.as_ref(),
                     device.read,

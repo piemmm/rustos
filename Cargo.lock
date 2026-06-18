@@ -942,6 +942,7 @@ dependencies = [
  "rustos-crypto",
  "rustos-devmatch",
  "rustos-devmgr",
+ "rustos-drv-bus-mmio",
  "rustos-drv-bus-pci",
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",

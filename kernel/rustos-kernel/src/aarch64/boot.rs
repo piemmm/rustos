@@ -740,9 +740,15 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
         // path fails closed without a binding (`AGENTS.md` §18.4 / §2.9).
         return;
     }
-    // The binding is consumed by the production mount path in the following
-    // increment; here the gate's effect is the audit record `finish` emits.
-    let _ = sink.selection.finish(log_sink);
+    // Resolve + audit the binding, then stash it (with the firmware DTB
+    // pointer) for the init seam, where the in-kernel root-unlock kthread
+    // reads it once (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)). The MMU is
+    // on here (the caller enabled it), so the `SpinLock` stash's atomic
+    // read-modify-write is well-defined — the same post-MMU constraint the
+    // keyboard discovery stash carries. A `None` binding (no/ambiguous disk)
+    // leaves the unlock a no-op and `login` fails closed (§18.4).
+    let binding = sink.selection.finish(log_sink);
+    crate::unlock_service::record_boot(binding, dtb);
 }
 
 /// Assemble the validated [`BootInfo`] hand-off and enter

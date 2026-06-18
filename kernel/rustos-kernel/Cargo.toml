@@ -205,6 +205,16 @@ rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 # the x86_64 `virtio_boot` path does. `drvhost` stays free of `kernel/*`
 # deps (`AGENTS.md` §17.4); the in-kernel resource hosts live elsewhere.
 rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
+# The virtio-MMIO bus + transport the in-kernel root-unlock service
+# (`unlock_service`) provisions the bootstrap virtio-blk root device from
+# on the QEMU `virt` board (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)).
+# `virtio_mmio_bus_from_dtb` builds the bus from the discovered device
+# tree; `MmioTransport` is the concrete transport the provisioning walk
+# constructs. The kernel binary (`Layer::Tooling`) is the permitted point
+# to name driver-bus crates (`AGENTS.md` §17.4 / §8), exactly as the
+# x86_64 boot path names `rustos-drv-bus-virtio`.
+rustos-drv-bus-mmio = { path = "../../drivers/bus/mmio", version = "=0.0.0" }
+rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
 
 # riscv64: the QEMU `virt` / SiFive production kernel links the riscv64
 # port (`plans/PI.md` RV-P1). `boot_riscv64` reaches

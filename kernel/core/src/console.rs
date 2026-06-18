@@ -103,10 +103,19 @@ pub static NULL_CONSOLE: NullConsole = NullConsole;
 /// the user-memory copy and the capability check, never the device
 /// implementation.
 ///
-/// Implementations must be [`Sync`]: the single installed console is
-/// shared by the per-CPU syscall handlers, exactly like
-/// [`ConsoleWrite`].
-pub trait ConsoleRead: Sync {
+/// The trait itself carries **no** [`Sync`] bound: a transient,
+/// single-kthread reader (the in-kernel root-unlock kthread's cooperative
+/// blocking reader, [`crate::kthread`]) holds a `!Sync` yield handle and
+/// must implement [`ConsoleRead`] without being shareable across CPUs.
+/// [`Sync`] is instead required at the **sharing sites** — the
+/// `'static` console list ([`ConsoleDevice::read`]) and the
+/// [`BlockingConsoleRead`] adapter both store `&'static (dyn ConsoleRead +
+/// Sync)` because that list is shared by the per-CPU syscall handlers,
+/// exactly like [`ConsoleWrite`]. Constraining at the storage site rather
+/// than the trait keeps the shared path `Sync` without forcing every
+/// transient reader to be (`AGENTS.md` §2.6 — do not over-constrain a
+/// trait).
+pub trait ConsoleRead {
     /// Read available console input into `buf`, returning the number of
     /// bytes actually read.
     ///
@@ -364,8 +373,10 @@ impl ConsoleInput for ConsoleInputQueue {
 pub struct ConsoleDevice {
     /// The console's byte sink (`stream_write`).
     pub write: &'static (dyn ConsoleWrite + 'static),
-    /// The console's byte source (`stream_read`).
-    pub read: &'static (dyn ConsoleRead + 'static),
+    /// The console's byte source (`stream_read`). [`Sync`] is required
+    /// here, at the shared-`'static`-list storage site, rather than on the
+    /// [`ConsoleRead`] trait itself.
+    pub read: &'static (dyn ConsoleRead + Sync + 'static),
     /// The console's injected-input sink (`console_input`).
     ///
     /// A keyboard-backed console (the video console) points this and
@@ -409,7 +420,7 @@ impl ConsoleDevice {
     #[must_use]
     pub const fn new(
         write: &'static (dyn ConsoleWrite + 'static),
-        read: &'static (dyn ConsoleRead + 'static),
+        read: &'static (dyn ConsoleRead + Sync + 'static),
     ) -> Self {
         Self::with_input(write, read, &NULL_CONSOLE_INPUT)
     }
@@ -424,7 +435,7 @@ impl ConsoleDevice {
     #[must_use]
     pub const fn with_input(
         write: &'static (dyn ConsoleWrite + 'static),
-        read: &'static (dyn ConsoleRead + 'static),
+        read: &'static (dyn ConsoleRead + Sync + 'static),
         input: &'static (dyn ConsoleInput + 'static),
     ) -> Self {
         Self {
@@ -573,7 +584,7 @@ where
     A: SchedulerArch + Send + Sync + 'static,
 {
     arch: &'static A,
-    inner: &'static (dyn ConsoleRead + 'static),
+    inner: &'static (dyn ConsoleRead + Sync + 'static),
 }
 
 impl<A> BlockingConsoleRead<A>
@@ -585,7 +596,7 @@ where
     /// `arch` supplies the current-CPU read the park needs, exactly as it
     /// does for [`KernelProcessWait`](crate::procwait::KernelProcessWait).
     #[must_use]
-    pub const fn new(arch: &'static A, inner: &'static (dyn ConsoleRead + 'static)) -> Self {
+    pub const fn new(arch: &'static A, inner: &'static (dyn ConsoleRead + Sync + 'static)) -> Self {
         Self { arch, inner }
     }
 }

@@ -4163,121 +4163,69 @@ two users — or the same user twice — can be logged in concurrently.
        eevdf scheduler, with the post-fire mask-before-wake check. Host tests:
        `KthreadIrqWaiter` (5), `gic_device_intid`/`gic_intid_from_cells` (9).
        No `lib/abi`/C-header change.
-     - **INCREMENT (2) — Chunk B-2 board bring-up — staged, with a confirmed
-       build recipe: the live in-kernel unlock kthread.** Everything the
-       kthread *calls* is now landed: the device-IRQ subsystem above
-       (INCREMENT (1)), the `root_storage` bind gate (`RootBlockBinding`,
-       `4135`), the `unlock_root_disk_interactively` policy + bounded retry,
-       the set-once `LATE_USERS_DB` + its dispatch-hook wiring, and the `-M
-       virt` proof of the policy over a real virtio-blk encrypted-root disk.
-       What remains is the *live*, board-specific block bring-up that supplies
-       the `Block` inside a scheduler kthread, the in-kernel primary-console
-       seam, and the init-seam admission. The whole of this remainder is
-       `#[cfg(freestanding)]` (it lives in `boot.rs` / `init_spawn.rs` / a new
-       metal module), so it is **not** compiled by host `cargo test`/clippy —
-       it is verifiable only by `cargo xtask image --target aarch64-rpi`,
-       target clippy, and the QEMU verticals. It rides the §0.9 operator metal
-       checkpoint and must not regress the metal-confirmed boot (§2.17).
-
-       Confirmed design facts (do not re-derive):
-       - The unlock is a **scheduler kthread**, not a synchronous pre-boot
-         step: the keyboard scaffold (`keyboard_service::spawn_if_present`)
-         only *admits* a kthread that feeds the `ConsoleInputQueue` once the
-         dispatch loop runs, so a blocking console read before that deadlocks.
-         Admit the unlock kthread via `ctx.spawn_kernel_service(Box::new(body))`
-         in `aarch64::init_spawn` right after the keyboard scaffold
-         (`init_spawn.rs`, the `let _keyboard_started = …` line), before
-         `admit_init` diverges into the dispatch loop.
-       - **A correct virtio-blk bring-up needs the real IRQ path.** The driver
-         (`rustos_drv_storage_virtio_blk`) does `notify_wait` *once* then
-         `poll_used` *once* — there is no re-poll loop — so `notify_wait` must
-         block until the device's completion interrupt. A "yield and re-poll
-         without an IRQ" host would depend on QEMU completing synchronously on
-         the notify MMIO write: a QEMU-only hack (§2.1), forbidden. Use
-         `KernelVirtioHost` (its `notify_wait` drives `block_until_ready` over
-         the bound `IrqHandle` + an injected `IrqWaiter`).
-       - The waiter must **cooperatively yield to the scheduler**, not `wfi`
-         the whole CPU (PID 1 + the keyboard kthread share it). Use the
-         landed `rustos_kernel_core::KthreadIrqWaiter` (INCREMENT (1)): it
-         wraps the `&mut dyn YieldHandle` the `spawn_kernel_service` body
-         receives plus a monotonic-clock closure and yields (re-enqueues),
-         exactly the shared-CPU-safe behaviour required. (The `-M virt`
-         harness's `WfiWaiter` parks the CPU because it is a single-purpose
-         vertical — do NOT copy that into the shared-CPU production kthread.)
-
-       Build recipe (one focused pass; mirror `keyboard_service`'s metal
-       module shape and the `tests/integration/virtio_qemu_support`
-       `imp_mmio_aarch64.rs` bring-up, which the production bin cannot depend
-       on — it is a dev-only test-support crate, so the sequence is
-       replicated, not reused):
-       1. **Retain the binding.** `aarch64::boot::audit_root_storage_binding`
-          currently *discards* the result (`let _ = sink.selection.finish(…)`).
-          Store the `Option<RootBlockBinding>` in a new `unlock_service`
-          boot-stash (`SpinLock<Option<RootBlockBinding>>`, set after the MMU
-          is on — same constraint as `keyboard_service::record_discovery`),
-          read once at the init seam. Headless / no-disk / ambiguous ⇒ `None`
-          ⇒ the kthread is a no-op and `LATE_USERS_DB` stays fail-closed
-          (§18.4).
-       2. **New module `kernel/rustos-kernel/src/unlock_service.rs`** with a
-          host-compiled, host-tested, device-independent core (consumed by the
-          metal glue, so non-speculative): the binding stash. The cooperative
-          IRQ waiter is already landed — reuse `rustos_kernel_core::
-          KthreadIrqWaiter` over the `spawn_kernel_service` body's
-          `&mut dyn YieldHandle` (INCREMENT (1)); do **not** roll a new one.
-          The metal bring-up lives in a
-          `#[cfg(all(freestanding, kernel_isa = "aarch64"))] mod metal` with
-          `pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool`.
-       3. **Metal `spawn_if_present` body** (`virt` virtio-blk path; EMMC2 is
-          the Pi metal path, staged — `raspi4b` cannot model EMMC2, §0.4 honest
-          gap): take the stashed `RootBlockBinding`; `None` ⇒ return false.
-          Build the bring-up exactly as `imp_mmio_aarch64::run_virtio_mmio_scenario`
-          does, off the **boot-discovered** DTB pointer (stash it like the
-          keyboard discovery), not an embedded blob: `virtio_mmio_bus_from_dtb`
-          → `MmioMap` + `KernelMmioMapper` (`CAP_MMIO_MAP`) →
-          `provision_virtio_mmio(&bus, 2, &mapper, MmioTransport::new)` →
-          resolve the slot's GICv2 SPI from the DTB with the landed
-          `fdt::gic_device_intid` (INCREMENT (1)) → `IrqTable` + bind + the
-          landed `gic_irq::GicIrqController` + EL1 `set_device_irq_dispatch`
-          (already installed by `install_irq_dispatch`) + `gic::route_spi` +
-          unmask → `DmaPool` + `KernelVirtioHost::new(pool, &caller, sink,
-          PoolId::fresh, table, handle, &waiter)` (the `KthreadIrqWaiter`) →
-          admit the virtio-blk driver
-          through the signed §8 `drvhost::Host::load` gate (not a bare
-          `register()`) → `VirtioBlk::open(transport, &vhost)` to get the
-          whole-disk `Block`.
-       4. **Primary-console seam.** Obtain console index 0's
-          `&'static dyn ConsoleWrite` and wrap its `&'static dyn ConsoleRead`
-          in `rustos_kernel_core::BlockingConsoleRead` (so an empty poll parks
-          the kthread, never busy-spins). On `virt` index 0 is
-          `UART_CONSOLE`; on the Pi with HDMI it is `VIDEO_CONSOLE` +
-          `VIDEO_KEYBOARD`. Run `unlock_root_disk_interactively(blk,
-          &console_write, &blocking_read, &root_mount::LATE_USERS_DB,
-          &SERIAL_SINK)`.
-       5. **Concurrency note (resolve in this pass).** Both the unlock kthread
-          and `login` drain console index 0's input. `login` refuses every
-          attempt until `LATE_USERS_DB` is installed, but the two readers still
-          compete for the same `ConsoleInputQueue` bytes. Decide and document
-          the coordination (e.g. gate the per-console `login` spawn on the
-          unlock completing, or route the passphrase prompt to a console the
-          login of which is not yet started) — do not ship two uncoordinated
-          readers of one queue.
-       6. **New aarch64 kernel deps.** Add `rustos-drv-bus-mmio`
-          (`virtio_mmio_bus_from_dtb`) and `rustos-drv-bus-virtio`
-          (`MmioTransport`) to the `[target.'cfg(target_arch = "aarch64")']`
-          deps (the bin crate is `Layer::Tooling`, permitted to name driver
-          crates, §17.4); `rustos-kernel-virtio`, `rustos-kernel-irq`,
-          `rustos-drv-storage-virtio-blk`, `zeroize` are already present.
-       7. **Production `-M virt` vertical.** A new integration bin that boots
-          the production `unlock_service::spawn_if_present` admission path over
-          the shared `rustos-test-encrypted-root-image` fixture and proves
-          `root`/`root` authenticates after the kthread mounts the root —
-          distinct from the existing `root_unlock_login_qemu_aarch64`, which
-          exercises the policy directly.
-       8. **Verify:** host tests for the device-independent core; `cargo xtask
-          image --target aarch64-rpi` (compiles the metal module — iterate
-          here); deps-check / cfg-check / clippy on target; the new vertical;
-          then the whole §5 gate. EMMC2 + the live UART-typed login carry the
-          §0.9 metal checklist + UART-log artefact.
+     - **INCREMENT (2) — Chunk B-2 the live in-kernel unlock kthread —
+       LANDED (host-proven + the whole `-M virt` QEMU matrix green, both Pi
+       images built).** `kernel/rustos-kernel::unlock_service` admits an
+       in-kernel root-unlock scheduler kthread at the aarch64 init seam (in
+       `init_spawn`, right after the keyboard scaffold, before `admit_init`
+       diverges) that brings the bootstrap virtio-blk root device up over the
+       INCREMENT (1) device-IRQ path and runs the device-independent
+       `unlock_root_disk_interactively` policy. What landed:
+       - `unlock_service` (top-level module, host-tested on the CI host): the
+         post-MMU boot stash `record_boot`/`take_boot` (`RootBlockBinding` +
+         the firmware DTB pointer, filled by `boot::audit_root_storage_binding`
+         which no longer discards the binding), and the **console-0 ownership
+         gate** (`Console0Gate`/`CONSOLE0_GATE`/`GatedConsoleRead`) that
+         resolves the two-readers-of-one-queue concurrency note (item 5): the
+         primary console's `login` reads through a `GatedConsoleRead` that
+         withholds input (kernel-core `BlockingConsoleRead` parks it) until the
+         unlock kthread opens the gate, while the kthread reads the raw device;
+         the gate opens on every completion/fail-closed path so `login` is
+         never left latched out. Wired into both aarch64 console lists
+         (`arch_wrapper`).
+       - `unlock_service::metal` (`#[cfg(all(freestanding, kernel_isa =
+         "aarch64"))]`): `spawn_if_present` + `run_unlock` build the bring-up
+         off the boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
+         `KernelMmioMapper` over a **throwaway bookkeeping** arch `AddressSpace`
+         (a private `PageTablePool`; device access is via the boot identity map
+         through `DirectPhysMap`, so the table is bookkeeping only, VBASEs far
+         above the identity window) → `provision_virtio_mmio(2)` → SPI via
+         `fdt::gic_device_intid` bound on the **core-published** `IrqTable`
+         (`gic_irq::published_irq_table`) + `gic::route_spi` + initial rearm →
+         `DmaPool` + `KernelVirtioHost` → signed §8 `drvhost::Host::load` gate
+         → `VirtioBlk::open` → `unlock_root_disk_interactively`. EMMC2 (the Pi
+         SD host) is the staged metal increment: an EMMC2 binding fails closed
+         (gate opened, root unbound).
+       - **Re-arm + shared-yield design (load-bearing).** `IrqTable::fire`
+         masks the GIC line on every completion (mask-before-wake), and unmask
+         is an *arch* op the kernel-side `IrqController` trait does not expose,
+         so the kthread's waiter (`metal::RearmingIrqWaiter`) re-arms via
+         `gic_irq::GicIrqController::rearm` then cooperatively yields. Because
+         the IRQ waiter (in `notify_wait`) and the cooperative console reader
+         must share the kthread's single `&mut dyn YieldHandle`, the landed
+         `KthreadIrqWaiter` was evolved to borrow a shared
+         `rustos_kernel_core::CooperativeYield` cell (its `irq_kthread` vertical
+         + 5 unit tests updated in the same change); `KthreadConsoleRead` is the
+         kthread analogue of `BlockingConsoleRead` (which only parks *user*
+         kthreads via `reschedule_current`), suspending through the same cell.
+       - `ConsoleRead` dropped its blanket `Sync` supertrait; `Sync` is now
+         required at the shared-`'static` storage sites (`ConsoleDevice.read`,
+         `BlockingConsoleRead`), so the single-kthread `!Sync` cooperative
+         reader is admissible.
+       - No `lib/abi`/C-header change. Verified green: host tests, full host
+         clippy (`--workspace --all-targets -D warnings`), `cfg-check`,
+         `deps-check`, `c-header`, fmt, `cargo deny`, `fuzz --secs 5`, the full
+         `cargo xtask test --qemu` matrix (the edited `irq_kthread` +
+         `root_unlock` verticals pass), and both `aarch64-rpi` images.
+       - **Remaining (next session):** (a) a *dedicated* `-M virt` vertical
+         that boots the production `unlock_service::spawn_if_present` admission
+         path over the `rustos-test-encrypted-root-image` fixture and proves
+         `root`/`root` authenticates after the **kthread** mounts the root
+         (distinct from `root_unlock_login_qemu_aarch64`, which drives the
+         policy directly; the device-IRQ kthread path is separately proven by
+         `irq_kthread_qemu_aarch64`); (b) the live EMMC2 root bring-up (Pi metal
+         increment, §0.4 — `raspi4b` cannot model EMMC2); (c) the §0.9 metal
+         UART-typed-login acceptance.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - The `-M virt` `rustos-test-root-unlock-login-qemu-aarch64` vertical
