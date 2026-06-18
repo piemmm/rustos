@@ -1056,18 +1056,21 @@ order (one fully-gated increment each):
            stashed tree + the leaked `'static` ctx and hands it to
            `unlock_root_disk_interactively` as the `MountedRootHook`, which
            calls `autoload_from_mounted_root` the instant the root mounts;
-           empty store binds nothing in `Ok`, §18.4). **Remaining** is the
-           autoloadable input driver + its vertical:
-           - the autoloadable **user-space input driver `rxe`** the `-M virt`
-             vertical proves: `virt` presents a **virtio-input** keyboard (no
-             QEMU vertical models USB/xHCI), so promote `drivers/input/virtio_input`
-             to a signed autoloadable `rxe`. Its §18.3 **`BIND_KEYS` bind table
-             is landed** (`HwMatchKey::virtio(18)`, `VIRTIO_INPUT_DEVICE_ID =
-             18`, exact-match tier — host-tested + README + docs). Remaining:
-             extract its `open`/`poll`/`decode` logic to a `lib/*` crate (the
-             §17.4 analogue of `lib/hid` ↔ `usb_hid`) and add the `rxe`
-             `main.rs` over `lib/drvrt`+`lib/rt` whose manifest carries that
-             `BIND_KEYS` — the metal Pi keyboard stays `usb_kbd`, flipped at 5e;
+           empty store binds nothing in `Ok`, §18.4). The autoloadable input
+           driver and its `-M virt` autoload vertical are **done** (host-proven
+           + `-M virt`):
+           - the autoloadable **user-space input driver `rxe`** — done.
+             `drivers/input/virtio_kbd` (`rustos-drv-input-virtio-kbd`) is a
+             freestanding `rustos-rt` program (lib/* only:
+             virtio/virtio_input/drvrt/rt/caps/abi, §17.4) whose signed manifest
+             carries the §18.3 `BIND_KEYS` (`HwMatchKey::virtio(18)`,
+             `VIRTIO_INPUT_DEVICE_ID = 18`, exact-match tier); it builds
+             `RtDriverHost::from_grants_query` over its grants, maps its sole
+             register window, builds `MmioTransport`, runs `VirtioInput::open`,
+             and loops `poll` → `VirtioKeyboardConsole::feed` → `key_inject`.
+             The reusable `open`/`poll`/`decode` logic lives in `lib/virtio_input`
+             and the concrete `MmioTransport` in `lib/virtio` (§2.2/§17.4). The
+             metal Pi keyboard stays `usb_kbd`, flipped at 5e;
            - **virtio-input hardware-tree discovery — done:**
              `root_storage::observe_virtio_mmio_input_devices` probes each
              `virtio,mmio` slot for virtio-input (id 18) and emits a discovered
@@ -1077,19 +1080,29 @@ order (one fully-gated increment each):
              mints the user-space driver's window grant from (§18.3). Wired
              into `aarch64::boot` beside the block probe, host-tested,
              metal-neutral (no-op on the Pi tree, §2.17);
-           - the **`-M virt` autoload vertical** (rustfs root with the signed
-             input-driver bundle + unlock descriptor, a virtio-keyboard device
-             → unlock → enumerate → `autoload_from_mounted_root` → spawn →
-             prove a typed keystroke reaches the input-focus arbiter via
-             `key_inject`), keyed on a new production audit witness — needs the
-             kernel driver-signing seed hoisted to a shared single source (§2.2)
-             so the fixture bundle is kernel-trusted, and a one-shot
-             `key_inject` audit witness (§20);
+           - the **`-M virt` autoload vertical — done.**
+             `tests/integration/autoload_input_qemu_aarch64` boots the
+             production pipeline on `virt` with the
+             `rustos-test-autoload-root-image` whole-disk fixture (encrypted
+             rustfs root carrying the kernel-signed `virtio_kbd.rxe` at
+             `/System/Drivers/input/virtio_kbd/Run`) and an attached
+             `virtio-keyboard-device`: unlock → enumerate → match the discovered
+             virtio-input node → verify against `KERNEL_DRIVER_SIGNER_PUBKEY` →
+             spawn into a user-space process → a typed keystroke reaches the
+             input-focus arbiter via `key_inject` (PASS on
+             `AuditEvent::InputDelivered` `EventId(4050)`). Both prerequisites
+             are landed: `KERNEL_DRIVER_SIGNING_SEED` is the single source in
+             `build_support.rs` that both the kernel build and the fixture sign
+             from (§2.2), and the one-shot `InputDelivered` witness is the
+             `InputFocus::note_first_delivery` first-delivery latch emitted once,
+             carrying no key content/timing (§20/§23.1).
+           **Remaining (metal-gated/deferred only):**
            - `tools/mkimage` laying the signed bundle into the store (signed
              against the finalised production trust anchor, a seed shared with
-             the kernel build §2.2); and **5e/(d)** below.
-           Flipping the metal scaffold is gated on the §0.9 metal checkpoint so
-           it never regresses the working metal keyboard (§2.17).
+             the kernel build §2.2), deferred with **5e/(d)** so the bundle is
+             not shipped unused before the flip (§2.19);
+           - flipping the metal scaffold is gated on the §0.9 metal checkpoint
+             so it never regresses the working metal keyboard (§2.17).
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /
