@@ -1096,17 +1096,32 @@ order (one fully-gated increment each):
              from (§2.2), and the one-shot `InputDelivered` witness is the
              `InputFocus::note_first_delivery` first-delivery latch emitted once,
              carrying no key content/timing (§20/§23.1).
-           **Remaining (metal-gated/deferred only):**
-           - `tools/mkimage` laying the signed bundle into the store (signed
-             against the finalised production trust anchor, a seed shared with
-             the kernel build §2.2), deferred with **5e/(d)** so the bundle is
-             not shipped unused before the flip (§2.19);
-           - flipping the metal scaffold is gated on the §0.9 metal checkpoint
-             so it never regresses the working metal keyboard (§2.17).
-     - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
-       evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
-       compiled-in list is the bootstrap floor only (§18.6), and update §3 /
-       this stage once the generic path drives the chain end to end on metal.
+           **Remaining — re-scoped under design B (operator-approved).** The
+           metal keyboard is needed to type the *encrypted-root* unlock
+           passphrase, so it cannot be autoloaded from the encrypted root
+           (chicken-and-egg). The correct §18 path puts the signed driver
+           store on a **dedicated read-only, signed `/System` volume reachable
+           before unlock** (per-bundle Ed25519 signatures make an unencrypted
+           read-only store tamper-evident, §18.6; `/System` holds no secrets).
+           Full architecture + the staged increments **B1–B5** live in
+           `plans/PI.md` ("Pre-unlock signed driver store (design B)"). The
+           in-kernel scaffold stays the metal keyboard driver and stays wired
+           throughout, so the working metal keyboard never regresses (§2.17):
+           - **B1** — three-partition image (FAT boot + read-only `/System` +
+             encrypted data root) in `tools/mkimage`, a `RustFsSystem`
+             partition type in `lib/partition`, and the kernel mounting
+             `/System` read-only (host + `-M virt`);
+           - **B2** — relocate the `AutoloadHook` store scan to the `/System`
+             volume and run it **pre-unlock** (`-M virt`);
+           - **B3** — metal USB→`hwtree` enumeration (metal-gated);
+           - **B4** — live EMMC2 root bring-up (metal-gated, INCREMENT (2)(a));
+           - **B5 (= 5e)** — the flip, after B1–B4 are metal-confirmed (§0.9).
+     - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
+       (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
+       compiled-in list is the bootstrap floor only (§18.6), lay the signed
+       input-driver bundle into the `/System` volume against the finalised
+       anchor, and update §3 / this stage — only once B1–B4 drive the chain end
+       to end on metal (`plans/PI.md` design B).
 
 ---
 

@@ -3741,19 +3741,22 @@ table, so a new board is match **data**, not new code. Sub-increments
           seed-hoist and one-shot `InputDelivered` witness prerequisites are
           done; the signed bundle is host-proven valid + matched over the real
           `scan_store`/`devmatch` path (`autoload_root_image` tests);
-        - `tools/mkimage` laying the signed input-driver bundle into
-          `/System/Drivers/`, signed with the kernel's driver-signing trust
+        - `tools/mkimage` laying the signed input-driver bundle into the
+          signed driver store, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —
-          deferred with (d) so the bundle is signed against the *finalised*
-          production anchor rather than a placeholder (§2.19);
+          deferred with (d). **Superseded by design B (see "Pre-unlock signed
+          driver store" below):** the store must live on a volume reachable
+          *before* the encrypted-root passphrase, so the bundle is laid into
+          the read-only `/System` volume, not the encrypted root.
         - **5e / (d):** flip `init_spawn`'s `keyboard_service::spawn_if_present`
-          to `autoload_drivers` and delete the in-kernel scaffold + evict
+          to the autoload path and delete the in-kernel scaffold + evict
           `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS`, in the same change
-          (§2.14), gated on the §0.9 metal checkpoint (re-flash, confirm the
-          prompt still takes keystrokes through the autoloaded user-space
-          driver). Until then the scaffold stays the metal driver and stays
-          wired — so flipping is **blocked** on the root mount and never
-          regresses the working metal keyboard (§2.17).
+          (§2.14). **This is the *last* design-B increment** (see below): it is
+          blocked not merely on a §0.9 metal re-flash but on the pre-unlock
+          `/System`-volume store, the metal USB→`hwtree` enumeration, and the
+          live EMMC2 root bring-up all landing first. Until then the in-kernel
+          scaffold stays the metal keyboard driver and stays wired, so the
+          working metal keyboard never regresses (§2.17).
       - **Userland clock + `Delay` prerequisite — done (host-proven).**
         `rustos_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
         the raw `u64` nanosecond reading, no coarsening of its own) and
@@ -3770,7 +3773,73 @@ table, so a new board is match **data**, not new code. Sub-increments
         `lib/abi`/C-header change (the syscall already existed).
   - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
     `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
-    generic path drives the chain end to end on metal.
+    generic path drives the chain end to end on metal — the **last** design-B
+    increment (below).
+
+#### Pre-unlock signed driver store (design B) — the correct §18 keyboard-at-unlock path
+
+**The constraint that fixes the design.** On metal the USB keyboard is needed
+to *type the encrypted-root unlock passphrase* (`root_unlock.rs`:
+`video::is_active()` reads `VIDEO_KEYBOARD`). The keyboard driver therefore
+cannot be autoloaded *from* the encrypted root — that volume is not mounted
+until the passphrase is entered (chicken-and-egg). The proven `-M virt`
+autoload vertical sidesteps this only because its passphrase is typed on the
+UART while `usb_kbd`/`virtio_kbd` autoloads *post-mount*. A keyboard-served
+HDMI unlock prompt needs the input driver up **before** unlock.
+
+**The decision (operator-approved): a dedicated read-only, signed `/System`
+volume reachable before unlock.** Drivers keep their §16.2 home
+(`/System/Drivers/`), so this is *not* the expedient "drivers on the FAT boot
+partition" layering smell. Security holds without encrypting `/System`:
+**every bundle is Ed25519-signed and verified against the kernel's embedded
+trust anchor at load (§18.6)**, so a tampered read-only store is detected and
+fails closed — encryption would add nothing the per-bundle signature does not
+already give, and `/System` holds no secrets. The encrypted root keeps only
+the secret-bearing user data (`/Users`, app/user installs, `/Storage`).
+
+**Target on-disk layout (the §16/§11 image; `tools/mkimage`):** three MBR
+partitions — (1) FAT boot (firmware/kernel/`root.unlock`, unchanged);
+(2) **`/System` — read-only `RustFS`, unencrypted, signed-bundle store**;
+(3) data root — encrypted `RustFS` carrying `/Users`/`/Apps`/`/Storage` and
+`/System/Security/Users`. The installer (§11) authors the same split; expert
+mode may not collapse it.
+
+**Boot sequencing (the §18 path, no ambient authority, fail closed §5.4):**
+1. bootstrap-floor storage + bus bring-up (incl. the metal PCIe-RC + xHCI);
+2. enumerate every device — **including the USB-HID keyboard behind the VL805
+   hub — into the `rustos_abi::hwtree`** (metal USB→tree enumeration, the
+   piece the deleted scaffold did imperatively);
+3. mount the read-only `/System` volume and **autoload its signed
+   `/System/Drivers/` store against the discovered tree** (`devmgr` match →
+   signed gate → user-space spawn), bringing the keyboard up in user space;
+4. prompt for and read the passphrase (now keyboard-served on HDMI), unlock
+   the data root, install the users database.
+
+**Staged increments (each one fully-gated; host/`-M virt`-verifiable unless
+marked metal).** The in-kernel `keyboard_service`/`usb_keyboard.rs` scaffold
+stays the metal driver and stays wired throughout, so the working metal
+keyboard never regresses (§2.17), until the final flip:
+- **B1 — three-partition layout + read-only `/System` mount.** `tools/mkimage`
+  emits the split image (new `build_system_partition`; a `RustFsSystem`
+  partition type in `lib/partition`); the kernel discovers and mounts
+  `/System` read-only over a `lib/partition` window; the two `-M virt`
+  fixtures (`encrypted_root_image`, `autoload_root_image`) and the installer
+  author the split. Host + `-M virt` provable.
+- **B2 — relocate the autoload store to the `/System` volume + run it
+  pre-unlock.** The `AutoloadHook` scans `/System/Drivers/` on the read-only
+  `/System` volume *before* the passphrase prompt rather than off the mounted
+  encrypted root; `-M virt` vertical proves keyboard-up-before-unlock.
+- **B3 — metal USB→`hwtree` enumeration (metal-gated).** The floor PCIe/USB
+  bring-up emits the HID-keyboard node into the tree so `devmgr` autoloads
+  `usb_kbd`; host-tested decode + a §0.9 metal checklist.
+- **B4 — live EMMC2 root bring-up (metal-gated).** INCREMENT (2) item (a):
+  `raspi4b` cannot model EMMC2, so host-tested + metal checklist.
+- **B5 (= 5e/(d)) — the flip.** Repoint `init_spawn` to the autoload path,
+  lay the signed input-driver bundle into the `/System` volume signed against
+  the finalised production anchor, delete `keyboard_service.rs` +
+  `usb_keyboard.rs`, and evict `usb_hid` from
+  `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6) — only after B1–B4 are
+  metal-confirmed (§0.9).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
