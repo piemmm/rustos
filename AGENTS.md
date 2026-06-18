@@ -713,6 +713,16 @@ an update to this section.
      equivalent by construction; if CI runs it, you run it.
   Quote the actual command output when reporting completion. A per-crate
   (`-p <crate>`) run is never a substitute for the whole-project run.
+- **Run the gate in the foreground and wait for it to finish.** The
+  `cargo xtask ci`, `cargo xtask fuzz`, and `tools/ci/soak.sh` runs (and any
+  other validation-gate command) MUST be launched in the foreground and run
+  to completion — never backgrounded, detached, or left running while you do
+  other work. Wait for the command to exit, observe its real exit status, and
+  only then report on it. Backgrounding the gate (e.g. shell `&`, `nohup`, a
+  detached process, or polling a log file instead of waiting for the process)
+  risks reading stale or partial output and reporting a result the run never
+  actually produced — that is the §2.1 hack this rule forbids. The completion
+  report quotes the output of a run you waited for, start to finish.
 - **Every issue found is fixed, not deferred.** If any of the runs above
   fails — in code you touched or anywhere else — you MUST fix it (or revert
   the change that caused it) before the task is done. "Pre-existing
@@ -1025,7 +1035,13 @@ You are not exempt from any rule above. In addition:
    run of at least 5 seconds (`cargo xtask fuzz --secs 5`), plus anything
    else `.github/workflows/ci.yml` runs (see §7's "Definition of done").
    Quote the actual output. Any failure found — yours or pre-existing — is
-   fixed before the task is done.
+   fixed before the task is done. **Run these in the foreground and wait for
+   them to finish** — never background, detach, or `&`/`nohup` the
+   `cargo xtask ci`, `cargo xtask fuzz`, or `tools/ci/soak.sh` runs, and never
+   poll a log file in place of waiting for the process. Wait for the command
+   to exit, read its real exit status, and only then report; reporting from a
+   backgrounded or still-running gate risks quoting stale or partial output
+   for a result the run never produced (§7, §2.1).
 7. **State your assumptions** at the top of any non-trivial change. If an
    assumption cannot be verified from the repository, stop and ask.
 8. **Never** edit generated files, `target/`, or `.idea/` content as part of
