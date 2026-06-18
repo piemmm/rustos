@@ -192,7 +192,10 @@ workspace (§7, §2.15, §15.6, never a `-p` subset):
   `docs-check`, `deny`, cfg/deps/abi checks, the per-PR fuzz/proptest gates,
   model-check, spec-review, crypto constant-time),
 - `cargo xtask fuzz --secs 5`,
-- anything else `.github/workflows/ci.yml` exercises (e.g. `tools/ci/soak.sh`),
+- anything else `.github/workflows/ci.yml` exercises (e.g. `tools/ci/soak.sh`,
+  which on a developer machine (that's us) runs for a **maximum of 20 seconds**
+  — `tools/ci/soak.sh both --secs 20` — never the unbounded 24 h soak, which is
+  the CI/soak host's job),
 
 all pass; the §23 self-review confirms the fix is correct, understood, tested,
 and leaves no dead code or compat shim; and `.junie/next-ai-codereview.md` has

@@ -26,13 +26,24 @@ pub const PART_TYPE_FAT32_LBA: u8 = 0x0c;
 /// classified as [`PartitionType::FatBoot`] on parse.
 pub const PART_TYPE_FAT32_CHS: u8 = 0x0b;
 
-/// MBR partition-type byte for the `RustFS` root partition.
+/// MBR partition-type byte for the encrypted `RustFS` data-root partition.
 ///
 /// `0x7f` is the de-facto "reserved for individual or local use" type for
 /// a filesystem without an assigned identifier. `RustFS` volumes are
 /// self-identifying (superblock magic + checksums), so the type byte is a
 /// routing hint, never a trusted input (`AGENTS.md` §18.6).
 pub const PART_TYPE_RUSTFS: u8 = 0x7f;
+
+/// MBR partition-type byte for the read-only, signed-bundle `RustFS`
+/// `/System` partition (the design-B pre-unlock store, `plans/PI.md`).
+///
+/// `0x7e` is a sibling "reserved for individual or local use" type,
+/// distinct from [`PART_TYPE_RUSTFS`] so the boot path tells the read-only
+/// `/System` volume apart from the encrypted data root by role. Like every
+/// type byte it is a routing hint, never a trusted input: the volume is
+/// still mounted under its own key and its bundles still verified against
+/// the load gate's trust anchor (`AGENTS.md` §18.6).
+pub const PART_TYPE_RUSTFS_SYSTEM: u8 = 0x7e;
 
 /// A partition entry with this type byte is unused; it is skipped on read
 /// rather than treated as a (malformed) zero-length partition.
@@ -102,6 +113,7 @@ struct RawExtent {
 pub fn classify(type_byte: u8) -> PartitionType {
     match type_byte {
         PART_TYPE_FAT32_LBA | PART_TYPE_FAT32_CHS => PartitionType::FatBoot,
+        PART_TYPE_RUSTFS_SYSTEM => PartitionType::RustFsSystem,
         PART_TYPE_RUSTFS => PartitionType::RustFsRoot,
         _ => PartitionType::Other,
     }
@@ -112,6 +124,7 @@ pub fn classify(type_byte: u8) -> PartitionType {
 pub fn type_byte_for(ty: PartitionType) -> u8 {
     match ty {
         PartitionType::FatBoot => PART_TYPE_FAT32_LBA,
+        PartitionType::RustFsSystem => PART_TYPE_RUSTFS_SYSTEM,
         PartitionType::RustFsRoot => PART_TYPE_RUSTFS,
         PartitionType::Other => PART_TYPE_UNUSED,
     }

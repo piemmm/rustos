@@ -44,8 +44,8 @@ use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
 use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::{
-    EntropySource, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, UNLOCK_DESCRIPTOR_LEN,
-    UNLOCK_MIN_ITERATIONS,
+    EntropySource, RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY,
+    UNLOCK_DESCRIPTOR_LEN, UNLOCK_MIN_ITERATIONS,
 };
 use rustos_partition::{mbr, Partition, PartitionType};
 use rustos_test_rustfs_image as root_image;
@@ -65,9 +65,18 @@ pub const BOOT_LBA: u64 = 2048;
 /// footprint — the same size `tools/mkimage` formats the boot partition at.
 pub const FAT_BOOT_SECTORS: u64 = 131_072;
 
-/// First sector of the `RustFS` root partition: directly after the boot
-/// partition, which already ends 1 MiB-aligned.
-pub const ROOT_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
+/// First sector of the read-only `RustFS` `/System` partition: directly
+/// after the boot partition, which already ends 1 MiB-aligned. This is the
+/// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
+pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
+
+/// Sectors in the read-only `RustFS` `/System` partition: a small volume
+/// carrying the §16.2 skeleton — enough to format and mount.
+pub const SYSTEM_SECTORS: u64 = 2048;
+
+/// First sector of the encrypted `RustFS` root partition: directly after
+/// the `/System` partition.
+pub const ROOT_LBA: u64 = SYSTEM_LBA + SYSTEM_SECTORS;
 
 /// Sectors in the encrypted `RustFS` root partition — the shared
 /// [`rustos_test_rustfs_image`] users-root volume's footprint.
@@ -198,6 +207,28 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
     Ok(fs.into_block().store)
 }
 
+/// Author the read-only `/System` partition: format a small `RustFS`
+/// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`] and lay the
+/// §16.2 `/System` skeleton at its root (`Drivers` plus `Security`), the
+/// layout `tools/mkimage::build_system_partition` writes (`AGENTS.md`
+/// §2.2). The kernel mounts it read-only before unlocking the encrypted
+/// root (`plans/PI.md` B1). Returns the partition's on-disk bytes.
+fn build_system_partition() -> Result<Vec<u8>, DriverError> {
+    let mut fs = RustFs::format(
+        MemDisk::new(SYSTEM_SECTORS),
+        64,
+        &SYSTEM_VOLUME_KEY,
+        &mut FixtureEntropy { next: 3 },
+    )?;
+    let root = fs.root();
+    let security = fs.create(root, b"Security", NodeKind::Directory)?;
+    fs.create(security, b"Keys", NodeKind::Directory)?;
+    fs.create(security, b"Policy", NodeKind::Directory)?;
+    fs.create(root, b"Drivers", NodeKind::Directory)?;
+    fs.flush()?;
+    Ok(fs.into_block().store)
+}
+
 /// Build the whole-disk encrypted-root image described in the module docs.
 ///
 /// # Errors
@@ -231,6 +262,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     let (descriptor, key) = provision()?;
     let boot = build_boot_partition(&descriptor)?;
+    let system = build_system_partition()?;
     let root = root_image::build_users_root_image_with_key_and_drivers(&key, drivers)?;
 
     let table = mbr::encode(&[
@@ -238,6 +270,11 @@ pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>
             ty: PartitionType::FatBoot,
             start_lba: BOOT_LBA,
             block_count: FAT_BOOT_SECTORS,
+        },
+        Partition {
+            ty: PartitionType::RustFsSystem,
+            start_lba: SYSTEM_LBA,
+            block_count: SYSTEM_SECTORS,
         },
         Partition {
             ty: PartitionType::RustFsRoot,
@@ -251,6 +288,8 @@ pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>
     image[..table.len()].copy_from_slice(&table);
     let boot_at = usize::try_from(BOOT_LBA).unwrap_or(0) * SECTOR_BYTES;
     image[boot_at..boot_at + boot.len()].copy_from_slice(&boot);
+    let system_at = usize::try_from(SYSTEM_LBA).unwrap_or(0) * SECTOR_BYTES;
+    image[system_at..system_at + system.len()].copy_from_slice(&system);
     let root_at = usize::try_from(ROOT_LBA).unwrap_or(0) * SECTOR_BYTES;
     image[root_at..root_at + root.len()].copy_from_slice(&root);
     Ok(image)
@@ -263,8 +302,8 @@ mod tests {
     use super::*;
     use rustos_partition::{parse_partition_table, PartitionBlock};
 
-    /// The assembled image carries exactly the two partitions, of the right
-    /// types, at the documented 1 MiB-aligned offsets.
+    /// The assembled image carries exactly the three design-B partitions,
+    /// of the right types, at the documented 1 MiB-aligned offsets.
     #[test]
     fn the_image_carries_the_documented_partition_layout() {
         let bytes = build_image().expect("the whole-disk image assembles");
@@ -282,11 +321,36 @@ mod tests {
         assert_eq!(boot.start_lba, BOOT_LBA);
         assert_eq!(boot.block_count, FAT_BOOT_SECTORS);
 
+        let system = table
+            .first_of_type(PartitionType::RustFsSystem)
+            .expect("a read-only /System partition is present");
+        assert_eq!(system.start_lba, SYSTEM_LBA);
+        assert_eq!(system.block_count, SYSTEM_SECTORS);
+
         let root = table
             .first_of_type(PartitionType::RustFsRoot)
             .expect("a RustFS root partition is present");
         assert_eq!(root.start_lba, ROOT_LBA);
         assert_eq!(root.block_count, ROOT_SECTORS);
+    }
+
+    /// The `/System` partition mounts read-only under the non-secret
+    /// well-known key and carries the §16.2 `Drivers` store directory.
+    #[test]
+    fn the_system_window_mounts_read_only_under_the_public_key() {
+        let bytes = build_image().expect("the whole-disk image assembles");
+        let mut disk = MemDisk { store: bytes };
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let system = table
+            .first_of_type(PartitionType::RustFsSystem)
+            .expect("a /System partition is present");
+        let window = PartitionBlock::new(disk, system.start_lba, system.block_count)
+            .expect("the /System window is in range");
+        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+            .expect("the /System volume mounts read-only under the public key");
+        let root = sys.root();
+        sys.lookup(root, b"Drivers")
+            .expect("/System/Drivers exists");
     }
 
     /// The encrypted root window mounts only under the key the on-disk

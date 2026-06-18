@@ -37,11 +37,21 @@ pub const TYPE_GUID_EFI_SYSTEM: [u8; 16] = [
     0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
 ];
 
-/// GPT type GUID of the `RustFS` root partition, stored in on-disk
-/// (mixed-endian) byte order: `52555354-4653-524F-4F54-000000000001`
+/// GPT type GUID of the encrypted `RustFS` data-root partition, stored in
+/// on-disk (mixed-endian) byte order: `52555354-4653-524F-4F54-000000000001`
 /// (`"RUST"`/`"FS"`/`"RO"`/`"OT"` …).
 pub const TYPE_GUID_RUSTFS_ROOT: [u8; 16] = [
     0x54, 0x53, 0x55, 0x52, 0x53, 0x46, 0x4f, 0x52, 0x4f, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+];
+
+/// GPT type GUID of the read-only, signed-bundle `RustFS` `/System`
+/// partition, stored in on-disk (mixed-endian) byte order:
+/// `52555354-4653-5359-5354-000000000002` (`"RUST"`/`"FS"`/`"SY"`/`"ST"`
+/// …), a sibling of [`TYPE_GUID_RUSTFS_ROOT`] so the boot path tells the
+/// read-only `/System` volume apart from the encrypted data root by role
+/// (the design-B pre-unlock store, `plans/PI.md`).
+pub const TYPE_GUID_RUSTFS_SYSTEM: [u8; 16] = [
+    0x54, 0x53, 0x55, 0x52, 0x53, 0x46, 0x59, 0x53, 0x53, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
 ];
 
 /// The all-zero type GUID marks an unused entry.
@@ -89,6 +99,8 @@ pub fn crc32(data: &[u8]) -> u32 {
 pub fn classify(type_guid: &[u8; 16]) -> PartitionType {
     if *type_guid == TYPE_GUID_EFI_SYSTEM {
         PartitionType::FatBoot
+    } else if *type_guid == TYPE_GUID_RUSTFS_SYSTEM {
+        PartitionType::RustFsSystem
     } else if *type_guid == TYPE_GUID_RUSTFS_ROOT {
         PartitionType::RustFsRoot
     } else {

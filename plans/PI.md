@@ -3819,12 +3819,23 @@ mode may not collapse it.
 marked metal).** The in-kernel `keyboard_service`/`usb_keyboard.rs` scaffold
 stays the metal driver and stays wired throughout, so the working metal
 keyboard never regresses (§2.17), until the final flip:
-- **B1 — three-partition layout + read-only `/System` mount.** `tools/mkimage`
-  emits the split image (new `build_system_partition`; a `RustFsSystem`
-  partition type in `lib/partition`); the kernel discovers and mounts
-  `/System` read-only over a `lib/partition` window; the two `-M virt`
-  fixtures (`encrypted_root_image`, `autoload_root_image`) and the installer
-  author the split. Host + `-M virt` provable.
+- **B1 — three-partition layout + read-only `/System` mount. DONE (host +
+  `-M virt`).** `lib/partition` carries a `RustFsSystem` role (MBR type byte
+  `0x7e`, GPT GUID `TYPE_GUID_RUSTFS_SYSTEM`). `RustFs::open_read_only` mounts
+  a volume read-only and every mutator fails closed (`commit` backstop +
+  early `deny_if_read_only` guards, §5.4). The `/System` volume is a `RustFS`
+  volume keyed by the non-secret well-known `rustos_drv_fs_rustfs::
+  SYSTEM_VOLUME_KEY` (effectively unencrypted; integrity rests on the
+  per-bundle signatures, §18.6). `tools/mkimage::rootfs::build_system_partition`
+  lays the §16.2 skeleton at the volume root and `build_rpi_image` emits the
+  three MBR partitions (boot @2048 / `/System` @133120 / encrypted root). The
+  kernel discovers + mounts `/System` read-only over a `lib/partition` window
+  in `root_mount::mount_and_audit_system_volume` (called from
+  `mount_root_disk_and_load_users`), auditing `SYSTEM_VOLUME_MOUNTED` (4140) /
+  `SYSTEM_VOLUME_UNAVAILABLE` (4141); fail-soft in B1 (absence never aborts the
+  unlock — B2 makes it load-bearing). The `encrypted_root_image` /
+  `autoload_root_image` `-M virt` fixtures author the split. The installer
+  (§11) is a Stage-8 placeholder; the split author is `tools/mkimage`.
 - **B2 — relocate the autoload store to the `/System` volume + run it
   pre-unlock.** The `AutoloadHook` scans `/System/Drivers/` on the read-only
   `/System` volume *before* the passphrase prompt rather than off the mounted
@@ -4511,7 +4522,8 @@ cargo xtask ci            # clippy -D warnings, deps-check, cfg-check, test matr
                           # model-check, spec-review, abi-check, and the image gate
                           # (both aarch64-rpi profiles built end-to-end)
 cargo xtask fuzz --secs 5
-tools/ci/soak.sh both --secs 10
+tools/ci/soak.sh both --secs 20   # developer machine (that's us): max 20 s;
+                                  # the unbounded 24 h soak is the CI host's job
 ```
 
 The QEMU verticals are **not** in the host-only `cargo xtask ci` gate; run

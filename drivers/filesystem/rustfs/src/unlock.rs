@@ -114,6 +114,23 @@ pub const UNLOCK_DESCRIPTOR_LEN: usize = 4 + 1 + 3 + 4 + UNLOCK_SALT_LEN;
 /// than each carrying a private copy of the literal (`AGENTS.md` §2.2).
 pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
 
+/// The fixed, **non-secret** volume key the read-only, signed-bundle
+/// `/System` volume is formatted and mounted under (the design-B
+/// pre-unlock driver store, `plans/PI.md`).
+///
+/// `RustFS` has no plaintext layout — every volume is encrypted under a
+/// [`VolumeKey`] — but the `/System` store carries **no secrets** and must
+/// be readable *before* any passphrase is typed (it holds the keyboard
+/// driver needed to type the encrypted-root passphrase). So it is keyed by
+/// this well-known constant, embedded identically in the image author
+/// (`tools/mkimage`) and the boot path that mounts it (`AGENTS.md` §2.2):
+/// the volume is effectively unencrypted, and its integrity rests on the
+/// per-bundle Ed25519 signatures the load gate verifies, not on key
+/// secrecy (`AGENTS.md` §18.6). It must **never** be used for a volume
+/// that carries secrets — those use a passphrase-derived
+/// [`UnlockDescriptor::derive_volume_key`] key.
+pub const SYSTEM_VOLUME_KEY: VolumeKey = *b"RustOS-/System-RO-public-key:001";
+
 /// The plaintext key-derivation descriptor stored beside an encrypted
 /// volume (on a Pi SD image, in a file on the FAT boot partition).
 ///

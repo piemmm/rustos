@@ -711,6 +711,13 @@ an update to this section.
      commands above do not already cover (e.g. the parallel soak via
      `tools/ci/soak.sh`). A locally green run and a green CI run must be
      equivalent by construction; if CI runs it, you run it.
+     - **`tools/ci/soak.sh` on a developer machine (that's us) runs for a
+       maximum of 20 seconds.** Run it as `tools/ci/soak.sh both --secs 20`
+       (or another kind with `--secs 20`): a developer-machine soak is a
+       smoke check, never the full nightly budget. The unbounded 24 h soak
+       (`--soak` / no `--secs`) is for the dedicated CI/soak host only and
+       must never be launched on a developer machine. The 20-second cap is
+       a ceiling, not a target — a shorter run is fine, a longer one is not.
   Quote the actual command output when reporting completion. A per-crate
   (`-p <crate>`) run is never a substitute for the whole-project run.
 - **Run the gate in the foreground and wait for it to finish.** The
@@ -723,6 +730,9 @@ an update to this section.
   risks reading stale or partial output and reporting a result the run never
   actually produced — that is the §2.1 hack this rule forbids. The completion
   report quotes the output of a run you waited for, start to finish.
+  `tools/ci/soak.sh` is additionally capped on a developer machine (that's
+  us) to a **maximum of 20 seconds** (`tools/ci/soak.sh both --secs 20`); the
+  unbounded 24 h soak is for the CI/soak host only, never a developer machine.
 - **Every issue found is fixed, not deferred.** If any of the runs above
   fails — in code you touched or anywhere else — you MUST fix it (or revert
   the change that caused it) before the task is done. "Pre-existing
@@ -1034,6 +1044,9 @@ You are not exempt from any rule above. In addition:
    `cargo fmt --all`, the complete `cargo xtask ci` pipeline, and a fuzzing
    run of at least 5 seconds (`cargo xtask fuzz --secs 5`), plus anything
    else `.github/workflows/ci.yml` runs (see §7's "Definition of done").
+   `tools/ci/soak.sh` is run on a developer machine (that's us) for a
+   **maximum of 20 seconds** — `tools/ci/soak.sh both --secs 20` — never the
+   unbounded 24 h nightly budget, which belongs to the CI/soak host alone.
    Quote the actual output. Any failure found — yours or pre-existing — is
    fixed before the task is done. **Run these in the foreground and wait for
    them to finish** — never background, detach, or `&`/`nohup` the

@@ -90,8 +90,8 @@ use integrity::{
 };
 pub use scrub::{ScrubBudget, ScrubReport};
 pub use unlock::{
-    UnlockDescriptor, ROOT_UNLOCK_NAME, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
-    UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
+    UnlockDescriptor, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DEFAULT_ITERATIONS,
+    UNLOCK_DESCRIPTOR_LEN, UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
 };
 
 use dedupe::{
@@ -1001,12 +1001,31 @@ impl<B: Block> RustFs<B> {
         }
     }
 
+    /// Refuse a mutating operation on a read-only handle **before** it
+    /// touches any state, so a read-only `/System` mount does no wasted
+    /// copy-on-write work and never dirties the device (`AGENTS.md` §5.4 /
+    /// §2.16). The [`Self::commit`] guard is the structural backstop for any
+    /// internal write path that does not funnel through here.
+    fn deny_if_read_only(&self) -> Result<(), DriverError> {
+        if self.read_only {
+            return Err(DriverError::PermissionDenied);
+        }
+        Ok(())
+    }
+
     /// Commit the staged transaction. The inode tree and every extent tree are
     /// already copy-on-written in place as the operation runs, so commit just
     /// writes the new transaction root naming the inode-tree root, then
     /// publishes the next superblock-ring slot pointing at it
     /// (`transaction` / `superblock`).
     fn commit(&mut self) -> Result<(), DriverError> {
+        // A read-only handle never publishes a transaction: every mutating
+        // operation funnels through here, so refusing to commit fails the
+        // whole mutation closed (`AGENTS.md` §5.4) — the read-only `/System`
+        // mount can be read but never written.
+        if self.read_only {
+            return Err(DriverError::PermissionDenied);
+        }
         let bs = self.block_size;
         let next_gen = self.generation.wrapping_add(1);
         let mut buf = [0u8; MAX_BLOCK_SIZE];
@@ -1204,7 +1223,41 @@ impl<B: Block> RustFs<B> {
     ///   (e.g. the device is not a rustfs volume).
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
     pub fn open(block: B, volume_key: &VolumeKey) -> Result<Self, DriverError> {
+        Self::open_inner(block, volume_key, false)
+    }
+
+    /// Open the rustfs volume on `block` **read-only**, under `volume_key`.
+    ///
+    /// Identical to [`Self::open`] in how it selects and replays the
+    /// committed transaction, but the returned handle is read-only: no
+    /// block is ever written to the device, neither the mount-time
+    /// companion-mirror repairs (the internal read paths skip them on a
+    /// read-only handle) nor any later mutation — every mutating operation
+    /// fails closed with [`DriverError::PermissionDenied`] (`AGENTS.md`
+    /// §5.4), never a panic (§2.9).
+    ///
+    /// This is how the boot path mounts the read-only, signed-bundle
+    /// `/System` volume (the design-B pre-unlock driver store,
+    /// `plans/PI.md`): the volume carries no secrets and is keyed by a
+    /// non-secret well-known key, so opening it grants read access to the
+    /// store while the kernel can never mutate it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    pub fn open_read_only(block: B, volume_key: &VolumeKey) -> Result<Self, DriverError> {
+        Self::open_inner(block, volume_key, true)
+    }
+
+    /// Shared body of [`Self::open`] and [`Self::open_read_only`]: select
+    /// and replay the highest-generation committed transaction. When
+    /// `read_only` is set the handle never writes the device (`AGENTS.md`
+    /// §2.2 — one open path for both modes).
+    fn open_inner(block: B, volume_key: &VolumeKey, read_only: bool) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
+        // Set the read-only flag before the ring scan so the mount-time
+        // companion-mirror repairs are suppressed on a read-only handle.
+        fs.read_only = read_only;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         // Establish the volume keys before reading any authenticated metadata:
         // unwrap the master key from a superblock slot's plaintext discovery
@@ -2810,6 +2863,7 @@ impl<B: Block> FilesystemRead for RustFs<B> {
 
 impl<B: Block> FilesystemWrite for RustFs<B> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
+        self.deny_if_read_only()?;
         self.begin();
         let result = self.create_inner(dir, name, kind);
         if result.is_err() {
@@ -2825,6 +2879,7 @@ impl<B: Block> FilesystemWrite for RustFs<B> {
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError> {
+        self.deny_if_read_only()?;
         self.begin();
         let result = self.write_inner(dir, name, offset, data);
         if result.is_err() {
@@ -2834,6 +2889,7 @@ impl<B: Block> FilesystemWrite for RustFs<B> {
     }
 
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
         self.begin();
         let result = self.truncate_inner(dir, name, size);
         if result.is_err() {
@@ -2843,6 +2899,7 @@ impl<B: Block> FilesystemWrite for RustFs<B> {
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
         self.begin();
         let result = self.remove_inner(dir, name);
         if result.is_err() {

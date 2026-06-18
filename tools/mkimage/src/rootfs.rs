@@ -17,8 +17,8 @@
 //! the operator (`crate::build_rpi_image`); it is never stored inside the
 //! image.
 
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey};
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, SYSTEM_VOLUME_KEY};
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -81,25 +81,89 @@ pub fn build_root_partition(
             .create(root, name.as_bytes(), NodeKind::Directory)
             .map_err(MkimageError::RootPartition)?;
         if name == "System" {
-            for sub in SYSTEM_SUBDIRS {
-                let sub_node = fs
-                    .create(node, sub.as_bytes(), NodeKind::Directory)
-                    .map_err(MkimageError::RootPartition)?;
-                if sub == "Security" {
-                    for sec in ["Keys", "Policy"] {
-                        fs.create(sub_node, sec.as_bytes(), NodeKind::Directory)
-                            .map_err(MkimageError::RootPartition)?;
-                    }
-                    if let Some(text) = users_db {
-                        write_users_db(&mut fs, sub_node, text)?;
-                    }
-                }
-            }
+            populate_system_subtree(&mut fs, node, users_db)?;
         }
     }
 
     fs.flush().map_err(MkimageError::RootPartition)?;
     Ok(fs.into_block().into_bytes())
+}
+
+/// Author the read-only, signed-bundle `/System` partition: format
+/// `sectors` sectors under the non-secret well-known
+/// [`SYSTEM_VOLUME_KEY`] and lay the `AGENTS.md` §16.2 `/System` subtree
+/// **at the volume root** (the volume *is* `/System` once mounted, so its
+/// root carries `Kernel`, `Drivers`, … directly).
+///
+/// This is the design-B pre-unlock store (`plans/PI.md`): it carries no
+/// secrets, so it is keyed by the public [`SYSTEM_VOLUME_KEY`] and the
+/// kernel mounts it read-only (`RustFs::open_read_only`) *before* the
+/// encrypted data root is unlocked. The signed driver bundles land here in
+/// the later design-B increments; B1 establishes the volume and its
+/// skeleton. The §16.2 subdirectories are laid down through the one shared
+/// `create_system_subdirs` helper used by the encrypted root too
+/// (`AGENTS.md` §2.2). No users database is written here — that secret
+/// stays on the encrypted root.
+///
+/// # Errors
+///
+/// [`MkimageError::SystemPartition`] if formatting or any directory
+/// creation fails (including an entropy failure provisioning the volume's
+/// key hierarchy, `AGENTS.md` §5.4).
+pub fn build_system_partition(
+    sectors: u64,
+    entropy: &mut dyn EntropySource,
+) -> Result<Vec<u8>, MkimageError> {
+    let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
+    let mut fs = RustFs::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
+        .map_err(MkimageError::SystemPartition)?;
+    let root = fs.root();
+    create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
+    fs.flush().map_err(MkimageError::SystemPartition)?;
+    Ok(fs.into_block().into_bytes())
+}
+
+/// Lay the `AGENTS.md` §16.2 `/System` subtree under `system` on the
+/// encrypted data root: the [`SYSTEM_SUBDIRS`], `Security/{Keys,Policy}`,
+/// and — for a debug image — the seeded users database. Shared with
+/// [`build_root_partition`] so the encrypted root and the `/System` volume
+/// agree on the subtree shape (`AGENTS.md` §2.2).
+fn populate_system_subtree(
+    fs: &mut RustFs<MemBlock>,
+    system: NodeId,
+    users_db: Option<&str>,
+) -> Result<(), MkimageError> {
+    create_system_subdirs(fs, system, MkimageError::RootPartition)?;
+    if let Some(text) = users_db {
+        let security = fs
+            .lookup(system, b"Security")
+            .map_err(MkimageError::RootPartition)?;
+        write_users_db(fs, security, text)?;
+    }
+    Ok(())
+}
+
+/// Create the [`SYSTEM_SUBDIRS`] under `system`, with `Keys` and `Policy`
+/// inside `Security`. The one definition both the encrypted-root and the
+/// `/System`-volume authoring paths reuse (`AGENTS.md` §2.2); `wrap` tags
+/// the failure with the partition the caller is authoring.
+fn create_system_subdirs(
+    fs: &mut RustFs<MemBlock>,
+    system: NodeId,
+    wrap: fn(rustos_abi::DriverError) -> MkimageError,
+) -> Result<(), MkimageError> {
+    for sub in SYSTEM_SUBDIRS {
+        let sub_node = fs
+            .create(system, sub.as_bytes(), NodeKind::Directory)
+            .map_err(wrap)?;
+        if sub == "Security" {
+            for sec in ["Keys", "Policy"] {
+                fs.create(sub_node, sec.as_bytes(), NodeKind::Directory)
+                    .map_err(wrap)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Create `/System/Security/Users` and write `text` into it whole; a short

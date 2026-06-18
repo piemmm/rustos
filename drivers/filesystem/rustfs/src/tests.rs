@@ -214,6 +214,83 @@ fn format_then_open_round_trips() {
 }
 
 #[test]
+fn open_read_only_reads_back_committed_content() {
+    // Author a volume, then mount it read-only and prove its content reads
+    // back through the ordinary read path (the design-B `/System` mount).
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create");
+    let body = alloc::vec![0x5Cu8; 1500];
+    assert_eq!(fs.write_at(root, b"file", 0, &body), Ok(1500));
+    let bytes = fs.into_block().bytes();
+
+    let mut ro = RustFs::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("read-only mount");
+    let node = ro.lookup(ro.root(), b"file").expect("lookup on RO mount");
+    let mut back = alloc::vec![0u8; 1500];
+    assert_eq!(ro.read_at(node, 0, &mut back), Ok(1500));
+    assert_eq!(back, body);
+}
+
+#[test]
+fn a_read_only_mount_refuses_every_mutation_fail_closed() {
+    // Author a real file, then prove a read-only mount refuses every
+    // mutator fail-closed (`AGENTS.md` §5.4) — never a panic (§2.9) — and
+    // leaves the existing content intact.
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"file", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(fs.write_at(root, b"file", 0, b"original"), Ok(8));
+    let bytes = fs.into_block().bytes();
+
+    let mut ro = RustFs::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("read-only mount");
+    let root = ro.root();
+    assert_eq!(
+        ro.create(root, b"new", NodeKind::RegularFile),
+        Err(DriverError::PermissionDenied)
+    );
+    assert_eq!(
+        ro.write_at(root, b"file", 0, b"clobber!"),
+        Err(DriverError::PermissionDenied)
+    );
+    assert_eq!(ro.remove(root, b"file"), Err(DriverError::PermissionDenied));
+    assert_eq!(
+        ro.truncate(root, b"file", 0),
+        Err(DriverError::PermissionDenied)
+    );
+    // The refused create never appeared, and the existing file is intact.
+    assert!(ro.lookup(root, b"new").is_err());
+    let node = ro
+        .lookup(root, b"file")
+        .expect("the original file survives");
+    let mut back = [0u8; 8];
+    assert_eq!(ro.read_at(node, 0, &mut back), Ok(8));
+    assert_eq!(&back, b"original");
+}
+
+#[test]
+fn a_read_only_mount_never_writes_the_device() {
+    // A read-only handle must not mutate a single byte of the backing
+    // device — no mount-time companion repairs, no anything.
+    let bytes = fmt(512, 256, 32).into_block().bytes();
+    let before = bytes.clone();
+    let mut ro = RustFs::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("read-only mount");
+    // Touch the read path and attempt (refused) mutations.
+    let root = ro.root();
+    let _ = ro.read_dir(root, 0, &mut [0u8; 64]);
+    let _ = ro.create(root, b"x", NodeKind::RegularFile);
+    let after = ro.into_block().bytes();
+    assert_eq!(
+        after, before,
+        "the read-only handle left the device untouched"
+    );
+}
+
+#[test]
 fn open_rejects_an_unformatted_device() {
     let dev = MemBlock::new(512, 256);
     assert!(matches!(

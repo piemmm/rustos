@@ -342,7 +342,10 @@ output:
    matrix, docs-check, `cargo deny`, supply-chain, the `--quick` fuzz/proptest
    gates, model-check, spec-review, crypto constant-time, abi-check, c-header).
 3. `cargo xtask fuzz --secs 5`.
-4. Anything else `.github/workflows/ci.yml` runs (e.g. `tools/ci/soak.sh`).
+4. Anything else `.github/workflows/ci.yml` runs (e.g. `tools/ci/soak.sh`). On a
+   developer machine (that's us) `tools/ci/soak.sh` runs for a **maximum of 20
+   seconds** (`tools/ci/soak.sh both --secs 20`); the unbounded 24 h soak is for
+   the CI/soak host only, never a developer machine.
 
 Any failure found — new or pre-existing — is fixed or reverted before the stage
 is done (§2.5, §7). Update `PLAN.md` and this file's stage statuses as stages

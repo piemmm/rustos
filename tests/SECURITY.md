@@ -257,6 +257,9 @@ subset:
    model-check, spec-review, crypto constant-time, abi-check.
 3. `cargo xtask fuzz --secs 5` (on top of the `--quick` gate).
 4. Anything else `.github/workflows/ci.yml` runs (e.g. `tools/ci/soak.sh`).
+   On a developer machine (that's us) `tools/ci/soak.sh` runs for a **maximum
+   of 20 seconds** (`tools/ci/soak.sh both --secs 20`); the unbounded 24 h
+   soak is for the CI/soak host only, never a developer machine.
 
 New fuzz/proptest harnesses fold automatically into the `--quick` PR gate and
 the nightly `--soak`. Any failure found — yours or pre-existing — is fixed or

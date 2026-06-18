@@ -87,6 +87,14 @@ fn root(start: u32, sectors: u32) -> Partition {
     }
 }
 
+fn system(start: u32, sectors: u32) -> Partition {
+    Partition {
+        ty: PartitionType::RustFsSystem,
+        start_lba: u64::from(start),
+        block_count: u64::from(sectors),
+    }
+}
+
 // ----------------------------------------------------------------------
 // MBR
 // ----------------------------------------------------------------------
@@ -104,6 +112,59 @@ fn mbr_round_trips_the_boot_and_root_layout() {
         Some(parts[1])
     );
     assert_eq!(table.first_of_type(PartitionType::Other), None);
+}
+
+#[test]
+fn mbr_round_trips_the_three_partition_design_b_layout() {
+    // The design-B image: FAT boot + read-only `/System` + encrypted data
+    // root, each located by role and distinct on the wire (`plans/PI.md`).
+    let parts = [
+        system(67584, 65536),
+        boot(2048, 65536),
+        root(133_120, 65536),
+    ];
+    let sector = mbr::encode(&parts).expect("encodes");
+
+    // The `/System` entry carries its own distinct type byte, separate from
+    // the encrypted data root's.
+    assert_eq!(sector[446 + 4], mbr::PART_TYPE_RUSTFS_SYSTEM);
+    assert_ne!(mbr::PART_TYPE_RUSTFS_SYSTEM, mbr::PART_TYPE_RUSTFS);
+
+    let table = mbr::parse(&sector).expect("parses");
+    assert_eq!(table.partitions().len(), 3);
+    assert_eq!(table.first_of_type(PartitionType::FatBoot), Some(parts[1]));
+    assert_eq!(
+        table.first_of_type(PartitionType::RustFsSystem),
+        Some(parts[0])
+    );
+    assert_eq!(
+        table.first_of_type(PartitionType::RustFsRoot),
+        Some(parts[2])
+    );
+}
+
+#[test]
+fn mbr_type_byte_round_trips_every_role() {
+    for ty in [
+        PartitionType::FatBoot,
+        PartitionType::RustFsSystem,
+        PartitionType::RustFsRoot,
+    ] {
+        assert_eq!(mbr::classify(mbr::type_byte_for(ty)), ty);
+    }
+}
+
+#[test]
+fn gpt_classifies_the_system_guid_distinctly_from_the_root_guid() {
+    assert_eq!(
+        gpt::classify(&gpt::TYPE_GUID_RUSTFS_SYSTEM),
+        PartitionType::RustFsSystem
+    );
+    assert_eq!(
+        gpt::classify(&TYPE_GUID_RUSTFS_ROOT),
+        PartitionType::RustFsRoot
+    );
+    assert_ne!(gpt::TYPE_GUID_RUSTFS_SYSTEM, TYPE_GUID_RUSTFS_ROOT);
 }
 
 #[test]

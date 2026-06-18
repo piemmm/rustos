@@ -1107,10 +1107,15 @@ order (one fully-gated increment each):
            `plans/PI.md` ("Pre-unlock signed driver store (design B)"). The
            in-kernel scaffold stays the metal keyboard driver and stays wired
            throughout, so the working metal keyboard never regresses (§2.17):
-           - **B1** — three-partition image (FAT boot + read-only `/System` +
-             encrypted data root) in `tools/mkimage`, a `RustFsSystem`
-             partition type in `lib/partition`, and the kernel mounting
-             `/System` read-only (host + `-M virt`);
+           - **B1 — DONE (host + `-M virt`)** — three-partition image (FAT boot
+             + read-only `/System` + encrypted data root) in `tools/mkimage`
+             (`build_system_partition` + `build_rpi_image`), a `RustFsSystem`
+             partition role in `lib/partition`, `RustFs::open_read_only` + the
+             non-secret `SYSTEM_VOLUME_KEY`, and the kernel mounting `/System`
+             read-only over a `lib/partition` window in
+             `root_mount::mount_and_audit_system_volume` (audited 4140/4141,
+             fail-soft until B2). The `encrypted_root_image`/`autoload_root_image`
+             fixtures author the split;
            - **B2** — relocate the `AutoloadHook` store scan to the `/System`
              volume and run it **pre-unlock** (`-M virt`);
            - **B3** — metal USB→`hwtree` enumeration (metal-gated);

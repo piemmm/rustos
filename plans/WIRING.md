@@ -1063,7 +1063,8 @@ cargo xtask ci            # clippy -D warnings, deps-check, cfg-check, test matr
                           # docs-check, deny, c-header drift, proptest/fuzz --quick,
                           # model-check, spec-review, abi-check
 cargo xtask fuzz --secs 5
-tools/ci/soak.sh both --secs 10
+tools/ci/soak.sh both --secs 20   # developer machine (that's us): max 20 s;
+                                  # the unbounded 24 h soak is the CI host's job
 ```
 
 The QEMU verticals are **not** in the host-only `cargo xtask ci` gate;

@@ -68,7 +68,17 @@ pub enum PartitionType {
     /// A FAT partition the platform firmware boots from: an MBR
     /// FAT32-LBA partition, or a GPT EFI System Partition.
     FatBoot,
-    /// The `RustFS` root partition the kernel mounts.
+    /// The read-only, signed-bundle `RustFS` `/System` partition the
+    /// kernel mounts read-only **before** unlocking the encrypted data
+    /// root (the design-B pre-unlock driver store, `plans/PI.md`). It
+    /// carries no secrets, so it is keyed by a non-secret well-known
+    /// volume key; tamper-evidence comes from the per-bundle Ed25519
+    /// signatures the load gate verifies (`AGENTS.md` §18.6), not from
+    /// encryption.
+    RustFsSystem,
+    /// The encrypted `RustFS` data-root partition the kernel mounts after
+    /// the operator unlocks it; carries `/Users`, `/Apps`, `/Storage`, and
+    /// `/System/Security`.
     RustFsRoot,
     /// Any other partition; RustOS's boot path does not consume it.
     Other,

@@ -5,7 +5,7 @@
 `images/rustos-aarch64-rpi-<profile>.img`, a flashable SD-card image for
 the Raspberry Pi 4 (BCM2711). The builder is `tools/mkimage`
 (`rustos-mkimage`): pure Rust, no `parted`/`mkfs` shell-outs (`AGENTS.md`
-§12), with both partitions laid down by the real in-tree filesystem
+§12), with every partition laid down by the real in-tree filesystem
 drivers.
 
 Both profiles are also assembled end-to-end by the `cargo xtask ci`
@@ -26,9 +26,10 @@ Two image profiles exist (`--profile`, default `debug`):
 
 | Region | Contents |
 | --- | --- |
-| Sector 0 | MBR: two primary partitions, `0x55AA` signature |
+| Sector 0 | MBR: three primary partitions, `0x55AA` signature |
 | Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, `root.unlock` |
-| Partition 2 (`0x7F`, RustFS, 64 MiB) | encrypted root volume with the `AGENTS.md` §16 skeleton (`/System`, `/Users`, `/Apps`, `/Storage`), unlocked by a passphrase-derived key |
+| Partition 2 (`0x7E`, RustFS, 64 MiB) | read-only, signed-bundle `/System` volume (the §16.2 skeleton); keyed by the non-secret well-known `SYSTEM_VOLUME_KEY` (effectively unencrypted — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6), mounted read-only before unlock (the design-B pre-unlock driver store, `plans/PI.md`) |
+| Partition 3 (`0x7F`, RustFS, 64 MiB) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), unlocked by a passphrase-derived key |
 
 `root.unlock` is the root volume's plaintext key-derivation descriptor
 (`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count

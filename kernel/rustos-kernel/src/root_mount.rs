@@ -70,7 +70,7 @@ use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKin
 use rustos_abi::DriverError;
 use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::{
-    RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, UNLOCK_DESCRIPTOR_LEN,
+    RustFs, UnlockDescriptor, VolumeKey, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DESCRIPTOR_LEN,
 };
 use rustos_kernel_core::{
     load_users_db_source, ConsoleRead, ConsoleWrite, HeldUsersDbSource, LateUsersDb, UsersLoadError,
@@ -138,6 +138,21 @@ const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
 /// secret (passphrase, key, or volume bytes) is ever logged (`AGENTS.md`
 /// §4 / §19.4). The decision fails closed: no database is held (§5.4.5).
 const ROOT_MOUNT_REJECTED: EventId = EventId(4134);
+
+/// Audit event: the read-only, signed-bundle `/System` volume (the
+/// design-B pre-unlock driver store, `plans/PI.md`) was discovered and
+/// mounted read-only over its `lib/partition` window under the non-secret
+/// well-known [`SYSTEM_VOLUME_KEY`] (`AGENTS.md` §18.6 / §19.4). The store
+/// itself is consumed in the later design-B increments; B1 proves the
+/// volume is reachable and read-only.
+const SYSTEM_VOLUME_MOUNTED: EventId = EventId(4140);
+
+/// Audit event: no read-only `/System` volume was mounted — the disk
+/// carries no `RustFsSystem` partition, or the volume's window could not be
+/// built or opened read-only. In B1 this is **not** fatal: the encrypted
+/// root still serves the system, so the boot proceeds (`AGENTS.md` §18.4 /
+/// §2.9). The `cause` field names which check declined, secret-free.
+const SYSTEM_VOLUME_UNAVAILABLE: EventId = EventId(4141);
 
 /// Why [`unlock_root_and_load_users`] produced no users database.
 ///
@@ -417,7 +432,16 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         }
     };
 
-    // 2. Locate the two partitions RustOS needs by role, not by index.
+    // 2. Discover and mount the read-only, signed-bundle `/System` volume
+    //    over a bounds-checked window, under the non-secret well-known key
+    //    (the design-B pre-unlock store, `plans/PI.md`). This is fail-soft
+    //    in B1 — a disk without one still boots off the encrypted root — so
+    //    its outcome is audited but never aborts the unlock (`AGENTS.md`
+    //    §18.4 / §2.9). The handle is dropped immediately; the later
+    //    design-B increments keep it and scan its driver store pre-unlock.
+    mount_and_audit_system_volume(&mut disk, &table, audit);
+
+    // 3. Locate the two partitions RustOS needs by role, not by index.
     let Some(boot_extent) = table.first_of_type(PartitionType::FatBoot) else {
         let error = RootMountError::NoBootPartition;
         reject(audit, error);
@@ -429,7 +453,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         return Err(error);
     };
 
-    // 3. Read the descriptor off a window onto the FAT boot partition,
+    // 4. Read the descriptor off a window onto the FAT boot partition,
     //    then drop the window to reclaim the disk for the root window
     //    (one device, two sequential windows).
     let descriptor = {
@@ -451,7 +475,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         }
     };
 
-    // 4. Open a window onto the RustFS root partition and run the unlock +
+    // 5. Open a window onto the RustFS root partition and run the unlock +
     //    users-load composition over it.
     let root = match PartitionBlock::from_partition(&mut disk, &root_extent) {
         Ok(root) => root,
@@ -462,6 +486,80 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
         }
     };
     unlock_root_and_load_users(&descriptor, passphrase, root, audit, hook)
+}
+
+/// Discover, mount read-only, and audit the signed-bundle `/System` volume
+/// on `disk` (the design-B pre-unlock driver store, `plans/PI.md`).
+///
+/// `table` is the already-parsed, fail-closed-validated partition table.
+/// If it carries a [`PartitionType::RustFsSystem`] partition, a
+/// bounds-checked [`PartitionBlock`] window is opened over it and mounted
+/// **read-only** under the non-secret well-known [`SYSTEM_VOLUME_KEY`]
+/// ([`RustFs::open_read_only`] — the volume holds no secrets and its
+/// integrity rests on the per-bundle signatures, `AGENTS.md` §18.6). The
+/// volume's root is probed for the §16.2 `Drivers` directory to confirm it
+/// is a real `/System` volume, the outcome is audited
+/// ([`SYSTEM_VOLUME_MOUNTED`] / [`SYSTEM_VOLUME_UNAVAILABLE`]), and the
+/// handle is dropped.
+///
+/// This is **fail-soft** in B1: a disk with no — or an unopenable —
+/// `/System` volume still boots off the encrypted root, so every decline
+/// is logged but never aborts the unlock (`AGENTS.md` §18.4 / §2.9). The
+/// later design-B increments keep the handle and scan its driver store
+/// before the passphrase prompt. It returns nothing and consumes no secret.
+fn mount_and_audit_system_volume<Disk: Block>(
+    disk: &mut Disk,
+    table: &rustos_partition::PartitionTable,
+    audit: &dyn Sink,
+) {
+    let Some(extent) = table.first_of_type(PartitionType::RustFsSystem) else {
+        system_volume_unavailable(audit, "no_system_partition");
+        return;
+    };
+    // A bounds-checked window onto the `/System` extent (`AGENTS.md` §24.4).
+    let Ok(window) = PartitionBlock::from_partition(&mut *disk, &extent) else {
+        system_volume_unavailable(audit, "system_window_out_of_range");
+        return;
+    };
+    // Mount read-only under the public key; the volume carries no secrets,
+    // so the kernel can never mutate it (`AGENTS.md` §18.6 / §5.4).
+    let Ok(mut system) = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
+        system_volume_unavailable(audit, "system_mount_failed");
+        return;
+    };
+    // Confirm it is a real `/System` volume: its root carries the §16.2
+    // `Drivers` store directory (the store the later increments scan).
+    let root = system.root();
+    if system.lookup(root, b"Drivers").is_err() {
+        system_volume_unavailable(audit, "system_layout_invalid");
+        return;
+    }
+    log(
+        audit,
+        &Event {
+            level: Level::Info,
+            id: SYSTEM_VOLUME_MOUNTED,
+            message: "root-mount: read-only /System volume mounted",
+            fields: &[],
+        },
+    );
+}
+
+/// Audit a declined `/System` mount with a stable, secret-free `cause`
+/// (`AGENTS.md` §19.4). B1-fail-soft, so this is always informational.
+fn system_volume_unavailable(audit: &dyn Sink, cause: &'static str) {
+    log(
+        audit,
+        &Event {
+            level: Level::Info,
+            id: SYSTEM_VOLUME_UNAVAILABLE,
+            message: "root-mount: no read-only /System volume mounted",
+            fields: &[Field {
+                key: "cause",
+                value: cause,
+            }],
+        },
+    );
 }
 
 /// Audit event: the operator's typed passphrase unlocked the root and the
@@ -1361,6 +1459,10 @@ mod tests {
         db.authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())
             .expect("the planted account authenticates");
         assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
+        // The design-B read-only `/System` volume was discovered and mounted
+        // read-only off the same disk (`plans/PI.md` B1).
+        assert!(sink.ids().contains(&4140), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4141), "{:?}", sink.ids());
     }
 
     #[test]
@@ -1409,6 +1511,10 @@ mod tests {
         assert_eq!(err.cause(), "no_root_partition");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+        // A disk with no `/System` partition logs the fail-soft
+        // unavailable event and is never the mounted-success one (B1).
+        assert!(sink.ids().contains(&4141), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
     }
 
     // --- unlock_root_disk_interactively (the prompt + retry policy) -----
