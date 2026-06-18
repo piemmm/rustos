@@ -1377,7 +1377,24 @@ where
         let decoded = KeyInput::from_bytes(&record_bytes);
         record_bytes.zeroize();
         let record = decoded?;
-        self.input_focus.inject(record).map(|n| n as u64)
+        let consumed = self.input_focus.inject(record)?;
+        // Witness the first successful delivery exactly once (`AGENTS.md`
+        // §18.3 / §20, `plans/PI.md` P11): proof that an (autoloaded)
+        // keyboard driver has come up and is routing input through the
+        // arbiter. The one-shot latch fires this on the first edge only —
+        // never per keystroke — and the record carries no key content,
+        // count, or timing, so a typed secret and its cadence never reach
+        // the log (`AGENTS.md` §20 — no input-content/timing noise; §23.1
+        // — secret hygiene).
+        if self.input_focus.note_first_delivery() {
+            crate::audit::emit(
+                self.audit,
+                rustos_log::Level::Info,
+                AuditEvent::InputDelivered,
+                &[],
+            );
+        }
+        Ok(consumed as u64)
     }
 
     fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -5628,6 +5645,76 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(crate::console::ConsoleRead::read(queue, &mut buf), Ok(1));
         assert_eq!(&buf[..1], b"a");
+    }
+
+    /// The first successful `key_inject` emits exactly one
+    /// `AuditEvent::InputDelivered` (`EventId(4050)`) — the witness that an
+    /// (autoloaded) keyboard driver is delivering input — and a second
+    /// inject emits no further witness, so the log never carries a
+    /// per-keystroke record (`AGENTS.md` §20, `plans/PI.md` P11). The
+    /// record carries **no** fields, so a typed character never reaches the
+    /// log (`AGENTS.md` §23.1 — secret hygiene).
+    #[test]
+    fn key_inject_witnesses_first_delivery_exactly_once_with_no_content() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        key_inject_aspace(&aspaces, press_char('a'));
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let queue: &'static crate::console::ConsoleInputQueue =
+            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+        let focus: &'static InputFocus = Box::leak(Box::new(InputFocus::new(queue)));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_input_focus(focus);
+
+        // Drop the fixture-setup records (e.g. `TaskCapabilitiesDerived`) so
+        // the assertion sees only the witness.
+        sink.clear();
+
+        let id = AuditEvent::InputDelivered.id().0;
+        assert_eq!(
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        let snapshot = sink.snapshot();
+        assert_eq!(
+            snapshot.iter().filter(|e| e.id.0 == id).count(),
+            1,
+            "first inject emits exactly one witness"
+        );
+        // The witness carries no key content: a typed secret never reaches
+        // the log (`AGENTS.md` §20 / §23.1).
+        let witness = snapshot
+            .iter()
+            .find(|e| e.id.0 == id)
+            .expect("witness present");
+        assert!(witness.fields.is_empty(), "the witness carries no fields");
+
+        // A second successful inject emits no further witness — never one
+        // per keystroke (`AGENTS.md` §20).
+        assert_eq!(
+            h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
+            Ok(KeyInput::WIRE_LEN as u64)
+        );
+        assert_eq!(
+            sink.event_ids().iter().filter(|&&i| i == id).count(),
+            1,
+            "no further witness on later injects"
+        );
     }
 
     /// `key_inject` fails closed when no arbiter is wired: the default

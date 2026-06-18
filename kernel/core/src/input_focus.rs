@@ -141,6 +141,14 @@ pub struct InputFocus {
     text_sink: &'static (dyn ConsoleInput + 'static),
     /// The desktop keyboard channel — the arbiter's desktop sink.
     channel: KeyboardChannel,
+    /// One-shot latch: `false` until the first key edge is delivered to
+    /// the arbiter, then `true` forever. It lets the `key_inject` syscall
+    /// handler emit a single audit witness the first time a (typically
+    /// autoloaded) keyboard driver delivers input — proof the input path
+    /// is live — without logging one record per keystroke, which would
+    /// leak typed secrets and their timing (`AGENTS.md` §20 — no
+    /// input-content/timing noise; §23.1 — secret hygiene).
+    first_delivery: AtomicBool,
 }
 
 impl InputFocus {
@@ -155,6 +163,7 @@ impl InputFocus {
             desktop: AtomicBool::new(false),
             text_sink,
             channel: KeyboardChannel::new(),
+            first_delivery: AtomicBool::new(false),
         }
     }
 
@@ -211,6 +220,25 @@ impl InputFocus {
             }
         }
         Ok(KeyInput::WIRE_LEN)
+    }
+
+    /// Record that a key edge has been delivered to the arbiter and report
+    /// whether this was the **first** delivery since boot.
+    ///
+    /// Returns `true` exactly once over the arbiter's lifetime — on the
+    /// first call — and `false` on every later call, through a one-shot
+    /// compare-and-set on the `first_delivery` latch. The `key_inject`
+    /// handler calls this after a successful [`Self::inject`] and emits a
+    /// single audit witness ([`crate::audit::AuditEvent::InputDelivered`])
+    /// on the `true`, so the log records that an (autoloaded) input driver
+    /// is live without a per-keystroke record (`AGENTS.md` §20 — no
+    /// input-content/timing noise; §23.1 — secret hygiene). It carries no
+    /// key content; only the fact of first delivery.
+    #[must_use]
+    pub fn note_first_delivery(&self) -> bool {
+        self.first_delivery
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Drain one decoded key event from the keyboard channel into `out`,
@@ -326,6 +354,18 @@ mod tests {
         let mut buf = [0u8; 8];
         let n = queue.read(&mut buf).expect("queue read");
         assert_eq!(&buf[..n], b"y");
+    }
+
+    #[test]
+    fn first_delivery_latch_fires_exactly_once() {
+        // The one-shot witness latch returns `true` on the first call and
+        // `false` forever after, regardless of routing or focus — so the
+        // `key_inject` handler emits a single audit witness and never one
+        // per keystroke (`AGENTS.md` §20).
+        let focus = InputFocus::new(&NULL_CONSOLE_INPUT);
+        assert!(focus.note_first_delivery());
+        assert!(!focus.note_first_delivery());
+        assert!(!focus.note_first_delivery());
     }
 
     #[test]

@@ -200,6 +200,18 @@ record under the `log` phase and halts.
 | 4040 | Info  | `USERS_DB_LOADED`            | audit  |
 | 4041 | Error | `USERS_DB_REJECTED`          | audit  |
 | 4042 | Info  | `DRIVER_STORE_SCANNED`      | audit  |
+| 4050 | Info  | `INPUT_DELIVERED`           | audit  |
+
+`INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
+§20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the
+first time a key edge is successfully delivered to the input-focus arbiter
+(`rustos_kernel_core::input_focus`), gated by a one-shot latch
+(`InputFocus::note_first_delivery`) so it fires exactly once over the
+kernel's lifetime — proof that an (autoloaded) keyboard driver has come up
+and is routing input. It carries **no** key content, count, or timing: a
+per-keystroke record would leak typed secrets and their cadence and is
+forbidden (`AGENTS.md` §20 — no input-content/timing noise on the log;
+§23.1 — secret hygiene).
 
 The `USERS_DB_*` pair reports the boot-time users-database load
 (`rustos_kernel_core::users::load_users_db`, `plans/PI.md` P11): given the

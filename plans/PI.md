@@ -3725,10 +3725,15 @@ table, so a new board is match **data**, not new code. Sub-increments
           `kernel/rustos-kernel/src/build_support.rs` (the dependency-free
           `#[path]` module the kernel build script pulls in), so the kernel
           build and any fixture/image build sign a kernel-trusted bundle from
-          the one definition (§2.2; host-tested pin). **Remaining** for the
-          vertical: the production `key_inject` path needs a one-shot audit
-          witness when an autoloaded driver first delivers input to the arbiter
-          (not per-keystroke, §20);
+          the one definition (§2.2; host-tested pin). The one-shot audit
+          witness prerequisite is **done**: the `key_inject` handler emits
+          `AuditEvent::InputDelivered` (`EventId(4050)`) the first time a key
+          edge is delivered to the input-focus arbiter, gated by the one-shot
+          `InputFocus::note_first_delivery` latch so it fires exactly once and
+          carries no key content/timing (§20 / §23.1; host-tested in
+          `kernel/core::input_focus` + the `key_inject` handler). **Remaining**
+          for the vertical: build the signed-bundle fixture rustfs image and
+          enrol the `-M virt` autoload vertical keyed on the `4050` witness;
         - `tools/mkimage` laying the signed input-driver bundle into
           `/System/Drivers/`, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —

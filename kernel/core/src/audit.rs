@@ -31,6 +31,7 @@
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED`           | audit  | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (`AGENTS.md` §5.4 — fail closed). The `cause` field names the refusal. |
 //! | 4042 | Info  | `DRIVER_STORE_SCANNED`        | audit  | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates (`AGENTS.md` §18.3 / §18.6). The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
+//! | 4050 | Info  | `INPUT_DELIVERED`             | audit  | A keyboard driver delivered the **first** key edge to the input-focus arbiter via `key_inject` (`AGENTS.md` §18.3 / §20). Emitted exactly once over the kernel's lifetime, carries no key content or timing — it witnesses that an autoloaded input driver is live, never a per-keystroke record. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
@@ -130,6 +131,20 @@ pub enum AuditEvent {
     /// walk (`skipped`). A missing store is not an error — it simply
     /// yields zero drivers (`AGENTS.md` §18.4).
     DriverStoreScanned,
+    /// A keyboard driver delivered the **first** key edge to the
+    /// input-focus arbiter (`crate::input_focus`, `plans/PI.md` P11 —
+    /// the autoload-by-discovery witness).
+    ///
+    /// Emitted by the `key_inject` syscall handler the first time
+    /// [`crate::input_focus::InputFocus::inject`] succeeds, gated by a
+    /// one-shot latch ([`crate::input_focus::InputFocus::note_first_delivery`]),
+    /// so it fires exactly once over the kernel's lifetime. It witnesses
+    /// that an (autoloaded) input driver has come up and is delivering
+    /// input; it carries **no** key content, count, or timing — a
+    /// per-keystroke record would leak typed secrets and is forbidden
+    /// (`AGENTS.md` §20 — no input-content/timing noise on the log; §23.1
+    /// — secret hygiene).
+    InputDelivered,
 }
 
 impl AuditEvent {
@@ -151,6 +166,7 @@ impl AuditEvent {
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::DriverStoreScanned => 4042,
+            Self::InputDelivered => 4050,
         })
     }
 
@@ -174,6 +190,7 @@ impl AuditEvent {
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::DriverStoreScanned => "driver store scanned",
+            Self::InputDelivered => "first input delivered to focus arbiter",
         }
     }
 }
@@ -211,6 +228,8 @@ mod tests {
             AuditEvent::ProcessSpawnFailed,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
+            AuditEvent::DriverStoreScanned,
+            AuditEvent::InputDelivered,
         ] {
             let id = ev.id().0;
             assert!(
@@ -236,6 +255,8 @@ mod tests {
             AuditEvent::ProcessSpawnFailed.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
+            AuditEvent::DriverStoreScanned.id().0,
+            AuditEvent::InputDelivered.id().0,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
