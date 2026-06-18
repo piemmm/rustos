@@ -31,6 +31,7 @@ mod wasm_tests;
 #[derive(Copy, Clone, Debug)]
 pub enum Command {
     Build,
+    Clean,
     Test,
     Clippy,
     Fmt,
@@ -55,6 +56,7 @@ impl Command {
     /// The full set of subcommands, in the order presented to users.
     pub const ALL: &'static [Command] = &[
         Command::Build,
+        Command::Clean,
         Command::Test,
         Command::Clippy,
         Command::Fmt,
@@ -78,6 +80,7 @@ impl Command {
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "build" => Command::Build,
+            "clean" => Command::Clean,
             "test" => Command::Test,
             "clippy" => Command::Clippy,
             "fmt" => Command::Fmt,
@@ -103,6 +106,7 @@ impl Command {
     pub fn name(self) -> &'static str {
         match self {
             Command::Build => "build",
+            Command::Clean => "clean",
             Command::Test => "test",
             Command::Clippy => "clippy",
             Command::Fmt => "fmt",
@@ -127,6 +131,7 @@ impl Command {
     pub fn summary(self) -> &'static str {
         match self {
             Command::Build => "Compile every workspace crate for the host target.",
+            Command::Clean => "Delete cargo build artefacts to reclaim target/ disk space.",
             Command::Test => "Run host-side unit and integration tests.",
             Command::Clippy => "Run clippy across the workspace with warnings denied.",
             Command::Fmt => "Check formatting (`--fix` to apply).",
@@ -161,6 +166,7 @@ impl Command {
     pub fn run(self, ctx: &Context, args: &[OsString]) -> Result<(), String> {
         match self {
             Command::Build => run_build(ctx, args),
+            Command::Clean => run_clean(ctx, args),
             Command::Test => run_test(ctx, args),
             Command::Clippy => run_clippy(ctx, args),
             Command::Fmt => run_fmt(ctx, args),
@@ -228,6 +234,101 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         },
         cmd,
     )
+}
+
+/// Remove cargo's build artefacts to reclaim `target/` disk space.
+///
+/// A full multi-arch workspace build is large: `-Z build-std` rebuilds the
+/// whole standard library for each of the four bare-metal Tier-1 targets,
+/// every crate is compiled with debug info, and the per-target profile
+/// directories grow into tens of gigabytes apiece. Reclaiming that space is
+/// a developer flow in its own right, so it is a *named* subcommand rather
+/// than behaviour hidden inside another step (see the closed command set in
+/// `main.rs`).
+///
+/// The work is delegated to `cargo clean`, exactly as `build`/`test`/`fmt`
+/// delegate to their cargo subcommands: cargo owns the artefact layout and
+/// honours the same `$CARGO_TARGET_DIR` resolution the rest of xtask relies
+/// on (`Context::target_dir`), so re-implementing the deletion here would
+/// only risk diverging from it. Any arguments are forwarded verbatim, so the
+/// usual cargo selectors work: `--release`, `--doc`, `--target <triple>`,
+/// and `-p <crate>` each scope the clean instead of wiping everything.
+///
+/// The reclaimed size is measured around the clean and reported, so the
+/// operator sees how much of the multi-gigabyte tree was freed.
+fn run_clean(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    let target_dir = ctx.target_dir();
+    let before = dir_size(&target_dir);
+
+    let mut cmd = ctx.cargo();
+    cmd.arg("clean");
+    cmd.args(args);
+    ctx.run("clean", cmd)?;
+
+    let after = dir_size(&target_dir);
+    eprintln!(
+        "xtask: [clean] reclaimed {} ({} -> {} in {})",
+        format_bytes(before.saturating_sub(after)),
+        format_bytes(before),
+        format_bytes(after),
+        relative(&ctx.workspace_root, &target_dir),
+    );
+    Ok(())
+}
+
+/// Total size in bytes of every regular file at or below `path`.
+///
+/// Best-effort and side-effect free: it is only used to report how much
+/// space a clean reclaimed, so unreadable entries and a missing directory
+/// are skipped rather than treated as errors (a clean must never fail
+/// because the report could not be computed). Symlinks are not followed, so
+/// the same bytes are never counted twice and the walk cannot cycle.
+fn dir_size(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(meta) = entry.metadata() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+/// Render a byte count with a binary-prefix unit (`B`, `KiB`, … `TiB`).
+///
+/// Used only for the human-readable `clean` report; values are rounded to
+/// one decimal place above a kibibyte.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    // Integer arithmetic only: the one-decimal fraction is the last division
+    // remainder scaled to tenths, so the report needs no float cast.
+    let mut value = bytes;
+    let mut remainder = 0u64;
+    let mut unit = 0;
+    while value >= 1024 && unit < UNITS.len() - 1 {
+        remainder = value % 1024;
+        value /= 1024;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{value} B")
+    } else {
+        let tenths = (remainder * 10) / 1024;
+        format!("{value}.{tenths} {}", UNITS[unit])
+    }
 }
 
 /// The `userland/gui/*` crates excluded from the headless image (§17.3).
@@ -1158,12 +1259,64 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, kernel_build_profile, parse_test_options, RunBudget,
-        TEST_SOAK_SECS,
+        cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile,
+        parse_test_options, Command, RunBudget, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
     use std::time::Duration;
+
+    /// `clean` is a first-class, parseable subcommand listed in the closed
+    /// command set, so `cargo xtask clean` reaches `run_clean` and the
+    /// generated `--help`/usage lists it.
+    #[test]
+    fn clean_is_a_registered_subcommand() {
+        assert!(
+            matches!(Command::parse("clean"), Some(Command::Clean)),
+            "`clean` must parse to the Clean subcommand"
+        );
+        assert!(
+            Command::ALL.iter().any(|c| c.name() == "clean"),
+            "`clean` must appear in the closed command set"
+        );
+    }
+
+    /// The reclaimed-space report renders bytes with binary-prefix units and
+    /// a single decimal place, using integer arithmetic only.
+    #[test]
+    fn format_bytes_uses_binary_prefixes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+        // Clamps at the largest known unit rather than overflowing it.
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024 * 1024), "2.0 TiB");
+    }
+
+    /// `dir_size` sums regular files recursively and treats an absent
+    /// directory as empty so the post-clean report never fails.
+    #[test]
+    fn dir_size_sums_regular_files_and_tolerates_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "rustos-xtask-clean-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        assert_eq!(dir_size(&root), 0, "a missing directory is empty");
+
+        let nested = root.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("create nested dirs");
+        std::fs::write(root.join("top.bin"), [0u8; 100]).expect("write top file");
+        std::fs::write(nested.join("deep.bin"), [0u8; 23]).expect("write nested file");
+
+        assert_eq!(dir_size(&root), 123, "sizes sum across the whole subtree");
+
+        std::fs::remove_dir_all(&root).expect("clean up temp tree");
+    }
 
     /// The image profile dictates the kernel's Cargo build profile so the
     /// console's `cfg!(debug_assertions)` boot-log routing is correct: the

@@ -11,6 +11,10 @@
 //! - `build`        — `cargo build --workspace --all-targets`;
 //!   `--target aarch64-rpi` instead builds the flashable platform image
 //!   (the `image` pipeline below)
+//! - `clean`        — `cargo clean` to reclaim `target/` disk space (a full
+//!   multi-arch `-Z build-std` tree runs to tens of GB per target); cargo
+//!   selectors are forwarded (`--release`, `--doc`, `--target <triple>`,
+//!   `-p <crate>`) and the reclaimed size is reported
 //! - `test`         — `cargo test --workspace --all-targets`; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
 //!   flaky tests (§7), defaulting to one run; `--soak` (tuned by `--secs N`)
