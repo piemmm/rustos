@@ -31,6 +31,27 @@
 
 pub mod elf2rxe;
 
+/// The signed `.rxe` driver-bundle composer, shared by the build scripts
+/// that lay a kernel-trusted driver into the system (`AGENTS.md` §2.2).
+/// Enabled by the `driver-image` feature so the Ed25519 dependency is
+/// pulled in only where a bundle is actually signed.
+#[cfg(feature = "driver-image")]
+pub mod driver_image;
+
+/// Virtual base the production aarch64 spawn producer maps every spawned
+/// user image at — the `SHELL_USER_BIAS` (64 GiB) the kernel's `build.rs`
+/// bakes into `spawn_layout`.
+///
+/// A `.rxe` the kernel spawn path will load must have its `R_*_RELATIVE`
+/// relocations baked for this exact bias ([`elf2rxe::elf_to_rxe`]'s
+/// `load_bias`), so the converted image runs correctly once mapped at
+/// `vaddr + USER_IMAGE_BIAS`. It is the one definition every build script
+/// that bakes a spawnable `rxe` shares (`AGENTS.md` §2.2); the kernel spawn
+/// path asserts the baked bias matches `SHELL_USER_BIAS` and fails closed on
+/// a mismatch (`AGENTS.md` §2.9), so a drift between this constant and the
+/// kernel is caught rather than miscompiled.
+pub const USER_IMAGE_BIAS: u64 = 0x10_0000_0000;
+
 /// Cargo environment key naming the target operating system.
 const TARGET_OS_KEY: &str = "CARGO_CFG_TARGET_OS";
 /// Cargo environment key naming the target instruction set.

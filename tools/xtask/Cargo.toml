@@ -59,6 +59,12 @@ rustos-test-rustfs-image = { path = "../../tests/integration/rustfs_image", vers
 # `root_mount` host tests split — so the planted layout and the guest's
 # unlock share one source of truth (`AGENTS.md` §2.2).
 rustos-test-encrypted-root-image = { path = "../../tests/integration/encrypted_root_image", version = "=0.0.0" }
+# `test --qemu` plants the `plans/PI.md` P10 5d-2-ii(b-2-iii) autoload
+# vertical's backing from the `rustos-test-autoload-root-image` fixture — the
+# encrypted-root image additionally carrying the kernel-signed virtio-input
+# keyboard driver bundle in `/System/Drivers/`, so the booted kernel discovers,
+# verifies, and spawns it off the very volume it mounts (`AGENTS.md` §2.2).
+rustos-test-autoload-root-image = { path = "../../tests/integration/autoload_root_image", version = "=0.0.0" }
 # The fuzz/proptest orchestrators and the in-tree harnesses share one
 # per-run seed/budget vocabulary: the orchestrator picks and logs the
 # seed, the harness reads it. Both sides use `rustos-fuzzseed` so the

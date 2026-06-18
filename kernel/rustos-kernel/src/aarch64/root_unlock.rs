@@ -50,8 +50,8 @@ use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB};
 use crate::unlock_service::{
-    loader_caps, note, service_caps, take_boot, AutoloadHook, KthreadConsoleRead, CONSOLE0_GATE,
-    UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
+    autoload_caps, loader_caps, note, service_caps, take_boot, AutoloadHook, KthreadConsoleRead,
+    CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
 };
 
 /// CPU-interface target bitmask routing the device SPI to the boot CPU.
@@ -440,9 +440,13 @@ fn run_unlock(
     // The post-mount autoload hook: once the passphrase mounts the root, it
     // matches every discovered node against the volume's signed driver store
     // and spawns each winner into its own user-space process (`AGENTS.md`
-    // §18.3). The kthread holds `CAP_DRV_LOAD` (`service_caps`), so a
-    // user-space driver can be admitted through the gate.
-    let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, caps, audit);
+    // §18.3). It presents the gate the delegatable `autoload_caps` superset
+    // (`CAP_DRV_LOAD` to pass the gate plus the resource capabilities an
+    // autoloaded driver's class may request — including `CAP_INPUT_INJECT` for
+    // an input driver), intersected per driver with its signed manifest
+    // request (`AGENTS.md` §5.2 / §18.3); the kthread's *own* context stays the
+    // minimal `service_caps` (§5.4).
+    let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, autoload_caps(), audit);
 
     Ok(unlock_root_disk_interactively(
         blk,

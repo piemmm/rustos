@@ -18,7 +18,7 @@
 //! already-located table bytes.
 
 use crate::acpi::{Madt, MadtEntry};
-use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT};
+use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// The MMIO window size of an I/O APIC register block (one 4 KiB page:
@@ -46,19 +46,26 @@ impl<'a> AcpiDiscovery<'a> {
 
 impl PlatformDiscovery for AcpiDiscovery<'_> {
     fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
-        // Root first so every later node's parent is already emitted.
-        sink.emit(HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root))?;
+        // Root first so every later node's parent is already emitted. Its
+        // id is the shared [`HW_NODE_ROOT_ID`]; its parent is the
+        // `HW_NODE_ROOT` sentinel (so it alone is `is_root`).
+        sink.emit(HwNode::new(
+            HW_NODE_ROOT_ID,
+            HW_NODE_ROOT,
+            HwDeviceClass::Root,
+        ))?;
         let madt = Madt::parse(self.madt).map_err(|_| DiscoveryError::MalformedSource)?;
 
         let mut next_id: u32 = 1;
         for entry in madt.entries() {
             match entry {
                 MadtEntry::LocalApic { flags, .. } if flags & LAPIC_FLAG_ENABLED != 0 => {
-                    sink.emit(HwNode::new(next_id, 0, HwDeviceClass::Cpu))?;
+                    sink.emit(HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Cpu))?;
                     next_id += 1;
                 }
                 MadtEntry::IoApic { address, .. } => {
-                    let mut node = HwNode::new(next_id, 0, HwDeviceClass::InterruptController);
+                    let mut node =
+                        HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::InterruptController);
                     node.push_resource(HwResource::mmio(u64::from(address), IOAPIC_WINDOW_LEN))
                         .map_err(|_| DiscoveryError::MalformedSource)?;
                     sink.emit(node)?;

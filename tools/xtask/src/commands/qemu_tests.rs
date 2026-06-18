@@ -115,6 +115,12 @@ enum FsDisk {
     /// `/System/Security/Users` — the root-mount->login vertical's backing
     /// (`plans/PI.md` P11 Chunk B-2).
     EncryptedRootDisk,
+    /// The shared [`rustos_test_autoload_root_image`] whole-disk image: the
+    /// [`Self::EncryptedRootDisk`] layout additionally carrying a kernel-signed
+    /// virtio-input keyboard driver bundle in `/System/Drivers/` — the
+    /// driver-loading-by-discovery autoload vertical's backing
+    /// (`plans/PI.md` P10 5d-2-ii(b-2-iii)).
+    AutoloadRootDisk,
 }
 
 /// `true` if `line` is exactly `value` followed by a single `\n`.
@@ -142,6 +148,17 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
 
 /// The passphrase line the admission vertical types at `Root passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
+
+/// Serial marker after which the autoload-input vertical injects a key.
+///
+/// The autoload runs in the root-mount hook *before* the users database
+/// installs, so once this unlock-service install message appears the
+/// virtio-input driver has already been spawned; injecting then lets the
+/// (slightly later) eventq-armed driver consume the queued event. It mirrors
+/// `rustos_kernel::unlock_service::USERS_DB_INSTALLED_MESSAGE` (a literal here
+/// because `tools/xtask` does not link the freestanding kernel crate).
+const AUTOLOAD_INPUT_KEY_MARKER: &str =
+    "root-unlock: users database installed; login can authenticate";
 
 const _: () = {
     assert!(
@@ -2196,6 +2213,40 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
     },
+    // `plans/PI.md` P10 5d-2-ii(b-2-iii): the driver-loading-by-discovery
+    // autoload vertical. `rustos-test-autoload-input-qemu-aarch64` boots the
+    // *production* aarch64 pipeline on the `virt` board with the
+    // `FsDisk::AutoloadRootDisk` whole-disk image — the encrypted root
+    // additionally carrying a kernel-signed virtio-input keyboard driver bundle
+    // in `/System/Drivers/` — and an attached `virtio-keyboard-device`. The
+    // boot binds the virtio-blk root and discovers the virtio-input node; the
+    // unlock kthread mounts the encrypted root after the runner types the
+    // fixture passphrase, and its post-mount autoload hook scans the signed
+    // store, verifies the bundle against the kernel's embedded driver trust
+    // anchor, matches it to the discovered virtio-input node, and spawns it into
+    // its own user-space process (granted the node's resources plus the
+    // delegated `CAP_INPUT_INJECT`). Once the unlock-service install message
+    // appears (the autoload has already run during the mount hook, so the
+    // driver is spawned), the runner injects a key through the QEMU monitor; the
+    // autoloaded driver decodes it and delivers it to the input-focus arbiter
+    // via `key_inject`. PASS the instant the kernel-side audit sink sees the
+    // one-shot `AuditEvent::InputDelivered` (`EventId(4050)`) — the witness that
+    // an autoloaded *user-space* input driver is live and delivering input. A
+    // 120-second budget covers the boot + bounded PBKDF2 + autoload + driver
+    // bring-up + injection on QEMU TCG.
+    QemuTest {
+        package: "rustos-test-autoload-input-qemu-aarch64",
+        binary: "rustos-test-autoload-input-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
+    },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board
     // MMIO analogue of the riscv64 virtio-net-mmio vertical — same
@@ -2664,6 +2715,16 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
                 )
             })?,
             rustos_test_encrypted_root_image::TOTAL_SECTORS,
+        )),
+        FsDisk::AutoloadRootDisk => Some((
+            "autoload-root.img",
+            rustos_test_autoload_root_image::build_image().map_err(|e| {
+                format!(
+                    "test --qemu ({}): build autoload-root image: {e:?}",
+                    t.package
+                )
+            })?,
+            rustos_test_autoload_root_image::TOTAL_SECTORS,
         )),
     };
     if let Some((extension, bytes, total_sectors)) = fs_image {

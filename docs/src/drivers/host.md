@@ -335,6 +335,21 @@ missing, empty, or full of malformed bundles simply binds nothing and
 returns `Ok` (§18.4 / §2.9). This is the composition the boot path's
 root-unlock path calls once the encrypted root is mounted.
 
+The `tests/integration/autoload_input_qemu_aarch64` `-M virt` vertical
+proves this end to end on the production boot path: it plants a kernel-signed
+`virtio_kbd` driver bundle in the encrypted root's `/System/Drivers/` (the
+`rustos-test-autoload-root-image` fixture) and attaches a `virtio-keyboard`
+device. After the operator unlocks the root, `autoload_from_mounted_root`
+discovers and signature-verifies the bundle, matches it to the discovered
+virtio-input node, and spawns it into its own user-space process; the
+injected keystroke is decoded and delivered to the input-focus arbiter, and
+the run passes on the one-shot `AuditEvent::InputDelivered` witness
+(`EventId(4050)`, `AGENTS.md` §20). The autoload caller presents
+`unlock_service::autoload_caps` (the kthread's minimal `service_caps` plus
+`CAP_INPUT_INJECT`), so the input driver's manifest∩caller intersection grants
+exactly the injection authority `key_inject` requires and nothing the kthread
+holds ambiently (§5.2 / §5.4).
+
 ### Audit sink
 
 Every state transition emits one structured `rustos_log::Event` with a

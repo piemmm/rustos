@@ -935,6 +935,7 @@ dependencies = [
 name = "rustos-itest-harness"
 version = "0.0.0"
 dependencies = [
+ "ed25519-dalek",
  "rustos-abi",
  "rustos-fdt",
 ]
@@ -1373,6 +1374,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-autoload-input-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-log",
+]
+
+[[package]]
+name = "rustos-test-autoload-root-image"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-devmatch",
+ "rustos-drv-input-virtio-input",
+ "rustos-drvhost",
+ "rustos-itest-harness",
+ "rustos-kernel-syscall",
+ "rustos-log",
+ "rustos-test-encrypted-root-image",
+ "rustos-virtio-input",
+]
+
+[[package]]
 name = "rustos-test-c-program-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -1478,7 +1506,6 @@ dependencies = [
 name = "rustos-test-driver-spawn-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
- "ed25519-dalek",
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
@@ -2707,6 +2734,7 @@ dependencies = [
  "rustos-kernel-syscall",
  "rustos-mkimage",
  "rustos-qemu",
+ "rustos-test-autoload-root-image",
  "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",
  "rustos-test-rustfs-image",

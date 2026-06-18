@@ -37,14 +37,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Virtual base the stub program image is mapped at. This is the production
-/// aarch64 spawn producer's image bias
-/// (`rustos_kernel::aarch64::spawn_producer::USER_IMAGE_BIAS`, 64 GiB): `spawn_with`
-/// passes that bias to `build_process_image`, so the `rxe`'s baked
-/// relocations must target the same value. The test kernel asserts the two
-/// constants agree at runtime and fails closed on a mismatch
+/// Virtual base the stub program image is mapped at: the production aarch64
+/// spawn producer's image bias (`spawn_with` passes it to
+/// `build_process_image`, so the `rxe`'s baked relocations must target the
+/// same value). It is the shared [`rustos_itest_harness::USER_IMAGE_BIAS`]
+/// definition (`AGENTS.md` §2.2); the test kernel asserts it agrees with the
+/// producer's `SHELL_USER_BIAS` at runtime and fails closed on a mismatch
 /// (`AGENTS.md` §2.9).
-const USER_BIAS: u64 = 0x10_0000_0000;
+use rustos_itest_harness::USER_IMAGE_BIAS as USER_BIAS;
 
 /// Rust target triple of the freestanding aarch64 build.
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
@@ -109,45 +109,29 @@ const DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-driver-spawn-vertical/v1!";
 /// gate (the bind-table decode path is covered by `drvhost`'s
 /// `devmgr_autoload` test).
 fn write_driver_image_fixture(path: &std::path::Path, rxe: &[u8]) {
-    use ed25519_dalek::{Signer, SigningKey};
-    use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
+    use rustos_abi::{CapabilityId, DriverKind};
+    use rustos_itest_harness::driver_image::build_signed_driver_image;
 
     let (image, pubkey): (Vec<u8>, [u8; 32]) = if rxe.is_empty() {
         // Host / non-aarch64 build: inert stub (the kernel body is
         // aarch64-only and never reads these on host).
         (Vec::new(), [0u8; 32])
     } else {
-        let signing_key = SigningKey::from_bytes(&DRIVER_SIGNING_SEED);
-        let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-        let caps = [CapabilityId::MEM_DMA, CapabilityId::IRQ_BIND];
-        let capability_count = u16::try_from(caps.len()).expect("caps fit in u16");
-        let mut manifest = DriverManifest {
-            magic: DRIVER_MANIFEST_MAGIC,
-            abi_version: rustos_abi::ABI_VERSION_CURRENT,
-            kind: DriverKind::UserSpace,
-            bind_key_count: 0,
-            capability_count,
-            syscall_table_hash: rustos_kernel_syscall::SYSCALL_TABLE_HASH,
-            signer_pubkey,
-            signature: [0u8; 64],
-        };
-        let mut cap_body = Vec::with_capacity(caps.len() * 2);
-        for c in &caps {
-            cap_body.extend_from_slice(&c.as_u16().to_le_bytes());
-        }
-        let header = manifest.to_le_bytes();
-        let signed_end = DriverManifest::WIRE_LEN - 64;
-        let mut signed_message = Vec::new();
-        signed_message.extend_from_slice(&header[..signed_end]);
-        signed_message.extend_from_slice(&cap_body);
-        // (empty bind table)
-        signed_message.extend_from_slice(rxe);
-        manifest.signature = signing_key.sign(&signed_message).to_bytes();
-        let mut out = Vec::new();
-        out.extend_from_slice(&manifest.to_le_bytes());
-        out.extend_from_slice(&cap_body);
-        out.extend_from_slice(rxe);
-        (out, signer_pubkey)
+        // The shared composer assembles + signs the bundle from the one
+        // manifest wire definition (`AGENTS.md` §2.2): a `kind = UserSpace`
+        // image requesting the driver-class caps the spawned stub needs to
+        // reply, with an empty bind table (the device manager matches against
+        // the candidate bind keys the kernel constructs), signed so the
+        // signature covers the payload (`AGENTS.md` §2.17).
+        let signed = build_signed_driver_image(
+            &DRIVER_SIGNING_SEED,
+            DriverKind::UserSpace,
+            &[CapabilityId::MEM_DMA, CapabilityId::IRQ_BIND],
+            &[],
+            rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+            rxe,
+        );
+        (signed.image, signed.signer_pubkey)
     };
 
     let mut out = String::new();

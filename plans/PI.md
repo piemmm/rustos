@@ -3443,8 +3443,11 @@ table, so a new board is match **data**, not new code. Sub-increments
       boundary, mirroring `bus_usb`'s `wiring` tests). No `lib/abi`/C-header
       change; whole gate green. Docs: `docs/src/drivers/input.md`,
       `docs/src/lib/usb.md`, both crate READMEs.
-    - **5d-2-ii (b-2-iii) (in progress)** the `devmgr`-autoloaded keyboard
-      driver `rxe`.
+    - **5d-2-ii (b-2-iii) — done (host-proven + `-M virt`)** the
+      `devmgr`-autoloaded keyboard driver `rxe`: the autoloadable driver, the
+      signed-bundle root fixture, and the `-M virt` autoload vertical are
+      landed (the per-piece status follows). What remains under this item is
+      the `tools/mkimage` signed bundle and the 5e flip, both gated below.
       - **`lib/hid` extraction + the keyboard driver `rxe` binary — done
         (host-proven, all three Tier-1 targets).** The §17.4 layering forbids a
         `drivers/*`/`userland/*` crate from depending on another `drivers/*`
@@ -3712,28 +3715,32 @@ table, so a new board is match **data**, not new code. Sub-increments
           tests, `slot_window` in `lib/abi` + `drivers/bus/mmio`); whole gate
           green incl. the full `-M virt` matrix. This is the discovery the
           autoload spawn below binds against.
-        - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
-          holding the signed input-driver bundle + the unlock descriptor,
-          attach a virtio-keyboard device → unlock → `enumerate_driver_store`
-          → `autoload_from_mounted_root` → spawn the input driver → prove a
-          typed keystroke reaches the input-focus arbiter via `key_inject`),
-          enrolled in `qemu_tests`, keyed on a new production audit witness
-          (mirroring `root_unlock_admission`). Its fixture rustfs root must
-          carry a `virtio_kbd.rxe` bundle signed by the kernel's
-          driver-signing key. The seed-hoist prerequisite is **done**:
-          `KERNEL_DRIVER_SIGNING_SEED` now lives once in
-          `kernel/rustos-kernel/src/build_support.rs` (the dependency-free
-          `#[path]` module the kernel build script pulls in), so the kernel
-          build and any fixture/image build sign a kernel-trusted bundle from
-          the one definition (§2.2; host-tested pin). The one-shot audit
-          witness prerequisite is **done**: the `key_inject` handler emits
-          `AuditEvent::InputDelivered` (`EventId(4050)`) the first time a key
-          edge is delivered to the input-focus arbiter, gated by the one-shot
-          `InputFocus::note_first_delivery` latch so it fires exactly once and
-          carries no key content/timing (§20 / §23.1; host-tested in
-          `kernel/core::input_focus` + the `key_inject` handler). **Remaining**
-          for the vertical: build the signed-bundle fixture rustfs image and
-          enrol the `-M virt` autoload vertical keyed on the `4050` witness;
+        - the `-M virt` autoload vertical — **done**.
+          `tests/integration/autoload_input_qemu_aarch64` boots the production
+          aarch64 pipeline on `virt` with the new
+          `rustos-test-autoload-root-image` whole-disk fixture (the encrypted
+          root additionally carrying a kernel-signed `virtio_kbd.rxe` bundle at
+          `/System/Drivers/input/virtio_kbd/Run`) and an attached
+          `virtio-keyboard-device`. The runner types the passphrase; the unlock
+          kthread mounts the root, and its post-mount `AutoloadHook` scans the
+          signed store, verifies the bundle against the kernel's embedded
+          `KERNEL_DRIVER_SIGNER_PUBKEY`, matches it to the discovered
+          virtio-input node, and spawns it into its own user-space process; the
+          injected key is decoded and delivered via `key_inject`, and the audit
+          sink reports PASS on `AuditEvent::InputDelivered` (`EventId(4050)`).
+          The fixture's `build.rs` cross-compiles `drivers/input/virtio_kbd`
+          PIE (new `drivers/input/virtio_kbd/Run.ld`), converts it to an `rxe`
+          relocated for the shared `rustos_itest_harness::USER_IMAGE_BIAS`, and
+          signs it via the shared `rustos_itest_harness::driver_image` composer
+          with `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
+          `BIND_KEYS` + caps (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/`CAP_INPUT_INJECT`).
+          The autoload caller now presents `unlock_service::autoload_caps`
+          (`service_caps` + `CAP_INPUT_INJECT`), so an autoloaded input driver's
+          manifest∩caller intersection can grant the injection authority while
+          the unlock kthread's own context stays minimal (§5.2 / §5.4). The
+          seed-hoist and one-shot `InputDelivered` witness prerequisites are
+          done; the signed bundle is host-proven valid + matched over the real
+          `scan_store`/`devmatch` path (`autoload_root_image` tests);
         - `tools/mkimage` laying the signed input-driver bundle into
           `/System/Drivers/`, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —

@@ -1,0 +1,40 @@
+[package]
+name = "rustos-test-autoload-input-qemu-aarch64"
+description = "plans/PI.md P10 5d-2-ii(b-2-iii) QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with a planted whole-disk encrypted-root image that carries a kernel-signed virtio-input keyboard driver bundle in /System/Drivers/, and a virtio-keyboard device attached. The production boot path binds the virtio-blk root, the in-kernel unlock kthread mounts the encrypted RustFS root after the operator types the passphrase, and its post-mount autoload hook (unlock_service::AutoloadHook -> driver_autoload::autoload_from_mounted_root) scans the signed store, verifies the bundle against the kernel's embedded driver trust anchor, matches it to the discovered virtio-input node, and spawns it into its own user-space process. The runner then injects a keystroke; the autoloaded driver decodes it and delivers it to the kernel input-focus arbiter via key_inject. PASS once AuditEvent::InputDelivered (EventId 4050) is observed — the one-shot witness that an autoloaded user-space input driver is live and delivering input."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-autoload-input-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline with a planted
+# encrypted-root virtio-blk disk carrying a signed virtio-input keyboard driver
+# bundle, and prove the in-kernel unlock kthread's post-mount autoload spawns
+# that user-space driver, which delivers an injected keystroke to the input-
+# focus arbiter" integration test. It reuses the entire production aarch64 boot
+# pipeline through `rustos-kernel`'s library half (`boot_aarch64::boot`) — the
+# bootstrap-floor virtio-MMIO enumeration (block + input discovery), the
+# `InitSpawn` seam, the runtime `ProcessSpawn` producer, the device-IRQ wiring,
+# `unlock_service::spawn_if_present`, and the post-mount `AutoloadHook` — and
+# only swaps the audit sink to report PASS on the one-shot
+# `AuditEvent::InputDelivered` witness (`AGENTS.md` §2.2 — no duplication).
+# Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
+# production crate) prevents feature unification from leaking it into any
+# production build (`AGENTS.md` §5.4.5 — fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

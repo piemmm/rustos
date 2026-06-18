@@ -208,9 +208,30 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
 /// panicked so the builder holds to `AGENTS.md` §2.9 in every path it links
 /// into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
+    build_image_with_drivers(&[])
+}
+
+/// Build the whole-disk encrypted-root image, additionally planting a set of
+/// installed driver bundles into the encrypted root's `/System/Drivers/`
+/// store.
+///
+/// This is [`build_image`] with the §18.6 discovered driver store populated:
+/// each `(path_components, bytes)` is laid into the encrypted `RustFS` root
+/// exactly as a real installation carries it, so the root-mount→autoload
+/// vertical (`rustos_kernel::driver_autoload::autoload_from_mounted_root`)
+/// discovers, verifies, and spawns the bundle off the very volume it mounts
+/// (`plans/PI.md` P10 5d-2-ii). [`build_image`] delegates here with no
+/// drivers (`AGENTS.md` §2.2 — one authoring path).
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
+/// §2.9).
+pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     let (descriptor, key) = provision()?;
     let boot = build_boot_partition(&descriptor)?;
-    let root = root_image::build_users_root_image_with_key(&key)?;
+    let root = root_image::build_users_root_image_with_key_and_drivers(&key, drivers)?;
 
     let table = mbr::encode(&[
         Partition {

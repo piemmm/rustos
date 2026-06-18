@@ -49,6 +49,19 @@ pub const HWTREE_VERSION_V1: u16 = 1;
 /// with one, so it is the unambiguous "no parent" marker.
 pub const HW_NODE_ROOT: u32 = u32::MAX;
 
+/// Id of the single synthetic root node every discovered hardware tree
+/// begins with (`AGENTS.md` §18.1).
+///
+/// The root node names [`HW_NODE_ROOT`] as its *parent* (so
+/// [`HwNode::is_root`] holds for it alone); every real device node names
+/// this id — or a deeper bus node's id — as its parent. Defining it once
+/// here keeps every architecture port's root emission and every
+/// bootstrap-floor probe that attaches a top-level device to the root in
+/// agreement (`AGENTS.md` §2.2): a device parented to [`HW_NODE_ROOT`]
+/// instead of this id would be mistaken for the root and skipped by the
+/// autoload walk.
+pub const HW_NODE_ROOT_ID: u32 = 0;
+
 /// Maximum bytes of a device-tree / MMIO `compatible` string a match key
 /// carries inline. Longer strings are rejected, never truncated.
 pub const HW_COMPATIBLE_MAX: usize = 64;

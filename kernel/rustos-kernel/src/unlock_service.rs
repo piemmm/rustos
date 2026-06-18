@@ -238,6 +238,31 @@ pub fn service_caps() -> CapabilitySet {
     caps
 }
 
+/// The capability set the post-mount driver autoload presents to the signed
+/// load gate — the driver-loading authority's **delegatable** superset, which
+/// each driver's manifest request is intersected with (`AGENTS.md` §5.2).
+///
+/// This is deliberately broader than [`service_caps`] (the unlock kthread's
+/// *own* minimal bring-up authority, §5.4): the kthread, standing in for
+/// `devmgr`, must be able to hand an autoloaded driver the resource
+/// capabilities its class needs, but never holds them ambiently itself. It is
+/// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`], so an autoloaded input
+/// driver (e.g. the virtio-input keyboard) can be granted the
+/// keyboard-injection authority `key_inject` requires while a storage or other
+/// driver — whose manifest does not request it — receives nothing extra (the
+/// per-driver intersection still binds, `AGENTS.md` §18.3 / §4 — no ambient
+/// authority). The driver never receives `CAP_DRV_LOAD`: it is the *caller's*
+/// key to the gate, not a capability any driver's manifest requests.
+///
+/// Architecture-neutral (`AGENTS.md` §2.2): every port's unlock kthread
+/// autoloads under the same delegatable set.
+#[must_use]
+pub fn autoload_caps() -> CapabilitySet {
+    let mut caps = service_caps();
+    caps.insert(CapabilityId::INPUT_INJECT);
+    caps
+}
+
 /// The capability set the signed driver-load gate is presented with:
 /// `CAP_DRV_LOAD` + `CAP_DRV_KERNEL` (the bootstrap block-device manifest
 /// is `kind = InKernel`). Each driver receives only the intersection with
@@ -521,6 +546,27 @@ mod tests {
         assert!(caps.contains(CapabilityId::MEM_DMA));
         assert!(caps.contains(CapabilityId::DRV_LOAD));
         assert!(!caps.contains(CapabilityId::DRV_KERNEL));
+    }
+
+    #[test]
+    fn autoload_caps_extends_service_caps_with_input_inject_only() {
+        // The autoload gate's delegatable superset is the kthread's own
+        // minimal caps plus `CAP_INPUT_INJECT` — so an autoloaded input
+        // driver's manifest∩caller intersection can grant the keyboard
+        // injection authority `key_inject` requires (`AGENTS.md` §5.2 /
+        // §18.3), while the kthread's own `service_caps` never holds it
+        // (§5.4 — no ambient authority for the bring-up context).
+        let service = service_caps();
+        let autoload = autoload_caps();
+        assert!(!service.contains(CapabilityId::INPUT_INJECT));
+        assert!(autoload.contains(CapabilityId::INPUT_INJECT));
+        // Every bring-up capability is still present; nothing else is added.
+        assert!(autoload.contains(CapabilityId::MMIO_MAP));
+        assert!(autoload.contains(CapabilityId::MEM_DMA));
+        assert!(autoload.contains(CapabilityId::DRV_LOAD));
+        // The driver never receives `CAP_DRV_KERNEL` (an in-kernel-only gate
+        // cap) through the autoload superset.
+        assert!(!autoload.contains(CapabilityId::DRV_KERNEL));
     }
 
     #[test]

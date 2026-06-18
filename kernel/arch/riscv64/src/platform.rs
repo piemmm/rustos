@@ -19,7 +19,7 @@
 //! trait.
 
 use crate::fdt::Fdt;
-use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT};
+use rustos_abi::{HwDeviceClass, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// Builds the hardware tree from a borrowed flattened device tree.
@@ -40,12 +40,18 @@ impl<'a> FdtDiscovery<'a> {
 
 impl PlatformDiscovery for FdtDiscovery<'_> {
     fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
-        // Root first so every later node's parent is already emitted.
-        sink.emit(HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root))?;
+        // Root first so every later node's parent is already emitted. Its
+        // id is the shared [`HW_NODE_ROOT_ID`]; its parent is the
+        // `HW_NODE_ROOT` sentinel (so it alone is `is_root`).
+        sink.emit(HwNode::new(
+            HW_NODE_ROOT_ID,
+            HW_NODE_ROOT,
+            HwDeviceClass::Root,
+        ))?;
         let mut next_id: u32 = 1;
 
         if let Some((base, size)) = self.fdt.first_memory_region() {
-            let mut node = HwNode::new(next_id, 0, HwDeviceClass::Memory);
+            let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Memory);
             // A single resource can never exceed the node's bound; a
             // failure would be a logic error in the ABI, so surface it as
             // a malformed source rather than panicking (`AGENTS.md` §2.9).
@@ -56,7 +62,7 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
         }
 
         if self.fdt.timebase_frequency().is_some() {
-            sink.emit(HwNode::new(next_id, 0, HwDeviceClass::Timer))?;
+            sink.emit(HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Timer))?;
         }
 
         Ok(())

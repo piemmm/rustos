@@ -40,7 +40,7 @@ use crate::fdt::{
     bus_level, dma_ranges_aperture, outbound_mmio_window, reg_entry_count, scan_translated,
     translated_reg, BusLevel, Fdt, MAX_WALK_DEPTH,
 };
-use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
+use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_fdt::{name_stem, read_cells, Node};
 
@@ -97,8 +97,14 @@ impl<'a> FdtDiscovery<'a> {
 
 impl PlatformDiscovery for FdtDiscovery<'_> {
     fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError> {
-        // Root first so every later node's parent is already emitted.
-        sink.emit(HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root))?;
+        // Root first so every later node's parent is already emitted. Its
+        // id is the shared [`HW_NODE_ROOT_ID`]; its parent is the
+        // `HW_NODE_ROOT` sentinel (so it alone is `is_root`).
+        sink.emit(HwNode::new(
+            HW_NODE_ROOT_ID,
+            HW_NODE_ROOT,
+            HwDeviceClass::Root,
+        ))?;
         let mut next_id: u32 = 1;
         // The shared per-depth bus state (`crate::fdt`, `AGENTS.md` §2.2)
         // plus this walk's own per-depth fact: the hardware-tree id of
@@ -122,7 +128,7 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
             if depth == 0 {
                 level.ranges = None;
                 levels[0] = level;
-                ancestors[0] = 0;
+                ancestors[0] = HW_NODE_ROOT_ID;
                 continue;
             }
 

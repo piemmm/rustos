@@ -65,12 +65,16 @@ rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 
 [build-dependencies]
-rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
-rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 # The build script wraps the converted stub `rxe` as the payload of a signed
 # `DriverManifest` image (`AGENTS.md` §8 / §9) the `SpawnDriverLoader` gate
 # admits, signed with a deterministic Ed25519 key whose public half the test
-# trusts. Encodes the manifest from the one ABI definition (`rustos-abi`).
-# Host-only build glue (`AGENTS.md` §12).
+# trusts. The signing + bundle assembly is the shared harness composer
+# (`driver_image`, `AGENTS.md` §2.2), so the manifest wire format is encoded
+# in exactly one place. Host-only build glue (`AGENTS.md` §12).
+rustos-itest-harness = { path = "../harness", version = "=0.0.0", features = [
+    "driver-image",
+] }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+# The build script names the `CapabilityId` / `DriverKind` the signed manifest
+# requests from the one ABI definition (`AGENTS.md` §2.2).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
