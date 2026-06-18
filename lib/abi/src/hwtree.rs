@@ -567,6 +567,33 @@ impl HwResource {
         self.xlate
     }
 
+    /// The device-visible base address by which a driver names this
+    /// resource when mapping it as a register window, or [`None`] if the
+    /// resource is not a mappable register window.
+    ///
+    /// A plain [`Mmio`](HwResourceKind::Mmio) window lives in CPU/identity
+    /// space, so it is named by its [`base`](Self::base). A
+    /// [`BusWindow`](HwResourceKind::BusWindow) is addressed in outbound
+    /// bus space, so it is named by its far-side
+    /// [`translated_base`](Self::translated_base) — the bridge's bus→CPU
+    /// translation is applied by the mapper, not the driver (`AGENTS.md`
+    /// §18.1). Every other kind (a DMA constraint, an IRQ line, a port
+    /// range) is not a mappable register window and yields [`None`].
+    ///
+    /// This is the single definition of "which address names this
+    /// resource's register window" (`AGENTS.md` §2.2): both
+    /// [`sole_register_window`](crate::driver::sole_register_window) and a
+    /// concrete driver's resource derivation build on it rather than
+    /// re-deciding `base` vs `translated_base` per device class.
+    #[must_use]
+    pub fn register_window_base(&self) -> Option<u64> {
+        match self.kind() {
+            Some(HwResourceKind::Mmio) => Some(self.base),
+            Some(HwResourceKind::BusWindow) => Some(self.xlate),
+            _ => None,
+        }
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -978,6 +1005,24 @@ mod tests {
         let mut bytes = HwMatchKey::pci(1, 2, 3).to_le_bytes();
         put_u16(&mut bytes, 0, 99);
         assert_eq!(HwMatchKey::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn register_window_base_selects_the_addressing_space_per_kind() {
+        // An MMIO window is named by its CPU base.
+        assert_eq!(
+            HwResource::mmio(0x1000_0000, 0x1000).register_window_base(),
+            Some(0x1000_0000)
+        );
+        // A bus window is named by its far-side (translated) base.
+        assert_eq!(
+            HwResource::bus_window(0x6_0000_0000, 0x2000, 0x4000_0000).register_window_base(),
+            Some(0x4000_0000)
+        );
+        // Non-window resources are not mappable register windows.
+        assert_eq!(HwResource::dma(0x8000_0000, 0).register_window_base(), None);
+        assert_eq!(HwResource::irq(33, 1).register_window_base(), None);
+        assert_eq!(HwResource::port(0x60, 8).register_window_base(), None);
     }
 
     #[test]

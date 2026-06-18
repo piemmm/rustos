@@ -1,0 +1,48 @@
+[package]
+name = "rustos-drv-input-virtio-kbd"
+description = "RustOS autoloaded user-space virtio-input keyboard driver process: builds the bus-agnostic virtio-MMIO transport over its granted register window and a `VirtioHost` over its granted DMA, brings the virtio-input device up via `lib/virtio_input`, and pumps decoded key edges into the kernel input-focus arbiter (`AGENTS.md` §4 / §18, plans/PI.md P10 chunk 5d-2-ii)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is **only** a binary: the `Run` entry point of the virtio-input
+# keyboard driver bundle, installed under `/System/Drivers/` and autoloaded into
+# user space by `devmgr` when a virtio-input device is discovered (`AGENTS.md`
+# §18). It links the userland runtime `rustos-rt`, so it is a separate crate
+# from the kernel-linked `rustos-drv-input-virtio-input` driver shell (the kernel
+# must not pull in the userland `_start` / panic handler), and depends only on
+# `lib/*` crates so the §17.4 layering holds (no `drivers/*`→`drivers/*` edge).
+# It is a freestanding pure-Rust program on the native Tier-1 targets and an
+# inert host stub elsewhere (`src/main.rs` / `build.rs`), mirroring
+# `drivers/input/usb_kbd` (`AGENTS.md` §2.2).
+
+# Everything the freestanding program links is pulled in only for the bare-metal
+# targets the binary is actually built for; on the host the binary is an inert
+# stub with no dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The frozen `abi-v1` surface (`InputEvent`, `KeyInput`, `CapabilityId`,
+# `DriverError`, and the `sole_register_window` grant helper).
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The capability-set type the rt-backed `DriverHost` is built over (§5.2).
+rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The bus-agnostic virtio-MMIO transport this driver builds over its granted
+# register window — a `lib/*` crate, so the §17.4 layering holds (the driver
+# never names `drivers/bus/virtio`; the `lib/usb` ↔ `drivers/bus/usb` precedent).
+rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+# The arch-neutral virtio-input open/poll/decode device logic and the
+# `evdev`-keycode console producer this process composes — a `lib/*` crate
+# (§17.4 / §2.2 — the same logic the in-kernel `-M virt` verticals use).
+rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource grants
+# into the `MmioMapper` + `VirtioHost` the bring-up consumes (`mmio_map` /
+# `dma_alloc` / `resource_grants` over the syscall surface, §5.4).
+rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# canary, the panic handler, and the syscall wrappers (`key_inject`, `yield`).
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }

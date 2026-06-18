@@ -93,11 +93,12 @@ validates against the PIT.
 
 `rustos-drv-input-virtio-input` is the §8 driver identity — the `register`
 entry and the §18.3 `BIND_KEYS` bind table. The reusable open/poll/decode
-device logic described below lives in the
+device logic and the keyboard console producer described below live in the
 [`rustos-virtio-input`](../lib/virtio_input.md) library (`lib/virtio_input`),
-shared by the in-kernel `-M virt` verticals and the (forthcoming) user-space
-input-driver process without a `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4
-/ §2.2 — the virtio analogue of `lib/hid` ↔ `drivers/input/usb_hid`).
+shared by the in-kernel `-M virt` verticals and the user-space input-driver
+process (`rustos-drv-input-virtio-kbd`, below) without a
+`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2 — the virtio analogue of
+`lib/hid` ↔ `drivers/input/usb_hid`).
 
 The virtio-input logic implements `Input` over the bus-agnostic virtio
 transport from `lib/virtio`, so one source compiles against both the PCI
@@ -161,6 +162,44 @@ xtask test --qemu`) drives the same driver and the same shared
 (PLIC source + S-mode trap path), so a single driver source covers the
 `input` row of the QEMU matrix on x86_64 (PS/2), aarch64, and riscv64
 (`AGENTS.md` §2.2).
+
+#### Console-input producer
+
+`lib/virtio_input`'s `VirtioKeyboardConsole` is the keyboard producer half: it
+turns the `Key` `InputEvent` edges `poll` decodes (whose `code` is the raw
+`evdev` keycode) into the `rustos_abi::input::KeyInput` records a driver injects
+through the `key_inject` syscall. It tracks the held modifiers (each of the
+eight modifier keys independently, collapsing the left/right pairs) and the
+caps-/num-lock toggles, resolves each printable or named key edge into the
+`Key` a US keyboard layout produces, and builds the record through the shared
+`rustos_keymap::key_input` map — the **one** `Key`→record definition the
+`lib/hid` USB console producer reaches too (`AGENTS.md` §2.2). The
+`evdev`-keycode→`Key` table is `evdev`-specific (a USB HID keyboard decodes HID
+usages into the same `Key` vocabulary), so it lives here; everything is
+allocation-free and fail-closed — an unknown keycode or a non-key event
+produces no record rather than guessing (`AGENTS.md` §2.9).
+
+#### The autoloaded driver binary (`rustos-drv-input-virtio-kbd`)
+
+`drivers/input/virtio_kbd` (`rustos-drv-input-virtio-kbd`, `src/main.rs`) is the
+autoloaded **user-space** virtio-input keyboard driver process — the "drivers in
+user space" steady state (`AGENTS.md` §4) on the hardware QEMU `-M virt`
+presents (the metal Pi 4 keyboard is the USB `rustos-drv-input-usb-kbd`). It is
+a freestanding pure-Rust `rustos-rt` program depending only on `lib/*`
+(`lib/virtio`, `lib/virtio_input`, `lib/drvrt`, `lib/rt`, `lib/caps`, `lib/abi`)
+so the §17.4 layering holds. `main` builds `RtDriverHost::from_grants_query`
+over its kernel-issued grants (coherency `None` — coherent DMA, platform-neutral
+§2.20), resolves its single granted register window with
+`rustos_abi::driver::sole_register_window` over `RtDriverHost::resources()` (the
+one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
+through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
+with `VirtioInput::open`, and loops `poll` → `VirtioKeyboardConsole::feed` →
+`key_inject`, yielding between polls (`AGENTS.md` §2.1). Every capability and
+bound is re-checked kernel-side (`AGENTS.md` §5.4); a bring-up failure exits with
+a reserved fail-closed code (`80`/`81`/`82`). It is a separate crate from the §8
+`rustos-drv-input-virtio-input` identity so it can link `rustos-rt` without
+pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2 — the `usb_kbd`
+analogue).
 
 ### `rustos-drv-input-usb-hid`
 

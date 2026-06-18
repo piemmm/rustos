@@ -41,6 +41,10 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod console;
+
+pub use console::VirtioKeyboardConsole;
+
 use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::DriverError;

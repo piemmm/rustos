@@ -113,42 +113,38 @@ where
     let mut bar: Option<(u64, u64)> = None;
     let mut aperture: Option<u64> = None;
     for resource in resources {
-        match resource.kind() {
-            Some(HwResourceKind::Mmio) => {
-                if bar.is_some() {
-                    return Err(DriverError::Unsupported);
-                }
-                bar = Some((resource.base(), resource.length()));
+        // The register-window base (CPU `base` for an `Mmio` window, far-side
+        // `translated_base` for a `BusWindow`) is the one definition in
+        // `HwResource::register_window_base` (`AGENTS.md` §2.2 — shared with
+        // `sole_register_window`), so this driver does not re-decide it.
+        if let Some(base) = resource.register_window_base() {
+            if bar.is_some() {
+                return Err(DriverError::Unsupported);
             }
-            Some(HwResourceKind::BusWindow) => {
-                if bar.is_some() {
-                    return Err(DriverError::Unsupported);
-                }
-                bar = Some((resource.translated_base(), resource.length()));
-            }
-            Some(HwResourceKind::Dma) => {
-                if aperture.is_some() {
-                    return Err(DriverError::Unsupported);
-                }
-                // A translated inbound viewport's device-visible window is
-                // `[translated_base, translated_base + len)`, so its exclusive
-                // top is the far-side base plus extent; an untranslated
-                // constraint's `addr_limit` (stored as `base`) is already the
-                // device-visible exclusive top (`AGENTS.md` §18.1).
-                let top = if resource.translated_base() != 0 {
-                    resource
-                        .translated_base()
-                        .checked_add(resource.length())
-                        .ok_or(DriverError::OutOfRange)?
-                } else {
-                    resource.base()
-                };
-                aperture = Some(top);
-            }
-            // An IRQ line, a port range, or an unknown kind is not part of
-            // this driver's bring-up (`AGENTS.md` §5.4 — validate the kind).
-            _ => {}
+            bar = Some((base, resource.length()));
+            continue;
         }
+        if resource.kind() == Some(HwResourceKind::Dma) {
+            if aperture.is_some() {
+                return Err(DriverError::Unsupported);
+            }
+            // A translated inbound viewport's device-visible window is
+            // `[translated_base, translated_base + len)`, so its exclusive
+            // top is the far-side base plus extent; an untranslated
+            // constraint's `addr_limit` (stored as `base`) is already the
+            // device-visible exclusive top (`AGENTS.md` §18.1).
+            let top = if resource.translated_base() != 0 {
+                resource
+                    .translated_base()
+                    .checked_add(resource.length())
+                    .ok_or(DriverError::OutOfRange)?
+            } else {
+                resource.base()
+            };
+            aperture = Some(top);
+        }
+        // An IRQ line, a port range, or an unknown kind is not part of this
+        // driver's bring-up (`AGENTS.md` §5.4 — validate the kind).
     }
     let (bar_base, bar_len) = bar.ok_or(DriverError::NotFound)?;
     let bar_len = usize::try_from(bar_len).map_err(|_| DriverError::OutOfRange)?;

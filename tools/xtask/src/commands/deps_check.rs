@@ -642,6 +642,10 @@ mod tests {
         for (driver, expected_lib) in [
             ("rustos-drv-storage-virtio-blk", "rustos-virtio"),
             ("rustos-drv-network-virtio-net", "rustos-virtio"),
+            // The user-space virtio-input keyboard driver `rxe` builds its
+            // bus-agnostic MMIO transport from `lib/virtio`, never the bus
+            // driver crate (`AGENTS.md` §17.4 — the `lib/usb` precedent).
+            ("rustos-drv-input-virtio-kbd", "rustos-virtio"),
         ] {
             let deps = dep_of(driver);
             assert!(

@@ -41,7 +41,7 @@
 //! [`CapabilityId::DRV_KERNEL`](crate::CapabilityId::DRV_KERNEL).
 //! Class traits document their own per-method capability gates.
 
-use crate::hwtree::HwMatchKey;
+use crate::hwtree::{HwMatchKey, HwResource};
 use crate::le::{put_u16, read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
@@ -640,6 +640,64 @@ pub fn decode_bind_keys(
     Ok(count)
 }
 
+/// Resolve the *single* mappable register window from a driver's
+/// kernel-issued device-resource grants.
+///
+/// A `devmgr`-autoloaded driver is granted exactly the resources its
+/// matched hardware-tree node requested — and no more (`AGENTS.md` §4 /
+/// §18.3). A bus/device driver maps one register block by *address*
+/// through its [`DriverHost`]'s [`MmioMapper`] (which resolves the
+/// covering grant and performs any bus→CPU translation, `AGENTS.md`
+/// §18.1); this finds that one window and returns the
+/// `(base, len)` pair to map. The base is whichever address names the
+/// window for its kind — [`HwResource::register_window_base`] is the one
+/// definition of that choice (`AGENTS.md` §2.2), so the same derivation
+/// serves every device class (the USB keyboard's BAR, a virtio MMIO
+/// transport's register block) without re-deciding `base` vs
+/// `translated_base`.
+///
+/// Non-window resources (a DMA constraint, an IRQ line, a port range)
+/// are ignored — they are carved or waited on through other syscalls,
+/// not mapped here.
+///
+/// # Errors
+///
+/// Fails closed (`AGENTS.md` §2.9 / §5.4), never guessing a missing or
+/// ambiguous address:
+///
+/// * [`DriverError::NotFound`] if no register-window grant is present.
+/// * [`DriverError::Unsupported`] if more than one register-window grant
+///   is present (an ambiguous delivery — a packaging defect the driver
+///   refuses rather than picking one).
+/// * [`DriverError::OutOfRange`] for a zero-length window or a length
+///   past `usize` on the target.
+///
+/// # Capabilities
+///
+/// None. This inspects a grant set the kernel already minted; the map
+/// itself is capability-checked kernel-side at the `mmio_map` trap
+/// (`AGENTS.md` §5.4).
+pub fn sole_register_window<'a, I>(resources: I) -> Result<(u64, usize), DriverError>
+where
+    I: IntoIterator<Item = &'a HwResource>,
+{
+    let mut window: Option<(u64, u64)> = None;
+    for resource in resources {
+        if let Some(base) = resource.register_window_base() {
+            if window.is_some() {
+                return Err(DriverError::Unsupported);
+            }
+            window = Some((base, resource.length()));
+        }
+    }
+    let (base, len) = window.ok_or(DriverError::NotFound)?;
+    let len = usize::try_from(len).map_err(|_| DriverError::OutOfRange)?;
+    if len == 0 {
+        return Err(DriverError::OutOfRange);
+    }
+    Ok((base, len))
+}
+
 /// Host-supplied environment passed to every driver's `register`
 /// entry point.
 ///
@@ -1063,6 +1121,53 @@ mod tests {
         assert_eq!(
             decode_bind_keys(&bad, 1, &mut out),
             Err(DriverError::BadMagic)
+        );
+    }
+
+    #[test]
+    fn sole_register_window_resolves_an_mmio_window_by_its_cpu_base() {
+        let grants = [
+            HwResource::dma(0x8000_0000, 0),
+            HwResource::mmio(0x1000_0000, 0x1000),
+            HwResource::irq(33, 1),
+        ];
+        assert_eq!(
+            sole_register_window(grants.iter()),
+            Ok((0x1000_0000, 0x1000))
+        );
+    }
+
+    #[test]
+    fn sole_register_window_resolves_a_bus_window_by_its_translated_base() {
+        // A `BusWindow` is named by its far-side (bus-space) base, not its
+        // CPU base (`AGENTS.md` §18.1).
+        let grants = [HwResource::bus_window(0x6_0000_0000, 0x2000, 0x4000_0000)];
+        assert_eq!(
+            sole_register_window(grants.iter()),
+            Ok((0x4000_0000, 0x2000))
+        );
+    }
+
+    #[test]
+    fn sole_register_window_fails_closed() {
+        // No window grant.
+        assert_eq!(
+            sole_register_window([HwResource::dma(0x8000_0000, 0)].iter()),
+            Err(DriverError::NotFound)
+        );
+        // Two window grants — ambiguous, refused rather than guessed.
+        let two = [
+            HwResource::mmio(0x1000_0000, 0x1000),
+            HwResource::bus_window(0x6_0000_0000, 0x2000, 0x4000_0000),
+        ];
+        assert_eq!(
+            sole_register_window(two.iter()),
+            Err(DriverError::Unsupported)
+        );
+        // Zero-length window.
+        assert_eq!(
+            sole_register_window([HwResource::mmio(0x1000_0000, 0)].iter()),
+            Err(DriverError::OutOfRange)
         );
     }
 }

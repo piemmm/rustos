@@ -777,6 +777,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-input-virtio-kbd"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-rt",
+ "rustos-virtio",
+ "rustos-virtio-input",
+]
+
+[[package]]
 name = "rustos-drv-network-virtio-net"
 version = "0.0.0"
 dependencies = [
@@ -2659,6 +2671,8 @@ name = "rustos-virtio-input"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-input",
+ "rustos-keymap",
  "rustos-virtio",
 ]
 

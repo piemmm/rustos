@@ -84,6 +84,7 @@ members = [
     "drivers/input/usb_hid",
     "drivers/input/usb_kbd",
     "drivers/input/virtio_input",
+    "drivers/input/virtio_kbd",
 
     # Drivers — bus
     "drivers/bus/pci",

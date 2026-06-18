@@ -4,9 +4,10 @@
 (keyboard / pointer) device logic the virtio-input driver is built from: the
 virtio-1.1 §5.8 open/poll/decode engine over the bus-agnostic `lib/virtio`
 `Transport`. It lives in `lib/*` — not in a driver crate — so **both** the
-in-kernel `-M virt` input verticals and the (forthcoming) user-space
-input-driver process compose it without a `drivers/*`→`drivers/*` dependency
-(`AGENTS.md` §17.4 / §2.2), exactly as the bus-agnostic xHCI protocol lives in
+in-kernel `-M virt` input verticals and the user-space input-driver process
+(`rustos-drv-input-virtio-kbd`) compose it without a `drivers/*`→`drivers/*`
+dependency (`AGENTS.md` §17.4 / §2.2), exactly as the bus-agnostic xHCI protocol
+lives in
 [`rustos-usb`](./usb.md) rather than the xHCI driver, and the HID logic lives
 in [`rustos-hid`](./hid.md) rather than `drivers/input/usb_hid`. The thin
 `drivers/input/virtio_input` crate keeps only the §8 `register` entry and the
@@ -37,12 +38,23 @@ in [`rustos-hid`](./hid.md) rather than `drivers/input/usb_hid`. The thin
 - **`VIRTIO_INPUT_DEVICE_ID`**: the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from — the single source of truth the device
   logic and the bind table both depend on (`AGENTS.md` §2.2 / §18.3).
+- **`VirtioKeyboardConsole`** (`console` module): the keyboard producer half.
+  `feed` turns each decoded `evdev`-keycode `Key` edge into the
+  `rustos_abi::input::KeyInput` record a driver injects through `key_inject`,
+  tracking the held modifiers (each of the eight modifier keys independently,
+  collapsing left/right pairs) and the caps-/num-lock toggles and resolving the
+  US layout. The `evdev`-keycode→`Key` table is `evdev`-specific, but the
+  `Key`→record map is the shared `rustos_keymap::key_input` — the one definition
+  the `lib/hid` USB console producer reaches too (`AGENTS.md` §2.2). An unknown
+  keycode or non-key event produces no record (fail closed, `AGENTS.md` §2.9).
 
 ## Layering and platform-neutrality
 
 `lib/virtio_input` depends only on other `lib/*` crates — `lib/abi` (the
-`Input`/`InputEvent`/`BufferClass` surface) and `lib/virtio` (the bus-agnostic
-`Transport`, `SplitQueue`, DMA slabs, and `VirtioHost`) — so it satisfies §17.4
+`Input`/`InputEvent`/`BufferClass`/`KeyInput` surface), `lib/virtio` (the
+bus-agnostic `Transport`, `SplitQueue`, DMA slabs, and `VirtioHost`), and
+`lib/input` + `lib/keymap` (the `Key` vocabulary and the shared `Key`→record
+map the console producer uses) — so it satisfies §17.4
 and names no board, PCI, or SoC detail (`AGENTS.md` §2.20). It allocates every
 device-visible buffer through the `VirtioHost` DMA seam and reaches the device
 only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
@@ -58,7 +70,10 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
   discard of `EV_SYN` frame markers / unmapped codes / unmodelled types;
 - poll-drain: a queued press, press-then-release in order, a frame marker
   surfacing no event, the no-pending-event `Ok(0)`, and empty-buffer rejection;
-- teardown: the `open` → `close` (load → unload) round-trip.
+- teardown: the `open` → `close` (load → unload) round-trip;
+- `console`: `evdev`-keycode resolution (letters, shifted digits, named and
+  keypad keys, function keys), caps/num-lock toggling, left/right modifier
+  collapsing, and the fail-closed unknown-keycode / non-key / key-repeat cases.
 
 ## Stability
 

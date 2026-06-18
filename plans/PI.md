@@ -3637,8 +3637,9 @@ table, so a new board is match **data**, not new code. Sub-increments
         `unlock_root_disk_interactively` as the `MountedRootHook`, which calls
         `autoload_from_mounted_root` the instant the root mounts — binding
         nothing when no node matches, §18.4). Empty store ⇒ nothing autoloads
-        in `Ok`. **Remaining** is the autoloadable user-space input driver and
-        its vertical:
+        in `Ok`. The autoloadable user-space input driver is **now landed** (the
+        first sub-bullet); **remaining** is its `-M virt` autoload vertical, the
+        signed bundle, and the 5e flip:
         - the autoloadable **user-space input driver `rxe`** the `-M virt`
           vertical proves: `-M virt` presents a **virtio-input** keyboard
           (not USB/xHCI — no QEMU vertical models xHCI), served by
@@ -3664,17 +3665,32 @@ table, so a new board is match **data**, not new code. Sub-increments
           precedent). `drivers/bus/virtio` re-exports it from `rustos_virtio`
           (existing `rustos_drv_bus_virtio::MmioTransport` import sites resolve
           unchanged, §2.2); §3, `docs/src/drivers/virtio.md`, and the
-          `transport_mmio` tests moved with it. **Remaining:** add the signed,
-          autoloadable `rxe` binary over `lib/drvrt`+`lib/rt` whose manifest
-          carries that `BIND_KEYS` (the `usb_kbd` analogue) — it builds the
-          `MmioTransport` over its kernel-granted register window + a
-          `VirtioHost` over its granted DMA, runs `VirtioInput::open`, and
-          injects each decoded key edge via `key_inject` — and extend the
-          `virtio_driver_layer_is_on_lib_only` deps-check to bind the new crate
-          to `lib/virtio`, not the bus driver. This is the most architecturally
-          honest "driver in user space by discovery" proof on the hardware
-          `virt` actually has (the metal Pi keyboard stays `usb_kbd`, flipped at
-          5e);
+          `transport_mmio` tests moved with it. The autoloadable `rxe`
+          **binary is now landed**: `drivers/input/virtio_kbd`
+          (`rustos-drv-input-virtio-kbd`, `src/main.rs`) is the `usb_kbd`
+          analogue — a freestanding `rustos-rt` program depending only on
+          `lib/*` (`lib/virtio`, `lib/virtio_input`, `lib/drvrt`, `lib/rt`,
+          `lib/caps`, `lib/abi`) that builds `RtDriverHost::from_grants_query`
+          over its kernel-issued grants, resolves its sole granted register
+          window with the new `rustos_abi::driver::sole_register_window`
+          (built on `HwResource::register_window_base`, the one §2.2 definition
+          of "which address names this resource's register window" — shared
+          with `lib/hid`'s `derive_keyboard_resources`), maps it, builds the
+          `MmioTransport`, runs `VirtioInput::open` over the host as
+          `VirtioHost`, and loops `poll` → `VirtioKeyboardConsole::feed` →
+          `key_inject` (the new `evdev`-keycode console producer in
+          `lib/virtio_input`, resolving the US layout through the shared
+          `rustos_keymap::key_input`, §2.2). The
+          `virtio_driver_layer_is_on_lib_only` deps-check binds the new crate to
+          `lib/virtio` (not the bus driver). Host-proven (`lib/abi`
+          `sole_register_window`/`register_window_base` tests,
+          `lib/virtio_input` `console` tests; the binary builds host + all three
+          Tier-1 freestanding); whole gate green (`cargo xtask ci` incl. both
+          Pi images, `fuzz --secs 5`, soak). No `lib/abi`/C-header change (the
+          helper is a Rust fn, not a `#[repr(C)]` type/syscall). This is the
+          most architecturally honest "driver in user space by discovery" proof
+          on the hardware `virt` actually has (the metal Pi keyboard stays
+          `usb_kbd`, flipped at 5e). **Remaining** is the vertical + bundle:
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
           holding the signed input-driver bundle + the unlock descriptor,
           attach a virtio-keyboard device → unlock → `enumerate_driver_store`
