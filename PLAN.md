@@ -2300,3 +2300,16 @@ can see *why* a rule exists without diffing the charter's history.
   gated like every driver. A plain leaf driver in that floor (e.g. a HID
   keyboard) is a defect — it belongs in the discovered tier in user space.
   Documentation only.
+
+- **2026-06-18 — Minimize arch-specific code; share across all archs.** Added
+  §2.21: arch-specific code under `kernel/arch/<target>/` is a last resort,
+  permitted only for what the silicon strictly makes target-divergent
+  (registers, privileged instructions, MMU/TLB/context-switch, errata,
+  discovery source); everything expressible over the Arch HAL (§17.2) and
+  `lib/*` must be. Single-arch work must check the sibling ports and hoist
+  identical logic into a shared home (`lib/*`, an arch-neutral `kernel/*`
+  subsystem, or a `kernel/arch/api/` default) — values that differ only by
+  runtime discovery (§18.1) are data, not arch-specific code — never leaving a
+  common routine stranded in one arch's file to be re-derived later (§2.2,
+  §2.19). Reinforced in §17.2, as agent instruction §15.15, and as a §23.2
+  self-review check. Documentation only.

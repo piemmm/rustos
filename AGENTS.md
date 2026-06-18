@@ -311,6 +311,44 @@ These are absolute. They override any local convenience.
       solution seems impossible without naming a platform, the HAL (§17.2) is
       incomplete — extend it under `kernel/arch/api/` and stop and ask (§15.7);
       do not work around it in shared or kernel-neutral code.
+21. **Architecture-specific code is a last resort, and shared code is found by
+    looking across *all* architectures.** §2.20 forbids tying generic code to a
+    board; this rule binds the amount of arch-specific code that may exist at
+    all and forbids leaving common logic stranded in one architecture's files.
+    - **Write the minimum arch-specific code the silicon strictly requires,
+      and no more.** A line belongs under `kernel/arch/<target>/` (or the §1
+      assembly carve-out) **only** when it expresses something the hardware
+      genuinely makes target-specific — a register layout, a privileged
+      instruction, an MMU/TLB/context-switch primitive, an errata mitigation
+      (§19.1/§19.10), a boot/discovery source (§18.2). Anything that *can* be
+      expressed once over the Arch HAL (§17.2) and `lib/*` MUST be, even if it
+      is momentarily convenient to inline it per target. "It was easier to copy
+      into each arch" is the §2.2 duplication this charter forbids.
+    - **Single-architecture work still considers every architecture.** Before
+      adding or changing code under one `kernel/arch/<target>/` (or any
+      single-target path), you MUST check whether the same logic does, or will,
+      exist for the other Tier-1 targets. If the logic is — or by its nature
+      will be — identical across targets, it is **not** arch-specific: hoist it
+      into a shared home (a `lib/*` crate, an arch-neutral `kernel/*`
+      subsystem, or a default method / helper in `kernel/arch/api/`) and have
+      every target depend on the one definition. Only the genuinely
+      target-divergent remainder stays in the per-target crate. Landing a fix
+      or feature in one arch's file while knowingly leaving its identical twin
+      to be re-derived in a sibling arch later is a §2.2 / §2.19 defect, not a
+      smaller diff.
+    - **The test of "is this really arch-specific?".** If two architectures'
+      versions of a thing would differ only by values that are *discovered* at
+      runtime (§18.1) — an MMIO base, an IRQ number, a hart/CPU count — then the
+      thing is generic and the values are data threaded from discovery; the code
+      goes in the shared home, not duplicated per arch. It is genuinely
+      arch-specific only when the *code itself* (instructions, layout, ordering
+      the ISA dictates) differs, not merely the data it operates on.
+    - **When the shared home is missing, create or extend it — do not duplicate
+      (§15.7).** If common logic has nowhere arch-neutral to live, the Arch HAL
+      (§17.2) or a `lib/*` crate is incomplete: extend `kernel/arch/api/` or add
+      the `lib/*` crate (§6, updating §3 and `PLAN.md`) so the one definition is
+      shared. If that is genuinely too large for the current change, stop and
+      ask (§15.7); never settle for a per-arch copy "for now" (§2.19).
 
 ---
 
@@ -1025,6 +1063,20 @@ You are not exempt from any rule above. In addition:
     reached only via the discovery/match path (§18.3) and never inside a
     generic framework. If you cannot write it generically, the HAL is
     incomplete — extend `kernel/arch/api/` and stop and ask (§15.7).
+15. **Write the least arch-specific code possible, and look across all
+    archs before writing any (§2.21).** Put a line under
+    `kernel/arch/<target>/` only when the silicon strictly requires it
+    (register layout, privileged instruction, MMU/TLB/context-switch
+    primitive, errata mitigation, discovery source); everything that can be
+    expressed once over the Arch HAL (§17.2) and `lib/*` must be. When you
+    touch one architecture, check the sibling architectures for the same
+    logic: if it is (or will be) identical, hoist it into a shared home
+    (`lib/*`, an arch-neutral `kernel/*` subsystem, or a `kernel/arch/api/`
+    default) so all targets share one definition — never leave a common
+    routine stranded in one arch's file to be copied into the others later.
+    If there is no shared home yet, create or extend one (§6, §17.2); if that
+    is too large for this change, stop and ask (§15.7) — do not duplicate it
+    "for now" (§2.19).
 
 ---
 
@@ -1271,6 +1323,17 @@ as non-negotiable as §2.
   implements the Arch HAL and **nothing else public**. No
   architecture crate exposes its own ad-hoc API to the rest of the
   kernel.
+- **An architecture crate holds only the genuinely target-divergent
+  code, and as little of it as possible (§2.21).** Logic that is — or
+  by its nature will be — identical across targets is not arch-specific:
+  it lives in `lib/*`, an arch-neutral `kernel/*` subsystem, or a
+  default method/helper in `kernel/arch/api/`, and every port depends on
+  that one definition. Per-target divergence that is only in *values*
+  discovered at runtime (MMIO base, IRQ line, hart/CPU count, §18.1) is
+  data threaded from discovery, never duplicated code. Work touching one
+  port must first check the sibling ports for the same logic and hoist
+  the common part out rather than leave its twin to be re-derived later
+  (§2.21, §2.2).
 - **`#[cfg(target_arch = "…")]`, `#[cfg(target_pointer_width = …)]`,
   and equivalent target-conditional compilation are forbidden
   outside `kernel/arch/<target>/`, the build glue in `.cargo/`,
@@ -1972,6 +2035,15 @@ Trace, do not assume. For every entry point the change adds or touches
   Arch HAL (§17.2); `cfg(target_arch …)` / `cfg(target_pointer_width …)`
   outside the §17.2 allow-list is a defect. Time and persisted metadata are
   64-bit-native (§21); pointer width is never time width.
+- **No needless arch-specific code; common logic is shared (§2.21).** Anything
+  the change puts under one `kernel/arch/<target>/` is genuinely
+  target-divergent (instructions, layout, ordering the ISA dictates), not
+  logic that is — or will be — identical across ports differing only in
+  runtime-discovered values. Logic shared with the sibling architectures was
+  hoisted into `lib/*`, an arch-neutral `kernel/*` subsystem, or a
+  `kernel/arch/api/` default, with every target depending on the one
+  definition — never copied into each arch's file or left for a sibling port
+  to re-derive later.
 - **SMP-correct.** Shared state uses `lib/sync` primitives with a stated
   ordering discipline; there is no data race, no torn read, no "works on one
   core" assumption (§4). Lock acquisition order cannot deadlock.
