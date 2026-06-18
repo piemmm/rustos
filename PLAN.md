@@ -1041,33 +1041,33 @@ order (one fully-gated increment each):
            `driver_spawn_qemu_aarch64` `-M virt` vertical now drives the chain
            through this seam (no hand-built `KernelSpawnCtx`). No
            `lib/abi`/C-header change.
-         - **Remaining — the boot-path attachment of the composition.** The
-           mounted-root composition (`autoload_from_mounted_root`) and the
-           spawn seam are ready; what remains is attaching them to the live
-           boot path now that the `-M virt` root mounts (the in-kernel unlock
-           kthread). Coupled pieces:
-           - a kernel/core **`'static`-spawner seam**: the unlock kthread
-             mounts the root *after* `admit_init` has diverged into the
-             dispatch loop and never returns, so its `'static`+`Send` body
-             cannot capture the init seam's borrowed `&dyn InitSpawnCtx`. Widen
-             `InitSpawn::spawn_init` to `&'static (dyn InitSpawnCtx + Sync)`
-             (the ctx already borrows the `Box::leak`'d `'static` `KernelState`,
-             so `KernelInitSpawner<'static, A>` is `'static` — realise/confirm
-             its `Sync`), leak the ctx in `kernel_main`, and forward it through
-             the three arch `init_spawn` seams to `unlock_service`;
-           - a **discovered-hardware-tree stash** for the kthread (today only
-             the root *binding* is stashed, not the `&[HwNode]` tree the match
-             needs, §18.1);
-           - the unlock-kthread **tail call** to
-             `autoload_from_mounted_root(fs, tree, trusted,
-             &AARCH64_PROCESS_SPAWN, …)` once the root is `Installed`;
+         - **Boot-path attachment of the composition — done (host-proven +
+           `-M virt`).** The in-kernel unlock kthread now runs the autoload
+           composition off the just-mounted root. Landed: the kernel/core
+           **`'static`-spawner seam** (`InitSpawn::spawn_init` takes
+           `&'static (dyn InitSpawnCtx + Sync)`, `kernel_main` leaks the ctx,
+           forwarded through the three arch `init_spawn` seams to
+           `unlock_service::spawn_if_present`); the **discovered-hardware-tree
+           stash** (`audit_root_storage_binding` leaks the full
+           `&'static [HwNode]` tree — virtio-MMIO block child probed in — and
+           `unlock_service::record_boot` stashes it beside the binding); and
+           the unlock-kthread **tail call** (`aarch64::root_unlock::run_unlock`
+           builds the arch-neutral `unlock_service::AutoloadHook` over the
+           stashed tree + the leaked `'static` ctx and hands it to
+           `unlock_root_disk_interactively` as the `MountedRootHook`, which
+           calls `autoload_from_mounted_root` the instant the root mounts;
+           empty store binds nothing in `Ok`, §18.4). **Remaining** is the
+           autoloadable input driver + its vertical:
            - the autoloadable **user-space input driver `rxe`** the `-M virt`
              vertical proves: `virt` presents a **virtio-input** keyboard (no
              QEMU vertical models USB/xHCI), so promote `drivers/input/virtio_input`
-             (today `register`-only) to a signed autoloadable `rxe` (its logic
-             extracted to a `lib/*` crate, the §17.4 analogue of `lib/hid` ↔
-             `usb_hid`) with a `BIND_KEYS` matching the discovered node — the
-             metal Pi keyboard stays `usb_kbd`, flipped at 5e;
+             to a signed autoloadable `rxe`. Its §18.3 **`BIND_KEYS` bind table
+             is landed** (`HwMatchKey::virtio(18)`, `VIRTIO_INPUT_DEVICE_ID =
+             18`, exact-match tier — host-tested + README + docs). Remaining:
+             extract its `open`/`poll`/`decode` logic to a `lib/*` crate (the
+             §17.4 analogue of `lib/hid` ↔ `usb_hid`) and add the `rxe`
+             `main.rs` over `lib/drvrt`+`lib/rt` whose manifest carries that
+             `BIND_KEYS` — the metal Pi keyboard stays `usb_kbd`, flipped at 5e;
            - the **`-M virt` autoload vertical** (rustfs root with the signed
              input-driver bundle + unlock descriptor, a virtio-keyboard device
              → unlock → enumerate → `autoload_from_mounted_root` → spawn →

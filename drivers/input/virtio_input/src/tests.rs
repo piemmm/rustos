@@ -233,6 +233,27 @@ fn register_requires_drv_load() {
 }
 
 #[test]
+fn bind_table_matches_a_virtio_input_node() {
+    use rustos_abi::HwMatchKey;
+
+    // One entry at the declared exact-match priority, matching a
+    // discovered virtio node whose probed device id is `virtio-input`
+    // (`AGENTS.md` §18.3).
+    assert_eq!(BIND_KEYS.len(), 1);
+    assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
+    let input = HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID);
+    assert!(BIND_KEYS[0].key.matches(&input));
+
+    // A different virtio device (e.g. virtio-blk, device id 2) and a
+    // non-virtio node both fail the match — the caller leaves them
+    // unbound rather than guessing (`AGENTS.md` §18.4 / §2.9).
+    let blk = HwMatchKey::virtio(2);
+    assert!(!BIND_KEYS[0].key.matches(&blk));
+    let pci_input = HwMatchKey::pci(0x1234, 0x5678, 0x09_00_00);
+    assert!(!BIND_KEYS[0].key.matches(&pci_input));
+}
+
+#[test]
 fn close_resets_the_device() {
     let (t, _events) = build_device();
     let dev = open_input(t);

@@ -3622,48 +3622,36 @@ table, so a new board is match **data**, not new code. Sub-increments
         payload/caps/grants/args unchanged) and the `driver_spawn_qemu_aarch64`
         `-M virt` vertical now drives the chain through this seam (no
         hand-built `KernelSpawnCtx`). No `lib/abi`/C-header change.
-      - **Remaining — gated on the production root mount.** `autoload_drivers`
-        cannot run in production until the root volume that backs
-        `/System/Drivers/` is mounted at boot, which is the P11 root-mount
-        increment (the production `boot_aarch64` does **not** yet mount the
-        root — the metal `users_db_read err=12` residual is exactly this). The
-        following therefore land **with** that root-mount work, not before it:
-        - the production driver-spawn *caller* attachment: the composition
-          (`autoload_from_mounted_root`) and the spawn seam +
-          `InitCtxDriverProcessSpawn` bridge are now all ready; what remains is
-          the boot-path *attachment* — three coupled pieces:
-          - a kernel/core `'static`-spawner seam: the unlock kthread mounts the
-            root **after** `admit_init` has diverged into the dispatch loop and
-            never returns, so its `'static`+`Send` body cannot capture the
-            init seam's borrowed `&dyn InitSpawnCtx`. Widen
-            `InitSpawn::spawn_init` to take `&'static (dyn InitSpawnCtx + Sync)`
-            (the ctx already borrows the `Box::leak`'d `'static` `KernelState`,
-            so `KernelInitSpawner<'static, A>` is `'static`; confirm/realise
-            its `Sync`), have `kernel_main` leak the ctx, and forward the
-            `'static` ctx through the three arch `init_spawn` seams to
-            `unlock_service::spawn_if_present`;
-          - a **discovered-hardware-tree stash** for the unlock kthread:
-            `audit_root_storage_binding` today stashes only the root *binding*
-            (`unlock_service::record_boot`), not the full `&[HwNode]` tree the
-            match needs (the input-device node included). Collect the
-            discovered nodes into an owned tree and stash it beside the binding
-            so the kthread can match against it (`AGENTS.md` §18.1);
-          - the unlock-kthread **tail call**: once `unlock_root_disk_interactively`
-            returns `Installed` (root mounted, `RustFs` alive), call
-            `autoload_from_mounted_root(fs, tree, trusted, &AARCH64_PROCESS_SPAWN,
-            …)` over the just-mounted volume, the stashed tree, and the leaked
-            `'static` init ctx — binding nothing when no node matches (§18.4).
+      - **Boot-path attachment — done (host-proven + `-M virt`).** The
+        production unlock kthread now runs the autoload composition off the
+        just-mounted root. Landed: the `'static`-spawner seam
+        (`InitSpawn::spawn_init` takes `&'static (dyn InitSpawnCtx + Sync)`,
+        `kernel_main` leaks the ctx, forwarded through the three arch
+        `init_spawn` seams to `unlock_service::spawn_if_present`); the
+        discovered-hardware-tree stash (`audit_root_storage_binding` leaks the
+        full `&'static [HwNode]` tree — virtio-MMIO block child probed in —
+        and `unlock_service::record_boot` stashes it beside the binding); and
+        the unlock-kthread tail call (`aarch64::root_unlock::run_unlock` builds
+        an arch-neutral `unlock_service::AutoloadHook` over the stashed tree +
+        the leaked `'static` ctx and hands it to
+        `unlock_root_disk_interactively` as the `MountedRootHook`, which calls
+        `autoload_from_mounted_root` the instant the root mounts — binding
+        nothing when no node matches, §18.4). Empty store ⇒ nothing autoloads
+        in `Ok`. **Remaining** is the autoloadable user-space input driver and
+        its vertical:
         - the autoloadable **user-space input driver `rxe`** the `-M virt`
           vertical proves: `-M virt` presents a **virtio-input** keyboard
           (not USB/xHCI — no QEMU vertical models xHCI), served by
-          `drivers/input/virtio_input`, today a `register`-only driver-host
-          driver. Promote its reusable logic to a `lib/*` crate (the §17.4
-          analogue of `lib/hid` ↔ `usb_hid`) and add a signed, autoloadable
-          `rxe` binary over `lib/drvrt`+`lib/rt` with a `BIND_KEYS` table that
-          matches the discovered virtio-input node — the most architecturally
-          honest "driver in user space by discovery" proof on the hardware
-          `virt` actually has (the metal Pi keyboard stays `usb_kbd`, flipped
-          at 5e);
+          `drivers/input/virtio_input`. The driver's §18.3 `BIND_KEYS` bind
+          table is **landed** (`HwMatchKey::virtio(18)` at the exact-match
+          priority tier — the single source of truth its signed manifest is
+          authored from; host-tested + README/`docs/src/drivers/input.md`).
+          **Remaining:** promote its reusable `open`/`poll`/`decode` logic to a
+          `lib/*` crate (the §17.4 analogue of `lib/hid` ↔ `usb_hid`) and add a
+          signed, autoloadable `rxe` binary over `lib/drvrt`+`lib/rt` whose
+          manifest carries that `BIND_KEYS` — the most architecturally honest
+          "driver in user space by discovery" proof on the hardware `virt`
+          actually has (the metal Pi keyboard stays `usb_kbd`, flipped at 5e);
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
           holding the signed input-driver bundle + the unlock descriptor,
           attach a virtio-keyboard device → unlock → `enumerate_driver_store`

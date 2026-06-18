@@ -121,6 +121,15 @@ device-visible buffer through the host `VirtioHost` DMA seam and reaches
 the device only through the `Transport` seam, so it holds no ambient
 authority (`AGENTS.md` §4 / §17.4).
 
+It publishes a canonical `BIND_KEYS` table (`AGENTS.md` §18.3): one
+entry matching a probed virtio node whose device id is `virtio-input`
+(`HwMatchKey::virtio(18)`) at the exact-match priority tier, the single
+source of truth its signed-manifest bind table is authored from and the
+data `devmgr` (or the in-kernel bootstrap-floor catalogue) resolves a
+discovered virtio-input node against. The key carries no transport
+detail, so the same driver binds whether the device is attached over
+virtio-MMIO or PCI (`AGENTS.md` §2.2 / §17.4).
+
 QEMU integration on a live device is exercised by
 `tests/integration/input_virtio_mmio_qemu_aarch64`
 (`rustos-test-input-virtio-mmio-qemu-aarch64`, enrolled in `cargo xtask

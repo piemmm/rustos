@@ -91,6 +91,9 @@ in-process `MockTransport`/`MockHost` doubles:
 - Relative pointer (X / Y) and scroll-wheel decode.
 - Frame-marker (`EV_SYN`) and unmodelled-event discard.
 - `open` → `close` (load → unload) round-trip.
+- The §18.3 `BIND_KEYS` table matches a probed `virtio-input` node
+  (device id 18) and rejects a different virtio device id or a
+  non-virtio (PCI) key.
 
 Two QEMU integration verticals — `input_virtio_mmio_qemu_aarch64`
 (`rustos-test-input-virtio-mmio-qemu-aarch64`) and
@@ -109,10 +112,23 @@ IRQ fires and the driver decodes the resulting press and, after reload,
 the matching release. Both verticals run the same driver source and the
 same shared `virtio_input_keypress` key-decode tail (`AGENTS.md` §2.2).
 
+## Discovery binding
+
+The driver publishes a canonical `BIND_KEYS` table (`AGENTS.md` §18.3):
+one entry matching a probed virtio node whose device id is
+`virtio-input` (`HwMatchKey::virtio(18)`), at the exact-match priority
+tier. This `const` is the single source of truth the driver's
+signed-manifest bind table is authored from (`AGENTS.md` §2.2) and the
+data `devmgr` (or the in-kernel bootstrap-floor catalogue) resolves a
+discovered virtio-input node against. The key carries no transport
+detail, so the same driver binds whether the device is attached over
+virtio-MMIO or PCI.
+
 ## Public surface
 
 `AGENTS.md` §8 — the only public *function* is `register`. The
 `VirtioInput` type and its `open` / `close` / `transport_mut` members
 are re-exported so the driver host (and the QEMU vertical) can
 construct and drive an instance; the host reaches it only through the
-`Input` trait afterwards.
+`Input` trait afterwards. `BIND_KEYS` (and `VIRTIO_INPUT_DEVICE_ID`)
+are the §18.3 bind-table data described above.
