@@ -289,6 +289,14 @@ mod stack_arena;
 #[path = "build_support.rs"]
 mod build_support;
 
+// Shared host-test fixtures. The in-memory mock root-volume filesystem
+// driver `MockRootFs` is the surface several boot-path readers delegate
+// through (`driver_store_source`, `driver_autoload`), so it is defined
+// once here rather than copy-pasted into each test module (`AGENTS.md`
+// §2.2). Compiled only under `cargo test`.
+#[cfg(test)]
+mod test_support;
+
 pub use bumpalloc::BumpAllocator;
 
 #[cfg(kernel_isa = "aarch64")]

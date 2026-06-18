@@ -316,6 +316,20 @@ function lives in the kernel binary — the one layer that may name both
 path drives once the root volume that backs the store is mounted in
 production (`plans/PI.md` P10 5d-2-ii "Remaining").
 
+`rustos_kernel::driver_autoload::autoload_from_mounted_root` is the thin
+production glue that drives `autoload_drivers` straight off a **mounted root
+volume**. Given the root volume's filesystem driver `fs` (rustfs on a real
+install), it sources both halves of the scan from `fs` itself: it walks the
+store with `enumerate_driver_store(fs, …)` for the bundle paths, then builds
+a `VfsImageSource` over the *same* `fs` for the bundle bytes. The two reads
+of `fs` are strictly sequential — the path walk returns owned `String`s and
+releases its `&mut` borrow before the source takes it — so the single
+mutable borrow never overlaps. It adds no policy and fails closed (returning
+`VfsError`) only if the private root mount cannot be built; a store that is
+missing, empty, or full of malformed bundles simply binds nothing and
+returns `Ok` (§18.4 / §2.9). This is the composition the boot path's
+root-unlock path calls once the encrypted root is mounted.
+
 ### Audit sink
 
 Every state transition emits one structured `rustos_log::Event` with a

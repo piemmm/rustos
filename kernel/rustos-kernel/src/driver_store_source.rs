@@ -83,187 +83,13 @@ where
 mod tests {
     use super::*;
 
-    use alloc::collections::BTreeMap;
-    use alloc::string::{String, ToString};
     use alloc::vec;
 
-    use rustos_abi::driver::filesystem::{DirEntry, NodeId, NodeInfo, NodeKind, NodeSecurity};
-    use rustos_abi::driver::DriverError;
-
-    const ROOT_ID: u64 = 1;
-
-    /// One node of a minimal mock root volume: a directory tree plus file
-    /// contents, enough to drive the root-backed VFS delegation path.
-    struct Node {
-        kind: NodeKind,
-        children: Vec<(String, u64)>,
-        content: Vec<u8>,
-        security: NodeSecurity,
-    }
-
-    /// A minimal mock root-volume driver serving an in-memory tree, the
-    /// surface `rustos_kernel_core::DriverImageReader` reads through.
-    struct MockFs {
-        nodes: BTreeMap<u64, Node>,
-        next: u64,
-    }
-
-    impl MockFs {
-        fn new() -> Self {
-            let mut nodes = BTreeMap::new();
-            nodes.insert(
-                ROOT_ID,
-                Node {
-                    kind: NodeKind::Directory,
-                    children: Vec::new(),
-                    content: Vec::new(),
-                    security: NodeSecurity::new(0o755, 0, 0),
-                },
-            );
-            Self {
-                nodes,
-                next: ROOT_ID + 1,
-            }
-        }
-
-        fn child(&self, dir: u64, name: &str) -> Option<u64> {
-            self.nodes
-                .get(&dir)?
-                .children
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, id)| *id)
-        }
-
-        fn ensure_dirs(&mut self, comps: &[&str]) -> u64 {
-            let mut cur = ROOT_ID;
-            for &c in comps {
-                cur = if let Some(id) = self.child(cur, c) {
-                    id
-                } else {
-                    let id = self.next;
-                    self.next += 1;
-                    self.nodes.insert(
-                        id,
-                        Node {
-                            kind: NodeKind::Directory,
-                            children: Vec::new(),
-                            content: Vec::new(),
-                            security: NodeSecurity::new(0o755, 0, 0),
-                        },
-                    );
-                    self.nodes
-                        .get_mut(&cur)
-                        .expect("parent")
-                        .children
-                        .push((c.to_string(), id));
-                    id
-                };
-            }
-            cur
-        }
-
-        fn add_file(&mut self, path: &str, content: &[u8]) {
-            let comps: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-            let (name, dirs) = comps.split_last().expect("non-empty path");
-            let parent = self.ensure_dirs(dirs);
-            let id = self.next;
-            self.next += 1;
-            self.nodes.insert(
-                id,
-                Node {
-                    kind: NodeKind::RegularFile,
-                    children: Vec::new(),
-                    content: content.to_vec(),
-                    security: NodeSecurity::new(0o644, 0, 0),
-                },
-            );
-            self.nodes
-                .get_mut(&parent)
-                .expect("parent")
-                .children
-                .push(((*name).to_string(), id));
-        }
-    }
-
-    impl FilesystemRead for MockFs {
-        fn root(&self) -> NodeId {
-            NodeId::from_raw(ROOT_ID)
-        }
-
-        fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-            let n = self.nodes.get(&node.raw()).ok_or(DriverError::NotFound)?;
-            Ok(NodeInfo {
-                kind: n.kind,
-                size: n.content.len() as u64,
-            })
-        }
-
-        fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-            let name = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
-            self.child(dir.raw(), name)
-                .map(NodeId::from_raw)
-                .ok_or(DriverError::NotFound)
-        }
-
-        fn read_at(
-            &mut self,
-            file: NodeId,
-            offset: u64,
-            buf: &mut [u8],
-        ) -> Result<usize, DriverError> {
-            let n = self.nodes.get(&file.raw()).ok_or(DriverError::NotFound)?;
-            let Ok(offset) = usize::try_from(offset) else {
-                return Ok(0);
-            };
-            if offset >= n.content.len() {
-                return Ok(0);
-            }
-            let avail = &n.content[offset..];
-            let take = avail.len().min(buf.len());
-            buf[..take].copy_from_slice(&avail[..take]);
-            Ok(take)
-        }
-
-        fn read_dir(
-            &mut self,
-            dir: NodeId,
-            index: u64,
-            name_out: &mut [u8],
-        ) -> Result<Option<DirEntry>, DriverError> {
-            let n = self.nodes.get(&dir.raw()).ok_or(DriverError::NotFound)?;
-            let Ok(index) = usize::try_from(index) else {
-                return Ok(None);
-            };
-            let Some((name, child_id)) = n.children.get(index) else {
-                return Ok(None);
-            };
-            let bytes = name.as_bytes();
-            if bytes.len() > name_out.len() {
-                return Err(DriverError::LengthOutOfRange);
-            }
-            name_out[..bytes.len()].copy_from_slice(bytes);
-            let kind = self.nodes.get(child_id).ok_or(DriverError::NotFound)?.kind;
-            Ok(Some(DirEntry {
-                node: NodeId::from_raw(*child_id),
-                kind,
-                name_len: bytes.len(),
-            }))
-        }
-    }
-
-    impl FilesystemSecurity for MockFs {
-        fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError> {
-            self.nodes
-                .get(&node.raw())
-                .map(|n| n.security)
-                .ok_or(DriverError::NotFound)
-        }
-    }
+    use crate::test_support::MockRootFs;
 
     #[test]
     fn read_delegates_to_the_reader_and_appends() {
-        let mut fs = MockFs::new();
+        let mut fs = MockRootFs::new();
         fs.add_file("/System/Drivers/usb_kbd", b"BUNDLE");
         let source = VfsImageSource::open(&mut fs).expect("root mount builds");
 
@@ -278,7 +104,7 @@ mod tests {
 
     #[test]
     fn read_serves_multiple_bundles_through_the_one_borrowed_driver() {
-        let mut fs = MockFs::new();
+        let mut fs = MockRootFs::new();
         fs.add_file("/System/Drivers/a", b"AAA");
         fs.add_file("/System/Drivers/b", b"BB");
         let source = VfsImageSource::open(&mut fs).expect("root mount builds");
@@ -293,7 +119,7 @@ mod tests {
 
     #[test]
     fn a_missing_bundle_maps_to_not_found() {
-        let mut fs = MockFs::new();
+        let mut fs = MockRootFs::new();
         fs.add_file("/System/Drivers/present", b"x");
         let source = VfsImageSource::open(&mut fs).expect("root mount builds");
 
@@ -307,7 +133,7 @@ mod tests {
 
     #[test]
     fn a_path_outside_the_store_is_denied() {
-        let mut fs = MockFs::new();
+        let mut fs = MockRootFs::new();
         fs.add_file("/System/Security/Users", b"secret");
         let source = VfsImageSource::open(&mut fs).expect("root mount builds");
 

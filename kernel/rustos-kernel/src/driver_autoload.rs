@@ -45,14 +45,19 @@
 //! exercised end to end by the `-M virt` autoload vertical, exactly as the
 //! sibling [`crate::driver_spawn_loader::SpawnDriverLoader`] is.
 
+use alloc::vec::Vec;
+
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
 use rustos_abi::HwNode;
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_devmgr::{AutoloadReport, DeviceManager};
 use rustos_drvhost::store::scan_store;
 use rustos_drvhost::{ImageSource, Sink};
+use rustos_kernel_core::{enumerate_driver_store, VfsError};
 
 use crate::driver_spawn_loader::{DriverProcessSpawn, SpawnDriverLoader};
+use crate::driver_store_source::VfsImageSource;
 
 /// Scan the installed signed driver store and autoload a user-space driver
 /// for every discovered hardware-tree node that binds one.
@@ -107,6 +112,90 @@ pub fn autoload_drivers(
     DeviceManager::new(sink).autoload(tree, &candidates, caller_caps, &mut loader)
 }
 
+/// Enumerate the `/System/Drivers/` store off the **mounted root volume**
+/// and autoload a user-space driver for every discovered node that binds
+/// one — the single production entry the boot path drives once the root is
+/// mounted (`plans/PI.md` P10 5d-2-ii; `AGENTS.md` §18.3 / §18.6).
+///
+/// This is the thin glue [`autoload_drivers`] is missing for the live boot
+/// path: it sources the store paths and the bundle bytes from the just-
+/// mounted root volume `fs` rather than from a caller-supplied list, then
+/// defers entirely to [`autoload_drivers`] for the match + signed-gate +
+/// spawn pipeline. It adds no policy of its own (`AGENTS.md` §2.2).
+///
+/// The two reads of `fs` are strictly sequential, so the single `&mut`
+/// borrow never overlaps: [`enumerate_driver_store`] walks the store tree
+/// and returns owned paths (releasing its borrow), and only then is `fs`
+/// handed to the [`VfsImageSource`] that reads each winning bundle's bytes.
+///
+/// * `fs` — the mounted root volume's filesystem driver (rustfs on a real
+///   installation), the §5.3-checked surface both the store walk and the
+///   bundle-byte reads delegate through under the kernel's bootstrap
+///   identity (`AGENTS.md` §5.1 — no ambient power).
+/// * `tree` — the discovered hardware tree (`AGENTS.md` §18.1).
+/// * `trusted` — the driver-signing trust anchors the load gate verifies
+///   every winning bundle against (`AGENTS.md` §8 / §9).
+/// * `spawn` — the architecture process-creation mechanism, behind the
+///   [`DriverProcessSpawn`] seam so this stays scheduler-agnostic (§17.1).
+/// * `args` — the startup-argument vector handed to every spawned driver.
+/// * `caller_caps` — the capability set the load gate intersects each
+///   manifest request with; must hold `CAP_DRV_LOAD` or every load fails
+///   closed (`AGENTS.md` §5.2 / §5.4).
+/// * `sink` — the audit sink every scan, match, load, and spawn decision is
+///   logged through (`AGENTS.md` §18.3 / §19.4).
+///
+/// # Errors
+///
+/// [`VfsError`] only if the kernel's private root mount cannot be built for
+/// the bundle-byte reader ([`VfsImageSource::open`]) — the one fail-closed
+/// path that prevents any autoload (`AGENTS.md` §2.9). A store that is
+/// missing, empty, or full of malformed bundles is **not** an error: it
+/// simply yields no candidates and binds nothing (`AGENTS.md` §18.4), so
+/// the [`AutoloadReport`] is returned in `Ok`.
+#[allow(clippy::too_many_arguments)]
+pub fn autoload_from_mounted_root<F>(
+    fs: &mut F,
+    tree: &[HwNode],
+    trusted: &[Ed25519PublicKey],
+    spawn: &dyn DriverProcessSpawn,
+    args: &[&[u8]],
+    caller_caps: &CapabilitySet,
+    sink: &dyn Sink,
+) -> Result<AutoloadReport, VfsError>
+where
+    F: FilesystemRead + FilesystemSecurity + ?Sized,
+{
+    // 1. Structural path discovery off the mounted root (`AGENTS.md`
+    //    §18.6). This reads no bundle and trusts nothing; it audits its own
+    //    `DriverStoreScanned` outcome and is fail-closed — a missing or
+    //    unreadable store yields fewer (or zero) paths, never an error.
+    let store_paths = enumerate_driver_store(fs, sink);
+
+    // 2. Build the bundle-byte reader over the *same* mounted root volume.
+    //    `enumerate_driver_store`'s borrow has ended (it returned owned
+    //    `String`s), so handing `fs` to the source here cannot alias it.
+    //    A failure to build the private root mount is the sole hard refusal
+    //    (fail closed, `AGENTS.md` §2.9).
+    let image_source = VfsImageSource::open(fs)?;
+
+    // 3. The match + signed-gate + spawn pipeline, verbatim. `scan_store`
+    //    wants `&[&str]`, so borrow the owned paths.
+    let path_refs: Vec<&str> = store_paths
+        .iter()
+        .map(alloc::string::String::as_str)
+        .collect();
+    Ok(autoload_drivers(
+        tree,
+        &path_refs,
+        &image_source,
+        trusted,
+        spawn,
+        args,
+        caller_caps,
+        sink,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +214,8 @@ mod tests {
         ABI_VERSION_CURRENT, DRIVER_MANIFEST_MAGIC, HW_NODE_ROOT,
     };
     use rustos_log::{Event, Sink as LogSink};
+
+    use crate::test_support::MockRootFs;
 
     /// Deterministic driver-signing seed for the test trust anchor. A
     /// distinct key models an untrusted signer.
@@ -500,5 +591,137 @@ mod tests {
         assert!(report.bindings.is_empty());
         assert_eq!(report.unbound, 1);
         assert!(spawn.calls.borrow().is_empty());
+    }
+
+    // --- `autoload_from_mounted_root` (the live boot-path composition) ---
+    //
+    // These drive the production composition over a mock *mounted root
+    // volume*: the store paths are discovered by `enumerate_driver_store`
+    // walking the volume's `/System/Drivers/` tree (not a hand-supplied
+    // list), and the bundle bytes are read back through the kernel's
+    // root-backed VFS — the same two reads of the one `&mut` driver the
+    // boot path performs.
+
+    #[test]
+    fn the_mounted_store_is_enumerated_and_a_matched_driver_is_spawned() {
+        // End to end on a mounted root: the signed bundle planted under
+        // `/System/Drivers/` is *discovered* by the store walk, matched to
+        // the discovered node, verified, and spawned with exactly the
+        // node's resources (`AGENTS.md` §18.3 / §18.6).
+        let key = HwMatchKey::virtio(0x1234);
+        let bind_keys = [DriverBindKey::new(5, key)];
+        let payload = b"the-input-driver-rxe-bytes";
+        let sk = signing_key();
+        let bundle = build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &bind_keys, payload);
+
+        let mut fs = MockRootFs::new();
+        // The store tree is `<class>/<driver>` (§16.2); the walk finds the
+        // bundle wherever it lives under the store root.
+        fs.add_file("/System/Drivers/input/kbd", &bundle);
+
+        let trusted = [pubkey_of(&sk)];
+        let spawn = RecordingSpawn::new();
+        let sink = RecordingSink::new();
+        let tree = tree_with_key(key);
+        let args: [&[u8]; 1] = [b"kbd"];
+
+        let report = autoload_from_mounted_root(
+            &mut fs,
+            &tree,
+            &trusted,
+            &spawn,
+            &args,
+            &caller_with_drv_load(),
+            &sink,
+        )
+        .expect("the private root mount builds");
+
+        assert_eq!(report.bindings.len(), 1, "the discovered node binds");
+        assert_eq!(report.bindings[0].node, 2);
+        assert_eq!(report.load_failures, 0);
+
+        let calls = spawn.calls.borrow();
+        assert_eq!(calls.len(), 1, "the discovered driver is spawned once");
+        assert_eq!(calls[0].0, payload, "the verified payload reaches spawn");
+        assert_eq!(
+            calls[0].2,
+            vec![
+                HwResource::mmio(0x0a00_0000, 0x200),
+                HwResource::dma(0x3fff_ffff, 0x1000),
+            ],
+            "only the matched node's resources are granted (§18.3)"
+        );
+        // The store-scan candidate (drvhost 7030) and the devmgr bound-node
+        // (13_001) audit records both appear on the shared sink.
+        let ids = sink.ids();
+        assert!(ids.contains(&7030), "store candidate audited: {ids:?}");
+        assert!(ids.contains(&13_001), "bound node audited: {ids:?}");
+    }
+
+    #[test]
+    fn an_empty_mounted_store_binds_nothing() {
+        // A root with no `/System/Drivers/` tree is the headless / driverless
+        // install: enumeration finds nothing, autoload binds nothing, and the
+        // result is `Ok` — never an error (`AGENTS.md` §18.4 / §2.9).
+        let mut fs = MockRootFs::new();
+        let trusted = [pubkey_of(&signing_key())];
+        let spawn = RecordingSpawn::new();
+        let sink = RecordingSink::new();
+        let tree = tree_with_key(HwMatchKey::virtio(0x1234));
+        let args: [&[u8]; 1] = [b"kbd"];
+
+        let report = autoload_from_mounted_root(
+            &mut fs,
+            &tree,
+            &trusted,
+            &spawn,
+            &args,
+            &caller_with_drv_load(),
+            &sink,
+        )
+        .expect("the private root mount builds");
+
+        assert!(report.bindings.is_empty());
+        assert_eq!(report.unbound, 1, "the node is left unbound, not errored");
+        assert!(spawn.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_untrusted_bundle_on_the_mounted_root_fails_closed() {
+        // A bundle discovered on the root but signed by a key not on the
+        // trust-anchor list is refused at the load gate: the node fails
+        // closed and nothing is spawned (`AGENTS.md` §5.4 / §23.1).
+        let key = HwMatchKey::virtio(0x1234);
+        let bind_keys = [DriverBindKey::new(5, key)];
+        let attacker = untrusted_key();
+        let bundle = build_signed_bundle(&attacker, &[CapabilityId::MMIO_MAP], &bind_keys, b"evil");
+
+        let mut fs = MockRootFs::new();
+        fs.add_file("/System/Drivers/input/kbd", &bundle);
+
+        // The kernel trusts only the legitimate key.
+        let trusted = [pubkey_of(&signing_key())];
+        let spawn = RecordingSpawn::new();
+        let sink = RecordingSink::new();
+        let tree = tree_with_key(key);
+        let args: [&[u8]; 1] = [b"kbd"];
+
+        let report = autoload_from_mounted_root(
+            &mut fs,
+            &tree,
+            &trusted,
+            &spawn,
+            &args,
+            &caller_with_drv_load(),
+            &sink,
+        )
+        .expect("the private root mount builds");
+
+        assert!(report.bindings.is_empty());
+        assert_eq!(report.load_failures, 1, "the gate refuses the node");
+        assert!(
+            spawn.calls.borrow().is_empty(),
+            "an unverified driver is never spawned (§5.4)"
+        );
     }
 }

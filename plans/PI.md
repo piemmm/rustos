@@ -3583,6 +3583,23 @@ table, so a new board is match **data**, not new code. Sub-increments
         without `CAP_DRV_LOAD` loads nothing, an unmatched node is left unbound,
         an empty store binds nothing). No `lib/abi`/C-header change. Docs:
         `docs/src/drivers/host.md` ("Autoloading by discovery").
+      - **Mounted-root composition — done (host-proven).**
+        `rustos_kernel::driver_autoload::autoload_from_mounted_root(fs, tree,
+        trusted, spawn, args, caller_caps, sink)` is the thin production glue
+        the live boot path drives once the root is mounted: it sources the
+        store paths *and* the bundle bytes from the just-mounted root volume
+        `fs` (the rustfs driver) — `enumerate_driver_store(fs, …)` for the
+        §5.3-checked path walk, then a `VfsImageSource` over the *same* `fs`
+        for the bytes (the two `&mut fs` reads are strictly sequential, so the
+        one borrow never overlaps) — and defers entirely to `autoload_drivers`
+        for match + signed gate + spawn. It adds no policy and fails closed
+        only if the private root mount cannot be built (`VfsError`); a missing
+        / empty / malformed store binds nothing in `Ok` (§18.4 / §2.9).
+        Host-proven (3 `driver_autoload` tests over the shared `MockRootFs`
+        fixture: a planted signed bundle is *discovered* and spawned with
+        exactly the node's resources, an empty store binds nothing, an
+        untrusted bundle fails the node closed). No `lib/abi`/C-header change.
+        Docs: `docs/src/drivers/host.md` ("Autoloading by discovery").
       - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
         virt`).** `InitSpawnCtx::spawn_driver_process(spawn, rxe, caps, grants,
         args)` (default fail-closed `NotImplemented`, §2.9) is the production
@@ -3611,16 +3628,50 @@ table, so a new board is match **data**, not new code. Sub-increments
         increment (the production `boot_aarch64` does **not** yet mount the
         root — the metal `users_db_read err=12` residual is exactly this). The
         following therefore land **with** that root-mount work, not before it:
-        - the production driver-spawn *caller* wiring: a new
-          `InitSpawnCtx`-driven `DriverProcessSpawn` reachable from
-          `init_spawn` (the seam + `InitCtxDriverProcessSpawn` bridge above are
-          ready; what remains is the boot path that hands `autoload_drivers` a
-          live `KernelInitSpawner` once the root is mounted);
+        - the production driver-spawn *caller* attachment: the composition
+          (`autoload_from_mounted_root`) and the spawn seam +
+          `InitCtxDriverProcessSpawn` bridge are now all ready; what remains is
+          the boot-path *attachment* — three coupled pieces:
+          - a kernel/core `'static`-spawner seam: the unlock kthread mounts the
+            root **after** `admit_init` has diverged into the dispatch loop and
+            never returns, so its `'static`+`Send` body cannot capture the
+            init seam's borrowed `&dyn InitSpawnCtx`. Widen
+            `InitSpawn::spawn_init` to take `&'static (dyn InitSpawnCtx + Sync)`
+            (the ctx already borrows the `Box::leak`'d `'static` `KernelState`,
+            so `KernelInitSpawner<'static, A>` is `'static`; confirm/realise
+            its `Sync`), have `kernel_main` leak the ctx, and forward the
+            `'static` ctx through the three arch `init_spawn` seams to
+            `unlock_service::spawn_if_present`;
+          - a **discovered-hardware-tree stash** for the unlock kthread:
+            `audit_root_storage_binding` today stashes only the root *binding*
+            (`unlock_service::record_boot`), not the full `&[HwNode]` tree the
+            match needs (the input-device node included). Collect the
+            discovered nodes into an owned tree and stash it beside the binding
+            so the kthread can match against it (`AGENTS.md` §18.1);
+          - the unlock-kthread **tail call**: once `unlock_root_disk_interactively`
+            returns `Installed` (root mounted, `RustFs` alive), call
+            `autoload_from_mounted_root(fs, tree, trusted, &AARCH64_PROCESS_SPAWN,
+            …)` over the just-mounted volume, the stashed tree, and the leaked
+            `'static` init ctx — binding nothing when no node matches (§18.4).
+        - the autoloadable **user-space input driver `rxe`** the `-M virt`
+          vertical proves: `-M virt` presents a **virtio-input** keyboard
+          (not USB/xHCI — no QEMU vertical models xHCI), served by
+          `drivers/input/virtio_input`, today a `register`-only driver-host
+          driver. Promote its reusable logic to a `lib/*` crate (the §17.4
+          analogue of `lib/hid` ↔ `usb_hid`) and add a signed, autoloadable
+          `rxe` binary over `lib/drvrt`+`lib/rt` with a `BIND_KEYS` table that
+          matches the discovered virtio-input node — the most architecturally
+          honest "driver in user space by discovery" proof on the hardware
+          `virt` actually has (the metal Pi keyboard stays `usb_kbd`, flipped
+          at 5e);
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
-          holding a signed `usb_kbd` bundle → `enumerate_driver_store` →
-          `autoload_drivers` → spawn `usb_kbd` → prove a keystroke reaches the
-          arbiter), enrolled in `qemu_tests`;
-        - `tools/mkimage` laying the signed `usb_kbd` bundle into
+          holding the signed input-driver bundle + the unlock descriptor,
+          attach a virtio-keyboard device → unlock → `enumerate_driver_store`
+          → `autoload_from_mounted_root` → spawn the input driver → prove a
+          typed keystroke reaches the input-focus arbiter via `key_inject`),
+          enrolled in `qemu_tests`, keyed on a new production audit witness
+          (mirroring `root_unlock_admission`);
+        - `tools/mkimage` laying the signed input-driver bundle into
           `/System/Drivers/`, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —
           deferred with (d) so the bundle is signed against the *finalised*

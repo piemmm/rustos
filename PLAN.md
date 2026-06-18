@@ -1010,6 +1010,18 @@ order (one fully-gated increment each):
            spawn with the node's resources, untrusted-signature/missing-cap
            fail-closed, unmatched unbound, empty-store). Docs:
            `docs/src/drivers/host.md` ("Autoloading by discovery").
+         - **Mounted-root composition — done (host-proven).**
+           `rustos_kernel::driver_autoload::autoload_from_mounted_root(fs, …)`
+           is the thin glue that drives `autoload_drivers` straight off a
+           mounted root volume `fs`: it walks the store with
+           `enumerate_driver_store(fs, …)` then builds a `VfsImageSource` over
+           the *same* `fs` (the two `&mut fs` reads are strictly sequential, so
+           the one borrow never overlaps), and defers to `autoload_drivers`. It
+           adds no policy and fails closed (`VfsError`) only if the private root
+           mount cannot be built; a missing/empty/malformed store binds nothing
+           in `Ok` (§18.4/§2.9). Host-proven (3 `driver_autoload` tests over the
+           shared `MockRootFs` fixture: discovered-bundle spawn, empty store,
+           untrusted bundle fail-closed). Docs: `docs/src/drivers/host.md`.
          - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
            virt`).** `InitSpawnCtx::spawn_driver_process(spawn, rxe, caps,
            grants, args)` (default fail-closed `NotImplemented`, §2.9) builds
@@ -1029,21 +1041,43 @@ order (one fully-gated increment each):
            `driver_spawn_qemu_aarch64` `-M virt` vertical now drives the chain
            through this seam (no hand-built `KernelSpawnCtx`). No
            `lib/abi`/C-header change.
-         - **Remaining — gated on the production root mount.**
-           `autoload_drivers` cannot run in production until the root volume
-           backing `/System/Drivers/` is mounted at boot (the P11 root-mount
-           increment; the production `boot_aarch64` does not yet mount the root,
-           the metal `users_db_read err=12` residual). These land **with** that
-           work: the production driver-spawn *caller* wiring from `init_spawn`
-           (the seam + `InitCtxDriverProcessSpawn` bridge above are ready; what
-           remains is handing `autoload_drivers` a live `KernelInitSpawner` once
-           the root is mounted); the `-M virt` autoload vertical (rustfs root
-           with a signed `usb_kbd` bundle → `autoload_drivers` → spawn →
-           keystroke); `tools/mkimage` laying the signed `usb_kbd` bundle into
-           the store (signed against the finalised production trust anchor, a
-           seed shared with the kernel build §2.2); and **5e/(d)** below.
-           Flipping is blocked on the root mount so it never regresses the
-           working metal keyboard (§2.17).
+         - **Remaining — the boot-path attachment of the composition.** The
+           mounted-root composition (`autoload_from_mounted_root`) and the
+           spawn seam are ready; what remains is attaching them to the live
+           boot path now that the `-M virt` root mounts (the in-kernel unlock
+           kthread). Coupled pieces:
+           - a kernel/core **`'static`-spawner seam**: the unlock kthread
+             mounts the root *after* `admit_init` has diverged into the
+             dispatch loop and never returns, so its `'static`+`Send` body
+             cannot capture the init seam's borrowed `&dyn InitSpawnCtx`. Widen
+             `InitSpawn::spawn_init` to `&'static (dyn InitSpawnCtx + Sync)`
+             (the ctx already borrows the `Box::leak`'d `'static` `KernelState`,
+             so `KernelInitSpawner<'static, A>` is `'static` — realise/confirm
+             its `Sync`), leak the ctx in `kernel_main`, and forward it through
+             the three arch `init_spawn` seams to `unlock_service`;
+           - a **discovered-hardware-tree stash** for the kthread (today only
+             the root *binding* is stashed, not the `&[HwNode]` tree the match
+             needs, §18.1);
+           - the unlock-kthread **tail call** to
+             `autoload_from_mounted_root(fs, tree, trusted,
+             &AARCH64_PROCESS_SPAWN, …)` once the root is `Installed`;
+           - the autoloadable **user-space input driver `rxe`** the `-M virt`
+             vertical proves: `virt` presents a **virtio-input** keyboard (no
+             QEMU vertical models USB/xHCI), so promote `drivers/input/virtio_input`
+             (today `register`-only) to a signed autoloadable `rxe` (its logic
+             extracted to a `lib/*` crate, the §17.4 analogue of `lib/hid` ↔
+             `usb_hid`) with a `BIND_KEYS` matching the discovered node — the
+             metal Pi keyboard stays `usb_kbd`, flipped at 5e;
+           - the **`-M virt` autoload vertical** (rustfs root with the signed
+             input-driver bundle + unlock descriptor, a virtio-keyboard device
+             → unlock → enumerate → `autoload_from_mounted_root` → spawn →
+             prove a typed keystroke reaches the input-focus arbiter via
+             `key_inject`), keyed on a new production audit witness;
+           - `tools/mkimage` laying the signed bundle into the store (signed
+             against the finalised production trust anchor, a seed shared with
+             the kernel build §2.2); and **5e/(d)** below.
+           Flipping the metal scaffold is gated on the §0.9 metal checkpoint so
+           it never regresses the working metal keyboard (§2.17).
      - **5e — delete `usb_keyboard.rs` + `keyboard_service.rs`** (§2.14),
        evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), and update §3 /
