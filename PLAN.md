@@ -1068,11 +1068,23 @@ order (one fully-gated increment each):
              §17.4 analogue of `lib/hid` ↔ `usb_hid`) and add the `rxe`
              `main.rs` over `lib/drvrt`+`lib/rt` whose manifest carries that
              `BIND_KEYS` — the metal Pi keyboard stays `usb_kbd`, flipped at 5e;
+           - **virtio-input hardware-tree discovery — done:**
+             `root_storage::observe_virtio_mmio_input_devices` probes each
+             `virtio,mmio` slot for virtio-input (id 18) and emits a discovered
+             `HwDeviceClass::Input` node carrying its register window
+             (`HwResource::mmio(base, len)`, the extent from the new
+             `VirtioMmioBus::slot_window`, §18.1) — the node the autoload spawn
+             mints the user-space driver's window grant from (§18.3). Wired
+             into `aarch64::boot` beside the block probe, host-tested,
+             metal-neutral (no-op on the Pi tree, §2.17);
            - the **`-M virt` autoload vertical** (rustfs root with the signed
              input-driver bundle + unlock descriptor, a virtio-keyboard device
              → unlock → enumerate → `autoload_from_mounted_root` → spawn →
              prove a typed keystroke reaches the input-focus arbiter via
-             `key_inject`), keyed on a new production audit witness;
+             `key_inject`), keyed on a new production audit witness — needs the
+             kernel driver-signing seed hoisted to a shared single source (§2.2)
+             so the fixture bundle is kernel-trusted, and a one-shot
+             `key_inject` audit witness (§20);
            - `tools/mkimage` laying the signed bundle into the store (signed
              against the finalised production trust anchor, a seed shared with
              the kernel build §2.2); and **5e/(d)** below.

@@ -3691,13 +3691,40 @@ table, so a new board is match **data**, not new code. Sub-increments
           most architecturally honest "driver in user space by discovery" proof
           on the hardware `virt` actually has (the metal Pi keyboard stays
           `usb_kbd`, flipped at 5e). **Remaining** is the vertical + bundle:
+        - **virtio-input hardware-tree discovery — done (host-proven).** The
+          bootstrap-floor virtio-MMIO enumeration now also discovers
+          **user-space-autoloadable input devices**:
+          `root_storage::observe_virtio_mmio_input_devices` probes each
+          `virtio,mmio` slot's `DeviceID` for virtio-input
+          (`VIRTIO_INPUT_DEVICE_ID = 18`) and emits a discovered
+          `HwDeviceClass::Input` node keyed by `HwMatchKey::virtio(18)` and
+          carrying `HwResource::mmio(base, len)`. Unlike the in-kernel block
+          floor (whose bring-up re-derives the window from the tree by base) a
+          user-space input driver is minted a grant per requested resource
+          (§18.3), so the node **must** carry its window; the extent is the
+          discovered `reg` length surfaced by the new
+          `VirtioMmioBus::slot_window` (§18.1 — discovered, never a literal),
+          implemented in `drivers/bus/mmio`. Wired into
+          `aarch64::boot::audit_root_storage_binding` beside the block probe,
+          so the leaked hardware tree the unlock kthread autoloads against
+          carries the input node. Additive + metal-neutral (no `virtio,mmio`
+          on the Pi tree, §2.17); host-tested (`root_storage` input-discovery
+          tests, `slot_window` in `lib/abi` + `drivers/bus/mmio`); whole gate
+          green incl. the full `-M virt` matrix. This is the discovery the
+          autoload spawn below binds against.
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
           holding the signed input-driver bundle + the unlock descriptor,
           attach a virtio-keyboard device → unlock → `enumerate_driver_store`
           → `autoload_from_mounted_root` → spawn the input driver → prove a
           typed keystroke reaches the input-focus arbiter via `key_inject`),
           enrolled in `qemu_tests`, keyed on a new production audit witness
-          (mirroring `root_unlock_admission`);
+          (mirroring `root_unlock_admission`). Its fixture rustfs root must
+          carry a `virtio_kbd.rxe` bundle signed by the kernel's
+          driver-signing key — so the kernel `KERNEL_DRIVER_SIGNING_SEED` must
+          first be hoisted to a shared single-source location (§2.2) both the
+          kernel build and the fixture build sign from; and the production
+          `key_inject` path needs a one-shot audit witness when an autoloaded
+          driver first delivers input to the arbiter (not per-keystroke, §20);
         - `tools/mkimage` laying the signed input-driver bundle into
           `/System/Drivers/`, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —

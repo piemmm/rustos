@@ -352,6 +352,28 @@ fn map_slot_window_propagates_capability_denial() {
     );
 }
 
+#[test]
+fn slot_window_len_reports_the_dtb_declared_extent() {
+    let blob = build_virt_dtb(4);
+    let dtb = Fdt::new(&blob).expect("DTB parses");
+    let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
+    // The `virt` layout advertises a 0x200-byte window per slot; the
+    // unmapped extent lookup reads it straight from the `reg` pair and
+    // touches no device register (no mapper involved).
+    assert_eq!(bus.slot_window_len(0x0A00_0200), Ok(0x200));
+}
+
+#[test]
+fn slot_window_len_reports_not_found_for_unknown_base() {
+    let blob = build_virt_dtb(2);
+    let dtb = Fdt::new(&blob).expect("DTB parses");
+    let bus = Mmio::new(dtb, FakeMmio { regs: vec![] });
+    assert_eq!(
+        bus.slot_window_len(0x0B00_0000).unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
 // ---- `virtio_mmio_bus_from_dtb` construction seam ------------------------
 
 /// Build a minimal `virt`-style DTB whose `virtio,mmio` slots sit at the

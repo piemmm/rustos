@@ -149,6 +149,14 @@ rustos-partition = { path = "../../lib/partition", version = "=0.0.0" }
 # so they are common dependencies and their host tests run on the CI host.
 rustos-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
+# The canonical virtio-input device id (`VIRTIO_INPUT_DEVICE_ID = 18`) the
+# bootstrap-floor discovery walk (`root_storage::observe_virtio_mmio_input_devices`)
+# matches a probed `virtio,mmio` slot's `DeviceID` against to emit a
+# user-space-autoloadable input node — the single source of truth the
+# `drivers/input/virtio_*` bind tables are also built from (`AGENTS.md`
+# §2.2 / §18.3). A `lib/*` crate, arch-neutral, so its host tests run on
+# the CI host.
+rustos-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
 # Zero-on-drop for the passphrase-derived `VolumeKey` on the boot stack
 # (`AGENTS.md` §4 — secret hygiene). The same audited crate `kernel/mem`
 # delegates its sensitive-region zeroing to (`AGENTS.md` §6 / §2.12 — no

@@ -41,6 +41,8 @@
 //! stable `ROOT_STORAGE_AUTOLOAD` event id (`AGENTS.md` §19.4).
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
+use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
+use rustos_abi::hwtree::HwResource;
 use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
 use rustos_arch_api::{DiscoveryError, HwNodeSink};
 use rustos_devmatch::MatchResolution;
@@ -48,6 +50,7 @@ use rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
 use rustos_kernel_virtio::MAX_SLOTS;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
+use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 
 use crate::driver_catalog;
 
@@ -64,6 +67,16 @@ use crate::driver_catalog;
 /// but a disjoint range keeps the origin of each id unambiguous). One id
 /// per enumerated block slot, so distinct disks stay distinct.
 const VIRTIO_PROBE_NODE_BASE_ID: u32 = 0x8000_0000;
+
+/// First synthetic hardware-tree id for a probed virtio-MMIO **input**
+/// child node ([`observe_virtio_mmio_input_devices`]).
+///
+/// Kept disjoint from [`VIRTIO_PROBE_NODE_BASE_ID`] (the block-child base)
+/// so a block node and an input node discovered on the same bus never
+/// share an id — the two probe walks number independently, and a shared id
+/// would make the leaked tree's node origins ambiguous. One id per
+/// enumerated input slot, so distinct devices stay distinct.
+const VIRTIO_INPUT_PROBE_NODE_BASE_ID: u32 = 0x8001_0000;
 
 /// Audit event id for the root-storage bind gate (`AGENTS.md` §19.4 — a
 /// stable id for the security-relevant bind decision). Sits beside the
@@ -304,6 +317,104 @@ pub fn observe_virtio_mmio_block_devices(
     Ok(())
 }
 
+/// Enumerate the virtio-MMIO `bus` and emit each populated **virtio-input**
+/// slot into `sink` as a discovered, user-space-autoloadable device node
+/// carrying its register window as a capability-grant request
+/// (`AGENTS.md` §18.2 / §18.3 / §18.6).
+///
+/// This is the input-device analogue of [`observe_virtio_mmio_block_devices`],
+/// and the discovery step the user-space input-driver autoload depends on:
+/// a virtio keyboard/pointer is driven entirely from user space (`AGENTS.md`
+/// §4 — drivers in user space), so unlike the in-kernel bootstrap-floor
+/// block path (whose bring-up re-derives the slot window from the device
+/// tree by base) the input node **must** carry its MMIO window as an
+/// [`HwResource`]. The privileged driver-spawn path mints exactly one
+/// device-resource grant per resource the matched node requested
+/// ([`crate::driver_spawn_loader`]), so the autoloaded driver is handed a
+/// window grant of precisely the slot it owns — and nothing more
+/// (`AGENTS.md` §18.3 / §4 — no ambient authority).
+///
+/// Each populated slot whose `DeviceID` register equals
+/// [`VIRTIO_INPUT_DEVICE_ID`] (the genuine probed identity read from the
+/// transport, never a fabricated key — `AGENTS.md` §18.5) is emitted as an
+/// [`HwDeviceClass::Input`] node keyed by [`HwMatchKey::virtio`] and
+/// carrying [`HwResource::mmio`] over the slot's discovered base and the
+/// extent [`VirtioMmioBus::slot_window`] reports from the device tree
+/// (`AGENTS.md` §18.1 — a discovered value, never a literal). The node is
+/// emitted into the same buffered hardware tree the discovery walk and the
+/// block probe write to, so the unlock kthread's `devmgr` autoload sees one
+/// faithful tree (`AGENTS.md` §18.1 / §2.2).
+///
+/// Driver-agnostic: it reaches the bus only through the frozen
+/// [`VirtioMmioBus`] / [`Bus`] ABI seams (`AGENTS.md` §8), so the boot path
+/// never names a concrete `drivers/bus/*` type. The Raspberry Pi 4 firmware
+/// tree describes no `virtio,mmio` node, so this is a no-op there — it is
+/// the QEMU `virt`-board path, additive and metal-neutral (`AGENTS.md`
+/// §2.17).
+///
+/// A slot whose window extent cannot be resolved (a malformed `reg`), or a
+/// fresh node that cannot hold its single match key and resource, is
+/// **skipped** rather than emitted on a partial identity — a node the
+/// kernel cannot mint a correct, bounded grant for is left undiscovered and
+/// thus unbound, never half-described (fail closed, `AGENTS.md` §2.9 /
+/// §18.4).
+///
+/// # Errors
+///
+/// Propagates the bus enumeration error verbatim — [`DriverError::BufferTooSmall`]
+/// when more than [`MAX_SLOTS`] slots respond, or a malformed-tree
+/// [`DriverError::DeviceFault`]. A [`DiscoveryError::SinkFull`] from a full
+/// sink is surfaced as [`DriverError::BufferTooSmall`]. The caller leaves
+/// the affected node undiscovered on any error (fail closed, §18.4).
+pub fn observe_virtio_mmio_input_devices(
+    bus: &dyn VirtioMmioBus,
+    sink: &mut dyn HwNodeSink,
+) -> Result<(), DriverError> {
+    let blank = BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    };
+    let mut table = [blank; MAX_SLOTS];
+    let count = bus.enumerate(&mut table)?;
+    let mut next_id = VIRTIO_INPUT_PROBE_NODE_BASE_ID;
+    for device in &table[..count] {
+        if device.device != VIRTIO_INPUT_DEVICE_ID {
+            continue;
+        }
+        // The window extent the device tree declares for this slot. A
+        // malformed `reg` (or a base the bus cannot resolve) means the
+        // kernel cannot size a correct grant, so skip the node rather than
+        // grant a guessed window (fail closed, `AGENTS.md` §5.4 / §2.9).
+        let Ok(len) = bus.slot_window(device.address) else {
+            continue;
+        };
+        let mut node = HwNode::new(next_id, HW_NODE_ROOT, HwDeviceClass::Input);
+        next_id = next_id.wrapping_add(1);
+        // The probed bind identity plus the register window the matched
+        // node requests as a grant. Both fit a fresh node by the ABI's
+        // capacity; a node that somehow could not hold either is dropped
+        // rather than emitted on a partial identity (`AGENTS.md` §2.9).
+        if node
+            .push_match_key(HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID))
+            .is_ok()
+            && node
+                .push_resource(HwResource::mmio(device.address, len))
+                .is_ok()
+        {
+            // A full sink (`DiscoveryError::SinkFull`) is the only emit
+            // failure a buffering sink raises; surface it as the same
+            // bounded-capacity refusal an over-full bus does (fail closed,
+            // `AGENTS.md` §2.9 / §24.4).
+            sink.emit(node)
+                .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +623,47 @@ mod tests {
         }
     }
 
+    /// Window extent the fake reports for every populated slot — the
+    /// `virt` board's per-slot virtio-MMIO register-block size, matching
+    /// the live `drivers/bus/mmio` reader.
+    const FAKE_SLOT_WINDOW: u64 = 0x200;
+
+    impl VirtioMmioBus for FakeBus {
+        fn map_slot_window(
+            &self,
+            _base: u64,
+            _mapper: &dyn rustos_abi::MmioMapper,
+        ) -> Result<rustos_abi::RegisterWindow, DriverError> {
+            // The input-discovery walk never maps a window (it only reads
+            // the slot extent through `slot_window`), so the host tests
+            // never reach this method; it exists only to satisfy the trait.
+            Err(DriverError::NotFound)
+        }
+
+        fn slot_window(&self, base: u64) -> Result<u64, DriverError> {
+            if self.slots.iter().any(|s| s.address == base) {
+                Ok(FAKE_SLOT_WINDOW)
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+    }
+
+    /// Collects every node a discovery probe emits, so the input-discovery
+    /// tests can assert the emitted node's class, bind key, and resource
+    /// directly. Unbounded, so emit never fails.
+    #[derive(Default)]
+    struct CollectingSink {
+        nodes: alloc::vec::Vec<HwNode>,
+    }
+
+    impl HwNodeSink for CollectingSink {
+        fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
+            self.nodes.push(node);
+            Ok(())
+        }
+    }
+
     /// Folds each probed child a [`observe_virtio_mmio_block_devices`] call
     /// emits into a [`RootBlockSelection`], so the enumeration tests assert
     /// the binding decision through the same streaming accumulator the
@@ -613,5 +765,89 @@ mod tests {
             .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Error);
+    }
+
+    #[test]
+    fn a_probed_virtio_input_slot_is_discovered_with_its_mmio_window() {
+        // A populated virtio-input slot (DeviceID 18) is emitted as a
+        // user-space-autoloadable `Input` node keyed by its probed virtio
+        // device id and carrying its register window as a grant request —
+        // the discovery the input-driver autoload binds against
+        // (`AGENTS.md` §18.2 / §18.3).
+        let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Input));
+        assert_eq!(node.id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)]
+        );
+        // The grant request is exactly the slot's discovered window — the
+        // driver is minted a window of precisely the region it owns.
+        assert_eq!(node.resources(), &[HwResource::mmio(0x0A00_0000, 0x200)]);
+    }
+
+    #[test]
+    fn a_non_input_virtio_slot_emits_no_input_node() {
+        // A virtio-blk slot (2) and a virtio-net slot (1) are not input
+        // devices, so the input probe emits nothing (`AGENTS.md` §18.2).
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, 1]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        assert!(sink.nodes.is_empty());
+    }
+
+    #[test]
+    fn an_input_slot_beside_a_block_slot_emits_only_the_input_node() {
+        // On a mixed bus the input probe emits exactly the input device and
+        // ignores the block disk; its node id comes from the disjoint input
+        // base, so it can never collide with a block probe child
+        // (`AGENTS.md` §2.2 / §18.1).
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        let node = &sink.nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Input));
+        assert_eq!(node.id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
+        // The input device sits in slot 1 (base = 0x0A00_0000 + 0x200).
+        assert_eq!(node.resources(), &[HwResource::mmio(0x0A00_0200, 0x200)]);
+    }
+
+    #[test]
+    fn two_input_slots_get_distinct_ids_and_windows() {
+        // Two virtio-input devices each become a distinct node with its own
+        // discovered window, so a keyboard and a pointer are never merged.
+        let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 2);
+        assert_eq!(sink.nodes[0].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
+        assert_eq!(sink.nodes[1].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID + 1);
+        assert_eq!(
+            sink.nodes[0].resources(),
+            &[HwResource::mmio(0x0A00_0000, 0x200)]
+        );
+        assert_eq!(
+            sink.nodes[1].resources(),
+            &[HwResource::mmio(0x0A00_0200, 0x200)]
+        );
+    }
+
+    #[test]
+    fn an_overfull_bus_fails_closed_for_input() {
+        // More than `MAX_SLOTS` responding slots cannot be enumerated whole,
+        // so the input probe surfaces the error and the caller leaves the
+        // affected nodes undiscovered (`AGENTS.md` §2.9 / §24.4).
+        let devices = alloc::vec![VIRTIO_INPUT_DEVICE_ID; MAX_SLOTS + 1];
+        let bus = FakeBus::with(&devices);
+        let mut sink = CollectingSink::default();
+        assert_eq!(
+            observe_virtio_mmio_input_devices(&bus, &mut sink),
+            Err(DriverError::BufferTooSmall)
+        );
     }
 }

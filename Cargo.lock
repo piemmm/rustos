@@ -984,6 +984,7 @@ dependencies = [
  "rustos-users",
  "rustos-util",
  "rustos-vcmailbox",
+ "rustos-virtio-input",
  "zeroize",
 ]
 

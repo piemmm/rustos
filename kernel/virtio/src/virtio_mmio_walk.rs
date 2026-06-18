@@ -216,6 +216,13 @@ mod tests {
                 .map_window(base, SLOT_LEN)
                 .map_err(MmioMapError::as_driver_error)
         }
+
+        fn slot_window(&self, base: u64) -> Result<u64, DriverError> {
+            if !self.slots.iter().any(|s| s.address == base) {
+                return Err(DriverError::NotFound);
+            }
+            Ok(SLOT_LEN as u64)
+        }
     }
 
     fn slot(device: u32, address: u64) -> BusDevice {

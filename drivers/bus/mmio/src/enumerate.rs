@@ -164,6 +164,33 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
         base: u64,
         mapper: &dyn MmioMapper,
     ) -> Result<RegisterWindow, DriverError> {
+        let length = self.slot_window_len(base)?;
+        let len = usize::try_from(length).map_err(|_| DriverError::LengthOutOfRange)?;
+        mapper
+            .map_window(base, len)
+            .map_err(MmioMapError::as_driver_error)
+    }
+
+    /// Return the length, in bytes, of the register window of the
+    /// `virtio,mmio` transport slot whose `reg` base equals `base`.
+    ///
+    /// This is the discovered slot extent the device tree `reg`
+    /// `<base, length>` pair declares (`AGENTS.md` §18.1 — a discovered
+    /// value, never a literal). It is the unmapped half of
+    /// [`Self::map_slot_window`]: the bootstrap-floor discovery walk
+    /// records it as a discovered virtio device node's MMIO resource so a
+    /// user-space driver autoloaded against that node is granted a window
+    /// of exactly the slot's size (`AGENTS.md` §18.3). It reads no device
+    /// state and maps nothing, so it needs no [`MmioMapper`].
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — no `virtio,mmio` slot whose `reg`
+    ///   base equals `base` exists in the device tree.
+    /// * [`DriverError::DeviceFault`] — the matching node's `reg`
+    ///   property is malformed (fails closed, like
+    ///   [`Self::enumerate_into`]).
+    pub fn slot_window_len(&self, base: u64) -> Result<u64, DriverError> {
         for node in self.dtb.nodes() {
             let node = node.map_err(|_| DriverError::DeviceFault)?;
             if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
@@ -174,11 +201,7 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
             if slot_base != base {
                 continue;
             }
-            let length = reg.read_be_u64(8).map_err(|_| DriverError::DeviceFault)?;
-            let len = usize::try_from(length).map_err(|_| DriverError::LengthOutOfRange)?;
-            return mapper
-                .map_window(slot_base, len)
-                .map_err(MmioMapError::as_driver_error);
+            return reg.read_be_u64(8).map_err(|_| DriverError::DeviceFault);
         }
         Err(DriverError::NotFound)
     }

@@ -97,6 +97,10 @@ impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
     ) -> Result<RegisterWindow, DriverError> {
         Mmio::map_slot_window(self, base, mapper)
     }
+
+    fn slot_window(&self, base: u64) -> Result<u64, DriverError> {
+        Mmio::slot_window_len(self, base)
+    }
 }
 
 // --- `virt`-board construction seam ---------------------------------------

@@ -18,9 +18,10 @@
 //! [`VirtioPciBus`](super::virtio_pci::VirtioPciBus), any bus through
 //! [`Bus`], and the MMIO-map facility through [`MmioMapper`].
 //!
-//! Like every other item in `lib/abi`, this trait is frozen for the
-//! lifetime of `abi-v1`: new behaviour ships in `abi-v2` rather than
-//! mutating this surface (`AGENTS.md` §9).
+//! This trait is part of the `abi-v1` surface. `abi-v1` is not yet
+//! frozen (RustOS has not shipped a release), so it may still be
+//! extended in place; from the first release onward it freezes and new
+//! behaviour ships in `abi-v2` (`AGENTS.md` §9 / §2.13).
 
 use super::bus::Bus;
 use super::{DriverError, MmioMapper, RegisterWindow};
@@ -69,6 +70,29 @@ pub trait VirtioMmioBus: Bus {
         base: u64,
         mapper: &dyn MmioMapper,
     ) -> Result<RegisterWindow, DriverError>;
+
+    /// Return the length, in bytes, of the register window of the
+    /// virtio-MMIO transport slot whose register block begins at
+    /// physical `base`.
+    ///
+    /// This is the discovered extent the slot's device tree `reg`
+    /// `<base, length>` pair declares (`AGENTS.md` §18.1 — a window
+    /// extent is a *discovered* value, never a compiled-in literal). The
+    /// bootstrap-floor discovery walk uses it to record a discovered
+    /// virtio device node's MMIO resource as a capability-grant request
+    /// of exactly the slot's size, so a user-space driver autoloaded
+    /// against that node is minted a window grant of precisely the
+    /// region it owns — never more (`AGENTS.md` §4 / §18.3). It reads no
+    /// device state and maps nothing, so it needs no [`MmioMapper`]:
+    /// [`Self::map_slot_window`] is the capability-gated mapping path.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — no virtio-MMIO slot whose register
+    ///   block begins at `base` exists on the bus.
+    /// * [`DriverError::DeviceFault`] — the slot descriptor is malformed
+    ///   (fails closed, never reports a guessed extent).
+    fn slot_window(&self, base: u64) -> Result<u64, DriverError>;
 }
 
 #[cfg(test)]
@@ -143,6 +167,13 @@ mod tests {
                 .map_window(base, SLOT_LEN)
                 .map_err(MmioMapError::as_driver_error)
         }
+
+        fn slot_window(&self, base: u64) -> Result<u64, DriverError> {
+            if base != SLOT_BASE {
+                return Err(DriverError::NotFound);
+            }
+            Ok(SLOT_LEN as u64)
+        }
     }
 
     #[test]
@@ -183,6 +214,21 @@ mod tests {
         assert!(matches!(
             bus.map_slot_window(SLOT_BASE, &mapper),
             Err(DriverError::PermissionDenied)
+        ));
+    }
+
+    #[test]
+    fn slot_window_reports_the_discovered_extent() {
+        let bus: &dyn VirtioMmioBus = &FakeBus;
+        assert_eq!(bus.slot_window(SLOT_BASE), Ok(SLOT_LEN as u64));
+    }
+
+    #[test]
+    fn slot_window_of_an_unknown_base_is_not_found() {
+        let bus: &dyn VirtioMmioBus = &FakeBus;
+        assert!(matches!(
+            bus.slot_window(SLOT_BASE + 0x1000),
+            Err(DriverError::NotFound)
         ));
     }
 

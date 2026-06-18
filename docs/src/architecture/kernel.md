@@ -303,6 +303,25 @@ volume is the root (§2.9). The gate is **resolution only** — it mounts
 nothing — so it changes no boot behaviour beyond the audit record and the
 metal-confirmed boot is unaffected (§2.17).
 
+The same `virtio,mmio` enumeration also discovers **user-space-autoloadable
+input devices** (`rustos_kernel::root_storage::observe_virtio_mmio_input_devices`,
+§18.2 / §18.3). A virtio keyboard/pointer is driven entirely from user space
+(§4 — drivers in user space), so unlike the in-kernel bootstrap-floor block
+path (whose bring-up re-derives the slot window from the device tree by
+base) an input node **must** carry its register window as an `HwResource`:
+the slot whose `DeviceID` is virtio-input (`18`) is emitted as a
+discovered `HwDeviceClass::Input` node keyed by the probed
+`HwMatchKey::virtio(18)` and carrying `HwResource::mmio(base, len)` over the
+slot's discovered base and the extent the device tree's `reg` pair declares
+(`VirtioMmioBus::slot_window`, §18.1 — a discovered value, never a literal).
+The privileged driver-spawn path mints exactly one device-resource grant per
+resource the matched node requested, so the user-space driver the `devmgr`
+autoload binds to that node is handed a window grant of precisely the slot it
+owns and nothing more (§18.3 / §4 — no ambient authority). A slot whose
+window extent cannot be resolved (a malformed `reg`) is skipped rather than
+emitted on a partial identity (fail closed, §2.9). The Pi 4 tree carries no
+`virtio,mmio` node, so this too is a no-op there (§2.17).
+
 `rustos_kernel::root_mount::unlock_root_disk_interactively` is the
 device-independent **interactive unlock policy** the in-kernel unlock
 kthread runs once the board has brought up the root block device and the

@@ -776,6 +776,18 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
         // A bus enumeration error (an over-full or malformed bus) leaves the
         // root unbound rather than aborting the boot (`AGENTS.md` §18.4).
         let _ = crate::root_storage::observe_virtio_mmio_block_devices(&bus, &mut sink);
+        // Bootstrap-floor virtio-MMIO input discovery (`AGENTS.md` §18.2 /
+        // §18.3): probe each slot's `DeviceID` for a virtio-input device and
+        // emit a user-space-autoloadable `Input` node carrying its register
+        // window as a grant request into the same buffered tree, so the
+        // unlock kthread's `devmgr` autoload spawns the matching user-space
+        // input driver with exactly that window (`plans/PI.md` P10 5d-2-ii).
+        // The two reads of `bus` are sequential, so the immutable borrows do
+        // not overlap. A no-op on the Pi tree (no `virtio,mmio` node), so it
+        // is metal-neutral and additive (`AGENTS.md` §2.17). An enumeration
+        // error leaves the input nodes undiscovered, never aborting the boot
+        // (§18.4).
+        let _ = crate::root_storage::observe_virtio_mmio_input_devices(&bus, &mut sink);
     }
 
     // Leak the buffered tree to `'static` (a one-shot boot publish, like the
