@@ -234,6 +234,23 @@ pub trait InitSpawnCtx {
         None
     }
 
+    /// The boot **audit sink** as a `'static` borrow, when one is wired.
+    ///
+    /// A service spawned through [`spawn_kernel_service`](Self::spawn_kernel_service)
+    /// runs as a `'static` kthread, so to route its security-relevant
+    /// decisions onto the audit channel (`AGENTS.md` §19.4 — the root-unlock
+    /// kthread's mount / install / give-up outcomes) it needs a `'static`
+    /// sink, not the call-scoped [`audit`](Self::audit) borrow. Mirrors
+    /// [`static_frames`](Self::static_frames).
+    ///
+    /// The default returns [`None`]; the production `KernelInitSpawner`
+    /// returns the leaked-`'static` boot audit sink. A service handed [`None`]
+    /// (a host test double) falls back to its own diagnostic sink rather than
+    /// dropping the record.
+    fn static_audit(&self) -> Option<&'static (dyn Sink + Sync)> {
+        None
+    }
+
     /// Spawn a verified user-space **driver** image into its own,
     /// hardware-isolated process and return its PID.
     ///

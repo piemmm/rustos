@@ -1243,10 +1243,22 @@ spec §18.
   carries the bootstrap root block device against the in-kernel floor
   catalogue through the same shared `lib/devmatch` policy `devmgr` uses
   (§18.3 / §18.6) — read-only, fail-closed (no block device → unbound; >1 →
-  ambiguous), so the metal boot is unaffected. The remaining board storage
-  bring-up that *supplies* the typed passphrase and brings the bound driver
-  up (in-kernel block DriverHost over the binding, console passphrase
-  prompt) is staged in `plans/PI.md` P11 Chunk B-2. The login
+  ambiguous), so the metal boot is unaffected. A device behind a probed bus
+  is enumerated too: the bootstrap-floor virtio-MMIO enumeration
+  (`root_storage::observe_virtio_mmio_block_devices`) reads each
+  `virtio,mmio` slot's `DeviceID` and folds a probed `HwMatchKey::virtio(2)`
+  child node into the same selection, so the QEMU `virt` boot binds its
+  virtio-blk root (a no-op on the Pi, which has no `virtio,mmio` node, §2.17).
+  The board storage bring-up that *supplies* the typed passphrase and brings
+  the bound driver up is wired (`plans/PI.md` P11 Chunk B-2): the init seam
+  admits the in-kernel root-unlock kthread
+  (`rustos_kernel::unlock_service::spawn_if_present`), which brings the bound
+  block driver up through an in-kernel block DriverHost behind the signed §8
+  load gate over the production device-IRQ path, prompts on the primary
+  console, and runs the interactive unlock policy — proven end to end on
+  `-M virt` by the `root_unlock_login` (policy) and `root_unlock_admission`
+  (full kthread-admission boot) verticals; EMMC2 is the staged Pi metal
+  increment (§0.4 / P8). The login
   `Run` binary ships at
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held

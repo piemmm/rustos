@@ -40,12 +40,29 @@
 //! nothing) rather than picking one. Every outcome is audited under a
 //! stable `ROOT_STORAGE_AUTOLOAD` event id (`AGENTS.md` §19.4).
 
-use rustos_abi::HwNode;
+use rustos_abi::driver::bus::{Bus, BusDevice};
+use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
 use rustos_devmatch::MatchResolution;
+use rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
+use rustos_kernel_virtio::MAX_SLOTS;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_util::fmt::format_hex_u64;
 
 use crate::driver_catalog;
+
+/// First synthetic hardware-tree id for a probed virtio-MMIO child node
+/// (`AGENTS.md` §18.2 — the bind key is the virtio device id read from the
+/// transport, attached as a *probed child* of the raw bus node).
+///
+/// [`RootBlockSelection`] uses a node id only to tell two distinct block
+/// devices apart (the ambiguity check) and to dedupe a re-emitted node.
+/// The discovery walk (`platform::FdtDiscovery`) numbers the raw firmware
+/// nodes from `1` upward; the probed children take ids from this high base
+/// so the two id spaces are obviously disjoint (a collision would be
+/// harmless — only block bindings ever populate the selection's `found` —
+/// but a disjoint range keeps the origin of each id unambiguous). One id
+/// per enumerated block slot, so distinct disks stay distinct.
+const VIRTIO_PROBE_NODE_BASE_ID: u32 = 0x8000_0000;
 
 /// Audit event id for the root-storage bind gate (`AGENTS.md` §19.4 — a
 /// stable id for the security-relevant bind decision). Sits beside the
@@ -209,6 +226,68 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
         selection.observe(node);
     }
     selection.finish(audit)
+}
+
+/// Enumerate the virtio-MMIO `bus` and fold each populated **block** slot
+/// into `selection` as a probed child node (`AGENTS.md` §18.2 / §18.6).
+///
+/// The raw `virtio,mmio` firmware node the discovery walk emits carries
+/// only its `compatible` string, which no floor block driver binds — the
+/// virtio-blk bind key is the device id *read from the transport*, not a
+/// string (the gate's own tests prove an unprobed bus node stays
+/// unbound). This is the bootstrap-floor bus enumeration that closes that
+/// gap: it reads each slot's `DeviceID` register through the MMIO bus
+/// driver and, for a virtio-block device ([`VIRTIO_BLK_DEVICE_ID`]),
+/// synthesises the probed child node keyed by [`HwMatchKey::virtio`] — the
+/// genuine probed identity (`AGENTS.md` §18.5 — never a fabricated key),
+/// exactly the node shape the gate models. The bring-up
+/// ([`crate::unlock_service`]) derives the slot's register window and GIC
+/// SPI from the same device tree by base, so the probed child carries only
+/// its bind identity.
+///
+/// Driver-agnostic: it reaches the bus only through the frozen [`Bus`] ABI
+/// seam (`AGENTS.md` §8), so the boot path never names a concrete
+/// `drivers/bus/*` type. The enumeration is bounded by
+/// [`MAX_SLOTS`]; an over-full bus fails closed rather than
+/// under-enumerating (`AGENTS.md` §2.9 / §24.4).
+///
+/// # Errors
+///
+/// Propagates the bus enumeration error verbatim — [`DriverError::BufferTooSmall`]
+/// when more than [`MAX_SLOTS`] slots respond, or a malformed-tree
+/// [`DriverError::DeviceFault`]. The caller leaves the root unbound on any
+/// error (fail closed, §18.4).
+pub fn observe_virtio_mmio_block_devices(
+    bus: &dyn Bus,
+    selection: &mut RootBlockSelection,
+) -> Result<(), DriverError> {
+    let blank = BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    };
+    let mut table = [blank; MAX_SLOTS];
+    let count = bus.enumerate(&mut table)?;
+    let mut next_id = VIRTIO_PROBE_NODE_BASE_ID;
+    for device in &table[..count] {
+        if device.device != VIRTIO_BLK_DEVICE_ID {
+            continue;
+        }
+        let mut node = HwNode::new(next_id, HW_NODE_ROOT, HwDeviceClass::Storage);
+        next_id = next_id.wrapping_add(1);
+        // One bind key always fits a fresh node; the capacity bound is the
+        // ABI's, so a node that somehow could not hold it is dropped rather
+        // than bound on a partial identity (`AGENTS.md` §2.9).
+        if node
+            .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
+            .is_ok()
+        {
+            selection.observe(&node);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -380,5 +459,125 @@ mod tests {
         let binding = selection.finish(&audit).expect("still bound");
         assert_eq!(binding.node.id(), 9);
         assert_eq!(audit.only().1, Level::Info);
+    }
+
+    /// A fake virtio-MMIO bus enumerating a fixed slot table, standing in
+    /// for the live `drivers/bus/mmio` reader so the §18.2 enumeration
+    /// (`observe_virtio_mmio_block_devices`) is host-testable without MMIO
+    /// (`AGENTS.md` §2.2 — same shape as the `kernel/virtio` walk's fake).
+    struct FakeBus {
+        slots: alloc::vec::Vec<BusDevice>,
+    }
+
+    impl FakeBus {
+        fn with(devices: &[u32]) -> Self {
+            let slots = devices
+                .iter()
+                .enumerate()
+                .map(|(i, &device)| BusDevice {
+                    vendor: 0x554D_4551,
+                    device,
+                    class: 2,
+                    reserved0: 0,
+                    // A distinct, plausible per-slot base; unused by the
+                    // gate (the probed child carries only its bind key).
+                    address: 0x0A00_0000 + (i as u64) * 0x200,
+                })
+                .collect();
+            Self { slots }
+        }
+    }
+
+    impl Bus for FakeBus {
+        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+            if out.len() < self.slots.len() {
+                return Err(DriverError::BufferTooSmall);
+            }
+            out[..self.slots.len()].copy_from_slice(&self.slots);
+            Ok(self.slots.len())
+        }
+    }
+
+    #[test]
+    fn a_probed_virtio_block_slot_binds_the_virtio_blk_driver() {
+        // A populated virtio-block slot (DeviceID 2) is attached as a probed
+        // child keyed by its virtio device id, which binds virtio-blk — the
+        // bootstrap-floor enumeration that lets the `virt` boot find its
+        // root (`AGENTS.md` §18.2 / §18.6).
+        let audit = RecordingSink::default();
+        let mut selection = RootBlockSelection::new();
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
+        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        let binding = selection.finish(&audit).expect("virtio-blk binds");
+        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
+        assert_eq!(binding.node.id(), VIRTIO_PROBE_NODE_BASE_ID);
+        assert_eq!(audit.only().1, Level::Info);
+    }
+
+    #[test]
+    fn a_non_block_virtio_slot_is_not_a_root_block_device() {
+        // A virtio-net slot (DeviceID 1) is enumerated but binds no floor
+        // *block* driver, so it never becomes the root (`AGENTS.md` §18.2);
+        // an empty slot (DeviceID 0 is filtered by the bus) likewise.
+        let audit = RecordingSink::default();
+        let mut selection = RootBlockSelection::new();
+        let bus = FakeBus::with(&[1]);
+        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        assert!(selection.finish(&audit).is_none());
+        assert_eq!(audit.only().1, Level::Info);
+    }
+
+    #[test]
+    fn a_block_slot_beside_a_net_slot_binds_only_the_block_disk() {
+        // The block disk is selected and the network device ignored — one
+        // device of each class is the common `virt` topology.
+        let audit = RecordingSink::default();
+        let mut selection = RootBlockSelection::new();
+        let bus = FakeBus::with(&[1, VIRTIO_BLK_DEVICE_ID]);
+        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        let binding = selection.finish(&audit).expect("virtio-blk binds");
+        assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
+    }
+
+    #[test]
+    fn two_probed_block_slots_fail_closed_as_ambiguous() {
+        // Two distinct virtio-block disks get distinct probed-child ids, so
+        // the gate fails closed rather than guess which is the root
+        // (`AGENTS.md` §2.9).
+        let audit = RecordingSink::default();
+        let mut selection = RootBlockSelection::new();
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_DEVICE_ID]);
+        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        assert!(selection.finish(&audit).is_none());
+        assert_eq!(audit.only().1, Level::Error);
+    }
+
+    #[test]
+    fn an_overfull_bus_fails_closed() {
+        // More than `MAX_SLOTS` responding slots cannot be enumerated whole,
+        // so the probe surfaces the error and the caller leaves the root
+        // unbound rather than under-enumerating (`AGENTS.md` §2.9 / §24.4).
+        let mut selection = RootBlockSelection::new();
+        let devices = alloc::vec![VIRTIO_BLK_DEVICE_ID; MAX_SLOTS + 1];
+        let bus = FakeBus::with(&devices);
+        assert_eq!(
+            observe_virtio_mmio_block_devices(&bus, &mut selection),
+            Err(DriverError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn a_probed_block_slot_beside_a_directly_described_emmc2_is_ambiguous() {
+        // The probed virtio-block child and a directly-described EMMC2 disk
+        // are two distinct block devices: ambiguous, fail closed. This also
+        // proves the high probed-child id never collides with a low
+        // firmware-node id in a way that hides the second device.
+        let audit = RecordingSink::default();
+        let mut selection = RootBlockSelection::new();
+        selection.observe(&emmc2_node(3));
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
+        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        assert!(selection.finish(&audit).is_none());
+        assert_eq!(audit.only().1, Level::Error);
     }
 }

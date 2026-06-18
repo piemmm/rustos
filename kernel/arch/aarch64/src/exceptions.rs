@@ -197,6 +197,56 @@ pub unsafe fn enable_irq() {
     }
 }
 
+/// Mask IRQ *taking* at the PE (`DAIF.I`), without disturbing a pending
+/// interrupt's latch.
+///
+/// This is the first half of the canonical race-free park (mask → check
+/// ready → [`wait_for_interrupt`] → [`enable_irq`]): masking only stops the
+/// CPU from *taking* an interrupt, so an enabled source that asserts
+/// between the readiness check and the `wfi` stays pending and still wakes
+/// the `wfi` — no edge is lost (`AGENTS.md` §2.1 — no unbounded sleep
+/// loop). An in-kernel service kthread blocking on a device line uses it to
+/// close the check-then-park window.
+///
+/// # Safety
+///
+/// Setting `DAIF.I` only changes the interrupt mask; it has no other side
+/// effect. The caller must pair it with [`enable_irq`] (or
+/// [`wait_for_interrupt`] then [`enable_irq`]) so IRQ taking is restored.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn mask_irq() {
+    // SAFETY: setting `DAIF.I` (immediate bit 1) masks IRQ taking; it has
+    // no other side effect and leaves any pending interrupt latched.
+    unsafe {
+        core::arch::asm!("msr DAIFSet, #2", options(nomem, nostack));
+    }
+}
+
+/// Park the calling CPU on `wfi` until an enabled interrupt is pending.
+///
+/// `wfi` wakes on a pending *enabled* interrupt even while IRQ taking is
+/// masked ([`mask_irq`]), which is exactly what makes the race-free park
+/// correct: the caller masks taking, re-checks the readiness condition, and
+/// only parks here if it is still unmet — a completion that lands in that
+/// window leaves the line pending and wakes the `wfi`. It is a hint with no
+/// architectural side effects, so a spurious wake merely returns to the
+/// caller's poll loop.
+///
+/// # Safety
+///
+/// `wfi` is a hint with no architectural side effects. The caller must hold
+/// IRQ taking masked ([`mask_irq`]) across the readiness check and this
+/// park, then restore it with [`enable_irq`], so the woken interrupt is
+/// actually dispatched.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub unsafe fn wait_for_interrupt() {
+    // SAFETY: `wfi` is a hint instruction; it suspends the CPU until an
+    // enabled interrupt is pending and has no other architectural effect.
+    unsafe {
+        core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+    }
+}
+
 /// Read the `ESR_EL1` exception syndrome.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn read_esr() -> u64 {

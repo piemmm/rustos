@@ -284,10 +284,21 @@ against the in-kernel floor catalogue (`rustos_kernel::driver_catalog`),
 through the **same** shared `lib/devmatch` policy the user-space `devmgr`
 autoloader uses: the kernel binds a block driver because that driver's
 signed bind table matched a discovered node, never because it *hunted* for
-a disk (§18.5). The record names the bound driver path, the node id, and
-the bind priority; a tree with no block device leaves the root unbound
-(informational, §18.4), and a tree with more than one distinct block
-device fails closed as ambiguous (`Error`) rather than guessing which
+a disk (§18.5). A device behind a bus that must be *probed* — a virtio-blk
+disk, whose bind key is the virtio device id read from the transport, not a
+`compatible` string — appears only after a bus enumeration attaches the
+probed child node (§18.2). On the QEMU `virt` board the boot path closes
+that gap with a **bootstrap-floor virtio-MMIO enumeration**
+(`rustos_kernel::root_storage::observe_virtio_mmio_block_devices`): it reads
+each `virtio,mmio` slot's `DeviceID` through the MMIO bus driver and folds a
+probed virtio-block child node (keyed by the genuine probed device id, never
+a fabricated key) into the same selection, so a discovered virtio-blk root
+binds exactly as a directly-described EMMC2 node does. The Raspberry Pi 4
+tree carries no `virtio,mmio` node, so the probe is a no-op there and the
+metal boot is unaffected (§2.17). The record names the bound driver path,
+the node id, and the bind priority; a tree with no block device leaves the
+root unbound (informational, §18.4), and a tree with more than one distinct
+block device fails closed as ambiguous (`Error`) rather than guessing which
 volume is the root (§2.9). The gate is **resolution only** — it mounts
 nothing — so it changes no boot behaviour beyond the audit record and the
 metal-confirmed boot is unaffected (§2.17).
@@ -325,13 +336,35 @@ closed exactly like the previous `NULL_USERS_DB` default, so login refuses
 every attempt until a root is mounted (§5.4.5) and the metal-confirmed boot
 is unaffected (§2.17).
 
-The remaining board-specific bring-up that *supplies* the block device and
-drives this policy — bringing up the bound block + filesystem driver
-through an in-kernel block DriverHost behind the signed §8 load gate and
-admitting the unlock kthread (with the primary-console prompt) into the
-init seam — is wired into the boot path next (`plans/PI.md` P11 Chunk B-2):
-`virtio-blk` proves the unlock end-to-end on `-M virt`, EMMC2 on metal
-(`plans/PI.md` §0.4 / P8).
+The board-specific bring-up that *supplies* the block device and drives this
+policy is wired into the boot path (`plans/PI.md` P11 Chunk B-2): the init
+seam admits the in-kernel root-unlock kthread
+(`rustos_kernel::unlock_service::spawn_if_present`), which brings the bound
+block driver up through an in-kernel block DriverHost behind the signed §8
+load gate over the production device-IRQ path, prompts on the primary
+console, runs `unlock_root_disk_interactively`, and opens the console-0
+ownership gate so login takes over. To deliver those device interrupts the
+production aarch64 boot runs **interrupt-driven**: the `irq` phase brings the
+GICv2 up (`gic::init`, via `gic_irq::install_device_irq_dispatch`), the
+kthread binds the device SPI on the core-published `IrqTable`, and its waiter
+parks on a race-free `wfi` (`exceptions::{mask_irq, wait_for_interrupt,
+enable_irq}`). The virtio-MMIO transport acknowledges its own device
+interrupt (`InterruptStatus` → `InterruptACK`, virtio 1.1 §4.2.2) after each
+completion so a stale edge cannot mis-pair back-to-back reads, and the
+service's mount / install / give-up decisions route onto the audit channel
+(`InitSpawnCtx::static_audit`, §19.4).
+
+`virtio-blk` proves it end to end on `-M virt`: the `root_unlock_login`
+vertical drives the unlock *policy* directly, and the `root_unlock_admission`
+vertical boots the *production* pipeline (`boot_aarch64::boot`) with a planted
+virtio-blk disk so the bootstrap-floor enumeration binds the root, the kthread
+is admitted, and it mounts the root + installs the database — the install is
+the vertical's PASS witness on the audit channel. Driving the per-console
+`login` to authenticate `root`/`root` end to end additionally needs the
+userland heap to parse the served database (`plans/SPAWN.md` SP5b); the
+database *content* authenticating `root`/`root` is proven by
+`root_unlock_login`. EMMC2 is the staged metal increment (`plans/PI.md`
+§0.4 / P8).
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store

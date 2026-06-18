@@ -335,10 +335,16 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         // returns immediately (the unit test calls
         // `MockTransport::drain_queue` to advance the peer).
         self.host.notify_wait(self.queue.index());
-        let _token = self
-            .queue
-            .poll_used()
-            .map_err(VirtioError::as_driver_error)?;
+        let polled = self.queue.poll_used();
+        // Acknowledge the device's interrupt now that its completion has
+        // been observed, so it de-asserts its line before the next request
+        // re-arms the kernel IRQ (otherwise a stale edge re-delivers and the
+        // following request mis-pairs its completion). Done regardless of
+        // whether `poll_used` found a valid token — a faulted request must
+        // still leave the device's line clear. A no-op on transports that
+        // need no device-side ack (MSI-X PCI, the mock).
+        self.transport.ack_interrupt();
+        let _token = polled.map_err(VirtioError::as_driver_error)?;
         // For reads, copy device-written data back to the caller.
         if !write_outbound {
             // The mock peer wrote into `data_bb`'s staging through

@@ -30,6 +30,18 @@ use rustos_sync::SpinLock;
 
 use crate::root_storage::RootBlockBinding;
 
+/// The audit message the unlock kthread logs once it has brought the root
+/// block device up, mounted the encrypted root, and installed the users
+/// database into [`crate::root_mount::LATE_USERS_DB`] (the `UNLOCK_SERVICE`
+/// event, logged from `metal::run_unlock`'s caller).
+///
+/// Exposed as a stable `pub const` so the `-M virt` admission vertical can
+/// key its PASS on the production message — the witness that the in-kernel
+/// kthread (not a directly-driven policy) reached a mounted, installed root
+/// — without re-declaring the literal (`AGENTS.md` §2.2).
+pub const USERS_DB_INSTALLED_MESSAGE: &str =
+    "root-unlock: users database installed; login can authenticate";
+
 /// The boot facts the init seam hands the unlock kthread: which discovered
 /// node bound the root block driver, and the firmware device-tree pointer
 /// the live bring-up walks.
@@ -69,7 +81,7 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 /// Record the resolved root binding and the firmware DTB pointer for the
 /// init seam.
 ///
-/// MUST be called **after** the MMU is enabled (see [`UNLOCK_BOOT`]).
+/// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT`).
 pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64) {
     *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
 }

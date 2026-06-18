@@ -540,6 +540,13 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         Some(self.frames)
     }
 
+    fn static_audit(&self) -> Option<&'static (dyn Sink + Sync)> {
+        // The boot audit sink is `'static` (leaked at boot), so a service
+        // kthread can route its §19.4 security decisions onto the audit
+        // channel for the life of the kernel.
+        Some(self.audit)
+    }
+
     fn spawn_driver_process(
         &self,
         spawn: &dyn ProcessSpawn,

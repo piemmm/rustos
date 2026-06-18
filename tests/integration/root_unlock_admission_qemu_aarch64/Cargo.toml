@@ -1,0 +1,37 @@
+[package]
+name = "rustos-test-root-unlock-admission-qemu-aarch64"
+description = "plans/PI.md P11 Chunk B-2 INCREMENT (2) QEMU integration test: boot the production aarch64 rustos-kernel pipeline (boot_aarch64::boot) on the virt board with a planted whole-disk encrypted-root image attached as a virtio-blk-mmio device. The production boot path's bootstrap-floor virtio-MMIO bus enumeration (root_storage::observe_virtio_mmio_block_devices) probes the slot, binds the virtio-blk root, and stashes the binding; the init seam admits the in-kernel root-unlock kthread (unlock_service::spawn_if_present), which brings the device up over the production device-IRQ path, prompts for the passphrase on the primary console, mounts the encrypted RustFS root, and installs the users database into LATE_USERS_DB. The console-0 login then authenticates root/root and spawns its shell. PASS once the unlock-service install message is observed and a subsequent process is spawned — proving the *kthread admission* path (distinct from root_unlock_login, which drives the policy directly) mounted the root and root/root authenticates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rustos-test-root-unlock-admission-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 kernel pipeline with a planted
+# encrypted-root virtio-blk disk and prove the in-kernel unlock kthread
+# admission path mounts the root" integration test. It reuses the entire
+# production aarch64 boot pipeline through `rustos-kernel`'s library half
+# (`boot_aarch64::boot`) — the bootstrap-floor virtio-MMIO enumeration, the
+# `InitSpawn` seam, the runtime `ProcessSpawn` producer, the device-IRQ
+# wiring, and `unlock_service::spawn_if_present` — and only swaps the audit
+# sink to observe the unlock-service install message and the login's shell
+# spawn (`AGENTS.md` §2.2 — no duplication). Keeping the QEMU-exit shortcut
+# in a dedicated bin (not a Cargo feature on a production crate) prevents
+# feature unification from leaking it into any production build
+# (`AGENTS.md` §5.4.5 — fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

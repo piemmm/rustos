@@ -17,7 +17,6 @@
 use rustos_abi::driver::dma::PoolId;
 use rustos_abi::{CapabilityId, IrqHandle};
 use rustos_arch_aarch64::fdt::gic_device_intid;
-use rustos_arch_aarch64::kernel_arch::{read_cntfrq, read_cntpct};
 use rustos_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
 };
@@ -25,17 +24,15 @@ use rustos_arch_aarch64::{gic, video, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
-use rustos_drv_storage_virtio_blk::VirtioBlk;
+use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use rustos_fdt::Fdt;
-use rustos_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, KthreadIrqWaiter, YieldHandle,
-};
+use rustos_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
 use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
 use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
-use rustos_log::{log, Event, EventId, Level};
+use rustos_log::{log, Event, EventId, Level, Sink};
 
 use crate::aarch64::arch_wrapper::{UART_CONSOLE, VIDEO_CONSOLE, VIDEO_KEYBOARD};
 use crate::aarch64::gic_irq::{published_irq_table, GIC_IRQ_CONTROLLER};
@@ -50,9 +47,6 @@ use super::{take_boot, CONSOLE0_GATE};
 /// from the kthread (`AGENTS.md` §19.4). Sits beside the root-mount audit
 /// ids (`4135`–`4138`, [`crate::root_mount`] / [`crate::root_storage`]).
 const UNLOCK_SERVICE: EventId = EventId(4139);
-
-/// Bare virtio-blk MMIO device id (the `DeviceID` register value).
-const VIRTIO_BLK_DEVICE_ID: u32 = 2;
 
 /// Synthetic owner task id for the unlock kthread's capability context and
 /// IRQ binding. Distinct from the keyboard service's so an audit observer
@@ -115,22 +109,10 @@ fn loader_caps() -> CapabilitySet {
     caps
 }
 
-/// Monotonic time in nanoseconds from the generic timer, for the IRQ
-/// waiter's deadline clock. A zero `CNTFRQ_EL0` yields `0` (never a
-/// divisor); the unbounded `u64::MAX` wait the host uses makes the exact
-/// value immaterial beyond monotonicity.
-fn now_ns() -> u64 {
-    let freq = read_cntfrq();
-    if freq == 0 {
-        return 0;
-    }
-    ((u128::from(read_cntpct()) * 1_000_000_000u128) / u128::from(freq)) as u64
-}
-
-/// Log an unlock-service lifecycle decision.
-fn note(level: Level, message: &'static str) {
+/// Log an unlock-service lifecycle decision onto the service's audit sink.
+fn note(audit: &dyn Sink, level: Level, message: &'static str) {
     log(
-        &SERIAL_SINK,
+        audit,
         &Event {
             level,
             id: UNLOCK_SERVICE,
@@ -160,35 +142,71 @@ fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     None
 }
 
-/// A cooperative [`IrqWaiter`] for the unlock kthread that **re-arms** the
-/// device's GIC line before each yield.
+/// A blocking [`IrqWaiter`] for the unlock kthread: it **re-arms** the
+/// device's GIC line, then parks on a race-free `wfi` until the next
+/// completion.
 ///
 /// [`IrqTable::fire`] masks the line on every completion (mask-before-wake),
-/// so the next `notify_wait` would block forever on a masked line. This
-/// waiter re-enables it through [`GIC_IRQ_CONTROLLER`] (the arch unmask the
-/// kernel-side [`rustos_kernel_irq::IrqController`] trait deliberately does
-/// not expose), then cooperatively yields through the shared
-/// [`KthreadIrqWaiter`] — combining the `-M virt` `WfiWaiter`'s re-arm with
-/// a scheduler yield instead of parking the whole CPU (PID 1 + the keyboard
-/// kthread share it). Both still drive the one [`rustos_kernel_irq::block_until_ready`]
-/// loop (`AGENTS.md` §2.2).
-struct RearmingIrqWaiter<'a, C: Fn() -> u64> {
-    inner: KthreadIrqWaiter<'a, C>,
+/// so the line is first re-enabled through [`GIC_IRQ_CONTROLLER`] (the arch
+/// unmask the kernel-side [`rustos_kernel_irq::IrqController`] trait
+/// deliberately does not expose). It then performs the canonical race-free
+/// park — mask IRQ *taking* ([`rustos_arch_aarch64::exceptions::mask_irq`]),
+/// re-check the line's ready flag, `wfi`
+/// ([`rustos_arch_aarch64::exceptions::wait_for_interrupt`]) only if still
+/// not ready, then unmask ([`rustos_arch_aarch64::exceptions::enable_irq`])
+/// so the woken completion is taken by the EL1 vector and dispatched into
+/// `IrqTable::fire`. This is exactly the discipline the proven `-M virt`
+/// `WfiWaiter` uses (`AGENTS.md` §2.2 — one wait shape).
+///
+/// Parking on `wfi` (rather than busy-yielding through the scheduler) is
+/// both correct and §2.1-clean. The production cooperative dispatch runs
+/// with `DAIF.I` masked once a user task's `svc` trap has masked it, and the
+/// register-only context switch (`context.s`) never restores it, so a
+/// kthread that merely yielded would spin a tight poll on a line whose
+/// interrupt is never taken — and re-arming the GIC line on every such spin
+/// can mis-deliver back-to-back completions, corrupting a multi-block read.
+/// The mask → check → `wfi` → unmask sequence takes exactly one completion
+/// per wake and loses no edge (a completion landing in the check-park window
+/// stays pending and wakes the `wfi`). During the boot root-unlock PID 1
+/// (`wait`) and `login` (gated console read) are parked, so halting the CPU
+/// until the completion starves nothing.
+struct RearmingIrqWaiter {
+    table: &'static IrqTable,
+    handle: IrqHandle,
     line: u32,
 }
 
-impl<C: Fn() -> u64> IrqWaiter for RearmingIrqWaiter<'_, C> {
+impl IrqWaiter for RearmingIrqWaiter {
     fn now_ns(&self) -> u64 {
-        self.inner.now_ns()
+        // The wait is the unbounded `u64::MAX` sentinel, so the clock value
+        // never reaches a deadline and is immaterial — the `WfiWaiter`
+        // returns `0` for the same reason.
+        0
     }
 
     fn yield_now(&self) -> Result<(), IrqWaitAbort> {
-        // Re-arm the line for the next completion before suspending; the
-        // previous `IrqTable::fire` masked it. A re-arm refusal (an
-        // out-of-range line — impossible for a bound SPI) is left to the
-        // next poll, which still yields (`AGENTS.md` §2.9).
+        // Re-arm the line for the next completion; the previous
+        // `IrqTable::fire` masked it. A re-arm refusal (an out-of-range
+        // line — impossible for a bound SPI) is harmless: the park below
+        // then waits on a line that cannot fire and the run budget bounds
+        // it (`AGENTS.md` §2.9).
         let _ = GIC_IRQ_CONTROLLER.rearm(self.line);
-        self.inner.yield_now()
+        // Canonical race-free park: mask IRQ taking, re-check the ready
+        // flag, `wfi` only if still not ready, then unmask so the woken
+        // completion is dispatched.
+        // SAFETY: the EL1 vector table is installed (boot
+        // `exceptions::init_vectors`) and the production device dispatch is
+        // published (the kernel-core `irq` phase), so the woken IRQ is
+        // handled rather than faulting; the three calls only manipulate
+        // `DAIF.I` and issue the `wfi` hint.
+        unsafe {
+            rustos_arch_aarch64::exceptions::mask_irq();
+            if !self.table.ready_for(self.handle) {
+                rustos_arch_aarch64::exceptions::wait_for_interrupt();
+            }
+            rustos_arch_aarch64::exceptions::enable_irq();
+        }
+        Ok(())
     }
 }
 
@@ -199,8 +217,11 @@ impl<C: Fn() -> u64> IrqWaiter for RearmingIrqWaiter<'_, C> {
 /// suspends the kthread through its shared [`CooperativeYield`] cell and
 /// re-polls on the next dispatch, so the passphrase prompt blocks for input
 /// without busy-spinning (`AGENTS.md` §2.1) and never fabricates an end of
-/// input. It shares the cell with the [`RearmingIrqWaiter`] so the single
-/// `YieldHandle` serves both (`!Sync`, never shared across CPUs).
+/// input. It drives the kthread's single [`YieldHandle`] through the
+/// [`CooperativeYield`] cell `run_unlock` lends it (`!Sync`, never shared
+/// across CPUs); the device-IRQ wait parks on `wfi` separately
+/// ([`RearmingIrqWaiter`]), so the console poll and the block-I/O wait do
+/// not share a suspend mechanism.
 struct KthreadConsoleRead<'a> {
     inner: &'static (dyn ConsoleRead + Sync + 'static),
     yielder: &'a CooperativeYield<'a>,
@@ -233,8 +254,14 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
 #[must_use]
 pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
     let boot = take_boot();
+    // Route the unlock service's security-relevant decisions (mount /
+    // install / give-up) onto the boot audit channel (`AGENTS.md` §19.4)
+    // when the init seam wired a `'static` audit sink; fall back to the
+    // serial log otherwise. The kthread body and the unlock policy share it.
+    let audit: &'static (dyn Sink + Sync) = ctx.static_audit().unwrap_or(&SERIAL_SINK);
     let Some(binding) = boot.binding else {
         note(
+            audit,
             Level::Info,
             "root-unlock: no root block device bound; root unbound, login refuses (§18.4)",
         );
@@ -248,6 +275,7 @@ pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
         // than half-bring it up (`AGENTS.md` §2.9 / §2.19 — a real
         // fail-closed boundary, not a disguised partial path).
         note(
+            audit,
             Level::Info,
             "root-unlock: EMMC2 root bring-up is the staged Pi metal increment; root unbound",
         );
@@ -256,6 +284,7 @@ pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
     }
     let Some(frames) = ctx.static_frames() else {
         note(
+            audit,
             Level::Error,
             "root-unlock: no kernel frame allocator; root unbound, login refuses",
         );
@@ -266,22 +295,20 @@ pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
     let dtb = boot.dtb;
     let caps = service_caps();
     let body = move |yielder: &mut dyn YieldHandle| {
-        let outcome = run_unlock(yielder, dtb, frames, caps);
+        let outcome = run_unlock(yielder, dtb, frames, caps, audit);
         match outcome {
             Ok(UnlockOutcome::Installed) => {
-                note(
-                    Level::Info,
-                    "root-unlock: users database installed; login can authenticate",
-                );
+                note(audit, Level::Info, super::USERS_DB_INSTALLED_MESSAGE);
             }
             Ok(UnlockOutcome::GaveUp) => {
                 note(
+                    audit,
                     Level::Error,
                     "root-unlock: gave up fail-closed; login refused until reboot",
                 );
             }
             Err(stage) => {
-                note(Level::Error, stage);
+                note(audit, Level::Error, stage);
             }
         }
         // Release console 0 to `login` regardless of outcome: the unlock is
@@ -294,6 +321,7 @@ pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
 
     let started = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
     note(
+        audit,
         if started { Level::Info } else { Level::Error },
         if started {
             "root-unlock service kthread admitted (bring-up runs on first dispatch)"
@@ -320,6 +348,7 @@ fn run_unlock(
     dtb: u64,
     frames: &'static FrameAllocator,
     caps: CapabilitySet,
+    audit: &'static (dyn Sink + Sync),
 ) -> Result<UnlockOutcome, &'static str> {
     // Move the kthread's single yield handle into the shared cell both the
     // re-arming IRQ waiter and the cooperative console reader suspend
@@ -343,8 +372,8 @@ fn run_unlock(
     let dtb_bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
 
     // The bus-driver task capability context: the unlock kthread's caps,
-    // owner `UNLOCK_TASK`, audited against `SERIAL_SINK`.
-    let caller = TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, &SERIAL_SINK);
+    // owner `UNLOCK_TASK`, audited onto the service's audit sink.
+    let caller = TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, audit);
 
     // Build the `virt`-board virtio-MMIO bus and provision the block
     // transport through the `CAP_MMIO_MAP`-gated kernel mapper.
@@ -369,7 +398,7 @@ fn run_unlock(
     )
     .map_err(|_| "root-unlock: mmio map")?;
     let (transport, slot_base) = {
-        let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
+        let mapper = KernelMmioMapper::new(&mut mmio, &caller, audit);
         let prov = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, MmioTransport::new)
             .map_err(|_| "root-unlock: virtio provisioning")?;
         (prov.transport, prov.base)
@@ -385,9 +414,10 @@ fn run_unlock(
         .bind(intid, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind device SPI")?;
     let handle: IrqHandle = bind.handle;
-    // SAFETY: the GIC distributor + CPU interface are up (the boot path
-    // brought them up for the timer), and the EL1 vectors + device dispatch
-    // are installed; this routes + enables the bound SPI on CPU 0.
+    // SAFETY: the GIC distributor + CPU interface are up (the kernel-core
+    // `irq` phase brought them up via `gic_irq::install_device_irq_dispatch`
+    // -> `gic::init`), and the EL1 vectors + device dispatch are installed;
+    // this routes + enables the bound SPI on CPU 0.
     unsafe {
         gic::route_spi(intid, CPU0_TARGET);
     }
@@ -396,7 +426,7 @@ fn run_unlock(
     let _ = GIC_IRQ_CONTROLLER.rearm(intid);
 
     // Mint the per-driver DMA host the driver allocates through, driven by
-    // the re-arming cooperative waiter.
+    // the re-arming `wfi` waiter.
     let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
         .ok_or("root-unlock: dma bookkeeping space")?;
     let pool = DmaPool::new(
@@ -407,15 +437,15 @@ fn run_unlock(
         &phys,
     )
     .map_err(|_| "root-unlock: dma pool")?;
-    let inner_waiter = KthreadIrqWaiter::new(&coop, now_ns);
     let waiter = RearmingIrqWaiter {
-        inner: inner_waiter,
+        table,
+        handle,
         line: intid,
     };
     let vhost = KernelVirtioHost::new(
         pool,
         &caller,
-        &SERIAL_SINK,
+        audit,
         PoolId::fresh(),
         table,
         handle,
@@ -425,7 +455,7 @@ fn run_unlock(
     // Admit the virtio-blk driver through the signed §8 load gate (Ed25519
     // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives
     // hardware — a refusal fails closed (`AGENTS.md` §5.4 / §23.1).
-    let loader = KernelDriverLoader::new(&SERIAL_SINK).ok_or("root-unlock: driver trust anchor")?;
+    let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
     loader
         .admit(VIRTIO_BLK_PATH, &loader_caps())
         .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
@@ -455,7 +485,7 @@ fn run_unlock(
         console_write,
         &reader,
         &LATE_USERS_DB,
-        &SERIAL_SINK,
+        audit,
     ))
 }
 

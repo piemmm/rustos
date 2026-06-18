@@ -64,6 +64,12 @@ pub mod regs {
     pub const QUEUE_READY: usize = 0x044;
     /// `QueueNotify` (W) — write the queue index to notify the device.
     pub const QUEUE_NOTIFY: usize = 0x050;
+    /// `InterruptStatus` (R) — bits the device set to raise its line
+    /// (bit 0 = used-buffer notification, bit 1 = config change).
+    pub const INTERRUPT_STATUS: usize = 0x060;
+    /// `InterruptACK` (W) — the driver writes the handled
+    /// [`INTERRUPT_STATUS`] bits back to de-assert the device's line.
+    pub const INTERRUPT_ACK: usize = 0x064;
     /// `Status` (RW) — the device-status byte (low 8 bits used).
     pub const STATUS: usize = 0x070;
     /// `QueueDescLow` (W) — low half of the descriptor-table address.
@@ -280,6 +286,23 @@ impl Transport for MmioTransport {
             *b = self.window.read_u8(regs::CONFIG + offset + i).unwrap_or(0);
         }
     }
+
+    fn ack_interrupt(&mut self) {
+        // Read which bits the device raised and write exactly those back
+        // to `InterruptACK`, de-asserting the device's interrupt line
+        // (virtio 1.1 §4.2.2). Without this the device holds the line
+        // asserted after a completion, so the next time the kernel re-arms
+        // (unmasks) the GIC line the same stale edge re-delivers — a
+        // spurious wake that makes the driver poll a used ring with no new
+        // entry and so mis-pairs back-to-back requests. Both offsets are
+        // below `WINDOW_MIN_LEN`, so a validly-constructed transport never
+        // faults; a zero status (no bits set, e.g. a spurious wake) writes
+        // nothing.
+        let status = self.window.read_u32(regs::INTERRUPT_STATUS).unwrap_or(0);
+        if status != 0 {
+            let _ = self.window.write_u32(regs::INTERRUPT_ACK, status);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +496,35 @@ mod tests {
         let mut over = [0xCDu8; 4];
         t.read_config(6, &mut over);
         assert_eq!(over, [7, 8, 0, 0]);
+    }
+
+    #[test]
+    fn ack_interrupt_writes_the_raised_status_bits_back() {
+        let dev = FakeMmioDevice::new(regs::WINDOW_MIN_LEN);
+        // The device raised a used-buffer notification (bit 0).
+        dev.dev().write_u32(regs::INTERRUPT_STATUS, 0b01).unwrap();
+        let mut t = dev.transport();
+        t.ack_interrupt();
+        // The driver acknowledged exactly the bits the device set, so the
+        // device de-asserts its line (virtio 1.1 §4.2.2).
+        assert_eq!(dev.dev().read_u32(regs::INTERRUPT_ACK).unwrap(), 0b01);
+    }
+
+    #[test]
+    fn ack_interrupt_is_a_noop_when_no_bits_are_set() {
+        let dev = FakeMmioDevice::new(regs::WINDOW_MIN_LEN);
+        // Pre-seed `InterruptACK` with a sentinel; a zero status (a
+        // spurious wake with nothing pending) must not write it, so the
+        // ack carries no fabricated bits.
+        dev.dev()
+            .write_u32(regs::INTERRUPT_ACK, 0xDEAD_BEEF)
+            .unwrap();
+        let mut t = dev.transport();
+        t.ack_interrupt();
+        assert_eq!(
+            dev.dev().read_u32(regs::INTERRUPT_ACK).unwrap(),
+            0xDEAD_BEEF
+        );
     }
 
     #[test]

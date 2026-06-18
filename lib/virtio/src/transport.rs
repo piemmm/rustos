@@ -182,6 +182,25 @@ pub trait Transport {
     /// Read `buf.len()` bytes from the device-configuration area
     /// starting at byte `offset`.
     fn read_config(&self, offset: usize, buf: &mut [u8]);
+
+    /// Acknowledge the device's interrupt after the driver has consumed
+    /// the completions it signalled, so the device de-asserts its line.
+    ///
+    /// This is the **device-level** half of interrupt handling, distinct
+    /// from the GIC/APIC-level acknowledge the kernel's IRQ dispatch does:
+    /// after the driver drains the used ring for a completion, it must tell
+    /// the device it has handled the notification, or the device keeps the
+    /// interrupt asserted and the *next* unmask re-delivers the same stale
+    /// edge — corrupting back-to-back requests. A driver calls this once
+    /// per `notify_wait` + drain cycle.
+    ///
+    /// The default is a no-op: it is correct for transports that need no
+    /// explicit device-side acknowledge — MSI-X PCI (each completion is a
+    /// fresh edge with no shared status to clear) and the in-process
+    /// [`MockTransport`] (no real device). The modern **MMIO** transport
+    /// overrides it to read `InterruptStatus` and write the handled bits
+    /// back to `InterruptACK` (virtio 1.1 §4.2.2).
+    fn ack_interrupt(&mut self) {}
 }
 
 /// The kernel-mapped register windows that make up a modern virtio PCI

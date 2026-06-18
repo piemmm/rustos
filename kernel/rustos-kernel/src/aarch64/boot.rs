@@ -729,6 +729,10 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
     let Ok(fdt) = (unsafe { Fdt::from_ptr(dtb as *const u8) }) else {
         return;
     };
+    // The validated blob's own length, captured before the walk consumes
+    // the reader, so the virtio-MMIO probe below can reborrow the same
+    // firmware bytes the bus builder needs.
+    let total = fdt.total_size();
     let mut sink = RootStorageSink {
         selection: crate::root_storage::RootBlockSelection::new(),
     };
@@ -739,6 +743,28 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
         // A malformed tree is not fatal: leave the root unbound — the mount
         // path fails closed without a binding (`AGENTS.md` §18.4 / §2.9).
         return;
+    }
+
+    // Bootstrap-floor virtio-MMIO bus enumeration (`AGENTS.md` §18.2 /
+    // §18.6): the raw `virtio,mmio` nodes the discovery walk emitted carry
+    // only their `compatible` string, which binds no block driver — the
+    // virtio-blk bind key is the device id read from the transport. Probe
+    // each slot's `DeviceID` through the MMIO bus driver and attach a probed
+    // virtio-block child node so the gate can bind the root. The Raspberry
+    // Pi 4 tree describes no `virtio,mmio` node, so `virtio_mmio_bus_from_dtb`
+    // returns `NotFound` and this is a no-op there — it is the QEMU
+    // `virt`-board path, additive and metal-neutral (`AGENTS.md` §2.17).
+    // SAFETY: `dtb`/`total` bound the firmware blob `Fdt::from_ptr` validated
+    // above; it is identity-mapped and immutable for the kernel's life, and
+    // the virtio-MMIO aperture it describes is identity-mapped Device memory
+    // the probe alone reads (side-effect-free `DeviceID` registers, MMU on —
+    // the caller enabled it, so this whole-tree walk is safe, `plans/PI.md`).
+    let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
+    let probe = unsafe { rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) };
+    if let Ok(bus) = probe {
+        // A bus enumeration error (an over-full or malformed bus) leaves the
+        // root unbound rather than aborting the boot (`AGENTS.md` §18.4).
+        let _ = crate::root_storage::observe_virtio_mmio_block_devices(&bus, &mut sink.selection);
     }
     // Resolve + audit the binding, then stash it (with the firmware DTB
     // pointer) for the init seam, where the in-kernel root-unlock kthread

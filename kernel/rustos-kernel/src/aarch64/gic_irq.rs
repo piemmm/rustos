@@ -224,6 +224,24 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         {
             rustos_arch_aarch64::halt_current_cpu();
         }
+        // Bring the GICv2 up for delivery: enable the distributor and this
+        // (boot) CPU's interface so a routed device SPI can reach the EL1
+        // vector once IRQs are unmasked (`crate::aarch64::init_spawn`). Reset
+        // state leaves every line disabled, so no interrupt fires until a
+        // driver routes + enables its own line (the root-unlock kthread does
+        // so for the virtio-blk completion SPI,
+        // [`crate::unlock_service`]); enabling the controller is therefore
+        // additive — it changes no behaviour until the first line is armed
+        // (`AGENTS.md` §2.17). It is the production counterpart of the
+        // `gic::init()` the `-M virt` IRQ verticals call.
+        //
+        // SAFETY: the GICv2 bases were configured from the device tree
+        // (`gic::configure_from_fdt`, boot discovery), the MMU is on (this
+        // runs in the kernel-core `irq` phase), and this is the one-time
+        // boot-CPU bring-up `gic::init` documents.
+        unsafe {
+            rustos_arch_aarch64::gic::init();
+        }
     }
 }
 

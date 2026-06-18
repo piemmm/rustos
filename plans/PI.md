@@ -4196,35 +4196,76 @@ two users — or the same user twice — can be logged in concurrently.
          → `VirtioBlk::open` → `unlock_root_disk_interactively`. EMMC2 (the Pi
          SD host) is the staged metal increment: an EMMC2 binding fails closed
          (gate opened, root unbound).
-       - **Re-arm + shared-yield design (load-bearing).** `IrqTable::fire`
-         masks the GIC line on every completion (mask-before-wake), and unmask
-         is an *arch* op the kernel-side `IrqController` trait does not expose,
-         so the kthread's waiter (`metal::RearmingIrqWaiter`) re-arms via
-         `gic_irq::GicIrqController::rearm` then cooperatively yields. Because
-         the IRQ waiter (in `notify_wait`) and the cooperative console reader
-         must share the kthread's single `&mut dyn YieldHandle`, the landed
-         `KthreadIrqWaiter` was evolved to borrow a shared
-         `rustos_kernel_core::CooperativeYield` cell (its `irq_kthread` vertical
-         + 5 unit tests updated in the same change); `KthreadConsoleRead` is the
-         kthread analogue of `BlockingConsoleRead` (which only parks *user*
-         kthreads via `reschedule_current`), suspending through the same cell.
+       - **Interrupt-driven boot + race-free `wfi` wait (load-bearing).** The
+         production aarch64 boot now brings the GICv2 up for delivery and runs
+         interrupt-driven: `gic_irq::install_device_irq_dispatch` (kernel-core
+         `irq` phase) calls `gic::init()` (enable distributor + CPU interface;
+         additive — no line delivers until a driver routes its own, §2.17).
+         The unlock kthread binds the device SPI on the core-published
+         `IrqTable` and its waiter (`metal::RearmingIrqWaiter`) re-arms the
+         line (`gic_irq::GicIrqController::rearm`; unmask is the arch op the
+         kernel `IrqController` trait omits) then does the canonical race-free
+         park — `exceptions::{mask_irq, wait_for_interrupt, enable_irq}` (mask
+         → re-check `IrqTable::ready_for` → `wfi` → unmask), the same discipline
+         as the `-M virt` `WfiWaiter`. A cooperative spin busy-loops a line
+         whose IRQ is never taken once a user `svc` trap masks `DAIF.I` (the
+         register-only `context.s` never restores it) and mis-delivers
+         back-to-back completions; the `wfi` park is §2.1-clean and correct.
+         `KthreadConsoleRead` keeps the cooperative `CooperativeYield` for the
+         IRQ-less, polled passphrase read.
+       - **virtio-MMIO device-interrupt ACK (load-bearing).** `rustos_virtio::
+         Transport` gained a default-no-op `ack_interrupt`; `MmioTransport`
+         overrides it to read `InterruptStatus` and write `InterruptACK`
+         (virtio 1.1 §4.2.2), and `virtio_blk::run_request` calls it after
+         `poll_used`. Without it the device holds its line asserted after a
+         completion, so the next re-arm re-delivers a stale edge and the
+         driver mis-pairs back-to-back reads — the read corruption that blocked
+         the live mount. The default no-op keeps MSI-X PCI / the mock
+         unchanged (3 host tests).
+       - **Unlock audit on the audit channel (§19.4).** The unlock service's
+         mount / install / give-up decisions route through the boot audit sink:
+         `InitSpawnCtx::static_audit()` (default `None`; production
+         `KernelInitSpawner` returns the `'static` audit) is threaded through
+         `spawn_if_present` → `run_unlock` → `note()` + the capability-derive,
+         MMIO map, virtio host, signed load gate, and
+         `unlock_root_disk_interactively` (fallback `SERIAL_SINK`).
        - `ConsoleRead` dropped its blanket `Sync` supertrait; `Sync` is now
          required at the shared-`'static` storage sites (`ConsoleDevice.read`,
          `BlockingConsoleRead`), so the single-kthread `!Sync` cooperative
          reader is admissible.
-       - No `lib/abi`/C-header change. Verified green: host tests, full host
-         clippy (`--workspace --all-targets -D warnings`), `cfg-check`,
-         `deps-check`, `c-header`, fmt, `cargo deny`, `fuzz --secs 5`, the full
-         `cargo xtask test --qemu` matrix (the edited `irq_kthread` +
-         `root_unlock` verticals pass), and both `aarch64-rpi` images.
-       - **Remaining (next session):** (a) a *dedicated* `-M virt` vertical
-         that boots the production `unlock_service::spawn_if_present` admission
-         path over the `rustos-test-encrypted-root-image` fixture and proves
-         `root`/`root` authenticates after the **kthread** mounts the root
-         (distinct from `root_unlock_login_qemu_aarch64`, which drives the
-         policy directly; the device-IRQ kthread path is separately proven by
-         `irq_kthread_qemu_aarch64`); (b) the live EMMC2 root bring-up (Pi metal
-         increment, §0.4 — `raspi4b` cannot model EMMC2); (c) the §0.9 metal
+       - **Bootstrap-floor virtio-MMIO enumeration** (`root_storage::
+         observe_virtio_mmio_block_devices`, driven from
+         `boot::audit_root_storage_binding`): the raw `virtio,mmio` firmware
+         node carries only its `compatible` string, which binds no block
+         driver, so the boot path probes each slot's `DeviceID` through the
+         MMIO bus driver (`virtio_mmio_bus_from_dtb`) and folds a *probed*
+         `HwMatchKey::virtio(2)` child node (the genuine probed identity,
+         §18.2/§18.5 — never fabricated) into the same `RootBlockSelection`.
+         This is what makes the production `virt` boot actually bind its
+         virtio-blk root and admit the unlock kthread; the Pi tree has no
+         `virtio,mmio` node, so it is a no-op there and metal-neutral
+         (§2.17). The reused `metal.rs` device-id constant is deduped to the
+         canonical `rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID`
+         (§2.2). Host-tested (7 `root_storage` cases over a fake `Bus`).
+       - The **admission vertical** `rustos-test-root-unlock-admission-qemu-
+         aarch64` boots the production pipeline (`boot_aarch64::boot`) on
+         `-M virt` with the planted `rustos-test-encrypted-root-image`
+         virtio-blk disk: the enumeration binds the root, `spawn_if_present`
+         admits the kthread, and it brings the device up over the device-IRQ
+         path, reads the typed passphrase, mounts the encrypted root, and
+         installs the database. PASS keys on the
+         `unlock_service::USERS_DB_INSTALLED_MESSAGE` (a shared `pub const`,
+         §2.2) observed on the audit sink — the *kthread-admission* witness
+         (distinct from `root_unlock_login`, which drives the policy directly).
+         Whole `-M virt` QEMU matrix green. Driving the per-console `login` to
+         authenticate end to end additionally needs the userland heap to parse
+         the served DB (SP5b, below), so it is out of this vertical's scope; the
+         DB content authenticating `root`/`root` is proven by
+         `root_unlock_login`.
+       - No `lib/abi`/C-header change (the enumeration adds a new trait-free
+         seam; the device-IRQ + console wiring is internal).
+       - **Remaining:** (a) the live EMMC2 root bring-up (Pi metal increment,
+         §0.4 — `raspi4b` cannot model EMMC2); (b) the §0.9 metal
          UART-typed-login acceptance.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).

@@ -117,6 +117,42 @@ enum FsDisk {
     EncryptedRootDisk,
 }
 
+/// `true` if `line` is exactly `value` followed by a single `\n`.
+///
+/// Used by the compile-time checks that keep the root-unlock-admission
+/// vertical's serial script in lockstep with the shared
+/// [`rustos_test_encrypted_root_image`] fixture: the serial table needs
+/// `&'static str` literals, so each typed line is verified against the
+/// fixture's own constant at build time (`AGENTS.md` §2.2 — single source
+/// of truth; drift fails the build rather than silently mistyping at the
+/// prompt).
+const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
+    if line.len() != value.len() + 1 {
+        return false;
+    }
+    let mut i = 0;
+    while i < value.len() {
+        if line[i] != value[i] {
+            return false;
+        }
+        i += 1;
+    }
+    line[value.len()] == b'\n'
+}
+
+/// The passphrase line the admission vertical types at `Root passphrase: `.
+const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
+
+const _: () = {
+    assert!(
+        is_line_of(
+            UNLOCK_PASSPHRASE_LINE.as_bytes(),
+            rustos_test_encrypted_root_image::PASSPHRASE
+        ),
+        "UNLOCK_PASSPHRASE_LINE drifted from the fixture passphrase"
+    );
+};
+
 const TESTS: &[QemuTest] = &[
     QemuTest {
         package: "rustos-test-memory-isolation",
@@ -2121,6 +2157,44 @@ const TESTS: &[QemuTest] = &[
         fs_disk: FsDisk::EncryptedRootDisk,
         keyboard: None,
         serial: &[],
+    },
+    // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
+    // `rustos-test-root-unlock-admission-qemu-aarch64` vertical boots the
+    // *production* aarch64 `rustos-kernel` pipeline (`boot_aarch64::boot`)
+    // on the `virt` board with the same planted whole-disk encrypted-root
+    // image (`FsDisk::EncryptedRootDisk`) attached as a virtio-blk-mmio
+    // device — but, unlike `root_unlock_login` (which drives the unlock
+    // *policy* directly), it proves the *kthread admission* path: the
+    // bootstrap-floor virtio-MMIO bus enumeration
+    // (`root_storage::observe_virtio_mmio_block_devices`) probes the slot
+    // and binds the virtio-blk root, the init seam admits the in-kernel
+    // unlock kthread (`unlock_service::spawn_if_present`), and the kthread
+    // brings the device up over the production device-IRQ path, prompts at
+    // `Root passphrase: `, reads the typed passphrase, mounts the encrypted
+    // `RustFS` root, and installs the users database into `LATE_USERS_DB`.
+    // The kernel-side audit sink reports PASS through the ARM semihosting
+    // finisher the instant it sees the unlock-service install message
+    // (`EventId(4139)`) — the witness that the kthread-admission path
+    // mounted the root end to end. The runner types only the fixture
+    // passphrase (verified against the shared fixture at compile time,
+    // `is_line_of`, §2.2); the database *content* authenticating
+    // `root`/`root` is proven by `root_unlock_login`, and driving the
+    // per-console `login` to authenticate end to end rides the userland heap
+    // (`plans/SPAWN.md` SP5b, not yet landed), so it is out of this
+    // vertical's scope. A 90-second budget covers the boot + bounded PBKDF2
+    // derivation on QEMU TCG; single CPU like the other full-boot verticals.
+    QemuTest {
+        package: "rustos-test-root-unlock-admission-qemu-aarch64",
+        binary: "rustos-test-root-unlock-admission-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(90),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::EncryptedRootDisk,
+        keyboard: None,
+        serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
     },
     // Stage W11 (`plans/WIRING.md` §3):
     // `rustos-test-virtio-net-mmio-aarch64` is the aarch64 `virt`-board

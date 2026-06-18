@@ -1970,6 +1970,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-root-unlock-admission-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-arch-aarch64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-root-unlock-login-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
