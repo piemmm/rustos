@@ -3720,11 +3720,15 @@ table, so a new board is match **data**, not new code. Sub-increments
           enrolled in `qemu_tests`, keyed on a new production audit witness
           (mirroring `root_unlock_admission`). Its fixture rustfs root must
           carry a `virtio_kbd.rxe` bundle signed by the kernel's
-          driver-signing key — so the kernel `KERNEL_DRIVER_SIGNING_SEED` must
-          first be hoisted to a shared single-source location (§2.2) both the
-          kernel build and the fixture build sign from; and the production
-          `key_inject` path needs a one-shot audit witness when an autoloaded
-          driver first delivers input to the arbiter (not per-keystroke, §20);
+          driver-signing key. The seed-hoist prerequisite is **done**:
+          `KERNEL_DRIVER_SIGNING_SEED` now lives once in
+          `kernel/rustos-kernel/src/build_support.rs` (the dependency-free
+          `#[path]` module the kernel build script pulls in), so the kernel
+          build and any fixture/image build sign a kernel-trusted bundle from
+          the one definition (§2.2; host-tested pin). **Remaining** for the
+          vertical: the production `key_inject` path needs a one-shot audit
+          witness when an autoloaded driver first delivers input to the arbiter
+          (not per-keystroke, §20);
         - `tools/mkimage` laying the signed input-driver bundle into
           `/System/Drivers/`, signed with the kernel's driver-signing trust
           anchor (a seed shared in one place with the kernel build, §2.2) —

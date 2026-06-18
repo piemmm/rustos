@@ -226,8 +226,13 @@ InKernel`, stamped with the kernel's `SYSCALL_TABLE_HASH`, requests
 `CAP_DRV_LOAD`, carries the driver crate's own `BIND_KEYS`, and is
 Ed25519-signed with the build's deterministic driver-signing key
 (`KERNEL_DRIVER_SIGNING_SEED`); the matching public key is embedded as
-the kernel's sole driver trust anchor. The kernel trusts only the drivers
-its own reproducible build signed; secrecy of the seed buys nothing
+the kernel's sole driver trust anchor. The seed has a single home in
+`kernel/rustos-kernel/src/build_support.rs` (the dependency-free
+`#[path]` module the build script pulls in), so a fixture or image build
+that lays a *kernel-trusted* bundle into the driver store signs from the
+same definition rather than a copy (`AGENTS.md` §2.2). The kernel trusts
+only the drivers its own reproducible build signed; secrecy of the seed
+buys nothing
 (`AGENTS.md` §19.3), so it is committed and the signatures stay
 bit-reproducible. The keyboard service admits the two bus drivers before
 bring-up and re-matches the enumerated HID child against the driver

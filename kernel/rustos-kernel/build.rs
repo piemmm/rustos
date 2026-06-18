@@ -39,7 +39,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use build_support::{is_freestanding, kernel_isa, linker_script_for};
+use build_support::{is_freestanding, kernel_isa, linker_script_for, KERNEL_DRIVER_SIGNING_SEED};
 
 /// Rust target triple of the freestanding aarch64 (Raspberry Pi 4) build.
 const AARCH64_TARGET: &str = "aarch64-unknown-none";
@@ -160,22 +160,6 @@ fn main() {
     emit_program_rxes(&target);
     emit_signed_driver_manifests();
 }
-
-/// Deterministic Ed25519 seed the build signs every embedded driver
-/// manifest with (`plans/PI.md` P10 5c-ii).
-///
-/// The kernel's driver-load trust anchor (`AGENTS.md` §8 / §9) is *this
-/// build's own key*: the kernel trusts the drivers its build signed and
-/// statically linked, nothing else. Because the chain drivers are baked
-/// into the kernel image from the same source tree, secrecy of the key
-/// buys nothing — the security boundary is "did this exact, reproducible
-/// source build produce this image" (`AGENTS.md` §19.3, reproducible
-/// builds + source-hash pinning + a signed SBOM), not a hidden authority.
-/// A deterministic seed keeps the baked signatures bit-reproducible
-/// (`AGENTS.md` §19.3); a random per-build key would defeat that. A
-/// third-party / userland signing authority is a later concern
-/// (`plans/PI.md` P10 5d).
-const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-kernel-driver-signing/v1!";
 
 /// One chain driver to bake a signed manifest for: the emitted `const`
 /// name and the driver crate's own canonical `BIND_KEYS` (so the signed

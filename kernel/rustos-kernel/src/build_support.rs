@@ -1,10 +1,20 @@
-//! Pure target-selection logic for the `rustos-kernel` build script.
+//! Pure build-support logic shared by the `rustos-kernel` build script.
 //!
 //! This file is pulled in by `build.rs` as a `#[path]` module (so the
 //! build script has no dependency to pull in) and is *also* compiled
-//! into the crate's host test build as a module, so the same selection
-//! rules are unit tested rather than only exercised implicitly by a
-//! cross-compile (`AGENTS.md` §7 — tests are part of the change).
+//! into the crate's host test build as a module, so the same rules are
+//! unit tested rather than only exercised implicitly by a cross-compile
+//! (`AGENTS.md` §7 — tests are part of the change).
+//!
+//! It holds two kinds of build-time fact: the target-selection logic
+//! (which instruction set / boot linker script a build is for) and the
+//! [`KERNEL_DRIVER_SIGNING_SEED`] — the single source of the driver-load
+//! trust-anchor seed. Because a `#[path]` include carries no dependency,
+//! every build that must sign a driver manifest with the *same* key the
+//! kernel trusts — the kernel's own `build.rs` and any out-of-tree fixture
+//! or image build that lays a kernel-trusted bundle into the driver store —
+//! reads the seed from here rather than carrying its own copy
+//! (`AGENTS.md` §2.2).
 //!
 //! Every decision the build script makes about *which* instruction set
 //! the production kernel is being built for, and *which* per-board boot
@@ -77,6 +87,30 @@ pub fn is_freestanding(target_os: &str, target_arch: &str) -> bool {
     target_os == "none" && kernel_isa(target_arch).is_some()
 }
 
+/// Deterministic Ed25519 seed the build signs every driver manifest with
+/// (`plans/PI.md` P10 5c-ii).
+///
+/// The kernel's driver-load trust anchor (`AGENTS.md` §8 / §9) is *this
+/// build's own key*: the kernel trusts the drivers its build signed and
+/// statically linked, nothing else. Because the chain drivers are baked
+/// into the kernel image from the same source tree, secrecy of the key
+/// buys nothing — the security boundary is "did this exact, reproducible
+/// source build produce this image" (`AGENTS.md` §19.3, reproducible
+/// builds + source-hash pinning + a signed SBOM), not a hidden authority.
+/// A deterministic seed keeps the baked signatures bit-reproducible
+/// (`AGENTS.md` §19.3); a random per-build key would defeat that. A
+/// third-party / userland signing authority is a later concern
+/// (`plans/PI.md` P10 5d).
+///
+/// This is the **single source** of the seed (`AGENTS.md` §2.2). The
+/// kernel's `build.rs` signs the embedded in-kernel chain manifests with
+/// it, and any fixture or image build that lays a *kernel-trusted* driver
+/// bundle into `/System/Drivers/` (the `-M virt` autoload vertical, the
+/// `tools/mkimage` signed bundle — `plans/PI.md` P10 5d-2-ii) signs from
+/// this same definition so the bundle verifies against the kernel's
+/// embedded trust anchor.
+pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-kernel-driver-signing/v1!";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +161,19 @@ mod tests {
         assert_eq!(kernel_isa("wasm32"), None);
         assert!(!is_freestanding("none", "wasm32"));
         assert_eq!(linker_script_for("wasm32-unknown-unknown"), None);
+    }
+
+    #[test]
+    fn the_driver_signing_seed_is_the_pinned_single_source_value() {
+        // The seed is the single source every kernel-trusted driver
+        // signature derives from (`AGENTS.md` §2.2); pinning its exact
+        // bytes guards against a silent edit that would desynchronise the
+        // kernel's embedded trust anchor from a fixture/image build that
+        // signs a bundle with it.
+        assert_eq!(
+            KERNEL_DRIVER_SIGNING_SEED,
+            *b"rustos-kernel-driver-signing/v1!"
+        );
+        assert_eq!(KERNEL_DRIVER_SIGNING_SEED.len(), 32);
     }
 }
