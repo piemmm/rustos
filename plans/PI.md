@@ -3646,12 +3646,26 @@ table, so a new board is match **data**, not new code. Sub-increments
           table is **landed** (`HwMatchKey::virtio(18)` at the exact-match
           priority tier — the single source of truth its signed manifest is
           authored from; host-tested + README/`docs/src/drivers/input.md`).
-          **Remaining:** promote its reusable `open`/`poll`/`decode` logic to a
-          `lib/*` crate (the §17.4 analogue of `lib/hid` ↔ `usb_hid`) and add a
-          signed, autoloadable `rxe` binary over `lib/drvrt`+`lib/rt` whose
-          manifest carries that `BIND_KEYS` — the most architecturally honest
-          "driver in user space by discovery" proof on the hardware `virt`
-          actually has (the metal Pi keyboard stays `usb_kbd`, flipped at 5e);
+          The reusable `open`/`poll`/`decode` device logic is **now extracted**
+          to the new `lib/virtio_input` (`rustos-virtio-input`) crate — the
+          §17.4 analogue of `lib/hid` ↔ `usb_hid` — so both the in-kernel
+          `-M virt` verticals and the user-space `rxe` compose it without a
+          `drivers/*`→`drivers/*` edge; `drivers/input/virtio_input` is now the
+          thin §8 `register` + `BIND_KEYS` shell (the device id is
+          `rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID`), and the
+          `virtio_qemu_support` harness consumes `VirtioInput` from the lib.
+          Host-proven (`rustos-virtio-input` 9 device-logic tests, driver shell
+          2). **Remaining:** add the signed, autoloadable `rxe` binary over
+          `lib/drvrt`+`lib/rt` whose manifest carries that `BIND_KEYS`. The
+          binary needs a **lib-reachable concrete virtio MMIO transport** (the
+          concrete `MmioTransport` is in `drivers/bus/virtio`, which a
+          `drivers/input/*` crate may not depend on, §17.4): relocate it into
+          `lib/virtio` — the `lib/usb` precedent, where the concrete xHCI engine
+          moved to `lib/*` so both the kernel bus driver and the user-space
+          driver use it — updating §3 and the `virtio_driver_layer_is_on_lib_only`
+          deps-check. This is the most architecturally honest "driver in user
+          space by discovery" proof on the hardware `virt` actually has (the
+          metal Pi keyboard stays `usb_kbd`, flipped at 5e);
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
           holding the signed input-driver bundle + the unlock descriptor,
           attach a virtio-keyboard device → unlock → `enumerate_driver_store`

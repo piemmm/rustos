@@ -1,6 +1,6 @@
 [package]
 name = "rustos-drv-input-virtio-input"
-description = "RustOS virtio-input driver (keyboard / pointer) over the bus-agnostic virtio transport."
+description = "RustOS virtio-input driver (keyboard / pointer): the §8 `register` entry and the §18.3 bind table. The open/poll/decode device logic lives in `lib/virtio_input` (§2.2 / §17.4)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,16 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The capability / bind-key / driver-host vocabulary the `register` entry and
+# the §18.3 bind table are written against — one ABI definition (§2.2).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The bus-agnostic virtio split-virtqueue protocol (Transport trait,
-# SplitQueue, DMA slabs, the MockHost/MockTransport doubles) lives in
-# `lib/virtio`. The driver consumes it from `lib/*` and never depends on
-# the `drivers/bus/virtio` transport crate (`AGENTS.md` §17.4 — a driver
-# may depend on `lib/*` but never on another driver).
-rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+# The arch-neutral virtio-input device logic (open/poll/decode) and the
+# canonical `VIRTIO_INPUT_DEVICE_ID` the bind table's match key is built from.
+# It lives in `lib/*` so both this driver and the user-space input-driver
+# process compose it without a `drivers/*`→`drivers/*` edge (`AGENTS.md`
+# §17.4 / §2.2). This crate keeps only the §8 `register` entry and the §18.3
+# bind table; it never names the `drivers/bus/virtio` transport crate.
+rustos-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 
 [lints]
 workspace = true

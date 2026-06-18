@@ -91,7 +91,15 @@ validates against the PIT.
 
 ### `rustos-drv-input-virtio-input`
 
-The virtio-input driver implements `Input` over the bus-agnostic virtio
+`rustos-drv-input-virtio-input` is the §8 driver identity — the `register`
+entry and the §18.3 `BIND_KEYS` bind table. The reusable open/poll/decode
+device logic described below lives in the
+[`rustos-virtio-input`](../lib/virtio_input.md) library (`lib/virtio_input`),
+shared by the in-kernel `-M virt` verticals and the (forthcoming) user-space
+input-driver process without a `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4
+/ §2.2 — the virtio analogue of `lib/hid` ↔ `drivers/input/usb_hid`).
+
+The virtio-input logic implements `Input` over the bus-agnostic virtio
 transport from `lib/virtio`, so one source compiles against both the PCI
 and MMIO transports (the queue protocol lives once, `AGENTS.md` §2.2).
 It is the paravirtualised input device every QEMU machine type can

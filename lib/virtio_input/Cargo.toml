@@ -1,0 +1,23 @@
+[package]
+name = "rustos-virtio-input"
+description = "RustOS arch-neutral, transport-agnostic virtio-input (keyboard / pointer) device logic over the bus-agnostic `lib/virtio` transport (§2.2, §6, §17.4 — plans/PI.md 5d-2-ii): the open/poll/decode engine both the kernel-side `-M virt` verticals and the user-space input-driver process compose, so neither a driver nor the harness re-implements it. no_std, fail-closed (§2.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The platform-neutral `Input`/`InputEvent` driver surface the device speaks
+# and the `BufferClass` / `DriverError` vocabulary it fails closed with — one
+# ABI definition (§2.2).
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+# The bus-agnostic virtio split-virtqueue protocol (the `Transport` trait,
+# `SplitQueue`, DMA slabs, `VirtioHost`) the device-class logic is written
+# against, so it consumes the protocol without naming a concrete bus driver
+# (`AGENTS.md` §17.4 — `lib/* → lib/*` only).
+rustos-virtio = { path = "../virtio", version = "=0.0.0" }
+
+[lints]
+workspace = true

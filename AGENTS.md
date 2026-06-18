@@ -496,6 +496,11 @@ rustos/
 │   │                    #   rpi_hvs display driver (§2.2).
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
 │   │                    #   (Transport trait, queues, DMA slabs).
+│   ├── virtio_input/    # Arch-neutral virtio-input (keyboard/pointer)
+│   │                    #   open/poll/decode device logic over lib/virtio,
+│   │                    #   shared by the kernel verticals and the user-space
+│   │                    #   input driver (§2.2/§17.4 — the virtio analogue of
+│   │                    #   lib/hid ↔ drivers/input/usb_hid).
 │   └── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
 │                        #   one control/SGR/colour/screen-op definition with an
 │                        #   emitter + streaming parser over the same tables (§2.2).

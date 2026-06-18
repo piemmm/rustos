@@ -65,6 +65,7 @@ members = [
     "lib/util",
     "lib/vcmailbox",
     "lib/virtio",
+    "lib/virtio_input",
     "lib/vt",
 
     # Drivers — display

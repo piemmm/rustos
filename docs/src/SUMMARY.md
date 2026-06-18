@@ -51,6 +51,7 @@
   - [`rustos-usb`](./lib/usb.md)
   - [`rustos-users`](./lib/users.md)
   - [`rustos-util`](./lib/util.md)
+  - [`rustos-virtio-input`](./lib/virtio_input.md)
   - [`rustos-vt`](./lib/vt.md)
 
 # Drivers
