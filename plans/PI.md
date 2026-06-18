@@ -3655,17 +3655,26 @@ table, so a new board is match **data**, not new code. Sub-increments
           `rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID`), and the
           `virtio_qemu_support` harness consumes `VirtioInput` from the lib.
           Host-proven (`rustos-virtio-input` 9 device-logic tests, driver shell
-          2). **Remaining:** add the signed, autoloadable `rxe` binary over
-          `lib/drvrt`+`lib/rt` whose manifest carries that `BIND_KEYS`. The
-          binary needs a **lib-reachable concrete virtio MMIO transport** (the
-          concrete `MmioTransport` is in `drivers/bus/virtio`, which a
-          `drivers/input/*` crate may not depend on, §17.4): relocate it into
-          `lib/virtio` — the `lib/usb` precedent, where the concrete xHCI engine
-          moved to `lib/*` so both the kernel bus driver and the user-space
-          driver use it — updating §3 and the `virtio_driver_layer_is_on_lib_only`
-          deps-check. This is the most architecturally honest "driver in user
-          space by discovery" proof on the hardware `virt` actually has (the
-          metal Pi keyboard stays `usb_kbd`, flipped at 5e);
+          2). The **lib-reachable concrete virtio MMIO transport** the
+          user-space driver needs is **now landed**: `MmioTransport` moved from
+          `drivers/bus/virtio` into `lib/virtio` (it depends only on the
+          bounds-checked `RegisterWindow` + the protocol types), so an
+          arch-neutral `drivers/input/*` `rxe` can build it without a
+          `drivers/*`→`drivers/*` edge (§17.4 — the `lib/usb` ↔ `drivers/bus/usb`
+          precedent). `drivers/bus/virtio` re-exports it from `rustos_virtio`
+          (existing `rustos_drv_bus_virtio::MmioTransport` import sites resolve
+          unchanged, §2.2); §3, `docs/src/drivers/virtio.md`, and the
+          `transport_mmio` tests moved with it. **Remaining:** add the signed,
+          autoloadable `rxe` binary over `lib/drvrt`+`lib/rt` whose manifest
+          carries that `BIND_KEYS` (the `usb_kbd` analogue) — it builds the
+          `MmioTransport` over its kernel-granted register window + a
+          `VirtioHost` over its granted DMA, runs `VirtioInput::open`, and
+          injects each decoded key edge via `key_inject` — and extend the
+          `virtio_driver_layer_is_on_lib_only` deps-check to bind the new crate
+          to `lib/virtio`, not the bus driver. This is the most architecturally
+          honest "driver in user space by discovery" proof on the hardware
+          `virt` actually has (the metal Pi keyboard stays `usb_kbd`, flipped at
+          5e);
         - the `-M virt` autoload vertical (mount a virtio-blk rustfs root
           holding the signed input-driver bundle + the unlock descriptor,
           attach a virtio-keyboard device → unlock → `enumerate_driver_store`

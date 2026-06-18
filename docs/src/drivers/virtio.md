@@ -1,8 +1,13 @@
 # Virtio transport
 
 The bus-agnostic virtqueue protocol lives in `lib/virtio`
-(crate `rustos-virtio`); `drivers/bus/virtio` adds only the concrete
-PCI / MMIO `Transport` implementations on top of it. Both wire
+(crate `rustos-virtio`), together with the concrete virtio-MMIO
+`Transport` (`MmioTransport`); `drivers/bus/virtio` adds only the
+concrete PCI `Transport` implementation (and the register-window
+backends) on top of it. The MMIO transport sits in `lib/virtio` so an
+arch-neutral user-space virtio driver process can build it without a
+`drivers/* → drivers/*` edge (`AGENTS.md` §17.4 / §2.2 — the `lib/usb`
+↔ `drivers/bus/usb` precedent). Both wire
 formats are implemented as parallel siblings (`AGENTS.md` §2.2): the
 **split virtqueue** (virtio 1.1 §2.6, `SplitQueue`) and the **packed
 virtqueue** (virtio 1.1 §2.7, `PackedQueue`). The device
@@ -18,10 +23,10 @@ and the device drivers carry only the device-specific wire format.
 
 - A `Transport` trait abstracting the PCI (`x86_64`) and MMIO
   (`aarch64`, `riscv64 virt`) bus seams behind a single interface.
-  Its two concrete implementations live in `drivers/bus/virtio`: the
-  modern-PCI `PciTransport`
+  Its two concrete implementations are the modern-PCI `PciTransport`
+  in `drivers/bus/virtio`
   (see [Modern PCI transport](#modern-pci-transport-pcitransport))
-  and the virtio-MMIO `MmioTransport`
+  and the virtio-MMIO `MmioTransport` in `lib/virtio`
   (see [Modern MMIO transport](#modern-mmio-transport-mmiotransport)).
 - Virtio 1.1 §3.1 device-initialisation status sequencing
   (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`).
@@ -68,12 +73,12 @@ and the device drivers carry only the device-specific wire format.
                     v
 +-------------------------------------+
 |  lib/virtio                         |  virtio 1.1 §2.6 split + §2.7 packed
-|                                     |  queues, §3.1 init
+|                                     |  queues, §3.1 init, MmioTransport
 +-------------------+-----------------+
-                    ^ implemented by PciTransport / MmioTransport
+                    ^ PciTransport implements Transport
                     |
 +-------------------+-----------------+
-|  drivers/bus/virtio                 |  concrete PCI / MMIO Transport impls
+|  drivers/bus/virtio                 |  concrete PCI Transport impl
 +-------------------+-----------------+
                     | PciBackend / MmioBackend (own a RegisterWindow)
                     v
@@ -133,17 +138,22 @@ unprogrammed queue.
 
 ## Modern MMIO transport (`MmioTransport`)
 
-`MmioTransport` (`drivers/bus/virtio/src/transport_mmio.rs`) is the
+`MmioTransport` (`lib/virtio/src/transport_mmio.rs`) is the
 concrete `Transport` for a modern (virtio-1.x) MMIO device — the
 layout QEMU's `-M virt` `virtio-mmio` transport and the RISC-V /
-`AArch64` device-tree nodes advertise (virtio 1.1 §4.2). Unlike the
-four capability-selected PCI windows, a virtio-MMIO device exposes a
-**single** contiguous register block, so the transport owns one
-`RegisterWindow`. The bus driver resolves the block's `(base,
-length)` from the boot device tree and maps it through the same
-`CAP_MMIO_MAP`-gated MMIO-map facility; the transport therefore holds
-**no** ambient authority and performs **no** pointer arithmetic
-(`AGENTS.md` §4).
+`AArch64` device-tree nodes advertise (virtio 1.1 §4.2). It lives in
+`lib/virtio` (not the bus driver) because it depends only on the
+bounds-checked `RegisterWindow` and the protocol types, so both the
+kernel-side consumers and an arch-neutral user-space virtio driver
+process can construct it without a `drivers/* → drivers/*` edge
+(`AGENTS.md` §17.4 / §2.2 — the `lib/usb` ↔ `drivers/bus/usb`
+precedent). Unlike the four capability-selected PCI windows, a
+virtio-MMIO device exposes a **single** contiguous register block, so
+the transport owns one `RegisterWindow`. A consumer resolves the
+block's `(base, length)` from the boot device tree and maps it through
+the same `CAP_MMIO_MAP`-gated MMIO-map facility; the transport
+therefore holds **no** ambient authority and performs **no** pointer
+arithmetic (`AGENTS.md` §4).
 
 `MmioTransport::new` validates the `MagicValue` (`"virt"`), a modern
 `Version` of `2`, a non-zero `DeviceID`, and a window that spans the
@@ -357,21 +367,23 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   (`poll_used_rejects_a_device_head_outside_the_descriptor_table`,
   `poll_used_reclaim_bails_on_a_corrupted_next_link`) and the
   `fuzz_virtqueue` harness drive a hostile device-written used ring /
-  descriptor table and assert the consumer fails closed.
-- `cargo test -p rustos-drv-bus-virtio` covers the concrete
-  transports: the `transport_pci` tests (short-window rejection,
+  descriptor table and assert the consumer fails closed. It also
+  covers the concrete virtio-MMIO transport (`transport_mmio`), which
+  lives here for the riscv64 / `AArch64` MMIO bus seam: short-window,
+  bad-magic, legacy-version and empty-slot rejection, status
+  write/read + reset, device/driver-feature halves, queue-select
+  register write, queue programming + `QueueReady`, oversize
+  rejection, single-register notify, device-config read with zero-fill
+  overflow, and a `SplitQueue`-drives-`MmioTransport` integration
+  check.
+- `cargo test -p rustos-drv-bus-virtio` covers the concrete PCI
+  transport: the `transport_pci` tests (short-window rejection,
   `num_queues` read, status write/read + reset, driver-feature
   halves, queue-select range check, queue programming + notify-offset
   recording, oversize and out-of-bounds-notify rejection, no-op
   notify for an unprogrammed queue, device-config read with zero-fill
   overflow, and a `SplitQueue`-drives-`PciTransport` integration
-  check) and the `transport_mmio` tests for the riscv64 / `AArch64`
-  virtio-MMIO transport (short-window, bad-magic, legacy-version and
-  empty-slot rejection, status write/read + reset, device/driver-
-  feature halves, queue-select register write, queue programming +
-  `QueueReady`, oversize rejection, single-register notify,
-  device-config read with zero-fill overflow, and a
-  `SplitQueue`-drives-`MmioTransport` integration check).
+  check).
 - `cargo test -p rustos-kernel-virtio` covers the kernel host and
   MMIO mapper: zero-initialisation + audit emit, drop routes through
   `free_dma`, `CapabilityId::MEM_DMA` refusal returns

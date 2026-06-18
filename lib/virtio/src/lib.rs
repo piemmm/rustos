@@ -13,9 +13,13 @@
 //! # Surface
 //!
 //! * [`Transport`] — the bus seam every virtio device speaks through.
-//!   The concrete PCI / MMIO implementations live in
-//!   `drivers/bus/virtio`; [`MockTransport`] is the in-process peer the
-//!   driver unit tests drive.
+//!   The concrete MMIO implementation ([`MmioTransport`]) lives here so
+//!   both kernel-side consumers and an arch-neutral user-space driver
+//!   process can build it without a `drivers/*` dependency (§17.4); the
+//!   concrete PCI implementation (which needs the bus driver's PCI
+//!   capability-window wiring) lives in `drivers/bus/virtio`.
+//!   [`MockTransport`] is the in-process peer the driver unit tests
+//!   drive.
 //! * [`SplitQueue`] — split-virtqueue descriptor/avail/used management
 //!   (virtio 1.1 §2.6).
 //! * [`PackedQueue`] — packed-virtqueue single-ring management
@@ -50,6 +54,7 @@ pub mod host;
 pub mod packed;
 pub mod queue;
 pub mod transport;
+pub mod transport_mmio;
 
 #[cfg(test)]
 mod tests;
@@ -61,3 +66,4 @@ pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{
     ChainView, Direction, MockTransport, PciTransportWindows, Status, Transport, VirtioError,
 };
+pub use transport_mmio::MmioTransport;

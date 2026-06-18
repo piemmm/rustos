@@ -4,10 +4,21 @@
 //! A virtio-MMIO device (virtio 1.1 §4.2) exposes a single,
 //! contiguous register block — the layout the QEMU `-M virt`
 //! `virtio-mmio` transport and the RISC-V / `AArch64` device-tree
-//! nodes advertise. The bus driver discovers the block's
+//! nodes advertise. A consumer discovers the block's
 //! `(base, length)` from the boot device tree, asks the kernel
 //! MMIO-map facility for a [`RegisterWindow`] over it, and hands that
 //! single window to [`MmioTransport::new`].
+//!
+//! This concrete transport lives in `lib/virtio` (not the
+//! `drivers/bus/virtio` bus driver) so that both the kernel-side
+//! consumers (`kernel/virtio`, the production binary, the `-M virt`
+//! integration verticals) **and** an arch-neutral user-space virtio
+//! input/storage driver process can construct it without depending on a
+//! `drivers/*` crate (`AGENTS.md` §17.4 — `drivers/* → lib/*` only; the
+//! `lib/usb` ↔ `drivers/bus/usb` precedent, §2.2). It depends only on
+//! the bounds-checked [`RegisterWindow`] in `lib/abi` and the protocol
+//! types in this crate, so it builds for every Tier-1 target and is
+//! identical across architectures.
 //!
 //! Unlike the PCI transport (four capability-selected windows), the
 //! MMIO transport reads and writes every register at a fixed offset
@@ -29,7 +40,7 @@
 
 use rustos_abi::RegisterWindow;
 
-use rustos_virtio::{Status, Transport, VirtioError};
+use crate::{Status, Transport, VirtioError};
 
 /// Byte offsets within the virtio-MMIO register block (virtio 1.1
 /// §4.2.2, `MMIO Device Register Layout`). All registers are 32 bits
@@ -308,9 +319,9 @@ impl Transport for MmioTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{MockHost, SplitQueue};
     use alloc::boxed::Box;
     use core::ptr::NonNull;
-    use rustos_virtio::{MockHost, SplitQueue};
 
     /// A buffer-backed stand-in for a modern virtio-MMIO device. The
     /// leaked, 8-byte-aligned backing storage outlives every window

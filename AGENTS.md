@@ -495,7 +495,11 @@ rustos/
 │   │                    #   by the aarch64 framebuffer boot console and the
 │   │                    #   rpi_hvs display driver (§2.2).
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
-│   │                    #   (Transport trait, queues, DMA slabs).
+│   │                    #   (Transport trait, queues, DMA slabs) + the
+│   │                    #   concrete virtio-MMIO transport, so a user-space
+│   │                    #   virtio driver builds it without a drivers/*→
+│   │                    #   drivers/* edge (§2.2/§17.4 — the lib/usb ↔
+│   │                    #   drivers/bus/usb precedent).
 │   ├── virtio_input/    # Arch-neutral virtio-input (keyboard/pointer)
 │   │                    #   open/poll/decode device logic over lib/virtio,
 │   │                    #   shared by the kernel verticals and the user-space
