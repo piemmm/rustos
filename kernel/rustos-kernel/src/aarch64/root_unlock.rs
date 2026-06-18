@@ -48,7 +48,9 @@ use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
-use crate::root_mount::{unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB};
+use crate::root_mount::{
+    autoload_system_drivers, unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB,
+};
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, service_caps, take_boot, AutoloadHook, KthreadConsoleRead,
     CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
@@ -278,13 +280,14 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
 /// Bring the virtio-blk root device up over the production device-IRQ path
 /// and run the interactive unlock policy, returning its outcome.
 ///
-/// Once the operator's passphrase mounts the root, the
-/// [`AutoloadHook`] this builds autoloads user-space drivers off the
-/// mounted volume's signed `/System/Drivers/` store — matching every node
-/// of the discovered `tree` against the store and spawning each winner into
-/// its own process through `ctx`'s [`InitSpawnCtx::spawn_driver_process`]
-/// seam (`AGENTS.md` §18.3). The autoload runs inside the mount, while the
-/// encrypted root is open, and cannot fail the unlock.
+/// Before prompting for the passphrase, the [`AutoloadHook`] this builds
+/// autoloads user-space drivers off the read-only `/System` volume's signed
+/// `/System/Drivers/` store ([`autoload_system_drivers`]) — matching every
+/// node of the discovered `tree` against the store and spawning each winner
+/// into its own process through `ctx`'s [`InitSpawnCtx::spawn_driver_process`]
+/// seam (`AGENTS.md` §18.3). Running it *first* brings the keyboard up in
+/// user space in time to type the unlock secret (design B); it is fail-soft
+/// and cannot fail the boot.
 ///
 /// Every fallible step fails closed with a stable stage string the caller
 /// logs (`AGENTS.md` §2.9); the caller opens the console-0 gate on every
@@ -409,7 +412,7 @@ fn run_unlock(
         .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
 
     // Open the whole-disk block device over the provisioned transport.
-    let blk = VirtioBlk::open(transport, &vhost).map_err(|_| "root-unlock: virtio-blk open")?;
+    let mut blk = VirtioBlk::open(transport, &vhost).map_err(|_| "root-unlock: virtio-blk open")?;
 
     // Primary console (index 0): the video console + its keyboard queue when
     // a framebuffer console is active, else the discovered UART. The unlock
@@ -437,10 +440,10 @@ fn run_unlock(
     // context + the aarch64 process producer (`AGENTS.md` §17.1 / §2.2) —
     // the one per-arch input the otherwise arch-neutral autoload hook needs.
     let driver_spawn = InitCtxDriverProcessSpawn::new(ctx, &AARCH64_PROCESS_SPAWN);
-    // The post-mount autoload hook: once the passphrase mounts the root, it
-    // matches every discovered node against the volume's signed driver store
-    // and spawns each winner into its own user-space process (`AGENTS.md`
-    // §18.3). It presents the gate the delegatable `autoload_caps` superset
+    // The pre-unlock autoload hook: run against the read-only `/System`
+    // volume below, it matches every discovered node against that volume's
+    // signed driver store and spawns each winner into its own user-space
+    // process (`AGENTS.md` §18.3). It presents the gate the delegatable `autoload_caps` superset
     // (`CAP_DRV_LOAD` to pass the gate plus the resource capabilities an
     // autoloaded driver's class may request — including `CAP_INPUT_INJECT` for
     // an input driver), intersected per driver with its signed manifest
@@ -448,13 +451,22 @@ fn run_unlock(
     // minimal `service_caps` (§5.4).
     let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, autoload_caps(), audit);
 
+    // Design B2: autoload off the read-only `/System` volume's signed store
+    // **before** the passphrase prompt, so the keyboard (and any other
+    // matched driver) is brought up in user space in time for the operator
+    // to type the encrypted-root unlock secret — the chicken-and-egg design B
+    // resolves. Fail-soft and fail-closed (`AGENTS.md` §18.4 / §2.9): a disk
+    // with no `/System` volume autoloads nothing and the boot still reaches
+    // the prompt (on the UART the passphrase can still be typed). The borrow
+    // of `blk` ends here, returning the device for the interactive unlock.
+    autoload_system_drivers(&mut blk, &mut autoload, audit);
+
     Ok(unlock_root_disk_interactively(
         blk,
         console_write,
         &reader,
         &LATE_USERS_DB,
         audit,
-        &mut autoload,
     ))
 }
 

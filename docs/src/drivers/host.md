@@ -267,22 +267,27 @@ manifest, or whose bind table fails to decode is **skipped and logged**,
 never fatal: one bad bundle cannot block the rest of the boot
 (`AGENTS.md` §18.4 / §5.4).
 
-#### Reading the bundle bytes off the root volume
+#### Reading the bundle bytes off the scanned volume
 
-In production the bundle bytes live on the mounted root volume under
-`/System/Drivers/`. The kernel finds *which* paths exist with
-`rustos_kernel_core::enumerate_driver_store` (a §5.3-checked VFS walk
-under the uid-0 bootstrap identity), and reads the bytes of a chosen
-bundle with `rustos_kernel_core::DriverImageReader`: it builds the
-root-backed VFS **once** (`AGENTS.md` §2.16), then per call validates
-that the path lies strictly within `/System/Drivers/`, bounds the file
-against `MAX_DRIVER_IMAGE_LEN` (a 16 MiB §24.4 validation cap) *before*
-reading a byte, reads the whole file, and **appends** it to the caller's
-buffer — failing closed and leaving the buffer untouched on any refusal
-(`AGENTS.md` §5.4 / §2.9). Every read runs under the uid-0, no-capability
-bootstrap identity: a bundle is reachable only because its stored §5.3
-record makes it readable to that identity, never through an ambient
-bypass (`AGENTS.md` §5.1).
+In production the bundle bytes live in the §16.2 `/System/Drivers/` store.
+The store path is taken **relative to the root of the volume being
+scanned**, passed explicitly as a `store_root` argument: a whole-root
+volume uses `rustos_kernel_core::DRIVER_STORE_PATH` (`/System/Drivers`),
+while the design-B dedicated `/System` volume — whose own root *is*
+`/System` — uses `rustos_kernel_core::SYSTEM_VOLUME_STORE_PATH`
+(`/Drivers`). The kernel finds *which* paths exist with
+`rustos_kernel_core::enumerate_driver_store(fs, store_root, audit)` (a
+§5.3-checked VFS walk under the uid-0 bootstrap identity), and reads the
+bytes of a chosen bundle with `rustos_kernel_core::DriverImageReader`: it
+builds the root-backed VFS **once** (`AGENTS.md` §2.16), then per call
+validates that the path lies strictly within that same `store_root`,
+bounds the file against `MAX_DRIVER_IMAGE_LEN` (a 16 MiB §24.4 validation
+cap) *before* reading a byte, reads the whole file, and **appends** it to
+the caller's buffer — failing closed and leaving the buffer untouched on
+any refusal (`AGENTS.md` §5.4 / §2.9). Every read runs under the uid-0,
+no-capability bootstrap identity: a bundle is reachable only because its
+stored §5.3 record makes it readable to that identity, never through an
+ambient bypass (`AGENTS.md` §5.1).
 
 The `ImageSource` trait lives in `drvhost` (userland), and the §17.4
 layering forbids `kernel/core` from depending on it, so the bin crate —
@@ -321,25 +326,37 @@ function lives in the kernel binary — the one layer that may name both
 path drives once the root volume that backs the store is mounted in
 production (`plans/PI.md` P10 5d-2-ii "Remaining").
 
-`rustos_kernel::driver_autoload::autoload_from_mounted_root` is the thin
-production glue that drives `autoload_drivers` straight off a **mounted root
-volume**. Given the root volume's filesystem driver `fs` (rustfs on a real
-install), it sources both halves of the scan from `fs` itself: it walks the
-store with `enumerate_driver_store(fs, …)` for the bundle paths, then builds
-a `VfsImageSource` over the *same* `fs` for the bundle bytes. The two reads
-of `fs` are strictly sequential — the path walk returns owned `String`s and
-releases its `&mut` borrow before the source takes it — so the single
-mutable borrow never overlaps. It adds no policy and fails closed (returning
-`VfsError`) only if the private root mount cannot be built; a store that is
-missing, empty, or full of malformed bundles simply binds nothing and
-returns `Ok` (§18.4 / §2.9). This is the composition the boot path's
-root-unlock path calls once the encrypted root is mounted.
+`rustos_kernel::driver_autoload::autoload_from_mounted_root(fs, store_root,
+…)` is the thin production glue that drives `autoload_drivers` straight off a
+**mounted volume**. Given the volume's filesystem driver `fs` and the
+`store_root` the store sits at on it, it sources both halves of the scan from
+`fs` itself: it walks the store with `enumerate_driver_store(fs, store_root,
+…)` for the bundle paths, then builds a `VfsImageSource` over the *same* `fs`
+(and `store_root`) for the bundle bytes. The two reads of `fs` are strictly
+sequential — the path walk returns owned `String`s and releases its `&mut`
+borrow before the source takes it — so the single mutable borrow never
+overlaps. It adds no policy and fails closed (returning `VfsError`) only if
+the private root mount cannot be built; a store that is missing, empty, or
+full of malformed bundles simply binds nothing and returns `Ok` (§18.4 /
+§2.9).
+
+Under design B (`plans/PI.md`) this composition runs **before** the
+encrypted-root passphrase prompt, off the read-only `/System` volume:
+`rustos_kernel::root_mount::autoload_system_drivers` mounts that volume
+read-only and runs the unlock kthread's `AutoloadHook` against it (passing
+`SYSTEM_VOLUME_STORE_PATH`), so the keyboard driver is up in user space in
+time to type the unlock secret. The keyboard cannot be autoloaded *from* the
+encrypted root, because that volume is not mounted until the passphrase is
+entered — and the passphrase needs the keyboard (chicken-and-egg). The
+`/System` volume holds no secrets; its store's integrity rests on the
+per-bundle Ed25519 signatures the load gate verifies (§18.6).
 
 The `tests/integration/autoload_input_qemu_aarch64` `-M virt` vertical
 proves this end to end on the production boot path: it plants a kernel-signed
-`virtio_kbd` driver bundle in the encrypted root's `/System/Drivers/` (the
-`rustos-test-autoload-root-image` fixture) and attaches a `virtio-keyboard`
-device. After the operator unlocks the root, `autoload_from_mounted_root`
+`virtio_kbd` driver bundle in the read-only `/System` volume's `Drivers/`
+store (the `rustos-test-autoload-root-image` fixture) and attaches a
+`virtio-keyboard` device. **Before** any passphrase is typed,
+`autoload_system_drivers` mounts `/System` and `autoload_from_mounted_root`
 discovers and signature-verifies the bundle, matches it to the discovered
 virtio-input node, and spawns it into its own user-space process; the
 injected keystroke is decoded and delivered to the input-focus arbiter, and

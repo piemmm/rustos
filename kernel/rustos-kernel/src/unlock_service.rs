@@ -29,7 +29,7 @@
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
-use rustos_kernel_core::{ConsoleRead, CooperativeYield};
+use rustos_kernel_core::{ConsoleRead, CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
 use rustos_kernel_sec::captable::TaskId;
 use rustos_log::{log, Event, EventId, Level, Sink};
 use rustos_sync::SpinLock;
@@ -340,15 +340,19 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
     }
 }
 
-/// The [`MountedRootHook`] the unlock kthread runs the instant the
-/// encrypted root mounts: it autoloads user-space drivers off the volume's
-/// signed `/System/Drivers/` store (`AGENTS.md` §18.3 / §18.6).
+/// The [`MountedRootHook`] the unlock kthread runs against the read-only
+/// `/System` volume **before** the passphrase prompt: it autoloads
+/// user-space drivers off that volume's signed `/System/Drivers/` store
+/// (`AGENTS.md` §18.3 / §18.6), at the volume-relative
+/// [`SYSTEM_VOLUME_STORE_PATH`]. This is design B's keyboard-before-unlock
+/// sequencing: the keyboard driver comes up in user space in time for the
+/// operator to type the encrypted-root passphrase (`plans/PI.md` design B).
 ///
 /// It holds only borrowed/`'static`/`Copy` state, adds no authority of its
 /// own, and runs inside the mount scope so the autoload reads the store off
-/// the live volume. A failed autoload never fails the unlock — a node that
+/// the live volume. A failed autoload never fails the boot — a node that
 /// matches nothing is left unbound and a bad bundle fails *that* node closed
-/// inside the pipeline (`AGENTS.md` §18.4 / §5.4); only an unopenable root
+/// inside the pipeline (`AGENTS.md` §18.4 / §5.4); only an unopenable
 /// volume is surfaced (logged, then swallowed) (`AGENTS.md` §2.9).
 ///
 /// Architecture-neutral (`AGENTS.md` §2.2): the autoload policy is the same
@@ -411,6 +415,7 @@ impl MountedRootHook for AutoloadHook<'_> {
         // unlock, so it is logged and swallowed (`AGENTS.md` §2.9).
         if autoload_from_mounted_root(
             volume,
+            SYSTEM_VOLUME_STORE_PATH,
             self.tree,
             self.trusted,
             self.spawn,
@@ -423,7 +428,7 @@ impl MountedRootHook for AutoloadHook<'_> {
             note(
                 self.audit,
                 Level::Error,
-                "root-unlock: driver autoload could not open the root volume; no drivers \
+                "root-unlock: driver autoload could not open the /System volume; no drivers \
                  autoloaded",
             );
         }

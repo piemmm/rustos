@@ -17,24 +17,25 @@
 //!   process spawn handshake with a stub program.
 //!
 //! This vertical composes them on the production boot path: it attaches the
-//! shared `rustos_test_autoload_root_image` whole-disk image (an encrypted
-//! root carrying the signed `virtio_kbd` bundle at
-//! `/System/Drivers/input/virtio_kbd/Run`) as a virtio-blk-mmio device **and** a
-//! `virtio-keyboard-device`, and boots `boot_aarch64::boot` verbatim. The
-//! production path then:
+//! shared `rustos_test_autoload_root_image` whole-disk image (a three-partition
+//! disk whose **read-only `/System` volume** carries the signed `virtio_kbd`
+//! bundle at the volume-relative `Drivers/input/virtio_kbd/Run`, design B) as a
+//! virtio-blk-mmio device **and** a `virtio-keyboard-device`, and boots
+//! `boot_aarch64::boot` verbatim. The production path then:
 //!
 //! 1. **Discovers** the virtio-block root *and* the virtio-input keyboard node
 //!    (bootstrap-floor virtio-MMIO enumeration), binding the root block driver
 //!    and stashing the full hardware tree for the init seam (`AGENTS.md` §18.2).
-//! 2. **Admits the unlock kthread**, which brings the root up over the
-//!    device-IRQ path, prompts on the primary (UART) console, reads the typed
-//!    passphrase, and mounts the encrypted `RustFS` root.
-//! 3. **Autoloads by discovery**: the post-mount `AutoloadHook` scans the
-//!    volume's signed `/System/Drivers/` store, verifies the `virtio_kbd`
-//!    bundle against the kernel's embedded `KERNEL_DRIVER_SIGNER_PUBKEY`,
-//!    matches it to the discovered virtio-input node, and **spawns it into its
-//!    own user-space process** with exactly that node's resource grants plus
-//!    the delegated `CAP_INPUT_INJECT` (`AGENTS.md` §18.3 / §5.2).
+//! 2. **Admits the unlock kthread**, which brings the root block device up over
+//!    the device-IRQ path.
+//! 3. **Autoloads by discovery — before unlock (design B2)**: the kthread mounts
+//!    the read-only `/System` volume and its `AutoloadHook` scans that volume's
+//!    signed `Drivers/` store, verifies the `virtio_kbd` bundle against the
+//!    kernel's embedded `KERNEL_DRIVER_SIGNER_PUBKEY`, matches it to the
+//!    discovered virtio-input node, and **spawns it into its own user-space
+//!    process** with exactly that node's resource grants plus the delegated
+//!    `CAP_INPUT_INJECT` (`AGENTS.md` §18.3 / §5.2) — all *before* the
+//!    passphrase prompt, so the keyboard is live for the operator to type it.
 //! 4. The spawned driver maps its register window, brings the virtio-input
 //!    device up, and pumps decoded key edges into the arbiter via `key_inject`.
 //!
@@ -45,11 +46,13 @@
 //! `key_inject` handler emits the first time an input driver delivers a key
 //! edge to the arbiter (`AGENTS.md` §20 — it carries no key content, count, or
 //! timing). Reaching it requires every preceding step to have succeeded: the
-//! root mounted, the store scanned, the signed bundle verified, the node
-//! matched, the user-space driver spawned and granted `CAP_INPUT_INJECT`, the
-//! device brought up, and the injected keystroke decoded and delivered. A run
-//! where any step fails never reaches that witness, so the harness times out —
-//! the documented fail-loud behaviour (`AGENTS.md` §7).
+//! read-only `/System` volume mounted, its store scanned, the signed bundle
+//! verified, the node matched, the user-space driver spawned and granted
+//! `CAP_INPUT_INJECT`, the device brought up, and the injected keystroke
+//! decoded and delivered — all before any passphrase is typed, proving the
+//! design-B keyboard-up-before-unlock sequencing. A run where any step fails
+//! never reaches that witness, so the harness times out — the documented
+//! fail-loud behaviour (`AGENTS.md` §7).
 //!
 //! ## Embedded `virt` device tree
 //!

@@ -128,10 +128,15 @@ pub fn autoload_drivers(
 /// and returns owned paths (releasing its borrow), and only then is `fs`
 /// handed to the [`VfsImageSource`] that reads each winning bundle's bytes.
 ///
-/// * `fs` — the mounted root volume's filesystem driver (rustfs on a real
+/// * `fs` — the mounted volume's filesystem driver (rustfs on a real
 ///   installation), the §5.3-checked surface both the store walk and the
 ///   bundle-byte reads delegate through under the kernel's bootstrap
-///   identity (`AGENTS.md` §5.1 — no ambient power).
+///   identity (`AGENTS.md` §5.1 — no ambient power). On the design-B path
+///   this is the read-only `/System` volume scanned before unlock.
+/// * `store_root` — the driver store's path relative to `fs`'s own root
+///   (`rustos_kernel_core::DRIVER_STORE_PATH` on a whole-root volume,
+///   `SYSTEM_VOLUME_STORE_PATH` on a `/System` volume); the one root the
+///   enumeration and the bundle reader both use (`AGENTS.md` §2.2).
 /// * `tree` — the discovered hardware tree (`AGENTS.md` §18.1).
 /// * `trusted` — the driver-signing trust anchors the load gate verifies
 ///   every winning bundle against (`AGENTS.md` §8 / §9).
@@ -155,6 +160,7 @@ pub fn autoload_drivers(
 #[allow(clippy::too_many_arguments)]
 pub fn autoload_from_mounted_root<F>(
     fs: &mut F,
+    store_root: &str,
     tree: &[HwNode],
     trusted: &[Ed25519PublicKey],
     spawn: &dyn DriverProcessSpawn,
@@ -169,14 +175,14 @@ where
     //    §18.6). This reads no bundle and trusts nothing; it audits its own
     //    `DriverStoreScanned` outcome and is fail-closed — a missing or
     //    unreadable store yields fewer (or zero) paths, never an error.
-    let store_paths = enumerate_driver_store(fs, sink);
+    let store_paths = enumerate_driver_store(fs, store_root, sink);
 
     // 2. Build the bundle-byte reader over the *same* mounted root volume.
     //    `enumerate_driver_store`'s borrow has ended (it returned owned
     //    `String`s), so handing `fs` to the source here cannot alias it.
     //    A failure to build the private root mount is the sole hard refusal
     //    (fail closed, `AGENTS.md` §2.9).
-    let image_source = VfsImageSource::open(fs)?;
+    let image_source = VfsImageSource::open(fs, store_root)?;
 
     // 3. The match + signed-gate + spawn pipeline, verbatim. `scan_store`
     //    wants `&[&str]`, so borrow the owned paths.
@@ -627,6 +633,7 @@ mod tests {
 
         let report = autoload_from_mounted_root(
             &mut fs,
+            "/System/Drivers",
             &tree,
             &trusted,
             &spawn,
@@ -672,6 +679,7 @@ mod tests {
 
         let report = autoload_from_mounted_root(
             &mut fs,
+            "/System/Drivers",
             &tree,
             &trusted,
             &spawn,
@@ -708,6 +716,7 @@ mod tests {
 
         let report = autoload_from_mounted_root(
             &mut fs,
+            "/System/Drivers",
             &tree,
             &trusted,
             &spawn,

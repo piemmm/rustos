@@ -267,36 +267,6 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked — `AGENTS.md` §2.9).
 pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>, DriverError> {
-    build_users_root_image_with_key_and_drivers(volume_key, &[])
-}
-
-/// Build the users-root volume under `volume_key`, additionally planting a
-/// set of installed driver bundles into the `/System/Drivers/` store — the
-/// on-disk shape a real installation gives the §18.3 / §18.6 autoload scan
-/// (`rustos_kernel::driver_autoload::autoload_from_mounted_root`,
-/// `plans/PI.md` P10 5d-2-ii).
-///
-/// Each driver is `(path_components, bytes)` where `path_components` is the
-/// path *under the volume root* of the bundle's leaf file (for example
-/// `&[b"System", b"Drivers", b"input", b"virtio_kbd", b"Run"]`). Intermediate
-/// directories are created on demand, so several bundles can share a parent
-/// (`System` is already created for the users database). The bytes are the
-/// signed `.rxe` bundle exactly as the store scanner reads it back — the one
-/// on-disk authoring path the QEMU autoload vertical and any future image
-/// builder share (`AGENTS.md` §2.2). [`build_users_root_image_with_key`]
-/// delegates here with no drivers.
-///
-/// # Errors
-///
-/// Propagates any [`DriverError`] from the driver; a fixture users database
-/// that violates the `users-v1` bounds surfaces as
-/// [`DriverError::Unsupported`], and a short write of a planted file as
-/// [`DriverError::DeviceFault`] (a programming error in the fixture,
-/// surfaced rather than panicked — `AGENTS.md` §2.9).
-pub fn build_users_root_image_with_key_and_drivers(
-    volume_key: &VolumeKey,
-    drivers: &[(&[&[u8]], &[u8])],
-) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
     let dev = VecBlock::new(TOTAL_SECTORS);
     let mut fs = RustFs::format(
@@ -317,9 +287,6 @@ pub fn build_users_root_image_with_key_and_drivers(
             }
         }
     }
-    for (components, bytes) in drivers {
-        plant_nested_file(&mut fs, root, components, bytes)?;
-    }
     fs.flush()?;
     Ok(fs.into_block().into_bytes())
 }
@@ -328,15 +295,22 @@ pub fn build_users_root_image_with_key_and_drivers(
 /// the file name) under `parent`, creating each intermediate directory that
 /// does not already exist.
 ///
-/// Used to lay driver bundles into `/System/Drivers/` without re-deriving the
-/// directory walk per bundle (`AGENTS.md` §2.2).
+/// The shared driver-bundle plant helper (`AGENTS.md` §2.2): the design-B
+/// `/System` volume builder (`rustos_test_encrypted_root_image`) uses it to
+/// lay signed driver bundles into that volume's `Drivers/` store — the
+/// on-disk shape a real installation gives the §18.3 / §18.6 autoload scan
+/// (`rustos_kernel::driver_autoload::autoload_from_mounted_root`,
+/// `plans/PI.md` design B). `components` is the path *under `parent`* of the
+/// bundle's leaf file (for example, relative to the `/System` volume root,
+/// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`). The bytes are the
+/// signed `.rxe` bundle exactly as the store scanner reads it back.
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from the driver, or [`DriverError::Unsupported`]
 /// for an empty `components` path. A short write surfaces as
 /// [`DriverError::DeviceFault`].
-fn plant_nested_file<B>(
+pub fn plant_nested_file<B>(
     fs: &mut RustFs<B>,
     parent: NodeId,
     components: &[&[u8]],
@@ -449,39 +423,32 @@ mod tests {
     }
 
     #[test]
-    fn a_planted_driver_bundle_reads_back_from_the_system_drivers_store() {
-        // The §18.6 store-planting path: a driver bundle laid into
-        // `/System/Drivers/input/virtio_kbd/Run` is created (with every
-        // intermediate directory) and reads back byte-for-byte off the
-        // mounted volume — the on-disk shape the autoload store scan walks
-        // (`AGENTS.md` §16.2 / §18.3).
+    fn plant_nested_file_lays_a_bundle_and_creates_intermediate_directories() {
+        // The shared §18.6 store-planting helper (`plant_nested_file`): a
+        // driver bundle laid at the design-B `/System` volume's
+        // `Drivers/input/virtio_kbd/Run` is created with every intermediate
+        // directory and reads back byte-for-byte off the mounted volume — the
+        // on-disk shape the autoload store scan walks (`AGENTS.md` §16.2 /
+        // §18.3). Driver bundles live on the `/System` volume under design B,
+        // so the path is relative to that volume's root (no `System` prefix).
         let bundle: &[u8] = b"a-signed-rxe-bundle-stand-in";
-        let path: &[&[u8]] = &[b"System", b"Drivers", b"input", b"virtio_kbd", b"Run"];
-        let bytes =
-            build_users_root_image_with_key_and_drivers(&FIXTURE_VOLUME_KEY, &[(path, bundle)])
-                .expect("users-root image with a planted driver builds");
-        let dev = VecBlock { store: bytes };
-        let mut fs = RustFs::open(dev, &FIXTURE_VOLUME_KEY).expect("the volume mounts");
+        let path: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
+
+        let dev = VecBlock::new(TOTAL_SECTORS);
+        let mut entropy = FixtureEntropy { next: 1 };
+        let mut fs = RustFs::format(dev, INODE_COUNT, &FIXTURE_VOLUME_KEY, &mut entropy)
+            .expect("a fresh volume formats");
+        let root = fs.root();
+        plant_nested_file(&mut fs, root, path, bundle).expect("the bundle plants");
 
         let mut node = fs.root();
-        for dir in [b"System".as_slice(), b"Drivers", b"input", b"virtio_kbd"] {
+        for dir in [b"Drivers".as_slice(), b"input", b"virtio_kbd"] {
             node = fs.lookup(node, dir).expect("store directory present");
         }
         let run = fs.lookup(node, b"Run").expect("the bundle leaf file");
         let mut buf = [0u8; 64];
         let n = fs.read_at(run, 0, &mut buf).expect("read the bundle bytes");
         assert_eq!(&buf[..n], bundle);
-
-        // The users database the same volume carries still authenticates,
-        // so planting a driver did not disturb the rest of the tree.
-        let security = {
-            let system = fs.lookup(fs.root(), b"System").expect("System present");
-            fs.lookup(system, b"Security").expect("Security present")
-        };
-        let users = fs.lookup(security, b"Users").expect("Users present");
-        let mut db_buf = [0u8; 512];
-        let read = fs.read_at(users, 0, &mut db_buf).expect("read users db");
-        assert!(read > 0, "the users database is still present");
     }
 
     #[test]

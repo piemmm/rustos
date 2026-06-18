@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::Errno;
 use rustos_drv_storage_virtio_blk::{register as virtio_blk_register, VirtioBlk};
-use rustos_kernel::root_mount::{unlock_root_disk_interactively, NoMountedRootHook, UnlockOutcome};
+use rustos_kernel::root_mount::{unlock_root_disk_interactively, UnlockOutcome};
 use rustos_kernel_core::{ConsoleRead, LateUsersDb, NullConsole, UsersDbSource};
 use rustos_test_encrypted_root_image as disk_image;
 use rustos_test_virtio_qemu_support::{
@@ -98,16 +98,10 @@ fn root_unlock_login(
     // outcome and the installed credentials, not the prompt rendering); the
     // scripted reader types the passphrase. The audit sink is the harness's,
     // so the unlock's decisions land on the same channel the boot log uses.
-    // This vertical proves the unlock *policy* (not driver autoload), so it
-    // passes the no-op `NoMountedRootHook`.
-    let outcome = unlock_root_disk_interactively(
-        blk,
-        &NullConsole,
-        &input,
-        &late,
-        env.audit_sink(),
-        &mut NoMountedRootHook,
-    );
+    // This vertical proves the unlock *policy* only; driver autoload is the
+    // separate pre-unlock `/System`-volume path (design B), not exercised here.
+    let outcome =
+        unlock_root_disk_interactively(blk, &NullConsole, &input, &late, env.audit_sink());
     if outcome != UnlockOutcome::Installed {
         return Err("interactive unlock did not install a database");
     }

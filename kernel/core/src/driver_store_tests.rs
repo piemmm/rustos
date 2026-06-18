@@ -13,8 +13,8 @@ use rustos_abi::driver::filesystem::{
 use rustos_abi::driver::DriverError;
 
 use crate::driver_store::{
-    enumerate_driver_store, DriverImageError, DriverImageReader, MAX_DRIVER_IMAGE_LEN,
-    MAX_STORE_DEPTH, MAX_STORE_DRIVERS,
+    enumerate_driver_store, DriverImageError, DriverImageReader, DRIVER_STORE_PATH,
+    MAX_DRIVER_IMAGE_LEN, MAX_STORE_DEPTH, MAX_STORE_DRIVERS,
 };
 use crate::fs::VfsError;
 use crate::test_sink::TestSink;
@@ -256,7 +256,7 @@ fn a_nested_store_enumerates_every_regular_file_in_order() {
     fs.add_file("/System/Drivers/usb_kbd");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     assert_eq!(
         drivers,
@@ -277,7 +277,7 @@ fn a_missing_store_is_not_an_error_and_yields_nothing() {
     fs.add_dir("/System");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     assert!(drivers.is_empty());
     // The absent store root is the legitimate "no drivers" case: not a
@@ -292,7 +292,7 @@ fn an_entirely_absent_system_tree_yields_nothing() {
     let mut fs = MockStore::new();
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     assert!(drivers.is_empty());
     assert_eq!(scanned_record(&sink), (0, 0));
@@ -309,7 +309,7 @@ fn an_unreadable_subdirectory_is_skipped_and_the_walk_continues() {
     fs.set_security(private, NodeSecurity::new(0o700, 7, 7));
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     // The readable driver is found; the unreadable subtree is skipped.
     assert_eq!(drivers, alloc::vec!["/System/Drivers/bus_usb".to_string()]);
@@ -332,7 +332,7 @@ fn a_node_below_the_depth_bound_is_refused() {
     fs.add_file("/System/Drivers/shallow");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     assert_eq!(drivers, alloc::vec!["/System/Drivers/shallow".to_string()]);
     let (found, skipped) = scanned_record(&sink);
@@ -349,7 +349,7 @@ fn the_driver_count_is_bounded() {
     }
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     assert_eq!(drivers.len(), MAX_STORE_DRIVERS);
     let (found, skipped) = scanned_record(&sink);
@@ -364,7 +364,7 @@ fn an_empty_store_directory_yields_nothing() {
     fs.add_dir("/System/Drivers");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, &sink);
+    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
 
     assert!(drivers.is_empty());
     assert_eq!(scanned_record(&sink), (0, 0));
@@ -381,7 +381,12 @@ fn read_image_returns_a_bundle_byte_for_byte() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
     reader
-        .read_image(&mut fs, "/System/Drivers/usb_kbd", &mut buf)
+        .read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/usb_kbd",
+            &mut buf,
+        )
         .expect("a readable in-store file");
 
     assert_eq!(buf.as_slice(), bytes.as_slice());
@@ -397,7 +402,12 @@ fn read_image_appends_rather_than_overwrites() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = alloc::vec![0xAAu8, 0xBB];
     reader
-        .read_image(&mut fs, "/System/Drivers/bus_usb", &mut buf)
+        .read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/bus_usb",
+            &mut buf,
+        )
         .expect("a readable in-store file");
 
     assert_eq!(buf, alloc::vec![0xAA, 0xBB, b'B', b'O', b'D', b'Y']);
@@ -413,7 +423,12 @@ fn read_image_reads_an_empty_bundle_as_zero_bytes() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
     reader
-        .read_image(&mut fs, "/System/Drivers/empty", &mut buf)
+        .read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/empty",
+            &mut buf,
+        )
         .expect("an empty in-store file reads cleanly");
 
     assert!(buf.is_empty());
@@ -429,7 +444,12 @@ fn read_image_refuses_a_path_outside_the_store() {
     // A path outside `/System/Drivers/` is refused before any fs access
     // (`AGENTS.md` §5.4): the reader only ever reads driver bundles.
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Security/Users", &mut buf),
+        reader.read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Security/Users",
+            &mut buf
+        ),
         Err(DriverImageError::OutsideStore)
     );
     assert!(buf.is_empty());
@@ -444,12 +464,17 @@ fn read_image_refuses_the_store_directory_itself() {
     let mut buf = Vec::new();
     // The store directory is not strictly *below* the store.
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Drivers", &mut buf),
+        reader.read_image(&mut fs, DRIVER_STORE_PATH, "/System/Drivers", &mut buf),
         Err(DriverImageError::OutsideStore)
     );
     // A sibling whose name merely shares the prefix is also refused.
     assert_eq!(
-        reader.read_image(&mut fs, "/System/DriversExtra/x", &mut buf),
+        reader.read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/DriversExtra/x",
+            &mut buf
+        ),
         Err(DriverImageError::OutsideStore)
     );
 }
@@ -462,7 +487,12 @@ fn read_image_reports_a_missing_bundle_as_not_found() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Drivers/absent", &mut buf),
+        reader.read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/absent",
+            &mut buf
+        ),
         Err(DriverImageError::Vfs(VfsError::NotFound))
     );
     assert!(buf.is_empty());
@@ -476,7 +506,12 @@ fn read_image_refuses_a_directory() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Drivers/display", &mut buf),
+        reader.read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/display",
+            &mut buf
+        ),
         Err(DriverImageError::NotAFile)
     );
 }
@@ -492,7 +527,7 @@ fn read_image_refuses_an_oversized_bundle_before_reading() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Drivers/huge", &mut buf),
+        reader.read_image(&mut fs, DRIVER_STORE_PATH, "/System/Drivers/huge", &mut buf),
         Err(DriverImageError::TooLarge)
     );
     assert!(buf.is_empty());
@@ -509,7 +544,12 @@ fn read_image_refuses_a_bundle_the_boot_identity_may_not_read() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Drivers/guarded", &mut buf),
+        reader.read_image(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/guarded",
+            &mut buf
+        ),
         Err(DriverImageError::Vfs(VfsError::PermissionDenied))
     );
     assert!(buf.is_empty());
@@ -526,7 +566,7 @@ fn read_image_unwinds_the_buffer_on_a_short_read() {
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = alloc::vec![0x11u8];
     assert_eq!(
-        reader.read_image(&mut fs, "/System/Drivers/torn", &mut buf),
+        reader.read_image(&mut fs, DRIVER_STORE_PATH, "/System/Drivers/torn", &mut buf),
         Err(DriverImageError::ShortRead)
     );
     // The prefix survives; nothing partial is left behind (§2.9).

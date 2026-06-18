@@ -3830,16 +3830,30 @@ keyboard never regresses (§2.17), until the final flip:
   lays the §16.2 skeleton at the volume root and `build_rpi_image` emits the
   three MBR partitions (boot @2048 / `/System` @133120 / encrypted root). The
   kernel discovers + mounts `/System` read-only over a `lib/partition` window
-  in `root_mount::mount_and_audit_system_volume` (called from
-  `mount_root_disk_and_load_users`), auditing `SYSTEM_VOLUME_MOUNTED` (4140) /
-  `SYSTEM_VOLUME_UNAVAILABLE` (4141); fail-soft in B1 (absence never aborts the
-  unlock — B2 makes it load-bearing). The `encrypted_root_image` /
+  in `root_mount::autoload_system_drivers`, auditing `SYSTEM_VOLUME_MOUNTED`
+  (4140) / `SYSTEM_VOLUME_UNAVAILABLE` (4141). The `encrypted_root_image` /
   `autoload_root_image` `-M virt` fixtures author the split. The installer
   (§11) is a Stage-8 placeholder; the split author is `tools/mkimage`.
 - **B2 — relocate the autoload store to the `/System` volume + run it
-  pre-unlock.** The `AutoloadHook` scans `/System/Drivers/` on the read-only
-  `/System` volume *before* the passphrase prompt rather than off the mounted
-  encrypted root; `-M virt` vertical proves keyboard-up-before-unlock.
+  pre-unlock. DONE (host + `-M virt`).** The aarch64 unlock kthread now calls
+  `root_mount::autoload_system_drivers(&mut blk, &mut AutoloadHook, audit)`
+  **once, before** `unlock_root_disk_interactively`: it mounts the read-only
+  `/System` volume and runs the `AutoloadHook` against it, so the keyboard
+  driver is spawned in user space before the passphrase prompt
+  (keyboard-up-before-unlock). The encrypted-root post-mount hook is gone —
+  `unlock_root_and_load_users`/`mount_root_disk_and_load_users`/
+  `unlock_root_disk_interactively` no longer take a hook and `NoMountedRootHook`
+  is deleted (§2.14). The driver store is addressed **relative to the scanned
+  volume's root**: `enumerate_driver_store`/`DriverImageReader::read_image` take
+  an explicit `store_root`, and the `/System` volume (whose own root *is*
+  `/System`) is scanned at the volume-relative `rustos_kernel_core::
+  SYSTEM_VOLUME_STORE_PATH` (`/Drivers`), the §16.2 `/System/Drivers/` store.
+  The fixtures plant the signed `virtio_kbd` bundle into the `/System` volume's
+  `Drivers/` store (shared `rustos_test_rustfs_image::plant_nested_file`; the
+  encrypted root carries no drivers, §2.14); `SYSTEM_SECTORS` grown to 8 MiB to
+  hold it. `autoload_input_qemu_aarch64` proves the full discover→signed
+  gate→spawn→`key_inject` path runs pre-unlock (PASS on
+  `AuditEvent::InputDelivered` 4050).
 - **B3 — metal USB→`hwtree` enumeration (metal-gated).** The floor PCIe/USB
   bring-up emits the HID-keyboard node into the tree so `devmgr` autoloads
   `usb_kbd`; host-tested decode + a §0.9 metal checklist.

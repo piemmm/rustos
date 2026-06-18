@@ -5,15 +5,16 @@
 //!
 //! [`build_image`] is [`rustos_test_encrypted_root_image::build_image`] with
 //! one addition: the signed `virtio_kbd` driver bundle `build.rs` produced
-//! ([`VIRTIO_KBD_BUNDLE`]) is planted into the encrypted `RustFS` root's
-//! `/System/Drivers/` store at [`STORE_PATH`]. The booted kernel then mounts
-//! that root, the §18.6 store scan discovers the bundle, the signed load gate
-//! verifies it against the kernel's embedded `KERNEL_DRIVER_SIGNER_PUBKEY`
-//! (the bundle is signed with the kernel's own driver-signing seed, so it
-//! verifies by construction — `AGENTS.md` §2.2), `devmatch` binds it to the
-//! discovered virtio-input node, and it is spawned into its own user-space
-//! process — the full "drivers in user space by discovery" path (`AGENTS.md`
-//! §4 / §18).
+//! ([`VIRTIO_KBD_BUNDLE`]) is planted into the **read-only `/System`
+//! volume**'s `Drivers/` store at [`STORE_PATH`] (design B — the store lives
+//! on a volume reachable *before* the encrypted-root passphrase). The booted
+//! kernel mounts that `/System` volume read-only, the §18.6 store scan
+//! discovers the bundle **before** unlock, the signed load gate verifies it
+//! against the kernel's embedded `KERNEL_DRIVER_SIGNER_PUBKEY` (the bundle is
+//! signed with the kernel's own driver-signing seed, so it verifies by
+//! construction — `AGENTS.md` §2.2), `devmatch` binds it to the discovered
+//! virtio-input node, and it is spawned into its own user-space process —
+//! the full "drivers in user space by discovery" path (`AGENTS.md` §4 / §18).
 //!
 //! `no_std` + `alloc` so the builder links into the host build tool
 //! (`tools/xtask`, which plants the image); the bundle itself is built and
@@ -40,11 +41,13 @@ pub use rustos_test_encrypted_root_image::{
     PASSPHRASE, PASSWORD, SECTOR_BYTES, TOTAL_SECTORS, USERNAME,
 };
 
-/// Path of the planted driver bundle's leaf file *under the volume root*:
-/// `/System/Drivers/input/virtio_kbd/Run` (`AGENTS.md` §16.2 — the store is
+/// Path of the planted driver bundle's leaf file *under the `/System`
+/// volume's root*: `Drivers/input/virtio_kbd/Run`. The `/System` volume's
+/// own root *is* `/System` (design B), so the §16.2 `/System/Drivers/` store
+/// is at the volume-relative `Drivers/…` (`AGENTS.md` §16.2 — the store is
 /// `<class>/<leaf>/<driver-file>`; the leaf names the device, never the bus
 /// namespace).
-pub const STORE_PATH: &[&[u8]] = &[b"System", b"Drivers", b"input", b"virtio_kbd", b"Run"];
+pub const STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
 
 /// Build the whole-disk encrypted-root image with the signed `virtio_kbd`
 /// bundle planted in its `/System/Drivers/` store.
@@ -74,8 +77,9 @@ mod tests {
     use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 
     /// The store path the bundle is planted at, as the `/`-joined string the
-    /// store scanner addresses it by.
-    const STORE_PATH_STR: &str = "/System/Drivers/input/virtio_kbd/Run";
+    /// store scanner addresses it by on the `/System` volume (volume-relative,
+    /// since that volume's root *is* `/System`).
+    const STORE_PATH_STR: &str = "/Drivers/input/virtio_kbd/Run";
 
     /// In-memory [`ImageSource`] returning the embedded bundle for its path.
     struct BundleSource;

@@ -41,6 +41,11 @@ use rustos_kernel_core::{DriverImageError, DriverImageReader, VfsError};
 /// [`rustos_kernel_core::enumerate_driver_store`] returned.
 pub struct VfsImageSource<'a, F: ?Sized> {
     reader: DriverImageReader,
+    /// The store root the enumerated paths are rooted at, relative to the
+    /// scanned volume's root (`AGENTS.md` §2.2 — the one definition the
+    /// scan and this reader agree on). [`read_image`](DriverImageReader::read_image)
+    /// validates every requested path lies strictly below it (§5.4).
+    store_root: &'a str,
     fs: RefCell<&'a mut F>,
 }
 
@@ -48,16 +53,20 @@ impl<'a, F> VfsImageSource<'a, F>
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    /// Build an adapter over the mounted root volume's filesystem driver
-    /// `fs`, constructing the root-backed VFS once.
+    /// Build an adapter over the mounted volume's filesystem driver `fs`,
+    /// constructing the root-backed VFS once. `store_root` is the store's
+    /// path relative to the volume's root (`rustos_kernel_core::DRIVER_STORE_PATH`
+    /// on a whole-root volume, `SYSTEM_VOLUME_STORE_PATH` on a `/System`
+    /// volume), the same root the paths were enumerated under.
     ///
     /// # Errors
     ///
     /// The [`VfsError`] from [`DriverImageReader::open`] if the private root
     /// mount cannot be built.
-    pub fn open(fs: &'a mut F) -> Result<Self, VfsError> {
+    pub fn open(fs: &'a mut F, store_root: &'a str) -> Result<Self, VfsError> {
         Ok(Self {
             reader: DriverImageReader::open()?,
+            store_root,
             fs: RefCell::new(fs),
         })
     }
@@ -74,7 +83,7 @@ where
     fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), Errno> {
         let mut fs = self.fs.borrow_mut();
         self.reader
-            .read_image(&mut **fs, path, buf)
+            .read_image(&mut **fs, self.store_root, path, buf)
             .map_err(DriverImageError::to_errno)
     }
 }
@@ -91,7 +100,7 @@ mod tests {
     fn read_delegates_to_the_reader_and_appends() {
         let mut fs = MockRootFs::new();
         fs.add_file("/System/Drivers/usb_kbd", b"BUNDLE");
-        let source = VfsImageSource::open(&mut fs).expect("root mount builds");
+        let source = VfsImageSource::open(&mut fs, "/System/Drivers").expect("root mount builds");
 
         // The scan pre-clears and reuses one buffer across bundles; prove a
         // non-empty prefix is preserved (the append contract).
@@ -107,7 +116,7 @@ mod tests {
         let mut fs = MockRootFs::new();
         fs.add_file("/System/Drivers/a", b"AAA");
         fs.add_file("/System/Drivers/b", b"BB");
-        let source = VfsImageSource::open(&mut fs).expect("root mount builds");
+        let source = VfsImageSource::open(&mut fs, "/System/Drivers").expect("root mount builds");
 
         let mut buf = Vec::new();
         source.read("/System/Drivers/a", &mut buf).expect("a");
@@ -121,7 +130,7 @@ mod tests {
     fn a_missing_bundle_maps_to_not_found() {
         let mut fs = MockRootFs::new();
         fs.add_file("/System/Drivers/present", b"x");
-        let source = VfsImageSource::open(&mut fs).expect("root mount builds");
+        let source = VfsImageSource::open(&mut fs, "/System/Drivers").expect("root mount builds");
 
         let mut buf = Vec::new();
         assert_eq!(
@@ -135,7 +144,7 @@ mod tests {
     fn a_path_outside_the_store_is_denied() {
         let mut fs = MockRootFs::new();
         fs.add_file("/System/Security/Users", b"secret");
-        let source = VfsImageSource::open(&mut fs).expect("root mount builds");
+        let source = VfsImageSource::open(&mut fs, "/System/Drivers").expect("root mount builds");
 
         let mut buf = Vec::new();
         assert_eq!(

@@ -70,9 +70,12 @@ pub const FAT_BOOT_SECTORS: u64 = 131_072;
 /// design-B pre-unlock signed-driver store (`plans/PI.md` B1).
 pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 
-/// Sectors in the read-only `RustFS` `/System` partition: a small volume
-/// carrying the §16.2 skeleton — enough to format and mount.
-pub const SYSTEM_SECTORS: u64 = 2048;
+/// Sectors in the read-only `RustFS` `/System` partition: 8 MiB. Large
+/// enough to carry the §16.2 skeleton **and** the design-B signed driver
+/// bundle(s) the pre-unlock autoload reads from its `Drivers/` store
+/// (`plans/PI.md` design B / B2) — a real `.rxe` keyboard driver sits far
+/// below this, and well below the kernel's `MAX_DRIVER_IMAGE_LEN` read bound.
+pub const SYSTEM_SECTORS: u64 = 16_384;
 
 /// First sector of the encrypted `RustFS` root partition: directly after
 /// the `/System` partition.
@@ -208,12 +211,21 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
 }
 
 /// Author the read-only `/System` partition: format a small `RustFS`
-/// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`] and lay the
-/// §16.2 `/System` skeleton at its root (`Drivers` plus `Security`), the
-/// layout `tools/mkimage::build_system_partition` writes (`AGENTS.md`
-/// §2.2). The kernel mounts it read-only before unlocking the encrypted
-/// root (`plans/PI.md` B1). Returns the partition's on-disk bytes.
-fn build_system_partition() -> Result<Vec<u8>, DriverError> {
+/// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`], lay the
+/// §16.2 `/System` skeleton at its root (`Drivers` plus `Security`), and
+/// plant the design-B signed driver `drivers` into its `Drivers/` store —
+/// the layout `tools/mkimage::build_system_partition` writes (`AGENTS.md`
+/// §2.2). The kernel mounts it read-only and autoloads the store **before**
+/// unlocking the encrypted root (`plans/PI.md` design B / B2), so the store
+/// — not the encrypted root — carries the boot drivers.
+///
+/// Each driver is `(path_components, bytes)` where `path_components` is the
+/// bundle leaf's path **relative to this `/System` volume's root** (the
+/// volume's root *is* `/System`, so the §16.2 `/System/Drivers/` store is at
+/// the volume-relative `Drivers/…`, e.g.
+/// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`). Returns the partition's
+/// on-disk bytes.
+fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     let mut fs = RustFs::format(
         MemDisk::new(SYSTEM_SECTORS),
         64,
@@ -225,6 +237,9 @@ fn build_system_partition() -> Result<Vec<u8>, DriverError> {
     fs.create(security, b"Keys", NodeKind::Directory)?;
     fs.create(security, b"Policy", NodeKind::Directory)?;
     fs.create(root, b"Drivers", NodeKind::Directory)?;
+    for (components, bytes) in drivers {
+        root_image::plant_nested_file(&mut fs, root, components, bytes)?;
+    }
     fs.flush()?;
     Ok(fs.into_block().store)
 }
@@ -247,12 +262,15 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// store.
 ///
 /// This is [`build_image`] with the §18.6 discovered driver store populated:
-/// each `(path_components, bytes)` is laid into the encrypted `RustFS` root
-/// exactly as a real installation carries it, so the root-mount→autoload
-/// vertical (`rustos_kernel::driver_autoload::autoload_from_mounted_root`)
-/// discovers, verifies, and spawns the bundle off the very volume it mounts
-/// (`plans/PI.md` P10 5d-2-ii). [`build_image`] delegates here with no
-/// drivers (`AGENTS.md` §2.2 — one authoring path).
+/// each `(path_components, bytes)` is laid into the **read-only `/System`
+/// volume**'s `Drivers/` store exactly as a real installation carries it, so
+/// the pre-unlock autoload
+/// (`rustos_kernel::root_mount::autoload_system_drivers` →
+/// `driver_autoload::autoload_from_mounted_root`) discovers, verifies, and
+/// spawns the bundle off the `/System` volume *before* the encrypted root is
+/// unlocked (design B — the store lives on a volume reachable before the
+/// passphrase). [`build_image`] delegates here with no drivers (`AGENTS.md`
+/// §2.2 — one authoring path).
 ///
 /// # Errors
 ///
@@ -262,8 +280,8 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     let (descriptor, key) = provision()?;
     let boot = build_boot_partition(&descriptor)?;
-    let system = build_system_partition()?;
-    let root = root_image::build_users_root_image_with_key_and_drivers(&key, drivers)?;
+    let system = build_system_partition(drivers)?;
+    let root = root_image::build_users_root_image_with_key(&key)?;
 
     let table = mbr::encode(&[
         Partition {

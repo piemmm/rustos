@@ -59,9 +59,29 @@ use rustos_util::fmt::format_usize;
 use crate::audit::{emit, AuditEvent};
 use crate::fs::{Credentials, Path, Vfs, VfsError};
 
-/// Absolute path of the signed-driver store on the root volume
+/// Canonical, global absolute path of the signed-driver store
 /// (`AGENTS.md` §16.2 — drivers live under `/System/Drivers/`).
+///
+/// This is the store's address in the *whole* filesystem namespace, i.e.
+/// on a volume whose own root is the namespace root `/` (the legacy whole-
+/// root model the host tests model). The store path a scan walks is always
+/// taken **relative to the root of the volume being scanned**, so a
+/// dedicated `/System` volume — whose own root *is* `/System` (design B,
+/// `plans/PI.md`) — carries the store at [`SYSTEM_VOLUME_STORE_PATH`]
+/// instead. The scan APIs take that root explicitly rather than baking one
+/// path in (`AGENTS.md` §2.2 — one definition, two mount models).
 pub const DRIVER_STORE_PATH: &str = "/System/Drivers";
+
+/// Path of the signed-driver store **relative to the root of a dedicated
+/// read-only `/System` volume** (design B, `plans/PI.md`).
+///
+/// On the design-B layout `/System` is its own volume mounted at the
+/// `/System` mount point, so the volume's own root *is* `/System` and the
+/// §16.2 `/System/Drivers/` store sits at the volume-relative `/Drivers`.
+/// This is the same store §16.2 names globally [`DRIVER_STORE_PATH`]; only
+/// the volume it is addressed on differs. The kernel boot path passes this
+/// when it scans the pre-unlock `/System` volume.
+pub const SYSTEM_VOLUME_STORE_PATH: &str = "/Drivers";
 
 /// Maximum directory depth the walk descends *below* [`DRIVER_STORE_PATH`].
 ///
@@ -79,13 +99,18 @@ pub const MAX_STORE_DEPTH: usize = 8;
 /// than allowed to grow the scan without limit.
 pub const MAX_STORE_DRIVERS: usize = 256;
 
-/// Enumerate the `/System/Drivers/` signed-driver store, returning the
-/// image path of every driver bundle found (`AGENTS.md` §18.3 / §18.6).
+/// Enumerate the signed-driver store rooted at `store_root` on the mounted
+/// volume `fs`, returning the image path of every driver bundle found
+/// (`AGENTS.md` §18.3 / §18.6).
 ///
-/// The returned paths are absolute and rooted at [`DRIVER_STORE_PATH`],
-/// in the driver's on-disk enumeration order. Each is understood verbatim
-/// by the user-space scan (`rustos_drvhost::store::scan_store`, which
-/// reads and bind-decodes the bundle) and by the load gate
+/// `store_root` is the store's path **relative to the root of `fs`** — the
+/// global [`DRIVER_STORE_PATH`] on a whole-root volume, or
+/// [`SYSTEM_VOLUME_STORE_PATH`] on a dedicated `/System` volume (design B).
+///
+/// The returned paths are absolute and rooted at `store_root`, in the
+/// driver's on-disk enumeration order. Each is understood verbatim by the
+/// user-space scan (`rustos_drvhost::store::scan_store`, which reads and
+/// bind-decodes the bundle) and by the load gate
 /// (`rustos_drvhost::Host::load`, which verifies it). This function does
 /// none of that — it only finds the paths.
 ///
@@ -95,7 +120,7 @@ pub const MAX_STORE_DRIVERS: usize = 256;
 /// unreadable sub-directory, or a malformed entry all simply contribute
 /// fewer paths (`AGENTS.md` §18.4 / §2.9).
 #[must_use]
-pub fn enumerate_driver_store<F>(fs: &mut F, audit: &dyn Sink) -> Vec<String>
+pub fn enumerate_driver_store<F>(fs: &mut F, store_root: &str, audit: &dyn Sink) -> Vec<String>
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
@@ -106,15 +131,7 @@ where
         Ok(vfs) => {
             let caps = CapabilitySet::empty();
             let cred = bootstrap_credentials(&caps);
-            walk_dir(
-                &vfs,
-                &cred,
-                fs,
-                DRIVER_STORE_PATH,
-                0,
-                &mut drivers,
-                &mut skipped,
-            );
+            walk_dir(&vfs, &cred, fs, store_root, 0, &mut drivers, &mut skipped);
         }
         // The private root mount could not be built; nothing to scan. The
         // walk is fail-closed (`AGENTS.md` §2.9), so this surfaces as an
@@ -122,15 +139,15 @@ where
         Err(_) => skipped += 1,
     }
 
-    audit_scan(audit, drivers.len(), skipped);
+    audit_scan(audit, store_root, drivers.len(), skipped);
     drivers
 }
 
 /// Recursively collect the regular-file image paths under the directory at
 /// `dir`, descending into sub-directories up to [`MAX_STORE_DEPTH`].
 ///
-/// `depth` counts levels below [`DRIVER_STORE_PATH`] (the store root is
-/// depth `0`). Every fail-closed refusal increments `skipped` and the walk
+/// `depth` counts levels below the store root (`store_root` itself is depth
+/// `0`). Every fail-closed refusal increments `skipped` and the walk
 /// continues; nothing here returns an error (`AGENTS.md` §18.4 / §5.4).
 fn walk_dir<F>(
     vfs: &Vfs,
@@ -251,9 +268,9 @@ pub const MAX_DRIVER_IMAGE_LEN: usize = 16 * 1024 * 1024;
 /// reason.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DriverImageError {
-    /// The path does not lie strictly within [`DRIVER_STORE_PATH`]. The
-    /// reader only ever reads driver bundles, never an arbitrary file
-    /// (`AGENTS.md` §5.4 — validate every input).
+    /// The path does not lie strictly within the store root the read was
+    /// scoped to. The reader only ever reads driver bundles, never an
+    /// arbitrary file (`AGENTS.md` §5.4 — validate every input).
     OutsideStore,
     /// The path names a directory (or other non-file), not a regular file.
     NotAFile,
@@ -293,10 +310,10 @@ impl From<VfsError> for DriverImageError {
     }
 }
 
-/// `true` iff `path` names a node strictly *below* [`DRIVER_STORE_PATH`]
-/// (the store directory itself, or any path outside it, is rejected).
-fn path_within_store(path: &str) -> bool {
-    match path.strip_prefix(DRIVER_STORE_PATH) {
+/// `true` iff `path` names a node strictly *below* `store_root` (the store
+/// directory itself, or any path outside it, is rejected).
+fn path_within_store(store_root: &str, path: &str) -> bool {
+    match path.strip_prefix(store_root) {
         Some(rest) => rest.starts_with('/') && rest.len() > 1,
         None => false,
     }
@@ -340,14 +357,16 @@ impl DriverImageReader {
         })
     }
 
-    /// Read the bundle image at `path` from the mounted root volume,
+    /// Read the bundle image at `path` from the mounted volume,
     /// **appending** its bytes to `buf`.
     ///
-    /// `path` must be an absolute path strictly below [`DRIVER_STORE_PATH`]
-    /// (typically one [`enumerate_driver_store`] returned). The read is
-    /// bounded against [`MAX_DRIVER_IMAGE_LEN`] before a single byte is
-    /// read (`AGENTS.md` §5.4.3) and fails closed on any refusal, leaving
-    /// `buf` unchanged from its entry length on error (`AGENTS.md` §2.9).
+    /// `path` must be an absolute path strictly below `store_root` (the
+    /// store root the path was enumerated under, typically one
+    /// [`enumerate_driver_store`] returned with the same `store_root`). The
+    /// read is bounded against [`MAX_DRIVER_IMAGE_LEN`] before a single
+    /// byte is read (`AGENTS.md` §5.4.3) and fails closed on any refusal,
+    /// leaving `buf` unchanged from its entry length on error
+    /// (`AGENTS.md` §2.9).
     ///
     /// Appending (rather than overwriting) matches the
     /// `rustos_drvhost::ImageSource` contract the bin-crate adapter
@@ -359,13 +378,14 @@ impl DriverImageReader {
     pub fn read_image<F>(
         &self,
         fs: &mut F,
+        store_root: &str,
         path: &str,
         buf: &mut Vec<u8>,
     ) -> Result<(), DriverImageError>
     where
         F: FilesystemRead + FilesystemSecurity + ?Sized,
     {
-        if !path_within_store(path) {
+        if !path_within_store(store_root, path) {
             return Err(DriverImageError::OutsideStore);
         }
 
@@ -405,7 +425,7 @@ impl DriverImageReader {
     }
 }
 
-fn audit_scan(audit: &dyn Sink, drivers: usize, skipped: usize) {
+fn audit_scan(audit: &dyn Sink, store_root: &str, drivers: usize, skipped: usize) {
     let mut drivers_buf = [0u8; 12];
     let mut skipped_buf = [0u8; 12];
     emit(
@@ -415,7 +435,7 @@ fn audit_scan(audit: &dyn Sink, drivers: usize, skipped: usize) {
         &[
             Field {
                 key: "path",
-                value: DRIVER_STORE_PATH,
+                value: store_root,
             },
             Field {
                 key: "drivers",

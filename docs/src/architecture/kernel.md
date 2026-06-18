@@ -409,11 +409,14 @@ database *content* authenticating `root`/`root` is proven by
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store
 (`rustos_kernel_core::driver_store::enumerate_driver_store`, `AGENTS.md`
-§18.3 / §18.6, `plans/PI.md` P10 Stage 4.HW item 5). Mirroring the
-users-database read, it walks the mounted root volume's `FilesystemRead` +
+§18.3 / §18.6, `plans/PI.md` P10 Stage 4.HW item 5 / design B). Mirroring
+the users-database read, it walks a mounted volume's `FilesystemRead` +
 `FilesystemSecurity` driver under the uid-0 bootstrap identity (no §5.1
-bypass), collecting the image path of every regular file under
-`/System/Drivers/` — the candidate paths the user-space scan
+bypass), starting at a `store_root` taken relative to that volume's own root
+(`DRIVER_STORE_PATH` on a whole-root volume; `SYSTEM_VOLUME_STORE_PATH`,
+`/Drivers`, on the design-B read-only `/System` volume scanned before
+unlock), collecting the image path of every regular file beneath it — the
+candidate paths the user-space scan
 (`rustos_drvhost::store::scan_store`) reads, bind-decodes, and hands to the
 `devmgr` autoloader. It only finds paths; it never reads, parses, or trusts
 a bundle — the load gate (`rustos_drvhost::Host::load`) verifies a bundle

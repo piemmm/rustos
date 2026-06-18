@@ -1113,11 +1113,21 @@ order (one fully-gated increment each):
              partition role in `lib/partition`, `RustFs::open_read_only` + the
              non-secret `SYSTEM_VOLUME_KEY`, and the kernel mounting `/System`
              read-only over a `lib/partition` window in
-             `root_mount::mount_and_audit_system_volume` (audited 4140/4141,
-             fail-soft until B2). The `encrypted_root_image`/`autoload_root_image`
-             fixtures author the split;
-           - **B2** — relocate the `AutoloadHook` store scan to the `/System`
-             volume and run it **pre-unlock** (`-M virt`);
+             `root_mount::autoload_system_drivers` (audited 4140/4141). The
+             `encrypted_root_image`/`autoload_root_image` fixtures author the
+             split;
+           - **B2 — DONE (host + `-M virt`)** — the aarch64 unlock kthread runs
+             `root_mount::autoload_system_drivers(&mut blk, &mut AutoloadHook,
+             audit)` **once, before** the passphrase prompt: it mounts the
+             read-only `/System` volume and autoloads its signed store, so the
+             keyboard comes up in user space before unlock. The encrypted-root
+             post-mount hook is removed (the unlock fns are hookless,
+             `NoMountedRootHook` deleted, §2.14); the store is addressed
+             relative to the scanned volume's root via a `store_root` arg on
+             `enumerate_driver_store`/`read_image`, the `/System` volume scanned
+             at `SYSTEM_VOLUME_STORE_PATH` (`/Drivers`); fixtures plant the
+             signed bundle into the `/System` volume. Proven by
+             `autoload_input_qemu_aarch64` (PASS pre-unlock on `InputDelivered`);
            - **B3** — metal USB→`hwtree` enumeration (metal-gated);
            - **B4** — live EMMC2 root bring-up (metal-gated, INCREMENT (2)(a));
            - **B5 (= 5e)** — the flip, after B1–B4 are metal-confirmed (§0.9).

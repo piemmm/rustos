@@ -116,10 +116,10 @@ enum FsDisk {
     /// (`plans/PI.md` P11 Chunk B-2).
     EncryptedRootDisk,
     /// The shared [`rustos_test_autoload_root_image`] whole-disk image: the
-    /// [`Self::EncryptedRootDisk`] layout additionally carrying a kernel-signed
-    /// virtio-input keyboard driver bundle in `/System/Drivers/` — the
-    /// driver-loading-by-discovery autoload vertical's backing
-    /// (`plans/PI.md` P10 5d-2-ii(b-2-iii)).
+    /// [`Self::EncryptedRootDisk`] layout whose **read-only `/System` volume**
+    /// additionally carries a kernel-signed virtio-input keyboard driver bundle
+    /// in its `Drivers/` store — the pre-unlock driver-loading-by-discovery
+    /// autoload vertical's backing (`plans/PI.md` design B / B2).
     AutoloadRootDisk,
 }
 
@@ -151,12 +151,15 @@ const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery stap
 
 /// Serial marker after which the autoload-input vertical injects a key.
 ///
-/// The autoload runs in the root-mount hook *before* the users database
-/// installs, so once this unlock-service install message appears the
-/// virtio-input driver has already been spawned; injecting then lets the
-/// (slightly later) eventq-armed driver consume the queued event. It mirrors
-/// `rustos_kernel::unlock_service::USERS_DB_INSTALLED_MESSAGE` (a literal here
-/// because `tools/xtask` does not link the freestanding kernel crate).
+/// Under design B the autoload runs *before* the passphrase prompt, off the
+/// read-only `/System` volume, so the virtio-input driver is spawned well
+/// before the encrypted root is unlocked. This unlock-service install
+/// message appears only *after* the passphrase is typed and the root mounts,
+/// so once it is seen the keyboard driver has long since been spawned and its
+/// eventq is armed; injecting then lets the driver consume the queued event.
+/// It mirrors `rustos_kernel::unlock_service::USERS_DB_INSTALLED_MESSAGE` (a
+/// literal here because `tools/xtask` does not link the freestanding kernel
+/// crate).
 const AUTOLOAD_INPUT_KEY_MARKER: &str =
     "root-unlock: users database installed; login can authenticate";
 
@@ -2213,26 +2216,27 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[("Root passphrase: ", UNLOCK_PASSPHRASE_LINE)],
     },
-    // `plans/PI.md` P10 5d-2-ii(b-2-iii): the driver-loading-by-discovery
+    // `plans/PI.md` design B / B2: the pre-unlock driver-loading-by-discovery
     // autoload vertical. `rustos-test-autoload-input-qemu-aarch64` boots the
     // *production* aarch64 pipeline on the `virt` board with the
-    // `FsDisk::AutoloadRootDisk` whole-disk image — the encrypted root
-    // additionally carrying a kernel-signed virtio-input keyboard driver bundle
-    // in `/System/Drivers/` — and an attached `virtio-keyboard-device`. The
-    // boot binds the virtio-blk root and discovers the virtio-input node; the
-    // unlock kthread mounts the encrypted root after the runner types the
-    // fixture passphrase, and its post-mount autoload hook scans the signed
-    // store, verifies the bundle against the kernel's embedded driver trust
-    // anchor, matches it to the discovered virtio-input node, and spawns it into
-    // its own user-space process (granted the node's resources plus the
-    // delegated `CAP_INPUT_INJECT`). Once the unlock-service install message
-    // appears (the autoload has already run during the mount hook, so the
-    // driver is spawned), the runner injects a key through the QEMU monitor; the
-    // autoloaded driver decodes it and delivers it to the input-focus arbiter
-    // via `key_inject`. PASS the instant the kernel-side audit sink sees the
-    // one-shot `AuditEvent::InputDelivered` (`EventId(4050)`) — the witness that
-    // an autoloaded *user-space* input driver is live and delivering input. A
-    // 120-second budget covers the boot + bounded PBKDF2 + autoload + driver
+    // `FsDisk::AutoloadRootDisk` whole-disk image — whose read-only `/System`
+    // volume carries a kernel-signed virtio-input keyboard driver bundle in its
+    // `Drivers/` store — and an attached `virtio-keyboard-device`. The boot
+    // binds the virtio-blk root and discovers the virtio-input node; the unlock
+    // kthread mounts the read-only `/System` volume and its autoload hook scans
+    // that volume's signed store **before** any passphrase prompt, verifies the
+    // bundle against the kernel's embedded driver trust anchor, matches it to
+    // the discovered virtio-input node, and spawns it into its own user-space
+    // process (granted the node's resources plus the delegated
+    // `CAP_INPUT_INJECT`). The runner then types the fixture passphrase to
+    // unlock the encrypted root; once the unlock-service install message appears
+    // (the keyboard driver was spawned earlier, pre-unlock), it injects a key
+    // through the QEMU monitor; the autoloaded driver decodes it and delivers it
+    // to the input-focus arbiter via `key_inject`. PASS the instant the
+    // kernel-side audit sink sees the one-shot `AuditEvent::InputDelivered`
+    // (`EventId(4050)`) — the witness that an autoloaded *user-space* input
+    // driver is live and delivering input (design-B keyboard-up-before-unlock).
+    // A 120-second budget covers the boot + bounded PBKDF2 + autoload + driver
     // bring-up + injection on QEMU TCG.
     QemuTest {
         package: "rustos-test-autoload-input-qemu-aarch64",
