@@ -116,7 +116,7 @@ pub struct RiscvInitSpawn;
 pub static RISCV_INIT_SPAWN: RiscvInitSpawn = RiscvInitSpawn;
 
 impl InitSpawn for RiscvInitSpawn {
-    fn spawn_init(&self, ctx: &dyn InitSpawnCtx) {
+    fn spawn_init(&self, ctx: &'static (dyn InitSpawnCtx + Sync)) {
         // Spawn PID 1 at most once; a spurious re-entry falls through to the
         // caller's fail-closed halt rather than building a second image.
         if INIT_SPAWNED

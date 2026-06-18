@@ -4223,19 +4223,32 @@ two users — or the same user twice — can be logged in concurrently.
        INCREMENT (1) device-IRQ path and runs the device-independent
        `unlock_root_disk_interactively` policy. What landed:
        - `unlock_service` (top-level module, host-tested on the CI host): the
-         post-MMU boot stash `record_boot`/`take_boot` (`RootBlockBinding` +
-         the firmware DTB pointer, filled by `boot::audit_root_storage_binding`
-         which no longer discards the binding), and the **console-0 ownership
-         gate** (`Console0Gate`/`CONSOLE0_GATE`/`GatedConsoleRead`) that
-         resolves the two-readers-of-one-queue concurrency note (item 5): the
-         primary console's `login` reads through a `GatedConsoleRead` that
-         withholds input (kernel-core `BlockingConsoleRead` parks it) until the
-         unlock kthread opens the gate, while the kthread reads the raw device;
-         the gate opens on every completion/fail-closed path so `login` is
-         never left latched out. Wired into both aarch64 console lists
-         (`arch_wrapper`).
-       - `unlock_service::metal` (`#[cfg(all(freestanding, kernel_isa =
-         "aarch64"))]`): `spawn_if_present` + `run_unlock` build the bring-up
+         **arch-neutral, device-independent core every port shares** (§2.2 /
+         §17.2 — it names no architecture). It holds the post-MMU boot stash
+         `record_boot`/`take_boot` (`RootBlockBinding` + the firmware DTB
+         pointer + the discovered `&[HwNode]`, filled by
+         `boot::audit_root_storage_binding`), the **console-0 ownership gate**
+         (`Console0Gate`/`CONSOLE0_GATE`/`GatedConsoleRead`) that resolves the
+         two-readers-of-one-queue concurrency note (item 5: the primary
+         console's `login` reads through a `GatedConsoleRead` that withholds
+         input — kernel-core `BlockingConsoleRead` parks it — until the unlock
+         kthread opens the gate, while the kthread reads the raw device; the
+         gate opens on every completion/fail-closed path so `login` is never
+         left latched out; wired into both aarch64 console lists
+         `arch_wrapper`), and the shared, host-tested helpers a future
+         x86_64 / riscv64 port reuses verbatim rather than copying: the
+         `UNLOCK_SERVICE`/`UNLOCK_TASK` ids + `note`, the `service_caps`
+         (`MMIO_MAP`+`MEM_DMA`+`DRV_LOAD`) / `loader_caps`
+         (`DRV_LOAD`+`DRV_KERNEL`) builders, the cooperative
+         `KthreadConsoleRead` passphrase reader, and the `AutoloadHook`
+         `MountedRootHook` over the abstract `DriverProcessSpawn` seam (so it
+         names no concrete producer).
+       - `aarch64::root_unlock` (`#[cfg(freestanding)]`, in the aarch64 boot
+         subtree beside `boot`/`init_spawn`): the **arch-specific bring-up
+         only** — `spawn_if_present` + `run_unlock` (over the arch-neutral
+         helpers above), the GIC/FDT `device_spi`, the `RearmingIrqWaiter`,
+         and the throwaway-bookkeeping VBASE/`PageTablePool` constants —
+         build the bring-up
          off the boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
          `KernelMmioMapper` over a **throwaway bookkeeping** arch `AddressSpace`
          (a private `PageTablePool`; device access is via the boot identity map
@@ -4253,7 +4266,7 @@ two users — or the same user twice — can be logged in concurrently.
          `irq` phase) calls `gic::init()` (enable distributor + CPU interface;
          additive — no line delivers until a driver routes its own, §2.17).
          The unlock kthread binds the device SPI on the core-published
-         `IrqTable` and its waiter (`metal::RearmingIrqWaiter`) re-arms the
+         `IrqTable` and its waiter (`root_unlock::RearmingIrqWaiter`) re-arms the
          line (`gic_irq::GicIrqController::rearm`; unmask is the arch op the
          kernel `IrqController` trait omits) then does the canonical race-free
          park — `exceptions::{mask_irq, wait_for_interrupt, enable_irq}` (mask
@@ -4295,9 +4308,10 @@ two users — or the same user twice — can be logged in concurrently.
          This is what makes the production `virt` boot actually bind its
          virtio-blk root and admit the unlock kthread; the Pi tree has no
          `virtio,mmio` node, so it is a no-op there and metal-neutral
-         (§2.17). The reused `metal.rs` device-id constant is deduped to the
-         canonical `rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID`
-         (§2.2). Host-tested (7 `root_storage` cases over a fake `Bus`).
+         (§2.17). The reused `aarch64::root_unlock` device-id constant is
+         deduped to the canonical
+         `rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID` (§2.2).
+         Host-tested (7 `root_storage` cases over a fake `Bus`).
        - The **admission vertical** `rustos-test-root-unlock-admission-qemu-
          aarch64` boots the production pipeline (`boot_aarch64::boot`) on
          `-M virt` with the planted `rustos-test-encrypted-root-image`

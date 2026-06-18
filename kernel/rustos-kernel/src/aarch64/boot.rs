@@ -47,7 +47,9 @@
 //! load — `plans/PI.md` W17). A missing or malformed tree leaves the
 //! `virt` default in place (`AGENTS.md` §2.9 — fail closed).
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use rustos_abi::HwNode;
 use rustos_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz};
@@ -686,20 +688,29 @@ pub fn boot(
     halt_current_cpu()
 }
 
-/// The discovery sink that resolves the root block device on the fly.
+/// A discovery sink that **buffers** the whole discovered hardware tree.
 ///
-/// Folds each discovered node into the [`crate::root_storage::RootBlockSelection`]
-/// as the [`platform::FdtDiscovery`] walk emits it, so the bind decision is
-/// reached without buffering the whole tree (`AGENTS.md` §2.16) — the
-/// allocation-free boot-path form of
-/// [`crate::root_storage::resolve_root_block_driver`].
-struct RootStorageSink {
-    selection: crate::root_storage::RootBlockSelection,
+/// The boot path now needs the full tree, not just the root binding: the
+/// in-kernel unlock kthread autoloads user-space drivers by matching every
+/// discovered node against the signed driver store once the root is mounted
+/// (`AGENTS.md` §18.1 / §18.3), so the input-device node — not only the
+/// block disk — must survive to the init seam. Because the tree must be
+/// buffered for that anyway, the boot path builds it **once** here and
+/// resolves the root binding from the same buffer
+/// ([`crate::root_storage::resolve_root_block_driver`], `AGENTS.md` §2.2),
+/// rather than maintaining a second streaming accumulator.
+///
+/// The buffer is a **growable** `Vec`, never a fixed-capacity array, so a
+/// larger machine's richer tree is never silently truncated (`AGENTS.md`
+/// §24.1 — no fixed-size tree buffer to outgrow); a node always fits, so
+/// `emit` never fails.
+struct DiscoveredTreeSink {
+    nodes: Vec<HwNode>,
 }
 
-impl HwNodeSink for RootStorageSink {
+impl HwNodeSink for DiscoveredTreeSink {
     fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
-        self.selection.observe(&node);
+        self.nodes.push(node);
         Ok(())
     }
 }
@@ -733,9 +744,7 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
     // the reader, so the virtio-MMIO probe below can reborrow the same
     // firmware bytes the bus builder needs.
     let total = fdt.total_size();
-    let mut sink = RootStorageSink {
-        selection: crate::root_storage::RootBlockSelection::new(),
-    };
+    let mut sink = DiscoveredTreeSink { nodes: Vec::new() };
     if platform::FdtDiscovery::new(fdt)
         .discover(&mut sink)
         .is_err()
@@ -749,11 +758,13 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
     // §18.6): the raw `virtio,mmio` nodes the discovery walk emitted carry
     // only their `compatible` string, which binds no block driver — the
     // virtio-blk bind key is the device id read from the transport. Probe
-    // each slot's `DeviceID` through the MMIO bus driver and attach a probed
-    // virtio-block child node so the gate can bind the root. The Raspberry
-    // Pi 4 tree describes no `virtio,mmio` node, so `virtio_mmio_bus_from_dtb`
-    // returns `NotFound` and this is a no-op there — it is the QEMU
-    // `virt`-board path, additive and metal-neutral (`AGENTS.md` §2.17).
+    // each slot's `DeviceID` through the MMIO bus driver and emit a probed
+    // virtio-block child node into the same buffered tree so the gate can
+    // bind the root *and* the kthread's autoload sees a faithful tree. The
+    // Raspberry Pi 4 tree describes no `virtio,mmio` node, so
+    // `virtio_mmio_bus_from_dtb` returns `NotFound` and this is a no-op there
+    // — it is the QEMU `virt`-board path, additive and metal-neutral
+    // (`AGENTS.md` §2.17).
     // SAFETY: `dtb`/`total` bound the firmware blob `Fdt::from_ptr` validated
     // above; it is identity-mapped and immutable for the kernel's life, and
     // the virtio-MMIO aperture it describes is identity-mapped Device memory
@@ -764,17 +775,27 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
     if let Ok(bus) = probe {
         // A bus enumeration error (an over-full or malformed bus) leaves the
         // root unbound rather than aborting the boot (`AGENTS.md` §18.4).
-        let _ = crate::root_storage::observe_virtio_mmio_block_devices(&bus, &mut sink.selection);
+        let _ = crate::root_storage::observe_virtio_mmio_block_devices(&bus, &mut sink);
     }
-    // Resolve + audit the binding, then stash it (with the firmware DTB
-    // pointer) for the init seam, where the in-kernel root-unlock kthread
-    // reads it once (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)). The MMU is
-    // on here (the caller enabled it), so the `SpinLock` stash's atomic
-    // read-modify-write is well-defined — the same post-MMU constraint the
-    // keyboard discovery stash carries. A `None` binding (no/ambiguous disk)
-    // leaves the unlock a no-op and `login` fails closed (§18.4).
-    let binding = sink.selection.finish(log_sink);
-    crate::unlock_service::record_boot(binding, dtb);
+
+    // Leak the buffered tree to `'static` (a one-shot boot publish, like the
+    // leaked `KernelState` — never a mutable global, `AGENTS.md` §2.1) so the
+    // unlock kthread can match every discovered node against the signed
+    // driver store during autoload (`AGENTS.md` §18.1 / §18.3). The tree
+    // outlives the boot frame and lives for the running kernel's lifetime.
+    let tree: &'static [HwNode] = Box::leak(sink.nodes.into_boxed_slice());
+
+    // Resolve + audit the root binding from the same buffered tree, then
+    // stash both (with the firmware DTB pointer) for the init seam, where the
+    // in-kernel root-unlock kthread reads it once (`plans/PI.md` P11 Chunk
+    // B-2 INCREMENT (2)). The MMU is on here (the caller enabled it), so the
+    // `SpinLock` stash's atomic read-modify-write is well-defined — the same
+    // post-MMU constraint the keyboard discovery stash carries. A `None`
+    // binding (no/ambiguous disk) leaves the unlock a no-op and `login` fails
+    // closed (§18.4); the tree is still stashed so an input driver can still
+    // autoload on a diskless boot once a store is reachable.
+    let binding = crate::root_storage::resolve_root_block_driver(tree, log_sink);
+    crate::unlock_service::record_boot(binding, dtb, tree);
 }
 
 /// Assemble the validated [`BootInfo`] hand-off and enter

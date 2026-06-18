@@ -146,7 +146,7 @@ pub struct X86_64InitSpawn;
 pub static X86_64_INIT_SPAWN: X86_64InitSpawn = X86_64InitSpawn;
 
 impl InitSpawn for X86_64InitSpawn {
-    fn spawn_init(&self, ctx: &dyn InitSpawnCtx) {
+    fn spawn_init(&self, ctx: &'static (dyn InitSpawnCtx + Sync)) {
         // Spawn PID 1 at most once; a spurious re-entry falls through to the
         // caller's fail-closed halt rather than building a second image.
         if INIT_SPAWNED

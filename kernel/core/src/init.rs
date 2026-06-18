@@ -301,7 +301,20 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // this kernel state's scheduler / capability table / address-space
         // registry and dispatches it. Every borrow targets the leaked
         // `KernelState`, which lives for the running kernel's lifetime.
-        let ctx = KernelInitSpawner::new(
+        //
+        // The context is leaked to `'static` (a one-shot boot publish over
+        // the already-leaked `KernelState`, never a mutable global —
+        // `AGENTS.md` §2.1) and handed to the seam as a
+        // `&'static (dyn InitSpawnCtx + Sync)`. That lets an in-kernel
+        // service the seam admits *before* `admit_init` diverges into the
+        // dispatch loop — the aarch64 root-unlock kthread, whose `'static +
+        // Send` body outlives this frame — capture the context and later
+        // drive `spawn_driver_process` to autoload user-space drivers off the
+        // mounted root (`plans/PI.md` P11; `AGENTS.md` §18.3). On the failure
+        // path `spawn_init` returns and we halt below, so the leak is
+        // immaterial; on success it diverges and the context lives for the
+        // running kernel's lifetime, exactly like the state it borrows.
+        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
             &state.frame_allocator,
             audit_sink,
             &state.scheduler,
@@ -309,8 +322,8 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
-        );
-        init.spawn_init(&ctx);
+        )));
+        init.spawn_init(ctx);
     }
 
     arch_for_halt.halt();

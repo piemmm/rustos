@@ -66,7 +66,7 @@
 //! `virtio-blk` proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
 
 use rustos_abi::driver::block::Block;
-use rustos_abi::driver::filesystem::{FilesystemRead, NodeKind};
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use rustos_abi::DriverError;
 use rustos_drv_fs_fat32::Fat32;
 use rustos_drv_fs_rustfs::{
@@ -78,6 +78,52 @@ use rustos_kernel_core::{
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
 use zeroize::Zeroizing;
+
+/// A mounted root volume, viewed as the read + security surface the
+/// driver-autoload pipeline needs (`AGENTS.md` §18.3 / §5.3).
+///
+/// Blanket-implemented for every filesystem driver that is both
+/// [`FilesystemRead`] and [`FilesystemSecurity`] (the production `RustFs`
+/// among them), so `&mut dyn RootVolume` is the **object-safe** handle the
+/// post-mount [`MountedRootHook`] receives — letting the generic unlock
+/// policy hand a freshly mounted, concretely-typed volume to a continuation
+/// without itself naming the concrete filesystem type (`AGENTS.md` §17.4).
+/// Its supertraits are exactly the bound
+/// [`autoload_from_mounted_root`](crate::driver_autoload::autoload_from_mounted_root)
+/// requires, so the hook forwards the `&mut dyn RootVolume` straight into it.
+pub trait RootVolume: FilesystemRead + FilesystemSecurity {}
+
+impl<T: FilesystemRead + FilesystemSecurity + ?Sized> RootVolume for T {}
+
+/// A continuation the unlock policy runs against the **just-mounted,
+/// still-open** root volume — after the encrypted root is unlocked and the
+/// volume's filesystem is live, before it is dropped (`plans/PI.md` P11).
+///
+/// The aarch64 in-kernel unlock kthread uses it to autoload user-space
+/// drivers off the mounted root's signed `/System/Drivers/` store
+/// (`AGENTS.md` §18.3 / §18.6) while the root is open — driver autoload is
+/// independent of the users database, so it runs whenever the volume mounts,
+/// not only when the database loads. Every path that mounts the root only to
+/// read its users database passes [`NoMountedRootHook`].
+///
+/// The hook **must not fail the unlock**: a driver that cannot load fails
+/// *that node* closed inside the autoload pipeline (`AGENTS.md` §18.4 /
+/// §5.4), never the mount, so `after_mount` returns `()` and the unlock
+/// proceeds to read the users database regardless.
+pub trait MountedRootHook {
+    /// Run against the mounted root `volume`.
+    fn after_mount(&mut self, volume: &mut dyn RootVolume);
+}
+
+/// The no-op [`MountedRootHook`] for callers that mount the root only to
+/// load the users database — every path but the aarch64 driver-autoload
+/// kthread. It does nothing, so those callers pay no autoload machinery
+/// (`AGENTS.md` §2.3).
+pub struct NoMountedRootHook;
+
+impl MountedRootHook for NoMountedRootHook {
+    fn after_mount(&mut self, _volume: &mut dyn RootVolume) {}
+}
 
 /// Audit event: the encrypted root volume was unlocked under the
 /// passphrase-derived key and mounted (`AGENTS.md` §5.4.4 / §19.4). The
@@ -174,6 +220,11 @@ impl RootMountError {
 /// * `audit` — the sink the unlock/mount decision and (via
 ///   [`load_users_db_source`]) the database-read decision are logged
 ///   through (`AGENTS.md` §19.4).
+/// * `hook` — a [`MountedRootHook`] run against the mounted root the instant
+///   it is unlocked, before the users database is read (the aarch64 unlock
+///   kthread autoloads user-space drivers off it; every other caller passes
+///   [`NoMountedRootHook`]). It runs only on a successful mount and cannot
+///   fail the unlock (`plans/PI.md` P11; `AGENTS.md` §18.3).
 ///
 /// On success the returned [`HeldUsersDbSource`] owns the validated
 /// `users-v1` text (zeroed on drop, `AGENTS.md` §4); the boot path
@@ -189,6 +240,7 @@ pub fn unlock_root_and_load_users<B: Block>(
     passphrase: &[u8],
     block: B,
     audit: &dyn Sink,
+    hook: &mut dyn MountedRootHook,
 ) -> Result<HeldUsersDbSource, RootMountError> {
     // 1. Decode the untrusted on-FAT descriptor fail-closed before its
     //    parameters drive any key derivation (`AGENTS.md` §5.4.3).
@@ -228,7 +280,16 @@ pub fn unlock_root_and_load_users<B: Block>(
         },
     );
 
-    // 4. Read and validate the users database off the mounted root. This
+    // 4. Run the post-mount hook against the now-open root before reading
+    //    the users database. Driver autoload (the kthread's hook) is
+    //    independent of the credential database, so it runs whenever the
+    //    volume mounts; a `NoMountedRootHook` (every non-autoload caller)
+    //    does nothing here. The hook cannot fail the unlock — a driver that
+    //    will not load fails that node closed inside the autoload pipeline
+    //    (`AGENTS.md` §18.4 / §5.4), never the mount.
+    hook.after_mount(&mut fs);
+
+    // 5. Read and validate the users database off the mounted root. This
     //    audits its own outcome (`UsersDbLoaded` / `UsersDbRejected`) and
     //    retains the canonical text in the returned holder.
     load_users_db_source(&mut fs, audit).map_err(RootMountError::Users)
@@ -287,7 +348,16 @@ where
             return Err(error);
         }
     };
-    unlock_root_and_load_users(&descriptor, passphrase, root_block, audit)
+    // This two-device entry exists for the boot path that loads only the
+    // users database; driver autoload rides the single-disk interactive
+    // path, so no hook runs here (`AGENTS.md` §2.3).
+    unlock_root_and_load_users(
+        &descriptor,
+        passphrase,
+        root_block,
+        audit,
+        &mut NoMountedRootHook,
+    )
 }
 
 /// Bring up the users database from a single partitioned disk: parse its
@@ -319,6 +389,10 @@ where
 ///   only to derive the volume key, never logged or retained.
 /// * `audit` — the sink every decision is logged through (`AGENTS.md`
 ///   §19.4).
+/// * `hook` — the [`MountedRootHook`] forwarded to
+///   [`unlock_root_and_load_users`], run against the mounted root (the
+///   aarch64 unlock kthread's driver autoload; [`NoMountedRootHook`]
+///   otherwise).
 ///
 /// # Errors
 ///
@@ -331,6 +405,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
     mut disk: Disk,
     passphrase: &[u8],
     audit: &dyn Sink,
+    hook: &mut dyn MountedRootHook,
 ) -> Result<HeldUsersDbSource, RootMountError> {
     // 1. Parse the untrusted partition table fail-closed (MBR or GPT).
     let table = match parse_partition_table(&mut disk) {
@@ -386,7 +461,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
             return Err(error);
         }
     };
-    unlock_root_and_load_users(&descriptor, passphrase, root, audit)
+    unlock_root_and_load_users(&descriptor, passphrase, root, audit, hook)
 }
 
 /// Audit event: the operator's typed passphrase unlocked the root and the
@@ -522,12 +597,19 @@ enum PassphraseReadError {
 /// * `late_db` — the set-once cell the loaded database is published into.
 /// * `audit` — the sink every decision is logged through (`AGENTS.md`
 ///   §19.4); no passphrase, key, or volume byte is ever logged.
+/// * `hook` — the [`MountedRootHook`] run against the root the moment it
+///   mounts under the correct passphrase, before the users database is
+///   read (the aarch64 unlock kthread autoloads user-space drivers off it;
+///   [`NoMountedRootHook`] for callers that only want the database). It
+///   runs at most once — on the single successful attempt — and never on a
+///   wrong-passphrase retry (`plans/PI.md` P11; `AGENTS.md` §18.3).
 pub fn unlock_root_disk_interactively<Disk: Block>(
     disk: Disk,
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
     late_db: &LateUsersDb,
     audit: &dyn Sink,
+    hook: &mut dyn MountedRootHook,
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
     // `impl Block for &mut B` forwarding, so one device is reused across
@@ -560,7 +642,9 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
             }
         };
 
-        match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
+        // Reborrow `hook` per attempt so the `&mut dyn` is not moved out of
+        // the loop; it is invoked at most once, on the successful mount.
+        match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit, &mut *hook) {
             Ok(source) => {
                 // The set-once install consumes the holder. A refusal means
                 // a database was already installed — the kthread runs once,
@@ -887,8 +971,14 @@ mod tests {
         let block = image::VecBlock::from_bytes(bytes);
         let sink = RecordingSink::new();
 
-        let source = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect("the correct passphrase unlocks the root and loads the database");
+        let source = unlock_root_and_load_users(
+            &descriptor_bytes,
+            PASSPHRASE,
+            block,
+            &sink,
+            &mut NoMountedRootHook,
+        )
+        .expect("the correct passphrase unlocks the root and loads the database");
 
         let text = source.text().expect("a loaded holder serves its text");
         let serialised = image::users_db_text().expect("fixture text serialises");
@@ -930,8 +1020,14 @@ mod tests {
         let block = image::VecBlock::from_bytes(bytes);
         let sink = RecordingSink::new();
 
-        let err = unlock_root_and_load_users(&descriptor_bytes, b"wrong passphrase", block, &sink)
-            .expect_err("a wrong passphrase must be refused");
+        let err = unlock_root_and_load_users(
+            &descriptor_bytes,
+            b"wrong passphrase",
+            block,
+            &sink,
+            &mut NoMountedRootHook,
+        )
+        .expect_err("a wrong passphrase must be refused");
 
         assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
         assert_eq!(err.cause(), "unlock_refused");
@@ -950,8 +1046,14 @@ mod tests {
         let block = image::VecBlock::from_bytes(bytes);
         let sink = RecordingSink::new();
 
-        let err = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect_err("a tampered descriptor must be refused");
+        let err = unlock_root_and_load_users(
+            &descriptor_bytes,
+            PASSPHRASE,
+            block,
+            &sink,
+            &mut NoMountedRootHook,
+        )
+        .expect_err("a tampered descriptor must be refused");
 
         assert!(matches!(err, RootMountError::Descriptor(_)), "{err:?}");
         assert_eq!(err.cause(), "descriptor_invalid");
@@ -970,8 +1072,14 @@ mod tests {
         let block = image::VecBlock::from_bytes(blank);
         let sink = RecordingSink::new();
 
-        let err = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect_err("a non-rustfs volume must be refused");
+        let err = unlock_root_and_load_users(
+            &descriptor_bytes,
+            PASSPHRASE,
+            block,
+            &sink,
+            &mut NoMountedRootHook,
+        )
+        .expect_err("a non-rustfs volume must be refused");
 
         assert!(matches!(err, RootMountError::Mount(_)), "{err:?}");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
@@ -1098,8 +1206,9 @@ mod tests {
             image::build_users_root_image_with_key(&key).expect("users-root volume builds");
         let root = image::VecBlock::from_bytes(root_bytes);
         let sink = RecordingSink::new();
-        let source = unlock_root_and_load_users(&read, PASSPHRASE, root, &sink)
-            .expect("the FAT-read descriptor unlocks the root");
+        let source =
+            unlock_root_and_load_users(&read, PASSPHRASE, root, &sink, &mut NoMountedRootHook)
+                .expect("the FAT-read descriptor unlocks the root");
         assert!(source.text().is_ok(), "a database is served");
     }
 
@@ -1238,8 +1347,13 @@ mod tests {
         let disk = FatVecBlock { store: bytes };
         let sink = RecordingSink::new();
 
-        let source = mount_root_disk_and_load_users(disk, disk_image::PASSPHRASE, &sink)
-            .expect("the disk splits and the root unlocks end to end");
+        let source = mount_root_disk_and_load_users(
+            disk,
+            disk_image::PASSPHRASE,
+            &sink,
+            &mut NoMountedRootHook,
+        )
+        .expect("the disk splits and the root unlocks end to end");
 
         let text = source.text().expect("a loaded holder serves its text");
         let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
@@ -1257,7 +1371,7 @@ mod tests {
         let disk = FatVecBlock::new(64);
         let sink = RecordingSink::new();
 
-        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink, &mut NoMountedRootHook)
             .expect_err("a disk with no table must be refused");
 
         assert!(matches!(err, RootMountError::PartitionTable(_)), "{err:?}");
@@ -1288,7 +1402,7 @@ mod tests {
         let disk = FatVecBlock { store };
         let sink = RecordingSink::new();
 
-        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink, &mut NoMountedRootHook)
             .expect_err("a disk with no root partition must be refused");
 
         assert_eq!(err, RootMountError::NoRootPartition);
@@ -1393,8 +1507,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut NoMountedRootHook,
+        );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed(), "the database is published");
@@ -1429,8 +1549,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut NoMountedRootHook,
+        );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed());
@@ -1449,8 +1575,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut NoMountedRootHook,
+        );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
         assert!(!late.is_installed(), "no database is installed on give-up");
@@ -1483,6 +1615,7 @@ mod tests {
             &input,
             &late,
             &sink,
+            &mut NoMountedRootHook,
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -1504,8 +1637,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut NoMountedRootHook,
+        );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
         assert!(!late.is_installed());
@@ -1527,8 +1666,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut NoMountedRootHook,
+        );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed());
@@ -1538,6 +1683,73 @@ mod tests {
             1,
             "the over-long line is one retry: {:?}",
             sink.ids()
+        );
+    }
+
+    /// A [`MountedRootHook`] that counts how many times it was run against a
+    /// mounted volume, so the tests can prove the hook fires on the
+    /// successful mount and never on a failed one.
+    #[derive(Default)]
+    struct CountingHook {
+        runs: usize,
+    }
+
+    impl MountedRootHook for CountingHook {
+        fn after_mount(&mut self, _volume: &mut dyn RootVolume) {
+            self.runs += 1;
+        }
+    }
+
+    #[test]
+    fn the_post_mount_hook_runs_exactly_once_on_a_successful_unlock() {
+        // The driver-autoload seam (`plans/PI.md` P11): the hook runs against
+        // the mounted root the moment the correct passphrase unlocks it, and
+        // exactly once — there is one successful mount.
+        let input = ScriptInput::new(script(&[PASSPHRASE]));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+        let mut hook = CountingHook::default();
+
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut hook,
+        );
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert_eq!(
+            hook.runs, 1,
+            "the hook runs once, on the single successful mount"
+        );
+    }
+
+    #[test]
+    fn the_post_mount_hook_never_runs_when_no_passphrase_mounts_the_root() {
+        // §18.4 / §5.4: every passphrase is wrong, so the root never mounts;
+        // the hook (driver autoload) must never run against an unmounted
+        // volume, and the unlock gives up fail-closed.
+        let lines = alloc::vec![b"wrong" as &[u8]; MAX_UNLOCK_ATTEMPTS as usize];
+        let input = ScriptInput::new(script(&lines));
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+        let mut hook = CountingHook::default();
+
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &mut hook,
+        );
+
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert_eq!(
+            hook.runs, 0,
+            "the hook never runs when no passphrase mounts the root"
         );
     }
 }

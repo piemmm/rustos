@@ -42,6 +42,7 @@
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
+use rustos_arch_api::{DiscoveryError, HwNodeSink};
 use rustos_devmatch::MatchResolution;
 use rustos_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
 use rustos_kernel_virtio::MAX_SLOTS;
@@ -228,8 +229,8 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
     selection.finish(audit)
 }
 
-/// Enumerate the virtio-MMIO `bus` and fold each populated **block** slot
-/// into `selection` as a probed child node (`AGENTS.md` §18.2 / §18.6).
+/// Enumerate the virtio-MMIO `bus` and emit each populated **block** slot
+/// into `sink` as a probed child node (`AGENTS.md` §18.2 / §18.6).
 ///
 /// The raw `virtio,mmio` firmware node the discovery walk emits carries
 /// only its `compatible` string, which no floor block driver binds — the
@@ -245,6 +246,13 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 /// SPI from the same device tree by base, so the probed child carries only
 /// its bind identity.
 ///
+/// The probed child is **emitted into the same [`HwNodeSink`] the platform
+/// discovery walk writes to**, so it becomes part of the one buffered
+/// hardware tree (`AGENTS.md` §18.1) the boot path both resolves the root
+/// binding from ([`resolve_root_block_driver`]) and stashes for the unlock
+/// kthread's `devmgr` autoload — a discovered node, never a side channel
+/// (`AGENTS.md` §2.2).
+///
 /// Driver-agnostic: it reaches the bus only through the frozen [`Bus`] ABI
 /// seam (`AGENTS.md` §8), so the boot path never names a concrete
 /// `drivers/bus/*` type. The enumeration is bounded by
@@ -255,11 +263,12 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 ///
 /// Propagates the bus enumeration error verbatim — [`DriverError::BufferTooSmall`]
 /// when more than [`MAX_SLOTS`] slots respond, or a malformed-tree
-/// [`DriverError::DeviceFault`]. The caller leaves the root unbound on any
-/// error (fail closed, §18.4).
+/// [`DriverError::DeviceFault`]. A [`DiscoveryError::SinkFull`] from a full
+/// sink is also surfaced as [`DriverError::BufferTooSmall`]. The caller
+/// leaves the root unbound on any error (fail closed, §18.4).
 pub fn observe_virtio_mmio_block_devices(
     bus: &dyn Bus,
-    selection: &mut RootBlockSelection,
+    sink: &mut dyn HwNodeSink,
 ) -> Result<(), DriverError> {
     let blank = BusDevice {
         vendor: 0,
@@ -284,7 +293,12 @@ pub fn observe_virtio_mmio_block_devices(
             .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
             .is_ok()
         {
-            selection.observe(&node);
+            // A full sink (`DiscoveryError::SinkFull`) is the only emit
+            // failure a buffering sink raises; surface it as the same
+            // bounded-capacity refusal an over-full bus does (fail closed,
+            // `AGENTS.md` §2.9 / §24.4).
+            sink.emit(node)
+                .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
         }
     }
     Ok(())
@@ -498,6 +512,21 @@ mod tests {
         }
     }
 
+    /// Folds each probed child a [`observe_virtio_mmio_block_devices`] call
+    /// emits into a [`RootBlockSelection`], so the enumeration tests assert
+    /// the binding decision through the same streaming accumulator the
+    /// production resolve path uses while exercising the [`HwNodeSink`]
+    /// emit contract (`AGENTS.md` §2.2). A selection is unbounded, so emit
+    /// never fails.
+    struct SelectionSink<'a>(&'a mut RootBlockSelection);
+
+    impl HwNodeSink for SelectionSink<'_> {
+        fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
+            self.0.observe(&node);
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_probed_virtio_block_slot_binds_the_virtio_blk_driver() {
         // A populated virtio-block slot (DeviceID 2) is attached as a probed
@@ -507,7 +536,8 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
+            .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
         assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
         assert_eq!(binding.node.id(), VIRTIO_PROBE_NODE_BASE_ID);
@@ -522,7 +552,8 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[1]);
-        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
+            .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Info);
     }
@@ -534,7 +565,8 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[1, VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
+            .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
         assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
     }
@@ -547,7 +579,8 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
+            .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Error);
     }
@@ -561,7 +594,7 @@ mod tests {
         let devices = alloc::vec![VIRTIO_BLK_DEVICE_ID; MAX_SLOTS + 1];
         let bus = FakeBus::with(&devices);
         assert_eq!(
-            observe_virtio_mmio_block_devices(&bus, &mut selection),
+            observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection)),
             Err(DriverError::BufferTooSmall)
         );
     }
@@ -576,7 +609,8 @@ mod tests {
         let mut selection = RootBlockSelection::new();
         selection.observe(&emmc2_node(3));
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut selection).expect("enumerate");
+        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
+            .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Error);
     }

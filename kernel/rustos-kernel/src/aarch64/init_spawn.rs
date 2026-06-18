@@ -93,7 +93,7 @@ pub struct Aarch64InitSpawn;
 pub static AARCH64_INIT_SPAWN: Aarch64InitSpawn = Aarch64InitSpawn;
 
 impl InitSpawn for Aarch64InitSpawn {
-    fn spawn_init(&self, ctx: &dyn InitSpawnCtx) {
+    fn spawn_init(&self, ctx: &'static (dyn InitSpawnCtx + Sync)) {
         // Spawn PID 1 at most once; a spurious re-entry falls through to the
         // caller's fail-closed halt rather than building a second image.
         if INIT_SPAWNED
@@ -313,7 +313,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // shape without a planted root, a headless Pi) it starts nothing,
         // opens the console-0 gate, and PID 1 runs unchanged
         // (`AGENTS.md` §18.4).
-        let _unlock_started = crate::unlock_service::spawn_if_present(ctx);
+        let _unlock_started = crate::aarch64::root_unlock::spawn_if_present(ctx);
 
         // Register PID 1's caps + address space, publish it as the current
         // task, and dispatch it — `admit_init` diverges into EL0 on success.

@@ -1,13 +1,20 @@
-//! Freestanding (aarch64) live root-unlock bring-up (`plans/PI.md` P11
-//! Chunk B-2 INCREMENT (2)).
+//! The aarch64 live root-unlock bring-up (`plans/PI.md` P11 Chunk B-2
+//! INCREMENT (2)).
 //!
-//! Runs only on the bare-metal aarch64 boot path. It admits the in-kernel
-//! unlock kthread at the init seam, brings the bootstrap virtio-blk root
-//! device up over the production device-IRQ path (INCREMENT (1)), and runs
-//! the device-independent unlock policy
+//! The freestanding-aarch64 half of the in-kernel root-unlock service: it
+//! lives in the architecture subtree ([`crate::aarch64`]) because it names
+//! the aarch64 port directly (`rustos_arch_aarch64`, the GIC, the firmware
+//! device tree), while the device-independent core — the boot stash and the
+//! console-0 ownership gate — stays in the arch-neutral
+//! [`crate::unlock_service`] (`AGENTS.md` §2.2 / §17.2).
+//!
+//! It admits the in-kernel unlock kthread at the init seam, brings the
+//! bootstrap virtio-blk root device up over the production device-IRQ path
+//! (INCREMENT (1)), and runs the device-independent unlock policy
 //! ([`crate::root_mount::unlock_root_disk_interactively`]) inside the
 //! kthread — opening the console-0 ownership gate the instant the unlock
-//! resolves so `login` can take over (`super::CONSOLE0_GATE`).
+//! resolves so `login` can take over
+//! ([`crate::unlock_service::CONSOLE0_GATE`]).
 //!
 //! The QEMU `virt` board (virtio-blk-MMIO) is the path proven here; the
 //! Raspberry Pi 4 EMMC2 SD host is the staged metal increment, so an EMMC2
@@ -15,13 +22,14 @@
 //! that increment lands (`plans/PI.md` P11).
 
 use rustos_abi::driver::dma::PoolId;
-use rustos_abi::{CapabilityId, IrqHandle};
+use rustos_abi::{HwNode, IrqHandle};
 use rustos_arch_aarch64::fdt::gic_device_intid;
 use rustos_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
 };
 use rustos_arch_aarch64::{gic, video, SERIAL_SINK};
 use rustos_caps::CapabilitySet;
+use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
 use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
@@ -29,29 +37,22 @@ use rustos_fdt::Fdt;
 use rustos_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
 use rustos_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
-use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
+use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
-use rustos_log::{log, Event, EventId, Level, Sink};
+use rustos_log::{Level, Sink};
 
 use crate::aarch64::arch_wrapper::{UART_CONSOLE, VIDEO_CONSOLE, VIDEO_KEYBOARD};
 use crate::aarch64::gic_irq::{published_irq_table, GIC_IRQ_CONTROLLER};
-use crate::driver_catalog::VIRTIO_BLK_PATH;
+use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
+use crate::driver_catalog::{KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
+use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB};
-
-use super::{take_boot, CONSOLE0_GATE};
-
-/// Audit event: the in-kernel root-unlock service lifecycle (started /
-/// skipped / device bring-up result), logged at the PID 1 spawn seam and
-/// from the kthread (`AGENTS.md` §19.4). Sits beside the root-mount audit
-/// ids (`4135`–`4138`, [`crate::root_mount`] / [`crate::root_storage`]).
-const UNLOCK_SERVICE: EventId = EventId(4139);
-
-/// Synthetic owner task id for the unlock kthread's capability context and
-/// IRQ binding. Distinct from the keyboard service's so an audit observer
-/// can tell the two in-kernel services apart.
-const UNLOCK_TASK: TaskId = TaskId(0x5b4);
+use crate::unlock_service::{
+    loader_caps, note, service_caps, take_boot, AutoloadHook, KthreadConsoleRead, CONSOLE0_GATE,
+    UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
+};
 
 /// CPU-interface target bitmask routing the device SPI to the boot CPU.
 const CPU0_TARGET: u8 = 0b0000_0001;
@@ -85,42 +86,6 @@ static UNLOCK_PT_POOL: PageTablePool = PageTablePool::new();
 
 /// Capacity, in pages, of the MMIO register-window map.
 const MMIO_CAP_PAGES: usize = 64;
-
-/// The capabilities the unlock kthread holds: [`CapabilityId::MMIO_MAP`]
-/// (the virtio register window), [`CapabilityId::MEM_DMA`] (the request
-/// DMA), and [`CapabilityId::DRV_LOAD`] (the signed driver-load gate). No
-/// more — every map/alloc/load is re-checked against this set (§5.4).
-fn service_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::MMIO_MAP);
-    caps.insert(CapabilityId::MEM_DMA);
-    caps.insert(CapabilityId::DRV_LOAD);
-    caps
-}
-
-/// The capability set the signed driver-load gate is presented with:
-/// `CAP_DRV_LOAD` + `CAP_DRV_KERNEL` (the bootstrap virtio-blk manifest is
-/// `kind = InKernel`). Each driver receives only the intersection with its
-/// manifest request (`AGENTS.md` §5.2).
-fn loader_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::DRV_LOAD);
-    caps.insert(CapabilityId::DRV_KERNEL);
-    caps
-}
-
-/// Log an unlock-service lifecycle decision onto the service's audit sink.
-fn note(audit: &dyn Sink, level: Level, message: &'static str) {
-    log(
-        audit,
-        &Event {
-            level,
-            id: UNLOCK_SERVICE,
-            message,
-            fields: &[],
-        },
-    );
-}
 
 /// Find the GICv2 INTID of the `virtio,mmio` node whose `reg` base equals
 /// `slot_base`, decoded through the production [`gic_device_intid`]
@@ -210,38 +175,6 @@ impl IrqWaiter for RearmingIrqWaiter {
     }
 }
 
-/// A cooperative blocking console reader for the unlock kthread.
-///
-/// The kthread analogue of kernel-core's `BlockingConsoleRead` (which parks
-/// only a *user* kthread, via `reschedule_current`): an empty device poll
-/// suspends the kthread through its shared [`CooperativeYield`] cell and
-/// re-polls on the next dispatch, so the passphrase prompt blocks for input
-/// without busy-spinning (`AGENTS.md` §2.1) and never fabricates an end of
-/// input. It drives the kthread's single [`YieldHandle`] through the
-/// [`CooperativeYield`] cell `run_unlock` lends it (`!Sync`, never shared
-/// across CPUs); the device-IRQ wait parks on `wfi` separately
-/// ([`RearmingIrqWaiter`]), so the console poll and the block-I/O wait do
-/// not share a suspend mechanism.
-struct KthreadConsoleRead<'a> {
-    inner: &'static (dyn ConsoleRead + Sync + 'static),
-    yielder: &'a CooperativeYield<'a>,
-}
-
-impl ConsoleRead for KthreadConsoleRead<'_> {
-    fn read(&self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            let read = self.inner.read(buf)?;
-            if read > 0 {
-                return Ok(read);
-            }
-            self.yielder.yield_now();
-        }
-    }
-}
-
 /// Admit the in-kernel root-unlock kthread if the boot path bound a
 /// virtio-blk root block device, returning whether it was started.
 ///
@@ -252,7 +185,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
 /// console-0 gate is also opened by the kthread body once the unlock
 /// resolves, so it is never left latched closed.
 #[must_use]
-pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
+pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     let boot = take_boot();
     // Route the unlock service's security-relevant decisions (mount /
     // install / give-up) onto the boot audit channel (`AGENTS.md` §19.4)
@@ -293,12 +226,17 @@ pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
     };
 
     let dtb = boot.dtb;
+    // The discovered hardware tree the kthread matches against the signed
+    // driver store once the root mounts (`AGENTS.md` §18.1 / §18.3). A
+    // `&'static [HwNode]` (the boot path leaked it), so the `'static + Send`
+    // kthread body captures it by value.
+    let tree = boot.tree;
     let caps = service_caps();
     let body = move |yielder: &mut dyn YieldHandle| {
-        let outcome = run_unlock(yielder, dtb, frames, caps, audit);
+        let outcome = run_unlock(yielder, dtb, frames, caps, audit, ctx, tree);
         match outcome {
             Ok(UnlockOutcome::Installed) => {
-                note(audit, Level::Info, super::USERS_DB_INSTALLED_MESSAGE);
+                note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE);
             }
             Ok(UnlockOutcome::GaveUp) => {
                 note(
@@ -340,6 +278,14 @@ pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
 /// Bring the virtio-blk root device up over the production device-IRQ path
 /// and run the interactive unlock policy, returning its outcome.
 ///
+/// Once the operator's passphrase mounts the root, the
+/// [`AutoloadHook`] this builds autoloads user-space drivers off the
+/// mounted volume's signed `/System/Drivers/` store — matching every node
+/// of the discovered `tree` against the store and spawning each winner into
+/// its own process through `ctx`'s [`InitSpawnCtx::spawn_driver_process`]
+/// seam (`AGENTS.md` §18.3). The autoload runs inside the mount, while the
+/// encrypted root is open, and cannot fail the unlock.
+///
 /// Every fallible step fails closed with a stable stage string the caller
 /// logs (`AGENTS.md` §2.9); the caller opens the console-0 gate on every
 /// path.
@@ -349,6 +295,8 @@ fn run_unlock(
     frames: &'static FrameAllocator,
     caps: CapabilitySet,
     audit: &'static (dyn Sink + Sync),
+    ctx: &'static (dyn InitSpawnCtx + Sync),
+    tree: &'static [HwNode],
 ) -> Result<UnlockOutcome, &'static str> {
     // Move the kthread's single yield handle into the shared cell both the
     // re-arming IRQ waiter and the cooperative console reader suspend
@@ -475,10 +423,26 @@ fn run_unlock(
     } else {
         (&UART_CONSOLE, &UART_CONSOLE)
     };
-    let reader = KthreadConsoleRead {
-        inner: raw_read,
-        yielder: &coop,
-    };
+    let reader = KthreadConsoleRead::new(raw_read, &coop);
+
+    // The driver-signing trust anchor the autoload load gate verifies each
+    // winning bundle against — the kernel's own embedded key, the single
+    // source `KernelDriverLoader` also trusts (`AGENTS.md` §8 / §9 / §2.2). A
+    // corrupt key is a broken build, not an admissible state: fail closed
+    // (`AGENTS.md` §2.9) rather than autoload against no anchor.
+    let trust_anchor = Ed25519PublicKey::from_bytes(&KERNEL_DRIVER_SIGNER_PUBKEY)
+        .map_err(|_| "root-unlock: driver trust anchor")?;
+    let trusted = [trust_anchor];
+    // The scheduler-agnostic driver-spawn seam over the captured boot
+    // context + the aarch64 process producer (`AGENTS.md` §17.1 / §2.2) —
+    // the one per-arch input the otherwise arch-neutral autoload hook needs.
+    let driver_spawn = InitCtxDriverProcessSpawn::new(ctx, &AARCH64_PROCESS_SPAWN);
+    // The post-mount autoload hook: once the passphrase mounts the root, it
+    // matches every discovered node against the volume's signed driver store
+    // and spawns each winner into its own user-space process (`AGENTS.md`
+    // §18.3). The kthread holds `CAP_DRV_LOAD` (`service_caps`), so a
+    // user-space driver can be admitted through the gate.
+    let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, caps, audit);
 
     Ok(unlock_root_disk_interactively(
         blk,
@@ -486,6 +450,7 @@ fn run_unlock(
         &reader,
         &LATE_USERS_DB,
         audit,
+        &mut autoload,
     ))
 }
 

@@ -75,7 +75,18 @@ pub trait InitSpawn {
     /// succeeded — so the MMU is enabled and the user→kernel trap path is
     /// installed (the new program's first syscall is therefore handled
     /// rather than faulting).
-    fn spawn_init(&self, ctx: &dyn InitSpawnCtx);
+    ///
+    /// `ctx` is a `&'static (dyn InitSpawnCtx + Sync)`, not a borrowed
+    /// `&dyn InitSpawnCtx`: `kernel_main` builds it over the kernel binary's
+    /// leaked-`'static` `KernelState` and hands it here so an in-kernel service the
+    /// seam admits **before** `admit_init` diverges (e.g. the aarch64
+    /// root-unlock kthread) can capture it in its `'static + Send` body and
+    /// later drive [`InitSpawnCtx::spawn_driver_process`] to autoload
+    /// user-space drivers off the mounted root (`plans/PI.md` P11; `AGENTS.md`
+    /// §18.3). The `Sync` bound is what makes the shared reference `Send`
+    /// into that body. The seam itself only needs a shared reference, so it
+    /// reborrows `ctx` as a plain `&dyn InitSpawnCtx` for its own use.
+    fn spawn_init(&self, ctx: &'static (dyn InitSpawnCtx + Sync));
 }
 
 /// The core-side capabilities an [`InitSpawn`] seam needs to spawn PID 1:
