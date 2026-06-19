@@ -109,16 +109,33 @@ register window), `dma_host()` (stage controller DMA), `mailbox()`
 keeping the floor driver free of ambient authority and of any board
 name in the generic layers above it.
 
-The chain is split across **two** floor crates, each strictly its own
-device, with no driver naming another (`AGENTS.md` §8 / §17.4): the
-board-specific PCIe / firmware steps live in the device's own
-`drivers/bus/pcie_brcm` (the §2.20 carve-out that may know the BCM2711 /
-VL805 — including the firmware reload, which is a VL805-specific mailbox
-operation and must **not** leak into the generic USB layer), while the
-board-neutral xHCI bring-up, enumeration, and HID-node emission live in
-`drivers/bus/usb`. The kernel's bootstrap-floor catalogue sequences the
-two autonomous entries and the hardware tree decouples them, so neither
-crate depends on the other.
+The chain is split across **three** floor crates, each strictly its own
+device, with no driver naming another (`AGENTS.md` §8 / §17.4 / §2.20):
+
+* the board-specific PCIe root-complex steps live in the device's own
+  `drivers/bus/pcie_brcm` (the §2.20 carve-out that may know the BCM2711)
+  — link reset, SerDes, window programming, link training;
+* the VL805-specific `VideoCore`-mailbox firmware reload lives in its own
+  device crate `drivers/bus/usb/vl805` (it is a VL805 operation and must
+  **not** leak into either the PCIe driver or the generic USB layer); and
+* the board-neutral xHCI bring-up, enumeration, and HID-node emission live
+  in `drivers/bus/usb/xhci`.
+
+The kernel's bootstrap-floor catalogue sequences the autonomous entries
+(PCIe link → VL805 firmware reload over `mailbox()` → xHCI bring-up +
+`emit_node()`) and the hardware tree decouples them, so no crate depends
+on another.
+
+The board-specific PCIe half is the landed
+`rustos_drv_bus_pcie_brcm::wiring::bring_up_from_node`: it reads the
+controller register window + the inbound/outbound address windows off the
+discovered `brcm,bcm2711-pcie` `HwNode` (`pcie_bringup_from_node`, never a
+compiled-in board constant — `AGENTS.md` §18.1), maps the window
+(`mmio_mapper()`), and trains the link over it, failing closed
+(`DriverError::NotFound`) on an incomplete node. QEMU models no Pi PCIe
+link timing, so its host tests prove the composition up to the
+root-port / link-up check; the live link training is the on-metal
+acceptance item.
 
 The board-neutral USB half is the landed
 `rustos_drv_bus_usb::wiring::bring_up_boot_input`: it maps the controller

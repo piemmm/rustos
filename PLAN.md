@@ -1227,16 +1227,26 @@ order (one fully-gated increment each):
            (`HwResource::dma`) grants, and `emit_node()`s it. Host tests prove the
            composition + fail-closed paths to the controller hand-off; the live
            enumerate→emit is the metal item.
-         - **PCIe autonomous half — TODO.** `drivers/bus/pcie_brcm` autonomous
-           entry: `pcie_bringup_from_node` + link train.
+         - **PCIe autonomous half — DONE (host-proven).** `drivers/bus/pcie_brcm`
+           owns its discovered-node parsing beside the link-training engine it
+           feeds (`AGENTS.md` §2.2 / §2.21): `wiring::pcie_bringup_from_node`
+           reads the controller window + inbound/outbound address windows off the
+           `brcm,bcm2711-pcie` `HwNode` into a `PcieBringup` (fail-closed
+           `BringupError` per missing resource, §18.5), and the §18.6 autonomous
+           `wiring::bring_up_from_node` maps the window under `CAP_MMIO_MAP` and
+           trains the link (`DriverError::NotFound` on an incomplete node). The
+           types moved out of the kernel scaffold (`usb_keyboard.rs`), which now
+           re-exports `PcieBringup` and consumes the relocated parse (§2.14); the
+           scaffold pump stays the live keyboard (§2.17). 8 pcie_brcm host tests;
+           no `lib/abi`/`#[repr(C)]` change ⇒ no C-header drift.
          - **Kernel autonomous sequencing — TODO.** The host drives the floor
-           `bring_up` entries (PCIe train → `vl805::reload_firmware` over
-           `host.mailbox()` → xHCI bring-up + `emit_node()`) in place of the
-           in-kernel `bring_up_keyboard` orchestration; `spawn_pump` stays the
-           live keyboard until B5. Acceptance is a real-Pi UART log: the floor
-           chain trains PCIe, reloads firmware, enumerates, and emits a *bindable*
-           HID node, scaffold still delivering keys (`raspi4b`/QEMU cannot model
-           the VL805).
+           `bring_up` entries (PCIe `bring_up_from_node` → `vl805::reload_firmware`
+           over `host.mailbox()` → xHCI `bring_up_boot_input` + `emit_node()`) in
+           place of the in-kernel `bring_up_keyboard` orchestration; `spawn_pump`
+           stays the live keyboard until B5. Acceptance is a real-Pi UART log: the
+           floor chain trains PCIe, reloads firmware, enumerates, and emits a
+           *bindable* HID node, scaffold still delivering keys (`raspi4b`/QEMU
+           cannot model the VL805).
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
        (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), lay the signed

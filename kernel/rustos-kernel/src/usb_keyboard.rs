@@ -30,14 +30,18 @@ use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::dma::{DmaHost, DmaSlab};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, HwNode, HwResourceKind, MmioMapper, PciBus,
-    RegisterWindow,
+    CapabilityId, DriverError, DriverHost, DriverKind, HwNode, MmioMapper, PciBus, RegisterWindow,
 };
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_pcie_brcm::{
     self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback, OutboundWindowReadback,
-    PcieWindows,
 };
+// The discovered-node parsing now lives in the PCIe device's own driver
+// crate (`drivers/bus/pcie_brcm`), beside the link-training engine it feeds
+// (`AGENTS.md` §2.2 / §2.21 — it is hwtree parsing, not kernel
+// orchestration). Re-exported so the composition keeps one definition; the
+// autonomous `wiring::bring_up_from_node` floor entry consumes it directly.
+pub use rustos_drv_bus_pcie_brcm::wiring::PcieBringup;
 use rustos_hid::{BootKeyboard, ConsoleSink};
 use rustos_kernel_core::InputFocus;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
@@ -1562,75 +1566,6 @@ pub struct BroughtUpKeyboard {
 const HID_NODE_PARENT_ID: u32 = 1;
 const HID_NODE_ID: u32 = 2;
 
-/// The discovered inputs the VL805 bring-up needs, all read from the
-/// `brcm,bcm2711-pcie` [`HwNode`] (`AGENTS.md` §18.1) — never compiled-in.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct PcieBringup {
-    /// CPU-physical base of the PCIe controller register block (the
-    /// translated `reg` MMIO window).
-    pub regs_phys: u64,
-    /// The inbound (`dma-ranges`) and outbound (`ranges`) address windows
-    /// the root complex is programmed with. The device-visible DMA upper
-    /// bound (`inbound_pcie_base + inbound_size`) is derived from these in
-    /// [`bring_up_keyboard`], not stored separately.
-    pub windows: PcieWindows,
-}
-
-/// Why a `brcm,bcm2711-pcie` [`HwNode`] could not be turned into a
-/// [`PcieBringup`]: a required discovered resource is absent. Each is a
-/// fail-closed refusal — the chain never invents a window (`AGENTS.md`
-/// §2.9 / §18.5).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum BringupError {
-    /// The node carries no controller register (`Mmio`) window.
-    NoControllerWindow,
-    /// The node carries no inbound-DMA aperture (`Dma`) resource.
-    NoInboundAperture,
-    /// The node carries no outbound (`BusWindow`) resource.
-    NoOutboundWindow,
-}
-
-/// Assemble the VL805 bring-up inputs from a discovered
-/// `brcm,bcm2711-pcie` [`HwNode`].
-///
-/// The node carries three resources the chain needs (all discovered by
-/// `kernel/arch/aarch64::platform`, `AGENTS.md` §18.1):
-///
-/// * the controller register window — the first [`Mmio`](HwResourceKind::Mmio)
-///   resource, whose base is [`PcieBringup::regs_phys`];
-/// * the inbound viewport — the [`Dma`](HwResourceKind::Dma) resource,
-///   whose `length` is the viewport size and `translated_base` the
-///   PCIe-space base the inbound BAR is programmed at (the device-visible
-///   DMA-reachability top `translated_base + length` is derived from these
-///   in [`bring_up_keyboard`]); and
-/// * the outbound window — the [`BusWindow`](HwResourceKind::BusWindow)
-///   resource (`base` CPU aperture, `length` size, `translated_base` the
-///   PCIe-space base it maps to).
-///
-/// # Errors
-///
-/// A [`BringupError`] naming the first missing resource; the inputs are
-/// never partially assembled (`AGENTS.md` §5.4).
-pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError> {
-    let resources = node.resources();
-    let find = |kind| resources.iter().find(|r| r.kind() == Some(kind));
-
-    let regs = find(HwResourceKind::Mmio).ok_or(BringupError::NoControllerWindow)?;
-    let inbound = find(HwResourceKind::Dma).ok_or(BringupError::NoInboundAperture)?;
-    let outbound = find(HwResourceKind::BusWindow).ok_or(BringupError::NoOutboundWindow)?;
-
-    Ok(PcieBringup {
-        regs_phys: regs.base(),
-        windows: PcieWindows {
-            inbound_pcie_base: inbound.translated_base(),
-            inbound_size: inbound.length(),
-            outbound_cpu_base: outbound.base(),
-            outbound_pcie_base: outbound.translated_base(),
-            outbound_size: outbound.length(),
-        },
-    })
-}
-
 /// A [`DriverHost`] view for the in-kernel VL805 chain: the bus-driver
 /// task's capabilities plus the kernel's capability-gated MMIO mapper and
 /// per-driver DMA host. Every [`MmioMapper::map_window`] /
@@ -1939,6 +1874,9 @@ mod tests {
     use rustos_abi::driver::mmio::MmioMapError;
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
+    // The discovered-node parse the orchestration tests build a `PcieBringup`
+    // from now lives in the PCIe device crate (`AGENTS.md` §2.2 / §2.21).
+    use rustos_drv_bus_pcie_brcm::wiring::pcie_bringup_from_node;
     use rustos_drv_bus_usb_vl805::FirmwareResetFailure;
     use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
 
@@ -2100,91 +2038,6 @@ mod tests {
         ))
         .unwrap();
         node
-    }
-
-    #[test]
-    fn bringup_inputs_are_assembled_from_the_node() {
-        let bringup = pcie_bringup_from_node(&pcie_node()).expect("all resources present");
-        assert_eq!(bringup.regs_phys, REGS_PHYS);
-        assert_eq!(bringup.windows.inbound_pcie_base, 0);
-        assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
-        assert_eq!(bringup.windows.outbound_cpu_base, OUTBOUND_CPU);
-        assert_eq!(bringup.windows.outbound_pcie_base, OUTBOUND_PCIE);
-        assert_eq!(bringup.windows.outbound_size, OUTBOUND_SIZE);
-    }
-
-    #[test]
-    fn bringup_carries_a_nonzero_inbound_pcie_base() {
-        // A viewport not anchored at PCIe address 0: the translation rides
-        // the DMA resource's far-side base, distinct from the CPU top.
-        let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
-        node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
-            .unwrap();
-        node.push_resource(HwResource::dma_translated(
-            APERTURE_TOP,
-            APERTURE_TOP,
-            0x4000_0000,
-        ))
-        .unwrap();
-        node.push_resource(HwResource::bus_window(
-            OUTBOUND_CPU,
-            OUTBOUND_SIZE,
-            OUTBOUND_PCIE,
-        ))
-        .unwrap();
-        let bringup = pcie_bringup_from_node(&node).expect("resources present");
-        assert_eq!(bringup.windows.inbound_pcie_base, 0x4000_0000);
-        assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
-        // The device-visible DMA top `bring_up_keyboard` derives from these
-        // is `inbound_pcie_base + inbound_size`, distinct from the CPU top.
-        assert_eq!(
-            bringup.windows.inbound_pcie_base + bringup.windows.inbound_size,
-            0x4000_0000 + APERTURE_TOP,
-        );
-    }
-
-    #[test]
-    fn bringup_fails_closed_on_each_missing_resource() {
-        // No controller register window.
-        let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
-        node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
-            .unwrap();
-        node.push_resource(HwResource::bus_window(
-            OUTBOUND_CPU,
-            OUTBOUND_SIZE,
-            OUTBOUND_PCIE,
-        ))
-        .unwrap();
-        assert_eq!(
-            pcie_bringup_from_node(&node),
-            Err(BringupError::NoControllerWindow)
-        );
-
-        // No inbound aperture.
-        let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
-        node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
-            .unwrap();
-        node.push_resource(HwResource::bus_window(
-            OUTBOUND_CPU,
-            OUTBOUND_SIZE,
-            OUTBOUND_PCIE,
-        ))
-        .unwrap();
-        assert_eq!(
-            pcie_bringup_from_node(&node),
-            Err(BringupError::NoInboundAperture)
-        );
-
-        // No outbound window.
-        let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
-        node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
-            .unwrap();
-        node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
-            .unwrap();
-        assert_eq!(
-            pcie_bringup_from_node(&node),
-            Err(BringupError::NoOutboundWindow)
-        );
     }
 
     /// A pressed-character [`KeyInput`] record with no modifiers.

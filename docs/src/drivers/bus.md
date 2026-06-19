@@ -264,11 +264,22 @@ the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`
 
 ### Composition
 
-`wiring::open_discovered` maps the discovered controller window under
-`CAP_MMIO_MAP` and runs the bring-up; the caller then recovers the
-window (`into_regs`) and builds `mechanism_brcm(window)` to enumerate
-the VL805. The crate performs only the link bring-up and so never
-depends on another driver crate (`AGENTS.md` §17.4). Both windows the
+The crate owns its discovered-node parsing and its autonomous floor
+entry, beside the link-training engine they feed (`AGENTS.md` §2.2 /
+§2.21): `wiring::pcie_bringup_from_node` reads the controller register
+window plus the inbound/outbound address windows off the discovered
+`brcm,bcm2711-pcie` `HwNode` into a `PcieBringup` (failing closed with a
+`BringupError` naming the first missing resource — never an invented
+window, `AGENTS.md` §18.5), and `wiring::bring_up_from_node` is the §18.6
+autonomous bootstrap-floor entry that maps the window under `CAP_MMIO_MAP`
+and trains the link over it (`DriverError::NotFound` on an incomplete
+node). `wiring::open_discovered` is the lower seam they share with a
+caller that already holds the windows. The caller then recovers the
+window (`into_regs`) and builds `mechanism_brcm(window)` to enumerate the
+VL805. The crate performs only the PCIe link bring-up and so never depends
+on another driver crate (`AGENTS.md` §17.4); the VL805 firmware reload is
+the separate `drivers/bus/usb/vl805` device crate's job and the xHCI
+bring-up the separate `drivers/bus/usb/xhci` crate's. Both windows the
 `PcieWindows` carries are device-tree-discovered: the inbound aperture
 from the node's `dma-ranges` (an `HwResource::dma_translated` carrying
 the CPU-reachability top, extent, and the inbound PCIe-space base) and
@@ -278,21 +289,21 @@ carrying the CPU base, size, and far-side PCIe base —
 `AGENTS.md` §18.1).
 
 The whole chain is composed in `kernel/rustos-kernel::usb_keyboard`
-(the image-assembly seam is the one crate permitted to name the four
-driver crates across strata, `AGENTS.md` §17.4 / §8):
-`pcie_bringup_from_node` reads the three resources off the discovered
-`brcm,bcm2711-pcie` `HwNode` into a `PcieBringup`, a `ChainHost` lends
-the bus driver the kernel's capability-gated MMIO mapper + per-driver
-DMA host, and `bring_up_keyboard` runs link-train → `mechanism_brcm` →
+(the image-assembly seam is the one crate permitted to name the driver
+crates across strata, `AGENTS.md` §17.4 / §8): it consumes the relocated
+`PcieBringup`, a `ChainHost` lends the bus driver the kernel's
+capability-gated MMIO mapper + per-driver DMA host, and
+`bring_up_keyboard` runs link-train → `mechanism_brcm` →
 `usb::wiring::open_discovered` → `enumerate_first_connected`, yielding a
 `BootKeyboard` whose decoded bytes a `QueueConsoleSink` feeds into the
 video console's input queue (`console_input`/`VIDEO_KEYBOARD`). That
 engine is host-tested up to the controller hand-off, where the inert
 mock register window faults — the metal boundary. The remaining
-follow-up is the aarch64 boot-path invocation (assembling the concrete
-`DriverHost` + a generic-timer `Delay` and looping `pump_once`); QEMU
-models no Pi PCIe link timing or USB, so metal acceptance is a checklist
-(`plans/PI.md` P10).
+follow-up is the kernel autonomous sequencing that drives each floor
+crate's `bring_up`/`bring_up_from_node` entry over a `DriverHost` (in
+place of this in-kernel orchestration), with the scaffold pump staying the
+live keyboard until B5; QEMU models no Pi PCIe link timing or USB, so
+metal acceptance is a checklist (`plans/PI.md` P10).
 
 ## MMIO driver — `drivers/bus/mmio`
 

@@ -2227,7 +2227,10 @@ compiles and host-tests on the CI host:
 - `pcie_bringup_from_node(&HwNode) -> PcieBringup` reads the three
   resources (controller `Mmio`, inbound `Dma`, outbound `BusWindow`) off
   the discovered `brcm,bcm2711-pcie` node, fail-closed per missing
-  resource (§2.9);
+  resource (§2.9) — relocated under Increment C-2 into the PCIe device's
+  own crate (`drivers/bus/pcie_brcm::wiring`, §2.2/§2.21), where it now
+  also backs the autonomous `bring_up_from_node` floor entry; the
+  composition re-exports and consumes it;
 - `ChainHost` is a `DriverHost` view lending the bus driver the kernel's
   capability-gated MMIO mapper + per-driver DMA host (every map/alloc
   re-checked kernel-side, §5.4);
@@ -2240,13 +2243,15 @@ compiles and host-tests on the CI host:
   `ConsoleInput` queue (`console_input`/`VIDEO_KEYBOARD`), short-pushing
   without spin (§2.1).
 
-Host-proven: 8 `usb_keyboard` tests (window assembly + each fail-closed
-missing resource + a non-zero inbound PCIe base, the sink delivers /
+Host-proven: the `usb_keyboard` composition tests (the sink delivers /
 drops-overflow-without-spin, `ChainHost` reports caps/mapper/dma, the
 chain fails closed without `CAP_MMIO_MAP`, and the chain reaches the
 BCM2711 root-complex bring-up over a mapped window and fails closed
 `DeviceFault` on the inert mock — the metal boundary), plus the usb
-`enumerate_first_connected_*` tests.
+`enumerate_first_connected_*` tests; the discovered-node parse tests
+(window assembly + each fail-closed missing resource + a non-zero inbound
+PCIe base) moved with `pcie_bringup_from_node` into the `pcie_brcm` crate
+under Increment C-2 (§2.2/§2.21).
 
 **Landed — the aarch64 boot-path invocation** (host-proven up to the
 metal boundary; the live bring-up is a metal-acceptance item, §0.4). The

@@ -739,3 +739,174 @@ fn bind_table_matches_the_pi4_pcie_node() {
     let emmc = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&emmc));
 }
+
+// --- Discovered-node parsing & autonomous floor entry ---------------------
+
+use rustos_abi::{HwDeviceClass, HwNode, HwResource};
+
+/// The Pi 4 discovered values: controller `reg`, inbound `dma-ranges`
+/// (PCIe base 0, 3 GiB), outbound `ranges` (CPU `0x6_0000_0000` → PCIe
+/// `0xc000_0000`, 1 GiB).
+const REGS_PHYS: u64 = 0xfd50_0000;
+const APERTURE_TOP: u64 = 0xc000_0000;
+const OUTBOUND_CPU: u64 = 0x6_0000_0000;
+const OUTBOUND_PCIE: u64 = 0xc000_0000;
+const OUTBOUND_SIZE: u64 = 0x4000_0000;
+
+fn pcie_node() -> HwNode {
+    let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
+    node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
+        .unwrap();
+    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
+        .unwrap();
+    node.push_resource(HwResource::bus_window(
+        OUTBOUND_CPU,
+        OUTBOUND_SIZE,
+        OUTBOUND_PCIE,
+    ))
+    .unwrap();
+    node
+}
+
+#[test]
+fn bringup_inputs_are_assembled_from_the_node() {
+    let bringup = wiring::pcie_bringup_from_node(&pcie_node()).expect("all resources present");
+    assert_eq!(bringup.regs_phys, REGS_PHYS);
+    assert_eq!(bringup.windows.inbound_pcie_base, 0);
+    assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
+    assert_eq!(bringup.windows.outbound_cpu_base, OUTBOUND_CPU);
+    assert_eq!(bringup.windows.outbound_pcie_base, OUTBOUND_PCIE);
+    assert_eq!(bringup.windows.outbound_size, OUTBOUND_SIZE);
+}
+
+#[test]
+fn bringup_carries_a_nonzero_inbound_pcie_base() {
+    // A viewport not anchored at PCIe address 0: the translation rides
+    // the DMA resource's far-side base, distinct from the CPU top.
+    let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
+    node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
+        .unwrap();
+    node.push_resource(HwResource::dma_translated(
+        APERTURE_TOP,
+        APERTURE_TOP,
+        0x4000_0000,
+    ))
+    .unwrap();
+    node.push_resource(HwResource::bus_window(
+        OUTBOUND_CPU,
+        OUTBOUND_SIZE,
+        OUTBOUND_PCIE,
+    ))
+    .unwrap();
+    let bringup = wiring::pcie_bringup_from_node(&node).expect("resources present");
+    assert_eq!(bringup.windows.inbound_pcie_base, 0x4000_0000);
+    assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
+}
+
+#[test]
+fn bringup_fails_closed_on_each_missing_resource() {
+    // No controller register window.
+    let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
+    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
+        .unwrap();
+    node.push_resource(HwResource::bus_window(
+        OUTBOUND_CPU,
+        OUTBOUND_SIZE,
+        OUTBOUND_PCIE,
+    ))
+    .unwrap();
+    assert_eq!(
+        wiring::pcie_bringup_from_node(&node),
+        Err(wiring::BringupError::NoControllerWindow)
+    );
+
+    // No inbound aperture.
+    let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
+    node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
+        .unwrap();
+    node.push_resource(HwResource::bus_window(
+        OUTBOUND_CPU,
+        OUTBOUND_SIZE,
+        OUTBOUND_PCIE,
+    ))
+    .unwrap();
+    assert_eq!(
+        wiring::pcie_bringup_from_node(&node),
+        Err(wiring::BringupError::NoInboundAperture)
+    );
+
+    // No outbound window.
+    let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
+    node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
+        .unwrap();
+    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
+        .unwrap();
+    assert_eq!(
+        wiring::pcie_bringup_from_node(&node),
+        Err(wiring::BringupError::NoOutboundWindow)
+    );
+}
+
+#[test]
+fn missing_resource_maps_to_a_fail_closed_not_found() {
+    // The autonomous entry surfaces an incomplete discovered node as a
+    // bus-neutral fail-closed `NotFound`, never an invented window.
+    assert_eq!(
+        wiring::BringupError::NoControllerWindow.as_driver_error(),
+        DriverError::NotFound
+    );
+}
+
+#[test]
+fn bring_up_from_node_requires_the_mmio_capability() {
+    // A complete node still cannot be brought up without the capability:
+    // the autonomous entry checks `CAP_MMIO_MAP` before mapping (§5.4).
+    let host = MockHost {
+        mmio_map: false,
+        mapper: Some(MockMapper { grant: true }),
+    };
+    assert_eq!(
+        wiring::bring_up_from_node(&host, &pcie_node(), &NoDelay).err(),
+        Some(DriverError::PermissionDenied)
+    );
+}
+
+#[test]
+fn bring_up_from_node_fails_closed_on_an_incomplete_node() {
+    // A node missing the controller window is refused before any mapping,
+    // as `NotFound` — the capability is granted, so this proves the
+    // node-parse gate, not the capability gate.
+    let host = MockHost {
+        mmio_map: true,
+        mapper: Some(MockMapper { grant: true }),
+    };
+    let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
+    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
+        .unwrap();
+    node.push_resource(HwResource::bus_window(
+        OUTBOUND_CPU,
+        OUTBOUND_SIZE,
+        OUTBOUND_PCIE,
+    ))
+    .unwrap();
+    assert_eq!(
+        wiring::bring_up_from_node(&host, &node, &NoDelay).err(),
+        Some(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn bring_up_from_node_reaches_the_root_port_check_over_a_mapped_window() {
+    // A complete node with the capability granted maps the window and
+    // reaches the engine's root-port check, which fails closed over the
+    // zeroed mock window (the on-metal boundary; a real controller
+    // reports the role bit set).
+    let host = MockHost {
+        mmio_map: true,
+        mapper: Some(MockMapper { grant: true }),
+    };
+    assert_eq!(
+        wiring::bring_up_from_node(&host, &pcie_node(), &NoDelay).err(),
+        Some(DriverError::DeviceFault)
+    );
+}
