@@ -1163,8 +1163,8 @@ order (one fully-gated increment each):
              draws `Root passphrase:`. `build_rpi_image` derives the
              passphrase from the profile (`passphrase_for`), never a caller
              argument;
-           - **B5 (= 5e)** — the flip; its Increment-C prerequisite is now
-             metal-confirmed, so this is the next increment.
+           - **B5 (= 5e)** — re-scoped under **DESIGN D** (reactive top-down
+             discovery); see item 5e below and `.junie/next-pi-prompt.md`.
      - **Increment C (B5 prerequisite) — DONE (metal-confirmed) — ported the
        autonomous floor bring-up off the in-kernel scaffold onto the
        `lib/abi::DriverHost` contract.** A blind B5 flip would have bricked the
@@ -1262,12 +1262,49 @@ order (one fully-gated increment each):
            keystrokes and typed `root` login working. (`raspi4b`/QEMU cannot
            model the VL805, so this was metal-only-verifiable.) Increment C is
            therefore complete; B5 (5e below) is the next increment.
-     - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
-       (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
-       compiled-in list is the bootstrap floor only (§18.6), lay the signed
-       input-driver bundle into the `/System` volume against the finalised
-       anchor, and update §3 / this stage. B1–B4 now drive the chain end to end
-       on metal (`plans/PI.md` design B), so this is the next increment.
+     - **5e — re-scoped under DESIGN D (operator-approved option A): full
+       reactive, top-down driver discovery.** The narrow "flip the keyboard onto
+       autoload and delete the scaffold" is rejected: `usb_keyboard.rs` does the
+       bring-up *the wrong way around* (a leaf "keyboard" file that trains PCIe,
+       reloads VL805 firmware, brings up xHCI and enumerates). The correct §18
+       shape is top-down — core bus discovery → each node discovers its children
+       and autoloads the matching driver, down to a `usb_kbd` that does **zero**
+       orchestration — and **reactive**, so it also serves USB hotplug
+       (attach/detach). The VL805 firmware-reload mailbox is served by an IPC
+       `vcmailbox` driver (capability-gated endpoint, no cross-device ambient
+       grant, §4/§2.20). Full architecture + the staged increments **D1–D5** live
+       in `.junie/next-pi-prompt.md` ("DESIGN D"). The in-kernel scaffold stays
+       the live metal keyboard and stays wired until the **D5** atomic flip, so
+       the working keyboard never regresses (§2.17); D5 is metal-only-verifiable.
+       - **D1 — runtime hardware-inventory store — DONE (host-proven + whole
+         gate).** `kernel/rustos-kernel::hwtree_store::HwTreeStore` (`seed` /
+         `append` / `snapshot`, growable §24.1) is the single authoritative
+         discovered-hardware inventory (§18.1/§2.2), replacing the
+         leak-a-new-`&'static`-slice stash in `unlock_service`: `record_boot`
+         seeds it, the floor `augment_boot_tree` emitter appends to it, and the
+         unlock kthread reads `boot_tree_snapshot()` for autoload — same order,
+         no metal-behaviour change. The reactive generation counter +
+         `hw_tree_wait`, node removal, and the `hw_*` syscalls are deferred to
+         D2/D4 with their first user-space consumers (§2.3/§2.4). Gate: `cargo
+         fmt --all --check`, `cargo xtask ci` (both Pi images built, no
+         ABI/C-header drift), `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both
+         --secs 20` all green.
+       - **D2 — user-space reactive `devmgr` service.** Move the match loop into
+         a long-running `userland/system/devmgr` binary (read tree → match store
+         → load/spawn winners → block on `hw_tree_wait` → unload on
+         `hw_remove_node`); `init` spawns it after `/System` mount; delete the
+         in-kernel single-pass `driver_autoload` it subsumes (§2.14). Adds
+         `hw_tree_read`/`hw_tree_wait` + the load syscall with this consumer.
+       - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
+       - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
+         `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +
+         `CAP_HW_EMIT` with these consumers.
+       - **D5 — the atomic flip.** `usb_kbd` autoloads onto the emitted HID node;
+         delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
+         `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the compiled-in
+         list is the storage bootstrap floor only (§18.6); repoint `init_spawn`;
+         update §3 / docs. Metal acceptance (§0.9): top-down autoload from
+         `/System`, a keystroke with the scaffold gone, and hotplug bind/unbind.
 
 ---
 

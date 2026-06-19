@@ -158,6 +158,18 @@ pub mod driver_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod root_storage;
 
+// The runtime hardware-inventory store (Design D, D1 —
+// `.junie/next-pi-prompt.md`): the single source of truth for the
+// discovered hardware tree (`AGENTS.md` §18.1 / §2.2), seeded by the boot
+// path, appended to by the floor bus bring-up, and snapshotted by the
+// autoload reader (the reactive generation counter / wait + node removal
+// land in Design D D2/D4 with their consumers, §2.3). Architecture-neutral
+// and host-tested on the CI host; gated, like the `unlock_service` that
+// drives it, on the two instruction sets where the boot/autoload path
+// compiles.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod hwtree_store;
+
 // The in-kernel root-unlock service (`plans/PI.md` §3 P11 root-mount
 // increment, Chunk B-2 INCREMENT (2)): the post-MMU boot stash carrying
 // the resolved `root_storage` binding + the firmware DTB pointer to the

@@ -27,7 +27,6 @@
 //! architecture (`AGENTS.md` §17.2 / §2.20).
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
@@ -71,21 +70,13 @@ pub struct UnlockBoot {
     /// over), used by the live bring-up to construct the virtio-MMIO bus
     /// and resolve the device's GIC SPI.
     pub dtb: u64,
-    /// The full discovered hardware tree (`AGENTS.md` §18.1), buffered once
-    /// by the boot path and leaked to `'static`, so the unlock kthread can
-    /// drive `devmgr` autoload over it once the encrypted root is mounted —
-    /// the input-device node included, not just the root block binding
-    /// (`plans/PI.md` P11). Empty (`&[]`) when no tree was discovered
-    /// (headless / no firmware tree), which autoloads nothing (§18.4).
-    pub tree: &'static [HwNode],
 }
 
 impl UnlockBoot {
-    /// The empty stash: nothing bound, no device tree.
+    /// The empty stash: nothing bound, no DTB.
     const EMPTY: Self = Self {
         binding: None,
         dtb: 0,
-        tree: &[],
     };
 }
 
@@ -99,15 +90,21 @@ impl UnlockBoot {
 static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 
 /// Record the resolved root binding and the firmware DTB pointer for the
-/// init seam.
+/// init seam, and seed the authoritative hardware-inventory store
+/// ([`crate::hwtree_store::HW_TREE`]) with the discovered `tree`.
 ///
 /// `tree` is the full discovered hardware tree the kthread matches against
-/// the signed driver store during autoload (`AGENTS.md` §18.1 / §18.3); the
-/// boot path leaks it to `'static` so this `Copy` stash can carry it.
+/// the signed driver store during autoload (`AGENTS.md` §18.1 / §18.3). It
+/// is copied into the store (the single source of truth, `AGENTS.md` §2.2),
+/// so the boot path no longer needs to leak it to `'static`; later
+/// bus-enumerated children are appended through [`augment_boot_tree`] and
+/// the autoload reader takes a [`boot_tree_snapshot`].
 ///
-/// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT`).
-pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64, tree: &'static [HwNode]) {
-    *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb, tree };
+/// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT` and
+/// [`crate::hwtree_store`]).
+pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64, tree: &[HwNode]) {
+    crate::hwtree_store::HW_TREE.seed(tree);
+    *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
 }
 
 /// Read the boot stash once at the init seam.
@@ -116,25 +113,25 @@ pub fn take_boot() -> UnlockBoot {
     *UNLOCK_BOOT.lock()
 }
 
-/// Append one bus-enumerated child `node` to `existing`, yielding the
-/// extended node list.
+/// An owned-then-leaked `'static` view of the current hardware inventory
+/// ([`crate::hwtree_store::HW_TREE`]), for the `'static + Send` autoload
+/// reader (the unlock kthread captures it by value).
 ///
-/// The pure, allocation-bounded core of [`augment_boot_tree`], factored out
-/// so the tree-extension policy is host-tested without touching the boot
-/// stash global (`AGENTS.md` §2.2 / §7). The order is preserved and the new
-/// node is appended last; a node is always added, never silently dropped
-/// (`AGENTS.md` §24.1 — a growable `Vec`, no fixed-capacity ceiling).
+/// Snapshotting *after* the floor bring-up has [`augment_boot_tree`]d its
+/// enumerated children yields the full discovered tree the autoload walk
+/// matches against the signed store. The one-shot leak is the boot publish
+/// the boot path used to perform itself, not a per-event allocation
+/// (`AGENTS.md` §2.1).
+///
+/// MUST be called **after** the MMU is enabled (see [`crate::hwtree_store`]).
 #[must_use]
-fn extended_tree(existing: &[HwNode], node: &HwNode) -> Vec<HwNode> {
-    let mut nodes = Vec::with_capacity(existing.len() + 1);
-    nodes.extend_from_slice(existing);
-    nodes.push(*node);
-    nodes
+pub fn boot_tree_snapshot() -> &'static [HwNode] {
+    Box::leak(crate::hwtree_store::HW_TREE.snapshot().into_boxed_slice())
 }
 
-/// Attach one bus-enumerated child `node` to the discovered boot hardware
-/// tree and re-publish the extended tree through [`record_boot`], so the
-/// pre-unlock autoload ([`take_boot`]) matches it against the signed
+/// Append one bus-enumerated child `node` to the discovered hardware
+/// inventory ([`crate::hwtree_store::HW_TREE`]), so the pre-unlock autoload
+/// (reading [`boot_tree_snapshot`]) matches it against the signed
 /// `/System/Drivers/` store like every other discovered device
 /// (`AGENTS.md` §18.2 — bus children are enumerated by the floor bus
 /// drivers and attached to the tree as further nodes).
@@ -142,22 +139,19 @@ fn extended_tree(existing: &[HwNode], node: &HwNode) -> Vec<HwNode> {
 /// Design B (`plans/PI.md` B3): the bootstrap-floor USB bring-up enumerates
 /// the HID keyboard behind the VL805 controller **once** and emits its
 /// [`describe_device`](rustos_abi::hwtree) node here, *before* the unlock
-/// kthread reads the stash, so the §18 discovery path sees the keyboard
-/// rather than it living only inside the imperative bring-up. The keyboard's
-/// signed driver bundle is not in the store until the B5 flip, so `devmgr`
-/// leaves the node unbound (`AGENTS.md` §18.4) and the in-kernel bring-up
-/// keeps driving the keyboard (`AGENTS.md` §2.17) until then.
+/// kthread snapshots the inventory, so the §18 discovery path sees the
+/// keyboard rather than it living only inside the imperative bring-up. The
+/// keyboard's signed driver bundle is not in the store until the D5 flip,
+/// so `devmgr` leaves the node unbound (`AGENTS.md` §18.4) and the in-kernel
+/// bring-up keeps driving the keyboard (`AGENTS.md` §2.17) until then.
 ///
-/// The previously-leaked tree slice is superseded; the few-node extension
-/// is a one-shot boot publish (like the boot path's own `Box::leak` of the
-/// tree), never a per-event allocation (`AGENTS.md` §2.1).
+/// The append never drops a node and grows the store on demand (`AGENTS.md`
+/// §24.1).
 ///
 /// MUST be called **after** the MMU is enabled and **before** the unlock
-/// kthread reads the stash (see [`record_boot`] / [`take_boot`]).
+/// kthread snapshots the inventory (see [`record_boot`] / [`boot_tree_snapshot`]).
 pub fn augment_boot_tree(node: &HwNode) {
-    let boot = take_boot();
-    let tree: &'static [HwNode] = Box::leak(extended_tree(boot.tree, node).into_boxed_slice());
-    record_boot(boot.binding, boot.dtb, tree);
+    crate::hwtree_store::HW_TREE.append(node);
 }
 
 /// The console-0 input ownership gate (`plans/PI.md` P11 Chunk B-2 item 5).
@@ -588,37 +582,37 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_stash_round_trips_the_dtb_and_an_absent_binding() {
-        record_boot(None, 0xDEAD_0000, &[]);
-        let boot = take_boot();
-        assert!(boot.binding.is_none());
-        assert_eq!(boot.dtb, 0xDEAD_0000);
-        assert!(boot.tree.is_empty());
-    }
-
-    #[test]
-    fn extending_the_tree_appends_the_bus_child_in_order() {
+    fn the_boot_stash_and_inventory_round_trip_through_seed_and_augment() {
         use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
 
-        // A minimal discovered tree (a root + a discovered bus), as the
-        // floor leaves it before the USB bring-up enumerates a child.
-        let existing = [
+        // `record_boot` stashes the binding + DTB and seeds the
+        // authoritative inventory with a minimal discovered tree (a root +
+        // a discovered bus), as the floor leaves it before the USB bring-up
+        // enumerates a child. (The single test touching the `HW_TREE` /
+        // `UNLOCK_BOOT` globals, so it never races a sibling.)
+        let seed = [
             HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
             HwNode::new(2, 1, HwDeviceClass::Bus),
         ];
-        // The bus-enumerated HID child (`AGENTS.md` §18.2), keyed by the
-        // usb interface-class match key the bring-up reads (never
-        // fabricated, §18.5).
+        record_boot(None, 0xDEAD_0000, &seed);
+        let boot = take_boot();
+        assert!(boot.binding.is_none());
+        assert_eq!(boot.dtb, 0xDEAD_0000);
+
+        // The bus-enumerated HID child (`AGENTS.md` §18.2), keyed by the USB
+        // interface-class match key the bring-up reads (never fabricated,
+        // §18.5), is appended last; the snapshot the autoload reader takes
+        // reflects seed + child in discovery order.
         let mut hid = HwNode::new(3, 2, HwDeviceClass::Input);
         hid.push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
             .expect("match key fits");
+        augment_boot_tree(&hid);
 
-        let extended = extended_tree(&existing, &hid);
-
-        assert_eq!(extended.len(), 3, "the child is appended, nothing dropped");
-        assert_eq!(extended[0], existing[0], "existing nodes keep their order");
-        assert_eq!(extended[1], existing[1]);
-        assert_eq!(extended[2], hid, "the enumerated child lands last");
+        let snap = boot_tree_snapshot();
+        assert_eq!(snap.len(), 3, "the child is appended, nothing dropped");
+        assert_eq!(snap[0], seed[0], "existing nodes keep their order");
+        assert_eq!(snap[1], seed[1]);
+        assert_eq!(snap[2], hid, "the enumerated child lands last");
     }
 
     /// A [`Sink`] that records each logged event's id and message so a test

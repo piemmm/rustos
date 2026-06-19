@@ -259,9 +259,11 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     let dtb = boot.dtb;
     // The discovered hardware tree the kthread matches against the signed
     // driver store once the root mounts (`AGENTS.md` §18.1 / §18.3). A
-    // `&'static [HwNode]` (the boot path leaked it), so the `'static + Send`
-    // kthread body captures it by value.
-    let tree = boot.tree;
+    // `'static` snapshot of the authoritative inventory store (taken *after*
+    // the floor bring-up has appended its enumerated children), so the
+    // `'static + Send` kthread body captures it by value (Design D, D1 —
+    // `crate::hwtree_store`).
+    let tree = crate::unlock_service::boot_tree_snapshot();
     let caps = service_caps();
     let env = UnlockEnv { ctx, audit, tree };
     let body = move |yielder: &mut dyn YieldHandle| {
