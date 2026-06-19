@@ -706,9 +706,16 @@ pub fn query_firmware_revision(transport: &mut dyn MailboxTransport) -> Result<u
 
 // --- VL805 xHCI firmware reload ------------------------------------------
 
-/// Encode the [`TAG_NOTIFY_XHCI_RESET`] property message carrying the
+/// Encode the `TAG_NOTIFY_XHCI_RESET` property message carrying the
 /// VL805's `dev_addr`.
-fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
+///
+/// Public so the VL805 device driver (`drivers/bus/usb/vl805`) can build
+/// the firmware-reload message and run it over the board-neutral
+/// [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) seam
+/// without re-deriving the property layout (`AGENTS.md` §2.2 — one
+/// definition, shared by [`notify_xhci_reset`] and the driver).
+#[must_use]
+pub fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
     let mut words = [0u32; PROPERTY_WORDS];
     let mut at = 2; // header written last, once the length is known.
     at = push_tag(&mut words, at, TAG_NOTIFY_XHCI_RESET, &[dev_addr]);
@@ -728,7 +735,7 @@ fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
 /// untouched, so trusting the header alone would report a reset that
 /// never happened. The firmware sets the per-tag response bit only when
 /// it actually processed the tag, so this additionally requires that bit
-/// (via [`find_tag`], which enforces it). Fails closed on a firmware
+/// (via `find_tag`, which enforces it). Fails closed on a firmware
 /// error, a malformed header, or an unhonoured tag (`AGENTS.md` §5.4 —
 /// the firmware is external input; an unverified ack is a defect, not a
 /// success).
@@ -738,7 +745,7 @@ fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
 /// asked to act on), or `0` when the firmware returned no value words —
 /// it is diagnostic only (logged at bring-up), never gating: an honoured
 /// tag is a success regardless of the value.
-fn decode_xhci_reset_response(words: &[u32; PROPERTY_WORDS]) -> Result<u32, MailboxError> {
+pub fn decode_xhci_reset_response(words: &[u32; PROPERTY_WORDS]) -> Result<u32, MailboxError> {
     match words[1] {
         CODE_RESPONSE_OK => {}
         CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),

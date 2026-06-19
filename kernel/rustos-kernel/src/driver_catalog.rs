@@ -55,7 +55,7 @@ include!(concat!(env!("OUT_DIR"), "/driver_images.rs"));
 pub const PCIE_BRCM_PATH: &str = "/System/Drivers/pcie/brcm/bcm2711";
 
 /// Logical image path of the xHCI USB host-controller bus driver
-/// (`drivers/bus/usb`).
+/// (`drivers/bus/usb/xhci`).
 pub const BUS_USB_PATH: &str = "/System/Drivers/bus_usb";
 
 /// Logical image path of the HID boot-protocol input driver

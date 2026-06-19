@@ -1,4 +1,4 @@
-//! Unit tests for the `drivers/bus/usb` driver entry and bind table.
+//! Unit tests for the `drivers/bus/usb/xhci` driver entry and bind table.
 //!
 //! The bus-agnostic xHCI protocol (the `Xhci` engine, the ring/TRB
 //! vocabulary, and `UsbDevice` enumeration) is proven in `lib/usb`; these

@@ -9,14 +9,14 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # The bus-agnostic xHCI protocol (the `XhciHost` seam, the `Xhci`
 # controller engine, the TRB/ring vocabulary, and the `UsbDevice`
 # enumeration engine) lives in `lib/usb` so the device-class drivers can
 # consume it without depending on this bus driver crate (`AGENTS.md`
 # §17.4 — `drivers/* → lib/*` only). This crate adds the concrete PCI
 # discovery / BAR / DMA wiring and the §8 `register` entry on top of it.
-rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 
 [lints]
 workspace = true

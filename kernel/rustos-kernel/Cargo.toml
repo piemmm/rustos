@@ -100,7 +100,13 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # so it compiles — and its host tests run — on the CI host.
 rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
 rustos-drv-bus-pci = { path = "../../drivers/bus/pci", version = "=0.0.0" }
-rustos-drv-bus-usb = { path = "../../drivers/bus/usb", version = "=0.0.0" }
+rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
+# The Raspberry Pi 4 VL805 device driver (`drivers/bus/usb/vl805`): the
+# board-specific VideoCore-mailbox firmware reload + firmware-version gate
+# the in-kernel keyboard composition runs over the `lib/abi` `MailboxChannel`
+# seam (`AGENTS.md` §2.20 device carve-out / §17.4). Arch-neutral (it consumes
+# only `lib/abi` + `lib/vcmailbox`), so its host tests run on the CI host.
+rustos-drv-bus-usb-vl805 = { path = "../../drivers/bus/usb/vl805", version = "=0.0.0" }
 # The bus-agnostic xHCI protocol engine (`lib/usb`): `usb_keyboard.rs`
 # names `rustos_usb::{Xhci, device::UsbDevice}` directly, alongside the
 # `drivers/bus/usb` wiring that composes the PCI bring-up over it
@@ -257,7 +263,7 @@ rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # stays Rust-only.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
 rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
-rustos-drv-bus-usb = { path = "../../drivers/bus/usb", version = "=0.0.0" }
+rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }

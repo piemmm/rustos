@@ -14,7 +14,8 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | P10 link bring-up (host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
-| `drivers/bus/usb`        | Pi 4 (VL805 xHCI)     | P10 protocol layers + HID enumeration (host-proven) |
+| `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + HID enumeration (host-proven) |
+| `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | Firmware reload over the mailbox seam (host-proven); metal pending |
 
 ## Capability model
 
@@ -330,7 +331,7 @@ The two trailing slots have `DeviceID == 0` and are skipped — the
 same behaviour `virtio-mmio.c` in QEMU exhibits for unattached
 transports.
 
-## xHCI driver — `drivers/bus/usb`
+## xHCI driver — `drivers/bus/usb/xhci`
 
 The Pi 4 reaches its USB-A ports through a VL805 PCIe xHCI controller
 (`plans/PI.md` P10). The bus-agnostic xHCI protocol layers and the
@@ -520,6 +521,49 @@ buffer — including a `BootKeyboard` polling decoded key events over
 the mock controller — plus the fail-closed paths (forged residual,
 stalled class request, empty port, double enumeration, undersized or
 misaligned DMA region).
+
+## VL805 device driver — `drivers/bus/usb/vl805`
+
+The VL805 firmware (re)load is the one thing specific to that *device*,
+so it is its own driver — separate from, and not intertwined with, the
+generic PCIe root-complex driver (`drivers/bus/pcie_brcm`, which trains
+the link) and the generic xHCI host driver (`drivers/bus/usb/xhci`, which
+brings the controller up and enumerates devices). A different board may
+need the PCIe driver without USB at all, or an xHCI controller that needs
+no firmware reload; keeping the three drivers separate is the correct
+modular shape (`AGENTS.md` §2.2 / §2.20 / §8 / §17.4).
+
+On a Pi 4 without the SPI EEPROM (rev 1.4+), the VL805 carries no
+resident firmware: the `VideoCore` loads it at power-on and a PCIe
+`PERST#` drops it, so only `VideoCore` can reload it over a
+`NOTIFY_XHCI_RESET` firmware-property request. The driver is
+device-specific (`AGENTS.md` §2.20 carve-out) — it may know the
+VL805/BCM2711 — but it reaches the firmware mailbox **only** through the
+board-neutral `rustos_abi::driver::mailbox::MailboxChannel` seam, never a
+doorbell address or a `kernel/*` dependency (`AGENTS.md` §17.4). Its
+public surface is the §8 `register` entry, the §18.3 `BIND_KEYS` bind
+table (exact PCI `1106:3483`, ranked above the generic class-wildcard
+xHCI driver), and two policy functions composed by the host over a
+`MailboxChannel`:
+
+- `probe_firmware_revision` — a benign firmware-revision liveness read
+  that separates a broken mailbox path from `VideoCore` dropping the
+  reset tag (`AGENTS.md` §15.7), and
+- `reload_firmware` — the `NOTIFY_XHCI_RESET` reload, fail-closed: an
+  unverified firmware ack is treated as a failure, never a success
+  (`AGENTS.md` §5.4).
+
+The property-message *layout* lives once in `lib/vcmailbox`
+(`encode_xhci_reset` / `decode_xhci_reset_response` and the
+firmware-revision pair); the driver only sequences the policy, never
+re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
+discovered doorbell window, the DMA-aliased property buffer, the cache
+coherency, and the `4121`/`4122` diagnostics) stays kernel-side: the
+in-kernel keyboard composition supplies a `MailboxChannel` that owns the
+`MmioMailbox` and runs the driver's policy over it. QEMU models no
+`VideoCore`, so the policy is host-proven against the protocol-faithful
+`lib/vcmailbox` mock firmware and the live reload is the on-metal
+acceptance item (`plans/PI.md` Increment C).
 
 ## Register-window hand-off
 

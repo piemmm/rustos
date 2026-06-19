@@ -1,0 +1,31 @@
+[package]
+name = "rustos-drv-bus-usb-vl805"
+description = "RustOS Raspberry Pi 4 (BCM2711) VL805 xHCI controller device driver: VideoCore-mailbox firmware reload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The BCM2711 VideoCore property-channel client (`AGENTS.md` §2.20 device
+# carve-out): the VL805 firmware-reload (`NOTIFY_XHCI_RESET`) and
+# firmware-revision property-message layout live here once; this driver
+# encodes/decodes those messages and runs them over the board-neutral
+# `lib/abi` `MailboxChannel` seam, never re-deriving the layout
+# (`AGENTS.md` §2.2). It is a `lib/*` crate, so this `drivers/*` driver may
+# depend on it (`AGENTS.md` §17.4 — `drivers/* → lib/*`).
+rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
+
+[dev-dependencies]
+# Protocol-faithful mock firmware (`mock-firmware` feature) backing the
+# host-test `MailboxChannel`, so the driver's policy is proven against the
+# real property semantics rather than a hand-faked response (`AGENTS.md`
+# §2.1 / §2.2). QEMU models no VideoCore, so the live doorbell is the
+# on-metal acceptance item (`plans/PI.md` Increment C).
+rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0", features = ["mock-firmware"] }
+
+[lints]
+workspace = true

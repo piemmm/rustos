@@ -44,6 +44,12 @@ use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_usb::device::UsbDevice;
 use rustos_usb::{Xhci, XhciOpenError, DEFAULT_POLL_BUDGET};
 use rustos_util::fmt::format_hex_u64;
+// The VL805 firmware-reset vocabulary now lives in the device's own driver
+// crate (`drivers/bus/usb/vl805`), reached over the `lib/abi` `MailboxChannel`
+// seam (`AGENTS.md` §2.20 / §2.2 / §17.4). This composition consumes those
+// types; the in-kernel `FirmwareReset` seam below is the host's reactive
+// wrapper the bring-up calls (the kernel owns the mailbox *mechanism*).
+use rustos_drv_bus_usb_vl805::{FirmwareResetOutcome, VL805_FIRMWARE_DEV_ADDR};
 
 /// Audit event: a progress/failure milestone of the VL805 USB-keyboard
 /// bring-up chain (PCIe link training, xHCI bring-up, root-hub
@@ -182,65 +188,10 @@ const USB_KEYBOARD_PUMP_ERROR: EventId = EventId(4130);
 /// but the keyboard delivers no reports.
 const USB_KEYBOARD_POLL_HEARTBEAT: EventId = EventId(4131);
 
-/// The Pi firmware reset controller's encoded VL805 PCI address
-/// (`bus << 20 | slot << 15 | func << 12`) for the hardwired bus-1,
-/// device-0, function-0 controller.
-pub const VL805_FIRMWARE_DEV_ADDR: u32 = 0x0010_0000;
-
 /// Minimum post-`NOTIFY_XHCI_RESET` settle before polling config `0x50`
 /// again; the vendor bring-up waits `200..1000 µs`, so this uses the lower bound and then
 /// the existing bounded firmware-version wait handles the remainder.
 const FW_RELOAD_SETTLE_US: u32 = 200;
-
-/// Stable reason reported when the optional VL805 firmware reload is refused.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FirmwareResetFailure {
-    /// The mailbox register or property-buffer window was not usable.
-    Window,
-    /// The firmware mailbox did not complete within the bounded poll budget.
-    Timeout,
-    /// The firmware returned its top-level error response.
-    FirmwareError,
-    /// The firmware returned a malformed or unhonoured tag response.
-    MalformedResponse,
-    /// The property buffer was outside the `VideoCore` DMA aperture.
-    BadAperture,
-    /// The discovered mailbox or buffer geometry was unusable.
-    BadGeometry,
-    /// A newer mailbox error reached an older firmware-reset mapper.
-    Unknown,
-}
-
-impl FirmwareResetFailure {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            FirmwareResetFailure::Window => "window",
-            FirmwareResetFailure::Timeout => "timeout",
-            FirmwareResetFailure::FirmwareError => "firmware_error",
-            FirmwareResetFailure::MalformedResponse => "malformed_response",
-            FirmwareResetFailure::BadAperture => "bad_aperture",
-            FirmwareResetFailure::BadGeometry => "bad_geometry",
-            FirmwareResetFailure::Unknown => "unknown",
-        }
-    }
-}
-
-/// Result of one optional VL805 firmware reload attempt.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FirmwareResetOutcome {
-    /// No firmware mailbox is available for this boot shape.
-    NotAvailable,
-    /// The firmware honoured the tag and returned `response_value`.
-    Reloaded {
-        /// Diagnostic response value written by the firmware.
-        response_value: u32,
-    },
-    /// The mailbox transport or firmware refused the tag.
-    Failed {
-        /// Stable failure reason for the diagnostic log.
-        reason: FirmwareResetFailure,
-    },
-}
 
 /// Optional `VideoCore` firmware reload seam used when config `0x50` stays
 /// zero after PCI/BAR setup.
@@ -1988,6 +1939,7 @@ mod tests {
     use rustos_abi::driver::mmio::MmioMapError;
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
+    use rustos_drv_bus_usb_vl805::FirmwareResetFailure;
     use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
 
     /// A [`Sink`] that records the `(level, id)` of every event it

@@ -403,9 +403,11 @@ mod metal {
 
     use alloc::boxed::Box;
 
+    use core::cell::RefCell;
     use core::ptr::NonNull;
     use core::sync::atomic::{AtomicU64, Ordering};
 
+    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
     use rustos_abi::RegisterWindow;
     use rustos_arch_aarch64::kernel_arch::{
         busy_delay_us, clean_invalidate_dcache_range, read_cntfrq, read_cntpct,
@@ -420,21 +422,25 @@ mod metal {
     use rustos_sync::SpinLock;
     use rustos_util::fmt::format_hex_u64;
     use rustos_vcmailbox::{
-        notify_xhci_reset, query_firmware_revision, BufferCoherency, ExchangeStats, MailboxError,
-        MmioMailbox, TimeoutStage, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET, MAILBOX_REGS_LEN_BYTES,
+        BufferCoherency, ExchangeStats, MailboxError, MailboxTransport, MmioMailbox, TimeoutStage,
+        DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET, MAILBOX_REGS_LEN_BYTES,
     };
 
-    use rustos_abi::{CapabilityId, HwNode};
+    use rustos_abi::{CapabilityId, DriverError, HwNode};
     use rustos_caps::CapabilitySet;
 
     use crate::aarch64::arch_wrapper::INPUT_FOCUS;
     use crate::driver_catalog;
     use crate::driver_loader::KernelDriverLoader;
     use crate::usb_keyboard::{
-        bring_up_keyboard, ArbiterConsoleSink, ChainHost, FirmwareReset, FirmwareResetFailure,
-        FirmwareResetOutcome, KeyboardChain, KeyboardPumpDiagnostics, PcieBringup,
-        VL805_FIRMWARE_DEV_ADDR,
+        bring_up_keyboard, ArbiterConsoleSink, ChainHost, FirmwareReset, KeyboardChain,
+        KeyboardPumpDiagnostics, PcieBringup,
     };
+    // The VL805 device driver owns the firmware-reset *policy*
+    // (`drivers/bus/usb/vl805`); this composition supplies the mailbox
+    // *mechanism* over the `lib/abi` `MailboxChannel` seam and logs the
+    // diagnostics (`AGENTS.md` §2.20 / §2.2 / §17.4).
+    use rustos_drv_bus_usb_vl805::{self as vl805, FirmwareResetFailure, FirmwareResetOutcome};
 
     /// Audit event: the USB-keyboard service kthread's lifecycle (started,
     /// or skipped because a prerequisite was absent), logged once at the
@@ -468,8 +474,9 @@ mod metal {
     const MAILBOX_EXCHANGE: EventId = EventId(4121);
 
     /// Audit event: the runtime mailbox liveness probe
-    /// ([`query_firmware_revision`]), issued before the `NOTIFY_XHCI_RESET`
-    /// reload over the same transport. It mutates no hardware, so it
+    /// (`vl805::probe_firmware_revision`), issued before the
+    /// `NOTIFY_XHCI_RESET` reload over the same channel. It mutates no
+    /// hardware, so it
     /// isolates whether the mailbox path works: `probe_outcome=ok` pins a
     /// later reload timeout on `VideoCore` dropping the tag, while a probe
     /// timeout pins it on the mailbox environment.
@@ -556,13 +563,6 @@ mod metal {
         ]
     }
 
-    /// Stable, allocation-free name for a [`MailboxError`], reusing the
-    /// [`FirmwareResetFailure`] reason table so the probe-outcome field and
-    /// the `4108` reload reason never diverge (`AGENTS.md` §2.2).
-    fn mailbox_error_name(err: MailboxError) -> &'static str {
-        VideoCoreFirmwareReset::mailbox_failure(err).as_str()
-    }
-
     /// Log the VL805 firmware-reload mailbox exchange diagnostics (`4121`)
     /// one-shot, so a metal capture localises a timed-out reload. Rendered
     /// on the stack, never on the poll path (`AGENTS.md` §2.9 / §2.16).
@@ -613,12 +613,16 @@ mod metal {
     /// mailbox path from `VideoCore` specifically dropping the xHCI tag.
     /// Rendered on the stack, never on the poll path (`AGENTS.md` §2.9 /
     /// §2.16 / §15.7).
-    fn log_mailbox_probe(outcome: Result<u32, MailboxError>, stats: ExchangeStats) {
+    fn log_mailbox_probe(outcome: Result<u32, FirmwareResetFailure>, stats: ExchangeStats) {
         let mut bufs = ExchangeStatBufs::new();
         let mut revision_buf = [0u8; 16];
+        // The VL805 driver re-derives the reason from the channel error;
+        // its `as_str` table is the single source of truth the `4108`
+        // reload reason also renders, so the two never diverge
+        // (`AGENTS.md` §2.2).
         let (outcome_name, revision) = match outcome {
             Ok(revision) => ("ok", revision),
-            Err(err) => (mailbox_error_name(err), 0),
+            Err(err) => (err.as_str(), 0),
         };
         let stat_fields = exchange_stat_fields(stats, &mut bufs);
         let fields = [
@@ -663,23 +667,50 @@ mod metal {
             FirmwareResetOutcome::Failed { reason }
         }
 
-        const fn mailbox_failure(err: MailboxError) -> FirmwareResetFailure {
-            match err {
-                MailboxError::Window => FirmwareResetFailure::Window,
-                MailboxError::Timeout => FirmwareResetFailure::Timeout,
-                MailboxError::FirmwareError => FirmwareResetFailure::FirmwareError,
-                MailboxError::MalformedResponse => FirmwareResetFailure::MalformedResponse,
-                MailboxError::BadAperture => FirmwareResetFailure::BadAperture,
-                MailboxError::BadGeometry => FirmwareResetFailure::BadGeometry,
-                _ => FirmwareResetFailure::Unknown,
-            }
-        }
-
         fn buffer_bus_addr(buffer_phys: u64) -> Option<u32> {
             if buffer_phys >= u64::from(DEFAULT_BUS_ALIAS) {
                 return None;
             }
             Some(DEFAULT_BUS_ALIAS | buffer_phys as u32)
+        }
+    }
+
+    /// The kernel's [`MailboxChannel`] implementation: the mailbox
+    /// *mechanism* the board-neutral VL805 driver policy
+    /// (`drivers/bus/usb/vl805`) runs over (`AGENTS.md` §2.20 / §2.2 /
+    /// §17.4). It owns the [`MmioMailbox`] (the discovered doorbell window,
+    /// the DMA-aliased property buffer, and the cache-coherency hooks) and
+    /// adapts its `&mut self` [`MailboxTransport`] onto the `&self` channel
+    /// through a [`RefCell`] — sound because the in-kernel keyboard service
+    /// is the channel's only, single-threaded caller (`AGENTS.md` §4 — the
+    /// host serialises access). A transport [`MailboxError`] is mapped to the
+    /// board-neutral [`DriverError`] the seam reports, while the per-exchange
+    /// [`ExchangeStats`] stay readable here for the `4121`/`4122`
+    /// diagnostics.
+    struct KernelMailboxChannel {
+        mailbox: RefCell<MmioMailbox>,
+    }
+
+    impl KernelMailboxChannel {
+        fn new(mailbox: MmioMailbox) -> Self {
+            Self {
+                mailbox: RefCell::new(mailbox),
+            }
+        }
+
+        /// The diagnostics from the most recent
+        /// [`exchange`](MailboxChannel::exchange) (`4121`/`4122`).
+        fn last_stats(&self) -> ExchangeStats {
+            self.mailbox.borrow().last_exchange_stats()
+        }
+    }
+
+    impl MailboxChannel for KernelMailboxChannel {
+        fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
+            self.mailbox
+                .borrow_mut()
+                .exchange(message)
+                .map_err(MailboxError::as_driver_error)
         }
     }
 
@@ -719,7 +750,7 @@ mod metal {
                 |base, len| clean_invalidate_dcache_range(base as usize, len),
                 |base, len| clean_invalidate_dcache_range(base as usize, len),
             );
-            let Ok(mut mailbox) = MmioMailbox::with_coherency(
+            let Ok(mailbox) = MmioMailbox::with_coherency(
                 regs,
                 buffer,
                 buffer_bus,
@@ -728,27 +759,30 @@ mod metal {
             ) else {
                 return Self::failed(FirmwareResetFailure::BadGeometry);
             };
+            // The kernel owns the mailbox *mechanism*; the VL805 driver owns
+            // the firmware-reset *policy* and runs it over this channel
+            // (`AGENTS.md` §2.20 / §2.2 / §17.4). The `4121`/`4122`
+            // diagnostics are still emitted here, from the stats the owned
+            // `MmioMailbox` records on each exchange.
+            let channel = KernelMailboxChannel::new(mailbox);
             // Liveness probe first: a benign firmware-revision read over the
-            // same transport, separating a broken mailbox path (probe times
-            // out) from `VideoCore` dropping the xHCI tag (probe ok, reload
-            // times out). It mutates no device state. Read the stats now —
-            // the reload below overwrites them.
-            let probe = query_firmware_revision(&mut mailbox);
-            log_mailbox_probe(probe, mailbox.last_exchange_stats());
+            // same channel, separating a broken mailbox path (probe fails)
+            // from `VideoCore` dropping the xHCI tag (probe ok, reload
+            // fails). It mutates no device state. Read the stats now — the
+            // reload below overwrites them.
+            let probe = vl805::probe_firmware_revision(&channel);
+            log_mailbox_probe(probe, channel.last_stats());
             // Measure the reload's real wall time across `CNTPCT_EL0`, so
             // `4121` reports the genuine wait, not an assumed iteration→time
             // mapping of the budget.
             let reload_start = read_cntpct();
-            let outcome = notify_xhci_reset(&mut mailbox, VL805_FIRMWARE_DEV_ADDR);
+            let outcome = vl805::reload_firmware(&channel);
             let reload_elapsed_us =
                 super::counter_elapsed_us(reload_start, read_cntpct(), read_cntfrq());
             // Log the exchange diagnostics (`4121`) regardless of outcome,
-            // read before mapping it so the stats reflect this call.
-            log_mailbox_exchange(mailbox.last_exchange_stats(), reload_elapsed_us);
-            match outcome {
-                Ok(response_value) => FirmwareResetOutcome::Reloaded { response_value },
-                Err(err) => Self::failed(Self::mailbox_failure(err)),
-            }
+            // read after the reload so the stats reflect this call.
+            log_mailbox_exchange(channel.last_stats(), reload_elapsed_us);
+            outcome
         }
     }
 

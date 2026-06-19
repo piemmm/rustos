@@ -409,7 +409,9 @@ rustos/
 │   ├── input/
 │   ├── network/
 │   ├── storage/
-│   └── bus/             # pci, pcie_brcm (BCM2711 RC bring-up), usb, virtio, mmio
+│   └── bus/             # pci, pcie_brcm (BCM2711 RC bring-up), virtio, mmio, and
+│                        #   usb/ (the USB bus-class folder): usb/xhci (generic
+│                        #   xHCI host) + usb/vl805 (Pi 4 VL805 firmware reload)
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -484,8 +486,8 @@ rustos/
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol: the
 │   │                    #   XhciHost register seam, the Xhci controller engine,
 │   │                    #   the TRB/ring vocabulary, and the single-device HID
-│   │                    #   enumeration engine, shared by drivers/bus/usb and an
-│   │                    #   arch-neutral user-space keyboard driver (§2.2/§17.4).
+│   │                    #   enumeration engine, shared by drivers/bus/usb/xhci and
+│   │                    #   an arch-neutral user-space keyboard driver (§2.2/§17.4).
 │   ├── users/           # User-account database: the /System/Security/Users
 │   │                    #   format, PBKDF2 password records over lib/crypto,
 │   │                    #   and timing-equalised authentication (§5.1).
