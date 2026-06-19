@@ -291,13 +291,18 @@ ambient bypass (`AGENTS.md` §5.1).
 
 The `ImageSource` trait lives in `drvhost` (userland), and the §17.4
 layering forbids `kernel/core` from depending on it, so the bin crate —
-the one layer that may name `drvhost` — supplies the thin adapter
-`rustos_kernel::driver_store_source::VfsImageSource`. It holds the
-`DriverImageReader` plus the root-volume filesystem driver (behind a
-`RefCell`, because `ImageSource::read` is `&self` while the driver needs
-`&mut`; the scan is single-threaded and pulls one bundle at a time, so
-the borrow never overlaps) and simply delegates each `read` to the
-kernel-core reader. It adds no authority of its own.
+the one layer that may name `drvhost` — supplies the read-only `/System`
+file service `rustos_kernel::system_files::SystemFileService`. It is the
+one object over the mounted `/System` volume that both **lists** the store
+(`list_store`, delegating to `enumerate_driver_store`) and **reads** a
+bundle's bytes (an `ImageSource`, delegating to `DriverImageReader`). It
+holds the `DriverImageReader` plus the root-volume filesystem driver
+(behind a `RefCell`, because `ImageSource::read` is `&self` while the
+driver needs `&mut`; the list-then-read sequence is single-threaded and
+pulls one bundle at a time, so the borrow never overlaps) and adds no
+authority of its own. Consolidating the listing and the reads behind this
+one seam (`AGENTS.md` §2.2) is what the Design-D D2b-2 `/System` file-read
+`IPC_RECV` endpoint wraps, rather than re-deriving the read path.
 
 #### Autoloading by discovery
 
@@ -308,8 +313,9 @@ by discovery" steady state (`AGENTS.md` §4 / §18). It adds no policy of its
 own; it threads the building blocks above together:
 
 1. `drvhost::store::scan_store` reads each `/System/Drivers/` bundle path
-   (from `enumerate_driver_store`) through the `VfsImageSource` and decodes
-   its manifest bind table fail-closed — a **match** step only (§18.6).
+   (from the service's `list_store`) through the `SystemFileService`
+   `ImageSource` and decodes its manifest bind table fail-closed — a
+   **match** step only (§18.6).
 2. `devmgr::DeviceManager::autoload` resolves every tree node against those
    candidates through the shared `lib/devmatch` policy (§18.3), leaving an
    unmatched node unbound and logged (§18.4).
@@ -330,12 +336,13 @@ production (`plans/PI.md` P10 5d-2-ii "Remaining").
 …)` is the thin production glue that drives `autoload_drivers` straight off a
 **mounted volume**. Given the volume's filesystem driver `fs` and the
 `store_root` the store sits at on it, it sources both halves of the scan from
-`fs` itself: it walks the store with `enumerate_driver_store(fs, store_root,
-…)` for the bundle paths, then builds a `VfsImageSource` over the *same* `fs`
-(and `store_root`) for the bundle bytes. The two reads of `fs` are strictly
-sequential — the path walk returns owned `String`s and releases its `&mut`
-borrow before the source takes it — so the single mutable borrow never
-overlaps. It adds no policy and fails closed (returning `VfsError`) only if
+`fs` itself through one `SystemFileService::open(fs, store_root)`: it lists
+the store with `service.list_store(…)` for the bundle paths, then reads each
+winning bundle's bytes back through the *same* service (its `ImageSource`).
+The service holds the one `&mut` borrow of `fs`, but its `list_store` and
+read are strictly sequential and single-threaded — the store is listed once,
+then one bundle is read at a time — so the borrow never overlaps. It adds no
+policy and fails closed (returning `VfsError`) only if
 the private root mount cannot be built; a store that is missing, empty, or
 full of malformed bundles simply binds nothing and returns `Ok` (§18.4 /
 §2.9).

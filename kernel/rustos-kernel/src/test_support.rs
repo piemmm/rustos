@@ -5,7 +5,7 @@
 //! [`FilesystemRead`] + [`FilesystemSecurity`] surface the kernel's
 //! root-backed VFS delegation walks ([`rustos_kernel_core::DriverImageReader`],
 //! [`rustos_kernel_core::enumerate_driver_store`]). Both the
-//! [`crate::driver_store_source`] adapter tests and the
+//! [`crate::system_files`] service tests and the
 //! [`crate::driver_autoload`] composition tests delegate through it, so it is
 //! defined once here rather than copy-pasted into each module (`AGENTS.md`
 //! §2.2).

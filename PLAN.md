@@ -991,17 +991,23 @@ order (one fully-gated increment each):
            bound *before* reading, full read, **appends** to the caller buffer,
            fail-closed/`buf`-untouched on refusal (§5.4/§2.9), `DriverImageError`
            →`Errno`. Since §17.4 forbids a `kernel/core`→drvhost edge, the bin
-           crate supplies the thin delegating adapter
-           `rustos_kernel::driver_store_source::VfsImageSource` (reader + the
-           root-volume driver behind a `RefCell` for the `&self`-vs-`&mut`
-           bridge), adding no authority. Host-proven (11 reader + 4 adapter
-           tests); no `lib/abi`/C-header change. Docs: `docs/src/drivers/host.md`
-           ("Reading the bundle bytes off the root volume").
+           crate supplies the read-only `/System` file service
+           `rustos_kernel::system_files::SystemFileService` (Design D D2b-1):
+           one object over the mounted volume that both **lists** the store
+           (`list_store`→`enumerate_driver_store`) and **reads** a bundle's
+           bytes (an `ImageSource`→`DriverImageReader`), reader + root-volume
+           driver behind a `RefCell` for the `&self`-vs-`&mut` bridge, adding
+           no authority. Consolidating list + read behind this one seam (§2.2)
+           is the seam the D2b-2 `/System` file-read `IPC_RECV` endpoint wraps.
+           Host-proven (11 reader + 6 service tests); no `lib/abi`/C-header
+           change. Docs: `docs/src/drivers/host.md` ("Reading the bundle bytes
+           off the root volume").
          - **Boot-wiring composition — done (host-proven).**
            `rustos_kernel::driver_autoload::autoload_drivers` is the single
            production composition: it scans the store
-           (`drvhost::store::scan_store` over the `VfsImageSource` and the
-           `enumerate_driver_store` paths — a match-only step, §18.6), runs
+           (`drvhost::store::scan_store` over the `SystemFileService`
+           `ImageSource` and its `list_store` paths — a match-only step,
+           §18.6), runs
            `devmgr::DeviceManager::autoload`, and loads each winner through
            `driver_spawn_loader::SpawnDriverLoader` (signed gate → process
            spawn with exactly the matched node's resource grants, §18.3),
@@ -1013,10 +1019,12 @@ order (one fully-gated increment each):
          - **Mounted-root composition — done (host-proven).**
            `rustos_kernel::driver_autoload::autoload_from_mounted_root(fs, …)`
            is the thin glue that drives `autoload_drivers` straight off a
-           mounted root volume `fs`: it walks the store with
-           `enumerate_driver_store(fs, …)` then builds a `VfsImageSource` over
-           the *same* `fs` (the two `&mut fs` reads are strictly sequential, so
-           the one borrow never overlaps), and defers to `autoload_drivers`. It
+           mounted root volume `fs`: it opens one
+           `SystemFileService::open(fs, …)`, lists the store with
+           `service.list_store(…)`, then reads each winning bundle's bytes back
+           through the *same* service (the one `&mut fs` borrow's list-then-read
+           is sequential, so it never overlaps), and defers to
+           `autoload_drivers`. It
            adds no policy and fails closed (`VfsError`) only if the private root
            mount cannot be built; a missing/empty/malformed store binds nothing
            in `Ok` (§18.4/§2.9). Host-proven (3 `driver_autoload` tests over the
@@ -1381,12 +1389,51 @@ order (one fully-gated increment each):
                D2b's `driver_store_load` instead wakes *this* kthread and reuses
                the proven I/O path, then re-parks.) Metal: re-verify the Pi
                unlock + login (§0.9).
-           - **D2b — the user-space migration.** Add `hw_tree_read` /
-             `hw_tree_wait` / `driver_store_load` (+ generation counter / park)
-             with the new signed `devmgr` rxe binary as their consumer; lay the
-             signed `devmgr` bundle into `/System`; `init` spawns it after the
-             mount; delete the in-kernel single-pass `driver_autoload` it
-             subsumes (§2.14).
+           - **D2b — the user-space migration, over a `/System` file-read IPC
+             service (operator-approved this session — supersedes the bespoke
+             "driver-store request channel").** The mess of a one-off channel
+             bolted onto the parked unlock kthread is replaced by the *general*
+             primitive RustOS needs anyway: the disk-owning never-returning
+             kthread (D2a-2) serves a **read-only `/System` file-read service**
+             over the existing capability-gated `IPC_SEND`/`IPC_RECV` ports —
+             `open`/`read`/`list`, fail-closed (§5.4), reusing its one proven
+             on-disk I/O path. This keeps D2a-2's "the kthread owns and drives
+             the disk on its IRQ-bound path" intact while giving it a real
+             protocol any client (devmgr now; shell/appmgr later) speaks. Scope
+             for this arc: **read-only, `/System`-scoped only** — not a general
+             VFS/write/mount surface (that would be §2.3 speculative beyond
+             devmgr's need); the server stays **kernel-resident** because the
+             floor block driver is in-kernel (§18.6) and the device backing is
+             bound to that kthread (a fully user-space fs server is a later,
+             larger pivot). `devmgr` (user space) lists `/System/Drivers/`,
+             reads each manifest's bind table over the service, matches with
+             `lib/devmatch`, and calls `driver_store_load(path, node_id)`
+             (`CAP_DRV_LOAD`); the kernel re-reads the bundle over the *same*
+             service, re-runs the full signed §8 gate, and spawns with only that
+             node's grants — signature/bytes/spawn stay kernel-side (§5.4 /
+             §23.1). `hw_tree_read` (`CAP_SYSINFO_HW`) + `hw_tree_wait` (parks on
+             the store generation counter) expose the tree. Decomposition (each
+             chunk gate-green, §2.3 — a surface lands only with its consumer):
+             - **D2b-1 — kernel-resident read-only `/System` file service API,
+               consumed by the *existing* in-kernel autoload.** Consolidate the
+               store path discovery (`enumerate_driver_store`) and bundle-byte
+               reads (`DriverImageReader`/`VfsImageSource`) behind one
+               `SystemFileService` that owns the `/System` mount window; the
+               current in-kernel `autoload_from_mounted_root` consumes it. Zero
+               behaviour change (proven by the autoload host tests + the
+               `-M virt` `autoload_input_qemu_aarch64` vertical), no new syscall,
+               no metal device-path change — the foundation the IPC endpoint
+               wraps in D2b-2.
+             - **D2b-2 — the IPC endpoint + syscalls + `devmgr` client.** Wrap
+               the D2b-1 service in an `IPC_RECV` loop on the parked store-service
+               kthread; add `hw_tree_read` / `hw_tree_wait` / `driver_store_load`
+               (+ store generation counter / park) with the new signed `devmgr`
+               rxe binary as their first consumer; lay the signed `devmgr` bundle
+               into `/System`; `init` spawns it after the mount; delete the
+               in-kernel single-pass `driver_autoload` it subsumes (§2.14). The
+               `-M virt` vertical is re-pointed to prove the devmgr-driven
+               autoload end to end; the parked-kthread/EMMC2 interaction is a
+               metal checklist (§0.9).
        - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +

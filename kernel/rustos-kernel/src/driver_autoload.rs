@@ -54,10 +54,10 @@ use rustos_crypto::Ed25519PublicKey;
 use rustos_devmgr::{AutoloadReport, DeviceManager};
 use rustos_drvhost::store::scan_store;
 use rustos_drvhost::{ImageSource, Sink};
-use rustos_kernel_core::{enumerate_driver_store, VfsError};
+use rustos_kernel_core::VfsError;
 
 use crate::driver_spawn_loader::{DriverProcessSpawn, SpawnDriverLoader};
-use crate::driver_store_source::VfsImageSource;
+use crate::system_files::SystemFileService;
 
 /// Scan the installed signed driver store and autoload a user-space driver
 /// for every discovered hardware-tree node that binds one.
@@ -69,8 +69,9 @@ use crate::driver_store_source::VfsImageSource;
 /// * `store_paths` — the `/System/Drivers/` bundle paths
 ///   [`rustos_kernel_core::enumerate_driver_store`] discovered on the
 ///   mounted root volume.
-/// * `image_source` — reads a bundle's bytes by path (the VFS-backed
-///   [`crate::driver_store_source::VfsImageSource`] in production).
+/// * `image_source` — reads a bundle's bytes by path (the
+///   [`crate::system_files::SystemFileService`] over the mounted `/System`
+///   volume in production).
 /// * `trusted` — the driver-signing trust anchors the load gate verifies
 ///   every winning bundle against (`AGENTS.md` §8 / §9).
 /// * `spawn` — the architecture process-creation mechanism the verified
@@ -123,10 +124,12 @@ pub fn autoload_drivers(
 /// defers entirely to [`autoload_drivers`] for the match + signed-gate +
 /// spawn pipeline. It adds no policy of its own (`AGENTS.md` §2.2).
 ///
-/// The two reads of `fs` are strictly sequential, so the single `&mut`
-/// borrow never overlaps: [`enumerate_driver_store`] walks the store tree
-/// and returns owned paths (releasing its borrow), and only then is `fs`
-/// handed to the [`VfsImageSource`] that reads each winning bundle's bytes.
+/// It builds one [`SystemFileService`] over `fs` and drives both the store
+/// listing and the per-bundle reads through it. The service holds the one
+/// `&mut` borrow of `fs`, but its [`list_store`](SystemFileService::list_store)
+/// and [`ImageSource`] read are strictly sequential and single-threaded —
+/// the store is listed once, then one bundle is read at a time — so the
+/// borrow never overlaps.
 ///
 /// * `fs` — the mounted volume's filesystem driver (rustfs on a real
 ///   installation), the §5.3-checked surface both the store walk and the
@@ -152,7 +155,7 @@ pub fn autoload_drivers(
 /// # Errors
 ///
 /// [`VfsError`] only if the kernel's private root mount cannot be built for
-/// the bundle-byte reader ([`VfsImageSource::open`]) — the one fail-closed
+/// the file service ([`SystemFileService::open`]) — the one fail-closed
 /// path that prevents any autoload (`AGENTS.md` §2.9). A store that is
 /// missing, empty, or full of malformed bundles is **not** an error: it
 /// simply yields no candidates and binds nothing (`AGENTS.md` §18.4), so
@@ -171,21 +174,21 @@ pub fn autoload_from_mounted_root<F>(
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    // 1. Structural path discovery off the mounted root (`AGENTS.md`
+    // 1. Open the read-only `/System` file service over the mounted volume,
+    //    building its root-backed VFS once. A failure to build the private
+    //    root mount is the sole hard refusal (fail closed, `AGENTS.md`
+    //    §2.9).
+    let service = SystemFileService::open(fs, store_root)?;
+
+    // 2. Structural path discovery off the mounted store (`AGENTS.md`
     //    §18.6). This reads no bundle and trusts nothing; it audits its own
     //    `DriverStoreScanned` outcome and is fail-closed — a missing or
     //    unreadable store yields fewer (or zero) paths, never an error.
-    let store_paths = enumerate_driver_store(fs, store_root, sink);
-
-    // 2. Build the bundle-byte reader over the *same* mounted root volume.
-    //    `enumerate_driver_store`'s borrow has ended (it returned owned
-    //    `String`s), so handing `fs` to the source here cannot alias it.
-    //    A failure to build the private root mount is the sole hard refusal
-    //    (fail closed, `AGENTS.md` §2.9).
-    let image_source = VfsImageSource::open(fs, store_root)?;
+    let store_paths = service.list_store(sink);
 
     // 3. The match + signed-gate + spawn pipeline, verbatim. `scan_store`
-    //    wants `&[&str]`, so borrow the owned paths.
+    //    wants `&[&str]`, so borrow the owned paths; each winning bundle's
+    //    bytes are read back through the *same* service (its `ImageSource`).
     let path_refs: Vec<&str> = store_paths
         .iter()
         .map(alloc::string::String::as_str)
@@ -193,7 +196,7 @@ where
     Ok(autoload_drivers(
         tree,
         &path_refs,
-        &image_source,
+        &service,
         trusted,
         spawn,
         args,
