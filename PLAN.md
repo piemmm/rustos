@@ -1163,8 +1163,46 @@ order (one fully-gated increment each):
              draws `Root passphrase:`. `build_rpi_image` derives the
              passphrase from the profile (`passphrase_for`), never a caller
              argument;
-           - **B5 (= 5e)** — the flip, **now unblocked**: B1–B4 are
-             metal-confirmed (§0.9).
+           - **B5 (= 5e)** — the flip, gated on **Increment C** below.
+     - **Increment C (B5 prerequisite) — port the autonomous floor bring-up off
+       the in-kernel scaffold onto the `lib/abi::DriverHost` contract.** A blind
+       B5 flip would brick the metal keyboard: the autonomous VL805 bring-up
+       (PCIe train + VideoCore firmware reload + xHCI bring-up + enumeration +
+       HID-node emission) lives **only** in `usb_keyboard.rs`/`keyboard_service.rs`,
+       and the floor `drivers/bus/*` crates expose just `register()`. The fix
+       (operator-approved option C-0) extends the host contract so the floor
+       driver can run that bring-up talking **only** through `lib/abi`
+       (§17.4) — no `kernel/*` edge — then relocates the orchestration there,
+       keeping the in-kernel scaffold pump live throughout (§2.17).
+       - **C-1 — `DriverHost` contract extension — DONE (host-proven).** The
+         host surface the floor bring-up needs is landed in `lib/abi`: a
+         bus-neutral `DmaHost` trait (`alloc_dma_zeroed`) with `VirtioHost:
+         DmaHost` so a non-virtio bus driver allocates DMA without a
+         virtio-shaped trait and the contract is defined once (§2.2); the
+         board-neutral `MailboxChannel` seam + `MAILBOX_PROPERTY_WORDS` (the
+         VideoCore property width `lib/vcmailbox` now re-uses, §2.2) so a driver
+         runs a firmware exchange with the doorbell/buffer/translation owned by
+         the host (board specifics behind `lib/vcmailbox`, §2.20); and
+         `DriverHost::dma_host()`/`mailbox()`/`emit_node(HwNode)` accessors
+         (default `None`/`Unsupported`, mirroring the `virtio_host()`/
+         `mmio_mapper()` extension pattern). `RtDriverHost` exposes `dma_host()`,
+         and `lib/hid`'s user-space keyboard bring-up now carves its xHCI DMA
+         through `dma_host()` (a USB device is not virtio). Host-proven (lib/abi
+         contract-surface tests; all virtio hosts split into `DmaHost`+`VirtioHost`;
+         `lib/hid`/`lib/drvrt`/`lib/virtio` + the virtio-driver crates green); no
+         `#[repr(C)]`/syscall/error/cap change ⇒ no C-header drift. Docs:
+         `docs/src/abi/driver_traits.md`.
+       - **C-2 — relocate the autonomous bring-up into the floor `drivers/bus/*`
+         — NEXT (metal-only).** Move the PCIe-RC train + config-scan + BAR-assign
+         + xHCI-node `emit_node()` into `drivers/bus/pcie_brcm`, and the xHCI
+         bring-up + firmware reload (`mailbox()`) + enumeration + HID-node
+         `emit_node()` into `drivers/bus/usb`, each consuming the C-1 facilities
+         and talking to the kernel only through `DriverHost` (no drivers→drivers
+         edge — the kernel sequences the two autonomous entries and the hwtree
+         decouples them, §18.1/§17.4). The scaffold pump stays live until B5.
+         `raspi4b`/QEMU cannot model the VL805, so the acceptance is a real-Pi
+         UART log: the floor chain trains PCIe, reloads firmware, enumerates, and
+         emits a *bindable* HID node, with the scaffold still delivering keys.
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
        (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), lay the signed

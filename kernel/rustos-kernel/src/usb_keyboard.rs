@@ -1684,7 +1684,8 @@ pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError
 /// A [`DriverHost`] view for the in-kernel VL805 chain: the bus-driver
 /// task's capabilities plus the kernel's capability-gated MMIO mapper and
 /// per-driver DMA host. Every [`MmioMapper::map_window`] /
-/// [`VirtioHost::alloc_dma_zeroed`] call is re-checked kernel-side against
+/// [`DmaHost::alloc_dma_zeroed`](rustos_abi::driver::DmaHost::alloc_dma_zeroed)
+/// call is re-checked kernel-side against
 /// those capabilities (`AGENTS.md` §5.4), so the host cannot widen its own
 /// authority.
 pub struct ChainHost<'a> {
@@ -1985,7 +1986,7 @@ mod tests {
     use core::cell::{Cell, RefCell};
     use core::ptr::NonNull;
 
-    use rustos_abi::driver::dma::PoolId;
+    use rustos_abi::driver::dma::{DmaHost, PoolId};
     use rustos_abi::driver::mmio::MmioMapError;
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
@@ -2295,7 +2296,7 @@ mod tests {
     }
 
     struct MockDmaHost;
-    impl VirtioHost for MockDmaHost {
+    impl DmaHost for MockDmaHost {
         fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
             let ptr = leak_aligned(size);
             // SAFETY: `ptr` covers `size` zeroed bytes and lives for the
@@ -2303,6 +2304,8 @@ mod tests {
             // (below `APERTURE_TOP`). Drop is a no-op (`from_leaked`).
             Ok(unsafe { DmaSlab::from_leaked(0x1000_0000, ptr, size, PoolId::MOCK, 0) })
         }
+    }
+    impl VirtioHost for MockDmaHost {
         fn notify_wait(&self, _queue_index: u16) {}
     }
 

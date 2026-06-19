@@ -22,7 +22,7 @@ use rustos_abi::{CapabilityQuery, DriverError};
 // trait is re-exported here so existing `use crate::VirtioHost`
 // import sites (in this crate and in every consuming virtio driver
 // crate) keep working unchanged.
-pub use rustos_abi::driver::VirtioHost;
+pub use rustos_abi::driver::{DmaHost, VirtioHost};
 
 /// Factory that mints a per-driver [`VirtioHost`] for the duration of a
 /// single driver `register()` call.
@@ -108,7 +108,7 @@ impl MockHost {
     }
 }
 
-impl VirtioHost for MockHost {
+impl DmaHost for MockHost {
     /// Hand out a zeroed [`DmaSlab`] backed by a `Box<[u8]>` that
     /// is **leaked for the lifetime of the unit-test process** so
     /// the returned slab can carry its raw pointer without
@@ -150,7 +150,9 @@ impl VirtioHost for MockHost {
         // and treat the slab as the sole owner via `ptr`.
         Ok(unsafe { DmaSlab::from_leaked(phys, ptr, size, PoolId::MOCK, slot) })
     }
+}
 
+impl VirtioHost for MockHost {
     fn notify_wait(&self, queue_index: u16) {
         self.notify_log.borrow_mut().push(queue_index);
     }

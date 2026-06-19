@@ -6,7 +6,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use rustos_virtio::{ChainView, MockHost, MockTransport};
+use rustos_virtio::{ChainView, DmaHost, MockHost, MockTransport};
 
 const SECTOR_SIZE: usize = 512;
 const SECTORS: u64 = 16;
@@ -113,10 +113,13 @@ impl AutoDrainHost {
     }
 }
 
-impl rustos_virtio::VirtioHost for AutoDrainHost {
+impl DmaHost for AutoDrainHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<rustos_virtio::DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
+}
+
+impl rustos_virtio::VirtioHost for AutoDrainHost {
     fn notify_wait(&self, queue_index: u16) {
         // SAFETY: the pointer was installed by `install_transport`
         // while no other borrow of the transport was live; the

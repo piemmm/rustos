@@ -41,7 +41,7 @@
 //! [`CapabilityId::DRV_KERNEL`](crate::CapabilityId::DRV_KERNEL).
 //! Class traits document their own per-method capability gates.
 
-use crate::hwtree::{HwMatchKey, HwResource};
+use crate::hwtree::{HwMatchKey, HwNode, HwResource};
 use crate::le::{put_u16, read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
@@ -52,6 +52,7 @@ pub mod display;
 pub mod dma;
 pub mod filesystem;
 pub mod input;
+pub mod mailbox;
 pub mod mmio;
 pub mod msix;
 pub mod net;
@@ -63,7 +64,8 @@ pub mod virtio;
 pub mod virtio_mmio;
 pub mod virtio_pci;
 
-pub use dma::{DmaSlab, PoolId, SlabFreeFn};
+pub use dma::{DmaHost, DmaSlab, PoolId, SlabFreeFn};
+pub use mailbox::MailboxChannel;
 pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
 pub use msix::{MsiMessage, MsixBus};
 pub use pci::PciBus;
@@ -815,11 +817,112 @@ pub trait DriverHost {
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         None
     }
+
+    /// Returns the per-driver DMA-allocation facility, if the driver host
+    /// has minted one for this driver module.
+    ///
+    /// This is the bus-neutral sibling of [`mmio_mapper`](Self::mmio_mapper):
+    /// a bus driver that has to hand the hardware a physically-addressable
+    /// buffer (an xHCI device-context array, event/command/transfer rings, a
+    /// scratchpad) obtains a [`DmaSlab`] through the returned [`DmaHost`]. A
+    /// virtio driver still uses [`virtio_host`](Self::virtio_host), which
+    /// extends [`DmaHost`]; this accessor exists so a *non*-virtio driver
+    /// never has to reach through a virtio-shaped trait to allocate DMA
+    /// (`AGENTS.md` §2.2 — the allocation contract is defined once, in
+    /// [`DmaHost`]).
+    ///
+    /// The default implementation returns `None`, the correct shape for a
+    /// host that ships no DMA facility (a unit-test seam for a driver that
+    /// needs none). This is an `abi-v1` *internal* addition that extends the
+    /// host trait observed by in-tree drivers; the public driver entry point
+    /// is unchanged and the default body keeps every existing host impl
+    /// source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// Never fails; absence of a DMA host is reported as `None`.
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the [`DmaHost`] enforces the host's per-task
+    /// DMA capability check at each allocation.
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
+        None
+    }
+
+    /// Returns the per-driver firmware property-mailbox channel, if the
+    /// driver host has wired one for this driver module.
+    ///
+    /// A bus driver whose bring-up needs the platform firmware — for example
+    /// the BCM2711 `VideoCore` reload of the VL805 USB controller's firmware —
+    /// obtains a board-neutral [`MailboxChannel`] here and marshals encoded
+    /// property messages through it. The doorbell window, the DMA-backed
+    /// property buffer, and the bus-address translation are owned by the
+    /// host; the board specifics stay behind the device's own crate
+    /// (`lib/vcmailbox`, `AGENTS.md` §2.20), so the generic framework above it
+    /// never names a board (`AGENTS.md` §2.20 / §17.4).
+    ///
+    /// The default implementation returns `None`, the correct shape for every
+    /// platform with no firmware mailbox (QEMU `virt`, x86_64, riscv64) and
+    /// for any test seam that drives a driver needing none (`AGENTS.md`
+    /// §18.4 — a missing facility is silent, never an error).
+    ///
+    /// # Errors
+    ///
+    /// Never fails; absence of a mailbox is reported as `None`.
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the channel's host enforces the capability gate
+    /// for the doorbell MMIO and property-buffer DMA it owns.
+    fn mailbox(&self) -> Option<&dyn MailboxChannel> {
+        None
+    }
+
+    /// Publish a discovered child [`HwNode`] into the hardware tree
+    /// (`AGENTS.md` §18.1).
+    ///
+    /// A bus driver that enumerates a device behind it (a PCIe function, a USB
+    /// device on a root-hub port) calls this to attach the device as a child
+    /// node carrying the [`HwResource`] grant *requests* the matched
+    /// downstream driver will receive — for example a USB-HID node carrying
+    /// its xHCI register-window and DMA-region resources. The host validates
+    /// the node, mints it into the live tree, and the §18.3 match/autoload
+    /// path then sees a bindable node like any other discovered device. The
+    /// driver requests only the resources its enumeration actually found; the
+    /// host grants nothing the node did not request (`AGENTS.md` §4 — no
+    /// ambient authority).
+    ///
+    /// The default implementation returns [`DriverError::Unsupported`], the
+    /// correct shape for a host with no hardware-tree producer wired (a
+    /// unit-test seam, or a host that loads only leaf drivers that never
+    /// enumerate children). This is an `abi-v1` *internal* addition; the
+    /// default body keeps every existing host impl source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the host exposes no hardware-tree
+    ///   producer (the default).
+    /// * [`DriverError::PermissionDenied`] if the host's capability check for
+    ///   emitting a node fails.
+    /// * [`DriverError::OutOfRange`] / [`DriverError::NoSpace`] if the node is
+    ///   malformed or the tree is full (the host fails closed — `AGENTS.md`
+    ///   §5.4).
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the host enforces its own gate on tree
+    /// mutation.
+    fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
+        let _ = node;
+        Err(DriverError::Unsupported)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hwtree::HwDeviceClass;
 
     fn sample() -> DriverManifest {
         DriverManifest {
@@ -1030,6 +1133,124 @@ mod tests {
         assert!(host.has_capability(CapabilityId::DRV_LOAD));
         assert!(!host.has_capability(CapabilityId::DRV_KERNEL));
         assert_eq!(host.kind(), DriverKind::UserSpace);
+    }
+
+    #[test]
+    fn driver_host_facility_accessors_default_to_absent() {
+        // A host that wires no facilities reports each optional accessor as
+        // absent, never as an error or a synthesised handle (`AGENTS.md`
+        // §18.4 — a missing facility is silent; the bus driver fails closed).
+        let host = StubHost;
+        assert!(host.virtio_host().is_none());
+        assert!(host.mmio_mapper().is_none());
+        assert!(host.dma_host().is_none());
+        assert!(host.mailbox().is_none());
+        // `emit_node` defaults to refusing, never to silently accepting a
+        // node a host with no tree producer cannot publish (fail closed).
+        let node = HwNode::new(1, crate::hwtree::HW_NODE_ROOT, HwDeviceClass::Input);
+        assert_eq!(host.emit_node(node), Err(DriverError::Unsupported));
+    }
+
+    /// Host wiring the DMA, mailbox, and node-emission facilities, used to
+    /// prove a floor bus driver reaches each through the [`DriverHost`]
+    /// contract alone (the surface the autonomous bring-up consumes).
+    struct FacilityHost {
+        emitted: core::cell::Cell<u32>,
+        last_emitted: core::cell::Cell<Option<HwNode>>,
+    }
+
+    impl FacilityHost {
+        fn new() -> Self {
+            Self {
+                emitted: core::cell::Cell::new(0),
+                last_emitted: core::cell::Cell::new(None),
+            }
+        }
+    }
+
+    impl DmaHost for FacilityHost {
+        fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
+            // No-alloc test seam: exercise the documented rejections without
+            // minting a slab (`lib/abi` is no-alloc). A real host returns a
+            // zeroed [`DmaSlab`]; the seam's contract — reject `size == 0`,
+            // surface pool pressure — is what the ABI test pins.
+            if size == 0 {
+                return Err(DriverError::BufferTooSmall);
+            }
+            Err(DriverError::LengthOutOfRange)
+        }
+    }
+
+    impl MailboxChannel for FacilityHost {
+        fn exchange(
+            &self,
+            message: &mut [u32; crate::driver::mailbox::MAILBOX_PROPERTY_WORDS],
+        ) -> Result<(), DriverError> {
+            // Echo a success response code into the header so a caller can
+            // observe the in-place round trip the seam guarantees.
+            message[1] = 0x8000_0000;
+            Ok(())
+        }
+    }
+
+    impl DriverHost for FacilityHost {
+        fn has_capability(&self, _cap: CapabilityId) -> bool {
+            true
+        }
+
+        fn kind(&self) -> DriverKind {
+            DriverKind::InKernel
+        }
+
+        fn dma_host(&self) -> Option<&dyn DmaHost> {
+            Some(self)
+        }
+
+        fn mailbox(&self) -> Option<&dyn MailboxChannel> {
+            Some(self)
+        }
+
+        fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
+            self.last_emitted.set(Some(node));
+            self.emitted.set(self.emitted.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn driver_host_routes_dma_allocation_through_the_seam() {
+        let host = FacilityHost::new();
+        let dma = host.dma_host().expect("dma host wired");
+        // `DmaSlab` is not `PartialEq` (it owns a device pointer), so match
+        // on the seam's error contract rather than comparing the `Result`.
+        assert!(matches!(
+            dma.alloc_dma_zeroed(0),
+            Err(DriverError::BufferTooSmall)
+        ));
+        assert!(matches!(
+            dma.alloc_dma_zeroed(4096),
+            Err(DriverError::LengthOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn driver_host_routes_mailbox_exchange_through_the_seam() {
+        let host = FacilityHost::new();
+        let mailbox = host.mailbox().expect("mailbox wired");
+        let mut message = [0u32; crate::driver::mailbox::MAILBOX_PROPERTY_WORDS];
+        mailbox.exchange(&mut message).expect("exchange");
+        // The response was written back in place (`AGENTS.md` §5.4 — the
+        // caller reads the firmware response from the same buffer).
+        assert_eq!(message[1], 0x8000_0000);
+    }
+
+    #[test]
+    fn driver_host_publishes_an_emitted_node() {
+        let host = FacilityHost::new();
+        let node = HwNode::new(42, crate::hwtree::HW_NODE_ROOT_ID, HwDeviceClass::Input);
+        assert_eq!(host.emit_node(node), Ok(()));
+        assert_eq!(host.emitted.get(), 1);
+        assert_eq!(host.last_emitted.get(), Some(node));
     }
 
     fn sample_bind_key() -> DriverBindKey {

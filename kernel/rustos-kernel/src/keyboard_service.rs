@@ -25,7 +25,7 @@
 
 use core::ptr::NonNull;
 
-use rustos_abi::driver::dma::{DmaSlab, PoolId, SlabCoherencyFn};
+use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::{CapabilityId, DriverError, MmioMapError, MmioMapper, RegisterWindow};
 use rustos_caps::CapabilitySet;
@@ -341,7 +341,7 @@ impl FrameDmaHost {
     }
 }
 
-impl VirtioHost for FrameDmaHost {
+impl DmaHost for FrameDmaHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         // Capability before state (`AGENTS.md` §5.4).
         if !self.caps.contains(CapabilityId::MEM_DMA) {
@@ -384,7 +384,9 @@ impl VirtioHost for FrameDmaHost {
             None => slab,
         })
     }
+}
 
+impl VirtioHost for FrameDmaHost {
     fn notify_wait(&self, _queue_index: u16) {}
 }
 

@@ -41,6 +41,7 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::display::DisplayFormat;
+use rustos_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
 use rustos_abi::{DriverError, RegisterWindow};
 
 #[cfg(test)]
@@ -91,7 +92,12 @@ impl MailboxError {
 
 /// Fixed word count of the framebuffer property message (header,
 /// six tags, end tag, padded to a 16-byte multiple).
-pub const PROPERTY_WORDS: usize = 32;
+///
+/// This is the same `VideoCore` property-channel width the host↔driver
+/// [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) seam
+/// transports, so it is defined once in `lib/abi` and re-used here rather
+/// than duplicated (`AGENTS.md` §2.2).
+pub const PROPERTY_WORDS: usize = MAILBOX_PROPERTY_WORDS;
 
 /// Byte length of the property message ([`PROPERTY_WORDS`] words).
 pub const PROPERTY_LEN_BYTES: usize = PROPERTY_WORDS * 4;

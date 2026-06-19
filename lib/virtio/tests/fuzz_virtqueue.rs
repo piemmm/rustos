@@ -34,8 +34,8 @@
 //! elapses, while the logged seed keeps any failure reproducible.
 
 use rustos_virtio::{
-    ChainSegment, ChainView, Direction, DmaSlab, MockHost, MockTransport, SplitQueue, VirtioError,
-    VirtioHost,
+    ChainSegment, ChainView, Direction, DmaHost, DmaSlab, MockHost, MockTransport, SplitQueue,
+    VirtioError,
 };
 
 const SMOKE_ITERATIONS: u64 = 20_000;

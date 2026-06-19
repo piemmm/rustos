@@ -221,7 +221,9 @@ pub fn bring_up_boot_keyboard(
         return Err(DriverError::PermissionDenied);
     }
     let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(DriverError::Unsupported)?;
-    let dma_host = host.virtio_host().ok_or(DriverError::Unsupported)?;
+    // A USB keyboard is not a virtio device: it allocates its xHCI DMA through
+    // the bus-neutral DMA seam, not the virtio host (`AGENTS.md` §2.2).
+    let dma_host = host.dma_host().ok_or(DriverError::Unsupported)?;
 
     // Carve the device-shared DMA region and verify it lies wholly below the
     // discovered inbound-DMA aperture before any register is touched: a region

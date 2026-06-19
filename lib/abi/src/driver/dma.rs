@@ -25,6 +25,48 @@
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::DriverError;
+
+/// Host-side facility that mints owned, device-visible DMA regions.
+///
+/// This is the bus-neutral DMA-allocation seam, a sibling of
+/// [`MmioMapper`](super::mmio::MmioMapper): any driver that has to hand the
+/// hardware a physically-addressable buffer — a bus driver staging an xHCI
+/// device-context / transfer ring, a virtio driver staging a split
+/// virtqueue — obtains a [`DmaSlab`] through it. It lives in `lib/abi` so the
+/// host accessor [`DriverHost::dma_host`](super::DriverHost::dma_host) can
+/// name it without inverting the dependency direction (`AGENTS.md` §3), and
+/// it is *separate from* virtio so a non-virtio bus driver never has to reach
+/// through a virtio-shaped trait to allocate DMA. [`VirtioHost`] extends it
+/// (`VirtioHost: DmaHost`) so a virtio host is also a DMA host without
+/// duplicating the allocation contract (`AGENTS.md` §2.2).
+///
+/// [`VirtioHost`]: super::virtio::VirtioHost
+pub trait DmaHost {
+    /// Allocate a contiguous, device-visible, zero-initialised DMA region.
+    ///
+    /// The returned [`DmaSlab`] is owned by the caller; it carries the pool
+    /// id and slot it was minted from so the host's drop path can reclaim
+    /// the slot. The bytes are zero-initialised so a driver can publish the
+    /// slab to a device without first clearing leftover bytes from another
+    /// transaction (defence in depth — `AGENTS.md` §4 zero-on-free / §7).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BufferTooSmall`] if `size == 0`.
+    /// * [`DriverError::LengthOutOfRange`] if the host exhausts its DMA pool.
+    /// * [`DriverError::PermissionDenied`] if the calling task is missing the
+    ///   capability the host enforces at allocation time (the kernel host
+    ///   gates on [`CapabilityId::MEM_DMA`](crate::CapabilityId::MEM_DMA)).
+    ///
+    /// # Capabilities
+    ///
+    /// None directly at the trait level; the host enforces its own DMA-pool
+    /// quota and per-task capability check at allocation time (`AGENTS.md`
+    /// §4 "per-process heaps" + §5.4 "fail closed").
+    fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError>;
+}
+
 /// Stable identifier of a DMA pool.
 ///
 /// The driver code is opaque to pool internals; the identifier

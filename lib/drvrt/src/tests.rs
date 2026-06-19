@@ -19,8 +19,7 @@ use super::*;
 use core::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use rustos_abi::driver::dma::SlabCoherencyFn;
-use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::driver::dma::{DmaHost, SlabCoherencyFn};
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,

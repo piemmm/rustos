@@ -60,7 +60,7 @@ pub mod transport_mmio;
 mod tests;
 
 pub use dma::{BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
-pub use host::{MockHost, VirtioHost, VirtioHostFactory};
+pub use host::{DmaHost, MockHost, VirtioHost, VirtioHostFactory};
 pub use packed::PackedQueue;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use transport::{

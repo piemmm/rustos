@@ -62,7 +62,7 @@ use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
 use rustos_log::Sink;
 
-use rustos_virtio::{DmaSlab, PoolId, VirtioHost};
+use rustos_virtio::{DmaHost, DmaSlab, PoolId, VirtioHost};
 
 /// Capability-checked, [`DmaPool`]-backed [`VirtioHost`].
 ///
@@ -224,7 +224,7 @@ unsafe fn slab_free_shim<P: PageTable, S: Sink + ?Sized>(
     }
 }
 
-impl<P: PageTable, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
+impl<P: PageTable, S: Sink + ?Sized> DmaHost for KernelVirtioHost<'_, P, S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if size == 0 {
             return Err(DriverError::BufferTooSmall);
@@ -277,7 +277,9 @@ impl<P: PageTable, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
         };
         Ok(slab)
     }
+}
 
+impl<P: PageTable, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
     fn notify_wait(&self, _queue_index: u16) {
         // Block on the device's pre-bound interrupt line. A virtio
         // device signals completion on its single MSI / MMIO line

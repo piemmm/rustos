@@ -17,8 +17,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::dma::{DmaSlab, PoolId};
-use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::{
     CapabilityId, Delay, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper,
@@ -72,7 +71,7 @@ struct MockDmaHost {
     fail: bool,
 }
 
-impl VirtioHost for MockDmaHost {
+impl DmaHost for MockDmaHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if self.fail {
             return Err(DriverError::LengthOutOfRange);
@@ -83,8 +82,6 @@ impl VirtioHost for MockDmaHost {
         // Drop is a no-op (the `from_leaked` contract).
         Ok(unsafe { DmaSlab::from_leaked(self.phys, ptr, size, PoolId::MOCK, 0) })
     }
-
-    fn notify_wait(&self, _queue_index: u16) {}
 }
 
 /// A host granting `MMIO_MAP`, with an optional mapper and DMA host.
@@ -111,8 +108,8 @@ impl DriverHost for MockHost {
         self.mapper.as_ref().map(|m| m as &dyn MmioMapper)
     }
 
-    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
-        self.dma.as_ref().map(|d| d as &dyn VirtioHost)
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
+        self.dma.as_ref().map(|d| d as &dyn DmaHost)
     }
 }
 

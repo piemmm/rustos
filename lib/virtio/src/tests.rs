@@ -2,7 +2,7 @@
 //! against the in-process [`crate::MockTransport`] peer.
 
 use crate::dma::{BounceBuffer, DmaSlab};
-use crate::host::{MockHost, VirtioHost};
+use crate::host::{DmaHost, MockHost};
 use crate::packed::PackedQueue;
 use crate::queue::{ChainSegment, SplitQueue};
 use crate::transport::{ChainView, Direction, MockTransport, Status, Transport, VirtioError};

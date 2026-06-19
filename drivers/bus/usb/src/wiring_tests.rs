@@ -17,7 +17,7 @@ use core::cell::Cell;
 use core::ptr::NonNull;
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::driver::dma::{DmaSlab, PoolId};
+use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::{
@@ -75,7 +75,7 @@ struct MockDmaHost {
     fail: bool,
 }
 
-impl VirtioHost for MockDmaHost {
+impl DmaHost for MockDmaHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if self.fail {
             return Err(DriverError::LengthOutOfRange);
@@ -86,7 +86,9 @@ impl VirtioHost for MockDmaHost {
         // for `ptr[0]`. Drop is a no-op (the `from_leaked` contract).
         Ok(unsafe { DmaSlab::from_leaked(self.phys, ptr, size, PoolId::MOCK, 0) })
     }
+}
 
+impl VirtioHost for MockDmaHost {
     fn notify_wait(&self, _queue_index: u16) {}
 }
 

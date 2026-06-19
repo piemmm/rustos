@@ -3,7 +3,7 @@
 use core::cell::Cell;
 use core::ptr::NonNull;
 
-use rustos_abi::driver::dma::{DmaSlab, PoolId, SlabCoherencyFn};
+use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::{
@@ -297,7 +297,7 @@ impl<S: GrantSyscalls> MmioMapper for RtDriverHost<S> {
     }
 }
 
-impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
+impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         // Capability before state (`AGENTS.md` §5.4); the kernel re-checks.
         if !self.caps.contains(CapabilityId::MEM_DMA) {
@@ -334,7 +334,9 @@ impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
             None => slab,
         })
     }
+}
 
+impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
     fn notify_wait(&self, _queue_index: u16) {
         // This host serves a polling / interrupt-driven driver (the xHCI
         // keyboard path polls; an interrupt-driven driver parks on `irq_wait`
@@ -359,6 +361,10 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
     }
 
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
+        Some(self)
+    }
+
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
         Some(self)
     }
 }
@@ -387,7 +393,7 @@ fn mmio_error(ret: i64) -> MmioMapError {
 /// `ret` is `≤ 0`. A kernel `PermissionDenied` maps to
 /// [`DriverError::PermissionDenied`]; an exhausted pool / over-limit / oversize
 /// carve maps to [`DriverError::LengthOutOfRange`] (the documented
-/// [`VirtioHost::alloc_dma_zeroed`] exhaustion error); anything else (an inert
+/// [`DmaHost::alloc_dma_zeroed`] exhaustion error); anything else (an inert
 /// facility, an unknown code, a `0` base) is [`DriverError::Unsupported`]
 /// (`AGENTS.md` §2.9).
 fn dma_error(ret: i64) -> DriverError {

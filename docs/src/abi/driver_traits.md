@@ -45,12 +45,69 @@ driver's `register` entry point.
 |-------------------------------------|---------------------------------------|
 | `has_capability(cap)`               | None (pure query of load-time grant). |
 | `kind()`                            | None.                                 |
-| `virtio_host()`                     | None (factory enforces gates).        |
+| `virtio_host()`                     | None (host enforces `CAP_MEM_DMA` per alloc). |
+| `mmio_mapper()`                     | None (mapper enforces `CAP_MMIO_MAP` per map). |
+| `dma_host()`                        | None (host enforces `CAP_MEM_DMA` per alloc). |
+| `mailbox()`                         | None (host enforces the doorbell/buffer gate). |
+| `emit_node(node)`                   | None at the call site (host gates tree mutation). |
 
 The trait deliberately exposes only what the driver needs to learn
-about its own load-time grant. Audit, logging, IPC channels, and
-device-tree access live in the userland driver host (delivered as a
-separate change set per the Stage 4 task split).
+about its own load-time grant and to reach the host facilities its
+matched node was granted. Audit, logging, and IPC channels live in the
+userland driver host. Every accessor that returns `Option`/`Result`
+reports an *absent* facility as `None` / `DriverError::Unsupported` and
+never as a synthesised handle, so a bus driver fails closed when a
+facility it needs is not wired (`AGENTS.md` §18.4 / §5.4).
+
+`dma_host(&self) -> Option<&dyn DmaHost>` is the **bus-neutral**
+DMA-allocation accessor, a sibling of `mmio_mapper()`. A non-virtio bus
+driver — e.g. the floor xHCI bring-up staging device-context and ring
+memory — allocates a `DmaSlab` through it without reaching through the
+virtio-shaped `VirtioHost`. The allocation contract lives once in
+`trait DmaHost { fn alloc_dma_zeroed(&self, size) -> Result<DmaSlab,
+DriverError>; }`; `VirtioHost: DmaHost` extends it, so a virtio host is
+also a DMA host and the contract is never duplicated (`AGENTS.md` §2.2).
+
+`mailbox(&self) -> Option<&dyn MailboxChannel>` is the board-neutral
+firmware property-mailbox seam. A bus driver whose bring-up needs the
+platform firmware (the BCM2711 VideoCore reload of the VL805 USB
+controller firmware) marshals 32-word property messages
+(`MAILBOX_PROPERTY_WORDS`) through it; the doorbell window, the
+DMA-backed property buffer, and the bus-address translation stay behind
+the host and the device's own `lib/vcmailbox` crate (`AGENTS.md` §2.20),
+so the generic framework above it never names a board.
+
+`emit_node(&self, node: HwNode) -> Result<(), DriverError>` lets a bus
+driver publish a *discovered child* node into the hardware tree
+(`AGENTS.md` §18.1): the enumerated device, carrying the `HwResource`
+grant **requests** (register window + DMA region) the matched downstream
+driver will receive. The §18.3 match/autoload path then sees a bindable
+node like any other discovered device, and the driver requests only what
+its enumeration found — no ambient authority (`AGENTS.md` §4).
+
+These four facility accessors are `abi-v1` *internal* additions: like
+`virtio_host()` before them, each carries a default body so every
+existing host impl stays source-compatible, and the public `register`
+entry point is unchanged. They are the host surface the **autonomous
+floor bring-up** consumes (see below).
+
+#### Autonomous floor bring-up entry
+
+`register(host)` is *reactive* — the host calls it to instantiate a
+driver against an already-discovered node. The bootstrap-floor bus
+chain, by contrast, must run **before** any node for the devices behind
+it exists: it has to train the PCIe root complex, reload the VL805
+firmware over the mailbox, bring up the xHCI controller, enumerate the
+boot device, and only then `emit_node()` the discovered children. That
+work is exposed as a distinct, documented floor entry point a compiled-in
+floor driver provides and the kernel's bootstrap-floor catalogue
+(`AGENTS.md` §18.6) drives directly, talking to the kernel solely through
+this `DriverHost` contract (no `kernel/*` dependency — `AGENTS.md` §17.4).
+The autonomous entry consumes `mmio_mapper()` (map the discovered
+register window), `dma_host()` (stage controller DMA), `mailbox()`
+(firmware reload), and `emit_node()` (publish the enumerated child),
+keeping the floor driver free of ambient authority and of any board
+name in the generic layers above it.
 
 `virtio_host(&self) -> Option<&dyn VirtioHost>` is an `abi-v1`
 *internal* extension added at Stage 4.D Item 0-tail. A virtio-class

@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use core::cell::RefCell;
-use rustos_virtio::{ChainView, DmaSlab, MockHost, MockTransport};
+use rustos_virtio::{ChainView, DmaHost, DmaSlab, MockHost, MockTransport};
 
 /// A queued raw `virtio_input_event` the mock device will deliver:
 /// `(type, code, value)`.
@@ -74,10 +74,13 @@ impl AutoDrainHost {
     }
 }
 
-impl VirtioHost for AutoDrainHost {
+impl DmaHost for AutoDrainHost {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         self.inner.alloc_dma_zeroed(size)
     }
+}
+
+impl VirtioHost for AutoDrainHost {
     fn notify_wait(&self, queue_index: u16) {
         // SAFETY: the driver releases its `&mut self.transport` borrow
         // between `kick` and `notify_wait`; the pointer was installed
