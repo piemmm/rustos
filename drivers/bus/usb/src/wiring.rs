@@ -26,8 +26,11 @@
 //! controller bring-up is the on-metal acceptance item.
 
 use rustos_abi::driver::bus::BusDevice;
-use rustos_abi::driver::dma::DmaSlab;
-use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, PciBus, RegisterWindow};
+use rustos_abi::driver::dma::{DmaHost, DmaSlab};
+use rustos_abi::{
+    CapabilityId, Delay, DriverError, DriverHost, HwNode, HwResource, MmioMapper, PciBus,
+    RegisterWindow,
+};
 
 use rustos_usb::device::UsbDevice;
 use rustos_usb::{Xhci, DEFAULT_POLL_BUDGET};
@@ -119,6 +122,118 @@ pub fn open_discovered(
     UsbDevice::start(xhci, mapped.dma, DEFAULT_POLL_BUDGET)
 }
 
+/// The outcome of a successful [`bring_up_boot_input`]: the enumerated
+/// controller and the discovered child node published into the tree.
+///
+/// The [`UsbDevice`] is left pointed at the enumerated device's slot — it
+/// is a [`rustos_abi::driver::input::ReportSource`] the composing host
+/// drains (in the in-kernel transition, the report-pump kthread; after the
+/// `plans/PI.md` B5 flip, the user-space `usb_kbd` driver that binds the
+/// emitted `node`). The `node` is the same value already handed to
+/// [`DriverHost::emit_node`], returned so the host can re-match it against
+/// the driver catalogue and admit the matched HID driver through the
+/// signed load gate before any input flows (`plans/PI.md` P10 5c-ii).
+pub struct EnumeratedBootInput {
+    /// The started controller, pointed at the enumerated device's slot.
+    pub device: UsbDevice<RegisterWindow, DmaSlab>,
+    /// The enumerated device as a discovered child [`HwNode`], carrying
+    /// its register-window and DMA `HwResource` grant requests.
+    pub node: HwNode,
+}
+
+/// Autonomous bootstrap-floor entry: bring the discovered xHCI controller
+/// online, enumerate the connected boot input device, and publish it into
+/// the hardware tree as a bindable child [`HwNode`] (`AGENTS.md` §18.6 /
+/// `plans/PI.md` Increment C / driver-traits "Autonomous floor bring-up
+/// entry").
+///
+/// `register` is *reactive* (`AGENTS.md` §8): the host instantiates the
+/// driver against an already-discovered node. This entry is the
+/// *proactive* floor counterpart — the kernel's bootstrap-floor catalogue
+/// drives it before any node for the device behind the controller exists,
+/// so it must itself enumerate that device and emit it. It runs the full
+/// chain over the [`DriverHost`] contract alone (no `kernel/*` dependency,
+/// `AGENTS.md` §17.4): [`map_controller`] (mapping the BAR through
+/// [`DriverHost::mmio_mapper`] and carving DMA through
+/// [`DriverHost::dma_host`]), [`Xhci::open`] + [`UsbDevice::start`],
+/// [`UsbDevice::enumerate_boot_keyboard`] (which transparently descends one
+/// tier through an onboard hub, `AGENTS.md` §2.2), and finally
+/// [`DriverHost::emit_node`] of the enumerated device.
+///
+/// This crate stays board-neutral (`AGENTS.md` §2.20): it never names the
+/// VL805/BCM2711. The PCIe link training and the device-specific firmware
+/// reload are the PCIe driver's job (`drivers/bus/pcie_brcm`); the caller
+/// hands this entry an already-trained [`PciBus`] and the discovered
+/// `dma_aperture_top` / `outbound_window` (see [`open_discovered`]).
+///
+/// # Emitted grants — no ambient authority
+///
+/// The emitted `node` carries exactly the two [`HwResource`] grant
+/// *requests* the matched downstream driver needs and no more
+/// (`AGENTS.md` §4 / §18.3):
+///
+/// * an [`HwResource::mmio`] of the controller's **already-assigned** xHCI
+///   register BAR (the window [`map_controller`] mapped — its CPU-physical
+///   base and length), so the matched user-space driver re-maps the live
+///   BAR rather than re-training the bus; and
+/// * an [`HwResource::dma`] declaring the device-visible reachability bound
+///   (`dma_aperture_top`) and the [`XHCI_DMA_BYTES`] region size the
+///   matched driver carves for its own rings.
+///
+/// `parent_id`/`node_id` place the child under the controller's discovered
+/// hardware-tree node; the node↔driver bind resolves on the node's match
+/// keys, not its ids (`AGENTS.md` §18.3).
+///
+/// # Errors
+///
+/// Every failure is fail-closed (`AGENTS.md` §5.4); nothing is left
+/// half-configured or half-published:
+///
+/// * any error of [`map_controller`] (capability/facility checks, the DMA
+///   carve and its aperture bound, BAR assignment and mapping),
+/// * any error of [`Xhci::open`] / [`UsbDevice::start`] (the controller
+///   does not decode or never runs),
+/// * [`DriverError::NotFound`] from [`UsbDevice::enumerate_boot_keyboard`]
+///   for an empty hub, or [`UsbDevice::describe_device`] if no HID
+///   interface was enumerated,
+/// * [`DriverError::NoSpace`] if the node cannot carry its grant requests,
+///   and
+/// * any error of [`DriverHost::emit_node`] (the host fails the tree
+///   mutation closed).
+///
+/// # Capabilities
+///
+/// Requires [`CapabilityId::MMIO_MAP`] (the BAR) and the host's DMA
+/// capability (the carve), both re-checked host-side at each
+/// map/allocation; emitting the node is gated by the host's own tree
+/// mutation check (`AGENTS.md` §5.4).
+pub fn bring_up_boot_input(
+    host: &dyn DriverHost,
+    bus: &dyn PciBus,
+    dma_aperture_top: u64,
+    outbound_window: (u64, u64),
+    delay: &dyn Delay,
+    parent_id: u32,
+    node_id: u32,
+) -> Result<EnumeratedBootInput, DriverError> {
+    let mapped = map_controller(host, bus, dma_aperture_top, outbound_window)?;
+    // Capture the controller's BAR window span before the window is moved
+    // into the engine: it becomes the matched downstream driver's register
+    // grant (the live, already-assigned BAR, not a fresh assignment).
+    let bar_base = mapped.window.phys_base();
+    let bar_len = mapped.window.len() as u64;
+    let xhci = Xhci::open(mapped.window)?;
+    let mut device = UsbDevice::start(xhci, mapped.dma, DEFAULT_POLL_BUDGET)?;
+    device.enumerate_boot_keyboard(delay)?;
+    let mut node = device.describe_device(parent_id, node_id)?;
+    node.push_resource(HwResource::mmio(bar_base, bar_len))
+        .map_err(|_| DriverError::NoSpace)?;
+    node.push_resource(HwResource::dma(dma_aperture_top, XHCI_DMA_BYTES as u64))
+        .map_err(|_| DriverError::NoSpace)?;
+    host.emit_node(node)?;
+    Ok(EnumeratedBootInput { device, node })
+}
+
 /// The discovered xHCI controller's mapped register BAR and its carved,
 /// in-aperture device-shared DMA region — the inputs [`Xhci::open`] and
 /// [`UsbDevice::start`] consume.
@@ -167,7 +282,12 @@ pub fn map_controller(
         return Err(DriverError::PermissionDenied);
     }
     let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(DriverError::Unsupported)?;
-    let dma_host = host.virtio_host().ok_or(DriverError::Unsupported)?;
+    // Carve DMA through the bus-neutral `dma_host()` facility, not the
+    // virtio-shaped `virtio_host()`: an xHCI host controller is not a
+    // virtio device, so it allocates its device-shared rings through the
+    // generic allocation contract (`AGENTS.md` §2.2 — the C-1 split that
+    // gave a non-virtio driver a DMA seam of its own).
+    let dma_host: &dyn DmaHost = host.dma_host().ok_or(DriverError::Unsupported)?;
 
     let bdf = find_usb_controller(bus)?;
 

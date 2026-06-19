@@ -27,8 +27,7 @@
 //! live link training and a keyboard driving the login are metal-only.
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::driver::dma::DmaSlab;
-use rustos_abi::driver::virtio::VirtioHost;
+use rustos_abi::driver::dma::{DmaHost, DmaSlab};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, HwNode, HwResourceKind, MmioMapper, PciBus,
@@ -1684,14 +1683,13 @@ pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError
 /// A [`DriverHost`] view for the in-kernel VL805 chain: the bus-driver
 /// task's capabilities plus the kernel's capability-gated MMIO mapper and
 /// per-driver DMA host. Every [`MmioMapper::map_window`] /
-/// [`DmaHost::alloc_dma_zeroed`](rustos_abi::driver::DmaHost::alloc_dma_zeroed)
-/// call is re-checked kernel-side against
+/// [`DmaHost::alloc_dma_zeroed`] call is re-checked kernel-side against
 /// those capabilities (`AGENTS.md` §5.4), so the host cannot widen its own
 /// authority.
 pub struct ChainHost<'a> {
     capabilities: CapabilitySet,
     mmio: &'a dyn MmioMapper,
-    dma: &'a dyn VirtioHost,
+    dma: &'a dyn DmaHost,
 }
 
 impl<'a> ChainHost<'a> {
@@ -1701,7 +1699,7 @@ impl<'a> ChainHost<'a> {
     pub fn new(
         capabilities: CapabilitySet,
         mmio: &'a dyn MmioMapper,
-        dma: &'a dyn VirtioHost,
+        dma: &'a dyn DmaHost,
     ) -> Self {
         Self {
             capabilities,
@@ -1722,7 +1720,7 @@ impl DriverHost for ChainHost<'_> {
         DriverKind::InKernel
     }
 
-    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
         Some(self.dma)
     }
 
@@ -2305,10 +2303,6 @@ mod tests {
             Ok(unsafe { DmaSlab::from_leaked(0x1000_0000, ptr, size, PoolId::MOCK, 0) })
         }
     }
-    impl VirtioHost for MockDmaHost {
-        fn notify_wait(&self, _queue_index: u16) {}
-    }
-
     fn caps(set: &[CapabilityId]) -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         for c in set {
@@ -2360,7 +2354,7 @@ mod tests {
         assert!(host.has_capability(CapabilityId::MEM_DMA));
         assert!(!host.has_capability(CapabilityId::DRV_LOAD));
         assert_eq!(host.kind(), DriverKind::InKernel);
-        assert!(host.virtio_host().is_some());
+        assert!(host.dma_host().is_some());
         assert!(host.mmio_mapper().is_some());
     }
 

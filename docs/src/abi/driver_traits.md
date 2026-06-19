@@ -96,7 +96,7 @@ floor bring-up** consumes (see below).
 `register(host)` is *reactive* — the host calls it to instantiate a
 driver against an already-discovered node. The bootstrap-floor bus
 chain, by contrast, must run **before** any node for the devices behind
-it exists: it has to train the PCIe root complex, reload the VL805
+it exists: it has to train the PCIe root complex, reload the device's
 firmware over the mailbox, bring up the xHCI controller, enumerate the
 boot device, and only then `emit_node()` the discovered children. That
 work is exposed as a distinct, documented floor entry point a compiled-in
@@ -108,6 +108,30 @@ register window), `dma_host()` (stage controller DMA), `mailbox()`
 (firmware reload), and `emit_node()` (publish the enumerated child),
 keeping the floor driver free of ambient authority and of any board
 name in the generic layers above it.
+
+The chain is split across **two** floor crates, each strictly its own
+device, with no driver naming another (`AGENTS.md` §8 / §17.4): the
+board-specific PCIe / firmware steps live in the device's own
+`drivers/bus/pcie_brcm` (the §2.20 carve-out that may know the BCM2711 /
+VL805 — including the firmware reload, which is a VL805-specific mailbox
+operation and must **not** leak into the generic USB layer), while the
+board-neutral xHCI bring-up, enumeration, and HID-node emission live in
+`drivers/bus/usb`. The kernel's bootstrap-floor catalogue sequences the
+two autonomous entries and the hardware tree decouples them, so neither
+crate depends on the other.
+
+The board-neutral USB half is the landed
+`rustos_drv_bus_usb::wiring::bring_up_boot_input`: it maps the controller
+BAR (`mmio_mapper()`), carves the device-shared DMA region (`dma_host()`
+— a USB host controller is not virtio, so it uses the bus-neutral DMA
+seam, not `virtio_host()`), brings the controller up, enumerates the boot
+device, augments the enumerated HID `HwNode` with its xHCI-BAR
+(`HwResource::mmio`) and DMA (`HwResource::dma`) grant *requests* — exactly
+what the matched user-space `usb_kbd` driver receives, no more
+(`AGENTS.md` §4) — and `emit_node()`s it. QEMU models no Pi USB
+controller, so its host tests prove the composition and its fail-closed
+paths up to the controller hand-off; the live enumerate→emit path is the
+on-metal acceptance item.
 
 `virtio_host(&self) -> Option<&dyn VirtioHost>` is an `abi-v1`
 *internal* extension added at Stage 4.D Item 0-tail. A virtio-class

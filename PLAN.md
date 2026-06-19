@@ -1193,16 +1193,39 @@ order (one fully-gated increment each):
          `#[repr(C)]`/syscall/error/cap change ⇒ no C-header drift. Docs:
          `docs/src/abi/driver_traits.md`.
        - **C-2 — relocate the autonomous bring-up into the floor `drivers/bus/*`
-         — NEXT (metal-only).** Move the PCIe-RC train + config-scan + BAR-assign
-         + xHCI-node `emit_node()` into `drivers/bus/pcie_brcm`, and the xHCI
-         bring-up + firmware reload (`mailbox()`) + enumeration + HID-node
-         `emit_node()` into `drivers/bus/usb`, each consuming the C-1 facilities
-         and talking to the kernel only through `DriverHost` (no drivers→drivers
-         edge — the kernel sequences the two autonomous entries and the hwtree
-         decouples them, §18.1/§17.4). The scaffold pump stays live until B5.
-         `raspi4b`/QEMU cannot model the VL805, so the acceptance is a real-Pi
-         UART log: the floor chain trains PCIe, reloads firmware, enumerates, and
-         emits a *bindable* HID node, with the scaffold still delivering keys.
+         — IN PROGRESS (metal-only acceptance).** Each driver is strictly its own
+         device with no drivers→drivers edge: the board-specific PCIe-RC train +
+         config-scan + BAR-assign **and the VL805 firmware reload** (a
+         VL805-specific `mailbox()` operation — it stays in the device's own
+         crate per §2.20 and must **not** leak into the generic USB layer) live in
+         `drivers/bus/pcie_brcm`; the board-neutral xHCI bring-up + enumeration +
+         HID-node `emit_node()` live in `drivers/bus/usb`. The kernel's
+         bootstrap-floor catalogue sequences the two autonomous entries and the
+         hwtree decouples them (§18.1/§17.4); each consumes only the C-1
+         facilities through `DriverHost`. The scaffold pump stays live until B5
+         (option B — land the floor entries first, then a single isolated kernel
+         flip the operator metal-verifies).
+         - **USB half — DONE (host-proven).** `rustos_drv_bus_usb::wiring::`
+           `bring_up_boot_input` maps the controller BAR (`mmio_mapper()`),
+           carves DMA via the bus-neutral `dma_host()` (an xHCI controller is not
+           virtio — `map_controller` was moved off `virtio_host()` accordingly,
+           §2.2), brings the controller up, enumerates the boot device, augments
+           the HID `HwNode` with its xHCI-BAR (`HwResource::mmio`) + DMA
+           (`HwResource::dma`) grant requests, and `emit_node()`s it. The kernel
+           `ChainHost` now exposes `dma_host()` so the live scaffold path keeps
+           working unchanged. Host tests prove the composition + fail-closed
+           paths to the controller hand-off (the inert window faults at
+           `Xhci::open`); the live enumerate→emit is the metal item.
+         - **PCIe half — TODO.** `drivers/bus/pcie_brcm` autonomous entry:
+           `pcie_bringup_from_node` + link train + the VL805 firmware reload over
+           `host.mailbox()` (board specifics via `lib/vcmailbox`).
+         - **Kernel flip — TODO.** `keyboard_service` host gains `mailbox()` +
+           `emit_node()`; it sequences the two floor entries in place of the
+           in-kernel `bring_up_keyboard` orchestration, which is then deleted
+           (§2.14); `spawn_pump` stays the live keyboard until B5. Acceptance is a
+           real-Pi UART log: the floor chain trains PCIe, reloads firmware,
+           enumerates, and emits a *bindable* HID node, with the scaffold still
+           delivering keys (`raspi4b`/QEMU cannot model the VL805).
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
        (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), lay the signed

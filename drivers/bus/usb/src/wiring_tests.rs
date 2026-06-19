@@ -25,7 +25,18 @@ use rustos_abi::{
     MmioMapper, PciBus, RegisterWindow,
 };
 
-use super::{map_controller, open_discovered, USB_CONTROLLER_CLASS};
+use super::{bring_up_boot_input, map_controller, open_discovered, USB_CONTROLLER_CLASS};
+
+/// A no-op [`Delay`] for the host tests (QEMU models no controller
+/// timing; the live waits are the metal-acceptance item).
+struct NoDelay;
+
+impl rustos_abi::Delay for NoDelay {
+    fn delay_us(&self, _us: u32) {}
+    fn now_us(&self) -> u64 {
+        0
+    }
+}
 
 /// Device-visible base the DMA host hands out for an in-aperture carve.
 const DMA_PHYS_IN_APERTURE: u64 = 0x1000_0000;
@@ -185,11 +196,13 @@ impl PciBus for MockPciBus {
     }
 }
 
-/// A host granting `MMIO_MAP`, with an optional mapper and DMA host.
+/// A host granting `MMIO_MAP`, with an optional mapper and DMA host, that
+/// records the last node handed to [`DriverHost::emit_node`].
 struct MockHost {
     mmio_map: bool,
     mapper: Option<MockMapper>,
     dma: Option<MockDmaHost>,
+    emitted: Cell<Option<HwNode>>,
 }
 
 impl DriverHost for MockHost {
@@ -209,8 +222,17 @@ impl DriverHost for MockHost {
         self.mapper.as_ref().map(|m| m as &dyn MmioMapper)
     }
 
+    fn dma_host(&self) -> Option<&dyn DmaHost> {
+        self.dma.as_ref().map(|d| d as &dyn DmaHost)
+    }
+
     fn virtio_host(&self) -> Option<&dyn VirtioHost> {
         self.dma.as_ref().map(|d| d as &dyn VirtioHost)
+    }
+
+    fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
+        self.emitted.set(Some(node));
+        Ok(())
     }
 }
 
@@ -219,6 +241,7 @@ fn host_with(phys: u64) -> MockHost {
         mmio_map: true,
         mapper: Some(MockMapper { grant: true }),
         dma: Some(MockDmaHost { phys, fail: false }),
+        emitted: Cell::new(None),
     }
 }
 
@@ -231,6 +254,7 @@ fn open_discovered_requires_the_mmio_capability() {
             phys: DMA_PHYS_IN_APERTURE,
             fail: false,
         }),
+        emitted: Cell::new(None),
     };
     let bus = MockPciBus::usb();
     assert_eq!(
@@ -249,6 +273,7 @@ fn open_discovered_requires_a_mapper() {
             phys: DMA_PHYS_IN_APERTURE,
             fail: false,
         }),
+        emitted: Cell::new(None),
     };
     let bus = MockPciBus::usb();
     assert_eq!(
@@ -263,6 +288,7 @@ fn open_discovered_requires_a_dma_host() {
         mmio_map: true,
         mapper: Some(MockMapper { grant: true }),
         dma: None,
+        emitted: Cell::new(None),
     };
     let bus = MockPciBus::usb();
     assert_eq!(
@@ -311,6 +337,7 @@ fn open_discovered_propagates_a_dma_allocation_failure() {
             phys: DMA_PHYS_IN_APERTURE,
             fail: true,
         }),
+        emitted: Cell::new(None),
     };
     let bus = MockPciBus::usb();
     assert_eq!(
@@ -363,5 +390,101 @@ fn open_discovered_enables_mastering_and_reaches_the_controller() {
         bus.assigned.get(),
         Some(OUTBOUND_WINDOW),
         "the outbound window must reach assign_bar before the BAR is mapped"
+    );
+}
+
+/// Tree-local ids the autonomous-entry tests place the emitted child
+/// under; the node↔driver bind resolves on match keys, not ids
+/// (`AGENTS.md` §18.3).
+const PARENT_NODE_ID: u32 = 7;
+const CHILD_NODE_ID: u32 = 8;
+
+#[test]
+fn bring_up_boot_input_requires_the_mmio_capability() {
+    // The autonomous floor entry shares `map_controller`'s capability
+    // gate: with `MMIO_MAP` ungranted it fails closed before any
+    // hardware is touched and nothing is published to the tree.
+    let host = MockHost {
+        mmio_map: false,
+        mapper: Some(MockMapper { grant: true }),
+        dma: Some(MockDmaHost {
+            phys: DMA_PHYS_IN_APERTURE,
+            fail: false,
+        }),
+        emitted: Cell::new(None),
+    };
+    let bus = MockPciBus::usb();
+    assert_eq!(
+        bring_up_boot_input(
+            &host,
+            &bus,
+            APERTURE_TOP,
+            OUTBOUND_WINDOW,
+            &NoDelay,
+            PARENT_NODE_ID,
+            CHILD_NODE_ID,
+        )
+        .err(),
+        Some(DriverError::PermissionDenied)
+    );
+    assert!(!bus.master_enabled.get());
+    assert!(
+        host.emitted.get().is_none(),
+        "no node may be published when the bring-up fails closed"
+    );
+}
+
+#[test]
+fn bring_up_boot_input_requires_a_dma_host() {
+    let host = MockHost {
+        mmio_map: true,
+        mapper: Some(MockMapper { grant: true }),
+        dma: None,
+        emitted: Cell::new(None),
+    };
+    let bus = MockPciBus::usb();
+    assert_eq!(
+        bring_up_boot_input(
+            &host,
+            &bus,
+            APERTURE_TOP,
+            OUTBOUND_WINDOW,
+            &NoDelay,
+            PARENT_NODE_ID,
+            CHILD_NODE_ID,
+        )
+        .err(),
+        Some(DriverError::Unsupported)
+    );
+    assert!(host.emitted.get().is_none());
+}
+
+#[test]
+fn bring_up_boot_input_reaches_the_controller_then_fails_closed() {
+    // Everything valid up to the controller: the entry maps the BAR and
+    // carves DMA, then hands the (inert, zeroed) window to the engine,
+    // which fails closed on the implausible capability block — exactly
+    // the metal boundary. Because enumeration never succeeds over the
+    // inert window, no child node is emitted (fail closed, `AGENTS.md`
+    // §5.4); the full enumerate→emit path is the on-metal acceptance item.
+    let host = host_with(DMA_PHYS_IN_APERTURE);
+    let bus = MockPciBus::usb();
+    let result = bring_up_boot_input(
+        &host,
+        &bus,
+        APERTURE_TOP,
+        OUTBOUND_WINDOW,
+        &NoDelay,
+        PARENT_NODE_ID,
+        CHILD_NODE_ID,
+    );
+    assert_eq!(result.err(), Some(DriverError::DeviceFault));
+    assert!(
+        bus.master_enabled.get(),
+        "the controller was reached (bus mastering enabled) before the fault"
+    );
+    assert!(
+        host.emitted.get().is_none(),
+        "a node is published only after a successful enumeration"
     );
 }
