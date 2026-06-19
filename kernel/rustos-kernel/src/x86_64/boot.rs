@@ -706,7 +706,12 @@ fn try_boot(
     .with_spawn(
         &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::x86_64::spawn_producer::X86_64_PROCESS_SPAWN,
-    );
+    )
+    // Serve the discovered hardware tree (`AGENTS.md` §18.1 / §18.4): the
+    // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
+    // `HW_TREE`, so the user-space device manager observes the same
+    // inventory the kernel discovered (Design D).
+    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE);
     boot_info
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;

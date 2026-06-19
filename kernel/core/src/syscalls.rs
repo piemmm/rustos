@@ -107,6 +107,7 @@ use crate::devres::{
     NULL_MMIO_MAP_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
+use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::memmap::{MemMap, NULL_MEM_MAP};
 use crate::procwait::{ProcessWait, NULL_PROCESS_WAIT};
@@ -269,6 +270,13 @@ where
     /// producer through [`Self::with_dma_alloc_facility`]. Held as a `'static`
     /// borrow, exactly like the MMIO-map producer.
     dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
+    /// The kernel-held discovered hardware tree the `hw_tree_read` /
+    /// `hw_tree_wait` syscalls serve (`AGENTS.md` §16.6 / §18.1 / §18.4,
+    /// Design D). Defaults to [`NULL_HW_TREE`] (fail closed with
+    /// [`Errno::NotImplemented`], `AGENTS.md` §2.9); the boot path installs
+    /// the real store through [`Self::with_hw_tree`] once the inventory is
+    /// seeded. Held as a `'static` borrow, exactly like the users database.
+    hw_tree: &'static (dyn HwTreeSource + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -360,6 +368,11 @@ where
             // `NotImplemented` with no DMA facility) — never carving against
             // an ungranted constraint (`AGENTS.md` §2.9 / §5.4).
             dma_alloc_facility: &NULL_DMA_ALLOC_FACILITY,
+            // Hardware-tree store unwired until the boot path seeds the
+            // discovered inventory and installs the holder (`AGENTS.md`
+            // §18.1): `hw_tree_read` / `hw_tree_wait` fail closed with
+            // `NotImplemented` (`AGENTS.md` §2.9).
+            hw_tree: &NULL_HW_TREE,
         }
     }
 
@@ -470,6 +483,21 @@ where
     #[must_use]
     pub const fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.users_db = users_db;
+        self
+    }
+
+    /// Install the discovered hardware-tree store the `hw_tree_read` /
+    /// `hw_tree_wait` syscalls serve, consuming and returning `self`
+    /// (`AGENTS.md` §18.1 / §18.4).
+    ///
+    /// Called once by the boot path after it seeds the inventory. Until
+    /// this is called the handler holds [`NULL_HW_TREE`] and both syscalls
+    /// fail closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9). The
+    /// store must be `'static`: it lives for the lifetime of the running
+    /// kernel, exactly like the users database.
+    #[must_use]
+    pub const fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
+        self.hw_tree = hw_tree;
         self
     }
 
@@ -1806,6 +1834,75 @@ where
             None => Err(Errno::BadAddress),
         }
     }
+
+    fn hw_tree_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // The dispatcher already checked `CAP_SYSINFO_HW` and that `buf` is
+        // a non-null `UserPtr`. Take one wire-encoded snapshot — header +
+        // nodes, read together so the reported generation matches the
+        // nodes (`AGENTS.md` §18.4). A build with no store wired fails
+        // closed with `NotImplemented` (`AGENTS.md` §2.9).
+        let blob = self.hw_tree.snapshot()?;
+
+        // The whole snapshot or nothing: the inventory is never truncated
+        // to fit an undersized buffer — the caller grows its buffer and
+        // retries (`AGENTS.md` §2.9 / §24.1).
+        if blob.len() > len {
+            return Err(Errno::BufferTooSmall);
+        }
+
+        // Copy the bytes out through the validated `copy_to_user` boundary
+        // (`AGENTS.md` §5.4). A faulting pointer — or a caller with no
+        // registered address space — fails closed with `BadAddress`,
+        // never leaking which case occurred (§19.1).
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &blob)
+        }) {
+            Some(Ok(())) => Ok(blob.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn hw_tree_wait(
+        &self,
+        caller: &CallerContext<'_>,
+        last_generation: u64,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_SYSINFO_HW`. Block the caller
+        // until the store's generation differs from the one it last
+        // observed, or the deadline elapses — the cooperative
+        // poll-and-yield shape `KernelProcessWait::wait` and the IRQ wait
+        // loop use, never a busy spin (`AGENTS.md` §2.1). The deadline is
+        // computed once from the first clock reading with a saturating add
+        // so `u64::MAX` does not wrap it back to a tiny value (`AGENTS.md`
+        // §5.4.5 — fail closed); `monotonic_ns` is non-decreasing per CPU
+        // and the handler does not migrate mid-wait.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
+        loop {
+            // A build with no store wired fails closed with
+            // `NotImplemented` (`AGENTS.md` §2.9), checked each iteration so
+            // the inert interface never spins.
+            let generation = self.hw_tree.generation()?;
+            if generation != last_generation {
+                return Ok(0);
+            }
+            if self.arch.monotonic_ns(cpu) >= deadline_ns {
+                return Err(Errno::TimedOut);
+            }
+            // Yield the quantum and re-poll on the next dispatch. An
+            // `InvalidState` (the calling task is not marked Running — only
+            // in host tests that do not drive a real dispatch loop) is a
+            // benign continue, exactly as `SyscallIrqWaiter::yield_now`
+            // treats it; a vanished task fails closed (`AGENTS.md` §5.4.5).
+            match self.sched.yield_current(caller.task_id.0) {
+                Ok(()) | Err(SchedError::InvalidState) => {}
+                Err(SchedError::NoSuchTask) => return Err(Errno::NotFound),
+                Err(_) => return Err(Errno::OutOfRange),
+            }
+        }
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -2247,6 +2344,20 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.handlers = self.handlers.with_users_db(users_db);
+        self
+    }
+
+    /// Install the discovered hardware-tree store the `hw_tree_read` /
+    /// `hw_tree_wait` syscalls serve, consuming and returning `self`
+    /// (`AGENTS.md` §18.1 / §18.4).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_hw_tree`]:
+    /// called once by the boot path after it seeds the discovered
+    /// inventory. A boot path that seeds no tree simply never calls it and
+    /// both syscalls stay fail-closed (`AGENTS.md` §2.9).
+    #[must_use]
+    pub fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
+        self.handlers = self.handlers.with_hw_tree(hw_tree);
         self
     }
 
@@ -7758,5 +7869,300 @@ mod tests {
         )
         .with_users_db(source);
         assert_eq!(h.users_db_read(&ctx, 0x1000, 4096), Err(Errno::BadAddress));
+    }
+
+    /// A test [`HwTreeSource`] holding a fixed generation and a
+    /// pre-encoded snapshot blob.
+    struct StaticHwTree {
+        generation: u64,
+        blob: alloc::vec::Vec<u8>,
+    }
+
+    impl HwTreeSource for StaticHwTree {
+        fn generation(&self) -> Result<u64, Errno> {
+            Ok(self.generation)
+        }
+        fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(self.blob.clone())
+        }
+    }
+
+    /// Build a wire-encoded `[HwTreeHeader][HwNode; n]` snapshot at
+    /// `generation` from `nodes`, exactly as the production source does.
+    fn encode_hw_snapshot(generation: u64, nodes: &[rustos_abi::HwNode]) -> alloc::vec::Vec<u8> {
+        let header = rustos_abi::HwTreeHeader::new(generation, nodes.len() as u64).to_le_bytes();
+        let mut blob = alloc::vec::Vec::with_capacity(header.len() + nodes.len() * 572);
+        blob.extend_from_slice(&header);
+        for node in nodes {
+            blob.extend_from_slice(&node.to_le_bytes());
+        }
+        blob
+    }
+
+    /// `hw_tree_read` copies the wire-encoded snapshot out to the caller
+    /// and returns its exact length (`AGENTS.md` §18.4).
+    #[test]
+    fn hw_tree_read_copies_the_snapshot_out_to_caller() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let nodes = [
+            rustos_abi::HwNode::new(1, rustos_abi::HW_NODE_ROOT, rustos_abi::HwDeviceClass::Root),
+            rustos_abi::HwNode::new(2, 1, rustos_abi::HwDeviceClass::Bus),
+        ];
+        let blob = encode_hw_snapshot(7, &nodes);
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
+            generation: 7,
+            blob: blob.clone(),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+
+        assert_eq!(h.hw_tree_read(&ctx, 0x1000, 4096), Ok(blob.len() as u64));
+        // The exact bytes landed at the caller's pointer, and the header
+        // reports the same generation and node count.
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; blob.len()];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(delivered, blob);
+        let header = rustos_abi::HwTreeHeader::from_bytes(&delivered).expect("header");
+        assert_eq!(header.generation(), 7);
+        assert_eq!(header.node_count(), 2);
+    }
+
+    /// With no store wired `hw_tree_read` keeps `NULL_HW_TREE` and fails
+    /// closed with `NotImplemented` (`AGENTS.md` §2.9).
+    #[test]
+    fn hw_tree_read_without_store_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.hw_tree_read(&ctx, 0x1000, 4096),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    /// An undersized buffer is refused whole with `BufferTooSmall` — the
+    /// inventory is never truncated (`AGENTS.md` §2.9) — and nothing is
+    /// copied to the caller.
+    #[test]
+    fn hw_tree_read_undersized_buffer_is_buffer_too_small() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let nodes = [rustos_abi::HwNode::new(
+            1,
+            rustos_abi::HW_NODE_ROOT,
+            rustos_abi::HwDeviceClass::Root,
+        )];
+        let blob = encode_hw_snapshot(1, &nodes);
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
+            generation: 1,
+            blob: blob.clone(),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+
+        assert_eq!(
+            h.hw_tree_read(&ctx, 0x1000, blob.len() - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        // Nothing was copied: the caller's page still reads zero.
+        let untouched = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; 8];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(untouched, [0u8; 8]);
+    }
+
+    /// A caller with no registered address space fails closed with
+    /// `BadAddress`, like every other copy-out path (§19.1).
+    #[test]
+    fn hw_tree_read_unregistered_caller_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let blob = encode_hw_snapshot(1, &[]);
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
+            generation: 1,
+            blob,
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(h.hw_tree_read(&ctx, 0x1000, 4096), Err(Errno::BadAddress));
+    }
+
+    /// `hw_tree_wait` returns immediately with `Ok(0)` when the store's
+    /// generation already differs from the one the caller observed — the
+    /// tree changed, so re-read and re-match (`AGENTS.md` §18.4).
+    #[test]
+    fn hw_tree_wait_returns_ok_when_generation_already_advanced() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
+            generation: 5,
+            blob: encode_hw_snapshot(5, &[]),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        // Last observed generation 4 != current 5: wake immediately.
+        assert_eq!(h.hw_tree_wait(&ctx, 4, u64::MAX), Ok(0));
+    }
+
+    /// `hw_tree_wait` with a zero timeout and an unchanged generation
+    /// returns `TimedOut` without busy-spinning (`AGENTS.md` §2.1).
+    #[test]
+    fn hw_tree_wait_times_out_when_generation_unchanged() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
+            generation: 3,
+            blob: encode_hw_snapshot(3, &[]),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        // Caller already observed generation 3; with a zero deadline and no
+        // change, the wait reports the timeout.
+        assert_eq!(h.hw_tree_wait(&ctx, 3, 0), Err(Errno::TimedOut));
+    }
+
+    /// With no store wired `hw_tree_wait` fails closed with
+    /// `NotImplemented` rather than spinning (`AGENTS.md` §2.9).
+    #[test]
+    fn hw_tree_wait_without_store_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.hw_tree_wait(&ctx, 0, u64::MAX),
+            Err(Errno::NotImplemented)
+        );
     }
 }

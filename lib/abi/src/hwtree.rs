@@ -920,6 +920,77 @@ impl HwNode {
     }
 }
 
+/// Fixed-size header prefixing a [`crate::SyscallNumber::HW_TREE_READ`]
+/// reply (`AGENTS.md` §18.1 / §18.4).
+///
+/// The read syscall copies out `[HwTreeHeader][HwNode; node_count]`. The
+/// header tells the reader two things it cannot otherwise know from the
+/// raw byte count: the store's current [`generation`](Self::generation) —
+/// the value it later passes to [`crate::SyscallNumber::HW_TREE_WAIT`] to
+/// block until the tree next changes — and how many
+/// [`HwNode`] records follow ([`node_count`](Self::node_count)).
+///
+/// [`generation`]: Self::generation
+/// [`node_count`]: Self::node_count
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HwTreeHeader {
+    generation: u64,
+    node_count: u64,
+}
+
+impl HwTreeHeader {
+    /// Encoded size on the wire: two little-endian `u64`s.
+    pub const WIRE_LEN: usize = 16;
+
+    /// Build a header naming the store `generation` and the number of
+    /// [`HwNode`] records that follow.
+    #[must_use]
+    pub const fn new(generation: u64, node_count: u64) -> Self {
+        Self {
+            generation,
+            node_count,
+        }
+    }
+
+    /// The store generation this snapshot was taken at.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The number of [`HwNode`] records following the header.
+    #[must_use]
+    pub const fn node_count(&self) -> u64 {
+        self.node_count
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.generation);
+        put_u64(&mut out, 8, self.node_count);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is shorter than
+    /// [`Self::WIRE_LEN`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(Self {
+            generation: read_u64(bytes, 0),
+            node_count: read_u64(bytes, 8),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,5 +1381,25 @@ mod tests {
         assert_eq!(HwResource::WIRE_LEN, 32);
         assert_eq!(GrantedResource::WIRE_LEN, 40);
         assert_eq!(HwNode::WIRE_LEN, 572);
+        assert_eq!(HwTreeHeader::WIRE_LEN, 16);
+    }
+
+    #[test]
+    fn tree_header_round_trips() {
+        let header = HwTreeHeader::new(0x1122_3344_5566_7788, 3);
+        assert_eq!(header.generation(), 0x1122_3344_5566_7788);
+        assert_eq!(header.node_count(), 3);
+
+        let bytes = header.to_le_bytes();
+        assert_eq!(bytes.len(), HwTreeHeader::WIRE_LEN);
+        assert_eq!(HwTreeHeader::from_bytes(&bytes), Ok(header));
+    }
+
+    #[test]
+    fn tree_header_decode_rejects_short() {
+        assert_eq!(
+            HwTreeHeader::from_bytes(&[0u8; 8]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 }

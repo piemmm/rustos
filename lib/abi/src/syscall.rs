@@ -418,6 +418,51 @@ impl SyscallNumber {
     /// `CAP_MMIO_MAP` / `CAP_MEM_DMA` the matched driver also holds, and the
     /// kernel re-checks ownership when they are presented.
     pub const RESOURCE_GRANTS: Self = Self(28);
+    /// Copy the discovered hardware tree (`AGENTS.md` §18.1) out to the
+    /// calling task (the read-only System Information API hardware view,
+    /// §16.6 / §18.4).
+    ///
+    /// Arguments: `buf: *mut u8` (a non-null user pointer) and
+    /// `len: usize` (the buffer's capacity). Returns the number of bytes
+    /// copied: a fixed [`crate::hwtree::HwTreeHeader`] (the store's current
+    /// generation and the node count) followed by that many
+    /// [`crate::hwtree::HwNode`] records, each
+    /// [`crate::hwtree::HwNode::WIRE_LEN`] bytes. The caller parses the
+    /// header to learn the generation (the value it passes to
+    /// [`SyscallNumber::HW_TREE_WAIT`]) and the node count.
+    ///
+    /// Gated by [`crate::CapabilityId::SYSINFO_HW`]: the hardware inventory
+    /// is a privileged global view (`AGENTS.md` §16.6 / §18.4), never an
+    /// ambient read. A buffer too small for the whole snapshot fails closed
+    /// with [`crate::Errno::BufferTooSmall`] — the inventory is never
+    /// truncated (`AGENTS.md` §2.9); the caller grows its buffer and retries
+    /// (the node count is a discovered capacity, not a fixed ceiling —
+    /// `AGENTS.md` §24.1). A build with no hardware-tree source wired fails
+    /// closed with
+    /// [`crate::Errno::NotImplemented`]. There is no `/proc`/`/sys` device
+    /// tree and no path that bypasses this capability check
+    /// (`AGENTS.md` §16.1 / §18.4).
+    pub const HW_TREE_READ: Self = Self(29);
+    /// Block the calling task until the hardware tree changes past a
+    /// previously observed generation (`AGENTS.md` §18.4 — reactive
+    /// re-match and hotplug).
+    ///
+    /// Arguments: `last_generation: u64` (the generation the caller last
+    /// observed through [`SyscallNumber::HW_TREE_READ`]'s header) and
+    /// `timeout_ns: u64` (`u64::MAX` for an effectively unbounded wait).
+    /// Returns `Ok(0)` once the store's generation differs from
+    /// `last_generation` — a node was seeded, appended, or removed — so the
+    /// caller re-reads the tree and re-matches; returns
+    /// [`crate::Errno::TimedOut`] if the deadline elapses first. The kernel
+    /// blocks the caller cooperatively (re-checking the generation between
+    /// scheduler dispatches, the same shape as
+    /// [`SyscallNumber::IRQ_WAIT`] / [`SyscallNumber::WAIT`]), never
+    /// busy-spinning (`AGENTS.md` §2.1).
+    ///
+    /// Gated by [`crate::CapabilityId::SYSINFO_HW`] — the same privilege as
+    /// reading the tree. A build with no hardware-tree source wired fails
+    /// closed with [`crate::Errno::NotImplemented`].
+    pub const HW_TREE_WAIT: Self = Self(30);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -520,6 +565,10 @@ mod tests {
         assert_eq!(SyscallNumber::DISPLAY_RELEASE.as_u16(), 24);
         assert_eq!(SyscallNumber::KEYBOARD_READ.as_u16(), 25);
         assert_eq!(SyscallNumber::MMIO_MAP.as_u16(), 26);
+        assert_eq!(SyscallNumber::DMA_ALLOC.as_u16(), 27);
+        assert_eq!(SyscallNumber::RESOURCE_GRANTS.as_u16(), 28);
+        assert_eq!(SyscallNumber::HW_TREE_READ.as_u16(), 29);
+        assert_eq!(SyscallNumber::HW_TREE_WAIT.as_u16(), 30);
     }
 
     #[test]

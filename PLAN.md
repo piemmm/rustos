@@ -1439,17 +1439,43 @@ order (one fully-gated increment each):
                above through the existing cooperative yield/park seam in D2b-2b
                (§2.2 / §17.4). Host-tested (≥95% tier); no syscall/ABI yet, no
                metal device-path change.
-             - **D2b-2b — the IPC endpoint + syscalls + `devmgr` client.** Wrap
-               the D2b-1 service in a `CallEndpoint`-served request loop on the
-               parked store-service kthread (the §2.19 prerequisite the D2b-2a
-               primitive now provides); add `hw_tree_read` / `hw_tree_wait` /
-               `driver_store_load` (+ store generation counter / park) with the
-               new signed `devmgr` rxe binary as their first consumer; lay the
-               signed `devmgr` bundle into `/System`; `init` spawns it after the
-               mount; delete the in-kernel single-pass `driver_autoload` it
-               subsumes (§2.14). The `-M virt` vertical is re-pointed to prove
-               the devmgr-driven autoload end to end; the parked-kthread/EMMC2
-               interaction is a metal checklist (§0.9).
+             - **D2b-2b-B — reactive-observe foundation (DONE).** The
+               read-only side of the device manager, landed green without the
+               production launch. Adds the `hw_tree_read` (no. 29, gated
+               `CAP_SYSINFO_HW`) and `hw_tree_wait` (no. 30) `abi-v1` syscalls
+               (regenerated C header + `ros_sys_*` stubs in `lib/abi-sys`), a
+               monotonic **generation counter** on `hwtree_store::HW_TREE`
+               (bumped on seed/append) served through `HW_TREE_SOURCE` and
+               threaded into the dispatch hook by `BootInfo::with_hw_tree` (all
+               three Tier-1 boot paths install it), and the signed `devmgr` rxe
+               binary whose reactive observe loop (`read → wait → re-read`)
+               lives host-tested behind the `rustos_devmgr::HwTreeService` seam
+               (`rustos_devmgr::run`). `lib/rt` gains the `hw_tree_read`/
+               `hw_tree_wait` wrappers. Host-tested end to end (kernel handlers,
+               store + generation, rt wrappers, abi-sys stubs, the seam loop's
+               read-and-react-to-one-bump behaviour).
+             - **D2b-2b-A — production launch + true blocking park (NEXT).**
+               PID 1 `init` must NOT yet spawn `devmgr`: `hw_tree_wait` is today
+               a cooperative poll-and-`yield_current` (the established kernel
+               wait shape — `irq_wait`, `KernelProcessWait`, `BlockingConsoleRead`
+               all poll-yield; `RescheduleAction::Park` exists but is unwired
+               with no wake plumbing). A device manager waits **unbounded**, so a
+               poll-yielding `devmgr` perpetually consumes scheduler turns and
+               starves a single-CPU system (proven: spawning it timed out the
+               `spawn_session`/`root_unlock`/`autoload_input` `-M virt`
+               verticals; not spawning it keeps the matrix green — §2.1). A
+               therefore ships a **true generation-keyed park + wake**: wire
+               `RescheduleAction::Park` so `hw_tree_wait` blocks the task off the
+               run queue and `HwTreeStore::seed`/`append` (and node removal) wake
+               every waiter (with timeout integration), then have `init` spawn
+               `/System/Services/devmgr` (the registered program already exists),
+               and add the end-to-end devmgr QEMU vertical (spawn → read →
+               react to a real generation bump). Then continue the original
+               D2b-2b: the `CallEndpoint`-served `/System` file-read request loop
+               on the parked store-service kthread + `driver_store_load`, delete
+               the in-kernel single-pass `driver_autoload` it subsumes (§2.14),
+               re-point the `-M virt` autoload vertical to the devmgr path. The
+               parked-kthread/EMMC2 interaction is a metal checklist (§0.9).
        - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +

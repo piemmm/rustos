@@ -34,6 +34,7 @@ use rustos_log::{Level, Sink};
 
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::dispatch_slot::DispatchCallbackSlot;
+use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
 use crate::input_focus::{InputFocus, NULL_INPUT_FOCUS};
 use crate::spawn::{
     InitSpawn, ProcessSpawn, ProgramRegistry, EMPTY_PROGRAM_REGISTRY, NULL_PROCESS_SPAWN,
@@ -476,6 +477,20 @@ where
     /// move, not a global mutable static).
     pub users_db: &'static (dyn UsersDbSource + 'static),
 
+    /// The discovered hardware-tree store the `hw_tree_read` (no. 29) /
+    /// `hw_tree_wait` (no. 30) syscalls serve (`AGENTS.md` §16.6 / §18.1
+    /// / §18.4, Design D).
+    ///
+    /// Defaults to [`NULL_HW_TREE`], whose reads fail closed with
+    /// [`rustos_abi::Errno::NotImplemented`]: a boot path that seeds no
+    /// inventory leaves this default and both syscalls announce an inert
+    /// interface (`AGENTS.md` §2.9). A boot path that seeds the discovered
+    /// tree installs its store through [`Self::with_hw_tree`];
+    /// `kernel_main` then threads it into the production dispatch hook.
+    /// Held as a `'static` borrow because the store lives for the lifetime
+    /// of the running kernel, exactly like the users database.
+    pub hw_tree: &'static (dyn HwTreeSource + 'static),
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -543,6 +558,11 @@ where
             // `with_users_db` (`plans/PI.md` P11): `users_db_read` fails
             // closed through `NULL_USERS_DB` (`AGENTS.md` §2.9 / §5.4.5).
             users_db: &NULL_USERS_DB,
+            // Hardware-tree store unwired until a boot path seeds the
+            // discovered inventory and installs its store through
+            // `with_hw_tree` (Design D): `hw_tree_read` / `hw_tree_wait`
+            // fail closed through `NULL_HW_TREE` (`AGENTS.md` §2.9).
+            hw_tree: &NULL_HW_TREE,
             _marker: core::marker::PhantomData,
         }
     }
@@ -644,6 +664,22 @@ where
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.users_db = users_db;
+        self
+    }
+
+    /// Install the discovered hardware-tree store the `hw_tree_read` /
+    /// `hw_tree_wait` syscalls serve, consuming and returning `self`
+    /// (`AGENTS.md` §18.1 / §18.4).
+    ///
+    /// Called by a boot path after it seeds the discovered inventory,
+    /// handing the store (typically a `&'static` wrapper over the binding
+    /// kernel's authoritative `HwTreeStore`) here. Until this is called the
+    /// handover holds [`NULL_HW_TREE`] and both syscalls fail closed
+    /// (`AGENTS.md` §2.9). The store must be `'static`: it lives for the
+    /// lifetime of the running kernel, exactly like the users database.
+    #[must_use]
+    pub fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
+        self.hw_tree = hw_tree;
         self
     }
 

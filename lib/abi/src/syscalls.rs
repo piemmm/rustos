@@ -722,6 +722,57 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::HW_TREE_READ,
+        name: "hw_tree_read",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `resource_grants` / `users_db_read` use.
+        ret: AbiType::U64,
+        // The discovered hardware inventory is a privileged *global* view,
+        // not a calling-task observation: it reveals every device on the
+        // machine, so it is gated by `CAP_SYSINFO_HW` exactly like the
+        // System Information API's hardware query (`AGENTS.md` §16.6 /
+        // §18.4), never the unprivileged own-process baseline. Not audited
+        // per call: the device manager re-reads the tree on every change
+        // (it is the high-volume reactive consumer), and the audited
+        // security decision is the subsequent driver load (§5.4.4 / §18.3),
+        // not the observation; the capability *denial* is audited by the
+        // dispatcher regardless.
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::HW_TREE_WAIT,
+        name: "hw_tree_wait",
+        arg_count: 2,
+        args: [
+            // `last_generation` then `timeout_ns`.
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention `irq_wait` uses: `Ok(0)` on a change,
+        // `-TimedOut` on deadline.
+        ret: AbiType::Errno,
+        // Same privilege as reading the tree — waiting for it to change is
+        // the reactive half of the same global observation (`AGENTS.md`
+        // §18.4). Not audited per call: it is a high-volume blocking wait,
+        // and a refused capability is audited by the dispatcher regardless.
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -984,6 +1035,17 @@ mod tests {
             Some(CapabilityId::INPUT_READ)
         );
         assert!(!keyboard_read.audit, "keyboard_read must not audit");
+        // hw_tree_read / hw_tree_wait expose the privileged *global*
+        // hardware inventory and its change notifications, gated on
+        // CAP_SYSINFO_HW (`AGENTS.md` §16.6 / §18.4 — never the ambient
+        // own-process baseline) and, as the high-volume reactive
+        // device-manager path, not audited per call: the audited security
+        // decision is the subsequent driver load (§5.4.4 / §18.3).
+        for n in [SyscallNumber::HW_TREE_READ, SyscallNumber::HW_TREE_WAIT] {
+            let spec = spec_for(n).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::SYSINFO_HW));
+            assert!(!spec.audit, "hw-tree observation must not audit per call");
+        }
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

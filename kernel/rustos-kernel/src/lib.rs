@@ -162,12 +162,14 @@ pub mod root_storage;
 // `.junie/next-pi-prompt.md`): the single source of truth for the
 // discovered hardware tree (`AGENTS.md` §18.1 / §2.2), seeded by the boot
 // path, appended to by the floor bus bring-up, and snapshotted by the
-// autoload reader (the reactive generation counter / wait + node removal
-// land in Design D D2/D4 with their consumers, §2.3). Architecture-neutral
-// and host-tested on the CI host; gated, like the `unlock_service` that
-// drives it, on the two instruction sets where the boot/autoload path
-// compiles.
-#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+// autoload reader. It also backs the `hw_tree_read` / `hw_tree_wait`
+// syscalls through `HW_TREE_SOURCE` (the reactive generation counter the
+// wait parks on; node removal lands in Design D D4 with its consumer,
+// §2.3). Architecture-neutral and host-tested on the CI host; gated on the
+// three instruction sets whose production boot path installs it through
+// `BootInfo::with_hw_tree` so the device manager can observe the discovered
+// inventory.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod hwtree_store;
 
 // The kernel block-device sharing layer (Design D, D2a —

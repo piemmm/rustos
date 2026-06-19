@@ -11,6 +11,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The package is both the `rustos-devmgr` match-policy library (above) and the
+# `Run` entry-point binary of the device-manager service installed at
+# `/System/Services/devmgr` (`AGENTS.md` §16.2, §18.3) — the long-running
+# user-space service PID 1 `init` launches to observe the discovered hardware
+# tree and react to it. The binary is a freestanding pure-Rust program on the
+# native Tier-1 targets and an inert host stub elsewhere (see `src/run.rs` /
+# `build.rs`).
+[[bin]]
+name = "rustos-devmgr-run"
+path = "src/run.rs"
+
 [dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
@@ -21,3 +32,12 @@ rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+# The pure-Rust userland runtime (`AGENTS.md` §1): `rustos-rt` provides the
+# `Run` binary's `_start`, stack canary, panic handler, and syscall wrappers
+# (including `hw_tree_read` / `hw_tree_wait`). RustOS is Rust-only, so the
+# service links this runtime, never the C ABI (`AGENTS.md` §16.4). Pulled in
+# only for the bare-metal targets the program is actually built for; on the
+# host the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }

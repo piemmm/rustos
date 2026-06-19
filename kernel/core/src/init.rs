@@ -653,6 +653,7 @@ fn run_phases<A: KernelArch>(
         spawn_service,
         input_focus,
         users_db,
+        hw_tree,
         ..
     } = boot;
 
@@ -831,7 +832,12 @@ fn run_phases<A: KernelArch>(
         // root volume (`plans/PI.md` P11); the default `NULL_USERS_DB`
         // keeps `users_db_read` fail-closed when no root volume was
         // mounted (`AGENTS.md` §5.4.5).
-        .with_users_db(users_db),
+        .with_users_db(users_db)
+        // Serve the discovered hardware tree the boot path seeded
+        // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
+        // `hw_tree_wait` fail-closed when no inventory was seeded
+        // (`AGENTS.md` §2.9 / §18.4).
+        .with_hw_tree(hw_tree),
     ));
     dispatcher_callback_slot
         .install_dispatcher(hook)

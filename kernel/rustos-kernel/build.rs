@@ -131,6 +131,20 @@ const PROGRAMS: &[Program] = &[
         prefix: "LOGIN",
         rerun: &["src/run.rs", "Run.ld", "Cargo.toml", "build.rs"],
     },
+    Program {
+        pkg: "rustos-devmgr",
+        bin: "rustos-devmgr-run",
+        rel_dir: "../../userland/system/devmgr",
+        fixture: "devmgr_rxe.rs",
+        prefix: "DEVMGR",
+        rerun: &[
+            "src/run.rs",
+            "src/observe.rs",
+            "Run.ld",
+            "Cargo.toml",
+            "build.rs",
+        ],
+    },
 ];
 
 fn main() {

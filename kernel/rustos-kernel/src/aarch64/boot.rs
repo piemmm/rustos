@@ -887,7 +887,13 @@ fn enter_kernel_core(
     // default — so login refuses every attempt until a root is mounted
     // (`AGENTS.md` §5.4.5), and the metal-confirmed boot is unaffected
     // (§2.17).
-    .with_users_db(&crate::root_mount::LATE_USERS_DB);
+    .with_users_db(&crate::root_mount::LATE_USERS_DB)
+    // Serve the discovered hardware tree (`AGENTS.md` §18.1 / §18.4): the
+    // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
+    // `HW_TREE` the boot path seeds and the floor bus bring-up appends to,
+    // so the user-space device manager observes the same inventory the
+    // kernel discovered (Design D).
+    .with_hw_tree(&crate::hwtree_store::HW_TREE_SOURCE);
     if boot_info.validate().is_err() {
         halt_current_cpu()
     }

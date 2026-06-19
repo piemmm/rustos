@@ -52,6 +52,8 @@ extern "C" {
 #define ROS_SYS_MMIO_MAP 26u
 #define ROS_SYS_DMA_ALLOC 27u
 #define ROS_SYS_RESOURCE_GRANTS 28u
+#define ROS_SYS_HW_TREE_READ 29u
+#define ROS_SYS_HW_TREE_WAIT 30u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -83,6 +85,8 @@ uint64_t ros_sys_keyboard_read(void * a0, uintptr_t a1);
 uint64_t ros_sys_mmio_map(uint64_t a0);
 uint64_t ros_sys_dma_alloc(uint64_t a0, uintptr_t a1, void * a2);
 uint64_t ros_sys_resource_grants(void * a0, uintptr_t a1);
+uint64_t ros_sys_hw_tree_read(void * a0, uintptr_t a1);
+int32_t ros_sys_hw_tree_wait(uint64_t a0, uint64_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

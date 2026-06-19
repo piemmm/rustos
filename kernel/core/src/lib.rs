@@ -78,6 +78,7 @@ pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;
 pub mod fs;
+pub mod hwtree;
 pub mod init;
 pub mod input_focus;
 pub mod kthread;
@@ -124,6 +125,7 @@ pub use fs::{
     Access, AclEntry, AclWho, Credentials, Metadata, Mode, MountPoint, MountTable, Path, Vfs,
     VfsError,
 };
+pub use hwtree::{HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase};
 pub use input_focus::{InputFocus, KEYBOARD_CHANNEL_CAPACITY, NULL_INPUT_FOCUS};
 pub use kthread::{

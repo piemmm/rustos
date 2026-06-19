@@ -219,6 +219,19 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn hw_tree_read(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn hw_tree_wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _last_generation: u64,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

@@ -216,6 +216,19 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn hw_tree_read(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn hw_tree_wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _last_generation: u64,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

@@ -651,6 +651,7 @@ dependencies = [
  "rustos-caps",
  "rustos-devmatch",
  "rustos-log",
+ "rustos-rt",
  "rustos-util",
 ]
 

@@ -92,6 +92,8 @@ const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
+const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
+const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -624,6 +626,53 @@ pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_USERS_DB_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `hw_tree_read`: copy the discovered hardware tree the kernel built at
+/// boot into the caller's `(buf, len)` buffer
+/// (`SyscallNumber::HW_TREE_READ`, `AGENTS.md` §16.6 / §18.1 / §18.4).
+/// Returns the byte count, or a `ROS_E_*` code reinterpreted into the
+/// result.
+///
+/// The bytes are a `ros_hw_tree_header_t` (the store's current generation
+/// and node count) followed by that many `ros_hw_node_t` records. The
+/// generation in the header is the value to pass to `ros_sys_hw_tree_wait`
+/// to block until the tree next changes. Gated kernel-side on
+/// `ROS_CAP_SYSINFO_HW` — the privileged global hardware view
+/// (`AGENTS.md` §16.6 / §18.4). The whole inventory is copied or none: a
+/// buffer smaller than the snapshot is refused with `ROS_E_BUFFER_TOO_SMALL`
+/// rather than truncated (`AGENTS.md` §2.9), so the caller grows `buf` and
+/// retries (`AGENTS.md` §24.1).
+#[must_use]
+#[export_name = "ros_sys_hw_tree_read"]
+pub extern "C" fn sys_hw_tree_read(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the `(buf, len)` pair
+    // against the caller's address space before writing the tree to it.
+    unsafe { raw_syscall(NUM_HW_TREE_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
+/// `hw_tree_wait`: block until the discovered hardware tree changes past
+/// `last_generation` (`SyscallNumber::HW_TREE_WAIT`, `AGENTS.md` §18.4 —
+/// reactive re-match and hotplug). Returns a `ROS_E_*` code.
+///
+/// `last_generation` is the generation last observed through
+/// `ros_sys_hw_tree_read`'s header; `timeout_ns` bounds the wait
+/// (`UINT64_MAX` for an effectively unbounded block). Returns `0` once the
+/// tree has changed, `ROS_E_TIMED_OUT` if the deadline elapses first, or
+/// `ROS_E_NOT_IMPLEMENTED` if no hardware-tree store is wired. Gated
+/// kernel-side on `ROS_CAP_SYSINFO_HW`, the same privilege as reading the
+/// tree.
+#[must_use]
+#[export_name = "ros_sys_hw_tree_wait"]
+pub extern "C" fn sys_hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i32 {
+    // SAFETY: see `sys_yield`. Both arguments are scalars; the call reads no
+    // caller memory.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_HW_TREE_WAIT,
+            [last_generation, timeout_ns, 0, 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +717,8 @@ mod tests {
         (NUM_MMIO_MAP, "mmio_map", 1),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
+        (NUM_HW_TREE_READ, "hw_tree_read", 2),
+        (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),
     ];
 
     #[test]
@@ -958,6 +1009,34 @@ mod tests {
         assert_eq!(number, NUM_RESOURCE_GRANTS);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hw_tree_read_marshals_pointer_and_len() {
+        let mut buf = [0u8; 64];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let len = buf.len();
+        // The kernel returns the number of bytes written (the snapshot).
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_hw_tree_read(ptr, len), len as u64);
+        });
+        assert_eq!(number, NUM_HW_TREE_READ);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hw_tree_wait_marshals_generation_and_timeout() {
+        // `0` is the success return (the tree changed); the arguments are the
+        // last-observed generation and the timeout bound.
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_hw_tree_wait(7, u64::MAX), 0);
+        });
+        assert_eq!(number, NUM_HW_TREE_WAIT);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], u64::MAX);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 

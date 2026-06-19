@@ -582,6 +582,53 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Copy the discovered hardware tree out to the calling task — the
+    /// read-only System Information API hardware view (`AGENTS.md` §16.6 /
+    /// §18.1 / §18.4).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SYSINFO_HW`] and that `buf` is a non-null `UserPtr`.
+    /// The implementation serialises the store's current snapshot as a
+    /// [`rustos_abi::hwtree::HwTreeHeader`] (generation + node count)
+    /// followed by that many [`rustos_abi::hwtree::HwNode`] records, copies
+    /// them out through the validated boundary (`AGENTS.md` §5.4), and
+    /// returns the total byte count. A buffer too small for the whole
+    /// snapshot fails closed with [`Errno::BufferTooSmall`] rather than
+    /// truncating the inventory (`AGENTS.md` §2.9).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// hardware-tree source wired has no tree to read. The real handler is
+    /// installed in `kernel/core`.
+    fn hw_tree_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Block the calling task until the hardware tree changes past
+    /// `last_generation` (`AGENTS.md` §18.4 — reactive re-match and
+    /// hotplug).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SYSINFO_HW`]. The implementation returns `Ok(0)` once
+    /// the store's generation differs from `last_generation` — a node was
+    /// seeded, appended, or removed — and [`Errno::TimedOut`] if
+    /// `timeout_ns` elapses first, blocking cooperatively in between (the
+    /// same shape as [`Self::irq_wait`] / [`Self::wait`]), never
+    /// busy-spinning (`AGENTS.md` §2.1).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// hardware-tree source wired has nothing to wait on. The real handler
+    /// is installed in `kernel/core`.
+    fn hw_tree_wait(
+        &self,
+        _caller: &CallerContext<'_>,
+        _last_generation: u64,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -814,6 +861,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // is the buffer capacity (`AGENTS.md` §18.3 / §20).
                 let len = decode_len(args.0[1])?;
                 self.handlers.resource_grants(caller, args.0[0], len)
+            }
+            SyscallNumber::HW_TREE_READ => {
+                // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
+                // is the buffer capacity (`AGENTS.md` §16.6 / §18.4).
+                let len = decode_len(args.0[1])?;
+                self.handlers.hw_tree_read(caller, args.0[0], len)
+            }
+            SyscallNumber::HW_TREE_WAIT => {
+                // args[0] is the last observed generation, args[1] the
+                // timeout in nanoseconds (`u64::MAX` for unbounded).
+                self.handlers.hw_tree_wait(caller, args.0[0], args.0[1])
             }
             _ => Err(Errno::NotFound),
         }
@@ -1280,6 +1338,27 @@ mod tests {
             // table here.
             Ok(len as u64)
         }
+
+        fn hw_tree_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("hw_tree_read");
+            // Echo the buffer length back so the reachability test can assert
+            // the dispatcher decoded `(buf, len)` without wiring a real
+            // hardware-tree store here.
+            Ok(len as u64)
+        }
+
+        fn hw_tree_wait(
+            &self,
+            _c: &CallerContext<'_>,
+            last_generation: u64,
+            _timeout_ns: u64,
+        ) -> SyscallResult {
+            self.record("hw_tree_wait");
+            // Echo the generation back so the reachability test can assert the
+            // dispatcher decoded `(last_generation, timeout_ns)` without
+            // wiring a real store / scheduler here.
+            Ok(last_generation)
+        }
     }
 
     #[test]
@@ -1305,6 +1384,7 @@ mod tests {
                 CapabilityId::INPUT_READ,
                 CapabilityId::MMIO_MAP,
                 CapabilityId::MEM_DMA,
+                CapabilityId::SYSINFO_HW,
             ],
             &sink,
         );

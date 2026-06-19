@@ -115,6 +115,17 @@ mod program {
                 core::hint::spin_loop();
             }
         }
+        // NOTE: PID 1 does **not** yet launch the device-manager service
+        // (`/System/Services/devmgr`). The service blocks reactively in
+        // `hw_tree_wait`, which today is a cooperative poll-and-yield (the
+        // kernel ships no true park/wake — `RescheduleAction::Park` is
+        // unwired); a perpetual waiter would spin and starve a single-CPU
+        // system (`AGENTS.md` §2.1). Spawning it from `init` lands together
+        // with the true generation-keyed park in the next tranche
+        // (`.junie/next-pi-prompt.md` Design D D2b-2b "A"). The foundation
+        // (the `hw_tree_read`/`hw_tree_wait` syscalls, the store generation
+        // counter, and the signed `devmgr` binary) is proven by
+        // `rustos-test-devmgr-hwtree-qemu-aarch64` until then.
         match supervise_sessions(&mut RtSessions, config.session().as_bytes()) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,
             Outcome::SpawnFailed => EXIT_SESSION_FAILED,

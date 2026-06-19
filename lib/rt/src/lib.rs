@@ -144,6 +144,12 @@ const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 /// `clock_get` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
 
+/// `hw_tree_read` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
+
+/// `hw_tree_wait` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -871,6 +877,79 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Read the discovered hardware tree the kernel built at boot into `buf`
+/// (`SyscallNumber::HW_TREE_READ`, `AGENTS.md` §16.6 / §18.1 / §18.4),
+/// returning the number of bytes copied.
+///
+/// The copied bytes are a [`rustos_abi::HwTreeHeader`] (the store's
+/// current generation and the node count) followed by that many
+/// [`rustos_abi::HwNode`] records, which the caller decodes with the
+/// fail-closed `from_bytes` parsers. The generation in the header is the
+/// value to pass to [`hw_tree_wait`] to block until the tree next changes.
+/// Gated kernel-side on [`rustos_abi::CapabilityId::SYSINFO_HW`] — the
+/// privileged global hardware view (`AGENTS.md` §16.6 / §18.4); the
+/// wrapper adds no authority.
+///
+/// The whole inventory is copied or none: a buffer smaller than the
+/// snapshot is refused with `BufferTooSmall` rather than truncated
+/// (`AGENTS.md` §2.9), so the caller grows `buf` and retries (the node
+/// count is a discovered capacity, not a fixed ceiling — `AGENTS.md`
+/// §24.1).
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure: the
+/// caller lacks the capability, no hardware-tree store is wired
+/// (`NotImplemented`), or `buf` is too small (`BufferTooSmall`).
+pub fn hw_tree_read(buf: &mut [u8]) -> Result<usize, i64> {
+    let len = buf.len() as u64;
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before
+    // writing to it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // `&mut [u8]` for the duration of the call, so the pair denotes
+    // writable memory the kernel may fill.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_HW_TREE_READ, [ptr, len, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller
+    // (`AGENTS.md` §5.4), exactly as `users_db_read` clamps.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(buf.len()))
+}
+
+/// Block until the discovered hardware tree changes past
+/// `last_generation` (`SyscallNumber::HW_TREE_WAIT`, `AGENTS.md` §18.4 —
+/// reactive re-match and hotplug).
+///
+/// `last_generation` is the generation the caller last observed through
+/// [`hw_tree_read`]'s header; `timeout_ns` bounds the wait
+/// (`u64::MAX` for an effectively unbounded block). The kernel blocks the
+/// caller cooperatively until the store's generation differs — a node was
+/// seeded, appended, or removed — then returns `0`, so the caller
+/// re-reads the tree and re-matches. Gated kernel-side on
+/// [`rustos_abi::CapabilityId::SYSINFO_HW`], the same privilege as reading
+/// the tree; the wrapper adds no authority.
+///
+/// Returns `0` once the tree has changed, or `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`): `-TimedOut` if the
+/// deadline elapses first, or `-NotImplemented` if no hardware-tree store
+/// is wired. The wrapper hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). Both
+    // arguments are scalars; the call reads no caller memory.
+    let ret = unsafe { raw_syscall(NUM_HW_TREE_WAIT, [last_generation, timeout_ns, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -1356,5 +1435,62 @@ mod tests {
         // Reads at 0,250,500,750 are below the deadline (4 yields); the read
         // at 1_000 stops the loop.
         assert_eq!(yields, 4);
+    }
+
+    #[test]
+    fn hw_tree_read_marshals_the_buffer_pointer_and_len() {
+        let mut buf = [0u8; 256];
+        let (number, args) = capture(16, || {
+            assert_eq!(hw_tree_read(&mut buf), Ok(16));
+        });
+        assert_eq!(number, NUM_HW_TREE_READ);
+        assert_ne!(args[0], 0); // a non-null out pointer
+        assert_eq!(args[1], 256);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hw_tree_read_clamps_an_oversized_count_to_the_buffer_length() {
+        // A kernel count larger than the buffer is clamped, never trusted
+        // into an out-of-bounds slice (`AGENTS.md` §5.4).
+        let mut buf = [0u8; 8];
+        let (_, _) = capture(9999, || {
+            assert_eq!(hw_tree_read(&mut buf), Ok(8));
+        });
+    }
+
+    #[test]
+    fn hw_tree_read_surfaces_negative_errno_encoding() {
+        // `BufferTooSmall` is encoded as the two's-complement negation; the
+        // wrapper hands that signed value back unchanged.
+        let mut buf = [0u8; 4];
+        let want = -i64::from(rustos_abi::Errno::BufferTooSmall.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(hw_tree_read(&mut buf), Err(want));
+        });
+    }
+
+    #[test]
+    fn hw_tree_wait_marshals_generation_and_timeout() {
+        let (number, args) = capture(0, || {
+            assert_eq!(hw_tree_wait(7, u64::MAX), 0);
+        });
+        assert_eq!(number, NUM_HW_TREE_WAIT);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], u64::MAX);
+        // No memory operand.
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hw_tree_wait_surfaces_negative_errno_encoding() {
+        // `TimedOut` is encoded as the two's-complement negation; the
+        // wrapper hands that signed value back unchanged.
+        let want = -i64::from(rustos_abi::Errno::TimedOut.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(hw_tree_wait(3, 0), want);
+        });
     }
 }

@@ -82,6 +82,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  26 | `mmio_map`     | `Handle handle`                         | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
 |  27 | `dma_alloc`    | `Handle handle`, `len`, `user_ptr` (device_out) | `u64` (base vaddr) | `CAP_MEM_DMA` | yes |
 |  28 | `resource_grants` | `user_ptr` (buf), `len`              | `u64` (bytes) | —                 | no      |
+|  29 | `hw_tree_read` | `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_SYSINFO_HW`  | no      |
+|  30 | `hw_tree_wait` | `u64 last_generation`, `u64 timeout_ns` | `errno` | `CAP_SYSINFO_HW`        | no      |
 
 ### Capability matrix
 
@@ -102,6 +104,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_INPUT_READ`   | `keyboard_read`            |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`                |
+| `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -191,6 +194,32 @@ load is the audited security decision (§5.4.4 / §18.3). The first-party Rust
 wrapper is `rustos_rt::resource_grants` (the user-space driver host
 `rustos_drvrt::RtDriverHost::from_grants_query` builds its grant table from
 it); the C stub is `ros_sys_resource_grants`.
+
+`hw_tree_read` (no. 29) and `hw_tree_wait` (no. 30) expose the discovered
+hardware tree the kernel built at boot (`AGENTS.md` §16.6 / §18.1 / §18.4) —
+the read side of the user-space device manager. `hw_tree_read` copies the
+current snapshot into the caller's `(buf, len)` buffer: a
+`rustos_abi::HwTreeHeader` (the store's current **generation** and node count)
+followed by that many `rustos_abi::HwNode` records, returning the byte count.
+The whole inventory is copied or none — an undersized buffer is refused with
+`BufferTooSmall`, never truncated, so the caller grows its buffer and retries
+(the node count is a discovered capacity, not a fixed ceiling, §24.1).
+`hw_tree_wait` blocks until the store's generation advances past
+`last_generation` (the value from the last header), returning `0` once the
+tree has changed or `TimedOut` when `timeout_ns` elapses first — the reactive
+re-match / hotplug signal (§18.4). Both are gated on **`CAP_SYSINFO_HW`**, the
+privileged *global* hardware view (never the ambient own-process baseline),
+and both are **unaudited per call** — they are the high-volume reactive
+device-manager path, and the audited security decision is the subsequent
+driver load (§5.4.4 / §18.3). Both serve the `kernel/core` `HwTreeSource` seam
+the boot path installs through `BootInfo::with_hw_tree` (the
+`hwtree_store::HW_TREE` store); until one is installed they fail closed with
+`NotImplemented` through `NULL_HW_TREE` (`AGENTS.md` §2.9). The first-party
+Rust wrappers are `rustos_rt::hw_tree_read` / `hw_tree_wait`; the C stubs are
+`ros_sys_hw_tree_read` / `ros_sys_hw_tree_wait`. The device manager
+(`userland/system/devmgr`) reads the tree, then waits and re-reads on every
+change — the reactive observe loop behind the `rustos_devmgr::HwTreeService`
+seam.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with
