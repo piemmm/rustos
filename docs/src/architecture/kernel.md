@@ -369,12 +369,19 @@ the next boot (§2.9 / §5.4.5).
 The `&'static LateUsersDb` dispatch-hook half is wired: the boot path hands
 the syscall dispatch hook `&rustos_kernel::root_mount::LATE_USERS_DB`
 through `BootInfo::with_users_db`, so `users_db_read` reads that one
-set-once cell on every call. The trusted unlock step publishes the mounted
-root volume's database into the *same* cell via `LateUsersDb::install`
-(`4136` `ROOT_UNLOCK_INSTALLED`); until then the cell fails every read
-closed exactly like the previous `NULL_USERS_DB` default, so login refuses
-every attempt until a root is mounted (§5.4.5) and the metal-confirmed boot
-is unaffected (§2.17).
+set-once cell on every call. The cell is a **three-state** machine, because
+design B spawns `login` *before* the unlock kthread mounts the root and
+prompts for the passphrase on the **same** console: while the unlock is
+still running the read returns `WouldBlock`, so `login` waits without
+printing `Username:` and the unlock owns the console (the two prompts never
+collide); the trusted unlock step publishes the mounted database into the
+*same* cell via `LateUsersDb::install` (`4136` `ROOT_UNLOCK_INSTALLED`) so
+the next read serves it; and every fail-closed / no-disk path calls
+`LateUsersDb::resolve`, flipping the read to `NotImplemented` (exactly the
+`NULL_USERS_DB` default) so `login` stops waiting and runs its deny-all
+prompt (§5.4.5). `resolve` is paired with opening the console-0 gate
+through one `release_console0_to_login` helper so they can never diverge
+(§2.2), and the metal-confirmed boot is unaffected (§2.17).
 
 The board-specific bring-up that *supplies* the block device and drives this
 policy is wired into the boot path (`plans/PI.md` P11 Chunk B-2): the init
@@ -382,8 +389,10 @@ seam admits the in-kernel root-unlock kthread
 (`rustos_kernel::unlock_service::spawn_if_present`), which brings the bound
 block driver up through an in-kernel block DriverHost behind the signed §8
 load gate over the production device-IRQ path, prompts on the primary
-console, runs `unlock_root_disk_interactively`, and opens the console-0
-ownership gate so login takes over. To deliver those device interrupts the
+console, runs `unlock_root_disk_interactively`, and (through the one
+`release_console0_to_login` helper) opens the console-0 ownership gate and
+resolves the `LateUsersDb` cell so a `login` parked on the pending
+(`WouldBlock`) read takes over. To deliver those device interrupts the
 production aarch64 boot runs **interrupt-driven**: the `irq` phase brings the
 GICv2 up (`gic::init`, via `gic_irq::install_device_irq_dispatch`), the
 kthread binds the device SPI on the core-published `IrqTable`, and its waiter

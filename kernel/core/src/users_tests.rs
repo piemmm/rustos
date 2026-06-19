@@ -365,13 +365,45 @@ fn held_source() -> crate::users::HeldUsersDbSource {
 }
 
 #[test]
-fn the_late_users_db_fails_closed_until_a_database_is_installed() {
-    // Before the in-kernel unlock step installs the mounted database the
-    // cell is empty and `users_db_read` (which calls `text()`) fails
-    // closed exactly as `NULL_USERS_DB` does (`AGENTS.md` §2.9 / §5.4.5).
+fn the_late_users_db_is_pending_until_the_unlock_resolves() {
+    // While the unlock is still running the cell is neither installed nor
+    // resolved: `users_db_read` (which calls `text()`) returns the
+    // live-but-not-ready `WouldBlock` so `login` waits without prompting,
+    // leaving the console to the passphrase prompt (`plans/PI.md` P11).
     let late = LateUsersDb::new();
     assert!(!late.is_installed());
+    assert!(!late.is_resolved());
+    assert_eq!(late.text(), Err(Errno::WouldBlock));
+}
+
+#[test]
+fn a_resolved_empty_late_users_db_fails_closed_not_implemented() {
+    // Once the unlock gives up (or there is no root to unlock) the cell is
+    // resolved with no database installed: `text()` flips from the pending
+    // `WouldBlock` to the inert `NotImplemented`, identical to
+    // `NULL_USERS_DB`, so `login` stops waiting and runs its fail-closed
+    // deny-all prompt (`AGENTS.md` §2.9 / §5.4.5).
+    let late = LateUsersDb::new();
+    late.resolve();
+    assert!(!late.is_installed());
+    assert!(late.is_resolved());
     assert_eq!(late.text(), Err(Errno::NotImplemented));
+    // Idempotent: a second resolve does not change the outcome.
+    late.resolve();
+    assert_eq!(late.text(), Err(Errno::NotImplemented));
+}
+
+#[test]
+fn an_installed_database_wins_over_a_later_resolve() {
+    // A successful unlock installs the database, and a `resolve` that the
+    // shared release path also fires afterwards must not hide it: the held
+    // text keeps serving so `login` authenticates against it.
+    let late = LateUsersDb::new();
+    let text = valid_db_text();
+    late.install(held_source()).expect("first install succeeds");
+    assert!(late.is_resolved());
+    late.resolve();
+    assert_eq!(late.text().expect("served text"), text.as_bytes());
 }
 
 #[test]

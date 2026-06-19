@@ -62,8 +62,8 @@ use crate::root_mount::{
 };
 use crate::root_storage::RootBlockBinding;
 use crate::unlock_service::{
-    autoload_caps, loader_caps, note, service_caps, take_boot, AutoloadHook, KthreadConsoleRead,
-    CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
+    autoload_caps, loader_caps, note, note_stage, service_caps, take_boot, AutoloadHook,
+    KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
 };
 
 /// CPU-interface target bitmask routing the device SPI to the boot CPU.
@@ -187,6 +187,23 @@ impl IrqWaiter for RearmingIrqWaiter {
     }
 }
 
+/// Release console 0 to `login` and mark the users-database source
+/// resolved.
+///
+/// The two always happen together — both mean "the unlock window is over,
+/// `login` may take the console now" — so they are flipped through one
+/// helper to keep them from diverging (`AGENTS.md` §2.2). Opening the gate
+/// lets `login`'s gated console reads through ([`GatedConsoleRead`]);
+/// [`LateUsersDb::resolve`](rustos_kernel_core::LateUsersDb::resolve) flips
+/// a `login` parked on the pending (`WouldBlock`) `users_db_read` into its
+/// prompt — against the installed database if the unlock succeeded
+/// ([`install`](rustos_kernel_core::LateUsersDb) ran first and wins), else
+/// fail-closed deny-all (`AGENTS.md` §5.4.5).
+fn release_console0_to_login() {
+    CONSOLE0_GATE.open();
+    LATE_USERS_DB.resolve();
+}
+
 /// Admit the in-kernel root-unlock kthread if the boot path bound a
 /// virtio-blk root block device, returning whether it was started.
 ///
@@ -210,7 +227,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
             Level::Info,
             "root-unlock: no root block device bound; root unbound, login refuses (§18.4)",
         );
-        CONSOLE0_GATE.open();
+        release_console0_to_login();
         return false;
     };
     if binding.driver_path != VIRTIO_BLK_PATH && binding.driver_path != EMMC2_PATH {
@@ -226,7 +243,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
             Level::Error,
             "root-unlock: bound block driver is not a known floor driver; root unbound",
         );
-        CONSOLE0_GATE.open();
+        release_console0_to_login();
         return false;
     }
     let Some(frames) = ctx.static_frames() else {
@@ -235,7 +252,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
             Level::Error,
             "root-unlock: no kernel frame allocator; root unbound, login refuses",
         );
-        CONSOLE0_GATE.open();
+        release_console0_to_login();
         return false;
     };
 
@@ -269,7 +286,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
         // over (`plans/PI.md` P11 item 5). A failed unlock leaves
         // `LATE_USERS_DB` empty, so `login` still refuses every attempt
         // (`AGENTS.md` §5.4.5).
-        CONSOLE0_GATE.open();
+        release_console0_to_login();
     };
 
     let started = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
@@ -285,7 +302,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     if !started {
         // Admission failed: nothing will open the gate, so do it here or
         // console-0 `login` would park forever (`AGENTS.md` §2.9).
-        CONSOLE0_GATE.open();
+        release_console0_to_login();
     }
     started
 }
@@ -516,8 +533,23 @@ fn emmc2_unlock<'a>(
     let blk = {
         let mapper = KernelMmioMapper::new(&mut mmio, caller, audit);
         let host = Emmc2Host::new(*caller.effective(), &mapper);
-        rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys)
-            .map_err(|_| "root-unlock: emmc2 open")?
+        rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys).map_err(|fault| {
+            // `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so the metal
+            // UART log is the only signal that localises an SD bring-up
+            // failure: record which identification step the card stalled at
+            // *and* how it failed, so a controller/command fault is told
+            // apart from a decode rejection at the same step (e.g. CMD9
+            // `SEND_CSD` timing out vs. returning an unsupported CSD)
+            // (`AGENTS.md` §19.4 / §2.16 — measure, do not guess).
+            note_stage(
+                audit,
+                Level::Error,
+                "root-unlock: emmc2 open failed during SD bring-up",
+                fault.stage.as_str(),
+                driver_error_name(fault.error),
+            );
+            "root-unlock: emmc2 open"
+        })?
     };
     finish_unlock(blk, coop, env)
 }
@@ -643,4 +675,27 @@ impl DriverHost for Emmc2Host<'_> {
 /// (`AGENTS.md` §24.1).
 fn identity_limit() -> u64 {
     (configured_identity_gigapages() as u64) << 30
+}
+
+/// A stable, terse name for the `DriverError` a floor block bring-up
+/// failed with, for the `error=` field of the `EventId(4139)` audit line.
+///
+/// Pairs with the `BringUpStage` name so the metal UART log distinguishes
+/// *how* a step failed — a controller/command fault (`DeviceFault`) from a
+/// decode rejection (`Unsupported`) at the same step (e.g. CMD9 `SEND_CSD`
+/// timing out vs. returning a CSD the driver does not support) — which
+/// `raspi4b` cannot reveal (`plans/PI.md` §0.4 / P8 / B4). Fails closed on an
+/// unforeseen variant (`DriverError` is `#[non_exhaustive]`) with a generic
+/// name rather than asserting (`AGENTS.md` §2.9).
+fn driver_error_name(error: rustos_abi::DriverError) -> &'static str {
+    use rustos_abi::DriverError;
+    match error {
+        DriverError::Unsupported => "unsupported",
+        DriverError::DeviceFault => "device fault",
+        DriverError::PermissionDenied => "permission denied",
+        DriverError::NotFound => "not found",
+        DriverError::BufferTooSmall => "buffer too small",
+        DriverError::LengthOutOfRange => "length out of range",
+        _ => "driver error",
+    }
 }

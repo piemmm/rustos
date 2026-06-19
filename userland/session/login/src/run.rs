@@ -48,15 +48,12 @@
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
-extern crate alloc;
-
-#[cfg(freestanding)]
 mod program {
     use rustos_abi::Errno;
     use rustos_log::{Event, Sink};
     use rustos_login::{
-        AuthenticatedUser, Authenticator, Credentials, Login, LoginConfig, LoginError, Prompt,
-        SessionKind, SessionLauncher, SessionOutcome, UsersAuthenticator,
+        supervise, AuthenticatedUser, Authenticator, DbLoad, Login, LoginConfig, LoginError,
+        Prompt, SessionKind, SessionLauncher, SessionOutcome,
     };
     use rustos_users::{UsersDb, MAX_DB_LEN};
 
@@ -165,18 +162,6 @@ mod program {
         }
     }
 
-    /// An [`Authenticator`] wired when no user database is held: every
-    /// attempt is refused with the same error, so an installer image (or a
-    /// boot whose database read was refused) sits at a prompt that grants
-    /// nothing (`AGENTS.md` §5.4.5 — fail closed, never invent accounts).
-    struct DenyAll;
-
-    impl Authenticator for DenyAll {
-        fn authenticate(&self, _credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
-            Err(Errno::PermissionDenied)
-        }
-    }
-
     /// Recover the [`Errno`] a syscall encoded as a negative register
     /// (`-errno`, the standard `abi-v1` convention). An unrecognised code
     /// fails closed as [`Errno::NotImplemented`] rather than being guessed.
@@ -235,37 +220,57 @@ mod program {
     }
 
     /// Read the user database through the capability-gated `users_db_read`
-    /// syscall and parse it fail-closed.
+    /// syscall and classify it for [`supervise`] as a [`DbLoad`].
     ///
-    /// Any failure — the syscall refused (no database held, no capability)
-    /// or the text failed the `users-v1` validation — yields [`None`] and
-    /// the caller wires the deny-all authenticator (`AGENTS.md` §5.4.5).
+    /// * `WouldBlock` (the kernel's pending signal) → [`DbLoad::Pending`]:
+    ///   the encrypted root is still being unlocked, so `login` waits
+    ///   without prompting and leaves the console to the `Root passphrase:`
+    ///   prompt (`plans/PI.md` P11).
+    /// * A delivered, valid database → [`DbLoad::Present`].
+    /// * Any other refusal (no database held once the unlock resolved, no
+    ///   capability) or text that failed the `users-v1` validation →
+    ///   [`DbLoad::Absent`]: the caller wires the deny-all authenticator
+    ///   (`AGENTS.md` §5.4.5).
+    ///
     /// The intermediate buffer holds credential records, so it is zeroed
-    /// before release (`AGENTS.md` §4).
-    ///
-    /// The buffer is a stack array, **not** a heap allocation: everything
-    /// on the path to the first prompt must be allocation-free, because
-    /// the userland heap is backed by the `mem_map` syscall whose
-    /// production producer is still staged (`plans/SPAWN.md` SP5b) — a
-    /// pre-prompt allocation would fail and the console would never reach
-    /// `login:`. Parsing a *successfully delivered* database allocates;
-    /// that path is only reachable once a root volume holds a database,
-    /// which arrives with the same staged work (`plans/PI.md` P11).
-    fn load_users_db() -> Option<UsersDb> {
+    /// before release (`AGENTS.md` §4). It is a stack array, **not** a heap
+    /// allocation: everything on the path to the first prompt must be
+    /// allocation-free, because the userland heap is backed by the
+    /// `mem_map` syscall whose production producer is still staged
+    /// (`plans/SPAWN.md` SP5b) — a pre-prompt allocation would fail and the
+    /// console would never reach `login:`. The pending and absent paths
+    /// allocate nothing; parsing a *successfully delivered* database
+    /// allocates, which is only reachable once the encrypted root that
+    /// holds it is unlocked (`plans/PI.md` P11). [`supervise`] calls this
+    /// before each round, so a database installed after `login` started —
+    /// the design-B order, where `login` is spawned before the in-kernel
+    /// unlock kthread mounts the root — is picked up by the next round
+    /// instead of a stale answer being cached for the process's lifetime.
+    fn load_users_db() -> DbLoad {
         let mut buf = [0u8; MAX_DB_LEN];
-        let db = match rustos_rt::users_db_read(&mut buf) {
-            Ok(len) => core::str::from_utf8(&buf[..len])
+        // The wrapper returns the raw `-errno` on failure (`AGENTS.md`
+        // §2.9); `WouldBlock` is the only one that means "retry", every
+        // other refusal fails closed to the deny-all prompt.
+        let pending = -i64::from(Errno::WouldBlock.as_i32());
+        let state = match rustos_rt::users_db_read(&mut buf) {
+            Ok(len) => match core::str::from_utf8(&buf[..len])
                 .ok()
-                .and_then(|text| UsersDb::parse(text).ok()),
-            Err(_) => None,
+                .and_then(|text| UsersDb::parse(text).ok())
+            {
+                Some(db) => DbLoad::Present(db),
+                None => DbLoad::Absent,
+            },
+            Err(code) if code == pending => DbLoad::Pending,
+            Err(_) => DbLoad::Absent,
         };
         buf.fill(0);
-        db
+        state
     }
 
     /// Run one login round: prompt → authenticate → run the session to
-    /// completion. Returns `true` to open another round, `false` when the
-    /// console is dead and the process should exit (PID 1 relaunches it).
+    /// completion against `authenticator`. Returns `true` to open another
+    /// round, `false` when the console is dead and the process should exit
+    /// (PID 1 relaunches it).
     fn login_round(authenticator: &dyn Authenticator, sink: &StderrSink) -> bool {
         let prompt = RtPrompt;
         let launcher = RtLauncher;
@@ -293,18 +298,25 @@ mod program {
 
     /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
+    ///
+    /// [`supervise`] reloads the user database (and so re-wires the
+    /// [`UsersAuthenticator`] or the fail-closed deny-all authenticator)
+    /// before every round, so a database installed after this process
+    /// started — design B spawns `login` before the encrypted root is
+    /// unlocked — is picked up by the next round rather than a stale
+    /// "no database" answer being cached for the process's lifetime
+    /// (`plans/PI.md` P11). It returns only when a round reports the console
+    /// dead; PID 1 relaunches `login`.
     fn main() -> i32 {
         let sink = StderrSink;
-        let db = load_users_db();
-        loop {
-            let alive = match db.as_ref() {
-                Some(db) => login_round(&UsersAuthenticator::new(db), &sink),
-                None => login_round(&DenyAll, &sink),
-            };
-            if !alive {
-                return 1;
-            }
-        }
+        // While the database read is `Pending` (the encrypted root is still
+        // being unlocked) `supervise` calls this to yield the CPU, so the
+        // in-kernel unlock kthread runs and `login` neither prompts nor
+        // reads the console — never a busy spin (`AGENTS.md` §2.1).
+        supervise(load_users_db, rustos_rt::yield_now, |authenticator| {
+            login_round(authenticator, &sink)
+        });
+        1
     }
 
     rustos_rt::entry!(main);

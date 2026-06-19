@@ -3857,8 +3857,8 @@ keyboard never regresses (§2.17), until the final flip:
   hold it. `autoload_input_qemu_aarch64` proves the full discover→signed
   gate→spawn→`key_inject` path runs pre-unlock (PASS on
   `AuditEvent::InputDelivered` 4050).
-- **B3 — floor USB→`hwtree` enumeration. HOST-COMPLETE; metal acceptance
-  pending.** Design A (operator-approved): the bootstrap-floor USB bring-up
+- **B3 — floor USB→`hwtree` enumeration. DONE (host + metal).** Design A
+  (operator-approved): the bootstrap-floor USB bring-up
   **owns** xHCI enumeration and emits the discovered HID-keyboard node into
   the boot hardware tree, so the §18 discovery path sees the keyboard like
   every other device (`AGENTS.md` §18.2). The controller is brought up
@@ -3879,16 +3879,14 @@ keyboard never regresses (§2.17), until the final flip:
   unaffected; the live VL805 enumeration into the tree has no Pi-board QEMU
   vertical (§0.4) and is metal-gated. Host-proven: `extended_tree` order
   test + the engine's existing `bring_up`/`describe_device` suite; the
-  freestanding aarch64 kernel builds clean. **Metal checklist (operator,
-  §0.9):** re-flash (`cargo xtask image --target aarch64-rpi`), confirm the
-  on-screen `Username:` prompt still takes keystrokes (the pump still drives
-  the keyboard — parity), and supply the UART log showing the keyboard
-  brought up once at the init seam (the `4129`/`4131` records) **and** a
-  `devmgr` *unbound* record for the enumerated HID node (matched against the
-  store, no bundle yet) — i.e. the node reached the autoload tree without a
-  second bring-up.
-- **B4 — live EMMC2 root bring-up. WIRED (host-tested at the driver level);
-  metal acceptance pending.** The aarch64 root-unlock kthread now dispatches
+  freestanding aarch64 kernel builds clean. **Metal-confirmed (§0.9):** the
+  Pi 4 UART log shows the keyboard brought up once at the init seam
+  (`4129` first report drained / `4131` heartbeat) and `devmgr` `13002`
+  *unbound* records for the enumerated HID node (matched against the store,
+  no bundle yet) — the node reached the autoload tree without a second
+  bring-up, and a typed keystroke reaches the prompt.
+- **B4 — live EMMC2 root bring-up. DONE (host + metal).** The aarch64
+  root-unlock kthread now dispatches
   on which floor block driver `root_storage` bound: `virtio_blk_unlock` (the
   proven `-M virt` / x86_64 path, device-IRQ + DMA) or the new `emmc2_unlock`
   arm. EMMC2 is programmed-I/O, so its arm binds no device IRQ and carves no
@@ -3904,21 +3902,43 @@ keyboard never regresses (§2.17), until the final flip:
   driver now fails closed. Host-proven at the driver level (`emmc2`
   `MockSdhci` read/write + `wiring`/`BIND_KEYS` suites; `sole_register_window`
   in `lib/abi`; the freestanding aarch64 kernel builds + clippy clean). No
-  `lib/abi`/C-header change. **Metal checklist (operator, §0.9):** re-flash
-  (`cargo xtask image --target aarch64-rpi`) on a real Pi 4 and supply the
-  UART log showing the root-unlock kthread mount the read-only `/System`
-  volume off the SD card (`SYSTEM_VOLUME_MOUNTED` 4140) and unlock the
-  encrypted root (passphrase → `ROOT_UNLOCK_INSTALLED` 4136), since `raspi4b`
-  cannot model EMMC2 (§0.4).
-- **B5 (= 5e/(d)) — the flip.** Repoint `init_spawn` to the autoload path,
-  lay the signed input-driver bundle into the `/System` volume signed against
-  the finalised production anchor, delete `keyboard_service.rs` +
-  `usb_keyboard.rs`, and evict `usb_hid` from
-  `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6) — only after B1–B4 are
-  metal-confirmed (§0.9). B4 is wired and host-tested; its metal acceptance
-  (the `/System` + encrypted-root mount off EMMC2 above) is the remaining
-  gate before the flip can land without regressing the working metal
-  keyboard (§2.17).
+  `lib/abi`/C-header change. **Metal status — DONE (metal-confirmed).** On a
+  real Pi 4 the root-unlock kthread brings the SD card up over programmed
+  I/O, mounts the read-only `/System` volume (`SYSTEM_VOLUME_MOUNTED` 4140),
+  and unlocks + mounts the encrypted root (`4133` → users db `4040`
+  `records=1` → `ROOT_UNLOCK_INSTALLED` 4136 → `4139` login can
+  authenticate). Two SD bring-up defects found via the `stage=` field were
+  fixed to get there; they are the load-bearing facts of `reset_and_clock`
+  and `geometry_from_csd`: (1) the host-controller reset clears SD Bus
+  Power, so `reset_and_clock` powers the card rail (3.3 V via `CONTROL0`,
+  Linux's `0x0F`) before clocking; (2) the SDHCI controller right-aligns the
+  CRC-stripped R2 response, so `CSD_STRUCTURE` is read at `RESP3[23:22]`
+  (`(resp[3] >> 22) & 0x3`, consistent with `C_SIZE` at `RESP1[29:8]`) and
+  `MockSdhci` mirrors that layout. Both regression-tested
+  (`unpowered_bus_fails_closed_at_first_command`,
+  `structure_bits_above_the_field_are_not_read_as_v2`); the `EventId(4139)`
+  failure line carries `stage=` + `error=` for any future stall. Metal
+  acceptance also surfaced — and this increment fixed — two login defects
+  that were masking the unlocked root (see P11 for the mechanism): (1)
+  `login` read the users database **once** at startup, but design B spawns
+  it before the unlock, so it cached the pre-unlock answer and refused
+  `root`/`root` forever; and (2) `login` printed its `Username:` prompt
+  immediately, on the **same** console the unlock kthread was prompting
+  `Root passphrase:` on, so the two prompts drew over each other. Both are
+  fixed by the `LateUsersDb` three-state machine + `rustos_login::supervise`
+  (see P11): while the unlock is pending `users_db_read` returns
+  `WouldBlock`, so `login` waits without prompting; once it resolves the
+  installed database is picked up (or the deny-all prompt runs).
+- **B5 (= 5e/(d)) — the flip. NOW UNBLOCKED — do next.** B1–B4 are
+  metal-confirmed (§0.9), so the flip may land: repoint `init_spawn` off
+  `keyboard_service::bring_up_keyboard_into_tree`/`spawn_pump` to the
+  autoload path, lay the signed input-driver bundle into the `/System`
+  volume signed against the finalised production anchor, delete
+  `keyboard_service.rs` + `usb_keyboard.rs`, and evict `usb_hid` from
+  `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6). Until the bundle is
+  laid, the metal `/System/Drivers/` store is empty (`4042` `drivers=0`) and
+  `devmgr` leaves every node unbound — the in-kernel scaffold keyboard stays
+  the live driver, so the flip and the bundle must land together (§2.17).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
@@ -3988,7 +4008,28 @@ two users — or the same user twice — can be logged in concurrently.
   and login re-parses it with the same fail-closed `rustos-users`
   parser. With no database (installer image, no root volume) login wires
   a deny-all authenticator — the prompt stays up and every attempt is
-  refused (§5.4.5). The `SessionLauncher` spawns the authenticated
+  refused (§5.4.5). Design B spawns `login` **before** the in-kernel unlock
+  kthread mounts the encrypted root, and the kthread prompts for the
+  passphrase on the **same** console, so the `users_db_read` seam is a
+  **three-state** machine (`LateUsersDb`) and `rustos_login::supervise`
+  acts on it **before every round**: while the unlock is still running the
+  read returns `WouldBlock` and `login` *waits without prompting* (yielding
+  the CPU) so the unlock owns the console and the two prompts never collide;
+  a delivered database wires `UsersAuthenticator`; and once the unlock
+  resolves with no database (installer image, or it gave up) the read
+  returns `NotImplemented` and the fail-closed `DenyAll` prompt runs. The
+  kernel pairs `LateUsersDb::resolve` with opening the console-0 input gate
+  through one `release_console0_to_login` helper (§2.2), so a `login` parked
+  on the pending read always makes progress. This fixes the two metal
+  P8/B4 login failures (`root`/`root` refused after unlock; the premature
+  `Username:` prompt). Regressions: kernel-core
+  `the_late_users_db_is_pending_until_the_unlock_resolves` /
+  `a_resolved_empty_late_users_db_fails_closed_not_implemented` /
+  `an_installed_database_wins_over_a_later_resolve`, and login
+  `login_waits_while_pending_then_authenticates_once_installed` /
+  `an_absent_database_prompts_deny_all_without_waiting` /
+  `the_users_database_is_reloaded_before_each_round`.
+  The `SessionLauncher` spawns the authenticated
   record's **shell of choice** via `spawn`/`wait`; the embedded-program
   registry now carries **per-program capability grants + argument
   vectors** (`EmbeddedProgram.caps`/`.args`, all three arch producers —

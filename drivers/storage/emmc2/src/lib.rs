@@ -164,6 +164,92 @@ const DATA_TIMEOUT_VALUE: u32 = 0x0E;
 /// asking for more is rejected fail-closed.
 const MAX_BLOCKS_PER_TRANSFER: usize = 0xFFFF;
 
+/// The step of the SD identification sequence a bring-up reached before
+/// failing.
+///
+/// Carried by [`BringUpFault`] so an in-kernel / metal caller can log
+/// *which* step of [`Emmc2::open`] the controller stalled at, rather than
+/// a single opaque error. `raspi4b` cannot model EMMC2 (`plans/PI.md`
+/// §0.4), so on a real Raspberry Pi 4 this stage is the only signal that
+/// localises an SD bring-up failure (`plans/PI.md` P8/B4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BringUpStage {
+    /// Mapping the discovered SDHCI register window (the [`wiring`]
+    /// pre-step, before any controller access).
+    MapWindow,
+    /// Controller reset and SD-clock stabilisation (`reset_and_clock`).
+    ResetClock,
+    /// `CMD0` `GO_IDLE_STATE`.
+    GoIdle,
+    /// `CMD8` `SEND_IF_COND` (v2 voltage / check-pattern echo).
+    SendIfCond,
+    /// `ACMD41` `SD_SEND_OP_COND` power-up polling.
+    OpCond,
+    /// `CMD2` `ALL_SEND_CID`.
+    AllSendCid,
+    /// `CMD3` `SEND_RELATIVE_ADDR`.
+    SendRelativeAddr,
+    /// `CMD9` `SEND_CSD` and the CSD geometry derivation.
+    SendCsd,
+    /// `CMD7` `SELECT_CARD`.
+    SelectCard,
+    /// `CMD16` `SET_BLOCKLEN`.
+    SetBlockLen,
+}
+
+impl BringUpStage {
+    /// A stable, terse, human-readable name for the stage.
+    ///
+    /// Logged as a structured field on the failing-stage audit line so the
+    /// metal UART log names the exact SD command that stalled. The strings
+    /// are part of the operator-facing diagnostic contract; treat them as
+    /// stable.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BringUpStage::MapWindow => "map register window",
+            BringUpStage::ResetClock => "reset + SD clock",
+            BringUpStage::GoIdle => "CMD0 GO_IDLE_STATE",
+            BringUpStage::SendIfCond => "CMD8 SEND_IF_COND",
+            BringUpStage::OpCond => "ACMD41 SD_SEND_OP_COND",
+            BringUpStage::AllSendCid => "CMD2 ALL_SEND_CID",
+            BringUpStage::SendRelativeAddr => "CMD3 SEND_RELATIVE_ADDR",
+            BringUpStage::SendCsd => "CMD9 SEND_CSD",
+            BringUpStage::SelectCard => "CMD7 SELECT_CARD",
+            BringUpStage::SetBlockLen => "CMD16 SET_BLOCKLEN",
+        }
+    }
+}
+
+/// A card bring-up failure: the [`BringUpStage`] reached and the
+/// underlying [`DriverError`].
+///
+/// [`Emmc2::open`] returns this so the failing step is recoverable for
+/// diagnostics (`plans/PI.md` P8/B4). A consumer that only needs the
+/// `DriverError` (the §8 driver-ABI shape) converts with
+/// `DriverError::from` / `?`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BringUpFault {
+    /// The step the bring-up reached before failing.
+    pub stage: BringUpStage,
+    /// The underlying driver error at that step.
+    pub error: DriverError,
+}
+
+impl BringUpFault {
+    /// Pair `stage` with the `error` that ended the bring-up there.
+    #[must_use]
+    const fn new(stage: BringUpStage, error: DriverError) -> Self {
+        Self { stage, error }
+    }
+}
+
+impl From<BringUpFault> for DriverError {
+    fn from(fault: BringUpFault) -> Self {
+        fault.error
+    }
+}
+
 /// An SD card brought up over the SDHCI register seam.
 ///
 /// `H` is the register backing: a capability-gated [`RegisterWindow`] on
@@ -188,12 +274,17 @@ impl<H: SdhciHost> Emmc2<H> {
     ///
     /// # Errors
     ///
+    /// Returns a [`BringUpFault`] naming the [`BringUpStage`] that failed
+    /// and the underlying error:
+    ///
     /// * [`DriverError::Unsupported`] if the card is not a v2 high-
     ///   capacity (block-addressed) SD card.
     /// * [`DriverError::DeviceFault`] if the controller never completes
     ///   a command or the card never finishes power-up within the poll
     ///   budget.
-    pub fn open(host: H) -> Result<Self, DriverError> {
+    ///
+    /// Convert to a bare [`DriverError`] with `?` / `DriverError::from`.
+    pub fn open(host: H) -> Result<Self, BringUpFault> {
         Self::open_with_budget(host, DEFAULT_POLL_BUDGET)
     }
 
@@ -204,7 +295,7 @@ impl<H: SdhciHost> Emmc2<H> {
     /// # Errors
     ///
     /// As [`Emmc2::open`].
-    pub fn open_with_budget(host: H, poll_budget: u32) -> Result<Self, DriverError> {
+    pub fn open_with_budget(host: H, poll_budget: u32) -> Result<Self, BringUpFault> {
         let mut dev = Self {
             host,
             geometry: BlockGeometry {
@@ -278,6 +369,17 @@ impl<H: SdhciHost> Emmc2<H> {
             .write32(regs::REG_CONTROL1, regs::CONTROL1_SRST_HC)?;
         self.wait_clear(regs::REG_CONTROL1, regs::CONTROL1_SRST_HC)?;
 
+        // Power the card rail before clocking it. The full host-controller
+        // reset above clears SD Bus Power, and the standard register block
+        // gates all command/data activity on it, so without this write the
+        // very first command (`CMD0`) never completes — the bus is dark.
+        // 3.3 V is the EMMC2-fed card supply (Linux's Pi 4 EMMC2 brings the
+        // power register up to the same `0x0F`).
+        self.host.write32(
+            regs::REG_CONTROL0,
+            regs::CONTROL0_BUS_VOLTAGE_3V3 | regs::CONTROL0_BUS_POWER,
+        )?;
+
         let control1 = (IDENT_CLOCK_DIVISOR << regs::CONTROL1_CLK_FREQ_SHIFT)
             | (DATA_TIMEOUT_VALUE << regs::CONTROL1_TIMEOUT_SHIFT)
             | regs::CONTROL1_CLK_INTLEN;
@@ -335,16 +437,27 @@ impl<H: SdhciHost> Emmc2<H> {
     }
 
     /// Run the SD identification sequence and derive the geometry.
-    fn init(&mut self) -> Result<(), DriverError> {
-        self.reset_and_clock()?;
+    ///
+    /// Each fallible step tags its [`DriverError`] with the
+    /// [`BringUpStage`] it failed at, so a metal caller logs the exact SD
+    /// command that stalled (`plans/PI.md` P8/B4).
+    fn init(&mut self) -> Result<(), BringUpFault> {
+        self.reset_and_clock()
+            .map_err(|e| BringUpFault::new(BringUpStage::ResetClock, e))?;
 
-        self.issue(command::GO_IDLE_STATE, 0, 0)?;
+        self.issue(command::GO_IDLE_STATE, 0, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::GoIdle, e))?;
 
-        let if_cond = self.issue(command::SEND_IF_COND, command::IF_COND_ARG, 0)?;
+        let if_cond = self
+            .issue(command::SEND_IF_COND, command::IF_COND_ARG, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::SendIfCond, e))?;
         if if_cond[0] & 0xFF != command::IF_COND_CHECK_PATTERN {
             // The card did not echo the check pattern: not a v2 card or a
             // voltage mismatch. Fail closed (`AGENTS.md` §5.4).
-            return Err(DriverError::Unsupported);
+            return Err(BringUpFault::new(
+                BringUpStage::SendIfCond,
+                DriverError::Unsupported,
+            ));
         }
 
         // Poll ACMD41 until the card finishes power-up. The poll budget
@@ -352,13 +465,18 @@ impl<H: SdhciHost> Emmc2<H> {
         // than spinning forever (`AGENTS.md` §2.1).
         let mut powered_up = false;
         for _ in 0..self.poll_budget {
-            let ocr = self.issue_app(command::SD_SEND_OP_COND, command::OP_COND_ARG, 0)?;
+            let ocr = self
+                .issue_app(command::SD_SEND_OP_COND, command::OP_COND_ARG, 0)
+                .map_err(|e| BringUpFault::new(BringUpStage::OpCond, e))?;
             if ocr[0] & command::OCR_READY != 0 {
                 if ocr[0] & command::OCR_CCS == 0 {
                     // A byte-addressed standard-capacity card. The read
                     // path is block-addressed; reject rather than
                     // mis-address (`plans/PI.md` P8).
-                    return Err(DriverError::Unsupported);
+                    return Err(BringUpFault::new(
+                        BringUpStage::OpCond,
+                        DriverError::Unsupported,
+                    ));
                 }
                 powered_up = true;
                 break;
@@ -366,20 +484,31 @@ impl<H: SdhciHost> Emmc2<H> {
             core::hint::spin_loop();
         }
         if !powered_up {
-            return Err(DriverError::DeviceFault);
+            return Err(BringUpFault::new(
+                BringUpStage::OpCond,
+                DriverError::DeviceFault,
+            ));
         }
 
-        self.issue(command::ALL_SEND_CID, 0, 0)?;
-        let rca = self.issue(command::SEND_RELATIVE_ADDR, 0, 0)?;
+        self.issue(command::ALL_SEND_CID, 0, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::AllSendCid, e))?;
+        let rca = self
+            .issue(command::SEND_RELATIVE_ADDR, 0, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::SendRelativeAddr, e))?;
         // RCA occupies bits [31:16] of the R6 response and is reused, in
         // the same position, as the argument of every addressed command.
         self.rca = rca[0] & 0xFFFF_0000;
 
-        let csd = self.issue(command::SEND_CSD, self.rca, 0)?;
-        self.geometry = command::geometry_from_csd(csd)?;
+        let csd = self
+            .issue(command::SEND_CSD, self.rca, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::SendCsd, e))?;
+        self.geometry = command::geometry_from_csd(csd)
+            .map_err(|e| BringUpFault::new(BringUpStage::SendCsd, e))?;
 
-        self.issue(command::SELECT_CARD, self.rca, 0)?;
-        self.issue(command::SET_BLOCKLEN, BLOCK_SIZE, 0)?;
+        self.issue(command::SELECT_CARD, self.rca, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::SelectCard, e))?;
+        self.issue(command::SET_BLOCKLEN, BLOCK_SIZE, 0)
+            .map_err(|e| BringUpFault::new(BringUpStage::SetBlockLen, e))?;
         Ok(())
     }
 

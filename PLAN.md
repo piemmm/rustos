@@ -1128,23 +1128,41 @@ order (one fully-gated increment each):
              at `SYSTEM_VOLUME_STORE_PATH` (`/Drivers`); fixtures plant the
              signed bundle into the `/System` volume. Proven by
              `autoload_input_qemu_aarch64` (PASS pre-unlock on `InputDelivered`);
-           - **B3** — metal USB→`hwtree` enumeration (metal-gated);
-           - **B4 — WIRED (host-tested at the driver level); metal acceptance
-             pending.** The aarch64 unlock kthread now dispatches on the bound
-             floor block driver (`run_unlock` → `virtio_blk_unlock` /
-             `emmc2_unlock`): the EMMC2 arm admits `rustos-drv-storage-emmc2`
-             through the signed §8 gate, maps the matched node's sole SDHCI
-             register window under `CAP_MMIO_MAP` through a minimal in-kernel
-             MMIO-only `Emmc2Host`, and feeds the opened `Block` to the shared
-             `finish_unlock` tail virtio-blk also uses (§2.2). `raspi4b` cannot
-             model EMMC2 (§0.4), so the live mount is metal-gated;
-           - **B5 (= 5e)** — the flip, after B1–B4 are metal-confirmed (§0.9).
+           - **B3 — DONE (host + metal)** — floor USB→`hwtree` enumeration;
+             the Pi 4 UART log shows the keyboard up at the init seam
+             (`4129`/`4131`) and `devmgr` `13002` unbound records for the HID
+             node;
+           - **B4 — DONE (host + metal).** The aarch64 unlock kthread
+             dispatches on the bound floor block driver (`run_unlock` →
+             `virtio_blk_unlock` / `emmc2_unlock`): the EMMC2 arm admits
+             `rustos-drv-storage-emmc2` through the signed §8 gate, maps the
+             matched node's sole SDHCI register window under `CAP_MMIO_MAP`
+             through a minimal in-kernel MMIO-only `Emmc2Host`, and feeds the
+             opened `Block` to the shared `finish_unlock` tail virtio-blk also
+             uses (§2.2). On a real Pi 4 it mounts `/System` (4140) and unlocks
+             the encrypted root (4133 → users db 4040 → 4136). Two SD defects
+             fixed to get there are the load-bearing facts of the driver:
+             `reset_and_clock` powers the card rail (3.3 V via `CONTROL0`,
+             Linux's `0x0F`) before clocking, and `geometry_from_csd` reads
+             `CSD_STRUCTURE` at the right-aligned `RESP3[23:22]`
+             (`(resp[3] >> 22) & 0x3`); both regression-tested. The
+             `EventId(4139)` line carries `stage=`+`error=` for any future
+             stall. Metal acceptance also surfaced — and this work fixed —
+             two login defects: `login` cached a pre-unlock empty users
+             database, and it printed `Username:` over the unlock kthread's
+             `Root passphrase:` prompt on the shared console. Both are fixed
+             by the `LateUsersDb` three-state seam (`WouldBlock` while the
+             unlock is pending → `login` waits without prompting; the
+             installed database, or `NotImplemented` once it resolves empty)
+             plus `rustos_login::supervise` acting per round (P11);
+           - **B5 (= 5e)** — the flip, **now unblocked**: B1–B4 are
+             metal-confirmed (§0.9).
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
        (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), lay the signed
        input-driver bundle into the `/System` volume against the finalised
-       anchor, and update §3 / this stage — only once B1–B4 drive the chain end
-       to end on metal (`plans/PI.md` design B).
+       anchor, and update §3 / this stage. B1–B4 now drive the chain end to end
+       on metal (`plans/PI.md` design B), so this is the next increment.
 
 ---
 
@@ -1363,10 +1381,15 @@ spec §18.
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held
   database through the `CAP_USERS_READ`-gated `users_db_read` syscall
-  (`abi-v1` no. 19), wires `UsersAuthenticator` (or a deny-all
-  authenticator when no database is held — installer images refuse every
-  login, §5.4.5), and spawns the record's shell of choice via
-  `spawn`/`wait`. The embedded-program registry carries per-program
+  (`abi-v1` no. 19) and acts on its three-state result before each round
+  via `rustos_login::supervise`: it **waits without prompting** while the
+  read is `WouldBlock` (the encrypted root is still being unlocked, so it
+  never draws `Username:` over the unlock kthread's `Root passphrase:`
+  prompt on the shared console), wires `UsersAuthenticator` for a delivered
+  database, and wires a deny-all authenticator once the read resolves with
+  no database held (an installer image refuses every login, §5.4.5). On
+  success it spawns the record's shell of choice via `spawn`/`wait`. The
+  embedded-program registry carries per-program
   capability grants and argument vectors (`EmbeddedProgram` — login
   additionally holds `CAP_PROC_SPAWN` + `CAP_USERS_READ`; the shell only
   the console pair). Per-console sessions are wired: the kernel installs

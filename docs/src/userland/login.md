@@ -122,10 +122,27 @@ supervises (`plans/PI.md` P11). It wires the real seams:
 - **`UsersAuthenticator`** over the database obtained through the
   capability-gated `users_db_read` syscall (`CAP_USERS_READ`, see
   [`architecture/syscalls.md`](../architecture/syscalls.md)) and re-parsed
-  with the fail-closed `rustos-users` parser. When no database is held —
-  an installer image, or no root volume mounted — a **deny-all**
-  authenticator is wired instead: the prompt stays up and every attempt is
-  refused (`AGENTS.md` §5.4.5, never an invented account).
+  with the fail-closed `rustos-users` parser. `rustos_login::supervise`
+  classifies each read into one of three states and acts on it **before
+  every round** (never a once-read cache):
+  - **Pending** (`Errno::WouldBlock`) — the encrypted root is still being
+    unlocked. Under design B (`plans/PI.md` P11) `init` spawns `login`
+    *before* the in-kernel root-unlock kthread mounts the root, and that
+    kthread prompts for its passphrase on the **same** console. So while
+    the read is pending `login` **waits** (`rustos_rt::yield_now`) and does
+    **not** print `Username:` — the unlock owns the console until it
+    resolves, so the two prompts never draw over each other and `login`
+    cannot steal the passphrase keystrokes (the kernel also gates
+    console-0 *input* from `login` until then). The wait yields the CPU; it
+    is never a busy spin (`AGENTS.md` §2.1).
+  - **Present** — a delivered, valid database wires `UsersAuthenticator`
+    for the round; `login` authenticates against it. Because the read
+    happens per round, the database the unlock installs *after* `login`
+    started is picked up by the next round.
+  - **Absent** — the unlock resolved with no database (an installer image,
+    or an unlock that gave up). A **deny-all** authenticator is wired: the
+    prompt stays up and every attempt is refused (`AGENTS.md` §5.4.5, never
+    an invented account).
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the record's
   shell of choice is spawned (receiving only its registered program grant,
   `AGENTS.md` §5.2) and waited on; its exit code closes the session.
@@ -163,4 +180,12 @@ paths, a dead console, and a refused session launch — plus the
 session-choice parser, the `EventId` range and uniqueness invariants, the
 numeric audit-field formatter, and the `UsersAuthenticator` (full identity
 mapping on success; one uniform refusal for a wrong password, an unknown
-user, a locked account, and empty credentials).
+user, a locked account, and empty credentials). The `supervise` loop is
+covered too: that `login` **waits without prompting** while the read is
+pending and then authenticates once the database is installed
+(`login_waits_while_pending_then_authenticates_once_installed`), that an
+absent database prompts deny-all without waiting
+(`an_absent_database_prompts_deny_all_without_waiting`), that a database
+installed after the process started is picked up by a later round
+(`the_users_database_is_reloaded_before_each_round`), and that a dead
+console returns after one round rather than spinning.

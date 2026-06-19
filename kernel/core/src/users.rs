@@ -31,6 +31,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
@@ -180,26 +182,66 @@ pub struct UsersDbAlreadyInstalled;
 /// into the same cell once it exists, and the next `users_db_read` serves
 /// it.
 ///
+/// # Three states, two errors
+///
+/// The cell distinguishes *"the unlock has not finished yet"* from *"the
+/// unlock finished and there is no database"*, because `login` must treat
+/// them differently. Under design B (`plans/PI.md` P11) `login` is spawned
+/// **before** the in-kernel unlock kthread mounts the root and prompts for
+/// the passphrase on the same console; if `login` prompted `Username:`
+/// straight away it would draw over the `Root passphrase:` prompt and the
+/// two would compete for the one keyboard. So:
+///
+/// * **Pending** (not installed, not [`resolve`](Self::resolve)d):
+///   [`text`](UsersDbSource::text) returns [`Errno::WouldBlock`] — the
+///   live-but-not-ready signal. `login` waits (yielding) and does **not**
+///   prompt, so the unlock owns the console until it finishes.
+/// * **Installed** ([`install`](Self::install) succeeded): the held text
+///   is served; `login` authenticates against it.
+/// * **Resolved-empty** ([`resolve`](Self::resolve)d with nothing
+///   installed — the unlock gave up, or there was no root to unlock):
+///   [`text`](UsersDbSource::text) returns [`Errno::NotImplemented`],
+///   identical to [`NullUsersDbSource`]. `login` then runs its fail-closed
+///   deny-all prompt (`AGENTS.md` §5.4.5) — an installer image stays
+///   usable.
+///
+/// Every boot path that hands `&LATE_USERS_DB` to
+/// [`with_users_db`](crate::BootInfo::with_users_db) reaches exactly one
+/// terminal step — [`install`](Self::install) on a successful unlock, or
+/// [`resolve`](Self::resolve) on every fail-closed / no-disk path (paired
+/// with releasing the console to `login`) — so a `login` parked on the
+/// pending state always makes progress and never waits forever
+/// (`AGENTS.md` §2.1).
+///
 /// Security properties (`AGENTS.md` §5.4):
 ///
-/// * **Fail closed by default.** Until [`install`](Self::install)
-///   succeeds the cell is empty and every read returns
-///   [`Errno::NotImplemented`], identical to [`NullUsersDbSource`] — a
-///   build that never mounts a root, or one whose unlock fails, refuses
-///   every login rather than inventing accounts (`AGENTS.md` §5.4.5).
+/// * **Fail closed by default.** Until [`install`](Self::install) or
+///   [`resolve`](Self::resolve), a read returns [`Errno::WouldBlock`]
+///   (wait, do not authenticate); once resolved without a database it
+///   returns [`Errno::NotImplemented`], identical to [`NullUsersDbSource`].
+///   Neither path ever invents an account (`AGENTS.md` §5.4.5).
 /// * **Immutable after install.** [`install`](Self::install) is
 ///   set-once: the first call publishes the database and every later
 ///   call is refused, so no code path that runs after the trusted boot
 ///   unlock can swap the live credential database.
-/// * **No user-reachable surface.** [`install`](Self::install) is
-///   internal kernel code the unlock step calls; it is never exposed as a
-///   syscall, so it adds no attack surface to the ABI.
+/// * **No user-reachable surface.** [`install`](Self::install) and
+///   [`resolve`](Self::resolve) are internal kernel code the unlock step
+///   calls; neither is exposed as a syscall, so they add no attack
+///   surface to the ABI.
 ///
-/// `Sync` (through [`OnceCell`]) so the single `&'static` instance is
-/// shared by the per-CPU syscall handlers, exactly like
-/// [`NullUsersDbSource`].
+/// `Sync` (through [`OnceCell`] and the resolved flag) so the single
+/// `&'static` instance is shared by the per-CPU syscall handlers, exactly
+/// like [`NullUsersDbSource`].
 pub struct LateUsersDb {
     held: OnceCell<HeldUsersDbSource>,
+    /// Set once the unlock reaches a terminal outcome with **no** database
+    /// installed (gave up, or there was no root). It turns a pending read
+    /// ([`Errno::WouldBlock`]) into the inert
+    /// [`Errno::NotImplemented`] so `login` stops waiting and runs its
+    /// fail-closed deny-all prompt. A successful unlock installs into
+    /// `held` instead, which wins in [`text`](UsersDbSource::text)
+    /// regardless of this flag.
+    resolved: AtomicBool,
 }
 
 impl LateUsersDb {
@@ -210,6 +252,7 @@ impl LateUsersDb {
     pub const fn new() -> Self {
         Self {
             held: OnceCell::new(),
+            resolved: AtomicBool::new(false),
         }
     }
 
@@ -237,6 +280,28 @@ impl LateUsersDb {
     pub fn is_installed(&self) -> bool {
         self.held.is_initialised()
     }
+
+    /// Mark the unlock terminated with no database to serve.
+    ///
+    /// Called on every fail-closed / no-disk unlock outcome (the unlock
+    /// gave up, or there was no root block device to unlock), paired with
+    /// releasing the console to `login`. It flips a pending read
+    /// ([`Errno::WouldBlock`]) into the inert [`Errno::NotImplemented`] so
+    /// `login` stops waiting and runs its fail-closed deny-all prompt
+    /// (`AGENTS.md` §5.4.5). Idempotent, and harmless after a successful
+    /// [`install`](Self::install): an installed database is served from
+    /// `held` regardless of this flag.
+    pub fn resolve(&self) {
+        self.resolved.store(true, Ordering::Release);
+    }
+
+    /// Whether the unlock has reached a terminal outcome — either a
+    /// database was [`install`](Self::install)ed or the cell was
+    /// [`resolve`](Self::resolve)d with none.
+    #[must_use]
+    pub fn is_resolved(&self) -> bool {
+        self.is_installed() || self.resolved.load(Ordering::Acquire)
+    }
 }
 
 impl Default for LateUsersDb {
@@ -247,12 +312,17 @@ impl Default for LateUsersDb {
 
 impl UsersDbSource for LateUsersDb {
     fn text(&self) -> Result<&[u8], Errno> {
-        // Empty (not yet unlocked) or poisoned both fail closed exactly
-        // as [`NullUsersDbSource`] does (`AGENTS.md` §2.9 / §5.4.5); only
-        // a published database serves its bytes.
+        // A published database always serves its bytes. Otherwise the
+        // result depends on whether the unlock has *finished*: while it is
+        // still pending return [`Errno::WouldBlock`] so `login` waits
+        // without prompting (the unlock owns the console); once it has
+        // resolved with no database, fail closed with
+        // [`Errno::NotImplemented`] exactly as [`NullUsersDbSource`] does
+        // (`AGENTS.md` §2.9 / §5.4.5) so `login` runs its deny-all prompt.
         match self.held.get() {
             Ok(Some(held)) => held.text(),
-            _ => Err(Errno::NotImplemented),
+            _ if self.resolved.load(Ordering::Acquire) => Err(Errno::NotImplemented),
+            _ => Err(Errno::WouldBlock),
         }
     }
 }

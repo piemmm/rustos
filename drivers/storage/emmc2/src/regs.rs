@@ -30,6 +30,8 @@ pub const REG_RESP3: usize = 0x1C;
 pub const REG_DATA: usize = 0x20;
 /// `STATUS`: present-state register (line-busy / buffer-ready flags).
 pub const REG_STATUS: usize = 0x24;
+/// `CONTROL0`: host control `[7:0]`, power control `[15:8]`.
+pub const REG_CONTROL0: usize = 0x28;
 /// `CONTROL1`: clock control `[15:0]`, timeout `[19:16]`, reset `[26:24]`.
 pub const REG_CONTROL1: usize = 0x2C;
 /// `INTERRUPT`: normal interrupt status `[15:0]`, error status `[31:16]`
@@ -46,6 +48,16 @@ pub const REG_IRPT_EN: usize = 0x38;
 pub const STATUS_CMD_INHIBIT: u32 = 1 << 0;
 /// Data line is busy; a new data command must not be issued.
 pub const STATUS_DAT_INHIBIT: u32 = 1 << 1;
+
+// --- `CONTROL0` power-control bits (byte `[15:8]`) ------------------------
+
+/// SD Bus Power: the card-supply rail is on. The standard register block
+/// gates command/data activity on this bit, so it must be set before any
+/// command is issued; a full host-controller reset clears it.
+pub const CONTROL0_BUS_POWER: u32 = 1 << 8;
+/// SD Bus Voltage Select = 3.3 V (the EMMC2-fed card rail). Occupies the
+/// 3-bit voltage field `[11:9]` of the power-control byte.
+pub const CONTROL0_BUS_VOLTAGE_3V3: u32 = 0b111 << 9;
 
 // --- `CONTROL1` bits ------------------------------------------------------
 

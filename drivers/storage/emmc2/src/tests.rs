@@ -48,6 +48,14 @@ struct MockSdhci {
     blksizecnt: u32,
     app_cmd: bool,
 
+    // SD Bus Power state. `power_on` tracks the power-control byte the
+    // driver writes; the controller refuses to complete commands while the
+    // bus is dark. `power_wired` models a rail that cannot come up (the
+    // power write is honoured only when wired), so a regression test can
+    // prove the engine depends on the power-on write.
+    power_on: bool,
+    power_wired: bool,
+
     // Card identity / capability the model presents.
     c_size: u32,
     high_capacity: bool,
@@ -80,6 +88,8 @@ impl MockSdhci {
             resp: [0; 4],
             blksizecnt: 0,
             app_cmd: false,
+            power_on: false,
+            power_wired: true,
             c_size,
             high_capacity: true,
             csd_structure_v2: true,
@@ -119,9 +129,15 @@ impl MockSdhci {
             .collect()
     }
 
-    /// The four R2 response words encoding the model's CSD.
+    /// The four R2 response words encoding the model's CSD, laid out exactly
+    /// as the SDHCI controller presents `RESP0..3`: the 120-bit CRC-stripped
+    /// field is right-aligned, so `CSD_STRUCTURE` (CSD[127:126]) lands at
+    /// `RESP3` bits [23:22] and `C_SIZE` at `RESP1` bits [29:8] (`command.rs`
+    /// `geometry_from_csd`). Encoding the structure at the wrong position is
+    /// the bug that let the metal CMD9 `SEND_CSD` failure escape host tests
+    /// (`plans/PI.md` P8/B4), so the model mirrors the real layout.
     fn csd_words(&self) -> [u32; 4] {
-        let r3 = if self.csd_structure_v2 { 1 << 30 } else { 0 };
+        let r3 = if self.csd_structure_v2 { 1 << 22 } else { 0 };
         let r1 = (self.c_size & 0x003F_FFFF) << 8;
         [0, r1, 0, r3]
     }
@@ -172,6 +188,13 @@ impl MockSdhci {
     fn process_command(&mut self, cmdtm: u32) {
         let index = ((cmdtm >> regs::CMD_INDEX_SHIFT) & 0x3F) as u8;
 
+        if !self.power_on {
+            // The SD bus is unpowered: the controller drives nothing on the
+            // line and command-complete never asserts, so the engine's
+            // bounded wait fails closed. This is the exact metal symptom the
+            // missing power-on write produced (`plans/PI.md` P8/B4).
+            return;
+        }
         if self.stall {
             // Never assert command-complete: model an absent / wedged
             // controller so the engine's bounded wait fails closed.
@@ -259,6 +282,14 @@ impl SdhciHost for MockSdhci {
             // The host-controller reset bit self-clears once reset is
             // complete.
             regs::REG_CONTROL1 => self.control1 = value & !regs::CONTROL1_SRST_HC,
+            // The host-controller reset clears SD Bus Power; the driver
+            // re-powers the rail here. A rail that cannot come up
+            // (`power_wired == false`) drops the write, leaving the bus dark.
+            regs::REG_CONTROL0 => {
+                if self.power_wired {
+                    self.power_on = value & regs::CONTROL0_BUS_POWER != 0;
+                }
+            }
             // The interrupt register is write-1-to-clear.
             regs::REG_INTERRUPT => self.interrupt &= !value,
             regs::REG_ARG1 => self.arg = value,
@@ -340,7 +371,13 @@ fn read_rejects_out_of_range_lba() {
 fn byte_addressed_card_is_unsupported() {
     let mut mock = MockSdhci::healthy(7);
     mock.high_capacity = false; // ACMD41 reports CCS = 0.
-    assert_eq!(Emmc2::open(mock).err(), Some(DriverError::Unsupported));
+    assert_eq!(
+        Emmc2::open(mock).err(),
+        Some(BringUpFault {
+            stage: BringUpStage::OpCond,
+            error: DriverError::Unsupported,
+        })
+    );
 }
 
 #[test]
@@ -348,7 +385,13 @@ fn non_v2_card_is_unsupported() {
     let mut mock = MockSdhci::healthy(7);
     // A card that does not echo CMD8's check pattern is pre-v2.
     mock.if_cond_echo = false;
-    assert_eq!(Emmc2::open(mock).err(), Some(DriverError::Unsupported));
+    assert_eq!(
+        Emmc2::open(mock).err(),
+        Some(BringUpFault {
+            stage: BringUpStage::SendIfCond,
+            error: DriverError::Unsupported,
+        })
+    );
 }
 
 #[test]
@@ -357,7 +400,13 @@ fn csd_v1_card_is_unsupported() {
     // High-capacity OCR but a structure-v1 CSD: rejected by the decoder
     // rather than mis-read.
     mock.csd_structure_v2 = false;
-    assert_eq!(Emmc2::open(mock).err(), Some(DriverError::Unsupported));
+    assert_eq!(
+        Emmc2::open(mock).err(),
+        Some(BringUpFault {
+            stage: BringUpStage::SendCsd,
+            error: DriverError::Unsupported,
+        })
+    );
 }
 
 #[test]
@@ -375,10 +424,35 @@ fn command_error_fails_closed() {
 fn stalled_controller_times_out_closed() {
     let mut mock = MockSdhci::healthy(7);
     mock.stall = true;
-    // A tiny budget keeps the bounded wait quick; it must fail closed.
+    // A tiny budget keeps the bounded wait quick; it must fail closed. The
+    // stall blocks command completion (not the clock bring-up), so the
+    // first command — `CMD0 GO_IDLE_STATE` — is where the bounded wait
+    // times out.
     assert_eq!(
         Emmc2::open_with_budget(mock, 8).err(),
-        Some(DriverError::DeviceFault)
+        Some(BringUpFault {
+            stage: BringUpStage::GoIdle,
+            error: DriverError::DeviceFault,
+        })
+    );
+}
+
+#[test]
+fn unpowered_bus_fails_closed_at_first_command() {
+    // The full host-controller reset clears SD Bus Power. If the driver did
+    // not re-power the rail, command-complete would never assert and the
+    // first command (`CMD0 GO_IDLE_STATE`) would time out — the exact metal
+    // symptom (`stage=CMD0 GO_IDLE_STATE`, `plans/PI.md` P8/B4). Modelling a
+    // rail that refuses to come up proves the engine depends on the
+    // power-on write `reset_and_clock` now performs.
+    let mut mock = MockSdhci::healthy(7);
+    mock.power_wired = false;
+    assert_eq!(
+        Emmc2::open_with_budget(mock, 8).err(),
+        Some(BringUpFault {
+            stage: BringUpStage::GoIdle,
+            error: DriverError::DeviceFault,
+        })
     );
 }
 
@@ -550,7 +624,10 @@ fn open_discovered_requires_mmio_map() {
     };
     assert_eq!(
         wiring::open_discovered(&host, EMMC2_PHYS).err(),
-        Some(DriverError::PermissionDenied)
+        Some(BringUpFault {
+            stage: BringUpStage::MapWindow,
+            error: DriverError::PermissionDenied,
+        })
     );
 }
 
@@ -563,7 +640,10 @@ fn open_discovered_without_mapper_is_unsupported() {
     };
     assert_eq!(
         wiring::open_discovered(&host, EMMC2_PHYS).err(),
-        Some(DriverError::Unsupported)
+        Some(BringUpFault {
+            stage: BringUpStage::MapWindow,
+            error: DriverError::Unsupported,
+        })
     );
 }
 
@@ -584,4 +664,40 @@ fn bind_table_matches_the_bcm2711_emmc2_node() {
     // guessing (`AGENTS.md` §18.4 / §2.9).
     let pcie = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&pcie));
+}
+
+#[test]
+fn bring_up_stage_names_every_step_distinctly() {
+    use alloc::collections::BTreeSet;
+
+    // Every stage maps to a non-empty, unique operator-facing name (the
+    // diagnostic contract the metal `stage=` log field carries). A missing
+    // or duplicated name would mislead the operator about which SD command
+    // stalled.
+    let stages = [
+        BringUpStage::MapWindow,
+        BringUpStage::ResetClock,
+        BringUpStage::GoIdle,
+        BringUpStage::SendIfCond,
+        BringUpStage::OpCond,
+        BringUpStage::AllSendCid,
+        BringUpStage::SendRelativeAddr,
+        BringUpStage::SendCsd,
+        BringUpStage::SelectCard,
+        BringUpStage::SetBlockLen,
+    ];
+    let names: BTreeSet<&'static str> = stages.iter().map(|s| s.as_str()).collect();
+    assert_eq!(names.len(), stages.len());
+    assert!(names.iter().all(|n| !n.is_empty()));
+}
+
+#[test]
+fn bring_up_fault_converts_to_its_driver_error() {
+    // A consumer that only needs the §8 driver-ABI `DriverError` drops the
+    // stage with `?` / `DriverError::from`.
+    let fault = BringUpFault {
+        stage: BringUpStage::OpCond,
+        error: DriverError::DeviceFault,
+    };
+    assert_eq!(DriverError::from(fault), DriverError::DeviceFault);
 }

@@ -49,8 +49,13 @@
 //!   [`AuthenticatedUser`], [`SessionKind`]) and the [`Prompt`],
 //!   [`Authenticator`], and [`SessionLauncher`] seams.
 //! * [`auth`] — [`UsersAuthenticator`], the production [`Authenticator`]
-//!   over the `/System/Security/Users` database (`lib/users`).
+//!   over the `/System/Security/Users` database (`lib/users`), and
+//!   [`DenyAll`], the fail-closed authenticator wired when no database is
+//!   held.
 //! * [`login`] — the [`Login`] state machine.
+//! * [`supervise`](mod@supervise) — [`supervise()`], the per-round
+//!   database-reload loop that keeps a `login` spawned before the encrypted
+//!   root is unlocked from caching a stale "no database" answer.
 //!
 //! # Layering & safety
 //!
@@ -74,8 +79,9 @@ pub mod events;
 pub mod line;
 pub mod login;
 pub mod session;
+pub mod supervise;
 
-pub use auth::UsersAuthenticator;
+pub use auth::{DenyAll, UsersAuthenticator};
 pub use error::LoginError;
 pub use line::{push_line_byte, LineFeed};
 pub use login::{Login, LoginConfig};
@@ -83,3 +89,4 @@ pub use session::{
     AuthenticatedUser, Authenticator, Credentials, Gid, Prompt, SessionKind, SessionLauncher,
     SessionOutcome, Uid,
 };
+pub use supervise::{supervise, DbLoad};

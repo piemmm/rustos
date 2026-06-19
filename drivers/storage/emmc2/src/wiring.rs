@@ -18,7 +18,7 @@
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
 
-use crate::{regs, Emmc2};
+use crate::{regs, BringUpFault, BringUpStage, Emmc2};
 
 /// Map the discovered EMMC2 register window and bring the card online.
 ///
@@ -29,12 +29,19 @@ use crate::{regs, Emmc2};
 ///
 /// # Errors
 ///
+/// Returns a [`BringUpFault`] naming the [`BringUpStage`] that failed: the
+/// window map and capability checks below report [`BringUpStage::MapWindow`],
+/// and the SD identification reports its own per-command stage (see
+/// [`Emmc2::open`]). The underlying [`DriverError`] is:
+///
 /// * [`DriverError::PermissionDenied`] if the host did not grant
 ///   [`CapabilityId::MMIO_MAP`].
 /// * [`DriverError::Unsupported`] if the host exposes no [`MmioMapper`].
 /// * [`DriverError::LengthOutOfRange`] / [`DriverError::DeviceFault`] if
 ///   the platform cannot map the window, plus any [`Emmc2::open`] error
 ///   (an unsupported card or a controller that never responds).
+///
+/// Convert to a bare [`DriverError`] with `?` / `DriverError::from`.
 ///
 /// # Capabilities
 ///
@@ -43,13 +50,22 @@ use crate::{regs, Emmc2};
 pub fn open_discovered(
     host: &dyn DriverHost,
     regs_phys: u64,
-) -> Result<Emmc2<rustos_abi::RegisterWindow>, DriverError> {
+) -> Result<Emmc2<rustos_abi::RegisterWindow>, BringUpFault> {
     if !host.has_capability(CapabilityId::MMIO_MAP) {
-        return Err(DriverError::PermissionDenied);
+        return Err(BringUpFault {
+            stage: BringUpStage::MapWindow,
+            error: DriverError::PermissionDenied,
+        });
     }
-    let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(DriverError::Unsupported)?;
+    let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(BringUpFault {
+        stage: BringUpStage::MapWindow,
+        error: DriverError::Unsupported,
+    })?;
     let window = mapper
         .map_window(regs_phys, regs::REGS_LEN_BYTES)
-        .map_err(MmioMapError::as_driver_error)?;
+        .map_err(|e| BringUpFault {
+            stage: BringUpStage::MapWindow,
+            error: MmioMapError::as_driver_error(e),
+        })?;
     Emmc2::open(window)
 }

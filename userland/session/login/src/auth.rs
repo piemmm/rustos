@@ -47,6 +47,21 @@ impl Authenticator for UsersAuthenticator<'_> {
     }
 }
 
+/// An [`Authenticator`] wired when no user database is held: every attempt
+/// is refused with the same error, so an installer image — or a boot that
+/// has not yet unlocked the encrypted root that carries the database — sits
+/// at a prompt that grants nothing (`AGENTS.md` §5.4.5 — fail closed, never
+/// invent an account). Paired with [`UsersAuthenticator`] by
+/// [`supervise`](crate::supervise::supervise), which wires this whenever a
+/// round's database reload returns nothing.
+pub struct DenyAll;
+
+impl Authenticator for DenyAll {
+    fn authenticate(&self, _credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno> {
+        Err(Errno::PermissionDenied)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::UsersAuthenticator;

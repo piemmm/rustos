@@ -165,9 +165,12 @@ pub const OCR_CCS: u32 = 1 << 30;
 ///
 /// * [`DriverError::Unsupported`] if the CSD is not structure version 2.
 pub fn geometry_from_csd(resp: [u32; 4]) -> Result<BlockGeometry, DriverError> {
-    // CSD_STRUCTURE is CSD bits [127:126] → response bits [119:118],
-    // i.e. the top two bits of resp[3].
-    let csd_structure = resp[3] >> 30;
+    // CSD_STRUCTURE is CSD bits [127:126] → response bits [119:118]. The
+    // controller right-aligns the 120-bit (CRC-stripped) field across
+    // `RESP0..3`, so `resp[3]` (`RESP3`) holds CSD[127:104] in its *low* 24
+    // bits (`RESP3[31:24]` is zero padding above the field) and CSD[127:126]
+    // sits at `resp[3]` bits [23:22], not the top of the word.
+    let csd_structure = (resp[3] >> 22) & 0x3;
     if csd_structure != 1 {
         return Err(DriverError::Unsupported);
     }
@@ -209,9 +212,11 @@ mod tests {
     #[test]
     fn csd_v2_decodes_capacity() {
         // C_SIZE = 0x3B37 → (0x3B37 + 1) * 1024 = 15,597,568 blocks
-        // (~7.6 GiB), a representative 8 GB SDHC card.
+        // (~7.6 GiB), a representative 8 GB SDHC card. CSD_STRUCTURE = v2 is
+        // CSD[127:126] = 01b, which the controller presents at `resp[3]`
+        // bits [23:22] (see `geometry_from_csd`).
         let c_size: u32 = 0x3B37;
-        let resp = [0, (c_size << 8), 0, 1 << 30];
+        let resp = [0, (c_size << 8), 0, 1 << 22];
         let geo = geometry_from_csd(resp).expect("v2 CSD decodes");
         assert_eq!(geo.block_size, 512);
         assert_eq!(geo.block_count, (u64::from(c_size) + 1) * 1024);
@@ -228,8 +233,21 @@ mod tests {
     fn csd_v2_minimum_capacity_is_one_unit() {
         // Structure v2 with C_SIZE = 0 yields the smallest legal
         // capacity, (0 + 1) * 1024 blocks, never zero.
-        let resp = [0, 0, 0, 1 << 30];
+        let resp = [0, 0, 0, 1 << 22];
         let geo = geometry_from_csd(resp).expect("minimum capacity");
         assert_eq!(geo.block_count, 1024);
+    }
+
+    #[test]
+    fn structure_bits_above_the_field_are_not_read_as_v2() {
+        // CSD_STRUCTURE lives at `resp[3]` bits [23:22]; the high byte of
+        // `RESP3` is zero padding above the 120-bit field. A value placed
+        // at the top of the word (the position a naive `resp[3] >> 30`
+        // would have read) is *not* the structure field, so it must not be
+        // mistaken for v2 — this is the metal CMD9 `SEND_CSD` regression
+        // (`plans/PI.md` P8/B4), where the real card reported its v2
+        // structure at [23:22] but the decoder looked at the wrong bits.
+        let resp = [0, 0, 0, 1 << 30];
+        assert_eq!(geometry_from_csd(resp), Err(DriverError::Unsupported));
     }
 }

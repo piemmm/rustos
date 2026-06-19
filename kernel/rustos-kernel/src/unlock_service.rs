@@ -339,6 +339,46 @@ pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
     );
 }
 
+/// Like [`note`], but carries the `stage` naming the bring-up step a
+/// failure was localised to and the `error` it failed with.
+///
+/// Used by the per-device root bring-up to surface *which* step of a
+/// floor block-device bring-up stalled and *how* (e.g. the EMMC2
+/// SD-identification command on a real Raspberry Pi 4, which `raspi4b`
+/// cannot emulate, so the metal UART log is the only signal —
+/// `plans/PI.md` §0.4 / P8 / B4). Both values are stable `&'static str`s
+/// from the driver (`rustos_drv_storage_emmc2::BringUpStage::as_str` and
+/// the caller's `DriverError` name), so no name is re-spelled here
+/// (`AGENTS.md` §2.2). The `error` distinguishes a controller/command
+/// fault from a decode rejection at the same stage (e.g. CMD9 `SEND_CSD`
+/// timing out vs. returning an unsupported CSD).
+pub fn note_stage(
+    audit: &dyn Sink,
+    level: Level,
+    message: &'static str,
+    stage: &'static str,
+    error: &'static str,
+) {
+    log(
+        audit,
+        &Event {
+            level,
+            id: UNLOCK_SERVICE,
+            message,
+            fields: &[
+                rustos_log::Field {
+                    key: "stage",
+                    value: stage,
+                },
+                rustos_log::Field {
+                    key: "error",
+                    value: error,
+                },
+            ],
+        },
+    );
+}
+
 /// A cooperative blocking console reader for the unlock kthread.
 ///
 /// The kthread analogue of kernel-core's `BlockingConsoleRead` (which parks

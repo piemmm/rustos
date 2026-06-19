@@ -250,7 +250,13 @@ mounted the root volume and ran the audited `load_users_db` read
 until one is installed it fails closed with `NotImplemented`, and a wired
 holder with no database fails closed with `NotFound` — a system without
 accounts refuses every login rather than inventing one (`AGENTS.md`
-§5.4.5). An undersized buffer is refused whole with `BufferTooSmall` (a
+§5.4.5). The `LateUsersDb` holder (the in-kernel-unlock boot path,
+`plans/PI.md` P11) adds one more state: while the encrypted root is still
+being unlocked the read returns **`WouldBlock`** — the live-but-not-ready
+signal — so `login` *waits without prompting* and leaves the console to
+the concurrent `Root passphrase:` prompt; once the unlock resolves the
+read returns the installed database, or `NotImplemented` if the unlock
+produced none (the deny-all prompt then runs). An undersized buffer is refused whole with `BufferTooSmall` (a
 credential database is never truncated, `AGENTS.md` §2.9); a buffer sized
 at the format's 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always
 suffices. The first-party Rust wrapper is `rustos_rt::users_db_read`; the

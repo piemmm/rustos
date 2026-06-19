@@ -34,17 +34,47 @@ test and metal acceptance is a documented checklist.
 ## SD identification
 
 `Emmc2::open` runs the standard SD bring-up over the SDHCI register block:
-controller reset → identification clock → `CMD0` (idle) → `CMD8`
+controller reset → **power the card rail** (SD Bus Power on, 3.3 V via the
+`CONTROL0` power-control byte) → identification clock → `CMD0` (idle) → `CMD8`
 (interface condition, v2 check pattern) → `ACMD41` (operating conditions,
 polled to power-up) → `CMD2`/`CMD3` (CID / RCA) → `CMD9` (CSD) → `CMD7`
 (select) → `CMD16` (512-byte block length). The block geometry is derived
 from the card's CSD (structure v2 / high-capacity), never assumed
 (`AGENTS.md` §18.5).
 
+The full host-controller reset clears SD Bus Power, and the standard
+register block gates all command/data activity on it, so the power-on
+write must precede the first command; without it `CMD0` never completes
+(the bus is dark — the failure a real Pi 4 reported at
+`stage=CMD0 GO_IDLE_STATE`). Linux's Pi 4 EMMC2 brings the same power
+register up to `0x0F`.
+
 Only high-capacity, block-addressed (SDHC/SDXC, CSD structure v2) cards
 are supported; a byte-addressed standard-capacity card, a pre-v2 card, or
 a structure-v1 CSD is rejected fail-closed with `DriverError::Unsupported`
 rather than mis-addressed (`AGENTS.md` §5.4).
+
+The CSD is decoded from the R2 response **exactly as the SDHCI controller
+presents it**: the 8-bit CRC tail is stripped and the remaining 120 bits
+are right-aligned across `RESP0..3`, so `CSD_STRUCTURE` (CSD[127:126]) sits
+at `RESP3` bits [23:22] (the high byte of `RESP3` is zero padding above the
+field) and `C_SIZE` (CSD v2) at `RESP1` bits [29:8]. Reading the structure
+field at the wrong position made a real Pi 4's valid SDHC card decode as an
+unsupported structure and fail at `stage=CMD9 SEND_CSD`; `MockSdhci` now
+models the same right-aligned layout so the decode is proven against the
+real register positions.
+
+Because there is no Pi-board QEMU vertical, a failed bring-up on a real Pi
+4 is otherwise blind. `Emmc2::open` therefore returns a `BringUpFault`
+pairing the `DriverError` with a `BringUpStage` naming the exact step that
+stalled (`MapWindow` / `ResetClock` / `GoIdle` / `SendIfCond` / `OpCond` /
+`AllSendCid` / `SendRelativeAddr` / `SendCsd` / `SelectCard` /
+`SetBlockLen`). `BringUpStage::as_str` gives the stable operator-facing
+name the in-kernel root-unlock path logs as a `stage=` field, alongside the
+`DriverError` as an `error=` field that distinguishes a controller/command
+fault from a decode rejection at the same step; a consumer that only needs
+the §8 `DriverError` drops the stage with `?` / `DriverError::from`
+(`AGENTS.md` §2.16 — measure, do not guess).
 
 ## Supported hardware
 
@@ -87,17 +117,25 @@ budget (`DEFAULT_POLL_BUDGET`). Exceeding it fails closed with
 
 `cargo test -p rustos-drv-storage-emmc2` exercises:
 
-- `CMDTM` command-word encoding and CSD-v2 capacity decode (`command`).
+- `CMDTM` command-word encoding and CSD-v2 capacity decode at the real
+  right-aligned register positions, including that a structure value placed
+  above the field is not mistaken for v2 (`command`).
 - Full identification and reported geometry over `MockSdhci`.
 - Single-block and multi-block reads returning the card's data.
 - Single-block and multi-block writes read back through the same mock
   card, with neighbouring blocks proven untouched.
 - Range / shape validation (`BufferTooSmall`, `LengthOutOfRange`) on
   both the read and write paths.
-- Byte-addressed, pre-v2, and CSD-v1 cards rejected `Unsupported`.
+- Byte-addressed, pre-v2, and CSD-v1 cards rejected `Unsupported`, each
+  reporting the `BringUpStage` it failed at (`OpCond` / `SendIfCond` /
+  `SendCsd`).
 - Command-error (read and write) and stalled-controller fail-closed
-  (`DeviceFault`).
-- The `wiring` capability / mapper gate.
+  (`DeviceFault`; the stall is localised to the `GoIdle` stage).
+- An unpowered SD bus (a rail that never comes up) fails closed at the
+  `GoIdle` stage, proving the engine depends on the bus-power write.
+- Every `BringUpStage` maps to a distinct, non-empty name and
+  `BringUpFault` converts to its `DriverError`.
+- The `wiring` capability / mapper gate (failing at the `MapWindow` stage).
 - The `BIND_KEYS` table matches the `brcm,bcm2711-emmc2` node and rejects
   the sibling `brcm,bcm2711-pcie` node (`AGENTS.md` §18.3).
 
@@ -108,10 +146,16 @@ kthread mount the read-only `/System` volume and the encrypted root off the
 SD card, and capture the UART log) is the acceptance artefact, recorded in
 `plans/PI.md` P8/B4. It requires a physical Pi 4; no further code is staged
 for it — the bring-up is wired (`crate::aarch64::root_unlock::emmc2_unlock`).
+If the card does not come up, the `EventId(4139)` unlock-service error line
+carries a `stage=` field naming the SD step that stalled and an `error=`
+field naming how it failed, which localises the fix without re-flashing
+blind.
 
 ## Public surface
 
 `AGENTS.md` §8 — the only public *function* is `register`. The `Emmc2`
 type is re-exported so the driver host can construct an instance through
 `wiring::open_discovered`; the host never reaches into the type beyond the
-`Block` trait surface.
+`Block` trait surface. `BringUpStage` and `BringUpFault` are public only as
+the error surface of `Emmc2::open` / `wiring::open_discovered`, so a metal
+caller can log the failing stage; the §8 `register` contract is unchanged.
