@@ -153,6 +153,19 @@ impl<'a> CooperativeYield<'a> {
     pub fn yield_now(&self) {
         self.yielder.borrow_mut().yield_now();
     }
+
+    /// Park the kthread until an external `unpark` re-enqueues it, then
+    /// resume on its next dispatch (see [`YieldHandle::park`]).
+    ///
+    /// Unlike [`Self::yield_now`], a parked task is *not* re-enqueued, so it
+    /// consumes no CPU while suspended — this is the suspension a long-lived
+    /// kernel service uses to wait for work without busy-yielding
+    /// (`AGENTS.md` §2.1). The `borrow_mut` is held only for the inner
+    /// [`YieldHandle::park`] call; the kthread's suspending sites never call
+    /// this re-entrantly, so the borrow is never already held.
+    pub fn park(&self) {
+        self.yielder.borrow_mut().park();
+    }
 }
 
 #[cfg(test)]
@@ -318,5 +331,35 @@ mod tests {
         let coop = CooperativeYield::new(&mut mock);
         let waiter = KthreadIrqWaiter::new(&coop, || 0xABCD_1234);
         assert_eq!(waiter.now_ns(), 0xABCD_1234);
+    }
+
+    /// A mock [`YieldHandle`] that counts `park` calls (and would record a
+    /// stray `yield_now`), so [`CooperativeYield::park`]'s delegation to the
+    /// inner handle's `park` is observable.
+    struct ParkRecorder<'a> {
+        parks: &'a Cell<u32>,
+    }
+
+    impl YieldHandle for ParkRecorder<'_> {
+        fn yield_now(&mut self) {
+            panic!("CooperativeYield::park must delegate to park, never yield_now");
+        }
+
+        fn park(&mut self) {
+            self.parks.set(self.parks.get() + 1);
+        }
+    }
+
+    #[test]
+    fn cooperative_park_delegates_to_the_inner_handle_park() {
+        // A long-lived kernel service (the Design D D2a-2 driver-store
+        // service) parks through the shared cell rather than busy-yielding
+        // (`AGENTS.md` §2.1): `park` must reach the inner handle's `park`.
+        let parks = Cell::new(0);
+        let mut mock = ParkRecorder { parks: &parks };
+        let coop = CooperativeYield::new(&mut mock);
+        coop.park();
+        coop.park();
+        assert_eq!(parks.get(), 2, "each park delegates exactly once");
     }
 }

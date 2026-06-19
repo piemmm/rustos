@@ -1349,14 +1349,38 @@ order (one fully-gated increment each):
                `autoload_input_qemu_aarch64` vertical. Metal (§0.9): confirm the Pi
                EMMC2 unlock + `/System` autoload + login still work through the
                shared handles.
-             - **D2a-2 — persistent `/System` mount + `DriverStoreService`.**
-               Promote the boot block device and its backing (DMA pools, MMIO
-               maps, IRQ waiters — today stack-local on the unlock kthread) to
-               `'static` so the `SharedBlock` outlives the unlock call; a
-               kernel-resident `DriverStoreService` holds a persistent read-only
-               `/System` window (a `SharedBlockHandle`) concurrently with the
-               unlock window; the existing in-kernel autoload consumes the
-               persistent service. Metal: re-verify the Pi unlock + login (§0.9).
+             - **D2a-2 — persistent `/System` mount + `DriverStoreService` —
+               DONE (host-proven + whole gate); metal re-verify pending (§0.9).**
+               Keep the `/System` `SharedBlock` alive for life so its read-only
+               handle outlives the unlock, without re-architecting the
+               metal-proven device bring-up. The unlock kthread becomes a
+               **never-returning kernel service** (the sanctioned
+               `KernelServiceBody` pattern): because `finish_unlock` takes `blk`
+               by value while the device backing (virtio bus / `MmioMap` /
+               `DmaPool` / `RearmingIrqWaiter` / `KernelVirtioHost`, or the EMMC2
+               `MmioMap`) stays on the still-suspended `virtio_blk_unlock` /
+               `emmc2_unlock` frame, making `finish_unlock` never return keeps
+               that whole call chain suspended on the kthread's coroutine stack
+               — so the backing stays live with **zero `'static` promotion and
+               zero new API surface**, and the proven IRQ-wait/cooperative-yield
+               device-driving model is unchanged (best §2.17). A minimal
+               `DriverStoreService` owns `shared` + the persistent read-only
+               `/System` `SharedBlockHandle`; the existing in-kernel autoload is
+               its present, real consumer (no §2.3 speculative surface); the
+               service then logs the unlock outcome, releases console 0, and
+               **parks** (`CooperativeYield::park`, added delegating to
+               `YieldHandle::park` — a real park, never a §2.1 busy-yield),
+               holding the mount for life. `finish_unlock` / `virtio_blk_unlock`
+               / `emmc2_unlock` / `run_unlock` return
+               `Result<Infallible, &'static str>`: success diverges into the
+               park, early bring-up errors still return `Err` to the kthread
+               closure. (Literal `'static` promotion is rejected: `VirtioBlk` /
+               `KernelVirtioHost` *borrow* their backing and the I/O is bound to
+               the kthread's IRQ waiter, so promoting and driving from a syscall
+               caller's context would re-architect the metal path for no gain —
+               D2b's `driver_store_load` instead wakes *this* kthread and reuses
+               the proven I/O path, then re-parks.) Metal: re-verify the Pi
+               unlock + login (§0.9).
            - **D2b — the user-space migration.** Add `hw_tree_read` /
              `hw_tree_wait` / `driver_store_load` (+ generation counter / park)
              with the new signed `devmgr` rxe binary as their consumer; lay the

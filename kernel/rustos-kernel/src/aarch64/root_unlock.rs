@@ -28,6 +28,8 @@
 //! (`AGENTS.md` §2.2). A bound driver that is neither fails closed
 //! (logged, gate opened, no database installed; `AGENTS.md` §2.9 / §18.4).
 
+use core::convert::Infallible;
+
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::dma::PoolId;
 use rustos_abi::driver::sole_register_window;
@@ -61,7 +63,7 @@ use crate::root_mount::{
     autoload_system_drivers, unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB,
 };
 use crate::root_storage::RootBlockBinding;
-use crate::shared_block::SharedBlock;
+use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, take_boot, AutoloadHook,
     KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
@@ -268,27 +270,16 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     let caps = service_caps();
     let env = UnlockEnv { ctx, audit, tree };
     let body = move |yielder: &mut dyn YieldHandle| {
-        let outcome = run_unlock(yielder, &binding, dtb, frames, caps, env);
-        match outcome {
-            Ok(UnlockOutcome::Installed) => {
-                note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE);
-            }
-            Ok(UnlockOutcome::GaveUp) => {
-                note(
-                    audit,
-                    Level::Error,
-                    "root-unlock: gave up fail-closed; login refused until reboot",
-                );
-            }
-            Err(stage) => {
-                note(audit, Level::Error, stage);
-            }
-        }
-        // Release console 0 to `login` regardless of outcome: the unlock is
-        // done (installed or fail-closed), so the byte-contention window is
-        // over (`plans/PI.md` P11 item 5). A failed unlock leaves
-        // `LATE_USERS_DB` empty, so `login` still refuses every attempt
-        // (`AGENTS.md` §5.4.5).
+        // On success the root-unlock service never returns: it parks for life
+        // as the persistent driver-store service (Design D D2a-2), having
+        // already logged the unlock outcome and released console 0. Only an
+        // early bring-up failure returns here — and because the success arm is
+        // the uninhabited [`Infallible`], the `Err` binding is irrefutable.
+        // Fail closed (`AGENTS.md` §2.9): log the stage and open the console-0
+        // gate so `login` proceeds (it refuses every attempt, as a failed
+        // unlock installs no database, §5.4.5).
+        let Err(stage) = run_unlock(yielder, &binding, dtb, frames, caps, env);
+        note(audit, Level::Error, stage);
         release_console0_to_login();
     };
 
@@ -311,7 +302,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
 }
 
 /// Bring up the bound bootstrap-floor block device and run the interactive
-/// unlock policy, returning its outcome.
+/// unlock policy.
 ///
 /// Dispatches on which floor block driver [`crate::root_storage`] bound
 /// (`AGENTS.md` §18.6): [`VIRTIO_BLK_PATH`] over the production device-IRQ
@@ -321,9 +312,12 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
 /// [`finish_unlock`] (`AGENTS.md` §2.2). A bound driver that is neither
 /// fails closed (`AGENTS.md` §2.9 / §18.4).
 ///
-/// Every fallible step fails closed with a stable stage string the caller
-/// logs (`AGENTS.md` §2.9); the caller opens the console-0 gate on every
-/// path.
+/// **On success this never returns:** [`finish_unlock`] logs the outcome,
+/// releases the console-0 gate, and parks the kthread for life as the
+/// persistent driver-store service (Design D D2a-2), so the [`Infallible`]
+/// `Ok` is never produced. Only an early bring-up failure returns `Err` with
+/// a stable stage string; on that path the caller logs it and opens the
+/// console-0 gate (`AGENTS.md` §2.9).
 fn run_unlock(
     yielder: &mut dyn YieldHandle,
     binding: &RootBlockBinding,
@@ -331,7 +325,7 @@ fn run_unlock(
     frames: &'static FrameAllocator,
     caps: CapabilitySet,
     env: UnlockEnv,
-) -> Result<UnlockOutcome, &'static str> {
+) -> Result<Infallible, &'static str> {
     // Move the kthread's single yield handle into the shared cell both the
     // re-arming IRQ waiter and the cooperative console reader suspend
     // through (`AGENTS.md` §2.2 — one cooperative-yield definition).
@@ -375,7 +369,7 @@ fn virtio_blk_unlock<'a>(
     dtb: u64,
     frames: &'static FrameAllocator,
     env: UnlockEnv,
-) -> Result<UnlockOutcome, &'static str> {
+) -> Result<Infallible, &'static str> {
     let audit = env.audit;
     if dtb == 0 {
         return Err("root-unlock: no device tree; root unbound");
@@ -495,7 +489,7 @@ fn emmc2_unlock<'a>(
     caller: &TaskCapabilities,
     binding: &RootBlockBinding,
     env: UnlockEnv,
-) -> Result<UnlockOutcome, &'static str> {
+) -> Result<Infallible, &'static str> {
     let audit = env.audit;
     // Admit the EMMC2 driver through the signed §8 load gate before it
     // drives hardware — a refusal fails closed (`AGENTS.md` §5.4 / §23.1 /
@@ -567,14 +561,25 @@ fn emmc2_unlock<'a>(
 /// every node of the discovered `tree` against the store and spawning each
 /// winner into its own process (`AGENTS.md` §18.3). Running it *first*
 /// brings the keyboard up in user space in time to type the unlock secret
-/// (design B); it is fail-soft and cannot fail the boot. Every fallible
-/// step fails closed with a stable stage string the caller logs
-/// (`AGENTS.md` §2.9).
+/// (design B); it is fail-soft and cannot fail the boot.
+///
+/// **This never returns on success.** The one brought-up disk is wrapped in
+/// a [`DriverStoreService`] (over the [`SharedBlock`] layer), the autoload
+/// and the encrypted-root unlock run through two concurrent windows onto it,
+/// the outcome is logged and the console-0 gate released, and the kthread
+/// then [`holds`](DriverStoreService::hold) the read-only `/System` mount
+/// **for life** — parking forever (Design D D2a-2). Because this whole
+/// bring-up call chain stays suspended beneath that park, the borrowed
+/// device backing (`virtio_blk_unlock`/`emmc2_unlock`'s DMA pool, MMIO map,
+/// IRQ waiter, virtio host) stays live with no `'static` promotion and the
+/// metal-proven device-driving model is unchanged (`AGENTS.md` §2.17).
+/// Every fallible *setup* step before the unlock still fails closed with a
+/// stable stage string the caller logs (`AGENTS.md` §2.9).
 fn finish_unlock<'a, B: Block>(
     blk: B,
     coop: &'a CooperativeYield<'a>,
     env: UnlockEnv,
-) -> Result<UnlockOutcome, &'static str> {
+) -> Result<Infallible, &'static str> {
     let UnlockEnv { ctx, audit, tree } = env;
     // Primary console (index 0): the video console + its keyboard queue when
     // a framebuffer console is active, else the discovered UART. The unlock
@@ -614,12 +619,14 @@ fn finish_unlock<'a, B: Block>(
     let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, autoload_caps(), audit);
 
     // Share the one brought-up disk behind the kernel block-sharing layer
-    // (Design D D2a): the read-only `/System` autoload window and the
-    // encrypted-root unlock window are then two concurrent windows over a
-    // single device, serialised by the layer's lock (`AGENTS.md` §4),
-    // rather than a borrow-then-move of one device. A geometry fault
-    // refuses the device fail-closed (`AGENTS.md` §2.9).
-    let shared = SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?;
+    // (Design D D2a) and hand it to the persistent driver-store service: the
+    // read-only `/System` autoload window and the encrypted-root unlock
+    // window are then two concurrent windows over a single device, serialised
+    // by the layer's lock (`AGENTS.md` §4). A geometry fault refuses the
+    // device fail-closed (`AGENTS.md` §2.9).
+    let store = DriverStoreService::new(
+        SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
+    );
 
     // Design B2: autoload off the read-only `/System` volume's signed store
     // **before** the passphrase prompt, so the keyboard (and any other
@@ -628,17 +635,42 @@ fn finish_unlock<'a, B: Block>(
     // resolves. Fail-soft and fail-closed (`AGENTS.md` §18.4 / §2.9): a disk
     // with no `/System` volume autoloads nothing and the boot still reaches
     // the prompt (on the UART the passphrase can still be typed). This runs
-    // through its own shared-device handle, dropped when the autoload
-    // returns, while the device stays owned by `shared`.
-    autoload_system_drivers(&mut shared.handle(), &mut autoload, audit);
+    // through its own service window, dropped when the autoload returns,
+    // while the device stays owned by the store service.
+    autoload_system_drivers(&mut store.window(), &mut autoload, audit);
 
-    Ok(unlock_root_disk_interactively(
-        shared.handle(),
+    // Run the interactive encrypted-root unlock through a second concurrent
+    // window onto the same disk, then log the outcome (`AGENTS.md` §19.4).
+    match unlock_root_disk_interactively(
+        store.window(),
         console_write,
         &reader,
         &LATE_USERS_DB,
         audit,
-    ))
+    ) {
+        UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
+        UnlockOutcome::GaveUp => note(
+            audit,
+            Level::Error,
+            "root-unlock: gave up fail-closed; login refused until reboot",
+        ),
+    }
+
+    // The unlock is resolved (installed or fail-closed), so release console 0
+    // to `login`: the byte-contention window is over (`plans/PI.md` P11 item
+    // 5). A failed unlock installs no users database, so `login` still
+    // refuses every attempt (`AGENTS.md` §5.4.5).
+    release_console0_to_login();
+
+    // Design D D2a-2: the unlock kthread is the persistent driver-store
+    // service. It never returns — it parks for life owning the `SharedBlock`,
+    // keeping the read-only `/System` driver store mounted. This whole
+    // bring-up call chain stays suspended beneath the park, so the borrowed
+    // device backing (DMA pool, MMIO map, IRQ waiter, virtio host) stays live
+    // without any `'static` promotion (`AGENTS.md` §2.17 — the metal-proven
+    // device-driving model is unchanged). `login`, PID 1, and every other
+    // task run on their own tasks; this one holds the mount.
+    store.hold(coop)
 }
 
 /// A minimal in-kernel [`DriverHost`] exposing only a capability-gated

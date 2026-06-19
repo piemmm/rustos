@@ -67,6 +67,35 @@ virtio-blk or EMMC2 device in a `SharedBlock` and drives both the `/System`
 autoload and the interactive unlock through concurrent handles rather than
 borrowing then moving the one device.
 
+## The persistent driver-store service
+
+Design D needs the `/System` driver store reachable for the life of the system
+(on-demand and reactive driver loads, `AGENTS.md` §18.3 / §18.4), not only
+during boot. `DriverStoreService<B>` (`rustos_kernel::shared_block`) owns the
+boot disk's `SharedBlock` and hands out a fresh read-only window
+(`SharedBlockHandle`) for each `/System` read.
+
+It keeps the mount alive **without promoting the device backing to `'static`**.
+The aarch64 root-unlock kthread is a *never-returning* kernel service
+(`AGENTS.md` §17.1 — "a continuous service never returns"): because
+`finish_unlock` receives the brought-up device by value while its backing (the
+DMA pool, MMIO map, IRQ waiter, and virtio host, or the EMMC2 register-window
+map) stays on the still-suspended `virtio_blk_unlock` / `emmc2_unlock` frame,
+making `finish_unlock` never return keeps that whole bring-up call chain
+suspended on the kthread's coroutine stack. The borrowed backing therefore
+stays live for free, and the proven IRQ-wait / cooperative-yield device-driving
+model is unchanged (`AGENTS.md` §2.17 — no security or correctness regression
+on a metal-confirmed path).
+
+After running the boot autoload and the encrypted-root unlock through two
+concurrent windows, logging the outcome, and releasing the console-0 gate to
+`login`, the service calls `DriverStoreService::hold`, which **parks** the
+kthread for life owning the `SharedBlock` — a real park, never a busy-yield
+loop (`AGENTS.md` §2.1), so it consumes no CPU while idle. A later reader (the
+D2b `driver_store_load` path) wakes this kthread to serve a `/System` read
+through a window and then re-parks, reusing the one proven I/O path rather than
+driving the device from an arbitrary caller's context.
+
 ## Shipped drivers
 
 | Driver                                   | Crate                                | Supported buses     | Status                                   |

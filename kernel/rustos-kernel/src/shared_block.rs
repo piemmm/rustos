@@ -45,6 +45,7 @@
 use rustos_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use rustos_abi::driver::BufferClass;
 use rustos_abi::DriverError;
+use rustos_kernel_core::CooperativeYield;
 use rustos_sync::SpinLock;
 
 /// A [`Block`] device shared behind a lock so several concurrent windows
@@ -158,6 +159,67 @@ impl<B: Block> Block for SharedBlockHandle<'_, B> {
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
         self.shared.device.lock().device_health()
+    }
+}
+
+/// The long-lived kernel service that owns the boot disk's [`SharedBlock`]
+/// and keeps the read-only `/System` driver store mounted for the life of
+/// the system (Design D, D2a-2 — `.junie/next-pi-prompt.md`).
+///
+/// The bootstrap floor brings up exactly **one** block device, which the
+/// boot path uses for two things at once — autoloading the signed `/System`
+/// driver store and unlocking the encrypted root — as concurrent windows
+/// onto that one disk ([`SharedBlock`]). Under Design D the `/System` store
+/// must stay reachable *after* boot for on-demand and reactive (hotplug)
+/// driver loads (`AGENTS.md` §18.3 / §18.4), and `/System` must stay mounted
+/// anyway so other subsystems can reach it.
+///
+/// This service is how that mount outlives the unlock **without** promoting
+/// the device backing (DMA pool, MMIO map, IRQ waiter, virtio host) to
+/// `'static`. It is run as the body of a never-returning kernel-service
+/// kthread (`AGENTS.md` §17.1 — "a continuous service never returns"): the
+/// kthread's device bring-up call chain stays suspended on its own coroutine
+/// stack, so the *borrowed* backing those frames own stays live for free,
+/// and [`Self::hold`] parks the kthread for life owning the [`SharedBlock`].
+/// Every `/System` read goes through a fresh [`SharedBlockHandle`] from
+/// [`Self::window`], serialised against any concurrent window by the
+/// `SharedBlock` lock (`AGENTS.md` §4).
+pub struct DriverStoreService<B: Block> {
+    shared: SharedBlock<B>,
+}
+
+impl<B: Block> DriverStoreService<B> {
+    /// Take ownership of the boot disk's [`SharedBlock`] as the driver store.
+    #[must_use]
+    pub fn new(shared: SharedBlock<B>) -> Self {
+        Self { shared }
+    }
+
+    /// A fresh read-only window onto the boot disk holding the `/System`
+    /// driver store. Each call hands out an independent [`SharedBlockHandle`];
+    /// the `SharedBlock` lock serialises device operations across windows
+    /// (`AGENTS.md` §4), so the autoload window and the encrypted-root unlock
+    /// window never interleave a device operation.
+    #[must_use]
+    pub fn window(&self) -> SharedBlockHandle<'_, B> {
+        self.shared.handle()
+    }
+
+    /// Hold the `/System` mount for the life of the system: park the calling
+    /// kernel-service kthread forever, owning the [`SharedBlock`].
+    ///
+    /// This never returns. The service owns the [`SharedBlock`] (and through
+    /// it the boot disk) for the whole park, while the kthread's bring-up
+    /// frames stay suspended beneath this call, keeping the borrowed device
+    /// backing live. It **parks** rather than yields, so it consumes no CPU
+    /// while there is no work (`AGENTS.md` §2.1 — never a busy-yield loop);
+    /// a spurious wake simply re-parks. D2b wakes this kthread to serve
+    /// `driver_store_load` reads through [`Self::window`], after which it
+    /// re-parks here.
+    pub fn hold(self, coop: &CooperativeYield<'_>) -> ! {
+        loop {
+            coop.park();
+        }
     }
 }
 
@@ -384,5 +446,24 @@ mod tests {
             handle.device_health().unwrap(),
             DeviceHealth::Available(_)
         ));
+    }
+
+    #[test]
+    fn the_driver_store_service_hands_out_windows_onto_the_one_disk() {
+        // The service owns the boot disk's `SharedBlock` and serves the
+        // `/System` store through independent windows: a write through one
+        // window is visible through a second, exactly as the boot autoload
+        // window and the encrypted-root unlock window share one disk.
+        let service = DriverStoreService::new(SharedBlock::new(MemBlock::new()).unwrap());
+        let mut writer = service.window();
+        let payload = [0x3Cu8; 64];
+        writer.write_blocks(7, &payload).unwrap();
+        let mut reader = service.window();
+        let mut readback = [0u8; 64];
+        reader.read_blocks(7, &mut readback).unwrap();
+        assert_eq!(
+            readback, payload,
+            "a second service window sees the first window's write"
+        );
     }
 }
