@@ -3887,14 +3887,38 @@ keyboard never regresses (§2.17), until the final flip:
   `devmgr` *unbound* record for the enumerated HID node (matched against the
   store, no bundle yet) — i.e. the node reached the autoload tree without a
   second bring-up.
-- **B4 — live EMMC2 root bring-up (metal-gated).** INCREMENT (2) item (a):
-  `raspi4b` cannot model EMMC2, so host-tested + metal checklist.
+- **B4 — live EMMC2 root bring-up. WIRED (host-tested at the driver level);
+  metal acceptance pending.** The aarch64 root-unlock kthread now dispatches
+  on which floor block driver `root_storage` bound: `virtio_blk_unlock` (the
+  proven `-M virt` / x86_64 path, device-IRQ + DMA) or the new `emmc2_unlock`
+  arm. EMMC2 is programmed-I/O, so its arm binds no device IRQ and carves no
+  DMA pool: it admits `rustos-drv-storage-emmc2` through the signed §8 load
+  gate, resolves the matched node's **sole register window**
+  (`rustos_abi::driver::sole_register_window` — never a board constant, §18.1
+  / §2.20), maps it under `CAP_MMIO_MAP` through a minimal in-kernel
+  MMIO-only `Emmc2Host` + the shared `KernelMmioMapper`, opens the card, and
+  feeds the `Block` to the **shared** `finish_unlock` tail (mount + read-only
+  `/System` autoload + interactive unlock) virtio-blk also feeds (§2.2). The
+  fail-closed EMMC2 stub at `spawn_if_present` (`root unbound` for any
+  non-virtio binding) is deleted (§2.14); only a genuinely unknown floor
+  driver now fails closed. Host-proven at the driver level (`emmc2`
+  `MockSdhci` read/write + `wiring`/`BIND_KEYS` suites; `sole_register_window`
+  in `lib/abi`; the freestanding aarch64 kernel builds + clippy clean). No
+  `lib/abi`/C-header change. **Metal checklist (operator, §0.9):** re-flash
+  (`cargo xtask image --target aarch64-rpi`) on a real Pi 4 and supply the
+  UART log showing the root-unlock kthread mount the read-only `/System`
+  volume off the SD card (`SYSTEM_VOLUME_MOUNTED` 4140) and unlock the
+  encrypted root (passphrase → `ROOT_UNLOCK_INSTALLED` 4136), since `raspi4b`
+  cannot model EMMC2 (§0.4).
 - **B5 (= 5e/(d)) — the flip.** Repoint `init_spawn` to the autoload path,
   lay the signed input-driver bundle into the `/System` volume signed against
   the finalised production anchor, delete `keyboard_service.rs` +
   `usb_keyboard.rs`, and evict `usb_hid` from
   `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6) — only after B1–B4 are
-  metal-confirmed (§0.9).
+  metal-confirmed (§0.9). B4 is wired and host-tested; its metal acceptance
+  (the `/System` + encrypted-root mount off EMMC2 above) is the remaining
+  gate before the flip can land without regressing the working metal
+  keyboard (§2.17).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
@@ -4523,9 +4547,17 @@ two users — or the same user twice — can be logged in concurrently.
          `root_unlock_login`.
        - No `lib/abi`/C-header change (the enumeration adds a new trait-free
          seam; the device-IRQ + console wiring is internal).
-       - **Remaining:** (a) the live EMMC2 root bring-up (Pi metal increment,
-         §0.4 — `raspi4b` cannot model EMMC2); (b) the §0.9 metal
-         UART-typed-login acceptance.
+       - **EMMC2 root bring-up — wired (host-tested at the driver level).**
+         The unlock kthread dispatches on the bound floor block driver
+         (`run_unlock` → `virtio_blk_unlock` / `emmc2_unlock`); the EMMC2
+         arm maps the matched node's sole SDHCI register window under
+         `CAP_MMIO_MAP` through a minimal in-kernel MMIO-only `Emmc2Host`,
+         admits `rustos-drv-storage-emmc2` through the signed §8 gate, and
+         feeds the opened `Block` to the shared `finish_unlock` tail
+         virtio-blk also uses (§2.2). See design B's **B4** above.
+       - **Remaining (metal-gated, §0.4 — `raspi4b` cannot model EMMC2):**
+         (a) the §0.9 metal UART log of the EMMC2 `/System` + encrypted-root
+         mount; (b) the §0.9 metal UART-typed-login acceptance.
    - **Login parse.** The userland `login` parses the served text, which
      needs the production `mem_map` producer (`plans/SPAWN.md` SP5b).
    - The `-M virt` `rustos-test-root-unlock-login-qemu-aarch64` vertical

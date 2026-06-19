@@ -42,7 +42,7 @@ payload.
 | Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
-| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write paths host-tested; metal pending |
+| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write host-tested; wired into root-unlock; metal pending |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
@@ -96,3 +96,14 @@ block-addressed (SDHC/SDXC, CSD v2) cards are supported and anything
 else is rejected fail-closed. Every controller wait is bounded by a poll
 budget and fails closed with `DriverError::DeviceFault` rather than
 spinning (`AGENTS.md` §2.1).
+
+The driver is **wired into the root-unlock path** (`plans/PI.md` B4): when
+the root-storage bind gate binds the `brcm,bcm2711-emmc2` node, the aarch64
+root-unlock kthread (`crate::aarch64::root_unlock::emmc2_unlock`) maps the
+node's sole SDHCI register window under `CAP_MMIO_MAP` through a minimal
+in-kernel MMIO-only DriverHost, admits the driver through the signed §8
+load gate, opens the card, and feeds the resulting `Block` to the same
+mount + `/System` autoload + interactive-unlock tail as virtio-blk
+(`finish_unlock`, §2.2). Since `raspi4b` cannot model EMMC2, that live
+bring-up is metal-gated; the host test and the §0.9 metal checklist are the
+acceptance artefacts.

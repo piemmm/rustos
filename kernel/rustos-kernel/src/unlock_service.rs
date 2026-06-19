@@ -19,12 +19,12 @@
 //! [`GatedConsoleRead`]) that keeps `login` from stealing the passphrase
 //! bytes while the unlock is in progress.
 //!
-//! The freestanding, architecture-specific other half — the live
-//! virtio-blk-MMIO bring-up that runs the unlock policy inside the kthread
-//! — lives beside the rest of the aarch64 boot pipeline in
-//! `crate::aarch64::root_unlock` (the QEMU `virt` path; EMMC2 on the
-//! Raspberry Pi 4 is the staged metal increment), so this arch-neutral core
-//! names no architecture (`AGENTS.md` §17.2 / §2.20).
+//! The freestanding, architecture-specific other half — the live block
+//! bring-up that runs the unlock policy inside the kthread — lives beside
+//! the rest of the aarch64 boot pipeline in `crate::aarch64::root_unlock`
+//! (virtio-blk-MMIO for the QEMU `virt` path, and the Raspberry Pi 4 EMMC2
+//! SD host for the Pi-metal root), so this arch-neutral core names no
+//! architecture (`AGENTS.md` §17.2 / §2.20).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

@@ -16,13 +16,22 @@
 //! resolves so `login` can take over
 //! ([`crate::unlock_service::CONSOLE0_GATE`]).
 //!
-//! The QEMU `virt` board (virtio-blk-MMIO) is the path proven here; the
-//! Raspberry Pi 4 EMMC2 SD host is the staged metal increment, so an EMMC2
-//! binding fails closed (logged, gate opened, no database installed) until
-//! that increment lands (`plans/PI.md` P11).
+//! Two bootstrap-floor block drivers (`AGENTS.md` §18.6) are brought up
+//! here, selected by which one [`crate::root_storage`] bound: the virtio-blk
+//! device over the production device-IRQ path (the QEMU `virt` / x86_64
+//! root, proven on `-M virt`), or the Raspberry Pi 4 EMMC2 SD host over
+//! programmed I/O ([`crate::driver_catalog::EMMC2_PATH`], the Pi-metal root
+//! — `raspi4b` cannot model EMMC2, so it is host-tested at the driver level
+//! and metal-gated here, `plans/PI.md` P8/B4). The bring-up differs per
+//! device; the read-only `/System` autoload, the passphrase prompt, and the
+//! interactive unlock are identical and shared in [`finish_unlock`]
+//! (`AGENTS.md` §2.2). A bound driver that is neither fails closed
+//! (logged, gate opened, no database installed; `AGENTS.md` §2.9 / §18.4).
 
+use rustos_abi::driver::block::Block;
 use rustos_abi::driver::dma::PoolId;
-use rustos_abi::{HwNode, IrqHandle};
+use rustos_abi::driver::sole_register_window;
+use rustos_abi::{CapabilityId, DriverHost, DriverKind, HwNode, IrqHandle, MmioMapper};
 use rustos_arch_aarch64::fdt::gic_device_intid;
 use rustos_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
@@ -45,12 +54,13 @@ use rustos_log::{Level, Sink};
 use crate::aarch64::arch_wrapper::{UART_CONSOLE, VIDEO_CONSOLE, VIDEO_KEYBOARD};
 use crate::aarch64::gic_irq::{published_irq_table, GIC_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
-use crate::driver_catalog::{KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
+use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{
     autoload_system_drivers, unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB,
 };
+use crate::root_storage::RootBlockBinding;
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, service_caps, take_boot, AutoloadHook, KthreadConsoleRead,
     CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
@@ -203,16 +213,18 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
         CONSOLE0_GATE.open();
         return false;
     };
-    if binding.driver_path != VIRTIO_BLK_PATH {
-        // EMMC2 (the Raspberry Pi 4 SD host) is the staged metal increment
-        // (`plans/PI.md` P11): the live EMMC2 bring-up is not yet wired, so
-        // fail closed — open the gate and leave the root unmounted rather
-        // than half-bring it up (`AGENTS.md` §2.9 / §2.19 — a real
-        // fail-closed boundary, not a disguised partial path).
+    if binding.driver_path != VIRTIO_BLK_PATH && binding.driver_path != EMMC2_PATH {
+        // The bound driver is not one of the bootstrap-floor block drivers
+        // this seam knows how to bring up (virtio-blk for the QEMU `virt` /
+        // x86_64 root, EMMC2 for the Raspberry Pi 4 SD card). Fail closed —
+        // open the gate and leave the root unmounted rather than guess at a
+        // bring-up (`AGENTS.md` §2.9 / §18.4). `root_storage` only ever binds
+        // a `provides_root_block` floor driver, so reaching here is a
+        // packaging defect, not an expected path.
         note(
             audit,
-            Level::Info,
-            "root-unlock: EMMC2 root bring-up is the staged Pi metal increment; root unbound",
+            Level::Error,
+            "root-unlock: bound block driver is not a known floor driver; root unbound",
         );
         CONSOLE0_GATE.open();
         return false;
@@ -234,8 +246,9 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     // kthread body captures it by value.
     let tree = boot.tree;
     let caps = service_caps();
+    let env = UnlockEnv { ctx, audit, tree };
     let body = move |yielder: &mut dyn YieldHandle| {
-        let outcome = run_unlock(yielder, dtb, frames, caps, audit, ctx, tree);
+        let outcome = run_unlock(yielder, &binding, dtb, frames, caps, env);
         match outcome {
             Ok(UnlockOutcome::Installed) => {
                 note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE);
@@ -277,34 +290,73 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     started
 }
 
-/// Bring the virtio-blk root device up over the production device-IRQ path
-/// and run the interactive unlock policy, returning its outcome.
+/// Bring up the bound bootstrap-floor block device and run the interactive
+/// unlock policy, returning its outcome.
 ///
-/// Before prompting for the passphrase, the [`AutoloadHook`] this builds
-/// autoloads user-space drivers off the read-only `/System` volume's signed
-/// `/System/Drivers/` store ([`autoload_system_drivers`]) — matching every
-/// node of the discovered `tree` against the store and spawning each winner
-/// into its own process through `ctx`'s [`InitSpawnCtx::spawn_driver_process`]
-/// seam (`AGENTS.md` §18.3). Running it *first* brings the keyboard up in
-/// user space in time to type the unlock secret (design B); it is fail-soft
-/// and cannot fail the boot.
+/// Dispatches on which floor block driver [`crate::root_storage`] bound
+/// (`AGENTS.md` §18.6): [`VIRTIO_BLK_PATH`] over the production device-IRQ
+/// path, or [`EMMC2_PATH`] (the Raspberry Pi 4 SD host) over programmed
+/// I/O. The bring-up differs per device; the read-only `/System` autoload,
+/// the passphrase prompt, and the interactive unlock are shared in
+/// [`finish_unlock`] (`AGENTS.md` §2.2). A bound driver that is neither
+/// fails closed (`AGENTS.md` §2.9 / §18.4).
 ///
 /// Every fallible step fails closed with a stable stage string the caller
 /// logs (`AGENTS.md` §2.9); the caller opens the console-0 gate on every
 /// path.
 fn run_unlock(
     yielder: &mut dyn YieldHandle,
+    binding: &RootBlockBinding,
     dtb: u64,
     frames: &'static FrameAllocator,
     caps: CapabilitySet,
-    audit: &'static (dyn Sink + Sync),
-    ctx: &'static (dyn InitSpawnCtx + Sync),
-    tree: &'static [HwNode],
+    env: UnlockEnv,
 ) -> Result<UnlockOutcome, &'static str> {
     // Move the kthread's single yield handle into the shared cell both the
     // re-arming IRQ waiter and the cooperative console reader suspend
     // through (`AGENTS.md` §2.2 — one cooperative-yield definition).
     let coop = CooperativeYield::new(yielder);
+
+    // The bus-driver task capability context: the unlock kthread's caps,
+    // owner `UNLOCK_TASK`, audited onto the service's audit sink. Both the
+    // virtio and the EMMC2 register-window maps gate on its `CAP_MMIO_MAP`
+    // (`AGENTS.md` §5.4).
+    let caller = TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, env.audit);
+
+    match binding.driver_path {
+        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, &caller, dtb, frames, env),
+        EMMC2_PATH => emmc2_unlock(&coop, &caller, binding, env),
+        _ => Err("root-unlock: bound block driver is not a known floor driver"),
+    }
+}
+
+/// The `'static` boot environment a root-unlock bring-up threads through:
+/// the init-spawn context (the per-arch driver-spawn seam), the audit sink,
+/// and the discovered hardware tree the pre-unlock autoload matches against.
+///
+/// Grouped because all three travel together from the kthread body through
+/// the per-device bring-up into the shared [`finish_unlock`] tail; passing
+/// one cohesive `Copy` value rather than re-listing three `'static`
+/// references in every signature keeps the seams readable and below the
+/// argument-count bar (`AGENTS.md` §2.2).
+#[derive(Clone, Copy)]
+struct UnlockEnv {
+    ctx: &'static (dyn InitSpawnCtx + Sync),
+    audit: &'static (dyn Sink + Sync),
+    tree: &'static [HwNode],
+}
+
+/// Bring the virtio-blk root device up over the production device-IRQ path
+/// and hand it to the shared [`finish_unlock`] tail (the QEMU `virt` /
+/// x86_64 root, proven on `-M virt`).
+fn virtio_blk_unlock<'a>(
+    coop: &'a CooperativeYield<'a>,
+    caller: &TaskCapabilities,
+    dtb: u64,
+    frames: &'static FrameAllocator,
+    env: UnlockEnv,
+) -> Result<UnlockOutcome, &'static str> {
+    let audit = env.audit;
     if dtb == 0 {
         return Err("root-unlock: no device tree; root unbound");
     }
@@ -321,10 +373,6 @@ fn run_unlock(
     // SAFETY: `dtb`/`total` bound the same firmware blob `Fdt::from_ptr`
     // validated; it is identity-mapped, read-only, and outlives the kernel.
     let dtb_bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
-
-    // The bus-driver task capability context: the unlock kthread's caps,
-    // owner `UNLOCK_TASK`, audited onto the service's audit sink.
-    let caller = TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, audit);
 
     // Build the `virt`-board virtio-MMIO bus and provision the block
     // transport through the `CAP_MMIO_MAP`-gated kernel mapper.
@@ -349,7 +397,7 @@ fn run_unlock(
     )
     .map_err(|_| "root-unlock: mmio map")?;
     let (transport, slot_base) = {
-        let mapper = KernelMmioMapper::new(&mut mmio, &caller, audit);
+        let mapper = KernelMmioMapper::new(&mut mmio, caller, audit);
         let prov = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, MmioTransport::new)
             .map_err(|_| "root-unlock: virtio provisioning")?;
         (prov.transport, prov.base)
@@ -393,15 +441,7 @@ fn run_unlock(
         handle,
         line: intid,
     };
-    let vhost = KernelVirtioHost::new(
-        pool,
-        &caller,
-        audit,
-        PoolId::fresh(),
-        table,
-        handle,
-        &waiter,
-    );
+    let vhost = KernelVirtioHost::new(pool, caller, audit, PoolId::fresh(), table, handle, &waiter);
 
     // Admit the virtio-blk driver through the signed §8 load gate (Ed25519
     // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives
@@ -411,9 +451,96 @@ fn run_unlock(
         .admit(VIRTIO_BLK_PATH, &loader_caps())
         .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
 
-    // Open the whole-disk block device over the provisioned transport.
-    let mut blk = VirtioBlk::open(transport, &vhost).map_err(|_| "root-unlock: virtio-blk open")?;
+    // Open the whole-disk block device over the provisioned transport. The
+    // opened device reads through `transport`/`vhost`/`mmio`/`pool`, all kept
+    // live in this scope for the whole `finish_unlock` call below.
+    let blk = VirtioBlk::open(transport, &vhost).map_err(|_| "root-unlock: virtio-blk open")?;
+    finish_unlock(blk, coop, env)
+}
 
+/// Bring the Raspberry Pi 4 EMMC2 SD host up over programmed I/O and hand
+/// it to the shared [`finish_unlock`] tail (`plans/PI.md` P8/B4).
+///
+/// EMMC2 transfers are programmed-I/O (the driver polls the SDHCI
+/// buffer-data port), so — unlike the virtio path — there is no DMA pool
+/// and no device interrupt to bind: the only resource is the SDHCI register
+/// window, which is the matched node's sole register-window grant
+/// (`AGENTS.md` §18.3) and never a board constant (`AGENTS.md` §18.1 /
+/// §2.20). The window is mapped under `CAP_MMIO_MAP` through the kernel
+/// mapper and the driver brought up over it; `raspi4b` cannot model EMMC2
+/// (`plans/PI.md` §0.4), so this path is host-tested at the driver level
+/// and metal-gated here.
+fn emmc2_unlock<'a>(
+    coop: &'a CooperativeYield<'a>,
+    caller: &TaskCapabilities,
+    binding: &RootBlockBinding,
+    env: UnlockEnv,
+) -> Result<UnlockOutcome, &'static str> {
+    let audit = env.audit;
+    // Admit the EMMC2 driver through the signed §8 load gate before it
+    // drives hardware — a refusal fails closed (`AGENTS.md` §5.4 / §23.1 /
+    // §18.6).
+    let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
+    loader
+        .admit(EMMC2_PATH, &loader_caps())
+        .map_err(|_| "root-unlock: emmc2 refused at the signed load gate")?;
+
+    // The SDHCI register window the matched node requested. `sole_register_window`
+    // fails closed on a missing or ambiguous window (`AGENTS.md` §2.9) rather
+    // than guessing an address.
+    let (regs_phys, _len) = sole_register_window(binding.node.resources())
+        .map_err(|_| "root-unlock: emmc2 register window")?;
+
+    // A throwaway *bookkeeping* page table for the register-window map
+    // (device access is via the boot identity map through `phys`; the window
+    // VA sits far above the identity window so it never collides with a
+    // gigapage block).
+    let phys = DirectPhysMap::identity(identity_limit());
+    let gib = configured_identity_gigapages();
+    let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
+        .ok_or("root-unlock: mmio bookkeeping space")?;
+    let mut mmio = MmioMap::new(
+        AddressSpace::new(mmio_space),
+        VirtAddr::new(MMIO_VBASE),
+        MMIO_CAP_PAGES,
+        &phys,
+    )
+    .map_err(|_| "root-unlock: mmio map")?;
+
+    // Map the window under `CAP_MMIO_MAP` and bring the card online. The
+    // opened `Emmc2` retains a `RegisterWindow` pointing into `mmio`'s window
+    // backing, so `mmio` is kept live in this scope for the whole
+    // `finish_unlock` call below (the `KernelMmioMapper` lifetime contract).
+    // The mapper/host borrow of `mmio` ends with this block; the raw window
+    // pointer the `Emmc2` holds stays valid because `mmio` outlives it.
+    let blk = {
+        let mapper = KernelMmioMapper::new(&mut mmio, caller, audit);
+        let host = Emmc2Host::new(*caller.effective(), &mapper);
+        rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys)
+            .map_err(|_| "root-unlock: emmc2 open")?
+    };
+    finish_unlock(blk, coop, env)
+}
+
+/// The shared mount + pre-unlock autoload + interactive-unlock tail both
+/// floor block bring-ups feed (`AGENTS.md` §2.2).
+///
+/// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or
+/// EMMC2). Before prompting for the passphrase, the [`AutoloadHook`] this
+/// builds autoloads user-space drivers off the read-only `/System` volume's
+/// signed `/System/Drivers/` store ([`autoload_system_drivers`]) — matching
+/// every node of the discovered `tree` against the store and spawning each
+/// winner into its own process (`AGENTS.md` §18.3). Running it *first*
+/// brings the keyboard up in user space in time to type the unlock secret
+/// (design B); it is fail-soft and cannot fail the boot. Every fallible
+/// step fails closed with a stable stage string the caller logs
+/// (`AGENTS.md` §2.9).
+fn finish_unlock<'a, B: Block>(
+    mut blk: B,
+    coop: &'a CooperativeYield<'a>,
+    env: UnlockEnv,
+) -> Result<UnlockOutcome, &'static str> {
+    let UnlockEnv { ctx, audit, tree } = env;
     // Primary console (index 0): the video console + its keyboard queue when
     // a framebuffer console is active, else the discovered UART. The unlock
     // reads the *raw* device directly (bypassing the console-0 gate `login`
@@ -426,7 +553,7 @@ fn run_unlock(
     } else {
         (&UART_CONSOLE, &UART_CONSOLE)
     };
-    let reader = KthreadConsoleRead::new(raw_read, &coop);
+    let reader = KthreadConsoleRead::new(raw_read, coop);
 
     // The driver-signing trust anchor the autoload load gate verifies each
     // winning bundle against — the kernel's own embedded key, the single
@@ -443,12 +570,12 @@ fn run_unlock(
     // The pre-unlock autoload hook: run against the read-only `/System`
     // volume below, it matches every discovered node against that volume's
     // signed driver store and spawns each winner into its own user-space
-    // process (`AGENTS.md` §18.3). It presents the gate the delegatable `autoload_caps` superset
-    // (`CAP_DRV_LOAD` to pass the gate plus the resource capabilities an
-    // autoloaded driver's class may request — including `CAP_INPUT_INJECT` for
-    // an input driver), intersected per driver with its signed manifest
-    // request (`AGENTS.md` §5.2 / §18.3); the kthread's *own* context stays the
-    // minimal `service_caps` (§5.4).
+    // process (`AGENTS.md` §18.3). It presents the gate the delegatable
+    // `autoload_caps` superset (`CAP_DRV_LOAD` to pass the gate plus the
+    // resource capabilities an autoloaded driver's class may request —
+    // including `CAP_INPUT_INJECT` for an input driver), intersected per
+    // driver with its signed manifest request (`AGENTS.md` §5.2 / §18.3);
+    // the kthread's *own* context stays the minimal `service_caps` (§5.4).
     let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, autoload_caps(), audit);
 
     // Design B2: autoload off the read-only `/System` volume's signed store
@@ -468,6 +595,45 @@ fn run_unlock(
         &LATE_USERS_DB,
         audit,
     ))
+}
+
+/// A minimal in-kernel [`DriverHost`] exposing only a capability-gated
+/// [`MmioMapper`] — the host the bootstrap-floor EMMC2 SD driver is brought
+/// up over.
+///
+/// EMMC2 is programmed-I/O, so it needs no virtio/DMA host: the only host
+/// service it uses is [`MmioMapper::map_window`] for its SDHCI register
+/// block. Every map is re-checked kernel-side against `caps` by the wrapped
+/// [`KernelMmioMapper`] (`AGENTS.md` §5.4), so the host cannot widen its own
+/// authority. Kept local to this bring-up rather than generalised, since it
+/// is the only in-kernel MMIO-only host today (`AGENTS.md` §2.3 / §15.5).
+struct Emmc2Host<'a> {
+    caps: CapabilitySet,
+    mmio: &'a dyn MmioMapper,
+}
+
+impl<'a> Emmc2Host<'a> {
+    /// Build the host over the floor driver's `caps` and the kernel's `mmio`
+    /// mapper.
+    fn new(caps: CapabilitySet, mmio: &'a dyn MmioMapper) -> Self {
+        Self { caps, mmio }
+    }
+}
+
+impl DriverHost for Emmc2Host<'_> {
+    fn has_capability(&self, cap: CapabilityId) -> bool {
+        self.caps.contains(cap)
+    }
+
+    fn kind(&self) -> DriverKind {
+        // The driver runs inside the kernel image as a bootstrap-floor block
+        // driver (`AGENTS.md` §18.6 — below the signed store it reads).
+        DriverKind::InKernel
+    }
+
+    fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
+        Some(self.mmio)
+    }
 }
 
 /// The production aarch64 identity-map extent the DMA/MMIO physical map

@@ -394,6 +394,16 @@ completion so a stale edge cannot mis-pair back-to-back reads, and the
 service's mount / install / give-up decisions route onto the audit channel
 (`InitSpawnCtx::static_audit`, §19.4).
 
+The kthread dispatches on which floor block driver bound: **virtio-blk**
+over the production device-IRQ path (the QEMU `virt` / x86_64 root), or the
+Raspberry Pi 4 **EMMC2** SD host over programmed I/O. The mount, the
+pre-unlock `/System` autoload, and the interactive unlock are shared between
+the two (`finish_unlock`, `AGENTS.md` §2.2); only the bring-up differs. EMMC2
+is programmed-I/O, so its arm has no DMA pool and no device interrupt — it
+maps the matched node's sole SDHCI register window under `CAP_MMIO_MAP`
+through a minimal in-kernel MMIO-only DriverHost and brings the card up over
+the host-proven `rustos-drv-storage-emmc2` engine.
+
 `virtio-blk` proves it end to end on `-M virt`: the `root_unlock_login`
 vertical drives the unlock *policy* directly, and the `root_unlock_admission`
 vertical boots the *production* pipeline (`boot_aarch64::boot`) with a planted
@@ -403,8 +413,9 @@ the vertical's PASS witness on the audit channel. Driving the per-console
 `login` to authenticate `root`/`root` end to end additionally needs the
 userland heap to parse the served database (`plans/SPAWN.md` SP5b); the
 database *content* authenticating `root`/`root` is proven by
-`root_unlock_login`. EMMC2 is the staged metal increment (`plans/PI.md`
-§0.4 / P8).
+`root_unlock_login`. The EMMC2 arm is wired into this same path; `raspi4b`
+cannot model EMMC2 (`plans/PI.md` §0.4 / P8 / B4), so it is host-tested at
+the driver level and its live bring-up is metal-gated.
 
 `DRIVER_STORE_SCANNED` reports the boot-time enumeration of the
 `/System/Drivers/` signed-driver store

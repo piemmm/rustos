@@ -1129,7 +1129,15 @@ order (one fully-gated increment each):
              signed bundle into the `/System` volume. Proven by
              `autoload_input_qemu_aarch64` (PASS pre-unlock on `InputDelivered`);
            - **B3** — metal USB→`hwtree` enumeration (metal-gated);
-           - **B4** — live EMMC2 root bring-up (metal-gated, INCREMENT (2)(a));
+           - **B4 — WIRED (host-tested at the driver level); metal acceptance
+             pending.** The aarch64 unlock kthread now dispatches on the bound
+             floor block driver (`run_unlock` → `virtio_blk_unlock` /
+             `emmc2_unlock`): the EMMC2 arm admits `rustos-drv-storage-emmc2`
+             through the signed §8 gate, maps the matched node's sole SDHCI
+             register window under `CAP_MMIO_MAP` through a minimal in-kernel
+             MMIO-only `Emmc2Host`, and feeds the opened `Block` to the shared
+             `finish_unlock` tail virtio-blk also uses (§2.2). `raspi4b` cannot
+             model EMMC2 (§0.4), so the live mount is metal-gated;
            - **B5 (= 5e)** — the flip, after B1–B4 are metal-confirmed (§0.9).
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
        (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
@@ -1343,11 +1351,14 @@ spec §18.
   admits the in-kernel root-unlock kthread
   (`rustos_kernel::unlock_service::spawn_if_present`), which brings the bound
   block driver up through an in-kernel block DriverHost behind the signed §8
-  load gate over the production device-IRQ path, prompts on the primary
-  console, and runs the interactive unlock policy — proven end to end on
-  `-M virt` by the `root_unlock_login` (policy) and `root_unlock_admission`
-  (full kthread-admission boot) verticals; EMMC2 is the staged Pi metal
-  increment (§0.4 / P8). The login
+  load gate, prompts on the primary console, and runs the interactive unlock
+  policy — proven end to end on `-M virt` by the `root_unlock_login` (policy)
+  and `root_unlock_admission` (full kthread-admission boot) verticals. It
+  dispatches on the bound floor block driver (`run_unlock` →
+  `virtio_blk_unlock` over the device-IRQ path, or `emmc2_unlock` over
+  programmed I/O); the EMMC2 arm is wired and host-tested at the driver level,
+  with its live SD-card mount metal-gated (`raspi4b` cannot model EMMC2, §0.4 /
+  P8 / B4). The login
   `Run` binary ships at
   `/System/Services/login`
   (PID 1's `session` directive points at it): it obtains the kernel-held

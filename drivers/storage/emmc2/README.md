@@ -8,8 +8,10 @@ directions (`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), so neither
 path needs a DMA capability.
 
 **Stability tier:** `experimental`. The read and write paths are both
-complete and host-tested; metal acceptance on a real Pi 4 is the
-remaining P8 item.
+complete and host-tested, and the driver is wired into the aarch64
+root-unlock bring-up (`plans/PI.md` B4 — `crate::aarch64::root_unlock::
+emmc2_unlock`); metal acceptance on a real Pi 4 is the remaining P8/B4
+item (`raspi4b` cannot model EMMC2, `plans/PI.md` §0.4).
 
 ## Layered seam
 
@@ -101,10 +103,11 @@ budget (`DEFAULT_POLL_BUDGET`). Exceeding it fails closed with
 
 ## Metal acceptance (pending hardware)
 
-The on-metal bring-up checklist (read the FAT boot partition and the
-RustFS root from a real card, capture the UART log) is the acceptance
-artefact, recorded in `plans/PI.md` P8. It requires a physical Pi 4; no
-further code is staged for it.
+The on-metal bring-up checklist (boot a real Pi 4, observe the root-unlock
+kthread mount the read-only `/System` volume and the encrypted root off the
+SD card, and capture the UART log) is the acceptance artefact, recorded in
+`plans/PI.md` P8/B4. It requires a physical Pi 4; no further code is staged
+for it — the bring-up is wired (`crate::aarch64::root_unlock::emmc2_unlock`).
 
 ## Public surface
 
