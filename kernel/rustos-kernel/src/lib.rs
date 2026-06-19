@@ -170,6 +170,17 @@ pub mod root_storage;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod hwtree_store;
 
+// The kernel block-device sharing layer (Design D, D2a —
+// `.junie/next-pi-prompt.md`): wraps the one brought-up bootstrap-floor
+// block device behind a `lib/sync` lock so it can back two concurrent
+// partition windows — the read-only `/System` driver-store mount and the
+// encrypted-root unlock window — over a single disk (`AGENTS.md` §4 — SMP
+// serialisation). Architecture-neutral and host-tested on the CI host;
+// gated, like the `unlock_service` boot path that wraps the device in it,
+// on the two instruction sets where the boot path compiles.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod shared_block;
+
 // The in-kernel root-unlock service (`plans/PI.md` §3 P11 root-mount
 // increment, Chunk B-2 INCREMENT (2)): the post-MMU boot stash carrying
 // the resolved `root_storage` binding + the firmware DTB pointer to the

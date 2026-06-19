@@ -61,6 +61,7 @@ use crate::root_mount::{
     autoload_system_drivers, unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB,
 };
 use crate::root_storage::RootBlockBinding;
+use crate::shared_block::SharedBlock;
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, take_boot, AutoloadHook,
     KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
@@ -570,7 +571,7 @@ fn emmc2_unlock<'a>(
 /// step fails closed with a stable stage string the caller logs
 /// (`AGENTS.md` §2.9).
 fn finish_unlock<'a, B: Block>(
-    mut blk: B,
+    blk: B,
     coop: &'a CooperativeYield<'a>,
     env: UnlockEnv,
 ) -> Result<UnlockOutcome, &'static str> {
@@ -612,18 +613,27 @@ fn finish_unlock<'a, B: Block>(
     // the kthread's *own* context stays the minimal `service_caps` (§5.4).
     let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, autoload_caps(), audit);
 
+    // Share the one brought-up disk behind the kernel block-sharing layer
+    // (Design D D2a): the read-only `/System` autoload window and the
+    // encrypted-root unlock window are then two concurrent windows over a
+    // single device, serialised by the layer's lock (`AGENTS.md` §4),
+    // rather than a borrow-then-move of one device. A geometry fault
+    // refuses the device fail-closed (`AGENTS.md` §2.9).
+    let shared = SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?;
+
     // Design B2: autoload off the read-only `/System` volume's signed store
     // **before** the passphrase prompt, so the keyboard (and any other
     // matched driver) is brought up in user space in time for the operator
     // to type the encrypted-root unlock secret — the chicken-and-egg design B
     // resolves. Fail-soft and fail-closed (`AGENTS.md` §18.4 / §2.9): a disk
     // with no `/System` volume autoloads nothing and the boot still reaches
-    // the prompt (on the UART the passphrase can still be typed). The borrow
-    // of `blk` ends here, returning the device for the interactive unlock.
-    autoload_system_drivers(&mut blk, &mut autoload, audit);
+    // the prompt (on the UART the passphrase can still be typed). This runs
+    // through its own shared-device handle, dropped when the autoload
+    // returns, while the device stays owned by `shared`.
+    autoload_system_drivers(&mut shared.handle(), &mut autoload, audit);
 
     Ok(unlock_root_disk_interactively(
-        blk,
+        shared.handle(),
         console_write,
         &reader,
         &LATE_USERS_DB,

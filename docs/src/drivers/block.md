@@ -37,6 +37,36 @@ The trait makes no guarantee about scrubbing the caller-owned `buf`;
 that remains the caller's responsibility once it has consumed the
 payload.
 
+## Sharing one device across windows
+
+The boot path brings up exactly **one** bootstrap-floor block device, yet two
+independent consumers must read it during bring-up — the read-only signed
+`/System` driver-store mount and the encrypted-root unlock window — and, under
+Design D, the `/System` store must stay reachable for on-demand and reactive
+(hotplug) driver loads (`AGENTS.md` §18.3 / §18.4). One disk must therefore
+back two concurrent partition windows.
+
+The kernel block-sharing layer (`rustos_kernel::shared_block`) is that
+primitive. A `SharedBlock<B>` owns the brought-up device behind a `lib/sync`
+`SpinLock` and hands out `SharedBlockHandle`s, each of which is itself a
+`Block`. Every byte-moving operation takes the lock for the duration of one
+device call, so concurrent windows on different CPUs are serialised
+(`AGENTS.md` §4 — SMP from day one). The device's `BlockGeometry` is immutable
+for the life of a disk, so it is queried once at construction and cached:
+`geometry()` is then lock-free (`AGENTS.md` §2.16). A geometry fault at
+construction refuses to wrap the device, so no handle is ever handed out for
+an unusable device (fail closed, §2.9).
+
+A plain `SpinLock` (not the IRQ-safe variant) is correct because block I/O is
+driven from task / kthread context — the device IRQ only *wakes* the waiting
+kthread, it never issues a transfer from inside the handler — so the lock is
+never taken from an interrupt. The layer is generic over any `Block` and names
+no device or architecture, so every port shares the one definition (§2.2 /
+§2.20). The aarch64 root-unlock tail (`finish_unlock`) wraps its brought-up
+virtio-blk or EMMC2 device in a `SharedBlock` and drives both the `/System`
+autoload and the interactive unlock through concurrent handles rather than
+borrowing then moving the one device.
+
 ## Shipped drivers
 
 | Driver                                   | Crate                                | Supported buses     | Status                                   |

@@ -1330,7 +1330,33 @@ order (one fully-gated increment each):
              persistent service (same match+spawn result, proven by
              `autoload_input_qemu_aarch64`), so there is no behaviour change
              beyond `/System` now staying mounted. Metal: re-verify the Pi
-             unlock still mounts the root and logs in (§0.9).
+             unlock still mounts the root and logs in (§0.9). Split for safe
+             metal-verified landing of a metal-confirmed boot path (operator
+             pre-agreed metal re-verify between chunks):
+             - **D2a-1 — kernel block-sharing layer — DONE (host-proven + whole
+               gate).** `kernel/rustos-kernel::shared_block`: `SharedBlock<B>`
+               wraps the one brought-up disk behind a `lib/sync::SpinLock` and
+               hands out `SharedBlockHandle`s (each itself a `Block`), serialising
+               every device op (§4 SMP) with a once-cached, lock-free
+               `geometry()` (§2.16) and a fail-closed geometry-fault refusal
+               (§2.9). The aarch64 `finish_unlock` now wraps `blk` once and drives
+               the `/System` autoload window and the encrypted-root unlock window
+               through **two concurrent serialised handles**, replacing the
+               borrow-then-move of one device — the concurrent-windows-over-one-
+               disk ownership model D2a-2's persistent mount is built on. No
+               device-backing lifetime change yet, so the metal risk is the small,
+               reviewable routing change; the virtio path is exercised by the
+               `autoload_input_qemu_aarch64` vertical. Metal (§0.9): confirm the Pi
+               EMMC2 unlock + `/System` autoload + login still work through the
+               shared handles.
+             - **D2a-2 — persistent `/System` mount + `DriverStoreService`.**
+               Promote the boot block device and its backing (DMA pools, MMIO
+               maps, IRQ waiters — today stack-local on the unlock kthread) to
+               `'static` so the `SharedBlock` outlives the unlock call; a
+               kernel-resident `DriverStoreService` holds a persistent read-only
+               `/System` window (a `SharedBlockHandle`) concurrently with the
+               unlock window; the existing in-kernel autoload consumes the
+               persistent service. Metal: re-verify the Pi unlock + login (§0.9).
            - **D2b — the user-space migration.** Add `hw_tree_read` /
              `hw_tree_wait` / `driver_store_load` (+ generation counter / park)
              with the new signed `devmgr` rxe binary as their consumer; lay the
