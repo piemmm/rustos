@@ -33,6 +33,16 @@
 //! | 3030 | Info  | `NOTIFY_BOUND`                | A receiver bound to a notification channel. |
 //! | 3031 | Info  | `NOTIFY_SIGNALLED`            | A notification was delivered. |
 //! | 3032 | Error | `NOTIFY_SIGNAL_DENIED`        | A signal was refused (sender lacks the channel's signal capabilities). |
+//! | 3040 | Info  | `CALL_ENDPOINT_CREATED`       | A capability-checked synchronous call endpoint was created. |
+//! | 3041 | Error | `CALL_ENDPOINT_CREATE_DENIED` | A call-endpoint creation request was refused (creator lacks bind authority). |
+//! | 3042 | Info  | `CALL_ENDPOINT_DESTROYED`     | A call endpoint was destroyed (in-flight callers fail closed). |
+//! | 3043 | Info  | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. |
+//! | 3044 | Error | `CALL_POST_DENIED`            | A request was refused for lack of the endpoint's required capabilities. |
+//! | 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | A request was refused because its payload exceeded `max_request`. |
+//! | 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
+//! | 3047 | Error | `CALL_QUEUE_FULL`             | A post was refused because the endpoint's outstanding-call queue was full. |
+//! | 3048 | Info  | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. |
+//! | 3049 | Error | `CALL_REPLY_DENIED`           | A reply was refused (unknown ticket, or reply exceeded `max_reply`). |
 //!
 //! Adding a new event requires assigning the next free identifier in
 //! this file and appending a row to the table in
@@ -91,6 +101,26 @@ pub enum AuditEvent {
     NotifySignalled,
     /// A signal was refused (sender lacks the channel's signal capabilities).
     NotifySignalDenied,
+    /// A capability-checked synchronous call endpoint was created.
+    CallEndpointCreated,
+    /// A call-endpoint creation request was refused.
+    CallEndpointCreateDenied,
+    /// A call endpoint was destroyed (in-flight callers fail closed).
+    CallEndpointDestroyed,
+    /// A request was posted to a call endpoint, awaiting a reply.
+    CallPosted,
+    /// A request was refused for lack of the endpoint's required capabilities.
+    CallPostDenied,
+    /// A request was refused because its payload exceeded `max_request`.
+    CallRequestTooLarge,
+    /// A post raced with destruction and lost.
+    CallPostToClosedEndpoint,
+    /// A post was refused because the endpoint's outstanding-call queue was full.
+    CallQueueFull,
+    /// A server delivered a reply to an in-flight call.
+    CallReplied,
+    /// A reply was refused (unknown ticket, or reply exceeded `max_reply`).
+    CallReplyDenied,
 }
 
 impl AuditEvent {
@@ -119,6 +149,16 @@ impl AuditEvent {
             Self::NotifyBound => 3030,
             Self::NotifySignalled => 3031,
             Self::NotifySignalDenied => 3032,
+            Self::CallEndpointCreated => 3040,
+            Self::CallEndpointCreateDenied => 3041,
+            Self::CallEndpointDestroyed => 3042,
+            Self::CallPosted => 3043,
+            Self::CallPostDenied => 3044,
+            Self::CallRequestTooLarge => 3045,
+            Self::CallPostToClosedEndpoint => 3046,
+            Self::CallQueueFull => 3047,
+            Self::CallReplied => 3048,
+            Self::CallReplyDenied => 3049,
         })
     }
 
@@ -141,7 +181,11 @@ impl AuditEvent {
             | Self::ShmemMapped
             | Self::ShmemRevoked
             | Self::NotifyBound
-            | Self::NotifySignalled => Level::Info,
+            | Self::NotifySignalled
+            | Self::CallEndpointCreated
+            | Self::CallEndpointDestroyed
+            | Self::CallPosted
+            | Self::CallReplied => Level::Info,
             Self::PortCreateDenied
             | Self::PortRegisterDenied
             | Self::PortNamePublishDenied
@@ -150,7 +194,13 @@ impl AuditEvent {
             | Self::MessageSendToClosedPort
             | Self::MailboxFull
             | Self::ShmemMapDenied
-            | Self::NotifySignalDenied => Level::Error,
+            | Self::NotifySignalDenied
+            | Self::CallEndpointCreateDenied
+            | Self::CallPostDenied
+            | Self::CallRequestTooLarge
+            | Self::CallPostToClosedEndpoint
+            | Self::CallQueueFull
+            | Self::CallReplyDenied => Level::Error,
         }
     }
 
@@ -182,6 +232,16 @@ impl AuditEvent {
             Self::NotifyBound => "ipc notify bound",
             Self::NotifySignalled => "ipc notify signalled",
             Self::NotifySignalDenied => "ipc notify signal denied",
+            Self::CallEndpointCreated => "ipc call endpoint created",
+            Self::CallEndpointCreateDenied => "ipc call endpoint creation denied",
+            Self::CallEndpointDestroyed => "ipc call endpoint destroyed",
+            Self::CallPosted => "ipc call posted",
+            Self::CallPostDenied => "ipc call post denied",
+            Self::CallRequestTooLarge => "ipc call request too large",
+            Self::CallPostToClosedEndpoint => "ipc call post to closed endpoint",
+            Self::CallQueueFull => "ipc call queue full",
+            Self::CallReplied => "ipc call replied",
+            Self::CallReplyDenied => "ipc call reply denied",
         }
     }
 }
@@ -287,6 +347,16 @@ mod tests {
         assert_eq!(AuditEvent::NotifyBound.id(), EventId(3030));
         assert_eq!(AuditEvent::NotifySignalled.id(), EventId(3031));
         assert_eq!(AuditEvent::NotifySignalDenied.id(), EventId(3032));
+        assert_eq!(AuditEvent::CallEndpointCreated.id(), EventId(3040));
+        assert_eq!(AuditEvent::CallEndpointCreateDenied.id(), EventId(3041));
+        assert_eq!(AuditEvent::CallEndpointDestroyed.id(), EventId(3042));
+        assert_eq!(AuditEvent::CallPosted.id(), EventId(3043));
+        assert_eq!(AuditEvent::CallPostDenied.id(), EventId(3044));
+        assert_eq!(AuditEvent::CallRequestTooLarge.id(), EventId(3045));
+        assert_eq!(AuditEvent::CallPostToClosedEndpoint.id(), EventId(3046));
+        assert_eq!(AuditEvent::CallQueueFull.id(), EventId(3047));
+        assert_eq!(AuditEvent::CallReplied.id(), EventId(3048));
+        assert_eq!(AuditEvent::CallReplyDenied.id(), EventId(3049));
     }
 
     #[test]
@@ -313,6 +383,16 @@ mod tests {
             AuditEvent::NotifyBound,
             AuditEvent::NotifySignalled,
             AuditEvent::NotifySignalDenied,
+            AuditEvent::CallEndpointCreated,
+            AuditEvent::CallEndpointCreateDenied,
+            AuditEvent::CallEndpointDestroyed,
+            AuditEvent::CallPosted,
+            AuditEvent::CallPostDenied,
+            AuditEvent::CallRequestTooLarge,
+            AuditEvent::CallPostToClosedEndpoint,
+            AuditEvent::CallQueueFull,
+            AuditEvent::CallReplied,
+            AuditEvent::CallReplyDenied,
         ] {
             let id = ev.id().0;
             assert!(
@@ -353,6 +433,12 @@ mod tests {
             AuditEvent::MailboxFull,
             AuditEvent::ShmemMapDenied,
             AuditEvent::NotifySignalDenied,
+            AuditEvent::CallEndpointCreateDenied,
+            AuditEvent::CallPostDenied,
+            AuditEvent::CallRequestTooLarge,
+            AuditEvent::CallPostToClosedEndpoint,
+            AuditEvent::CallQueueFull,
+            AuditEvent::CallReplyDenied,
         ] {
             assert_eq!(ev.level(), rustos_log::Level::Error);
         }

@@ -47,6 +47,7 @@
 #![deny(missing_docs)]
 
 pub mod audit;
+pub mod call;
 mod loom_compat;
 pub mod notify;
 pub mod port;
@@ -54,6 +55,7 @@ pub mod registry;
 pub mod shmem;
 
 pub use audit::AuditEvent;
+pub use call::{CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, ReplyOutcome};
 pub use notify::{NotificationChannel, NotificationFlags};
 pub use port::{EndpointId, Message, Port};
 pub use registry::PortRegistry;

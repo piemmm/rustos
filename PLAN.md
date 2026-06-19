@@ -1424,16 +1424,32 @@ order (one fully-gated increment each):
                `-M virt` `autoload_input_qemu_aarch64` vertical), no new syscall,
                no metal device-path change — the foundation the IPC endpoint
                wraps in D2b-2.
-             - **D2b-2 — the IPC endpoint + syscalls + `devmgr` client.** Wrap
-               the D2b-1 service in an `IPC_RECV` loop on the parked store-service
-               kthread; add `hw_tree_read` / `hw_tree_wait` / `driver_store_load`
-               (+ store generation counter / park) with the new signed `devmgr`
-               rxe binary as their first consumer; lay the signed `devmgr` bundle
-               into `/System`; `init` spawns it after the mount; delete the
-               in-kernel single-pass `driver_autoload` it subsumes (§2.14). The
-               `-M virt` vertical is re-pointed to prove the devmgr-driven
-               autoload end to end; the parked-kthread/EMMC2 interaction is a
-               metal checklist (§0.9).
+             - **D2b-2a — the synchronous call/reply IPC primitive (DONE).**
+               The store file-read service is request/reply, but `kernel/ipc`
+               `Port`s are fire-and-forget and non-blocking. Operator chose a
+               *first-class* synchronous primitive over a convention bolted onto
+               two async ones. Landed `kernel/ipc::call::CallEndpoint`: a
+               capability-gated endpoint correlating each `post`ed request with
+               one `reply` via an opaque unforgeable `CallTicket`
+               (`recv_call`/`reply`/`take_reply`), bounds grouped in
+               `CallEndpointLimits`, fail-closed audit (IDs 3040–3049), a
+               poster-only reply claim (`take_reply(claimant, …)`, §19.1), and
+               `destroy` cancelling in-flight tickets (§2.9). It is the state
+               machine only — never blocks; the caller/server parking is layered
+               above through the existing cooperative yield/park seam in D2b-2b
+               (§2.2 / §17.4). Host-tested (≥95% tier); no syscall/ABI yet, no
+               metal device-path change.
+             - **D2b-2b — the IPC endpoint + syscalls + `devmgr` client.** Wrap
+               the D2b-1 service in a `CallEndpoint`-served request loop on the
+               parked store-service kthread (the §2.19 prerequisite the D2b-2a
+               primitive now provides); add `hw_tree_read` / `hw_tree_wait` /
+               `driver_store_load` (+ store generation counter / park) with the
+               new signed `devmgr` rxe binary as their first consumer; lay the
+               signed `devmgr` bundle into `/System`; `init` spawns it after the
+               mount; delete the in-kernel single-pass `driver_autoload` it
+               subsumes (§2.14). The `-M virt` vertical is re-pointed to prove
+               the devmgr-driven autoload end to end; the parked-kthread/EMMC2
+               interaction is a metal checklist (§0.9).
        - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +

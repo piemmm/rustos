@@ -165,6 +165,33 @@ raise one or more bits with `signal(flags)` and the bound receiver
 takes-and-clears the pending set with `take_pending()` (one atomic
 swap). The same bind-/send-time capability split as ports applies.
 
+## Synchronous call/reply endpoints
+
+A `Port` is fire-and-forget; the reactive driver-store file service
+(Design D — `/System` file-read IPC service) and any future request/reply
+system service need *synchronous* semantics instead. `CallEndpoint` is
+that primitive: a caller `post`s a request and receives an opaque,
+unforgeable `CallTicket`; the single bound server drains the oldest
+request with `recv_call` (moving it to an in-service table keyed by its
+ticket) and answers with `reply(ticket, …)`; the caller claims the answer
+with `take_reply(claimant, ticket)`. The bind-/send-time capability split
+and size/closed-port checks mirror `Port` exactly; `create` takes its
+bounds as one `CallEndpointLimits` value (`max_request`, `max_reply`,
+`capacity`), where `capacity` is a fail-closed bound on the number of
+*outstanding* calls (`AGENTS.md` §24.4), not a scaling capacity.
+
+`CallEndpoint` is the request/reply *state machine* only and never
+blocks — the caller parking until its ticket is replied and the server
+parking until a request arrives are layered above through the same
+cooperative yield/park seam the IRQ-wait and `wait` syscalls use
+(`kernel/core`), so the primitive stays scheduler-free and host-testable
+(`AGENTS.md` §2.2 / §17.4). Two security properties beyond `Port`:
+`take_reply` takes the claiming task id and a reply is claimable only by
+the task that posted it (a mismatch is reported as `Unknown`, never
+revealing another task's ticket — `AGENTS.md` §19.1); and `destroy`
+cancels every in-flight ticket so a parked caller observes `Cancelled`
+and abandons rather than waiting forever (fail closed, `AGENTS.md` §2.9).
+
 ## Audit catalogue
 
 Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
@@ -194,6 +221,16 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 | 3030 | Info  | `NOTIFY_BOUND`                | A receiver bound to a channel. |
 | 3031 | Info  | `NOTIFY_SIGNALLED`            | A notification was delivered. |
 | 3032 | Error | `NOTIFY_SIGNAL_DENIED`        | Sender lacks the channel's signal capabilities. |
+| 3040 | Info  | `CALL_ENDPOINT_CREATED`       | A capability-checked synchronous call endpoint was created. |
+| 3041 | Error | `CALL_ENDPOINT_CREATE_DENIED` | A call-endpoint creation request was refused. |
+| 3042 | Info  | `CALL_ENDPOINT_DESTROYED`     | A call endpoint was destroyed (in-flight callers fail closed). |
+| 3043 | Info  | `CALL_POSTED`                 | A request was posted to a call endpoint, awaiting a reply. |
+| 3044 | Error | `CALL_POST_DENIED`            | Caller lacks the endpoint's required capabilities. |
+| 3045 | Error | `CALL_REQUEST_TOO_LARGE`      | Request payload exceeded `max_request`. |
+| 3046 | Error | `CALL_POST_TO_CLOSED_ENDPOINT`| A post raced with destruction and lost. |
+| 3047 | Error | `CALL_QUEUE_FULL`             | The endpoint's outstanding-call queue was full. |
+| 3048 | Info  | `CALL_REPLIED`                | A server delivered a reply to an in-flight call. |
+| 3049 | Error | `CALL_REPLY_DENIED`           | Unknown ticket, or reply exceeded `max_reply`. |
 
 Adding a new event requires assigning the next free identifier in
 `kernel/ipc/src/audit.rs` and appending a row to this table.

@@ -1,0 +1,1025 @@
+//! Capability-checked synchronous call/reply endpoints.
+//!
+//! A [`Port`](crate::port::Port) is fire-and-forget: a sender enqueues a
+//! message and never hears back. The reactive driver-store file service
+//! (Design D, D2b — `.junie/next-pi-prompt.md`) and any future request/reply
+//! system service instead need **synchronous** semantics: a caller posts a
+//! request, blocks until exactly one matching reply arrives, and reads it.
+//! [`CallEndpoint`] is that primitive.
+//!
+//! Like [`Port`](crate::port::Port) it is a kernel-owned endpoint identified
+//! by a stable [`EndpointId`] and gated by capabilities (checked at create
+//! and on every post; the single bound server does not re-check —
+//! `AGENTS.md` §5.2). Unlike a port it correlates each request with one
+//! reply through an opaque, unforgeable [`CallTicket`]:
+//!
+//! * a caller [`post`](CallEndpoint::post)s a request and receives a ticket;
+//! * the server [`recv_call`](CallEndpoint::recv_call)s the oldest pending
+//!   request (moving it to an in-service table keyed by its ticket);
+//! * the server [`reply`](CallEndpoint::reply)s with that ticket;
+//! * the caller [`take_reply`](CallEndpoint::take_reply)s its ticket to claim
+//!   the reply.
+//!
+//! # Not a scheduler primitive
+//!
+//! This type is the request/reply *state machine* only; it never blocks. The
+//! blocking — the caller parking until its ticket is replied, the server
+//! parking until a request arrives — is layered above through the same
+//! cooperative yield/park seam the IRQ wait and `wait` syscalls use
+//! (`kernel/core`), so the primitive stays synchronous-test-friendly and
+//! free of any scheduler dependency (`AGENTS.md` §2.2 / §17.4). A parker
+//! polls [`CallEndpoint::recv_call`] / [`CallEndpoint::take_reply`] (both
+//! return immediately) between parks, exactly as `block_until_ready` polls
+//! IRQ readiness.
+//!
+//! # Fail closed
+//!
+//! Every refused operation emits exactly one [`crate::audit`] event before
+//! returning a stable [`Errno`] (`AGENTS.md` §5.4). A destroyed endpoint
+//! cancels every in-flight ticket: an outstanding
+//! [`CallEndpoint::take_reply`] reports [`ReplyOutcome::Cancelled`] so a
+//! parked caller wakes and abandons rather than waiting forever
+//! (`AGENTS.md` §2.9).
+
+extern crate alloc;
+
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec::Vec;
+
+use rustos_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+use rustos_abi::Errno;
+use rustos_caps::CapabilitySet;
+use rustos_kernel_sec::captable::TaskCapabilities;
+use rustos_log::{Field, Sink};
+use rustos_util::fmt::{format_hex_u64, format_usize};
+
+use crate::audit::{record, AuditEvent};
+use crate::loom_compat::{AtomicU32, Ordering};
+use crate::port::EndpointId;
+
+/// Fixed atomic states a [`CallEndpoint`] can be in, encoded into one
+/// `AtomicU32` so the post fast path observes liveness without the lock.
+mod state {
+    /// Open and accepting requests.
+    pub(super) const OPEN: u32 = 0;
+    /// `destroy()` has begun; posters fail closed and in-flight callers
+    /// observe [`super::ReplyOutcome::Cancelled`].
+    pub(super) const CLOSED: u32 = 1;
+}
+
+/// An opaque, unforgeable handle correlating a posted request with its
+/// reply.
+///
+/// Minted by [`CallEndpoint::post`] from a per-endpoint monotonic counter
+/// and surrendered to [`CallEndpoint::take_reply`]. The newtype keeps call
+/// tickets distinct from endpoint, task, and capability identifiers.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct CallTicket(pub u64);
+
+/// A request handed to the server by [`CallEndpoint::recv_call`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceivedCall {
+    /// The ticket the server must [`reply`](CallEndpoint::reply) with.
+    pub ticket: CallTicket,
+    /// Task identifier of the caller that posted the request.
+    pub sender: u64,
+    /// The request payload (kernel-owned copy).
+    pub request: Vec<u8>,
+}
+
+/// The result of [`CallEndpoint::take_reply`] for a given ticket.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReplyOutcome {
+    /// The request has been posted (and perhaps received) but the server
+    /// has not replied yet. The caller should park and retry.
+    Pending,
+    /// The reply is ready; its bytes are returned and the ticket retired.
+    Ready(Vec<u8>),
+    /// The endpoint was destroyed before a reply arrived; the caller must
+    /// abandon the call.
+    Cancelled,
+    /// The ticket is unknown to this (open) endpoint — never posted here,
+    /// or already claimed. Fail closed.
+    Unknown,
+}
+
+/// The size and capacity bounds a [`CallEndpoint`] is created with.
+///
+/// Grouped into one value so [`CallEndpoint::create`] stays a small,
+/// reviewable constructor rather than a long positional argument list, and
+/// so a caller cannot transpose the two payload caps.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CallEndpointLimits {
+    /// Maximum request payload (bytes) [`CallEndpoint::post`] accepts.
+    pub max_request: u32,
+    /// Maximum reply payload (bytes) [`CallEndpoint::reply`] accepts.
+    pub max_reply: u32,
+    /// Maximum number of outstanding calls before [`CallEndpoint::post`]
+    /// fails closed (a fail-closed memory bound, not a scaling capacity —
+    /// `AGENTS.md` §24.4).
+    pub capacity: usize,
+}
+
+/// One posted request awaiting receipt or reply.
+struct PendingCall {
+    ticket: u64,
+    sender: u64,
+    request: Vec<u8>,
+}
+
+/// The lock-guarded request/reply state machine of a [`CallEndpoint`].
+struct Inner {
+    /// Next ticket value; monotonic for the life of the endpoint.
+    next_ticket: u64,
+    /// Posted, not yet received by the server (FIFO).
+    pending: VecDeque<PendingCall>,
+    /// Received by the server, awaiting [`CallEndpoint::reply`]. Keyed by
+    /// ticket; the value is the posting caller's task id, so only that task
+    /// may later claim the reply.
+    in_service: BTreeMap<u64, u64>,
+    /// Replied, awaiting [`CallEndpoint::take_reply`]. Keyed by ticket; the
+    /// value is the posting caller's task id and the reply bytes.
+    completed: BTreeMap<u64, (u64, Vec<u8>)>,
+}
+
+impl Inner {
+    /// Total outstanding tickets, bounding endpoint memory at post time.
+    fn outstanding(&self) -> usize {
+        self.pending.len() + self.in_service.len() + self.completed.len()
+    }
+}
+
+/// A kernel-owned synchronous call/reply endpoint.
+///
+/// Construct with [`CallEndpoint::create`] (which performs the bind-time
+/// capability check) and tear down with [`CallEndpoint::destroy`]. Callers
+/// [`post`](Self::post) requests; the single bound server drains them with
+/// [`recv_call`](Self::recv_call) and answers with [`reply`](Self::reply);
+/// callers claim answers with [`take_reply`](Self::take_reply).
+///
+/// `CallEndpoint` is [`Sync`]: the [`SpinLock`](rustos_sync::SpinLock) makes
+/// interior access exclusive and the state word is atomic, so it may be
+/// shared by `&` across CPUs exactly like a [`Port`](crate::port::Port).
+pub struct CallEndpoint {
+    id: EndpointId,
+    required_send_caps: CapabilitySet,
+    required_recv_caps: CapabilitySet,
+    max_request: u32,
+    max_reply: u32,
+    capacity: usize,
+    /// Liveness read on the post fast path before taking the lock.
+    state: AtomicU32,
+    inner: rustos_sync::SpinLock<Inner>,
+}
+
+impl CallEndpoint {
+    /// Create a new capability-checked synchronous call endpoint.
+    ///
+    /// The authority model is identical to [`Port::create`](crate::port::Port::create):
+    /// `creator` must already hold every capability in `required_recv_caps`
+    /// (no ambient authority, `AGENTS.md` §4), and must additionally hold
+    /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
+    /// `required_send_caps` is non-empty (a restricted-sender endpoint is by
+    /// definition privileged).
+    ///
+    /// `capacity` bounds the number of *outstanding* calls (posted, in
+    /// service, or replied-but-unclaimed) so a misbehaving caller or server
+    /// cannot grow the endpoint without bound (`AGENTS.md` §24.1 fail-closed
+    /// bound, not a scaling capacity).
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::LengthOutOfRange`] if `max_request` or `max_reply` exceeds
+    ///   [`IPC_MESSAGE_MAX_PAYLOAD_LEN`], or `capacity == 0`.
+    /// * [`Errno::PermissionDenied`] if `creator` lacks the bind authority
+    ///   above.
+    ///
+    /// On any failure exactly one [`AuditEvent::CallEndpointCreateDenied`] is
+    /// emitted; on success exactly one [`AuditEvent::CallEndpointCreated`].
+    pub fn create<S: Sink + ?Sized>(
+        id: EndpointId,
+        creator: &TaskCapabilities,
+        required_send_caps: CapabilitySet,
+        required_recv_caps: CapabilitySet,
+        limits: CallEndpointLimits,
+        audit: &S,
+    ) -> Result<Self, Errno> {
+        let CallEndpointLimits {
+            max_request,
+            max_reply,
+            capacity,
+        } = limits;
+        let mut id_buf = [0u8; 16];
+        let id_field = Field {
+            key: "endpoint",
+            value: format_hex_u64(id.0, &mut id_buf),
+        };
+
+        if max_request > IPC_MESSAGE_MAX_PAYLOAD_LEN
+            || max_reply > IPC_MESSAGE_MAX_PAYLOAD_LEN
+            || capacity == 0
+        {
+            record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
+            return Err(Errno::LengthOutOfRange);
+        }
+
+        if !required_recv_caps.is_subset_of(creator.effective()) {
+            record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
+            return Err(Errno::PermissionDenied);
+        }
+
+        if !required_send_caps.is_empty()
+            && !creator.has(rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED)
+        {
+            record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
+            return Err(Errno::PermissionDenied);
+        }
+
+        record(audit, AuditEvent::CallEndpointCreated, &[id_field]);
+
+        Ok(Self {
+            id,
+            required_send_caps,
+            required_recv_caps,
+            max_request,
+            max_reply,
+            capacity,
+            state: AtomicU32::new(state::OPEN),
+            inner: rustos_sync::SpinLock::new(Inner {
+                next_ticket: 0,
+                pending: VecDeque::new(),
+                in_service: BTreeMap::new(),
+                completed: BTreeMap::new(),
+            }),
+        })
+    }
+
+    /// Endpoint identifier this endpoint was created with.
+    #[must_use]
+    pub fn id(&self) -> EndpointId {
+        self.id
+    }
+
+    /// Maximum request payload (bytes) [`post`](Self::post) will accept.
+    #[must_use]
+    pub fn max_request(&self) -> u32 {
+        self.max_request
+    }
+
+    /// Maximum reply payload (bytes) [`reply`](Self::reply) will accept.
+    #[must_use]
+    pub fn max_reply(&self) -> u32 {
+        self.max_reply
+    }
+
+    /// Capability set required of every caller.
+    #[must_use]
+    pub fn required_send_caps(&self) -> &CapabilitySet {
+        &self.required_send_caps
+    }
+
+    /// Capability set required of the binder/server at create time.
+    #[must_use]
+    pub fn required_recv_caps(&self) -> &CapabilitySet {
+        &self.required_recv_caps
+    }
+
+    /// `true` once [`Self::destroy`] has run.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.state.load(Ordering::Acquire) == state::CLOSED
+    }
+
+    /// Number of outstanding calls (posted, in service, or unclaimed).
+    ///
+    /// Snapshot only; production paths must not branch on it.
+    #[must_use]
+    pub fn outstanding(&self) -> usize {
+        self.inner.lock().outstanding()
+    }
+
+    /// Mark the endpoint closed and cancel every in-flight call.
+    ///
+    /// Idempotent and fail-closed: subsequent [`post`](Self::post)s return
+    /// [`Errno::NotFound`], outstanding [`take_reply`](Self::take_reply)s
+    /// observe [`ReplyOutcome::Cancelled`], and any buffered request/reply
+    /// bytes are dropped. Records one [`AuditEvent::CallEndpointDestroyed`].
+    pub fn destroy<S: Sink + ?Sized>(&self, audit: &S) {
+        self.state.store(state::CLOSED, Ordering::Release);
+        let cancelled = {
+            let mut g = self.inner.lock();
+            let n = g.outstanding();
+            g.pending.clear();
+            g.in_service.clear();
+            g.completed.clear();
+            n
+        };
+        let mut id_buf = [0u8; 16];
+        let mut n_buf = [0u8; 12];
+        record(
+            audit,
+            AuditEvent::CallEndpointDestroyed,
+            &[
+                Field {
+                    key: "endpoint",
+                    value: format_hex_u64(self.id.0, &mut id_buf),
+                },
+                Field {
+                    key: "cancelled",
+                    value: format_usize(cancelled, &mut n_buf),
+                },
+            ],
+        );
+    }
+
+    /// Post `request` and obtain the [`CallTicket`] correlating its reply.
+    ///
+    /// The kernel enforces every check, mirroring [`Port::send`](crate::port::Port::send):
+    ///
+    /// 1. **Lock-free fast path.** A destroyed endpoint returns
+    ///    [`Errno::NotFound`] without taking the lock and records one
+    ///    [`AuditEvent::CallPostToClosedEndpoint`].
+    /// 2. **Capability check.** Every capability in `required_send_caps` must
+    ///    be in `caller.effective()`, else [`Errno::PermissionDenied`] +
+    ///    [`AuditEvent::CallPostDenied`].
+    /// 3. **Size check.** The request must be `<= max_request` (bounded again
+    ///    by [`IPC_MESSAGE_MAX_PAYLOAD_LEN`]), else [`Errno::MessageTooLarge`]
+    ///    + [`AuditEvent::CallRequestTooLarge`].
+    /// 4. **Capacity check.** If the endpoint already holds `capacity`
+    ///    outstanding calls, [`Errno::LengthOutOfRange`] +
+    ///    [`AuditEvent::CallQueueFull`].
+    ///
+    /// On success the request is copied into a kernel-owned buffer, a fresh
+    /// ticket is minted, and one [`AuditEvent::CallPosted`] is emitted. The
+    /// returned ticket is later surrendered to [`take_reply`](Self::take_reply)
+    /// by the *same* caller task.
+    ///
+    /// # Errors
+    ///
+    /// As enumerated above.
+    pub fn post<S: Sink + ?Sized>(
+        &self,
+        caller: &TaskCapabilities,
+        request: &[u8],
+        audit: &S,
+    ) -> Result<CallTicket, Errno> {
+        let mut id_buf = [0u8; 16];
+        let mut sender_buf = [0u8; 16];
+        let mut len_buf = [0u8; 12];
+        let id_field = Field {
+            key: "endpoint",
+            value: format_hex_u64(self.id.0, &mut id_buf),
+        };
+        let sender_field = Field {
+            key: "sender",
+            value: format_hex_u64(caller.task().0, &mut sender_buf),
+        };
+        let len_field = Field {
+            key: "len",
+            value: format_usize(request.len(), &mut len_buf),
+        };
+
+        // 1. Fast path: reject posts to a closed endpoint without locking.
+        if self.state.load(Ordering::Acquire) == state::CLOSED {
+            record(
+                audit,
+                AuditEvent::CallPostToClosedEndpoint,
+                &[id_field, sender_field],
+            );
+            return Err(Errno::NotFound);
+        }
+
+        // 2. Capability check.
+        if !self.required_send_caps.is_subset_of(caller.effective()) {
+            record(audit, AuditEvent::CallPostDenied, &[id_field, sender_field]);
+            return Err(Errno::PermissionDenied);
+        }
+
+        // 3. Size check (endpoint-local plus the global ABI cap), computed in
+        //    `u64` so a 32-bit target (wasm32) rejects oversize correctly.
+        let effective_max = u64::from(self.max_request).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN));
+        if request.len() as u64 > effective_max {
+            record(
+                audit,
+                AuditEvent::CallRequestTooLarge,
+                &[id_field, sender_field, len_field],
+            );
+            return Err(Errno::MessageTooLarge);
+        }
+
+        // 4. Enqueue under the lock; re-check destruction after acquiring,
+        //    because `destroy()` may have raced between step 1 and here.
+        let mut g = self.inner.lock();
+        if self.state.load(Ordering::Acquire) == state::CLOSED {
+            drop(g);
+            record(
+                audit,
+                AuditEvent::CallPostToClosedEndpoint,
+                &[id_field, sender_field],
+            );
+            return Err(Errno::NotFound);
+        }
+        if g.outstanding() >= self.capacity {
+            drop(g);
+            record(audit, AuditEvent::CallQueueFull, &[id_field, sender_field]);
+            return Err(Errno::LengthOutOfRange);
+        }
+        let ticket = g.next_ticket;
+        g.next_ticket += 1;
+        let sender = caller.task().0;
+        g.pending.push_back(PendingCall {
+            ticket,
+            sender,
+            request: request.to_vec(),
+        });
+        drop(g);
+        record(
+            audit,
+            AuditEvent::CallPosted,
+            &[id_field, sender_field, len_field],
+        );
+        Ok(CallTicket(ticket))
+    }
+
+    /// Dequeue the oldest pending request for the server to service.
+    ///
+    /// Returns [`None`] when no request is pending (the server should park
+    /// and retry — this never blocks). The returned call is moved into the
+    /// in-service table keyed by its ticket, so a later [`reply`](Self::reply)
+    /// can match it. Performs no capability check: the server's authority is
+    /// fixed at [`create`](Self::create) time (`AGENTS.md` §5.2), exactly like
+    /// [`Port::recv`](crate::port::Port::recv).
+    #[must_use]
+    pub fn recv_call(&self) -> Option<ReceivedCall> {
+        let mut g = self.inner.lock();
+        let call = g.pending.pop_front()?;
+        g.in_service.insert(call.ticket, call.sender);
+        Some(ReceivedCall {
+            ticket: CallTicket(call.ticket),
+            sender: call.sender,
+            request: call.request,
+        })
+    }
+
+    /// Deliver `reply` for the in-service call identified by `ticket`.
+    ///
+    /// The reply must be `<= max_reply` (bounded again by
+    /// [`IPC_MESSAGE_MAX_PAYLOAD_LEN`]) and `ticket` must name a call the
+    /// server is currently servicing (received but not yet replied);
+    /// otherwise the reply is refused fail-closed and one
+    /// [`AuditEvent::CallReplyDenied`] is emitted. On success the reply is
+    /// buffered for the caller and one [`AuditEvent::CallReplied`] is emitted.
+    ///
+    /// No capability check: the single bound server's authority is fixed at
+    /// create time (`AGENTS.md` §5.2).
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::MessageTooLarge`] if the reply exceeds `max_reply`.
+    /// * [`Errno::NotFound`] if `ticket` is not currently in service (unknown,
+    ///   already replied, or cancelled by [`destroy`](Self::destroy)).
+    pub fn reply<S: Sink + ?Sized>(
+        &self,
+        ticket: CallTicket,
+        reply: &[u8],
+        audit: &S,
+    ) -> Result<(), Errno> {
+        let mut id_buf = [0u8; 16];
+        let mut ticket_buf = [0u8; 16];
+        let mut len_buf = [0u8; 12];
+        let id_field = Field {
+            key: "endpoint",
+            value: format_hex_u64(self.id.0, &mut id_buf),
+        };
+        let ticket_field = Field {
+            key: "ticket",
+            value: format_hex_u64(ticket.0, &mut ticket_buf),
+        };
+        let len_field = Field {
+            key: "len",
+            value: format_usize(reply.len(), &mut len_buf),
+        };
+
+        let effective_max = u64::from(self.max_reply).min(u64::from(IPC_MESSAGE_MAX_PAYLOAD_LEN));
+        if reply.len() as u64 > effective_max {
+            record(
+                audit,
+                AuditEvent::CallReplyDenied,
+                &[id_field, ticket_field, len_field],
+            );
+            return Err(Errno::MessageTooLarge);
+        }
+
+        let mut g = self.inner.lock();
+        let Some(sender) = g.in_service.remove(&ticket.0) else {
+            drop(g);
+            record(
+                audit,
+                AuditEvent::CallReplyDenied,
+                &[id_field, ticket_field],
+            );
+            return Err(Errno::NotFound);
+        };
+        g.completed.insert(ticket.0, (sender, reply.to_vec()));
+        drop(g);
+        record(
+            audit,
+            AuditEvent::CallReplied,
+            &[id_field, ticket_field, len_field],
+        );
+        Ok(())
+    }
+
+    /// Claim the reply for `ticket` on behalf of `claimant` (the task that
+    /// posted it).
+    ///
+    /// This is the caller's poll step; it never blocks (`AGENTS.md` §2.1 — a
+    /// parker loops it under the cooperative yield/park seam). The ticket is
+    /// the unforgeable authority, and `claimant` must match the posting task:
+    /// a mismatch reports [`ReplyOutcome::Unknown`], never revealing whether
+    /// another task's ticket exists (`AGENTS.md` §5.4 / §19.1).
+    ///
+    /// * [`ReplyOutcome::Ready`] — the reply is available; its bytes are
+    ///   returned and the ticket retired.
+    /// * [`ReplyOutcome::Pending`] — posted/in service but not yet replied.
+    /// * [`ReplyOutcome::Cancelled`] — the endpoint was destroyed; abandon.
+    /// * [`ReplyOutcome::Unknown`] — no such ticket for `claimant`.
+    #[must_use]
+    pub fn take_reply(&self, claimant: u64, ticket: CallTicket) -> ReplyOutcome {
+        let mut g = self.inner.lock();
+        match g.completed.remove(&ticket.0) {
+            // A ready reply, but only its poster may claim it.
+            Some((sender, bytes)) if sender == claimant => return ReplyOutcome::Ready(bytes),
+            // Someone else's ticket: put the reply back untouched and deny
+            // without revealing that it exists (`AGENTS.md` §19.1).
+            Some(entry) => {
+                g.completed.insert(ticket.0, entry);
+                return ReplyOutcome::Unknown;
+            }
+            None => {}
+        }
+        if self.is_closed() {
+            return ReplyOutcome::Cancelled;
+        }
+        let in_service = g.in_service.get(&ticket.0) == Some(&claimant);
+        let pending = g
+            .pending
+            .iter()
+            .any(|c| c.ticket == ticket.0 && c.sender == claimant);
+        if in_service || pending {
+            ReplyOutcome::Pending
+        } else {
+            ReplyOutcome::Unknown
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::RecordingSink;
+    use rustos_abi::CapabilityId;
+    use rustos_kernel_sec::captable::TaskId;
+    use rustos_kernel_sec::identity::UserId;
+
+    fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
+        let mut s = CapabilitySet::empty();
+        for c in items {
+            s.insert(*c);
+        }
+        s
+    }
+
+    fn task_with(task_id: u64, caps: &[CapabilityId]) -> TaskCapabilities {
+        let sink = RecordingSink::new();
+        let set = caps_of(caps);
+        TaskCapabilities::derive(TaskId(task_id), UserId(1), set, set, &sink)
+    }
+
+    /// An unrestricted endpoint any task may call, with generous bounds.
+    fn open_endpoint(sink: &RecordingSink) -> CallEndpoint {
+        let creator = task_with(1, &[]);
+        CallEndpoint::create(
+            EndpointId(0xC),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 128,
+                max_reply: 128,
+                capacity: 8,
+            },
+            sink,
+        )
+        .expect("unrestricted endpoint")
+    }
+
+    #[test]
+    fn create_rejects_oversize_request_cap() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let err = CallEndpoint::create(
+            EndpointId(1),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: IPC_MESSAGE_MAX_PAYLOAD_LEN + 1,
+                max_reply: 8,
+                capacity: 8,
+            },
+            &sink,
+        )
+        .err()
+        .expect("oversize request cap is refused");
+        assert_eq!(err, Errno::LengthOutOfRange);
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallEndpointCreateDenied.id().0));
+    }
+
+    #[test]
+    fn create_rejects_oversize_reply_cap() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let err = CallEndpoint::create(
+            EndpointId(1),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 8,
+                max_reply: IPC_MESSAGE_MAX_PAYLOAD_LEN + 1,
+                capacity: 8,
+            },
+            &sink,
+        )
+        .err()
+        .expect("oversize reply cap is refused");
+        assert_eq!(err, Errno::LengthOutOfRange);
+    }
+
+    #[test]
+    fn create_rejects_zero_capacity() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let err = CallEndpoint::create(
+            EndpointId(2),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 0,
+            },
+            &sink,
+        )
+        .err()
+        .expect("zero capacity is refused");
+        assert_eq!(err, Errno::LengthOutOfRange);
+    }
+
+    #[test]
+    fn create_rejects_recv_caps_not_held_by_creator() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]); // holds nothing
+        let required_recv = caps_of(&[CapabilityId::AUDIT_READ]);
+        let err = CallEndpoint::create(
+            EndpointId(3),
+            &creator,
+            CapabilitySet::empty(),
+            required_recv,
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 8,
+            },
+            &sink,
+        )
+        .err()
+        .expect("must not grant unheld authority");
+        assert_eq!(err, Errno::PermissionDenied);
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallEndpointCreateDenied.id().0));
+    }
+
+    #[test]
+    fn create_requires_ipc_bind_privileged_for_restricted_sender() {
+        let sink = RecordingSink::new();
+        // Holds the send cap but lacks IPC_BIND_PRIVILEGED, so may not bind
+        // an endpoint that restricts who may call it.
+        let creator = task_with(1, &[CapabilityId::NET_RAW]);
+        let err = CallEndpoint::create(
+            EndpointId(4),
+            &creator,
+            caps_of(&[CapabilityId::NET_RAW]),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 8,
+            },
+            &sink,
+        )
+        .err()
+        .expect("privileged bind requires IPC_BIND_PRIVILEGED");
+        assert_eq!(err, Errno::PermissionDenied);
+    }
+
+    #[test]
+    fn create_succeeds_and_exposes_its_parameters() {
+        let sink = RecordingSink::new();
+        let creator = task_with(
+            1,
+            &[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW],
+        );
+        let ep = CallEndpoint::create(
+            EndpointId(5),
+            &creator,
+            caps_of(&[CapabilityId::NET_RAW]),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 100,
+                max_reply: 200,
+                capacity: 4,
+            },
+            &sink,
+        )
+        .expect("authorised");
+        assert_eq!(ep.id(), EndpointId(5));
+        assert_eq!(ep.max_request(), 100);
+        assert_eq!(ep.max_reply(), 200);
+        assert!(ep.required_send_caps().contains(CapabilityId::NET_RAW));
+        assert!(ep.required_recv_caps().is_empty());
+        assert!(!ep.is_closed());
+        assert_eq!(ep.outstanding(), 0);
+        assert!(sink.ids().contains(&AuditEvent::CallEndpointCreated.id().0));
+    }
+
+    #[test]
+    fn post_without_required_cap_is_denied_and_audited() {
+        let sink = RecordingSink::new();
+        let creator = task_with(
+            1,
+            &[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW],
+        );
+        let ep = CallEndpoint::create(
+            EndpointId(0xA),
+            &creator,
+            caps_of(&[CapabilityId::NET_RAW]),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 4,
+            },
+            &sink,
+        )
+        .expect("authorised");
+        let caller = task_with(7, &[]); // lacks NET_RAW
+        let err = ep.post(&caller, b"hi", &sink).expect_err("denied");
+        assert_eq!(err, Errno::PermissionDenied);
+        assert!(sink.ids().contains(&AuditEvent::CallPostDenied.id().0));
+        assert_eq!(ep.outstanding(), 0);
+    }
+
+    #[test]
+    fn post_oversize_request_is_too_large() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let ep = CallEndpoint::create(
+            EndpointId(0xB),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 4,
+                max_reply: 64,
+                capacity: 4,
+            },
+            &sink,
+        )
+        .expect("ok");
+        let caller = task_with(7, &[]);
+        let err = ep
+            .post(&caller, b"too many bytes", &sink)
+            .expect_err("oversize");
+        assert_eq!(err, Errno::MessageTooLarge);
+        assert!(sink.ids().contains(&AuditEvent::CallRequestTooLarge.id().0));
+    }
+
+    #[test]
+    fn post_to_closed_endpoint_is_not_found() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        ep.destroy(&sink);
+        let caller = task_with(7, &[]);
+        let err = ep.post(&caller, b"x", &sink).expect_err("closed");
+        assert_eq!(err, Errno::NotFound);
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallPostToClosedEndpoint.id().0));
+        assert!(ep.is_closed());
+    }
+
+    #[test]
+    fn post_beyond_capacity_is_queue_full() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let ep = CallEndpoint::create(
+            EndpointId(0xD),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 2,
+            },
+            &sink,
+        )
+        .expect("ok");
+        let caller = task_with(7, &[]);
+        ep.post(&caller, b"a", &sink).expect("1");
+        ep.post(&caller, b"b", &sink).expect("2");
+        let err = ep.post(&caller, b"c", &sink).expect_err("full");
+        assert_eq!(err, Errno::LengthOutOfRange);
+        assert!(sink.ids().contains(&AuditEvent::CallQueueFull.id().0));
+        assert_eq!(ep.outstanding(), 2);
+    }
+
+    #[test]
+    fn full_round_trip_post_recv_reply_take() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+
+        let ticket = ep.post(&caller, b"ping", &sink).expect("posted");
+        // Before the server receives it, the caller sees Pending.
+        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Pending);
+
+        let received = ep.recv_call().expect("a pending call");
+        assert_eq!(received.ticket, ticket);
+        assert_eq!(received.sender, 7);
+        assert_eq!(received.request, b"ping");
+        // Received but unreplied is still Pending for the caller.
+        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Pending);
+
+        ep.reply(ticket, b"pong", &sink).expect("replied");
+        assert!(sink.ids().contains(&AuditEvent::CallReplied.id().0));
+
+        // The caller claims the reply exactly once.
+        assert_eq!(
+            ep.take_reply(7, ticket),
+            ReplyOutcome::Ready(b"pong".to_vec())
+        );
+        // A second claim finds nothing.
+        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Unknown);
+        assert_eq!(ep.outstanding(), 0);
+    }
+
+    #[test]
+    fn recv_call_is_fifo_and_empty_yields_none() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        assert!(ep.recv_call().is_none());
+
+        let t1 = ep.post(&caller, b"1", &sink).expect("1");
+        let t2 = ep.post(&caller, b"2", &sink).expect("2");
+        assert_ne!(t1, t2);
+        assert_eq!(ep.recv_call().expect("first").ticket, t1);
+        assert_eq!(ep.recv_call().expect("second").ticket, t2);
+        assert!(ep.recv_call().is_none());
+    }
+
+    #[test]
+    fn take_reply_for_unknown_ticket_is_unknown() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        assert_eq!(ep.take_reply(7, CallTicket(999)), ReplyOutcome::Unknown);
+    }
+
+    #[test]
+    fn a_reply_is_claimable_only_by_its_poster() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        ep.recv_call().expect("received");
+        ep.reply(ticket, b"r", &sink).expect("replied");
+
+        // A different task may not claim it, and learns nothing.
+        assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
+        // The reply is preserved for its rightful owner.
+        assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Ready(b"r".to_vec()));
+    }
+
+    #[test]
+    fn pending_and_in_service_are_invisible_to_non_posters() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        // A non-poster polling the ticket while it is pending learns nothing.
+        assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
+        ep.recv_call().expect("received");
+        assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
+    }
+
+    #[test]
+    fn reply_to_unknown_ticket_is_denied() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let err = ep
+            .reply(CallTicket(42), b"r", &sink)
+            .expect_err("unknown ticket");
+        assert_eq!(err, Errno::NotFound);
+        assert!(sink.ids().contains(&AuditEvent::CallReplyDenied.id().0));
+    }
+
+    #[test]
+    fn reply_twice_is_denied_the_second_time() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        ep.recv_call().expect("received");
+        ep.reply(ticket, b"r", &sink).expect("first reply");
+        // The ticket left the in-service table on the first reply.
+        let err = ep.reply(ticket, b"r2", &sink).expect_err("second reply");
+        assert_eq!(err, Errno::NotFound);
+    }
+
+    #[test]
+    fn oversize_reply_is_denied_and_leaves_the_call_in_service() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let ep = CallEndpoint::create(
+            EndpointId(0xE),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 4,
+                capacity: 4,
+            },
+            &sink,
+        )
+        .expect("ok");
+        let caller = task_with(7, &[]);
+        let ticket = ep.post(&caller, b"q", &sink).expect("posted");
+        ep.recv_call().expect("received");
+        let err = ep
+            .reply(ticket, b"too long", &sink)
+            .expect_err("oversize reply");
+        assert_eq!(err, Errno::MessageTooLarge);
+        assert!(sink.ids().contains(&AuditEvent::CallReplyDenied.id().0));
+        // The call is still in service: a correctly-sized reply still works.
+        ep.reply(ticket, b"ok", &sink).expect("retry");
+        assert_eq!(
+            ep.take_reply(7, ticket),
+            ReplyOutcome::Ready(b"ok".to_vec())
+        );
+    }
+
+    #[test]
+    fn destroy_cancels_in_flight_calls_and_audits_the_count() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        // Post three, then drive them into three distinct states: the first
+        // received-and-replied (completed), the second received (in service),
+        // the third never received (pending).
+        let t_done = ep.post(&caller, b"d", &sink).expect("done");
+        let t_in_service = ep.post(&caller, b"s", &sink).expect("in service");
+        let t_pending = ep.post(&caller, b"p", &sink).expect("pending");
+        assert_eq!(ep.recv_call().expect("first").ticket, t_done);
+        assert_eq!(ep.recv_call().expect("second").ticket, t_in_service);
+        ep.reply(t_done, b"r", &sink).expect("reply the first");
+        assert_eq!(ep.outstanding(), 3);
+
+        ep.destroy(&sink);
+
+        for t in [t_pending, t_in_service, t_done] {
+            assert_eq!(ep.take_reply(7, t), ReplyOutcome::Cancelled);
+        }
+        assert_eq!(ep.outstanding(), 0);
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallEndpointDestroyed.id().0));
+    }
+
+    #[test]
+    fn destroy_is_idempotent() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        ep.destroy(&sink);
+        ep.destroy(&sink);
+        assert!(ep.is_closed());
+    }
+}
