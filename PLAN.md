@@ -1294,7 +1294,49 @@ order (one fully-gated increment each):
          → load/spawn winners → block on `hw_tree_wait` → unload on
          `hw_remove_node`); `init` spawns it after `/System` mount; delete the
          in-kernel single-pass `driver_autoload` it subsumes (§2.14). Adds
-         `hw_tree_read`/`hw_tree_wait` + the load syscall with this consumer.
+         `hw_tree_read`/`hw_tree_wait` + the `driver_store_load` syscall with this
+         consumer.
+         - **Confirmed contract (operator-approved).** Mechanism stays in the
+           kernel TCB; only *policy* (matching) moves to user space (§4). The
+           kernel keeps signature verification, bundle bytes, and process spawn;
+           `devmgr` reads the discovered tree (`hw_tree_read`, gated by the
+           existing `CAP_SYSINFO_HW`), reads the **already-fail-closed-parsed
+           store catalogue** (opaque kernel-issued bundle ids + decoded bind
+           keys, *no* bytes), matches node→bundle with the shared `lib/devmatch`,
+           and calls `driver_store_load(bundle_id, node_id)` (gated by
+           `CAP_DRV_LOAD`). The kernel re-runs the full signed §8 gate over the
+           named bundle and mints exactly that node's resource grants. **No
+           general user-space VFS-read syscall is introduced** (smallest new
+           attack surface, §5.4/§23.1). `hw_tree_wait` blocks on the store's
+           monotonic generation counter, mirroring the `irq_bind`/`irq_wait`
+           park.
+         - **`/System` stays mounted for life (operator decision — option X).**
+           The driver store must be reachable *after* boot for on-demand and
+           reactive (hotplug) loads, and `/System` must stay mounted anyway so
+           other subsystems can reach it. So a kernel block-device **sharing
+           layer** lets the one whole-disk device back two concurrent partition
+           windows — a persistent read-only `/System` mount owned by a
+           kernel-resident `DriverStoreService` **and** the encrypted-root unlock
+           window — with `lib/sync` serialisation (§4 SMP). This replaces the
+           current "borrow `/System` then move the one disk into the unlock"
+           ownership in `finish_unlock`, so it **modifies the metal-confirmed
+           Design-B unlock path** and carries a §0.9 metal re-verification of the
+           Pi unlock.
+         - **Staging (§2.3 — syscalls land only with their user-space consumer).**
+           - **D2a — shareable block layer + persistent `/System` mount +
+             kernel-resident `DriverStoreService`.** The §2.19 prerequisite, and
+             independently valuable (other subsystems can now reach `/System`).
+             No new syscalls; the *existing* in-kernel autoload consumes the
+             persistent service (same match+spawn result, proven by
+             `autoload_input_qemu_aarch64`), so there is no behaviour change
+             beyond `/System` now staying mounted. Metal: re-verify the Pi
+             unlock still mounts the root and logs in (§0.9).
+           - **D2b — the user-space migration.** Add `hw_tree_read` /
+             `hw_tree_wait` / `driver_store_load` (+ generation counter / park)
+             with the new signed `devmgr` rxe binary as their consumer; lay the
+             signed `devmgr` bundle into `/System`; `init` spawns it after the
+             mount; delete the in-kernel single-pass `driver_autoload` it
+             subsumes (§2.14).
        - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +
