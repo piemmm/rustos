@@ -433,14 +433,15 @@ mod metal {
     use crate::driver_catalog;
     use crate::driver_loader::KernelDriverLoader;
     use crate::usb_keyboard::{
-        bring_up_keyboard, ArbiterConsoleSink, ChainHost, FirmwareReset, KeyboardChain,
+        bring_up_keyboard, ArbiterConsoleSink, BootTreeEmitter, ChainHost, KeyboardChain,
         KeyboardPumpDiagnostics, PcieBringup,
     };
     // The VL805 device driver owns the firmware-reset *policy*
-    // (`drivers/bus/usb/vl805`); this composition supplies the mailbox
-    // *mechanism* over the `lib/abi` `MailboxChannel` seam and logs the
-    // diagnostics (`AGENTS.md` §2.20 / §2.2 / §17.4).
-    use rustos_drv_bus_usb_vl805::{self as vl805, FirmwareResetFailure, FirmwareResetOutcome};
+    // (`drivers/bus/usb/vl805`); the floor xHCI/PCIe bring-up runs it over
+    // `host.mailbox()`. This composition only supplies the mailbox
+    // *mechanism* ([`KernelMailboxChannel`]) and the boot-tree emitter
+    // ([`KernelBootTreeEmitter`]) behind the `lib/abi` contract, logging the
+    // exchange diagnostics (`AGENTS.md` §2.20 / §2.2 / §17.4).
 
     /// Audit event: the USB-keyboard service kthread's lifecycle (started,
     /// or skipped because a prerequisite was absent), logged once at the
@@ -472,15 +473,6 @@ mod metal {
     /// completions, and the last status — distinguishing a transport fault
     /// from `VideoCore` dropping the tag.
     const MAILBOX_EXCHANGE: EventId = EventId(4121);
-
-    /// Audit event: the runtime mailbox liveness probe
-    /// (`vl805::probe_firmware_revision`), issued before the
-    /// `NOTIFY_XHCI_RESET` reload over the same channel. It mutates no
-    /// hardware, so it
-    /// isolates whether the mailbox path works: `probe_outcome=ok` pins a
-    /// later reload timeout on `VideoCore` dropping the tag, while a probe
-    /// timeout pins it on the mailbox environment.
-    const MAILBOX_PROBE: EventId = EventId(4122);
 
     /// The poll budget the VL805 firmware-**reload** mailbox waits the
     /// `NOTIFY_XHCI_RESET` completion out against — ten times the quick
@@ -608,49 +600,6 @@ mod metal {
         );
     }
 
-    /// Log the runtime mailbox liveness-probe diagnostics (`4122`) one-shot,
-    /// before the reload, so a metal capture separates a broken post-MMU
-    /// mailbox path from `VideoCore` specifically dropping the xHCI tag.
-    /// Rendered on the stack, never on the poll path (`AGENTS.md` §2.9 /
-    /// §2.16 / §15.7).
-    fn log_mailbox_probe(outcome: Result<u32, FirmwareResetFailure>, stats: ExchangeStats) {
-        let mut bufs = ExchangeStatBufs::new();
-        let mut revision_buf = [0u8; 16];
-        // The VL805 driver re-derives the reason from the channel error;
-        // its `as_str` table is the single source of truth the `4108`
-        // reload reason also renders, so the two never diverge
-        // (`AGENTS.md` §2.2).
-        let (outcome_name, revision) = match outcome {
-            Ok(revision) => ("ok", revision),
-            Err(err) => (err.as_str(), 0),
-        };
-        let stat_fields = exchange_stat_fields(stats, &mut bufs);
-        let fields = [
-            Field {
-                key: "probe_outcome",
-                value: outcome_name,
-            },
-            Field {
-                key: "firmware_revision_hex",
-                value: format_hex_u64(u64::from(revision), &mut revision_buf),
-            },
-            stat_fields[0],
-            stat_fields[1],
-            stat_fields[2],
-            stat_fields[3],
-            stat_fields[4],
-        ];
-        log(
-            &SERIAL_SINK,
-            &Event {
-                level: Level::Info,
-                id: MAILBOX_PROBE,
-                message: "usb-keyboard: runtime mailbox liveness probe diagnostics",
-                fields: &fields,
-            },
-        );
-    }
-
     /// Record the boot-discovered `VideoCore` mailbox doorbell base for the
     /// optional VL805 firmware fallback. Called once by the boot CPU after
     /// the MMU is live.
@@ -658,35 +607,18 @@ mod metal {
         *MAILBOX_DOORBELL.lock() = Some(doorbell_base);
     }
 
-    struct VideoCoreFirmwareReset {
-        doorbell_base: Option<u64>,
-    }
-
-    impl VideoCoreFirmwareReset {
-        const fn failed(reason: FirmwareResetFailure) -> FirmwareResetOutcome {
-            FirmwareResetOutcome::Failed { reason }
-        }
-
-        fn buffer_bus_addr(buffer_phys: u64) -> Option<u32> {
-            if buffer_phys >= u64::from(DEFAULT_BUS_ALIAS) {
-                return None;
-            }
-            Some(DEFAULT_BUS_ALIAS | buffer_phys as u32)
-        }
-    }
-
     /// The kernel's [`MailboxChannel`] implementation: the mailbox
     /// *mechanism* the board-neutral VL805 driver policy
-    /// (`drivers/bus/usb/vl805`) runs over (`AGENTS.md` §2.20 / §2.2 /
-    /// §17.4). It owns the [`MmioMailbox`] (the discovered doorbell window,
-    /// the DMA-aliased property buffer, and the cache-coherency hooks) and
-    /// adapts its `&mut self` [`MailboxTransport`] onto the `&self` channel
-    /// through a [`RefCell`] — sound because the in-kernel keyboard service
-    /// is the channel's only, single-threaded caller (`AGENTS.md` §4 — the
-    /// host serialises access). A transport [`MailboxError`] is mapped to the
-    /// board-neutral [`DriverError`] the seam reports, while the per-exchange
-    /// [`ExchangeStats`] stay readable here for the `4121`/`4122`
-    /// diagnostics.
+    /// (`drivers/bus/usb/vl805`) runs over via `DriverHost::mailbox`
+    /// (`AGENTS.md` §2.20 / §2.2 / §17.4). It owns the [`MmioMailbox`] (the
+    /// discovered doorbell window, the DMA-aliased property buffer, and the
+    /// cache-coherency hooks) and adapts its `&mut self` [`MailboxTransport`]
+    /// onto the `&self` channel through a [`RefCell`] — sound because the
+    /// in-kernel keyboard service is the channel's only, single-threaded
+    /// caller (`AGENTS.md` §4 — the host serialises access). A transport
+    /// [`MailboxError`] is mapped to the board-neutral [`DriverError`] the
+    /// seam reports, and every exchange logs its [`ExchangeStats`] (`4121`)
+    /// so a metal capture localises a timed-out reload.
     struct KernelMailboxChannel {
         mailbox: RefCell<MmioMailbox>,
     }
@@ -697,92 +629,100 @@ mod metal {
                 mailbox: RefCell::new(mailbox),
             }
         }
-
-        /// The diagnostics from the most recent
-        /// [`exchange`](MailboxChannel::exchange) (`4121`/`4122`).
-        fn last_stats(&self) -> ExchangeStats {
-            self.mailbox.borrow().last_exchange_stats()
-        }
     }
 
     impl MailboxChannel for KernelMailboxChannel {
         fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
-            self.mailbox
-                .borrow_mut()
-                .exchange(message)
-                .map_err(MailboxError::as_driver_error)
+            // Measure the exchange's real wall time across `CNTPCT_EL0` so
+            // `4121` reports the genuine wait, not an assumed iteration→time
+            // mapping of the budget. The VL805 driver policy
+            // (`drivers/bus/usb/vl805`) drives this over `DriverHost::mailbox`;
+            // the kernel owns only the mechanism and its diagnostics.
+            let start = read_cntpct();
+            let (outcome, stats) = {
+                let mut mailbox = self.mailbox.borrow_mut();
+                let outcome = mailbox
+                    .exchange(message)
+                    .map_err(MailboxError::as_driver_error);
+                (outcome, mailbox.last_exchange_stats())
+            };
+            let elapsed_us = super::counter_elapsed_us(start, read_cntpct(), read_cntfrq());
+            log_mailbox_exchange(stats, elapsed_us);
+            outcome
         }
     }
 
-    impl FirmwareReset for VideoCoreFirmwareReset {
-        fn reload(&self) -> FirmwareResetOutcome {
-            let Some(doorbell_base) = self.doorbell_base else {
-                return FirmwareResetOutcome::NotAvailable;
-            };
-            let Some(buffer_ptr) = NonNull::new(MAILBOX_PROPERTY_BUFFER.0.get().cast::<u8>())
-            else {
-                return Self::failed(FirmwareResetFailure::BadGeometry);
-            };
-            let buffer_phys = buffer_ptr.as_ptr() as u64;
-            let Some(buffer_bus) = Self::buffer_bus_addr(buffer_phys) else {
-                return Self::failed(FirmwareResetFailure::BadAperture);
-            };
-            let Some(doorbell_ptr) = NonNull::new(doorbell_base as usize as *mut u8) else {
-                return Self::failed(FirmwareResetFailure::BadGeometry);
-            };
-            // SAFETY: `doorbell_base` was discovered from the firmware FDT,
-            // folded into the Device identity map before MMU enable, and its
-            // advertised length was checked by the video mailbox discovery;
-            // the property exchange accesses it only through checked dword
-            // register operations during this one-shot fallback.
-            let regs = unsafe {
-                RegisterWindow::from_mapping(doorbell_base, doorbell_ptr, MAILBOX_REGS_LEN_BYTES)
-            };
-            // SAFETY: `MAILBOX_PROPERTY_BUFFER` is a 16-byte-aligned static
-            // owned by this one service for the single firmware-reload
-            // fallback. The `MmioMailbox` bounds every access to the 128-byte
-            // property message, and the coherency hooks publish/invalidate it
-            // around the firmware DMA exchange.
-            let buffer = unsafe {
-                RegisterWindow::from_mapping(buffer_phys, buffer_ptr, MAILBOX_PROPERTY_BYTES)
-            };
-            let coherency = BufferCoherency::new(
-                |base, len| clean_invalidate_dcache_range(base as usize, len),
-                |base, len| clean_invalidate_dcache_range(base as usize, len),
-            );
-            let Ok(mailbox) = MmioMailbox::with_coherency(
-                regs,
-                buffer,
-                buffer_bus,
-                FIRMWARE_RELOAD_POLL_BUDGET,
-                coherency,
-            ) else {
-                return Self::failed(FirmwareResetFailure::BadGeometry);
-            };
-            // The kernel owns the mailbox *mechanism*; the VL805 driver owns
-            // the firmware-reset *policy* and runs it over this channel
-            // (`AGENTS.md` §2.20 / §2.2 / §17.4). The `4121`/`4122`
-            // diagnostics are still emitted here, from the stats the owned
-            // `MmioMailbox` records on each exchange.
-            let channel = KernelMailboxChannel::new(mailbox);
-            // Liveness probe first: a benign firmware-revision read over the
-            // same channel, separating a broken mailbox path (probe fails)
-            // from `VideoCore` dropping the xHCI tag (probe ok, reload
-            // fails). It mutates no device state. Read the stats now — the
-            // reload below overwrites them.
-            let probe = vl805::probe_firmware_revision(&channel);
-            log_mailbox_probe(probe, channel.last_stats());
-            // Measure the reload's real wall time across `CNTPCT_EL0`, so
-            // `4121` reports the genuine wait, not an assumed iteration→time
-            // mapping of the budget.
-            let reload_start = read_cntpct();
-            let outcome = vl805::reload_firmware(&channel);
-            let reload_elapsed_us =
-                super::counter_elapsed_us(reload_start, read_cntpct(), read_cntfrq());
-            // Log the exchange diagnostics (`4121`) regardless of outcome,
-            // read after the reload so the stats reflect this call.
-            log_mailbox_exchange(channel.last_stats(), reload_elapsed_us);
-            outcome
+    /// The far-side (`VideoCore`-bus) alias of the property buffer, or
+    /// [`None`] if the buffer's CPU-physical base does not fit the bus
+    /// window (`AGENTS.md` §5.4 — fail closed, never a wrapped alias).
+    fn mailbox_buffer_bus_addr(buffer_phys: u64) -> Option<u32> {
+        if buffer_phys >= u64::from(DEFAULT_BUS_ALIAS) {
+            return None;
+        }
+        Some(DEFAULT_BUS_ALIAS | buffer_phys as u32)
+    }
+
+    /// Build the kernel's `VideoCore` [`MailboxChannel`] over the discovered
+    /// `doorbell_base`, or [`None`] when no doorbell was discovered or the
+    /// property-buffer geometry is unusable — the chain then proceeds with
+    /// no mailbox and the VL805 firmware reload reports
+    /// `FirmwareResetOutcome::NotAvailable` (`AGENTS.md` §2.9 — the
+    /// authoritative liveness gate is the xHCI capability block).
+    ///
+    /// The channel is built once on the boot CPU and handed to the
+    /// [`ChainHost`] as the `DriverHost::mailbox` seam; the VL805 device
+    /// driver runs the firmware-reset policy over it from inside the floor
+    /// bring-up (`AGENTS.md` §2.20 / §17.4).
+    fn build_mailbox_channel(doorbell_base: Option<u64>) -> Option<KernelMailboxChannel> {
+        let doorbell_base = doorbell_base?;
+        let buffer_ptr = NonNull::new(MAILBOX_PROPERTY_BUFFER.0.get().cast::<u8>())?;
+        let buffer_phys = buffer_ptr.as_ptr() as u64;
+        let buffer_bus = mailbox_buffer_bus_addr(buffer_phys)?;
+        let doorbell_ptr = NonNull::new(doorbell_base as usize as *mut u8)?;
+        // SAFETY: `doorbell_base` was discovered from the firmware FDT,
+        // folded into the Device identity map before MMU enable, and its
+        // advertised length was checked by the video mailbox discovery; the
+        // property exchange accesses it only through checked dword register
+        // operations.
+        let regs = unsafe {
+            RegisterWindow::from_mapping(doorbell_base, doorbell_ptr, MAILBOX_REGS_LEN_BYTES)
+        };
+        // SAFETY: `MAILBOX_PROPERTY_BUFFER` is a 16-byte-aligned static owned
+        // by this one service. The `MmioMailbox` bounds every access to the
+        // property message, and the coherency hooks publish/invalidate it
+        // around the firmware DMA exchange.
+        let buffer = unsafe {
+            RegisterWindow::from_mapping(buffer_phys, buffer_ptr, MAILBOX_PROPERTY_BYTES)
+        };
+        let coherency = BufferCoherency::new(
+            |base, len| clean_invalidate_dcache_range(base as usize, len),
+            |base, len| clean_invalidate_dcache_range(base as usize, len),
+        );
+        let mailbox = MmioMailbox::with_coherency(
+            regs,
+            buffer,
+            buffer_bus,
+            FIRMWARE_RELOAD_POLL_BUDGET,
+            coherency,
+        )
+        .ok()?;
+        Some(KernelMailboxChannel::new(mailbox))
+    }
+
+    /// The kernel's [`BootTreeEmitter`]: the floor xHCI bring-up publishes
+    /// the enumerated boot-keyboard child node through
+    /// `DriverHost::emit_node`, and the in-kernel host attaches it to the
+    /// discovered boot hardware tree so the pre-unlock autoload matches it
+    /// like every other discovered device (`AGENTS.md` §18.2,
+    /// `plans/PI.md` B3). The keyboard's signed driver bundle is not in the
+    /// store until the B5 flip, so `devmgr` leaves the node unbound (§18.4)
+    /// and the in-kernel pump keeps driving it (`AGENTS.md` §2.17).
+    struct KernelBootTreeEmitter;
+
+    impl BootTreeEmitter for KernelBootTreeEmitter {
+        fn emit_node(&self, node: &HwNode) -> Result<(), DriverError> {
+            crate::unlock_service::augment_boot_tree(node);
+            Ok(())
         }
     }
 
@@ -1108,20 +1048,21 @@ mod metal {
         }
     }
 
-    /// Bring the VL805 USB-HID keyboard online **once** on the boot CPU and
-    /// emit its enumerated identity as a discovered child [`HwNode`]
-    /// (`AGENTS.md` §18.2), returning that node together with the live
-    /// keyboard the report-pump kthread drives ([`spawn_pump`]).
+    /// Bring the VL805 USB-HID keyboard online **once** on the boot CPU,
+    /// returning the live keyboard the report-pump kthread drives
+    /// ([`spawn_pump`]).
     ///
     /// This is design B's floor ownership of USB enumeration (`plans/PI.md`
-    /// B3): the bootstrap-floor bus drivers bring the controller up and
-    /// enumerate the keyboard behind it, so the §18 discovery path sees the
-    /// device like every other one. The caller attaches the returned node to
-    /// the discovered tree ([`crate::unlock_service::augment_boot_tree`])
-    /// before the pre-unlock autoload runs, and hands the keyboard to
-    /// [`spawn_pump`]; the controller is brought up exactly once here, never
-    /// a second time (`AGENTS.md` §2.16 / §2.17 — the in-kernel pump keeps
-    /// driving the keyboard until the B5 flip, with no redundant bring-up).
+    /// B3 / Increment C): the bootstrap-floor bus drivers (`pcie_brcm` →
+    /// `vl805` firmware reload over `DriverHost::mailbox` → `bus_usb` xHCI
+    /// bring-up) enumerate the keyboard behind the controller and publish it
+    /// as a discovered child [`HwNode`] through `DriverHost::emit_node`,
+    /// which the [`KernelBootTreeEmitter`] attaches to the boot hardware
+    /// tree so the §18 discovery path sees the device like every other one
+    /// (`AGENTS.md` §18.2). The controller is brought up exactly once here,
+    /// never a second time (`AGENTS.md` §2.16 / §2.17 — the in-kernel pump
+    /// keeps driving the keyboard until the B5 flip, with no redundant
+    /// bring-up).
     ///
     /// Returns [`None`], failing closed (`AGENTS.md` §18.4 / §2.9 / §5.4),
     /// when: no PCIe bridge was discovered (the QEMU `virt` shape); the
@@ -1132,7 +1073,7 @@ mod metal {
     /// fails. The capability-gated MMIO mapper and DMA host are leaked to
     /// `'static` — a one-shot boot publish, never a per-event allocation.
     #[must_use]
-    pub fn bring_up_keyboard_into_tree(ctx: &dyn InitSpawnCtx) -> Option<(HwNode, SendKeyboard)> {
+    pub fn bring_up_keyboard_into_tree(ctx: &dyn InitSpawnCtx) -> Option<SendKeyboard> {
         // No discovered bridge is the QEMU `virt` shape, not an error: stay
         // silent and bring nothing up (`AGENTS.md` §18.4).
         let discovery = (*DISCOVERED.lock())?;
@@ -1215,10 +1156,23 @@ mod metal {
             },
         };
 
-        let host = ChainHost::new(caps, mapper, dma);
-        let firmware_reset = VideoCoreFirmwareReset {
-            doorbell_base: *MAILBOX_DOORBELL.lock(),
-        };
+        // The VideoCore mailbox the VL805 firmware reload runs over, built
+        // once here on the boot CPU and exposed to the floor bring-up as the
+        // `DriverHost::mailbox` seam (the VL805 driver owns the *policy*,
+        // `AGENTS.md` §2.20). `None` on a shape with no discovered doorbell;
+        // the reload then reports `NotAvailable` and the bring-up proceeds
+        // (`AGENTS.md` §2.9). Leaked to `'static` — a one-shot boot publish.
+        let mailbox: Option<&'static KernelMailboxChannel> =
+            build_mailbox_channel(*MAILBOX_DOORBELL.lock())
+                .map(|channel| &*Box::leak(Box::new(channel)));
+        let emitter = KernelBootTreeEmitter;
+        let host = ChainHost::new(
+            caps,
+            mapper,
+            dma,
+            mailbox.map(|channel| channel as &dyn MailboxChannel),
+            &emitter,
+        );
         let delay = GenericTimerDelay::new();
         // Bring the VL805 up once on the boot CPU. A failure fails closed
         // (login then parks with no keyboard); the chain logs its own staged
@@ -1229,7 +1183,7 @@ mod metal {
         // requested/elapsed are only a few hundred ms is a timer-rate fault,
         // not a code-side spin.
         let start_ticks = read_cntpct();
-        let result = bring_up_keyboard(&host, &bringup, &firmware_reset, &delay, &SERIAL_SINK);
+        let result = bring_up_keyboard(&host, &bringup, &delay, &SERIAL_SINK);
         let elapsed_ticks = read_cntpct().wrapping_sub(start_ticks);
         let freq = read_cntfrq();
         let counter_elapsed_us = if freq == 0 {
@@ -1250,7 +1204,7 @@ mod metal {
         if !admit_hid_child(&loader, &brought_up.hid_node) {
             return None;
         }
-        Some((brought_up.hid_node, SendKeyboard(brought_up.keyboard)))
+        Some(SendKeyboard(brought_up.keyboard))
     }
 
     /// Spawn the report-pump kthread that drives the already-brought-up

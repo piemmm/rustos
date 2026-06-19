@@ -26,11 +26,11 @@
 //! composition up to the controller hand-off (the mock window faults there);
 //! live link training and a keyboard driving the login are metal-only.
 
-use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::dma::{DmaHost, DmaSlab};
+use rustos_abi::driver::mailbox::MailboxChannel;
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, HwNode, MmioMapper, PciBus, RegisterWindow,
+    CapabilityId, DriverError, DriverHost, DriverKind, HwNode, MmioMapper, RegisterWindow,
 };
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_pcie_brcm::{
@@ -46,66 +46,28 @@ use rustos_hid::{BootKeyboard, ConsoleSink};
 use rustos_kernel_core::InputFocus;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
 use rustos_usb::device::UsbDevice;
-use rustos_usb::{Xhci, XhciOpenError, DEFAULT_POLL_BUDGET};
 use rustos_util::fmt::format_hex_u64;
-// The VL805 firmware-reset vocabulary now lives in the device's own driver
-// crate (`drivers/bus/usb/vl805`), reached over the `lib/abi` `MailboxChannel`
-// seam (`AGENTS.md` §2.20 / §2.2 / §17.4). This composition consumes those
-// types; the in-kernel `FirmwareReset` seam below is the host's reactive
-// wrapper the bring-up calls (the kernel owns the mailbox *mechanism*).
-use rustos_drv_bus_usb_vl805::{FirmwareResetOutcome, VL805_FIRMWARE_DEV_ADDR};
+// The VL805 firmware-reset *policy* lives in the device's own driver crate
+// (`drivers/bus/usb/vl805`), reached over the board-neutral `lib/abi`
+// `MailboxChannel` seam (`AGENTS.md` §2.20 / §2.2 / §17.4); the xHCI
+// controller bring-up + boot-keyboard enumeration + child-node emission
+// lives in the generic `drivers/bus/usb` floor entry. This composition only
+// sequences the floor drivers over the `DriverHost` contract.
+use rustos_drv_bus_usb::wiring::bring_up_boot_input;
+use rustos_drv_bus_usb_vl805::{self as vl805, FirmwareResetOutcome};
 
 /// Audit event: a progress/failure milestone of the VL805 USB-keyboard
 /// bring-up chain (PCIe link training, xHCI bring-up, root-hub
 /// enumeration), so a metal capture shows which stage stalls.
 const USB_KEYBOARD_BRINGUP: EventId = EventId(4101);
 
-/// Audit event: a USB device enumerated on the VL805 root hub. Carries its
-/// vendor/product id and assigned xHCI slot.
-const USB_KEYBOARD_DEVICE: EventId = EventId(4102);
-
-/// Audit event: the optional `VideoCore` VL805 firmware reload fallback,
-/// issued once when config `0x50` (firmware version) stays zero. One-shot,
-/// best-effort: a failure is logged but does not stop bring-up; the
-/// fail-closed gate is [`Xhci::open`] (`AGENTS.md` §2.9).
+/// Audit event: the per-boot `VideoCore` VL805 firmware reload, issued
+/// once after the PCIe link trains (its `PERST#` drops the VL805's
+/// VideoCore-loaded firmware on EEPROM-less Pi 4 boards). One-shot,
+/// best-effort: a missing mailbox or a refused tag is logged but does not
+/// stop bring-up; the authoritative fail-closed liveness gate is
+/// `Xhci::open` inside the xHCI floor entry (`AGENTS.md` §2.9).
 const USB_KEYBOARD_FW_RESET: EventId = EventId(4108);
-
-/// Audit event: a function seen by the one-shot PCIe configuration scan
-/// (plus a summary count). A healthy Pi 4 shows two: the root complex
-/// (`14e4:2711`, class `0604`) and the VL805 USB host (`1106:3483`, class
-/// `0c03`).
-const USB_KEYBOARD_PCI_SCAN: EventId = EventId(4104);
-
-/// Audit event: the one-shot xHCI DMA carve (base/length/aperture) and
-/// capability-block geometry (BAR window length, `CAPLENGTH`/`DBOFF`/
-/// `RTSOFF`, `MaxSlots`/`MaxPorts`/`AC64`/`CSZ`) read after mapping the
-/// BAR, so an `out_of_range` bring-up localises to a concrete value.
-const USB_KEYBOARD_GEOMETRY: EventId = EventId(4106);
-
-/// Audit event: the raw capability-register dwords (`CAPLENGTH`/
-/// `HCIVERSION`, `HCSPARAMS1`, `HCCPARAMS1`, `DBOFF`, `RTSOFF`) read off
-/// the BAR before [`Xhci::open`] validates them, so a capture shows
-/// whether the BAR decodes and the exact `CAPLENGTH` driving a refusal.
-const USB_KEYBOARD_CAPS_RAW: EventId = EventId(4107);
-
-/// Audit event: the bounded wait for the VL805 capability block to come
-/// live after firmware loads. Records reads taken (`polls_hex`), the final
-/// header dword, and whether it became live (`ready_hex`). Bounded by
-/// elapsed wall time ([`CAPS_READY_BUDGET_US`]); fails closed at
-/// [`Xhci::open`].
-const USB_KEYBOARD_CAPS_READY: EventId = EventId(4109);
-
-/// Audit event: a read-back of configuration space after BAR assignment
-/// and command-enable: the bridge bus numbers (`0x18`), Memory Base/Limit
-/// (`0x20`) and command/status (`0x04`), and the VL805's command/status
-/// (`0x04`), BAR0 (`0x10`), BAR1 (`0x14`) — to show which write stuck. A
-/// faulting read renders an all-ones sentinel and is not propagated.
-const USB_KEYBOARD_CONFIG: EventId = EventId(4110);
-
-/// Audit event: the response word from the `VideoCore` `NOTIFY_XHCI_RESET`
-/// tag (normally echoes the VL805 address `0x10_0000`). Diagnostic only,
-/// never authority.
-const USB_KEYBOARD_FW_RESPONSE: EventId = EventId(4113);
 
 /// Audit event: a read-back of the outbound (CPU→PCIe) memory-window
 /// registers (`MEM_WIN0_LO`/`HI`, `BASE_LIMIT`, `BASE_HI`, `LIMIT_HI`) and
@@ -113,14 +75,6 @@ const USB_KEYBOARD_FW_RESPONSE: EventId = EventId(4113);
 /// the programmed CPU/PCIe bases and the link is up. A faulting read
 /// renders an all-ones sentinel and is not propagated.
 const USB_KEYBOARD_OUTBOUND: EventId = EventId(4111);
-
-/// Audit event: a re-read of the VL805's vendor/device (`0x00`),
-/// command/status (`0x04`), BAR0 (`0x10`), BAR1 (`0x14`) and the mapped
-/// BAR's `CAPLENGTH`/`HCIVERSION` after the firmware-version wait and BAR
-/// settle, so a capture distinguishes "present but no firmware" from
-/// "firmware-loaded but still not decoding". A faulting read renders an
-/// all-ones sentinel and is not propagated.
-const USB_KEYBOARD_POST_RELOAD: EventId = EventId(4114);
 
 /// Audit event: the per-phase wall-time breakdown of the PCIe
 /// root-complex `bring_up`, in microseconds, so a capture pins any stall
@@ -131,45 +85,6 @@ const USB_KEYBOARD_POST_RELOAD: EventId = EventId(4114);
 /// reset is released before touching MISC, else the MISC access
 /// master-aborts on the `SoC` bus completion timeout (~10.8 s).
 const USB_KEYBOARD_BRINGUP_TIMING: EventId = EventId(4117);
-
-/// Audit event: the bounded wait for the VL805's XHCI MCU firmware
-/// version ([`VL805_FW_VERSION_OFFSET`] `0x50`) to read non-zero after the
-/// link trains. The version is in configuration space (reachable while the
-/// BAR still aborts), so it is the working readiness signal. Records
-/// `polls_hex`, `fw_version_hex`, `ready_hex`; bounded by
-/// [`FW_LOADED_BUDGET_US`], fails closed at [`Xhci::open`].
-const USB_KEYBOARD_FW_READY: EventId = EventId(4118);
-
-/// Audit event: the firmware-version gate decision
-/// (`firmware_loaded_hex`). A zero version or failed reload no longer
-/// aborts bring-up: the authoritative xHCI liveness signal is the
-/// capability block, so the bring-up proceeds to [`wait_for_caps_ready`]
-/// and [`Xhci::open`], the real fail-closed gate (`AGENTS.md` §2.9).
-const USB_KEYBOARD_FW_GATE: EventId = EventId(4123);
-
-/// Audit event: the PCIe root-port error/status read **read-only** after
-/// the `NOTIFY_XHCI_RESET` reload — bridge command/status (`0x04`), bridge
-/// secondary status (`0x1C`), VL805 command/status (`0x04`). A set
-/// Received-Master-Abort means the firmware-load could not reach the VL805
-/// over PCIe, pinning a hang to the bus rather than the mailbox. A
-/// post-reload snapshot, not a delta (no write issued).
-const USB_KEYBOARD_PCIE_ERR: EventId = EventId(4124);
-
-/// Audit event: one record per root-hub port's `PORTSC` when the scan
-/// finds no connected device, carrying the raw `portsc_hex` and decoded
-/// `ccs_hex`/`pp_hex`/`ped_hex`/`speed_hex`. `pp_hex=1 ccs_hex=0` means
-/// power is asserted but nothing is attached; `pp_hex=0` means the power
-/// write did not stick. A faulting read is logged as an all-ones sentinel.
-const USB_KEYBOARD_ROOT_PORTS: EventId = EventId(4125);
-
-/// Audit event: the enumeration step last entered when
-/// [`UsbDevice::enumerate_first_connected`] errors. `stage_hex` is
-/// [`UsbDevice::enum_stage`] and `completion_hex` is
-/// [`UsbDevice::last_completion_code`] (the last event's raw xHCI
-/// completion code): `stage_hex=0` is an empty hub; a later stage with
-/// `completion_hex=0` is a stuck controller; a non-zero code is the device
-/// answering with that error.
-const USB_KEYBOARD_ENUM_STAGE: EventId = EventId(4126);
 
 /// Audit event: the first keyboard report drained on the poll loop
 /// (one-shot, with cumulative poll/event counts). Its presence proves the
@@ -192,26 +107,25 @@ const USB_KEYBOARD_PUMP_ERROR: EventId = EventId(4130);
 /// but the keyboard delivers no reports.
 const USB_KEYBOARD_POLL_HEARTBEAT: EventId = EventId(4131);
 
-/// Minimum post-`NOTIFY_XHCI_RESET` settle before polling config `0x50`
-/// again; the vendor bring-up waits `200..1000 µs`, so this uses the lower bound and then
-/// the existing bounded firmware-version wait handles the remainder.
-const FW_RELOAD_SETTLE_US: u32 = 200;
-
-/// Optional `VideoCore` firmware reload seam used when config `0x50` stays
-/// zero after PCI/BAR setup.
-pub trait FirmwareReset {
-    /// Attempt the single `NOTIFY_XHCI_RESET` fallback.
-    fn reload(&self) -> FirmwareResetOutcome;
-}
-
-/// Firmware-reset implementation for host tests and boot shapes with no
-/// discovered `VideoCore` firmware mailbox.
-pub struct NoFirmwareReset;
-
-impl FirmwareReset for NoFirmwareReset {
-    fn reload(&self) -> FirmwareResetOutcome {
-        FirmwareResetOutcome::NotAvailable
-    }
+/// The boot-tree publication seam the [`ChainHost`] forwards
+/// [`DriverHost::emit_node`] to.
+///
+/// The floor xHCI bring-up ([`bring_up_boot_input`]) publishes the
+/// enumerated child [`HwNode`] through `DriverHost::emit_node`; in the
+/// in-kernel composition that mutation is attaching the node to the
+/// discovered boot hardware tree so the pre-unlock autoload sees it
+/// (`AGENTS.md` §18.2). The metal boot path implements this over
+/// `unlock_service::augment_boot_tree`; host tests pass a recording
+/// double. It is a thin seam so the arch-neutral [`ChainHost`] never names
+/// the kernel boot-tree global directly (`AGENTS.md` §2.2 / §17.4).
+pub trait BootTreeEmitter {
+    /// Publish `node` into the discovered boot hardware tree.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with a [`DriverError`] if the tree mutation is refused
+    /// (`AGENTS.md` §5.4).
+    fn emit_node(&self, node: &HwNode) -> Result<(), DriverError>;
 }
 
 /// Audit event: read-back of the **inbound** (PCIe→system-memory) viewport
@@ -449,398 +363,6 @@ impl KeyboardPumpDiagnostics {
     }
 }
 
-fn option_hex(value: Option<u32>, buf: &mut [u8; 16]) -> &str {
-    match value {
-        Some(value) => format_hex_u64(u64::from(value), buf),
-        None => "unreadable",
-    }
-}
-
-fn log_xhci_open_err(sink: &dyn Sink, err: XhciOpenError) {
-    let mut cmd_buf = [0u8; 16];
-    let mut status_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Error,
-            id: USB_KEYBOARD_BRINGUP,
-            message: "usb-keyboard: vl805 xhci controller open (capability/reset) failed",
-            fields: &[
-                Field {
-                    key: "err",
-                    value: driver_error_name(err.error),
-                },
-                Field {
-                    key: "stage",
-                    value: err.stage.as_str(),
-                },
-                Field {
-                    key: "usbcmd_hex",
-                    value: option_hex(err.registers.usbcmd, &mut cmd_buf),
-                },
-                Field {
-                    key: "usbsts_hex",
-                    value: option_hex(err.registers.usbsts, &mut status_buf),
-                },
-            ],
-        },
-    );
-}
-
-/// Upper bound on functions the diagnostic scan reports: a defence bound
-/// (`AGENTS.md` §24.4), not a capacity. A healthy Pi 4 bus has two.
-const SCAN_REPORT_LIMIT: usize = 32;
-
-/// Enumerate PCIe configuration space once and log every responding
-/// function, so a capture shows whether the VL805 answers config reads.
-/// Purely diagnostic: an enumeration error is logged, not propagated (the
-/// authoritative search is `open_discovered`).
-fn log_bus_scan(sink: &dyn Sink, bus: &dyn Bus) {
-    let mut devices = [BusDevice {
-        vendor: 0,
-        device: 0,
-        class: 0,
-        reserved0: 0,
-        address: 0,
-    }; SCAN_REPORT_LIMIT];
-    let found = match bus.enumerate(&mut devices) {
-        Ok(n) => n,
-        // The bus filled the buffer before reporting the overflow; report
-        // the populated prefix rather than dropping the whole scan.
-        Err(DriverError::BufferTooSmall) => devices.len(),
-        Err(err) => {
-            log_stage_err(sink, "usb-keyboard: pcie configuration scan faulted", err);
-            return;
-        }
-    };
-    let mut count_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_PCI_SCAN,
-            message: "usb-keyboard: pcie configuration scan complete",
-            fields: &[Field {
-                key: "function_count_hex",
-                value: format_hex_u64(found as u64, &mut count_buf),
-            }],
-        },
-    );
-    for device in &devices[..found] {
-        let mut bdf_buf = [0u8; 16];
-        let mut vendor_buf = [0u8; 16];
-        let mut device_buf = [0u8; 16];
-        let mut class_buf = [0u8; 16];
-        log(
-            sink,
-            &Event {
-                level: Level::Info,
-                id: USB_KEYBOARD_PCI_SCAN,
-                message: "usb-keyboard: pcie function discovered",
-                fields: &[
-                    Field {
-                        key: "bdf_hex",
-                        value: format_hex_u64(device.address, &mut bdf_buf),
-                    },
-                    Field {
-                        key: "vendor_hex",
-                        value: format_hex_u64(u64::from(device.vendor), &mut vendor_buf),
-                    },
-                    Field {
-                        key: "device_hex",
-                        value: format_hex_u64(u64::from(device.device), &mut device_buf),
-                    },
-                    Field {
-                        key: "class_hex",
-                        value: format_hex_u64(u64::from(device.class), &mut class_buf),
-                    },
-                ],
-            },
-        );
-    }
-}
-
-/// Log the device-shared DMA carve against the inbound-aperture bound it
-/// must lie below. `dma_phys` is the device-visible (PCIe-space) base.
-fn log_dma_carve(sink: &dyn Sink, dma: &DmaSlab, dma_aperture_top: u64, window_len: usize) {
-    let mut phys_buf = [0u8; 16];
-    let mut len_buf = [0u8; 16];
-    let mut end_buf = [0u8; 16];
-    let mut top_buf = [0u8; 16];
-    let mut win_buf = [0u8; 16];
-    let dma_phys = dma.phys();
-    let dma_len = dma.len() as u64;
-    let dma_end = dma_phys.saturating_add(dma_len);
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_GEOMETRY,
-            message: "usb-keyboard: xhci dma carve and bar window mapped",
-            fields: &[
-                Field {
-                    key: "dma_phys_hex",
-                    value: format_hex_u64(dma_phys, &mut phys_buf),
-                },
-                Field {
-                    key: "dma_len_hex",
-                    value: format_hex_u64(dma_len, &mut len_buf),
-                },
-                Field {
-                    key: "dma_end_hex",
-                    value: format_hex_u64(dma_end, &mut end_buf),
-                },
-                Field {
-                    key: "dma_aperture_top_hex",
-                    value: format_hex_u64(dma_aperture_top, &mut top_buf),
-                },
-                Field {
-                    key: "bar_window_len_hex",
-                    value: format_hex_u64(window_len as u64, &mut win_buf),
-                },
-            ],
-        },
-    );
-}
-
-/// Log the controller's capability-block geometry read by [`Xhci::open`],
-/// so a capture shows whether a register offset lands past the mapped BAR.
-fn log_xhci_geometry(sink: &dyn Sink, xhci: &Xhci<RegisterWindow>) {
-    let mut cap_buf = [0u8; 16];
-    let mut ver_buf = [0u8; 16];
-    let mut db_buf = [0u8; 16];
-    let mut rt_buf = [0u8; 16];
-    let mut slots_buf = [0u8; 16];
-    let mut ports_buf = [0u8; 16];
-    let mut scratch_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_GEOMETRY,
-            message: "usb-keyboard: xhci capability block read",
-            fields: &[
-                Field {
-                    key: "caplength_hex",
-                    value: format_hex_u64(xhci.caplength() as u64, &mut cap_buf),
-                },
-                Field {
-                    key: "hci_version_hex",
-                    value: format_hex_u64(u64::from(xhci.hci_version()), &mut ver_buf),
-                },
-                Field {
-                    key: "doorbell_off_hex",
-                    value: format_hex_u64(xhci.doorbell_base() as u64, &mut db_buf),
-                },
-                Field {
-                    key: "runtime_off_hex",
-                    value: format_hex_u64(xhci.runtime_base() as u64, &mut rt_buf),
-                },
-                Field {
-                    key: "max_slots_hex",
-                    value: format_hex_u64(u64::from(xhci.max_slots()), &mut slots_buf),
-                },
-                Field {
-                    key: "max_ports_hex",
-                    value: format_hex_u64(u64::from(xhci.max_ports()), &mut ports_buf),
-                },
-                // Max Scratchpad Buffers (xHCI §4.20): page-sized buffers
-                // `UsbDevice::start` reserves and points `DCBAA[0]` at.
-                Field {
-                    key: "max_scratchpad_hex",
-                    value: format_hex_u64(
-                        u64::from(xhci.max_scratchpad_buffers()),
-                        &mut scratch_buf,
-                    ),
-                },
-            ],
-        },
-    );
-}
-
-/// Read one capability-register dword raw from the mapped BAR window,
-/// rendering the value read, or the `ffff_ffff_ffff_ffff` sentinel if
-/// the window itself refused the (bounds/alignment-checked) read.
-fn read_cap_dword(window: &RegisterWindow, offset: usize) -> u64 {
-    window.read_u32(offset).map_or(u64::MAX, u64::from)
-}
-
-/// Maximum elapsed wall time (µs) to wait for the VL805 register block
-/// after the firmware-version wait (~256 ms). A defence bound
-/// (`AGENTS.md` §2.1 / §24.4), not a capacity. A *time* budget, not a poll
-/// count: each un-decoded BAR read master-aborts and stalls tens of ms on
-/// the BCM2711, so a poll-count budget would inflate the wait wildly.
-const CAPS_READY_BUDGET_US: u64 = 256_000;
-
-/// Delay between capability-header readiness polls, in microseconds.
-const CAPS_READY_POLL_INTERVAL_US: u32 = 1_000;
-
-/// Maximum elapsed wall time (µs) to wait for the VL805's XHCI MCU
-/// firmware version ([`VL805_FW_VERSION_OFFSET`]) to read non-zero after
-/// the link trains (~2 s). A defence bound (`AGENTS.md` §2.1 / §24.4): a
-/// healthy board loads within a few hundred ms; one that never loads fails
-/// closed. These are config-space reads (no master-abort), so the budget
-/// tracks firmware-load latency, not read cost.
-const FW_LOADED_BUDGET_US: u64 = 2_000_000;
-
-/// Delay between firmware-version readiness polls, in microseconds.
-const FW_LOADED_POLL_INTERVAL_US: u32 = 2_000;
-
-/// The VL805's PCI bus/device/function address as the configuration
-/// accessor keys it: the lone device on the secondary bus the
-/// root-complex bring-up named.
-fn vl805_bdf() -> u64 {
-    u64::from(pcie_brcm::regs::RC_SECONDARY_BUS) << 16
-}
-
-/// Whether the `CAPLENGTH`/`HCIVERSION` header dword looks like a live
-/// xHCI controller, rather than an uninitialised/aborted bus pattern. A
-/// live header has a plausible `CAPLENGTH` (≥ `0x20`) and `HCIVERSION`
-/// (xHCI 0.96‥1.2); the `0`/UR-sentinel/`dead_dead` pre-firmware patterns
-/// all fail. Takes the [`read_cap_dword`] `u64` (no truncating cast).
-fn caps_block_is_live(header: u64) -> bool {
-    if header == u64::MAX {
-        return false;
-    }
-    let caplength = header & 0xFF;
-    let hci_version = (header >> 16) & 0xFFFF;
-    caplength >= 0x20 && (0x0090..=0x0120).contains(&hci_version)
-}
-
-/// Poll the mapped BAR's `CAPLENGTH`/`HCIVERSION` header until the
-/// controller presents a live capability block, bounded by
-/// [`CAPS_READY_BUDGET_US`] of elapsed wall time, logging the outcome once
-/// (`4109`). Read-only; returns whether the block became live. A
-/// controller that never decodes fails closed at [`Xhci::open`]. The bound
-/// is wall time, not a poll count, because each un-decoded BAR read
-/// master-aborts and stalls tens of ms on the BCM2711.
-fn wait_for_caps_ready(window: &RegisterWindow, delay: &dyn Delay, sink: &dyn Sink) -> bool {
-    use rustos_usb::regs;
-
-    let start_us = delay.now_us();
-    let mut polls = 0u32;
-    let (ready, header) = loop {
-        let header = read_cap_dword(window, regs::CAPLENGTH_HCIVERSION);
-        if caps_block_is_live(header) {
-            break (true, header);
-        }
-        if delay.now_us().wrapping_sub(start_us) >= CAPS_READY_BUDGET_US {
-            break (false, header);
-        }
-        delay.delay_us(CAPS_READY_POLL_INTERVAL_US);
-        polls += 1;
-    };
-
-    let mut polls_buf = [0u8; 16];
-    let mut header_buf = [0u8; 16];
-    let mut ready_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_CAPS_READY,
-            message: "usb-keyboard: waited for the xhci capability block to come live",
-            fields: &[
-                Field {
-                    key: "polls_hex",
-                    value: format_hex_u64(u64::from(polls), &mut polls_buf),
-                },
-                Field {
-                    key: "caplength_hciversion_hex",
-                    value: format_hex_u64(header, &mut header_buf),
-                },
-                Field {
-                    key: "ready_hex",
-                    value: format_hex_u64(u64::from(ready), &mut ready_buf),
-                },
-            ],
-        },
-    );
-    ready
-}
-
-/// Whether the VL805 firmware-version dword indicates a loaded MCU
-/// firmware: a non-zero build id, and not the faulting-read all-ones
-/// sentinel ([`read_config_or_sentinel`]). Reset value is `0` (firmware
-/// not loaded); any non-zero value means loaded.
-fn firmware_version_is_loaded(version: u64) -> bool {
-    version != 0 && version != 0xFFFF_FFFF
-}
-
-/// Poll the VL805's XHCI MCU firmware version
-/// ([`VL805_FW_VERSION_OFFSET`]) over configuration space until it reads a
-/// non-zero build id, bounded by [`FW_LOADED_BUDGET_US`] of elapsed wall
-/// time, logging the outcome once (`4118`). Read-only; returns whether the
-/// firmware loaded. The config path works on metal while the MMIO BAR
-/// master-aborts until the MCU firmware is loaded, so this is the working
-/// readiness signal.
-fn wait_for_firmware_loaded(bus: &dyn PciBus, delay: &dyn Delay, sink: &dyn Sink) -> bool {
-    let bdf = vl805_bdf();
-    let start_us = delay.now_us();
-    let mut polls = 0u32;
-    let (ready, version) = loop {
-        let version = read_config_or_sentinel(bus, bdf, VL805_FW_VERSION_OFFSET);
-        if firmware_version_is_loaded(version) {
-            break (true, version);
-        }
-        if delay.now_us().wrapping_sub(start_us) >= FW_LOADED_BUDGET_US {
-            break (false, version);
-        }
-        delay.delay_us(FW_LOADED_POLL_INTERVAL_US);
-        polls += 1;
-    };
-
-    let mut polls_buf = [0u8; 16];
-    let mut version_buf = [0u8; 16];
-    let mut ready_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_FW_READY,
-            message: "usb-keyboard: waited for the vl805 xhci mcu firmware version to load",
-            fields: &[
-                Field {
-                    key: "polls_hex",
-                    value: format_hex_u64(u64::from(polls), &mut polls_buf),
-                },
-                Field {
-                    key: "fw_version_hex",
-                    value: format_hex_u64(version, &mut version_buf),
-                },
-                Field {
-                    key: "ready_hex",
-                    value: format_hex_u64(u64::from(ready), &mut ready_buf),
-                },
-            ],
-        },
-    );
-    ready
-}
-
-fn log_firmware_response(sink: &dyn Sink, response_value: u32) {
-    let mut dev_buf = [0u8; 16];
-    let mut response_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_FW_RESPONSE,
-            message: "usb-keyboard: vl805 firmware reset mailbox response",
-            fields: &[
-                Field {
-                    key: "dev_addr_hex",
-                    value: format_hex_u64(u64::from(VL805_FIRMWARE_DEV_ADDR), &mut dev_buf),
-                },
-                Field {
-                    key: "response_value_hex",
-                    value: format_hex_u64(u64::from(response_value), &mut response_buf),
-                },
-            ],
-        },
-    );
-}
-
 fn log_firmware_reset(sink: &dyn Sink, outcome: FirmwareResetOutcome) {
     match outcome {
         FirmwareResetOutcome::NotAvailable => {
@@ -882,189 +404,6 @@ fn log_firmware_reset(sink: &dyn Sink, outcome: FirmwareResetOutcome) {
             );
         }
     }
-}
-
-fn ensure_firmware_loaded(
-    bus: &dyn PciBus,
-    delay: &dyn Delay,
-    firmware_reset: &dyn FirmwareReset,
-    sink: &dyn Sink,
-) -> bool {
-    if wait_for_firmware_loaded(bus, delay, sink) {
-        return true;
-    }
-    let outcome = firmware_reset.reload();
-    if let FirmwareResetOutcome::Reloaded { response_value } = outcome {
-        log_firmware_response(sink, response_value);
-    }
-    log_firmware_reset(sink, outcome);
-    if !matches!(outcome, FirmwareResetOutcome::Reloaded { .. }) {
-        return false;
-    }
-    delay.delay_us(FW_RELOAD_SETTLE_US);
-    wait_for_firmware_loaded(bus, delay, sink)
-}
-
-/// Log the firmware-version gate decision (`4123`) — whether the VL805's
-/// configuration-space firmware-version register became loaded — recording
-/// that the bring-up proceeds to probe the controller's own BAR capability
-/// block regardless (see [`USB_KEYBOARD_FW_GATE`]).
-fn log_firmware_gate(sink: &dyn Sink, firmware_loaded: bool) {
-    let mut loaded_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_FW_GATE,
-            message:
-                "usb-keyboard: firmware-version gate evaluated; probing the controller bar regardless",
-            fields: &[Field {
-                key: "firmware_loaded_hex",
-                value: format_hex_u64(u64::from(firmware_loaded), &mut loaded_buf),
-            }],
-        },
-    );
-}
-
-/// Log every root-hub port's `PORTSC` (`4125`), one record per port, when
-/// the root-hub scan found no connected device. Read-only; reflects the
-/// post-power state, pinning whether power stuck (`pp_hex`) and whether
-/// any port sees a device (`ccs_hex`). A faulting read renders the
-/// all-ones sentinel.
-fn log_root_ports(sink: &dyn Sink, usb: &mut UsbDevice<RegisterWindow, DmaSlab>) {
-    use rustos_usb::regs;
-
-    let count = usb.root_port_count();
-    for port in 1..=count {
-        let raw = usb.root_port_status_raw(port).unwrap_or(u32::MAX);
-        let ccs = u64::from(raw & regs::PORTSC_CCS != 0);
-        let pp = u64::from(raw & regs::PORTSC_PP != 0);
-        let ped = u64::from(raw & regs::PORTSC_PED != 0);
-        let speed = u64::from((raw >> regs::PORTSC_SPEED_SHIFT) & regs::PORTSC_SPEED_MASK);
-        let mut port_buf = [0u8; 16];
-        let mut portsc_buf = [0u8; 16];
-        let mut ccs_buf = [0u8; 16];
-        let mut pp_buf = [0u8; 16];
-        let mut ped_buf = [0u8; 16];
-        let mut speed_buf = [0u8; 16];
-        log(
-            sink,
-            &Event {
-                level: Level::Info,
-                id: USB_KEYBOARD_ROOT_PORTS,
-                message: "usb-keyboard: root-hub port status after the empty scan",
-                fields: &[
-                    Field {
-                        key: "port_hex",
-                        value: format_hex_u64(u64::from(port), &mut port_buf),
-                    },
-                    Field {
-                        key: "portsc_hex",
-                        value: format_hex_u64(u64::from(raw), &mut portsc_buf),
-                    },
-                    Field {
-                        key: "ccs_hex",
-                        value: format_hex_u64(ccs, &mut ccs_buf),
-                    },
-                    Field {
-                        key: "pp_hex",
-                        value: format_hex_u64(pp, &mut pp_buf),
-                    },
-                    Field {
-                        key: "ped_hex",
-                        value: format_hex_u64(ped, &mut ped_buf),
-                    },
-                    Field {
-                        key: "speed_hex",
-                        value: format_hex_u64(speed, &mut speed_buf),
-                    },
-                ],
-            },
-        );
-    }
-}
-
-/// Log which enumeration step the root-hub bring-up last entered (`4126`)
-/// when [`UsbDevice::enumerate_first_connected`] fails: the
-/// [`UsbDevice::enum_stage`] breadcrumb with the last event's raw xHCI
-/// completion code ([`UsbDevice::last_completion_code`]), pinning which
-/// operation faulted and whether it timed out. Read-only.
-fn log_enum_stage(sink: &dyn Sink, usb: &UsbDevice<RegisterWindow, DmaSlab>) {
-    let stage = u64::from(usb.enum_stage().as_u8());
-    let completion = u64::from(usb.last_completion_code());
-    let mut stage_buf = [0u8; 16];
-    let mut completion_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_ENUM_STAGE,
-            message: "usb-keyboard: enumeration stage the root-hub bring-up last entered",
-            fields: &[
-                Field {
-                    key: "stage_hex",
-                    value: format_hex_u64(stage, &mut stage_buf),
-                },
-                Field {
-                    key: "completion_hex",
-                    value: format_hex_u64(completion, &mut completion_buf),
-                },
-            ],
-        },
-    );
-}
-
-/// Dump the first capability-register dwords straight off the mapped VL805
-/// BAR before [`Xhci::open`] interprets them, so a capture shows whether
-/// the BAR decodes and the exact `CAPLENGTH` byte behind an `out_of_range`
-/// refusal. Read-only.
-fn log_raw_caps(sink: &dyn Sink, window: &RegisterWindow) {
-    use rustos_usb::regs;
-
-    let mut header_buf = [0u8; 16];
-    let mut structural_buf = [0u8; 16];
-    let mut capability_buf = [0u8; 16];
-    let mut doorbell_buf = [0u8; 16];
-    let mut runtime_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_CAPS_RAW,
-            message: "usb-keyboard: xhci capability registers raw",
-            fields: &[
-                Field {
-                    key: "caplength_hciversion_hex",
-                    value: format_hex_u64(
-                        read_cap_dword(window, regs::CAPLENGTH_HCIVERSION),
-                        &mut header_buf,
-                    ),
-                },
-                Field {
-                    key: "hcsparams1_hex",
-                    value: format_hex_u64(
-                        read_cap_dword(window, regs::HCSPARAMS1),
-                        &mut structural_buf,
-                    ),
-                },
-                Field {
-                    key: "hccparams1_hex",
-                    value: format_hex_u64(
-                        read_cap_dword(window, regs::HCCPARAMS1),
-                        &mut capability_buf,
-                    ),
-                },
-                Field {
-                    key: "dboff_hex",
-                    value: format_hex_u64(read_cap_dword(window, regs::DBOFF), &mut doorbell_buf),
-                },
-                Field {
-                    key: "rtsoff_hex",
-                    value: format_hex_u64(read_cap_dword(window, regs::RTSOFF), &mut runtime_buf),
-                },
-            ],
-        },
-    );
 }
 
 /// Log the controller's outbound (CPU→PCIe) memory-window registers
@@ -1247,299 +586,6 @@ fn log_bring_up_timing(sink: &dyn Sink, timing: BringUpTiming) {
     );
 }
 
-/// The VL805's XHCI MCU Firmware Version PCI configuration-space register
-/// (offset `0x50`, read-only, reset `0`): `0` while the MCU has no
-/// firmware, a non-zero build id once loaded. It lives in config space
-/// (reachable on metal) unlike the MMIO BAR, so it measures the
-/// firmware-load outcome directly.
-const VL805_FW_VERSION_OFFSET: u16 = 0x50;
-
-/// Read a configuration-space dword back, rendering a faulting read as
-/// the all-ones sentinel: the readback is diagnostic, never propagated
-/// (`AGENTS.md` §2.9).
-fn read_config_or_sentinel(bus: &dyn PciBus, bdf: u64, offset: u16) -> u64 {
-    u64::from(bus.read_config(bdf, offset).unwrap_or(0xFFFF_FFFF))
-}
-
-/// Read configuration space back after BAR assignment and command-enable,
-/// before [`Xhci::open`]: the root port's bus numbers (`0x18`), Memory
-/// Base/Limit (`0x20`), command/status (`0x04`), and the VL805's
-/// command/status (`0x04`), BAR0 (`0x10`), BAR1 (`0x14`) and firmware
-/// version ([`VL805_FW_VERSION_OFFSET`], `0x50`) — so a capture shows which
-/// write stuck. A non-zero firmware version means the boot chain left it
-/// resident; `0` means the BAR is expected to stay dark. Read-only.
-fn log_config_readback(sink: &dyn Sink, bus: &dyn PciBus) {
-    // The root port presents as the bus-0 bridge; the VL805 is the lone
-    // device on the secondary bus the root-complex bring-up named.
-    const BRIDGE_BDF: u64 = 0;
-    let vl805_bdf = vl805_bdf();
-
-    let mut bus_buf = [0u8; 16];
-    let mut mem_buf = [0u8; 16];
-    let mut brcmd_buf = [0u8; 16];
-    let mut vlcmd_buf = [0u8; 16];
-    let mut bar0_buf = [0u8; 16];
-    let mut bar1_buf = [0u8; 16];
-    let mut fwver_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_CONFIG,
-            message: "usb-keyboard: pcie configuration read-back after bar assign + command enable",
-            fields: &[
-                Field {
-                    key: "bridge_bus_numbers_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, BRIDGE_BDF, 0x18),
-                        &mut bus_buf,
-                    ),
-                },
-                Field {
-                    key: "bridge_mem_base_limit_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, BRIDGE_BDF, 0x20),
-                        &mut mem_buf,
-                    ),
-                },
-                Field {
-                    key: "bridge_command_status_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, BRIDGE_BDF, 0x04),
-                        &mut brcmd_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_command_status_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x04),
-                        &mut vlcmd_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_bar0_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x10),
-                        &mut bar0_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_bar1_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x14),
-                        &mut bar1_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_fw_version_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, VL805_FW_VERSION_OFFSET),
-                        &mut fwver_buf,
-                    ),
-                },
-            ],
-        },
-    );
-}
-
-/// Log the PCIe root-port + VL805 error/status registers
-/// ([`USB_KEYBOARD_PCIE_ERR`]) after the `NOTIFY_XHCI_RESET` reload: the
-/// bridge command/status (`0x04`), bridge secondary status (`0x1C`), and
-/// VL805 command/status (`0x04`). A set Received-Master-Abort in the
-/// secondary status pins a hang on the bus rather than the mailbox.
-/// Read-only (RW1C abort bits left untouched, so a snapshot not a delta).
-fn log_bridge_error_status(sink: &dyn Sink, bus: &dyn PciBus) {
-    // The root port presents as the bus-0 bridge; the VL805 is the lone
-    // device on the secondary bus the root-complex bring-up named.
-    const BRIDGE_BDF: u64 = 0;
-    let vl805_bdf = vl805_bdf();
-
-    let mut brstat_buf = [0u8; 16];
-    let mut secstat_buf = [0u8; 16];
-    let mut vlstat_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_PCIE_ERR,
-            message: "usb-keyboard: pcie root-port + vl805 error/status after firmware reload",
-            fields: &[
-                Field {
-                    key: "bridge_command_status_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, BRIDGE_BDF, 0x04),
-                        &mut brstat_buf,
-                    ),
-                },
-                Field {
-                    key: "bridge_secondary_status_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, BRIDGE_BDF, 0x1C),
-                        &mut secstat_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_command_status_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x04),
-                        &mut vlstat_buf,
-                    ),
-                },
-            ],
-        },
-    );
-}
-
-/// Re-read the VL805's config space and capability header after the
-/// firmware-version wait and readiness settle
-/// ([`USB_KEYBOARD_POST_RELOAD`]). Compared with [`log_config_readback`]
-/// (captured before the wait), it distinguishes "present but no firmware"
-/// from "firmware-loaded yet not decoding". The decisive field is
-/// `vl805_fw_version_hex` ([`VL805_FW_VERSION_OFFSET`]): non-zero proves
-/// the firmware is resident, `0` means leave the controller untouched.
-/// Read-only.
-fn log_post_reload_state(sink: &dyn Sink, bus: &dyn PciBus, window: &RegisterWindow) {
-    use rustos_usb::regs;
-
-    let vl805_bdf = vl805_bdf();
-    let mut id_buf = [0u8; 16];
-    let mut cmd_buf = [0u8; 16];
-    let mut bar0_buf = [0u8; 16];
-    let mut bar1_buf = [0u8; 16];
-    let mut fwver_buf = [0u8; 16];
-    let mut cap_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_POST_RELOAD,
-            message:
-                "usb-keyboard: vl805 config + caps re-read after firmware-version wait + settle",
-            fields: &[
-                Field {
-                    key: "vl805_vendor_device_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x00),
-                        &mut id_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_command_status_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x04),
-                        &mut cmd_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_bar0_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x10),
-                        &mut bar0_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_bar1_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, 0x14),
-                        &mut bar1_buf,
-                    ),
-                },
-                Field {
-                    key: "vl805_fw_version_hex",
-                    value: format_hex_u64(
-                        read_config_or_sentinel(bus, vl805_bdf, VL805_FW_VERSION_OFFSET),
-                        &mut fwver_buf,
-                    ),
-                },
-                Field {
-                    key: "caplength_hciversion_hex",
-                    value: format_hex_u64(
-                        read_cap_dword(window, regs::CAPLENGTH_HCIVERSION),
-                        &mut cap_buf,
-                    ),
-                },
-            ],
-        },
-    );
-}
-
-/// Map and bring up the discovered VL805 xHCI controller on `bus` in
-/// stages — map the BAR and carve DMA
-/// ([`map_controller`](rustos_drv_bus_usb::wiring::map_controller)),
-/// [`Xhci::open`] (capability block + reset), then [`UsbDevice::start`]
-/// (DMA program + run) — logging geometry between the map and bring-up and
-/// reporting each stage's failure distinctly.
-///
-/// # Errors
-///
-/// The first failing stage's [`DriverError`], logged at `Error`.
-fn open_controller(
-    host: &dyn DriverHost,
-    bus: &dyn PciBus,
-    dma_aperture_top: u64,
-    outbound_window: (u64, u64),
-    firmware_reset: &dyn FirmwareReset,
-    delay: &dyn Delay,
-    sink: &dyn Sink,
-) -> Result<UsbDevice<RegisterWindow, DmaSlab>, DriverError> {
-    let mapped = match rustos_drv_bus_usb::wiring::map_controller(
-        host,
-        bus,
-        dma_aperture_top,
-        outbound_window,
-    ) {
-        Ok(mapped) => mapped,
-        Err(err) => {
-            log_stage_err(
-                sink,
-                "usb-keyboard: mapping the vl805 controller (discovery/dma/bar) failed",
-                err,
-            );
-            return Err(err);
-        }
-    };
-    log_dma_carve(sink, &mapped.dma, dma_aperture_top, mapped.window.len());
-    // Read config space back now the BAR is assigned and command enabled,
-    // to show which write stuck.
-    log_config_readback(sink, bus);
-    // Wait for firmware over the working config-space `0x50` register, not
-    // the aborting BAR; if it stays zero, issue one mailbox fallback. This
-    // is best-effort and diagnostic — it does NOT gate bring-up. The
-    // authoritative fail-closed gate is `Xhci::open` below.
-    let firmware_loaded = ensure_firmware_loaded(bus, delay, firmware_reset, sink);
-    log_firmware_gate(sink, firmware_loaded);
-    // Snapshot root-port error/status after the reload (`4124`): a latched
-    // secondary-status master-abort pins a dropped reload on the bus.
-    log_bridge_error_status(sink, bus);
-    // Give the BAR a bounded window to present a live capability block
-    // before `Xhci::open` interprets it. Non-fatal: a controller that never
-    // decodes fails closed there.
-    wait_for_caps_ready(&mapped.window, delay, sink);
-    // Re-read config + capability header after the settle, for comparison
-    // with the pre-wait `4110` read-back.
-    log_post_reload_state(sink, bus, &mapped.window);
-    log_raw_caps(sink, &mapped.window);
-    let xhci = match Xhci::open_diagnostic(mapped.window) {
-        Ok(xhci) => xhci,
-        Err(err) => {
-            log_xhci_open_err(sink, err);
-            return Err(err.error);
-        }
-    };
-    log_xhci_geometry(sink, &xhci);
-    match UsbDevice::start(xhci, mapped.dma, DEFAULT_POLL_BUDGET) {
-        Ok(usb) => Ok(usb),
-        Err(err) => {
-            log_stage_err(
-                sink,
-                "usb-keyboard: vl805 xhci controller start (dma program/run) failed",
-                err,
-            );
-            Err(err)
-        }
-    }
-}
-
 /// The enumerated boot keyboard the bring-up chain yields: a
 /// [`BootKeyboard`] decoding reports out of the started [`UsbDevice`]
 /// (the xHCI controller over its mapped register window + DMA region).
@@ -1576,21 +622,37 @@ pub struct ChainHost<'a> {
     capabilities: CapabilitySet,
     mmio: &'a dyn MmioMapper,
     dma: &'a dyn DmaHost,
+    mailbox: Option<&'a dyn MailboxChannel>,
+    emitter: &'a dyn BootTreeEmitter,
 }
 
 impl<'a> ChainHost<'a> {
-    /// Build the view over the bus-driver task's `capabilities` and the
-    /// kernel's `mmio` mapper and `dma` host.
+    /// Build the view over the bus-driver task's `capabilities`, the
+    /// kernel's `mmio` mapper and `dma` host, the optional `VideoCore`
+    /// `mailbox` channel (the device-specific VL805 firmware reload runs
+    /// over it, `AGENTS.md` §2.20), and the boot-tree `emitter` the floor
+    /// xHCI bring-up publishes the enumerated child node through
+    /// (`DriverHost::emit_node`).
+    ///
+    /// `mailbox` is [`None`] on a boot shape with no discovered `VideoCore`
+    /// mailbox; the VL805 firmware reload then reports
+    /// [`FirmwareResetOutcome::NotAvailable`] and the bring-up proceeds
+    /// (`AGENTS.md` §2.9 — the authoritative liveness gate is the xHCI
+    /// capability block).
     #[must_use]
     pub fn new(
         capabilities: CapabilitySet,
         mmio: &'a dyn MmioMapper,
         dma: &'a dyn DmaHost,
+        mailbox: Option<&'a dyn MailboxChannel>,
+        emitter: &'a dyn BootTreeEmitter,
     ) -> Self {
         Self {
             capabilities,
             mmio,
             dma,
+            mailbox,
+            emitter,
         }
     }
 }
@@ -1612,6 +674,14 @@ impl DriverHost for ChainHost<'_> {
 
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         Some(self.mmio)
+    }
+
+    fn mailbox(&self) -> Option<&dyn MailboxChannel> {
+        self.mailbox
+    }
+
+    fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
+        self.emitter.emit_node(&node)
     }
 }
 
@@ -1651,25 +721,40 @@ impl ConsoleSink for ArbiterConsoleSink<'_> {
 /// Bring the VL805 keyboard online over `host`, from the discovered
 /// `bringup` inputs, using `delay` for the link bring-up's timed waits.
 ///
-/// Runs the full chain: train the BCM2711 root-complex link
-/// ([`pcie_brcm::wiring::open_discovered`]), build the windowed PCI config
-/// accessor over the same register window
-/// ([`rustos_drv_bus_pci::mechanism_brcm`]), bring the VL805 xHCI up
-/// ([`rustos_drv_bus_usb::wiring::open_discovered`]), and enumerate the
-/// first connected root-hub port as a boot keyboard. The returned
-/// [`KeyboardChain`] is then polled with [`rustos_hid::pump_once`]
-/// in the driver's service loop, feeding each produced [`KeyInput`] record to
-/// an [`ArbiterConsoleSink`].
+/// Sequences the three floor driver crates over the [`DriverHost`] contract
+/// alone (`AGENTS.md` §17.4) — this composition names them all (the §17.4
+/// carve-out for the image-assembly binary), but no driver names another:
+///
+/// 1. [`pcie_brcm::wiring::open_discovered`] resets the BCM2711 root complex
+///    and trains its link over the discovered register window;
+/// 2. the VL805 device driver's [`vl805::reload_firmware`] asks the
+///    `VideoCore` over [`DriverHost::mailbox`] to (re)load the controller's
+///    firmware, dropped by the link bring-up's `PERST#` (device-specific,
+///    `AGENTS.md` §2.20 — best-effort, the authoritative gate is `Xhci::open`
+///    inside the next step); and
+/// 3. the generic xHCI floor entry [`bring_up_boot_input`] maps the BAR,
+///    carves DMA, brings the controller up, enumerates the boot keyboard,
+///    and publishes it as a child [`HwNode`] through
+///    [`DriverHost::emit_node`] carrying the BAR + DMA `HwResource` grants
+///    the matched user-space driver will receive (`AGENTS.md` §4 / §18.3).
+///
+/// The returned [`KeyboardChain`] is then polled with [`rustos_hid::pump_once`]
+/// in the in-kernel report-pump loop, feeding each produced [`KeyInput`]
+/// record to an [`ArbiterConsoleSink`] (the live keyboard until the
+/// `plans/PI.md` B5 flip, `AGENTS.md` §2.17).
 ///
 /// # Errors
 ///
 /// * [`DriverError::PermissionDenied`] if `host` did not grant
 ///   [`CapabilityId::MMIO_MAP`].
+/// * [`DriverError::OutOfRange`] if the discovered inbound aperture top
+///   overflows the address space.
 /// * Any error of the link bring-up (the controller is not a root port or
-///   the link never trains), the VL805 bring-up (no USB function, a DMA
-///   carve above the aperture, a mapping failure), or the enumeration
-///   ([`DriverError::NotFound`] for an empty root hub). Every failure is
-///   fail-closed (`AGENTS.md` §5.4); nothing is left half-configured.
+///   the link never trains) or of [`bring_up_boot_input`] (no USB function,
+///   a DMA carve above the aperture, a mapping failure, the controller
+///   never running, an empty root hub, or a refused node emission). Every
+///   failure is fail-closed (`AGENTS.md` §5.4); nothing is left
+///   half-configured.
 ///
 /// # Capabilities
 ///
@@ -1679,14 +764,13 @@ impl ConsoleSink for ArbiterConsoleSink<'_> {
 ///
 /// # Logging
 ///
-/// Each stage (link training, the PCIe configuration scan, xHCI bring-up,
-/// root-hub enumeration) is logged on success and failure, so a capture
-/// localises a silent keyboard to the stage that stalled. One-shot
-/// bring-up diagnostics, never on the poll path.
+/// Each stage (link training + the trained-window read-backs, the VL805
+/// firmware reload, the xHCI bring-up/enumeration) is logged on success and
+/// failure, so a capture localises a silent keyboard to the stage that
+/// stalled. One-shot bring-up diagnostics, never on the poll path.
 pub fn bring_up_keyboard(
     host: &dyn DriverHost,
     bringup: &PcieBringup,
-    firmware_reset: &dyn FirmwareReset,
     delay: &dyn Delay,
     sink: &dyn Sink,
 ) -> Result<BroughtUpKeyboard, DriverError> {
@@ -1723,13 +807,25 @@ pub fn bring_up_keyboard(
     log_inbound_window(sink, rc.inbound_window_readback());
     // Reach the VL805 through the BCM2711 windowed config accessor over the
     // trained register window. It forwards config only to the single device
-    // on the secondary bus, so the flat scan below never TLPs an absent
-    // target (which would CPU-abort and wedge the boot).
+    // on the secondary bus, so the floor xHCI scan below never TLPs an
+    // absent target (which would CPU-abort and wedge the boot).
     let bus = rustos_drv_bus_pci::mechanism_brcm(rc.into_regs(), pcie_brcm::regs::RC_SECONDARY_BUS);
-    // Diagnostic: log every function before the controller search, to tell
-    // "VL805 never answered config reads" from "enumerated but xHCI did not
-    // come up".
-    log_bus_scan(sink, &bus);
+    // The link bring-up asserted `PERST#`, which drops the VL805's
+    // VideoCore-loaded firmware on EEPROM-less Pi 4 boards. Ask the device's
+    // own driver to reload it over the board-neutral mailbox seam *before*
+    // the generic xHCI bring-up reads the capability block (`AGENTS.md`
+    // §2.20). Best-effort: a missing mailbox or a refused tag is logged but
+    // never aborts — the authoritative liveness gate is `Xhci::open` inside
+    // `bring_up_boot_input` (`AGENTS.md` §2.9).
+    log_stage(
+        sink,
+        "usb-keyboard: reloading vl805 firmware over the videocore mailbox",
+    );
+    let firmware_outcome = match host.mailbox() {
+        Some(channel) => vl805::reload_firmware(channel),
+        None => FirmwareResetOutcome::NotAvailable,
+    };
+    log_firmware_reset(sink, firmware_outcome);
     // The DMA carve is bounded in the *device-visible* (PCIe) space the
     // descriptors carry: the exclusive top is `inbound_pcie_base +
     // inbound_size`, not the CPU-physical aperture top (`AGENTS.md` §5.4 —
@@ -1754,111 +850,44 @@ pub fn bring_up_keyboard(
         bringup.windows.outbound_pcie_base,
         bringup.windows.outbound_size,
     );
-    let mut usb = open_controller(
+    log_stage(
+        sink,
+        "usb-keyboard: bringing up the vl805 xhci controller and enumerating the boot keyboard",
+    );
+    // The generic xHCI floor entry maps the BAR, carves DMA, brings the
+    // controller up, enumerates the boot keyboard (transparently descending
+    // one tier through the Pi 4B's onboard hub), and `emit_node()`s the
+    // enumerated child through `host.emit_node` — which the in-kernel host
+    // forwards to the boot hardware tree so the pre-unlock autoload sees the
+    // keyboard like every other discovered device (`AGENTS.md` §18.2). The
+    // returned device is left pointed at the keyboard's slot for the pump.
+    let enumerated = match bring_up_boot_input(
         host,
         &bus,
         dma_aperture_top,
         outbound_window,
-        firmware_reset,
         delay,
-        sink,
-    )?;
-    log_stage(
-        sink,
-        "usb-keyboard: vl805 xhci controller online, enumerating boot keyboard",
-    );
-    // Bring up the boot keyboard, transparently descending one tier through
-    // the Pi 4B's onboard 2109:3431 hub when the root-hub device is itself a
-    // hub. The arch-neutral root→hub→downstream orchestration lives once in
-    // `rustos_usb::device::UsbDevice::enumerate_boot_keyboard` (`AGENTS.md`
-    // §2.2), so the keyboard is *discovered*, never a guessed port (§18); on
-    // success `usb` is left pointed at the keyboard's slot so `BootKeyboard`
-    // drains its reports, and any fault fails closed (§2.9).
-    let descriptor = match usb.enumerate_boot_keyboard(delay) {
-        Ok(descriptor) => descriptor,
+        HID_NODE_PARENT_ID,
+        HID_NODE_ID,
+    ) {
+        Ok(enumerated) => enumerated,
         Err(err) => {
             log_stage_err(
                 sink,
-                "usb-keyboard: enumerating a boot keyboard failed",
+                "usb-keyboard: vl805 xhci bring-up / boot-keyboard enumeration failed",
                 err,
             );
-            // Pin which enumeration step faulted, then dump each root-hub
-            // port's post-power `PORTSC` (power stuck? anything attached?).
-            log_enum_stage(sink, &usb);
-            log_root_ports(sink, &mut usb);
             return Err(err);
         }
     };
-    // Read the assigned slot before `usb` is moved into the keyboard.
-    let slot = usb.slot();
-    log_enumerated_root_device(sink, descriptor, slot);
-    let hid_node = describe_enumerated_hid(&usb, sink)?;
-    Ok(BroughtUpKeyboard {
-        keyboard: BootKeyboard::new(usb),
-        hid_node,
-    })
-}
-
-/// Log the `vid:pid` and assigned xHCI slot of the device enumerated on
-/// the VL805 root hub ([`USB_KEYBOARD_DEVICE`]) — a one-shot bring-up
-/// diagnostic, never on the poll path.
-fn log_enumerated_root_device(
-    sink: &dyn Sink,
-    descriptor: rustos_usb::device::DeviceDescriptor,
-    slot: u8,
-) {
-    let mut vid_buf = [0u8; 16];
-    let mut pid_buf = [0u8; 16];
-    let mut slot_buf = [0u8; 16];
-    log(
+    log_stage(
         sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_DEVICE,
-            message: "usb-keyboard: enumerated usb device on the vl805 root hub",
-            fields: &[
-                Field {
-                    key: "vendor_id_hex",
-                    value: format_hex_u64(u64::from(descriptor.vendor_id), &mut vid_buf),
-                },
-                Field {
-                    key: "product_id_hex",
-                    value: format_hex_u64(u64::from(descriptor.product_id), &mut pid_buf),
-                },
-                Field {
-                    key: "xhci_slot",
-                    value: format_hex_u64(u64::from(slot), &mut slot_buf),
-                },
-            ],
-        },
+        "usb-keyboard: boot keyboard enumerated and emitted into the hardware tree",
     );
-}
-
-/// Describe the enumerated HID device as a discovered child [`HwNode`] for
-/// the §18 re-match step (`plans/PI.md` P10 5c-ii), reading the `vid:pid` +
-/// interface class captured during enumeration (never fabricated,
-/// `AGENTS.md` §18.5), so the service can re-match it against the driver
-/// catalogue and admit the HID driver through the signed load gate before
-/// feeding the input arbiter.
-///
-/// # Errors
-///
-/// Surfaces [`UsbDevice::describe_device`]'s error fail-closed (logged),
-/// most notably [`DriverError::NotFound`] if no HID interface was
-/// enumerated.
-fn describe_enumerated_hid(
-    usb: &UsbDevice<RegisterWindow, DmaSlab>,
-    sink: &dyn Sink,
-) -> Result<HwNode, DriverError> {
-    usb.describe_device(HID_NODE_PARENT_ID, HID_NODE_ID)
-        .map_err(|err| {
-            log_stage_err(
-                sink,
-                "usb-keyboard: describing the enumerated HID device for re-match failed",
-                err,
-            );
-            err
-        })
+    Ok(BroughtUpKeyboard {
+        keyboard: BootKeyboard::new(enumerated.device),
+        hid_node: enumerated.node,
+    })
 }
 
 #[cfg(test)]
@@ -2108,6 +1137,40 @@ mod tests {
             Ok(unsafe { DmaSlab::from_leaked(0x1000_0000, ptr, size, PoolId::MOCK, 0) })
         }
     }
+    /// A [`BootTreeEmitter`] double recording how many nodes the chain
+    /// published through [`DriverHost::emit_node`].
+    #[derive(Default)]
+    struct RecordingEmitter {
+        emitted: core::cell::Cell<usize>,
+    }
+
+    impl RecordingEmitter {
+        fn count(&self) -> usize {
+            self.emitted.get()
+        }
+    }
+
+    impl BootTreeEmitter for RecordingEmitter {
+        fn emit_node(&self, _node: &HwNode) -> Result<(), DriverError> {
+            self.emitted.set(self.emitted.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// A no-op [`MailboxChannel`] double: the chain only checks that a
+    /// channel is present here; the VL805 firmware exchange is exercised
+    /// in the `drivers/bus/usb/vl805` crate's own tests.
+    struct MockMailbox;
+
+    impl MailboxChannel for MockMailbox {
+        fn exchange(
+            &self,
+            _message: &mut [u32; rustos_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS],
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
     fn caps(set: &[CapabilityId]) -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         for c in set {
@@ -2150,10 +1213,14 @@ mod tests {
     fn chain_host_reports_caps_mapper_and_dma() {
         let mapper = MockMapper { grant: true };
         let dma = MockDmaHost;
+        let mailbox = MockMailbox;
+        let emitter = RecordingEmitter::default();
         let host = ChainHost::new(
             caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
             &mapper,
             &dma,
+            Some(&mailbox),
+            &emitter,
         );
         assert!(host.has_capability(CapabilityId::MMIO_MAP));
         assert!(host.has_capability(CapabilityId::MEM_DMA));
@@ -2161,6 +1228,12 @@ mod tests {
         assert_eq!(host.kind(), DriverKind::InKernel);
         assert!(host.dma_host().is_some());
         assert!(host.mmio_mapper().is_some());
+        // The mailbox + node-emit seams are exposed and forwarded: the
+        // emitter records each node published through `emit_node`
+        // (`AGENTS.md` §18.2).
+        assert!(host.mailbox().is_some());
+        assert_eq!(host.emit_node(pcie_node()), Ok(()));
+        assert_eq!(emitter.count(), 1);
     }
 
     #[test]
@@ -2169,13 +1242,20 @@ mod tests {
         // step (the PCIe controller-window map), before any hardware.
         let mapper = MockMapper { grant: false };
         let dma = MockDmaHost;
-        let host = ChainHost::new(caps(&[CapabilityId::MEM_DMA]), &mapper, &dma);
+        let emitter = RecordingEmitter::default();
+        let host = ChainHost::new(
+            caps(&[CapabilityId::MEM_DMA]),
+            &mapper,
+            &dma,
+            None,
+            &emitter,
+        );
         let bringup = pcie_bringup_from_node(&pcie_node()).unwrap();
         let sink = RecordingSink::new();
         // `.err()` drops the unenumerated keyboard (which is neither
         // `Debug` nor `PartialEq`) and compares only the error.
         assert_eq!(
-            bring_up_keyboard(&host, &bringup, &NoFirmwareReset, &NoDelay::new(), &sink).err(),
+            bring_up_keyboard(&host, &bringup, &NoDelay::new(), &sink).err(),
             Some(DriverError::PermissionDenied)
         );
         // The bring-up logged the failing stage as an `Error` event under
@@ -2197,15 +1277,18 @@ mod tests {
         // window was assembled and mapped and pcie_brcm was driven.
         let mapper = MockMapper { grant: true };
         let dma = MockDmaHost;
+        let emitter = RecordingEmitter::default();
         let host = ChainHost::new(
             caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
             &mapper,
             &dma,
+            None,
+            &emitter,
         );
         let bringup = pcie_bringup_from_node(&pcie_node()).unwrap();
         let sink = RecordingSink::new();
         assert_eq!(
-            bring_up_keyboard(&host, &bringup, &NoFirmwareReset, &NoDelay::new(), &sink).err(),
+            bring_up_keyboard(&host, &bringup, &NoDelay::new(), &sink).err(),
             Some(DriverError::DeviceFault)
         );
         // The chain logged the link-training start and then the
@@ -2213,375 +1296,6 @@ mod tests {
         // metal boundary refused (`AGENTS.md` §23.4).
         assert!(sink.errors() >= 1);
         assert!(sink.count(USB_KEYBOARD_BRINGUP) >= 1);
-    }
-
-    /// A [`Bus`] returning a fixed device list, modelling the Pi 4's
-    /// trained root complex (the bridge plus the VL805) so the scan
-    /// diagnostic can be exercised without a live controller.
-    struct MockBus {
-        devices: Vec<BusDevice>,
-    }
-
-    impl Bus for MockBus {
-        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
-            let n = self.devices.len().min(out.len());
-            out[..n].copy_from_slice(&self.devices[..n]);
-            if out.len() < self.devices.len() {
-                Err(DriverError::BufferTooSmall)
-            } else {
-                Ok(n)
-            }
-        }
-    }
-
-    fn bus_device(address: u64, vendor: u32, device: u32, class: u16) -> BusDevice {
-        BusDevice {
-            vendor,
-            device,
-            class,
-            reserved0: 0,
-            address,
-        }
-    }
-
-    #[test]
-    fn bus_scan_logs_a_summary_and_one_event_per_function() {
-        // The healthy Pi 4 shape: the root complex (14e4:2711, bridge) and
-        // the VL805 USB host behind it (1106:3483, USB class 0x0c03).
-        let bus = MockBus {
-            devices: alloc::vec![
-                bus_device(0x0000, 0x14e4, 0x2711, 0x0604),
-                bus_device(0x0100, 0x1106, 0x3483, 0x0c03),
-            ],
-        };
-        let sink = RecordingSink::new();
-        log_bus_scan(&sink, &bus);
-        // One summary event plus one per discovered function, all under the
-        // scan id and none at `Error` (`AGENTS.md` §23.4 — the diagnostic
-        // is covered).
-        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), 3);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn bus_scan_reports_an_empty_bus_without_faulting() {
-        // The failure shape the issue points at: the link trained but no
-        // function answers configuration reads. The scan still emits its
-        // summary (function count zero) and logs no error — the real
-        // `NotFound` comes from the controller search that follows.
-        let bus = MockBus {
-            devices: Vec::new(),
-        };
-        let sink = RecordingSink::new();
-        log_bus_scan(&sink, &bus);
-        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn bus_scan_caps_an_oversized_bus_at_the_report_limit() {
-        // A malfunctioning bus reporting more functions than the bound is
-        // truncated to `SCAN_REPORT_LIMIT` (plus the summary), never an
-        // unbounded log (`AGENTS.md` §24.4), and never an error.
-        let devices = (0..(SCAN_REPORT_LIMIT + 8) as u64)
-            .map(|i| bus_device(i, 0x1234, 0x5678, 0x0c03))
-            .collect();
-        let bus = MockBus { devices };
-        let sink = RecordingSink::new();
-        log_bus_scan(&sink, &bus);
-        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), SCAN_REPORT_LIMIT + 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn bus_scan_logs_an_error_when_enumeration_faults() {
-        // A transport that faults enumeration is logged as an error rather
-        // than panicking or being swallowed (`AGENTS.md` §2.9).
-        struct FaultingBus;
-        impl Bus for FaultingBus {
-            fn enumerate(&self, _out: &mut [BusDevice]) -> Result<usize, DriverError> {
-                Err(DriverError::DeviceFault)
-            }
-        }
-        let sink = RecordingSink::new();
-        log_bus_scan(&sink, &FaultingBus);
-        assert_eq!(sink.errors(), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_BRINGUP), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_PCI_SCAN), 0);
-    }
-
-    /// A [`PciBus`] recording every `read_config(bdf, offset)` it serves
-    /// and returning a canned dword, so the configuration read-back
-    /// diagnostic ([`log_config_readback`]) can be exercised without a
-    /// live bus. Only the `read_config` arm is reachable from the test;
-    /// the other `PciBus`/`Bus` methods are unused.
-    struct ConfigMockBus {
-        reads: RefCell<Vec<(u64, u16)>>,
-    }
-
-    impl Bus for ConfigMockBus {
-        fn enumerate(&self, _out: &mut [BusDevice]) -> Result<usize, DriverError> {
-            Err(DriverError::Unsupported)
-        }
-    }
-
-    impl PciBus for ConfigMockBus {
-        fn map_bar_window(
-            &self,
-            _bdf: u64,
-            _bar_index: u8,
-            _mapper: &dyn MmioMapper,
-        ) -> Result<RegisterWindow, DriverError> {
-            Err(DriverError::Unsupported)
-        }
-
-        fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-            Err(DriverError::Unsupported)
-        }
-
-        fn assign_bar(
-            &self,
-            _bdf: u64,
-            _bar_index: u8,
-            _window_base: u64,
-            _window_size: u64,
-        ) -> Result<u64, DriverError> {
-            Err(DriverError::Unsupported)
-        }
-
-        fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, DriverError> {
-            self.reads.borrow_mut().push((bdf, offset));
-            // A plausible programmed value per register, enough to assert
-            // the readback reached each one.
-            Ok(match (bdf, offset) {
-                (0, 0x18) => 0x00ff_0100,        // bridge primary/secondary/subordinate
-                (0, 0x20) => 0xfff0_c000,        // bridge mem base/limit
-                (0, 0x04) => 0x0010_0407,        // bridge command/status (io+mem+busmaster)
-                (0x1_0000, 0x04) => 0x0010_0006, // VL805 command/status (mem+busmaster)
-                (0x1_0000, 0x10) => 0xc000_0004, // VL805 BAR0 (64-bit mem)
-                (0x1_0000, 0x14) => 0x0000_0000, // VL805 BAR1 high
-                _ => 0xffff_ffff,
-            })
-        }
-
-        fn describe_function(
-            &self,
-            _bdf: u64,
-            _parent_id: u32,
-            _node_id: u32,
-        ) -> Result<HwNode, DriverError> {
-            Err(DriverError::Unsupported)
-        }
-    }
-
-    #[test]
-    fn config_readback_dumps_each_register_once() {
-        let bus = ConfigMockBus {
-            reads: RefCell::new(Vec::new()),
-        };
-        let sink = RecordingSink::new();
-        log_config_readback(&sink, &bus);
-        // Exactly one one-shot 4110 event, at Info (a readback is never an
-        // error; a faulting read renders the sentinel, §2.9).
-        assert_eq!(sink.count(USB_KEYBOARD_CONFIG), 1);
-        assert_eq!(sink.errors(), 0);
-        // It read back every register the bring-up programmed: the bridge
-        // bus numbers / memory window / command, the VL805 command and
-        // both BAR dwords, and the VL805 XHCI MCU firmware version
-        // (`0x50`) — the config-space register the vendor firmware-init
-        // sequence uses to confirm the firmware load
-        // (`AGENTS.md` §15.7 / §23.4).
-        let reads = bus.reads.borrow();
-        assert!(reads.contains(&(0, 0x18)));
-        assert!(reads.contains(&(0, 0x20)));
-        assert!(reads.contains(&(0, 0x04)));
-        assert!(reads.contains(&(0x1_0000, 0x04)));
-        assert!(reads.contains(&(0x1_0000, 0x10)));
-        assert!(reads.contains(&(0x1_0000, 0x14)));
-        assert!(reads.contains(&(0x1_0000, VL805_FW_VERSION_OFFSET)));
-    }
-
-    #[test]
-    fn config_readback_renders_a_sentinel_for_a_faulting_read() {
-        // A bus whose config reads fault must not propagate or panic: the
-        // diagnostic still emits its one-shot event (`AGENTS.md` §2.9).
-        struct FaultingConfigBus;
-        impl Bus for FaultingConfigBus {
-            fn enumerate(&self, _out: &mut [BusDevice]) -> Result<usize, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-        }
-        impl PciBus for FaultingConfigBus {
-            fn map_bar_window(
-                &self,
-                _bdf: u64,
-                _bar_index: u8,
-                _mapper: &dyn MmioMapper,
-            ) -> Result<RegisterWindow, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-            fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-                Err(DriverError::Unsupported)
-            }
-            fn assign_bar(
-                &self,
-                _bdf: u64,
-                _bar_index: u8,
-                _window_base: u64,
-                _window_size: u64,
-            ) -> Result<u64, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-            fn read_config(&self, _bdf: u64, _offset: u16) -> Result<u32, DriverError> {
-                Err(DriverError::DeviceFault)
-            }
-            fn describe_function(
-                &self,
-                _bdf: u64,
-                _parent_id: u32,
-                _node_id: u32,
-            ) -> Result<HwNode, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-        }
-        let sink = RecordingSink::new();
-        log_config_readback(&sink, &FaultingConfigBus);
-        assert_eq!(sink.count(USB_KEYBOARD_CONFIG), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    /// A 4-byte-aligned host buffer presented as a [`RegisterWindow`], so
-    /// the raw-capability probe runs over the real window read path. The
-    /// `u32` backing guarantees the 4-byte alignment `from_mapping`
-    /// requires; the bytes are little-endian, matching every Tier-1
-    /// target (`AGENTS.md` §23.2).
-    fn window_over(backing: &mut [u32]) -> RegisterWindow {
-        let len = core::mem::size_of_val(backing);
-        let ptr = NonNull::new(backing.as_mut_ptr().cast::<u8>()).expect("non-null");
-        // SAFETY: `backing` is a live, 4-aligned `u32` slice of exactly
-        // `len` bytes that outlives the window (the caller holds it for
-        // the test body), and nothing else aliases it.
-        unsafe { RegisterWindow::from_mapping(0xc000_0000, ptr, len) }
-    }
-
-    #[test]
-    fn raw_cap_dword_reads_the_value_or_a_sentinel() {
-        // CAPLENGTH=0x20, HCIVERSION=0x0100 in the first dword; the read
-        // returns that value, and an out-of-window offset fails closed to
-        // the all-ones sentinel rather than reading past the mapping
-        // (`AGENTS.md` §5.4).
-        let mut backing = [0u32; 0x400];
-        backing[0] = 0x0100_0020;
-        let window = window_over(&mut backing);
-        assert_eq!(read_cap_dword(&window, 0x00), 0x0100_0020);
-        assert_eq!(read_cap_dword(&window, 0x1000), u64::MAX);
-    }
-
-    #[test]
-    fn raw_caps_probe_dumps_the_capability_block_once() {
-        // The probe emits exactly one `4107` record at `Info`, reading the
-        // real BAR window — the measurement a metal `out_of_range` capture
-        // needs (`AGENTS.md` §15.7 / §23.4).
-        let mut backing = [0u32; 0x400];
-        backing[0] = 0x0100_0020;
-        let window = window_over(&mut backing);
-        let sink = RecordingSink::new();
-        log_raw_caps(&sink, &window);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_RAW), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn caps_block_liveness_rejects_the_uninitialised_bus_patterns() {
-        // A live header: CAPLENGTH=0x20, HCIVERSION=0x0100.
-        assert!(caps_block_is_live(0x0100_0020));
-        // The pre-firmware patterns the metal capture showed are all
-        // rejected: the BCM2711 `dead_dead` poison (HCIVERSION 0xdead),
-        // the all-ones UR sentinel, and an unpowered zero.
-        assert!(!caps_block_is_live(0xdead_dead));
-        assert!(!caps_block_is_live(0xffff_ffff));
-        assert!(!caps_block_is_live(0));
-        // The `read_cap_dword` refused-read sentinel is rejected too.
-        assert!(!caps_block_is_live(u64::MAX));
-        // A real version but an implausibly small CAPLENGTH is not live.
-        assert!(!caps_block_is_live(0x0100_0010));
-    }
-
-    #[test]
-    fn caps_readiness_returns_immediately_when_the_block_is_live() {
-        // A controller already presenting its capability block needs no
-        // wait: ready on the first read (zero polls), one `4109` at Info.
-        let mut backing = [0u32; 0x400];
-        backing[0] = 0x0100_0020;
-        let window = window_over(&mut backing);
-        let sink = RecordingSink::new();
-        assert!(wait_for_caps_ready(&window, &NoDelay::new(), &sink));
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_READY), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn caps_readiness_fails_closed_after_the_bounded_budget() {
-        // A controller that never decodes (the `dead_dead` capture) is
-        // polled until the wall-time budget elapses and then reported
-        // not-ready, so the bring-up falls through to a fail-closed
-        // `Xhci::open` rather than spinning forever (`AGENTS.md` §2.1 /
-        // §2.9). The `4109` line is still Info — the not-ready report is
-        // diagnostic, not an error. `NoDelay` advances its virtual
-        // clock by each requested delay, so the loop terminates by the
-        // wall budget the way it does on metal (where each master-aborting
-        // read costs real time), not by an iteration count.
-        let mut backing = [0u32; 0x400];
-        backing[0] = 0xdead_dead;
-        let window = window_over(&mut backing);
-        let sink = RecordingSink::new();
-        assert!(!wait_for_caps_ready(&window, &NoDelay::new(), &sink));
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_READY), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn caps_readiness_wall_budget_caps_the_poll_count_under_slow_reads() {
-        // The defect the `4116` capture exposed: a poll-count budget
-        // assumed each read was cheap, but on the BCM2711 each read of an
-        // un-decoded BAR master-aborts and stalls for tens of milliseconds,
-        // so 256 polls inflated the intended ~256 ms wait into ~14 s.
-        // Bounding by elapsed wall time fixes this — a delay whose clock
-        // also jumps a large per-read cost forward (here far larger than
-        // the poll interval) makes the loop stop after only a handful of
-        // reads, never the old 256. We assert the loop honours the wall
-        // budget regardless of how few iterations that takes
-        // (`AGENTS.md` §2.16).
-        struct SlowReadDelay {
-            now_us: core::cell::Cell<u64>,
-            per_read_us: u64,
-        }
-        impl Delay for SlowReadDelay {
-            fn delay_us(&self, us: u32) {
-                // Model each iteration's wall cost as the requested delay
-                // plus the master-abort read stall the previous read paid.
-                self.now_us
-                    .set(self.now_us.get() + u64::from(us) + self.per_read_us);
-            }
-            fn now_us(&self) -> u64 {
-                self.now_us.get()
-            }
-        }
-        let mut backing = [0u32; 0x400];
-        backing[0] = 0xdead_dead;
-        let window = window_over(&mut backing);
-        let sink = RecordingSink::new();
-        // ~54 ms per read (the metal `4116` figure): the loop must give up
-        // within a handful of polls, not the old 256.
-        let delay = SlowReadDelay {
-            now_us: core::cell::Cell::new(0),
-            per_read_us: 54_000,
-        };
-        assert!(!wait_for_caps_ready(&window, &delay, &sink));
-        // ~256 ms budget / ~55 ms per iteration ≈ 5 polls; assert it is
-        // far below the old 256-poll ceiling and that the virtual wall
-        // clock did not blow far past the budget.
-        assert!(delay.now_us() <= CAPS_READY_BUDGET_US + 55_000);
     }
 
     #[test]
@@ -2674,357 +1388,5 @@ mod tests {
         );
         assert_eq!(sink.count(USB_KEYBOARD_BRINGUP_TIMING), 1);
         assert_eq!(sink.errors(), 0);
-    }
-
-    /// A [`PciBus`] that enumerates a single VL805-class function and
-    /// bases/maps its BAR, so `map_controller` succeeds end to end. The
-    /// mapped window is the mock host's zeroed BAR, so `Xhci::open` then
-    /// fails closed at the metal boundary (`AGENTS.md` §0.4).
-    struct OrderingMockBus<'a> {
-        firmware_version: Option<&'a core::cell::Cell<u32>>,
-    }
-
-    impl<'a> OrderingMockBus<'a> {
-        const fn not_loaded() -> Self {
-            Self {
-                firmware_version: None,
-            }
-        }
-
-        const fn with_firmware_version(firmware_version: &'a core::cell::Cell<u32>) -> Self {
-            Self {
-                firmware_version: Some(firmware_version),
-            }
-        }
-    }
-
-    impl Bus for OrderingMockBus<'_> {
-        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
-            if out.is_empty() {
-                return Ok(0);
-            }
-            // USB-class function (PCI class 0x0c03) — the controller search
-            // matches this class (`rustos_drv_bus_usb::wiring`).
-            out[0] = bus_device(0x1_0000, 0x1106, 0x3483, 0x0c03);
-            Ok(1)
-        }
-    }
-
-    impl PciBus for OrderingMockBus<'_> {
-        fn map_bar_window(
-            &self,
-            _bdf: u64,
-            _bar_index: u8,
-            mapper: &dyn MmioMapper,
-        ) -> Result<RegisterWindow, DriverError> {
-            mapper
-                .map_window(0xc000_0000, 0x1000)
-                .map_err(MmioMapError::as_driver_error)
-        }
-
-        fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-            Ok(())
-        }
-
-        fn assign_bar(
-            &self,
-            _bdf: u64,
-            _bar_index: u8,
-            window_base: u64,
-            _window_size: u64,
-        ) -> Result<u64, DriverError> {
-            Ok(window_base)
-        }
-
-        fn read_config(&self, _bdf: u64, offset: u16) -> Result<u32, DriverError> {
-            if offset == VL805_FW_VERSION_OFFSET {
-                return Ok(self.firmware_version.map_or(0, core::cell::Cell::get));
-            }
-            Ok(0)
-        }
-
-        fn describe_function(
-            &self,
-            _bdf: u64,
-            _parent_id: u32,
-            _node_id: u32,
-        ) -> Result<HwNode, DriverError> {
-            Err(DriverError::Unsupported)
-        }
-    }
-
-    #[test]
-    fn open_controller_stops_before_firmware_wait_when_mapping_fails() {
-        // A host lacking MMIO_MAP fails `map_controller` closed before the
-        // firmware-version wait or BAR readiness diagnostics run.
-        let mapper = MockMapper { grant: true };
-        let dma = MockDmaHost;
-        let host = ChainHost::new(caps(&[CapabilityId::MEM_DMA]), &mapper, &dma);
-        let bus = OrderingMockBus::not_loaded();
-        let sink = RecordingSink::new();
-        assert_eq!(
-            open_controller(
-                &host,
-                &bus,
-                0x2_0000_0000,
-                (0xc000_0000, 0x4000_0000),
-                &NoFirmwareReset,
-                &NoDelay::new(),
-                &sink,
-            )
-            .err(),
-            Some(DriverError::PermissionDenied)
-        );
-        assert_eq!(sink.count(USB_KEYBOARD_FW_READY), 0);
-    }
-
-    #[test]
-    fn open_controller_probes_the_bar_when_reload_does_not_make_version_loaded() {
-        // With a granted host and a bus that enumerates the VL805 and bases
-        // its BAR, `open_controller` maps the controller and waits for the
-        // VL805's firmware version (config `0x50`) to read non-zero. The mock
-        // bus returns `0` for every config read, so the first firmware-loaded
-        // wait fails. The bring-up then issues exactly one
-        // `NOTIFY_XHCI_RESET` fallback; because the version still stays zero,
-        // the firmware-version gate (`4123`) records `firmware_loaded=0` and
-        // the bring-up proceeds to probe the controller's own capability
-        // block regardless — the config-space `0x50` register is not the
-        // authoritative readiness signal. The mock window is the zeroed mock
-        // BAR, so the bring-up then fails closed at `Xhci::open` (the real
-        // gate), not at the firmware step.
-        struct RecordingFirmwareReset {
-            calls: core::cell::Cell<u32>,
-        }
-
-        impl FirmwareReset for RecordingFirmwareReset {
-            fn reload(&self) -> FirmwareResetOutcome {
-                self.calls.set(self.calls.get() + 1);
-                FirmwareResetOutcome::Reloaded {
-                    response_value: VL805_FIRMWARE_DEV_ADDR,
-                }
-            }
-        }
-
-        let mapper = MockMapper { grant: true };
-        let dma = MockDmaHost;
-        let host = ChainHost::new(
-            caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
-            &mapper,
-            &dma,
-        );
-        let bus = OrderingMockBus::not_loaded();
-        let firmware_reset = RecordingFirmwareReset {
-            calls: core::cell::Cell::new(0),
-        };
-        let sink = RecordingSink::new();
-        // The carved DMA region (mock base 0x1000_0000) lies below this
-        // aperture top; the outbound window is the Pi 4's PCIe MMIO window.
-        let result = open_controller(
-            &host,
-            &bus,
-            0x2_0000_0000,
-            (0xc000_0000, 0x4000_0000),
-            &firmware_reset,
-            &NoDelay::new(),
-            &sink,
-        );
-        // The bring-up reaches and fails closed at `Xhci::open` on the zeroed
-        // mock BAR, not at the firmware step.
-        assert!(result.is_err());
-        assert_eq!(firmware_reset.calls.get(), 1);
-        // One wait before the reload, and one after the 200 µs settle.
-        assert_eq!(sink.count(USB_KEYBOARD_FW_READY), 2);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESET), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESPONSE), 1);
-        // The gate is logged once with `firmware_loaded=0`, and the bring-up
-        // proceeds to probe the controller's own capability block.
-        assert_eq!(sink.count(USB_KEYBOARD_FW_GATE), 1);
-        // The root-port error/status snapshot is taken once, right after the
-        // reload, so a metal capture can tell a bus-reach failure (secondary
-        // Received-Master-Abort) from a dropped mailbox reply.
-        assert_eq!(sink.count(USB_KEYBOARD_PCIE_ERR), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_READY), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_POST_RELOAD), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_RAW), 1);
-    }
-
-    #[test]
-    fn open_controller_proceeds_after_reload_makes_version_loaded() {
-        struct LoadingFirmwareReset<'a> {
-            calls: core::cell::Cell<u32>,
-            firmware_version: &'a core::cell::Cell<u32>,
-        }
-
-        impl FirmwareReset for LoadingFirmwareReset<'_> {
-            fn reload(&self) -> FirmwareResetOutcome {
-                self.calls.set(self.calls.get() + 1);
-                self.firmware_version.set(0x0001_38c0);
-                FirmwareResetOutcome::Reloaded {
-                    response_value: VL805_FIRMWARE_DEV_ADDR,
-                }
-            }
-        }
-
-        let mapper = MockMapper { grant: true };
-        let dma = MockDmaHost;
-        let host = ChainHost::new(
-            caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
-            &mapper,
-            &dma,
-        );
-        let firmware_version = core::cell::Cell::new(0);
-        let bus = OrderingMockBus::with_firmware_version(&firmware_version);
-        let firmware_reset = LoadingFirmwareReset {
-            calls: core::cell::Cell::new(0),
-            firmware_version: &firmware_version,
-        };
-        let sink = RecordingSink::new();
-        let result = open_controller(
-            &host,
-            &bus,
-            0x2_0000_0000,
-            (0xc000_0000, 0x4000_0000),
-            &firmware_reset,
-            &NoDelay::new(),
-            &sink,
-        );
-
-        assert!(result.is_err());
-        assert_eq!(firmware_reset.calls.get(), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_READY), 2);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESET), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESPONSE), 1);
-        // The gate is logged once (here with `firmware_loaded=1`).
-        assert_eq!(sink.count(USB_KEYBOARD_FW_GATE), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_READY), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_POST_RELOAD), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_RAW), 1);
-    }
-
-    #[test]
-    fn open_controller_probes_the_bar_when_firmware_reload_fails() {
-        // The reload itself fails (the `NOTIFY_XHCI_RESET` timeout the metal
-        // capture shows). That no longer aborts the bring-up: the gate
-        // (`4123`) records `firmware_loaded=0` and the bring-up proceeds to
-        // probe the controller's own capability block, failing closed at
-        // `Xhci::open` on the zeroed mock BAR. Two `Error` events result —
-        // the reload failure and the `Xhci::open` failure.
-        struct FailingFirmwareReset {
-            calls: core::cell::Cell<u32>,
-        }
-
-        impl FirmwareReset for FailingFirmwareReset {
-            fn reload(&self) -> FirmwareResetOutcome {
-                self.calls.set(self.calls.get() + 1);
-                FirmwareResetOutcome::Failed {
-                    reason: FirmwareResetFailure::Timeout,
-                }
-            }
-        }
-
-        let mapper = MockMapper { grant: true };
-        let dma = MockDmaHost;
-        let host = ChainHost::new(
-            caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
-            &mapper,
-            &dma,
-        );
-        let bus = OrderingMockBus::not_loaded();
-        let firmware_reset = FailingFirmwareReset {
-            calls: core::cell::Cell::new(0),
-        };
-        let sink = RecordingSink::new();
-        let result = open_controller(
-            &host,
-            &bus,
-            0x2_0000_0000,
-            (0xc000_0000, 0x4000_0000),
-            &firmware_reset,
-            &NoDelay::new(),
-            &sink,
-        );
-
-        assert!(result.is_err());
-        assert_eq!(firmware_reset.calls.get(), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_READY), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESET), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESPONSE), 0);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_GATE), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_READY), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_POST_RELOAD), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_CAPS_RAW), 1);
-        // The reload failure and the `Xhci::open` failure are both `Error`s.
-        assert_eq!(sink.errors(), 2);
-    }
-
-    #[test]
-    fn firmware_reload_is_skipped_when_version_is_already_loaded() {
-        struct LoadedBus;
-
-        impl Bus for LoadedBus {
-            fn enumerate(&self, _out: &mut [BusDevice]) -> Result<usize, DriverError> {
-                Ok(0)
-            }
-        }
-
-        impl PciBus for LoadedBus {
-            fn map_bar_window(
-                &self,
-                _bdf: u64,
-                _bar_index: u8,
-                _mapper: &dyn MmioMapper,
-            ) -> Result<RegisterWindow, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-
-            fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-                Err(DriverError::Unsupported)
-            }
-
-            fn assign_bar(
-                &self,
-                _bdf: u64,
-                _bar_index: u8,
-                _window_base: u64,
-                _window_size: u64,
-            ) -> Result<u64, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-
-            fn read_config(&self, _bdf: u64, offset: u16) -> Result<u32, DriverError> {
-                if offset == VL805_FW_VERSION_OFFSET {
-                    Ok(0x0001_38c0)
-                } else {
-                    Ok(0)
-                }
-            }
-
-            fn describe_function(
-                &self,
-                _bdf: u64,
-                _parent_id: u32,
-                _node_id: u32,
-            ) -> Result<HwNode, DriverError> {
-                Err(DriverError::Unsupported)
-            }
-        }
-
-        struct PanicFirmwareReset;
-
-        impl FirmwareReset for PanicFirmwareReset {
-            fn reload(&self) -> FirmwareResetOutcome {
-                panic!("firmware reload must be skipped when config 0x50 is non-zero");
-            }
-        }
-
-        let sink = RecordingSink::new();
-        assert!(ensure_firmware_loaded(
-            &LoadedBus,
-            &NoDelay::new(),
-            &PanicFirmwareReset,
-            &sink
-        ));
-        assert_eq!(sink.count(USB_KEYBOARD_FW_READY), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_FW_RESET), 0);
     }
 }

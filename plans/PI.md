@@ -2051,6 +2051,29 @@ real hardware per a recorded checklist — pending hardware.
   launchable option `userland/session/login` offers when the display +
   input drivers loaded.
 
+**Landed — Increment C (the full swap): the kernel sequences the floor
+crates over `DriverHost`.** The in-kernel `usb_keyboard::bring_up_keyboard`
+composition now drives the three separate floor crates over the
+`lib/abi::DriverHost` contract — `drivers/bus/pcie_brcm` trains the link,
+the `drivers/bus/usb/vl805` device driver reloads VL805 firmware over
+`host.mailbox()`, and `drivers/bus/usb/xhci`'s
+`wiring::bring_up_boot_input` maps the BAR, carves DMA, enumerates the boot
+keyboard, and publishes it through `host.emit_node()` (forwarded to the
+boot hardware tree by the in-kernel `KernelBootTreeEmitter`) carrying its
+xHCI-BAR + DMA grants. The bespoke in-kernel xHCI/firmware-version
+diagnostics — `open_controller`, `wait_for_caps_ready`,
+`VideoCoreFirmwareReset`, the `open_controller_*`/caps-readiness tests, and
+events `4102`/`4104`/`4106`/`4107`/`4109`/`4110`/`4114`/`4118`/`4122`/
+`4123`/`4124`/`4125`/`4126` — were deleted (§2.14); the `KernelMailboxChannel`
+now logs only the `4121` exchange diagnostics. **The historical "Landed"
+subsections below describe the superseded in-kernel diagnostic path (the
+old `drivers/bus/usb` path is now `drivers/bus/usb/xhci`, and
+`wiring::open_discovered`'s signature gained the discovered
+`outbound_window`); they are retained for the PCIe root-cause findings that
+still apply to `pcie_brcm`.** `spawn_pump` stays the live keyboard until B5
+(§2.17); metal acceptance is the real-Pi UART log in PLAN.md Stage 4.HW
+item 5 (Increment C). The status detail of record lives in `PLAN.md`.
+
 **Landed — the host-provable protocol layers** (the `emmc2`/`rpi_hvs`
 seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
 §0.4):

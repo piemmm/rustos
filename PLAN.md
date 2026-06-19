@@ -1163,10 +1163,12 @@ order (one fully-gated increment each):
              draws `Root passphrase:`. `build_rpi_image` derives the
              passphrase from the profile (`passphrase_for`), never a caller
              argument;
-           - **B5 (= 5e)** — the flip, gated on **Increment C** below.
-     - **Increment C (B5 prerequisite) — port the autonomous floor bring-up off
-       the in-kernel scaffold onto the `lib/abi::DriverHost` contract.** A blind
-       B5 flip would brick the metal keyboard: the autonomous VL805 bring-up
+           - **B5 (= 5e)** — the flip; its Increment-C prerequisite is now
+             metal-confirmed, so this is the next increment.
+     - **Increment C (B5 prerequisite) — DONE (metal-confirmed) — ported the
+       autonomous floor bring-up off the in-kernel scaffold onto the
+       `lib/abi::DriverHost` contract.** A blind B5 flip would have bricked the
+       metal keyboard: the autonomous VL805 bring-up
        (PCIe train + VideoCore firmware reload + xHCI bring-up + enumeration +
        HID-node emission) lives **only** in `usb_keyboard.rs`/`keyboard_service.rs`,
        and the floor `drivers/bus/*` crates expose just `register()`. The fix
@@ -1203,19 +1205,19 @@ order (one fully-gated increment each):
          device crate (§2.20 — it must **not** leak into the generic PCIe or USB
          layer). Each consumes only `lib/abi`/`lib/*` through `DriverHost`
          (§17.4); the hwtree decouples them (§18.1).
-         - **Driver structure / VL805 reload — DONE (host-proven; metal: confirm
-           keyboard unchanged).** The generic xHCI driver moved
+         - **Driver structure / VL805 reload — DONE (host-proven; metal-confirmed).**
+           The generic xHCI driver moved
            `drivers/bus/usb` → `drivers/bus/usb/xhci` (package name unchanged);
            the new `drivers/bus/usb/vl805` crate owns the firmware-reset
            vocabulary (`FirmwareResetOutcome`/`FirmwareResetFailure`,
            `VL805_FIRMWARE_DEV_ADDR`, the §18.3 `BIND_KEYS` for PCI `1106:3483`)
            and the `probe_firmware_revision`/`reload_firmware` policy run over the
            C-1 `MailboxChannel` seam, reusing the `lib/vcmailbox` property layout
-           (§2.2, never re-derived). The in-kernel keyboard composition now runs
-           that policy: `VideoCoreFirmwareReset` supplies a `KernelMailboxChannel`
-           that owns the `MmioMailbox` (doorbell/buffer/coherency mechanism) and
-           still logs the `4121`/`4122` diagnostics, calling
-           `vl805::probe`/`reload_firmware`. 7 vl805 host tests (mock-firmware
+           (§2.2, never re-derived). The kernel keyboard composition supplies a
+           `KernelMailboxChannel` that owns the `MmioMailbox`
+           (doorbell/buffer/coherency mechanism) and logs the `4121` exchange
+           diagnostics; the floor xHCI bring-up runs `vl805::reload_firmware`
+           over it through `host.mailbox()`. 7 vl805 host tests (mock-firmware
            channel); kernel host + aarch64 freestanding green; scaffold pump
            unchanged (§2.17). No `#[repr(C)]`/syscall/lib-abi change ⇒ no
            C-header drift.
@@ -1239,14 +1241,27 @@ order (one fully-gated increment each):
            re-exports `PcieBringup` and consumes the relocated parse (§2.14); the
            scaffold pump stays the live keyboard (§2.17). 8 pcie_brcm host tests;
            no `lib/abi`/`#[repr(C)]` change ⇒ no C-header drift.
-         - **Kernel autonomous sequencing — TODO.** The host drives the floor
-           `bring_up` entries (PCIe `bring_up_from_node` → `vl805::reload_firmware`
-           over `host.mailbox()` → xHCI `bring_up_boot_input` + `emit_node()`) in
-           place of the in-kernel `bring_up_keyboard` orchestration; `spawn_pump`
-           stays the live keyboard until B5. Acceptance is a real-Pi UART log: the
-           floor chain trains PCIe, reloads firmware, enumerates, and emits a
-           *bindable* HID node, scaffold still delivering keys (`raspi4b`/QEMU
-           cannot model the VL805).
+         - **Kernel autonomous sequencing — DONE (host-proven; metal-confirmed).**
+           The in-kernel `bring_up_keyboard` composition
+           now sequences the floor crates over the `DriverHost` contract —
+           `pcie_brcm::wiring::open_discovered` trains the link,
+           `vl805::reload_firmware` runs over `host.mailbox()`, and
+           `rustos_drv_bus_usb::wiring::bring_up_boot_input` maps the BAR, carves
+           DMA, enumerates the boot keyboard, and publishes it via
+           `host.emit_node()` (forwarded to the boot hardware tree by the
+           in-kernel `KernelBootTreeEmitter`) carrying its xHCI-BAR + DMA grants.
+           The bespoke in-kernel xHCI/firmware-version diagnostics
+           (`open_controller`, `wait_for_caps_ready`, `VideoCoreFirmwareReset`,
+           events `4102`/`4104`/`4106`/`4107`/`4109`/`4110`/`4114`/`4118`/`4122`/
+           `4123`/`4124`/`4125`/`4126`) are deleted (§2.14); `spawn_pump` stays
+           the live keyboard until B5 (§2.17). Kernel host lib + aarch64
+           freestanding green, and metal-confirmed on a real Pi 4B: the floor
+           chain trains PCIe, reloads VL805 firmware over `host.mailbox()`,
+           enumerates the boot keyboard, and emits a *bindable* HID node carrying
+           its xHCI-BAR + DMA grants, with the scaffold pump still delivering
+           keystrokes and typed `root` login working. (`raspi4b`/QEMU cannot
+           model the VL805, so this was metal-only-verifiable.) Increment C is
+           therefore complete; B5 (5e below) is the next increment.
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**
        (§2.14), evict `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the
        compiled-in list is the bootstrap floor only (§18.6), lay the signed

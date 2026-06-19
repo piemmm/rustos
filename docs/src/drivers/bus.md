@@ -290,20 +290,23 @@ carrying the CPU base, size, and far-side PCIe base —
 
 The whole chain is composed in `kernel/rustos-kernel::usb_keyboard`
 (the image-assembly seam is the one crate permitted to name the driver
-crates across strata, `AGENTS.md` §17.4 / §8): it consumes the relocated
-`PcieBringup`, a `ChainHost` lends the bus driver the kernel's
-capability-gated MMIO mapper + per-driver DMA host, and
-`bring_up_keyboard` runs link-train → `mechanism_brcm` →
-`usb::wiring::open_discovered` → `enumerate_first_connected`, yielding a
-`BootKeyboard` whose decoded bytes a `QueueConsoleSink` feeds into the
-video console's input queue (`console_input`/`VIDEO_KEYBOARD`). That
-engine is host-tested up to the controller hand-off, where the inert
-mock register window faults — the metal boundary. The remaining
-follow-up is the kernel autonomous sequencing that drives each floor
-crate's `bring_up`/`bring_up_from_node` entry over a `DriverHost` (in
-place of this in-kernel orchestration), with the scaffold pump staying the
-live keyboard until B5; QEMU models no Pi PCIe link timing or USB, so
-metal acceptance is a checklist (`plans/PI.md` P10).
+crates across strata, `AGENTS.md` §17.4 / §8): a `ChainHost` lends the
+floor drivers the kernel's capability-gated MMIO mapper, per-driver DMA
+host, the `VideoCore` `MailboxChannel`, and a boot-tree node emitter, all
+behind the `lib/abi::DriverHost` contract. `bring_up_keyboard` then
+**sequences the three floor crates over that contract** (Increment C, the
+full swap) — `pcie_brcm` trains the link (`open_discovered`), the `vl805`
+device driver reloads firmware over `host.mailbox()`, and
+`usb::wiring::bring_up_boot_input` maps the BAR, carves DMA, brings the
+controller up, enumerates the boot keyboard, and publishes it through
+`host.emit_node()` carrying its xHCI-BAR + DMA `HwResource` grants. The
+returned `BootKeyboard` is polled by the in-kernel report pump, whose
+decoded records reach the input-focus arbiter (`ArbiterConsoleSink`) — the
+live keyboard until the B5 flip (`AGENTS.md` §2.17). No driver names
+another; the hardware tree decouples them. The engine is host-tested up to
+the controller hand-off, where the inert mock register window faults — the
+metal boundary; QEMU models no Pi PCIe link timing or USB, so metal
+acceptance is a checklist (`plans/PI.md` P10 / Increment C).
 
 ## MMIO driver — `drivers/bus/mmio`
 

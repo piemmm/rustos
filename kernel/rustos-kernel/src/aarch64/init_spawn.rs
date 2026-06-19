@@ -291,26 +291,26 @@ impl InitSpawn for Aarch64InitSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // Design B (B3, `plans/PI.md`): the bootstrap-floor USB bring-up
-        // enumerates the HID keyboard behind the VL805 controller **once**,
-        // here on the boot CPU, and emits it as a discovered child node.
-        // Attaching that node to the boot hardware tree *before* the unlock
-        // kthread reads it (below) lets the §18 pre-unlock autoload see the
-        // keyboard like every other discovered device (`AGENTS.md` §18.2);
-        // its signed driver bundle is not in the store until the B5 flip, so
-        // `devmgr` leaves the node unbound (§18.4) and the in-kernel report
-        // pump keeps driving the keyboard so the working metal path never
-        // regresses (`AGENTS.md` §2.17). The controller is brought up
-        // exactly once; the pump kthread only polls (`AGENTS.md` §2.16).
-        // With no discovered `brcm,bcm2711-pcie` bridge (the QEMU `virt`
-        // shape) the bring-up yields `None` and PID 1 runs unchanged (§18.4).
-        // The pump kthread is admitted onto the boot CPU's run queue *before*
-        // `admit_init` diverges into the dispatch loop, so the loop then
-        // dispatches it alongside PID 1.
-        if let Some((hid_node, keyboard)) =
-            crate::keyboard_service::bring_up_keyboard_into_tree(ctx)
-        {
-            crate::unlock_service::augment_boot_tree(&hid_node);
+        // Design B (B3, `plans/PI.md`) / Increment C: the bootstrap-floor
+        // bus chain (`pcie_brcm` → `vl805` firmware reload over
+        // `DriverHost::mailbox` → `bus_usb` xHCI) brings the VL805 controller
+        // up **once**, here on the boot CPU, enumerates the HID keyboard
+        // behind it, and publishes it as a discovered child node through
+        // `DriverHost::emit_node` — which the in-kernel host attaches to the
+        // boot hardware tree *before* the unlock kthread reads it (below), so
+        // the §18 pre-unlock autoload sees the keyboard like every other
+        // discovered device (`AGENTS.md` §18.2). Its signed driver bundle is
+        // not in the store until the B5 flip, so `devmgr` leaves the node
+        // unbound (§18.4) and the in-kernel report pump keeps driving the
+        // keyboard so the working metal path never regresses (`AGENTS.md`
+        // §2.17). The controller is brought up exactly once; the pump kthread
+        // only polls (`AGENTS.md` §2.16). With no discovered
+        // `brcm,bcm2711-pcie` bridge (the QEMU `virt` shape) the bring-up
+        // yields `None` and PID 1 runs unchanged (§18.4). The pump kthread is
+        // admitted onto the boot CPU's run queue *before* `admit_init`
+        // diverges into the dispatch loop, so the loop then dispatches it
+        // alongside PID 1.
+        if let Some(keyboard) = crate::keyboard_service::bring_up_keyboard_into_tree(ctx) {
             let _pump_started = crate::keyboard_service::spawn_pump(ctx, keyboard);
         }
 
