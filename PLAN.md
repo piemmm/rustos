@@ -1154,7 +1154,15 @@ order (one fully-gated increment each):
              by the `LateUsersDb` three-state seam (`WouldBlock` while the
              unlock is pending → `login` waits without prompting; the
              installed database, or `NotImplemented` once it resolves empty)
-             plus `rustos_login::supervise` acting per round (P11);
+             plus `rustos_login::supervise` acting per round (P11). The
+             unlock also tries the **blank** passphrase silently first
+             (`finish_install` shared with the prompted path), so the
+             installer image (`INSTALLER_PASSPHRASE` blank, §11) auto-unlocks
+             with **no prompt**; only a non-blank passphrase (debug
+             `DEBUG_PASSPHRASE` = `root`, or a production operator-chosen one)
+             draws `Root passphrase:`. `build_rpi_image` derives the
+             passphrase from the profile (`passphrase_for`), never a caller
+             argument;
            - **B5 (= 5e)** — the flip, **now unblocked**: B1–B4 are
              metal-confirmed (§0.9).
      - **5e (= design-B B5) — delete `usb_keyboard.rs` + `keyboard_service.rs`**

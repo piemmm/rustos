@@ -99,15 +99,23 @@ manifest, and writes (for the default `debug` profile; pass
 RustFS has no plaintext mode, so the root partition is always encrypted.
 Its volume key is **derived from a passphrase** (`AGENTS.md` §11): the
 build provisions a per-volume `root.unlock` descriptor (random salt +
-PBKDF2 cost), runs the passphrase through it to a 256-bit key, and
-provisions the root under that key. Both `mkimage` profiles use a
-**blank** passphrase — these are special-case images (the debug image
-must never ship; the installer image's root is re-provisioned on first
-boot), so neither prompts and the key is auto-derived. The volume is
-still fully encrypted under a real, salt-derived key. The `.rootkey`
-file is that derived key, written for mounting the volume on a host; it
-can equally be re-derived from the on-image `root.unlock` descriptor and
-the blank passphrase.
+PBKDF2 cost), runs the profile's passphrase through it to a 256-bit key,
+and provisions the root under that key. The passphrase is fixed by the
+profile (`rustos_mkimage::passphrase_for`):
+
+- **`installer`** — a **blank** passphrase. The bootstrap tries the blank
+  passphrase silently *first*, so the installer image unlocks with **no
+  prompt** at all and boots straight into the first-boot installer
+  (`AGENTS.md` §11), which re-provisions the root under the user's chosen
+  passphrase.
+- **`debug`** — the passphrase `root` (matching the seeded `root` / `root`
+  account). The blank attempt fails, so the bootstrap draws the
+  `Root passphrase:` prompt; type `root` to unlock.
+
+Either way the volume is fully encrypted under a real, salt-derived key.
+The `.rootkey` file is that derived key, written for mounting the volume
+on a host; it can equally be re-derived from the on-image `root.unlock`
+descriptor and the profile's passphrase.
 
 A shippable, user-installed root is different: the first-boot installer
 (`AGENTS.md` §11, PLAN.md Stage 8) provisions the volume under a

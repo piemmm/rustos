@@ -176,19 +176,21 @@ impl Block for MemDisk {
 }
 
 /// Provision the root volume's `root.unlock` descriptor and the volume key
-/// it derives from [`PASSPHRASE`].
+/// it derives from `passphrase`.
 ///
 /// The descriptor carries [`UNLOCK_MIN_ITERATIONS`] — the format floor — so
 /// the per-build and per-boot PBKDF2 derivations stay fast under QEMU TCG
 /// while still exercising the real key-derivation path (`AGENTS.md` §5.4).
+/// Passing a **blank** `passphrase` builds the installer-profile image,
+/// which the bootstrap unlocks with no prompt (`AGENTS.md` §11).
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning or encoding.
-fn provision() -> Result<([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKey), DriverError> {
+fn provision(passphrase: &[u8]) -> Result<([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKey), DriverError> {
     let descriptor =
         UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut FixtureEntropy { next: 7 })?;
-    let key = descriptor.derive_volume_key(PASSPHRASE);
+    let key = descriptor.derive_volume_key(passphrase);
     let mut bytes = [0u8; UNLOCK_DESCRIPTOR_LEN];
     descriptor.encode(&mut bytes)?;
     Ok((bytes, key))
@@ -257,6 +259,24 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
     build_image_with_drivers(&[])
 }
 
+/// Build the whole-disk encrypted-root image whose root is encrypted under
+/// `passphrase` (rather than the default [`PASSPHRASE`]).
+///
+/// A **blank** `passphrase` builds the installer-profile image: the
+/// bootstrap unlocks it with no prompt (`AGENTS.md` §11), so this is the
+/// fixture the kernel's silent auto-unlock regression mounts. Delegates to
+/// [`build_image_with_drivers_and_passphrase`] with no drivers (`AGENTS.md`
+/// §2.2 — one authoring path).
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
+/// §2.9).
+pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
+    build_image_with_drivers_and_passphrase(&[], passphrase)
+}
+
 /// Build the whole-disk encrypted-root image, additionally planting a set of
 /// installed driver bundles into the encrypted root's `/System/Drivers/`
 /// store.
@@ -278,7 +298,27 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
 /// §2.9).
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
-    let (descriptor, key) = provision()?;
+    build_image_with_drivers_and_passphrase(drivers, PASSPHRASE)
+}
+
+/// Build the whole-disk encrypted-root image, planting `drivers` into the
+/// read-only `/System` store and encrypting the root under `passphrase`.
+///
+/// The single authoring path behind [`build_image`],
+/// [`build_image_with_drivers`], and [`build_image_with_passphrase`]
+/// (`AGENTS.md` §2.2): they differ only in the driver set and the
+/// passphrase the root volume key is derived from.
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
+/// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
+/// §2.9).
+pub fn build_image_with_drivers_and_passphrase(
+    drivers: &[(&[&[u8]], &[u8])],
+    passphrase: &[u8],
+) -> Result<Vec<u8>, DriverError> {
+    let (descriptor, key) = provision(passphrase)?;
     let boot = build_boot_partition(&descriptor)?;
     let system = build_system_partition(drivers)?;
     let root = root_image::build_users_root_image_with_key(&key)?;
@@ -385,7 +425,7 @@ mod tests {
             .first_of_type(PartitionType::RustFsRoot)
             .expect("a RustFS root partition is present");
 
-        let (_descriptor, key) = provision().expect("the descriptor provisions");
+        let (_descriptor, key) = provision(PASSPHRASE).expect("the descriptor provisions");
         let window = PartitionBlock::new(disk, root.start_lba, root.block_count)
             .expect("the root window is in range");
         RustFs::open(window, &key).expect("the root mounts under the descriptor-derived key");

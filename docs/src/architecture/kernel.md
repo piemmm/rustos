@@ -351,12 +351,22 @@ the `Block` disk and takes the console write/read halves as the object-safe
 `rustos_kernel_core::{ConsoleWrite, ConsoleRead}` seams, so it names no
 architecture or device type (§17.4) and is host-tested with a mock console
 over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage` writes
-(§2.2). Each attempt prompts `Root passphrase:`, reads one line into a
-zeroized, fixed-length on-stack buffer (`MAX_PASSPHRASE_LEN`; the secret
-never reaches the heap, a log, or memory beyond the attempt, §4 / §19.4),
-and runs `mount_root_disk_and_load_users`. On success the loaded database
-is published into the set-once `LateUsersDb` cell (`4136`
-`ROOT_UNLOCK_INSTALLED`) so login can authenticate. A wrong passphrase
+(§2.2). It tries the **blank** passphrase silently *first*, before drawing
+any prompt: the installer image is provisioned with a blank root passphrase
+(`rustos_mkimage::INSTALLER_PASSPHRASE`, §11), so a fresh install unlocks and
+boots straight into the §11 installer with no `Root passphrase:` prompt at
+all. Only when the blank passphrase does not unlock the root (a debug image —
+passphrase `root` — or a production image with an operator-chosen passphrase)
+is the operator prompted interactively; a non-blank passphrase failing the
+silent attempt is no oracle (the master key simply never unwraps, exactly as
+for any wrong passphrase, §5.4). Each interactive attempt prompts
+`Root passphrase:`, reads one line into a zeroized, fixed-length on-stack
+buffer (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
+memory beyond the attempt, §4 / §19.4), and runs
+`mount_root_disk_and_load_users`. On success (silent or prompted) the loaded
+database is published into the set-once `LateUsersDb` cell through the shared
+`finish_install` helper (`4136` `ROOT_UNLOCK_INSTALLED`) so login can
+authenticate. A wrong passphrase
 (`Mount(PermissionDenied)`) is audited (`4137` `ROOT_UNLOCK_RETRY`, no
 oracle) and retried up to `MAX_UNLOCK_ATTEMPTS` (5, the User-chosen policy);
 the budget is bounded, never an infinite loop (§2.1). Any other error is

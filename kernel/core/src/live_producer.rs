@@ -233,7 +233,9 @@ mod tests {
     use std::boxed::Box;
     use std::vec::Vec;
 
-    use rustos_kernel_mem::{DmaMapping, LiveUserSpace};
+    use rustos_kernel_mem::{
+        AddressSpace, DmaMapping, FrozenAddressSpace, HostPageTable, LiveUserSpace,
+    };
 
     use crate::kthread::publish_live_space_for_test;
     use crate::test_arch::TestArch;
@@ -303,6 +305,13 @@ mod tests {
                     phys_base: DMA_PHYS,
                 }),
             }
+        }
+
+        fn freeze(&self) -> FrozenAddressSpace {
+            // The producer-routing tests never inspect the snapshot; an empty
+            // frozen space satisfies the trait. The re-freeze behaviour is
+            // exercised end-to-end against a real `LiveSpace` in `aspace`.
+            AddressSpace::new(HostPageTable::new()).freeze()
         }
     }
 

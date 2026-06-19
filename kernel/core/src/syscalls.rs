@@ -589,6 +589,35 @@ where
         let (space, physmap) = registry.resolve(caller.task_id)?;
         Some(f(space, physmap))
     }
+
+    /// Re-freeze the calling task's live address space into the registry
+    /// after a syscall has mutated it (`mem_map` / `mem_unmap` / `mmio_map`
+    /// / `dma_alloc`).
+    ///
+    /// The registry holds a `Send + Sync` [`rustos_kernel_mem::FrozenAddressSpace`]
+    /// snapshot, not the live `!Sync` space; a snapshot frozen at spawn
+    /// describes only the spawn-time image and stack. Once a task grows its
+    /// own heap, frees part of it, or a driver maps a granted window, that
+    /// snapshot is stale and [`with_caller_aspace`](Self::with_caller_aspace)'s
+    /// `copy_in` / `copy_out` walk would miss (or still expose) those pages
+    /// — the defect that made `spawn`'s heap-allocated path argument fault
+    /// with [`Errno::BadAddress`]. The mutating handler runs on the CPU the
+    /// caller is switched in on, so the caller's live space is the one
+    /// published for [`SchedulerArch::current_cpu`]; re-freeze it and publish
+    /// the fresh snapshot so the very next copy reflects the current
+    /// mappings (`AGENTS.md` §5.4). A caller with no published live space (a
+    /// kernel task, or a task spawned without a retained space) or no
+    /// registered snapshot is a no-op — there is nothing to refresh and the
+    /// mutation could not have touched a live space either (`AGENTS.md`
+    /// §2.9).
+    fn refreeze_caller_aspace(&self, caller: &CallerContext<'_>) {
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        if let Some(frozen) = crate::kthread::with_current_live_space(cpu, |live| live.freeze()) {
+            self.aspaces
+                .write()
+                .reregister_space(caller.task_id, Box::new(frozen));
+        }
+    }
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
@@ -1458,7 +1487,7 @@ where
 
     fn mem_map(
         &self,
-        _caller: &CallerContext<'_>,
+        caller: &CallerContext<'_>,
         len: usize,
         flags: MapFlags,
         addr_hint: u64,
@@ -1478,7 +1507,15 @@ where
         // `NotImplemented` (`AGENTS.md` §2.9), never pretending a region was
         // mapped. A frame exhaustion surfaces as `OutOfMemory` here
         // (`AGENTS.md` §4 — deterministic OOM).
-        self.mem_map.map(len, flags, addr_hint)
+        let result = self.mem_map.map(len, flags, addr_hint);
+        // The map grew the caller's live space; re-freeze the registry
+        // snapshot so the next `copy_in`/`copy_out` can see the new region
+        // (`AGENTS.md` §5.4 — the copy path must reflect live memory). Only
+        // on success: a failed map touched no mappings.
+        if result.is_ok() {
+            self.refreeze_caller_aspace(caller);
+        }
+        result
     }
 
     fn mmio_map(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
@@ -1507,7 +1544,14 @@ where
         // `NULL_MMIO_MAP_FACILITY` fails closed with `NotImplemented`
         // (`AGENTS.md` §2.9), never pretending a window was mapped; frame
         // exhaustion surfaces as `OutOfMemory` (deterministic OOM, §4).
-        self.mmio_map_facility.map_window(phys_base, len)
+        let result = self.mmio_map_facility.map_window(phys_base, len);
+        // The window grew the caller's live space; re-freeze the registry
+        // snapshot so a later copy through the driver's space sees it
+        // (`AGENTS.md` §5.4). Only on success.
+        if result.is_ok() {
+            self.refreeze_caller_aspace(caller);
+        }
+        result
     }
 
     fn dma_alloc(
@@ -1555,6 +1599,10 @@ where
         // fails closed with `NotImplemented` (`AGENTS.md` §2.9); frame
         // exhaustion surfaces as `OutOfMemory` (deterministic OOM, §4).
         let carve = self.dma_alloc_facility.alloc(len, constraint.addr_limit)?;
+        // The carve grew the caller's live space; re-freeze the registry
+        // snapshot before the copy below so the new DMA window is visible to
+        // the copy path (`AGENTS.md` §5.4).
+        self.refreeze_caller_aspace(caller);
         // Hand the device-visible base back through the `device_out` user
         // pointer via the validated `copy_to_user` boundary (`AGENTS.md`
         // §5.4), exactly as `wait` writes the reaped status — a faulting
@@ -1609,7 +1657,7 @@ where
         }
     }
 
-    fn mem_unmap(&self, _caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
+    fn mem_unmap(&self, caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
         // The dispatcher already validated `base` and that `len` fits in
         // `usize`. A zero-length range names nothing; reject it before
         // touching any state (`AGENTS.md` §5.4).
@@ -1622,7 +1670,17 @@ where
         // `NULL_MEM_MAP` fails closed with `NotImplemented`. Success reports
         // `Ok(0)` — the `Errno`-return ABI shape (`mem_unmap` returns an
         // error code, not a value).
-        self.mem_map.unmap(base, len).map(|()| 0)
+        let result = self.mem_map.unmap(base, len).map(|()| 0);
+        // The unmap shrank the caller's live space; re-freeze the registry
+        // snapshot so the freed pages are dropped from it too — leaving them
+        // in the stale snapshot would let the copy path read or write memory
+        // the task no longer owns (`AGENTS.md` §5.4 / §2.17 — fail closed,
+        // never expose freed memory). Only on success: a failed unmap left
+        // the mappings unchanged.
+        if result.is_ok() {
+            self.refreeze_caller_aspace(caller);
+        }
+        result
     }
 
     fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult {
@@ -2334,7 +2392,8 @@ mod tests {
     use rustos_kernel_ipc::Port;
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
     use rustos_kernel_mem::{
-        AddressSpace, BootMemoryMap, Frame, FrameAllocator, HostPageTable, MapFlags, MemoryRegion,
+        AddressSpace, AnonError, BootMemoryMap, DmaMapping, Frame, FrameAllocator,
+        FrozenAddressSpace, HostPageTable, LiveSpaceError, LiveUserSpace, MapFlags, MemoryRegion,
         Page, PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
     use rustos_kernel_sec::{TaskCapabilities, UserId};
@@ -6147,6 +6206,121 @@ mod tests {
         // The producer was never reached: the zero-length guard fails
         // closed before any state is touched.
         assert!(producer.last_map.lock().is_none());
+    }
+
+    /// A minimal published live space whose [`LiveUserSpace::freeze`] returns
+    /// a snapshot of an inner [`AddressSpace`] — standing in for the live
+    /// space a real `mem_map` would have grown. Only `freeze` is exercised;
+    /// the mutating methods are unreachable in this test (the producer is the
+    /// fake `RecordingMemMap`), so they fail closed.
+    struct PublishedLive {
+        space: AddressSpace<HostPageTable>,
+    }
+
+    impl LiveUserSpace for PublishedLive {
+        fn map_anonymous(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn map_anonymous_placed(&mut self, _pages: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn unmap_anonymous(&mut self, _base: u64, _pages: u64) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
+        fn map_device_window(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn freeze(&self) -> FrozenAddressSpace {
+            self.space.freeze()
+        }
+    }
+
+    /// The metal regression for the login `spawn err=18` (`BadAddress`):
+    /// the registry's frozen snapshot is taken at spawn and was never
+    /// refreshed when `mem_map` grew the live space, so `copy_in` of a
+    /// heap-allocated pointer (the shell path `login` passed to `spawn`)
+    /// found it unmapped. After a successful `mem_map` the handler must
+    /// re-freeze the caller's live space into the registry, so the next
+    /// `with_caller_aspace` copy sees the new region (`AGENTS.md` §5.4).
+    #[test]
+    fn mem_map_refreezes_the_caller_snapshot_so_a_new_region_is_reachable() {
+        install_trace_filter();
+        let sink = make_sink();
+        // `with_cpus(1)` reports current CPU 0 — the slot the live space is
+        // published on. No other `kernel/core` test publishes on CPU 0
+        // (`live_producer` uses CPUs ≥ 1), so the global slot is unshared
+        // here (`AGENTS.md` §7 — no flaky tests).
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // The page the "grown heap" lives at — absent from the spawn-time
+        // snapshot, present in the live space.
+        let heap = Page::from_addr(VirtAddr::new(0x4000)).expect("aligned");
+
+        // Register the spawn-time snapshot: an empty space (no heap page).
+        {
+            let spawn_time = AddressSpace::new(HostPageTable::new());
+            let physmap = SimPhysMap::new(PhysAddr::new(0), PAGE_SIZE);
+            aspaces
+                .write()
+                .register(
+                    SecTaskId(2),
+                    Box::new(spawn_time.freeze()),
+                    Box::new(physmap),
+                )
+                .expect("register spawn-time snapshot");
+        }
+        // The stale snapshot cannot see the heap page — the faulting state.
+        assert!(aspaces
+            .read()
+            .resolve(SecTaskId(2))
+            .expect("registered")
+            .0
+            .translate(heap)
+            .is_none());
+
+        // Publish a live space that maps the heap page (what the producer
+        // would have mapped). `mem_map`'s fake producer returns `Ok`, which
+        // must trigger the re-freeze.
+        let mut live_space = AddressSpace::new(HostPageTable::new());
+        live_space
+            .map(heap, Frame(9), MapFlags::READ | MapFlags::USER)
+            .expect("map heap page");
+        let live: &'static mut PublishedLive =
+            Box::leak(Box::new(PublishedLive { space: live_space }));
+        let _guard = crate::kthread::publish_live_space_for_test(0, live);
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        h.mem_map(&ctx, 0x1000, rustos_abi::MapFlags::FIXED, 0x4000)
+            .expect("mem_map succeeds");
+
+        // The re-freeze published the live space's mappings: the heap page
+        // now resolves through the registry, so a subsequent `copy_in`
+        // (e.g. `spawn`'s path argument) would reach it.
+        let reg = aspaces.read();
+        let (space, _) = reg.resolve(SecTaskId(2)).expect("still registered");
+        let (frame, flags) = space.translate(heap).expect("heap page now visible");
+        assert_eq!(frame, Frame(9));
+        assert!(flags.contains(MapFlags::USER));
     }
 
     /// `mem_unmap` forwards `(base, len)` to the producer and reports

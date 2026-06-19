@@ -3,7 +3,7 @@
 //! chunk 5d-0-ii (b′); the `plans/SPAWN.md` `SP5b` production follow-on).
 //!
 //! Post-spawn an address space was previously captured only as an immutable
-//! [`FrozenAddressSpace`](crate::vmm::FrozenAddressSpace) snapshot — enough
+//! [`FrozenAddressSpace`] snapshot — enough
 //! for the read-only user-memory copy path, but the live arch
 //! [`AddressSpace<P>`] was *dropped*. `mem_map` / `mmio_map` need the
 //! *running* space to stay **mutable** so a process can grow its own heap or
@@ -42,7 +42,7 @@ use crate::dma::{DmaError, DmaWindowMap};
 use crate::frame::FrameAllocator;
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
-use crate::vmm::{AddressSpace, PageTable, VirtAddr};
+use crate::vmm::{AddressSpace, FrozenAddressSpace, PageTable, VirtAddr};
 
 /// Why a [`LiveUserSpace`] operation failed.
 ///
@@ -188,6 +188,22 @@ pub trait LiveUserSpace: Send {
     /// (zero length, exceeds the max buddy order, no contiguous block,
     /// addressing-limit exceeded, no virtual slot, …).
     fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError>;
+
+    /// Snapshot this space's current live mappings into a `Send + Sync`
+    /// [`FrozenAddressSpace`], the form the kernel-wide address-space
+    /// registry holds for the user-memory copy path (`AGENTS.md` §5.4).
+    ///
+    /// A live space grows and shrinks as a task maps its own heap
+    /// ([`Self::map_anonymous`] / [`Self::map_anonymous_placed`]), unmaps it
+    /// ([`Self::unmap_anonymous`]), or a driver maps a granted device window
+    /// or DMA buffer. The registry's snapshot must be re-frozen after every
+    /// such mutation, or the copy path (`copy_in` / `copy_out`) would walk a
+    /// stale snapshot that cannot see memory the task mapped after spawn —
+    /// the exact defect [`FrozenAddressSpace`]'s own docs warn against. This
+    /// is the object-safe seam `kernel/core` calls to produce that fresh
+    /// snapshot without naming the concrete page-table backend `P`
+    /// (`AGENTS.md` §17.4 / §2.2 — one freeze definition).
+    fn freeze(&self) -> FrozenAddressSpace;
 }
 
 /// The generic concrete live address space retained per task.
@@ -381,6 +397,12 @@ where
             cpu_va: buf.virt().as_u64(),
             phys_base: buf.phys().as_u64(),
         })
+    }
+
+    fn freeze(&self) -> FrozenAddressSpace {
+        // One freeze definition lives on `AddressSpace`; this only erases the
+        // backend `P` for the registry (`AGENTS.md` §2.2).
+        self.space.freeze()
     }
 }
 

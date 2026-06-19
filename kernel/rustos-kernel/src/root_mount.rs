@@ -640,10 +640,53 @@ enum PassphraseReadError {
     TooLong,
 }
 
-/// Prompt for the root passphrase, read it off the console, unlock the
-/// root disk under it, and publish the loaded database into `late_db` —
-/// retrying a wrong passphrase up to [`MAX_UNLOCK_ATTEMPTS`] times before
-/// giving up fail-closed (`plans/PI.md` P11 Chunk B-2).
+/// Publish a successfully unlocked database into `late_db` and audit it.
+///
+/// Shared by both unlock paths — the silent blank-passphrase attempt and
+/// each interactive attempt — so the set-once install, its fail-closed
+/// "already installed" guard, and the [`ROOT_UNLOCK_INSTALLED`] audit line
+/// have exactly one definition (`AGENTS.md` §2.2). The install
+/// ([`LateUsersDb::install`]) is set-once: a refusal means a database was
+/// already published (the kthread runs once, so that is a logic error),
+/// and the rejected holder is zeroed inside `install` (`AGENTS.md` §4 /
+/// §5.4).
+fn finish_install(
+    source: HeldUsersDbSource,
+    late_db: &LateUsersDb,
+    audit: &dyn Sink,
+) -> UnlockOutcome {
+    if late_db.install(source).is_err() {
+        gave_up(audit, "already_installed");
+        return UnlockOutcome::GaveUp;
+    }
+    log(
+        audit,
+        &Event {
+            level: Level::Info,
+            id: ROOT_UNLOCK_INSTALLED,
+            message: "root-unlock: root unlocked; users database installed",
+            fields: &[],
+        },
+    );
+    UnlockOutcome::Installed
+}
+
+/// Unlock the root disk and publish the loaded database into `late_db`,
+/// prompting for the passphrase only when the root is not unlockable
+/// without one — retrying a wrong typed passphrase up to
+/// [`MAX_UNLOCK_ATTEMPTS`] times before giving up fail-closed
+/// (`plans/PI.md` P11 Chunk B-2).
+///
+/// The **blank** passphrase is tried silently first, before any prompt is
+/// drawn. An installer image is provisioned with a blank root passphrase
+/// (`rustos_mkimage::INSTALLER_PASSPHRASE`, `AGENTS.md` §11) so a fresh
+/// install boots straight into the §11 installer rather than stalling
+/// behind a `Root passphrase:` prompt the operator cannot answer. Only
+/// when the blank passphrase does **not** unlock the root (a debug or
+/// production image with a non-blank passphrase) is the operator prompted
+/// interactively. A non-blank passphrase failing the silent attempt is no
+/// oracle: the master key simply never unwraps, exactly as for any wrong
+/// passphrase (`AGENTS.md` §5.4).
 ///
 /// This is the device-independent unlock *policy* the in-kernel unlock
 /// kthread runs once the board has brought up the root block device and
@@ -700,6 +743,31 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // retries without re-acquiring it (`AGENTS.md` §2.2).
     let mut disk = disk;
 
+    // Try the blank passphrase silently first, before drawing any prompt.
+    // An installer image is provisioned with a **blank** root passphrase
+    // (`rustos_mkimage::INSTALLER_PASSPHRASE`, `AGENTS.md` §11): a fresh
+    // install must boot straight into the §11 installer, never stall behind
+    // a `Root passphrase:` prompt the operator has no value to answer. So
+    // if the blank passphrase unlocks the root we install and return with
+    // no prompt at all. A debug or production image whose passphrase is
+    // non-blank simply fails this attempt — the master key never unwraps,
+    // exactly like any wrong passphrase, so it is no oracle (`AGENTS.md`
+    // §5.4) — and falls through to the interactive prompt below.
+    match mount_root_disk_and_load_users(&mut disk, b"", audit) {
+        Ok(source) => return finish_install(source, late_db, audit),
+        Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
+            // Non-blank passphrase: prompt the operator interactively.
+        }
+        Err(error) => {
+            // A structural failure (no table/partition, unreadable or
+            // invalid descriptor, corrupt database): re-prompting cannot
+            // fix the disk, so give up now (`4134` already named the
+            // cause).
+            gave_up(audit, error.cause());
+            return UnlockOutcome::GaveUp;
+        }
+    }
+
     let mut attempt = 0u32;
     while attempt < MAX_UNLOCK_ATTEMPTS {
         attempt += 1;
@@ -727,27 +795,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
         };
 
         match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
-            Ok(source) => {
-                // The set-once install consumes the holder. A refusal means
-                // a database was already installed — the kthread runs once,
-                // so this is a logic error; fail closed and do not retry
-                // (the rejected holder is zeroed inside `install`,
-                // `AGENTS.md` §4 / §5.4).
-                if late_db.install(source).is_err() {
-                    gave_up(audit, "already_installed");
-                    return UnlockOutcome::GaveUp;
-                }
-                log(
-                    audit,
-                    &Event {
-                        level: Level::Info,
-                        id: ROOT_UNLOCK_INSTALLED,
-                        message: "root-unlock: root unlocked; users database installed",
-                        fields: &[],
-                    },
-                );
-                return UnlockOutcome::Installed;
-            }
+            Ok(source) => return finish_install(source, late_db, audit),
             Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
                 // Wrong passphrase: the master key never unwrapped. Bounded
                 // retry — never an oracle and never an infinite loop
@@ -1586,6 +1634,53 @@ mod tests {
         assert!(
             !sink.ids().contains(&4137),
             "no retry on a first-try success: {:?}",
+            sink.ids()
+        );
+    }
+
+    #[test]
+    fn a_blank_passphrase_volume_auto_unlocks_with_no_prompt() {
+        // The installer image is provisioned with a **blank** root
+        // passphrase (`AGENTS.md` §11): the unlock must mount it silently,
+        // with no console read at all, so a fresh install boots straight
+        // into the §11 installer rather than stalling behind a prompt the
+        // operator cannot answer (`plans/PI.md` P11). The console input is
+        // wired to *fail* on every read, so a successful unlock proves the
+        // interactive prompt path was never entered.
+        let bytes = disk_image::build_image_with_passphrase(b"")
+            .expect("the blank-passphrase image assembles");
+        let disk = FatVecBlock { store: bytes };
+        let late = LateUsersDb::new();
+        let sink = RecordingSink::new();
+
+        let outcome = unlock_root_disk_interactively(
+            disk,
+            &AcceptConsole,
+            &ScriptInput::failing(),
+            &late,
+            &sink,
+        );
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(late.is_installed(), "the database is published");
+        let text = late.text().expect("the cell serves the loaded database");
+        let db = UsersDb::parse(core::str::from_utf8(text).expect("utf-8"))
+            .expect("the served database parses");
+        db.authenticate(
+            image::USERS_FIXTURE_USERNAME,
+            image::USERS_FIXTURE_PASSWORD.as_bytes(),
+        )
+        .expect("the planted account authenticates through the installed cell");
+        assert!(
+            sink.ids().contains(&4136),
+            "install audited: {:?}",
+            sink.ids()
+        );
+        // No prompt was drawn and no console read was attempted, so there
+        // is no retry: the silent blank attempt unlocked it outright.
+        assert!(
+            !sink.ids().contains(&4137),
+            "no retry on a silent auto-unlock: {:?}",
             sink.ids()
         );
     }

@@ -1999,16 +1999,20 @@ remains (pending hardware).
   `Security/{Keys,Policy}`, `/Users`, `/Apps`, `/Storage`); the §11
   databases/users are the installer's first-boot job. The volume key is
   **passphrase-derived** (§11): the build provisions a per-volume rustfs
-  `UnlockDescriptor` (random salt + PBKDF2 cost), derives the key from
-  `IMAGE_PASSPHRASE` (blank for both profiles — these are special-case
-  images: the debug image never ships, the installer image is
-  re-provisioned on first boot), provisions the root under it, and plants
-  the plaintext descriptor on the FAT boot partition as `root.unlock` (the
-  LUKS-header analogue the bootstrap reads before mounting). The derived
-  key is written to the sibling `…-rpi.rootkey` file (0600) for host
-  mounting — never inside the image, and re-derivable from `root.unlock` +
-  the blank passphrase. A shippable user root is unlocked by an
-  operator-chosen passphrase the installer sets, never a blank default.
+  `UnlockDescriptor` (random salt + PBKDF2 cost), derives the key from the
+  profile's `passphrase_for` (`INSTALLER_PASSPHRASE` — **blank** — for the
+  installer; `DEBUG_PASSPHRASE` — `root` — for the never-shipped debug
+  image), provisions the root under it, and plants the plaintext descriptor
+  on the FAT boot partition as `root.unlock` (the LUKS-header analogue the
+  bootstrap reads before mounting). The bootstrap tries the **blank**
+  passphrase silently first, so the installer image unlocks with **no
+  prompt** and boots straight into the §11 installer; only a non-blank
+  passphrase (debug `root`, or a production operator-chosen one) draws the
+  `Root passphrase:` prompt. The derived key is written to the sibling
+  `…-rpi.rootkey` file (0600) for host mounting — never inside the image,
+  and re-derivable from `root.unlock` + the profile passphrase. A shippable
+  user root is unlocked by an operator-chosen passphrase the installer sets,
+  never a blank default.
 - Entry points: `cargo xtask image --target aarch64-rpi` and the
   delegating `cargo xtask build --target aarch64-rpi` (`--headless`
   accepted; the image content is identical until installable GUI userland
@@ -3815,8 +3819,11 @@ mode may not collapse it.
 3. mount the read-only `/System` volume and **autoload its signed
    `/System/Drivers/` store against the discovered tree** (`devmgr` match →
    signed gate → user-space spawn), bringing the keyboard up in user space;
-4. prompt for and read the passphrase (now keyboard-served on HDMI), unlock
-   the data root, install the users database.
+4. unlock the data root and install the users database. The bootstrap tries
+   the **blank** passphrase silently first, so the installer image unlocks
+   with **no prompt** at all (§11); only a non-blank passphrase (debug
+   `root`, or a production operator-chosen one) draws the `Root passphrase:`
+   prompt (now keyboard-served on HDMI).
 
 **Staged increments (each one fully-gated; host/`-M virt`-verifiable unless
 marked metal).** The in-kernel `keyboard_service`/`usb_keyboard.rs` scaffold
@@ -4244,18 +4251,21 @@ two users — or the same user twice — can be logged in concurrently.
 
    **Image authoring is landed** (`tools/mkimage`): `build_rpi_image`
    provisions a per-volume `UnlockDescriptor` (random salt +
-   `UNLOCK_DEFAULT_ITERATIONS`), derives the volume key from the blank
-   `IMAGE_PASSPHRASE` (both profiles — these are special-case images:
-   the debug image never ships, the installer image is re-provisioned at
-   install time), provisions the encrypted root under that derived key,
-   and plants the plaintext descriptor on the FAT boot partition as
-   `root.unlock` (`fatboot::ROOT_UNLOCK_NAME`). The obsolete raw
-   `--root-key` *input* is removed (a supplied key could not match the
-   on-image descriptor); the derived key is still emitted to `.rootkey`
-   for host mounting and is re-derivable from `root.unlock` + the blank
-   passphrase. Host-proven by the mkimage tests (the on-FAT descriptor
-   re-derives the exact key; a wrong passphrase is refused with no
-   separate oracle, §5.4). Docs: `docs/src/install/raspberry_pi.md`.
+   `UNLOCK_DEFAULT_ITERATIONS`) and derives the volume key from the
+   profile's `passphrase_for` — `INSTALLER_PASSPHRASE` (**blank**, the
+   installer image re-provisioned at install time) or `DEBUG_PASSPHRASE`
+   (`root`, the never-shipped debug image). The passphrase is not a
+   `build_rpi_image` argument: deriving it from the profile makes it
+   impossible to provision an image under a passphrase that disagrees with
+   the prompt (§2.2). It provisions the encrypted root under the derived
+   key and plants the plaintext descriptor on the FAT boot partition as
+   `root.unlock` (`fatboot::ROOT_UNLOCK_NAME`). The boot path tries the
+   blank passphrase silently, so the installer unlocks with no prompt; the
+   derived key is also emitted to `.rootkey` for host mounting and is
+   re-derivable from `root.unlock` + the profile passphrase. Host-proven by
+   the mkimage tests (the on-FAT descriptor re-derives the exact key per
+   profile; a wrong passphrase is refused with no separate oracle, §5.4).
+   Docs: `docs/src/install/raspberry_pi.md`.
 
    **Still staged** (each its own increment; the chain end to end is
    gated on these):

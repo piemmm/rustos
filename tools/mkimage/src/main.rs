@@ -10,8 +10,9 @@
 //!     [--root-key-out <key file>]
 //! ```
 //!
-//! The root volume is encrypted under a key **derived** from a blank
-//! passphrase (`rustos_mkimage::IMAGE_PASSPHRASE`, `AGENTS.md` §11); the
+//! The root volume is encrypted under a key **derived** from the
+//! profile's passphrase (`rustos_mkimage::passphrase_for`, `AGENTS.md`
+//! §11) — `root` for the debug image, blank for the installer; the
 //! unlock descriptor travels on the boot partition. `--root-key-out`
 //! names where the derived key is written for host-side mounting (default
 //! `<out>.rootkey`).
@@ -27,9 +28,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use rustos_mkimage::firmware::FirmwareManifest;
-use rustos_mkimage::{
-    build_rpi_image, volume_key_to_hex, HostEntropy, ImageProfile, IMAGE_PASSPHRASE,
-};
+use rustos_mkimage::{build_rpi_image, volume_key_to_hex, HostEntropy, ImageProfile};
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = env::args_os().skip(1).collect();
@@ -71,14 +70,8 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     let kernel_elf = std::fs::read(&rpi.kernel)
         .map_err(|e| format!("cannot read kernel ELF {}: {e}", rpi.kernel.display()))?;
 
-    let built = build_rpi_image(
-        &kernel_elf,
-        &firmware,
-        IMAGE_PASSPHRASE,
-        &mut HostEntropy,
-        rpi.profile,
-    )
-    .map_err(|e| e.to_string())?;
+    let built = build_rpi_image(&kernel_elf, &firmware, &mut HostEntropy, rpi.profile)
+        .map_err(|e| e.to_string())?;
 
     if let Some(parent) = rpi.out.parent() {
         if !parent.as_os_str().is_empty() {
@@ -105,8 +98,8 @@ fn run(argv: &[OsString]) -> Result<(), String> {
 
 /// Write the derived root-key file with owner-only permissions: it is the
 /// mount key for the image's root volume (`AGENTS.md` §5.4 secret
-/// hygiene). For these blank-passphrase images it can also be re-derived
-/// from the on-image unlock descriptor; the file is an operator
+/// hygiene). It can also be re-derived from the on-image unlock
+/// descriptor and the profile's passphrase; the file is an operator
 /// convenience for mounting the volume on a host.
 fn write_key_file(path: &std::path::Path, body: &str) -> Result<(), String> {
     std::fs::write(path, body)

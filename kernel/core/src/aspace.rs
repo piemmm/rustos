@@ -167,6 +167,47 @@ impl AddressSpaceRegistry {
         Ok(())
     }
 
+    /// Replace `task`'s registered address-space snapshot with `space`,
+    /// keeping its existing physical map, and return `true` if an entry was
+    /// present to update.
+    ///
+    /// The registry stores a `Send + Sync`
+    /// [`FrozenAddressSpace`](rustos_kernel_mem::vmm::FrozenAddressSpace)
+    /// snapshot rather than the live, `!Sync` arch space (see
+    /// [`rustos_kernel_mem::LiveUserSpace`]). A snapshot frozen at spawn
+    /// describes only the task's spawn-time image and stack; once the task
+    /// maps its own heap (`mem_map`), unmaps it, or a driver maps a granted
+    /// window/DMA buffer, the snapshot is stale and the
+    /// [`rustos_kernel_mem::uaccess`] copy path can no longer see the new
+    /// (or freed) pages. The mutating syscall handler re-freezes the live
+    /// space and calls this to publish the fresh snapshot, so the very next
+    /// `copy_in` / `copy_out` reflects the current mappings (`AGENTS.md`
+    /// §5.4 — the copy path must see exactly the task's live memory; the
+    /// behaviour
+    /// [`FrozenAddressSpace`](rustos_kernel_mem::vmm::FrozenAddressSpace)'s
+    /// docs prescribe for a remap path).
+    ///
+    /// The physical map is left untouched: it is the kernel direct map,
+    /// identical across every snapshot of the same task, so re-freezing only
+    /// the mappings is sufficient and avoids re-boxing it. A task with no
+    /// registered entry is **not** created here — re-freezing concerns only
+    /// a task that already has a space (a kernel task has none and reaches no
+    /// user copy path), so the call is a no-op returning `false` (fail
+    /// closed, `AGENTS.md` §5.4).
+    pub fn reregister_space(
+        &mut self,
+        task: TaskId,
+        space: Box<dyn UserAddressSpace + Send + Sync>,
+    ) -> bool {
+        match self.tasks.get_mut(&task) {
+            Some(entry) => {
+                entry.space = space;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Withdraw `task`'s entry, returning `true` if one was present.
     ///
     /// Idempotent: withdrawing a task with no entry (e.g. a kernel task
@@ -410,6 +451,41 @@ mod tests {
         let (space, _) = reg.resolve(TaskId(3)).expect("first entry intact");
         assert_eq!(space.translate(page(1)).expect("page 1").0, Frame(100));
         assert!(space.translate(page(2)).is_none());
+    }
+
+    #[test]
+    fn reregister_space_swaps_the_snapshot_and_keeps_the_physmap() {
+        let mut reg = AddressSpaceRegistry::new();
+        // Register a snapshot that maps only page 1 (the "spawn-time" view).
+        reg.register(TaskId(5), user_space(1, 100), sim())
+            .expect("first registration succeeds");
+
+        // The freeze-time snapshot cannot see page 2 yet — exactly the stale
+        // state a `login` hit when its heap was mapped after spawn.
+        let (space, _) = reg.resolve(TaskId(5)).expect("registered");
+        assert!(space.translate(page(2)).is_none());
+
+        // Re-freeze: a fresh snapshot that now also maps page 2 (the grown
+        // heap). `reregister_space` reports the task was present.
+        assert!(reg.reregister_space(TaskId(5), user_space(2, 200)));
+
+        // The copy path now sees the newly-mapped page through the same task.
+        let (space, physmap) = reg.resolve(TaskId(5)).expect("still registered");
+        let (frame, flags) = space.translate(page(2)).expect("page 2 now resolves");
+        assert_eq!(frame, Frame(200));
+        assert!(flags.contains(MapFlags::USER));
+        // The physical map survived the swap (its window still translates).
+        assert!(physmap.translate(PhysAddr::new(0), PAGE_SIZE).is_some());
+    }
+
+    #[test]
+    fn reregister_space_of_an_unregistered_task_is_a_no_op() {
+        let mut reg = AddressSpaceRegistry::new();
+        // A task with no entry is never created by a re-freeze (a kernel task
+        // reaches no user copy path); the call fails closed (`AGENTS.md` §5.4).
+        assert!(!reg.reregister_space(TaskId(9), user_space(1, 1)));
+        assert!(!reg.contains(TaskId(9)));
+        assert!(reg.resolve(TaskId(9)).is_none());
     }
 
     #[test]

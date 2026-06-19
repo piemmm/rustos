@@ -21,17 +21,23 @@
 //!   build provisions an
 //!   [`UnlockDescriptor`] (a
 //!   per-volume random salt + PBKDF2 iteration count), derives the volume
-//!   key from [`IMAGE_PASSPHRASE`] under it, provisions the root with that
-//!   key, and lays the plaintext descriptor on the boot partition
+//!   key from the profile's [`passphrase_for`] under it, provisions the
+//!   root with that key, and lays the plaintext descriptor on the boot
+//!   partition
 //!   ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap can re-derive the key
 //!   before mounting. The passphrase itself is never stored in the image.
 //!
 //! Two [`ImageProfile`]s exist. **Installer** is the shippable form: the
-//! root carries no user accounts, and the §11 installer authors
-//! `/System/Security/Users` on first boot. **Debug** is the development
-//! form: the root is seeded with a `root`/`root` account
-//! ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], salted and hashed per build) so
-//! the login prompt is usable without running the installer. A debug image
+//! root carries no user accounts, the §11 installer authors
+//! `/System/Security/Users` on first boot, and its encrypted root is
+//! unlocked by a **blank** passphrase ([`INSTALLER_PASSPHRASE`]) the
+//! bootstrap auto-enters with no prompt, so a fresh install boots straight
+//! into the installer. **Debug** is the development form: the root is
+//! seeded with a `root`/`root` account
+//! ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], salted and hashed per build) and
+//! its encrypted root is unlocked by the matching `root` passphrase
+//! ([`DEBUG_PASSPHRASE`], typed at the `Root passphrase:` prompt), so the
+//! login prompt is usable without running the installer. A debug image
 //! must never ship.
 //!
 //! The builder is driven by `cargo xtask image --target aarch64-rpi` (or
@@ -184,20 +190,47 @@ pub const DEBUG_USERNAME: &str = "root";
 /// ship; the installer image seeds no account at all.
 pub const DEBUG_PASSWORD: &str = "root";
 
-/// Passphrase the `rustos-mkimage` images' encrypted root is unlocked
-/// with — **blank** for both profiles (`AGENTS.md` §11).
+/// Passphrase the **debug** image's encrypted root is unlocked with.
 ///
-/// These are special-case images: the debug image must never ship, and
-/// the installer image's root is **re-provisioned by the §11 installer**,
+/// The debug profile is a bring-up image that must never ship (see
+/// [`ImageProfile::Debug`]); its root account is `root`/`root`
+/// ([`DEBUG_USERNAME`] / [`DEBUG_PASSWORD`]), and for a consistent,
+/// memorable bring-up experience the encrypted-root unlock passphrase is
+/// the same word. The operator types `root` at the `Root passphrase:`
+/// prompt to unlock the volume. Knowable by design — like the seeded
+/// account, it exists only for development hardware.
+pub const DEBUG_PASSPHRASE: &[u8] = b"root";
+
+/// Passphrase the **installer** image's encrypted root is provisioned
+/// under — **blank** (`AGENTS.md` §11).
+///
+/// The installer image's root is **re-provisioned by the §11 installer**,
 /// which sets the user's real, operator-chosen passphrase when it authors
-/// the production root on first boot. Until then a blank passphrase is
-/// auto-entered, so neither image prompts. The volume is still fully
-/// encrypted: a blank passphrase is run through PBKDF2 over the
-/// descriptor's per-volume random salt to derive a real 256-bit
-/// [`VolumeKey`], exactly as a typed one would be. A shippable,
+/// the production root on first boot. Until then a blank passphrase
+/// unlocks it (auto-enterable, so a fresh install does not stall). The
+/// volume is still fully encrypted: a blank passphrase is run through
+/// PBKDF2 over the descriptor's per-volume random salt to derive a real
+/// 256-bit [`VolumeKey`], exactly as a typed one would be. A shippable,
 /// user-installed root MUST be unlocked by a passphrase the operator
 /// chooses at install time — never this blank default.
-pub const IMAGE_PASSPHRASE: &[u8] = b"";
+pub const INSTALLER_PASSPHRASE: &[u8] = b"";
+
+/// The encrypted-root unlock passphrase each [`ImageProfile`] is
+/// provisioned under.
+///
+/// The passphrase is fully determined by the profile (there is no
+/// operator choice at *image-build* time — the §11 installer is where a
+/// real passphrase is chosen), so it is derived here rather than passed in
+/// alongside the profile, which removes any chance of provisioning an
+/// image under a passphrase that disagrees with the one its prompt expects
+/// (`AGENTS.md` §2.2 — one source of truth).
+#[must_use]
+pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
+    match profile {
+        ImageProfile::Debug => DEBUG_PASSPHRASE,
+        ImageProfile::Installer => INSTALLER_PASSPHRASE,
+    }
+}
 
 /// Build the debug-profile `/System/Security/Users` text: the single
 /// `root` account, its password salted from `entropy` and hashed at the
@@ -254,9 +287,9 @@ pub struct RpiImage {
     /// passphrase.
     pub unlock: UnlockDescriptor,
     /// The root volume key the image was provisioned under, derived from
-    /// [`IMAGE_PASSPHRASE`] and [`Self::unlock`]. Mounting the root needs
-    /// it; the key itself is stored nowhere inside the image (it can be
-    /// re-derived from the on-image descriptor and the passphrase).
+    /// the profile's [`passphrase_for`] and [`Self::unlock`]. Mounting the
+    /// root needs it; the key itself is stored nowhere inside the image (it
+    /// can be re-derived from the on-image descriptor and the passphrase).
     pub root_key: VolumeKey,
 }
 
@@ -264,15 +297,18 @@ pub struct RpiImage {
 ///
 /// `kernel_elf` is the freestanding aarch64 `rustos-kernel` ELF;
 /// `firmware` is the verified blob set from
-/// [`firmware::FirmwareManifest::load_dir`]; `passphrase` is the operator
-/// passphrase the root's volume key is derived from (blank for both
-/// `rustos-mkimage` profiles — see [`IMAGE_PASSPHRASE`]); `entropy` draws
-/// the unlock descriptor's salt, the root volume's internal key
-/// hierarchy, and, on a debug build, the seeded account's password salt;
-/// `profile` selects the [`ImageProfile`].
+/// [`firmware::FirmwareManifest::load_dir`]; `entropy` draws the unlock
+/// descriptor's salt, the root volume's internal key hierarchy, and, on a
+/// debug build, the seeded account's password salt; `profile` selects the
+/// [`ImageProfile`] **and** the encrypted-root unlock passphrase
+/// ([`passphrase_for`]) — `root` for the debug image, blank for the
+/// installer (`AGENTS.md` §11). The passphrase is not a separate argument:
+/// deriving it from the profile makes it impossible to provision an image
+/// under a passphrase that disagrees with the one its prompt expects
+/// (`AGENTS.md` §2.2).
 ///
-/// The root is encrypted under a [`VolumeKey`] **derived** from
-/// `passphrase` through a freshly provisioned
+/// The root is encrypted under a [`VolumeKey`] **derived** from the
+/// profile's passphrase through a freshly provisioned
 /// [`UnlockDescriptor`]; the
 /// plaintext descriptor is laid on the boot partition
 /// ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap re-derives the key
@@ -286,7 +322,6 @@ pub struct RpiImage {
 pub fn build_rpi_image(
     kernel_elf: &[u8],
     firmware: &[FirmwareFile],
-    passphrase: &[u8],
     entropy: &mut dyn EntropySource,
     profile: ImageProfile,
 ) -> Result<RpiImage, MkimageError> {
@@ -296,9 +331,11 @@ pub fn build_rpi_image(
     };
     let kernel8 = elfflat::elf_to_flat(kernel_elf)?;
 
-    // Derive the root volume key from the passphrase under a fresh
-    // per-volume descriptor, then lay the (non-secret) descriptor beside
-    // the volume on the boot partition so the bootstrap can re-derive it.
+    // Derive the root volume key from the profile's passphrase under a
+    // fresh per-volume descriptor, then lay the (non-secret) descriptor
+    // beside the volume on the boot partition so the bootstrap can
+    // re-derive it.
+    let passphrase = passphrase_for(profile);
     let unlock = UnlockDescriptor::provision(UNLOCK_DEFAULT_ITERATIONS, entropy)
         .map_err(MkimageError::Unlock)?;
     let root_key = unlock.derive_volume_key(passphrase);
@@ -451,7 +488,6 @@ mod tests {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
-            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Installer,
         )
@@ -487,7 +523,7 @@ mod tests {
         let descriptor = read_unlock_descriptor(&built.image);
         assert_eq!(descriptor, built.unlock);
         assert_eq!(
-            descriptor.derive_volume_key(IMAGE_PASSPHRASE),
+            descriptor.derive_volume_key(INSTALLER_PASSPHRASE),
             built.root_key
         );
 
@@ -497,7 +533,7 @@ mod tests {
         let root_bytes = built.image[root_at..root_at + root_len].to_vec();
         let mut rfs = RustFs::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &descriptor.derive_volume_key(IMAGE_PASSPHRASE),
+            &descriptor.derive_volume_key(INSTALLER_PASSPHRASE),
         )
         .expect("root partition mounts");
         let rustfs_root = rfs.root();
@@ -519,7 +555,6 @@ mod tests {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
-            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Installer,
         )
@@ -563,7 +598,6 @@ mod tests {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
-            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Installer,
         )
@@ -589,7 +623,6 @@ mod tests {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
-            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Debug,
         )
@@ -631,11 +664,29 @@ mod tests {
         assert!(build_rpi_image(
             b"not an elf",
             &test_firmware(),
-            IMAGE_PASSPHRASE,
             &mut TestEntropy(9),
             ImageProfile::Installer
         )
         .is_err());
+    }
+
+    #[test]
+    fn each_profile_maps_to_its_unlock_passphrase() {
+        // The debug image unlocks with `root` (typed at the prompt); the
+        // installer with a blank passphrase (auto-entered, no prompt) —
+        // `AGENTS.md` §11. The two differ, so the wrong-passphrase test
+        // above is a genuine negative.
+        assert_eq!(passphrase_for(ImageProfile::Debug), DEBUG_PASSPHRASE);
+        assert_eq!(
+            passphrase_for(ImageProfile::Installer),
+            INSTALLER_PASSPHRASE
+        );
+        assert_eq!(passphrase_for(ImageProfile::Debug), b"root");
+        assert_eq!(passphrase_for(ImageProfile::Installer), b"");
+        assert_ne!(
+            passphrase_for(ImageProfile::Debug),
+            passphrase_for(ImageProfile::Installer)
+        );
     }
 
     #[test]

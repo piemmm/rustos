@@ -969,9 +969,10 @@ struct ImageArgs {
 /// manifest's pinned source otherwise), `--profile debug|installer`
 /// (default `debug` — the development image seeds the test `root` account;
 /// the installer image seeds none), `--out <path>`, and `--headless`. The
-/// root volume key is derived from a blank passphrase
-/// (`rustos_mkimage::IMAGE_PASSPHRASE`, `AGENTS.md` §11); there is no
-/// operator-supplied key.
+/// root volume key is derived from the profile's passphrase
+/// (`rustos_mkimage::passphrase_for`, `AGENTS.md` §11 — `root` for the
+/// debug image, blank for the installer); there is no operator-supplied
+/// key.
 fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
     let mut target: Option<String> = None;
     let mut firmware_dir: Option<PathBuf> = None;
@@ -1184,7 +1185,6 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let built = rustos_mkimage::build_rpi_image(
         &kernel_elf,
         &firmware,
-        rustos_mkimage::IMAGE_PASSPHRASE,
         &mut rustos_mkimage::HostEntropy,
         profile,
     )
