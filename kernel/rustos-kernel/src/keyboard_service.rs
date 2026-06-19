@@ -430,7 +430,8 @@ mod metal {
     use crate::driver_loader::KernelDriverLoader;
     use crate::usb_keyboard::{
         bring_up_keyboard, ArbiterConsoleSink, ChainHost, FirmwareReset, FirmwareResetFailure,
-        FirmwareResetOutcome, KeyboardPumpDiagnostics, PcieBringup, VL805_FIRMWARE_DEV_ADDR,
+        FirmwareResetOutcome, KeyboardChain, KeyboardPumpDiagnostics, PcieBringup,
+        VL805_FIRMWARE_DEV_ADDR,
     };
 
     /// Audit event: the USB-keyboard service kthread's lifecycle (started,
@@ -1044,33 +1045,69 @@ mod metal {
         }
     }
 
-    /// Spawn the USB-keyboard service kthread if the boot path discovered a
-    /// PCIe bridge **and** the driver-candidate catalogue binds a driver to
-    /// it, returning whether it was started. With no bridge (the `virt`
-    /// shape), an unmatched/tied discovered node
-    /// ([`resolve_discovered_bridge`]), no `'static` frame allocator, or a
-    /// in-kernel driver refused at the signed load gate it starts nothing
-    /// and returns `false`, failing closed (`AGENTS.md` §18.4 / §2.9 / §5.4).
-    /// The capability-gated mapper and DMA host are leaked to `'static`;
-    /// the body runs the bring-up once then polls forever, yielding between
-    /// polls so PID 1 also runs.
-    #[must_use]
-    pub fn spawn_if_present(ctx: &dyn InitSpawnCtx) -> bool {
-        // No discovered bridge is the QEMU `virt` shape, not an error: stay
-        // silent and start nothing (`AGENTS.md` §18.4).
-        let Some(discovery) = *DISCOVERED.lock() else {
-            return false;
-        };
-        // §18 data-driven gate (`plans/PI.md` P10 5c): bring the chain up
-        // only because the driver-candidate catalogue *binds* a driver to
-        // the discovered node — not because a bridge address exists. An
-        // unmatched node (no in-kernel driver claims it), a packaging tie, or an
-        // unrepresentable identity leaves the node unbound, logged, and the
-        // service unstarted (`AGENTS.md` §18.4 / §2.9). The catalogue binds
-        // `brcm,bcm2711-pcie` to `pcie_brcm`, so on the Pi 4 this proceeds.
-        if resolve_discovered_bridge().is_none() {
-            return false;
+    /// The enumerated boot keyboard handed from the synchronous floor
+    /// bring-up ([`bring_up_keyboard_into_tree`]) to the report-pump kthread
+    /// ([`spawn_pump`]).
+    ///
+    /// A [`KeyboardChain`] owns its mapped xHCI register window and DMA
+    /// region (raw device pointers), so it is not auto-`Send`. The hand-off
+    /// is a one-shot transfer of *exclusive* ownership from the boot CPU
+    /// (where the controller was brought up) to the single pump kthread that
+    /// is thereafter its sole owner — never aliased, never concurrently
+    /// accessed — and the device memory it points at is identity-mapped for
+    /// the kernel's lifetime, so moving it across that boundary is sound.
+    pub struct SendKeyboard(KeyboardChain);
+
+    // SAFETY: `SendKeyboard` is the sole, exclusive owner of the keyboard's
+    // mapped MMIO/DMA resources (no aliasing), transferred exactly once from
+    // the boot CPU to the one pump kthread; there is never concurrent or
+    // shared access, so moving the handle between those execution contexts
+    // cannot race (`AGENTS.md` §2.10).
+    unsafe impl Send for SendKeyboard {}
+
+    impl SendKeyboard {
+        /// Borrow the wrapped keyboard for the pump loop.
+        fn keyboard_mut(&mut self) -> &mut KeyboardChain {
+            &mut self.0
         }
+    }
+
+    /// Bring the VL805 USB-HID keyboard online **once** on the boot CPU and
+    /// emit its enumerated identity as a discovered child [`HwNode`]
+    /// (`AGENTS.md` §18.2), returning that node together with the live
+    /// keyboard the report-pump kthread drives ([`spawn_pump`]).
+    ///
+    /// This is design B's floor ownership of USB enumeration (`plans/PI.md`
+    /// B3): the bootstrap-floor bus drivers bring the controller up and
+    /// enumerate the keyboard behind it, so the §18 discovery path sees the
+    /// device like every other one. The caller attaches the returned node to
+    /// the discovered tree ([`crate::unlock_service::augment_boot_tree`])
+    /// before the pre-unlock autoload runs, and hands the keyboard to
+    /// [`spawn_pump`]; the controller is brought up exactly once here, never
+    /// a second time (`AGENTS.md` §2.16 / §2.17 — the in-kernel pump keeps
+    /// driving the keyboard until the B5 flip, with no redundant bring-up).
+    ///
+    /// Returns [`None`], failing closed (`AGENTS.md` §18.4 / §2.9 / §5.4),
+    /// when: no PCIe bridge was discovered (the QEMU `virt` shape); the
+    /// discovered node binds no in-kernel bus driver
+    /// ([`resolve_discovered_bridge`]); the driver trust anchor is
+    /// unavailable; a bus or HID driver is refused at the signed load gate;
+    /// there is no `'static` frame allocator; or the bring-up / enumeration
+    /// fails. The capability-gated MMIO mapper and DMA host are leaked to
+    /// `'static` — a one-shot boot publish, never a per-event allocation.
+    #[must_use]
+    pub fn bring_up_keyboard_into_tree(ctx: &dyn InitSpawnCtx) -> Option<(HwNode, SendKeyboard)> {
+        // No discovered bridge is the QEMU `virt` shape, not an error: stay
+        // silent and bring nothing up (`AGENTS.md` §18.4).
+        let discovery = (*DISCOVERED.lock())?;
+        // §18 data-driven gate (`plans/PI.md` P10 5c): bring the chain up
+        // only because the driver-candidate catalogue *binds* a driver to the
+        // discovered node — not because a bridge address exists. An unmatched
+        // node (no in-kernel driver claims it), a packaging tie, or an
+        // unrepresentable identity leaves the node unbound, logged, and
+        // nothing brought up (`AGENTS.md` §18.4 / §2.9). The catalogue binds
+        // `brcm,bcm2711-pcie` to `pcie_brcm`, so on the Pi 4 this proceeds.
+        resolve_discovered_bridge()?;
         // §8 / §9 load gate (`plans/PI.md` P10 5c-ii): admit the head bus
         // drivers (`pcie_brcm`, `bus_usb`) through the signed
         // `drvhost::Host::load` path — Ed25519 signature verification
@@ -1078,7 +1115,7 @@ mod metal {
         // `CAP_DRV_KERNEL` gates — *before* the chain touches hardware, not
         // a bare `register()` call. A refused admission fails closed: the
         // chain is not brought up (`AGENTS.md` §5.4 / §23.1). The HID driver
-        // is admitted later, once enumeration discovers the device
+        // is admitted below, once enumeration discovers the device
         // (`admit_hid_child`).
         let Some(loader) = KernelDriverLoader::new(&SERIAL_SINK) else {
             log_admission(
@@ -1086,10 +1123,10 @@ mod metal {
                 "(trust-anchor)",
                 "usb-keyboard: driver trust anchor unavailable; not starting",
             );
-            return false;
+            return None;
         };
         if !admit_bus_drivers(&loader) {
-            return false;
+            return None;
         }
         // A discovered bridge with no `'static` frame allocator is worth
         // logging: the keyboard cannot be brought up. Fail closed.
@@ -1103,7 +1140,7 @@ mod metal {
                     fields: &[],
                 },
             );
-            return false;
+            return None;
         };
 
         let caps = service_caps();
@@ -1142,49 +1179,57 @@ mod metal {
             },
         };
 
+        let host = ChainHost::new(caps, mapper, dma);
+        let firmware_reset = VideoCoreFirmwareReset {
+            doorbell_base: *MAILBOX_DOORBELL.lock(),
+        };
+        let delay = GenericTimerDelay::new();
+        // Bring the VL805 up once on the boot CPU. A failure fails closed
+        // (login then parks with no keyboard); the chain logs its own staged
+        // progress to the serial sink.
+        //
+        // Bracket the chain with `CNTPCT_EL0` and compare against the delay's
+        // requested-microsecond tally (`4116`): a multi-second pause whose
+        // requested/elapsed are only a few hundred ms is a timer-rate fault,
+        // not a code-side spin.
+        let start_ticks = read_cntpct();
+        let result = bring_up_keyboard(&host, &bringup, &firmware_reset, &delay, &SERIAL_SINK);
+        let elapsed_ticks = read_cntpct().wrapping_sub(start_ticks);
+        let freq = read_cntfrq();
+        let counter_elapsed_us = if freq == 0 {
+            0
+        } else {
+            elapsed_ticks.saturating_mul(1_000_000) / freq
+        };
+        let (requested_us, delay_calls) = delay.totals();
+        log_bringup_timing(requested_us, delay_calls, counter_elapsed_us);
+        let brought_up = result.ok()?;
+        // §18 re-autoload (`plans/PI.md` P10 5c-ii): re-match the enumerated
+        // HID child against the driver catalogue and admit the winning HID
+        // driver through the signed gate before any key edge can reach the
+        // input arbiter. Fail closed: an unmatched/refused child means the
+        // keyboard is not pumped (`AGENTS.md` §5.4 / §23.1 — an unadmitted
+        // device must not drive input).
+        let loader = KernelDriverLoader::new(&SERIAL_SINK)?;
+        if !admit_hid_child(&loader, &brought_up.hid_node) {
+            return None;
+        }
+        Some((brought_up.hid_node, SendKeyboard(brought_up.keyboard)))
+    }
+
+    /// Spawn the report-pump kthread that drives the already-brought-up
+    /// `keyboard` ([`bring_up_keyboard_into_tree`]) into the input-focus
+    /// arbiter, returning whether it was admitted.
+    ///
+    /// The kthread polls the keyboard forever, yielding between polls so
+    /// PID 1 keeps running; a `pump_once` error is non-fatal and folded into
+    /// the bounded pump diagnostics (`4129` first report, `4130` pump error,
+    /// `4131` heartbeat). The controller is **not** brought up here — that
+    /// happened once on the boot CPU — so this never touches the VL805 a
+    /// second time (`plans/PI.md` B3 / `AGENTS.md` §2.16).
+    #[must_use]
+    pub fn spawn_pump(ctx: &dyn InitSpawnCtx, mut keyboard: SendKeyboard) -> bool {
         let body = move |yielder: &mut dyn YieldHandle| {
-            let host = ChainHost::new(caps, mapper, dma);
-            let firmware_reset = VideoCoreFirmwareReset {
-                doorbell_base: *MAILBOX_DOORBELL.lock(),
-            };
-            let delay = GenericTimerDelay::new();
-            // Bring the VL805 up once. A failure ends the service
-            // fail-closed (the login parks with no keyboard); the chain logs
-            // its own staged progress to the serial sink.
-            //
-            // Bracket the chain with `CNTPCT_EL0` and compare against the
-            // delay's requested-microsecond tally (`4116`): a multi-second
-            // pause whose requested/elapsed are only a few hundred ms is a
-            // timer-rate fault, not a code-side spin.
-            let start_ticks = read_cntpct();
-            let result = bring_up_keyboard(&host, &bringup, &firmware_reset, &delay, &SERIAL_SINK);
-            let elapsed_ticks = read_cntpct().wrapping_sub(start_ticks);
-            let freq = read_cntfrq();
-            let counter_elapsed_us = if freq == 0 {
-                0
-            } else {
-                elapsed_ticks.saturating_mul(1_000_000) / freq
-            };
-            let (requested_us, delay_calls) = delay.totals();
-            log_bringup_timing(requested_us, delay_calls, counter_elapsed_us);
-            let brought_up = match result {
-                Ok(brought_up) => brought_up,
-                Err(_) => return,
-            };
-            // §18 re-autoload (`plans/PI.md` P10 5c-ii): re-match the
-            // enumerated HID child against the driver catalogue and admit
-            // the winning HID driver through the signed gate before any
-            // key edge reaches the input arbiter. Fail closed: an
-            // unmatched/refused child means the keyboard is not pumped
-            // (`AGENTS.md` §5.4 / §23.1 — an unadmitted device must not
-            // drive input).
-            let Some(loader) = KernelDriverLoader::new(&SERIAL_SINK) else {
-                return;
-            };
-            if !admit_hid_child(&loader, &brought_up.hid_node) {
-                return;
-            }
-            let mut keyboard = brought_up.keyboard;
             let mut console = KeyboardConsole::new();
             let mut sink = ArbiterConsoleSink::new(&INPUT_FOCUS);
             let mut diagnostics = KeyboardPumpDiagnostics::new();
@@ -1193,7 +1238,7 @@ mod metal {
             // folded into `diagnostics`, which emits bounded audit events
             // (`4129` first report, `4130` pump error, `4131` heartbeat).
             loop {
-                let result = pump_once(&mut keyboard, &mut console, &mut sink);
+                let result = pump_once(keyboard.keyboard_mut(), &mut console, &mut sink);
                 diagnostics.record(result, &SERIAL_SINK);
                 yielder.yield_now();
             }
@@ -1206,9 +1251,9 @@ mod metal {
                 level: if started { Level::Info } else { Level::Error },
                 id: KEYBOARD_SERVICE,
                 message: if started {
-                    "usb-keyboard service kthread admitted (bring-up runs on first dispatch)"
+                    "usb-keyboard report-pump kthread admitted"
                 } else {
-                    "usb-keyboard service kthread could not be admitted"
+                    "usb-keyboard report-pump kthread could not be admitted"
                 },
                 fields: &[],
             },
@@ -1218,7 +1263,10 @@ mod metal {
 }
 
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-pub use metal::{record_discovery, record_mailbox_doorbell, spawn_if_present};
+pub use metal::{
+    bring_up_keyboard_into_tree, record_discovery, record_mailbox_doorbell, spawn_pump,
+    SendKeyboard,
+};
 
 #[cfg(test)]
 mod tests {

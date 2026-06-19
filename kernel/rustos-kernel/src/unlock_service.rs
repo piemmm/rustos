@@ -26,6 +26,9 @@
 //! Raspberry Pi 4 is the staged metal increment), so this arch-neutral core
 //! names no architecture (`AGENTS.md` §17.2 / §2.20).
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
@@ -111,6 +114,50 @@ pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64, tree: &'static [
 #[must_use]
 pub fn take_boot() -> UnlockBoot {
     *UNLOCK_BOOT.lock()
+}
+
+/// Append one bus-enumerated child `node` to `existing`, yielding the
+/// extended node list.
+///
+/// The pure, allocation-bounded core of [`augment_boot_tree`], factored out
+/// so the tree-extension policy is host-tested without touching the boot
+/// stash global (`AGENTS.md` §2.2 / §7). The order is preserved and the new
+/// node is appended last; a node is always added, never silently dropped
+/// (`AGENTS.md` §24.1 — a growable `Vec`, no fixed-capacity ceiling).
+#[must_use]
+fn extended_tree(existing: &[HwNode], node: &HwNode) -> Vec<HwNode> {
+    let mut nodes = Vec::with_capacity(existing.len() + 1);
+    nodes.extend_from_slice(existing);
+    nodes.push(*node);
+    nodes
+}
+
+/// Attach one bus-enumerated child `node` to the discovered boot hardware
+/// tree and re-publish the extended tree through [`record_boot`], so the
+/// pre-unlock autoload ([`take_boot`]) matches it against the signed
+/// `/System/Drivers/` store like every other discovered device
+/// (`AGENTS.md` §18.2 — bus children are enumerated by the floor bus
+/// drivers and attached to the tree as further nodes).
+///
+/// Design B (`plans/PI.md` B3): the bootstrap-floor USB bring-up enumerates
+/// the HID keyboard behind the VL805 controller **once** and emits its
+/// [`describe_device`](rustos_abi::hwtree) node here, *before* the unlock
+/// kthread reads the stash, so the §18 discovery path sees the keyboard
+/// rather than it living only inside the imperative bring-up. The keyboard's
+/// signed driver bundle is not in the store until the B5 flip, so `devmgr`
+/// leaves the node unbound (`AGENTS.md` §18.4) and the in-kernel bring-up
+/// keeps driving the keyboard (`AGENTS.md` §2.17) until then.
+///
+/// The previously-leaked tree slice is superseded; the few-node extension
+/// is a one-shot boot publish (like the boot path's own `Box::leak` of the
+/// tree), never a per-event allocation (`AGENTS.md` §2.1).
+///
+/// MUST be called **after** the MMU is enabled and **before** the unlock
+/// kthread reads the stash (see [`record_boot`] / [`take_boot`]).
+pub fn augment_boot_tree(node: &HwNode) {
+    let boot = take_boot();
+    let tree: &'static [HwNode] = Box::leak(extended_tree(boot.tree, node).into_boxed_slice());
+    record_boot(boot.binding, boot.dtb, tree);
 }
 
 /// The console-0 input ownership gate (`plans/PI.md` P11 Chunk B-2 item 5).
@@ -507,6 +554,31 @@ mod tests {
         assert!(boot.binding.is_none());
         assert_eq!(boot.dtb, 0xDEAD_0000);
         assert!(boot.tree.is_empty());
+    }
+
+    #[test]
+    fn extending_the_tree_appends_the_bus_child_in_order() {
+        use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
+
+        // A minimal discovered tree (a root + a discovered bus), as the
+        // floor leaves it before the USB bring-up enumerates a child.
+        let existing = [
+            HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(2, 1, HwDeviceClass::Bus),
+        ];
+        // The bus-enumerated HID child (`AGENTS.md` §18.2), keyed by the
+        // usb interface-class match key the bring-up reads (never
+        // fabricated, §18.5).
+        let mut hid = HwNode::new(3, 2, HwDeviceClass::Input);
+        hid.push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+            .expect("match key fits");
+
+        let extended = extended_tree(&existing, &hid);
+
+        assert_eq!(extended.len(), 3, "the child is appended, nothing dropped");
+        assert_eq!(extended[0], existing[0], "existing nodes keep their order");
+        assert_eq!(extended[1], existing[1]);
+        assert_eq!(extended[2], hid, "the enumerated child lands last");
     }
 
     /// A [`Sink`] that records each logged event's id and message so a test

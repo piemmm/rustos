@@ -2274,10 +2274,12 @@ keyboard service kthread**:
   aperture, §5.4). A `GenericTimerDelay` over `kernel_arch::busy_delay_us`
   (`CNTPCT_EL0`) drives the link-training settle waits.
 - The PID 1 spawn seam (`init_spawn`) calls
-  `keyboard_service::spawn_if_present(ctx)` **before** `admit_init` drives
-  the dispatch loop, so the service kthread is admitted onto the boot CPU's
-  run queue and runs alongside PID 1. The body runs `bring_up_keyboard`
-  once, then loops `usb_hid::pump_once` into the input-focus arbiter
+  `keyboard_service::bring_up_keyboard_into_tree(ctx)` **before** `admit_init`
+  drives the dispatch loop: it runs `bring_up_keyboard` once on the boot CPU,
+  emits the enumerated HID node into the boot tree (design B / B3), and hands
+  the live keyboard to `keyboard_service::spawn_pump`, whose kthread is
+  admitted onto the boot CPU's run queue and runs alongside PID 1 looping
+  `usb_hid::pump_once` into the input-focus arbiter
   (`ArbiterConsoleSink`), yielding between polls (§2.1). A bring-up failure
   ends the service fail-closed (the video login parks with no keyboard,
   §2.9); with no discovered bridge (the `virt` shape) nothing is started.
@@ -2286,7 +2288,7 @@ keyboard service kthread**:
   events to the serial sink so a silent keyboard is diagnosable from a UART
   capture alone (§2.16/§19.4 — never on the poll loop): `boot_aarch64`
   logs the discovered `brcm,bcm2711-pcie` chipset windows (id `4100`),
-  `spawn_if_present` logs the kthread admitted/skipped (id `4103`), and
+  `spawn_pump` logs the report-pump kthread admitted/skipped (id `4103`), and
   `bring_up_keyboard` logs each stage and the failing stage+`DriverError`
   (id `4101`), a one-shot post-link PCIe configuration scan listing every
   responding function (`function_count_hex` + per-function
@@ -3142,9 +3144,9 @@ table, so a new board is match **data**, not new code. Sub-increments
     are admission-only (§8 capability check), so the gate uses a plain
     `Host` with no MMIO/DMA host; the real register-window mapping + DMA
     carve still run over the keyboard service's own capability-gated
-    `ChainHost` after admission. `keyboard_service::spawn_if_present` admits
-    `pcie_brcm` + `bus_usb` before bring-up (fail closed → no service), and
-    the service body **re-matches the enumerated HID child** against the
+    `ChainHost` after admission. `keyboard_service::bring_up_keyboard_into_tree`
+    admits `pcie_brcm` + `bus_usb` before bring-up (fail closed → no service),
+    and **re-matches the enumerated HID child** against the
     catalogue (`bring_up_keyboard` now returns the keyboard + the
     `UsbDevice::describe_device` `HwNode`) and admits `usb_hid` before the
     report pump (fail closed → no input). Audited at `EventId(4132)`.
@@ -3748,7 +3750,8 @@ table, so a new board is match **data**, not new code. Sub-increments
           driver store" below):** the store must live on a volume reachable
           *before* the encrypted-root passphrase, so the bundle is laid into
           the read-only `/System` volume, not the encrypted root.
-        - **5e / (d):** flip `init_spawn`'s `keyboard_service::spawn_if_present`
+        - **5e / (d):** flip `init_spawn`'s
+          `keyboard_service::bring_up_keyboard_into_tree` / `spawn_pump`
           to the autoload path and delete the in-kernel scaffold + evict
           `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS`, in the same change
           (§2.14). **This is the *last* design-B increment** (see below): it is
@@ -3854,9 +3857,36 @@ keyboard never regresses (§2.17), until the final flip:
   hold it. `autoload_input_qemu_aarch64` proves the full discover→signed
   gate→spawn→`key_inject` path runs pre-unlock (PASS on
   `AuditEvent::InputDelivered` 4050).
-- **B3 — metal USB→`hwtree` enumeration (metal-gated).** The floor PCIe/USB
-  bring-up emits the HID-keyboard node into the tree so `devmgr` autoloads
-  `usb_kbd`; host-tested decode + a §0.9 metal checklist.
+- **B3 — floor USB→`hwtree` enumeration. HOST-COMPLETE; metal acceptance
+  pending.** Design A (operator-approved): the bootstrap-floor USB bring-up
+  **owns** xHCI enumeration and emits the discovered HID-keyboard node into
+  the boot hardware tree, so the §18 discovery path sees the keyboard like
+  every other device (`AGENTS.md` §18.2). The controller is brought up
+  **once**, on the boot CPU at the init seam:
+  `keyboard_service::bring_up_keyboard_into_tree(ctx)` runs the VL805 chain
+  (the former kthread bring-up, unchanged) and returns the
+  `UsbDevice::describe_device` `HwNode` plus the live keyboard wrapped in a
+  one-shot-exclusive-owner `SendKeyboard` (`unsafe impl Send`, §2.10);
+  `init_spawn` attaches the node to the discovered tree via the host-tested
+  `unlock_service::augment_boot_tree` (the pure `extended_tree` core, §2.2)
+  **before** the unlock kthread reads `take_boot().tree`, then
+  `keyboard_service::spawn_pump(ctx, keyboard)` runs the report pump only
+  (no second bring-up, §2.16). The in-kernel pump stays the live keyboard
+  driver (§2.17) and `devmgr` leaves the node **unbound** — the metal
+  `/System/Drivers/` store carries no `usb_kbd` bundle until the B5 flip
+  (§18.4). The path is inert on `-M virt`/host (it only fires when a
+  `brcm,bcm2711-pcie` bridge is discovered), so the QEMU matrix is
+  unaffected; the live VL805 enumeration into the tree has no Pi-board QEMU
+  vertical (§0.4) and is metal-gated. Host-proven: `extended_tree` order
+  test + the engine's existing `bring_up`/`describe_device` suite; the
+  freestanding aarch64 kernel builds clean. **Metal checklist (operator,
+  §0.9):** re-flash (`cargo xtask image --target aarch64-rpi`), confirm the
+  on-screen `Username:` prompt still takes keystrokes (the pump still drives
+  the keyboard — parity), and supply the UART log showing the keyboard
+  brought up once at the init seam (the `4129`/`4131` records) **and** a
+  `devmgr` *unbound* record for the enumerated HID node (matched against the
+  store, no bundle yet) — i.e. the node reached the autoload tree without a
+  second bring-up.
 - **B4 — live EMMC2 root bring-up (metal-gated).** INCREMENT (2) item (a):
   `raspi4b` cannot model EMMC2, so host-tested + metal checklist.
 - **B5 (= 5e/(d)) — the flip.** Repoint `init_spawn` to the autoload path,

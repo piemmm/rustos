@@ -686,8 +686,8 @@ order (one fully-gated increment each):
        key as the kernel's trust anchor; `driver_loader::ChainDriverLoader`
        runs the full load pipeline (signature + `CAP_DRV_LOAD` /
        `CAP_DRV_KERNEL` gates, bind-table validation, in-process `register()`
-       hand-off). `keyboard_service::spawn_if_present` admits `pcie_brcm` +
-       `bus_usb` before bring-up and re-matches the enumerated HID child
+       hand-off). `keyboard_service::bring_up_keyboard_into_tree` admits
+       `pcie_brcm` + `bus_usb` before bring-up and re-matches the enumerated HID child
        (`bring_up_keyboard` now yields the keyboard + its
        `UsbDevice::describe_device` `HwNode`) to admit `usb_hid` before the
        report pump — fail closed at each step (`AGENTS.md` §5.4). The chain
