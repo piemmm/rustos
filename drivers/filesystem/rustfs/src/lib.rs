@@ -592,6 +592,9 @@ impl<B: Block> RustFs<B> {
     /// * [`DriverError::Unsupported`] if `dir` is not a directory or the
     ///   source is not a regular file.
     /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or too long.
+    /// * [`DriverError::PermissionDenied`] if the handle is read-only — the
+    ///   refusal is returned **before** any state is touched, so a read-only
+    ///   `/System` mount never dirties the device (`AGENTS.md` §5.4 / §18.6).
     /// * [`DriverError::DeviceFault`] on an unrecoverable block or metadata
     ///   failure (fail-closed, `AGENTS.md` §5.4 / §2.9).
     pub fn reflink(
@@ -600,6 +603,7 @@ impl<B: Block> RustFs<B> {
         src_name: &[u8],
         dst_name: &[u8],
     ) -> Result<NodeId, DriverError> {
+        self.deny_if_read_only()?;
         self.begin();
         let result = self.reflink_inner(dir, src_name, dst_name);
         if result.is_err() {
@@ -2521,9 +2525,13 @@ impl<B: Block> RustFs<B> {
     ///
     /// # Errors
     ///
+    /// * [`DriverError::PermissionDenied`] if the handle is read-only — the
+    ///   refusal is returned **before** any state is touched, so a read-only
+    ///   `/System` mount never dirties the device (`AGENTS.md` §5.4 / §18.6).
     /// * [`DriverError::NotFound`] if `node` does not name a live inode.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     pub fn set_security(&mut self, node: NodeId, sec: Security) -> Result<(), DriverError> {
+        self.deny_if_read_only()?;
         self.begin();
         let result = self.set_security_inner(node, sec);
         if result.is_err() {

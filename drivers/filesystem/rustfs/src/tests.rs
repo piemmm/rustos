@@ -261,6 +261,18 @@ fn a_read_only_mount_refuses_every_mutation_fail_closed() {
         ro.truncate(root, b"file", 0),
         Err(DriverError::PermissionDenied)
     );
+    // The inherent mutators (not part of a `Filesystem*` trait) fail closed
+    // too — they must early-deny, not rely on the `commit` backstop after
+    // dirtying the device (`AGENTS.md` §5.4 / §18.6).
+    assert_eq!(
+        ro.reflink(root, b"file", b"clone"),
+        Err(DriverError::PermissionDenied)
+    );
+    let node = ro.lookup(root, b"file").expect("the original file exists");
+    assert_eq!(
+        ro.set_security(node, Security::new(0o600, 0, 0)),
+        Err(DriverError::PermissionDenied)
+    );
     // The refused create never appeared, and the existing file is intact.
     assert!(ro.lookup(root, b"new").is_err());
     let node = ro
@@ -274,15 +286,30 @@ fn a_read_only_mount_refuses_every_mutation_fail_closed() {
 #[test]
 fn a_read_only_mount_never_writes_the_device() {
     // A read-only handle must not mutate a single byte of the backing
-    // device — no mount-time companion repairs, no anything.
-    let bytes = fmt(512, 256, 32).into_block().bytes();
+    // device — no mount-time companion repairs, no anything. Author a real
+    // file so the inherent `reflink`/`set_security` mutators below exercise
+    // their *full* copy-on-write/inode-write path (a live source, a live
+    // node) and must still refuse before touching the device.
+    let mut authored = fmt(512, 256, 32);
+    let authored_root = authored.root();
+    authored
+        .create(authored_root, b"x", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(authored.write_at(authored_root, b"x", 0, b"payload"), Ok(7));
+    let bytes = authored.into_block().bytes();
     let before = bytes.clone();
     let mut ro = RustFs::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
         .expect("read-only mount");
-    // Touch the read path and attempt (refused) mutations.
+    // Touch the read path and attempt (refused) mutations — including the
+    // inherent `reflink`/`set_security` mutators, which must refuse before
+    // writing a single block (their old `commit`-only backstop would have
+    // dirtied free blocks first, `AGENTS.md` §5.4 / §18.6 / §2.16).
     let root = ro.root();
+    let node = ro.lookup(root, b"x").expect("the authored file exists");
     let _ = ro.read_dir(root, 0, &mut [0u8; 64]);
-    let _ = ro.create(root, b"x", NodeKind::RegularFile);
+    let _ = ro.create(root, b"z", NodeKind::RegularFile);
+    let _ = ro.reflink(root, b"x", b"y");
+    let _ = ro.set_security(node, Security::new(0o600, 0, 0));
     let after = ro.into_block().bytes();
     assert_eq!(
         after, before,
