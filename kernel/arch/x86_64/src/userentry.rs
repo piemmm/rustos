@@ -14,9 +14,18 @@
 //!
 //! # Interrupt and GS state on entry
 //!
-//! `RFLAGS` is built with `IF` clear, so ring 3 runs with interrupts
-//! masked — matching the riscv64 (`SSTATUS.SPIE` clear) and aarch64
-//! (`DAIF` masked) ports.
+//! `RFLAGS` is built with `IF` **set**, so ring 3 runs with interrupts
+//! enabled and is therefore preemptible: the periodic LAPIC-timer IRQ the
+//! production boot arms (`crate::preempt::init_local_preempt`) is taken in
+//! user mode and drives the ring-3 preempt point
+//! (`plans/PI.md` D2b-2b-A P-1c) — the x86_64 analogue of aarch64's
+//! preemptible-EL0 `SPSR` and riscv64's U-mode supervisor-timer rule. The
+//! *kernel* stays non-preemptible: it never executes `sti`, so it always
+//! runs with `IF == 0`, and a maskable timer IRQ is only ever *taken* once
+//! this `iretq` lands in ring 3 (the dispatcher gates the preempt point on
+//! the interrupted `CS` regardless). Only the LAPIC timer is unmasked at
+//! boot; device IRQs stay masked at the IO-APIC until a driver binds, so
+//! enabling `IF` in ring 3 admits no other interrupt source yet.
 //!
 //! `iretq` does **not** swap `GS`. The production syscall entry stub
 //! (`crate::syscall_entry::syscall_entry_stub`) `swapgs`es on entry and
@@ -64,10 +73,14 @@ const USER_CS: u64 = ((crate::gdt::USER_CS_INDEX << 3) | 3) as u64;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const USER_SS: u64 = ((crate::gdt::USER_DS_INDEX << 3) | 3) as u64;
 /// `RFLAGS` for the `iretq` frame: bit 1 is the architecturally
-/// reserved-one bit; `IF` (bit 9) is left clear so ring 3 starts with
-/// interrupts masked (parity with the riscv64/aarch64 ports).
+/// reserved-one bit; `IF` (bit 9) is **set** so ring 3 runs with
+/// interrupts enabled and the periodic LAPIC timer can preempt a runaway
+/// user task (`plans/PI.md` D2b-2b-A P-1c). The kernel itself never sets
+/// `IF` (it issues no `sti`), so it stays non-preemptible; this only makes
+/// *user* mode interruptible (parity with aarch64's preemptible-EL0 `SPSR`
+/// and riscv64's U-mode supervisor-timer rule).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-const USER_RFLAGS: u64 = 1 << 1;
+const USER_RFLAGS: u64 = (1 << 1) | (1 << 9);
 
 /// Drop to ring 3 at `entry` with stack pointer `sp` and `rdi` set.
 ///

@@ -526,27 +526,36 @@ pub unsafe fn install_kernel_rsp0(
     }
 }
 
-/// Repoint the per-CPU [`SyscallTls::kernel_rsp0`] for `cpu_index` at
-/// `kernel_rsp0` *without* touching `IA32_KERNEL_GS_BASE` or the
-/// `user_rsp_save` slot.
+/// Repoint *both* per-CPU kernel-entry stacks for `cpu_index` — the
+/// `syscall` entry stack ([`SyscallTls::kernel_rsp0`], `gs:0`) **and** the
+/// trap entry stack (`TSS.RSP0`) — at `kernel_rsp0`, without touching
+/// `IA32_KERNEL_GS_BASE` or the `user_rsp_save` slot.
 ///
-/// This is the per-resume half of the X1 user-kthread `pre_resume` hook
-/// (`plans/PI.md` §X). [`install_kernel_rsp0`] runs once per CPU at boot and
-/// returns the address to load into `IA32_KERNEL_GS_BASE`; thereafter the
-/// `gs:` base is fixed and only the *value* in the slot must change. When
-/// the scheduler is about to resume a user kthread, the kernel stack the
-/// next `syscall` from that task must pivot onto is **that task's own**
-/// kernel stack — on aarch64 the EL1 trap reuses the running kthread's
-/// `SP_EL1` implicitly, but on x86_64 the entry stub reads the stack top
-/// from this per-CPU field, so it must be repointed explicitly before each
-/// resume or two tasks' syscall handlers would collide on one stack (a
-/// correctness *and* isolation defect, `AGENTS.md` §4).
+/// This is the per-resume half of the user-kthread `pre_resume` hook
+/// (`plans/PI.md` §X, D2b-2b-A P-1c). [`install_kernel_rsp0`] runs once per
+/// CPU at boot and returns the address to load into `IA32_KERNEL_GS_BASE`;
+/// thereafter the `gs:` base is fixed and only the *value* in the slot must
+/// change. When the scheduler is about to resume a user kthread, the kernel
+/// stack the next entry from that task must pivot onto is **that task's
+/// own** kernel stack — on aarch64 the EL1 trap reuses the running
+/// kthread's `SP_EL1` implicitly, but on x86_64 a user→kernel transition
+/// reads a per-CPU field: `syscall`/`sysret` reads `gs:0` (this module's
+/// TLS) and an **interrupt or exception** (e.g. the P-1c preemption timer,
+/// a `#PF`/`#GP`) reads `TSS.RSP0`. The two are one and the same per-task
+/// stack (as on Linux), so they are repointed **together** here — one
+/// definition (`AGENTS.md` §2.2) that cannot diverge, rather than each
+/// resume site repeating two writes. Repointing only one would let an
+/// involuntary preemption (or fault) of one task land on another task's —
+/// or the boot — kernel stack and corrupt it (a correctness *and* isolation
+/// defect, `AGENTS.md` §4).
 ///
 /// The value is validated exactly as [`install_kernel_rsp0`] validates it
 /// ([`validate_kernel_rsp0`]: non-null, 16-byte aligned, canonical, kernel
-/// half) before it is written, so a hostile or buggy stack top is rejected
-/// fail-closed (`AGENTS.md` §3.5 / §5.4) rather than installed as a stack-
-/// pivot vector.
+/// half) before either field is written, so a hostile or buggy stack top is
+/// rejected fail-closed (`AGENTS.md` §3.5 / §5.4) rather than installed as a
+/// stack-pivot vector. The `TSS.RSP0` repoint is freestanding-only (the TSS
+/// is real hardware state); a host test exercises the `gs:0` path and the
+/// shared validator.
 ///
 /// # Errors
 ///
@@ -555,6 +564,9 @@ pub unsafe fn install_kernel_rsp0(
 ///   registered).
 /// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
 ///   `kernel_rsp0` is null, misaligned, non-canonical, or in the user half.
+/// * [`crate::percpu::InitError::NotInitialised`] (freestanding) if the
+///   per-CPU `TSS` slot for `cpu_index` has not been finalised by
+///   [`crate::percpu::init`] — never the case at resume time.
 ///
 /// Indexes the registered [`SyscallTlsStorage`] on every target: a host
 /// test registers a backing first, so the same bound-then-validate-then-
@@ -573,6 +585,23 @@ pub fn set_kernel_rsp0(cpu_index: usize, kernel_rsp0: u64) -> Result<(), crate::
     // entry stub. `slot` points inside the `&'static` registered storage.
     unsafe {
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).kernel_rsp0), kernel_rsp0);
+    }
+    // Repoint the trap entry stack (`TSS.RSP0`) at the *same* per-task kernel
+    // stack, so an interrupt/exception taken from ring 3 (the P-1c preemption
+    // timer, a `#PF`/`#GP`) lands on this task's own kernel stack — not the
+    // boot-time `TSS.RSP0` a concurrently parked task would also use. The two
+    // user→kernel entry paths share one stack (`AGENTS.md` §2.2), so they are
+    // repointed in lock-step here.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        // SAFETY: this runs on the dispatcher's context on `cpu_index` (the
+        // resuming CPU) with interrupts disabled (the kernel issues no `sti`),
+        // so no ring-3→ring-0 delivery races the `TSS.RSP0` write;
+        // `install_tss_rsp0` re-validates the (already-validated) stack top and
+        // fails closed if this CPU's `percpu::init` has not finalised the slot.
+        unsafe {
+            crate::percpu::install_tss_rsp0(cpu_index, kernel_rsp0)?;
+        }
     }
     Ok(())
 }

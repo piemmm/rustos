@@ -238,10 +238,31 @@ mod kernel {
 
         syscall_entry::set_dispatch_callback(record_and_exit);
 
-        // SAFETY: the new space maps the low 32 MiB and the higher-half
-        // kernel window, so the currently executing RIP, the current
-        // stack, the per-CPU `swapgs` TLS, and `record_and_exit` all stay
-        // mapped across the switch.
+        // Identity-map the architectural LAPIC MMIO page (supervisor-only).
+        // The production boot now arms ring-3 preemption (P-1c): a periodic
+        // LAPIC-timer IRQ is taken while the stub runs in ring 3 (under this
+        // CR3), and its ISR reads the LAPIC ID register and writes EOI at
+        // `LAPIC_BASE_PHYS`. Without this mapping that kernel-mode MMIO access
+        // would page-fault under the minimal user CR3 (`AGENTS.md` §2.17) — the
+        // same page the production / timeshare spaces map. The preempt callback
+        // then no-ops here (no user kthread is published), so preemption stays
+        // transparent to this round-trip.
+        if space
+            .map_4k(
+                &PAGE_TABLE_POOL,
+                rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+                rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+                true,
+            )
+            .is_none()
+        {
+            qemu_exit::exit_failure();
+        }
+
+        // SAFETY: the new space maps the low 32 MiB, the higher-half kernel
+        // window, and the LAPIC MMIO page, so the currently executing RIP, the
+        // current stack, the per-CPU `swapgs` TLS, `record_and_exit`, and the
+        // timer ISR's LAPIC access all stay mapped across the switch.
         unsafe { space.switch() };
 
         // SAFETY: `user_entry` aliases the executable USER|R|X stub page

@@ -1510,6 +1510,48 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // PI Stage D2b-2b-A P-1c (`plans/PI.md`): the x86_64 involuntary-preemption
+    // vertical — the cross-port sibling of the aarch64/riscv64 preempt tests,
+    // proving the production LAPIC-timer interrupt preempts a **runaway** ring-3
+    // task. Unlike the other ports, the ring-3 transition needs the GDT ring-3
+    // selectors, the TSS, and `syscall`/`IA32_LSTAR` entry installed, so the
+    // test boots the production `rustos-kernel` pipeline (which also programs
+    // the periodic LAPIC timer in `preempt::init_local_preempt`); only the audit
+    // sink is replaced. On `BootCompleted` it enables `IA32_EFER.NXE`, builds
+    // **one** hardware-isolated ring-3 address space from the pure-Rust
+    // `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
+    // issues no syscall, built PIE + converted to `rxe` by `build.rs`) through
+    // the capability-checked, audited `kernel_core::spawn_image`, and admits it
+    // as a resumable user kthread whose `pre_resume` hook reloads CR3 and
+    // repoints **both** the per-CPU `syscall` entry stack
+    // (`syscall_entry::set_kernel_rsp0`) and the `TSS.RSP0` trap stack
+    // (`percpu::install_tss_rsp0`) at the task's own kernel stack. It then arms
+    // the **production** ring-3-preemption path verbatim (`AGENTS.md` §2.2 — the
+    // `rustos_arch_x86_64::preempt::set_preempt_callback` surface the bin crate's
+    // `install_irq_dispatch` uses): a callback that `reschedule_current(_,
+    // Yield)`s the running task. Ring 3 runs preemptible (`userentry`'s `IF`-set
+    // `RFLAGS`), so a LAPIC-timer tick taken while the spinner runs lands on the
+    // timer ISR and (gated on the saved `CS` RPL) drives the preempt point.
+    // Because the loop never traps, the only way it leaves ring 3 before its
+    // final `exit` is an involuntary preemption. PASS once the preempt callback
+    // fired at least once AND the task — resumed mid-loop after each preemption —
+    // still completed and exited; a preemption that never fires (the `step`
+    // spins forever inside ring 3) or a botched resume (the task never exits)
+    // times out (fail-loud, `AGENTS.md` §7). Single CPU; a 120-second budget
+    // covers the multi-tick busy loop under QEMU TCG.
+    QemuTest {
+        package: "rustos-test-preempt-el0-qemu-x86-64",
+        binary: "rustos-test-preempt-el0-qemu-x86-64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
     // script compiles the pure-Rust driver-stub fixture

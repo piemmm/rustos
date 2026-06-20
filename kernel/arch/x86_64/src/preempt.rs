@@ -53,7 +53,7 @@ use crate::apic::{Lapic, LapicMmio};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::apic_timer::{self, Calibration};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use crate::interrupts::SavedRegs;
+use crate::interrupts::{InterruptStackFrame, SavedRegs};
 
 /// IDT vector the LAPIC timer fires on.
 ///
@@ -74,6 +74,33 @@ pub const TIMER_VECTOR: u8 = 0x20;
 /// operation.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+
+/// The preemption callback the timer ISR forwards each tick **taken from
+/// ring 3** to, packed into a `usize`. Installed by the binary before the
+/// timer is armed; absent (`0`) the tick is pure accounting and nothing is
+/// preempted, so an image that arms the timer without wiring preemption
+/// simply keeps cooperative scheduling (fail-safe, `AGENTS.md` §2.9).
+///
+/// This is the x86_64 sibling of the aarch64/riscv64 `PREEMPT_CALLBACK_FN`
+/// (`AGENTS.md` §2.21 — the same shape over the Arch HAL): the involuntary
+/// analogue of the cooperative reschedule the `syscall` path drives. A
+/// timer interrupt taken while ring 3 was running is delivered through the
+/// IDT interrupt gate onto the interrupted task's own kernel stack (the
+/// `TSS.RSP0` the resume hook repoints per task), so the installed callback
+/// can suspend that task back to the scheduler exactly as
+/// `reschedule_current` does for a `yield` syscall.
+///
+/// The callback runs **after** the LAPIC EOI (so the in-service bit is
+/// released before the context switch strands it) and **only** for a tick
+/// taken from ring 3 — a tick taken in ring 0 never preempts (the kernel is
+/// non-preemptible, `AGENTS.md` §4 watch-out: a half-completed kernel
+/// critical section must never be switched away from). In production the
+/// kernel runs with `RFLAGS.IF == 0`, so a maskable timer IRQ is *taken*
+/// only while ring 3 runs (which `crate::userentry` enters with `IF` set);
+/// the explicit ring gate is defence-in-depth so a future in-kernel `sti`
+/// can never accidentally preempt the kernel (`AGENTS.md` §2.9).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// LAPIC EOI register MMIO offset (Intel SDM Vol 3A §11.4.1 Table 11-1).
 /// Re-declared here so the dispatcher can write through a bare-metal
@@ -137,6 +164,60 @@ pub fn timer_callback() -> Option<extern "C" fn(u32)> {
     {
         None
     }
+}
+
+/// Install the per-CPU ring-3-preemption callback the timer ISR forwards
+/// each tick taken from ring 3 to (the private `PREEMPT_CALLBACK_FN`
+/// slot).
+///
+/// The binary installs the callback (which suspends the running user task
+/// back to the scheduler via `reschedule_current`) before arming the
+/// timer. Storing a `fn` (not a closure) keeps it safe to invoke from
+/// interrupt context: there is no captured environment that could be
+/// `Drop`-ped while the ISR is mid-flight. Mirrors
+/// [`set_timer_callback`]'s host-inert gating.
+pub fn set_preempt_callback(cb: extern "C" fn(u32)) {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    PREEMPT_CALLBACK_FN.store(cb as usize, Ordering::Release);
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    let _ = cb;
+}
+
+/// Read the currently-installed ring-3-preemption callback, if any.
+/// Test-only; always `None` on the host (the storage is gated to the
+/// freestanding target, like [`timer_callback`]).
+#[must_use]
+pub fn preempt_callback() -> Option<extern "C" fn(u32)> {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        let raw = PREEMPT_CALLBACK_FN.load(Ordering::Acquire);
+        if raw == 0 {
+            None
+        } else {
+            // SAFETY: every store into `PREEMPT_CALLBACK_FN` originates
+            // from `set_preempt_callback`, which always round-trips a
+            // valid `extern "C" fn(u32)` pointer.
+            Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        None
+    }
+}
+
+/// `true` iff the code-segment selector `cs` of an interrupted context
+/// has requestor privilege level (RPL, the low two bits) 3 — i.e. the
+/// interrupt was taken from ring 3 (user mode).
+///
+/// The CPU pushes the full ring-3 `CS` (RPL 3) on a privilege-raising
+/// interrupt and the kernel `CS` (RPL 0) on a ring-0 interrupt, so the RPL
+/// is the authoritative origin (Intel SDM Vol 3A §6.12.1). Pure and
+/// host-testable; the freestanding dispatcher reads `cs` from the saved
+/// [`crate::interrupts::InterruptStackFrame`] and consults this.
+#[must_use]
+pub const fn cs_is_ring3(cs: u64) -> bool {
+    (cs & 0b11) == 3
 }
 
 // --- Per-CPU ID hook ------------------------------------------------
@@ -203,34 +284,41 @@ pub fn cpu_id_for_lapic(lapic_id: u8) -> u32 {
 /// Rust trampoline called by the timer ISR stub emitted via
 /// `define_isr!`.
 ///
-/// `_regs` is the [`SavedRegs`] block the stub pushed; the dispatcher
-/// does not currently consult it (the scheduler does not need it for
-/// preemption — it only needs the current CPU's id). It is kept in
-/// the signature so a future commit (full context-save preemption)
-/// can pick it up without changing the ISR ABI.
+/// `regs` is the [`SavedRegs`] block the stub pushed; the dispatcher reads
+/// the CPU-pushed [`InterruptStackFrame`] that sits immediately above it to
+/// recover the interrupted context's `CS`, which decides whether the tick
+/// preempts (ring 3) or merely accounts (ring 0).
 ///
 /// Steps (in order):
 ///
 /// 1. Read the LAPIC ID from MMIO and look up the dense `CpuId`.
-/// 2. Invoke the installed callback (if any) with that `CpuId`.
-/// 3. Write `0` to the LAPIC EOI register, releasing the in-service
-///    bit for the timer vector so the next tick can be delivered.
+/// 2. Invoke the installed scheduler-tick callback (if any) with that
+///    `CpuId` (EEVDF is tickless in production, so there usually is none).
+/// 3. Write `0` to the LAPIC EOI register, releasing the in-service bit
+///    for the timer vector so the next tick can be delivered — done
+///    **before** any preemptive context switch so the switch cannot strand
+///    the in-service bit while another task runs.
+/// 4. If the tick was taken from **ring 3** and a ring-3-preemption
+///    callback is installed, invoke it (it suspends the running user task
+///    back to the scheduler), bracketed by the `swapgs` pair that
+///    establishes the in-handler GS convention for the kthread
+///    cooperative-park balance and restores the user GS before `iretq`.
 ///
-/// EOI is performed *after* the callback so the scheduler has driven
-/// at least one step before another timer tick can stack. The
-/// callback runs with interrupts disabled (the CPU automatically
-/// clears `IF` on interrupt-gate delivery), so the dispatcher itself
-/// is non-re-entrant by construction.
+/// A tick taken in ring 0 never preempts: the kernel is non-preemptible
+/// (`AGENTS.md` §4). The callback runs with interrupts disabled (the CPU
+/// clears `IF` on interrupt-gate delivery), so the dispatcher is
+/// non-re-entrant by construction.
 ///
 /// # Safety
 ///
-/// Only callable from the ISR stub. Invoking it from arbitrary Rust
-/// is undefined behaviour because the EOI write below assumes the
-/// LAPIC's in-service bit is set, and writing EOI with no pending
-/// IRQ corrupts the LAPIC's TPR-arbitration state.
+/// Only callable from the ISR stub, with `regs` the live saved-regs block
+/// at the current `%rsp`. Invoking it from arbitrary Rust is undefined
+/// behaviour: the EOI write assumes the LAPIC's in-service bit is set, and
+/// the `InterruptStackFrame` read assumes the CPU-pushed frame sits above
+/// `regs`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
-unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(_regs: *mut SavedRegs) {
+unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // SAFETY: LAPIC MMIO is identity-mapped (boot.s SAFETY-INVARIANT 4).
     // The ID register is read-only and accessing it has no side
     // effects. The EOI register accepts any 32-bit write.
@@ -255,10 +343,65 @@ unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(_regs: *mut SavedRegs) {
 
     // SAFETY: LAPIC_EOI_OFFSET is the architecturally-fixed EOI
     // register; writing `0` is the documented "end-of-interrupt"
-    // sequence (Intel SDM Vol 3A §11.8.5).
+    // sequence (Intel SDM Vol 3A §11.8.5). EOI is written *before* the
+    // preemptive switch below so the in-service bit is released and a
+    // later resumed task can be preempted again.
     unsafe {
         let eoi = (LAPIC_BASE_PHYS + LAPIC_EOI_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(eoi, 0);
+    }
+
+    // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1c): a tick taken
+    // from ring 3 suspends the running user task back to the scheduler,
+    // exactly as a cooperative `yield` does. A tick taken in ring 0 never
+    // preempts — the kernel is non-preemptible (`AGENTS.md` §4) — and an
+    // absent callback keeps the system cooperative (fail-safe, §2.9).
+    let preempt_raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
+    if preempt_raw != 0 && cpu_id != u32::MAX {
+        // The CPU-pushed interrupt frame sits immediately above the saved
+        // GPR block the `define_isr!` stub pushed; its `cs` is the selector
+        // of the interrupted context.
+        // SAFETY: `regs` is the live saved-regs block the stub passed at the
+        // current `%rsp`; the `InterruptStackFrame` the CPU pushed lies
+        // exactly `size_of::<SavedRegs>()` bytes above it (the stub inserts
+        // no other words between them, per `define_isr!`), so the read is in
+        // bounds and reads an initialised qword.
+        let from_ring3 = unsafe {
+            let frame =
+                (regs as usize + core::mem::size_of::<SavedRegs>()) as *const InterruptStackFrame;
+            cs_is_ring3((*frame).cs)
+        };
+        if from_ring3 {
+            // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
+            // valid `extern "C" fn(u32)` through `set_preempt_callback`; the
+            // callback is a `fn` with no captured environment, safe to call
+            // from interrupt context.
+            let cb: extern "C" fn(u32) =
+                unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(preempt_raw) };
+            // Establish the in-handler GS convention (current GS = kernel
+            // TLS) the kthread cooperative-park balance expects, exactly as
+            // the `syscall` entry stub's `swapgs` does (`plans/PI.md` X2):
+            // an interrupt gate taken from ring 3 does *not* swap GS, so on
+            // entry the current GS is still the user value. The callback's
+            // `reschedule_current` flips GS to the between-handler
+            // convention for the dispatcher (`enter_cooperative_park`) and
+            // back on resume (`leave_cooperative_park`); the closing
+            // `swapgs` then restores the user GS before the stub's `iretq`
+            // returns to ring 3.
+            // SAFETY: `swapgs` is privileged and runs in ring 0 here; it
+            // touches only the GS-base/`KERNEL_GS_BASE` swap, no memory or
+            // flags. The two swaps bracket exactly one preempt callback on
+            // this task's own ISR control flow, so they pair.
+            unsafe {
+                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+            }
+            cb(cpu_id);
+            // SAFETY: as above — the matching swap restoring the user GS the
+            // `iretq` returns into.
+            unsafe {
+                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+            }
+        }
     }
 }
 
@@ -369,5 +512,30 @@ mod tests {
         // documented sentinel.
         set_cpu_id_for_lapic(0, 7);
         assert_eq!(cpu_id_for_lapic(0), u32::MAX);
+    }
+
+    #[test]
+    fn preempt_callback_on_host_is_none() {
+        // The ring-3-preemption callback storage is `cfg`-gated out on the
+        // host, exactly like `TIMER_CALLBACK_FN`. `set_preempt_callback` is
+        // a no-op stub on the host; the getter must consistently report
+        // "none" so a regression that quietly enables host-side storage is
+        // caught.
+        extern "C" fn cb(_cpu: u32) {}
+        set_preempt_callback(cb);
+        assert!(preempt_callback().is_none());
+    }
+
+    #[test]
+    fn cs_is_ring3_reads_the_selector_rpl() {
+        // Kernel CS (RPL 0) is not ring 3; a ring-3 selector (RPL 3) is.
+        assert!(!cs_is_ring3(0x08)); // kernel CS, RPL 0
+        assert!(!cs_is_ring3(0x00));
+        // User 64-bit CS at GDT index 5 with RPL 3 (`(5 << 3) | 3 = 0x2B`).
+        assert!(cs_is_ring3(0x2B));
+        // Only the low two bits matter — RPL 1/2 are not ring 3.
+        assert!(!cs_is_ring3(0x29)); // ...01
+        assert!(!cs_is_ring3(0x2A)); // ...10
+        assert!(cs_is_ring3(0x2B)); // ...11
     }
 }

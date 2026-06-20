@@ -22,7 +22,7 @@
 use rustos_arch_x86_64::apic_timer::{Calibration, Rdtsc, TscReader};
 use rustos_arch_x86_64::context_hal::ContextSwitchHal;
 use rustos_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch};
-use rustos_kernel_core::{IrqRouting, KernelArch};
+use rustos_kernel_core::{reschedule_current, IrqRouting, KernelArch, RescheduleAction};
 use rustos_kernel_irq::{IrqController, IrqTable};
 use rustos_kernel_mem::BootMemoryMap;
 use rustos_kernel_sched_api::{CpuId, SchedulerArch};
@@ -91,6 +91,29 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
     // regardless. Errors here surface to the next `irq_wait` caller
     // via the `IrqTable`'s `Stray` / `ArchUnsupported` paths.
     let _ = table.fire(gsi, *controller);
+}
+
+/// The ring-3-preemption callback the LAPIC-timer ISR invokes for a tick
+/// taken from ring 3 (installed via
+/// [`rustos_arch_x86_64::preempt::set_preempt_callback`] in
+/// [`KernelArch::install_irq_dispatch`]).
+///
+/// It suspends the user task currently running on `cpu` back to the
+/// scheduler with [`RescheduleAction::Yield`] — the *involuntary* analogue
+/// of a `yield` syscall: the task is re-enqueued at its priority and the
+/// scheduler picks the next runnable task, giving EEVDF-ordered
+/// time-slicing. This is the x86_64 sibling of the aarch64/riscv64
+/// `production_preempt_dispatch` (`AGENTS.md` §2.21 — one shape over the
+/// Arch HAL). [`reschedule_current`] returns `false` when no resumable
+/// user kthread is published on `cpu` (unreachable from ring 3 with none
+/// switched in, but the fail-closed return means a stray invocation is a
+/// harmless no-op rather than an unsound switch — `AGENTS.md` §2.9). The
+/// call only ever runs after the ISR has written the LAPIC EOI, so the
+/// in-service bit is already released across the context switch, and the
+/// ISR brackets it with the `swapgs` pair that balances the kthread
+/// cooperative park.
+extern "C" fn production_preempt_dispatch(cpu: CpuId) {
+    let _ = reschedule_current(cpu, RescheduleAction::Yield);
 }
 
 /// Read the [`IrqTable`] published into `IRQ_TABLE_SLOT` by
@@ -292,6 +315,26 @@ impl KernelArch for BinArch {
             // Second publish — same fail-closed posture.
             arch_halt();
         }
+        // Arm ring-3 preemption now that the scheduler is up (P-1c,
+        // `plans/PI.md` D2b-2b-A): install the ring-3-preemption callback
+        // the LAPIC-timer ISR forwards each user-mode tick to. The timer
+        // itself was already programmed in periodic mode during boot
+        // (`preempt::init_local_preempt`, the production boot's step 8); the
+        // callback was absent until now, so every tick merely EOI'd
+        // (cooperative scheduling). The kernel runs with `RFLAGS.IF == 0`
+        // (it issues no `sti`), so no tick is *taken* until `init` drops to
+        // ring 3 with `IF` set (`userentry`), by which point a user kthread
+        // is published — so installing the callback here, in the kernel-core
+        // `Irq` phase before `BootCompleted`, is race-free and additive
+        // (`AGENTS.md` §2.17): it cannot preempt the cooperative kernel,
+        // only a runaway user task. No scheduler-tick callback is installed
+        // — EEVDF is tickless, so the timer is armed solely to preempt
+        // (`AGENTS.md` §2.3); the timed-wake sweep a deadline-bearing
+        // blocking wait needs (P-2) installs its tick consumer then, not
+        // ahead of it (§2.4). `set_preempt_callback` is an idempotent
+        // pointer store (not a one-shot slot), so no fail-closed re-call
+        // guard is needed here.
+        rustos_arch_x86_64::preempt::set_preempt_callback(production_preempt_dispatch);
     }
 
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {

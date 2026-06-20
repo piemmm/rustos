@@ -296,11 +296,16 @@ impl ProcessSpawn for X86_64ProcessSpawn {
         // `syscall` entry stack at the child's own kernel stack (the value the
         // runtime hands it). It captures only the `u64` root, so it is `Send`.
         let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |stack_top: u64| {
-            // Repoint the per-CPU syscall entry stack before the switch-in. A
-            // rejected value (it is validated canonical/aligned/kernel-half)
-            // leaves the slot unchanged and the next syscall faults loudly —
-            // fail closed, never a silent wrong stack (`AGENTS.md` §5.4 /
-            // §2.9).
+            // `set_kernel_rsp0` repoints **both** the child's `syscall` entry
+            // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at the
+            // child's own kernel stack — the latter is what makes an involuntary
+            // LAPIC-timer preemption (P-1c), delivered through the IDT interrupt
+            // gate which reads `TSS.RSP0`, land on the child's own stack rather
+            // than corrupt a concurrently parked task's frame (`AGENTS.md` §2.2
+            // — one per-task kernel stack for both entry kinds, §4). A rejected
+            // value (validated canonical/aligned/kernel-half) leaves the slots
+            // unchanged and the next entry faults loudly (fail closed,
+            // `AGENTS.md` §5.4 / §2.9).
             let _ = syscall_entry::set_kernel_rsp0(BOOT_CPU, stack_top);
             // SAFETY: paging is enabled and `child_root_phys` is the PML4 of
             // the child's space, which identity-maps the low kernel window the

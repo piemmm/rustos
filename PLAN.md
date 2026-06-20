@@ -1535,10 +1535,34 @@ order (one fully-gated increment each):
                  `el0_spinner` fixture, armed via `install_trap_vector`), PASSing
                  (`EventId(4330)`) once the runaway U-mode task is involuntarily
                  preempted ≥ 1 and resumed to exit.
-                 **Next: P-1c x86_64** (already arms the LAPIC timer with a null
-                 callback — wire the ring-3 preempt). Lands fully gated, mirroring
-                 P-1a/P-1b's shape over the Arch HAL, with any logic shared across
-                 ports hoisted, not copied (§2.21, §2.2).
+                 **P-1c (x86_64) DONE — whole gate green.** A ring-3-only
+                 preempt-callback hook in `rustos_arch_x86_64::preempt`
+                 (`set_preempt_callback` / `preempt_callback`, plus the pure
+                 `cs_is_ring3` origin test) is invoked from the LAPIC-timer ISR
+                 `rustos_arch_x86_64_timer_dispatch` — **after** the LAPIC EOI
+                 (so the in-service bit is released before the context switch) and
+                 **only** for a tick whose saved interrupt-frame `CS` has RPL 3 —
+                 bracketed by the `swapgs` pair that establishes the in-handler GS
+                 convention the kthread cooperative-park balance expects and
+                 restores the user GS before `iretq` (symmetric with the `syscall`
+                 stub). `userentry` now `iretq`s to ring 3 with `RFLAGS.IF` set
+                 (preemptible user mode); the kernel issues no `sti`, so it stays
+                 non-preemptible (IF == 0) and a maskable tick is taken only in
+                 ring 3. The bin's `BinArch::install_irq_dispatch` installs the
+                 `reschedule_current(Yield)` callback (the LAPIC timer is already
+                 armed at boot step 8). Because x86_64 delivers a ring-3
+                 interrupt through the IDT gate using `TSS.RSP0` (distinct from the
+                 `syscall` `gs:0` stack), the per-resume `syscall_entry::
+                 set_kernel_rsp0` now repoints **both** the `gs:0` and `TSS.RSP0`
+                 entry stacks at the task's own kernel stack — one definition
+                 (§2.2) so a preemption (or fault) can never land on another
+                 task's stack. The behavioural proof is the
+                 `preempt_el0_qemu_x86_64` vertical (boots the production pipeline;
+                 maps the supervisor-only LAPIC page; single `el0_spinner`),
+                 PASSing (`EventId(4337)`) once the runaway ring-3 task is
+                 involuntarily preempted ≥ 1 and resumed to exit.
+                 **Next: P-2.** P-1 (production timer-IRQ-driven preemption) is now
+                 complete on all three bare-metal targets.
                - **P-2 — generic blocking wait-queue + true `Park` + timed wake.**
                  A reusable kernel wait primitive: a task registers on a wait
                  object and parks (`RescheduleAction::Park`, off the run queue),

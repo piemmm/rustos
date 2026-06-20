@@ -2028,6 +2028,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-preempt-el0-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-api",
+ "rustos-arch-x86_64",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-kernel-mem",
+ "rustos-kernel-sched-eevdf",
+ "rustos-kernel-syscall",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-ps2-qemu-x86-64"
 version = "0.0.0"
 dependencies = [

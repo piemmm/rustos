@@ -394,14 +394,36 @@ fn run_round_trip() -> ! {
 
     // Fresh address space (low 32 MiB identity + higher-half kernel window) and
     // activate it before any user mapping is added.
-    let Some(arch) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) else {
+    let Some(mut arch) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "mem_map test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };
-    // SAFETY: the new space maps the low 32 MiB and the higher-half kernel
-    // window, so the executing RIP, the current stack, the per-CPU `swapgs`
-    // TLS, the page-table pool, the frame pool, and `dispatch`/`on_fault` all
-    // stay mapped across the CR3 switch.
+    // Identity-map the architectural LAPIC MMIO page (supervisor-only) into this
+    // space. The production boot now arms ring-3 preemption (P-1c): a periodic
+    // LAPIC-timer IRQ is taken while this program runs in ring 3 (under this
+    // CR3), and its ISR reads the LAPIC ID register and writes EOI at
+    // `LAPIC_BASE_PHYS`. Without this mapping that kernel-mode MMIO access would
+    // page-fault under the minimal user CR3 (`AGENTS.md` §2.17) — the same page
+    // the production / timeshare spaces map. The preempt callback then no-ops
+    // here (no user kthread is published), so preemption stays transparent to
+    // the test.
+    if arch
+        .map_4k(
+            &PAGE_TABLE_POOL,
+            rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+            rustos_arch_x86_64::preempt::LAPIC_BASE_PHYS,
+            true,
+        )
+        .is_none()
+    {
+        note(TEST_FAIL, "mem_map test: could not map LAPIC MMIO page");
+        qemu_exit::exit_failure();
+    }
+    // SAFETY: the new space maps the low 32 MiB, the higher-half kernel window,
+    // and the LAPIC MMIO page, so the executing RIP, the current stack, the
+    // per-CPU `swapgs` TLS, the page-table pool, the frame pool,
+    // `dispatch`/`on_fault`, and the timer ISR's LAPIC access all stay mapped
+    // across the CR3 switch.
     unsafe { arch.switch() };
     syscall_entry::set_dispatch_callback(dispatch);
 

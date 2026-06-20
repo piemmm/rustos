@@ -388,9 +388,14 @@ fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
     let pre_resume = move |kernel_stack_top: u64| {
-        // Repoint the per-CPU syscall entry stack at this task's own kernel
-        // stack before the switch-in. A rejected value leaves the slot
-        // unchanged and the next syscall faults loudly — fail closed
+        // `set_kernel_rsp0` repoints **both** this task's `syscall` entry
+        // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at its own
+        // kernel stack, so an involuntary LAPIC-timer preemption (P-1c) taken
+        // from ring 3 (delivered through the IDT interrupt gate, which reads
+        // `TSS.RSP0`) lands on this task's own stack and the parent's and
+        // child's preemptions never collide (`AGENTS.md` §2.2 — one per-task
+        // kernel stack for both entry kinds, §4). A rejected value leaves the
+        // slots unchanged and the next entry faults loudly — fail closed
         // (`AGENTS.md` §5.4 / §2.9).
         if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
             note(TEST_FAIL, "X4 test: set_kernel_rsp0 rejected the stack top");
