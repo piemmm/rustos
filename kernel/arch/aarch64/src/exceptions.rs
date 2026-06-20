@@ -281,9 +281,18 @@ fn read_elr() -> u64 {
 }
 
 /// Handle an IRQ: acknowledge the GIC, dispatch the timer PPI to the
-/// scheduler-tick path, then complete the interrupt.
+/// scheduler-tick path, complete the interrupt, then — for a timer tick
+/// taken from EL0 — drive the preemption point.
+///
+/// `from_el0` is `true` when the interrupted context was EL0 user mode
+/// (the `LOWER_IRQ` vector). It gates **preemption only**: a timer tick
+/// taken in EL1 (`CUR_SPX_IRQ`) still runs the scheduler-tick accounting
+/// and re-arms the timer, but it never switches the current task away —
+/// the kernel is non-preemptible, so a half-completed kernel critical
+/// section (a held `lib/sync` lock, an in-flight syscall) is never
+/// abandoned mid-flight (`AGENTS.md` §4 SMP watch-out / §2.1 no hacks).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn handle_irq() {
+fn handle_irq(from_el0: bool) {
     let intid = crate::gic::acknowledge();
     if intid == crate::gic::SPURIOUS_INTID {
         // Spurious read: nothing pending, and the GIC requires no EOI.
@@ -310,6 +319,21 @@ fn handle_irq() {
     // Complete every acknowledged interrupt (timer, SGI/IPI, or device)
     // so the CPU interface does not wedge with an active priority.
     crate::gic::end_of_interrupt(intid);
+
+    // Preempt **after** the end-of-interrupt handshake: the installed
+    // callback may context-switch away to another task and not return to
+    // this frame for a long time, so the timer line must already be
+    // deactivated (otherwise the GIC would hold an active priority across
+    // the switch and block every further interrupt on this CPU). Only a
+    // timer tick taken from EL0 preempts; the callback suspends the
+    // running user task back to the scheduler (the involuntary analogue
+    // of a `yield` syscall) and returns here when the task is next
+    // dispatched, after which the trampoline `eret`s to the interrupted
+    // EL0 context. A build that armed the timer without installing the
+    // callback keeps cooperative scheduling (`AGENTS.md` §2.9 fail-safe).
+    if from_el0 && intid == crate::preempt::TIMER_PPI {
+        crate::preempt::on_el0_preempt_point(cpu);
+    }
 }
 
 /// Rust entry invoked by the asm vector trampoline with the exception
@@ -332,7 +356,10 @@ fn handle_irq() {
 #[no_mangle]
 unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
     if is_irq(kind) {
-        handle_irq();
+        // `LOWER_IRQ` is the only IRQ entry whose interrupted context was
+        // EL0 user mode; `CUR_SP0_IRQ`/`CUR_SPX_IRQ` interrupted EL1
+        // kernel code, which is never preempted (see [`handle_irq`]).
+        handle_irq(kind == kind::LOWER_IRQ);
         return;
     }
 

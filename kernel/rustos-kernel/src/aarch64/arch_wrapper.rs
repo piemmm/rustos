@@ -109,6 +109,17 @@ impl KernelArch for Aarch64BinArch {
         // so an acknowledged non-timer GIC INTID is translated into an
         // `IrqTable::fire` (mask-before-wake, `docs/src/security/irq.md`).
         crate::aarch64::gic_irq::install_device_irq_dispatch(table);
+
+        // Arm timer-driven preemption now that the GICv2 is up (P-1,
+        // `plans/PI.md` D2b-2b-A): register the per-CPU preempt storage,
+        // install the EL0-preemption callback, and start the periodic
+        // generic timer. PE IRQs stay masked until EL0 runs preemptibly /
+        // the unlock kthread unmasks, so the armed timer is inert until a
+        // handler context exists — additive and non-regressing (`AGENTS.md`
+        // §2.17). A tick taken in EL1 never preempts (non-preemptible
+        // kernel, §4); a tick taken in EL0 round-robin-preempts the running
+        // user task back to the scheduler.
+        crate::aarch64::gic_irq::arm_preemption();
     }
 }
 

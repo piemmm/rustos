@@ -148,6 +148,26 @@ impl<const N: usize> Default for PreemptStorage<N> {
 /// packed into a `usize`. Set up before any IPI is enabled.
 static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
+/// The preemption callback the timer IRQ path forwards each tick **taken
+/// from EL0** to, packed into a `usize`. Installed by the binary before
+/// the timer is armed; absent (`0`) the timer tick is pure accounting and
+/// nothing is preempted, so an image that arms the timer without wiring
+/// preemption simply keeps cooperative scheduling (fail-safe, `AGENTS.md`
+/// §2.9).
+///
+/// This is the involuntary analogue of the cooperative reschedule the
+/// `svc` syscall path drives: a timer interrupt taken while EL0 was
+/// running lands on the interrupted task's own kernel stack (the same
+/// stack a syscall trap uses), so the installed callback can suspend that
+/// task back to the scheduler exactly as `reschedule_current` does for a
+/// `yield` syscall. The callback runs **after** the GIC end-of-interrupt
+/// handshake (so the line is no longer active across the context switch)
+/// and **only** for a tick taken from EL0 — a tick taken in EL1 never
+/// preempts (the kernel is non-preemptible, `AGENTS.md` §4 watch-out: a
+/// half-completed kernel critical section must never be switched away
+/// from).
+static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+
 /// Install the timer callback.
 ///
 /// Invoked from the timer IRQ path on every tick with the CPU's
@@ -190,6 +210,53 @@ pub fn ipi_callback() -> Option<extern "C" fn(CpuId)> {
         // SAFETY: every store into `IPI_CALLBACK_FN` round-trips a valid
         // `extern "C" fn(CpuId)` pointer through `set_ipi_callback`.
         Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
+    }
+}
+
+/// Install the EL0-preemption callback the timer IRQ path forwards each
+/// tick taken from EL0 to (the private `PREEMPT_CALLBACK_FN` slot).
+///
+/// Storing a `fn` (not a closure) keeps it safe to call from interrupt
+/// context: there is no captured environment to drop mid-flight. The
+/// binary installs the callback (which suspends the running user task
+/// back to the scheduler) before arming the timer.
+pub fn set_preempt_callback(cb: extern "C" fn(CpuId)) {
+    PREEMPT_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+}
+
+/// Read the currently-installed EL0-preemption callback, if any.
+/// Test/diagnostic.
+#[must_use]
+pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
+    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
+        // valid `extern "C" fn(CpuId)` pointer through
+        // `set_preempt_callback`.
+        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
+    }
+}
+
+/// Invoke the installed EL0-preemption callback for `cpu`, if any.
+///
+/// Called from the IRQ path **only** for a timer tick taken from EL0,
+/// **after** the GIC end-of-interrupt handshake (so the timer line is no
+/// longer active while the callback context-switches away). A build that
+/// armed the timer without installing the callback keeps cooperative
+/// scheduling — the tick is pure accounting (`AGENTS.md` §2.9, fail-safe).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub(crate) fn on_el0_preempt_point(cpu: CpuId) {
+    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw != 0 {
+        // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
+        // valid `extern "C" fn(CpuId)` pointer through
+        // `set_preempt_callback`; the callback carries no captured
+        // environment and is safe to call from interrupt context.
+        let cb: extern "C" fn(CpuId) =
+            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
+        cb(cpu);
     }
 }
 
@@ -261,6 +328,7 @@ pub fn timer_cpu_id(cpu: CpuId) -> Option<CpuId> {
 fn clear_for_tests() {
     TIMER_CALLBACK_FN.store(0, Ordering::Relaxed);
     IPI_CALLBACK_FN.store(0, Ordering::Relaxed);
+    PREEMPT_CALLBACK_FN.store(0, Ordering::Relaxed);
     let len = PREEMPT_LEN.load(Ordering::Acquire);
     for idx in 0..len {
         interval_slot(idx).store(0, Ordering::Relaxed);
@@ -468,6 +536,20 @@ mod tests {
         assert_eq!(got as usize, host_cb as *const () as usize);
         // The timer slot is independent of the IPI slot.
         assert!(timer_callback().is_none());
+        clear_for_tests();
+    }
+
+    #[test]
+    fn preempt_callback_round_trips_through_its_own_slot() {
+        clear_for_tests();
+        assert!(preempt_callback().is_none());
+        set_preempt_callback(host_cb);
+        let got = preempt_callback().expect("preempt callback installed");
+        assert_eq!(got as usize, host_cb as *const () as usize);
+        // The preempt slot is independent of the timer and IPI slots, so
+        // arming preemption never disturbs the tick/IPI dispatch.
+        assert!(timer_callback().is_none());
+        assert!(ipi_callback().is_none());
         clear_for_tests();
     }
 

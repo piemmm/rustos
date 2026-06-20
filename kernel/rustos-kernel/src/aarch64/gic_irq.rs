@@ -48,6 +48,18 @@ use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
 use rustos_sync::once::OnceCell;
 
+/// Scheduler-tick / preemption frequency, in hertz (a 10 ms time slice).
+///
+/// The generic-timer interrupt fires at this rate; a tick taken while EL0
+/// was running preempts the current user task (round-robin time-slicing
+/// over the EEVDF virtual-deadline order, `kernel/sched`). 100 Hz matches
+/// the `timer_preempt`/`sched_drive` `-M virt` verticals and is a
+/// conventional general-purpose desktop/server slice — long enough that
+/// the per-tick cost is negligible (`AGENTS.md` §2.16), short enough that
+/// a CPU-bound task cannot monopolise a core for a perceptible time.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+const PREEMPT_TICK_HZ: u64 = 100;
+
 /// A kernel-side [`IrqController`] over the arch port's [`GicController`].
 ///
 /// Wraps the validated GICv2 controller and re-exposes its line masking
@@ -241,6 +253,105 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         // boot-CPU bring-up `gic::init` documents.
         unsafe {
             rustos_arch_aarch64::gic::init();
+        }
+    }
+}
+
+/// Caller-owned per-CPU preemption backing for the production boot CPU.
+///
+/// The production aarch64 image is single-CPU (`BootInfo::new(BOOT_CPU, 1,
+/// …)`), so a `PreemptStorage<1>` covers it; secondary-core preemption is
+/// sized from the discovered CPU count when SMP bring-up lands (`AGENTS.md`
+/// §24.1 — the per-CPU timer bookkeeping is the discovered core count,
+/// never a baked-in ceiling). Published once by [`arm_preemption`].
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static PREEMPT_STORAGE: rustos_arch_aarch64::preempt::PreemptStorage<1> =
+    rustos_arch_aarch64::preempt::PreemptStorage::new();
+
+/// The EL0-preemption callback the timer IRQ path invokes for a tick taken
+/// from EL0 (installed via
+/// [`rustos_arch_aarch64::preempt::set_preempt_callback`]).
+///
+/// It suspends the user task currently running on `cpu` back to the
+/// scheduler with [`rustos_kernel_core::RescheduleAction::Yield`] — the
+/// *involuntary* analogue of a `yield` syscall: the task is re-enqueued at
+/// its priority and the scheduler picks the next runnable task, giving
+/// EEVDF-ordered time-slicing. [`rustos_kernel_core::reschedule_current`]
+/// returns `false` when no resumable user kthread is published on `cpu`
+/// (it cannot be reached from EL0 with none switched in, but the
+/// fail-closed return means a stray invocation is a harmless no-op rather
+/// than an unsound switch — `AGENTS.md` §2.9). The call only ever runs
+/// after the GIC end-of-interrupt handshake (see
+/// [`rustos_arch_aarch64::exceptions::handle_irq`]), so the timer line is
+/// already deactivated across the context switch.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
+    let _ =
+        rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
+}
+
+/// Arm production timer-driven preemption on the boot CPU: register the
+/// per-CPU preempt storage, install the EL0-preemption callback, and start
+/// the periodic generic timer at [`PREEMPT_TICK_HZ`].
+///
+/// Called once per boot by
+/// [`Aarch64BinArch::install_irq_dispatch`](crate::aarch64::arch_wrapper::Aarch64BinArch),
+/// immediately after [`install_device_irq_dispatch`] has brought the GICv2
+/// up — the earliest point the timer PPI can be enabled. The PE keeps IRQs
+/// masked here (the kernel-core `Irq` phase runs with `DAIF.I` set), so no
+/// tick is *taken* until EL0 runs with IRQs unmasked
+/// (`crate::aarch64::userentry`'s preemptible `SPSR`) or the root-unlock
+/// kthread unmasks at EL1 — the armed timer simply leaves PPI 30 pending
+/// until then, so this is **additive and non-regressing** (`AGENTS.md`
+/// §2.17): a tick taken in EL1 only re-arms the timer (it never preempts —
+/// the kernel is non-preemptible), and a tick taken in EL0 drives
+/// [`production_preempt_dispatch`].
+///
+/// No scheduler-tick callback is installed: EEVDF is tickless (fairness is
+/// advanced inside `Scheduler::step`, not by a periodic count), so the
+/// generic timer is armed solely to *preempt*. The arch
+/// `on_timer_interrupt` re-arms `CNTP_TVAL_EL0` independently of any tick
+/// callback, so omitting one is correct and avoids a no-op wrapper
+/// (`AGENTS.md` §2.3). The timed-wake sweep that a deadline-bearing
+/// blocking wait needs (P-2) installs its tick consumer then, not ahead of
+/// it (§2.4).
+///
+/// A zero `CNTFRQ_EL0` reading (a board that does not report the counter
+/// frequency) leaves the kernel cooperative rather than arming a nonsense
+/// interval — fail-safe (`AGENTS.md` §2.9).
+pub fn arm_preemption() {
+    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+    {
+        use rustos_arch_aarch64::preempt;
+
+        // Set-once per boot; a stray re-call fails closed by halting rather
+        // than re-pointing the live per-CPU slices (`AGENTS.md` §2.1).
+        if PREEMPT_STORAGE.register().is_err() {
+            rustos_arch_aarch64::halt_current_cpu();
+        }
+
+        // Install the EL0-preemption callback *before* arming the timer, so
+        // the first tick taken from EL0 already has a handler.
+        preempt::set_preempt_callback(production_preempt_dispatch);
+
+        // Derive the tick interval from the discovered counter frequency
+        // (never a board constant, `AGENTS.md` §2.20). A zero reading is a
+        // fail-safe skip.
+        let counter_hz = rustos_arch_aarch64::kernel_arch::read_cntfrq();
+        if counter_hz == 0 {
+            return;
+        }
+        let interval = preempt::interval_for_hz(counter_hz, PREEMPT_TICK_HZ);
+
+        // SAFETY: this is the boot CPU (id 0); the preempt callback is
+        // installed (above), the per-CPU storage is registered (above), the
+        // EL1 vector table is installed (`boot::init_vectors`), and the GIC
+        // is up (`install_device_irq_dispatch` ran immediately before). It
+        // enables the timer PPI at the GIC and starts the down-counter; PE
+        // IRQs stay masked until EL0/the unlock kthread, so no tick is taken
+        // before a handler context exists.
+        unsafe {
+            preempt::init_local_preempt(0, interval);
         }
     }
 }

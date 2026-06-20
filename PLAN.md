@@ -1454,28 +1454,87 @@ order (one fully-gated increment each):
                `hw_tree_wait` wrappers. Host-tested end to end (kernel handlers,
                store + generation, rt wrappers, abi-sys stubs, the seam loop's
                read-and-react-to-one-bump behaviour).
-             - **D2b-2b-A — production launch + true blocking park (NEXT).**
-               PID 1 `init` must NOT yet spawn `devmgr`: `hw_tree_wait` is today
-               a cooperative poll-and-`yield_current` (the established kernel
-               wait shape — `irq_wait`, `KernelProcessWait`, `BlockingConsoleRead`
-               all poll-yield; `RescheduleAction::Park` exists but is unwired
-               with no wake plumbing). A device manager waits **unbounded**, so a
-               poll-yielding `devmgr` perpetually consumes scheduler turns and
-               starves a single-CPU system (proven: spawning it timed out the
+             - **D2b-2b-A — production preemption + true blocking park.**
+               A device manager waits **unbounded**; today every kernel wait
+               (`irq_wait`, `KernelProcessWait`, `BlockingConsoleRead`,
+               `hw_tree_wait`) is a cooperative poll-and-`yield_current`, so a
+               perpetual `devmgr` consumes scheduler turns and starves a
+               single-CPU system (proven: spawning it timed out the
                `spawn_session`/`root_unlock`/`autoload_input` `-M virt`
-               verticals; not spawning it keeps the matrix green — §2.1). A
-               therefore ships a **true generation-keyed park + wake**: wire
-               `RescheduleAction::Park` so `hw_tree_wait` blocks the task off the
-               run queue and `HwTreeStore::seed`/`append` (and node removal) wake
-               every waiter (with timeout integration), then have `init` spawn
-               `/System/Services/devmgr` (the registered program already exists),
-               and add the end-to-end devmgr QEMU vertical (spawn → read →
-               react to a real generation bump). Then continue the original
-               D2b-2b: the `CallEndpoint`-served `/System` file-read request loop
-               on the parked store-service kthread + `driver_store_load`, delete
-               the in-kernel single-pass `driver_autoload` it subsumes (§2.14),
-               re-point the `-M virt` autoload vertical to the devmgr path. The
-               parked-kthread/EMMC2 interaction is a metal checklist (§0.9).
+               verticals — §2.1). The correct fix is a task that truly **parks**
+               off the run queue, which in turn needs the kernel to be
+               **preemptive** so a parked-everyone CPU still wakes a timed waiter
+               and a CPU-bound task cannot monopolise a core (operator decision:
+               *all* architectures preemptive — §4 SMP, §2.16 performance).
+               There is no IRQ-driven preemptive context switch yet: the kthread
+               model only suspends cooperatively at syscall traps
+               (`reschedule_current`), EEVDF is tickless (`on_timer_tick` is a
+               counter), and aarch64/riscv64 production never arm the timer.
+               Staged P-1..P-3, one fully-gated landing each (operator-approved):
+               - **P-1 — production timer-IRQ-driven preemption (all arches).**
+                 Arm the periodic generic-timer interrupt in the production boot
+                 on aarch64 + riscv64 (x86_64 already arms it, with a null
+                 callback) and build the IRQ-context preemptive reschedule behind
+                 the Arch HAL (§17.2): a timer IRQ **taken from EL0** lands on the
+                 interrupted task's own kernel stack (the same stack a syscall
+                 trap uses), so after the GIC/EOI handshake it suspends that task
+                 back to the scheduler via the existing `reschedule_current` —
+                 the involuntary analogue of the cooperative `Yielder::suspend`,
+                 sharing one context-switch definition (§2.2); the trampoline
+                 already saves/restores `ELR_EL1`/`SPSR_EL1`/`SP_EL0` per
+                 exception so the resume is correct. A tick taken in **EL1** never
+                 preempts — the kernel is non-preemptible, so a held lock or
+                 in-flight syscall is never abandoned (§4 SMP watch-out).
+                 **Prerequisite (aarch64):** EL0 currently erets with
+                 `SPSR.DAIF = 0b1111` (all masked — `userentry`), so no IRQ fires
+                 in user mode; preemption requires unmasking IRQ (`I`) in the EL0
+                 entry `SPSR`, after which **all** enabled interrupts (timer +
+                 device, e.g. virtio) are taken in user mode, not only while a
+                 kthread is parked in EL1 — a metal-affecting change verified on
+                 the Pi (§0.9). Landed per-arch (P-1a aarch64 first, the metal
+                 target; P-1b riscv64; P-1c x86_64). Proven on `-M virt`
+                 verticals (a CPU-bound EL0 task is involuntarily preempted) +
+                 host tests; SMP-correct (§4), fail-closed/fail-safe (§5.4/§2.9);
+                 Pi metal checklist (§0.9).
+                 **P-1a (aarch64) landed — whole gate green, not yet
+                 metal-verified.** `userentry` erets to EL0 with IRQ unmasked
+                 (`SPSR_EL0T_PREEMPTIBLE`); a fail-safe EL0-only preempt-callback
+                 hook in `rustos_arch_aarch64::preempt` (`set_preempt_callback` /
+                 `on_el0_preempt_point`) is invoked from
+                 `exceptions::handle_irq(from_el0)` after EOI only for an
+                 EL0-origin timer tick (EL1 ticks never preempt); and
+                 `gic_irq::arm_preemption()` (called from
+                 `Aarch64BinArch::install_irq_dispatch`) registers
+                 `PreemptStorage<1>`, installs the `reschedule_current(Yield)`
+                 callback, and arms the 100 Hz generic timer. No tick callback
+                 (EEVDF is tickless; armed solely to preempt). Verified green:
+                 `cargo fmt --all --check`, full `cargo xtask ci` (both Pi images
+                 + the whole QEMU matrix, incl. the metal-confirmed
+                 `root_unlock_admission`/`autoload_input` aarch64 verticals),
+                 `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both --secs 20` —
+                 proving **non-regression** under preemption. Remaining: a
+                 dedicated `-M virt` vertical proving a CPU-bound EL0 task is
+                 involuntarily preempted, Pi metal re-verify (§0.9), then **P-1b
+                 riscv64** + **P-1c x86_64** (x86_64 already arms the LAPIC timer
+                 with a null callback).
+               - **P-2 — generic blocking wait-queue + true `Park` + timed wake.**
+                 A reusable kernel wait primitive: a task registers on a wait
+                 object and parks (`RescheduleAction::Park`, off the run queue),
+                 woken by an explicit event or, with a deadline, by P-1's tick
+                 sweeping expired waiters. `hw_tree_wait` is its first consumer —
+                 `HwTreeStore::seed`/`append` (and later node removal) wake every
+                 waiter; the finite `timeout_ns` is now honoured by the timed
+                 wake. No busy-yield, no lost wake-ups.
+               - **P-3 — production launch + devmgr vertical.** `init` spawns the
+                 perpetual `/System/Services/devmgr` (no longer starving the CPU,
+                 since the wait truly parks), and a new end-to-end devmgr QEMU
+                 vertical proves spawn → read → react to a real generation bump.
+               Then the original D2b-2b tail continues: the `CallEndpoint`-served
+               `/System` file-read request loop on the parked store-service
+               kthread + `driver_store_load`, delete the in-kernel single-pass
+               `driver_autoload` it subsumes (§2.14), re-point the `-M virt`
+               autoload vertical to the devmgr path. The parked-kthread/EMMC2
+               interaction is a metal checklist (§0.9).
        - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +

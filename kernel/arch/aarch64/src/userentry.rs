@@ -3,12 +3,13 @@
 //!
 //! Dropping a freshly built process image into EL0 is the `eret`
 //! sequence: program `SP_EL0` with the user stack pointer, `ELR_EL1`
-//! with the entry point, and `SPSR_EL1` to "EL0t with `DAIF` masked" (so
-//! EL0 runs with interrupts disabled), set the first-argument register
-//! `x0`, then `eret` — a context-synchronising EL1→EL0 transition. This
-//! is the one definition of that sequence (`AGENTS.md` §2.2); the
-//! CC2/CC3 QEMU verticals reach it through the HAL rather than copying
-//! the `asm!` block.
+//! with the entry point, and `SPSR_EL1` to "EL0t with IRQ unmasked" (so
+//! EL0 runs **preemptible** — a generic-timer interrupt taken in user
+//! mode drives the P-1 preemptive reschedule, `plans/PI.md` D2b-2b-A
+//! P-1), set the first-argument register `x0`, then `eret` — a
+//! context-synchronising EL1→EL0 transition. This is the one definition
+//! of that sequence (`AGENTS.md` §2.2); the CC2/CC3 QEMU verticals reach
+//! it through the HAL rather than copying the `asm!` block.
 
 use rustos_arch_api::{EnterUser, UserEntry};
 
@@ -36,10 +37,23 @@ impl EnterUser for UserMode {
     }
 }
 
-/// `SPSR_EL1` for an `eret` to EL0t (`M[3:0] = 0b0000`) with the four
-/// `DAIF` interrupt masks set (bits `[9:6]`).
+/// `SPSR.I` — the IRQ mask bit (bit 7 of `[9:6]` `DAIF` = `D A I F`).
+/// Clearing it lets EL0 take IRQs.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-const SPSR_EL0T_DAIF_MASKED: u64 = 0b1111 << 6;
+const SPSR_DAIF_IRQ: u64 = 1 << 7;
+
+/// `SPSR_EL1` for an `eret` to EL0t (`M[3:0] = 0b0000`) with `DAIF` set
+/// to mask Debug/SError/FIQ but leave **IRQ unmasked** (bit 7 clear), so
+/// EL0 is preemptible: a generic-timer (or device) interrupt taken in
+/// user mode traps to the EL1 `LOWER_IRQ` vector and drives the P-1
+/// preemptive reschedule (`crate::exceptions::handle_irq` /
+/// `crate::preempt::on_el0_preempt_point`). FIQ and SError stay masked
+/// (the kernel routes neither to EL0), and Debug stays masked; only the
+/// IRQ unmask is required for preemption (`AGENTS.md` §2.16 — preemption
+/// is a first-class scheduling goal; §4 — the kernel itself stays
+/// non-preemptible, EL1 ticks never switch away).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+const SPSR_EL0T_PREEMPTIBLE: u64 = (0b1111 << 6) & !SPSR_DAIF_IRQ;
 
 /// Drop to EL0 at `entry` with `SP_EL0` = `sp` and `x0` set.
 ///
@@ -64,7 +78,7 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
             "eret",
             sp = in(reg) sp,
             entry = in(reg) entry,
-            spsr = in(reg) SPSR_EL0T_DAIF_MASKED,
+            spsr = in(reg) SPSR_EL0T_PREEMPTIBLE,
             in("x0") x0,
             options(noreturn, nostack),
         );
