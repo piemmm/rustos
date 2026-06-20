@@ -65,8 +65,9 @@ use crate::root_mount::{
 use crate::root_storage::RootBlockBinding;
 use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::unlock_service::{
-    autoload_caps, loader_caps, note, note_stage, service_caps, take_boot, AutoloadHook,
-    KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
+    autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
+    take_boot, AutoloadHook, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK,
+    USERS_DB_INSTALLED_MESSAGE,
 };
 
 /// CPU-interface target bitmask routing the device SPI to the boot CPU.
@@ -662,15 +663,65 @@ fn finish_unlock<'a, B: Block>(
     // refuses every attempt (`AGENTS.md` §5.4.5).
     release_console0_to_login();
 
-    // Design D D2a-2: the unlock kthread is the persistent driver-store
-    // service. It never returns — it parks for life owning the `SharedBlock`,
-    // keeping the read-only `/System` driver store mounted. This whole
-    // bring-up call chain stays suspended beneath the park, so the borrowed
-    // device backing (DMA pool, MMIO map, IRQ waiter, virtio host) stays live
+    // Design D D2a-2 / D2b-2: the unlock kthread is the persistent
+    // driver-store service. It never returns — it keeps the read-only
+    // `/System` volume mounted for life and serves the capability-gated
+    // file-read IPC endpoint the user-space `devmgr` reads the signed driver
+    // store through (`AGENTS.md` §18.3 / §18.4). The serve loop runs over a
+    // *fresh* persistent window onto the same shared disk; this whole
+    // bring-up call chain stays suspended beneath it, so the borrowed device
+    // backing (DMA pool, MMIO map, IRQ waiter, virtio host) stays live
     // without any `'static` promotion (`AGENTS.md` §2.17 — the metal-proven
     // device-driving model is unchanged). `login`, PID 1, and every other
-    // task run on their own tasks; this one holds the mount.
-    store.hold(coop)
+    // task run on their own tasks; this one holds the mount and serves it.
+    //
+    // The binder context holds only `IPC_BIND_PRIVILEGED` (the privileged
+    // authority to bind the restricted-sender store endpoint, §5.2), distinct
+    // from the kthread's own minimal `service_caps` (§5.4 — no ambient
+    // authority).
+    let binder = TaskCapabilities::derive(
+        UNLOCK_TASK,
+        UserId(0),
+        store_endpoint_binder_caps(),
+        store_endpoint_binder_caps(),
+        audit,
+    );
+    // The persistent `/System` window is taken in an inner scope so that, on
+    // a fail-closed fallback, the window borrow of `store` ends before
+    // `store.hold` moves `store` by value. On the success path
+    // `serve_system_store` never returns, so the window stays borrowed on
+    // this frame for the life of the system (`AGENTS.md` §2.17).
+    let outcome = {
+        let mut window = store.window();
+        crate::root_mount::with_system_volume(&mut window, audit, |volume| {
+            crate::driver_store_server::serve_system_store(volume, &binder, coop, audit)
+        })
+    };
+    match outcome {
+        // The serve loop never returns on success (`Infallible`).
+        Some(Ok(never)) => match never {},
+        // The endpoint could not be bound (e.g. its well-known id is already
+        // registered, or the mount became unreadable). Fail closed
+        // (`AGENTS.md` §2.9): log the stage and park the kthread for life
+        // still owning the disk, so an `ipc_call` to the unbound store
+        // endpoint fails closed with `NotFound` rather than blocking.
+        Some(Err(stage)) => {
+            note(audit, Level::Error, stage);
+            store.hold(coop)
+        }
+        // No read-only `/System` volume on this disk (already audited
+        // `SYSTEM_VOLUME_UNAVAILABLE`): nothing to serve. Park for life
+        // owning the disk; `devmgr`'s store reads fail closed with
+        // `NotFound` (`AGENTS.md` §18.4 / §2.9).
+        None => {
+            note(
+                audit,
+                Level::Error,
+                "driver-store: no /System volume to serve; file-read endpoint not bound",
+            );
+            store.hold(coop)
+        }
+    }
 }
 
 /// A minimal in-kernel [`DriverHost`] exposing only a capability-gated

@@ -51,7 +51,10 @@ rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The device manager (autoload policy) + the driver host (the signed load
 # gate) the `SpawnDriverLoader` bridges: this vertical proves the
 # `devmgr`-driven driver-spawn path end to end (`plans/PI.md` P10 5d-2-ii).
-rustos-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0" }
+# Linked with `default-features = false` so the device manager's `program`
+# feature (its `rustos-rt` userland runtime) never enters this kernel-harness
+# image (`AGENTS.md` §17.4 / §1) — the same opt-out the kernel binary makes.
+rustos-devmgr = { path = "../../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }

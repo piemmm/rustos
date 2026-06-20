@@ -2659,12 +2659,12 @@ mod tests {
     use rustos_caps::CapabilitySet;
     use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port};
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
-    use rustos_kernel_sched_api::{Priority, TaskAction};
     use rustos_kernel_mem::{
         AddressSpace, AnonError, BootMemoryMap, DmaMapping, Frame, FrameAllocator,
         FrozenAddressSpace, HostPageTable, LiveSpaceError, LiveUserSpace, MapFlags, MemoryRegion,
         Page, PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
+    use rustos_kernel_sched_api::{Priority, TaskAction};
     use rustos_kernel_sec::{TaskCapabilities, UserId};
 
     // `ProcessSpawn`, `ProgramRegistry`, `SpawnCtx`, and `AdmitError` are
@@ -8354,7 +8354,11 @@ mod tests {
         }
         let mut space = AddressSpace::new(HostPageTable::new());
         space
-            .map(page(1), Frame(CALL_FRAME), MapFlags::READ | MapFlags::WRITE | MapFlags::USER)
+            .map(
+                page(1),
+                Frame(CALL_FRAME),
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            )
             .expect("map request page");
         space
             .map(

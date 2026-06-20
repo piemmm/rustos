@@ -1556,7 +1556,11 @@ mod tests {
         let mut reply = [0u8; 64];
         let (number, args) = capture(12, || {
             assert_eq!(
-                ipc_call(rustos_abi::driver_store::DRIVER_STORE_ENDPOINT, &request, &mut reply),
+                ipc_call(
+                    rustos_abi::driver_store::DRIVER_STORE_ENDPOINT,
+                    &request,
+                    &mut reply
+                ),
                 Ok(12)
             );
         });

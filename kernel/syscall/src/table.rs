@@ -912,8 +912,14 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // request length and reply-buffer capacity.
                 let request_len = decode_len(args.0[2])?;
                 let reply_cap = decode_len(args.0[4])?;
-                self.handlers
-                    .ipc_call(caller, args.0[0], args.0[1], request_len, args.0[3], reply_cap)
+                self.handlers.ipc_call(
+                    caller,
+                    args.0[0],
+                    args.0[1],
+                    request_len,
+                    args.0[3],
+                    reply_cap,
+                )
             }
             _ => Err(Errno::NotFound),
         }

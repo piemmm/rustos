@@ -7,8 +7,8 @@
 //! driver-store service) and the caller half is the `ipc_call` syscall
 //! handler (`crate::syscalls`); both must reach the *same* endpoint
 //! instance. This registry is that rendezvous: the server
-//! [`register`](register)s the endpoint it created under its well-known id,
-//! and the handler [`lookup`](lookup)s the id the caller named.
+//! [`register`]s the endpoint it created under its well-known id,
+//! and the handler [`lookup`]s the id the caller named.
 //!
 //! # Why a registry and not a borrowed seam
 //!

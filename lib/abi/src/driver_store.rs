@@ -157,7 +157,7 @@ const REPLY_OK_HEADER_LEN: usize = REPLY_STATUS_LEN + 4;
 ///
 /// # Errors
 ///
-/// [`Errno::BufferTooSmall`] if `buf` is shorter than [`REPLY_STATUS_LEN`].
+/// [`Errno::BufferTooSmall`] if `buf` is shorter than the status word.
 pub fn encode_error_reply(buf: &mut [u8], err: Errno) -> Result<usize, Errno> {
     if buf.len() < REPLY_STATUS_LEN {
         return Err(Errno::BufferTooSmall);
@@ -187,9 +187,7 @@ fn split_status(reply: &[u8]) -> Result<i32, Errno> {
 pub fn reply_status(reply: &[u8]) -> Result<(), Errno> {
     match split_status(reply)? {
         0 => Ok(()),
-        negative => {
-            Errno::from_i32(-negative).map_or(Err(Errno::BadMagic), Err)
-        }
+        negative => Errno::from_i32(-negative).map_or(Err(Errno::BadMagic), Err),
     }
 }
 
@@ -205,7 +203,11 @@ pub fn encode_read_reply(buf: &mut [u8], bytes: &[u8]) -> Result<usize, Errno> {
         return Err(Errno::BufferTooSmall);
     }
     put_i32(buf, 0, 0);
-    put_u32(buf, REPLY_STATUS_LEN, u32::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?);
+    put_u32(
+        buf,
+        REPLY_STATUS_LEN,
+        u32::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?,
+    );
     buf[REPLY_OK_HEADER_LEN..total].copy_from_slice(bytes);
     Ok(total)
 }
@@ -357,7 +359,10 @@ mod tests {
     #[test]
     fn request_encode_rejects_small_buffer() {
         let mut empty: [u8; 0] = [];
-        assert_eq!(FileRequest::List.encode(&mut empty), Err(Errno::BufferTooSmall));
+        assert_eq!(
+            FileRequest::List.encode(&mut empty),
+            Err(Errno::BufferTooSmall)
+        );
         let req = FileRequest::Read {
             path: "abc",
             offset: 0,
@@ -399,10 +404,7 @@ mod tests {
 
     #[test]
     fn list_reply_round_trips_paths() {
-        let paths = [
-            "/System/Drivers/input/kbd",
-            "/System/Drivers/storage/blk",
-        ];
+        let paths = ["/System/Drivers/input/kbd", "/System/Drivers/storage/blk"];
         let mut buf = [0u8; 256];
         let n = encode_list_reply(&mut buf, &paths).expect("encodes");
         let mut it = decode_list_reply(&buf[..n]).expect("ok frame");

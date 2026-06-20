@@ -492,31 +492,77 @@ pub fn autoload_system_drivers<Disk: Block>(
     hook: &mut dyn MountedRootHook,
     audit: &dyn Sink,
 ) {
+    // Autoload off the read-only `/System` store, pre-unlock. The hook never
+    // fails the boot (`AGENTS.md` §18.4 / §5.4); a disk with no `/System`
+    // volume runs no hook at all (`with_system_volume` returns `None`).
+    with_system_volume(disk, audit, |volume| hook.after_mount(volume));
+}
+
+/// Discover and mount the read-only signed-bundle `/System` volume on
+/// `disk` and run the continuation `f` against the **still-open** volume,
+/// returning whatever `f` returns wrapped in [`Some`].
+///
+/// This is the one place the `/System` discovery + read-only mount + layout
+/// confirmation lives (`AGENTS.md` §2.2): the design-B pre-unlock autoload
+/// ([`autoload_system_drivers`]) runs its hook through it, and the Design D
+/// persistent driver-store file service
+/// ([`crate::driver_store_server::serve_system_store`]) runs its
+/// never-returning serve loop through it. Because the mounted volume borrows
+/// the [`PartitionBlock`] window which borrows `disk`, all of it lives on
+/// the caller's frame for as long as `f` runs — so a continuation that never
+/// returns (the persistent server) keeps the mount live for the life of the
+/// system without any `'static` promotion (`AGENTS.md` §2.17).
+///
+/// The disk's partition table is parsed fail-closed; if it carries a
+/// [`PartitionType::RustFsSystem`] partition, a bounds-checked
+/// [`PartitionBlock`] window is opened over it and mounted **read-only**
+/// under the non-secret well-known [`SYSTEM_VOLUME_KEY`]
+/// ([`RustFs::open_read_only`] — the volume holds no secrets and its
+/// integrity rests on the per-bundle Ed25519 signatures the load gate
+/// verifies, `AGENTS.md` §18.6). The volume's root is probed for the §16.2
+/// `Drivers` store directory to confirm it is a real `/System` volume, the
+/// mount is audited (`SYSTEM_VOLUME_MOUNTED`), and only then is `f` run.
+///
+/// **Fail-soft and fail-closed** (`AGENTS.md` §18.4 / §2.9): a disk with no
+/// — or an unopenable — `/System` volume returns [`None`] (each decline
+/// audited `SYSTEM_VOLUME_UNAVAILABLE`) without running `f`, and never
+/// aborts the boot.
+///
+/// * `disk` — the whole-disk [`Block`] device the board brought up.
+/// * `f` — the continuation run against the mounted read-only `/System`
+///   volume.
+/// * `audit` — the sink every decision is logged through (`AGENTS.md`
+///   §19.4). No secret is consumed or logged.
+pub fn with_system_volume<Disk: Block, R>(
+    disk: &mut Disk,
+    audit: &dyn Sink,
+    f: impl FnOnce(&mut dyn RootVolume) -> R,
+) -> Option<R> {
     let Ok(table) = parse_partition_table(&mut *disk) else {
         system_volume_unavailable(audit, "partition_table_invalid");
-        return;
+        return None;
     };
     let Some(extent) = table.first_of_type(PartitionType::RustFsSystem) else {
         system_volume_unavailable(audit, "no_system_partition");
-        return;
+        return None;
     };
     // A bounds-checked window onto the `/System` extent (`AGENTS.md` §24.4).
     let Ok(window) = PartitionBlock::from_partition(&mut *disk, &extent) else {
         system_volume_unavailable(audit, "system_window_out_of_range");
-        return;
+        return None;
     };
     // Mount read-only under the public key; the volume carries no secrets,
     // so the kernel can never mutate it (`AGENTS.md` §18.6 / §5.4).
     let Ok(mut system) = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
         system_volume_unavailable(audit, "system_mount_failed");
-        return;
+        return None;
     };
     // Confirm it is a real `/System` volume: its root carries the §16.2
-    // `Drivers` store directory the hook scans.
+    // `Drivers` store directory the continuation reads.
     let root = system.root();
     if system.lookup(root, b"Drivers").is_err() {
         system_volume_unavailable(audit, "system_layout_invalid");
-        return;
+        return None;
     }
     log(
         audit,
@@ -527,9 +573,7 @@ pub fn autoload_system_drivers<Disk: Block>(
             fields: &[],
         },
     );
-    // Autoload off the read-only `/System` store, pre-unlock. The hook never
-    // fails the boot (`AGENTS.md` §18.4 / §5.4).
-    hook.after_mount(&mut system);
+    Some(f(&mut system))
 }
 
 /// Audit a declined `/System` mount with a stable, secret-free `cause`
@@ -1864,6 +1908,47 @@ mod tests {
             hook.runs, 0,
             "the hook never runs when no /System volume mounts"
         );
+        assert!(sink.ids().contains(&4141), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn with_system_volume_runs_the_continuation_and_returns_its_result() {
+        // The one mount seam (`AGENTS.md` §2.2): it mounts the read-only
+        // `/System` volume, runs `f` against the still-open volume, and
+        // returns `Some(f(..))`. The volume reads cleanly inside `f` — proven
+        // by reading the §16.2 `Drivers` store directory back out.
+        let mut disk = success_disk();
+        let sink = RecordingSink::new();
+
+        let found_store = with_system_volume(&mut disk, &sink, |volume| {
+            let root = volume.root();
+            volume.lookup(root, b"Drivers").is_ok()
+        });
+
+        assert_eq!(
+            found_store,
+            Some(true),
+            "the continuation runs against the mounted volume and its result is returned"
+        );
+        assert!(sink.ids().contains(&4140), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4141), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn with_system_volume_returns_none_and_never_runs_the_continuation_without_a_volume() {
+        // §18.4 / §2.9: with no recognised partition table there is no
+        // `/System` volume, so `with_system_volume` returns `None` without
+        // ever running the continuation, audits the unavailable case
+        // (`4141`), and never the mounted one (`4140`).
+        let mut disk = FatVecBlock::new(64);
+        let sink = RecordingSink::new();
+
+        let ran = with_system_volume(&mut disk, &sink, |_volume| {
+            panic!("the continuation must not run when no /System volume mounts");
+        });
+
+        assert_eq!(ran, None);
         assert!(sink.ids().contains(&4141), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
     }

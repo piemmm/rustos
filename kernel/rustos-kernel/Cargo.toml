@@ -199,8 +199,11 @@ rustos-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" 
 # kernel binary's `driver_spawn_loader` implements its `DriverLoader` seam to
 # spawn a discovered user-space driver, bridging `devmgr` policy to the
 # kernel spawn mechanism. `devmgr` stays on `lib/*` only (§17.4); the kernel
-# binary (`Layer::Tooling`) is the permitted integration point.
-rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0" }
+# binary (`Layer::Tooling`) is the permitted integration point. Linked with
+# `default-features = false` so the device manager's `program` feature (its
+# `rustos-rt` userland runtime) never enters the kernel image (`AGENTS.md`
+# §17.4 / §1).
+rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 
 # aarch64: the Raspberry Pi 4 production kernel links the aarch64 port
 # (`plans/PI.md` P1). The aarch64 boot path is intentionally minimal at
@@ -213,7 +216,10 @@ rustos-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 # discovered user-space driver with the matched node's device-resource
 # grants (`plans/PI.md` P10 5d-2-ii). `devmgr` stays on `lib/*` only (§17.4);
 # the kernel binary (`Layer::Tooling`) is the permitted integration point.
-rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0" }
+# Linked with `default-features = false` so the device manager's `program`
+# feature (its `rustos-rt` userland runtime) never enters the kernel image
+# (`AGENTS.md` §17.4 / §1).
+rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
 # The shared FDT reader (`AGENTS.md` §2.2): `boot_aarch64` parses the
 # firmware device tree the loader hands the kernel to discover the board
 # console base (`plans/PI.md` P2).

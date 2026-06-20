@@ -28,6 +28,9 @@
 //! every capability and §5.3 check stays in `kernel/core` behind the
 //! [`SystemFileService`] delegation.
 
+use core::convert::Infallible;
+
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
@@ -38,10 +41,12 @@ use rustos_abi::driver_store::{
 use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 use rustos_drvhost::ImageSource;
+use rustos_kernel_core::{CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
 use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
 
+use crate::root_mount::RootVolume;
 use crate::system_files::SystemFileService;
 
 /// Maximum request payload the driver-store endpoint accepts: a
@@ -117,7 +122,11 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
 /// reply rather than dropped (`AGENTS.md` §5.4 / §2.9). The reply is never
 /// silently truncated.
 #[must_use]
-pub fn build_reply<F>(service: &SystemFileService<'_, F>, request: &[u8], audit: &dyn Sink) -> Vec<u8>
+pub fn build_reply<F>(
+    service: &SystemFileService<'_, F>,
+    request: &[u8],
+    audit: &dyn Sink,
+) -> Vec<u8>
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
@@ -174,7 +183,9 @@ where
     if let Err(err) = service.read(path, &mut image) {
         return driver_store::encode_error_reply(buf, err);
     }
-    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(image.len());
+    let start = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(image.len());
     let want = (len as usize).min(FILE_READ_CHUNK_MAX as usize);
     let end = start.saturating_add(want).min(image.len());
     driver_store::encode_read_reply(buf, &image[start..end])
@@ -207,6 +218,60 @@ where
     let _ = endpoint.reply(call.ticket, &reply, audit);
     rustos_kernel_core::call_wake();
     true
+}
+
+/// Serve the read-only `/System` driver-store file-read IPC endpoint over
+/// the already-mounted `volume` **for the life of the system** — the
+/// never-returning body the disk-owning kthread runs in place of the bare
+/// [`crate::shared_block::DriverStoreService::hold`] park (Design D D2b-2,
+/// a-2).
+///
+/// It builds one [`SystemFileService`] over `volume` (the root-backed VFS
+/// mounted once, `AGENTS.md` §2.16), binds the well-known driver-store
+/// [`CallEndpoint`] under `binder` (which must hold
+/// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] — see
+/// [`crate::unlock_service::store_endpoint_binder_caps`]), registers it in
+/// the kernel call-endpoint registry so the `ipc_call` syscall handler can
+/// resolve it, then loops: drain one pending call ([`serve_pending`]) or
+/// **park** off the run queue through `coop` when none is pending
+/// (`AGENTS.md` §2.1 — never a busy-yield). Every served caller is woken by
+/// [`serve_pending`].
+///
+/// `volume`, the [`SystemFileService`] built over it, and the endpoint all
+/// live on the calling kthread's frame for the whole serve loop; the
+/// kthread's device bring-up chain stays suspended beneath this call, so the
+/// borrowed device backing (DMA pool, MMIO map, IRQ waiter, virtio host)
+/// stays live with no `'static` promotion (`AGENTS.md` §2.17 — the
+/// metal-proven device-driving model is unchanged).
+///
+/// # Errors
+///
+/// Returns a stable stage string fail-closed (`AGENTS.md` §2.9), **without**
+/// entering the serve loop, if the file service cannot open the mounted
+/// volume, the endpoint cannot be bound (`binder` lacks the privileged bind
+/// authority), or its well-known id is already registered. The caller then
+/// parks the kthread without a live endpoint, so an `ipc_call` to the store
+/// fails closed with `NotFound` rather than blocking. The success arm never
+/// returns (the [`Infallible`] `Ok` is never produced).
+pub fn serve_system_store(
+    volume: &mut dyn RootVolume,
+    binder: &TaskCapabilities,
+    coop: &CooperativeYield<'_>,
+    audit: &dyn Sink,
+) -> Result<Infallible, &'static str> {
+    let service = SystemFileService::open(volume, SYSTEM_VOLUME_STORE_PATH)
+        .map_err(|_| "driver-store: /System mount unreadable for the file service")?;
+    let endpoint = Arc::new(
+        create_driver_store_endpoint(binder, audit)
+            .map_err(|_| "driver-store: could not bind the file-read endpoint")?,
+    );
+    rustos_kernel_core::callreg::register(endpoint.clone())
+        .map_err(|_| "driver-store: file-read endpoint id already bound")?;
+    loop {
+        if !serve_pending(&service, &endpoint, audit) {
+            coop.park();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -339,5 +404,57 @@ mod tests {
         // Opcode 0xFF is unknown → OutOfRange (decode), surfaced in band.
         let reply = build_reply(&service, &[0xFF], &NullSink);
         assert_eq!(reply_status(&reply), Err(Errno::OutOfRange));
+    }
+
+    /// A [`YieldHandle`] the serve loop must never reach: the fail-closed
+    /// bind path returns before the loop, so neither `park` nor `yield_now`
+    /// may fire.
+    struct UnreachableYielder;
+    impl rustos_kernel_core::YieldHandle for UnreachableYielder {
+        fn yield_now(&mut self) {
+            panic!("serve_system_store must not yield on the fail-closed bind path");
+        }
+        fn park(&mut self) {
+            panic!("serve_system_store must not park on the fail-closed bind path");
+        }
+    }
+
+    /// `serve_system_store` fails closed — returning a stable stage string
+    /// **without** registering the well-known endpoint or entering the serve
+    /// loop — when its binder lacks `CAP_IPC_BIND_PRIVILEGED` and so cannot
+    /// bind the restricted-sender driver-store endpoint (`AGENTS.md` §5.4 /
+    /// §2.9). An `ipc_call` to the store then resolves nothing and fails
+    /// closed with `NotFound` rather than blocking forever.
+    #[test]
+    fn serve_system_store_without_bind_authority_fails_closed_and_registers_nothing() {
+        use rustos_caps::CapabilitySet;
+        use rustos_kernel_core::CooperativeYield;
+        use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
+        use rustos_kernel_sec::identity::UserId;
+
+        // Guard against a leaked binding from an earlier aborted run so the
+        // assertion reflects this call alone (the registry is process-global).
+        rustos_kernel_core::callreg::unregister(EndpointId(DRIVER_STORE_ENDPOINT));
+
+        let mut volume = service_with(&[("/System/Drivers/usb_kbd", b"BUNDLE")]);
+        // A binder holding no capabilities — in particular not
+        // `IPC_BIND_PRIVILEGED` — may not bind a restricted-sender endpoint.
+        let binder = TaskCapabilities::derive(
+            TaskId(0x5b4),
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &NullSink,
+        );
+        let mut yielder = UnreachableYielder;
+        let coop = CooperativeYield::new(&mut yielder);
+
+        let err = serve_system_store(&mut volume, &binder, &coop, &NullSink)
+            .expect_err("an unprivileged binder cannot bind the store endpoint");
+        assert_eq!(err, "driver-store: could not bind the file-read endpoint");
+        assert!(
+            !rustos_kernel_core::callreg::contains(EndpointId(DRIVER_STORE_ENDPOINT)),
+            "a refused bind must leave the registry untouched"
+        );
     }
 }

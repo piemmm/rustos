@@ -13,34 +13,52 @@
 //!
 //! # What this service does (Design D foundation)
 //!
-//! It reads the architecture-neutral hardware tree the kernel discovered
-//! at boot through the capability-gated `hw_tree_read` syscall
+//! At startup it lists the read-only `/System/Drivers/` driver store over
+//! the capability-gated `ipc_call` endpoint the kernel store service serves
+//! (`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`, `AGENTS.md` §18.3 /
+//! §5.2) and logs every installed bundle path — fail-soft if no store is
+//! served (`AGENTS.md` §18.4 / §2.9). The store is read-only and static for
+//! the life of the system, so it is listed **once**, not on every hotplug
+//! generation (`AGENTS.md` §2.16).
+//!
+//! It then reads the architecture-neutral hardware tree the kernel
+//! discovered at boot through the capability-gated `hw_tree_read` syscall
 //! (`CAP_SYSINFO_HW`, `AGENTS.md` §16.6 / §18.4), logs every node, then
 //! **blocks** in `hw_tree_wait` until the tree changes (a node seeded,
 //! appended, or removed — `AGENTS.md` §18.4) and re-reads it. It never
 //! busy-spins (`AGENTS.md` §2.1): the wait parks the task in the kernel
 //! until the store's generation advances.
 //!
-//! Matching each node against the signed driver store's bind tables and
-//! loading the winners (`driver_store_load`) is the **next** tranche; in
-//! this foundation the in-kernel single-pass autoload still performs the
-//! loads, so this service only observes and reacts. The match policy it
-//! will use already lives in [`rustos_devmgr::resolve`] (`AGENTS.md`
-//! §18.3).
+//! **Matching is not done here yet.** Resolving each discovered node against
+//! the store bundles' bind tables and loading the winners
+//! (`driver_store_load`) is the **next** tranche; the in-kernel single-pass
+//! autoload still performs the loads, so this service only observes (the hw
+//! tree and the store listing) and reacts. The match policy already lives in
+//! [`rustos_devmgr::resolve`] (`AGENTS.md` §18.3), but it consumes
+//! *decoded* bind tables — decoding a bundle's signed manifest is the
+//! driver-host load gate's job (`ParsedImage::decode_bind_table`), which
+//! sits outside this `lib/*`-only crate's dependencies (§17.4), so the
+//! match step lands with that wiring in the next tranche.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
 
-#![cfg_attr(freestanding, no_std)]
-#![cfg_attr(freestanding, no_main)]
+#![cfg_attr(all(freestanding, feature = "program"), no_std)]
+#![cfg_attr(all(freestanding, feature = "program"), no_main)]
 #![deny(missing_docs)]
 
 // --- Pure-Rust program --------------------------------------------------
-#[cfg(freestanding)]
+// Compiled only for the freestanding service binary, which links the
+// optional `rustos-rt` runtime through the default `program` feature. The
+// kernel links this crate's *library* with `default-features = false`, so
+// it never builds this module (nor pulls in `rustos-rt`, `AGENTS.md`
+// §17.4).
+#[cfg(all(freestanding, feature = "program"))]
 mod program {
+    use rustos_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use rustos_abi::hwtree::HwDeviceClass;
     use rustos_abi::{Errno, HwNode, HwTreeHeader};
-    use rustos_devmgr::HwTreeService;
+    use rustos_devmgr::{list_store, DriverStoreCall, HwTreeService};
     use rustos_util::fmt::{format_hex_u64, format_usize};
 
     /// Buffer the discovered tree is read into. Sized as a generous §24.2
@@ -157,16 +175,71 @@ mod program {
         }
     }
 
-    /// Program entry point. Runs the reactive observe loop for the life of
-    /// the service (`budget = None`): read and log the discovered tree, then
-    /// block on every generation advance and re-read it (`AGENTS.md` §18.4).
-    /// The loop returns only on a fail-closed error; PID 1 `init` supervises
-    /// and relaunches the service.
+    /// The production [`DriverStoreCall`] backing: it binds the `ipc_call`
+    /// `abi-v1` syscall to the read-only `/System` driver-store endpoint
+    /// ([`DRIVER_STORE_ENDPOINT`]) the kernel store service serves
+    /// (`AGENTS.md` §18.3 / §5.2). The protocol logic (request framing, reply
+    /// decoding) is host-tested in `rustos_devmgr::store`; this is the
+    /// freestanding I/O it binds (`AGENTS.md` §2.2). The kernel re-checks the
+    /// caller's `CAP_DRV_LOAD` on every call; this client adds no authority.
+    struct RtStoreCall;
+
+    impl DriverStoreCall for RtStoreCall {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            // `ipc_call` returns the raw `-errno` on failure; recover the
+            // typed `Errno` and surface it fail-closed (`AGENTS.md` §2.9).
+            rustos_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(errno_from)
+        }
+    }
+
+    /// List the read-only `/System/Drivers/` store over the `ipc_call`
+    /// endpoint and report every installed bundle path to the diagnostic
+    /// stream (fd 2, `AGENTS.md` §20), reusing `buf` for the reply.
+    ///
+    /// Fail-soft (`AGENTS.md` §18.4 / §2.9): if the store endpoint is not
+    /// bound (no `/System` volume served) or the listing fails, it reports
+    /// the condition and returns — it never aborts the service, mirroring the
+    /// kernel server's own fail-closed-but-non-fatal store handling. Design D
+    /// (a) is observe-only: the in-kernel autoload still performs the loads,
+    /// so this logs the discovered store without matching or loading.
+    fn report_store(buf: &mut [u8]) {
+        match list_store(&mut RtStoreCall, buf) {
+            Ok(paths) => {
+                let mut count = [0u8; 12];
+                write_all_stderr(b"devmgr: driver store bundles ");
+                write_all_stderr(format_usize(paths.len(), &mut count).as_bytes());
+                write_all_stderr(b"\n");
+                for path in &paths {
+                    write_all_stderr(b"devmgr: store bundle ");
+                    write_all_stderr(path.as_bytes());
+                    write_all_stderr(b"\n");
+                }
+            }
+            Err(err) => {
+                let mut code = [0u8; 12];
+                write_all_stderr(b"devmgr: driver store unavailable errno ");
+                write_all_stderr(format_usize(err as usize, &mut code).as_bytes());
+                write_all_stderr(b"\n");
+            }
+        }
+    }
+
+    /// Program entry point. Lists and logs the read-only `/System` driver
+    /// store once (`AGENTS.md` §18.3), then runs the reactive observe loop
+    /// for the life of the service (`budget = None`): read and log the
+    /// discovered tree, then block on every generation advance and re-read it
+    /// (`AGENTS.md` §18.4). The loop returns only on a fail-closed error;
+    /// PID 1 `init` supervises and relaunches the service.
     fn main() -> i32 {
         // The read buffer is a single persistent allocation on the stack;
         // the §16.5 stack sizing (`spawn_layout::USER_STACK_PAGES`) covers
-        // it comfortably.
+        // it comfortably. It is reused for the one-shot store listing (which
+        // completes before the loop) and then for every tree read — the
+        // read-only `/System` store is static for the life of the system, so
+        // it is listed once, not on every hotplug generation (`AGENTS.md`
+        // §2.16).
         let mut buf = [0u8; READ_BUF_LEN];
+        report_store(&mut buf);
         match rustos_devmgr::run(&mut RtTreeService, &mut buf, None) {
             Ok(()) => 0,
             Err(_) => 1,
@@ -178,9 +251,9 @@ mod program {
 
 // --- Host stub ----------------------------------------------------------
 //
-// On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
-// this inert `main` keeps the crate building under the host tooling. It
-// performs no I/O.
-#[cfg(not(freestanding))]
+// Whenever the real freestanding `rustos-rt` `_start` path is not compiled
+// — on the host (`cargo build --workspace`, clippy, fmt), or for a
+// `program`-less build of this crate — this inert `main` keeps the crate
+// building under the host tooling. It performs no I/O.
+#[cfg(not(all(freestanding, feature = "program")))]
 fn main() {}

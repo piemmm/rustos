@@ -319,6 +319,31 @@ pub fn loader_caps() -> CapabilitySet {
     caps
 }
 
+/// The capability set the disk-owning kthread binds the well-known
+/// driver-store call endpoint under (Design D D2b —
+/// [`crate::driver_store_server::create_driver_store_endpoint`]).
+///
+/// The endpoint restricts its callers to holders of [`CapabilityId::DRV_LOAD`]
+/// (the device manager's authority to read the store, `AGENTS.md` §5.2), and
+/// binding such a *restricted-sender* endpoint is by definition privileged:
+/// [`rustos_kernel_ipc::CallEndpoint::create`] requires the binder to hold
+/// [`CapabilityId::IPC_BIND_PRIVILEGED`]. That bind authority is **not** part
+/// of [`service_caps`] — the kthread's minimal device bring-up set, which
+/// holds no IPC authority (§5.4 — no ambient authority) — so the one-shot
+/// binder context is derived from this distinct, deliberately narrow set:
+/// `IPC_BIND_PRIVILEGED` and nothing else. The kthread never posts to or
+/// reads the store endpoint as a *caller* (it is the bound *server*), so it
+/// needs no `CAP_DRV_LOAD` here.
+///
+/// Architecture-neutral (`AGENTS.md` §2.2): every port's driver-store
+/// kthread binds the endpoint under the same single capability.
+#[must_use]
+pub fn store_endpoint_binder_caps() -> CapabilitySet {
+    let mut caps = CapabilitySet::empty();
+    caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
+    caps
+}
+
 /// Log an unlock-service lifecycle decision onto the service's audit sink
 /// under the shared [`UNLOCK_SERVICE`] event id (`AGENTS.md` §19.4).
 pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
