@@ -329,6 +329,56 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     arch_for_halt.halt();
 }
 
+/// The boot-leaked [`crate::WaitQueueArch`] adapter (Design D P-2).
+///
+/// Bridges the global blocking wait-queue (`crate::waitq`) to the live,
+/// generic `Scheduler<A>` and arch port without the wait-queue naming
+/// either concrete type (`AGENTS.md` §17.4 / §2.2): an explicit or timed
+/// wake `unpark`s through the scheduler (whose wake-pending token closes
+/// the lost-wakeup race, §2.1), the timed sweep reads `monotonic_ns`, and
+/// the nearest-deadline one-shot is armed through the arch port's
+/// `set_wakeup` (§17.1). Holds only `'static` borrows into the leaked
+/// `KernelState`, so it is itself leaked and installed once at boot.
+struct SchedWaitQueueArch<A: KernelArch + 'static> {
+    scheduler: &'static Scheduler<A>,
+    arch: &'static A,
+}
+
+impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch<A> {
+    fn unpark(&self, id: rustos_kernel_sched_api::TaskId) {
+        // Cancellation-safe: `unpark` of a not-yet-parked task records a
+        // wake-pending token rather than erroring, so a wake racing the
+        // park is never lost (`AGENTS.md` §2.1). A vanished task is a
+        // benign no-op for a wake.
+        let _ = self.scheduler.unpark(id);
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch))
+    }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        SchedulerArch::set_wakeup(self.arch, deadline_ns);
+    }
+}
+
+/// Leak a [`SchedWaitQueueArch`] over the boot-leaked `KernelState` and
+/// install it as the global wait-queue hook (Design D P-2), so the
+/// explicit-wake (`crate::hw_tree_wake`) and timed-wake
+/// (`crate::timed_wake_sweep`) paths reach the live scheduler + arch
+/// without the wait-queue naming either concrete type (`AGENTS.md` §17.4 /
+/// §2.2). Set-once per boot; a stray re-install is a benign skip (this is
+/// the only caller — `AGENTS.md` §2.1). Factored out of `run_phases` to
+/// keep that function within its line budget (§2.3).
+fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<A>) {
+    let wait_arch: &'static SchedWaitQueueArch<A> = Box::leak(Box::new(SchedWaitQueueArch {
+        scheduler: &state.scheduler,
+        arch: state.arch.as_ref(),
+    }));
+    let _ = crate::waitq::install_wait_arch(wait_arch);
+}
+
 /// The production [`InitSpawnCtx`] [`kernel_main`] hands the arch
 /// [`crate::InitSpawn`] seam to spawn PID 1 (`plans/PI.md` P6c-3) and the
 /// bin crate's driver autoloader drives to spawn user-space drivers
@@ -751,6 +801,11 @@ fn run_phases<A: KernelArch>(
     // fail-closed `NULL_PROCESS_WAIT`.
     let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) =
         Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
+
+    // Publish the wait-queue arch hook (Design D P-2) so the explicit /
+    // timed wake paths reach the live scheduler + arch (factored out to
+    // keep this function within the line budget — `AGENTS.md` §2.3).
+    publish_wait_queue_arch(state);
 
     // Wrap every boot-installed console's input half in the blocking
     // adapter (`AGENTS.md` §20 — the stream backing owns blocking, never

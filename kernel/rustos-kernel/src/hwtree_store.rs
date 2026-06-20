@@ -71,19 +71,31 @@ impl HwTreeStore {
     /// Called once by the boot path at the post-MMU init seam; a re-seed is
     /// permitted (it simply supersedes the prior contents).
     pub fn seed(&self, tree: &[HwNode]) {
-        let mut inner = self.inner.lock();
-        inner.nodes.clear();
-        inner.nodes.extend_from_slice(tree);
-        inner.generation += 1;
+        {
+            let mut inner = self.inner.lock();
+            inner.nodes.clear();
+            inner.nodes.extend_from_slice(tree);
+            inner.generation += 1;
+        }
+        // The generation advanced: wake every parked `hw_tree_wait` caller
+        // so it re-reads and re-matches (`AGENTS.md` §18.4). Done after the
+        // inner lock is dropped so the scheduler's `unpark` locks are never
+        // taken under ours (`AGENTS.md` §2.1); a fail-safe no-op before the
+        // wait-queue arch hook is installed (early boot).
+        rustos_kernel_core::hw_tree_wake();
     }
 
     /// Append one discovered child `node` to the inventory and bump the
     /// generation. The node is always added, never dropped, and the store
     /// grows on demand (`AGENTS.md` §24.1).
     pub fn append(&self, node: &HwNode) {
-        let mut inner = self.inner.lock();
-        inner.nodes.push(*node);
-        inner.generation += 1;
+        {
+            let mut inner = self.inner.lock();
+            inner.nodes.push(*node);
+            inner.generation += 1;
+        }
+        // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]).
+        rustos_kernel_core::hw_tree_wake();
     }
 
     /// An owned snapshot of the current inventory.

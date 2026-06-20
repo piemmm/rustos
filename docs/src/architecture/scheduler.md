@@ -295,6 +295,18 @@ period (x86_64); a fired timer never re-arms itself, so a CPU running a
 sole runnable task takes no timer interrupts at all (PLAN P-4 retired the
 P-1 100 Hz periodic arming).
 
+The *nearest timed wakeup* half of the one-shot is the provided
+[`SchedulerArch::set_wakeup(deadline_ns)`] hook: a blocking wait with a
+finite timeout (the [blocking wait-queue](#blocking-wait-queue-and-the-wake-pending-token)
+below) records its soonest waiter deadline through it, so the port programs
+its single physical one-shot to the *earlier* of the quantum arming and the
+wakeup, and a parked waiter fires on time even on an otherwise-idle CPU
+that has no task to preempt (`AGENTS.md` §17.1). `set_wakeup` defaults to a
+no-op, so a port that has not yet wired the per-port one-shot reprogram
+inherits the explicit-wake path only; realising the hardware arming (and
+the idle drive-loop that re-steps a woken sole waiter) is the production
+launch staged in `.junie/next-pi-prompt.md` (Design D P-3).
+
 In both policies `on_timer_tick` increments the per-CPU
 preemption counter and returns; it does **not** call `Scheduler::step`.
 The counter is
@@ -335,6 +347,38 @@ this path: `send_ipi` already documents the scheduler-asks-arch
 direction, and the ISR-into-scheduler call is, by construction, a
 method on the scheduler itself rather than on the arch trait
 (`AGENTS.md` §2.4 — no interface creep).
+
+## Blocking wait-queue and the wake-pending token
+
+A task that must wait for an event it cannot make progress on **parks** off
+the run queue rather than busy-yielding (`AGENTS.md` §2.1). The reusable
+primitive is `kernel/core::waitq::WaitQueue`: a waiter registers (with an
+optional absolute monotonic-ns deadline), then suspends with
+`RescheduleAction::Park`; it is woken either by an **explicit event**
+(`WaitQueue::wake_all`) or, with a deadline, by the **timed sweep**
+(`WaitQueue::sweep`, driven from the arch timer ISR's per-tick sweep and the
+`set_wakeup` one-shot above). The first consumer is the `hw_tree_wait`
+syscall, whose waiters `HW_TREE_WAITQ` holds and the discovered-hardware
+store wakes on every generation bump (`AGENTS.md` §18.4). Waking a parked
+waiter, reading the clock, and arming the one-shot all route through one
+boot-installed `WaitQueueArch` adapter over the live `Scheduler<A>` + arch,
+so the global wait-queue never names either concrete type (`AGENTS.md`
+§17.4 / §2.2).
+
+### No lost wake-ups
+
+The park/unpark race — a wake delivered after the waiter last checked its
+condition but before it commits to park — is closed in the scheduler
+itself by a **wake-pending token** (mirroring Rust's `Thread`
+park/unpark). `Scheduler::unpark` of a task that has *not* yet committed to
+park (it is `Ready`/`Running`) cannot move a non-parked task, so instead of
+no-oping the wake away it sets the token; the dispatch loop's `Park` commit
+consumes the token and re-readies the task rather than sleeping it. A
+waiter therefore only ever sleeps through a wake it has not yet observed,
+and always re-checks its condition after each wake, so a finished or
+timed-out wait returns rather than parking forever. The shared
+`SchedulerPolicy` conformance suite's `unpark_before_park_is_not_lost`
+case asserts this for every policy.
 
 ## Current-task slot
 

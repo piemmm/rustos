@@ -400,7 +400,14 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchTask)?;
         match task.load_state() {
             TaskState::Exited => return Err(SchedError::InvalidState),
-            TaskState::Ready | TaskState::Running => return Ok(()),
+            // Not yet committed to park: a `cas` to Ready would be a no-op,
+            // so record the wake as a pending token instead. The dispatch
+            // loop's `Park` commit consumes it and re-readies the task
+            // rather than sleeping it (`AGENTS.md` §2.1 — no lost wake-ups).
+            TaskState::Ready | TaskState::Running => {
+                task.set_wake_pending();
+                return Ok(());
+            }
             TaskState::Parked => {}
         }
         task.cas_state(TaskState::Parked, TaskState::Ready)
@@ -724,7 +731,26 @@ impl<A: SchedulerArch> Scheduler<A> {
                 self.tasks.write().remove(&id);
             }
             TaskAction::Park => {
-                task.store_state(TaskState::Parked);
+                // Close the park/unpark lost-wakeup race: an `unpark` that
+                // arrived while the body ran left a token (it could not
+                // move a non-parked task). Consume it and re-ready the task
+                // at its current band — no demotion, this is not a
+                // voluntary yield — rather than sleeping it (`AGENTS.md`
+                // §2.1). Otherwise park as usual.
+                if task.take_wake_pending() {
+                    task.store_state(TaskState::Ready);
+                    let dest = self.preferred_home(prio, cpu);
+                    task.home_cpu.store(dest, Ordering::Release);
+                    let target = self
+                        .cpus
+                        .get(dest as usize)
+                        .unwrap_or(&self.cpus[cpu as usize]);
+                    if target.push_priority(prio, id).is_err() {
+                        self.overflow.lock().push(id);
+                    }
+                } else {
+                    task.store_state(TaskState::Parked);
+                }
             }
             TaskAction::Yield => {
                 let yields = task.yields_at_band.fetch_add(1, Ordering::AcqRel) + 1;

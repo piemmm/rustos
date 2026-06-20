@@ -301,6 +301,34 @@ pub trait SchedulerArch: Send + Sync {
     /// [`crate::Timer::disarm`]). An implementation must never panic
     /// (§2.9).
     fn set_preemption(&self, _armed: bool) {}
+
+    /// Arm (or clear) the **calling** CPU's one-shot to also fire no later
+    /// than the absolute monotonic-nanoseconds deadline `deadline_ns`, for
+    /// the nearest pending timed blocking wait.
+    ///
+    /// This is the timed half of the tickless one-shot (`AGENTS.md` §17.1:
+    /// the timer is armed "to the next event the scheduler actually needs —
+    /// the running task's preemption deadline *or* the nearest armed
+    /// wakeup"). A blocking wait with a finite timeout (the wait-queue in
+    /// `kernel/core`, whose first consumer is `hw_tree_wait`) records its
+    /// soonest waiter deadline through this hook so the parked waiter is
+    /// woken on time even when the CPU has *no* runnable task to preempt and
+    /// would otherwise take no timer interrupt at all.
+    ///
+    /// `Some(deadline_ns)` requests a wake at or before that monotonic-ns
+    /// instant (the same clock [`crate::SchedulerArch`]'s host double and
+    /// the kernel's `monotonic_ns` use); `None` clears the timed arming.
+    /// It composes with [`Self::set_preemption`]: a port programs its single
+    /// physical one-shot to the *earlier* of the quantum arming and this
+    /// wakeup, so neither suppresses the other. A deadline already in the
+    /// past arms the soonest possible tick rather than wrapping (`AGENTS.md`
+    /// §2.9 — fail closed).
+    ///
+    /// **Provided**, defaulting to a no-op so the host `TestArch` and any
+    /// non-preemptive port inherit cooperative behaviour unchanged; a real
+    /// port overrides it to reprogram its [`crate::Timer`] one-shot. An
+    /// implementation must never panic (§2.9).
+    fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
 }
 
 #[cfg(test)]

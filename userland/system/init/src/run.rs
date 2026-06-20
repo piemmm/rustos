@@ -117,14 +117,18 @@ mod program {
         }
         // NOTE: PID 1 does **not** yet launch the device-manager service
         // (`/System/Services/devmgr`). The service blocks reactively in
-        // `hw_tree_wait`, which today is a cooperative poll-and-yield (the
-        // kernel ships no true park/wake — `RescheduleAction::Park` is
-        // unwired); a perpetual waiter would spin and starve a single-CPU
-        // system (`AGENTS.md` §2.1). Spawning it from `init` lands together
-        // with the true generation-keyed park in the next tranche
-        // (`.junie/next-pi-prompt.md` Design D D2b-2b "A"). The foundation
-        // (the `hw_tree_read`/`hw_tree_wait` syscalls, the store generation
-        // counter, and the signed `devmgr` binary) is proven by
+        // `hw_tree_wait`, which is now a **true generation-keyed park**: the
+        // kernel ships the blocking wait-queue + scheduler wake-pending
+        // token + explicit wake (Design D P-2 — `kernel/core::waitq`,
+        // `RescheduleAction::Park` is wired), so a perpetual waiter parks
+        // off the run queue rather than busy-yielding (`AGENTS.md` §2.1).
+        // The remaining prerequisite before spawning it here is the
+        // production launch (`.junie/next-pi-prompt.md` Design D P-3): the
+        // idle drive-loop must `wfi`/re-step (rather than halt) so a parked
+        // sole service is reached when woken, alongside the reactive
+        // bus-driver chain (D3/D4) that emits the nodes it matches. The
+        // foundation (the `hw_tree_read`/`hw_tree_wait` syscalls, the store
+        // generation counter, and the signed `devmgr` binary) is proven by
         // `rustos-test-devmgr-hwtree-qemu-aarch64` until then.
         match supervise_sessions(&mut RtSessions, config.session().as_bytes()) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,

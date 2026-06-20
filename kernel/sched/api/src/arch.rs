@@ -20,7 +20,7 @@
 pub use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
 
 #[cfg(any(test, feature = "test-arch"))]
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// In-memory [`SchedulerArch`] implementation used by host-side tests and
 /// the `conformance` suite.
@@ -64,6 +64,13 @@ pub struct TestArch {
     last_preemption: AtomicU8,
     arm_count: AtomicU64,
     disarm_count: AtomicU64,
+    /// Last value passed to [`SchedulerArch::set_wakeup`]: `last_wakeup_ns`
+    /// holds the deadline and `last_wakeup_some` whether it was `Some`, so a
+    /// host test can assert the nearest-deadline arming without a real
+    /// timer. `wakeup_call_count` counts the calls (`0` = never called).
+    last_wakeup_ns: AtomicU64,
+    last_wakeup_some: AtomicBool,
+    wakeup_call_count: AtomicU64,
 }
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -95,6 +102,9 @@ impl TestArch {
             last_preemption: AtomicU8::new(2),
             arm_count: AtomicU64::new(0),
             disarm_count: AtomicU64::new(0),
+            last_wakeup_ns: AtomicU64::new(0),
+            last_wakeup_some: AtomicBool::new(false),
+            wakeup_call_count: AtomicU64::new(0),
         })
     }
 
@@ -169,6 +179,27 @@ impl TestArch {
     pub fn disarm_count(&self) -> u64 {
         self.disarm_count.load(Ordering::Relaxed)
     }
+
+    /// The most recent [`SchedulerArch::set_wakeup`] argument:
+    /// `Some(Some(ns))` armed to `ns`, `Some(None)` cleared, `None` never
+    /// called. Lets a host test assert the nearest-deadline timed arming.
+    #[must_use]
+    pub fn last_wakeup(&self) -> Option<Option<u64>> {
+        if self.wakeup_call_count.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        if self.last_wakeup_some.load(Ordering::Relaxed) {
+            Some(Some(self.last_wakeup_ns.load(Ordering::Relaxed)))
+        } else {
+            Some(None)
+        }
+    }
+
+    /// Number of [`SchedulerArch::set_wakeup`] calls.
+    #[must_use]
+    pub fn wakeup_call_count(&self) -> u64 {
+        self.wakeup_call_count.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -211,6 +242,17 @@ impl SchedulerArch for TestArch {
         } else {
             self.disarm_count.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        match deadline_ns {
+            Some(ns) => {
+                self.last_wakeup_ns.store(ns, Ordering::Relaxed);
+                self.last_wakeup_some.store(true, Ordering::Relaxed);
+            }
+            None => self.last_wakeup_some.store(false, Ordering::Relaxed),
+        }
+        self.wakeup_call_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 

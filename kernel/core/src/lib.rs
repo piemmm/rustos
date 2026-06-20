@@ -96,6 +96,7 @@ pub(crate) mod sched;
 pub mod spawn;
 pub mod syscalls;
 pub mod users;
+pub mod waitq;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;
@@ -153,4 +154,8 @@ pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers};
 pub use users::{
     load_users_db, load_users_db_source, HeldUsersDbSource, LateUsersDb, NullUsersDbSource,
     UsersDbAlreadyInstalled, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
+};
+pub use waitq::{
+    hw_tree_wake, install_wait_arch, timed_wake_sweep, WaitArchAlreadyInstalled, WaitQueue,
+    WaitQueueArch, HW_TREE_WAITQ, NO_DEADLINE,
 };

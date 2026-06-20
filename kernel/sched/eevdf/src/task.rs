@@ -14,7 +14,7 @@
 //! *cancellation-safe*: they may be issued while the task is running on
 //! another CPU and take effect at the next safe point.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use alloc::boxed::Box;
 use rustos_sync::SpinLock;
@@ -79,6 +79,16 @@ pub(crate) struct TaskInner {
     /// allocation is reclaimed immediately rather than living as long as
     /// the registry entry.
     pub body: SpinLock<Option<Box<TaskBody>>>,
+    /// Wake-pending token closing the park/unpark lost-wakeup race
+    /// (`AGENTS.md` §2.1 — no lost wake-ups). An [`crate::Scheduler::unpark`]
+    /// that arrives while the task is still [`TaskState::Running`] /
+    /// [`TaskState::Ready`] (it has not yet committed to park) cannot move a
+    /// non-parked task, so it instead sets this flag; the dispatch loop's
+    /// `Park` commit consumes it and re-readies the task rather than sleeping
+    /// it, so a wake delivered in the window between "decide to park" and
+    /// "actually parked" is never dropped. Mirrors Rust's `Thread`
+    /// park/unpark token semantics.
+    pub wake_pending: AtomicBool,
 }
 
 impl TaskInner {
@@ -99,7 +109,21 @@ impl TaskInner {
             virtual_deadline: AtomicU64::new(0),
             last_started: AtomicU64::new(0),
             body: SpinLock::new(Some(body)),
+            wake_pending: AtomicBool::new(false),
         }
+    }
+
+    /// Record that a wake arrived before the task committed to park, so the
+    /// next park is cancelled (`AGENTS.md` §2.1 — no lost wake-ups).
+    pub(crate) fn set_wake_pending(&self) {
+        self.wake_pending.store(true, Ordering::Release);
+    }
+
+    /// Atomically consume the wake-pending token, returning whether one was
+    /// set. Called at the dispatch-loop `Park` commit: a `true` cancels the
+    /// park (the task is re-readied instead of slept).
+    pub(crate) fn take_wake_pending(&self) -> bool {
+        self.wake_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Atomically load the priority.

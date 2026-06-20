@@ -308,7 +308,16 @@ impl<A: SchedulerArch> Scheduler<A> {
         let task = self.lookup(id)?;
         match task.load_state() {
             TaskState::Exited => return Err(SchedError::InvalidState),
-            TaskState::Ready | TaskState::Running => return Ok(()),
+            // The task has not committed to park yet (it is running its
+            // body, or already queued). A `cas` to Ready would be a no-op
+            // here, so the wake would be *lost* if the task then parked.
+            // Record the wake as a pending token instead; the dispatch
+            // loop's `Park` commit consumes it and re-readies the task
+            // rather than sleeping it (`AGENTS.md` §2.1 — no lost wake-ups).
+            TaskState::Ready | TaskState::Running => {
+                task.set_wake_pending();
+                return Ok(());
+            }
             TaskState::Parked => {}
         }
         task.cas_state(TaskState::Parked, TaskState::Ready)
@@ -535,11 +544,21 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpus[cpu as usize].queue.advance(SERVICE_PER_DISPATCH);
 
         let observed = task.load_state();
-        let effective = match (observed, action) {
+        let mut effective = match (observed, action) {
             (TaskState::Exited, _) | (_, TaskAction::Exit) => TaskAction::Exit,
             (TaskState::Parked, _) | (_, TaskAction::Park) => TaskAction::Park,
             _ => TaskAction::Yield,
         };
+        // Close the park/unpark lost-wakeup race: if an `unpark` arrived
+        // while this task was running its body (it could not move a
+        // non-parked task, so it left a token), cancel the park and
+        // re-ready the task so the wake is honoured rather than dropped
+        // (`AGENTS.md` §2.1). Consume the token exactly when we would have
+        // parked, so a token left by an earlier already-honoured wake never
+        // suppresses a genuine later park.
+        if effective == TaskAction::Park && task.take_wake_pending() {
+            effective = TaskAction::Yield;
+        }
 
         self.clear_current(cpu);
         match effective {

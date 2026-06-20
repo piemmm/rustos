@@ -1871,37 +1871,77 @@ where
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_SYSINFO_HW`. Block the caller
         // until the store's generation differs from the one it last
-        // observed, or the deadline elapses — the cooperative
-        // poll-and-yield shape `KernelProcessWait::wait` and the IRQ wait
-        // loop use, never a busy spin (`AGENTS.md` §2.1). The deadline is
-        // computed once from the first clock reading with a saturating add
-        // so `u64::MAX` does not wrap it back to a tiny value (`AGENTS.md`
+        // observed, or the deadline elapses. The caller *parks* off the run
+        // queue (`AGENTS.md` §2.1 — no busy yield); it is woken either by
+        // the `HwTreeSource` store on a generation bump
+        // (`crate::waitq::hw_tree_wake`) or, with a finite timeout, by the
+        // architecture one-shot's per-tick sweep (`crate::waitq::timed_wake_sweep`),
+        // and re-checks its condition after every wake (`AGENTS.md` §18.4).
+        //
+        // The deadline is one saturating add from the first clock reading,
+        // so a `u64::MAX` timeout stays `NO_DEADLINE` (no timed wake, only
+        // an explicit one) rather than wrapping to a tiny value (`AGENTS.md`
         // §5.4.5 — fail closed); `monotonic_ns` is non-decreasing per CPU
         // and the handler does not migrate mid-wait.
         let cpu = SchedulerArch::current_cpu(self.arch);
-        let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
-        loop {
-            // A build with no store wired fails closed with
-            // `NotImplemented` (`AGENTS.md` §2.9), checked each iteration so
-            // the inert interface never spins.
-            let generation = self.hw_tree.generation()?;
-            if generation != last_generation {
-                return Ok(0);
-            }
-            if self.arch.monotonic_ns(cpu) >= deadline_ns {
-                return Err(Errno::TimedOut);
-            }
-            // Yield the quantum and re-poll on the next dispatch. An
-            // `InvalidState` (the calling task is not marked Running — only
-            // in host tests that do not drive a real dispatch loop) is a
-            // benign continue, exactly as `SyscallIrqWaiter::yield_now`
-            // treats it; a vanished task fails closed (`AGENTS.md` §5.4.5).
-            match self.sched.yield_current(caller.task_id.0) {
-                Ok(()) | Err(SchedError::InvalidState) => {}
-                Err(SchedError::NoSuchTask) => return Err(Errno::NotFound),
-                Err(_) => return Err(Errno::OutOfRange),
-            }
+        let task = caller.task_id.0;
+
+        // Fast paths, checked before registering so the common
+        // already-changed / zero-timeout / no-store cases allocate nothing
+        // and never touch the wait-queue (`AGENTS.md` §2.16). A build with
+        // no store wired fails closed with `NotImplemented` (`?`, §2.9).
+        let now = self.arch.monotonic_ns(cpu);
+        let deadline_ns = now.saturating_add(timeout_ns);
+        if self.hw_tree.generation()? != last_generation {
+            return Ok(0);
         }
+        if deadline_ns != crate::waitq::NO_DEADLINE && now >= deadline_ns {
+            return Err(Errno::TimedOut);
+        }
+
+        // Must block: register so a waker can find and `unpark` us, then
+        // loop check → arm one-shot → park. The wake-pending token in the
+        // scheduler closes the check/park race, so a generation bump or
+        // timeout arriving in that window is never lost (`AGENTS.md` §2.1).
+        crate::waitq::HW_TREE_WAITQ.register(task, deadline_ns);
+        let result = loop {
+            let generation = match self.hw_tree.generation() {
+                Ok(g) => g,
+                Err(err) => break Err(err),
+            };
+            if generation != last_generation {
+                break Ok(0);
+            }
+            if deadline_ns != crate::waitq::NO_DEADLINE
+                && self.arch.monotonic_ns(cpu) >= deadline_ns
+            {
+                break Err(Errno::TimedOut);
+            }
+            // Arm the timed-wake one-shot to the nearest pending deadline so
+            // a finite timeout fires even on an otherwise-idle CPU
+            // (`AGENTS.md` §17.1 — the nearest armed wakeup).
+            self.arch
+                .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
+            // Park off the run queue until woken. `reschedule_current`
+            // returns `false` only when the caller is not a resumable user
+            // kthread (host tests with no live dispatch loop); fall back to
+            // a cooperative yield then, mirroring the IRQ-wait fail-closed
+            // shape, so a degenerate caller never busy-spins (§2.1).
+            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
+                match self.sched.yield_current(task) {
+                    Ok(()) | Err(SchedError::InvalidState) => {}
+                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
+                    Err(_) => break Err(Errno::OutOfRange),
+                }
+            }
+        };
+        // Leave the wait set and re-point the one-shot at whatever deadline
+        // any *remaining* waiter needs (or clear it if none) so a finished
+        // wait never leaves a stale arming behind (`AGENTS.md` §17.1).
+        crate::waitq::HW_TREE_WAITQ.deregister(task);
+        self.arch
+            .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
+        result
     }
 }
 

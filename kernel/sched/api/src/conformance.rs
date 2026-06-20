@@ -39,6 +39,7 @@ use crate::task::{Priority, TaskAction, TaskState};
 pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     spawn_runs_and_exits::<S>();
     block_wake_roundtrip::<S>();
+    unpark_before_park_is_not_lost::<S>();
     lifecycle_error_codes::<S>();
     yield_current_semantics::<S>();
     no_starvation_under_priority_boost::<S>();
@@ -92,6 +93,47 @@ fn block_wake_roundtrip<S: SchedulerPolicy<TestArch>>() {
     assert_eq!(sched.state_of(id), TaskState::Parked, "body parked it");
     sched.unpark(id).expect("unpark a parked task");
     assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "re-dispatched");
+}
+
+/// A wake delivered *before* a task commits to park is not lost
+/// (`AGENTS.md` §2.1 — no lost wake-ups). This is the park/unpark race a
+/// blocking syscall hits: the caller checks its condition, the event then
+/// fires (an `unpark` against the still-running caller), and only *then*
+/// does the caller try to park. The wake must cancel that park rather than
+/// sleep through it. Every policy must close this race via the wake-pending
+/// token, so the property is asserted here, for both policies, through the
+/// public surface only.
+fn unpark_before_park_is_not_lost<S: SchedulerPolicy<TestArch>>() {
+    let (_arch, sched) = make::<S>(1, 64);
+    // The body always asks to park; whether it actually sleeps depends on
+    // the token, which is what this test exercises.
+    let id = sched
+        .spawn(0, Priority::Normal, |_| TaskAction::Park)
+        .expect("spawn");
+    // Deliver the wake while the task has not yet parked (it is `Ready`,
+    // never dispatched). `unpark` cannot move a non-parked task, so it must
+    // record a pending token rather than no-op the wake away.
+    sched
+        .unpark(id)
+        .expect("unpark a not-yet-parked task records a token");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "body ran");
+    assert_eq!(
+        sched.state_of(id),
+        TaskState::Ready,
+        "the early wake cancelled the park; the task stays runnable"
+    );
+    // With the token consumed, a genuine later park is honoured normally —
+    // the token must not suppress every future park.
+    assert_eq!(
+        sched.step(0),
+        Ok(StepOutcome::Ran(id)),
+        "re-dispatched after the cancelled park"
+    );
+    assert_eq!(
+        sched.state_of(id),
+        TaskState::Parked,
+        "with no pending token, the next park takes effect"
+    );
 }
 
 /// Lifecycle entry points report the documented typed errors and are
