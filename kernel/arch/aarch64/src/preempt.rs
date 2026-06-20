@@ -370,14 +370,55 @@ fn write_tval(interval: u64) {
     }
 }
 
+/// Arm the EL1 physical generic timer **one-shot** to fire once after
+/// `ticks_from_now` counter ticks, then stop until armed again.
+///
+/// The down-counter is loaded with `ticks_from_now` (clamped to at least
+/// one tick so a degenerate `0` cannot re-trap with no progress,
+/// `AGENTS.md` §2.9) and the timer is enabled with its interrupt unmasked
+/// (`CNTP_CTL_EL0.ENABLE`, `IMASK = 0`). There is **no** periodic re-arm:
+/// once it fires, the next fire happens only if the scheduler arms it
+/// again via [`crate::kernel_arch::Aarch64Arch`]'s `set_preemption`
+/// (`AGENTS.md` §17.1 tickless / `NO_HZ`). The GIC PPI must already be
+/// enabled (done by [`init_local_preempt`]).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn arm_oneshot(ticks_from_now: u64) {
+    write_tval(ticks_from_now.max(1));
+    // SAFETY: enabling `CNTP_CTL_EL0.ENABLE` with `IMASK` clear starts the
+    // timer and lets it raise PPI 30 once the down-counter reaches zero;
+    // no memory side effects beyond the system register.
+    unsafe {
+        core::arch::asm!("msr CNTP_CTL_EL0, {}", in(reg) CNTP_CTL_ENABLE, options(nomem, nostack));
+    }
+}
+
+/// Disarm the EL1 physical generic timer so no further interrupt fires
+/// until the next [`arm_oneshot`].
+///
+/// Clears `CNTP_CTL_EL0` (both `ENABLE` and `IMASK`): the timer stops and
+/// raises no interrupt, so a CPU running a sole runnable task takes no
+/// timer ticks at all (`AGENTS.md` §17.1 / §2.16). Disarming an
+/// already-stopped timer is a harmless no-op (§2.9).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn disarm() {
+    // SAFETY: clearing `CNTP_CTL_EL0` disables the timer and masks its
+    // interrupt; no memory side effects beyond the system register.
+    unsafe {
+        core::arch::asm!("msr CNTP_CTL_EL0, {}", in(reg) 0u64, options(nomem, nostack));
+    }
+}
+
 /// Initialise generic-timer preemption on `cpu`.
 ///
-/// Records the CPU and the tick `interval_ticks`, enables the timer PPI
-/// at the GIC, programs the first countdown, and enables the timer with
-/// its interrupt unmasked. It does **not** unmask interrupts at the PE
-/// (`DAIF`); the caller does that via [`crate::exceptions::enable_irq`]
-/// once it is ready to take ticks — matching the riscv64
-/// `init_local_preempt` / `sstatus.SIE` split.
+/// Records the CPU and the per-quantum `interval_ticks` (the value the
+/// scheduler's one-shot is later armed to) and enables the timer PPI at
+/// the GIC, but **leaves the timer disarmed**: RustOS is tickless, so the
+/// timer is armed only when the scheduler has a task to bound, via
+/// [`arm_oneshot`] from [`crate::kernel_arch::Aarch64Arch`]'s
+/// `set_preemption` (`AGENTS.md` §17.1 `NO_HZ`). It does **not** unmask
+/// interrupts at the PE (`DAIF`); the caller does that via
+/// [`crate::exceptions::enable_irq`] once it is ready to take ticks —
+/// matching the riscv64 `init_local_preempt` / `sstatus.SIE` split.
 ///
 /// # Safety
 ///
@@ -390,8 +431,8 @@ fn write_tval(interval: u64) {
 pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     let Some(slot) = per_cpu_index(cpu) else {
         // No `PreemptStorage` registered (or `cpu` outside it): fail
-        // closed rather than arm a timer whose tick can never be recorded
-        // or dispatched (`AGENTS.md` §2.9). A registered caller never hits
+        // closed rather than record a quantum whose tick can never be
+        // dispatched (`AGENTS.md` §2.9). A registered caller never hits
         // this branch.
         return;
     };
@@ -400,31 +441,41 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     cpu_id_slot(slot).store(u64::from(cpu), Ordering::Relaxed);
 
     // SAFETY: the GIC distributor is enabled by the caller's contract;
-    // enabling the timer PPI lets the armed timer reach the CPU.
+    // enabling the timer PPI lets a later-armed one-shot reach the CPU.
     unsafe {
         crate::gic::enable_ppi(TIMER_PPI);
     }
 
-    write_tval(interval);
-    // SAFETY: enabling `CNTP_CTL_EL0.ENABLE` with `IMASK` clear starts
-    // the timer and lets it raise PPI 30; no memory side effects beyond
-    // the system register.
-    unsafe {
-        core::arch::asm!("msr CNTP_CTL_EL0, {}", in(reg) CNTP_CTL_ENABLE, options(nomem, nostack));
-    }
+    // Leave the timer disarmed: the scheduler arms the first one-shot when
+    // it dispatches a task onto a contended CPU (tickless, §17.1). The
+    // per-quantum interval the one-shot is later armed to is read back
+    // through [`timer_interval_ticks`] (the single stored copy, §2.2).
+    disarm();
 }
 
-/// Handle a generic-timer interrupt: invoke the installed callback with
-/// the recorded CPU `CpuId`, then re-arm `CNTP_TVAL_EL0` for the next
-/// tick (which clears the timer condition).
+/// Handle a generic-timer interrupt: clear the timer condition and
+/// dispatch the (observation-only) scheduler-tick callback.
+///
+/// RustOS is tickless (`AGENTS.md` §17.1): the timer was armed **one-shot**
+/// by the scheduler, so this handler does **not** re-arm it — the next
+/// fire happens only when the scheduler arms another quantum via
+/// [`arm_oneshot`]. It disarms (clearing the now-asserted timer condition
+/// so the IRQ does not immediately re-trap) and then dispatches the tick
+/// callback. The *preemption* of the running EL0 task is driven separately
+/// by [`on_el0_preempt_point`], called from the IRQ path after the GIC
+/// end-of-interrupt handshake; the scheduler's next dispatch re-arms the
+/// one-shot for whichever task it runs next.
 ///
 /// Called only from [`crate::exceptions`]' IRQ path, with interrupts
 /// masked (the PE masked them on exception entry).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt(cpu: CpuId) {
+    // Clear the fired one-shot's timer condition so the line deasserts;
+    // the scheduler re-arms a fresh one-shot on its next dispatch (§17.1).
+    disarm();
     let Some(slot) = per_cpu_index(cpu) else {
-        // No registered per-CPU slot for this core: nothing to dispatch or
-        // re-arm (fail closed, `AGENTS.md` §2.9).
+        // No registered per-CPU slot for this core: nothing to dispatch
+        // (fail closed, `AGENTS.md` §2.9).
         return;
     };
     let recorded = cpu_id_slot(slot).load(Ordering::Relaxed);
@@ -438,12 +489,6 @@ pub(crate) fn on_timer_interrupt(cpu: CpuId) {
         let recorded_cpu = recorded as u32;
         use rustos_arch_api::Timer;
         crate::timer_hal::TimerHal::new().dispatch_tick(recorded_cpu);
-    }
-    // Re-arm last so the scheduler runs at least one tick before the next
-    // interrupt can stack.
-    let interval = interval_slot(slot).load(Ordering::Relaxed);
-    if interval != 0 {
-        write_tval(interval);
     }
 }
 

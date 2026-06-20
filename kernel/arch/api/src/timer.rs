@@ -11,18 +11,25 @@
 //! architecture-neutral scheduler-tick callback, and, on every fire,
 //! invoke that callback with the firing CPU's [`crate::CpuId`].
 //!
-//! The one-shot *arming* (programming the LAPIC deadline, `CNTP_TVAL_EL0`,
-//! the SBI timer, or requesting the next animation frame) stays in the
-//! port; this surface owns only the callback slot and the dispatch. The
-//! production preemption path landed in PLAN P-1 currently re-arms a
-//! *fixed-frequency periodic* interval — a §17.1 defect being migrated to
-//! the one-shot form under PLAN P-4. §17.2 makes the architecture
-//! surface a closed set of traits on the HAL; this module is the "timer
-//! programming" member of that set, so the callback install/dispatch
-//! lives behind one vocabulary instead of being re-described per port
-//! (`AGENTS.md` §2.2). The parallel per-arch implementations of this one
-//! trait are the deliberate shape of §17.1/§17.2 modularity, never
-//! collapsed behind `cfg` (§2.2 carve-out).
+//! The one-shot *arming* (programming the LAPIC one-shot count,
+//! `CNTP_TVAL_EL0`, the SBI timer, or requesting the next animation
+//! frame) is performed through [`Timer::arm_oneshot`] /
+//! [`Timer::disarm`]: the *decision* to arm a relative one-shot deadline
+//! is architecture-neutral (the scheduler makes it — see
+//! [`crate::SchedulerArch::set_preemption`]), and only the per-port
+//! register/MMIO write differs, so the two arming verbs live on this one
+//! HAL surface (`AGENTS.md` §2.2) while their bodies stay genuinely
+//! per-port (§2.21). RustOS arms the timer **one-shot, to the next event
+//! the scheduler needs, and leaves it disarmed when a CPU has nothing to
+//! preempt to** — there is no fixed-frequency periodic re-arm anywhere
+//! (PLAN P-4 retired the P-1 100 Hz arming, `AGENTS.md` §17.1). §17.2
+//! makes the architecture surface a closed set of traits on the HAL;
+//! this module is the "timer programming" member of that set, so the
+//! callback install/dispatch *and* the one-shot arm/disarm live behind
+//! one vocabulary instead of being re-described per port (`AGENTS.md`
+//! §2.2). The parallel per-arch implementations of this one trait are the
+//! deliberate shape of §17.1/§17.2 modularity, never collapsed behind
+//! `cfg` (§2.2 carve-out).
 //!
 //! # What lives here
 //!
@@ -31,15 +38,16 @@
 //!   interrupt/trap context: there is no captured environment that could
 //!   be dropped mid-flight.
 //! * [`Timer`] — the per-port handle the kernel reaches through. It
-//!   installs the tick callback ([`Timer::set_tick_callback`]) and, from
-//!   the port's interrupt/frame path, dispatches a tick
-//!   ([`Timer::dispatch_tick`]) which invokes the installed callback. The
-//!   *hardware* arming/re-arming (programming the LAPIC LVT,
-//!   `CNTP_TVAL_EL0`, the SBI timer, or requesting the next animation
-//!   frame) stays in the port — it is per-CPU register/MMIO work with no
-//!   architecture-neutral shape, and folding it into this surface would
-//!   be interface creep (`AGENTS.md` §2.4). What *is* shared is the
-//!   callback slot and the dispatch, which is what this trait owns.
+//!   installs the tick callback ([`Timer::set_tick_callback`]); from the
+//!   port's interrupt/frame path it dispatches a tick
+//!   ([`Timer::dispatch_tick`]) which invokes the installed callback; and
+//!   it programs the per-CPU hardware timer **one-shot**
+//!   ([`Timer::arm_oneshot`]) or stops it ([`Timer::disarm`]). The
+//!   one-shot deadline is supplied by the scheduler
+//!   ([`crate::SchedulerArch::set_preemption`]); the per-port body is the
+//!   LAPIC one-shot count / `CNTP_TVAL_EL0` / SBI `set_timer` / next
+//!   animation-frame request. There is no periodic re-arm: a fired timer
+//!   recurs only if the scheduler arms it again (`AGENTS.md` §17.1).
 //! * [`conformance`] — the §17.2 conformance vertical: a host-run
 //!   [`conformance::run_all`] check every port runs over its [`Timer`]
 //!   handle, proving the installed callback fires on dispatch and that a
@@ -55,6 +63,22 @@
 //! handle in that port's crate.
 
 use crate::CpuId;
+
+/// Default preemption-quantum rate, in slices per second, shared by the
+/// down-counter ports (aarch64 generic timer, riscv64 supervisor timer).
+///
+/// A `100 Hz` (~10 ms) slice bounds a runaway user task's hold on a
+/// *contended* CPU while costing negligible trap overhead. This is **not**
+/// a periodic tick: RustOS is tickless (`AGENTS.md` §17.1), so the timer
+/// is armed one-shot to one quantum only when a CPU has a competitor, and
+/// disarmed otherwise. The value lives here, once, so the aarch64 and
+/// riscv64 ports (which both derive their per-quantum counter-tick
+/// interval via `interval_for_hz(discovered_hz, DEFAULT_PREEMPT_QUANTUM_HZ)`)
+/// share a single definition rather than each carrying their own copy
+/// (`AGENTS.md` §2.2). The x86_64 port arms its LAPIC one-shot from a
+/// calibration expressed in microseconds and keeps its own period; a port
+/// whose silicon genuinely wants a different slice overrides locally.
+pub const DEFAULT_PREEMPT_QUANTUM_HZ: u64 = 100;
 
 /// The scheduler-tick callback a [`Timer`] invokes on every tick.
 ///
@@ -98,11 +122,44 @@ pub trait Timer: Send + Sync {
     /// installed.
     ///
     /// This is the architecture-neutral half of the port's
-    /// interrupt/frame handler. The port's handler calls it and then
-    /// re-arms its hardware timer; a tick that arrives before any
-    /// callback is installed dispatches harmlessly (returns `false`),
-    /// never a panic (`AGENTS.md` §2.9).
+    /// interrupt/frame handler. A tick that arrives before any callback
+    /// is installed dispatches harmlessly (returns `false`), never a
+    /// panic (`AGENTS.md` §2.9). The port's handler does **not** re-arm
+    /// the timer after this returns: RustOS is tickless, so the next fire
+    /// happens only if the scheduler arms it again via
+    /// [`Self::arm_oneshot`] (`AGENTS.md` §17.1).
     fn dispatch_tick(&self, cpu: CpuId) -> bool;
+
+    /// Arm the calling CPU's timer **one-shot** to fire once after
+    /// `ticks_from_now` of the port's counter ticks, then stop until
+    /// armed again.
+    ///
+    /// This is the per-CPU register/MMIO write the tickless preemption
+    /// path uses (the LAPIC one-shot initial count, `CNTP_TVAL_EL0`, an
+    /// SBI `set_timer(now + ticks_from_now)`, or the next animation-frame
+    /// request). It acts on the **calling** CPU's timer only — a one-shot
+    /// deadline is inherently a write to a per-CPU register — so the
+    /// scheduler calls it from the CPU whose running task it wants to
+    /// bound (`AGENTS.md` §17.1: armed to the next event the scheduler
+    /// needs, never at a fixed frequency). A `ticks_from_now` of `0` is
+    /// clamped by the port to at least one tick so a degenerate deadline
+    /// cannot wedge the CPU re-trapping with no progress (§2.9).
+    ///
+    /// Calling it before any tick callback is installed is permitted; the
+    /// fire will dispatch harmlessly (see [`Self::dispatch_tick`]).
+    fn arm_oneshot(&self, ticks_from_now: u64);
+
+    /// Stop the calling CPU's timer so no further interrupt fires until
+    /// the next [`Self::arm_oneshot`].
+    ///
+    /// The scheduler disarms when the calling CPU has nothing to preempt
+    /// to — it is idle or runs a single runnable task — so an otherwise
+    /// quiet core takes no timer interrupts at all (`AGENTS.md` §17.1
+    /// tickless / `NO_HZ`; §2.16 — work paid off the hot path). Like
+    /// [`Self::arm_oneshot`] it acts on the calling CPU's per-CPU timer
+    /// only. Disarming an already-stopped timer is a harmless no-op
+    /// (§2.9).
+    fn disarm(&self);
 }
 
 /// The §17.2 timer-programming conformance vertical.
@@ -144,12 +201,31 @@ pub mod conformance {
     /// # Panics
     ///
     /// Panics (failing the test) if a handle with no callback installed
-    /// reports one, if the installed callback does not round-trip, or if
+    /// reports one, if the installed callback does not round-trip, if
     /// dispatching a tick does not invoke the callback with the CPU it
-    /// was handed.
+    /// was handed, or if arming/disarming the one-shot is not a total
+    /// operation.
     pub fn run_all<T: Timer + ?Sized>(timer: &T) {
         no_callback_dispatches_harmlessly(timer);
         installed_callback_fires_on_dispatch(timer);
+        arm_and_disarm_are_total(timer);
+    }
+
+    /// Arming a one-shot deadline and disarming are total operations that
+    /// never panic for any input — including a zero deadline (clamped by
+    /// the port) and a disarm of an already-stopped timer (`AGENTS.md`
+    /// §2.9). The cross-core *effect* (an interrupt actually firing once)
+    /// is not observable from a single-threaded host test; it is proven
+    /// by the `preempt_el0_qemu_*` verticals. Here we only pin that the
+    /// two arming verbs are callable and harmless on the port's real
+    /// handle.
+    fn arm_and_disarm_are_total<T: Timer + ?Sized>(timer: &T) {
+        timer.arm_oneshot(1);
+        timer.arm_oneshot(0);
+        timer.arm_oneshot(u64::MAX);
+        timer.disarm();
+        // Disarming twice is still a no-op.
+        timer.disarm();
     }
 
     /// A freshly observed handle reports no callback and a dispatch on it
@@ -217,6 +293,10 @@ pub mod conformance {
         #[derive(Default)]
         struct CellTimer {
             callback: AtomicUsize,
+            /// Last armed deadline (`u64::MAX` sentinel = disarmed), so a
+            /// local unit test can assert arm/disarm round-trips. The
+            /// generic `run_all` only proves the calls are total.
+            armed: core::sync::atomic::AtomicU64,
         }
 
         impl Timer for CellTimer {
@@ -242,6 +322,14 @@ pub mod conformance {
                     None => false,
                 }
             }
+            fn arm_oneshot(&self, ticks_from_now: u64) {
+                // Mirror the port clamp so the recorded deadline is the
+                // one the hardware would see.
+                self.armed.store(ticks_from_now.max(1), Ordering::Relaxed);
+            }
+            fn disarm(&self) {
+                self.armed.store(u64::MAX, Ordering::Relaxed);
+            }
         }
 
         #[test]
@@ -250,6 +338,19 @@ pub mod conformance {
             run_all(&timer);
             let dynamic: &dyn Timer = &timer;
             run_all(dynamic);
+        }
+
+        #[test]
+        fn arm_records_a_clamped_deadline_and_disarm_clears_it() {
+            let timer = CellTimer::default();
+            timer.arm_oneshot(42);
+            assert_eq!(timer.armed.load(Ordering::Relaxed), 42);
+            // A zero deadline is clamped to one tick so the CPU cannot
+            // re-trap with no progress (`AGENTS.md` §2.9).
+            timer.arm_oneshot(0);
+            assert_eq!(timer.armed.load(Ordering::Relaxed), 1);
+            timer.disarm();
+            assert_eq!(timer.armed.load(Ordering::Relaxed), u64::MAX);
         }
 
         /// A broken timer that never invokes the callback must be
@@ -278,6 +379,8 @@ pub mod conformance {
                 // runs it.
                 self.tick_callback().is_some()
             }
+            fn arm_oneshot(&self, _ticks_from_now: u64) {}
+            fn disarm(&self) {}
         }
 
         #[test]

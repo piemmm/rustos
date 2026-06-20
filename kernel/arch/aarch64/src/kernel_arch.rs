@@ -449,6 +449,31 @@ impl SchedulerArch for Aarch64Arch {
             }
         }
     }
+
+    fn set_preemption(&self, armed: bool) {
+        // Tickless preemption (`AGENTS.md` §17.1): the scheduler decided
+        // whether the calling CPU has a competitor to bound the running
+        // task for. `armed` programs the EL1 generic-timer one-shot to one
+        // quantum (the per-CPU interval recorded by `init_local_preempt`,
+        // the single stored copy — §2.2); `!armed` disarms so a CPU
+        // running a sole task takes no timer ticks. Off the freestanding
+        // target there is no generic timer, so this is inert.
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            use rustos_arch_api::Timer;
+            let timer = crate::timer_hal::TimerHal::new();
+            if armed {
+                let quantum = crate::preempt::timer_interval_ticks(self.current_cpu());
+                timer.arm_oneshot(quantum);
+            } else {
+                timer.disarm();
+            }
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            let _ = armed;
+        }
+    }
 }
 
 impl CrossCpuTlbShootdown for Aarch64Arch {

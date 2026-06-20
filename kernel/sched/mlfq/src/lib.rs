@@ -15,10 +15,20 @@
 //!   bounded Chase–Lev variant — see `runqueue` for the citation and
 //!   ordering rationale.
 //! * **MLFQ priority + fairness.** Three bands (High / Normal / Low),
-//!   demotion after `yields_before_demotion` voluntary yields, periodic
-//!   global priority boost to guarantee starvation-freedom. The policy
-//!   is the classical MLFQ as described in Arpaci-Dusseau, *Operating
-//!   Systems: Three Easy Pieces*, ch. 8.
+//!   demotion after `yields_before_demotion` voluntary yields, and an
+//!   anti-starvation global priority boost every `boost_interval_ticks`.
+//!   The policy is the classical MLFQ as described in Arpaci-Dusseau,
+//!   *Operating Systems: Three Easy Pieces*, ch. 8.
+//! * **Tickless boost cadence (§17.1 carve-out).** RustOS is tickless
+//!   (`AGENTS.md` §17.1): there is no global fixed-frequency timer. The
+//!   boost interval is far longer than one scheduling quantum and there is
+//!   only one per-CPU timer, so the boost rides the **on-demand preemption
+//!   one-shots** the kernel already arms whenever a CPU is *contended*
+//!   (exactly when starvation is possible). [`Scheduler::step`] — and with
+//!   it the internal `maybe_priority_boost` — runs at that quantum cadence,
+//!   so the boost fires once `boost_interval_ticks` elapse; a CPU running a
+//!   sole runnable task disarms (no starvation, no boost needed) and takes
+//!   no ticks. No global periodic tick is reintroduced for the boost.
 //! * **IPI-based preemption.** [`Scheduler::spawn`] and
 //!   [`Scheduler::unpark`] always notify the home CPU via
 //!   [`SchedulerArch::send_ipi`]; the arch port decides whether that

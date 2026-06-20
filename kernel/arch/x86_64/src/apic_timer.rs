@@ -25,7 +25,8 @@
 //! * [`compute_initial_count`] — the pure ticks-per-second → initial-
 //!   count math, host-unit-tested.
 //! * [`Calibration`] — the parameters produced by [`calibrate`] and
-//!   consumed by [`program_periodic`].
+//!   consumed by [`program_oneshot_disarmed`] (the per-quantum
+//!   initial-count the tickless one-shot is armed to).
 //!
 //! Calibration via PIT channel 2 (gated by port 0x61 bit 0) is the
 //! recommended approach because channel 0 may already be in use by
@@ -51,9 +52,11 @@ pub const LAPIC_TIMER_DIVIDE_16: u32 = 16;
 /// `LVT_TIMER.mode` bits (SDM §11.5.4, Figure 11-11).
 pub mod timer_mode {
     /// One-shot mode (initial-count decrements once to zero, then stops).
+    ///
+    /// RustOS programs the LAPIC timer one-shot only (`AGENTS.md` §17.1
+    /// tickless / `NO_HZ`); there is no periodic-mode constant because no
+    /// path arms a fixed-frequency auto-reload (§2.14 — no dead code).
     pub const ONE_SHOT: u32 = 0b00 << 17;
-    /// Periodic mode (counter auto-reloads from initial-count).
-    pub const PERIODIC: u32 = 0b01 << 17;
 }
 
 /// Errors returned by the calibration helper.
@@ -348,21 +351,32 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
     })
 }
 
-/// Program the LAPIC timer in periodic mode using the result of
-/// [`calibrate`].
+/// Program the LAPIC timer in **one-shot** mode and leave it disarmed.
+///
+/// Sets the divide configuration and the LVT to one-shot delivery on
+/// `vector` (the divisor and mode persist across one-shot fires, so the
+/// later `crate::preempt::arm_oneshot` only has to rewrite the
+/// initial-count), and writes an initial-count of `0` to halt the timer
+/// (SDM §11.5.4). RustOS is tickless (`AGENTS.md` §17.1): the scheduler
+/// arms the one-shot to one quantum (`calibration.initial_count` ticks)
+/// only when a CPU is contended, and disarms otherwise — there is no
+/// periodic auto-reload. The calibration is consumed by the caller
+/// (`crate::preempt::init_local_preempt`) to record that per-quantum
+/// count.
 ///
 /// `vector` is the CPU interrupt vector the timer LVT fires on.
-pub fn program_periodic<L: LapicMmio>(lapic: &mut Lapic<L>, calibration: Calibration, vector: u8) {
+pub fn program_oneshot_disarmed<L: LapicMmio>(lapic: &mut Lapic<L>, vector: u8) {
     lapic.mmio_mut().write(
         Lapic::<L>::TIMER_DIVIDE_CONFIG_OFFSET,
         LAPIC_TIMER_DIVIDE_16_RAW,
     );
-    let lvt = u32::from(vector) | timer_mode::PERIODIC;
+    let lvt = u32::from(vector) | timer_mode::ONE_SHOT;
     lapic.mmio_mut().write(Lapic::<L>::TIMER_LVT_OFFSET, lvt);
-    lapic.mmio_mut().write(
-        Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET,
-        calibration.initial_count,
-    );
+    // Initial-count 0 halts the timer: it stays disarmed until the
+    // scheduler arms a one-shot quantum (`AGENTS.md` §17.1).
+    lapic
+        .mmio_mut()
+        .write(Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET, 0);
 }
 
 // --- Production PIT impl --------------------------------------------
@@ -620,22 +634,16 @@ mod tests {
     }
 
     #[test]
-    fn program_periodic_writes_expected_sequence() {
+    fn program_oneshot_disarmed_writes_expected_sequence() {
         let mut lapic = Lapic::new(MockLapicMmio::default());
-        let cal = Calibration {
-            ticks_per_second: 100_000,
-            initial_count: 100,
-            period_micros: 1_000,
-            tsc_per_second: 0,
-        };
-        program_periodic(&mut lapic, cal, 0x40);
+        program_oneshot_disarmed(&mut lapic, 0x40);
         let w = &lapic.mmio_mut().writes;
-        // Three writes: divide, LVT, initial-count.
+        // Three writes: divide, LVT (one-shot), initial-count 0 (disarmed).
         assert_eq!(w[0].0, Lapic::<MockLapicMmio>::TIMER_DIVIDE_CONFIG_OFFSET);
         assert_eq!(w[0].1, LAPIC_TIMER_DIVIDE_16_RAW);
         assert_eq!(w[1].0, Lapic::<MockLapicMmio>::TIMER_LVT_OFFSET);
-        assert_eq!(w[1].1, 0x40 | timer_mode::PERIODIC);
+        assert_eq!(w[1].1, 0x40 | timer_mode::ONE_SHOT);
         assert_eq!(w[2].0, Lapic::<MockLapicMmio>::TIMER_INITIAL_COUNT_OFFSET);
-        assert_eq!(w[2].1, 100);
+        assert_eq!(w[2].1, 0, "timer must be left disarmed (initial-count 0)");
     }
 }

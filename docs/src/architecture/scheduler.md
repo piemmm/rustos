@@ -271,15 +271,29 @@ task's preemption deadline or the nearest timed wakeup), and is left
 unarmed when a CPU is idle or runs a single runnable task. Under the
 default EEVDF policy a periodic tick is **not** required for correctness
 at all (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default)). The
-sole carve-out is a policy that genuinely needs periodic wakeups — MLFQ's
-anti-starvation priority boost — which schedules its own on-demand
-one-shot wakeup for that cadence and never reintroduces a global tick.
+sole §17.1 carve-out is a policy that needs periodic wakeups — MLFQ's
+anti-starvation priority boost. There is exactly one per-CPU timer, and
+the boost interval is far longer than one scheduling quantum, so the
+boost rides the same on-demand one-shots the preemption path already
+arms: those fire **only while a CPU is contended** (which is precisely
+when starvation is possible), so `step` — and with it MLFQ's
+`maybe_priority_boost` — runs at the quantum cadence and the boost fires
+once `boost_interval_ticks` of virtual/wall time elapse. A CPU running a
+sole runnable task disarms (no starvation is possible, so no boost is
+needed), and **no global fixed-frequency tick is ever reintroduced** —
+the §17.1 mandate the carve-out protects.
 
-> **Migration note (PLAN P-4).** The production preemption path landed in
-> P-1 currently arms a *fixed-frequency 100 Hz periodic* timer purely to
-> force preemption. Under the §17.1 NO_HZ mandate that is a charter
-> defect; it is being migrated to the one-shot, scheduler-armed form
-> above. Until P-4 lands, the periodic arming is the interim it replaces.
+The one-shot is armed through the Arch HAL timer surface
+([`Timer::arm_oneshot`] / [`Timer::disarm`], `kernel/arch/api`): the
+scheduler decides *whether* to arm on each dispatch — via the provided
+[`SchedulerArch::set_preemption(armed)`] hook, where `armed` is "this CPU
+still has a ready competitor" — and the port programs (or stops) its
+per-CPU timer (the LAPIC one-shot count, `CNTP_TVAL_EL0`, an SBI
+`set_timer`). The per-CPU quantum the one-shot is armed to is the shared
+[`DEFAULT_PREEMPT_QUANTUM_HZ`] (aarch64/riscv64) or the LAPIC calibration
+period (x86_64); a fired timer never re-arms itself, so a CPU running a
+sole runnable task takes no timer interrupts at all (PLAN P-4 retired the
+P-1 100 Hz periodic arming).
 
 In both policies `on_timer_tick` increments the per-CPU
 preemption counter and returns; it does **not** call `Scheduler::step`.

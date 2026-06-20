@@ -48,17 +48,19 @@ use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
 use rustos_sync::once::OnceCell;
 
-/// Scheduler-tick / preemption frequency, in hertz (a 10 ms time slice).
+/// Preemption-quantum rate, in hertz (a ~10 ms time slice).
 ///
-/// The generic-timer interrupt fires at this rate; a tick taken while EL0
-/// was running preempts the current user task (round-robin time-slicing
-/// over the EEVDF virtual-deadline order, `kernel/sched`). 100 Hz matches
-/// the `timer_preempt`/`sched_drive` `-M virt` verticals and is a
-/// conventional general-purpose desktop/server slice — long enough that
-/// the per-tick cost is negligible (`AGENTS.md` §2.16), short enough that
-/// a CPU-bound task cannot monopolise a core for a perceptible time.
+/// The scheduler arms the generic-timer one-shot to one quantum at this
+/// rate while a CPU is contended; a tick taken while EL0 was running
+/// preempts the current user task (round-robin time-slicing over the
+/// EEVDF virtual-deadline order, `kernel/sched`). RustOS is tickless
+/// (`AGENTS.md` §17.1): a CPU running a sole task disarms and takes no
+/// ticks. The rate is the shared
+/// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ)
+/// the riscv64 port also uses — defined once so the two ports cannot
+/// diverge (`AGENTS.md` §2.2).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-const PREEMPT_TICK_HZ: u64 = 100;
+const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 
 /// A kernel-side [`IrqController`] over the arch port's [`GicController`].
 ///
@@ -290,9 +292,14 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
         rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
 }
 
-/// Arm production timer-driven preemption on the boot CPU: register the
-/// per-CPU preempt storage, install the EL0-preemption callback, and start
-/// the periodic generic timer at [`PREEMPT_TICK_HZ`].
+/// Set up tickless timer-driven preemption on the boot CPU: register the
+/// per-CPU preempt storage, install the EL0-preemption callback, record
+/// the per-quantum interval derived from [`PREEMPT_TICK_HZ`], and enable
+/// the timer PPI — but leave the generic timer **disarmed**. RustOS is
+/// tickless (`AGENTS.md` §17.1 `NO_HZ`): the scheduler arms the one-shot to
+/// one quantum only when it dispatches a task onto a contended CPU (via
+/// `Aarch64Arch::set_preemption`), and disarms when a CPU runs a sole
+/// task, so an otherwise-quiet core takes no timer interrupts.
 ///
 /// Called once per boot by
 /// [`Aarch64BinArch::install_irq_dispatch`](crate::aarch64::arch_wrapper::Aarch64BinArch),
@@ -303,18 +310,16 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// (`crate::aarch64::userentry`'s preemptible `SPSR`) or the root-unlock
 /// kthread unmasks at EL1 — the armed timer simply leaves PPI 30 pending
 /// until then, so this is **additive and non-regressing** (`AGENTS.md`
-/// §2.17): a tick taken in EL1 only re-arms the timer (it never preempts —
+/// §2.17): a one-shot tick taken in EL1 only disarms (it never preempts —
 /// the kernel is non-preemptible), and a tick taken in EL0 drives
-/// [`production_preempt_dispatch`].
+/// [`production_preempt_dispatch`]; the scheduler re-arms the next
+/// one-shot on its following dispatch.
 ///
 /// No scheduler-tick callback is installed: EEVDF is tickless (fairness is
 /// advanced inside `Scheduler::step`, not by a periodic count), so the
-/// generic timer is armed solely to *preempt*. The arch
-/// `on_timer_interrupt` re-arms `CNTP_TVAL_EL0` independently of any tick
-/// callback, so omitting one is correct and avoids a no-op wrapper
-/// (`AGENTS.md` §2.3). The timed-wake sweep that a deadline-bearing
-/// blocking wait needs (P-2) installs its tick consumer then, not ahead of
-/// it (§2.4).
+/// generic timer is armed solely to *preempt* (one-shot, by the
+/// scheduler). The timed-wake sweep that a deadline-bearing blocking wait
+/// needs (P-2) installs its tick consumer then, not ahead of it (§2.4).
 ///
 /// A zero `CNTFRQ_EL0` reading (a board that does not report the counter
 /// frequency) leaves the kernel cooperative rather than arming a nonsense
@@ -347,9 +352,9 @@ pub fn arm_preemption() {
         // installed (above), the per-CPU storage is registered (above), the
         // EL1 vector table is installed (`boot::init_vectors`), and the GIC
         // is up (`install_device_irq_dispatch` ran immediately before). It
-        // enables the timer PPI at the GIC and starts the down-counter; PE
-        // IRQs stay masked until EL0/the unlock kthread, so no tick is taken
-        // before a handler context exists.
+        // records the quantum, enables the timer PPI, and leaves the timer
+        // disarmed; the scheduler arms the first one-shot on its next
+        // dispatch onto a contended CPU (tickless, §17.1).
         unsafe {
             preempt::init_local_preempt(0, interval);
         }

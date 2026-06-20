@@ -194,6 +194,14 @@ impl SchedulerArch for RiscvBinArch {
     fn send_ipi(&self, target: CpuId) {
         self.arch.send_ipi(target);
     }
+
+    fn set_preemption(&self, armed: bool) {
+        // Tickless preemption (`AGENTS.md` §17.1): forward the scheduler's
+        // arm/disarm decision to the arch port, which programs the
+        // supervisor-timer one-shot. The default no-op would silently drop
+        // preemption, so the delegation is required (§2.9).
+        self.arch.set_preemption(armed);
+    }
 }
 
 impl KernelArch for RiscvBinArch {
@@ -212,19 +220,20 @@ impl KernelArch for RiscvBinArch {
     }
 
     fn install_irq_dispatch(&self, _table: &'static rustos_kernel_irq::IrqTable) {
-        // Arm supervisor-timer-driven preemption now that the scheduler is
-        // up (P-1b, `plans/PI.md` D2b-2b-A): register the per-hart preempt
-        // storage, install the U-mode-preemption callback, and start the
-        // periodic SBI timer derived from the device-tree
-        // `timebase-frequency`. The kernel keeps `sstatus.SIE == 0`, so a
-        // tick is *taken* only while a U-mode task runs (the privilege rule
-        // U < S); a tick that ever fired in S-mode would re-arm but never
-        // preempt (`crate::trap` gates the preempt point on the saved
-        // `SPP`). The armed timer is therefore additive and non-regressing
-        // (`AGENTS.md` §2.17): it cannot preempt the cooperative kernel,
-        // only a runaway user task. `_table` is unused here — the riscv64
-        // production boot wires no PLIC external-IRQ dispatch in this slice
-        // (the default no-op), and adding it is out of P-1b scope.
+        // Set up tickless supervisor-timer preemption now that the
+        // scheduler is up (P-1b, `plans/PI.md` D2b-2b-A): register the
+        // per-hart preempt storage, install the U-mode-preemption
+        // callback, record the per-quantum interval derived from the
+        // device-tree `timebase-frequency`, and enable `sie.STIE` — but
+        // leave the timer disarmed. RustOS is tickless (`AGENTS.md`
+        // §17.1): the scheduler arms the one-shot to one quantum only when
+        // it dispatches onto a contended hart (via
+        // `RiscvArch::set_preemption`) and disarms otherwise, so a hart
+        // running a sole task takes no timer ticks. The kernel keeps
+        // `sstatus.SIE == 0`, so a tick is *taken* only while a U-mode task
+        // runs (the privilege rule U < S). `_table` is unused here — the
+        // riscv64 production boot wires no PLIC external-IRQ dispatch in
+        // this slice (the default no-op).
         arm_preemption(self.arch.timebase_hz());
     }
 }
@@ -235,14 +244,17 @@ impl KernelArch for RiscvBinArch {
 const _RISCV_BIN_ARCH_HALT_RETURNS_NEVER: fn(&RiscvBinArch) -> ! =
     <RiscvBinArch as KernelArch>::halt;
 
-/// Periodic preemption-timer rate, in ticks per second. Matches the
-/// aarch64 production rate (`gic_irq::PREEMPT_TICK_HZ`): a 100 Hz slice
-/// bounds a runaway user task's hold on a hart to ~10 ms while costing
-/// negligible trap overhead. The interval in `time`-CSR ticks is derived
-/// from the discovered `timebase-frequency`, never a board constant
-/// (`AGENTS.md` §2.20).
+/// Preemption-quantum rate, in slices per second. The shared
+/// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ)
+/// the aarch64 port also uses (defined once so the two cannot diverge,
+/// `AGENTS.md` §2.2): a ~10 ms slice bounds a runaway user task's hold on
+/// a contended hart while costing negligible trap overhead. This is
+/// **not** a periodic tick — the timer is armed one-shot to one quantum
+/// only when a hart is contended (`AGENTS.md` §17.1 tickless). The
+/// interval in `time`-CSR ticks is derived from the discovered
+/// `timebase-frequency`, never a board constant (§2.20).
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
-const PREEMPT_TICK_HZ: u64 = 100;
+const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 
 /// Caller-owned per-hart preemption backing for the production boot hart.
 ///
@@ -269,33 +281,36 @@ static PREEMPT_STORAGE: rustos_arch_riscv64::preempt::PreemptStorage<1> =
 /// (unreachable from U-mode with none switched in, but the fail-closed
 /// return means a stray invocation is a harmless no-op rather than an
 /// unsound switch — `AGENTS.md` §2.9). The call only ever runs after
-/// [`on_timer_interrupt`](rustos_arch_riscv64::preempt) re-armed the SBI
-/// timer, so `sip.STIP` is already cleared across the context switch.
+/// [`on_timer_interrupt`](rustos_arch_riscv64::preempt) disarmed the SBI
+/// timer (`set_timer(u64::MAX)`), so `sip.STIP` is already cleared across
+/// the context switch; the scheduler re-arms the next one-shot on its
+/// following dispatch (tickless, §17.1).
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
     let _ =
         rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
 }
 
-/// Arm supervisor-timer-driven preemption on the boot hart: register the
-/// per-hart preempt storage, install the U-mode-preemption callback, and
-/// start the periodic SBI timer at [`PREEMPT_TICK_HZ`].
+/// Set up tickless supervisor-timer preemption on the boot hart: register
+/// the per-hart preempt storage, install the U-mode-preemption callback,
+/// record the per-quantum interval from [`PREEMPT_TICK_HZ`], and enable
+/// `sie.STIE` — but leave the timer disarmed. The scheduler arms the
+/// one-shot to one quantum only when it dispatches onto a contended hart
+/// (`RiscvArch::set_preemption`), and disarms otherwise (`AGENTS.md`
+/// §17.1 tickless / `NO_HZ`).
 ///
 /// Called once per boot from [`RiscvBinArch::install_irq_dispatch`], in
 /// the kernel-core `Irq` phase — after the scheduler is built and before
 /// `init` drops to U-mode. The kernel runs with `sstatus.SIE == 0`, so no
-/// tick is *taken* until a U-mode task runs (the privilege rule U < S);
-/// the armed timer simply leaves `sip.STIP` pending in the meantime, so
-/// this is **additive and non-regressing** (`AGENTS.md` §2.17): a tick
-/// taken in U-mode drives [`production_preempt_dispatch`], and a tick that
-/// ever fired in S-mode would only re-arm (never preempt — the kernel is
-/// non-preemptible).
+/// tick is *taken* until a U-mode task runs (the privilege rule U < S),
+/// so this is **additive and non-regressing** (`AGENTS.md` §2.17): a tick
+/// taken in U-mode drives [`production_preempt_dispatch`], and a one-shot
+/// that ever fired in S-mode would only disarm (never preempt — the
+/// kernel is non-preemptible).
 ///
 /// No scheduler-tick callback is installed: EEVDF is tickless (fairness is
 /// advanced inside `Scheduler::step`, not by a periodic count), so the SBI
-/// timer is armed solely to *preempt*. The arch `on_timer_interrupt`
-/// re-arms the SBI timer independently of any tick callback, so omitting
-/// one is correct and avoids a no-op wrapper (`AGENTS.md` §2.3). The
+/// timer is armed solely to *preempt* (one-shot, by the scheduler). The
 /// timed-wake sweep a deadline-bearing blocking wait needs (P-2) installs
 /// its tick consumer then, not ahead of it (§2.4).
 ///
@@ -328,9 +343,10 @@ fn arm_preemption(timebase_hz: u64) {
         // SAFETY: this is the boot hart (id 0); the preempt callback is
         // installed (above), the per-hart storage is registered (above),
         // and the trap vector is installed (`enable_mmu_and_vectors`, run
-        // before `kernel_main`). It records the interval, arms the first
-        // SBI timer, and enables `sie.STIE`; it does not set `sstatus.SIE`,
-        // so no tick is taken until a U-mode task runs.
+        // before `kernel_main`). It records the quantum, enables
+        // `sie.STIE`, and leaves the timer disarmed; it does not set
+        // `sstatus.SIE`, so no tick is taken until a U-mode task runs, and
+        // the scheduler arms the first one-shot on its next dispatch.
         unsafe {
             preempt::init_local_preempt(0, interval);
         }

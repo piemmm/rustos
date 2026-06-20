@@ -18,7 +18,8 @@ use rustos_arch_x86_64::{preempt, qemu_exit, smp, syscall_entry};
 use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
 use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
 use rustos_kernel_core::{
-    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
+    reschedule_current, spawn_image, spawn_kthread, spawn_user_kthread, RescheduleAction,
+    SpawnRequest, Yielder,
 };
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -66,10 +67,32 @@ const FRAME_COUNT: usize = 256;
 /// declares the workload deadlocked. Sized generously for QEMU TCG.
 const MAX_STEPS: u64 = 50_000_000;
 
+/// Involuntary preemptions the competitor waits to observe before it
+/// exits, handing the CPU to the now-sole spinner (see the aarch64
+/// vertical). One proves the contended LAPIC one-shot fires; the long
+/// uninterrupted remainder proves the sole-task disarm.
+const TARGET_PREEMPTIONS: u64 = 1;
+
+/// Slack the sole-task disarm check tolerates over the hand-off snapshot.
+/// The disarm is exact in principle, but under an oversubscribed host
+/// (the concurrent QEMU matrix) the competitor's last armed LAPIC one-shot
+/// can fire once at the contended→sole boundary before the sole spinner's
+/// `set_preemption(false)` disarms it. A genuine periodic-timer regression
+/// would instead add *hundreds* of ticks over the long sole run, so this
+/// small bound stays immune to the benign boundary fire while still
+/// failing loudly on a re-armed periodic tick (`AGENTS.md` §7; §17.1).
+const SOLE_PREEMPT_SLACK: u64 = 16;
+
 /// Count of involuntary timer-driven preemptions of the running ring-3 task.
 static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 /// `exit` syscalls observed (the spinner exits exactly once on completion).
 static EXITS: AtomicU64 = AtomicU64::new(0);
+/// [`PREEMPTIONS`] snapshot captured by the competitor kthread when it
+/// exits (handing the CPU to the now-sole spinner); `u64::MAX` until
+/// recorded. `PREEMPTIONS == PREEMPTIONS_AT_SOLE` after the run proves the
+/// sole spinner took **no** further LAPIC-timer interrupt (tickless
+/// disarm, `AGENTS.md` §17.1).
+static PREEMPTIONS_AT_SOLE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Set once the round-trip has been driven so a duplicate `BootCompleted`
 /// cannot re-enter the test logic.
@@ -286,12 +309,15 @@ fn run_preempt() -> ! {
 
     syscall_entry::set_dispatch_callback(dispatch);
 
-    // Arm the production ring-3-preemption path verbatim (`AGENTS.md` §2.2):
-    // install the ring-3-preemption callback the LAPIC-timer ISR forwards each
-    // user-mode tick to. The timer itself was already programmed in periodic
-    // mode by the production boot (`preempt::init_local_preempt`); ring 3 runs
-    // preemptible (`userentry`'s `IF`-set `RFLAGS`), so a tick taken while the
-    // spinner runs drives `preempt_dispatch`.
+    // Arm the production tickless ring-3-preemption path verbatim
+    // (`AGENTS.md` §2.2): install the ring-3-preemption callback the
+    // LAPIC-timer ISR forwards each user-mode tick to. The production boot
+    // programmed the LAPIC timer **one-shot and disarmed**
+    // (`preempt::init_local_preempt`); the scheduler arms the one-shot to
+    // one quantum only when it dispatches the spinner onto a CPU that still
+    // has the competitor kthread queued (`X86_64Arch::set_preemption`), and
+    // ring 3 runs preemptible (`userentry`'s `IF`-set `RFLAGS`), so a tick
+    // taken while the spinner runs drives `preempt_dispatch`.
     preempt::set_preempt_callback(preempt_dispatch);
 
     // Parse the build-time `rxe` blob once against the kernel's own CFI tag.
@@ -318,6 +344,31 @@ fn run_preempt() -> ! {
         note(TEST_FAIL, "P-1c test: Scheduler::new failed");
         qemu_exit::exit_failure();
     };
+
+    // Admit the **competitor** first: a kernel kthread that yields until it
+    // observes the spinner preempted at least [`TARGET_PREEMPTIONS`] times,
+    // records the count, and exits — handing the CPU to the now-sole
+    // spinner. While it is queued the scheduler arms the one-shot, so the
+    // runaway spinner is preempted (contention case); once it exits the sole
+    // spinner runs disarmed to completion (tickless case, `AGENTS.md` §17.1).
+    let competitor = move |yielder: &mut Yielder<ContextSwitchHal>| {
+        while PREEMPTIONS.load(Ordering::SeqCst) < TARGET_PREEMPTIONS {
+            yielder.yield_now();
+        }
+        PREEMPTIONS_AT_SOLE.store(PREEMPTIONS.load(Ordering::SeqCst), Ordering::SeqCst);
+    };
+    if spawn_kthread(
+        &sched,
+        ContextSwitchHal::new(),
+        BOOT_CPU,
+        Priority::Normal,
+        competitor,
+    )
+    .is_err()
+    {
+        note(TEST_FAIL, "P-1c test: spawn competitor kthread failed");
+        qemu_exit::exit_failure();
+    }
 
     // Admit the spinner as a resumable user kthread. Its `pre_resume` hook runs
     // on the dispatcher's context immediately before every switch-in: it
@@ -364,11 +415,11 @@ fn run_preempt() -> ! {
     }
     note(TEST_SPAWNED, "x86_64 P-1c test: ring-3 spinner spawned");
 
-    // Dispatch loop: drive `step` until the spinner exits. The spinner never
-    // yields, so each `step` enters it into ring 3 where it busy-loops until a
-    // timer tick preempts it (the preempt callback `reschedule_current`s back
-    // here) — or, on the final quantum, until it finishes the loop and `exit`s.
-    // A preemption that never fires would leave `step` spinning forever inside
+    // Dispatch loop: drive `step` until both tasks finish. While the
+    // competitor is queued, each spinner dispatch arms the one-shot and the
+    // never-yielding spinner is preempted; once the competitor exits, the
+    // lone spinner runs disarmed to completion and `exit`s. A preemption
+    // that never fires would leave the contended `step` spinning forever in
     // ring 3 and the harness would time out (fail-loud, `AGENTS.md` §7).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
@@ -382,12 +433,22 @@ fn run_preempt() -> ! {
         );
         qemu_exit::exit_failure();
     }
-    // The runaway loop never yielded, so the only thing that returned control
-    // to the dispatcher before `exit` is an involuntary preemption: at least
-    // one must have fired, proving the timer IRQ preempts a non-cooperative
-    // ring-3 task.
-    if PREEMPTIONS.load(Ordering::SeqCst) == 0 {
-        note(TEST_FAIL, "P-1c test: task exited but was never preempted");
+    // Contention case: the competitor recorded the preemption count at
+    // hand-off, and it must be at least `TARGET_PREEMPTIONS` — proving the
+    // LAPIC one-shot fired and preempted the runaway ring-3 task.
+    let at_sole = PREEMPTIONS_AT_SOLE.load(Ordering::SeqCst);
+    if at_sole == u64::MAX || at_sole < TARGET_PREEMPTIONS {
+        note(TEST_FAIL, "P-1c test: task ran but was never preempted");
+        qemu_exit::exit_failure();
+    }
+    // Sole-task (tickless) case: after the competitor exited, the sole
+    // spinner ran millions of iterations to completion with the one-shot
+    // disarmed, so no further preemption may have fired.
+    if PREEMPTIONS.load(Ordering::SeqCst) > at_sole.saturating_add(SOLE_PREEMPT_SLACK) {
+        note(
+            TEST_FAIL,
+            "P-1c test: sole task kept being preempted (timer not disarmed)",
+        );
         qemu_exit::exit_failure();
     }
     if EXITS.load(Ordering::SeqCst) != 1 {
@@ -397,7 +458,7 @@ fn run_preempt() -> ! {
 
     note(
         TEST_PASS,
-        "x86_64 P-1c test: runaway ring-3 task involuntarily preempted and resumed to exit",
+        "x86_64 P-1c test: contended runaway task preempted; sole task ran tickless",
     );
     qemu_exit::exit_success();
 }

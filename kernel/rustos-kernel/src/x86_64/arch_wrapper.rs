@@ -272,6 +272,14 @@ impl SchedulerArch for BinArch {
     fn send_ipi(&self, target: CpuId) {
         self.arch.send_ipi(target);
     }
+
+    fn set_preemption(&self, armed: bool) {
+        // Tickless preemption (`AGENTS.md` §17.1): forward the scheduler's
+        // arm/disarm decision to the arch port, which programs the
+        // LAPIC-timer one-shot. The default no-op would silently drop
+        // preemption, so the delegation is required (§2.9).
+        self.arch.set_preemption(armed);
+    }
 }
 
 impl KernelArch for BinArch {
@@ -318,13 +326,15 @@ impl KernelArch for BinArch {
         // Arm ring-3 preemption now that the scheduler is up (P-1c,
         // `plans/PI.md` D2b-2b-A): install the ring-3-preemption callback
         // the LAPIC-timer ISR forwards each user-mode tick to. The timer
-        // itself was already programmed in periodic mode during boot
-        // (`preempt::init_local_preempt`, the production boot's step 8); the
-        // callback was absent until now, so every tick merely EOI'd
-        // (cooperative scheduling). The kernel runs with `RFLAGS.IF == 0`
-        // (it issues no `sti`), so no tick is *taken* until `init` drops to
-        // ring 3 with `IF` set (`userentry`), by which point a user kthread
-        // is published — so installing the callback here, in the kernel-core
+        // was programmed **one-shot and left disarmed** during boot
+        // (`preempt::init_local_preempt`, the production boot's step 8);
+        // RustOS is tickless (`AGENTS.md` §17.1), so the scheduler arms
+        // the one-shot to one quantum (via `X86_64Arch::set_preemption`)
+        // only when it dispatches onto a contended CPU and disarms
+        // otherwise. The kernel runs with `RFLAGS.IF == 0` (it issues no
+        // `sti`), so no tick is *taken* until `init` drops to ring 3 with
+        // `IF` set (`userentry`), by which point a user kthread is
+        // published — so installing the callback here, in the kernel-core
         // `Irq` phase before `BootCompleted`, is race-free and additive
         // (`AGENTS.md` §2.17): it cannot preempt the cooperative kernel,
         // only a runaway user task. No scheduler-tick callback is installed

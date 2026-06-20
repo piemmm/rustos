@@ -185,13 +185,25 @@ mod kernel {
         halt_current_hart()
     }
 
+    /// Per-quantum interval (`time`-CSR ticks) the one-shot is re-armed to,
+    /// published before interrupts are enabled so [`on_tick`] can read it.
+    static TIMER_INTERVAL: AtomicU64 = AtomicU64::new(0);
+
     /// The supervisor-timer scheduler-tick callback. Drives the live
     /// scheduler's per-CPU preemption counter through
     /// [`Scheduler::on_timer_tick`]. ISR-safe: `on_timer_tick` is wait-free
-    /// (one bounds check + one `fetch_add`).
+    /// (one bounds check + one `fetch_add`). RustOS is tickless
+    /// (`AGENTS.md` §17.1): the one-shot does not auto-reload, so the
+    /// callback re-arms the next one-shot itself (standing in for the
+    /// scheduler's `set_preemption`) so the timer keeps driving the live
+    /// scheduler while this hart idles in `wfi` below.
     extern "C" fn on_tick(cpu: CpuId) {
         if let Some(sched) = scheduler() {
             let _ = sched.on_timer_tick(cpu);
+        }
+        let interval = TIMER_INTERVAL.load(Ordering::Relaxed);
+        if interval != 0 {
+            preempt::arm_oneshot(interval);
         }
     }
 
@@ -308,10 +320,16 @@ mod kernel {
         //    the 100 Hz SBI timer.
         // SAFETY: called once on the boot hart with a stack established and
         // before any source is armed; both callbacks are installed.
+        let interval = preempt::interval_for_hz(timebase, TICK_HZ);
+        TIMER_INTERVAL.store(interval, Ordering::Relaxed);
         unsafe {
             trap::init_traps();
             preempt::enable_ipi();
-            preempt::init_local_preempt(BOOT_CPU, preempt::interval_for_hz(timebase, TICK_HZ));
+            // `init_local_preempt` records the interval + enables `sie.STIE`
+            // but leaves the timer disarmed (tickless); arm the first
+            // one-shot, after which `on_tick` re-arms each fire.
+            preempt::init_local_preempt(BOOT_CPU, interval);
+            preempt::arm_oneshot(interval);
         }
 
         // Spawn the workload. Each body increments the shared counter and

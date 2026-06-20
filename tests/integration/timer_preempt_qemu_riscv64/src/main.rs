@@ -14,16 +14,20 @@
 //!    dispatches back through the same HAL handle (`AGENTS.md` §17.2).
 //! 3. Install the S-mode trap vector and enable interrupts
 //!    (`rustos_arch_riscv64::trap::init_traps`).
-//! 4. Arm the SBI timer at 100 Hz and enable `sie.STIE`
-//!    (`rustos_arch_riscv64::preempt::init_local_preempt`).
-//! 5. Spin on `wfi`; once the callback has fired `TARGET_TICKS`
-//!    times — proving the timer trap path repeatedly re-arms and
-//!    dispatches — write the `SiFive` Test PASS finisher.
+//! 4. Record the per-quantum interval and enable `sie.STIE`
+//!    (`rustos_arch_riscv64::preempt::init_local_preempt` leaves the timer
+//!    **disarmed** — RustOS is tickless, `AGENTS.md` §17.1), then arm the
+//!    first **one-shot** (`preempt::arm_oneshot`).
+//! 5. Spin on `wfi`; the tick callback re-arms the next one-shot
+//!    (`preempt::arm_oneshot`) on every fire, so the timer trap path is
+//!    exercised `TARGET_TICKS` times under explicit scheduler-style
+//!    re-arming (there is no periodic auto-reload). Once the callback has
+//!    fired `TARGET_TICKS` times, write the `SiFive` Test PASS finisher.
 //!
-//! A regression that fails to deliver or re-arm the timer never reaches
-//! `TARGET_TICKS`, so the run times out and the harness reports
-//! `Outcome::Timeout` — the documented fail-loud behaviour
-//! (`AGENTS.md` §7).
+//! A regression that fails to deliver the one-shot or whose callback
+//! fails to re-arm never reaches `TARGET_TICKS`, so the run times out and
+//! the harness reports `Outcome::Timeout` — the documented fail-loud
+//! behaviour (`AGENTS.md` §7).
 //!
 //! ## How it differs from a production kernel
 //!
@@ -66,11 +70,23 @@ mod kernel {
     /// Count of supervisor-timer interrupts the callback has serviced.
     static TICKS: AtomicU64 = AtomicU64::new(0);
 
-    /// The scheduler-tick callback the timer trap path invokes. A real
-    /// scheduler would `Scheduler::on_timer_tick(cpu)` here; the test
-    /// only needs to prove the interrupt is delivered and re-armed.
+    /// Per-quantum interval (`time`-CSR ticks) the one-shot is re-armed to,
+    /// published before interrupts are enabled so the callback can read it.
+    static INTERVAL: AtomicU64 = AtomicU64::new(0);
+
+    /// The scheduler-tick callback the timer trap path invokes. RustOS is
+    /// tickless (`AGENTS.md` §17.1): the one-shot does not auto-reload, so
+    /// the callback re-arms the next one-shot itself — standing in for the
+    /// scheduler's `set_preemption` on a contended hart. A real scheduler
+    /// would `Scheduler::on_timer_tick(cpu)` here; the test only needs to
+    /// prove the interrupt is delivered and that re-arming drives the next
+    /// fire.
     extern "C" fn on_tick(_cpu: CpuId) {
         TICKS.fetch_add(1, Ordering::Relaxed);
+        let interval = INTERVAL.load(Ordering::Relaxed);
+        if interval != 0 {
+            preempt::arm_oneshot(interval);
+        }
     }
 
     /// Forward to the shared riscv64 panic bridge (parks the hart; the
@@ -137,13 +153,17 @@ mod kernel {
             halt_current_hart();
         }
 
-        // 5. Arm the SBI timer at TICK_HZ and enable `sie.STIE`.
+        // 5. Arm the first one-shot SBI timer; `init_local_preempt` enables
+        //    `sie.STIE` but leaves the timer disarmed (tickless), and
+        //    `on_tick` re-arms each fire.
         let interval = preempt::interval_for_hz(timebase, TICK_HZ);
+        INTERVAL.store(interval, Ordering::Relaxed);
         // SAFETY: `cpu` is the boot hart's id, the callback is installed,
         // the per-hart storage is registered, and the trap vector is in
         // place (step 3).
         unsafe {
             preempt::init_local_preempt(0, interval);
+            preempt::arm_oneshot(interval);
         }
 
         // 6. Idle until the timer has driven the callback TARGET_TICKS

@@ -274,6 +274,33 @@ pub trait SchedulerArch: Send + Sync {
     fn core_class(&self, _cpu: CpuId) -> CoreClass {
         CoreClass::Performance
     }
+
+    /// Arm or disarm the **calling** CPU's one-shot preemption timer for
+    /// the task the scheduler is about to run.
+    ///
+    /// The scheduler calls this from its dispatch path on the CPU it is
+    /// dispatching to: `armed = true` when that CPU still has at least one
+    /// *other* ready task (a competitor that must get a turn), so the
+    /// running task is bounded to one scheduling quantum; `armed = false`
+    /// when the CPU has nothing to preempt to (it is idle or runs a single
+    /// runnable task), so the timer is stopped and the core takes **no**
+    /// timer interrupts at all. This is what makes RustOS tickless
+    /// (`AGENTS.md` §17.1 `NO_HZ`): the timer is armed one-shot only when a
+    /// CPU is contended, never at a fixed frequency.
+    ///
+    /// It belongs on this surface for the same reason [`Self::send_ipi`]
+    /// does — both are *scheduler-asks-arch* per-CPU requests — and the
+    /// quantum length (a counter-tick value the port derives from its
+    /// discovered timer frequency) lives in the port, so this signal stays
+    /// a pure boolean and the arithmetic is never duplicated into the
+    /// architecture-neutral scheduler (`AGENTS.md` §2.2, §2.20). It is a
+    /// **provided** method defaulting to a no-op so the host `TestArch`
+    /// and any non-preemptive port inherit the cooperative behaviour
+    /// unchanged; a real port overrides it to program its
+    /// [`crate::Timer`] one-shot ([`crate::Timer::arm_oneshot`] /
+    /// [`crate::Timer::disarm`]). An implementation must never panic
+    /// (§2.9).
+    fn set_preemption(&self, _armed: bool) {}
 }
 
 #[cfg(test)]

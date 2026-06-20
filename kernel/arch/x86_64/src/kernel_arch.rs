@@ -434,6 +434,29 @@ impl SchedulerArch for X86_64Arch {
             }
         }
     }
+
+    fn set_preemption(&self, armed: bool) {
+        // Tickless preemption (`AGENTS.md` §17.1): `armed` programs the
+        // LAPIC-timer one-shot to one quantum (the per-CPU initial-count
+        // recorded by `init_local_preempt`, the single stored copy —
+        // §2.2); `!armed` disarms so a CPU running a sole task takes no
+        // timer ticks. Off the freestanding target there is no LAPIC, so
+        // this is inert.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            use rustos_arch_api::Timer;
+            let timer = crate::timer_hal::TimerHal::new();
+            if armed {
+                timer.arm_oneshot(crate::preempt::quantum_count());
+            } else {
+                timer.disarm();
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        {
+            let _ = armed;
+        }
+    }
 }
 
 impl CrossCpuTlbShootdown for X86_64Arch {

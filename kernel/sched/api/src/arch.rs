@@ -57,6 +57,13 @@ pub struct TestArch {
     /// an asymmetric (performance + efficiency) topology and assert the
     /// scheduler places work sensibly across it.
     core_classes: alloc::vec::Vec<AtomicU8>,
+    /// Last value passed to [`SchedulerArch::set_preemption`] (`1` armed,
+    /// `0` disarmed; `2` = never called), plus a count of each, so a host
+    /// test can assert the tickless arm/disarm decision without a real
+    /// timer.
+    last_preemption: AtomicU8,
+    arm_count: AtomicU64,
+    disarm_count: AtomicU64,
 }
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -85,6 +92,9 @@ impl TestArch {
             ipis,
             stray_ipis: AtomicU64::new(0),
             core_classes,
+            last_preemption: AtomicU8::new(2),
+            arm_count: AtomicU64::new(0),
+            disarm_count: AtomicU64::new(0),
         })
     }
 
@@ -135,6 +145,30 @@ impl TestArch {
     pub fn stray_ipi_count(&self) -> u64 {
         self.stray_ipis.load(Ordering::Relaxed)
     }
+
+    /// The most recent [`SchedulerArch::set_preemption`] decision:
+    /// `Some(true)` armed, `Some(false)` disarmed, `None` never called.
+    /// Lets a host test assert the tickless arm/disarm behaviour.
+    #[must_use]
+    pub fn last_preemption(&self) -> Option<bool> {
+        match self.last_preemption.load(Ordering::Relaxed) {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Number of times preemption was armed (`set_preemption(true)`).
+    #[must_use]
+    pub fn arm_count(&self) -> u64 {
+        self.arm_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of times preemption was disarmed (`set_preemption(false)`).
+    #[must_use]
+    pub fn disarm_count(&self) -> u64 {
+        self.disarm_count.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -167,6 +201,16 @@ impl SchedulerArch for TestArch {
             .map_or(CoreClass::Performance, |slot| {
                 CoreClass::from_u8(slot.load(Ordering::Relaxed)).unwrap_or(CoreClass::Performance)
             })
+    }
+
+    fn set_preemption(&self, armed: bool) {
+        self.last_preemption
+            .store(u8::from(armed), Ordering::Relaxed);
+        if armed {
+            self.arm_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.disarm_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 

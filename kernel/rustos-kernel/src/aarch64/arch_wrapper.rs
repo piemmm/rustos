@@ -70,6 +70,14 @@ impl SchedulerArch for Aarch64BinArch {
     fn send_ipi(&self, target: CpuId) {
         self.arch.send_ipi(target);
     }
+
+    fn set_preemption(&self, armed: bool) {
+        // Tickless preemption (`AGENTS.md` §17.1): forward the scheduler's
+        // arm/disarm decision to the arch port, which programs the EL1
+        // generic-timer one-shot. The default no-op would silently drop
+        // preemption, so the delegation is required, not optional (§2.9).
+        self.arch.set_preemption(armed);
+    }
 }
 
 impl KernelArch for Aarch64BinArch {

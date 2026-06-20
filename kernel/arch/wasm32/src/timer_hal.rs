@@ -53,6 +53,25 @@ impl Timer for TimerHal {
             None => false,
         }
     }
+
+    fn arm_oneshot(&self, _ticks_from_now: u64) {
+        // wasm32 cannot pre-empt a running module with a hardware timer:
+        // it runs to completion on the host's JavaScript turn. Preemption
+        // is driven through the host's equivalent yield facility — the
+        // self-sustaining `requestAnimationFrame` loop
+        // ([`crate::preempt::on_animation_frame`]) — which is the §17.1
+        // carve-out for a target that cannot deliver an asynchronous
+        // timer interrupt. The scheduler's quantum deadline has no LAPIC/
+        // generic-timer analogue here, so arming a one-shot is a no-op:
+        // the frame loop already re-enters the scheduler each frame, and
+        // a CPU-bound task yields cooperatively at the frame boundary.
+    }
+
+    fn disarm(&self) {
+        // No-op for the same reason as [`Self::arm_oneshot`]: the
+        // cooperative frame loop is the host yield facility (§17.1 wasm
+        // carve-out) and is not gated on a per-quantum arm/disarm.
+    }
 }
 
 #[cfg(test)]

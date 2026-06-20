@@ -499,6 +499,19 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.last_started.store(tick, Ordering::Release);
         task.home_cpu.store(cpu, Ordering::Release);
 
+        // Tickless preemption (`AGENTS.md` §17.1): arm this CPU's one-shot
+        // timer for a single quantum iff at least one *other* ready task
+        // is waiting on it (a competitor the task we are about to run must
+        // be preempted for), and disarm otherwise so a CPU running a sole
+        // runnable task takes no timer interrupts at all. The running task
+        // sits in the current slot, not the queue, so a non-empty ready
+        // queue is exactly "there is a competitor". The port owns the
+        // quantum length (`set_preemption` is a pure boolean, §2.2); the
+        // host `TestArch` inherits the no-op default. Armed *before* the
+        // body switches into the task so the deadline is live for the run.
+        self.arch
+            .set_preemption(self.cpus[cpu as usize].queue.ready_len() > 0);
+
         let mut ctx = TaskContext {
             cpu,
             tick,
@@ -814,6 +827,52 @@ mod tests {
         assert_eq!(sched.state_of(id), TaskState::Parked);
         sched.unpark(id).expect("unpark");
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+    }
+
+    /// Tickless preemption arming (`AGENTS.md` §17.1): a CPU running a
+    /// sole runnable task disarms its one-shot timer (no competitor to
+    /// preempt for), and a CPU with a second ready task arms it. Proven
+    /// through the `TestArch` `set_preemption` ledger without a real
+    /// timer.
+    #[test]
+    fn sole_task_disarms_and_a_competitor_arms_preemption() {
+        let (arch, sched) = mk(1);
+        arch.set_current_cpu(0);
+
+        // One perpetual yielder: every dispatch leaves the ready queue
+        // empty (the running task sits in the current slot), so the CPU
+        // disarms.
+        let solo = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("solo");
+        let _ = sched.step(0).expect("step");
+        assert_eq!(
+            arch.last_preemption(),
+            Some(false),
+            "a sole runnable task must disarm preemption (tickless idle)"
+        );
+        assert_eq!(arch.arm_count(), 0, "no competitor — never armed");
+        assert!(arch.disarm_count() >= 1);
+
+        // Add a second runnable task: now each dispatch leaves the other
+        // queued, so the CPU arms its one-shot quantum.
+        sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("rival");
+        let arms_before = arch.arm_count();
+        for _ in 0..4 {
+            let _ = sched.step(0).expect("step");
+        }
+        assert!(
+            arch.arm_count() > arms_before,
+            "a contended CPU must arm the one-shot preemption timer"
+        );
+        assert_eq!(
+            arch.last_preemption(),
+            Some(true),
+            "the last dispatch had a queued competitor"
+        );
+        let _ = solo;
     }
 
     /// EEVDF is tickless: fairness must hold without ever advancing the

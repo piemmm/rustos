@@ -114,6 +114,18 @@ impl RunQueue {
         g.total_weight = g.total_weight.saturating_sub(weight);
     }
 
+    /// Number of ready entries currently queued on this CPU.
+    ///
+    /// The task a CPU is *running* is held in the scheduler's current-task
+    /// slot, not in this queue, so a non-zero count means at least one
+    /// **other** ready task is waiting — a competitor the running task
+    /// must be preempted for. The tickless preemption decision
+    /// (`crate::Scheduler::dispatch`) reads this to arm the one-shot timer
+    /// only when a CPU is contended (`AGENTS.md` §17.1).
+    pub(crate) fn ready_len(&self) -> usize {
+        self.inner.lock().ready.len()
+    }
+
     /// Push a ready entry. Returns `Err(id)` if the queue is at its
     /// compile-time bound (the caller then routes it to overflow).
     pub(crate) fn push(&self, entry: Entry) -> Result<(), TaskId> {

@@ -1506,7 +1506,8 @@ order (one fully-gated increment each):
                  `gic_irq::arm_preemption()` (called from
                  `Aarch64BinArch::install_irq_dispatch`) registers
                  `PreemptStorage<1>`, installs the `reschedule_current(Yield)`
-                 callback, and arms the 100 Hz generic timer. No tick callback
+                 callback, and sets up the tickless one-shot generic timer
+                 (armed per-dispatch by the scheduler — P-4). No tick callback
                  (EEVDF is tickless; armed solely to preempt). The behavioural
                  proof is the `preempt_el0_qemu_aarch64` `-M virt` vertical: a
                  runaway, never-yielding EL0 spinner (the pure-Rust
@@ -1549,8 +1550,9 @@ order (one fully-gated increment each):
                  (preemptible user mode); the kernel issues no `sti`, so it stays
                  non-preemptible (IF == 0) and a maskable tick is taken only in
                  ring 3. The bin's `BinArch::install_irq_dispatch` installs the
-                 `reschedule_current(Yield)` callback (the LAPIC timer is already
-                 armed at boot step 8). Because x86_64 delivers a ring-3
+                 `reschedule_current(Yield)` callback (the LAPIC timer is
+                 programmed one-shot and disarmed at boot step 8, then armed
+                 per-dispatch by the scheduler — P-4). Because x86_64 delivers a ring-3
                  interrupt through the IDT gate using `TSS.RSP0` (distinct from the
                  `syscall` `gs:0` stack), the per-resume `syscall_entry::
                  set_kernel_rsp0` now repoints **both** the `gs:0` and `TSS.RSP0`
@@ -1580,42 +1582,40 @@ order (one fully-gated increment each):
                  since the wait truly parks), and a new end-to-end devmgr QEMU
                  vertical proves spawn → read → react to a real generation bump.
                - **P-4 — tickless (NO_HZ) preemption: one-shot, scheduler-armed
-                 (planned; operator-decided).** P-1 arms a **100 Hz fixed-frequency
-                 periodic** generic/LAPIC/SBI timer purely to force preemption.
-                 `AGENTS.md` §17.1 now mandates a **tickless (NO_HZ)** kernel: a
-                 fixed-frequency periodic timer armed merely to drive preemption is
-                 a defect, so this arming MUST migrate to a **one-shot** timer the
-                 scheduler programs to the next event it actually needs, left
-                 **unarmed** when a CPU is idle or runs a single runnable task. The
-                 mechanism is already behind the Arch HAL (§17.2) and EEVDF is
-                 tickless, so the rework is concentrated, not architectural — but it
-                 is **operator-decided** and spans all three bare-metal ports plus a
-                 real-Pi metal re-confirmation (§0.9), so it is staged here rather
-                 than crammed into the charter change that discovered it (§2.18/
-                 §2.19/§15.7). Shape:
-                 - Add an Arch HAL **one-shot arm** to the timer surface
-                   (`rustos_arch_api::timer`): `arm_oneshot(deadline_ticks)` /
-                   `disarm()` over the existing per-port `CNTP_TVAL_EL0` / SBI
-                   `set_timer` / LAPIC TSC-deadline arming (one shared decision,
-                   per-port register work only — §2.2). Drop the unconditional
-                   periodic re-arm in each port's `on_timer_interrupt`.
-                 - The scheduler returns, on each reschedule, **whether** the
-                   running task can be preempted and **when**: a competing-runnable
-                   CPU arms the one-shot to the running task's quantum/next EEVDF
-                   virtual deadline (mapped to counter ticks via the per-CPU clock);
-                   a CPU with ≤ 1 runnable task disarms. EEVDF stays observation-
-                   only on `on_timer_tick`; the one-shot deadline is the new shared
-                   definition (§2.2).
-                 - MLFQ (§17.1 carve-out) requests its anti-starvation boost cadence
-                   as its own on-demand one-shot wakeup, never a global periodic
-                   tick; document the cadence in its crate `README.md`.
-                 - Re-validate: the `preempt_el0_qemu_{aarch64,riscv64,x86_64}`
-                   verticals must still preempt a runaway spinner that now shares
-                   the CPU with a second runnable task (so a one-shot is armed), and
-                   a single-spinner-on-an-otherwise-idle-CPU case must take **no**
-                   timer interrupt until a competitor appears. Pi metal re-confirm
-                   (§0.9). Until P-4 lands, the P-1 periodic arming is the
-                   charter-non-compliant interim it replaces.
+                 — DONE (host + all three `-M virt`/QEMU preempt verticals +
+                 SMP stress; Pi metal re-confirm is §0.9, operator-run).** The
+                 preemption timer is armed **one-shot** to one scheduling quantum
+                 only while a CPU is contended, and disarmed when a CPU runs a sole
+                 runnable task — no fixed-frequency periodic arming remains
+                 anywhere (`AGENTS.md` §17.1 NO_HZ). Shape as built:
+                 - The Arch HAL timer surface (`rustos_arch_api::timer::Timer`)
+                   gained `arm_oneshot(ticks_from_now)` / `disarm()` over each
+                   port's `CNTP_TVAL_EL0` / SBI `set_timer` (disarm = far-future) /
+                   LAPIC one-shot initial-count (disarm = count 0). Each port's
+                   `init_local_preempt` records the per-quantum interval but leaves
+                   the timer disarmed, and `on_timer_interrupt` no longer re-arms.
+                 - The scheduler decides on each dispatch via the provided
+                   `SchedulerArch::set_preemption(armed)` (default no-op), where
+                   `armed` = "this CPU still has a ready competitor" (the per-CPU
+                   ready run-queue length, since the running task sits in the
+                   current slot). The port arms the stored quantum or disarms;
+                   `on_timer_tick` stays observation-only. The shared quantum rate
+                   is `rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ` (one
+                   definition for aarch64+riscv64; x86_64 keeps its 1 ms LAPIC
+                   calibration period).
+                 - MLFQ (§17.1 carve-out): there is one per-CPU timer and the boost
+                   interval ≫ one quantum, so the anti-starvation boost rides the
+                   on-demand preemption one-shots that fire only while a CPU is
+                   contended (exactly when starvation is possible) — no global
+                   fixed-frequency tick is reintroduced. Documented in the MLFQ
+                   crate rustdoc + `docs/src/architecture/scheduler.md`.
+                 - Verticals: the `preempt_el0_qemu_{aarch64,riscv64,x86_64}`
+                   verticals now spawn a competitor alongside the runaway spinner
+                   (so the one-shot arms and a preemption fires) and assert the
+                   **sole** spinner that runs after the competitor exits takes **no**
+                   further timer interrupt (the disarm). `scheduler_stress_qemu`
+                   uses busy self-terminating witnesses per CPU to drive each CPU's
+                   one-shot to its per-CPU preemption threshold under contention.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass

@@ -43,7 +43,7 @@
 //! closed.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 // Bare-metal-only imports — host builds carry neither
 // `init_local_preempt` nor the timer dispatcher (the static callback
@@ -115,6 +115,28 @@ pub const LAPIC_EOI_OFFSET: usize = 0xB0;
 /// — 0..4 GiB identity map). Re-declared here rather than imported
 /// from `apic.rs` to avoid a dependency cycle in the ISR-fast path.
 pub const LAPIC_BASE_PHYS: u64 = 0xFEE0_0000;
+
+/// LAPIC Timer LVT register MMIO offset (Intel SDM Vol 3A §11.5.4,
+/// Table 11-1). Re-declared here, like [`LAPIC_EOI_OFFSET`], so the
+/// tickless one-shot arm path writes the LAPIC through a bare-metal
+/// raw-pointer write without holding the `&mut Lapic<M>` driver the
+/// scheduler-context arming path cannot own.
+pub const LAPIC_TIMER_LVT_OFFSET: usize = 0x320;
+
+/// LAPIC Timer Initial-Count register MMIO offset (SDM Table 11-1).
+/// Writing it starts the one-shot countdown; writing `0` halts the timer
+/// (SDM §11.5.4).
+pub const LAPIC_TIMER_INITIAL_COUNT_OFFSET: usize = 0x380;
+
+/// The LAPIC one-shot initial-count for a single scheduling quantum,
+/// recorded by [`init_local_preempt`] from the boot calibration.
+///
+/// The scheduler arms the one-shot to this many LAPIC ticks via
+/// [`arm_oneshot`] when a CPU is contended (`AGENTS.md` §17.1 tickless);
+/// `0` until calibration runs, in which case [`arm_oneshot`] clamps to one
+/// tick so a degenerate deadline cannot wedge the CPU (§2.9).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static PREEMPT_QUANTUM_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Install the per-CPU timer callback.
 ///
@@ -419,6 +441,60 @@ pub fn timer_isr_addr() -> u64 {
     rustos_arch_x86_64_isr_timer as *const () as usize as u64
 }
 
+// --- One-shot arming (scheduler-context, raw-pointer LAPIC writes) --
+
+/// Arm the calling CPU's LAPIC timer **one-shot** to fire once after
+/// `ticks_from_now` LAPIC ticks (clamped to one tick, `AGENTS.md` §2.9).
+///
+/// Writes the LAPIC initial-count register through a bare-metal
+/// raw-pointer write to `LAPIC_BASE_PHYS`, exactly like the ISR's EOI
+/// write — the scheduler-context arming path cannot hold the `&mut
+/// Lapic<M>` driver. The LVT was set to one-shot mode + [`TIMER_VECTOR`]
+/// by [`init_local_preempt`] and persists, so writing the initial-count
+/// (re)starts the one-shot countdown. There is no periodic re-arm; the
+/// next fire happens only if the scheduler arms again (`AGENTS.md`
+/// §17.1).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn arm_oneshot(ticks_from_now: u64) {
+    // The LAPIC initial-count register is 32-bit; clamp to the register
+    // width and to at least one tick.
+    let count = u32::try_from(ticks_from_now).unwrap_or(u32::MAX).max(1);
+    // SAFETY: the LAPIC MMIO window is identity-mapped (boot.s
+    // SAFETY-INVARIANT 4); the initial-count register accepts any 32-bit
+    // write, which (re)starts the one-shot countdown (Intel SDM §11.5.4).
+    unsafe {
+        let icr = (LAPIC_BASE_PHYS + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
+        core::ptr::write_volatile(icr, count);
+    }
+}
+
+/// Disarm the calling CPU's LAPIC timer so no further interrupt fires
+/// until the next [`arm_oneshot`].
+///
+/// Writing `0` to the initial-count register halts the timer (Intel SDM
+/// §11.5.4), so a CPU running a sole runnable task takes no timer ticks
+/// (`AGENTS.md` §17.1 / §2.16). Disarming an already-stopped timer is a
+/// harmless no-op (§2.9).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn disarm() {
+    // SAFETY: as in `arm_oneshot`; writing `0` to the initial-count
+    // register is the documented "halt the timer" sequence.
+    unsafe {
+        let icr = (LAPIC_BASE_PHYS + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
+        core::ptr::write_volatile(icr, 0);
+    }
+}
+
+/// The recorded per-quantum LAPIC initial-count, or `0` before
+/// calibration. The scheduler arms the one-shot to this value via
+/// [`crate::kernel_arch::X86_64Arch`]'s `set_preemption` (the single
+/// stored copy — `AGENTS.md` §2.2).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub fn quantum_count() -> u64 {
+    u64::from(PREEMPT_QUANTUM_COUNT.load(Ordering::Relaxed))
+}
+
 // --- Per-CPU init --------------------------------------------------
 
 /// Initialise LAPIC-timer-driven preemption on the calling CPU.
@@ -427,9 +503,9 @@ pub fn timer_isr_addr() -> u64 {
 ///
 /// 1. Install the timer ISR stub in the calling CPU's per-CPU IDT at
 ///    [`TIMER_VECTOR`].
-/// 2. Program the LAPIC timer in periodic mode from `calibration`
-///    (the [`Calibration`] the BSP produced via
-///    [`crate::apic_timer::calibrate`]).
+/// 2. Program the LAPIC timer in **one-shot** mode and leave it disarmed
+///    (`AGENTS.md` §17.1 tickless), and record the per-quantum
+///    initial-count from `calibration` for the scheduler to arm.
 ///
 /// The function does *not* enable interrupts — the caller is
 /// responsible for `sti` once it is ready to accept ticks. This split
@@ -466,8 +542,11 @@ pub unsafe fn init_local_preempt<M: LapicMmio>(
         crate::percpu::install_vector(cpu_index, TIMER_VECTOR, timer_isr_addr())?;
     }
 
-    // 2. Program the LAPIC timer in periodic mode.
-    apic_timer::program_periodic(lapic, calibration, TIMER_VECTOR);
+    // 2. Program the LAPIC timer one-shot and leave it disarmed; record
+    //    the per-quantum initial-count for the scheduler to arm to
+    //    (`AGENTS.md` §17.1 tickless — no periodic auto-reload).
+    apic_timer::program_oneshot_disarmed(lapic, TIMER_VECTOR);
+    PREEMPT_QUANTUM_COUNT.store(calibration.initial_count, Ordering::Relaxed);
 
     Ok(())
 }

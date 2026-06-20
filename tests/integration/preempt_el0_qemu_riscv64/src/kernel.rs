@@ -22,7 +22,8 @@ use rustos_arch_riscv64::{
 };
 use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
 use rustos_kernel_core::{
-    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
+    reschedule_current, spawn_image, spawn_kthread, spawn_user_kthread, RescheduleAction,
+    SpawnRequest, Yielder,
 };
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -35,11 +36,30 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 /// The single-hart slice runs logical CPU 0 on the boot hart.
 const BOOT_CPU: CpuId = 0;
 
-/// Preemption tick rate (hertz). Matches the production rate
-/// (`rustos_kernel::riscv64::boot::PREEMPT_TICK_HZ`): a fast tick so the
-/// runaway spinner is preempted promptly under QEMU TCG; the spinner's loop
-/// spans many ticks.
-const PREEMPT_TICK_HZ: u64 = 100;
+/// Preemption-quantum rate (slices/second) — the shared production rate
+/// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ),
+/// a ~10 ms slice so a contended runaway spinner is preempted promptly
+/// under QEMU TCG. RustOS is tickless (`AGENTS.md` §17.1): the one-shot is
+/// armed to one quantum only while the spinner shares the hart with the
+/// competitor kthread, and disarmed once the spinner is the sole task.
+const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
+
+/// Involuntary preemptions the competitor waits to observe before it
+/// exits, handing the hart to the now-sole spinner (see the aarch64
+/// vertical). One proves the contended one-shot fires; the long
+/// uninterrupted remainder proves the sole-task disarm.
+const TARGET_PREEMPTIONS: u64 = 1;
+
+/// Slack the sole-task disarm check tolerates over the hand-off snapshot.
+/// The disarm is exact in principle, but riscv64's aclint timer is
+/// wall-clock: under an oversubscribed host (the concurrent QEMU matrix)
+/// the competitor's last armed one-shot can fire once at the
+/// contended→sole boundary before the sole spinner's `set_preemption(false)`
+/// disarms it. A genuine periodic-timer regression would instead add
+/// *hundreds* of ticks over the long sole run, so this small bound stays
+/// immune to the benign boundary fire while still failing loudly on a
+/// re-armed periodic tick (`AGENTS.md` §7 — no flaky tests; §17.1).
+const SOLE_PREEMPT_SLACK: u64 = 16;
 
 /// Gigabytes of identity map the U-mode address space provides: `[0, 4 GiB)`
 /// covers the `virt` board's low MMIO and the RAM base where this kernel runs,
@@ -87,11 +107,19 @@ const FAIL_DEADLOCK: u16 = 9;
 const FAIL_NO_PREEMPT: u16 = 10;
 const FAIL_PREEMPT_STORAGE: u16 = 11;
 const FAIL_EXIT_COUNT: u16 = 12;
+const FAIL_SOLE_PREEMPTED: u16 = 13;
+const FAIL_SPAWN_COMPETITOR: u16 = 14;
 
 /// Count of involuntary timer-driven preemptions of the running U-mode task.
 static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 /// `exit` syscalls observed (the spinner exits exactly once on completion).
 static EXITS: AtomicU64 = AtomicU64::new(0);
+/// [`PREEMPTIONS`] snapshot captured by the competitor kthread when it
+/// exits (handing the hart to the now-sole spinner); `u64::MAX` until
+/// recorded. `PREEMPTIONS == PREEMPTIONS_AT_SOLE` after the run proves the
+/// sole spinner took **no** further timer interrupt (tickless disarm,
+/// `AGENTS.md` §17.1).
+static PREEMPTIONS_AT_SOLE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
@@ -303,11 +331,12 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     unsafe { trap::install_trap_vector() };
     syscall_entry::set_dispatch_callback(dispatch);
 
-    // Arm the production preemption path verbatim (`AGENTS.md` §2.2): register
-    // the per-hart storage, install the U-mode-preemption callback, and start
-    // the periodic SBI timer. `init_local_preempt` sets `sie.STIE` and arms the
-    // first timer but does not touch `sstatus.SIE`, so no tick is taken until
-    // the spinner runs in U-mode.
+    // Set up the production tickless preemption path verbatim (`AGENTS.md`
+    // §2.2): register the per-hart storage, install the U-mode-preemption
+    // callback, record the per-quantum interval, and enable `sie.STIE` — but
+    // leave the timer **disarmed**. The scheduler arms the one-shot to one
+    // quantum only when it dispatches the spinner onto a hart that still has
+    // the competitor kthread queued (`RiscvArch::set_preemption`).
     if PREEMPT_STORAGE.register().is_err() {
         qemu_exit::exit_failure(FAIL_PREEMPT_STORAGE);
     }
@@ -315,9 +344,10 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     let interval = preempt::interval_for_hz(timebase, PREEMPT_TICK_HZ);
     // SAFETY: the boot hart (id 0); the preempt callback is installed (above),
     // the per-hart storage is registered (above), and the trap vector is
-    // installed (`install_trap_vector`). It records the interval, arms the
-    // first SBI timer, and enables `sie.STIE`. `sstatus.SIE` stays clear, so no
-    // tick is taken until the spinner runs in U-mode.
+    // installed (`install_trap_vector`). It records the quantum, enables
+    // `sie.STIE`, and leaves the timer disarmed; `sstatus.SIE` stays clear, so
+    // no tick is taken until the spinner runs in U-mode, and the scheduler
+    // arms the first one-shot on its next dispatch onto a contended hart.
     unsafe {
         preempt::init_local_preempt(BOOT_CPU, interval);
     }
@@ -330,6 +360,30 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
         qemu_exit::exit_failure(FAIL_SCHED_NEW);
     };
+
+    // Admit the **competitor** first: a kernel kthread that yields until it
+    // observes the spinner preempted at least [`TARGET_PREEMPTIONS`] times,
+    // records the count, and exits — handing the hart to the now-sole
+    // spinner. While it is queued the scheduler arms the one-shot, so the
+    // runaway spinner is preempted (contention case); once it exits the sole
+    // spinner runs disarmed to completion (tickless case, `AGENTS.md` §17.1).
+    let competitor = move |yielder: &mut Yielder<ContextSwitchHal>| {
+        while PREEMPTIONS.load(Ordering::SeqCst) < TARGET_PREEMPTIONS {
+            yielder.yield_now();
+        }
+        PREEMPTIONS_AT_SOLE.store(PREEMPTIONS.load(Ordering::SeqCst), Ordering::SeqCst);
+    };
+    if spawn_kthread(
+        &sched,
+        ContextSwitchHal::new(),
+        BOOT_CPU,
+        Priority::Normal,
+        competitor,
+    )
+    .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_SPAWN_COMPETITOR);
+    }
 
     // Admit the spinner as a resumable user kthread: its `pre_resume` hook
     // reactivates its page-table root (isolation, §4), and its work body
@@ -357,11 +411,11 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         "riscv64 U-mode preemption test: spinner spawned",
     );
 
-    // Dispatch loop: drive `step` until the spinner exits. The spinner never
-    // yields, so each `step` enters it into U-mode where it busy-loops until a
-    // timer tick preempts it (the preempt callback `reschedule_current`s back
-    // here) — or, on the final quantum, until it finishes the loop and `exit`s.
-    // A preemption that never fires would leave `step` spinning forever inside
+    // Dispatch loop: drive `step` until both tasks finish. While the
+    // competitor is queued, each spinner dispatch arms the one-shot and the
+    // never-yielding spinner is preempted; once the competitor exits, the
+    // lone spinner runs disarmed to completion and `exit`s. A preemption
+    // that never fires would leave the contended `step` spinning forever in
     // U-mode and the harness would time out (fail-loud, `AGENTS.md` §7).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
@@ -371,12 +425,20 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     if sched.live_task_count() != 0 {
         qemu_exit::exit_failure(FAIL_DEADLOCK);
     }
-    // The runaway loop never yielded, so the only thing that returned control
-    // to the dispatcher before `exit` is an involuntary preemption: at least
-    // one must have fired, proving the timer interrupt preempts a
-    // non-cooperative U-mode task.
-    if PREEMPTIONS.load(Ordering::SeqCst) == 0 {
+    // Contention case: the competitor recorded the preemption count at
+    // hand-off, and it must be at least `TARGET_PREEMPTIONS` — proving the
+    // timer one-shot fired and preempted the runaway U-mode task.
+    let at_sole = PREEMPTIONS_AT_SOLE.load(Ordering::SeqCst);
+    if at_sole == u64::MAX || at_sole < TARGET_PREEMPTIONS {
         qemu_exit::exit_failure(FAIL_NO_PREEMPT);
+    }
+    // Sole-task (tickless) case: after the competitor exited, the sole
+    // spinner ran millions of iterations to completion with the one-shot
+    // disarmed, so essentially no further preemption fired — at most the
+    // benign contended→sole boundary fire (`SOLE_PREEMPT_SLACK`). A
+    // re-armed periodic tick would have added hundreds.
+    if PREEMPTIONS.load(Ordering::SeqCst) > at_sole.saturating_add(SOLE_PREEMPT_SLACK) {
+        qemu_exit::exit_failure(FAIL_SOLE_PREEMPTED);
     }
     if EXITS.load(Ordering::SeqCst) != 1 {
         qemu_exit::exit_failure(FAIL_EXIT_COUNT);
@@ -384,7 +446,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
 
     note(
         TEST_PASS,
-        "riscv64 U-mode preemption test: runaway U-mode task involuntarily preempted and resumed to exit",
+        "riscv64 U-mode preemption test: contended runaway task preempted; sole task ran tickless",
     );
     qemu_exit::exit_success();
 }

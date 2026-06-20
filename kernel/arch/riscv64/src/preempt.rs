@@ -400,13 +400,46 @@ pub const fn interval_for_hz(timebase_hz: u64, hz: u64) -> u64 {
     }
 }
 
+/// Arm the supervisor timer **one-shot** to fire once `ticks_from_now`
+/// `time`-CSR ticks ahead, then leave it effectively unarmed.
+///
+/// Programs the absolute SBI timer at `read_time() + ticks_from_now`
+/// (clamped to at least one tick, `AGENTS.md` §2.9). There is **no**
+/// periodic re-arm: once it fires, the next fire happens only if the
+/// scheduler arms it again via [`crate::kernel_arch::RiscvArch`]'s
+/// `set_preemption` (`AGENTS.md` §17.1 tickless / `NO_HZ`). `sie.STIE` must
+/// already be enabled (done by [`init_local_preempt`]).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub fn arm_oneshot(ticks_from_now: u64) {
+    let deadline = crate::kernel_arch::read_time().wrapping_add(ticks_from_now.max(1));
+    crate::sbi::set_timer(deadline);
+}
+
+/// Disarm the supervisor timer so no further interrupt fires until the
+/// next [`arm_oneshot`].
+///
+/// RISC-V has no "stop the timer" SBI call; setting the deadline to
+/// `u64::MAX` clears the pending `sip.STIP` (the SBI `set_timer`
+/// side-effect) and schedules the next interrupt so far out it never
+/// arrives in any realistic uptime — so a CPU running a sole runnable
+/// task takes no timer ticks (`AGENTS.md` §17.1 / §2.16). `sie.STIE`
+/// stays enabled so a subsequent [`arm_oneshot`] fires normally.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub fn disarm() {
+    crate::sbi::set_timer(u64::MAX);
+}
+
 /// Initialise supervisor-timer preemption on the calling hart.
 ///
-/// Records the hart `cpu` and the tick `interval_ticks`, arms the first
-/// SBI timer at `now + interval_ticks`, and enables `sie.STIE`. The
-/// function does **not** set `sstatus.SIE`; the caller enables global
-/// interrupts (via [`crate::trap::init_traps`]) once it is ready to
-/// take ticks — matching the x86_64 `init_local_preempt` / `sti` split.
+/// Records the hart `cpu` and the per-quantum `interval_ticks` (the value
+/// the scheduler's one-shot is later armed to) and enables `sie.STIE`,
+/// but **leaves the timer disarmed** (`set_timer(u64::MAX)`): RustOS is
+/// tickless, so the timer is armed only when the scheduler has a task to
+/// bound, via [`arm_oneshot`] from [`crate::kernel_arch::RiscvArch`]'s
+/// `set_preemption` (`AGENTS.md` §17.1 `NO_HZ`). The function does **not**
+/// set `sstatus.SIE`; the caller enables global interrupts (via
+/// [`crate::trap::init_traps`]) once it is ready to take ticks — matching
+/// the x86_64 `init_local_preempt` / `sti` split.
 ///
 /// # Safety
 ///
@@ -419,15 +452,17 @@ pub const fn interval_for_hz(timebase_hz: u64, hz: u64) -> u64 {
 pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No `PreemptStorage` registered (or this hart outside it): fail
-        // closed rather than arm a timer whose tick can never be recorded
-        // or dispatched (`AGENTS.md` §2.9). A registered caller never hits
+        // closed rather than record a quantum whose tick can never be
+        // dispatched (`AGENTS.md` §2.9). A registered caller never hits
         // this branch.
         return;
     };
     let interval = interval_ticks.max(1);
     interval_slot(slot).store(interval, Ordering::Relaxed);
     cpu_id_slot(slot).store(u64::from(cpu), Ordering::Relaxed);
-    crate::sbi::set_timer(crate::kernel_arch::read_time().wrapping_add(interval));
+    // Leave the timer disarmed; the scheduler arms the first one-shot on
+    // its next dispatch onto a contended CPU (tickless, §17.1).
+    disarm();
     // SAFETY: setting `sie.STIE` enables supervisor timer interrupts;
     // it has no memory side effects beyond the named CSR. The caller's
     // contract guarantees the trap vector and callback are installed.
@@ -436,18 +471,30 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     }
 }
 
-/// Handle a supervisor timer interrupt: invoke the installed callback
-/// with the recorded hart `CpuId`, then re-arm the SBI timer for the
-/// next tick (which clears the pending `sip.STIP`).
+/// Handle a supervisor timer interrupt: acknowledge it (clearing the
+/// pending `sip.STIP`) and dispatch the (observation-only) scheduler-tick
+/// callback.
+///
+/// RustOS is tickless (`AGENTS.md` §17.1): the timer was armed **one-shot**
+/// by the scheduler, so this handler does **not** re-arm it — the next
+/// fire happens only when the scheduler arms another quantum via
+/// [`arm_oneshot`]. It disarms (`set_timer(u64::MAX)`, which clears the
+/// now-pending `sip.STIP` so the trap does not immediately re-fire) and
+/// then dispatches the tick callback. The *preemption* of the running
+/// U-mode task is driven separately by [`on_u_mode_preempt_point`].
 ///
 /// Called only from [`crate::trap`]'s S-mode handler, with interrupts
 /// disabled (hardware cleared `sstatus.SIE` on trap entry).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt() {
     use rustos_arch_api::Timer;
+    // Acknowledge + disarm: `set_timer(u64::MAX)` clears the pending
+    // `sip.STIP` so the trap deasserts; the scheduler re-arms a fresh
+    // one-shot on its next dispatch (§17.1).
+    disarm();
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No registered per-hart slot for this hart: nothing to dispatch
-        // or re-arm (fail closed, `AGENTS.md` §2.9).
+        // (fail closed, `AGENTS.md` §2.9).
         return;
     };
     let cpu = cpu_id_slot(slot).load(Ordering::Relaxed);
@@ -460,12 +507,6 @@ pub(crate) fn on_timer_interrupt() {
         #[allow(clippy::cast_possible_truncation)]
         let cpu = cpu as u32;
         crate::timer_hal::TimerHal::new().dispatch_tick(cpu);
-    }
-    // Re-arm (and acknowledge) the timer last so the scheduler runs at
-    // least one tick before the next interrupt can stack.
-    let interval = interval_slot(slot).load(Ordering::Relaxed);
-    if interval != 0 {
-        crate::sbi::set_timer(crate::kernel_arch::read_time().wrapping_add(interval));
     }
 }
 

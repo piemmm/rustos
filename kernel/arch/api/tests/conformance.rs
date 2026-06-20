@@ -144,6 +144,8 @@ impl Timer for DoubleTimer {
             None => false,
         }
     }
+    fn arm_oneshot(&self, _ticks_from_now: u64) {}
+    fn disarm(&self) {}
 }
 
 #[test]

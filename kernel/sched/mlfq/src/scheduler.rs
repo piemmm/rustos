@@ -77,6 +77,14 @@ impl CpuState {
         }
         Steal::Empty
     }
+
+    /// Whether any band holds a ready task. The running task sits in the
+    /// current-task slot, not in a band, so a `true` here means there is a
+    /// **competitor** the running task must be preempted for — the
+    /// tickless one-shot arming decision (`AGENTS.md` §17.1).
+    fn has_ready_competitor(&self) -> bool {
+        self.bands.iter().any(RunDeque::has_ready)
+    }
 }
 
 /// The SMP scheduler.
@@ -665,6 +673,19 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.last_started.store(tick, Ordering::Release);
         task.home_cpu.store(cpu, Ordering::Release);
 
+        // Tickless preemption (`AGENTS.md` §17.1): arm this CPU's one-shot
+        // timer for a single quantum iff another ready task is queued (a
+        // competitor), and disarm otherwise so a CPU running a sole
+        // runnable task takes no timer interrupts. The port owns the
+        // quantum length; `set_preemption` is a pure boolean (§2.2). The
+        // contended-CPU one-shots that result are also what service MLFQ's
+        // anti-starvation boost cadence (`maybe_priority_boost`) without
+        // any global fixed-frequency tick — see the crate `README.md`
+        // (§17.1 carve-out). Armed *before* the body switches into the
+        // task so the deadline is live for the run.
+        self.arch
+            .set_preemption(self.cpus[cpu as usize].has_ready_competitor());
+
         let mut ctx = TaskContext {
             cpu,
             tick,
@@ -1006,6 +1027,41 @@ mod tests {
         // unpark + step again should re-run.
         sched.unpark(id).expect("unpark");
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+    }
+
+    /// Tickless preemption arming (`AGENTS.md` §17.1): a CPU running a
+    /// sole runnable task disarms its one-shot timer, and a CPU with a
+    /// second ready task arms it. Asserted through the `TestArch`
+    /// `set_preemption` ledger.
+    #[test]
+    fn sole_task_disarms_and_a_competitor_arms_preemption() {
+        let (arch, sched) = mk(1);
+        arch.set_current_cpu(0);
+
+        let solo = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("solo");
+        let _ = sched.step(0).expect("step");
+        assert_eq!(
+            arch.last_preemption(),
+            Some(false),
+            "a sole runnable task must disarm preemption (tickless idle)"
+        );
+        assert_eq!(arch.arm_count(), 0, "no competitor — never armed");
+        assert!(arch.disarm_count() >= 1);
+
+        sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("rival");
+        let arms_before = arch.arm_count();
+        for _ in 0..4 {
+            let _ = sched.step(0).expect("step");
+        }
+        assert!(
+            arch.arm_count() > arms_before,
+            "a contended CPU must arm the one-shot preemption timer"
+        );
+        let _ = solo;
     }
 
     #[test]

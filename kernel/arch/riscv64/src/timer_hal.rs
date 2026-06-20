@@ -91,6 +91,26 @@ impl Timer for TimerHal {
             None => false,
         }
     }
+
+    fn arm_oneshot(&self, ticks_from_now: u64) {
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            crate::preempt::arm_oneshot(ticks_from_now);
+        }
+        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+        {
+            // No SBI timer on the host; the conformance vertical only
+            // requires the call to be total (`AGENTS.md` §2.9).
+            let _ = ticks_from_now;
+        }
+    }
+
+    fn disarm(&self) {
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            crate::preempt::disarm();
+        }
+    }
 }
 
 #[cfg(test)]

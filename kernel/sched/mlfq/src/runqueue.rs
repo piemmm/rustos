@@ -127,6 +127,23 @@ impl RunDeque {
         self.mask + 1
     }
 
+    /// Whether the deque appears to hold at least one ready task.
+    ///
+    /// Exact in the absence of concurrent stealers (the common case, and
+    /// always true on a single-CPU boot); under concurrency it is a hint
+    /// that may transiently miss a just-pushed or just-stolen entry. It
+    /// is used **only** for the tickless preemption arming decision
+    /// (`crate::Scheduler::dispatch` → `set_preemption`), never to enforce
+    /// safety: a spurious "ready" merely arms one extra one-shot quantum,
+    /// and a missed "ready" is corrected at the next dispatch or the
+    /// spawn/unpark IPI (`AGENTS.md` §17.1 / §2.9).
+    #[must_use]
+    pub fn has_ready(&self) -> bool {
+        let b = self.bottom.load(Ordering::Acquire);
+        let t = self.top.load(Ordering::Acquire);
+        b.wrapping_sub(t) > 0
+    }
+
     /// Number of items currently in the deque (approximate under concurrency).
     ///
     /// The result is exact in the absence of concurrent stealers and is

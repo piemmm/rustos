@@ -100,6 +100,23 @@ const PREEMPT_CALIBRATION_WINDOW_US: u32 = 10_000;
 /// disabled (`AGENTS.md` §7 — no flaky tests, no silent regressions).
 const MIN_PREEMPTIONS_PER_CPU: u64 = 10;
 
+/// Black-box busy-spin iterations one tickless **witness** task runs per
+/// dispatch before yielding. Sized to comfortably exceed one preemption
+/// quantum ([`PREEMPT_PERIOD_US`] = 1 ms) on QEMU TCG, so the armed
+/// one-shot fires exactly once during the chunk (a ring-0 kernel task is
+/// not preempted, so it gets one fire per dispatch and is re-armed only
+/// on its next dispatch after the yield). The witnesses loop until every
+/// CPU has observed [`MIN_PREEMPTIONS_PER_CPU`] ticks, so the count is
+/// self-calibrating rather than tied to a fixed iteration budget
+/// (`AGENTS.md` §7 — no flaky tests).
+const WITNESS_SPIN: u64 = 20_000_000;
+
+/// Number of busy witness tasks pinned per CPU. Two so each CPU stays
+/// contended (and therefore keeps its one-shot armed) even after the
+/// short workload tasks drain — a single sole task would disarm under the
+/// tickless model (`AGENTS.md` §17.1) and never observe a further tick.
+const WITNESSES_PER_CPU: u32 = 2;
+
 /// BSP-computed LAPIC-timer calibration, packed into a `u64` (ticks/s
 /// fit in 32 bits for any LAPIC RustOS targets; `initial_count` is
 /// 32 bits). Zero means "not yet calibrated".
@@ -145,6 +162,26 @@ fn unpack_calibration() -> Option<Calibration> {
 /// strong count) in interrupt context.
 static SCHED_FOR_TIMER: AtomicPtr<Scheduler<SmpArch>> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Minimum `preemption_count` across CPUs `0..cpu_count`, read through the
+/// published scheduler pointer (`0` if not yet published). The tickless
+/// preemption witnesses use it to decide when every CPU has observed
+/// enough one-shot ticks and they may exit.
+fn min_preemptions(cpu_count: u32) -> u64 {
+    let raw = SCHED_FOR_TIMER.load(Ordering::Acquire);
+    if raw.is_null() {
+        return 0;
+    }
+    // SAFETY: as in `scheduler_tick` — the BSP published a leaked
+    // `Arc::into_raw` pointer before any task ran; the pointee outlives the
+    // workload because the leaked strong count is never decremented.
+    let sched: &Scheduler<SmpArch> = unsafe { &*raw };
+    let mut m = u64::MAX;
+    for cpu in 0..cpu_count {
+        m = m.min(sched.preemption_count(cpu).unwrap_or(0));
+    }
+    m
+}
+
 /// Timer-tick callback installed via `preempt::set_timer_callback`.
 ///
 /// Runs in ISR context with interrupts disabled. Steps:
@@ -152,8 +189,8 @@ static SCHED_FOR_TIMER: AtomicPtr<Scheduler<SmpArch>> = AtomicPtr::new(core::ptr
 /// 1. Load the scheduler pointer (a raw `*const`, never freed once
 ///    published).
 /// 2. Call `Scheduler::on_timer_tick(cpu)`, which bumps the
-///    scheduler's per-CPU preemption counter and drives one
-///    `step(cpu)`.
+///    scheduler's per-CPU preemption counter (observation-only; it does
+///    **not** drive `step` — the cooperative step loops do dispatch).
 ///
 /// We deliberately do **not** propagate `on_timer_tick`'s `Result`:
 /// the dispatcher only invokes us with a `CpuId` produced by the
@@ -276,6 +313,23 @@ impl SchedulerArch for SmpArch {
     fn send_ipi(&self, _target: u32) {
         // No preemption in (b); the receiver is already polling
         // `step()`. Stage 3a (c) replaces this with a real IPI.
+    }
+
+    fn set_preemption(&self, armed: bool) {
+        // Tickless preemption (`AGENTS.md` §17.1): the scheduler arms the
+        // calling CPU's LAPIC one-shot to one quantum when it dispatches a
+        // task onto a contended CPU, and disarms otherwise. The per-CPU
+        // quantum (LAPIC initial-count) was recorded by
+        // `preempt::init_local_preempt`; arming writes it through the
+        // raw-pointer LAPIC path the ISR also uses. This is what makes the
+        // per-CPU preemption-tick assertion below observe ticks under the
+        // tickless model (a busy witness contended on each CPU is armed,
+        // runs past the quantum, and the one-shot fires).
+        if armed {
+            preempt::arm_oneshot(preempt::quantum_count());
+        } else {
+            preempt::disarm();
+        }
     }
 }
 
@@ -533,9 +587,40 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
             })
             .expect("spawn");
     }
+    // Tickless preemption witnesses (`AGENTS.md` §17.1): the short workload
+    // tasks above each run far under one quantum, so the one-shot is
+    // re-armed before it can fire — under the tickless model they alone
+    // would never drive a timer tick on any CPU. To prove the per-CPU LAPIC
+    // one-shot genuinely fires under contention, spawn busy witnesses
+    // ([`WITNESSES_PER_CPU`] per CPU so each CPU stays contended after the
+    // workload drains): each runs a long black-box spin (well past one
+    // quantum, so the armed one-shot fires once), then yields so it is
+    // re-dispatched and re-armed, repeating until *every* CPU has observed
+    // at least [`MIN_PREEMPTIONS_PER_CPU`] ticks — then exits. It does not
+    // touch `EXECUTIONS`, so the workload exec assertion is unaffected, and
+    // it exits, so `live_task_count` still reaches 0 for the step-loop
+    // termination.
+    for cpu in 0..cpu_count {
+        for _ in 0..WITNESSES_PER_CPU {
+            sched
+                .spawn(cpu, Priority::Normal, move |_ctx| {
+                    let mut x = WITNESS_SPIN;
+                    while x > 0 {
+                        x = core::hint::black_box(x - 1);
+                    }
+                    if min_preemptions(cpu_count) >= MIN_PREEMPTIONS_PER_CPU {
+                        TaskAction::Exit
+                    } else {
+                        TaskAction::Yield
+                    }
+                })
+                .expect("spawn witness");
+        }
+    }
     let _ = writeln!(
         com1,
-        "[scheduler_stress_qemu] spawned {total_tasks} tasks; entering step loop"
+        "[scheduler_stress_qemu] spawned {total_tasks} tasks + {} witnesses; entering step loop",
+        u64::from(WITNESSES_PER_CPU) * u64::from(cpu_count)
     );
 
     // BSP step loop alongside the APs.
