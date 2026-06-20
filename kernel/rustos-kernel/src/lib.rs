@@ -225,30 +225,22 @@ pub mod driver_spawn_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod system_files;
 
-// The kernel-resident `/System` driver-store file-read IPC *server*
-// (`.junie/next-pi-prompt.md` Design D D2b-2): the arch-neutral request→reply
-// translation that drains a `rustos_kernel_ipc::CallEndpoint`, serves each
-// `rustos_abi::driver_store::FileRequest` against the `system_files`
-// `SystemFileService` (list/read), frames the answer with the shared wire
-// encoders, and wakes the parked caller (`rustos_kernel_core::call_wake`).
-// The per-arch kthread loop drives `serve_pending` between parks. Gated, like
-// `system_files`, on the two instruction sets where `rustos-drvhost` /
-// `rustos-kernel-ipc` are dependencies of this crate.
+// The kernel-resident `/System` driver-store IPC *server* (Design D
+// D2b-2c): the arch-neutral request→reply translation that drains a
+// `rustos_kernel_ipc::CallEndpoint` and serves each
+// `rustos_abi::driver_store::StoreRequest` against the `system_files`
+// `SystemFileService` — a `Catalogue` op (the signed-store scan exposed as
+// opaque `bundle_id` + decoded bind keys) and a `Load` op (the signed §8
+// gate + process spawn, granting the matched node's resources). The
+// user-space `devmgr` owns matching *policy*; this server keeps the load
+// *mechanism* in the kernel TCB (`AGENTS.md` §4). It names both
+// `rustos_devmgr` (`DriverLoader`) and `rustos_drvhost`
+// (`scan_store`/`ImageSource`), so it is gated, like `system_files`, on the
+// two instruction sets where those crates are dependencies of this crate —
+// `x86_64` (the CI host, where its unit tests run) and `aarch64` (the
+// Raspberry Pi 4 boot path that drives it).
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod driver_store_server;
-
-// The production driver-autoload boot wiring (`plans/PI.md` P10 5d-2-ii):
-// composes the signed-store scan (`drvhost::store::scan_store` over the
-// `/System/Drivers/` bundle paths), the `devmgr` match walk, and the
-// process-spawning `driver_spawn_loader` into the one entry the boot path
-// drives to autoload user-space drivers by discovery (`AGENTS.md` §4 / §18).
-// It names both `rustos_devmgr` and `rustos_drvhost`, so it is gated, like
-// the other `drvhost`/`devmgr`-consuming modules, on the two instruction
-// sets where those crates are dependencies of this crate — `x86_64` (the CI
-// host, where its unit tests run) and `aarch64` (the Raspberry Pi 4 boot
-// path that will drive it once the production root volume is mounted).
-#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
-pub mod driver_autoload;
 
 // The architecture ports. Each subtree gathers exactly one instruction
 // set's `KernelArch` wrapper, fail-closed dispatch callback, production
@@ -330,7 +322,7 @@ mod build_support;
 
 // Shared host-test fixtures. The in-memory mock root-volume filesystem
 // driver `MockRootFs` is the surface several boot-path readers delegate
-// through (`system_files`, `driver_autoload`), so it is defined
+// through (`system_files`, `driver_store_server`), so it is defined
 // once here rather than copy-pasted into each test module (`AGENTS.md`
 // §2.2). Compiled only under `cargo test`.
 #[cfg(test)]

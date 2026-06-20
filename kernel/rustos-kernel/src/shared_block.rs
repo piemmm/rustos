@@ -99,6 +99,37 @@ impl<B: Block> SharedBlock<B> {
     }
 }
 
+// SAFETY: `SharedBlock` is the kernel's disk-sharing boundary, and it is the
+// single place that vouches for sharing a brought-up block device across the
+// tasks that drive it (`AGENTS.md` §4 — disk access is a common,
+// capability-checked kernel service, reached by the disk-owning kthread, the
+// driver-store serve kthread, and the encrypted-root unlock kthread over one
+// `&'static SharedBlock`). The auto-derived `Send`/`Sync` are conservatively
+// withheld because a concrete `B` (e.g. `VirtioBlk`) holds raw `NonNull`
+// pointers into the device's MMIO register window and DMA region. Asserting
+// `Send + Sync` here is sound because:
+//   1. **Exclusive access.** Every byte-moving operation on the contained
+//      device goes through `self.device.lock()` (the cached `geometry` is the
+//      only lock-free field and is an immutable `Copy` value), so `B` is never
+//      touched by two tasks at once — there is no data race on `B`'s interior,
+//      including any non-atomic bookkeeping it keeps.
+//   2. **Location-independent backing.** `B`'s `!Send` parts are raw pointers
+//      into globally-valid device memory: an MMIO register window and a DMA
+//      slab, both reachable from any CPU/task through the kernel's identity
+//      map. They are not tied to the task that mapped them, so moving the
+//      handle's *reference* between tasks observes the same device bytes.
+//   3. **Lifetime.** A `&'static SharedBlock` only ever wraps a device whose
+//      backing was boot-leaked to `'static` (`kernel/rustos-kernel`'s
+//      `root_unlock`), so the device and its pointers outlive every handle.
+// This is the irreducible `unsafe` for in-kernel device sharing; it is
+// confined to this one boundary type rather than scattered across the virtio
+// transport/host (`AGENTS.md` §2.10 — encapsulated behind a safe API).
+unsafe impl<B: Block> Send for SharedBlock<B> {}
+// SAFETY: as for `Send` above — `&SharedBlock` hands out `SharedBlockHandle`s
+// whose every device op locks `self.device`, so concurrent `&` access from
+// multiple tasks is serialised down to one device operation at a time.
+unsafe impl<B: Block> Sync for SharedBlock<B> {}
+
 /// One window onto a [`SharedBlock`]. It is itself a [`Block`]: every
 /// operation locks the shared device for the duration of the single device
 /// call, so concurrent handles never interleave a device operation.
@@ -174,16 +205,17 @@ impl<B: Block> Block for SharedBlockHandle<'_, B> {
 /// driver loads (`AGENTS.md` §18.3 / §18.4), and `/System` must stay mounted
 /// anyway so other subsystems can reach it.
 ///
-/// This service is how that mount outlives the unlock **without** promoting
-/// the device backing (DMA pool, MMIO map, IRQ waiter, virtio host) to
-/// `'static`. It is run as the body of a never-returning kernel-service
-/// kthread (`AGENTS.md` §17.1 — "a continuous service never returns"): the
-/// kthread's device bring-up call chain stays suspended on its own coroutine
-/// stack, so the *borrowed* backing those frames own stays live for free,
-/// and [`Self::hold`] parks the kthread for life owning the [`SharedBlock`].
-/// Every `/System` read goes through a fresh [`SharedBlockHandle`] from
-/// [`Self::window`], serialised against any concurrent window by the
-/// `SharedBlock` lock (`AGENTS.md` §4).
+/// The device backing (DMA pool, MMIO map, IRQ waiter, virtio host) is
+/// boot-leaked to `'static` (`kernel/rustos-kernel`'s `root_unlock`), so this
+/// service — and the [`SharedBlock`] it owns — is itself leaked to `'static`
+/// and shared by `&'static` across two independent preemptive tasks: the
+/// disk-owning **driver-store serve** task (which binds and answers the store
+/// IPC endpoint, independent of the user-data passphrase) and the
+/// **encrypted-root unlock** task. Each reaches the disk through a fresh
+/// [`SharedBlockHandle`] from [`Self::window`], serialised against the other
+/// by the `SharedBlock` lock (`AGENTS.md` §4 — disk access is a common,
+/// capability-checked kernel service). [`Self::hold`] parks the calling task
+/// for life when it has no endpoint to serve.
 pub struct DriverStoreService<B: Block> {
     shared: SharedBlock<B>,
 }
@@ -205,18 +237,18 @@ impl<B: Block> DriverStoreService<B> {
         self.shared.handle()
     }
 
-    /// Hold the `/System` mount for the life of the system: park the calling
-    /// kernel-service kthread forever, owning the [`SharedBlock`].
+    /// Park the calling kernel-service task for life.
     ///
-    /// This never returns. The service owns the [`SharedBlock`] (and through
-    /// it the boot disk) for the whole park, while the kthread's bring-up
-    /// frames stay suspended beneath this call, keeping the borrowed device
-    /// backing live. It **parks** rather than yields, so it consumes no CPU
-    /// while there is no work (`AGENTS.md` §2.1 — never a busy-yield loop);
-    /// a spurious wake simply re-parks. D2b wakes this kthread to serve
-    /// `driver_store_load` reads through [`Self::window`], after which it
-    /// re-parks here.
-    pub fn hold(self, coop: &CooperativeYield<'_>) -> ! {
+    /// This never returns. Used on the fail-closed fallback when there is no
+    /// `/System` store endpoint to serve (no volume, or the bind failed): the
+    /// disk-owning task still owns the leaked `'static` disk, so it parks
+    /// rather than exiting, and an `ipc_call` to the unbound store endpoint
+    /// fails closed with `NotFound` rather than blocking (`AGENTS.md` §2.9).
+    /// It **parks** rather than yields, so it consumes no CPU while idle
+    /// (`AGENTS.md` §2.1 — never a busy-yield loop); a spurious wake re-parks.
+    /// Takes `&self` because the service is a leaked `'static` value shared by
+    /// reference, never owned by one frame.
+    pub fn hold(&self, coop: &CooperativeYield<'_>) -> ! {
         loop {
             coop.park();
         }

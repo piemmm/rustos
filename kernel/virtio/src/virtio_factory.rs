@@ -63,16 +63,19 @@ pub struct KernelVirtioFactoryConfig<'k> {
     /// `caller.task()` (`AGENTS.md` §5.4 — forgery defence).
     pub caller: &'k TaskCapabilities,
     /// Audit sink every DMA grant/denial and IRQ decision is logged to.
-    pub audit: &'k dyn Sink,
+    /// `+ Sync` so the minted [`KernelVirtioHost`] is [`Sync`] (a shared
+    /// `&'static` host is reached from more than one task, `AGENTS.md` §4).
+    pub audit: &'k (dyn Sink + Sync),
     /// Kernel IRQ table the device's interrupt line is bound in.
     pub irq: &'k IrqTable,
     /// Handle the bus driver minted when it bound the device's line
     /// (Stage 4.D Item 3 supplies the GSI alongside the register
     /// window).
     pub irq_handle: IrqHandle,
-    /// Clock + cooperative-yield seam the blocking wait loop drives
-    /// (wraps the scheduler + architecture monotonic clock).
-    pub waiter: &'k dyn IrqWaiter,
+    /// Clock + blocking-wait seam the completion wait loop drives
+    /// (wraps the scheduler + architecture monotonic clock). `+ Sync` for
+    /// the same reason as `audit`.
+    pub waiter: &'k (dyn IrqWaiter + Sync),
     /// Base virtual address of the per-driver DMA window inside the
     /// freshly-minted address space.
     pub pool_base: VirtAddr,
@@ -141,7 +144,7 @@ where
         )
         .ok()?;
 
-        let host: KernelVirtioHost<'r, P, dyn Sink> = KernelVirtioHost::new(
+        let host: KernelVirtioHost<'r, P, dyn Sink + Sync> = KernelVirtioHost::new(
             pool,
             self.config.caller,
             self.config.audit,
@@ -157,7 +160,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::cell::RefCell as StdRefCell;
 
     use alloc::vec::Vec;
     use rustos_caps::CapabilitySet;
@@ -169,6 +171,7 @@ mod tests {
     use rustos_kernel_sec::captable::{TaskCapabilities, TaskId};
     use rustos_kernel_sec::identity::UserId;
     use rustos_log::{Event, Sink};
+    use rustos_sync::SpinLock;
 
     const OWNER: TaskId = TaskId(99);
 
@@ -183,23 +186,24 @@ mod tests {
         }
     }
 
-    /// Minimal recording [`Sink`] capturing every event id.
+    /// Minimal recording [`Sink`] capturing every event id. Behind a
+    /// [`SpinLock`] so it is [`Sync`] (the host now requires `S: Sync`).
     struct Recorder {
-        ids: StdRefCell<Vec<u32>>,
+        ids: SpinLock<Vec<u32>>,
     }
     impl Recorder {
         fn new() -> Self {
             Self {
-                ids: StdRefCell::new(Vec::new()),
+                ids: SpinLock::new(Vec::new()),
             }
         }
         fn ids(&self) -> Vec<u32> {
-            self.ids.borrow().clone()
+            self.ids.lock().clone()
         }
     }
     impl Sink for Recorder {
         fn write_event(&self, event: &Event<'_>) {
-            self.ids.borrow_mut().push(event.id.0);
+            self.ids.lock().push(event.id.0);
         }
     }
 

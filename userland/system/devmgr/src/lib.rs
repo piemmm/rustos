@@ -47,15 +47,17 @@
 
 extern crate alloc;
 
+pub mod autoload;
 pub mod events;
 pub mod manager;
 pub mod observe;
 pub mod service;
 pub mod store;
 
+pub use autoload::{match_and_load, LoadedBundles};
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
-pub use service::{observe_once, run, HwTreeService};
-pub use store::{list_store, DriverStoreCall};
+pub use service::{run, HwTreeService};
+pub use store::{fetch_catalogue, load_driver, CatalogueDriver, DriverStoreCall};
 // The deterministic match policy is the shared `lib/devmatch` definition
 // (`AGENTS.md` §2.2): re-exported here so existing consumers and the
 // crate's public surface are unchanged.

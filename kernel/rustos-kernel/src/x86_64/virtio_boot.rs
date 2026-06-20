@@ -62,8 +62,9 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTable> {
     /// Capabilities of the bus-driver task; every MMIO map and DMA
     /// allocation is audited against this set.
     pub caller: &'k TaskCapabilities,
-    /// Audit sink for every map/DMA/load decision.
-    pub audit: &'k dyn Sink,
+    /// Audit sink for every map/DMA/load decision. `+ Sync` so the minted
+    /// `KernelVirtioHost` is `Sync` (a shared `&'static` host, `AGENTS.md` §4).
+    pub audit: &'k (dyn Sink + Sync),
     /// Kernel IRQ table the device's interrupt line is bound in.
     pub irq: &'k IrqTable,
     /// Handle for the device's bound interrupt line.
@@ -76,8 +77,9 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTable> {
     /// [`Self::irq_handle`]'s line maps to; copied verbatim into the
     /// device's MSI-X table entry by [`MsixBus::route_msix`].
     pub msi_message: MsiMessage,
-    /// Clock + cooperative-yield seam the blocking wait loop drives.
-    pub waiter: &'k dyn IrqWaiter,
+    /// Clock + blocking-wait seam the completion wait loop drives. `+ Sync`
+    /// for the same reason as [`Self::audit`].
+    pub waiter: &'k (dyn IrqWaiter + Sync),
     /// Base virtual address of each minted per-driver DMA window.
     pub pool_base: VirtAddr,
     /// Capacity, in pages, of each minted per-driver DMA window.

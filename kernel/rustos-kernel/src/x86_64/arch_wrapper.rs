@@ -91,6 +91,12 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
     // regardless. Errors here surface to the next `irq_wait` caller
     // via the `IrqTable`'s `Stray` / `ArchUnsupported` paths.
     let _ = table.fire(gsi, *controller);
+    // Wake any `irq_wait` caller parked on a bound line: `fire` set the
+    // per-line ready flag (after masking — mask-before-wake holds). A
+    // spurious wake for a waiter on a different line is harmless — it
+    // re-checks its own line and parks again (`AGENTS.md` §2.1 / §2.16).
+    // Wait-free and allocation-free, safe from this interrupt context.
+    rustos_kernel_core::irq_wake();
 }
 
 /// The ring-3-preemption callback the LAPIC-timer ISR invokes for a tick

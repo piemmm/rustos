@@ -45,12 +45,18 @@ pub trait IrqWaiter {
     /// extend the wait rather than corrupt the table.
     fn now_ns(&self) -> u64;
 
-    /// Yield the remainder of the current scheduling quantum.
+    /// Suspend the calling task until it should re-poll the line.
     ///
     /// Called once per poll iteration that observes neither a fire
-    /// nor a timeout. Returning [`Ok`] re-enters the loop; returning
-    /// [`Err`] aborts the wait with the supplied [`IrqWaitAbort`]
-    /// reason (e.g. the task can no longer be scheduled).
+    /// nor a timeout. How it suspends is the implementation's choice:
+    /// the `irq_wait` syscall path *parks* off the run queue (woken by
+    /// the device-IRQ dispatch path's wake or the timed sweep —
+    /// `AGENTS.md` §2.1, no busy yield), while the in-kernel kthread
+    /// path suspends through its own race-free wait (a `wfi` park on
+    /// metal, a cooperative yield under the QEMU verticals). Returning
+    /// [`Ok`] re-enters the loop; returning [`Err`] aborts the wait with
+    /// the supplied [`IrqWaitAbort`] reason (e.g. the task can no longer
+    /// be scheduled).
     ///
     /// # Errors
     ///

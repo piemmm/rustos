@@ -1,28 +1,46 @@
-//! The read-only `/System` driver-store file-read IPC protocol (Design D
-//! D2b — `.junie/next-pi-prompt.md`).
+//! The read-only `/System` driver-store IPC protocol (Design D D2b-2c —
+//! `.junie/next-pi-prompt.md`).
 //!
-//! Under Design D the one bootstrap-floor disk is owned for life by the
-//! never-returning driver-store kernel service, which keeps the read-only
-//! signed-bundle `/System` volume mounted (`AGENTS.md` §18.3 / §18.4). A
-//! user-space client — the reactive device manager (`userland/system/devmgr`)
-//! — reaches that volume through a single capability-gated synchronous IPC
-//! call endpoint ([`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL))
-//! served by the kernel service. The two operations the client needs are
-//! **list** the `/System/Drivers/` store and **read** a bundle's bytes.
+//! Under Design D the one bootstrap-floor disk is owned for the life of the
+//! system by the never-returning kernel driver-store service, which keeps
+//! the read-only signed-bundle `/System` volume mounted (`AGENTS.md` §18.3 /
+//! §18.4). The reactive user-space device manager (`userland/system/devmgr`)
+//! reaches that service through a single capability-gated synchronous IPC
+//! call endpoint — the [`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL)
+//! surface served by the kernel over the well-known [`DRIVER_STORE_ENDPOINT`].
+//!
+//! The device manager owns *policy* (which driver binds which node); the
+//! kernel keeps the *mechanism* (bundle bytes, signature verification, spawn)
+//! in its trusted base (`AGENTS.md` §4). The two operations that contract
+//! needs are:
+//!
+//! * [`StoreRequest::Catalogue`] — the kernel returns one entry per installed
+//!   bundle: an **opaque** `bundle_id` plus the bind table the kernel already
+//!   decoded fail-closed from that bundle's signed manifest (`AGENTS.md`
+//!   §18.6). No bytes and no `/System` path ever cross to user space — the
+//!   device manager matches the decoded bind keys against the hardware tree
+//!   with `lib/devmatch` (`AGENTS.md` §18.3) and never re-parses an
+//!   image, keeping the §17.4 layering intact.
+//! * [`StoreRequest::Load`] — naming a `bundle_id` it matched and the
+//!   hardware-tree `node_id` that matched it, the device manager asks the
+//!   kernel to load that bundle. The kernel re-reads the bundle, re-runs the
+//!   full signed §8 gate, and spawns it with **only** the resources the named
+//!   node requested — the device manager supplies no bytes and no grants
+//!   (`AGENTS.md` §4 — no ambient authority).
 //!
 //! This module is the wire contract for that endpoint: the request encoder
 //! both sides share and the reply framing, all operating on borrowed buffers
-//! (`AGENTS.md` §2.2 — the one definition the kernel server and the user-space
-//! client agree on; no allocation, matching the crate's `no_std` contract).
-//! Both `list` and `read` replies are length-framed and carry a leading
-//! status word so a fail-closed refusal is delivered in-band rather than as a
-//! truncated payload (`AGENTS.md` §5.4 / §2.9).
+//! (`AGENTS.md` §2.2; no allocation, matching the crate's `no_std` contract).
+//! Every reply is length-framed and carries a leading status word so a
+//! fail-closed refusal is delivered in-band rather than as a truncated
+//! payload (`AGENTS.md` §5.4 / §2.9).
 
-use crate::le::{put_i32, put_u32, put_u64, read_i32, read_u32, read_u64};
-use crate::Errno;
+use crate::driver::DriverBindKey;
+use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
+use crate::{Errno, DRIVER_MANIFEST_MAX_BIND_KEYS};
 
 /// Well-known kernel-owned call-endpoint id of the read-only `/System`
-/// driver-store file-read service (Design D D2b).
+/// driver-store service (Design D D2b).
 ///
 /// The disk-owning kernel service creates one [`crate::ipc`]-style call
 /// endpoint under this reserved id; the device manager names it as the
@@ -33,79 +51,56 @@ use crate::Errno;
 /// (`AGENTS.md` §5.2 / §5.4).
 pub const DRIVER_STORE_ENDPOINT: u64 = 0xD012_5701;
 
-/// Maximum length, in bytes, of a store-relative path in a [`FileRequest`].
-///
-/// A validation bound on untrusted input, not a scaling capacity
-/// (`AGENTS.md` §24.4): a request naming a longer path is refused fail-closed.
-pub const DRIVER_STORE_PATH_MAX: usize = 255;
+/// Request opcode: list the installed store as opaque-id + bind-key entries.
+const OP_CATALOGUE: u8 = 1;
+/// Request opcode: load the bundle `bundle_id` for the matched `node_id`.
+const OP_LOAD: u8 = 2;
 
-/// Maximum number of bytes a single [`FileRequest::Read`] may ask for.
-///
-/// The reply is length-framed and must fit the endpoint's reply bound and
-/// the client's buffer; a larger run is read in successive chunks. A
-/// validation bound, not a capacity (`AGENTS.md` §24.4).
-pub const FILE_READ_CHUNK_MAX: u32 = 4096;
+/// Encoded length of a [`StoreRequest::Load`]: opcode + `bundle_id` (u32) +
+/// `node_id` (u32). A [`StoreRequest::Catalogue`] is the single opcode byte,
+/// so this is also the endpoint's maximum request size.
+pub const LOAD_REQUEST_LEN: usize = 1 + 4 + 4;
 
-/// Request opcode: list the installed `/System/Drivers/` bundle paths.
-const OP_LIST: u8 = 1;
-/// Request opcode: read a run of a bundle's bytes.
-const OP_READ: u8 = 2;
-
-/// Fixed prefix of an encoded [`FileRequest::Read`]: opcode + `offset` (u64)
-/// + `len` (u32), before the path bytes.
-///
-/// Public so the kernel-side server can size its request buffer to the
-/// largest valid [`FileRequest::Read`] (`READ_HEADER_LEN +
-/// DRIVER_STORE_PATH_MAX`) from the one definition both sides share
-/// (`AGENTS.md` §2.2).
-pub const READ_HEADER_LEN: usize = 1 + 8 + 4;
-
-/// A request posted to the driver-store file-read endpoint.
+/// A request posted to the driver-store endpoint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FileRequest<'a> {
-    /// List every installed bundle path under the store root.
-    List,
-    /// Read `len` bytes of the bundle at `path` starting at `offset`.
-    Read {
-        /// Store-relative bundle path (`<= DRIVER_STORE_PATH_MAX` bytes).
-        path: &'a str,
-        /// Byte offset to start reading at.
-        offset: u64,
-        /// Number of bytes to read (`<= FILE_READ_CHUNK_MAX`).
-        len: u32,
+pub enum StoreRequest {
+    /// List every installed bundle as an opaque `bundle_id` plus its decoded
+    /// bind table (`AGENTS.md` §18.3 / §18.6).
+    Catalogue,
+    /// Load the bundle the device manager matched, granting the loaded
+    /// driver only the resources the matched hardware-tree node requested.
+    Load {
+        /// Opaque bundle id from a prior [`StoreRequest::Catalogue`] entry.
+        bundle_id: u32,
+        /// The matched hardware-tree node ([`crate::HwNode::id`]) whose
+        /// resource grants the kernel mints for the loaded driver.
+        node_id: u32,
     },
 }
 
-impl<'a> FileRequest<'a> {
+impl StoreRequest {
     /// Encode `self` into `buf`, returning the number of bytes written.
     ///
     /// # Errors
     ///
-    /// * [`Errno::BufferTooSmall`] if `buf` cannot hold the encoding.
-    /// * [`Errno::LengthOutOfRange`] if a `Read` path exceeds
-    ///   [`DRIVER_STORE_PATH_MAX`] or `len` exceeds [`FILE_READ_CHUNK_MAX`].
+    /// [`Errno::BufferTooSmall`] if `buf` cannot hold the encoding.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         match *self {
-            FileRequest::List => {
+            StoreRequest::Catalogue => {
                 if buf.is_empty() {
                     return Err(Errno::BufferTooSmall);
                 }
-                buf[0] = OP_LIST;
+                buf[0] = OP_CATALOGUE;
                 Ok(1)
             }
-            FileRequest::Read { path, offset, len } => {
-                if path.len() > DRIVER_STORE_PATH_MAX || len > FILE_READ_CHUNK_MAX {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let total = READ_HEADER_LEN + path.len();
-                if buf.len() < total {
+            StoreRequest::Load { bundle_id, node_id } => {
+                if buf.len() < LOAD_REQUEST_LEN {
                     return Err(Errno::BufferTooSmall);
                 }
-                buf[0] = OP_READ;
-                put_u64(buf, 1, offset);
-                put_u32(buf, 9, len);
-                buf[READ_HEADER_LEN..total].copy_from_slice(path.as_bytes());
-                Ok(total)
+                buf[0] = OP_LOAD;
+                put_u32(buf, 1, bundle_id);
+                put_u32(buf, 5, node_id);
+                Ok(LOAD_REQUEST_LEN)
             }
         }
     }
@@ -114,32 +109,23 @@ impl<'a> FileRequest<'a> {
     ///
     /// # Errors
     ///
-    /// * [`Errno::LengthOutOfRange`] if `bytes` is empty, a `Read` is
-    ///   truncated, its path exceeds [`DRIVER_STORE_PATH_MAX`], or `len`
-    ///   exceeds [`FILE_READ_CHUNK_MAX`].
+    /// * [`Errno::LengthOutOfRange`] if `bytes` is empty or a `Load` is
+    ///   truncated.
     /// * [`Errno::OutOfRange`] if the opcode is unknown.
-    /// * [`Errno::BadAddress`] if a `Read` path is not valid UTF-8.
-    pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
-        let Some((&op, rest)) = bytes.split_first() else {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
+        let Some((&op, _)) = bytes.split_first() else {
             return Err(Errno::LengthOutOfRange);
         };
         match op {
-            OP_LIST => Ok(FileRequest::List),
-            OP_READ => {
-                if rest.len() < READ_HEADER_LEN - 1 {
+            OP_CATALOGUE => Ok(StoreRequest::Catalogue),
+            OP_LOAD => {
+                if bytes.len() < LOAD_REQUEST_LEN {
                     return Err(Errno::LengthOutOfRange);
                 }
-                let offset = read_u64(bytes, 1);
-                let len = read_u32(bytes, 9);
-                if len > FILE_READ_CHUNK_MAX {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let path_bytes = &bytes[READ_HEADER_LEN..];
-                if path_bytes.len() > DRIVER_STORE_PATH_MAX {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let path = core::str::from_utf8(path_bytes).map_err(|_| Errno::BadAddress)?;
-                Ok(FileRequest::Read { path, offset, len })
+                Ok(StoreRequest::Load {
+                    bundle_id: read_u32(bytes, 1),
+                    node_id: read_u32(bytes, 5),
+                })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -149,9 +135,6 @@ impl<'a> FileRequest<'a> {
 /// Fixed prefix of every reply frame: a status word (`0` on success, else
 /// the negated [`Errno`] discriminant).
 const REPLY_STATUS_LEN: usize = 4;
-/// Reply prefix once the status word is `0`: the status word plus a `u32`
-/// count (entry count for a list reply, byte count for a read reply).
-const REPLY_OK_HEADER_LEN: usize = REPLY_STATUS_LEN + 4;
 
 /// Encode a fail-closed error reply (status only) into `buf`.
 ///
@@ -167,15 +150,6 @@ pub fn encode_error_reply(buf: &mut [u8], err: Errno) -> Result<usize, Errno> {
     Ok(REPLY_STATUS_LEN)
 }
 
-/// Recover the [`Errno`] a reply frame carries, or `Ok` if it is a success
-/// frame (returning the success body following the header).
-fn split_status(reply: &[u8]) -> Result<i32, Errno> {
-    if reply.len() < REPLY_STATUS_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    Ok(read_i32(reply, 0))
-}
-
 /// Map a reply's status word to the [`Errno`] it encodes, or `Ok(())` when
 /// the status is success (`0`).
 ///
@@ -183,67 +157,44 @@ fn split_status(reply: &[u8]) -> Result<i32, Errno> {
 ///
 /// The decoded [`Errno`] when the status is negative, or
 /// [`Errno::BadMagic`] if the status is neither `0` nor a known negated
-/// discriminant (wire corruption — fail closed).
+/// discriminant (wire corruption — fail closed), or [`Errno::BufferTooSmall`]
+/// if `reply` is shorter than the status word.
 pub fn reply_status(reply: &[u8]) -> Result<(), Errno> {
-    match split_status(reply)? {
+    if reply.len() < REPLY_STATUS_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    match read_i32(reply, 0) {
         0 => Ok(()),
         negative => Errno::from_i32(-negative).map_or(Err(Errno::BadMagic), Err),
     }
 }
 
-/// Encode the successful body of a [`FileRequest::Read`] reply (`bytes` read)
-/// into `buf`, returning the number of bytes written.
-///
-/// # Errors
-///
-/// [`Errno::BufferTooSmall`] if `buf` cannot hold the framed reply.
-pub fn encode_read_reply(buf: &mut [u8], bytes: &[u8]) -> Result<usize, Errno> {
-    let total = REPLY_OK_HEADER_LEN + bytes.len();
-    if buf.len() < total {
-        return Err(Errno::BufferTooSmall);
-    }
-    put_i32(buf, 0, 0);
-    put_u32(
-        buf,
-        REPLY_STATUS_LEN,
-        u32::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?,
-    );
-    buf[REPLY_OK_HEADER_LEN..total].copy_from_slice(bytes);
-    Ok(total)
-}
+/// Reply prefix once the status word is `0`: the status word plus a `u32`
+/// entry count.
+const REPLY_OK_HEADER_LEN: usize = REPLY_STATUS_LEN + 4;
+/// Fixed prefix of one catalogue entry: `bundle_id` (u32) + `key_count`
+/// (u16), before the entry's [`DriverBindKey`] records.
+const CATALOGUE_ENTRY_HEADER_LEN: usize = 4 + 2;
 
-/// Recover the bytes a successful [`FileRequest::Read`] reply carries.
+/// Encode the body of a [`StoreRequest::Catalogue`] reply into `buf`,
+/// returning the number of bytes written.
+///
+/// Each `entries` item is `(bundle_id, bind_keys)`: the opaque kernel bundle
+/// id and the bind table the kernel decoded from that bundle's signed
+/// manifest (`AGENTS.md` §18.6). The frame is
+/// `status(0) || count || (bundle_id || key_count || DriverBindKey*)*`.
 ///
 /// # Errors
 ///
-/// The carried [`Errno`] for an error frame, or [`Errno::BadMagic`] if the
-/// frame is truncated or the declared count overruns it (fail closed).
-pub fn decode_read_reply(reply: &[u8]) -> Result<&[u8], Errno> {
-    reply_status(reply)?;
-    if reply.len() < REPLY_OK_HEADER_LEN {
-        return Err(Errno::BadMagic);
-    }
-    let n = read_u32(reply, REPLY_STATUS_LEN) as usize;
-    let body = &reply[REPLY_OK_HEADER_LEN..];
-    if body.len() < n {
-        return Err(Errno::BadMagic);
-    }
-    Ok(&body[..n])
-}
-
-/// Encode the successful body of a [`FileRequest::List`] reply listing
-/// `paths` into `buf`, returning the number of bytes written.
-///
-/// Each entry is a `u16` length followed by the path bytes; the frame is
-/// `status(0) || count || (u16 len || bytes)*`.
-///
-/// # Errors
-///
-/// * [`Errno::BufferTooSmall`] if `buf` cannot hold every entry — the list
-///   is never truncated (`AGENTS.md` §2.9); the caller grows its buffer.
-/// * [`Errno::LengthOutOfRange`] if a path exceeds [`DRIVER_STORE_PATH_MAX`]
-///   or the entry count exceeds `u32`.
-pub fn encode_list_reply(buf: &mut [u8], paths: &[&str]) -> Result<usize, Errno> {
+/// * [`Errno::BufferTooSmall`] if `buf` cannot hold every entry — the
+///   catalogue is never truncated (`AGENTS.md` §2.9); the caller grows its
+///   buffer.
+/// * [`Errno::LengthOutOfRange`] if an entry holds more than
+///   [`DRIVER_MANIFEST_MAX_BIND_KEYS`] keys or the entry count exceeds `u32`.
+pub fn encode_catalogue_reply(
+    buf: &mut [u8],
+    entries: &[(u32, &[DriverBindKey])],
+) -> Result<usize, Errno> {
     if buf.len() < REPLY_OK_HEADER_LEN {
         return Err(Errno::BufferTooSmall);
     }
@@ -251,192 +202,313 @@ pub fn encode_list_reply(buf: &mut [u8], paths: &[&str]) -> Result<usize, Errno>
     put_u32(
         buf,
         REPLY_STATUS_LEN,
-        u32::try_from(paths.len()).map_err(|_| Errno::LengthOutOfRange)?,
+        u32::try_from(entries.len()).map_err(|_| Errno::LengthOutOfRange)?,
     );
     let mut pos = REPLY_OK_HEADER_LEN;
-    for path in paths {
-        if path.len() > DRIVER_STORE_PATH_MAX {
+    for (bundle_id, keys) in entries {
+        if keys.len() > DRIVER_MANIFEST_MAX_BIND_KEYS as usize {
             return Err(Errno::LengthOutOfRange);
         }
-        let entry = 2 + path.len();
-        if buf.len() < pos + entry {
+        let entry_len = CATALOGUE_ENTRY_HEADER_LEN + keys.len() * DriverBindKey::WIRE_LEN;
+        if buf.len() < pos + entry_len {
             return Err(Errno::BufferTooSmall);
         }
-        crate::le::put_u16(buf, pos, u16::try_from(path.len()).expect("bounded above"));
-        buf[pos + 2..pos + entry].copy_from_slice(path.as_bytes());
-        pos += entry;
+        put_u32(buf, pos, *bundle_id);
+        put_u16(
+            buf,
+            pos + 4,
+            u16::try_from(keys.len()).expect("bounded above"),
+        );
+        let mut kp = pos + CATALOGUE_ENTRY_HEADER_LEN;
+        for key in *keys {
+            buf[kp..kp + DriverBindKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
+            kp += DriverBindKey::WIRE_LEN;
+        }
+        pos += entry_len;
     }
     Ok(pos)
 }
 
-/// An iterator over the paths a successful [`FileRequest::List`] reply
-/// carries.
+/// One entry of a decoded [`StoreRequest::Catalogue`] reply: the opaque
+/// `bundle_id` plus the still-encoded bind-key records, decoded on demand
+/// by [`CatalogueEntry::decode_keys`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CatalogueEntry<'a> {
+    /// The opaque kernel bundle id to name in a subsequent
+    /// [`StoreRequest::Load`].
+    pub bundle_id: u32,
+    /// Number of [`DriverBindKey`] records the entry carries.
+    key_count: u16,
+    /// The entry's bind-key records, `key_count * DriverBindKey::WIRE_LEN`
+    /// bytes.
+    keys_bytes: &'a [u8],
+}
+
+impl CatalogueEntry<'_> {
+    /// The number of bind keys this entry carries.
+    #[must_use]
+    pub fn key_count(&self) -> usize {
+        usize::from(self.key_count)
+    }
+
+    /// Decode this entry's bind table into `out`, returning the key count.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `out` is shorter than
+    ///   [`Self::key_count`].
+    /// * [`Errno::BadMagic`] if any record fails to decode (wire
+    ///   corruption — fail closed, `AGENTS.md` §2.9).
+    pub fn decode_keys(&self, out: &mut [DriverBindKey]) -> Result<usize, Errno> {
+        let count = usize::from(self.key_count);
+        if out.len() < count {
+            return Err(Errno::BufferTooSmall);
+        }
+        for (i, slot) in out.iter_mut().enumerate().take(count) {
+            let off = i * DriverBindKey::WIRE_LEN;
+            *slot =
+                DriverBindKey::from_bytes(&self.keys_bytes[off..]).map_err(|_| Errno::BadMagic)?;
+        }
+        Ok(count)
+    }
+}
+
+/// An iterator over the entries a successful [`StoreRequest::Catalogue`]
+/// reply carries.
 ///
-/// Construct with [`decode_list_reply`]; each [`Iterator::next`] yields one
-/// `Result<&str, Errno>`, failing closed on a truncated entry or non-UTF-8
-/// path (`AGENTS.md` §2.9).
-pub struct ListReplyIter<'a> {
+/// Construct with [`decode_catalogue_reply`]; each [`Iterator::next`] yields
+/// one `Result<CatalogueEntry, Errno>`, failing closed on a truncated entry
+/// (`AGENTS.md` §2.9).
+pub struct CatalogueReplyIter<'a> {
     body: &'a [u8],
     remaining: u32,
 }
 
-impl<'a> Iterator for ListReplyIter<'a> {
-    type Item = Result<&'a str, Errno>;
+impl<'a> Iterator for CatalogueReplyIter<'a> {
+    type Item = Result<CatalogueEntry<'a>, Errno>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;
         }
         self.remaining -= 1;
-        if self.body.len() < 2 {
+        if self.body.len() < CATALOGUE_ENTRY_HEADER_LEN {
             return Some(Err(Errno::BadMagic));
         }
-        let len = crate::le::read_u16(self.body, 0) as usize;
-        let entry_end = 2 + len;
+        let bundle_id = read_u32(self.body, 0);
+        let key_count = read_u16(self.body, 4);
+        let span = usize::from(key_count) * DriverBindKey::WIRE_LEN;
+        let entry_end = CATALOGUE_ENTRY_HEADER_LEN + span;
         if self.body.len() < entry_end {
             return Some(Err(Errno::BadMagic));
         }
-        let raw = &self.body[2..entry_end];
+        let keys_bytes = &self.body[CATALOGUE_ENTRY_HEADER_LEN..entry_end];
         self.body = &self.body[entry_end..];
-        Some(core::str::from_utf8(raw).map_err(|_| Errno::BadAddress))
+        Some(Ok(CatalogueEntry {
+            bundle_id,
+            key_count,
+            keys_bytes,
+        }))
     }
 }
 
-/// Decode a successful [`FileRequest::List`] reply into an iterator over its
-/// paths.
+/// Decode a successful [`StoreRequest::Catalogue`] reply into an iterator
+/// over its entries.
 ///
 /// # Errors
 ///
 /// The carried [`Errno`] for an error frame, or [`Errno::BadMagic`] if the
 /// frame header is truncated (fail closed).
-pub fn decode_list_reply(reply: &[u8]) -> Result<ListReplyIter<'_>, Errno> {
+pub fn decode_catalogue_reply(reply: &[u8]) -> Result<CatalogueReplyIter<'_>, Errno> {
     reply_status(reply)?;
     if reply.len() < REPLY_OK_HEADER_LEN {
         return Err(Errno::BadMagic);
     }
     let count = read_u32(reply, REPLY_STATUS_LEN);
-    Ok(ListReplyIter {
+    Ok(CatalogueReplyIter {
         body: &reply[REPLY_OK_HEADER_LEN..],
         remaining: count,
     })
 }
 
+/// Encoded length of a successful [`StoreRequest::Load`] reply: the status
+/// word plus the spawned driver's [`crate::DriverHandle`] (u64).
+const LOAD_REPLY_LEN: usize = REPLY_STATUS_LEN + 8;
+
+/// Encode the body of a successful [`StoreRequest::Load`] reply carrying the
+/// loaded driver's `handle`.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `buf` cannot hold the framed reply.
+pub fn encode_load_reply(buf: &mut [u8], handle: u64) -> Result<usize, Errno> {
+    if buf.len() < LOAD_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    put_i32(buf, 0, 0);
+    put_u64(buf, REPLY_STATUS_LEN, handle);
+    Ok(LOAD_REPLY_LEN)
+}
+
+/// Recover the driver handle a successful [`StoreRequest::Load`] reply
+/// carries.
+///
+/// # Errors
+///
+/// The carried [`Errno`] for an error frame (e.g. the load gate's refusal),
+/// or [`Errno::BadMagic`] if a success frame is truncated (fail closed).
+pub fn decode_load_reply(reply: &[u8]) -> Result<u64, Errno> {
+    reply_status(reply)?;
+    if reply.len() < LOAD_REPLY_LEN {
+        return Err(Errno::BadMagic);
+    }
+    Ok(read_u64(reply, REPLY_STATUS_LEN))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HwMatchKey;
+
+    fn key(priority: u16, virtio: u32) -> DriverBindKey {
+        DriverBindKey::new(priority, HwMatchKey::virtio(virtio))
+    }
 
     #[test]
-    fn list_request_round_trips() {
+    fn catalogue_request_round_trips() {
         let mut buf = [0u8; 8];
-        let n = FileRequest::List.encode(&mut buf).expect("encodes");
+        let n = StoreRequest::Catalogue.encode(&mut buf).expect("encodes");
         assert_eq!(n, 1);
-        assert_eq!(FileRequest::decode(&buf[..n]), Ok(FileRequest::List));
+        assert_eq!(StoreRequest::decode(&buf[..n]), Ok(StoreRequest::Catalogue));
     }
 
     #[test]
-    fn read_request_round_trips() {
-        let req = FileRequest::Read {
-            path: "/System/Drivers/input/kbd",
-            offset: 4096,
-            len: 512,
+    fn load_request_round_trips() {
+        let req = StoreRequest::Load {
+            bundle_id: 0x0102_0304,
+            node_id: 0x1300_2,
         };
-        let mut buf = [0u8; 128];
+        let mut buf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut buf).expect("encodes");
-        assert_eq!(FileRequest::decode(&buf[..n]), Ok(req));
+        assert_eq!(n, LOAD_REQUEST_LEN);
+        assert_eq!(StoreRequest::decode(&buf[..n]), Ok(req));
     }
 
     #[test]
-    fn read_request_rejects_oversize_len() {
-        let req = FileRequest::Read {
-            path: "x",
-            offset: 0,
-            len: FILE_READ_CHUNK_MAX + 1,
-        };
-        let mut buf = [0u8; 64];
-        assert_eq!(req.encode(&mut buf), Err(Errno::LengthOutOfRange));
+    fn request_decode_rejects_empty_unknown_and_truncated() {
+        assert_eq!(StoreRequest::decode(&[]), Err(Errno::LengthOutOfRange));
+        assert_eq!(StoreRequest::decode(&[0xFF]), Err(Errno::OutOfRange));
+        // A `Load` opcode with a truncated body is rejected, never read past
+        // its bytes (`AGENTS.md` §5.4).
+        assert_eq!(
+            StoreRequest::decode(&[OP_LOAD, 1, 2, 3]),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 
     #[test]
     fn request_encode_rejects_small_buffer() {
         let mut empty: [u8; 0] = [];
         assert_eq!(
-            FileRequest::List.encode(&mut empty),
+            StoreRequest::Catalogue.encode(&mut empty),
             Err(Errno::BufferTooSmall)
         );
-        let req = FileRequest::Read {
-            path: "abc",
-            offset: 0,
-            len: 1,
-        };
-        let mut buf = [0u8; 4];
-        assert_eq!(req.encode(&mut buf), Err(Errno::BufferTooSmall));
-    }
-
-    #[test]
-    fn request_decode_rejects_empty_and_unknown_opcode() {
-        assert_eq!(FileRequest::decode(&[]), Err(Errno::LengthOutOfRange));
-        assert_eq!(FileRequest::decode(&[0xFF]), Err(Errno::OutOfRange));
-    }
-
-    #[test]
-    fn read_reply_round_trips_the_bytes() {
-        let payload = b"BUNDLEBYTES";
-        let mut buf = [0u8; 64];
-        let n = encode_read_reply(&mut buf, payload).expect("encodes");
-        assert_eq!(decode_read_reply(&buf[..n]), Ok(&payload[..]));
-    }
-
-    #[test]
-    fn empty_read_reply_round_trips() {
-        let mut buf = [0u8; 16];
-        let n = encode_read_reply(&mut buf, &[]).expect("encodes");
-        assert_eq!(decode_read_reply(&buf[..n]), Ok(&[][..]));
-    }
-
-    #[test]
-    fn an_error_reply_surfaces_its_errno() {
-        let mut buf = [0u8; 16];
-        let n = encode_error_reply(&mut buf, Errno::NotFound).expect("encodes");
-        assert_eq!(reply_status(&buf[..n]), Err(Errno::NotFound));
-        assert_eq!(decode_read_reply(&buf[..n]), Err(Errno::NotFound));
-        assert!(decode_list_reply(&buf[..n]).is_err());
-    }
-
-    #[test]
-    fn list_reply_round_trips_paths() {
-        let paths = ["/System/Drivers/input/kbd", "/System/Drivers/storage/blk"];
-        let mut buf = [0u8; 256];
-        let n = encode_list_reply(&mut buf, &paths).expect("encodes");
-        let mut it = decode_list_reply(&buf[..n]).expect("ok frame");
-        assert_eq!(it.next(), Some(Ok(paths[0])));
-        assert_eq!(it.next(), Some(Ok(paths[1])));
-        assert!(it.next().is_none());
-    }
-
-    #[test]
-    fn empty_list_reply_round_trips() {
-        let mut buf = [0u8; 16];
-        let n = encode_list_reply(&mut buf, &[]).expect("encodes");
-        let mut it = decode_list_reply(&buf[..n]).expect("ok frame");
-        assert!(it.next().is_none());
-    }
-
-    #[test]
-    fn list_reply_fails_closed_on_small_buffer_never_truncates() {
-        let paths = ["aaaaaaaa", "bbbbbbbb"];
-        let mut buf = [0u8; 12];
+        let mut buf = [0u8; LOAD_REQUEST_LEN - 1];
         assert_eq!(
-            encode_list_reply(&mut buf, &paths),
+            StoreRequest::Load {
+                bundle_id: 1,
+                node_id: 2
+            }
+            .encode(&mut buf),
             Err(Errno::BufferTooSmall)
         );
     }
 
     #[test]
-    fn truncated_read_reply_fails_closed() {
-        // Status ok + declared count 5 but no body.
+    fn catalogue_reply_round_trips_entries_and_their_bind_keys() {
+        let a = [key(5, 2)];
+        let b = [key(4, 16), key(7, 1)];
+        let entries: [(u32, &[DriverBindKey]); 2] = [(10, &a), (20, &b)];
+        let mut buf = [0u8; 1024];
+        let n = encode_catalogue_reply(&mut buf, &entries).expect("encodes");
+
+        let mut it = decode_catalogue_reply(&buf[..n]).expect("ok frame");
+        let first = it.next().expect("first").expect("entry");
+        assert_eq!(first.bundle_id, 10);
+        assert_eq!(first.key_count(), 1);
+        let mut kbuf = [key(0, 0); DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
+        assert_eq!(first.decode_keys(&mut kbuf), Ok(1));
+        assert_eq!(&kbuf[..1], &a);
+
+        let second = it.next().expect("second").expect("entry");
+        assert_eq!(second.bundle_id, 20);
+        assert_eq!(second.decode_keys(&mut kbuf), Ok(2));
+        assert_eq!(&kbuf[..2], &b);
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn empty_catalogue_reply_round_trips() {
+        let mut buf = [0u8; 16];
+        let entries: [(u32, &[DriverBindKey]); 0] = [];
+        let n = encode_catalogue_reply(&mut buf, &entries).expect("encodes");
+        let mut it = decode_catalogue_reply(&buf[..n]).expect("ok frame");
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn catalogue_reply_fails_closed_on_small_buffer_never_truncates() {
+        let a = [key(5, 2), key(6, 3)];
+        let entries: [(u32, &[DriverBindKey]); 1] = [(1, &a)];
+        let mut buf = [0u8; REPLY_OK_HEADER_LEN + 4];
+        assert_eq!(
+            encode_catalogue_reply(&mut buf, &entries),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn catalogue_reply_rejects_over_max_bind_keys() {
+        let many = [key(1, 1); DRIVER_MANIFEST_MAX_BIND_KEYS as usize + 1];
+        let entries: [(u32, &[DriverBindKey]); 1] = [(1, &many)];
+        let mut buf = [0u8; 4096];
+        assert_eq!(
+            encode_catalogue_reply(&mut buf, &entries),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn truncated_catalogue_entry_fails_closed() {
+        // Status ok + declared count 1, but no entry body.
         let mut buf = [0u8; REPLY_OK_HEADER_LEN];
         put_i32(&mut buf, 0, 0);
-        put_u32(&mut buf, REPLY_STATUS_LEN, 5);
-        assert_eq!(decode_read_reply(&buf), Err(Errno::BadMagic));
+        put_u32(&mut buf, REPLY_STATUS_LEN, 1);
+        let mut it = decode_catalogue_reply(&buf).expect("ok frame");
+        assert_eq!(it.next(), Some(Err(Errno::BadMagic)));
+    }
+
+    #[test]
+    fn load_reply_round_trips_the_handle() {
+        let mut buf = [0u8; LOAD_REPLY_LEN];
+        let n = encode_load_reply(&mut buf, 0xDEAD_BEEF_0000_0001).expect("encodes");
+        assert_eq!(decode_load_reply(&buf[..n]), Ok(0xDEAD_BEEF_0000_0001));
+    }
+
+    #[test]
+    fn an_error_reply_surfaces_its_errno_for_both_decoders() {
+        let mut buf = [0u8; 16];
+        let n = encode_error_reply(&mut buf, Errno::PermissionDenied).expect("encodes");
+        assert_eq!(reply_status(&buf[..n]), Err(Errno::PermissionDenied));
+        assert_eq!(decode_load_reply(&buf[..n]), Err(Errno::PermissionDenied));
+        assert!(decode_catalogue_reply(&buf[..n]).is_err());
+    }
+
+    #[test]
+    fn truncated_load_reply_fails_closed() {
+        // Status ok but no handle body.
+        let mut buf = [0u8; REPLY_STATUS_LEN];
+        put_i32(&mut buf, 0, 0);
+        assert_eq!(decode_load_reply(&buf), Err(Errno::BadMagic));
     }
 }

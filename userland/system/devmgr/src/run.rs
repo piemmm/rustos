@@ -11,34 +11,31 @@
 //! (`hw_tree_read` / `hw_tree_wait`); `rustos_rt::entry!` names this
 //! program's `main`.
 //!
-//! # What this service does (Design D foundation)
+//! # What this service does (Design D D2b-2c)
 //!
-//! At startup it lists the read-only `/System/Drivers/` driver store over
-//! the capability-gated `ipc_call` endpoint the kernel store service serves
+//! At startup it fetches the kernel-decoded driver **catalogue** over the
+//! capability-gated `ipc_call` endpoint the kernel store service serves
 //! (`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`, `AGENTS.md` §18.3 /
-//! §5.2) and logs every installed bundle path — fail-soft if no store is
-//! served (`AGENTS.md` §18.4 / §2.9). The store is read-only and static for
-//! the life of the system, so it is listed **once**, not on every hotplug
-//! generation (`AGENTS.md` §2.16).
+//! §5.2): one entry per installed bundle, an opaque `bundle_id` plus the
+//! bind table the kernel decoded from its signed manifest. The store is
+//! read-only and static for the life of the system, so the catalogue is
+//! fetched **once** (`AGENTS.md` §2.16); a fetch failure is fail-soft
+//! (`AGENTS.md` §18.4 / §2.9).
 //!
 //! It then reads the architecture-neutral hardware tree the kernel
 //! discovered at boot through the capability-gated `hw_tree_read` syscall
-//! (`CAP_SYSINFO_HW`, `AGENTS.md` §16.6 / §18.4), logs every node, then
+//! (`CAP_SYSINFO_HW`, `AGENTS.md` §16.6 / §18.4), matches each node against
+//! the catalogue with the shared [`rustos_devmatch`] policy (`AGENTS.md`
+//! §18.3), and asks the kernel to load the matched bundle for each winning
+//! node (`StoreRequest::Load`) — the kernel re-runs the signed §8 gate and
+//! spawns the driver with only that node's grants (`AGENTS.md` §4). It then
 //! **blocks** in `hw_tree_wait` until the tree changes (a node seeded,
-//! appended, or removed — `AGENTS.md` §18.4) and re-reads it. It never
-//! busy-spins (`AGENTS.md` §2.1): the wait parks the task in the kernel
-//! until the store's generation advances.
-//!
-//! **Matching is not done here yet.** Resolving each discovered node against
-//! the store bundles' bind tables and loading the winners
-//! (`driver_store_load`) is the **next** tranche; the in-kernel single-pass
-//! autoload still performs the loads, so this service only observes (the hw
-//! tree and the store listing) and reacts. The match policy already lives in
-//! [`rustos_devmgr::resolve`] (`AGENTS.md` §18.3), but it consumes
-//! *decoded* bind tables — decoding a bundle's signed manifest is the
-//! driver-host load gate's job (`ParsedImage::decode_bind_table`), which
-//! sits outside this `lib/*`-only crate's dependencies (§17.4), so the
-//! match step lands with that wiring in the next tranche.
+//! appended, or removed — `AGENTS.md` §18.4) and re-matches, loading each
+//! newly-appeared node's driver once. It never busy-spins (`AGENTS.md`
+//! §2.1): the wait parks the task in the kernel until the store's generation
+//! advances. The device manager owns matching *policy* only; the kernel
+//! keeps the load *mechanism* (bytes, signature, spawn) in its TCB
+//! (`AGENTS.md` §4).
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -58,18 +55,23 @@ mod program {
     use rustos_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use rustos_abi::hwtree::HwDeviceClass;
     use rustos_abi::{Errno, HwNode, HwTreeHeader};
-    use rustos_devmgr::{list_store, DriverStoreCall, HwTreeService};
+    use rustos_devmgr::{DriverStoreCall, HwTreeService};
+    use rustos_log::{Event, Sink};
     use rustos_util::fmt::{format_hex_u64, format_usize};
 
     /// Buffer the discovered tree is read into. Sized as a generous §24.2
     /// headroom default — a `HwNode` is `HwNode::WIRE_LEN` (572) bytes, so
     /// 64 KiB holds ~114 nodes, far more than any discovered floor tree —
-    /// not a hard ceiling on the inventory. Growing it on `BufferTooSmall`
-    /// needs the `mem_map`-backed userland heap, whose production producer
-    /// is still staged (`plans/SPAWN.md` SP5b); until then an
-    /// over-large tree is reported and the service fails closed
-    /// (`AGENTS.md` §2.9 / §24.1) rather than truncating the inventory.
+    /// not a hard ceiling on the inventory. An over-large tree fails closed
+    /// (`Errno::BufferTooSmall`, `AGENTS.md` §2.9 / §24.1) rather than
+    /// truncating the inventory.
     const READ_BUF_LEN: usize = 64 * 1024;
+
+    /// Buffer the catalogue and each `Load` reply are received into, sized to
+    /// the endpoint's `DRIVER_STORE_MAX_REPLY` so a full catalogue is never
+    /// truncated (`AGENTS.md` §2.9 / §24.1). Disjoint from the tree buffer so
+    /// a load can run while a tree snapshot is being decoded.
+    const REPLY_BUF_LEN: usize = 64 * 1024;
 
     /// Write all of `bytes` to standard error (fd 2 — diagnostics,
     /// `AGENTS.md` §20), looping over short writes. A write that accepts
@@ -192,55 +194,51 @@ mod program {
         }
     }
 
-    /// List the read-only `/System/Drivers/` store over the `ipc_call`
-    /// endpoint and report every installed bundle path to the diagnostic
-    /// stream (fd 2, `AGENTS.md` §20), reusing `buf` for the reply.
-    ///
-    /// Fail-soft (`AGENTS.md` §18.4 / §2.9): if the store endpoint is not
-    /// bound (no `/System` volume served) or the listing fails, it reports
-    /// the condition and returns — it never aborts the service, mirroring the
-    /// kernel server's own fail-closed-but-non-fatal store handling. Design D
-    /// (a) is observe-only: the in-kernel autoload still performs the loads,
-    /// so this logs the discovered store without matching or loading.
-    fn report_store(buf: &mut [u8]) {
-        match list_store(&mut RtStoreCall, buf) {
-            Ok(paths) => {
-                let mut count = [0u8; 12];
-                write_all_stderr(b"devmgr: driver store bundles ");
-                write_all_stderr(format_usize(paths.len(), &mut count).as_bytes());
-                write_all_stderr(b"\n");
-                for path in &paths {
-                    write_all_stderr(b"devmgr: store bundle ");
-                    write_all_stderr(path.as_bytes());
-                    write_all_stderr(b"\n");
-                }
+    /// The production audit [`Sink`]: renders each match/load decision to the
+    /// inherited diagnostic stream (fd 2, `AGENTS.md` §20). The reactive
+    /// loop's audit records are host-tested in `rustos_devmgr::autoload`;
+    /// this is the freestanding rendering it binds (`AGENTS.md` §2.2).
+    struct StderrSink;
+
+    impl Sink for StderrSink {
+        fn write_event(&self, event: &Event<'_>) {
+            let mut id = [0u8; 12];
+            write_all_stderr(b"devmgr: [");
+            write_all_stderr(format_usize(event.id.0 as usize, &mut id).as_bytes());
+            write_all_stderr(b"] ");
+            write_all_stderr(event.message.as_bytes());
+            for field in event.fields {
+                write_all_stderr(b" ");
+                write_all_stderr(field.key.as_bytes());
+                write_all_stderr(b"=");
+                write_all_stderr(field.value.as_bytes());
             }
-            Err(err) => {
-                let mut code = [0u8; 12];
-                write_all_stderr(b"devmgr: driver store unavailable errno ");
-                write_all_stderr(format_usize(err as usize, &mut code).as_bytes());
-                write_all_stderr(b"\n");
-            }
+            write_all_stderr(b"\n");
         }
     }
 
-    /// Program entry point. Lists and logs the read-only `/System` driver
-    /// store once (`AGENTS.md` §18.3), then runs the reactive observe loop
-    /// for the life of the service (`budget = None`): read and log the
-    /// discovered tree, then block on every generation advance and re-read it
-    /// (`AGENTS.md` §18.4). The loop returns only on a fail-closed error;
-    /// PID 1 `init` supervises and relaunches the service.
+    /// Program entry point. Runs the reactive match-and-load loop for the
+    /// life of the service (`budget = None`): fetch the catalogue once, then
+    /// read the discovered tree, load a driver for every matched node, and
+    /// block on every generation advance to re-match (`AGENTS.md` §18.4). The
+    /// loop returns only on a fail-closed tree-seam error; PID 1 `init`
+    /// supervises and relaunches the service.
     fn main() -> i32 {
-        // The read buffer is a single persistent allocation on the stack;
-        // the §16.5 stack sizing (`spawn_layout::USER_STACK_PAGES`) covers
-        // it comfortably. It is reused for the one-shot store listing (which
-        // completes before the loop) and then for every tree read — the
-        // read-only `/System` store is static for the life of the system, so
-        // it is listed once, not on every hotplug generation (`AGENTS.md`
-        // §2.16).
-        let mut buf = [0u8; READ_BUF_LEN];
-        report_store(&mut buf);
-        match rustos_devmgr::run(&mut RtTreeService, &mut buf, None) {
+        // Two persistent stack buffers: the tree snapshot and the
+        // catalogue/load reply. The §16.5 stack sizing
+        // (`spawn_layout::USER_STACK_PAGES`, ~1.1 MiB) covers both 64 KiB
+        // buffers comfortably; they are disjoint so a load reply never
+        // clobbers the tree snapshot mid-decode (`AGENTS.md` §2.16).
+        let mut tree_buf = [0u8; READ_BUF_LEN];
+        let mut reply_buf = [0u8; REPLY_BUF_LEN];
+        match rustos_devmgr::run(
+            &mut RtTreeService,
+            &mut RtStoreCall,
+            &StderrSink,
+            &mut tree_buf,
+            &mut reply_buf,
+            None,
+        ) {
             Ok(()) => 0,
             Err(_) => 1,
         }

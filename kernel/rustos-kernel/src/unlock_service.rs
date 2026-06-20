@@ -30,15 +30,11 @@ use alloc::boxed::Box;
 
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
-use rustos_crypto::Ed25519PublicKey;
-use rustos_kernel_core::{ConsoleRead, CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
+use rustos_kernel_core::{ConsoleRead, CooperativeYield};
 use rustos_kernel_sec::captable::TaskId;
 use rustos_log::{log, Event, EventId, Level, Sink};
 use rustos_sync::SpinLock;
 
-use crate::driver_autoload::autoload_from_mounted_root;
-use crate::driver_spawn_loader::DriverProcessSpawn;
-use crate::root_mount::{MountedRootHook, RootVolume};
 use crate::root_storage::RootBlockBinding;
 
 /// The audit message the unlock kthread logs once it has brought the root
@@ -344,6 +340,35 @@ pub fn store_endpoint_binder_caps() -> CapabilitySet {
     caps
 }
 
+/// The scheduler task id of the disk-owning driver-store service kthread,
+/// published once at admission (Design D D2b-2c).
+///
+/// The driver-store server parks on [`rustos_kernel_core::SERVE_WAITQ`]
+/// between requests (a real park, never a busy-yield — `AGENTS.md` §2.1);
+/// the `ipc_call` handler's [`rustos_kernel_core::serve_wake`] unparks
+/// **by id**, so the kthread's scheduler id must be reachable from the
+/// serve loop. The init seam learns the id only when
+/// [`rustos_kernel_core::InitSpawnCtx::spawn_kernel_service`] returns
+/// (after the body that runs the serve loop was already built), so it is
+/// stashed here and read by the loop on its first park. Single producer
+/// (the admission seam) writes it once before the body ever runs; the loop
+/// only reads — the lock never contends.
+static STORE_SERVICE_TASK: SpinLock<Option<rustos_kernel_sched_api::TaskId>> = SpinLock::new(None);
+
+/// Publish the disk-owning driver-store service kthread's scheduler task
+/// id, so its serve loop can register on [`rustos_kernel_core::SERVE_WAITQ`]
+/// to be unparked when a request is posted (see `STORE_SERVICE_TASK`).
+pub fn set_store_service_task(id: rustos_kernel_sched_api::TaskId) {
+    *STORE_SERVICE_TASK.lock() = Some(id);
+}
+
+/// The disk-owning driver-store service kthread's scheduler task id, or
+/// [`None`] before admission published it (see `STORE_SERVICE_TASK`).
+#[must_use]
+pub fn store_service_task() -> Option<rustos_kernel_sched_api::TaskId> {
+    *STORE_SERVICE_TASK.lock()
+}
+
 /// Log an unlock-service lifecycle decision onto the service's audit sink
 /// under the shared [`UNLOCK_SERVICE`] event id (`AGENTS.md` §19.4).
 pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
@@ -442,101 +467,6 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 return Ok(read);
             }
             self.yielder.yield_now();
-        }
-    }
-}
-
-/// The [`MountedRootHook`] the unlock kthread runs against the read-only
-/// `/System` volume **before** the passphrase prompt: it autoloads
-/// user-space drivers off that volume's signed `/System/Drivers/` store
-/// (`AGENTS.md` §18.3 / §18.6), at the volume-relative
-/// [`SYSTEM_VOLUME_STORE_PATH`]. This is design B's keyboard-before-unlock
-/// sequencing: the keyboard driver comes up in user space in time for the
-/// operator to type the encrypted-root passphrase (`plans/PI.md` design B).
-///
-/// It holds only borrowed/`'static`/`Copy` state, adds no authority of its
-/// own, and runs inside the mount scope so the autoload reads the store off
-/// the live volume. A failed autoload never fails the boot — a node that
-/// matches nothing is left unbound and a bad bundle fails *that* node closed
-/// inside the pipeline (`AGENTS.md` §18.4 / §5.4); only an unopenable
-/// volume is surfaced (logged, then swallowed) (`AGENTS.md` §2.9).
-///
-/// Architecture-neutral (`AGENTS.md` §2.2): the autoload policy is the same
-/// for every port; the only per-arch input is the [`DriverProcessSpawn`]
-/// seam each port hands [`AutoloadHook::new`] (its `InitCtxDriverProcessSpawn`
-/// over that architecture's process producer), so a winning driver is
-/// spawned through that architecture's process mechanism while this hook
-/// names none of it (`AGENTS.md` §17.1 / §2.20).
-pub struct AutoloadHook<'a> {
-    /// The architecture process-creation seam each winning driver is
-    /// spawned through, behind the [`DriverProcessSpawn`] abstraction so
-    /// this hook stays scheduler- and arch-agnostic (`AGENTS.md` §17.1 /
-    /// §2.2).
-    spawn: &'a dyn DriverProcessSpawn,
-    /// The discovered hardware tree every node is matched against
-    /// (`AGENTS.md` §18.1).
-    tree: &'static [HwNode],
-    /// The driver-signing trust anchor(s) the load gate verifies each
-    /// winning bundle against — the kernel's embedded key (`AGENTS.md` §8 /
-    /// §9).
-    trusted: &'a [Ed25519PublicKey],
-    /// The capability set the load gate intersects each manifest request
-    /// with; holds `CAP_DRV_LOAD`, so a user-space driver can be admitted
-    /// (`AGENTS.md` §5.2 / §5.4).
-    caps: CapabilitySet,
-    /// The audit sink every scan / match / load / spawn decision is logged
-    /// through (`AGENTS.md` §18.3 / §19.4).
-    audit: &'a dyn Sink,
-}
-
-impl<'a> AutoloadHook<'a> {
-    /// Build the post-mount autoload hook over the port's `spawn` seam and
-    /// the boot-discovered `tree`, verifying winning bundles against
-    /// `trusted`, granting them at most `caps`, and auditing to `audit`.
-    #[must_use]
-    pub fn new(
-        spawn: &'a dyn DriverProcessSpawn,
-        tree: &'static [HwNode],
-        trusted: &'a [Ed25519PublicKey],
-        caps: CapabilitySet,
-        audit: &'a dyn Sink,
-    ) -> Self {
-        Self {
-            spawn,
-            tree,
-            trusted,
-            caps,
-            audit,
-        }
-    }
-}
-
-impl MountedRootHook for AutoloadHook<'_> {
-    fn after_mount(&mut self, volume: &mut dyn RootVolume) {
-        // Match every discovered node against the signed store and spawn each
-        // winner with exactly its node's resource grants. A missing / empty /
-        // all-malformed store binds nothing in `Ok`, and an unmatched node is
-        // left unbound — never an error (`AGENTS.md` §18.4). Only the
-        // private-root-mount failure is `Err`; it must never fail the root
-        // unlock, so it is logged and swallowed (`AGENTS.md` §2.9).
-        if autoload_from_mounted_root(
-            volume,
-            SYSTEM_VOLUME_STORE_PATH,
-            self.tree,
-            self.trusted,
-            self.spawn,
-            &[],
-            &self.caps,
-            self.audit,
-        )
-        .is_err()
-        {
-            note(
-                self.audit,
-                Level::Error,
-                "root-unlock: driver autoload could not open the /System volume; no drivers \
-                 autoloaded",
-            );
         }
     }
 }
@@ -721,45 +651,6 @@ mod tests {
         // A distinct synthetic owner so an audit observer tells the two
         // in-kernel services apart; fixed and shared by every port (§2.2).
         assert_eq!(UNLOCK_TASK, TaskId(0x5b4));
-    }
-
-    /// A [`DriverProcessSpawn`] that must never be invoked: an empty driver
-    /// store binds nothing, so the autoload hook spawns no driver.
-    struct NoSpawn;
-
-    impl DriverProcessSpawn for NoSpawn {
-        fn spawn_driver(
-            &self,
-            _rxe: &[u8],
-            _granted: CapabilitySet,
-            _grants: &[rustos_abi::hwtree::HwResource],
-            _args: &[&[u8]],
-        ) -> Result<u64, Errno> {
-            panic!("an empty driver store must not spawn any driver");
-        }
-    }
-
-    #[test]
-    fn the_autoload_hook_binds_nothing_off_an_empty_store_and_never_errors() {
-        // The post-mount hook over a volume with no `/System/Drivers/` store
-        // and an empty hardware tree must match nothing, spawn nothing, and
-        // log no failure — the autoload never fails the unlock (§18.4 /
-        // §2.9).
-        let mut fs = crate::test_support::MockRootFs::new();
-        let sink = CapturingSink::new();
-        let spawn = NoSpawn;
-        let trusted: [Ed25519PublicKey; 0] = [];
-        let mut hook = AutoloadHook::new(&spawn, &[], &trusted, service_caps(), &sink);
-        hook.after_mount(&mut fs);
-        // No driver-volume-open failure was logged (the only `Err` path).
-        assert!(
-            !sink
-                .events
-                .borrow()
-                .iter()
-                .any(|(_, m)| m.contains("could not open the root volume")),
-            "an empty store must not surface a volume-open failure"
-        );
     }
 
     /// A console source that reports `remaining_empty` zero-length reads

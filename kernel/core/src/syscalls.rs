@@ -1013,13 +1013,23 @@ where
         handle: IrqHandle,
         timeout_ns: u64,
     ) -> SyscallResult {
-        // The poll-and-yield loop itself lives in
+        // The poll-and-park loop itself lives in
         // `rustos_kernel_irq::block_until_ready` so the in-kernel
         // `KernelVirtioHost::notify_wait` path can drive the same
         // implementation without a second copy (`AGENTS.md` §2.2).
         // This handler supplies the scheduler + arch seam through
         // `SyscallIrqWaiter` and translates the terminal outcome to
         // the documented stable `Errno`.
+        //
+        // The caller *parks* off the run queue between polls (`AGENTS.md`
+        // §2.1 — no busy yield): it is woken by `crate::waitq::irq_wake`
+        // the instant the device-IRQ dispatch path runs `IrqTable::fire`,
+        // or, with a finite timeout, by the architecture one-shot's
+        // per-tick sweep (`crate::waitq::timed_wake_sweep`), and re-checks
+        // its bound line after every wake. This mirrors `hw_tree_wait`
+        // exactly (`AGENTS.md` §2.2 — one park discipline).
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let task = caller.task_id.0;
         let waiter = SyscallIrqWaiter {
             sched: self.sched,
             arch: self.arch,
@@ -1028,17 +1038,37 @@ where
             // migrates mid-wait, so every clock read inside the loop
             // observes the same monotone source
             // (`docs/src/security/irq.md`).
-            cpu: SchedulerArch::current_cpu(self.arch),
+            cpu,
             task: caller.task_id,
         };
-        match block_until_ready(self.irq, handle, caller.task_id, timeout_ns, &waiter) {
+
+        // Register *before* the first poll so a fire arriving in the
+        // window between the poll and the park is not lost: the
+        // dispatch-path `irq_wake` then `unpark`s this task and the
+        // scheduler's wake-pending token converts a concurrent park
+        // commit into a re-ready (`AGENTS.md` §2.1). The deadline is one
+        // saturating add from the clock so a `u64::MAX` timeout stays
+        // `NO_DEADLINE` (explicit wake only) rather than wrapping to a
+        // tiny value (`AGENTS.md` §5.4.5 — fail closed). `block_until_ready`
+        // recomputes the identical deadline from its own first reading.
+        let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
+        crate::waitq::IRQ_WAITQ.register(task, deadline_ns);
+        let outcome = block_until_ready(self.irq, handle, caller.task_id, timeout_ns, &waiter);
+        // Leave the wait set and re-point the one-shot at whatever deadline
+        // any *remaining* waiter needs (or clear it if none) so a finished
+        // wait never leaves a stale arming behind (`AGENTS.md` §17.1).
+        crate::waitq::IRQ_WAITQ.deregister(task);
+        self.arch
+            .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+
+        match outcome {
             WaitOutcome::Ready => Ok(0),
             WaitOutcome::TimedOut => Err(Errno::TimedOut),
             // A forged / released handle and a vanished task both map
             // to `Errno::NotFound`: `NoSuchTask` cannot happen here
             // (`CallerContext` is built from the live scheduler
             // current-task slot) but is mapped for symmetry with
-            // `yield_now` (`AGENTS.md` §5.4.5).
+            // the park seam (`AGENTS.md` §5.4.5).
             WaitOutcome::NotFound | WaitOutcome::Aborted(IrqWaitAbort::TaskVanished) => {
                 Err(Errno::NotFound)
             }
@@ -1997,6 +2027,15 @@ where
         // correlating this caller with its reply.
         let ticket = ep.post(caller.caps, &payload, self.audit)?;
 
+        // Wake the bound server: an in-kernel IPC-server kthread parks off
+        // the run queue on `SERVE_WAITQ` between requests (no busy-yield,
+        // `AGENTS.md` §2.1), so the posted request must unpark it or the
+        // call would block until some unrelated wake. The server re-checks
+        // its endpoint after every wake; the scheduler's wake-pending token
+        // closes the post/park race so a request posted while the server is
+        // mid-commit-to-park is never lost.
+        crate::waitq::serve_wake();
+
         // Block until the bound server replies, parking off the run queue
         // (`AGENTS.md` §2.1 — no busy yield). `ipc_call` carries no timeout,
         // so register with `NO_DEADLINE`: the caller is woken only by the
@@ -2043,7 +2082,7 @@ where
         // Refuse to truncate: a reply larger than the caller's buffer fails
         // closed (`AGENTS.md` §2.9). The reply was already claimed and the
         // ticket retired, so the caller must re-issue the call with a larger
-        // buffer — the protocol's `FILE_READ_CHUNK_MAX` bounds a read so a
+        // buffer — each endpoint's protocol bounds its replies, so a
         // correctly-sized buffer always fits.
         if bytes.len() > reply_cap {
             return Err(Errno::BufferTooSmall);
@@ -2365,18 +2404,29 @@ where
     }
 
     fn yield_now(&self) -> Result<(), IrqWaitAbort> {
-        // A successful yield re-enters the run queue; `InvalidState`
-        // happens in tests where the calling task is not marked
-        // Running (e.g. the host-side handler tests that do not
-        // drive a real dispatch loop) and is treated as a benign
-        // continue — the loop still terminates because
-        // `monotonic_ns` is strictly monotonic on every supported
-        // arch port.
-        match self.sched.yield_current(self.task.0) {
-            Ok(()) | Err(SchedError::InvalidState) => Ok(()),
-            Err(SchedError::NoSuchTask) => Err(IrqWaitAbort::TaskVanished),
-            Err(_) => Err(IrqWaitAbort::SchedulerError),
+        // Arm the timed-wake one-shot to the nearest pending `irq_wait`
+        // deadline so a finite timeout fires even on an otherwise-idle CPU
+        // (`AGENTS.md` §17.1 — the nearest armed wakeup), then *park* off
+        // the run queue until woken by `irq_wake` (a fire) or the timed
+        // sweep. The caller registered this task on `IRQ_WAITQ` before the
+        // first poll, so the park/unpark race is closed by the scheduler's
+        // wake-pending token (`AGENTS.md` §2.1 — no busy yield). This
+        // mirrors `hw_tree_wait`'s park exactly (`AGENTS.md` §2.2).
+        self.arch
+            .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+        // `reschedule_current` returns `false` only when the caller is not
+        // a resumable user kthread (host tests with no live dispatch loop);
+        // fall back to a cooperative yield then so a degenerate caller
+        // never busy-spins and the loop still terminates on the monotone
+        // clock reaching its deadline (`AGENTS.md` §2.1 / §5.4.5).
+        if !crate::kthread::reschedule_current(self.cpu, RescheduleAction::Park) {
+            match self.sched.yield_current(self.task.0) {
+                Ok(()) | Err(SchedError::InvalidState) => {}
+                Err(SchedError::NoSuchTask) => return Err(IrqWaitAbort::TaskVanished),
+                Err(_) => return Err(IrqWaitAbort::SchedulerError),
+            }
         }
+        Ok(())
     }
 }
 

@@ -157,6 +157,7 @@ pub use users::{
     UsersDbAlreadyInstalled, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
 };
 pub use waitq::{
-    call_wake, hw_tree_wake, install_wait_arch, timed_wake_sweep, WaitArchAlreadyInstalled,
-    WaitQueue, WaitQueueArch, CALL_WAITQ, HW_TREE_WAITQ, NO_DEADLINE,
+    call_wake, hw_tree_wake, install_wait_arch, irq_wake, serve_wake, timed_wake_sweep,
+    WaitArchAlreadyInstalled, WaitQueue, WaitQueueArch, CALL_WAITQ, HW_TREE_WAITQ, IRQ_WAITQ,
+    NO_DEADLINE, SERVE_WAITQ,
 };

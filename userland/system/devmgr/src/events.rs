@@ -28,16 +28,22 @@ pub const NODE_TIE_REJECTED: EventId = EventId(13_003);
 /// A node's winning driver failed to load through the driver-host load
 /// gate; the node stays unbound (fail closed, `AGENTS.md` §5.4).
 pub const NODE_LOAD_FAILED: EventId = EventId(13_004);
+/// The read-only `/System` driver-store catalogue could not be fetched (the
+/// store endpoint is unbound or the store is unreadable). The device
+/// manager loads nothing but keeps observing the hardware tree — never an
+/// error (fail-soft, `AGENTS.md` §18.4 / §2.9).
+pub const DRIVER_STORE_UNAVAILABLE: EventId = EventId(13_005);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 4] = [
+    const ALL: [EventId; 5] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
         NODE_LOAD_FAILED,
+        DRIVER_STORE_UNAVAILABLE,
     ];
 
     #[test]

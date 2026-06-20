@@ -52,8 +52,8 @@
 //!   sound.
 
 use alloc::collections::BTreeMap;
-use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use rustos_abi::{DriverError, IrqHandle};
 use rustos_kernel_irq::{block_until_ready, IrqTable, IrqWaiter};
@@ -61,6 +61,7 @@ use rustos_kernel_mem::{DmaBuffer, DmaPool, PageTable};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
 use rustos_log::Sink;
+use rustos_sync::SpinLock;
 
 use rustos_virtio::{DmaHost, DmaSlab, PoolId, VirtioHost};
 
@@ -83,16 +84,26 @@ use rustos_virtio::{DmaHost, DmaSlab, PoolId, VirtioHost};
 /// Every slab re-enters the host through its free shim on drop, so
 /// all outstanding slabs must be dropped before the host (and the
 /// [`DmaPool`] it owns) is dropped.
-pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + ?Sized> {
-    pool: RefCell<DmaPool<'a, P>>,
+pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
+    /// Per-driver DMA pool, behind a [`SpinLock`] (not a `RefCell`) so the
+    /// host is [`Sync`] and a `&'static` host can be shared across the
+    /// tasks that share one device behind a [`crate`]-external block-sharing
+    /// lock (`AGENTS.md` §4 — disk access is a common, capability-checked
+    /// service many tasks reach). The lock is effectively uncontended (the
+    /// outer block-sharing layer already serialises every device op), so it
+    /// costs nothing on the hot path (`AGENTS.md` §2.16).
+    pool: SpinLock<DmaPool<'a, P>>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
     id: PoolId,
-    next_slot: Cell<usize>,
+    /// Monotonic slab-slot stamp. An [`AtomicUsize`] (not a `Cell`) so the
+    /// host stays [`Sync`]; the increment is a single `fetch_add`.
+    next_slot: AtomicUsize,
     /// Live `(slot → DmaBuffer)` table. The drop-path shim receives
     /// only `(*const(), slot, len)`; it recovers the originating
-    /// [`DmaBuffer`] by removing the entry under `slot`.
-    live: RefCell<BTreeMap<usize, DmaBuffer>>,
+    /// [`DmaBuffer`] by removing the entry under `slot`. Behind a
+    /// [`SpinLock`] for the same [`Sync`] reason as `pool`.
+    live: SpinLock<BTreeMap<usize, DmaBuffer>>,
     /// Kernel IRQ table the device's line is bound in. Borrowed for
     /// the host's lifetime; [`Self::notify_wait`] waits on it.
     irq: &'a IrqTable,
@@ -100,14 +111,16 @@ pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + ?Sized> {
     /// interrupt line (Stage 4.D Item 3 supplies the GSI). Stable
     /// for the life of the host.
     irq_handle: IrqHandle,
-    /// Clock + cooperative-yield seam the blocking wait loop drives.
+    /// Clock + blocking-wait seam the completion wait loop drives.
     /// Supplied by the kernel binary (it wraps the scheduler +
     /// architecture clock); `kernel/*` stays out of this crate's
-    /// default build (`AGENTS.md` §3 — gated behind `kernel-host`).
-    waiter: &'a dyn IrqWaiter,
+    /// default build (`AGENTS.md` §3 — gated behind `kernel-host`). The
+    /// `+ Sync` bound keeps the host [`Sync`] (a shared `&'static` host is
+    /// reached from more than one task).
+    waiter: &'a (dyn IrqWaiter + Sync),
 }
 
-impl<'a, P: PageTable, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
+impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     /// Take ownership of a [`DmaPool`] behind a capability-checking
     /// host.
     ///
@@ -139,15 +152,15 @@ impl<'a, P: PageTable, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
         id: PoolId,
         irq: &'a IrqTable,
         irq_handle: IrqHandle,
-        waiter: &'a dyn IrqWaiter,
+        waiter: &'a (dyn IrqWaiter + Sync),
     ) -> Self {
         Self {
-            pool: RefCell::new(pool),
+            pool: SpinLock::new(pool),
             caller,
             audit,
             id,
-            next_slot: Cell::new(0),
-            live: RefCell::new(BTreeMap::new()),
+            next_slot: AtomicUsize::new(0),
+            live: SpinLock::new(BTreeMap::new()),
             irq,
             irq_handle,
             waiter,
@@ -167,7 +180,7 @@ impl<'a, P: PageTable, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
     /// canonical leak check for the slab/free-shim wiring.
     #[must_use]
     pub fn outstanding(&self) -> usize {
-        self.live.borrow().len()
+        self.live.lock().len()
     }
 
     /// The pre-bound [`IrqHandle`] this host waits on.
@@ -200,7 +213,7 @@ impl<'a, P: PageTable, S: Sink + ?Sized> KernelVirtioHost<'a, P, S> {
 ///   slab will then have been double-freed, which is `Drop`'s
 ///   responsibility to avoid — see [`DmaSlab::drop`] running exactly
 ///   once).
-unsafe fn slab_free_shim<P: PageTable, S: Sink + ?Sized>(
+unsafe fn slab_free_shim<P: PageTable, S: Sink + Sync + ?Sized>(
     pool: *const (),
     slot: usize,
     _len: usize,
@@ -212,7 +225,7 @@ unsafe fn slab_free_shim<P: PageTable, S: Sink + ?Sized>(
     // same monomorphisation.
     let host: &KernelVirtioHost<'_, P, S> =
         unsafe { &*(pool.cast::<KernelVirtioHost<'_, P, S>>()) };
-    let removed = host.live.borrow_mut().remove(&slot);
+    let removed = host.live.lock().remove(&slot);
     if let Some(buf) = removed {
         // `Drop` cannot propagate errors; a refusal here means the
         // task lost `CAP_MEM_DMA` between alloc and free, which
@@ -220,17 +233,17 @@ unsafe fn slab_free_shim<P: PageTable, S: Sink + ?Sized>(
         // pool keeps the slot reserved (the supervisor process is
         // expected to reclaim it). We deliberately do not retry —
         // `AGENTS.md` §2.1 forbids retry-until-it-works.
-        let _ = free_dma(&mut *host.pool.borrow_mut(), host.caller, buf, host.audit);
+        let _ = free_dma(&mut *host.pool.lock(), host.caller, buf, host.audit);
     }
 }
 
-impl<P: PageTable, S: Sink + ?Sized> DmaHost for KernelVirtioHost<'_, P, S> {
+impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if size == 0 {
             return Err(DriverError::BufferTooSmall);
         }
         let buf = {
-            let mut pool = self.pool.borrow_mut();
+            let mut pool = self.pool.lock();
             alloc_dma(&mut *pool, self.caller, size, self.audit).map_err(map_gate_error)?
         };
         // `slot_base` returns the data-region base for the buffer.
@@ -238,7 +251,7 @@ impl<P: PageTable, S: Sink + ?Sized> DmaHost for KernelVirtioHost<'_, P, S> {
         // statement above, but the result is plumbed through to
         // surface any allocator-internal inconsistency as a
         // `DriverError` instead of a panic (`AGENTS.md` §2.9).
-        let base: NonNull<u8> = if let Ok(p) = self.pool.borrow().slot_base(&buf) {
+        let base: NonNull<u8> = if let Ok(p) = self.pool.lock().slot_base(&buf) {
             p
         } else {
             // Roll back the allocation rather than leak the buffer;
@@ -246,12 +259,15 @@ impl<P: PageTable, S: Sink + ?Sized> DmaHost for KernelVirtioHost<'_, P, S> {
             // in practice for a buffer minted one statement above,
             // but the recovery path keeps `AGENTS.md` §2.9 satisfied
             // without an `expect`.
-            let _ = free_dma(&mut *self.pool.borrow_mut(), self.caller, buf, self.audit);
+            let _ = free_dma(&mut *self.pool.lock(), self.caller, buf, self.audit);
             return Err(DriverError::LengthOutOfRange);
         };
-        let slot = self.next_slot.get();
-        self.next_slot.set(slot.wrapping_add(1));
-        self.live.borrow_mut().insert(slot, buf);
+        // A single atomic stamp; `Relaxed` is sufficient because the slot is
+        // only an opaque per-host key (the outer block-sharing lock already
+        // serialises device ops, so there is no cross-slab ordering to
+        // establish here).
+        let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
+        self.live.lock().insert(slot, buf);
         let phys = buf.phys().as_u64();
         let len = buf.len();
         let pool_ptr: *const () = (self as *const Self).cast::<()>();
@@ -279,7 +295,7 @@ impl<P: PageTable, S: Sink + ?Sized> DmaHost for KernelVirtioHost<'_, P, S> {
     }
 }
 
-impl<P: PageTable, S: Sink + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
+impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, P, S> {
     fn notify_wait(&self, _queue_index: u16) {
         // Block on the device's pre-bound interrupt line. A virtio
         // device signals completion on its single MSI / MMIO line
@@ -331,7 +347,7 @@ fn map_gate_error(e: DmaGateError) -> DriverError {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
-    use core::cell::RefCell as StdRefCell;
+    use core::sync::atomic::{AtomicU32, AtomicU64};
     use rustos_abi::CapabilityId;
     use rustos_caps::CapabilitySet;
     use rustos_kernel_irq::{IrqController, IrqWaitAbort, MaskError};
@@ -371,8 +387,8 @@ mod tests {
         controller: OkController,
         fire_line: Option<u32>,
         fire_after: u32,
-        yields: Cell<u32>,
-        now: Cell<u64>,
+        yields: AtomicU32,
+        now: AtomicU64,
     }
 
     impl<'a> TestWaiter<'a> {
@@ -384,8 +400,8 @@ mod tests {
                 controller: OkController,
                 fire_line: None,
                 fire_after: 0,
-                yields: Cell::new(0),
-                now: Cell::new(0),
+                yields: AtomicU32::new(0),
+                now: AtomicU64::new(0),
             }
         }
 
@@ -397,30 +413,29 @@ mod tests {
                 controller: OkController,
                 fire_line: Some(line),
                 fire_after: after,
-                yields: Cell::new(0),
-                now: Cell::new(0),
+                yields: AtomicU32::new(0),
+                now: AtomicU64::new(0),
             }
         }
 
         fn yields(&self) -> u32 {
-            self.yields.get()
+            self.yields.load(Ordering::Relaxed)
         }
     }
 
     impl IrqWaiter for TestWaiter<'_> {
         fn now_ns(&self) -> u64 {
-            self.now.get()
+            self.now.load(Ordering::Relaxed)
         }
 
         fn yield_now(&self) -> Result<(), IrqWaitAbort> {
-            let n = self.yields.get() + 1;
-            self.yields.set(n);
+            let n = self.yields.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(line) = self.fire_line {
                 if n == self.fire_after {
                     self.table.fire(line, &self.controller).expect("fire");
                 }
             }
-            self.now.set(self.now.get().saturating_add(1));
+            self.now.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -438,23 +453,23 @@ mod tests {
     /// keep this crate from depending on `kernel/sec`'s test-only
     /// surface.
     struct Recorder {
-        events: StdRefCell<Vec<u32>>,
+        events: SpinLock<Vec<u32>>,
     }
 
     impl Recorder {
         fn new() -> Self {
             Self {
-                events: StdRefCell::new(Vec::new()),
+                events: SpinLock::new(Vec::new()),
             }
         }
         fn ids(&self) -> Vec<u32> {
-            self.events.borrow().clone()
+            self.events.lock().clone()
         }
     }
 
     impl Sink for Recorder {
         fn write_event(&self, event: &Event<'_>) {
-            self.events.borrow_mut().push(event.id.0);
+            self.events.lock().push(event.id.0);
         }
     }
 
@@ -551,7 +566,7 @@ mod tests {
         );
         // After drop the pool must show zero live allocations — the
         // canonical witness that `kernel_sec::free_dma` ran.
-        assert_eq!(host.pool.borrow().live(), 0);
+        assert_eq!(host.pool.lock().live(), 0);
     }
 
     #[test]
@@ -619,7 +634,7 @@ mod tests {
         assert_eq!(host.outstanding(), 1);
         drop(b);
         assert_eq!(host.outstanding(), 0);
-        assert_eq!(host.pool.borrow().live(), 0);
+        assert_eq!(host.pool.lock().live(), 0);
     }
 
     /// `notify_wait` returns immediately when the bound line fired
@@ -686,17 +701,16 @@ mod tests {
     /// (`docs/src/security/irq.md`).
     #[test]
     fn notify_wait_observes_mask_before_wake() {
-        use core::cell::Cell as StdCell;
-
+        // `SpinLock`/atomics (not `Cell`) so `Probe`/`ProbeWaiter` are
+        // `Sync` — the host now requires `waiter: &(dyn IrqWaiter + Sync)`.
         struct Probe<'a> {
             table: &'a IrqTable,
             handle: IrqHandle,
-            ready_during_mask: StdCell<Option<bool>>,
+            ready_during_mask: SpinLock<Option<bool>>,
         }
         impl IrqController for Probe<'_> {
             fn mask(&self, _line: u32) -> Result<(), MaskError> {
-                self.ready_during_mask
-                    .set(Some(self.table.ready_for(self.handle)));
+                *self.ready_during_mask.lock() = Some(self.table.ready_for(self.handle));
                 Ok(())
             }
         }
@@ -707,15 +721,14 @@ mod tests {
             table: &'a IrqTable,
             probe: &'a Probe<'a>,
             line: u32,
-            yields: Cell<u32>,
+            yields: AtomicU32,
         }
         impl IrqWaiter for ProbeWaiter<'_> {
             fn now_ns(&self) -> u64 {
                 0
             }
             fn yield_now(&self) -> Result<(), IrqWaitAbort> {
-                self.yields.set(self.yields.get() + 1);
-                if self.yields.get() == 1 {
+                if self.yields.fetch_add(1, Ordering::Relaxed) == 0 {
                     self.table.fire(self.line, self.probe).expect("fire");
                 }
                 Ok(())
@@ -731,19 +744,19 @@ mod tests {
         let probe = Probe {
             table: &irq,
             handle,
-            ready_during_mask: StdCell::new(None),
+            ready_during_mask: SpinLock::new(None),
         };
         let waiter = ProbeWaiter {
             table: &irq,
             probe: &probe,
             line: 4,
-            yields: Cell::new(0),
+            yields: AtomicU32::new(0),
         };
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         host.notify_wait(0);
         assert_eq!(
-            probe.ready_during_mask.get(),
+            *probe.ready_during_mask.lock(),
             Some(false),
             "ready must still be false while the controller mask runs"
         );

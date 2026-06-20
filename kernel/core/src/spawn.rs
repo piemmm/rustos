@@ -214,16 +214,28 @@ pub trait InitSpawnCtx {
     /// A body that returns ends the service; a continuous service never
     /// returns.
     ///
-    /// The default implementation admits nothing and returns `false`
+    /// Returns [`Some`] with the admitted task's scheduler
+    /// [`TaskId`](rustos_kernel_sched_api::TaskId) so the
+    /// caller can wake the service by id — e.g. register it on a
+    /// [`crate::waitq::WaitQueue`] (the driver-store server parks on
+    /// [`crate::waitq::SERVE_WAITQ`] and is unparked by
+    /// [`crate::waitq::serve_wake`] when an `ipc_call` request is posted,
+    /// `AGENTS.md` §2.1 — a real wake, never a busy-yield). [`None`] means
+    /// the service was not admitted.
+    ///
+    /// The default implementation admits nothing and returns [`None`]
     /// (`AGENTS.md` §2.9 — a context that wires no scheduler offers no
     /// service rather than pretending to). The production
     /// `KernelInitSpawner` admits the body as a [`crate::spawn_kthread`]
     /// task on the boot CPU; this adds **no** ambient authority — the body
     /// holds only the capabilities and resources the seam built into it
     /// (`AGENTS.md` §4).
-    fn spawn_kernel_service(&self, body: crate::kthread::KernelServiceBody) -> bool {
+    fn spawn_kernel_service(
+        &self,
+        body: crate::kthread::KernelServiceBody,
+    ) -> Option<rustos_kernel_sched_api::TaskId> {
         let _ = body;
-        false
+        None
     }
 
     /// The kernel's live physical-frame allocator as a `'static` borrow,
@@ -302,7 +314,7 @@ pub trait InitSpawnCtx {
     /// (`AGENTS.md` §2.9). The default returns [`Errno::NotImplemented`]: a
     /// context that wires no scheduler offers no driver spawn rather than
     /// pretending to, mirroring [`spawn_kernel_service`](Self::spawn_kernel_service)
-    /// returning `false` and [`ProcessSpawn::spawn_with`]'s own default.
+    /// returning [`None`] and [`ProcessSpawn::spawn_with`]'s own default.
     fn spawn_driver_process(
         &self,
         spawn: &dyn ProcessSpawn,

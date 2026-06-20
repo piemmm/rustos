@@ -217,6 +217,13 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
         return;
     };
     let _ = table.fire(intid, &GIC_IRQ_CONTROLLER);
+    // Wake any `irq_wait` caller parked on a bound line: `fire` set the
+    // per-line ready flag (after masking — mask-before-wake holds), so a
+    // woken waiter that consumes it observes the mask. A spurious wake for
+    // a waiter on a different line is harmless — it re-checks its own line
+    // and parks again (`AGENTS.md` §2.1 / §2.16). Wait-free and
+    // allocation-free, safe from this interrupt context.
+    rustos_kernel_core::irq_wake();
 }
 
 /// Publish `table` and register [`production_device_irq_dispatch`] with

@@ -1138,6 +1138,7 @@ dependencies = [
  "rustos-kernel-mem",
  "rustos-kernel-sec",
  "rustos-log",
+ "rustos-sync",
  "rustos-virtio",
 ]
 

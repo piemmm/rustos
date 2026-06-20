@@ -603,21 +603,27 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         }
     }
 
-    fn spawn_kernel_service(&self, mut body: crate::kthread::KernelServiceBody) -> bool {
+    fn spawn_kernel_service(
+        &self,
+        mut body: crate::kthread::KernelServiceBody,
+    ) -> Option<rustos_kernel_sched_api::TaskId> {
         // Admit the service as a kernel-only resumable kthread on the boot
         // CPU's run queue (`plans/SPAWN.md` SP1). It must be admitted
         // **before** `admit_init` drives the dispatch loop, so the loop
         // dispatches it alongside PID 1. The work shim wraps the
         // dispatcher-side concrete `Yielder<A::Cs>` in the object-safe
         // `YielderHandle`, so the arch seam's `body` never names the port's
-        // context-switch type (`AGENTS.md` §17.4 / §2.2).
+        // context-switch type (`AGENTS.md` §17.4 / §2.2). The admitted
+        // scheduler [`TaskId`] is returned so the caller can wake the
+        // service by id (the driver-store server registers it on
+        // `SERVE_WAITQ`); a failed admission yields `None` (`AGENTS.md` §2.9).
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
         let cs = self.arch.context_switch();
         let work = move |yielder: &mut crate::kthread::Yielder<A::Cs>| {
             let mut handle = crate::kthread::YielderHandle::new(yielder);
             body(&mut handle);
         };
-        crate::kthread::spawn_kthread(self.scheduler, cs, cpu, Priority::Normal, work).is_ok()
+        crate::kthread::spawn_kthread(self.scheduler, cs, cpu, Priority::Normal, work).ok()
     }
 
     fn static_frames(&self) -> Option<&'static FrameAllocator> {
@@ -1209,11 +1215,16 @@ mod tests {
 
         let before = state.scheduler.live_task_count();
         // A trivial body; admission registers the kthread on the run queue
-        // without running it (the work runs on the next `step`).
-        assert!(ctx.spawn_kernel_service(Box::new(|_yielder| {})));
+        // without running it (the work runs on the next `step`). The seam
+        // returns the admitted task's scheduler id so a caller can wake it
+        // (the driver-store server registers it on `SERVE_WAITQ`).
+        let first = ctx.spawn_kernel_service(Box::new(|_yielder| {}));
+        assert!(first.is_some());
         assert_eq!(state.scheduler.live_task_count(), before + 1);
-        // A second service is admitted independently.
-        assert!(ctx.spawn_kernel_service(Box::new(|_yielder| {})));
+        // A second service is admitted independently, with a distinct id.
+        let second = ctx.spawn_kernel_service(Box::new(|_yielder| {}));
+        assert!(second.is_some());
+        assert_ne!(first, second);
         assert_eq!(state.scheduler.live_task_count(), before + 2);
     }
 

@@ -59,15 +59,12 @@ use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
-use crate::root_mount::{
-    autoload_system_drivers, unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB,
-};
+use crate::root_mount::{unlock_root_disk_interactively, UnlockOutcome, LATE_USERS_DB};
 use crate::root_storage::RootBlockBinding;
 use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
-    take_boot, AutoloadHook, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK,
-    USERS_DB_INSTALLED_MESSAGE,
+    take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
 };
 
 /// CPU-interface target bitmask routing the device SPI to the boot CPU.
@@ -284,7 +281,15 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
         release_console0_to_login();
     };
 
-    let started = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
+    let admitted = ctx.spawn_kernel_service(alloc::boxed::Box::new(body));
+    if let Some(task_id) = admitted {
+        // Publish the disk-owning kthread's scheduler id so its driver-store
+        // serve loop registers on `SERVE_WAITQ` and is unparked the instant
+        // a request is posted (Design D D2b-2c; `AGENTS.md` §2.1 — a real
+        // wake, never a busy-yield).
+        crate::unlock_service::set_store_service_task(task_id);
+    }
+    let started = admitted.is_some();
     note(
         audit,
         if started { Level::Info } else { Level::Error },
@@ -335,12 +340,17 @@ fn run_unlock(
     // The bus-driver task capability context: the unlock kthread's caps,
     // owner `UNLOCK_TASK`, audited onto the service's audit sink. Both the
     // virtio and the EMMC2 register-window maps gate on its `CAP_MMIO_MAP`
-    // (`AGENTS.md` §5.4).
-    let caller = TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, env.audit);
+    // (`AGENTS.md` §5.4). Leaked to `'static` because the brought-up device
+    // host borrows it for the life of the (now `'static`, shared) disk
+    // (`AGENTS.md` §4 — kernel state is never freed); a single boot-time leak,
+    // like `boot_tree_snapshot`.
+    let caller: &'static TaskCapabilities = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, env.audit),
+    ));
 
     match binding.driver_path {
-        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, &caller, dtb, frames, env),
-        EMMC2_PATH => emmc2_unlock(&coop, &caller, binding, env),
+        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, dtb, frames, env),
+        EMMC2_PATH => emmc2_unlock(&coop, caller, binding, env),
         _ => Err("root-unlock: bound block driver is not a known floor driver"),
     }
 }
@@ -366,7 +376,7 @@ struct UnlockEnv {
 /// x86_64 root, proven on `-M virt`).
 fn virtio_blk_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
-    caller: &TaskCapabilities,
+    caller: &'static TaskCapabilities,
     dtb: u64,
     frames: &'static FrameAllocator,
     env: UnlockEnv,
@@ -395,7 +405,17 @@ fn virtio_blk_unlock<'a>(
     // identity-mapped Device memory the bus alone reads.
     let bus =
         unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }.map_err(|_| "root-unlock: virtio bus")?;
-    let phys = DirectPhysMap::identity(identity_limit());
+    // The device backing is boot-leaked to `'static`: the brought-up disk is
+    // shared for the life of the system by two independent preemptive tasks
+    // (the driver-store serve task and the encrypted-root unlock task, see
+    // `finish_unlock`), so its backing must outlive both frames. Leaking is
+    // the sanctioned "kernel state is never freed" pattern
+    // (`kernel/core/src/spawn.rs`; cf. `crate::unlock_service::boot_tree_snapshot`)
+    // and uses only safe `Box::leak`, never an `unsafe` lifetime cast
+    // (`AGENTS.md` §4).
+    let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        DirectPhysMap::identity(identity_limit()),
+    ));
     let gib = configured_identity_gigapages();
     // Two throwaway *bookkeeping* page tables (device access is via the
     // boot identity map through `phys`): one for the MMIO window map, one
@@ -404,15 +424,17 @@ fn virtio_blk_unlock<'a>(
     // far above it so they never collide with an identity block.
     let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
         .ok_or("root-unlock: mmio bookkeeping space")?;
-    let mut mmio = MmioMap::new(
-        AddressSpace::new(mmio_space),
-        VirtAddr::new(MMIO_VBASE),
-        MMIO_CAP_PAGES,
-        &phys,
-    )
-    .map_err(|_| "root-unlock: mmio map")?;
+    let mmio: &'static mut MmioMap<'static, _> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        MmioMap::new(
+            AddressSpace::new(mmio_space),
+            VirtAddr::new(MMIO_VBASE),
+            MMIO_CAP_PAGES,
+            phys,
+        )
+        .map_err(|_| "root-unlock: mmio map")?,
+    ));
     let (transport, slot_base) = {
-        let mapper = KernelMmioMapper::new(&mut mmio, caller, audit);
+        let mapper = KernelMmioMapper::new(mmio, caller, audit);
         let prov = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, MmioTransport::new)
             .map_err(|_| "root-unlock: virtio provisioning")?;
         (prov.transport, prov.base)
@@ -448,15 +470,25 @@ fn virtio_blk_unlock<'a>(
         VirtAddr::new(POOL_VBASE),
         POOL_PAGES,
         frames,
-        &phys,
+        phys,
     )
     .map_err(|_| "root-unlock: dma pool")?;
-    let waiter = RearmingIrqWaiter {
-        table,
-        handle,
-        line: intid,
-    };
-    let vhost = KernelVirtioHost::new(pool, caller, audit, PoolId::fresh(), table, handle, &waiter);
+    let waiter: &'static RearmingIrqWaiter =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(RearmingIrqWaiter {
+            table,
+            handle,
+            line: intid,
+        }));
+    let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(KernelVirtioHost::new(
+            pool,
+            caller,
+            audit,
+            PoolId::fresh(),
+            table,
+            handle,
+            waiter,
+        )));
 
     // Admit the virtio-blk driver through the signed §8 load gate (Ed25519
     // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives
@@ -466,10 +498,11 @@ fn virtio_blk_unlock<'a>(
         .admit(VIRTIO_BLK_PATH, &loader_caps())
         .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
 
-    // Open the whole-disk block device over the provisioned transport. The
-    // opened device reads through `transport`/`vhost`/`mmio`/`pool`, all kept
-    // live in this scope for the whole `finish_unlock` call below.
-    let blk = VirtioBlk::open(transport, &vhost).map_err(|_| "root-unlock: virtio-blk open")?;
+    // Open the whole-disk block device over the provisioned transport. Every
+    // borrowed backing (`transport`/`vhost`/`mmio`/`pool`/`waiter`/`phys`) is
+    // `'static`, so the opened device is `VirtioBlk<'static>` and can be
+    // shared for life behind the block-sharing layer (`finish_unlock`).
+    let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
     finish_unlock(blk, coop, env)
 }
 
@@ -487,7 +520,7 @@ fn virtio_blk_unlock<'a>(
 /// and metal-gated here.
 fn emmc2_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
-    caller: &TaskCapabilities,
+    caller: &'static TaskCapabilities,
     binding: &RootBlockBinding,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
@@ -509,27 +542,32 @@ fn emmc2_unlock<'a>(
     // A throwaway *bookkeeping* page table for the register-window map
     // (device access is via the boot identity map through `phys`; the window
     // VA sits far above the identity window so it never collides with a
-    // gigapage block).
-    let phys = DirectPhysMap::identity(identity_limit());
+    // gigapage block). Boot-leaked to `'static` (safe `Box::leak`) like the
+    // virtio path: the brought-up disk is shared for life by the two
+    // independent tasks `finish_unlock` runs, so the `Emmc2`'s window backing
+    // must outlive both frames (`AGENTS.md` §4 — kernel state is never freed).
+    let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        DirectPhysMap::identity(identity_limit()),
+    ));
     let gib = configured_identity_gigapages();
     let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
         .ok_or("root-unlock: mmio bookkeeping space")?;
-    let mut mmio = MmioMap::new(
-        AddressSpace::new(mmio_space),
-        VirtAddr::new(MMIO_VBASE),
-        MMIO_CAP_PAGES,
-        &phys,
-    )
-    .map_err(|_| "root-unlock: mmio map")?;
+    let mmio: &'static mut MmioMap<'static, _> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        MmioMap::new(
+            AddressSpace::new(mmio_space),
+            VirtAddr::new(MMIO_VBASE),
+            MMIO_CAP_PAGES,
+            phys,
+        )
+        .map_err(|_| "root-unlock: mmio map")?,
+    ));
 
     // Map the window under `CAP_MMIO_MAP` and bring the card online. The
-    // opened `Emmc2` retains a `RegisterWindow` pointing into `mmio`'s window
-    // backing, so `mmio` is kept live in this scope for the whole
-    // `finish_unlock` call below (the `KernelMmioMapper` lifetime contract).
-    // The mapper/host borrow of `mmio` ends with this block; the raw window
-    // pointer the `Emmc2` holds stays valid because `mmio` outlives it.
+    // opened `Emmc2` retains a `RegisterWindow` pointing into the leaked
+    // `'static` `mmio` window backing, so it stays valid for life. The
+    // mapper/host borrow of `mmio` ends with this block.
     let blk = {
-        let mapper = KernelMmioMapper::new(&mut mmio, caller, audit);
+        let mapper = KernelMmioMapper::new(mmio, caller, audit);
         let host = Emmc2Host::new(*caller.effective(), &mapper);
         rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys).map_err(|fault| {
             // `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so the metal
@@ -552,49 +590,111 @@ fn emmc2_unlock<'a>(
     finish_unlock(blk, coop, env)
 }
 
-/// The shared mount + pre-unlock autoload + interactive-unlock tail both
-/// floor block bring-ups feed (`AGENTS.md` §2.2).
+/// The shared two-task tail both floor block bring-ups feed (`AGENTS.md`
+/// §2.2), turning the one brought-up disk into a disk shared for life by two
+/// independent preemptive tasks (Design D D2b-2c).
 ///
-/// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or
-/// EMMC2). Before prompting for the passphrase, the [`AutoloadHook`] this
-/// builds autoloads user-space drivers off the read-only `/System` volume's
-/// signed `/System/Drivers/` store ([`autoload_system_drivers`]) — matching
-/// every node of the discovered `tree` against the store and spawning each
-/// winner into its own process (`AGENTS.md` §18.3). Running it *first*
-/// brings the keyboard up in user space in time to type the unlock secret
-/// (design B); it is fail-soft and cannot fail the boot.
+/// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or EMMC2),
+/// already boot-leaked to `'static` by its bring-up. It is wrapped in a
+/// leaked `&'static` [`DriverStoreService`] (over the [`SharedBlock`] layer),
+/// so two tasks reach it through independent serialised windows
+/// (`AGENTS.md` §4):
 ///
-/// **This never returns on success.** The one brought-up disk is wrapped in
-/// a [`DriverStoreService`] (over the [`SharedBlock`] layer), the autoload
-/// and the encrypted-root unlock run through two concurrent windows onto it,
-/// the outcome is logged and the console-0 gate released, and the kthread
-/// then [`holds`](DriverStoreService::hold) the read-only `/System` mount
-/// **for life** — parking forever (Design D D2a-2). Because this whole
-/// bring-up call chain stays suspended beneath that park, the borrowed
-/// device backing (`virtio_blk_unlock`/`emmc2_unlock`'s DMA pool, MMIO map,
-/// IRQ waiter, virtio host) stays live with no `'static` promotion and the
-/// metal-proven device-driving model is unchanged (`AGENTS.md` §2.17).
-/// Every fallible *setup* step before the unlock still fails closed with a
-/// stable stage string the caller logs (`AGENTS.md` §2.9).
-fn finish_unlock<'a, B: Block>(
+/// * A **separate, spawned** preemptive task runs the interactive
+///   encrypted-root unlock against the *user-data* volume and, when it
+///   resolves (installed or fail-closed), releases the console-0 gate to
+///   `login` (`AGENTS.md` §5.4.5).
+/// * **This** task becomes the persistent driver-store serve loop: it binds
+///   and serves the capability-gated store IPC endpoint the user-space
+///   `devmgr` loads signed `/System` drivers through (`AGENTS.md` §18.3 /
+///   §18.4), real-parking on `SERVE_WAITQ` between requests, and never
+///   returns on success.
+///
+/// Crucially the store endpoint binds **independently of** the user-data
+/// passphrase (the signed driver store lives on the always-readable `/System`
+/// volume, `plans/PI.md` design B), so the keyboard driver loads in user
+/// space *before* the unlock prompt — no chicken-and-egg, and no cooperative
+/// interleaving of the two on one kthread.
+///
+/// On success this never returns. Every fallible *setup* step fails closed
+/// with a stable stage string the caller logs (`AGENTS.md` §2.9).
+fn finish_unlock<B: Block + 'static>(
     blk: B,
-    coop: &'a CooperativeYield<'a>,
+    coop: &CooperativeYield<'_>,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
     let UnlockEnv { ctx, audit, tree } = env;
-    // Primary console (index 0): the video console + its keyboard queue when
-    // a framebuffer console is active, else the discovered UART. The unlock
-    // reads the *raw* device directly (bypassing the console-0 gate `login`
-    // reads through), wrapped in the kthread cooperative blocking reader.
-    let (console_write, raw_read): (
-        &'static dyn ConsoleWrite,
-        &'static (dyn ConsoleRead + Sync + 'static),
-    ) = if video::is_active() {
-        (&VIDEO_CONSOLE, &VIDEO_KEYBOARD)
-    } else {
-        (&UART_CONSOLE, &UART_CONSOLE)
+
+    // The one brought-up disk, boot-leaked to `'static` behind the
+    // block-sharing layer so two independent preemptive tasks drive it through
+    // their own serialised windows (`AGENTS.md` §4): *this* task is the
+    // driver-store serve loop (below), and a *separate* spawned task runs the
+    // encrypted-root unlock. A geometry fault refuses the device fail-closed
+    // (`AGENTS.md` §2.9).
+    let store: &'static DriverStoreService<B> =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
+            SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
+        )));
+
+    // Spawn the encrypted-root unlock as its own preemptive task. The
+    // user-data volume's passphrase is independent of the always-readable
+    // `/System` driver store (`plans/PI.md` design B), so the store endpoint
+    // (bound + served by *this* task below) answers `devmgr` immediately —
+    // the keyboard driver loads in user space *before* the prompt, with no
+    // cooperative interleaving on one kthread (`AGENTS.md` §4 / §17.1 — two
+    // independent tasks sharing the disk). The unlock task drives its own
+    // console reader over its own scheduler yield handle.
+    let unlock_body = move |yielder: &mut dyn YieldHandle| {
+        let coop = CooperativeYield::new(yielder);
+        // Primary console (index 0): the video console + its keyboard queue
+        // when a framebuffer console is active, else the discovered UART. The
+        // unlock reads the *raw* device directly (bypassing the console-0 gate
+        // `login` reads through), wrapped in the kthread blocking reader.
+        let (console_write, raw_read): (
+            &'static dyn ConsoleWrite,
+            &'static (dyn ConsoleRead + Sync + 'static),
+        ) = if video::is_active() {
+            (&VIDEO_CONSOLE, &VIDEO_KEYBOARD)
+        } else {
+            (&UART_CONSOLE, &UART_CONSOLE)
+        };
+        let reader = KthreadConsoleRead::new(raw_read, &coop);
+        match unlock_root_disk_interactively(
+            store.window(),
+            console_write,
+            &reader,
+            &LATE_USERS_DB,
+            audit,
+        ) {
+            UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
+            UnlockOutcome::GaveUp => note(
+                audit,
+                Level::Error,
+                "root-unlock: gave up fail-closed; login refused until reboot",
+            ),
+        }
+        // The unlock is resolved (installed or fail-closed), so release
+        // console 0 to `login`: the byte-contention window is over
+        // (`plans/PI.md` P11 item 5). A failed unlock installs no users
+        // database, so `login` still refuses every attempt (`AGENTS.md`
+        // §5.4.5). The unlock task then ends (the disk stays alive — it is
+        // `'static`-leaked — and this task's window borrow ends with it).
     };
-    let reader = KthreadConsoleRead::new(raw_read, coop);
+    if ctx
+        .spawn_kernel_service(alloc::boxed::Box::new(unlock_body))
+        .is_none()
+    {
+        // The unlock task could not be admitted: nothing will prompt for the
+        // passphrase or open the console-0 gate, so open it here (login still
+        // refuses, as no database is installed) and serve the store anyway so
+        // `devmgr` can load drivers (`AGENTS.md` §2.9).
+        note(
+            audit,
+            Level::Error,
+            "root-unlock: unlock task not admitted; console gate opened, store still served",
+        );
+        release_console0_to_login();
+    }
 
     // The driver-signing trust anchor the autoload load gate verifies each
     // winning bundle against — the kernel's own embedded key, the single
@@ -606,74 +706,35 @@ fn finish_unlock<'a, B: Block>(
     let trusted = [trust_anchor];
     // The scheduler-agnostic driver-spawn seam over the captured boot
     // context + the aarch64 process producer (`AGENTS.md` §17.1 / §2.2) —
-    // the one per-arch input the otherwise arch-neutral autoload hook needs.
+    // the one per-arch input the otherwise arch-neutral driver-store load op
+    // needs to spawn a verified driver into its own process.
     let driver_spawn = InitCtxDriverProcessSpawn::new(ctx, &AARCH64_PROCESS_SPAWN);
-    // The pre-unlock autoload hook: run against the read-only `/System`
-    // volume below, it matches every discovered node against that volume's
-    // signed driver store and spawns each winner into its own user-space
-    // process (`AGENTS.md` §18.3). It presents the gate the delegatable
-    // `autoload_caps` superset (`CAP_DRV_LOAD` to pass the gate plus the
-    // resource capabilities an autoloaded driver's class may request —
-    // including `CAP_INPUT_INJECT` for an input driver), intersected per
-    // driver with its signed manifest request (`AGENTS.md` §5.2 / §18.3);
-    // the kthread's *own* context stays the minimal `service_caps` (§5.4).
-    let mut autoload = AutoloadHook::new(&driver_spawn, tree, &trusted, autoload_caps(), audit);
+    // The kernel-side load mechanism the persistent driver-store service
+    // keeps in its trusted base (Design D D2b-2c): the driver-signing trust
+    // anchor, the delegatable `autoload_caps` gate superset (`CAP_DRV_LOAD`
+    // to pass the §8 gate plus the resource caps an autoloaded driver's class
+    // may request — including `CAP_INPUT_INJECT` for an input driver,
+    // intersected per driver with its signed manifest request, `AGENTS.md`
+    // §5.2 / §18.3), the aarch64 process-spawn seam, and the discovered tree a
+    // matched `node_id` is resolved against to mint exactly that node's
+    // grants (§4 — no ambient authority). The user-space `devmgr` owns the
+    // matching *policy*; this kthread serves the *mechanism* over the
+    // capability-gated store endpoint below.
+    let serve_ctx = crate::driver_store_server::StoreServeContext {
+        trusted: &trusted,
+        caps: autoload_caps(),
+        spawn: &driver_spawn,
+        tree,
+    };
 
-    // Share the one brought-up disk behind the kernel block-sharing layer
-    // (Design D D2a) and hand it to the persistent driver-store service: the
-    // read-only `/System` autoload window and the encrypted-root unlock
-    // window are then two concurrent windows over a single device, serialised
-    // by the layer's lock (`AGENTS.md` §4). A geometry fault refuses the
-    // device fail-closed (`AGENTS.md` §2.9).
-    let store = DriverStoreService::new(
-        SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
-    );
-
-    // Design B2: autoload off the read-only `/System` volume's signed store
-    // **before** the passphrase prompt, so the keyboard (and any other
-    // matched driver) is brought up in user space in time for the operator
-    // to type the encrypted-root unlock secret — the chicken-and-egg design B
-    // resolves. Fail-soft and fail-closed (`AGENTS.md` §18.4 / §2.9): a disk
-    // with no `/System` volume autoloads nothing and the boot still reaches
-    // the prompt (on the UART the passphrase can still be typed). This runs
-    // through its own service window, dropped when the autoload returns,
-    // while the device stays owned by the store service.
-    autoload_system_drivers(&mut store.window(), &mut autoload, audit);
-
-    // Run the interactive encrypted-root unlock through a second concurrent
-    // window onto the same disk, then log the outcome (`AGENTS.md` §19.4).
-    match unlock_root_disk_interactively(
-        store.window(),
-        console_write,
-        &reader,
-        &LATE_USERS_DB,
-        audit,
-    ) {
-        UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
-        UnlockOutcome::GaveUp => note(
-            audit,
-            Level::Error,
-            "root-unlock: gave up fail-closed; login refused until reboot",
-        ),
-    }
-
-    // The unlock is resolved (installed or fail-closed), so release console 0
-    // to `login`: the byte-contention window is over (`plans/PI.md` P11 item
-    // 5). A failed unlock installs no users database, so `login` still
-    // refuses every attempt (`AGENTS.md` §5.4.5).
-    release_console0_to_login();
-
-    // Design D D2a-2 / D2b-2: the unlock kthread is the persistent
-    // driver-store service. It never returns — it keeps the read-only
-    // `/System` volume mounted for life and serves the capability-gated
-    // file-read IPC endpoint the user-space `devmgr` reads the signed driver
-    // store through (`AGENTS.md` §18.3 / §18.4). The serve loop runs over a
-    // *fresh* persistent window onto the same shared disk; this whole
-    // bring-up call chain stays suspended beneath it, so the borrowed device
-    // backing (DMA pool, MMIO map, IRQ waiter, virtio host) stays live
-    // without any `'static` promotion (`AGENTS.md` §2.17 — the metal-proven
-    // device-driving model is unchanged). `login`, PID 1, and every other
-    // task run on their own tasks; this one holds the mount and serves it.
+    // This task is now the persistent driver-store service: it binds and
+    // serves the capability-gated store IPC endpoint the user-space `devmgr`
+    // reads the signed `/System` driver store through (`AGENTS.md` §18.3 /
+    // §18.4), real-parking on `SERVE_WAITQ` between requests. It serves over
+    // its own `/System` window onto the `'static`-leaked shared disk,
+    // independently of the encrypted-root unlock task spawned above
+    // (`plans/PI.md` design B). `login`, PID 1, `devmgr`, the unlock task, and
+    // every other task run on their own tasks.
     //
     // The binder context holds only `IPC_BIND_PRIVILEGED` (the privileged
     // authority to bind the restricted-sender store endpoint, §5.2), distinct
@@ -687,14 +748,13 @@ fn finish_unlock<'a, B: Block>(
         audit,
     );
     // The persistent `/System` window is taken in an inner scope so that, on
-    // a fail-closed fallback, the window borrow of `store` ends before
-    // `store.hold` moves `store` by value. On the success path
-    // `serve_system_store` never returns, so the window stays borrowed on
-    // this frame for the life of the system (`AGENTS.md` §2.17).
+    // a fail-closed fallback, the window borrow of `store` ends before the
+    // `store.hold` park. On the success path `serve_system_store` never
+    // returns, so the window stays borrowed for the life of the system.
     let outcome = {
         let mut window = store.window();
         crate::root_mount::with_system_volume(&mut window, audit, |volume| {
-            crate::driver_store_server::serve_system_store(volume, &binder, coop, audit)
+            crate::driver_store_server::serve_system_store(volume, &serve_ctx, &binder, coop, audit)
         })
     };
     match outcome {
@@ -717,7 +777,7 @@ fn finish_unlock<'a, B: Block>(
             note(
                 audit,
                 Level::Error,
-                "driver-store: no /System volume to serve; file-read endpoint not bound",
+                "driver-store: no /System volume to serve; driver-store endpoint not bound",
             );
             store.hold(coop)
         }

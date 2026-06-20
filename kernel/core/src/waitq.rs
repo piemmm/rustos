@@ -202,6 +202,61 @@ pub fn wait_arch() -> Option<&'static (dyn WaitQueueArch + 'static)> {
     WAIT_ARCH.get().ok().flatten().copied()
 }
 
+/// The wait-queue holding the in-kernel driver-store **server** kthread
+/// while it has no pending call to serve (Design D D2b-2c). Unlike
+/// [`CALL_WAITQ`] (which holds the *callers* awaiting a reply), this holds
+/// the bound *server* so it parks off the run queue between requests
+/// instead of busy-yielding (`AGENTS.md` §2.1). It is woken by
+/// [`serve_wake`] the instant the `ipc_call` handler posts a request to a
+/// registered endpoint, so the server re-runs and drains it. The server
+/// registers with [`NO_DEADLINE`] (it waits only for work, never a
+/// timeout) and re-checks its endpoint after every wake, so the
+/// check-then-park race is closed by the scheduler's wake-pending token.
+pub static SERVE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every parked IPC-server kthread because a request was posted to a
+/// registered call endpoint; each re-drains its endpoint and parks again
+/// when empty. A fail-safe no-op before the arch hook is installed
+/// (`AGENTS.md` §2.9).
+pub fn serve_wake() {
+    if let Some(arch) = wait_arch() {
+        SERVE_WAITQ.wake_all(arch);
+    }
+}
+
+/// The wait-queue holding `irq_wait` callers (Design D — the user-space
+/// device-driver IRQ path). A task that bound an IRQ line with `irq_bind`
+/// and called `irq_wait` parks here off the run queue (`AGENTS.md` §2.1 —
+/// no busy yield) and is woken by [`irq_wake`] the instant the device-IRQ
+/// dispatch path runs [`rustos_kernel_irq::IrqTable::fire`] for *any* line,
+/// or, with a finite timeout, by the timed [`WaitQueue::sweep`] below. Each
+/// woken waiter re-checks its own bound line's ready flag through
+/// [`rustos_kernel_irq::IrqTable::try_wait_step`] and either returns or
+/// parks again, so a fire for a different line is a harmless spurious wake
+/// (`AGENTS.md` §2.16) and the check-then-park race is closed by the
+/// scheduler's wake-pending token (the same interlock `hw_tree_wait` uses).
+pub static IRQ_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every parked `irq_wait` caller because a bound IRQ line fired; each
+/// re-checks its own line and either returns [`Ready`] or parks again. A
+/// fail-safe no-op before the arch hook is installed (`AGENTS.md` §2.9).
+///
+/// Called from the production device-IRQ dispatch path immediately after
+/// [`rustos_kernel_irq::IrqTable::fire`] sets the per-line ready flag
+/// (mask-before-wake is preserved: `fire` masks the line and sets `ready`
+/// *before* this wake, so a woken waiter that consumes `ready` observes the
+/// mask). Safe from interrupt context: [`WaitQueue::wake_all`] collects the
+/// waiter ids under a short spin-lock, releases it, then `unpark`s — it
+/// takes no scheduler lock while holding the wait-queue lock (`AGENTS.md`
+/// §2.1).
+///
+/// [`Ready`]: rustos_kernel_irq::WaitOutcome::Ready
+pub fn irq_wake() {
+    if let Some(arch) = wait_arch() {
+        IRQ_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
 /// the [`crate::HwTreeSource`] store on every change to the discovered
 /// hardware tree (`AGENTS.md` §18.4) and by the timed sweep below.
@@ -245,7 +300,19 @@ pub fn timed_wake_sweep() {
     if let Some(arch) = wait_arch() {
         let now = arch.now_ns();
         HW_TREE_WAITQ.sweep(arch, now);
-        arch.set_wakeup(HW_TREE_WAITQ.earliest_deadline());
+        IRQ_WAITQ.sweep(arch, now);
+        // Re-arm to the soonest pending deadline across *every* timed
+        // wait-queue, so neither a `hw_tree_wait` nor an `irq_wait` finite
+        // timeout is dropped because the other queue armed a later one-shot
+        // (`AGENTS.md` §17.1 — the nearest armed wakeup).
+        let next = match (
+            HW_TREE_WAITQ.earliest_deadline(),
+            IRQ_WAITQ.earliest_deadline(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        arch.set_wakeup(next);
     }
 }
 

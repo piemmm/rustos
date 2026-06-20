@@ -96,17 +96,26 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
         ],
         args: &[b"login"],
     },
-    // The device-manager service (`AGENTS.md` §18.3): it observes the
-    // discovered hardware tree and reacts to changes, so it requests
-    // `CAP_SYSINFO_HW` (the privileged global hardware view, §16.6 / §18.4)
-    // and `CAP_CONSOLE_WRITE` to log to its inherited diagnostic stream
-    // (fd 2, §20) — nothing more. It loads no driver in this foundation
-    // tranche, so it holds neither `CAP_DRV_LOAD` nor any console-read
-    // authority (`AGENTS.md` §5.2 — least privilege).
+    // The device-manager service (`AGENTS.md` §18.3): it reads the
+    // discovered hardware tree, matches each node against the kernel-decoded
+    // driver-store catalogue, and asks the kernel to load each winning
+    // bundle. It therefore requests `CAP_SYSINFO_HW` (the privileged global
+    // hardware view, §16.6 / §18.4) for `hw_tree_read`/`hw_tree_wait`,
+    // `CAP_DRV_LOAD` (the §5.2 authority the restricted driver-store
+    // `ipc_call` endpoint requires and the kernel re-checks at the §8 load
+    // gate), and `CAP_CONSOLE_WRITE` to log to its inherited diagnostic
+    // stream (fd 2, §20) — nothing more. It never holds a console-read or
+    // any resource capability: the kernel mints a loaded driver's grants
+    // from its matched node, never from this caller (`AGENTS.md` §4 / §5.2 —
+    // least privilege, no ambient authority).
     EmbeddedProgram {
         path: DEVMGR_PATH,
         rxe: DEVMGR_RXE,
-        caps: &[CapabilityId::CONSOLE_WRITE, CapabilityId::SYSINFO_HW],
+        caps: &[
+            CapabilityId::CONSOLE_WRITE,
+            CapabilityId::SYSINFO_HW,
+            CapabilityId::DRV_LOAD,
+        ],
         args: &[b"devmgr"],
     },
 ];

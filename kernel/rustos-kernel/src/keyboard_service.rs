@@ -1234,7 +1234,10 @@ mod metal {
             }
         };
 
-        let started = ctx.spawn_kernel_service(Box::new(body));
+        // The keyboard pump is woken by its own device poll (it never parks
+        // on `SERVE_WAITQ`), so its admitted task id is not needed here —
+        // only whether admission succeeded (`AGENTS.md` §2.9).
+        let started = ctx.spawn_kernel_service(Box::new(body)).is_some();
         log(
             &SERIAL_SINK,
             &Event {

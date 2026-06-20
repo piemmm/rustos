@@ -98,6 +98,29 @@ impl HwTreeStore {
         rustos_kernel_core::hw_tree_wake();
     }
 
+    /// Bump the generation **without** changing the node set, waking every
+    /// parked `hw_tree_wait` caller so it re-reads and re-evaluates
+    /// (`AGENTS.md` §18.4).
+    ///
+    /// This is the "re-evaluate now" signal for a reactive observer that
+    /// depends on system state the node set does not itself carry — in
+    /// particular the user-space `devmgr`, which must re-attempt its
+    /// driver-store catalogue fetch once the kernel driver-store service has
+    /// bound its endpoint (which happens after the boot tree settles, so no
+    /// `seed`/`append` would otherwise wake the parked manager). The node
+    /// set is unchanged, so a re-read is idempotent (the manager's load
+    /// dedup makes a re-match a no-op); only the generation advances so the
+    /// wait observes a change.
+    pub fn bump(&self) {
+        {
+            let mut inner = self.inner.lock();
+            inner.generation += 1;
+        }
+        // Wake parked `hw_tree_wait` callers (see [`Self::seed`]); done after
+        // the inner lock is dropped (`AGENTS.md` §2.1).
+        rustos_kernel_core::hw_tree_wake();
+    }
+
     /// An owned snapshot of the current inventory.
     ///
     /// Returns a `Vec` so the caller owns a stable view that cannot change

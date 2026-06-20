@@ -80,41 +80,20 @@ use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, Pa
 use zeroize::Zeroizing;
 
 /// A mounted root volume, viewed as the read + security surface the
-/// driver-autoload pipeline needs (`AGENTS.md` §18.3 / §5.3).
+/// driver-store file service needs (`AGENTS.md` §18.3 / §5.3).
 ///
 /// Blanket-implemented for every filesystem driver that is both
 /// [`FilesystemRead`] and [`FilesystemSecurity`] (the production `RustFs`
 /// among them), so `&mut dyn RootVolume` is the **object-safe** handle the
-/// post-mount [`MountedRootHook`] receives — letting the generic unlock
-/// policy hand a freshly mounted, concretely-typed volume to a continuation
-/// without itself naming the concrete filesystem type (`AGENTS.md` §17.4).
-/// Its supertraits are exactly the bound
-/// [`autoload_from_mounted_root`](crate::driver_autoload::autoload_from_mounted_root)
-/// requires, so the hook forwards the `&mut dyn RootVolume` straight into it.
+/// continuation passed to [`with_system_volume`] receives — letting the
+/// generic unlock policy hand a freshly mounted, concretely-typed volume to
+/// a continuation without itself naming the concrete filesystem type
+/// (`AGENTS.md` §17.4). Its supertraits are exactly the bound the
+/// [`SystemFileService`](crate::system_files::SystemFileService) the
+/// driver-store server builds over the volume requires.
 pub trait RootVolume: FilesystemRead + FilesystemSecurity {}
 
 impl<T: FilesystemRead + FilesystemSecurity + ?Sized> RootVolume for T {}
-
-/// A continuation the boot path runs against the **just-mounted, still-open**
-/// read-only `/System` volume, before that volume handle is dropped
-/// (`plans/PI.md` design B).
-///
-/// The aarch64 in-kernel unlock kthread uses it to autoload user-space
-/// drivers off the read-only `/System` volume's signed `/System/Drivers/`
-/// store (`AGENTS.md` §18.3 / §18.6) **before** the operator types the
-/// encrypted-root passphrase — the design-B sequencing that brings the
-/// keyboard up in user space in time to type the unlock prompt. The volume
-/// holds no secrets; its integrity rests on the per-bundle signatures the
-/// load gate verifies, so it is mounted read-only ([`autoload_system_drivers`]).
-///
-/// The hook **must not fail the boot**: a driver that cannot load fails
-/// *that node* closed inside the autoload pipeline (`AGENTS.md` §18.4 /
-/// §5.4), never the mount, so `after_mount` returns `()` and the boot
-/// proceeds to the passphrase prompt regardless.
-pub trait MountedRootHook {
-    /// Run against the mounted `volume`.
-    fn after_mount(&mut self, volume: &mut dyn RootVolume);
-}
 
 /// Audit event: the encrypted root volume was unlocked under the
 /// passphrase-derived key and mounted (`AGENTS.md` §5.4.4 / §19.4). The
@@ -339,9 +318,11 @@ where
             return Err(error);
         }
     };
-    // This two-device entry loads only the users database; driver autoload
-    // is the design-B pre-unlock `/System`-volume path ([`autoload_system_drivers`]),
-    // independent of this read (`AGENTS.md` §2.3).
+    // This two-device entry loads only the users database; driver loading
+    // is the design-B `/System`-volume path the `devmgr` drives over the
+    // driver-store endpoint ([`with_system_volume`] /
+    // [`crate::driver_store_server`]), independent of this read (`AGENTS.md`
+    // §2.3).
     unlock_root_and_load_users(&descriptor, passphrase, root_block, audit)
 }
 
@@ -375,9 +356,10 @@ where
 /// * `audit` — the sink every decision is logged through (`AGENTS.md`
 ///   §19.4).
 ///
-/// Driver autoload is **not** part of this read: it is the design-B
-/// pre-unlock `/System`-volume path ([`autoload_system_drivers`]), run once
-/// before the passphrase prompt, independent of the users-database load.
+/// Driver loading is **not** part of this read: it is the design-B
+/// `/System`-volume path the user-space `devmgr` drives over the
+/// driver-store endpoint ([`with_system_volume`] /
+/// [`crate::driver_store_server`]), independent of the users-database load.
 ///
 /// # Errors
 ///
@@ -449,65 +431,17 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 }
 
 /// Discover and mount the read-only signed-bundle `/System` volume on
-/// `disk` and run `hook` against it — the design-B pre-unlock driver-store
-/// autoload (`plans/PI.md` design B / B2).
-///
-/// Called **once, before the passphrase prompt**, so the keyboard driver
-/// the `/System/Drivers/` store carries is brought up in user space *before*
-/// the operator must type the encrypted-root passphrase — the chicken-and-
-/// egg design B resolves (the store lives on a volume reachable before
-/// unlock, since the keyboard is needed to type the unlock secret).
-///
-/// The disk's partition table is parsed fail-closed; if it carries a
-/// [`PartitionType::RustFsSystem`] partition, a bounds-checked
-/// [`PartitionBlock`] window is opened over it and mounted **read-only**
-/// under the non-secret well-known [`SYSTEM_VOLUME_KEY`]
-/// ([`RustFs::open_read_only`] — the volume holds no secrets and its
-/// integrity rests on the per-bundle Ed25519 signatures the load gate
-/// verifies, `AGENTS.md` §18.6). The volume's root is probed for the §16.2
-/// `Drivers` store directory to confirm it is a real `/System` volume, the
-/// mount is audited (`SYSTEM_VOLUME_MOUNTED`), and then `hook` runs
-/// against the still-open volume (the aarch64 unlock kthread's
-/// [`AutoloadHook`](crate::unlock_service::AutoloadHook), which scans the
-/// store at [`SYSTEM_VOLUME_STORE_PATH`](rustos_kernel_core::SYSTEM_VOLUME_STORE_PATH)
-/// and spawns each matched driver into its own process).
-///
-/// **Fail-soft and fail-closed** (`AGENTS.md` §18.4 / §2.9): a disk with no
-/// — or an unopenable — `/System` volume autoloads nothing and the boot
-/// proceeds to the passphrase prompt (on a UART console the passphrase can
-/// still be typed); every decline is audited (`SYSTEM_VOLUME_UNAVAILABLE`)
-/// but never aborts the boot. The `hook` likewise can never fail the boot —
-/// a node matching nothing is left unbound and a bad bundle fails *that*
-/// node closed inside the autoload pipeline. The borrow of `disk` ends when
-/// the volume handle drops here, so the caller reuses the device for the
-/// interactive unlock that follows.
-///
-/// * `disk` — the whole-disk [`Block`] device the board brought up.
-/// * `hook` — the [`MountedRootHook`] run against the mounted read-only
-///   `/System` volume (driver autoload).
-/// * `audit` — the sink every decision is logged through (`AGENTS.md`
-///   §19.4). No secret is consumed or logged.
-pub fn autoload_system_drivers<Disk: Block>(
-    disk: &mut Disk,
-    hook: &mut dyn MountedRootHook,
-    audit: &dyn Sink,
-) {
-    // Autoload off the read-only `/System` store, pre-unlock. The hook never
-    // fails the boot (`AGENTS.md` §18.4 / §5.4); a disk with no `/System`
-    // volume runs no hook at all (`with_system_volume` returns `None`).
-    with_system_volume(disk, audit, |volume| hook.after_mount(volume));
-}
-
-/// Discover and mount the read-only signed-bundle `/System` volume on
 /// `disk` and run the continuation `f` against the **still-open** volume,
 /// returning whatever `f` returns wrapped in [`Some`].
 ///
 /// This is the one place the `/System` discovery + read-only mount + layout
-/// confirmation lives (`AGENTS.md` §2.2): the design-B pre-unlock autoload
-/// ([`autoload_system_drivers`]) runs its hook through it, and the Design D
-/// persistent driver-store file service
+/// confirmation lives (`AGENTS.md` §2.2): the Design D persistent
+/// driver-store service
 /// ([`crate::driver_store_server::serve_system_store`]) runs its
-/// never-returning serve loop through it. Because the mounted volume borrows
+/// never-returning serve loop through it, building a
+/// [`SystemFileService`](crate::system_files::SystemFileService) over the
+/// mounted volume to serve the `devmgr` catalogue/load requests. Because the
+/// mounted volume borrows
 /// the [`PartitionBlock`] window which borrows `disk`, all of it lives on
 /// the caller's frame for as long as `f` runs — so a continuation that never
 /// returns (the persistent server) keeps the mount live for the life of the
@@ -771,10 +705,12 @@ fn finish_install(
 /// * `audit` — the sink every decision is logged through (`AGENTS.md`
 ///   §19.4); no passphrase, key, or volume byte is ever logged.
 ///
-/// Driver autoload is **not** part of this policy: under design B it runs
-/// once *before* this prompt, off the read-only `/System` volume
-/// ([`autoload_system_drivers`]), so the keyboard is already up when the
-/// operator types here.
+/// Driver loading is **not** part of this policy: under design B the
+/// user-space `devmgr` loads drivers over the driver-store endpoint served
+/// off the read-only `/System` volume ([`with_system_volume`] /
+/// [`crate::driver_store_server`]), independent of this encrypted-root
+/// (user-data) prompt — the store volume is reachable without this
+/// passphrase.
 pub fn unlock_root_disk_interactively<Disk: Block>(
     disk: Disk,
     console: &dyn ConsoleWrite,
@@ -1505,9 +1441,9 @@ mod tests {
         db.authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())
             .expect("the planted account authenticates");
         assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
-        // The `/System`-volume autoload is no longer part of this users-load
-        // path; it is the separate pre-unlock `autoload_system_drivers` step
-        // (design B2), exercised by its own tests below.
+        // The `/System`-volume mount is no longer part of this users-load
+        // path; it is the separate `with_system_volume` mount seam (design
+        // B), exercised by its own tests below.
         assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
     }
 
@@ -1850,67 +1786,7 @@ mod tests {
         );
     }
 
-    // --- autoload_system_drivers (the design-B pre-unlock /System scan) --
-
-    /// A [`MountedRootHook`] that counts how many times it was run against a
-    /// mounted volume, so a test can prove the autoload runs against the
-    /// `/System` volume exactly when (and only when) that volume mounts.
-    #[derive(Default)]
-    struct CountingHook {
-        runs: usize,
-    }
-
-    impl MountedRootHook for CountingHook {
-        fn after_mount(&mut self, _volume: &mut dyn RootVolume) {
-            self.runs += 1;
-        }
-    }
-
-    #[test]
-    fn autoload_system_drivers_runs_the_hook_against_the_mounted_system_volume() {
-        // Design B2: the autoload mounts the read-only `/System` volume off
-        // the same whole disk — *before* any passphrase — and runs the hook
-        // against it exactly once. The audit records the read-only mount
-        // (`4140`) and never the unavailable case (`4141`); the encrypted
-        // root is never touched (no `4133`).
-        let mut disk = success_disk();
-        let sink = RecordingSink::new();
-        let mut hook = CountingHook::default();
-
-        autoload_system_drivers(&mut disk, &mut hook, &sink);
-
-        assert_eq!(
-            hook.runs, 1,
-            "the hook runs once, on the single /System mount"
-        );
-        assert!(sink.ids().contains(&4140), "{:?}", sink.ids());
-        assert!(!sink.ids().contains(&4141), "{:?}", sink.ids());
-        assert!(
-            !sink.ids().contains(&4133),
-            "the encrypted root is never unlocked by the autoload: {:?}",
-            sink.ids()
-        );
-    }
-
-    #[test]
-    fn autoload_system_drivers_is_fail_soft_when_there_is_no_system_volume() {
-        // §18.4 / §2.9: a disk with no recognised partition table carries no
-        // `/System` volume, so the autoload mounts nothing and runs no hook —
-        // it is fail-soft (the boot proceeds to the passphrase prompt) and
-        // audits the unavailable case (`4141`), never the mounted one.
-        let mut disk = FatVecBlock::new(64);
-        let sink = RecordingSink::new();
-        let mut hook = CountingHook::default();
-
-        autoload_system_drivers(&mut disk, &mut hook, &sink);
-
-        assert_eq!(
-            hook.runs, 0,
-            "the hook never runs when no /System volume mounts"
-        );
-        assert!(sink.ids().contains(&4141), "{:?}", sink.ids());
-        assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
-    }
+    // --- with_system_volume (the one design-B /System mount seam) --------
 
     #[test]
     fn with_system_volume_runs_the_continuation_and_returns_its_result() {

@@ -200,28 +200,39 @@ place — `rustos_kernel_irq::block_until_ready` — so every in-kernel
 waiter drives the same implementation rather than re-deriving it
 (`AGENTS.md` §2.2 — no duplication). The loop computes the deadline
 once (`start + saturating(timeout)`, so `u64::MAX` does not wrap to a
-tiny value), polls `try_wait_step`, and yields between polls until
+tiny value), polls `try_wait_step`, and suspends between polls until
 the line fires, the deadline elapses, or the binding disappears.
 
-The clock and the cooperative yield are inverted behind the
+The clock and the suspend step are inverted behind the
 two-method `IrqWaiter` trait, which keeps `kernel/irq` free of any
 scheduler or architecture dependency:
 
 * `IrqWaiter::now_ns()` — non-decreasing per-CPU clock reading.
-* `IrqWaiter::yield_now()` — surrenders the rest of the quantum and
-  returns `Ok` to re-loop, or `Err(IrqWaitAbort)` to abort (e.g. the
-  task can no longer be scheduled).
+* `IrqWaiter::yield_now()` — suspends until the next poll (a real park
+  off the run queue on the syscall path, a cooperative yield / `wfi`
+  on the kthread path — the implementation's choice) and returns `Ok`
+  to re-loop, or `Err(IrqWaitAbort)` to abort (e.g. the task can no
+  longer be scheduled).
 
 Three implementations exist:
 
-* **`irq_wait` syscall handler** (`kernel/core::syscalls`): wraps
-  `KernelArch::monotonic_ns(arch.current_cpu())` and
-  `Scheduler::yield_current(caller.task_id)`. It tolerates
-  `SchedError::InvalidState` (in host-side tests the calling task is
-  not marked Running) and re-loops, maps `NoSuchTask` to
-  `Errno::NotFound`, and fails closed to `Errno::OutOfRange` on any
-  other scheduler error. The loop always terminates because the
-  per-CPU monotonic clock is strictly monotonic.
+* **`irq_wait` syscall handler** (`kernel/core::syscalls`): registers
+  the caller on `rustos_kernel_core::IRQ_WAITQ` *before* the first
+  poll, then **parks** off the run queue (`SyscallIrqWaiter` calls
+  `reschedule_current(Park)` — `AGENTS.md` §2.1, no busy yield). It is
+  woken by `irq_wake` the instant the device-IRQ dispatch path runs
+  `IrqTable::fire`, or, with a finite timeout, by the architecture
+  one-shot's per-tick `timed_wake_sweep`; it re-checks its own bound
+  line after every wake and deregisters when the wait ends. The
+  register-before-poll order plus the scheduler wake-pending token
+  closes the park/unpark race, exactly as `hw_tree_wait` does
+  (`AGENTS.md` §2.2). In host-side tests (no live dispatch loop)
+  `reschedule_current` returns `false` and it falls back to
+  `Scheduler::yield_current`, tolerating `SchedError::InvalidState`,
+  mapping `NoSuchTask` to `Errno::NotFound`, and failing closed to
+  `Errno::OutOfRange` on any other scheduler error; the loop still
+  terminates because the per-CPU monotonic clock is strictly
+  monotonic.
 * **`KthreadIrqWaiter`** (`kernel/core::kthread_irq`): the waiter an
   in-kernel **service kthread** drives — it has no syscall frame or
   `Scheduler` borrow, so it suspends through the object-safe
@@ -229,8 +240,9 @@ Three implementations exist:
   `RefCell`, because `IrqWaiter::yield_now` is `&self` while
   `YieldHandle::yield_now` is `&mut self`) plus a monotonic-clock
   closure, and like the syscall path it *yields* (re-enqueues,
-  staying runnable) rather than parks, so there is no lost-wakeup
-  window. This is the path the P11 root-unlock kthread takes to drive
+  staying runnable, or `wfi`-parks on metal) rather than parking on the
+  scheduler run queue, so there is no lost-wakeup window. This is the
+  path the P11 root-unlock kthread takes to drive
   interrupt-driven block I/O before login; it is proven end-to-end by
   the `tests/integration/irq_kthread_qemu_aarch64` vertical, where a
   device SPI wakes a parked kthread under the live scheduler.
@@ -247,10 +259,15 @@ Three implementations exist:
 
 This design composes existing scheduler primitives only; no new
 scheduler interface is introduced (`AGENTS.md` §2.4 — no interface
-creep). A power-efficient variant that parks the caller and
-relies on a controller-tick to wake on timeout is queued for a
-future landing alongside the per-arch trap glue; today's wait
-loop is correct but consumes scheduler quanta while blocked.
+creep). The `irq_wait` syscall path now **parks** off the run queue
+rather than busy-yielding: the device-IRQ dispatch path's `irq_wake`
+(after `IrqTable::fire`) unparks a waiter on a fire, and `IRQ_WAITQ`
+is swept by `timed_wake_sweep` for finite timeouts, so a blocked
+user-space driver consumes no scheduler quanta. The in-kernel kthread
+path still suspends through its own race-free wait (a cooperative
+yield under the QEMU verticals, a `wfi` park on metal); migrating it
+to the same scheduler park is the device two-task split, queued for a
+future landing alongside the per-arch trap glue.
 
 ### Architecture-port glue
 

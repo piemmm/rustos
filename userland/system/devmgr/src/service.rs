@@ -1,26 +1,36 @@
-//! The device manager's reactive observe loop (`AGENTS.md` §18.4).
+//! The device manager's reactive match-and-load loop (`AGENTS.md` §18.4).
 //!
-//! The `Run` service reads the discovered hardware tree, reports every
-//! node, then **blocks** until the tree changes and re-reads it — the
-//! reactive discovery the §18.4 hotplug model requires. That control flow
-//! is pure with respect to the kernel: it reads, waits, and reports through
-//! the [`HwTreeService`] seam, so the loop's logic — read once, then
-//! re-read on every generation advance — is exercised on the host against a
-//! scripted seam, independently of the freestanding program and the live
-//! `hw_tree_read` / `hw_tree_wait` syscalls it binds in production
-//! (`AGENTS.md` §2.2). The wire decode it builds on is the same
-//! fail-closed [`crate::observe::for_each_node`] walk.
+//! The `Run` service fetches the kernel-decoded driver catalogue once (the
+//! read-only `/System` store is static for the life of the system,
+//! `AGENTS.md` §2.16), then reads the discovered hardware tree, loads a
+//! driver for every node that matches a catalogue bundle, and **blocks**
+//! until the tree changes and re-reads it — the reactive discovery the §18.4
+//! hotplug model requires. Both halves are pure with respect to the kernel:
+//! the loop reads/waits through the [`HwTreeService`] seam and fetches/loads
+//! through the [`DriverStoreCall`] seam, so its logic — fetch once, then
+//! match-and-load on every generation advance — is exercised on the host
+//! against scripted doubles, independently of the freestanding
+//! `hw_tree_read` / `hw_tree_wait` / `ipc_call` syscalls it binds in
+//! production (`AGENTS.md` §2.2).
 //!
 //! The loop never busy-spins (`AGENTS.md` §2.1): [`HwTreeService::wait_for_change`]
-//! blocks until the store's generation advances. A failure in any seam
+//! blocks until the store's generation advances. A failure in a tree-seam
 //! operation ends the loop fail-closed with the reported [`Errno`]
-//! (`AGENTS.md` §2.9); the supervising PID 1 decides what to do next.
+//! (`AGENTS.md` §2.9); a catalogue that cannot be fetched is fail-soft —
+//! the service loads nothing but keeps observing (`AGENTS.md` §18.4).
+
+use alloc::vec::Vec;
 
 use rustos_abi::{Errno, HwNode, HwTreeHeader};
+use rustos_devmatch::DriverCandidate;
+use rustos_log::{log as log_event, Event, Level, Sink};
 
+use crate::autoload::{match_and_load, LoadedBundles};
+use crate::events;
 use crate::observe::for_each_node;
+use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 
-/// The kernel-facing operations the reactive observe loop performs,
+/// The kernel-facing hardware-tree operations the reactive loop performs,
 /// abstracted so the loop is host-testable against a scripted double.
 ///
 /// The production implementation (the freestanding `devmgr` `Run` binary)
@@ -48,63 +58,153 @@ pub trait HwTreeService {
     fn on_node(&mut self, node: &HwNode);
 }
 
-/// Read the current tree through `svc`, reporting its header and every
-/// node, and return the generation the snapshot was taken at (the value to
-/// pass to the next [`HwTreeService::wait_for_change`]).
+/// (Re)fetch the catalogue while it has not yet been obtained, then read the
+/// current tree through `tree` (reporting and collecting its nodes) and
+/// match-and-load each node through `store`, returning the generation the
+/// snapshot was taken at.
+///
+/// The catalogue is retried while `catalogue` is [`None`]: the kernel store
+/// service binds its endpoint *after* the boot tree settles, so a fetch
+/// issued before the bind fails (the endpoint is unbound) — the kernel then
+/// bumps the tree generation when it binds, waking this loop to retry
+/// (`AGENTS.md` §18.4). Until the catalogue is obtained, matching runs
+/// against an empty candidate set, so every node is observed and left
+/// unbound, then loaded on the re-evaluation once the store is reachable.
 ///
 /// # Errors
 ///
 /// Propagates the [`Errno`] from [`HwTreeService::read_tree`] or from the
 /// fail-closed [`for_each_node`] decode; on any error no header is reported
-/// (`AGENTS.md` §2.9).
-pub fn observe_once<S: HwTreeService>(svc: &mut S, buf: &mut [u8]) -> Result<u64, Errno> {
-    let len = svc.read_tree(buf)?;
-    // `for_each_node` borrows `buf` immutably and the closure borrows `svc`
-    // mutably; the two borrows are disjoint, so the per-node report runs
-    // while the snapshot is decoded without copying it out.
-    let header = for_each_node(&buf[..len], |node| svc.on_node(node))?;
-    svc.on_header(&header);
+/// and no node is loaded (`AGENTS.md` §2.9). A catalogue-fetch failure is
+/// **not** propagated — it is fail-soft (logged, retried, `AGENTS.md` §18.4).
+fn react_once<T: HwTreeService, C: DriverStoreCall>(
+    tree: &mut T,
+    store: &mut C,
+    catalogue: &mut Option<Vec<CatalogueDriver>>,
+    loaded: &mut LoadedBundles,
+    tree_buf: &mut [u8],
+    reply_buf: &mut [u8],
+    sink: &dyn Sink,
+) -> Result<u64, Errno> {
+    if catalogue.is_none() {
+        match fetch_catalogue(store, reply_buf) {
+            Ok(fetched) => *catalogue = Some(fetched),
+            Err(_) => {
+                // Fail-soft: no store served yet (unbound endpoint) or an
+                // unreadable store loads nothing this cycle, but the service
+                // keeps observing and retries on the next generation bump
+                // (`AGENTS.md` §18.4 / §2.9).
+                log_event(
+                    sink,
+                    &Event {
+                        level: Level::Warn,
+                        id: events::DRIVER_STORE_UNAVAILABLE,
+                        message: "driver-store catalogue unavailable; retrying on re-evaluation",
+                        fields: &[],
+                    },
+                );
+            }
+        }
+    }
+    let len = tree.read_tree(tree_buf)?;
+    // Decode the snapshot once: report each node and collect it (`HwNode`
+    // is `Copy`), so the immutable borrow of `tree_buf` ends before the
+    // match-and-load pass writes into the disjoint `reply_buf`.
+    let mut nodes: Vec<HwNode> = Vec::new();
+    let header = for_each_node(&tree_buf[..len], |node| {
+        tree.on_node(node);
+        nodes.push(*node);
+    })?;
+    tree.on_header(&header);
+    // Match against the obtained catalogue, or an empty set while it is not
+    // yet available (every node observed and left unbound until the store
+    // binds, `AGENTS.md` §18.4).
+    let drivers: &[CatalogueDriver] = catalogue.as_deref().unwrap_or(&[]);
+    let candidates: Vec<DriverCandidate<'_>> =
+        drivers.iter().map(CatalogueDriver::candidate).collect();
+    match_and_load(&nodes, drivers, &candidates, store, reply_buf, loaded, sink);
     Ok(header.generation())
 }
 
-/// Run the reactive observe loop: read and report the tree, then block on
-/// every generation advance and re-read it (`AGENTS.md` §18.4).
+/// Run the reactive match-and-load loop: read the tree, load a driver for
+/// every matched node, and block on every generation advance to re-match
+/// (`AGENTS.md` §18.4).
 ///
-/// `budget` bounds the number of *reactions* (re-reads after a change):
-/// [`None`] runs for the life of the service (the production device
-/// manager waits forever), while [`Some(n)`](Some) returns [`Ok`] after `n`
-/// reactions — the bounded form the host tests drive so the loop
-/// terminates. The initial read is always performed before the first wait.
+/// * `tree` — the hardware-tree read/wait seam.
+/// * `store` — the driver-store catalogue/load seam.
+/// * `sink` — the audit sink every match/load decision is logged through.
+/// * `tree_buf` — the buffer the tree snapshot is read into.
+/// * `reply_buf` — the buffer the catalogue and each load reply are received
+///   into (disjoint from `tree_buf`, so a load can run while a snapshot is
+///   decoded).
+/// * `budget` — bounds the number of *reactions* (re-reads after a change):
+///   [`None`] runs for the life of the service (the production device
+///   manager waits forever), while [`Some(n)`](Some) returns [`Ok`] after
+///   `n` reactions — the bounded form the host tests drive. The initial read
+///   is always performed before the first wait.
+///
+/// The catalogue is fetched lazily and retried while it has not been
+/// obtained: the kernel store service binds its endpoint after the boot tree
+/// settles, so the first fetch may fail and is retried on the re-evaluation
+/// the kernel triggers when it binds (`AGENTS.md` §18.4 / §2.16 — once
+/// obtained, the static read-only store is not re-fetched).
 ///
 /// # Errors
 ///
-/// Returns the first [`Errno`] any seam operation reports; the loop is
-/// fail-closed (`AGENTS.md` §2.9) and never silently continues past an
-/// error.
-pub fn run<S: HwTreeService>(
-    svc: &mut S,
-    buf: &mut [u8],
+/// Returns the first [`Errno`] a *tree-seam* operation reports
+/// ([`HwTreeService::read_tree`] / [`HwTreeService::wait_for_change`]) or a
+/// snapshot decode failure; the loop is fail-closed (`AGENTS.md` §2.9) and
+/// never silently continues past such an error. A catalogue-fetch failure is
+/// fail-soft, not propagated (`AGENTS.md` §18.4).
+pub fn run<T: HwTreeService, C: DriverStoreCall>(
+    tree: &mut T,
+    store: &mut C,
+    sink: &dyn Sink,
+    tree_buf: &mut [u8],
+    reply_buf: &mut [u8],
     budget: Option<u32>,
 ) -> Result<(), Errno> {
-    let mut last_generation = observe_once(svc, buf)?;
+    let mut catalogue: Option<Vec<CatalogueDriver>> = None;
+    let mut loaded = LoadedBundles::new();
+
+    let mut last_generation = react_once(
+        tree,
+        store,
+        &mut catalogue,
+        &mut loaded,
+        tree_buf,
+        reply_buf,
+        sink,
+    )?;
     let mut reactions = 0u32;
     loop {
         if budget.is_some_and(|max| reactions >= max) {
             return Ok(());
         }
-        svc.wait_for_change(last_generation)?;
-        last_generation = observe_once(svc, buf)?;
+        tree.wait_for_change(last_generation)?;
+        last_generation = react_once(
+            tree,
+            store,
+            &mut catalogue,
+            &mut loaded,
+            tree_buf,
+            reply_buf,
+            sink,
+        )?;
         reactions += 1;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    extern crate alloc;
-    use alloc::vec::Vec;
-
     use super::*;
-    use rustos_abi::hwtree::{HwDeviceClass, HW_NODE_ROOT};
+
+    use alloc::vec;
+    use core::cell::RefCell;
+
+    use rustos_abi::driver_store::{encode_catalogue_reply, encode_load_reply, StoreRequest};
+    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
+    use rustos_abi::DriverBindKey;
 
     /// Encode `[HwTreeHeader][HwNode; n]` exactly as the kernel store does.
     fn encode(generation: u64, nodes: &[HwNode]) -> Vec<u8> {
@@ -116,33 +216,36 @@ mod tests {
         blob
     }
 
-    /// A scripted seam: hands out a queued snapshot on each `read_tree`,
-    /// records the generations it was asked to wait past and the nodes /
-    /// headers it was asked to report, and fails closed once its script is
-    /// exhausted (so a loop that reads more than scripted is caught).
-    struct ScriptedService {
+    fn input_node(id: u32, key: HwMatchKey) -> HwNode {
+        let mut node = HwNode::new(id, 1, HwDeviceClass::Input);
+        node.push_match_key(key).expect("key fits");
+        node
+    }
+
+    /// A scripted hardware-tree seam: hands out a queued snapshot on each
+    /// `read_tree`, records the generations it waited past and the node ids
+    /// it reported, and fails closed once its script is exhausted.
+    struct ScriptedTree {
         snapshots: Vec<Vec<u8>>,
         next: usize,
         waited_on: Vec<u64>,
-        reported_headers: Vec<(u64, u64)>,
         reported_nodes: Vec<u32>,
         wait_error: Option<Errno>,
     }
 
-    impl ScriptedService {
+    impl ScriptedTree {
         fn new(snapshots: Vec<Vec<u8>>) -> Self {
             Self {
                 snapshots,
                 next: 0,
                 waited_on: Vec::new(),
-                reported_headers: Vec::new(),
                 reported_nodes: Vec::new(),
                 wait_error: None,
             }
         }
     }
 
-    impl HwTreeService for ScriptedService {
+    impl HwTreeService for ScriptedTree {
         fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
             let snapshot = self.snapshots.get(self.next).ok_or(Errno::NotFound)?;
             self.next += 1;
@@ -161,95 +264,324 @@ mod tests {
             Ok(())
         }
 
-        fn on_header(&mut self, header: &HwTreeHeader) {
-            self.reported_headers
-                .push((header.generation(), header.node_count()));
-        }
+        fn on_header(&mut self, _header: &HwTreeHeader) {}
 
         fn on_node(&mut self, node: &HwNode) {
             self.reported_nodes.push(node.id());
         }
     }
 
-    fn root_only(generation: u64) -> Vec<u8> {
-        encode(
-            generation,
-            &[HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)],
-        )
+    /// A scripted driver-store seam: frames a fixed catalogue on a
+    /// `Catalogue` request, and on a `Load` records `(bundle_id, node_id)`
+    /// and frames a per-bundle handle — the in-memory analogue of the kernel
+    /// server's `build_reply`, so the client's framing round-trips against a
+    /// real wire reply.
+    struct ScriptedStore {
+        catalogue: Vec<(u32, Vec<DriverBindKey>)>,
+        loads: RefCell<Vec<(u32, u32)>>,
     }
 
-    fn root_plus_bus(generation: u64) -> Vec<u8> {
-        encode(
-            generation,
+    impl DriverStoreCall for ScriptedStore {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            match StoreRequest::decode(request)? {
+                StoreRequest::Catalogue => {
+                    let entries: Vec<(u32, &[DriverBindKey])> = self
+                        .catalogue
+                        .iter()
+                        .map(|(id, keys)| (*id, keys.as_slice()))
+                        .collect();
+                    encode_catalogue_reply(reply, &entries)
+                }
+                StoreRequest::Load { bundle_id, node_id } => {
+                    self.loads.borrow_mut().push((bundle_id, node_id));
+                    // A distinct, non-zero handle per bundle.
+                    encode_load_reply(reply, u64::from(bundle_id) + 0x1000)
+                }
+            }
+        }
+    }
+
+    /// A store whose catalogue fetch fails in band (the kernel framed an
+    /// error reply, e.g. an unreadable store).
+    struct FailingCatalogue;
+
+    impl DriverStoreCall for FailingCatalogue {
+        fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            rustos_abi::driver_store::encode_error_reply(reply, Errno::PermissionDenied)
+        }
+    }
+
+    struct RecordingSink {
+        ids: RefCell<Vec<u32>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                ids: RefCell::new(Vec::new()),
+            }
+        }
+        fn ids(&self) -> Vec<u32> {
+            self.ids.borrow().clone()
+        }
+    }
+
+    impl Sink for RecordingSink {
+        fn write_event(&self, event: &Event<'_>) {
+            self.ids.borrow_mut().push(event.id.0);
+        }
+    }
+
+    fn bind(priority: u16, key: HwMatchKey) -> DriverBindKey {
+        DriverBindKey::new(priority, key)
+    }
+
+    #[test]
+    fn the_first_cycle_loads_a_driver_for_every_matched_node() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let snapshot = encode(
+            1,
             &[
                 HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
-                HwNode::new(2, 1, HwDeviceClass::Bus),
+                input_node(2, kbd),
             ],
+        );
+        let mut tree = ScriptedTree::new(vec![snapshot]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, kbd)])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &sink,
+            &mut tree_buf,
+            &mut reply_buf,
+            Some(0),
         )
+        .expect("the initial cycle runs");
+
+        // Node 2 matched bundle 7 and was loaded for that node id.
+        assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
+        assert!(
+            sink.ids().contains(&events::NODE_BOUND.0),
+            "{:?}",
+            sink.ids()
+        );
     }
 
     #[test]
-    fn observe_once_reports_every_node_and_returns_the_generation() {
-        let mut svc = ScriptedService::new(alloc::vec![root_plus_bus(7)]);
-        let mut buf = [0u8; 4096];
-        let generation = observe_once(&mut svc, &mut buf).expect("decodes");
-        assert_eq!(generation, 7);
-        assert_eq!(svc.reported_nodes, alloc::vec![1, 2]);
-        assert_eq!(svc.reported_headers, alloc::vec![(7, 2)]);
+    fn an_unmatched_node_is_left_unbound_and_never_loaded() {
+        let snapshot = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, HwMatchKey::virtio(0xFFFF)),
+            ],
+        );
+        let mut tree = ScriptedTree::new(vec![snapshot]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, HwMatchKey::virtio(0x1234))])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &sink,
+            &mut tree_buf,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("the initial cycle runs");
+
+        assert!(store.loads.borrow().is_empty(), "no node matched");
+        assert!(sink.ids().contains(&events::NODE_UNBOUND.0));
     }
 
     #[test]
-    fn run_reads_then_reacts_to_one_generation_bump() {
-        // The bounded loop: read generation 1 (root only), block once, then
-        // re-read generation 2 (a bus appeared) and stop after the single
-        // scripted reaction (`AGENTS.md` §18.4).
-        let mut svc = ScriptedService::new(alloc::vec![root_only(1), root_plus_bus(2)]);
-        let mut buf = [0u8; 4096];
-        run(&mut svc, &mut buf, Some(1)).expect("one reaction");
+    fn a_bundle_matched_by_two_nodes_is_loaded_once() {
+        let key = HwMatchKey::compatible(b"arm,pl011").expect("compatible fits");
+        let snapshot = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                {
+                    let mut n = HwNode::new(2, 1, HwDeviceClass::Serial);
+                    n.push_match_key(key).expect("key fits");
+                    n
+                },
+                {
+                    let mut n = HwNode::new(3, 1, HwDeviceClass::Serial);
+                    n.push_match_key(key).expect("key fits");
+                    n
+                },
+            ],
+        );
+        let mut tree = ScriptedTree::new(vec![snapshot]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(4, vec![bind(2, key)])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 8192];
+        let mut reply_buf = [0u8; 4096];
 
-        // It waited exactly once, on the first read's generation.
-        assert_eq!(svc.waited_on, alloc::vec![1]);
-        // Two reads happened: the initial one and the post-change re-read.
-        assert_eq!(svc.reported_headers, alloc::vec![(1, 1), (2, 2)]);
-        // The re-read observed the appeared bus node.
-        assert_eq!(svc.reported_nodes, alloc::vec![1, 1, 2]);
+        run(
+            &mut tree,
+            &mut store,
+            &sink,
+            &mut tree_buf,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("the initial cycle runs");
+
+        // The shared bundle 4 is loaded once (for the first matched node),
+        // but both nodes are reported bound.
+        assert_eq!(store.loads.borrow().as_slice(), &[(4, 2)]);
+        assert_eq!(
+            sink.ids()
+                .iter()
+                .filter(|&&id| id == events::NODE_BOUND.0)
+                .count(),
+            2
+        );
     }
 
     #[test]
-    fn run_stops_immediately_with_a_zero_budget() {
-        // A zero reaction budget performs the initial read and returns
-        // without ever waiting.
-        let mut svc = ScriptedService::new(alloc::vec![root_only(3)]);
-        let mut buf = [0u8; 4096];
-        run(&mut svc, &mut buf, Some(0)).expect("initial read only");
-        assert!(svc.waited_on.is_empty(), "a zero budget never waits");
-        assert_eq!(svc.reported_headers, alloc::vec![(3, 1)]);
+    fn a_reaction_reloads_only_a_newly_appeared_node() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let net = HwMatchKey::virtio(0x0001);
+        let first = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, kbd),
+            ],
+        );
+        let second = encode(
+            2,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, kbd),
+                {
+                    let mut n = HwNode::new(3, 1, HwDeviceClass::Network);
+                    n.push_match_key(net).expect("key fits");
+                    n
+                },
+            ],
+        );
+        let mut tree = ScriptedTree::new(vec![first, second]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, kbd)]), (8, vec![bind(5, net)])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 8192];
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &sink,
+            &mut tree_buf,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("one reaction");
+
+        // The keyboard (bundle 7) is loaded only once across both cycles;
+        // the appeared network node loads bundle 8 on the reaction.
+        assert_eq!(store.loads.borrow().as_slice(), &[(7, 2), (8, 3)]);
+        assert_eq!(tree.waited_on, vec![1]);
+    }
+
+    #[test]
+    fn a_failed_catalogue_fetch_is_fail_soft_and_still_observes() {
+        let snapshot = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, HwMatchKey::virtio(0x1234)),
+            ],
+        );
+        let mut tree = ScriptedTree::new(vec![snapshot]);
+        let mut store = FailingCatalogue;
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &sink,
+            &mut tree_buf,
+            &mut reply_buf,
+            Some(0),
+        )
+        .expect("a failed catalogue fetch does not abort the loop");
+
+        // The store-unavailable event is logged and the node is observed and
+        // (with an empty catalogue) left unbound — never an error.
+        assert!(sink.ids().contains(&events::DRIVER_STORE_UNAVAILABLE.0));
+        assert!(sink.ids().contains(&events::NODE_UNBOUND.0));
+        assert_eq!(tree.reported_nodes, vec![1, 2]);
     }
 
     #[test]
     fn run_fails_closed_when_the_initial_read_fails() {
-        // An empty script makes `read_tree` fail closed; the loop never
-        // waits and propagates the error (`AGENTS.md` §2.9).
-        let mut svc = ScriptedService::new(Vec::new());
-        let mut buf = [0u8; 4096];
-        assert_eq!(run(&mut svc, &mut buf, None), Err(Errno::NotFound));
-        assert!(svc.waited_on.is_empty());
+        let mut tree = ScriptedTree::new(Vec::new());
+        let mut store = ScriptedStore {
+            catalogue: Vec::new(),
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 4096];
+        assert_eq!(
+            run(
+                &mut tree,
+                &mut store,
+                &sink,
+                &mut tree_buf,
+                &mut reply_buf,
+                None
+            ),
+            Err(Errno::NotFound)
+        );
+        assert!(tree.waited_on.is_empty());
     }
 
     #[test]
     fn run_fails_closed_when_the_wait_fails() {
-        let mut svc = ScriptedService::new(alloc::vec![root_only(1)]);
-        svc.wait_error = Some(Errno::NotImplemented);
-        let mut buf = [0u8; 4096];
-        assert_eq!(run(&mut svc, &mut buf, None), Err(Errno::NotImplemented));
-        // The initial read still happened before the failed wait.
-        assert_eq!(svc.reported_headers, alloc::vec![(1, 1)]);
-    }
-
-    #[test]
-    fn observe_once_propagates_an_undersized_buffer() {
-        let mut svc = ScriptedService::new(alloc::vec![root_plus_bus(1)]);
-        let mut buf = [0u8; 8];
-        assert_eq!(observe_once(&mut svc, &mut buf), Err(Errno::BufferTooSmall));
+        let snapshot = encode(1, &[HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)]);
+        let mut tree = ScriptedTree::new(vec![snapshot]);
+        tree.wait_error = Some(Errno::NotImplemented);
+        let mut store = ScriptedStore {
+            catalogue: Vec::new(),
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut tree_buf = [0u8; 4096];
+        let mut reply_buf = [0u8; 4096];
+        assert_eq!(
+            run(
+                &mut tree,
+                &mut store,
+                &sink,
+                &mut tree_buf,
+                &mut reply_buf,
+                None
+            ),
+            Err(Errno::NotImplemented)
+        );
     }
 }
