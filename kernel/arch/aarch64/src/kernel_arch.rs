@@ -453,25 +453,51 @@ impl SchedulerArch for Aarch64Arch {
     fn set_preemption(&self, armed: bool) {
         // Tickless preemption (`AGENTS.md` §17.1): the scheduler decided
         // whether the calling CPU has a competitor to bound the running
-        // task for. `armed` programs the EL1 generic-timer one-shot to one
-        // quantum (the per-CPU interval recorded by `init_local_preempt`,
-        // the single stored copy — §2.2); `!armed` disarms so a CPU
-        // running a sole task takes no timer ticks. Off the freestanding
-        // target there is no generic timer, so this is inert.
+        // task for. `armed` records the running task's quantum deadline
+        // (now + the per-CPU interval recorded by `init_local_preempt`, the
+        // single stored copy — §2.2); `!armed` clears it. The deadline
+        // combiner then programs the single EL1 generic-timer one-shot to
+        // the *earlier* of this quantum and any pending blocking-wait
+        // wakeup ([`Self::set_wakeup`]), so neither suppresses the other.
+        // Off the freestanding target there is no generic timer, so the
+        // arming is inert (the recorded deadline is still bookkept).
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
-            use rustos_arch_api::Timer;
-            let timer = crate::timer_hal::TimerHal::new();
-            if armed {
-                let quantum = crate::preempt::timer_interval_ticks(self.current_cpu());
-                timer.arm_oneshot(quantum);
+            let cpu = self.current_cpu();
+            let deadline = if armed {
+                let quantum = crate::preempt::timer_interval_ticks(cpu);
+                Some(read_cntpct().wrapping_add(quantum.max(1)))
             } else {
-                timer.disarm();
-            }
+                None
+            };
+            crate::preempt::record_quantum_deadline(cpu, deadline);
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {
             let _ = armed;
+        }
+    }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        // The timed half of the tickless one-shot (`AGENTS.md` §17.1): a
+        // blocking wait with a finite timeout records its soonest waiter
+        // deadline here so the parked waiter is woken on time even when the
+        // CPU has no runnable task to preempt. Convert the absolute
+        // monotonic-ns deadline to an absolute `CNTPCT_EL0` tick against
+        // this handle's `timer_hz` (the same frequency `monotonic_ns`
+        // converts the other way, §2.4), then record it; the combiner arms
+        // the one-shot to the earlier of this wakeup and any quantum. Off
+        // the freestanding target the arming is inert.
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            let cpu = self.current_cpu();
+            let deadline =
+                deadline_ns.map(|ns| rustos_arch_api::wakeup::ns_to_ticks(ns, self.timer_hz));
+            crate::preempt::record_wakeup_deadline(cpu, deadline);
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        {
+            let _ = deadline_ns;
         }
     }
 }

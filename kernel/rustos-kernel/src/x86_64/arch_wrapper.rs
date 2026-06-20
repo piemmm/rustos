@@ -116,6 +116,23 @@ extern "C" fn production_preempt_dispatch(cpu: CpuId) {
     let _ = reschedule_current(cpu, RescheduleAction::Yield);
 }
 
+/// The per-tick callback the LAPIC-timer ISR invokes on **every** tick
+/// (ring 3 *or* idle ring 0), installed via
+/// [`rustos_arch_x86_64::preempt::set_timer_callback`].
+///
+/// It runs the blocking-wait timed-wake sweep (Design D P-2): any waiter
+/// whose finite deadline has elapsed is unparked and the one-shot is
+/// re-armed to the next pending deadline
+/// ([`rustos_kernel_core::timed_wake_sweep`]), so a finite `hw_tree_wait`
+/// timeout fires even when the CPU is otherwise idle (every task parked)
+/// and takes no preemption tick (`AGENTS.md` §17.1). It is pure accounting
+/// (it never context-switches), so it is safe on a tick taken in ring 0;
+/// the *preemption* of a ring-3 task is the separate
+/// [`production_preempt_dispatch`] ring-3-only callback.
+extern "C" fn production_tick_dispatch(_cpu: CpuId) {
+    rustos_kernel_core::timed_wake_sweep();
+}
+
 /// Read the [`IrqTable`] published into `IRQ_TABLE_SLOT` by
 /// [`KernelArch::install_irq_dispatch`].
 ///
@@ -280,6 +297,15 @@ impl SchedulerArch for BinArch {
         // preemption, so the delegation is required (§2.9).
         self.arch.set_preemption(armed);
     }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        // Forward the nearest blocking-wait deadline to the arch port,
+        // which combines it with the quantum and arms the single
+        // LAPIC-timer one-shot to the earlier (`AGENTS.md` §17.1). The
+        // default no-op would silently drop timed wakes, so the delegation
+        // is required (§2.9).
+        self.arch.set_wakeup(deadline_ns);
+    }
 }
 
 impl KernelArch for BinArch {
@@ -345,6 +371,38 @@ impl KernelArch for BinArch {
         // pointer store (not a one-shot slot), so no fail-closed re-call
         // guard is needed here.
         rustos_arch_x86_64::preempt::set_preempt_callback(production_preempt_dispatch);
+
+        // Install the per-tick timed-wake sweep callback (Design D P-2), so
+        // every tick — including one taken on an idle ring-0 CPU armed
+        // solely for a blocking-wait deadline — releases any elapsed waiter
+        // and re-arms the one-shot to the next deadline (`AGENTS.md`
+        // §17.1). `set_timer_callback` is an idempotent pointer store, so
+        // no fail-closed re-call guard is needed.
+        rustos_arch_x86_64::preempt::set_timer_callback(production_tick_dispatch);
+    }
+
+    fn wait_for_interrupt(&self) {
+        // The tickless idle wait (`AGENTS.md` §17.1): the ring-0 dispatch
+        // loop runs with `RFLAGS.IF == 0` (the kernel is non-preemptible,
+        // §4 — it issues no `sti`), so a wake delivered between the loop's
+        // `step` and here stays *pending* rather than being taken, and no
+        // edge is lost (the race-free park, §2.1). The `sti; hlt` pair is
+        // atomic with respect to interrupt delivery — `sti` enables `IF`
+        // only *after* the following instruction, so the pending interrupt
+        // is taken during `hlt` (waking it), the timer/IRQ handler unparks
+        // a waiter, and `cli` then restores the masked loop invariant
+        // before returning so the loop re-steps. On a host build there is
+        // no ring 0, so this is a benign no-op.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            // SAFETY: `sti; hlt; cli` is the canonical race-free idle wait;
+            // the IDT and LAPIC are installed by this point, so a taken
+            // interrupt dispatches through a valid handler, and `cli`
+            // leaves `IF` clear exactly as the dispatch loop expects.
+            unsafe {
+                core::arch::asm!("sti; hlt; cli", options(nomem, nostack, preserves_flags));
+            }
+        }
     }
 
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {

@@ -200,6 +200,38 @@ pub trait KernelArch: SchedulerArch {
         // through.
         let _ = table;
     }
+
+    /// Park the calling CPU until the next interrupt, then return.
+    ///
+    /// Unlike [`Self::halt`] (which never returns), this is the *idle
+    /// wait*: when the dispatch loop finds no runnable task but live tasks
+    /// are still **parked** (e.g. a perpetual service blocked in a
+    /// blocking-wait syscall), the CPU sleeps on the lowest-power
+    /// wait-for-event instruction with interrupts **enabled** for the
+    /// duration of the wait, so the armed one-shot
+    /// ([`SchedulerArch::set_wakeup`]) or a device IRQ can fire, run its
+    /// handler (waking a parked waiter), and let this method return so the
+    /// loop re-steps and dispatches the now-runnable task (`AGENTS.md`
+    /// §17.1 tickless idle).
+    ///
+    /// # Contract
+    ///
+    /// * It **must** return after handling at least the next interrupt;
+    ///   it must never spin (`AGENTS.md` §2.1) or busy-wait.
+    /// * It must leave the CPU's interrupt-mask state as it found it once
+    ///   it returns, so the non-preemptible kernel dispatch loop it
+    ///   returns into is unchanged (`AGENTS.md` §4).
+    /// * It must never panic (`AGENTS.md` §2.9).
+    ///
+    /// # Default
+    ///
+    /// A no-op so the `TestArch` mock and any port without an idle-wait
+    /// primitive inherit a benign (busy) re-step rather than blocking; a
+    /// real port overrides it with its `wfi` / `hlt` / host-yield. The
+    /// no-op default never deadlocks the loop because the loop only calls
+    /// it while at least one task is live and will re-evaluate after every
+    /// return.
+    fn wait_for_interrupt(&self) {}
 }
 
 /// IRQ routing handed from the architecture port to the kernel core

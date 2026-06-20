@@ -326,25 +326,49 @@ impl SchedulerArch for RiscvArch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): `armed` programs the
-        // supervisor-timer one-shot to one quantum (the per-hart interval
+        // Tickless preemption (`AGENTS.md` §17.1): `armed` records the
+        // running task's quantum deadline (now + the per-hart interval
         // recorded by `init_local_preempt`, the single stored copy — §2.2);
-        // `!armed` disarms so a hart running a sole task takes no timer
-        // ticks. Off the freestanding target there is no SBI timer, so
-        // this is inert.
+        // `!armed` clears it. The deadline combiner then programs the
+        // single supervisor-timer one-shot to the *earlier* of this quantum
+        // and any pending blocking-wait wakeup ([`Self::set_wakeup`]), so
+        // neither suppresses the other. Off the freestanding target there
+        // is no SBI timer, so the arming is inert.
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
-            use rustos_arch_api::Timer;
-            let timer = crate::timer_hal::TimerHal::new();
-            if armed {
-                timer.arm_oneshot(crate::preempt::timer_interval_ticks());
+            let deadline = if armed {
+                let quantum = crate::preempt::timer_interval_ticks();
+                Some(read_time().wrapping_add(quantum.max(1)))
             } else {
-                timer.disarm();
-            }
+                None
+            };
+            crate::preempt::record_quantum_deadline(deadline);
         }
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
             let _ = armed;
+        }
+    }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        // The timed half of the tickless one-shot (`AGENTS.md` §17.1): a
+        // blocking wait with a finite timeout records its soonest waiter
+        // deadline here so the parked waiter is woken on time even when the
+        // hart has no runnable task to preempt. Convert the absolute
+        // monotonic-ns deadline to an absolute `time`-CSR tick against this
+        // handle's `timebase_hz` (the same frequency `monotonic_ns`
+        // converts the other way, §2.4), then record it; the combiner arms
+        // the one-shot to the earlier of this wakeup and any quantum. Off
+        // the freestanding target the arming is inert.
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        {
+            let deadline =
+                deadline_ns.map(|ns| rustos_arch_api::wakeup::ns_to_ticks(ns, self.timebase_hz));
+            crate::preempt::record_wakeup_deadline(deadline);
+        }
+        #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+        {
+            let _ = deadline_ns;
         }
     }
 }

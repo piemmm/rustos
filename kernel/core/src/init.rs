@@ -576,8 +576,29 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         let _ = task_id;
         loop {
             match self.scheduler.step(cpu) {
-                Ok(StepOutcome::Ran(_)) if self.scheduler.live_task_count() > 0 => {}
-                Ok(_) | Err(_) => break,
+                // A task ran. Keep dispatching while live tasks remain;
+                // stop once every task has exited so `kernel_main` halts.
+                Ok(StepOutcome::Ran(_)) => {
+                    if self.scheduler.live_task_count() == 0 {
+                        break;
+                    }
+                }
+                // No runnable task this step. If every live task has
+                // exited, the system is finished — break so `kernel_main`
+                // halts fail-closed (`AGENTS.md` §2.9). Otherwise the live
+                // tasks are all **parked** (a perpetual service blocked in
+                // a blocking-wait syscall, e.g. `devmgr` on `hw_tree_wait`):
+                // sleep on the arch idle-wait until the next interrupt (the
+                // armed timed-wake one-shot or a device IRQ) wakes a waiter,
+                // then re-step and dispatch it — never busy-spin
+                // (`AGENTS.md` §2.1 / §17.1 tickless idle).
+                Ok(StepOutcome::Idle) => {
+                    if self.scheduler.live_task_count() == 0 {
+                        break;
+                    }
+                    self.arch.wait_for_interrupt();
+                }
+                Err(_) => break,
             }
         }
     }

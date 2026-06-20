@@ -110,6 +110,7 @@ pub mod smp;
 pub mod timer;
 pub mod tlb;
 pub mod userentry;
+pub mod wakeup;
 pub mod xtlb;
 
 pub use sidechannel::{

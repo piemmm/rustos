@@ -301,11 +301,38 @@ finite timeout (the [blocking wait-queue](#blocking-wait-queue-and-the-wake-pend
 below) records its soonest waiter deadline through it, so the port programs
 its single physical one-shot to the *earlier* of the quantum arming and the
 wakeup, and a parked waiter fires on time even on an otherwise-idle CPU
-that has no task to preempt (`AGENTS.md` §17.1). `set_wakeup` defaults to a
-no-op, so a port that has not yet wired the per-port one-shot reprogram
-inherits the explicit-wake path only; realising the hardware arming (and
-the idle drive-loop that re-steps a woken sole waiter) is the production
-launch staged in `.junie/next-pi-prompt.md` (Design D P-3).
+that has no task to preempt (`AGENTS.md` §17.1).
+
+Each port realises this with a small per-CPU **deadline combiner**
+alongside its preemption state: `set_preemption` records the running
+task's quantum deadline (now + one quantum) and `set_wakeup` records the
+nearest waiter deadline, both as absolute ticks of the port's free-running
+counter (`CNTPCT_EL0` on aarch64, the `time` CSR on riscv64, the TSC on
+x86_64); a shared `reprogram` arms the single one-shot to the earlier of
+the two via the host-tested `rustos_arch_api::wakeup::earliest` helper, or
+disarms when neither is pending. The conversion from monotonic-ns deadline
+to counter ticks, and (on x86_64) the rebase of the chosen TSC duration
+onto the LAPIC count, use the same calibrated frequency `monotonic_ns`
+reads the other way (`AGENTS.md` §2.4). Each port installs the
+blocking-wait **timed-wake sweep** (`kernel/core::timed_wake_sweep`) as its
+per-tick timer callback, so every tick — including one taken on an
+otherwise-idle CPU armed solely for a wakeup — releases any elapsed waiter
+and re-arms the one-shot to the next deadline. `set_wakeup` defaults to a
+no-op, so the host `TestArch` and any non-preemptive port inherit the
+explicit-wake path only.
+
+The idle CPU itself sleeps through [`KernelArch::wait_for_interrupt`]: when
+the dispatch loop finds no runnable task but a live task is still parked
+(e.g. a perpetual service blocked in a blocking-wait syscall), the loop
+parks the CPU on the port's race-free idle wait (`wfi` on aarch64/riscv64,
+`sti; hlt; cli` on x86_64) rather than halting, so the armed wakeup one-shot
+or a device IRQ wakes a waiter and the loop re-steps and dispatches it. The
+dispatch loop runs with interrupts masked (the kernel is non-preemptible,
+§4), so a wake delivered between `step` and the idle wait stays pending and
+no edge is lost. The remaining production-launch work — spawning the
+perpetual `/System/Services/devmgr` and the reactive bus-driver chain that
+emits the nodes it reacts to — is staged in `.junie/next-pi-prompt.md`
+(Design D P-3 / D3–D5).
 
 In both policies `on_timer_tick` increments the per-CPU
 preemption counter and returns; it does **not** call `Scheduler::step`.

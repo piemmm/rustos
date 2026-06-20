@@ -240,7 +240,12 @@ mod tests {
     /// without a real scheduler or timer.
     struct MockArch {
         unparked: RefCell<Vec<TaskId>>,
-        last_wakeup: RefCell<Option<Option<u64>>>,
+        /// Number of [`WaitQueueArch::set_wakeup`] calls (`0` = never
+        /// called), and the most recent argument. Split into a count plus
+        /// an `Option<u64>` rather than an `Option<Option<u64>>` so the
+        /// three states are distinguished without the `option_option` lint.
+        wakeup_calls: RefCell<u32>,
+        last_wakeup: RefCell<Option<u64>>,
         now: RefCell<u64>,
     }
 
@@ -248,6 +253,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 unparked: RefCell::new(Vec::new()),
+                wakeup_calls: RefCell::new(0),
                 last_wakeup: RefCell::new(None),
                 now: RefCell::new(0),
             }
@@ -267,7 +273,8 @@ mod tests {
             *self.now.borrow()
         }
         fn set_wakeup(&self, deadline_ns: Option<u64>) {
-            *self.last_wakeup.borrow_mut() = Some(deadline_ns);
+            *self.wakeup_calls.borrow_mut() += 1;
+            *self.last_wakeup.borrow_mut() = deadline_ns;
         }
     }
 
@@ -327,5 +334,18 @@ mod tests {
         let q = WaitQueue::new();
         assert_eq!(q.earliest_deadline(), None);
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn set_wakeup_records_the_latest_arming_through_the_arch() {
+        let arch = MockArch::new();
+        assert_eq!(*arch.wakeup_calls.borrow(), 0, "never called yet");
+        arch.set_wakeup(Some(900));
+        assert_eq!(*arch.last_wakeup.borrow(), Some(900));
+        // Clearing the timed arming records `None`, distinguished from
+        // "never called" by the call count.
+        arch.set_wakeup(None);
+        assert_eq!(*arch.last_wakeup.borrow(), None);
+        assert_eq!(*arch.wakeup_calls.borrow(), 2);
     }
 }

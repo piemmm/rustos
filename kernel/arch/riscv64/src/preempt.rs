@@ -74,6 +74,11 @@ pub const SIP_SSIP: u64 = 1 << 1;
 /// `u32` sentinel meaning "no hart `CpuId` recorded yet".
 const NO_CPU: u64 = u32::MAX as u64;
 
+/// Sentinel meaning "no deadline pending" in the per-hart quantum / wakeup
+/// slots. A real `time`-CSR value never reaches [`u64::MAX`] in any
+/// realistic uptime, so it is unambiguous.
+const NO_DEADLINE: u64 = u64::MAX;
+
 /// `true` iff `scause` denotes a supervisor timer interrupt — the
 /// interrupt bit is set *and* the cause code is
 /// [`SCAUSE_SUPERVISOR_TIMER`].
@@ -109,6 +114,20 @@ static PREEMPT_INTERVAL_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::nu
 /// `CpuId` passed to the callback, [`NO_CPU`] until recorded.
 static PREEMPT_CPU_ID_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Published per-hart **quantum-deadline** slice base (`null` until a
+/// [`PreemptStorage`] is registered). Slot `i` holds the absolute
+/// `time`-CSR tick at which the running task's preemption quantum expires,
+/// or [`NO_DEADLINE`] when no quantum is armed. One half of the tickless
+/// one-shot combiner (`AGENTS.md` §17.1).
+static PREEMPT_QUANTUM_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Published per-hart **wakeup-deadline** slice base (`null` until a
+/// [`PreemptStorage`] is registered). Slot `i` holds the absolute
+/// `time`-CSR tick of the nearest pending blocking-wait timeout, or
+/// [`NO_DEADLINE`] when none is pending (`AGENTS.md` §17.1 — the nearest
+/// armed wakeup).
+static PREEMPT_WAKEUP_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Length of the published per-hart slices (`0` until a [`PreemptStorage`]
 /// is registered, so every per-hart access fails closed — `AGENTS.md`
 /// §2.9).
@@ -143,6 +162,8 @@ pub enum PreemptStorageError {
 pub struct PreemptStorage<const N: usize> {
     interval_ticks: [AtomicU64; N],
     cpu_id: [AtomicU64; N],
+    quantum_abs: [AtomicU64; N],
+    wakeup_abs: [AtomicU64; N],
 }
 
 impl<const N: usize> PreemptStorage<N> {
@@ -154,6 +175,8 @@ impl<const N: usize> PreemptStorage<N> {
         Self {
             interval_ticks: [const { AtomicU64::new(0) }; N],
             cpu_id: [const { AtomicU64::new(NO_CPU) }; N],
+            quantum_abs: [const { AtomicU64::new(NO_DEADLINE) }; N],
+            wakeup_abs: [const { AtomicU64::new(NO_DEADLINE) }; N],
         }
     }
 
@@ -174,6 +197,8 @@ impl<const N: usize> PreemptStorage<N> {
         }
         PREEMPT_INTERVAL_PTR.store(self.interval_ticks.as_ptr().cast_mut(), Ordering::Release);
         PREEMPT_CPU_ID_PTR.store(self.cpu_id.as_ptr().cast_mut(), Ordering::Release);
+        PREEMPT_QUANTUM_PTR.store(self.quantum_abs.as_ptr().cast_mut(), Ordering::Release);
+        PREEMPT_WAKEUP_PTR.store(self.wakeup_abs.as_ptr().cast_mut(), Ordering::Release);
         PREEMPT_LEN.store(N, Ordering::Release);
         Ok(N)
     }
@@ -342,6 +367,106 @@ fn cpu_id_slot(idx: usize) -> &'static AtomicU64 {
     unsafe { &*base.add(idx) }
 }
 
+/// Borrow the quantum-deadline slot at `idx`. `idx` must come from
+/// [`per_cpu_index`] (so `idx < PREEMPT_LEN` and the base is non-null).
+fn quantum_slot(idx: usize) -> &'static AtomicU64 {
+    let base = PREEMPT_QUANTUM_PTR.load(Ordering::Acquire);
+    // SAFETY: as for [`interval_slot`] — the non-null `quantum_abs` base and
+    // the matching `PREEMPT_LEN` are published together, and `idx < len`.
+    unsafe { &*base.add(idx) }
+}
+
+/// Borrow the wakeup-deadline slot at `idx`. `idx` must come from
+/// [`per_cpu_index`] (so `idx < PREEMPT_LEN` and the base is non-null).
+fn wakeup_slot(idx: usize) -> &'static AtomicU64 {
+    let base = PREEMPT_WAKEUP_PTR.load(Ordering::Acquire);
+    // SAFETY: as for [`interval_slot`] — the non-null `wakeup_abs` base and
+    // the matching `PREEMPT_LEN` are published together, and `idx < len`.
+    unsafe { &*base.add(idx) }
+}
+
+/// Decode a stored deadline slot value into [`Option`] form
+/// ([`NO_DEADLINE`] ⇒ `None`).
+const fn slot_deadline(raw: u64) -> Option<u64> {
+    if raw == NO_DEADLINE {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+/// Record the calling hart's preemption-quantum deadline (absolute
+/// `time`-CSR ticks), or clear it with `None`, then reprogram the one-shot
+/// to the earlier of the quantum and any pending wakeup (`AGENTS.md`
+/// §17.1). Called from [`crate::kernel_arch::RiscvArch`]'s `set_preemption`.
+/// A no-op before a [`PreemptStorage`] is registered (fail closed,
+/// `AGENTS.md` §2.9).
+pub fn record_quantum_deadline(deadline: Option<u64>) {
+    if let Some(idx) = per_cpu_index(current_hartid()) {
+        quantum_slot(idx).store(deadline.unwrap_or(NO_DEADLINE), Ordering::Relaxed);
+        reprogram();
+    }
+}
+
+/// Record the calling hart's nearest blocking-wait deadline (absolute
+/// `time`-CSR ticks), or clear it with `None`, then reprogram the one-shot
+/// to the earlier of this wakeup and any armed quantum (`AGENTS.md`
+/// §17.1). Called from `set_wakeup`. A no-op before a [`PreemptStorage`]
+/// is registered (fail closed).
+pub fn record_wakeup_deadline(deadline: Option<u64>) {
+    if let Some(idx) = per_cpu_index(current_hartid()) {
+        wakeup_slot(idx).store(deadline.unwrap_or(NO_DEADLINE), Ordering::Relaxed);
+        reprogram();
+    }
+}
+
+/// The calling hart's recorded quantum / wakeup deadlines (each `None`
+/// when unset). Test/diagnostic observer (also keeps the per-hart slots
+/// live on the host build).
+#[must_use]
+pub fn recorded_deadlines() -> (Option<u64>, Option<u64>) {
+    match per_cpu_index(current_hartid()) {
+        Some(idx) => (
+            slot_deadline(quantum_slot(idx).load(Ordering::Relaxed)),
+            slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed)),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Reprogram the calling hart's single supervisor-timer one-shot to fire
+/// at the earlier of its recorded quantum and wakeup deadlines, or disarm
+/// it when neither is pending (`AGENTS.md` §17.1 — the tickless one-shot
+/// is armed only for a real pending event).
+///
+/// The combining math is the shared, host-tested
+/// [`rustos_arch_api::wakeup`] helper; only the `time`-CSR read and the
+/// `arm_oneshot` / `disarm` SBI programming are riscv64-specific. Off the
+/// freestanding target there is no SBI timer, so the arming is inert (the
+/// deadline bookkeeping above still runs for host tests).
+fn reprogram() {
+    let Some(idx) = per_cpu_index(current_hartid()) else {
+        return;
+    };
+    let quantum = slot_deadline(quantum_slot(idx).load(Ordering::Relaxed));
+    let wakeup = slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed));
+    let target = rustos_arch_api::wakeup::earliest(quantum, wakeup);
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        match target {
+            Some(abs) => {
+                let now = crate::kernel_arch::read_time();
+                arm_oneshot(rustos_arch_api::wakeup::ticks_from_now(abs, now));
+            }
+            None => disarm(),
+        }
+    }
+    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+    {
+        let _ = target;
+    }
+}
+
 /// The calling hart's recorded tick interval in `time`-CSR ticks (`0`
 /// if unset or no storage registered). Test/diagnostic observer.
 #[must_use]
@@ -375,6 +500,8 @@ fn clear_for_tests() {
     for idx in 0..len {
         interval_slot(idx).store(0, Ordering::Relaxed);
         cpu_id_slot(idx).store(NO_CPU, Ordering::Relaxed);
+        quantum_slot(idx).store(NO_DEADLINE, Ordering::Relaxed);
+        wakeup_slot(idx).store(NO_DEADLINE, Ordering::Relaxed);
     }
 }
 
@@ -384,6 +511,8 @@ fn reset_preempt_storage_for_tests() {
     PREEMPT_LEN.store(0, Ordering::Release);
     PREEMPT_INTERVAL_PTR.store(core::ptr::null_mut(), Ordering::Release);
     PREEMPT_CPU_ID_PTR.store(core::ptr::null_mut(), Ordering::Release);
+    PREEMPT_QUANTUM_PTR.store(core::ptr::null_mut(), Ordering::Release);
+    PREEMPT_WAKEUP_PTR.store(core::ptr::null_mut(), Ordering::Release);
 }
 
 /// Compute the tick interval, in `time`-CSR ticks, for `hz` ticks per
@@ -492,6 +621,14 @@ pub(crate) fn on_timer_interrupt() {
     // `sip.STIP` so the trap deasserts; the scheduler re-arms a fresh
     // one-shot on its next dispatch (§17.1).
     disarm();
+    // The quantum (if any) just expired, so clear its recorded deadline:
+    // the dispatch after the preempt point re-arms a fresh quantum, and the
+    // per-tick wakeup sweep (the timer callback below) must not re-arm the
+    // one-shot against this already-fired deadline (`AGENTS.md` §17.1). The
+    // wakeup deadline is owned by the sweep and left untouched.
+    if let Some(slot) = per_cpu_index(current_hartid()) {
+        quantum_slot(slot).store(NO_DEADLINE, Ordering::Relaxed);
+    }
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No registered per-hart slot for this hart: nothing to dispatch
         // (fail closed, `AGENTS.md` §2.9).

@@ -117,18 +117,21 @@ mod program {
         }
         // NOTE: PID 1 does **not** yet launch the device-manager service
         // (`/System/Services/devmgr`). The service blocks reactively in
-        // `hw_tree_wait`, which is now a **true generation-keyed park**: the
+        // `hw_tree_wait`, which is a **true generation-keyed park**: the
         // kernel ships the blocking wait-queue + scheduler wake-pending
         // token + explicit wake (Design D P-2 — `kernel/core::waitq`,
-        // `RescheduleAction::Park` is wired), so a perpetual waiter parks
-        // off the run queue rather than busy-yielding (`AGENTS.md` §2.1).
-        // The remaining prerequisite before spawning it here is the
-        // production launch (`.junie/next-pi-prompt.md` Design D P-3): the
-        // idle drive-loop must `wfi`/re-step (rather than halt) so a parked
-        // sole service is reached when woken, alongside the reactive
-        // bus-driver chain (D3/D4) that emits the nodes it matches. The
-        // foundation (the `hw_tree_read`/`hw_tree_wait` syscalls, the store
-        // generation counter, and the signed `devmgr` binary) is proven by
+        // `RescheduleAction::Park`), and the tickless one-shot now arms a
+        // finite-timeout wakeup per-port (`SchedulerArch::set_wakeup`) with
+        // the idle drive-loop parking on `KernelArch::wait_for_interrupt`
+        // and re-stepping a woken sole waiter rather than halting — so a
+        // perpetual `devmgr` parks off the run queue without starving a
+        // single-CPU system (`AGENTS.md` §2.1 / §17.1). The remaining
+        // prerequisite before spawning it here is the rest of the
+        // production launch (`.junie/next-pi-prompt.md` Design D P-3 /
+        // D3–D5): laying the signed `devmgr` bundle and the reactive
+        // bus-driver chain that emits the nodes it matches. The foundation
+        // (the `hw_tree_read`/`hw_tree_wait` syscalls, the store generation
+        // counter, and the signed `devmgr` binary) is proven by
         // `rustos-test-devmgr-hwtree-qemu-aarch64` until then.
         match supervise_sessions(&mut RtSessions, config.session().as_bytes()) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,

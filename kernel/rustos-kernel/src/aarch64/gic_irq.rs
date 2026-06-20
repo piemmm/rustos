@@ -292,6 +292,24 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
         rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
 }
 
+/// The per-tick callback the timer IRQ path invokes on **every** tick
+/// (EL0 *or* idle EL1), installed via
+/// [`rustos_arch_aarch64::preempt::set_timer_callback`].
+///
+/// It runs the blocking-wait timed-wake sweep (Design D P-2): any waiter
+/// whose finite deadline has elapsed is unparked and the one-shot is
+/// re-armed to the next pending deadline
+/// ([`rustos_kernel_core::timed_wake_sweep`]). This is what makes a finite
+/// `hw_tree_wait` timeout fire even when the CPU is otherwise idle (every
+/// task parked) and takes no preemption tick (`AGENTS.md` §17.1). It is
+/// pure accounting — it never context-switches — so it is safe on a tick
+/// taken in EL1; the *preemption* of an EL0 task is the separate
+/// [`production_preempt_dispatch`] EL0-only callback.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
+    rustos_kernel_core::timed_wake_sweep();
+}
+
 /// Set up tickless timer-driven preemption on the boot CPU: register the
 /// per-CPU preempt storage, install the EL0-preemption callback, record
 /// the per-quantum interval derived from [`PREEMPT_TICK_HZ`], and enable
@@ -315,11 +333,14 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// [`production_preempt_dispatch`]; the scheduler re-arms the next
 /// one-shot on its following dispatch.
 ///
-/// No scheduler-tick callback is installed: EEVDF is tickless (fairness is
-/// advanced inside `Scheduler::step`, not by a periodic count), so the
-/// generic timer is armed solely to *preempt* (one-shot, by the
-/// scheduler). The timed-wake sweep that a deadline-bearing blocking wait
-/// needs (P-2) installs its tick consumer then, not ahead of it (§2.4).
+/// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
+/// (fairness is advanced inside `Scheduler::step`, not by a periodic
+/// count). The per-tick callback that *is* installed
+/// ([`production_tick_dispatch`]) runs only the blocking-wait timed-wake
+/// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
+/// waiter and re-arms the one-shot to the next deadline, so the timer is
+/// armed only for a real pending event — a preemption quantum and/or the
+/// nearest wakeup — never a fixed periodic tick (`AGENTS.md` §17.1).
 ///
 /// A zero `CNTFRQ_EL0` reading (a board that does not report the counter
 /// frequency) leaves the kernel cooperative rather than arming a nonsense
@@ -338,6 +359,12 @@ pub fn arm_preemption() {
         // Install the EL0-preemption callback *before* arming the timer, so
         // the first tick taken from EL0 already has a handler.
         preempt::set_preempt_callback(production_preempt_dispatch);
+
+        // Install the per-tick timed-wake sweep callback (Design D P-2), so
+        // every tick — including one taken on an idle EL1 CPU armed solely
+        // for a blocking-wait deadline — releases any elapsed waiter and
+        // re-arms the one-shot to the next deadline (`AGENTS.md` §17.1).
+        preempt::set_timer_callback(production_tick_dispatch);
 
         // Derive the tick interval from the discovered counter frequency
         // (never a board constant, `AGENTS.md` §2.20). A zero reading is a

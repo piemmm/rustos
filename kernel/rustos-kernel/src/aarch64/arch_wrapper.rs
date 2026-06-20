@@ -78,6 +78,15 @@ impl SchedulerArch for Aarch64BinArch {
         // preemption, so the delegation is required, not optional (§2.9).
         self.arch.set_preemption(armed);
     }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        // Forward the nearest blocking-wait deadline to the arch port,
+        // which combines it with the quantum and arms the single EL1
+        // generic-timer one-shot to the earlier (`AGENTS.md` §17.1). The
+        // default no-op would silently drop timed wakes, so the delegation
+        // is required (§2.9).
+        self.arch.set_wakeup(deadline_ns);
+    }
 }
 
 impl KernelArch for Aarch64BinArch {
@@ -93,6 +102,34 @@ impl KernelArch for Aarch64BinArch {
 
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {
         self.arch.monotonic_ns()
+    }
+
+    fn wait_for_interrupt(&self) {
+        // The tickless idle wait (`AGENTS.md` §17.1): the EL1 dispatch loop
+        // runs with IRQs masked (the kernel is non-preemptible, §4 — every
+        // return into the loop is via an exception that masked `DAIF.I`),
+        // so a wake delivered between the loop's `step` and here stays
+        // *pending* rather than being taken, and no edge is lost (the
+        // race-free park, §2.1). `wfi` wakes on that pending-but-masked
+        // interrupt; `enable_irq` then lets it actually be taken, running
+        // the timer/device ISR that unparks a waiter; `mask_irq` restores
+        // the masked loop invariant before returning so the loop re-steps
+        // and dispatches the now-runnable task. On a host build there is no
+        // EL1, so this is a benign no-op (the loop re-steps immediately).
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            use rustos_arch_aarch64::exceptions;
+            // SAFETY: `wfi`/`enable_irq`/`mask_irq` are the documented
+            // race-free idle-wait sequence; the vector table and the GICv2
+            // are installed by this point (`install_irq_dispatch` ran), so a
+            // taken interrupt dispatches through a valid handler, and the
+            // sequence leaves IRQs masked exactly as it found them.
+            unsafe {
+                exceptions::wait_for_interrupt();
+                exceptions::enable_irq();
+                exceptions::mask_irq();
+            }
+        }
     }
 
     fn irq_routing(&self) -> IrqRouting {

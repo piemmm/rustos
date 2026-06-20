@@ -105,6 +105,20 @@ fn per_hart_slots_track_the_registered_storage() {
     assert_eq!(timer_interval_ticks(), 99);
     assert_eq!(timer_cpu_id(), 0);
 
+    // The tickless one-shot combiner's per-hart deadline bookkeeping
+    // (Design D P-2): recording a quantum and/or a wakeup round-trips
+    // through `recorded_deadlines`, and clearing with `None` removes it.
+    // (The SBI-timer arming inside `reprogram` is cfg-gated to the
+    // freestanding target, so on the host only the bookkeeping runs.)
+    assert_eq!(recorded_deadlines(), (None, None));
+    record_quantum_deadline(Some(5_000));
+    assert_eq!(recorded_deadlines(), (Some(5_000), None));
+    record_wakeup_deadline(Some(3_000));
+    assert_eq!(recorded_deadlines(), (Some(5_000), Some(3_000)));
+    record_quantum_deadline(None);
+    record_wakeup_deadline(None);
+    assert_eq!(recorded_deadlines(), (None, None));
+
     // Registration is set-once: a second backing is refused rather than
     // silently re-pointing the live slices.
     assert_eq!(

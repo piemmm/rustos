@@ -266,6 +266,41 @@ pub unsafe fn init_traps() {
     }
 }
 
+/// Park the hart on `wfi` until the next enabled interrupt, take it, then
+/// return with `sstatus.SIE` cleared — the tickless idle wait
+/// (`AGENTS.md` §17.1).
+///
+/// The S-mode dispatch loop runs with `sstatus.SIE == 0` (the kernel is
+/// non-preemptible, §4), so a supervisor interrupt that becomes pending
+/// between the loop's `step` and this call is **not taken** — it stays
+/// latched, and no edge is lost (the race-free park, §2.1). `wfi` wakes on
+/// that pending-but-untaken interrupt even with `SIE == 0`; setting
+/// `sstatus.SIE` then lets it actually be taken, running the timer/PLIC
+/// handler that unparks a waiter; clearing `SIE` again restores the
+/// non-preemptible idle-loop invariant before returning so the loop
+/// re-steps and dispatches the now-runnable task.
+///
+/// # Safety
+///
+/// `wfi` is a hint with no architectural side effects, and toggling
+/// `sstatus.SIE` only changes the global interrupt-enable. The caller
+/// must hold `sstatus.SIE` clear on entry (the idle-loop invariant) and
+/// have installed the trap vector ([`init_traps`] / [`install_trap_vector`])
+/// and the timer source, so a taken interrupt dispatches through a valid
+/// handler.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub unsafe fn idle_wait() {
+    // SAFETY: see the function contract — `wfi` suspends until a pending
+    // enabled interrupt, and the `csrs`/`csrc` pair briefly enables S-mode
+    // interrupt taking so the pending one is serviced, then restores
+    // `SIE == 0`. None has memory side effects beyond the named CSRs.
+    unsafe {
+        core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+        core::arch::asm!("csrs sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
+        core::arch::asm!("csrc sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
+    }
+}
+
 /// Rust entry invoked by the asm trap vector.
 ///
 /// Reads `scause` and dispatches:

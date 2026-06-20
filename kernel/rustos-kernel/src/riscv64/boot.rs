@@ -202,6 +202,15 @@ impl SchedulerArch for RiscvBinArch {
         // preemption, so the delegation is required (§2.9).
         self.arch.set_preemption(armed);
     }
+
+    fn set_wakeup(&self, deadline_ns: Option<u64>) {
+        // Forward the nearest blocking-wait deadline to the arch port,
+        // which combines it with the quantum and arms the single
+        // supervisor-timer one-shot to the earlier (`AGENTS.md` §17.1). The
+        // default no-op would silently drop timed wakes, so the delegation
+        // is required (§2.9).
+        self.arch.set_wakeup(deadline_ns);
+    }
 }
 
 impl KernelArch for RiscvBinArch {
@@ -217,6 +226,28 @@ impl KernelArch for RiscvBinArch {
 
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {
         self.arch.monotonic_ns()
+    }
+
+    fn wait_for_interrupt(&self) {
+        // The tickless idle wait (`AGENTS.md` §17.1): the S-mode dispatch
+        // loop runs with `sstatus.SIE == 0` (the kernel is non-preemptible,
+        // §4), so a wake delivered between the loop's `step` and here stays
+        // *pending* rather than being taken, and no edge is lost (the
+        // race-free park, §2.1). `idle_wait` `wfi`s on that pending-but-
+        // untaken interrupt, briefly enables `sstatus.SIE` so the
+        // timer/PLIC handler is taken (unparking a waiter), then clears
+        // `SIE` to restore the masked loop invariant before returning. On a
+        // host build there is no S-mode, so this is a benign no-op.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            // SAFETY: the trap vector is installed (`enable_mmu_and_vectors`)
+            // and the timer source armed by this point, and the dispatch
+            // loop holds `sstatus.SIE` clear on entry, exactly `idle_wait`'s
+            // contract.
+            unsafe {
+                trap::idle_wait();
+            }
+        }
     }
 
     fn install_irq_dispatch(&self, _table: &'static rustos_kernel_irq::IrqTable) {
@@ -291,6 +322,24 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
         rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
 }
 
+/// The per-tick callback the timer trap path invokes on **every** tick
+/// (U-mode *or* idle S-mode), installed via
+/// [`rustos_arch_riscv64::preempt::set_timer_callback`].
+///
+/// It runs the blocking-wait timed-wake sweep (Design D P-2): any waiter
+/// whose finite deadline has elapsed is unparked and the one-shot is
+/// re-armed to the next pending deadline
+/// ([`rustos_kernel_core::timed_wake_sweep`]), so a finite `hw_tree_wait`
+/// timeout fires even when the hart is otherwise idle (every task parked)
+/// and takes no preemption tick (`AGENTS.md` §17.1). It is pure accounting
+/// (it never context-switches), so it is safe on a tick taken in S-mode;
+/// the *preemption* of a U-mode task is the separate
+/// [`production_preempt_dispatch`] U-mode-only callback.
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
+    rustos_kernel_core::timed_wake_sweep();
+}
+
 /// Set up tickless supervisor-timer preemption on the boot hart: register
 /// the per-hart preempt storage, install the U-mode-preemption callback,
 /// record the per-quantum interval from [`PREEMPT_TICK_HZ`], and enable
@@ -308,11 +357,14 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// that ever fired in S-mode would only disarm (never preempt — the
 /// kernel is non-preemptible).
 ///
-/// No scheduler-tick callback is installed: EEVDF is tickless (fairness is
-/// advanced inside `Scheduler::step`, not by a periodic count), so the SBI
-/// timer is armed solely to *preempt* (one-shot, by the scheduler). The
-/// timed-wake sweep a deadline-bearing blocking wait needs (P-2) installs
-/// its tick consumer then, not ahead of it (§2.4).
+/// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
+/// (fairness is advanced inside `Scheduler::step`, not by a periodic
+/// count). The per-tick callback that *is* installed
+/// ([`production_tick_dispatch`]) runs only the blocking-wait timed-wake
+/// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
+/// waiter and re-arms the one-shot to the next deadline, so the SBI timer
+/// is armed only for a real pending event — a preemption quantum and/or
+/// the nearest wakeup — never a fixed periodic tick (`AGENTS.md` §17.1).
 ///
 /// A zero `timebase_hz` (a board that does not report the timer rate)
 /// leaves the kernel cooperative rather than arming a nonsense interval —
@@ -337,6 +389,12 @@ fn arm_preemption(timebase_hz: u64) {
         // Install the U-mode-preemption callback *before* arming the timer,
         // so the first tick taken from U-mode already has a handler.
         preempt::set_preempt_callback(production_preempt_dispatch);
+
+        // Install the per-tick timed-wake sweep callback (Design D P-2), so
+        // every tick — including one taken on an idle S-mode hart armed
+        // solely for a blocking-wait deadline — releases any elapsed waiter
+        // and re-arms the one-shot to the next deadline (`AGENTS.md` §17.1).
+        preempt::set_timer_callback(production_tick_dispatch);
 
         let interval = preempt::interval_for_hz(timebase_hz, PREEMPT_TICK_HZ);
 
