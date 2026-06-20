@@ -48,6 +48,13 @@ a coalesced, address-sorted free list held inside the allocator (not as
 intrusive links in user memory), so every returned pointer is bounds-checked
 before it is handed out (`AGENTS.md` §4). When coalescing frees whole trailing
 pages they are returned to the kernel with `mem_unmap` (the arena shrinks).
+`realloc` resizes in place wherever it can, avoiding the copy (`AGENTS.md`
+§2.16): a shrink always succeeds in place (the surrendered tail returns to the
+free list, and whole top pages are unmapped if it reaches the arena top), and a
+grow succeeds in place when the bytes immediately after the block are free or
+the block abuts the growable arena top. Only when neither holds does it fall
+back to allocate-copy-free (copying just the overlapping prefix, leaving the
+original block intact if the new allocation fails).
 The free-span table is **not** a fixed-size array: it is a capacity that grows
 on demand (`AGENTS.md` §24.1 "grow before you fail"). When a workload fragments
 the heap past the table's current capacity, the allocator maps one more whole

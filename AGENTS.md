@@ -2323,5 +2323,50 @@ growable capacity, or a capacity into a frozen ceiling, are both defects.
 
 ---
 
+## 25. Userland Heap (`lib/rt` global allocator)
+
+First-party Rust userland programs have a heap. `rustos-rt` registers the
+process `#[global_allocator]` (`lib/rt/src/heap.rs`), so a program that links
+the runtime (§1, §16.4) can use `alloc` — `Box`, `Vec`, `String`, … — with no
+extra setup. This section is binding and documents the one userland heap so no
+one writes a second.
+
+- **One heap, per process, no second allocator.** The `lib/rt` global
+  allocator is the only userland heap. A program (or `lib/*` crate consumed by
+  userland) must **not** roll its own `malloc`/arena/bump allocator alongside
+  it — that is the §2.2 duplication this section forecloses. It is genuinely
+  per-process (§4): each process owns its own arena in its own address space;
+  there is no shared global user heap.
+- **`mem_map`-backed, capability-clean.** The heap is built **only** on the
+  `abi-v1` anonymous-memory pair (`mem_map` / `mem_unmap`, both unprivileged,
+  §16.6). It adds no syscall, no ABI surface, and no ambient authority (§5.4):
+  every check stays kernel-side. The arena is mapped `RW`-only, never
+  executable (W^X, §19.2), and the kernel zeroes every frame on map and on
+  free, so no cross-process bytes ever leak (§4).
+- **No raw pointer arithmetic without bounds checks (§4).** The free-list
+  bookkeeping lives inside the allocator, never as intrusive links in user
+  memory; every returned pointer is range-checked before it is handed out.
+- **Deterministic OOM, never a panic (§4 / §2.9).** Exhaustion — `mem_map`
+  can supply neither an arena page nor a metadata page — returns null per the
+  `GlobalAlloc` contract. Allocation failure is never a panic.
+- **Reallocation resizes in place where it can (§2.16).** `realloc` shrinks in
+  place (returning the tail to the free list, unmapping whole freed top pages)
+  and grows in place when the following bytes are free or the block abuts the
+  growable arena top, copying only as a last resort.
+- **The free-span table is a growable capacity, not a fixed ceiling (§24.1).**
+  It maps further metadata pages on demand rather than capping a fragmented
+  workload at a hand-picked `const`.
+- **Secret hygiene is the holder's job, not the heap's.** The heap does **not**
+  re-zero a process's own freed bytes (reuse within one address space is not a
+  security boundary, §2.16). Userland code holding a credential, key, or
+  capability token zeroes it before drop (e.g. a zeroizing wrapper); it does
+  not rely on the allocator to scrub freed heap bytes.
+- **Documented and tested.** The design lives in `lib/rt/src/heap.rs` rustdoc
+  and `lib/rt/README.md`; the pure bookkeeping is host-unit-tested and the end
+  to end path (including `realloc` grow/shrink with data preservation) is a
+  QEMU vertical (`tests/integration/heap_program` + `heap_qemu_aarch64`).
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.

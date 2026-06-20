@@ -30,6 +30,15 @@
 //!   the very top of the arena, they are returned to the kernel with
 //!   `mem_unmap` (the heap shrinks — both syscalls are genuinely exercised, no
 //!   dead path, `AGENTS.md` §2.14).
+//! * **Reallocate.** `realloc` resizes in place whenever it can, avoiding the
+//!   copy entirely (`AGENTS.md` §2.16). A **shrink** always succeeds in place:
+//!   the surrendered tail is returned to the free list (and whole top pages are
+//!   unmapped if it reaches the arena top). A **grow** succeeds in place when
+//!   the bytes immediately following the block are free, or the block abuts the
+//!   arena top and the arena can be grown to cover the extra. Only when neither
+//!   holds does it fall back to allocate-copy-free, copying just the overlapping
+//!   prefix; a failed move leaves the original block intact (`GlobalAlloc`
+//!   contract).
 //! * **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A failed `mem_map`, an
 //!   exhausted arena, or an overflowed free-span table returns a null pointer
 //!   per the [`GlobalAlloc`] contract — never a panic.
@@ -358,6 +367,88 @@ impl<S: SpanStore> HeapState<S> {
         self.try_shrink_top(pager);
     }
 
+    /// Index of the free span that begins exactly at `start`, if any. The
+    /// table is small and address-sorted, so a linear scan is adequate.
+    fn span_index_starting_at(&self, start: usize) -> Option<usize> {
+        self.store.slots()[..self.count]
+            .iter()
+            .position(|span| span.start == start)
+    }
+
+    /// Remove `amount` bytes (`amount <= span.len`) from the front of the free
+    /// span at `index`, dropping the span when it is wholly consumed.
+    fn shrink_span_front(&mut self, index: usize, amount: usize) {
+        let span = self.store.slots()[index];
+        if span.len == amount {
+            self.remove(index);
+        } else {
+            let slot = &mut self.store.slots_mut()[index];
+            slot.start += amount;
+            slot.len -= amount;
+        }
+    }
+
+    /// Resize the live allocation based at `addr` from `old_layout` to
+    /// `new_size` bytes **without moving it**, returning `true` on success.
+    ///
+    /// A shrink always succeeds in place: the surrendered tail is returned to
+    /// the free table and the arena shrinks if whole top pages fall free. A
+    /// grow succeeds only when the bytes immediately following the allocation
+    /// are free (a free span starting at the allocation's end) or the
+    /// allocation abuts the arena top and the arena can be grown to cover the
+    /// extra; otherwise it returns `false` and the caller relocates. Never
+    /// panics — a failed arena grow is a deterministic `false` (`AGENTS.md`
+    /// §4 / §2.9).
+    fn resize_in_place(
+        &mut self,
+        addr: usize,
+        old_layout: Layout,
+        new_size: usize,
+        pager: &dyn Pager,
+    ) -> bool {
+        let old_size = old_layout.size().max(1);
+        let new_size = new_size.max(1);
+        if new_size == old_size {
+            return true;
+        }
+        if new_size < old_size {
+            self.insert_free(Span {
+                start: addr + new_size,
+                len: old_size - new_size,
+            });
+            self.try_shrink_top(pager);
+            return true;
+        }
+        let extra = new_size - old_size;
+        let Some(tail_start) = addr.checked_add(old_size) else {
+            return false;
+        };
+        loop {
+            if let Some(i) = self.span_index_starting_at(tail_start) {
+                let span = self.store.slots()[i];
+                if span.len >= extra {
+                    self.shrink_span_front(i, extra);
+                    return true;
+                }
+                // The following bytes are free but too few: only the top span
+                // can be extended (by growing the arena); a lower span is
+                // boxed in by the allocation above it, so the caller relocates.
+                if span.end() != self.mapped_end {
+                    return false;
+                }
+                if self.grow(extra - span.len, 1, pager).is_none() {
+                    return false;
+                }
+            } else if tail_start != self.mapped_end {
+                // The next bytes are allocated, not free: no room to grow.
+                return false;
+            } else if self.grow(extra, 1, pager).is_none() {
+                // The block abuts the arena top; grow the arena to cover it.
+                return false;
+            }
+        }
+    }
+
     /// If the free span at the arena top covers one or more whole pages,
     /// release them with `mem_unmap` and lower `mapped_end`. A failed unmap
     /// leaves the pages mapped and tracked (no loss; `AGENTS.md` §2.9).
@@ -434,6 +525,41 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         self.state.lock().free(ptr as usize, layout, &self.pager);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Try to keep the original address: a shrink always succeeds in place,
+        // and a grow does when the following bytes are free or the block abuts
+        // the arena top (no copy, the cheap path — `AGENTS.md` §2.16).
+        if self
+            .state
+            .lock()
+            .resize_in_place(ptr as usize, layout, new_size, &self.pager)
+        {
+            return ptr;
+        }
+        // Relocate: a fresh block of the requested size at the original
+        // alignment, copy the overlapping prefix, free the old block. A failed
+        // allocation returns null and leaves the original block intact, exactly
+        // as the [`GlobalAlloc::realloc`] contract requires (`AGENTS.md`
+        // §4 / §2.9 — deterministic, never a panic).
+        let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
+            return core::ptr::null_mut();
+        };
+        let new_ptr = match self.state.lock().alloc(new_layout, &self.pager) {
+            Some(addr) => addr as *mut u8,
+            None => return core::ptr::null_mut(),
+        };
+        // SAFETY: `ptr` is a live allocation of `layout.size()` bytes and
+        // `new_ptr` is a fresh allocation carved from a disjoint arena range of
+        // `new_size` bytes, so the two never overlap; copying the smaller of
+        // the two lengths stays within both. Both denote this process's own
+        // `RW`-mapped memory.
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
+        }
+        self.state.lock().free(ptr as usize, layout, &self.pager);
+        new_ptr
     }
 }
 
@@ -855,5 +981,114 @@ mod tests {
         unsafe { heap.dealloc(p, l) };
         // The whole page freed and was returned to the kernel.
         assert_eq!(heap.pager.unmaps(), 1);
+    }
+
+    #[test]
+    fn resize_to_the_same_size_is_a_no_op_in_place() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let before = heap.count;
+        assert!(heap.resize_in_place(a, layout(64, 8), 64, &pager));
+        assert_eq!(heap.count, before, "no span churn for an unchanged size");
+    }
+
+    #[test]
+    fn shrink_in_place_returns_the_surrendered_tail_to_the_free_list() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let _b = heap.alloc(layout(64, 8), &pager).unwrap();
+        // Shrinking `a` from 64 to 16 frees `[a+16, a+64)`; `_b` sits above it,
+        // so the tail cannot reach the arena top and stays a tracked span.
+        assert!(heap.resize_in_place(a, layout(64, 8), 16, &pager));
+        assert_eq!(pager.unmaps(), 0);
+        assert!(heap.store.slots()[..heap.count]
+            .iter()
+            .any(|s| s.start == a + 16 && s.len == 64 - 16));
+    }
+
+    #[test]
+    fn shrink_at_the_arena_top_unmaps_the_freed_pages() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        // A two-page allocation that exactly fills the mapped arena.
+        let a = heap.alloc(layout(2 * PAGE_SIZE, 8), &pager).unwrap();
+        assert_eq!(heap.count, 0);
+        assert_eq!(heap.mapped_end, base() + 2 * PAGE_SIZE);
+        // Shrinking to 64 bytes frees the rest; the whole second page (and the
+        // page-aligned remainder of the first) falls free at the top and is
+        // returned to the kernel.
+        assert!(heap.resize_in_place(a, layout(2 * PAGE_SIZE, 8), 64, &pager));
+        assert_eq!(pager.unmaps(), 1);
+        assert_eq!(heap.mapped_end, base() + PAGE_SIZE);
+    }
+
+    #[test]
+    fn grow_in_place_consumes_the_adjacent_free_span() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let _c = heap.alloc(layout(64, 8), &pager).unwrap();
+        // Free the middle block, then grow `a` into the hole it left — no copy,
+        // no new mapping, and the hole is fully consumed.
+        heap.free(b, layout(64, 8), &pager);
+        assert!(heap.resize_in_place(a, layout(64, 8), 128, &pager));
+        assert_eq!(pager.maps(), 1, "grew in place, no new page mapped");
+        assert!(
+            heap.span_index_starting_at(b).is_none(),
+            "the adjacent hole was consumed"
+        );
+    }
+
+    #[test]
+    fn grow_in_place_at_the_arena_top_grows_the_arena() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        // Growing past the mapped page extends the top free span by mapping one
+        // more page, then carves the extra — still in place at `a`.
+        assert!(heap.resize_in_place(a, layout(64, 8), PAGE_SIZE + 64, &pager));
+        assert_eq!(pager.maps(), 2, "one initial page plus one growth page");
+        assert_eq!(heap.mapped_end, base() + 2 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn grow_in_place_is_refused_when_the_next_block_is_allocated() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let _b = heap.alloc(layout(64, 8), &pager).unwrap();
+        // `_b` immediately follows `a` and is live, so there is no room to grow
+        // in place: the caller must relocate.
+        assert!(!heap.resize_in_place(a, layout(64, 8), 128, &pager));
+    }
+
+    #[test]
+    fn grow_in_place_fails_closed_when_the_arena_cannot_be_grown() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        // Lay the arena out with the live pager, then attempt a top-growing
+        // resize against a pager that cannot map: the grow must fail closed.
+        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let mapped_end = heap.mapped_end;
+        assert!(!heap.resize_in_place(a, layout(64, 8), 4 * PAGE_SIZE, &DeadPager));
+        assert_eq!(
+            heap.mapped_end, mapped_end,
+            "no arena growth on a failed map"
+        );
+    }
+
+    #[test]
+    fn realloc_wrapper_keeps_the_pointer_when_it_resizes_in_place() {
+        let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
+        let l = layout(128, 16);
+        // SAFETY: `l` is a valid non-zero layout; the wrapper is freshly built.
+        let p = unsafe { heap.alloc(l) };
+        // SAFETY: `p` was just returned for `l`; a shrink is always in place, so
+        // no bytes are read or copied from the (unbacked, test-only) address.
+        let q = unsafe { heap.realloc(p, l, 32) };
+        assert_eq!(q, p, "an in-place shrink keeps the original pointer");
     }
 }

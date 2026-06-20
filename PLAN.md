@@ -1887,8 +1887,9 @@ spec §18.
   delivers the HID reports, and configurable log policy) is staged in
   `plans/PI.md` P11; login's
   authenticate path on a real volume additionally rides the production
-  `mem_map` producer (`plans/SPAWN.md` SP5b — the userland heap is inert
-  until it lands, so login's path to its prompt is allocation-free).
+  `mem_map` producer (`plans/SPAWN.md` SP5b, landed — so the `lib/rt`
+  userland heap is live, `AGENTS.md` §25; login's path to its prompt
+  nonetheless stays allocation-free by design).
 
 ### Stage 6 follow-up — Rust I/O abstraction (`plans/IO.md`)
 

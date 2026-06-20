@@ -18,6 +18,10 @@
 //! 3. After the `Vec` is dropped (freeing — and shrinking the arena through
 //!    `mem_unmap`), a fresh, larger allocation succeeds and reads back its
 //!    fill, proving reclaimed space is reusable.
+//! 4. A `Vec` is reserved (forcing the allocator's `realloc` to **grow** the
+//!    block) and then `shrink_to_fit` (forcing `realloc` to **shrink** it),
+//!    and every original element still reads back — proving `realloc`
+//!    preserves the live bytes across both an in-place resize and a move.
 //!
 //! Each step that can fail returns a distinct non-zero exit code; a clean
 //! `exit(0)` is the success signal the vertical reports as PASS (`AGENTS.md`
@@ -53,6 +57,9 @@ mod program {
     /// The post-free reallocation failed or did not read back its fill (freed
     /// arena space is not reusable).
     const FAIL_REUSE: i32 = 13;
+    /// A `realloc` (grow via `reserve`, then shrink via `shrink_to_fit`) did
+    /// not preserve the vector's contents.
+    const FAIL_REALLOC: i32 = 14;
 
     /// Number of `u32`s the growing `Vec` accumulates: 4096 elements is 16 KiB,
     /// several pages, so the arena must grow through repeated `mem_map`.
@@ -104,6 +111,34 @@ mod program {
             return FAIL_REUSE;
         }
         drop(reused);
+
+        // 4. `realloc` must preserve contents across a grow and a shrink.
+        // `with_capacity(exact)` then `push` to that capacity leaves the block
+        // full, so `reserve` cannot grow in place (the next bytes are the
+        // arena top span or beyond) and exercises the grow path; the trailing
+        // `shrink_to_fit` exercises the shrink path. Either way the original
+        // elements must survive.
+        let mut grown: Vec<u32> = Vec::with_capacity(8);
+        let mut i = 0u32;
+        while i < 8 {
+            grown.push(vec_pattern(i));
+            i += 1;
+        }
+        grown.reserve(VEC_LEN as usize);
+        let mut i = 0u32;
+        while i < 8 {
+            grown.push(vec_pattern(i + 8));
+            i += 1;
+        }
+        grown.shrink_to_fit();
+        let mut i = 0u32;
+        while i < 16 {
+            if grown[i as usize] != vec_pattern(i) {
+                return FAIL_REALLOC;
+            }
+            i += 1;
+        }
+        drop(grown);
 
         EXIT_OK
     }
