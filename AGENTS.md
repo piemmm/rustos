@@ -1345,6 +1345,32 @@ as non-negotiable as §2.
   under N×M load, correct yield/wake semantics, SMP stress on ≥ 4
   emulated cores). A scheduler that does not pass the suite cannot
   ship.
+- **Preemption is mandatory on every Tier-1 architecture (§1) — not a
+  per-target option.** RustOS is a preemptive multitasking system on
+  `x86_64`, `aarch64`, `riscv64`, and `wasm32` alike: a runnable task
+  must never be able to monopolise a CPU by refusing to yield. A
+  cooperative-only build, or one where preemption works on some arches
+  but not others, is a defect, not a configuration (§4 SMP, §2.16
+  performance). This binds independently of which `SchedulerPolicy` is
+  selected — preemption is a property of the kernel, not of the policy.
+- **The preemption mechanism lives behind the Arch HAL timer (§17.2),
+  so it is the same shape on every port.** Each `kernel/arch/<target>/`
+  port drives an involuntary, timer-interrupt-driven reschedule of the
+  *currently running task* via its Arch HAL timer + interrupt-entry
+  primitives; only the genuinely target-divergent trap/timer plumbing
+  is arch-specific, and the reschedule decision and context-switch path
+  are the one shared definition every port reuses (§2.21, §2.2). A
+  preemptive context switch never abandons a held kernel lock or an
+  in-flight syscall: only a task interrupted in user mode is preempted;
+  the kernel itself stays non-preemptible (§4). Where a target cannot
+  deliver an asynchronous timer interrupt in the usual way (e.g. the
+  `wasm32` host environment), the port MUST drive preemption through the
+  host's equivalent yield/scheduling facility rather than degrade to
+  cooperative-only — the mandate holds, only the mechanism differs.
+- The §17.1 conformance suite verifies preemption on every Tier-1
+  target: a CPU-bound task that issues no syscall and never yields is
+  involuntarily preempted and correctly resumed. A port that does not
+  demonstrate this cannot ship.
 
 ### 17.2 Pluggable architecture (Arch HAL)
 
