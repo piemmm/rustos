@@ -232,6 +232,18 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn ipc_call(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _request: u64,
+        _request_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

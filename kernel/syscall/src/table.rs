@@ -629,6 +629,39 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Make a synchronous capability-checked call to a kernel-owned IPC call
+    /// endpoint: post the request, block until the reply arrives, and copy it
+    /// out (`AGENTS.md` §5.2 / §5.4; Design D D2b).
+    ///
+    /// The dispatcher has already checked `request` and `reply` are non-null
+    /// `UserPtr`s. The implementation resolves `endpoint` against the kernel
+    /// call-endpoint registry, enforces the endpoint's required send
+    /// capability against the **caller's** effective set before posting
+    /// (`AGENTS.md` §5.2 — no ambient authority), copies the request in and
+    /// the reply out through the validated boundary, and blocks the caller
+    /// cooperatively until the reply arrives (the same park shape as
+    /// [`Self::hw_tree_wait`] / [`Self::wait`]), never busy-spinning
+    /// (`AGENTS.md` §2.1). It returns the number of reply bytes written, or
+    /// fails closed: [`Errno::BufferTooSmall`] if the reply exceeds
+    /// `reply_cap`, [`Errno::PermissionDenied`] without the send capability,
+    /// [`Errno::NotFound`] for an unknown or destroyed endpoint.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// call-endpoint registry wired has nothing to call. The real handler is
+    /// installed in `kernel/core`.
+    fn ipc_call(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _request: u64,
+        _request_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -872,6 +905,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[0] is the last observed generation, args[1] the
                 // timeout in nanoseconds (`u64::MAX` for unbounded).
                 self.handlers.hw_tree_wait(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::IPC_CALL => {
+                // args[0] is the call-endpoint id; args[1]/args[3] are non-null
+                // `UserPtr`s (dispatcher-checked); args[2]/args[4] are the
+                // request length and reply-buffer capacity.
+                let request_len = decode_len(args.0[2])?;
+                let reply_cap = decode_len(args.0[4])?;
+                self.handlers
+                    .ipc_call(caller, args.0[0], args.0[1], request_len, args.0[3], reply_cap)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1358,6 +1400,22 @@ mod tests {
             // dispatcher decoded `(last_generation, timeout_ns)` without
             // wiring a real store / scheduler here.
             Ok(last_generation)
+        }
+
+        fn ipc_call(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _request: u64,
+            request_len: usize,
+            _reply: u64,
+            _reply_cap: usize,
+        ) -> SyscallResult {
+            self.record("ipc_call");
+            // Echo the request length back so the reachability test can assert
+            // the dispatcher decoded the five arguments without wiring a real
+            // call-endpoint registry / scheduler here.
+            Ok(request_len as u64)
         }
     }
 

@@ -19,6 +19,7 @@
 pub mod appinfo;
 pub mod capability;
 pub mod driver;
+pub mod driver_store;
 pub mod error;
 pub mod hwtree;
 pub mod input;

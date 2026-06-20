@@ -150,6 +150,9 @@ const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 /// `hw_tree_wait` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
 
+/// `ipc_call` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -950,6 +953,59 @@ pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
     ret as i64
 }
 
+/// Make a synchronous capability-checked call to the kernel-owned IPC call
+/// endpoint `endpoint`: post `request`, block until the reply arrives, and
+/// copy it into `reply` (`SyscallNumber::IPC_CALL`, `AGENTS.md` §5.2 / §5.4;
+/// Design D D2b). Returns the number of reply bytes written.
+///
+/// The kernel enforces the endpoint's required send capability against the
+/// caller before posting (`AGENTS.md` §5.2 — no ambient authority), copies
+/// `request` in and the reply out through the validated boundary, and blocks
+/// the caller cooperatively until the reply arrives, never busy-spinning
+/// (`AGENTS.md` §2.1). The first consumer is the reactive device manager
+/// reading the read-only `/System` driver store over
+/// [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`].
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure: a missing
+/// send capability (`PermissionDenied`), an unknown or destroyed endpoint
+/// (`NotFound`), an oversize request (`MessageTooLarge`), a reply larger than
+/// `reply` (`BufferTooSmall`), or no call-endpoint registry wired
+/// (`NotImplemented`). The wrapper hides no error (`AGENTS.md` §2.9).
+pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, i64> {
+    let req_ptr = request.as_ptr() as usize as u64;
+    let reply_ptr = reply.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `(ptr, len)` pairs against the caller's address space before
+    // touching them (`AGENTS.md` §5.4). `request` is a live shared `&[u8]`
+    // and `reply` a live exclusive `&mut [u8]` for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_IPC_CALL,
+            [
+                endpoint,
+                req_ptr,
+                request.len() as u64,
+                reply_ptr,
+                reply.len() as u64,
+                0,
+            ],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice in the caller
+    // (`AGENTS.md` §5.4), exactly as `hw_tree_read` clamps.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(reply.len()))
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -1491,6 +1547,43 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(hw_tree_wait(3, 0), want);
+        });
+    }
+
+    #[test]
+    fn ipc_call_marshals_endpoint_and_both_buffers() {
+        let request = [0xAAu8; 5];
+        let mut reply = [0u8; 64];
+        let (number, args) = capture(12, || {
+            assert_eq!(
+                ipc_call(rustos_abi::driver_store::DRIVER_STORE_ENDPOINT, &request, &mut reply),
+                Ok(12)
+            );
+        });
+        assert_eq!(number, NUM_IPC_CALL);
+        assert_eq!(args[0], rustos_abi::driver_store::DRIVER_STORE_ENDPOINT);
+        assert_ne!(args[1], 0); // request pointer
+        assert_eq!(args[2], 5); // request len
+        assert_ne!(args[3], 0); // reply pointer
+        assert_eq!(args[4], 64); // reply capacity
+        assert_eq!(args[5], 0);
+    }
+
+    #[test]
+    fn ipc_call_clamps_an_oversized_count_to_the_reply_length() {
+        let mut reply = [0u8; 8];
+        let (_, _) = capture(9999, || {
+            assert_eq!(ipc_call(1, &[], &mut reply), Ok(8));
+        });
+    }
+
+    #[test]
+    fn ipc_call_surfaces_negative_errno_encoding() {
+        let mut reply = [0u8; 4];
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(ipc_call(1, &[1, 2], &mut reply), Err(want));
         });
     }
 }

@@ -94,6 +94,7 @@ const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
+const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -673,6 +674,47 @@ pub extern "C" fn sys_hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i32
     }
 }
 
+/// `ipc_call`: make a synchronous capability-checked call to the kernel-owned
+/// IPC call endpoint `endpoint` — post `request_len` bytes at `request`,
+/// block until the reply arrives, and copy it into the `reply_cap`-byte
+/// buffer at `reply` (`SyscallNumber::IPC_CALL`, `AGENTS.md` §5.2 / §5.4).
+/// Returns the number of reply bytes written, or a `ROS_E_*` code
+/// reinterpreted into the result.
+///
+/// The kernel enforces the endpoint's required send capability against the
+/// caller before posting (`AGENTS.md` §5.2 — no ambient authority), copies
+/// both buffers through the validated boundary, and blocks the caller
+/// cooperatively until the reply arrives, never busy-spinning. A reply larger
+/// than `reply_cap` fails closed with `ROS_E_BUFFER_TOO_SMALL`; a missing
+/// send capability, an unknown or destroyed endpoint, or no call-endpoint
+/// registry wired each fail closed (`AGENTS.md` §2.9).
+#[must_use]
+#[export_name = "ros_sys_ipc_call"]
+pub extern "C" fn sys_ipc_call(
+    endpoint: u64,
+    request: *mut c_void,
+    request_len: usize,
+    reply: *mut c_void,
+    reply_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)` pairs
+    // against the caller's address space before touching them (`AGENTS.md`
+    // §5.4).
+    unsafe {
+        raw_syscall(
+            NUM_IPC_CALL,
+            [
+                endpoint,
+                ptr_arg(request),
+                request_len as u64,
+                ptr_arg(reply),
+                reply_cap as u64,
+                0,
+            ],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +761,7 @@ mod tests {
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),
+        (NUM_IPC_CALL, "ipc_call", 5),
     ];
 
     #[test]
@@ -1038,6 +1081,34 @@ mod tests {
         assert_eq!(args[0], 7);
         assert_eq!(args[1], u64::MAX);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn ipc_call_marshals_endpoint_and_both_buffers() {
+        let mut request = [0xAAu8; 5];
+        let mut reply = [0u8; 64];
+        let req_ptr = request.as_mut_ptr().cast::<c_void>();
+        let reply_ptr = reply.as_mut_ptr().cast::<c_void>();
+        // The kernel returns the number of reply bytes written.
+        let (number, args) = capture(12, || {
+            assert_eq!(
+                sys_ipc_call(
+                    rustos_abi::driver_store::DRIVER_STORE_ENDPOINT,
+                    req_ptr,
+                    request.len(),
+                    reply_ptr,
+                    reply.len()
+                ),
+                12
+            );
+        });
+        assert_eq!(number, NUM_IPC_CALL);
+        assert_eq!(args[0], rustos_abi::driver_store::DRIVER_STORE_ENDPOINT);
+        assert_eq!(args[1], req_ptr as usize as u64);
+        assert_eq!(args[2], request.len() as u64);
+        assert_eq!(args[3], reply_ptr as usize as u64);
+        assert_eq!(args[4], reply.len() as u64);
+        assert_eq!(args[5], 0);
     }
 
     #[test]

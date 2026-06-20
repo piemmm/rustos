@@ -463,6 +463,39 @@ impl SyscallNumber {
     /// reading the tree. A build with no hardware-tree source wired fails
     /// closed with [`crate::Errno::NotImplemented`].
     pub const HW_TREE_WAIT: Self = Self(30);
+    /// Make a **synchronous** capability-checked call to a kernel-owned IPC
+    /// call endpoint: post a request, block until exactly one matching reply
+    /// arrives, and copy it out (`AGENTS.md` §5.2 / §5.4; Design D D2b —
+    /// `.junie/next-pi-prompt.md`).
+    ///
+    /// Unlike [`SyscallNumber::IPC_SEND`] (fire-and-forget over a
+    /// [`crate::ipc`] port), this is request/reply: the kernel correlates the
+    /// posted request with one reply through an opaque per-call ticket, so a
+    /// system service can answer a specific caller. The first consumer is the
+    /// reactive device manager (`userland/system/devmgr`) reading the
+    /// read-only `/System` driver store over the disk-owning kernel service's
+    /// file-read endpoint ([`crate::driver_store`]).
+    ///
+    /// Arguments: `endpoint: u64` — the kernel-owned call endpoint id (a
+    /// well-known reserved id such as
+    /// [`crate::driver_store::DRIVER_STORE_ENDPOINT`], or a delegated one);
+    /// `request: *const u8` and `request_len: usize` — the request payload;
+    /// `reply: *mut u8` and `reply_cap: usize` — the buffer the reply is
+    /// copied into. Returns the number of reply bytes written (`>= 0`), or
+    /// `-errno`.
+    ///
+    /// The kernel enforces the endpoint's required send capability against
+    /// the **caller's** effective set before posting (`AGENTS.md` §5.2 /
+    /// §5.4 — no ambient authority), validates both buffers against the
+    /// caller's address space, and blocks the caller cooperatively until the
+    /// reply arrives (the same park shape as [`SyscallNumber::HW_TREE_WAIT`]
+    /// / [`SyscallNumber::WAIT`]), never busy-spinning (`AGENTS.md` §2.1). A
+    /// reply larger than `reply_cap` fails closed with
+    /// [`crate::Errno::BufferTooSmall`] (`AGENTS.md` §2.9); an unknown
+    /// endpoint, a missing capability, or the endpoint being destroyed
+    /// mid-call each fail closed. A build with no call-endpoint registry
+    /// wired fails closed with [`crate::Errno::NotImplemented`].
+    pub const IPC_CALL: Self = Self(31);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -569,6 +602,7 @@ mod tests {
         assert_eq!(SyscallNumber::RESOURCE_GRANTS.as_u16(), 28);
         assert_eq!(SyscallNumber::HW_TREE_READ.as_u16(), 29);
         assert_eq!(SyscallNumber::HW_TREE_WAIT.as_u16(), 30);
+        assert_eq!(SyscallNumber::IPC_CALL.as_u16(), 31);
     }
 
     #[test]

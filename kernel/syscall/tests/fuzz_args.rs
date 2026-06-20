@@ -229,6 +229,18 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn ipc_call(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _request: u64,
+        _request_len: usize,
+        _reply: u64,
+        _reply_cap: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity
@@ -507,12 +519,15 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
 
     let mut saw_ptr_slot = false;
     for (spec_idx, spec) in SYSCALLS.iter().enumerate() {
-        let Some(ptr_slot) = spec.args[..spec.arg_count as usize]
-            .iter()
-            .position(|ty| *ty == AbiType::UserPtr)
-        else {
+        // A syscall may carry more than one `UserPtr` argument (e.g.
+        // `ipc_call` takes both a request and a reply pointer). Drive *every*
+        // pointer slot to the adversarial base together, so a non-null case
+        // reaches the handler rather than tripping the null check on a sibling
+        // pointer left at zero.
+        let has_ptr = spec.args[..spec.arg_count as usize].contains(&AbiType::UserPtr);
+        if !has_ptr {
             continue;
-        };
+        }
         saw_ptr_slot = true;
 
         #[allow(clippy::cast_possible_truncation)]
@@ -523,7 +538,11 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
             for slot in &mut args[spec.arg_count as usize..] {
                 *slot = 0;
             }
-            args[ptr_slot] = base;
+            for (i, ty) in spec.args[..spec.arg_count as usize].iter().enumerate() {
+                if *ty == AbiType::UserPtr {
+                    args[i] = base;
+                }
+            }
 
             let result = dispatcher.dispatch(&ctx, raw_number, RawArgs(args));
             if is_null {

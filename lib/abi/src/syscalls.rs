@@ -773,6 +773,32 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::SYSINFO_HW),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::IPC_CALL,
+        name: "ipc_call",
+        arg_count: 5,
+        args: [
+            // endpoint, request ptr, request len, reply ptr, reply cap.
+            AbiType::IpcEndpoint,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        // `U64` carries the reply-bytes-written-or-`-errno` register
+        // convention `hw_tree_read` / `users_db_read` use.
+        ret: AbiType::U64,
+        // The endpoint enforces its own required send capability against the
+        // caller before posting (`AGENTS.md` §5.2), exactly like `ipc_send`
+        // over a port, so the dispatcher gate is `None`. Audited per call:
+        // a synchronous system-service call is a security-relevant IPC, like
+        // `ipc_send` (`AGENTS.md` §5.4.4); the driver-store consumer is
+        // low-volume (a boot/hotplug match pass), so the record cannot drown
+        // the log.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1046,6 +1072,14 @@ mod tests {
             assert_eq!(spec.required_capability, Some(CapabilityId::SYSINFO_HW));
             assert!(!spec.audit, "hw-tree observation must not audit per call");
         }
+        // ipc_call carries no dispatcher capability gate (the call endpoint
+        // enforces its own required send capability against the caller, like
+        // ipc_send over a port — `AGENTS.md` §5.2) but IS audited per call,
+        // matching ipc_send (a synchronous system-service call is
+        // security-relevant IPC, `AGENTS.md` §5.4.4).
+        let ipc_call = spec_for(SyscallNumber::IPC_CALL).unwrap();
+        assert_eq!(ipc_call.required_capability, None);
+        assert!(ipc_call.audit, "ipc_call must be audited");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

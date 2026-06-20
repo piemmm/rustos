@@ -54,6 +54,7 @@ extern "C" {
 #define ROS_SYS_RESOURCE_GRANTS 28u
 #define ROS_SYS_HW_TREE_READ 29u
 #define ROS_SYS_HW_TREE_WAIT 30u
+#define ROS_SYS_IPC_CALL 31u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -87,6 +88,7 @@ uint64_t ros_sys_dma_alloc(uint64_t a0, uintptr_t a1, void * a2);
 uint64_t ros_sys_resource_grants(void * a0, uintptr_t a1);
 uint64_t ros_sys_hw_tree_read(void * a0, uintptr_t a1);
 int32_t ros_sys_hw_tree_wait(uint64_t a0, uint64_t a1);
+uint64_t ros_sys_ipc_call(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */
