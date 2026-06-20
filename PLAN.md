@@ -1496,8 +1496,8 @@ order (one fully-gated increment each):
                  verticals (a CPU-bound EL0 task is involuntarily preempted) +
                  host tests; SMP-correct (§4), fail-closed/fail-safe (§5.4/§2.9);
                  Pi metal checklist (§0.9).
-                 **P-1a (aarch64) landed — whole gate green, not yet
-                 metal-verified.** `userentry` erets to EL0 with IRQ unmasked
+                 **P-1a (aarch64) DONE — whole gate green and metal-confirmed
+                 on a real Pi 4B.** `userentry` erets to EL0 with IRQ unmasked
                  (`SPSR_EL0T_PREEMPTIBLE`); a fail-safe EL0-only preempt-callback
                  hook in `rustos_arch_aarch64::preempt` (`set_preempt_callback` /
                  `on_el0_preempt_point`) is invoked from
@@ -1507,16 +1507,19 @@ order (one fully-gated increment each):
                  `Aarch64BinArch::install_irq_dispatch`) registers
                  `PreemptStorage<1>`, installs the `reschedule_current(Yield)`
                  callback, and arms the 100 Hz generic timer. No tick callback
-                 (EEVDF is tickless; armed solely to preempt). Verified green:
-                 `cargo fmt --all --check`, full `cargo xtask ci` (both Pi images
-                 + the whole QEMU matrix, incl. the metal-confirmed
-                 `root_unlock_admission`/`autoload_input` aarch64 verticals),
-                 `cargo xtask fuzz --secs 5`, `tools/ci/soak.sh both --secs 20` —
-                 proving **non-regression** under preemption. Remaining: a
-                 dedicated `-M virt` vertical proving a CPU-bound EL0 task is
-                 involuntarily preempted, Pi metal re-verify (§0.9), then **P-1b
-                 riscv64** + **P-1c x86_64** (x86_64 already arms the LAPIC timer
-                 with a null callback).
+                 (EEVDF is tickless; armed solely to preempt). The behavioural
+                 proof is the `preempt_el0_qemu_aarch64` `-M virt` vertical: a
+                 runaway, never-yielding EL0 spinner (the pure-Rust
+                 `el0_spinner` fixture, a `black_box` busy loop issuing no
+                 syscall) is involuntarily preempted at least once **and**
+                 correctly resumed mid-loop to run to completion and exit — the
+                 only way it leaves EL0 before `exit` is a forced preemption.
+                 **Next: P-1b riscv64** (arm the supervisor timer + the
+                 supervisor-trap EL0 preempt point), then **P-1c x86_64**
+                 (already arms the LAPIC timer with a null callback — wire the
+                 ring-3 preempt). Each lands fully gated, mirroring P-1a's shape
+                 over the Arch HAL, with any logic shared across ports hoisted,
+                 not copied (§2.21, §2.2).
                - **P-2 — generic blocking wait-queue + true `Park` + timed wake.**
                  A reusable kernel wait primitive: a task registers on a wait
                  object and parks (`RescheduleAction::Park`, off the run queue),

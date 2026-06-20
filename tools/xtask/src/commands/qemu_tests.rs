@@ -1437,6 +1437,41 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // PI Stage D2b-2b-A P-1 (`plans/PI.md`): the aarch64 involuntary-preemption
+    // vertical — the proof that the production generic-timer IRQ preempts a
+    // **runaway** EL0 task on the `virt` board (the P-1a behavioural test the
+    // boot matrix only covered by non-regression). It reads the GICv2 base +
+    // timer rate from the embedded `virt` DTB (P3/P4), brings up the EL1 vectors
+    // + GICv2, and builds **one** hardware-isolated EL0 address space from the
+    // pure-Rust `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy
+    // loop that issues no syscall, built PIE + converted to `rxe` by `build.rs`)
+    // through the capability-checked, audited `kernel_core::spawn_image`. It
+    // then arms the **production** preemption path verbatim (`AGENTS.md` §2.2 —
+    // the `rustos_arch_aarch64::preempt` surface the bin crate's
+    // `arm_preemption` uses): a per-CPU `PreemptStorage`, an EL0-preemption
+    // callback that `reschedule_current(_, Yield)`s the running task, and the
+    // periodic generic timer; EL0 runs preemptible (`SPSR_EL0T_PREEMPTIBLE`), so
+    // a tick taken while the spinner runs traps to `LOWER_IRQ` and preempts it.
+    // Because the loop never traps, the only way it leaves EL0 before its final
+    // `exit` is an involuntary preemption. PASS once the preempt callback fired
+    // at least once AND the task — resumed mid-loop after each preemption —
+    // still completed and exited; a preemption that never fires (the `step`
+    // spins forever inside EL0) or a botched resume (the task never exits)
+    // times out (fail-loud, `AGENTS.md` §7). Single CPU; a 120-second budget
+    // covers the multi-tick busy loop under QEMU TCG.
+    QemuTest {
+        package: "rustos-test-preempt-el0-qemu-aarch64",
+        binary: "rustos-test-preempt-el0-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
     // script compiles the pure-Rust driver-stub fixture
