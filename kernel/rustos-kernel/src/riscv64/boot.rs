@@ -210,6 +210,23 @@ impl KernelArch for RiscvBinArch {
     fn monotonic_ns(&self, _cpu: CpuId) -> u64 {
         self.arch.monotonic_ns()
     }
+
+    fn install_irq_dispatch(&self, _table: &'static rustos_kernel_irq::IrqTable) {
+        // Arm supervisor-timer-driven preemption now that the scheduler is
+        // up (P-1b, `plans/PI.md` D2b-2b-A): register the per-hart preempt
+        // storage, install the U-mode-preemption callback, and start the
+        // periodic SBI timer derived from the device-tree
+        // `timebase-frequency`. The kernel keeps `sstatus.SIE == 0`, so a
+        // tick is *taken* only while a U-mode task runs (the privilege rule
+        // U < S); a tick that ever fired in S-mode would re-arm but never
+        // preempt (`crate::trap` gates the preempt point on the saved
+        // `SPP`). The armed timer is therefore additive and non-regressing
+        // (`AGENTS.md` §2.17): it cannot preempt the cooperative kernel,
+        // only a runaway user task. `_table` is unused here — the riscv64
+        // production boot wires no PLIC external-IRQ dispatch in this slice
+        // (the default no-op), and adding it is out of P-1b scope.
+        arm_preemption(self.arch.timebase_hz());
+    }
 }
 
 // SAFETY-INVARIANT: `RiscvBinArch::halt` returns the bottom type. The
@@ -217,6 +234,112 @@ impl KernelArch for RiscvBinArch {
 // the contract at compile time (`AGENTS.md` §2.10).
 const _RISCV_BIN_ARCH_HALT_RETURNS_NEVER: fn(&RiscvBinArch) -> ! =
     <RiscvBinArch as KernelArch>::halt;
+
+/// Periodic preemption-timer rate, in ticks per second. Matches the
+/// aarch64 production rate (`gic_irq::PREEMPT_TICK_HZ`): a 100 Hz slice
+/// bounds a runaway user task's hold on a hart to ~10 ms while costing
+/// negligible trap overhead. The interval in `time`-CSR ticks is derived
+/// from the discovered `timebase-frequency`, never a board constant
+/// (`AGENTS.md` §2.20).
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+const PREEMPT_TICK_HZ: u64 = 100;
+
+/// Caller-owned per-hart preemption backing for the production boot hart.
+///
+/// The production riscv64 image is single-hart (`BootInfo::new(BOOT_CPU,
+/// 1, …)`), so a `PreemptStorage<1>` covers it; secondary-hart preemption
+/// is sized from the discovered hart count when SMP bring-up lands
+/// (`AGENTS.md` §24.1 — the per-hart timer bookkeeping is the discovered
+/// hart count, never a baked-in ceiling). Published once by
+/// [`arm_preemption`].
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+static PREEMPT_STORAGE: rustos_arch_riscv64::preempt::PreemptStorage<1> =
+    rustos_arch_riscv64::preempt::PreemptStorage::new();
+
+/// The U-mode-preemption callback the timer trap path invokes for a tick
+/// taken from U-mode (installed via
+/// [`rustos_arch_riscv64::preempt::set_preempt_callback`]).
+///
+/// It suspends the user task currently running on `cpu` back to the
+/// scheduler with [`rustos_kernel_core::RescheduleAction::Yield`] — the
+/// *involuntary* analogue of a `yield` syscall: the task is re-enqueued at
+/// its priority and the scheduler picks the next runnable task, giving
+/// EEVDF-ordered time-slicing. [`rustos_kernel_core::reschedule_current`]
+/// returns `false` when no resumable user kthread is published on `cpu`
+/// (unreachable from U-mode with none switched in, but the fail-closed
+/// return means a stray invocation is a harmless no-op rather than an
+/// unsound switch — `AGENTS.md` §2.9). The call only ever runs after
+/// [`on_timer_interrupt`](rustos_arch_riscv64::preempt) re-armed the SBI
+/// timer, so `sip.STIP` is already cleared across the context switch.
+#[cfg(all(freestanding, kernel_isa = "riscv64"))]
+extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
+    let _ =
+        rustos_kernel_core::reschedule_current(cpu, rustos_kernel_core::RescheduleAction::Yield);
+}
+
+/// Arm supervisor-timer-driven preemption on the boot hart: register the
+/// per-hart preempt storage, install the U-mode-preemption callback, and
+/// start the periodic SBI timer at [`PREEMPT_TICK_HZ`].
+///
+/// Called once per boot from [`RiscvBinArch::install_irq_dispatch`], in
+/// the kernel-core `Irq` phase — after the scheduler is built and before
+/// `init` drops to U-mode. The kernel runs with `sstatus.SIE == 0`, so no
+/// tick is *taken* until a U-mode task runs (the privilege rule U < S);
+/// the armed timer simply leaves `sip.STIP` pending in the meantime, so
+/// this is **additive and non-regressing** (`AGENTS.md` §2.17): a tick
+/// taken in U-mode drives [`production_preempt_dispatch`], and a tick that
+/// ever fired in S-mode would only re-arm (never preempt — the kernel is
+/// non-preemptible).
+///
+/// No scheduler-tick callback is installed: EEVDF is tickless (fairness is
+/// advanced inside `Scheduler::step`, not by a periodic count), so the SBI
+/// timer is armed solely to *preempt*. The arch `on_timer_interrupt`
+/// re-arms the SBI timer independently of any tick callback, so omitting
+/// one is correct and avoids a no-op wrapper (`AGENTS.md` §2.3). The
+/// timed-wake sweep a deadline-bearing blocking wait needs (P-2) installs
+/// its tick consumer then, not ahead of it (§2.4).
+///
+/// A zero `timebase_hz` (a board that does not report the timer rate)
+/// leaves the kernel cooperative rather than arming a nonsense interval —
+/// fail-safe (`AGENTS.md` §2.9). The boot pipeline already refuses a
+/// zero/absent `timebase-frequency` (`BootError::NoTimebase`), so this is
+/// defence-in-depth.
+fn arm_preemption(timebase_hz: u64) {
+    #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+    {
+        use rustos_arch_riscv64::preempt;
+
+        if timebase_hz == 0 {
+            return;
+        }
+
+        // Set-once per boot; a stray re-call fails closed by halting rather
+        // than re-pointing the live per-hart slices (`AGENTS.md` §2.1).
+        if PREEMPT_STORAGE.register().is_err() {
+            halt_current_hart();
+        }
+
+        // Install the U-mode-preemption callback *before* arming the timer,
+        // so the first tick taken from U-mode already has a handler.
+        preempt::set_preempt_callback(production_preempt_dispatch);
+
+        let interval = preempt::interval_for_hz(timebase_hz, PREEMPT_TICK_HZ);
+
+        // SAFETY: this is the boot hart (id 0); the preempt callback is
+        // installed (above), the per-hart storage is registered (above),
+        // and the trap vector is installed (`enable_mmu_and_vectors`, run
+        // before `kernel_main`). It records the interval, arms the first
+        // SBI timer, and enables `sie.STIE`; it does not set `sstatus.SIE`,
+        // so no tick is taken until a U-mode task runs.
+        unsafe {
+            preempt::init_local_preempt(0, interval);
+        }
+    }
+    #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+    {
+        let _ = timebase_hz;
+    }
+}
 
 /// The system console device the riscv64 boot path installs on
 /// [`rustos_kernel_core::BootInfo`].

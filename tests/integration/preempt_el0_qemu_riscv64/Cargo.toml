@@ -1,0 +1,57 @@
+[package]
+name = "rustos-test-preempt-el0-qemu-riscv64"
+description = "plans/PI.md D2b-2b-A P-1b QEMU integration test (riscv64 sibling of rustos-test-preempt-el0-qemu-aarch64): prove the production supervisor-timer interrupt involuntarily preempts a runaway U-mode task on the riscv64 virt board. The build script compiles the pure-Rust EL0 spinner (tests/integration/el0_spinner_program) PIE — a busy loop that issues no syscall — and converts it to an rxe blob; the kernel reads the generic-timer rate from the firmware device tree, installs the trap vector (without enabling sstatus.SIE, so the kernel stays non-preemptible), builds one hardware-isolated Sv39 U-mode address space via rustos_kernel_core::spawn_image, admits it as a resumable user kthread, arms the production preemption path (per-hart PreemptStorage, the reschedule_current(Yield) preempt callback, init_local_preempt), and drives the cooperative Scheduler::step loop. Because the loop never traps, any reschedule before exit is forced — PASS once the task is preempted at least once AND still completes and exits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# This bin is the `plans/PI.md` D2b-2b-A P-1b riscv64 involuntary-preemption
+# vertical (the cross-port sibling of `preempt_el0_qemu_aarch64`). The fixture
+# program (`rustos-test-el0-spinner`) is built position-independent by
+# `build.rs` and converted to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
+# carrying the kernel's compiled-in syscall CFI tag. On boot the test reads the
+# `timebase-frequency` from the firmware device tree (the `a1` DTB pointer),
+# installs the S-mode trap vector via `trap::install_trap_vector` — deliberately
+# NOT `init_traps`, so `sstatus.SIE` stays clear and the kernel is
+# non-preemptible — builds an isolated Sv39 U-mode space via
+# `rustos_kernel_core::spawn_image` (capability-checked + audited), admits it as
+# a resumable user kthread via `spawn_user_kthread`, arms the production timer
+# preemption path, and drives the `step` loop. The spinner issues no syscall, so
+# the only way it leaves U-mode before its final `exit` is an involuntary
+# supervisor-timer preemption (taken in U-mode by the privilege rule U < S).
+# PASS once the preempt callback fired at least once AND the task still
+# completed and exited; a runaway that never preempts (the `step` never returns)
+# or a botched resume (the task never exits) times out (fail-loud,
+# `AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the other EL0 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-preempt-el0-qemu-riscv64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }
+rustos-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

@@ -3,13 +3,27 @@
 //!
 //! Dropping a freshly built process image into U-mode is the `sret`
 //! sequence: clear `sstatus.SPP` (so `sret` targets U-mode) and
-//! `sstatus.SPIE` (so interrupts stay masked in U-mode), set
+//! `sstatus.SPIE` (so `sstatus.SIE` is `0` once back in U-mode), set
 //! `sstatus.SUM` (so the S-mode trap handler that runs after the
 //! program's `ecall` may touch the U-bit user stack), load `sepc` with
 //! the entry point and `sp`/`a0` with the stack pointer and first
 //! argument, then `sret`. This is the one definition of that sequence
 //! (`AGENTS.md` §2.2); the CC2/CC3 QEMU verticals reach it through the
 //! HAL rather than copying the `asm!` block.
+//!
+//! # U-mode preemptibility
+//!
+//! Clearing `SPIE` does **not** make U-mode uninterruptible. A
+//! supervisor interrupt is taken whenever the hart runs at a privilege
+//! *below* S-mode (the privileged-spec rule: priv `U` < `S`), regardless
+//! of `sstatus.SIE`; `SIE`/`SPIE` only gate interrupts taken *in S-mode*.
+//! So once the boot path arms the supervisor timer (`sie.STIE` +
+//! `crate::preempt::init_local_preempt`), a runaway U-mode task is
+//! involuntarily preempted by the timer trap — the riscv64 analogue of
+//! aarch64's preemptible-EL0 `SPSR` (`plans/PI.md` D2b-2b-A P-1b).
+//! Leaving `SIE` clear keeps the *kernel* non-preemptible (`AGENTS.md`
+//! §4): a tick taken while in S-mode never fires the preempt point
+//! (`crate::trap` gates it on the saved `SPP`).
 
 use rustos_arch_api::{EnterUser, UserEntry};
 
@@ -41,7 +55,10 @@ impl EnterUser for UserMode {
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 const SSTATUS_SUM: u64 = 1 << 18;
 /// `sstatus.SPP` (bit 8) | `sstatus.SPIE` (bit 5): cleared so `sret`
-/// enters U-mode with interrupts disabled.
+/// enters U-mode with `sstatus.SIE == 0`. This does not block
+/// preemption — a supervisor-timer interrupt is still taken in U-mode
+/// because the hart runs below S-mode (see the module docs); `SIE` only
+/// governs interrupts taken in S-mode.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 const SSTATUS_SPP_SPIE: u64 = (1 << 8) | (1 << 5);
 

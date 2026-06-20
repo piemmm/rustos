@@ -189,6 +189,29 @@ impl<const N: usize> Default for PreemptStorage<N> {
 /// IPI to, packed into a `usize`. Set up before any IPI is enabled.
 static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
+/// The preemption callback the timer trap path forwards each tick **taken
+/// from U-mode** to, packed into a `usize`. Installed by the binary before
+/// the timer is armed; absent (`0`) the timer tick is pure accounting and
+/// nothing is preempted, so an image that arms the timer without wiring
+/// preemption simply keeps cooperative scheduling (fail-safe, `AGENTS.md`
+/// §2.9).
+///
+/// This is the involuntary analogue of the cooperative reschedule the
+/// `ecall` syscall path drives: a supervisor-timer interrupt taken while
+/// U-mode was running lands on the interrupted task's own kernel stack
+/// (the same stack an `ecall` trap uses, via the `sscratch` swap in
+/// `trap.s`), so the installed callback can suspend that task back to the
+/// scheduler exactly as the cooperative `yield` path does. The callback is
+/// invoked **only** for a tick taken from U-mode — a tick taken in S-mode
+/// never preempts (the kernel is non-preemptible, `AGENTS.md` §4 watch-out:
+/// a half-completed kernel critical section must never be switched away
+/// from). In production the kernel runs with `sstatus.SIE == 0`, so the
+/// privilege rule (U < S) is the *only* path on which a tick is taken at
+/// all, but the explicit SPP gate is defence-in-depth so a future S-mode
+/// `SIE` enable can never accidentally preempt the kernel (`AGENTS.md`
+/// §2.9).
+static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+
 /// Install the per-hart timer callback.
 ///
 /// Invoked from the timer trap path on every tick with the hart's
@@ -230,6 +253,55 @@ pub fn ipi_callback() -> Option<extern "C" fn(CpuId)> {
         // valid `extern "C" fn(CpuId)` pointer through
         // `set_ipi_callback`.
         Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
+    }
+}
+
+/// Install the U-mode-preemption callback the timer trap path forwards
+/// each tick taken from U-mode to (the private `PREEMPT_CALLBACK_FN`
+/// slot).
+///
+/// Storing a `fn` (not a closure) keeps it safe to call from trap
+/// context: there is no captured environment to drop mid-flight. The
+/// binary installs the callback (which suspends the running user task
+/// back to the scheduler) before arming the timer.
+pub fn set_preempt_callback(cb: extern "C" fn(CpuId)) {
+    PREEMPT_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+}
+
+/// Read the currently-installed U-mode-preemption callback, if any.
+/// Test/diagnostic.
+#[must_use]
+pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
+    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
+        // valid `extern "C" fn(CpuId)` pointer through
+        // `set_preempt_callback`.
+        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
+    }
+}
+
+/// Invoke the installed U-mode-preemption callback for `cpu`, if any.
+///
+/// Called from the trap path **only** for a supervisor-timer tick taken
+/// from U-mode (the saved `sstatus.SPP == 0`), **after**
+/// [`on_timer_interrupt`] has re-armed the SBI timer (so the timer line is
+/// no longer pending while the callback context-switches away). A build
+/// that armed the timer without installing the callback keeps cooperative
+/// scheduling — the tick is pure accounting (`AGENTS.md` §2.9, fail-safe).
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub(crate) fn on_u_mode_preempt_point(cpu: CpuId) {
+    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw != 0 {
+        // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
+        // valid `extern "C" fn(CpuId)` pointer through
+        // `set_preempt_callback`; the callback carries no captured
+        // environment and is safe to call from trap context.
+        let cb: extern "C" fn(CpuId) =
+            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
+        cb(cpu);
     }
 }
 
@@ -298,6 +370,7 @@ pub fn timer_cpu_id() -> u32 {
 fn clear_for_tests() {
     TIMER_CALLBACK_FN.store(0, Ordering::Relaxed);
     IPI_CALLBACK_FN.store(0, Ordering::Relaxed);
+    PREEMPT_CALLBACK_FN.store(0, Ordering::Relaxed);
     let len = PREEMPT_LEN.load(Ordering::Acquire);
     for idx in 0..len {
         interval_slot(idx).store(0, Ordering::Relaxed);

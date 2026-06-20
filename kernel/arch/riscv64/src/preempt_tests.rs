@@ -152,3 +152,19 @@ fn ipi_callback_round_trips() {
     );
     clear_for_tests();
 }
+
+#[test]
+fn preempt_callback_round_trips_through_its_own_slot() {
+    clear_for_tests();
+    assert!(preempt_callback().is_none());
+    set_preempt_callback(host_cb);
+    assert_eq!(
+        preempt_callback().map(|f| f as *const () as usize),
+        Some(host_cb as *const () as usize)
+    );
+    // The preempt slot is independent of the timer and IPI slots, so
+    // arming U-mode preemption never disturbs the tick/IPI dispatch.
+    assert!(timer_callback().is_none());
+    assert!(ipi_callback().is_none());
+    clear_for_tests();
+}

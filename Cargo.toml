@@ -193,6 +193,7 @@ members = [
     "tests/integration/spawn_el0_timeshare_qemu_aarch64",
     "tests/integration/el0_spinner_program",
     "tests/integration/preempt_el0_qemu_aarch64",
+    "tests/integration/preempt_el0_qemu_riscv64",
     "tests/integration/mem_map_program",
     "tests/integration/mem_map_qemu_aarch64",
     "tests/integration/mmio_map_program",

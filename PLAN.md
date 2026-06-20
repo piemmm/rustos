@@ -1514,12 +1514,31 @@ order (one fully-gated increment each):
                  syscall) is involuntarily preempted at least once **and**
                  correctly resumed mid-loop to run to completion and exit — the
                  only way it leaves EL0 before `exit` is a forced preemption.
-                 **Next: P-1b riscv64** (arm the supervisor timer + the
-                 supervisor-trap EL0 preempt point), then **P-1c x86_64**
-                 (already arms the LAPIC timer with a null callback — wire the
-                 ring-3 preempt). Each lands fully gated, mirroring P-1a's shape
-                 over the Arch HAL, with any logic shared across ports hoisted,
-                 not copied (§2.21, §2.2).
+                 **P-1b (riscv64) DONE — whole gate green (Pi metal N/A:
+                 riscv64 is QEMU `virt`/SiFive).** A U-mode-only preempt-callback
+                 hook in `rustos_arch_riscv64::preempt` (`set_preempt_callback` /
+                 `on_u_mode_preempt_point`) is invoked from the supervisor-timer
+                 branch of `trap::rustos_riscv64_trap_handler` after the SBI
+                 re-arm, gated on the saved `frame.sstatus` SPP == 0
+                 (`trap::trap_came_from_user`); `rustos_kernel::riscv64::boot`'s
+                 `arm_preemption()` (called from a new
+                 `RiscvBinArch::install_irq_dispatch`) registers
+                 `PreemptStorage<1>`, installs the `reschedule_current(Yield)`
+                 callback, derives the interval from the device-tree
+                 `timebase_hz`, and `init_local_preempt`s. Crucially riscv64
+                 needs **no** EL0-SPSR-style change and **no** global-`SIE`
+                 enable: a supervisor timer interrupt is taken in U-mode by the
+                 privilege rule (U < S) regardless of `sstatus.SIE`, so leaving
+                 `SIE` clear keeps the kernel non-preemptible while U-mode is
+                 preemptible. The behavioural proof is the
+                 `preempt_el0_qemu_riscv64` `-M virt` vertical (reusing the shared
+                 `el0_spinner` fixture, armed via `install_trap_vector`), PASSing
+                 (`EventId(4330)`) once the runaway U-mode task is involuntarily
+                 preempted ≥ 1 and resumed to exit.
+                 **Next: P-1c x86_64** (already arms the LAPIC timer with a null
+                 callback — wire the ring-3 preempt). Lands fully gated, mirroring
+                 P-1a/P-1b's shape over the Arch HAL, with any logic shared across
+                 ports hoisted, not copied (§2.21, §2.2).
                - **P-2 — generic blocking wait-queue + true `Park` + timed wake.**
                  A reusable kernel wait primitive: a task registers on a wait
                  object and parks (`RescheduleAction::Park`, off the run queue),

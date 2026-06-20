@@ -118,6 +118,21 @@ pub const SIE_SEIE: u64 = 1 << 9;
 /// `sstatus.SIE` — supervisor global interrupt enable (bit 1).
 pub const SSTATUS_SIE: u64 = 1 << 1;
 
+/// `sstatus.SPP` — supervisor previous privilege (bit 8). Set when the
+/// trap was taken from S-mode, clear when it was taken from U-mode. The
+/// timer-preemption path gates on this so a tick taken in the
+/// non-preemptible kernel never switches a half-completed critical
+/// section away (`AGENTS.md` §4 watch-out).
+pub const SSTATUS_SPP: u64 = 1 << 8;
+
+/// `true` iff a trap whose saved `sstatus` is `sstatus` was taken from
+/// U-mode (the `SPP` bit is clear). The U-mode preemption point fires
+/// only for such a tick.
+#[must_use]
+pub const fn trap_came_from_user(sstatus: u64) -> bool {
+    (sstatus & SSTATUS_SPP) == 0
+}
+
 /// `true` iff `scause` denotes a supervisor external interrupt — the
 /// interrupt bit is set *and* the cause code is
 /// [`SCAUSE_SUPERVISOR_EXTERNAL`].
@@ -337,6 +352,19 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         // Supervisor timer interrupt: drive the scheduler tick and
         // re-arm the SBI timer (which acknowledges `sip.STIP`).
         crate::preempt::on_timer_interrupt();
+        // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1b): a tick
+        // taken from U-mode suspends the running user task back to the
+        // scheduler, exactly as a cooperative `yield` does. The re-arm
+        // above already cleared `sip.STIP`, so the context switch happens
+        // with no timer line pending. A tick taken from S-mode never
+        // preempts — the kernel is non-preemptible (`AGENTS.md` §4), and
+        // the saved `SPP` gate enforces that even if `sstatus.SIE` is ever
+        // enabled in S-mode. `frame` is the live saved-register frame.
+        // SAFETY: `frame` is the live saved-register frame the asm vector
+        // passed; reading its saved `sstatus` is a plain field load.
+        if trap_came_from_user(unsafe { (*frame).sstatus }) {
+            crate::preempt::on_u_mode_preempt_point(crate::smp::current_hartid());
+        }
         return;
     }
 
@@ -402,7 +430,18 @@ mod tests {
     fn enable_bit_constants_match_privileged_spec() {
         assert_eq!(SIE_SEIE, 0x200);
         assert_eq!(SSTATUS_SIE, 0x2);
+        assert_eq!(SSTATUS_SPP, 0x100);
         assert_eq!(SCAUSE_INTERRUPT_BIT, 0x8000_0000_0000_0000);
+    }
+
+    #[test]
+    fn trap_origin_is_read_from_the_spp_bit() {
+        // SPP clear → the trap came from U-mode (preemption point fires).
+        assert!(trap_came_from_user(SSTATUS_SIE));
+        assert!(trap_came_from_user(0));
+        // SPP set → the trap came from S-mode (the kernel; never preempts).
+        assert!(!trap_came_from_user(SSTATUS_SPP));
+        assert!(!trap_came_from_user(SSTATUS_SPP | SSTATUS_SIE));
     }
 
     extern "C" fn host_dispatch_cb() {}
