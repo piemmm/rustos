@@ -1583,7 +1583,7 @@ order (one fully-gated increment each):
                  vertical proves spawn → read → react to a real generation bump.
                - **P-4 — tickless (NO_HZ) preemption: one-shot, scheduler-armed
                  — DONE (host + all three `-M virt`/QEMU preempt verticals +
-                 SMP stress; Pi metal re-confirm is §0.9, operator-run).** The
+                 SMP stress; metal-confirmed on a real Pi 4B, §0.9).** The
                  preemption timer is armed **one-shot** to one scheduling quantum
                  only while a CPU is contended, and disarmed when a CPU runs a sole
                  runnable task — no fixed-frequency periodic arming remains
