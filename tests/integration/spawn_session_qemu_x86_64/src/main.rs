@@ -22,12 +22,19 @@
 //! (`userland/system/init/src/run.rs`):
 //!
 //! 1. Writes its gated banner to fd 1 (`stream_write` over the COM1 backing).
-//! 2. Issues the (audited) `spawn` syscall to launch
+//! 2. Launches the configured long-running services first — the device
+//!    manager `/System/Services/devmgr` (`AGENTS.md` §18.3) — with an
+//!    (audited) `spawn`, building it a fresh PML4 (emitting `ProcessSpawned`,
+//!    #2). `devmgr` reads the discovered hardware tree (unaudited
+//!    `hw_tree_read`) and parks in `hw_tree_wait` (unaudited), so it adds
+//!    exactly one `ProcessSpawned` and one audited `spawn`, then contributes
+//!    no further records.
+//! 3. Issues the (audited) `spawn` syscall to launch
 //!    `/System/Services/login` (P11). The X3b producer resolves it against
 //!    the registry and builds login a *fresh, hardware-isolated* PML4
-//!    (emitting `ProcessSpawned`, #2), admits it **Ready**, and returns its
+//!    (emitting `ProcessSpawned`, #3), admits it **Ready**, and returns its
 //!    PID — the X3b deliverable.
-//! 3. Calls `wait` on that child. The cooperative drain steps login: its
+//! 4. Calls `wait` on that child. The cooperative drain steps login: its
 //!    `users_db_read` fails closed (no root volume, no database held), it
 //!    wires the deny-all authenticator (`AGENTS.md` §5.4.5), writes its
 //!    `Username: ` prompt, and reads a dead console (the x86_64 boot path
@@ -39,24 +46,26 @@
 //!    supervision cycle (`plans/PI.md` X4 follow-on, the cross-port sibling
 //!    of the aarch64 `spawn_session_qemu_aarch64`).
 //!
-//! ## Why the PASS keys on three spawns and four audited syscalls
+//! ## Why the PASS keys on four spawns and five audited syscalls
 //!
-//! The **second** `ProcessSpawned` proves the runtime producer authorised the
-//! first `spawn`, built an isolated address space, and admitted it (the X3b
-//! deliverable). The **third** `ProcessSpawned` is the supervision-cycle
+//! The **second** `ProcessSpawned` is the device manager (the first service
+//! `init` launches); the **third** proves the runtime producer authorised the
+//! login `spawn`, built an isolated address space, and admitted it (the X3b
+//! deliverable). The **fourth** `ProcessSpawned` is the supervision-cycle
 //! witness: it can only be emitted if `init`'s `wait` reaped the first login,
 //! returned to ring 3, and issued its relaunch `spawn` — so it proves the whole
-//! cycle, not just a single concurrent spawn. The four audited `SyscallInvoked`
-//! records are, in order, `init`'s `spawn`, login's `exit`, `init`'s
-//! `wait`, and `init`'s relaunch `spawn` (`init`'s `wait` only completes after
-//! login exits and is reaped, so login's `exit` necessarily precedes the
-//! `wait` record). A regression that never reaps+relaunches (`< 3`
-//! spawns / `< 4` audited syscalls) never reaches the threshold, so the run
-//! times out and the harness reports `Outcome::Timeout` — the documented
-//! fail-loud behaviour (`AGENTS.md` §7). (`stream_write`/`stream_read` are
-//! unaudited high-frequency I/O, and login's refused `users_db_read` audits
-//! as a *rejected* record, so login contributes no `SyscallInvoked` but its
-//! `exit`.)
+//! cycle, not just a single concurrent spawn. The five audited `SyscallInvoked`
+//! records are, in order, `init`'s `spawn` of `devmgr`, `init`'s `spawn` of
+//! login, login's `exit`, `init`'s `wait`, and `init`'s relaunch `spawn`
+//! (`init`'s `wait` only completes after login exits and is reaped, so login's
+//! `exit` necessarily precedes the `wait` record). A regression that never
+//! reaps+relaunches (`< 4` spawns / `< 5` audited syscalls) never reaches the
+//! threshold, so the run times out and the harness reports `Outcome::Timeout`
+//! — the documented fail-loud behaviour (`AGENTS.md` §7).
+//! (`stream_write`/`stream_read` and `devmgr`'s `hw_tree_read`/`hw_tree_wait`
+//! are unaudited, and login's refused `users_db_read` audits as a *rejected*
+//! record, so neither `devmgr` after its spawn nor login but its `exit`
+//! contributes a `SyscallInvoked`.)
 //!
 //! ## How it differs from the production binary
 //!
@@ -103,10 +112,11 @@ mod kernel {
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS
-    /// requires three: PID 1 `init`, the login it launches, and the login
-    /// it **relaunches** after reaping the first — the third is the witness
-    /// that the `wait`→reap→relaunch supervision cycle completed (`plans/PI.md`
-    /// X4 follow-on).
+    /// requires four: PID 1 `init`, the `devmgr` service it launches first,
+    /// the login it then launches, and the login it **relaunches** after
+    /// reaping the first — the fourth is the witness that the
+    /// `wait`→reap→relaunch supervision cycle completed (`plans/PI.md` X4
+    /// follow-on).
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
     /// `EventId` the syscall dispatcher emits for a successfully dispatched
@@ -121,11 +131,11 @@ mod kernel {
 
     /// Sink that replays every event through [`SERIAL_SINK`] (so the QEMU
     /// transcript captures the full boot + spawn timeline) and reports PASS to
-    /// QEMU once **three** processes were built and **four** audited syscalls
-    /// have run — proving PID 1 launched the session into its own isolated
-    /// ring-3 space, the session executed there, and `init` reaped it and
-    /// relaunched a fresh session (the full supervision cycle, `plans/PI.md`
-    /// X4 follow-on).
+    /// QEMU once **four** processes were built and **five** audited syscalls
+    /// have run — proving PID 1 launched the device manager, launched the
+    /// session into its own isolated ring-3 space, the session executed
+    /// there, and `init` reaped it and relaunched a fresh session (the full
+    /// supervision cycle, `plans/PI.md` X4 follow-on).
     struct SpawnSessionExitSink;
 
     impl Sink for SpawnSessionExitSink {
@@ -136,7 +146,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 3 && SYSCALLS.load(Ordering::Acquire) >= 4 {
+            if SPAWNED.load(Ordering::Acquire) >= 4 && SYSCALLS.load(Ordering::Acquire) >= 5 {
                 qemu_exit::exit_success();
             }
         }

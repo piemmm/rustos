@@ -1505,6 +1505,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-test-devmgr-hwtree-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-arch-aarch64",
+ "rustos-bumpalloc",
+ "rustos-itest-harness",
+ "rustos-kernel",
+ "rustos-kernel-core",
+ "rustos-log",
+]
+
+[[package]]
 name = "rustos-test-driver-register-program"
 version = "0.0.0"
 dependencies = [

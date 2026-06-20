@@ -10,6 +10,15 @@
 //! per-console crash-loop budget (`AGENTS.md` §2.1 — never an unbounded
 //! `spawn` loop).
 //!
+//! PID 1 also launches the configured long-running **services** (the device
+//! manager, today — `AGENTS.md` §16.2 / §18.3) once each at startup, on the
+//! primary console (index 0, for their fd 2 diagnostics — `AGENTS.md` §20),
+//! and supervises them in the *same* wait-any loop with the same per-entry
+//! crash-loop budget. A perpetual service that blocks rather than exits
+//! (`devmgr` parks in `hw_tree_wait`) simply never consumes a relaunch, so
+//! the supervisor holds it up for the life of the system; if it does crash
+//! it is reaped and relaunched within budget, never spawn-and-forgotten.
+//!
 //! The logic is pure and parameterised over the [`Sessions`] seam so every
 //! decision — launch fan-out, pid→console accounting, per-console budgets,
 //! exhaustion, error propagation — is host-tested without a kernel,
@@ -41,6 +50,18 @@ pub const MAX_SUPERVISED_CONSOLES: usize = 8;
 /// console cannot starve the others' relaunches.
 pub const SESSION_SPAWN_BUDGET: u32 = 3;
 
+/// Maximum number of long-running services PID 1 supervises in the
+/// bootstrap (allocation-free) supervisor.
+///
+/// A stack-array sizing for the no-heap PID 1, matching the startup
+/// config's `service`-directive bound (`startup::MAX_SERVICES`): the slot
+/// table must live on `main`'s stack until the userland heap lands
+/// (`plans/SPAWN.md` `SP5b`). Services beyond the bound are not launched
+/// rather than overrunning the table (fail closed, §2.9); the caller's
+/// configured list is itself capped at the same bound, so this is never
+/// reached in practice.
+pub const MAX_SUPERVISED_SERVICES: usize = 4;
+
 /// The syscalls the supervisor drives, as a seam so the policy is
 /// host-testable (`plans/PI.md` P11; the `Spawner`/`Reaper` split's
 /// shape). The freestanding binary backs it with `rustos-rt`.
@@ -56,7 +77,7 @@ pub trait Sessions {
     fn wait_any(&mut self, status: &mut i32) -> i64;
 }
 
-/// Why [`supervise_sessions`] returned (PID 1 never returns while a
+/// Why [`supervise`] returned (PID 1 never returns while a
 /// session is still supervisable).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Outcome {
@@ -77,20 +98,29 @@ pub enum Outcome {
     Exhausted,
 }
 
-/// One supervised console's bookkeeping.
+/// One supervised entry's bookkeeping: the program to (re)launch, the
+/// console it attaches to, its live PID, and how many launches it has
+/// consumed. One slot per text console (a session) and one per configured
+/// service, all supervised uniformly in the wait-any loop.
 #[derive(Copy, Clone)]
-struct Slot {
-    /// The live session's PID, or `-1` when the slot is abandoned.
+struct Slot<'a> {
+    /// The program path to (re)launch this slot with.
+    path: &'a [u8],
+    /// The console index the program's standard streams attach to.
+    console: u32,
+    /// The live child's PID, or `-1` when the slot is abandoned.
     pid: i64,
     /// Launches consumed (counts the initial launch).
     launches: u32,
 }
 
-impl Slot {
+impl Slot<'_> {
     const ABANDONED: i64 = -1;
 
     const fn vacant() -> Self {
         Self {
+            path: &[],
+            console: 0,
             pid: Self::ABANDONED,
             launches: 0,
         }
@@ -101,39 +131,65 @@ impl Slot {
     }
 }
 
-/// Launch and supervise one `session` instance per installed console.
+/// Launch and supervise the configured `services` plus one `session`
+/// instance per installed console.
 ///
 /// 1. Read the console count; zero (or an error) is [`Outcome::NoConsoles`].
-/// 2. Launch `session` on each console (up to
-///    [`MAX_SUPERVISED_CONSOLES`]) through [`Sessions::spawn_at`]; any
-///    launch failure is [`Outcome::SpawnFailed`].
-/// 3. Wait-any in a loop: map each reaped PID back to its console and
-///    relaunch the session **on that console**, until the console's
-///    [`SESSION_SPAWN_BUDGET`] is consumed (the slot is then abandoned).
-///    A reaped PID belonging to no slot (a session's leaked child) is
-///    reaped and ignored. When every slot is abandoned the supervisor
-///    returns [`Outcome::Exhausted`].
+/// 2. Launch each entry once through [`Sessions::spawn_at`]: every
+///    `service` on the primary console (index 0, for its fd 2 diagnostics
+///    — `AGENTS.md` §20), then `session` on each console (up to
+///    [`MAX_SUPERVISED_CONSOLES`]). The services are launched first so a
+///    perpetual service (`devmgr`) is up before the sessions. Any launch
+///    failure is [`Outcome::SpawnFailed`].
+/// 3. Wait-any in a loop: map each reaped PID back to its slot and relaunch
+///    that slot's program on **its own** console, until the slot's
+///    [`SESSION_SPAWN_BUDGET`] is consumed (the slot is then abandoned). A
+///    reaped PID belonging to no slot (a leaked grandchild) is reaped and
+///    ignored. When every slot is abandoned the supervisor returns
+///    [`Outcome::Exhausted`].
 ///
-/// The reaped exit status is read but not yet acted on; a policy that
-/// distinguishes a clean logout from a crash (and resets the budget on a
-/// session that ran long enough) awaits a clock/session-state ABI.
-pub fn supervise_sessions<S: Sessions>(sys: &mut S, session: &[u8]) -> Outcome {
+/// A perpetual service that blocks (e.g. `devmgr` in `hw_tree_wait`) never
+/// exits, so its slot stays alive and the supervisor never reaches
+/// exhaustion — PID 1 holds it up for the life of the system (`AGENTS.md`
+/// §18.3). The reaped exit status is read but not yet acted on; a policy
+/// that distinguishes a clean logout from a crash (and resets the budget on
+/// an entry that ran long enough) awaits a clock/session-state ABI.
+pub fn supervise<'a, S: Sessions>(
+    sys: &mut S,
+    session: &'a [u8],
+    services: &[&'a [u8]],
+) -> Outcome {
     let count = sys.console_count();
     if count <= 0 {
         return Outcome::NoConsoles;
     }
-    // Clamp to the allocation-free slot table; consoles past the bound
-    // get no session rather than overrunning it (fail closed, §2.9).
-    // `count` is positive here, so the conversion only fails on a width
-    // the clamp would saturate anyway.
+    // Clamp to the allocation-free slot tables; entries past the bounds are
+    // not launched rather than overrunning them (fail closed, §2.9).
+    // `count` is positive here, so the conversion only fails on a width the
+    // clamp would saturate anyway.
     let consoles =
         usize::try_from(count).map_or(MAX_SUPERVISED_CONSOLES, |n| n.min(MAX_SUPERVISED_CONSOLES));
+    let service_n = services.len().min(MAX_SUPERVISED_SERVICES);
 
-    let mut slots = [Slot::vacant(); MAX_SUPERVISED_CONSOLES];
-    for (console, slot) in slots.iter_mut().enumerate().take(consoles) {
+    // One unified slot table: services first (console 0), then one session
+    // per console. Both halves are supervised identically by the wait-any
+    // loop below, keyed off each slot's own `path` / `console`.
+    let mut slots = [Slot::vacant(); MAX_SUPERVISED_SERVICES + MAX_SUPERVISED_CONSOLES];
+    let active = service_n + consoles;
+    for (slot, &service) in slots[..service_n].iter_mut().zip(services) {
+        slot.path = service;
+        slot.console = 0;
+    }
+    for (console, slot) in slots[service_n..active].iter_mut().enumerate() {
+        slot.path = session;
         // Console indices fit `u32`: the table is bounded far below it.
         #[allow(clippy::cast_possible_truncation)]
-        let pid = sys.spawn_at(session, console as u32);
+        {
+            slot.console = console as u32;
+        }
+    }
+    for slot in &mut slots[..active] {
+        let pid = sys.spawn_at(slot.path, slot.console);
         if pid < 0 {
             return Outcome::SpawnFailed;
         }
@@ -142,7 +198,7 @@ pub fn supervise_sessions<S: Sessions>(sys: &mut S, session: &[u8]) -> Outcome {
     }
 
     loop {
-        if !slots[..consoles].iter().any(Slot::alive) {
+        if !slots[..active].iter().any(Slot::alive) {
             return Outcome::Exhausted;
         }
 
@@ -152,25 +208,24 @@ pub fn supervise_sessions<S: Sessions>(sys: &mut S, session: &[u8]) -> Outcome {
             return Outcome::WaitFailed;
         }
 
-        let Some(console) = slots[..consoles]
+        let Some(index) = slots[..active]
             .iter()
             .position(|slot| slot.alive() && slot.pid == reaped)
         else {
-            // Not one of the supervised sessions (a reparented grandchild):
+            // Not one of the supervised entries (a reparented grandchild):
             // it is reaped, nothing to relaunch.
             continue;
         };
 
-        let slot = &mut slots[console];
+        let slot = &mut slots[index];
         if slot.launches >= SESSION_SPAWN_BUDGET {
-            // This console's session cannot stay up; abandon the slot
-            // rather than busy-looping on `spawn` (`AGENTS.md` §2.1). The
-            // remaining consoles keep their sessions.
+            // This entry cannot stay up; abandon the slot rather than
+            // busy-looping on `spawn` (`AGENTS.md` §2.1). The remaining
+            // entries keep running.
             slot.pid = Slot::ABANDONED;
             continue;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = sys.spawn_at(session, console as u32);
+        let pid = sys.spawn_at(slot.path, slot.console);
         if pid < 0 {
             return Outcome::SpawnFailed;
         }
@@ -183,13 +238,14 @@ pub fn supervise_sessions<S: Sessions>(sys: &mut S, session: &[u8]) -> Outcome {
 mod tests {
     use super::*;
 
-    /// Scripted [`Sessions`] double: hands out PIDs, records every spawn
-    /// `(path-ok, console)`, and replays a scripted sequence of wait-any
+    /// Scripted [`Sessions`] double: hands out PIDs, records every spawn's
+    /// `console` and `path`, and replays a scripted sequence of wait-any
     /// results.
     struct ScriptedSessions {
         count: i64,
         spawn_results: Vec<i64>,
         spawns: Vec<u32>,
+        spawn_paths: Vec<Vec<u8>>,
         waits: Vec<i64>,
         next_spawn: usize,
         next_wait: usize,
@@ -201,6 +257,7 @@ mod tests {
                 count,
                 spawn_results,
                 spawns: Vec::new(),
+                spawn_paths: Vec::new(),
                 waits,
                 next_spawn: 0,
                 next_wait: 0,
@@ -213,8 +270,8 @@ mod tests {
             self.count
         }
         fn spawn_at(&mut self, path: &[u8], console: u32) -> i64 {
-            assert_eq!(path, b"login");
             self.spawns.push(console);
+            self.spawn_paths.push(path.to_vec());
             let result = self.spawn_results[self.next_spawn];
             self.next_spawn += 1;
             result
@@ -229,11 +286,11 @@ mod tests {
     #[test]
     fn zero_or_failed_console_count_is_no_consoles() {
         let mut none = ScriptedSessions::new(0, vec![], vec![]);
-        assert_eq!(supervise_sessions(&mut none, b"login"), Outcome::NoConsoles);
+        assert_eq!(supervise(&mut none, b"login", &[]), Outcome::NoConsoles);
         assert!(none.spawns.is_empty());
 
         let mut err = ScriptedSessions::new(-7, vec![], vec![]);
-        assert_eq!(supervise_sessions(&mut err, b"login"), Outcome::NoConsoles);
+        assert_eq!(supervise(&mut err, b"login", &[]), Outcome::NoConsoles);
         assert!(err.spawns.is_empty());
     }
 
@@ -249,7 +306,7 @@ mod tests {
             vec![10, 20, 11, 21, 12, 22],
             vec![10, 20, 11, 21, 12, 22],
         );
-        assert_eq!(supervise_sessions(&mut sys, b"login"), Outcome::Exhausted);
+        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::Exhausted);
         assert_eq!(sys.spawns, vec![0, 1, 0, 1, 0, 1]);
     }
 
@@ -260,7 +317,7 @@ mod tests {
         // (3 launches) abandons that console and the next wait fails the
         // run out so the test terminates deterministically.
         let mut sys = ScriptedSessions::new(2, vec![10, 20, 21, 22], vec![20, 21, 22, -7]);
-        assert_eq!(supervise_sessions(&mut sys, b"login"), Outcome::WaitFailed);
+        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::WaitFailed);
         assert_eq!(sys.spawns, vec![0, 1, 1, 1]);
     }
 
@@ -269,7 +326,7 @@ mod tests {
         // PID 99 is no supervised session (a reparented grandchild): it
         // is reaped without consuming any console's budget or spawning.
         let mut sys = ScriptedSessions::new(1, vec![10], vec![99, -7]);
-        assert_eq!(supervise_sessions(&mut sys, b"login"), Outcome::WaitFailed);
+        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::WaitFailed);
         assert_eq!(sys.spawns, vec![0]);
     }
 
@@ -277,13 +334,13 @@ mod tests {
     fn a_failed_launch_is_spawn_failed() {
         let mut at_start = ScriptedSessions::new(2, vec![10, -3], vec![]);
         assert_eq!(
-            supervise_sessions(&mut at_start, b"login"),
+            supervise(&mut at_start, b"login", &[]),
             Outcome::SpawnFailed
         );
 
         let mut at_relaunch = ScriptedSessions::new(1, vec![10, -3], vec![10]);
         assert_eq!(
-            supervise_sessions(&mut at_relaunch, b"login"),
+            supervise(&mut at_relaunch, b"login", &[]),
             Outcome::SpawnFailed
         );
     }
@@ -294,7 +351,7 @@ mod tests {
         // exits, then exhaustion — exactly the single-console behaviour
         // the pre-P11 supervisor had.
         let mut sys = ScriptedSessions::new(1, vec![10, 11, 12], vec![10, 11, 12]);
-        assert_eq!(supervise_sessions(&mut sys, b"login"), Outcome::Exhausted);
+        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::Exhausted);
         assert_eq!(sys.spawns, vec![0, 0, 0]);
     }
 
@@ -308,11 +365,92 @@ mod tests {
         let spawn_results: Vec<i64> = (0..bound).map(|n| 100 + n).collect();
         let waits: Vec<i64> = spawn_results.clone();
         let mut sys = ScriptedSessions::new(64, spawn_results, waits);
-        assert_eq!(supervise_sessions(&mut sys, b"login"), Outcome::Exhausted);
+        assert_eq!(supervise(&mut sys, b"login", &[]), Outcome::Exhausted);
         assert_eq!(sys.spawns.len(), launches);
         assert!(sys
             .spawns
             .iter()
             .all(|&console| (console as usize) < MAX_SUPERVISED_CONSOLES));
+    }
+
+    #[test]
+    fn a_service_is_launched_first_on_console_zero_then_the_sessions() {
+        // One service + one console. The service launches first on console
+        // 0, then the session on console 0. Both then crash-loop to
+        // exhaustion (budget 3 each): 2 initial + 2×2 relaunches.
+        let mut sys = ScriptedSessions::new(
+            1,
+            vec![10, 20, 11, 21, 12, 22],
+            vec![10, 20, 11, 21, 12, 22],
+        );
+        let services: [&[u8]; 1] = [b"devmgr"];
+        assert_eq!(supervise(&mut sys, b"login", &services), Outcome::Exhausted);
+        // First spawn is the service, then the session; every spawn is on
+        // console 0 here.
+        assert_eq!(sys.spawns, vec![0, 0, 0, 0, 0, 0]);
+        assert_eq!(sys.spawn_paths[0], b"devmgr");
+        assert_eq!(sys.spawn_paths[1], b"login");
+    }
+
+    #[test]
+    fn a_reaped_service_relaunches_on_console_zero_within_budget() {
+        // One service + one console. The service (PID 10) exits twice and
+        // is relaunched on console 0 each time with its *own* path; the
+        // session (PID 20) never exits. After the service consumes its
+        // budget (3 launches) it is abandoned, and the next wait error ends
+        // the run deterministically.
+        let mut sys = ScriptedSessions::new(1, vec![10, 20, 11, 12], vec![10, 11, 12, -7]);
+        let services: [&[u8]; 1] = [b"devmgr"];
+        assert_eq!(
+            supervise(&mut sys, b"login", &services),
+            Outcome::WaitFailed
+        );
+        // Service (console 0), session (console 0), then two service
+        // relaunches (console 0).
+        assert_eq!(sys.spawns, vec![0, 0, 0, 0]);
+        assert_eq!(
+            sys.spawn_paths,
+            vec![
+                b"devmgr".to_vec(),
+                b"login".to_vec(),
+                b"devmgr".to_vec(),
+                b"devmgr".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_perpetual_service_keeps_the_supervisor_from_exhausting() {
+        // One service + one console. The session crash-loops to its budget
+        // and is abandoned, but the service (PID 10) never exits, so the
+        // supervisor never reaches `Exhausted`. After the session is
+        // abandoned the only live slot is the service; the next wait error
+        // ends the run, proving the supervisor was still waiting (not
+        // exhausted) because the perpetual service held a live slot.
+        let mut sys = ScriptedSessions::new(1, vec![10, 20, 21, 22], vec![20, 21, 22, -7]);
+        let services: [&[u8]; 1] = [b"devmgr"];
+        assert_eq!(
+            supervise(&mut sys, b"login", &services),
+            Outcome::WaitFailed
+        );
+    }
+
+    #[test]
+    fn services_past_the_bound_are_not_launched() {
+        // More services than `MAX_SUPERVISED_SERVICES`: only the first
+        // `MAX_SUPERVISED_SERVICES` are launched (plus one session). The
+        // run is ended by a wait error after the launches.
+        let service_list: Vec<&[u8]> = (0..MAX_SUPERVISED_SERVICES + 2)
+            .map(|_| b"svc".as_slice())
+            .collect();
+        let total_launches = MAX_SUPERVISED_SERVICES + 1; // + one session
+        let bound = i64::try_from(total_launches).expect("small test constant");
+        let spawn_results: Vec<i64> = (0..bound).map(|n| 100 + n).collect();
+        let mut sys = ScriptedSessions::new(1, spawn_results, vec![-7]);
+        assert_eq!(
+            supervise(&mut sys, b"login", &service_list),
+            Outcome::WaitFailed
+        );
+        assert_eq!(sys.spawns.len(), total_launches);
     }
 }

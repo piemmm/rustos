@@ -17,13 +17,20 @@
 //! `init` writes its banner, then runs its supervise loop
 //! (`userland/system/init/src/run.rs`):
 //!
-//! 1. `spawn` for `/System/Services/login` (audited `SyscallInvoked`,
-//!    `EventId(5000)`, #1) — the P11 session. The runtime `ProcessSpawn`
-//!    producer builds login a *fresh, hardware-isolated* address space
-//!    (emitting `ProcessSpawned`, #2) and admits it **Ready**.
-//! 2. `wait` on that child (audited `SyscallInvoked` #2), which parks `init`
-//!    back on the scheduler until the child is reapable.
-//! 3. The cooperative drain loop steps login; its `users_db_read` fails
+//! 1. `spawn` for the device-manager service `/System/Services/devmgr`
+//!    (audited `SyscallInvoked`, `EventId(5000)`, #1) — the long-running
+//!    service `init` launches *first* (`AGENTS.md` §18.3). The producer
+//!    builds it a fresh address space (emitting `ProcessSpawned`, #2);
+//!    `devmgr` reads the discovered hardware tree (unaudited `hw_tree_read`)
+//!    and parks in `hw_tree_wait` (unaudited), contributing no further
+//!    records after its spawn.
+//! 2. `spawn` for `/System/Services/login` (audited `SyscallInvoked` #2) —
+//!    the P11 session. The runtime `ProcessSpawn` producer builds login a
+//!    *fresh, hardware-isolated* address space (emitting `ProcessSpawned`,
+//!    #3) and admits it **Ready**.
+//! 3. `wait` on the children (audited `SyscallInvoked` #3), which parks
+//!    `init` back on the scheduler until a child is reapable.
+//! 4. The cooperative drain loop steps login; its `users_db_read` fails
 //!    closed (this board mounts no root volume, so no database is held), it
 //!    wires the deny-all authenticator (`AGENTS.md` §5.4.5), writes its
 //!    `Username: ` prompt, and **blocks** in `stream_read` on the
@@ -39,29 +46,32 @@
 //!    `LINE_MAX` validation bound (`AGENTS.md` §24.4) — at the **second**
 //!    `Username: ` prompt. Login refuses the over-long line whole, records
 //!    the console error, and exits fail-closed (audited `SyscallInvoked`
-//!    #3 of the supervision chain). `init`'s `wait` then reaps it and
+//!    #4 of the supervision chain). `init`'s `wait` then reaps it and
 //!    reads its code.
-//! 4. `init` relaunches the session — a second `spawn` (audited
-//!    `SyscallInvoked` #4 of the chain) producing a **third**
-//!    `ProcessSpawned` (#3). The second login blocks at its own prompt;
+//! 5. `init` relaunches the session — a second login `spawn` (audited
+//!    `SyscallInvoked` #5 of the chain) producing a **fourth**
+//!    `ProcessSpawned` (#4). The second login blocks at its own prompt;
 //!    the PASS finisher has already fired by then and the script is
 //!    exhausted, so the run ends without typing at it.
 //!
-//! ## Why the PASS keys on three spawns and four audited syscalls
+//! ## Why the PASS keys on four spawns and five audited syscalls
 //!
-//! The **third** `ProcessSpawned` is the supervision witness: `init` only
-//! reaches its second `spawn` *after* its `wait` returned, which only happens
-//! once the first login was reaped — so a third built image proves the full
-//! reap-and-restart cycle, not merely a single concurrent spawn. Login's
-//! `exit` is on the critical path only if login actually ran and its blocked
-//! `stream_read` received the injected UART RX bytes: its prompt write is
-//! gated through its *own* isolated address space (`AGENTS.md` §4), and
-//! `init`'s `wait` cannot return until that `exit` recorded the child's
-//! code. The supervision chain's audited syscalls are `init`'s first
-//! `spawn`, `init`'s `wait`, login's `exit`, and `init`'s second `spawn`
-//! (login's own audited `users_db_read` rides on top, which the `>=`
-//! thresholds absorb). A regression that never spawns login, never delivers
-//! its input, never reaps it, or never relaunches it never reaches the third
+//! The **second** `ProcessSpawned` is the device manager (the first service
+//! `init` launches). The **fourth** `ProcessSpawned` is the supervision
+//! witness: `init` only reaches its second login `spawn` *after* its `wait`
+//! returned, which only happens once the first login was reaped — so a fourth
+//! built image proves the full reap-and-restart cycle, not merely a single
+//! concurrent spawn. Login's `exit` is on the critical path only if login
+//! actually ran and its blocked `stream_read` received the injected UART RX
+//! bytes: its prompt write is gated through its *own* isolated address space
+//! (`AGENTS.md` §4), and `init`'s `wait` cannot return until that `exit`
+//! recorded the child's code. The supervision chain's audited syscalls are
+//! `init`'s `spawn` of `devmgr`, `init`'s `spawn` of login, `init`'s `wait`,
+//! login's `exit`, and `init`'s second login `spawn` (login's own audited
+//! `users_db_read` rides on top, which the `>=` thresholds absorb; `devmgr`'s
+//! `hw_tree_read`/`hw_tree_wait` are unaudited). A regression that never
+//! spawns login, never delivers its input, never reaps it, or never
+//! relaunches it never reaches the fourth
 //! `ProcessSpawned`, so the run times out and the harness reports
 //! `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
 //! §7). The runner adds the converse guard: it fails the run if the guest
@@ -135,22 +145,26 @@ mod kernel {
     /// audit-id test in `kernel/syscall/src/audit.rs`.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
-    /// Number of `ProcessSpawned` records seen so far. PASS requires three:
-    /// PID 1 `init` and the **two** login instances it launches — the
-    /// second launch can only happen after `init` reaped the first, so a third
-    /// `ProcessSpawned` is the witness that supervision (reap + restart) ran.
+    /// Number of `ProcessSpawned` records seen so far. PASS requires four:
+    /// PID 1 `init`, the `devmgr` service it launches first, and the **two**
+    /// login instances it launches — the second login launch can only happen
+    /// after `init` reaped the first, so a fourth `ProcessSpawned` is the
+    /// witness that supervision (reap + restart) ran.
     static SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
     /// Number of audited `SyscallInvoked` records seen so far. PASS requires
-    /// four, the prefix of `init`'s supervise loop up to the relaunch:
-    /// `init`'s first `spawn`, `init`'s `wait` (which parks it), the first
-    /// login's fail-closed `exit`, and `init`'s second `spawn` (the relaunch).
+    /// five, the prefix of `init`'s supervise loop up to the relaunch:
+    /// `init`'s `spawn` of `devmgr`, `init`'s `spawn` of login, `init`'s
+    /// `wait` (which parks it), the first login's fail-closed `exit`, and
+    /// `init`'s second login `spawn` (the relaunch). `devmgr`'s own
+    /// `hw_tree_read`/`hw_tree_wait` are unaudited, so it adds none.
     static SYSCALLS: AtomicUsize = AtomicUsize::new(0);
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
-    /// to QEMU once three processes have been built and four audited syscalls
-    /// have run — proving PID 1 launched the session, waited on and reaped it
-    /// when it exited, and relaunched it (supervision, not spawn-and-forget).
+    /// to QEMU once four processes have been built and five audited syscalls
+    /// have run — proving PID 1 launched the device manager and the session,
+    /// waited on and reaped the session when it exited, and relaunched it
+    /// (supervision, not spawn-and-forget).
     struct SpawnSessionExitSink;
 
     impl Sink for SpawnSessionExitSink {
@@ -163,7 +177,7 @@ mod kernel {
             } else if event.id == SYSCALL_INVOKED_EVENT_ID {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
-            if SPAWNED.load(Ordering::Acquire) >= 3 && SYSCALLS.load(Ordering::Acquire) >= 4 {
+            if SPAWNED.load(Ordering::Acquire) >= 4 && SYSCALLS.load(Ordering::Acquire) >= 5 {
                 qemu_exit::exit_success();
             }
         }

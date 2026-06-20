@@ -329,10 +329,14 @@ parks the CPU on the port's race-free idle wait (`wfi` on aarch64/riscv64,
 or a device IRQ wakes a waiter and the loop re-steps and dispatches it. The
 dispatch loop runs with interrupts masked (the kernel is non-preemptible,
 §4), so a wake delivered between `step` and the idle wait stays pending and
-no edge is lost. The remaining production-launch work — spawning the
-perpetual `/System/Services/devmgr` and the reactive bus-driver chain that
-emits the nodes it reacts to — is staged in `.junie/next-pi-prompt.md`
-(Design D P-3 / D3–D5).
+no edge is lost. PID 1 `init` now launches the perpetual
+`/System/Services/devmgr` service (a `service` directive in its startup
+config, supervised alongside the per-console login sessions), which reads
+the discovered hardware tree and parks in `hw_tree_wait` for the life of
+the system — the first production caller of this blocking-wait path. The
+remaining production-launch work — the reactive bus-driver chain that emits
+the nodes `devmgr` reacts to — is staged in `.junie/next-pi-prompt.md`
+(Design D D3–D5).
 
 In both policies `on_timer_tick` increments the per-CPU
 preemption counter and returns; it does **not** call `Scheduler::step`.

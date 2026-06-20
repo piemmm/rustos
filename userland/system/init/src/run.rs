@@ -39,8 +39,8 @@ mod supervisor;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use crate::startup::{StartupConfig, BANNER, DEFAULT_CONFIG};
-    use crate::supervisor::{supervise_sessions, Outcome, Sessions};
+    use crate::startup::{StartupConfig, BANNER, DEFAULT_CONFIG, MAX_SERVICES};
+    use crate::supervisor::{supervise, Outcome, Sessions};
 
     /// Exit code when the compiled-in startup config does not parse. A
     /// reserved, fail-closed value (`AGENTS.md` §2.9); the default config is
@@ -74,7 +74,7 @@ mod program {
     /// The production [`Sessions`] backing: the real `rustos-rt` syscall
     /// wrappers (`console_count`, the console-selecting `spawn_at`, and
     /// wait-any). Zero-sized — PID 1's supervision state lives on `main`'s
-    /// stack inside [`supervise_sessions`].
+    /// stack inside [`supervise`].
     struct RtSessions;
 
     impl Sessions for RtSessions {
@@ -95,7 +95,7 @@ mod program {
     /// Parses the compiled-in [`DEFAULT_CONFIG`], writes the startup banner to
     /// its inherited standard output (fd 1), then supervises one session per
     /// discovered text console for the lifetime of PID 1
-    /// ([`supervise_sessions`] — `plans/PI.md` P11).
+    /// ([`supervise`] — `plans/PI.md` P11).
     ///
     /// The banner write is *gated*: `stdout` returns the number of
     /// bytes the kernel accepted, so a short count means the write did not
@@ -115,25 +115,35 @@ mod program {
                 core::hint::spin_loop();
             }
         }
-        // NOTE: PID 1 does **not** yet launch the device-manager service
-        // (`/System/Services/devmgr`). The service blocks reactively in
-        // `hw_tree_wait`, which is a **true generation-keyed park**: the
-        // kernel ships the blocking wait-queue + scheduler wake-pending
-        // token + explicit wake (Design D P-2 — `kernel/core::waitq`,
-        // `RescheduleAction::Park`), and the tickless one-shot now arms a
+        // Launch the configured long-running services (the device manager,
+        // `/System/Services/devmgr`, today) once each, then supervise them
+        // alongside one login session per console for the life of PID 1
+        // ([`supervise`]). `devmgr` observes the discovered hardware tree
+        // and blocks reactively in `hw_tree_wait` — a **true**
+        // generation-keyed park, not a busy poll: the kernel ships the
+        // blocking wait-queue + scheduler wake-pending token + explicit
+        // wake (Design D P-2 — `kernel/core::waitq`,
+        // `RescheduleAction::Park`), and the tickless one-shot arms a
         // finite-timeout wakeup per-port (`SchedulerArch::set_wakeup`) with
         // the idle drive-loop parking on `KernelArch::wait_for_interrupt`
-        // and re-stepping a woken sole waiter rather than halting — so a
+        // and re-stepping a woken sole waiter rather than halting, so the
         // perpetual `devmgr` parks off the run queue without starving a
-        // single-CPU system (`AGENTS.md` §2.1 / §17.1). The remaining
-        // prerequisite before spawning it here is the rest of the
-        // production launch (`.junie/next-pi-prompt.md` Design D P-3 /
-        // D3–D5): laying the signed `devmgr` bundle and the reactive
-        // bus-driver chain that emits the nodes it matches. The foundation
-        // (the `hw_tree_read`/`hw_tree_wait` syscalls, the store generation
-        // counter, and the signed `devmgr` binary) is proven by
-        // `rustos-test-devmgr-hwtree-qemu-aarch64` until then.
-        match supervise_sessions(&mut RtSessions, config.session().as_bytes()) {
+        // single-CPU system (`AGENTS.md` §2.1 / §17.1 / §18.3).
+        //
+        // The service paths arrive as `&str` from the parsed config; PID 1
+        // re-borrows them as bytes into a fixed stack array (no heap,
+        // `plans/SPAWN.md` SP5b) bounded by `MAX_SERVICES`, which the parser
+        // already enforces, so the slice is never truncated.
+        let services = config.services();
+        let mut service_bytes: [&[u8]; MAX_SERVICES] = [b""; MAX_SERVICES];
+        for (dst, path) in service_bytes.iter_mut().zip(services) {
+            *dst = path.as_bytes();
+        }
+        match supervise(
+            &mut RtSessions,
+            config.session().as_bytes(),
+            &service_bytes[..services.len()],
+        ) {
             Outcome::NoConsoles => EXIT_NO_CONSOLES,
             Outcome::SpawnFailed => EXIT_SESSION_FAILED,
             Outcome::WaitFailed => EXIT_WAIT_FAILED,
@@ -174,10 +184,10 @@ impl supervisor::Sessions for NoSessions {
 #[cfg(not(freestanding))]
 fn main() {
     if let Ok(config) = startup::StartupConfig::parse(startup::DEFAULT_CONFIG) {
-        let _ = (config.session(), startup::BANNER);
+        let _ = (config.session(), config.services(), startup::BANNER);
     }
     assert_eq!(
-        supervisor::supervise_sessions(&mut NoSessions, b"session"),
+        supervisor::supervise(&mut NoSessions, b"session", &[]),
         supervisor::Outcome::NoConsoles
     );
 }

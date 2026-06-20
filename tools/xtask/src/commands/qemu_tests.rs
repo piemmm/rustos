@@ -1407,6 +1407,51 @@ const TESTS: &[QemuTest] = &[
             ),
         ],
     },
+    // PI Design D P-3 (`.junie/next-pi-prompt.md`):
+    // `rustos-test-devmgr-hwtree-qemu-aarch64` boots the *production* aarch64
+    // `rustos-kernel` pipeline (`boot_aarch64::boot`) verbatim on the `virt`
+    // board and proves the **device-manager service's reactive observe loop**
+    // end to end. PID 1 `init` now launches the perpetual `devmgr` service
+    // (`/System/Services/devmgr`, in `spawn_layout::SPAWN_PROGRAMS`) before the
+    // login session; `devmgr` reads the discovered hardware tree
+    // (`hw_tree_read`) and **truly parks** in `hw_tree_wait`, registering on the
+    // kernel's `HW_TREE_WAITQ` (Design D P-2 — no busy poll, `AGENTS.md` §2.1 /
+    // §17.1). The audit sink observes that wait-queue (a parked `devmgr` is its
+    // only possible waiter): the instant it is non-empty the sink appends a node
+    // to the authoritative `HwTreeStore` — a real generation bump / simulated
+    // hotplug that calls `hw_tree_wake` exactly as the floor bus bring-up does
+    // (`AGENTS.md` §18.4) — and reports PASS via the ARM semihosting finisher
+    // once `devmgr` has been scheduled past the bump and re-parked. The login
+    // dialogue below is reused verbatim from `spawn-session-qemu-aarch64` only
+    // to keep audit events (and thus drive-loop scheduling rounds) flowing past
+    // `devmgr`'s park so the sink's two-phase witness can advance; the run still
+    // fails if any scripted prompt never appears. `hw_tree_read`/`hw_tree_wait`
+    // are unaudited high-volume reactive syscalls, so the wake's *correctness*
+    // is pinned by the host unit tests (`kernel/core/src/waitq.rs`,
+    // `kernel/core/src/syscalls.rs`); this vertical proves the integrated
+    // boot → spawn → read → park → real-generation-bump → no-starvation path on
+    // the production pipeline. Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work aarch64 tests.
+    QemuTest {
+        package: "rustos-test-devmgr-hwtree-qemu-aarch64",
+        binary: "rustos-test-devmgr-hwtree-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[
+            ("Username: ", "root\n"),
+            ("Password: ", "wrong\n"),
+            (
+                "Username: ",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+            ),
+        ],
+    },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
     // vertical — the first proof that two **user** (EL0) tasks timeshare one
     // CPU under the live scheduler, on the `virt` board. It reads the GICv2

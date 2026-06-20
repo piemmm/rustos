@@ -1,0 +1,53 @@
+[package]
+name = "rustos-test-devmgr-hwtree-qemu-aarch64"
+description = "QEMU integration test (.junie Design D P-3): boot the production aarch64 rustos-kernel pipeline on the virt board, have PID 1 (init) launch the perpetual device-manager service (/System/Services/devmgr), prove it reads the discovered hardware tree and truly parks in hw_tree_wait, then deliver a real generation bump (a simulated hotplug append to the kernel HwTreeStore) and prove devmgr wakes, re-reads, and re-parks — the reactive observe loop end to end with no starvation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "boot the production aarch64 kernel pipeline, launch the
+# perpetual devmgr service, and prove it reacts to a hardware-tree generation
+# bump" integration test (Design D P-3, `.junie/next-pi-prompt.md`). It reuses
+# the production aarch64 boot pipeline through `rustos-kernel`'s library half
+# (`boot_aarch64::boot`) verbatim — including the `InitSpawn` seam, the runtime
+# `ProcessSpawn` producer + embedded-program registry (which now carries the
+# `devmgr` service in `spawn_layout::SPAWN_PROGRAMS`), and the `HwTreeStore`
+# source — and only swaps the audit sink. The sink observes the
+# `HW_TREE_WAITQ` wait-queue to detect devmgr's true park, then appends a node
+# to the authoritative `HwTreeStore` (a real generation bump / simulated
+# hotplug, §18.4) and reports PASS once devmgr has woken, re-read, and
+# re-parked. Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo
+# feature on a production crate) prevents feature unification from leaking it
+# into any production build (`AGENTS.md` §5.4.5 — fail closed).
+
+[[bin]]
+name = "rustos-test-devmgr-hwtree-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+# The production aarch64 boot pipeline (with the `InitSpawn` seam and the
+# runtime `ProcessSpawn` producer) lives in `rustos-kernel`'s library half;
+# this vertical reuses it verbatim and only swaps the audit sink
+# (`AGENTS.md` §2.2 — no duplication). It also re-exports the authoritative
+# `hwtree_store::HW_TREE` the sink bumps.
+rustos-kernel = { path = "../../../kernel/rustos-kernel", version = "=0.0.0" }
+# The kernel core's blocking wait-queue (`waitq::HW_TREE_WAITQ`) the sink
+# observes to detect devmgr's true park.
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+# `HwNode` + `HwDeviceClass`, to build the node the sink appends as the
+# simulated hotplug generation bump.
+rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The boot heap the `kernel_core::kernel_main` allocations (the leaked
+# `KernelState`, the scheduler, the spawned address spaces) draw from.
+rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

@@ -22,14 +22,18 @@
 //! The text is a sequence of lines. A `#` begins a comment that runs to the
 //! end of the line; blank lines and comment-only lines are ignored. Every
 //! other line is a directive: a keyword optionally followed by whitespace and
-//! a single argument. Exactly two directives are defined, and both are
-//! required exactly once:
+//! a single argument. Three directives are defined:
 //!
 //! * `console` — open the system console so the banner and later output have
 //!   somewhere to go. Takes no argument.
 //! * `session <path>` — the absolute path of the program `init` launches as
 //!   the user's session (the shell, today). The argument must be an absolute
-//!   path (`AGENTS.md` §16.5 bundle layout).
+//!   path (`AGENTS.md` §16.5 bundle layout). Required exactly once.
+//! * `service <path>` — the absolute path of a long-running system service
+//!   `init` launches once at startup and supervises for the life of the
+//!   system (the device manager, today — `AGENTS.md` §16.2 / §18.3). The
+//!   argument must be an absolute path. Optional and **repeatable**, up to
+//!   [`MAX_SERVICES`]; the directives' order is the launch order.
 
 use core::fmt;
 
@@ -38,6 +42,18 @@ use core::fmt;
 /// rather than scanned — the config `init` carries is tiny, and an
 /// unboundedly large one is a defect, not a workload (`AGENTS.md` §2.9).
 pub const MAX_CONFIG_LEN: usize = 4096;
+
+/// Maximum number of `service` directives a startup config may declare.
+///
+/// A fixed, allocation-free bound for the no-heap PID 1 (`plans/SPAWN.md`
+/// `SP5b` — the userland heap producer is still staged): the parsed service
+/// paths live in a stack array borrowing the config text. The compiled-in
+/// [`DEFAULT_CONFIG`] declares one (`devmgr`); the small headroom leaves
+/// room for the session/login-adjacent services later stages add without a
+/// heap. A config that declares more fails closed
+/// ([`ConfigError::TooManyServices`]) rather than overrunning the array
+/// (`AGENTS.md` §2.9 / §24.1).
+pub const MAX_SERVICES: usize = 4;
 
 /// The startup configuration compiled into the `init` `Run` binary.
 ///
@@ -49,8 +65,10 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 /// change.
 pub const DEFAULT_CONFIG: &str = "\
 # RustOS PID 1 startup configuration (plans/PI.md P6b / P11).
-# Open the system console and start the login service as the session.
+# Open the system console, launch the device-manager service, and start the
+# login service as the session.
 console
+service /System/Services/devmgr
 session /System/Services/login
 ";
 
@@ -77,12 +95,14 @@ pub enum ConfigError {
     MissingArgument,
     /// A directive that takes no argument was given one.
     UnexpectedArgument,
-    /// A `session` path was not absolute (did not begin with `/`).
+    /// A `session` or `service` path was not absolute (did not begin with `/`).
     NotAbsolutePath,
     /// The required `console` directive was absent.
     ConsoleRequired,
     /// The required `session` directive was absent.
     SessionRequired,
+    /// More than [`MAX_SERVICES`] `service` directives were declared.
+    TooManyServices,
 }
 
 impl fmt::Display for ConfigError {
@@ -96,6 +116,7 @@ impl fmt::Display for ConfigError {
             Self::NotAbsolutePath => "a startup path argument is not absolute",
             Self::ConsoleRequired => "startup config omits the required `console` directive",
             Self::SessionRequired => "startup config omits the required `session` directive",
+            Self::TooManyServices => "startup config declares too many `service` directives",
         };
         f.write_str(message)
     }
@@ -104,11 +125,17 @@ impl fmt::Display for ConfigError {
 /// A parsed, validated startup configuration borrowing from its source text.
 ///
 /// Construct one with [`StartupConfig::parse`]. The borrow keeps the parser
-/// allocation-free: the [`session`](Self::session) path points into the config
-/// text the caller supplied and is valid for as long as that text lives.
+/// allocation-free: the [`session`](Self::session) path and every
+/// [`services`](Self::services) path point into the config text the caller
+/// supplied and are valid for as long as that text lives.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct StartupConfig<'a> {
     session: &'a str,
+    /// The declared `service` paths in declaration (launch) order; only the
+    /// first [`service_count`](Self::service_count) entries are populated.
+    services: [&'a str; MAX_SERVICES],
+    /// How many of [`services`](Self::services) are populated.
+    service_count: usize,
 }
 
 impl<'a> StartupConfig<'a> {
@@ -118,9 +145,10 @@ impl<'a> StartupConfig<'a> {
     ///
     /// Returns the matching [`ConfigError`] if `text` exceeds
     /// [`MAX_CONFIG_LEN`], contains an unknown or duplicated directive, gives a
-    /// directive the wrong arguments, carries a non-absolute `session` path, or
-    /// omits a required directive. The parser fails closed: a config it cannot
-    /// fully understand yields no [`StartupConfig`].
+    /// directive the wrong arguments, carries a non-absolute `session` /
+    /// `service` path, declares more than [`MAX_SERVICES`] services, or omits a
+    /// required directive. The parser fails closed: a config it cannot fully
+    /// understand yields no [`StartupConfig`].
     pub fn parse(text: &'a str) -> Result<Self, ConfigError> {
         if text.len() > MAX_CONFIG_LEN {
             return Err(ConfigError::TooLong);
@@ -128,6 +156,8 @@ impl<'a> StartupConfig<'a> {
 
         let mut console = false;
         let mut session: Option<&'a str> = None;
+        let mut services: [&'a str; MAX_SERVICES] = [""; MAX_SERVICES];
+        let mut service_count = 0usize;
 
         for raw in text.lines() {
             let line = strip_comment(raw).trim();
@@ -159,6 +189,19 @@ impl<'a> StartupConfig<'a> {
                     }
                     session = Some(path);
                 }
+                "service" => {
+                    let path = argument.ok_or(ConfigError::MissingArgument)?;
+                    if !path.starts_with('/') {
+                        return Err(ConfigError::NotAbsolutePath);
+                    }
+                    // `service` is repeatable; overflow fails closed rather
+                    // than overrunning the fixed array (`AGENTS.md` §2.9).
+                    if service_count >= MAX_SERVICES {
+                        return Err(ConfigError::TooManyServices);
+                    }
+                    services[service_count] = path;
+                    service_count += 1;
+                }
                 _ => return Err(ConfigError::UnknownDirective),
             }
         }
@@ -167,13 +210,25 @@ impl<'a> StartupConfig<'a> {
             return Err(ConfigError::ConsoleRequired);
         }
         let session = session.ok_or(ConfigError::SessionRequired)?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            services,
+            service_count,
+        })
     }
 
     /// The absolute path of the program to launch as the user's session.
     #[must_use]
     pub fn session(&self) -> &'a str {
         self.session
+    }
+
+    /// The absolute paths of the long-running services `init` launches once
+    /// at startup and supervises, in declaration (launch) order. Empty when
+    /// the config declares none.
+    #[must_use]
+    pub fn services(&self) -> &[&'a str] {
+        &self.services[..self.service_count]
     }
 }
 
@@ -189,16 +244,70 @@ fn strip_comment(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN};
+    use super::{ConfigError, StartupConfig, DEFAULT_CONFIG, MAX_CONFIG_LEN, MAX_SERVICES};
 
     extern crate alloc;
     use alloc::format;
     use alloc::string::String;
+    use core::fmt::Write as _;
 
     #[test]
-    fn default_config_parses_to_console_plus_login_session() {
+    fn default_config_parses_to_console_login_session_and_the_devmgr_service() {
         let config = StartupConfig::parse(DEFAULT_CONFIG).expect("default config parses");
         assert_eq!(config.session(), "/System/Services/login");
+        assert_eq!(config.services(), &["/System/Services/devmgr"]);
+    }
+
+    #[test]
+    fn a_config_without_a_service_directive_has_no_services() {
+        let config = StartupConfig::parse("console\nsession /Apps/Shell.app/Run\n").unwrap();
+        assert!(config.services().is_empty());
+    }
+
+    #[test]
+    fn service_directives_are_collected_in_declaration_order() {
+        let config = StartupConfig::parse(
+            "console\nservice /System/Services/devmgr\nservice /System/Services/netd\nsession /x\n",
+        )
+        .expect("config parses");
+        assert_eq!(
+            config.services(),
+            &["/System/Services/devmgr", "/System/Services/netd"],
+        );
+    }
+
+    #[test]
+    fn a_service_path_must_be_absolute() {
+        assert_eq!(
+            StartupConfig::parse("console\nservice devmgr\nsession /x\n"),
+            Err(ConfigError::NotAbsolutePath),
+        );
+        assert_eq!(
+            StartupConfig::parse("console\nservice\nsession /x\n"),
+            Err(ConfigError::MissingArgument),
+        );
+    }
+
+    #[test]
+    fn more_than_max_services_fails_closed() {
+        let mut text = String::from("console\nsession /x\n");
+        for n in 0..=MAX_SERVICES {
+            let _ = writeln!(text, "service /System/Services/s{n}");
+        }
+        assert_eq!(
+            StartupConfig::parse(&text),
+            Err(ConfigError::TooManyServices),
+        );
+    }
+
+    #[test]
+    fn exactly_max_services_is_accepted() {
+        let mut text = String::from("console\nsession /x\n");
+        for n in 0..MAX_SERVICES {
+            let _ = writeln!(text, "service /System/Services/s{n}");
+        }
+        let config = StartupConfig::parse(&text).expect("exactly the bound parses");
+        assert_eq!(config.services().len(), MAX_SERVICES);
     }
 
     #[test]
