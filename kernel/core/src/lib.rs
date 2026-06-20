@@ -73,6 +73,7 @@ extern crate std;
 pub mod aspace;
 pub mod audit;
 pub mod bootinfo;
+pub mod callreg;
 pub mod console;
 pub mod devres;
 pub mod dispatch_slot;
@@ -156,6 +157,6 @@ pub use users::{
     UsersDbAlreadyInstalled, UsersDbSource, UsersLoadError, NULL_USERS_DB, USERS_DB_PATH,
 };
 pub use waitq::{
-    hw_tree_wake, install_wait_arch, timed_wake_sweep, WaitArchAlreadyInstalled, WaitQueue,
-    WaitQueueArch, HW_TREE_WAITQ, NO_DEADLINE,
+    call_wake, hw_tree_wake, install_wait_arch, timed_wake_sweep, WaitArchAlreadyInstalled,
+    WaitQueue, WaitQueueArch, CALL_WAITQ, HW_TREE_WAITQ, NO_DEADLINE,
 };

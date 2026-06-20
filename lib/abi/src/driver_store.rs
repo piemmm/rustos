@@ -53,7 +53,12 @@ const OP_READ: u8 = 2;
 
 /// Fixed prefix of an encoded [`FileRequest::Read`]: opcode + `offset` (u64)
 /// + `len` (u32), before the path bytes.
-const READ_HEADER_LEN: usize = 1 + 8 + 4;
+///
+/// Public so the kernel-side server can size its request buffer to the
+/// largest valid [`FileRequest::Read`] (`READ_HEADER_LEN +
+/// DRIVER_STORE_PATH_MAX`) from the one definition both sides share
+/// (`AGENTS.md` §2.2).
+pub const READ_HEADER_LEN: usize = 1 + 8 + 4;
 
 /// A request posted to the driver-store file-read endpoint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

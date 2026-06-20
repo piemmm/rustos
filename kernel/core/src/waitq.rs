@@ -216,6 +216,26 @@ pub fn hw_tree_wake() {
     }
 }
 
+/// The wait-queue holding `ipc_call` callers (Design D D2b). A caller parks
+/// here after posting its request to a [`rustos_kernel_ipc::call::CallEndpoint`]
+/// and is woken by [`call_wake`] when the bound server replies (`AGENTS.md`
+/// §2.1 — no busy yield). `ipc_call` carries no timeout, so every waiter
+/// registers with [`NO_DEADLINE`] and is only ever released by an explicit
+/// wake, never the timed [`WaitQueue::sweep`].
+pub static CALL_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every parked `ipc_call` caller because a [`CallEndpoint`] reply (or
+/// cancellation) arrived; each re-checks its ticket and either claims the
+/// reply or parks again. A fail-safe no-op before the arch hook is installed
+/// (`AGENTS.md` §2.9).
+///
+/// [`CallEndpoint`]: rustos_kernel_ipc::call::CallEndpoint
+pub fn call_wake() {
+    if let Some(arch) = wait_arch() {
+        CALL_WAITQ.wake_all(arch);
+    }
+}
+
 /// Release any timed waiters whose deadline has elapsed and re-arm the
 /// one-shot to the next pending deadline. Called from the arch timer ISR's
 /// per-tick sweep (every tick, EL0 or idle EL1) so a finite-timeout wait is

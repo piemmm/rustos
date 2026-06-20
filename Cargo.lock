@@ -980,6 +980,7 @@ dependencies = [
  "rustos-hid",
  "rustos-itest-harness",
  "rustos-kernel-core",
+ "rustos-kernel-ipc",
  "rustos-kernel-irq",
  "rustos-kernel-mem",
  "rustos-kernel-sched-api",

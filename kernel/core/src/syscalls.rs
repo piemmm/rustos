@@ -81,7 +81,7 @@ use rustos_abi::{
     ResourceLimit, StreamMode, SyscallNumber, CONSOLE_INHERIT, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
-use rustos_kernel_ipc::{EndpointId, PortRegistry};
+use rustos_kernel_ipc::{EndpointId, PortRegistry, ReplyOutcome};
 use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
@@ -1943,6 +1943,123 @@ where
             .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
         result
     }
+
+    fn ipc_call(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        request: u64,
+        request_len: usize,
+        reply: u64,
+        reply_cap: usize,
+    ) -> SyscallResult {
+        // §5.4: resolve the call endpoint against the kernel call-endpoint
+        // registry before touching the caller's buffers. An endpoint that
+        // is not bound fails closed with `NotFound`; the dispatcher's
+        // standard pipeline audits the rejection at this boundary (the
+        // registry lookup, like `PortRegistry::lookup`, does not). A build
+        // whose kthread server never registered the endpoint therefore
+        // fails closed rather than blocking (`AGENTS.md` §2.9).
+        let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
+            return Err(Errno::NotFound);
+        };
+
+        // Bound the request copy *before* allocating: refuse a payload
+        // larger than the endpoint advertises (itself capped at
+        // `IPC_MESSAGE_MAX_PAYLOAD_LEN` at create time). The same
+        // `MessageTooLarge` code `CallEndpoint::post` would return, made
+        // cheap to reject here (`AGENTS.md` §2.16).
+        if request_len as u64 > u64::from(ep.max_request()) {
+            return Err(Errno::MessageTooLarge);
+        }
+
+        // Copy the request in from the caller's address space through the
+        // validated `copy_from_user` boundary (`AGENTS.md` §5.4). The bytes
+        // are staged in a kernel-owned buffer; `CallEndpoint::post` then
+        // takes its own copy, so the caller cannot mutate the request after
+        // it is posted. `with_caller_aspace` yields `None` when the caller
+        // has no registered address space — fail closed with the same
+        // `BadAddress` a fault produces, never leaking which case occurred
+        // (§19.1).
+        let mut payload = alloc::vec![0u8; request_len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(request), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Post the request. `CallEndpoint::post` performs the per-call
+        // capability check against the caller's effective set (`AGENTS.md`
+        // §5.2 — no ambient authority) and re-checks the size, returning a
+        // stable `Errno` for every refusal and otherwise an opaque ticket
+        // correlating this caller with its reply.
+        let ticket = ep.post(caller.caps, &payload, self.audit)?;
+
+        // Block until the bound server replies, parking off the run queue
+        // (`AGENTS.md` §2.1 — no busy yield). `ipc_call` carries no timeout,
+        // so register with `NO_DEADLINE`: the caller is woken only by the
+        // server's reply (`crate::waitq::call_wake`) or the endpoint's
+        // destruction, and re-checks its ticket after every wake. The
+        // wake-pending token in the scheduler closes the check/park race so
+        // a reply arriving in that window is never lost.
+        //
+        // `take_reply` is matched by `claimant`, the *security* task id the
+        // request was posted under (`caller.caps.task()`), while the
+        // wait-queue and the scheduler park/unpark use the *scheduler* task
+        // id (`caller.task_id`), exactly as `hw_tree_wait` does.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let sched_task = caller.task_id.0;
+        let claimant = caller.caps.task().0;
+        crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        let outcome = loop {
+            match ep.take_reply(claimant, ticket) {
+                ReplyOutcome::Ready(bytes) => break Ok(bytes),
+                // The endpoint was torn down, or the ticket is no longer
+                // ours: abandon the call fail-closed (`AGENTS.md` §2.9).
+                ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
+                ReplyOutcome::Pending => {
+                    // Park off the run queue until woken. `reschedule_current`
+                    // returns `false` only when the caller is not a resumable
+                    // user kthread (host tests with no live dispatch loop);
+                    // fall back to a cooperative yield then, mirroring
+                    // `hw_tree_wait`, so a degenerate caller never busy-spins
+                    // (§2.1).
+                    if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
+                        match self.sched.yield_current(sched_task) {
+                            Ok(()) | Err(SchedError::InvalidState) => {}
+                            Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
+                            Err(_) => break Err(Errno::OutOfRange),
+                        }
+                    }
+                }
+            }
+        };
+        crate::waitq::CALL_WAITQ.deregister(sched_task);
+
+        let bytes = outcome?;
+
+        // Refuse to truncate: a reply larger than the caller's buffer fails
+        // closed (`AGENTS.md` §2.9). The reply was already claimed and the
+        // ticket retired, so the caller must re-issue the call with a larger
+        // buffer — the protocol's `FILE_READ_CHUNK_MAX` bounds a read so a
+        // correctly-sized buffer always fits.
+        if bytes.len() > reply_cap {
+            return Err(Errno::BufferTooSmall);
+        }
+
+        // Copy the reply out through the validated `copy_to_user` boundary
+        // (`AGENTS.md` §5.4). A faulting pointer — or a caller with no
+        // registered address space — fails closed with `BadAddress`.
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(reply), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -2540,8 +2657,9 @@ mod tests {
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT};
     use rustos_caps::CapabilitySet;
-    use rustos_kernel_ipc::Port;
+    use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port};
     use rustos_kernel_irq::{IrqTable, UnsupportedController};
+    use rustos_kernel_sched_api::{Priority, TaskAction};
     use rustos_kernel_mem::{
         AddressSpace, AnonError, BootMemoryMap, DmaMapping, Frame, FrameAllocator,
         FrozenAddressSpace, HostPageTable, LiveSpaceError, LiveUserSpace, MapFlags, MemoryRegion,
@@ -8204,5 +8322,355 @@ mod tests {
             h.hw_tree_wait(&ctx, 0, u64::MAX),
             Err(Errno::NotImplemented)
         );
+    }
+
+    // ---- ipc_call ----------------------------------------------------
+
+    /// First frame of the two-page address space the `ipc_call` round-trip
+    /// tests use: page 1 (`0x1000`) holds the request, page 2 (`0x2000`)
+    /// receives the reply. Chosen disjoint from [`SEND_FRAME`].
+    const CALL_FRAME: usize = 20;
+
+    /// Build a caller address space mapping user page 1 (`0x1000`, the
+    /// request) and page 2 (`0x2000`, the reply) `RW|USER` onto two
+    /// contiguous frames, with `request` seeded at the start of page 1.
+    /// Returns the boxed pair the registry stores; read the reply back via
+    /// [`read_reply_page`].
+    fn call_aspace(
+        request: &[u8],
+    ) -> (
+        Box<dyn UserAddressSpace + Send + Sync>,
+        Box<dyn PhysMap + Send + Sync>,
+    ) {
+        let base = PhysAddr::new(CALL_FRAME as u64 * PAGE_SIZE as u64);
+        let sim = SimPhysMap::new(base, PAGE_SIZE * 2);
+        if !request.is_empty() {
+            let ptr = sim.translate(base, request.len()).expect("seed request");
+            // SAFETY: the window owns these bytes for the simulator's
+            // lifetime and nothing else aliases them during the test.
+            unsafe {
+                core::ptr::copy_nonoverlapping(request.as_ptr(), ptr.as_ptr(), request.len());
+            }
+        }
+        let mut space = AddressSpace::new(HostPageTable::new());
+        space
+            .map(page(1), Frame(CALL_FRAME), MapFlags::READ | MapFlags::WRITE | MapFlags::USER)
+            .expect("map request page");
+        space
+            .map(
+                page(2),
+                Frame(CALL_FRAME + 1),
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            )
+            .expect("map reply page");
+        (Box::new(space), Box::new(sim))
+    }
+
+    /// Read `len` bytes the handler copied out to page 2 (`0x2000`).
+    fn read_reply_page(physmap: &dyn PhysMap, len: usize) -> alloc::vec::Vec<u8> {
+        let reply_base = PhysAddr::new((CALL_FRAME as u64 + 1) * PAGE_SIZE as u64);
+        let ptr = physmap.translate(reply_base, len).expect("reply window");
+        let mut out = alloc::vec![0u8; len];
+        // SAFETY: the window owns these bytes for the simulator's lifetime
+        // and the handler has already finished writing them.
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr.as_ptr(), out.as_mut_ptr(), len);
+        }
+        out
+    }
+
+    /// Register an unrestricted call endpoint in the global registry under
+    /// `id` and return it; the test must `crate::callreg::unregister(id)`
+    /// when done so the global registry does not leak across tests.
+    fn register_call_endpoint(id: u64, sink: &(dyn Sink + Sync)) -> Arc<CallEndpoint> {
+        let creator = make_caps_record(1, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &creator,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 128,
+                    max_reply: 128,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(ep.clone()).expect("registered");
+        ep
+    }
+
+    /// `ipc_call` to an unregistered endpoint fails closed with `NotFound`
+    /// without touching the caller's buffers (`AGENTS.md` §5.4 / §2.9).
+    #[test]
+    fn ipc_call_to_unregistered_endpoint_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // Endpoint id 0xDEAD0001 was never registered.
+        assert_eq!(
+            h.ipc_call(&ctx, 0xDEAD_0001, 0x1000, 4, 0x2000, 64),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// `ipc_call` with a request larger than the endpoint advertises fails
+    /// closed with `MessageTooLarge` before any copy (`AGENTS.md` §2.16).
+    #[test]
+    fn ipc_call_oversize_request_is_message_too_large() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let id = 0xCA11_1001;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // max_request is 128; ask to post 200 bytes.
+        assert_eq!(
+            h.ipc_call(&ctx, id, 0x1000, 200, 0x2000, 64),
+            Err(Errno::MessageTooLarge)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `ipc_call` from a caller with no registered address space fails
+    /// closed with `BadAddress` during the request copy-in (`AGENTS.md`
+    /// §5.4 / §19.1) — it never reaches the post/park.
+    #[test]
+    fn ipc_call_without_registered_aspace_is_bad_address() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let id = 0xCA11_1002;
+        let _ep = register_call_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64),
+            Err(Errno::BadAddress)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `ipc_call` against a restricted-sender endpoint the caller lacks the
+    /// send capability for fails closed with `PermissionDenied` at post
+    /// time — after the request copy-in, before any reply (`AGENTS.md`
+    /// §5.2).
+    #[test]
+    fn ipc_call_without_send_capability_is_permission_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink); // lacks NET_RAW
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // A restricted-sender endpoint requiring NET_RAW; its creator holds
+        // IPC_BIND_PRIVILEGED (required to bind a restricted endpoint).
+        let id = 0xCA11_1003;
+        let binder = make_caps_record(
+            1,
+            &[CapabilityId::IPC_BIND_PRIVILEGED, CapabilityId::NET_RAW],
+            sink,
+        );
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &binder,
+                caps_with(&[CapabilityId::NET_RAW]),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 128,
+                    max_reply: 128,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("restricted endpoint"),
+        );
+        crate::callreg::register(ep).expect("registered");
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64),
+            Err(Errno::PermissionDenied)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// End-to-end: `ipc_call` posts the request, parks the caller, and —
+    /// once a server drains the call and replies — copies the reply out to
+    /// the caller's buffer and returns its length. A background thread
+    /// plays the server so the parked caller is woken with a real reply.
+    #[test]
+    fn ipc_call_round_trips_request_and_reply() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        // A live scheduler task so the park loop's cooperative-yield
+        // fallback returns `InvalidState` (the task is Ready, not Running)
+        // and keeps polling, rather than `NoSuchTask`.
+        let tid = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn caller task");
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(tid), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(tid, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(tid),
+            caps: &caps,
+        };
+
+        let id = 0xCA11_2001;
+        let ep = register_call_endpoint(id, sink);
+
+        // The server: drain the one posted call and answer it.
+        let server_ep = ep.clone();
+        let handle = std::thread::spawn(move || loop {
+            if let Some(call) = server_ep.recv_call() {
+                assert_eq!(call.request, b"ping");
+                server_ep
+                    .reply(call.ticket, b"pong", &TestSink::new())
+                    .expect("reply");
+                break;
+            }
+            std::thread::yield_now();
+        });
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let written = h
+            .ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+            .expect("call completes");
+        handle.join().expect("server thread joins");
+        assert_eq!(written, 4);
+
+        // The reply landed in the caller's page-2 buffer.
+        let guard = aspaces.read();
+        let (_space, physmap) = guard.resolve(SecTaskId(tid)).expect("aspace present");
+        assert_eq!(read_reply_page(physmap, 4), b"pong");
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A reply larger than the caller's buffer fails closed with
+    /// `BufferTooSmall` rather than truncating (`AGENTS.md` §2.9).
+    #[test]
+    fn ipc_call_reply_larger_than_buffer_is_buffer_too_small() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let tid = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn caller task");
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(tid), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(tid, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(tid),
+            caps: &caps,
+        };
+
+        let id = 0xCA11_2002;
+        let ep = register_call_endpoint(id, sink);
+        let server_ep = ep.clone();
+        let handle = std::thread::spawn(move || loop {
+            if let Some(call) = server_ep.recv_call() {
+                server_ep
+                    .reply(call.ticket, b"a long reply", &TestSink::new())
+                    .expect("reply");
+                break;
+            }
+            std::thread::yield_now();
+        });
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // The reply is 12 bytes; the caller offers only 4.
+        let result = h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 4);
+        handle.join().expect("server thread joins");
+        assert_eq!(result, Err(Errno::BufferTooSmall));
+        crate::callreg::unregister(EndpointId(id));
     }
 }

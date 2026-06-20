@@ -66,6 +66,12 @@ rustos-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 rustos-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
 rustos-log = { path = "../../lib/log", version = "=0.0.0" }
 rustos-kernel-core = { path = "../core", version = "=0.0.0" }
+# The synchronous call/reply endpoint primitive (`AGENTS.md` §5.2): the
+# kernel-resident `/System` driver-store file-read server
+# (`driver_store_server`) creates and drains a `CallEndpoint` the reactive
+# `devmgr` reaches over the `ipc_call` syscall (Design D D2b-2). `rustos-kernel`
+# (`Layer::Tooling`) is the integration seam that wires the server kthread.
+rustos-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 rustos-kernel-irq = { path = "../irq", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../mem", version = "=0.0.0" }
 rustos-kernel-sec = { path = "../sec", version = "=0.0.0" }

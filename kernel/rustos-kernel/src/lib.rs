@@ -225,6 +225,18 @@ pub mod driver_spawn_loader;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
 pub mod system_files;
 
+// The kernel-resident `/System` driver-store file-read IPC *server*
+// (`.junie/next-pi-prompt.md` Design D D2b-2): the arch-neutral request→reply
+// translation that drains a `rustos_kernel_ipc::CallEndpoint`, serves each
+// `rustos_abi::driver_store::FileRequest` against the `system_files`
+// `SystemFileService` (list/read), frames the answer with the shared wire
+// encoders, and wakes the parked caller (`rustos_kernel_core::call_wake`).
+// The per-arch kthread loop drives `serve_pending` between parks. Gated, like
+// `system_files`, on the two instruction sets where `rustos-drvhost` /
+// `rustos-kernel-ipc` are dependencies of this crate.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64"))]
+pub mod driver_store_server;
+
 // The production driver-autoload boot wiring (`plans/PI.md` P10 5d-2-ii):
 // composes the signed-store scan (`drvhost::store::scan_store` over the
 // `/System/Drivers/` bundle paths), the `devmgr` match walk, and the
