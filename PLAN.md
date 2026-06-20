@@ -1566,8 +1566,12 @@ order (one fully-gated increment each):
                - **P-2 — generic blocking wait-queue + true `Park` + timed wake.**
                  A reusable kernel wait primitive: a task registers on a wait
                  object and parks (`RescheduleAction::Park`, off the run queue),
-                 woken by an explicit event or, with a deadline, by P-1's tick
-                 sweeping expired waiters. `hw_tree_wait` is its first consumer —
+                 woken by an explicit event or, with a deadline, when the timer
+                 fires for the nearest expiry. A timed wait's deadline is one of
+                 the events that arm the scheduler's one-shot timer (P-4), so the
+                 timed wake is itself tickless — it MUST NOT depend on a
+                 fixed-frequency periodic sweep (`AGENTS.md` §17.1).
+                 `hw_tree_wait` is its first consumer —
                  `HwTreeStore::seed`/`append` (and later node removal) wake every
                  waiter; the finite `timeout_ns` is now honoured by the timed
                  wake. No busy-yield, no lost wake-ups.
@@ -1575,6 +1579,43 @@ order (one fully-gated increment each):
                  perpetual `/System/Services/devmgr` (no longer starving the CPU,
                  since the wait truly parks), and a new end-to-end devmgr QEMU
                  vertical proves spawn → read → react to a real generation bump.
+               - **P-4 — tickless (NO_HZ) preemption: one-shot, scheduler-armed
+                 (planned; operator-decided).** P-1 arms a **100 Hz fixed-frequency
+                 periodic** generic/LAPIC/SBI timer purely to force preemption.
+                 `AGENTS.md` §17.1 now mandates a **tickless (NO_HZ)** kernel: a
+                 fixed-frequency periodic timer armed merely to drive preemption is
+                 a defect, so this arming MUST migrate to a **one-shot** timer the
+                 scheduler programs to the next event it actually needs, left
+                 **unarmed** when a CPU is idle or runs a single runnable task. The
+                 mechanism is already behind the Arch HAL (§17.2) and EEVDF is
+                 tickless, so the rework is concentrated, not architectural — but it
+                 is **operator-decided** and spans all three bare-metal ports plus a
+                 real-Pi metal re-confirmation (§0.9), so it is staged here rather
+                 than crammed into the charter change that discovered it (§2.18/
+                 §2.19/§15.7). Shape:
+                 - Add an Arch HAL **one-shot arm** to the timer surface
+                   (`rustos_arch_api::timer`): `arm_oneshot(deadline_ticks)` /
+                   `disarm()` over the existing per-port `CNTP_TVAL_EL0` / SBI
+                   `set_timer` / LAPIC TSC-deadline arming (one shared decision,
+                   per-port register work only — §2.2). Drop the unconditional
+                   periodic re-arm in each port's `on_timer_interrupt`.
+                 - The scheduler returns, on each reschedule, **whether** the
+                   running task can be preempted and **when**: a competing-runnable
+                   CPU arms the one-shot to the running task's quantum/next EEVDF
+                   virtual deadline (mapped to counter ticks via the per-CPU clock);
+                   a CPU with ≤ 1 runnable task disarms. EEVDF stays observation-
+                   only on `on_timer_tick`; the one-shot deadline is the new shared
+                   definition (§2.2).
+                 - MLFQ (§17.1 carve-out) requests its anti-starvation boost cadence
+                   as its own on-demand one-shot wakeup, never a global periodic
+                   tick; document the cadence in its crate `README.md`.
+                 - Re-validate: the `preempt_el0_qemu_{aarch64,riscv64,x86_64}`
+                   verticals must still preempt a runaway spinner that now shares
+                   the CPU with a second runnable task (so a one-shot is armed), and
+                   a single-spinner-on-an-otherwise-idle-CPU case must take **no**
+                   timer interrupt until a competitor appears. Pi metal re-confirm
+                   (§0.9). Until P-4 lands, the P-1 periodic arming is the
+                   charter-non-compliant interim it replaces.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass
@@ -2830,3 +2871,17 @@ can see *why* a rule exists without diffing the charter's history.
   common routine stranded in one arch's file to be re-derived later (§2.2,
   §2.19). Reinforced in §17.2, as agent instruction §15.15, and as a §23.2
   self-review check. Documentation only.
+
+- **2026-06-20 — Tickless (NO_HZ) kernel is mandatory.** Added a §17.1 rule
+  (operator decision, "option B"): no CPU may be driven by a fixed-frequency
+  periodic timer interrupt — scheduler accounting, preemption, and timekeeping
+  must all use a **one-shot** timer the scheduler arms to the next event it
+  needs, left unarmed when a CPU is idle or runs a single runnable task. EEVDF
+  is already fully tickless; the sole carve-out is a policy that genuinely needs
+  periodic wakeups (MLFQ's anti-starvation boost), which must request its own
+  on-demand one-shot wakeups and never reintroduce a global tick. The rule makes
+  the P-1 100 Hz fixed-frequency periodic preemption timer a charter defect; its
+  migration to one-shot/scheduler-armed form is too large (all three bare-metal
+  ports + Pi metal re-confirm) to land in this charter change, so it is staged
+  and surfaced as PLAN P-4 (§2.18/§2.19/§15.7) rather than left silent. Charter
+  + plan + docs only; the timer-arming code change is P-4.

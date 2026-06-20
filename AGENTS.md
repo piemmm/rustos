@@ -1371,6 +1371,40 @@ as non-negotiable as §2.
   target: a CPU-bound task that issues no syscall and never yields is
   involuntarily preempted and correctly resumed. A port that does not
   demonstrate this cannot ship.
+- **Tickless (NO_HZ) is mandatory — no fixed-frequency periodic timer
+  interrupt.** RustOS is a tickless kernel. No CPU may be driven by a
+  fixed-frequency periodic timer interrupt (a "scheduler tick" / `HZ`):
+  scheduler accounting, preemption (above), and timekeeping must none of
+  them depend on a periodic tick. The timer the preemption mechanism and
+  any timed wait use is programmed **one-shot, to the next event the
+  scheduler actually needs** — the running task's preemption deadline or
+  the nearest armed wakeup — and is left **unarmed** whenever a CPU has
+  nothing to preempt to (it is idle, or runs a single runnable task), so
+  an otherwise-quiet core takes no needless interrupts (§2.16 — work paid
+  off the hot path). The reschedule decision and the deadline that arms
+  the next one-shot are the one shared definition every port reuses
+  (§2.2, §17.2); only the genuinely target-divergent register/MMIO
+  arming is arch-specific.
+  - **The default policy (EEVDF) is fully tickless.** Fairness,
+    eligibility, and virtual-time accounting are advanced as work is
+    dispatched, never by a periodic tick; `on_timer_tick` / `ticks_now`
+    are observation-only and no scheduling decision reads them.
+  - **Carve-out — a policy that genuinely needs periodic wakeups.** The
+    sibling MLFQ policy's anti-starvation priority boost (§17.1
+    modularity) is the sole exemption: such a policy MUST obtain its
+    boost cadence as explicit, on-demand one-shot timer events scheduled
+    for *its own* accounting, and MUST NOT reintroduce a global
+    fixed-frequency tick for the rest of the kernel — preemption and
+    timekeeping stay tickless regardless of policy. Each exempt policy
+    documents that cadence in its crate docs (rustdoc + its
+    `docs/src/architecture/scheduler.md` entry).
+  - A fixed-frequency periodic timer armed merely to *drive preemption*
+    (instead of a one-shot deadline computed by the scheduler) is a
+    defect, not a configuration — including on a port that already ships
+    one. Where such an arming exists it is migrated to one-shot/deadline
+    form, never left "for now" (§2.19); a migration genuinely too large
+    for the discovering change is staged in `PLAN.md` and surfaced
+    (§2.18, §15.7).
 
 ### 17.2 Pluggable architecture (Arch HAL)
 

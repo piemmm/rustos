@@ -264,11 +264,24 @@ calls this once per fire, *after* it has acknowledged the device-
 level interrupt source (EOI on the LAPIC, etc.). The scheduler
 itself never reaches for a timer register; the arch port owns that.
 
-Under the default tickless EEVDF policy a periodic tick is **not
-required** for correctness (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default));
-the entry point exists so a port that does run a periodic timer can
-record that it fired. Under MLFQ the same tick also bounds the priority
-boost interval. In both policies `on_timer_tick` increments the per-CPU
+RustOS is a **tickless (NO_HZ)** kernel (`AGENTS.md` §17.1): no CPU is
+driven by a fixed-frequency periodic timer interrupt. The timer is armed
+**one-shot**, to the next event the scheduler actually needs (the running
+task's preemption deadline or the nearest timed wakeup), and is left
+unarmed when a CPU is idle or runs a single runnable task. Under the
+default EEVDF policy a periodic tick is **not** required for correctness
+at all (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default)). The
+sole carve-out is a policy that genuinely needs periodic wakeups — MLFQ's
+anti-starvation priority boost — which schedules its own on-demand
+one-shot wakeup for that cadence and never reintroduces a global tick.
+
+> **Migration note (PLAN P-4).** The production preemption path landed in
+> P-1 currently arms a *fixed-frequency 100 Hz periodic* timer purely to
+> force preemption. Under the §17.1 NO_HZ mandate that is a charter
+> defect; it is being migrated to the one-shot, scheduler-armed form
+> above. Until P-4 lands, the periodic arming is the interim it replaces.
+
+In both policies `on_timer_tick` increments the per-CPU
 preemption counter and returns; it does **not** call `Scheduler::step`.
 The counter is
 observable from `Scheduler::preemption_count(cpu)` and

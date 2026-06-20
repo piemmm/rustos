@@ -1,14 +1,22 @@
 //! Timer-programming surface of the Arch HAL (`AGENTS.md` §17.2
 //! "timer programming").
 //!
-//! Every port drives the SMP scheduler from a periodic per-CPU tick: the
-//! x86_64 LAPIC timer, the aarch64 EL1 generic timer, the riscv64
-//! supervisor (SBI) timer, and the wasm32 cooperative
-//! `requestAnimationFrame` loop. The hardware that produces the tick is
-//! wildly different per target, but the kernel needs the *same* two
-//! things from each: install the one architecture-neutral
-//! scheduler-tick callback, and, on every tick, invoke that callback
-//! with the firing CPU's [`crate::CpuId`]. §17.2 makes the architecture
+//! RustOS is a **tickless (`NO_HZ`)** kernel (`AGENTS.md` §17.1): the timer
+//! is armed *one-shot*, to the next event the scheduler needs, never at a
+//! fixed frequency. Each port owns a per-CPU timer — the x86_64 LAPIC
+//! timer, the aarch64 EL1 generic timer, the riscv64 supervisor (SBI)
+//! timer, and the wasm32 cooperative `requestAnimationFrame` loop. The
+//! hardware that produces the interrupt is wildly different per target,
+//! but the kernel needs the *same* two things from each: install the one
+//! architecture-neutral scheduler-tick callback, and, on every fire,
+//! invoke that callback with the firing CPU's [`crate::CpuId`].
+//!
+//! The one-shot *arming* (programming the LAPIC deadline, `CNTP_TVAL_EL0`,
+//! the SBI timer, or requesting the next animation frame) stays in the
+//! port; this surface owns only the callback slot and the dispatch. The
+//! production preemption path landed in PLAN P-1 currently re-arms a
+//! *fixed-frequency periodic* interval — a §17.1 defect being migrated to
+//! the one-shot form under PLAN P-4. §17.2 makes the architecture
 //! surface a closed set of traits on the HAL; this module is the "timer
 //! programming" member of that set, so the callback install/dispatch
 //! lives behind one vocabulary instead of being re-described per port
