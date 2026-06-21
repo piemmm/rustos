@@ -151,17 +151,23 @@ const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery stap
 
 /// Serial marker after which the autoload-input vertical injects a key.
 ///
-/// Under design B the autoload runs *before* the passphrase prompt, off the
-/// read-only `/System` volume, so the virtio-input driver is spawned well
-/// before the encrypted root is unlocked. This unlock-service install
-/// message appears only *after* the passphrase is typed and the root mounts,
-/// so once it is seen the keyboard driver has long since been spawned and its
-/// eventq is armed; injecting then lets the driver consume the queued event.
-/// It mirrors `rustos_kernel::unlock_service::USERS_DB_INSTALLED_MESSAGE` (a
-/// literal here because `tools/xtask` does not link the freestanding kernel
-/// crate).
-const AUTOLOAD_INPUT_KEY_MARKER: &str =
-    "root-unlock: users database installed; login can authenticate";
+/// The autoloaded user-space virtio-input keyboard driver is *interrupt
+/// driven*: after `VirtioInput::open` brings the device to `DRIVER_OK` and
+/// posts its event-queue buffers, the driver binds its granted device
+/// interrupt line through the `irq_bind` syscall and parks on `irq_wait`
+/// (`lib/drvrt::RtDriverHost::notify_wait`). `irq_bind` is an audited syscall
+/// (`lib/abi` `SyscallSpec { audit: true }`), and **only a user-space driver
+/// issues the `irq_bind` *syscall*** — the in-kernel block path binds its
+/// completion line through `IrqTable::bind` directly — so this dispatch
+/// record appears exactly once, the instant the keyboard driver is armed and
+/// waiting. Injecting then guarantees the device is active with posted
+/// buffers, so the keypress is delivered (virtio-input interrupts are
+/// level-triggered, so the assertion is held until the kernel routes+enables
+/// the line on the driver's first park) rather than dropped against an
+/// un-ready device. It is the user-space analogue of the in-kernel
+/// `input_virtio_mmio` vertical's "eventq armed" readiness marker
+/// (`AGENTS.md` §2.2 — inject only once the driver can receive).
+const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 
 const _: () = {
     assert!(

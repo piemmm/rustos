@@ -41,6 +41,23 @@ pub trait GrantSyscalls {
     ///
     /// Mirrors [`rustos_rt::resource_grants`].
     fn resource_grants(&self, buf: &mut [u8]) -> i64;
+
+    /// Bind interrupt `line` (an [`HwResourceKind::Irq`] grant the driver's
+    /// matched node carried) to the calling task, returning the raw
+    /// [`rustos_abi::IrqHandle`] (or `-errno`). Carries `CAP_IRQ_BIND`.
+    ///
+    /// [`HwResourceKind::Irq`]: rustos_abi::hwtree::HwResourceKind
+    ///
+    /// Mirrors [`rustos_rt::irq_bind`].
+    fn irq_bind(&self, line: u32) -> i64;
+
+    /// Park the calling task until the interrupt bound to `handle` fires (or
+    /// `timeout_ns` elapses), returning `0` on a fire (or `-errno`). The
+    /// kernel re-arms the bound line on the driver's behalf across the park
+    /// (`AGENTS.md` §4 — the driver holds no controller access).
+    ///
+    /// Mirrors [`rustos_rt::irq_wait`].
+    fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64;
 }
 
 /// The production [`GrantSyscalls`]: forward to `rustos_rt`'s wrappers.
@@ -66,5 +83,15 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn resource_grants(&self, buf: &mut [u8]) -> i64 {
         rustos_rt::resource_grants(buf)
+    }
+
+    #[inline]
+    fn irq_bind(&self, line: u32) -> i64 {
+        rustos_rt::irq_bind(line)
+    }
+
+    #[inline]
+    fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64 {
+        rustos_rt::irq_wait(handle, timeout_ns)
     }
 }

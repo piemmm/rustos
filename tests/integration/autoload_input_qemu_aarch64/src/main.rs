@@ -24,20 +24,27 @@
 //! `boot_aarch64::boot` verbatim. The production path then:
 //!
 //! 1. **Discovers** the virtio-block root *and* the virtio-input keyboard node
-//!    (bootstrap-floor virtio-MMIO enumeration), binding the root block driver
-//!    and stashing the full hardware tree for the init seam (`AGENTS.md` §18.2).
+//!    (bootstrap-floor virtio-MMIO enumeration). The input node carries its
+//!    register window, a coherent DMA constraint, **and** its discovered GICv2
+//!    interrupt line as capability-grant requests (`AGENTS.md` §18.3); the full
+//!    hardware tree is stashed for the init seam (`AGENTS.md` §18.2).
 //! 2. **Admits the unlock kthread**, which brings the root block device up over
-//!    the device-IRQ path.
-//! 3. **Autoloads by discovery — before unlock (design B2)**: the kthread mounts
-//!    the read-only `/System` volume and its `AutoloadHook` scans that volume's
-//!    signed `Drivers/` store, verifies the `virtio_kbd` bundle against the
-//!    kernel's embedded `KERNEL_DRIVER_SIGNER_PUBKEY`, matches it to the
-//!    discovered virtio-input node, and **spawns it into its own user-space
-//!    process** with exactly that node's resource grants plus the delegated
-//!    `CAP_INPUT_INJECT` (`AGENTS.md` §18.3 / §5.2) — all *before* the
-//!    passphrase prompt, so the keyboard is live for the operator to type it.
+//!    the device-IRQ path, mounts the read-only `/System` volume, and serves
+//!    its signed driver store over the capability-gated IPC endpoint.
+//! 3. **Reactive user-space autoload (Design D)**: the long-running
+//!    `devmgr` service reads the hardware tree, lists the `/System` store over
+//!    the IPC service, matches the signed `virtio_kbd` bundle to the discovered
+//!    virtio-input node (`lib/devmatch`), and asks the kernel to load it; the
+//!    kernel re-runs the full signed §8 gate (verified against the embedded
+//!    `KERNEL_DRIVER_SIGNER_PUBKEY`) and **spawns it into its own user-space
+//!    process** with exactly that node's resource grants (register window, DMA,
+//!    and the IRQ line) plus the delegated `CAP_INPUT_INJECT` (`AGENTS.md`
+//!    §18.3 / §5.2).
 //! 4. The spawned driver maps its register window, brings the virtio-input
-//!    device up, and pumps decoded key edges into the arbiter via `key_inject`.
+//!    device up, **binds its granted interrupt line and parks on `irq_wait`**
+//!    (interrupt-driven, never a busy poll — `AGENTS.md` §2.1 / §2.16), and on
+//!    each device interrupt pumps decoded key edges into the arbiter via
+//!    `key_inject`.
 //!
 //! ## Why the PASS keys on the first-delivery witness
 //!
@@ -46,13 +53,16 @@
 //! `key_inject` handler emits the first time an input driver delivers a key
 //! edge to the arbiter (`AGENTS.md` §20 — it carries no key content, count, or
 //! timing). Reaching it requires every preceding step to have succeeded: the
-//! read-only `/System` volume mounted, its store scanned, the signed bundle
-//! verified, the node matched, the user-space driver spawned and granted
-//! `CAP_INPUT_INJECT`, the device brought up, and the injected keystroke
-//! decoded and delivered — all before any passphrase is typed, proving the
-//! design-B keyboard-up-before-unlock sequencing. A run where any step fails
-//! never reaches that witness, so the harness times out — the documented
-//! fail-loud behaviour (`AGENTS.md` §7).
+//! `/System` volume mounted and served, the store listed, the signed bundle
+//! verified, the node matched, the user-space driver spawned and granted its
+//! resources plus `CAP_INPUT_INJECT`, the device brought up, its interrupt
+//! bound and routed, and the injected keystroke decoded and delivered. The
+//! harness injects the key only once the driver has armed its interrupt (the
+//! audited `irq_bind` syscall, `AUTOLOAD_INPUT_KEY_MARKER`), so the device is
+//! active with posted buffers and the keypress is delivered rather than dropped
+//! against an un-ready device. A run where any step fails never reaches that
+//! witness, so the harness times out — the documented fail-loud behaviour
+//! (`AGENTS.md` §7).
 //!
 //! ## Embedded `virt` device tree
 //!

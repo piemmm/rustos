@@ -265,9 +265,9 @@ mod tests {
             last_load: None,
         };
         let mut buf = [0u8; 64];
-        let handle = load_driver(&mut store, 7, 0x1300_2, &mut buf).expect("the load succeeds");
+        let handle = load_driver(&mut store, 7, 0x0001_3002, &mut buf).expect("the load succeeds");
         assert_eq!(handle, 0xAB00 + 7);
-        assert_eq!(store.last_load, Some((7, 0x1300_2)));
+        assert_eq!(store.last_load, Some((7, 0x0001_3002)));
     }
 
     #[test]

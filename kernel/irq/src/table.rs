@@ -47,6 +47,35 @@ pub trait IrqController {
     /// * [`MaskError::OutOfRange`] if `line` exceeds the
     ///   controller's addressable range.
     fn mask(&self, line: u32) -> Result<(), MaskError>;
+
+    /// Route `line` to a waiting CPU and unmask it so the next device
+    /// interrupt on it is delivered.
+    ///
+    /// [`IrqTable::fire`] masks a line before a waiter observes the wake
+    /// (mask-before-wake, `docs/src/security/irq.md`), so once a driver has
+    /// drained the completion the line must be re-enabled for the next one.
+    /// A user-space interrupt-driven driver cannot touch the controller, so
+    /// the `irq_wait` park path re-arms the bound line through this method on
+    /// the driver's behalf (`AGENTS.md` §4 — no ambient hardware access). It
+    /// is idempotent: re-routing an already-routed line and clearing an
+    /// already-clear mask are both no-ops.
+    ///
+    /// The default is a no-op for controllers without a programmable unmask
+    /// (placeholders, mask-only test doubles, or ports with no interrupt-driven
+    /// user-space driver consumer yet — §2.4, no interface ahead of a caller).
+    /// The aarch64 `GicIrqController` overrides it to route the line to the
+    /// boot CPU and clear its enable bit, which is what the user-space
+    /// virtio-input keyboard driver's `irq_wait` park path drives.
+    ///
+    /// # Errors
+    ///
+    /// * [`MaskError::Unsupported`] if the architecture has no programmable
+    ///   controller wired in this build.
+    /// * [`MaskError::OutOfRange`] if `line` exceeds the controller's range.
+    fn rearm(&self, line: u32) -> Result<(), MaskError> {
+        let _ = line;
+        Ok(())
+    }
 }
 
 /// Outcome of one [`IrqTable::try_wait_step`] poll.
@@ -347,6 +376,24 @@ impl IrqTable {
             return WaitStep::TimedOut;
         }
         WaitStep::Continue
+    }
+
+    /// The line bound to `handle` for `caller`, or [`None`] if the handle is
+    /// unknown or its binding is owned by another task.
+    ///
+    /// Applies the same owner check [`Self::try_wait_step`] performs
+    /// (`AGENTS.md` §5.4 — identify before acting), so the `irq_wait` park
+    /// path can resolve the line to re-arm without trusting a caller-supplied
+    /// value: a forged or foreign handle yields [`None`] and re-arms nothing.
+    #[must_use]
+    pub fn line_for(&self, handle: IrqHandle, caller: TaskId) -> Option<u32> {
+        let g = self.inner.read();
+        let line = *g.by_handle.get(&handle.as_u64())?;
+        let entry = g.entries.get(&line)?;
+        if entry.owner != caller {
+            return None;
+        }
+        Some(line)
     }
 
     /// Fire `line`: mask the controller, then set the per-entry

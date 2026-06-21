@@ -105,16 +105,20 @@ mod program {
     };
 
     /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `dma_alloc` trap, so a missing grant fails fast without a
-    /// round trip. It mirrors the resources the matched node requested — the
-    /// register window (`CAP_MMIO_MAP`) and the DMA region (`CAP_MEM_DMA`). The
-    /// kernel is the authority and re-checks every trap regardless
-    /// (`AGENTS.md` §5.4): claiming a capability the process was not granted
-    /// only fails the trap kernel-side, never widens authority.
+    /// `mmio_map` / `dma_alloc` / `irq_bind` trap, so a missing grant fails
+    /// fast without a round trip. It mirrors the resources the matched node
+    /// requested — the register window (`CAP_MMIO_MAP`), the DMA region
+    /// (`CAP_MEM_DMA`), and the device interrupt line the report pump parks on
+    /// (`CAP_IRQ_BIND`). The kernel is the authority and re-checks every trap
+    /// regardless (`AGENTS.md` §5.4): claiming a capability the process was not
+    /// granted only fails the trap kernel-side, never widens authority. It
+    /// must list every capability the host gates on locally, or the host
+    /// short-circuits a real, granted operation before it ever traps.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MMIO_MAP);
         caps.insert(CapabilityId::MEM_DMA);
+        caps.insert(CapabilityId::IRQ_BIND);
         caps
     }
 

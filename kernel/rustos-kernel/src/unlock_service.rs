@@ -283,10 +283,12 @@ pub fn service_caps() -> CapabilitySet {
 /// *own* minimal bring-up authority, §5.4): the kthread, standing in for
 /// `devmgr`, must be able to hand an autoloaded driver the resource
 /// capabilities its class needs, but never holds them ambiently itself. It is
-/// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`], so an autoloaded input
-/// driver (e.g. the virtio-input keyboard) can be granted the
-/// keyboard-injection authority `key_inject` requires while a storage or other
-/// driver — whose manifest does not request it — receives nothing extra (the
+/// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`] and
+/// [`CapabilityId::IRQ_BIND`], so an autoloaded input driver (e.g. the
+/// virtio-input keyboard) can be granted the keyboard-injection authority
+/// `key_inject` requires and the `irq_bind`/`irq_wait` authority its
+/// interrupt-driven event loop parks on, while a storage or other driver —
+/// whose manifest does not request them — receives nothing extra (the
 /// per-driver intersection still binds, `AGENTS.md` §18.3 / §4 — no ambient
 /// authority). The driver never receives `CAP_DRV_LOAD`: it is the *caller's*
 /// key to the gate, not a capability any driver's manifest requests.
@@ -297,6 +299,12 @@ pub fn service_caps() -> CapabilitySet {
 pub fn autoload_caps() -> CapabilitySet {
     let mut caps = service_caps();
     caps.insert(CapabilityId::INPUT_INJECT);
+    // An interrupt-driven user-space input driver parks on its device line
+    // through `irq_bind`/`irq_wait`, so the delegatable set carries
+    // `CAP_IRQ_BIND` too; the per-driver manifest intersection still binds, so
+    // a driver that does not request it receives nothing extra (`AGENTS.md`
+    // §18.3 / §4 — no ambient authority).
+    caps.insert(CapabilityId::IRQ_BIND);
     caps
 }
 

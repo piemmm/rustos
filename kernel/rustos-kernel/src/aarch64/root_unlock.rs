@@ -54,7 +54,7 @@ use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtio
 use rustos_log::{Level, Sink};
 
 use crate::aarch64::arch_wrapper::{UART_CONSOLE, VIDEO_CONSOLE, VIDEO_KEYBOARD};
-use crate::aarch64::gic_irq::{published_irq_table, GIC_IRQ_CONTROLLER};
+use crate::aarch64::gic_irq::{published_irq_table, CPU0_TARGET, GIC_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
@@ -66,9 +66,6 @@ use crate::unlock_service::{
     autoload_caps, loader_caps, note, note_stage, service_caps, store_endpoint_binder_caps,
     take_boot, KthreadConsoleRead, CONSOLE0_GATE, UNLOCK_TASK, USERS_DB_INSTALLED_MESSAGE,
 };
-
-/// CPU-interface target bitmask routing the device SPI to the boot CPU.
-const CPU0_TARGET: u8 = 0b0000_0001;
 
 /// Per-device DMA window capacity, in pages, the virtio-blk driver
 /// allocates its request/data buffers from (transient per-request DMA).
@@ -105,7 +102,7 @@ const MMIO_CAP_PAGES: usize = 64;
 /// (INCREMENT (1)) — no board constant (`AGENTS.md` §2.20). [`None`] when
 /// no node matches or its `interrupts` specifier is unrepresentable
 /// (fail closed, §18.4).
-fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
+pub(crate) fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     for node in fdt.nodes() {
         let node = node.ok()?;
         if !node.is_compatible("virtio,mmio") {
@@ -168,7 +165,7 @@ impl IrqWaiter for RearmingIrqWaiter {
         // line — impossible for a bound SPI) is harmless: the park below
         // then waits on a line that cannot fire and the run budget bounds
         // it (`AGENTS.md` §2.9).
-        let _ = GIC_IRQ_CONTROLLER.rearm(self.line);
+        let _ = GIC_IRQ_CONTROLLER.unmask_line(self.line);
         // Canonical race-free park: mask IRQ taking, re-check the ready
         // flag, `wfi` only if still not ready, then unmask so the woken
         // completion is dispatched.
@@ -459,7 +456,7 @@ fn virtio_blk_unlock<'a>(
     }
     // Arm the line for the first completion; the waiter re-arms it after
     // each subsequent one.
-    let _ = GIC_IRQ_CONTROLLER.rearm(intid);
+    let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
 
     // Mint the per-driver DMA host the driver allocates through, driven by
     // the re-arming `wfi` waiter.

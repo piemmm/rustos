@@ -1040,6 +1040,13 @@ where
             // (`docs/src/security/irq.md`).
             cpu,
             task: caller.task_id,
+            // Re-arm the bound line through the wired controller before each
+            // park so an interrupt-driven user-space driver (which holds no
+            // controller access) is routed + unmasked on the kernel's behalf.
+            // The line is resolved once, owner-checked: a forged/foreign
+            // handle yields `None` and re-arms nothing (`AGENTS.md` §5.4).
+            irq_controller: self.irq_controller,
+            line: self.irq.line_for(handle, caller.task_id),
         };
 
         // Register *before* the first poll so a fire arriving in the
@@ -2393,6 +2400,12 @@ where
     arch: &'a A,
     cpu: CpuId,
     task: SecTaskId,
+    /// The controller the bound line is re-armed through before each park.
+    irq_controller: &'a (dyn IrqController + Sync),
+    /// The line bound to this wait's handle (owner-checked at entry), or
+    /// [`None`] if the handle was forged/foreign — in which case nothing is
+    /// re-armed and `try_wait_step` fails the wait closed (`AGENTS.md` §5.4).
+    line: Option<u32>,
 }
 
 impl<A> IrqWaiter for SyscallIrqWaiter<'_, A>
@@ -2404,6 +2417,20 @@ where
     }
 
     fn yield_now(&self) -> Result<(), IrqWaitAbort> {
+        // Re-arm the bound line on the driver's behalf before parking: a
+        // user-space interrupt-driven driver holds no controller access, so
+        // the kernel routes its line to the waiting CPU and clears the mask
+        // `IrqTable::fire` set on the previous completion (mask-before-wake,
+        // `docs/src/security/irq.md`). On the first park this is the initial
+        // route+enable; on later parks it re-enables after a drained
+        // completion. Idempotent and best-effort — a refusal (an impossible
+        // out-of-range line for a bound handle, or a placeholder controller)
+        // leaves the line as-is and the wait is bounded by its deadline
+        // (`AGENTS.md` §2.9). A forged/foreign handle resolved to `None` and
+        // re-arms nothing — `try_wait_step` already fails it closed.
+        if let Some(line) = self.line {
+            let _ = self.irq_controller.rearm(line);
+        }
         // Arm the timed-wake one-shot to the nearest pending `irq_wait`
         // deadline so a finite timeout fires even on an otherwise-idle CPU
         // (`AGENTS.md` §17.1 — the nearest armed wakeup), then *park* off

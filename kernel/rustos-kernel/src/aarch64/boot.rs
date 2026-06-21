@@ -787,7 +787,28 @@ fn audit_root_storage_binding(dtb: u64, log_sink: &'static (dyn Sink + Sync)) {
         // is metal-neutral and additive (`AGENTS.md` §2.17). An enumeration
         // error leaves the input nodes undiscovered, never aborting the boot
         // (§18.4).
-        let _ = crate::root_storage::observe_virtio_mmio_input_devices(&bus, &mut sink);
+        // Resolve each virtio-input slot's GICv2 INTID from the firmware tree
+        // (`device_spi` decodes the node's `interrupts` specifier — a
+        // discovered value, never a board constant, `AGENTS.md` §18.1 /
+        // §2.20) so the emitted node carries the IRQ line its interrupt-driven
+        // user-space driver parks on (`AGENTS.md` §18.3).
+        let _ = crate::root_storage::observe_virtio_mmio_input_devices(
+            &bus,
+            &|slot_base| {
+                // Re-parse the validated blob per slot: the first `fdt` was
+                // consumed by the discovery walk above, and there are only a
+                // handful of virtio-input slots, so re-reading the FDT header
+                // is negligible boot-time cost (`AGENTS.md` §2.16). A bogus
+                // pointer fails the magic check and yields `None`, skipping
+                // the slot fail-closed (§2.9).
+                // SAFETY: `dtb`/`total` bound the firmware blob `Fdt::from_ptr`
+                // validated above; it is identity-mapped and immutable for the
+                // kernel's life, and the MMU is on (the caller enabled it).
+                let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
+                crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
+            },
+            &mut sink,
+        );
     }
 
     // Leak the buffered tree to `'static` (a one-shot boot publish, like the

@@ -1078,7 +1078,21 @@ order (one fully-gated increment each):
              and loops `poll` → `VirtioKeyboardConsole::feed` → `key_inject`.
              The reusable `open`/`poll`/`decode` logic lives in `lib/virtio_input`
              and the concrete `MmioTransport` in `lib/virtio` (§2.2/§17.4). The
-             metal Pi keyboard stays `usb_kbd`, flipped at 5e;
+             metal Pi keyboard stays `usb_kbd`, flipped at 5e. **Now
+             interrupt-driven (not a busy poll, §2.1/§2.16):** the discovered
+             input node also carries its GICv2 IRQ line (`HwResource::irq`, the
+             INTID from `device_spi`, §18.1); the kernel re-arms it on the
+             driver's behalf via the arch-neutral `IrqController::rearm`
+             (route-to-CPU + unmask) driven from the `irq_wait` park path; and
+             `RtDriverHost::notify_wait` binds the line once and `irq_wait`s. The
+             driver/`autoload_caps`/manifest carry `CAP_IRQ_BIND`. **Root-cause
+             fix that made the vertical green:** `lib/virtio::SplitQueue` was
+             missing its virtio 1.1 §2.7.13.3 memory barriers (a defect the
+             synchronous virtio-blk path tolerated but the asynchronous
+             virtio-input device exposed as a stale/empty avail ring); added a
+             `fence(Release)` before publishing avail.idx, `fence(SeqCst)` before
+             `notify`, and `fence(Acquire)` after reading used.idx. Doc:
+             `docs/src/drivers/virtio.md` "Virtqueue memory ordering";
            - **virtio-input hardware-tree discovery — done:**
              `root_storage::observe_virtio_mmio_input_devices` probes each
              `virtio,mmio` slot for virtio-input (id 18) and emits a discovered

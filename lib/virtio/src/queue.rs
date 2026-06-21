@@ -284,6 +284,17 @@ impl SplitQueue {
         let off = AVAIL_HEADER_BYTES + (slot as usize) * 2;
         avail_bytes[off..off + 2].copy_from_slice(&head.to_le_bytes());
         self.next_avail_idx = self.next_avail_idx.wrapping_add(1);
+        // Publish barrier (virtio 1.1 §2.7.13.3.1): the descriptor-table and
+        // avail-ring *entry* stores above must be visible to the device
+        // **before** the avail-`idx` store that exposes them, or a device that
+        // observes the new index could read a not-yet-written descriptor. A
+        // synchronous backend (virtio-blk, drained on the same `notify` the
+        // guest issues) tolerates the omission; an *asynchronous* device
+        // (virtio-input, which pops a buffer when an input event arrives out
+        // of band) does not — it reads the ring from a different context and
+        // must see a consistent snapshot (`AGENTS.md` §2.1 — no races). The
+        // release fence orders the entry stores before the index store.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         // Update the avail.idx field (offset 2, little-endian u16).
         avail_bytes[2..4].copy_from_slice(&self.next_avail_idx.to_le_bytes());
         Ok(head)
@@ -292,6 +303,13 @@ impl SplitQueue {
     /// Notify the device that new chain(s) are available on this
     /// queue.
     pub fn kick<T: Transport>(&self, transport: &mut T) {
+        // Notify barrier (virtio 1.1 §2.7.13.3.1): the avail-`idx` store in
+        // `add_chain` must be globally visible before the device is notified,
+        // so a device that wakes on the notify reads the published index
+        // rather than a stale one. Without it an asynchronous device
+        // (virtio-input) can observe an empty avail ring and report
+        // queue-full on the next event (`AGENTS.md` §2.1).
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         transport.notify(self.queue_index);
     }
 
@@ -313,6 +331,12 @@ impl SplitQueue {
         if used_idx == self.last_used_idx {
             return Err(VirtioError::NoCompletion);
         }
+        // Consume barrier (virtio 1.1 §2.7.13.3.2): having observed a new
+        // used-`idx`, the device's writes to the used-ring *entry* it points
+        // at must be acquired before they are read, so the entry read cannot
+        // be reordered ahead of — or read stale relative to — the index that
+        // announced it (`AGENTS.md` §2.1).
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         let slot = (self.last_used_idx % self.queue_size) as usize;
         let entry_off = USED_HEADER_BYTES + slot * size_of::<UsedElem>();
         let id = u32::from_le_bytes(

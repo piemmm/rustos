@@ -383,6 +383,7 @@ pub fn observe_virtio_mmio_block_devices(
 /// the affected node undiscovered on any error (fail closed, §18.4).
 pub fn observe_virtio_mmio_input_devices(
     bus: &dyn VirtioMmioBus,
+    slot_irq: &dyn Fn(u64) -> Option<u32>,
     sink: &mut dyn HwNodeSink,
 ) -> Result<(), DriverError> {
     let blank = BusDevice {
@@ -406,28 +407,42 @@ pub fn observe_virtio_mmio_input_devices(
         let Ok(len) = bus.slot_window(device.address) else {
             continue;
         };
+        // The interrupt line the platform routes this slot to, resolved by
+        // the arch-supplied `slot_irq` (the aarch64 port decodes the FDT
+        // `interrupts` specifier through `gic_device_intid`; the line is a
+        // *discovered* value, never a board constant — `AGENTS.md` §18.1 /
+        // §2.20). A user-space virtio-input driver is interrupt-driven: it
+        // parks on `irq_wait` rather than busy-polling its event queue
+        // (`AGENTS.md` §2.1 / §2.16), so a slot whose IRQ cannot be resolved
+        // is left undiscovered rather than emitted without the line its
+        // driver needs (fail closed, `AGENTS.md` §5.4 / §2.9 / §18.4).
+        let Some(intid) = slot_irq(device.address) else {
+            continue;
+        };
         // A top-level discovered device parents to the tree root
         // ([`HW_NODE_ROOT_ID`]), never the `HW_NODE_ROOT` parent sentinel
         // (which marks the root itself and is skipped by the autoload
         // walk, `HwNode::is_root`) — `AGENTS.md` §2.2 / §18.1.
         let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Input);
         next_id = next_id.wrapping_add(1);
-        // The probed bind identity, the register window, **and** a coherent
-        // DMA constraint — the three things the autoloaded user-space driver
-        // needs and the spawn path mints one grant each for (`AGENTS.md`
-        // §18.3). A virtio device drives its split virtqueues out of
-        // driver-allocated DMA memory, so without a DMA resource the
-        // autoloaded driver is granted no DMA region and its queue bring-up
-        // fails closed — the input node must request DMA exactly as it
-        // requests its register window. The QEMU `virt` virtio interconnect
-        // is cache-coherent with no IOMMU, so the device can address all of
-        // RAM: `addr_limit = 0` declares no upper bound and `max_len = 0` no
-        // per-buffer cap (the driver's DMA footprint is bounded by its fixed
-        // queue sizes and the kernel's deterministic OOM, §4) — a discovered
-        // property of the coherent transport, never a board constant (§18.5).
-        // All three fit a fresh node by the ABI's capacity; a node that
-        // somehow could not hold them is dropped rather than emitted on a
-        // partial identity (`AGENTS.md` §2.9).
+        // The probed bind identity, the register window, a coherent DMA
+        // constraint, **and** the interrupt line — the four things the
+        // autoloaded user-space driver needs and the spawn path mints one
+        // grant each for (`AGENTS.md` §18.3). A virtio device drives its
+        // split virtqueues out of driver-allocated DMA memory, so without a
+        // DMA resource the autoloaded driver is granted no DMA region and its
+        // queue bring-up fails closed — the input node must request DMA
+        // exactly as it requests its register window. The QEMU `virt` virtio
+        // interconnect is cache-coherent with no IOMMU, so the device can
+        // address all of RAM: `addr_limit = 0` declares no upper bound and
+        // `max_len = 0` no per-buffer cap (the driver's DMA footprint is
+        // bounded by its fixed queue sizes and the kernel's deterministic
+        // OOM, §4) — a discovered property of the coherent transport, never a
+        // board constant (§18.5). The IRQ resource carries the discovered
+        // line so the driver can `irq_bind` it (it requests `CAP_IRQ_BIND`,
+        // `AGENTS.md` §5.2). All four fit a fresh node by the ABI's capacity;
+        // a node that somehow could not hold them is dropped rather than
+        // emitted on a partial identity (`AGENTS.md` §2.9).
         if node
             .push_match_key(HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID))
             .is_ok()
@@ -435,6 +450,9 @@ pub fn observe_virtio_mmio_input_devices(
                 .push_resource(HwResource::mmio(device.address, len))
                 .is_ok()
             && node.push_resource(HwResource::dma(0, 0)).is_ok()
+            && node
+                .push_resource(HwResource::irq(u64::from(intid), 1))
+                .is_ok()
         {
             // A full sink (`DiscoveryError::SinkFull`) is the only emit
             // failure a buffering sink raises; surface it as the same
@@ -454,6 +472,13 @@ mod tests {
     use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource};
 
     use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
+
+    /// A deterministic interrupt line the input-probe tests hand the
+    /// `slot_irq` closure for every slot, so the emitted node carries a
+    /// predictable [`HwResource::irq`] the assertions check. An arbitrary
+    /// in-range GICv2 SPI; the value is the test's own and never a board
+    /// constant the production path uses (`AGENTS.md` §2.2).
+    const TEST_INPUT_INTID: u32 = 34;
 
     /// Captures every audited event so a test can assert the bind decision
     /// was logged with the right id and level (`AGENTS.md` §19.4). Host
@@ -808,7 +833,8 @@ mod tests {
         // (`AGENTS.md` §18.2 / §18.3).
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
@@ -818,12 +844,16 @@ mod tests {
             &[HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)]
         );
         // The grant requests are exactly the slot's discovered register
-        // window plus a coherent DMA constraint — the window of precisely
-        // the region it owns, and the DMA region its virtqueues need
-        // (`AGENTS.md` §18.3).
+        // window, a coherent DMA constraint, and the discovered interrupt
+        // line — the window of precisely the region it owns, the DMA region
+        // its virtqueues need, and the IRQ it parks on (`AGENTS.md` §18.3).
         assert_eq!(
             node.resources(),
-            &[HwResource::mmio(0x0A00_0000, 0x200), HwResource::dma(0, 0)]
+            &[
+                HwResource::mmio(0x0A00_0000, 0x200),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
+            ]
         );
     }
 
@@ -833,7 +863,8 @@ mod tests {
         // devices, so the input probe emits nothing (`AGENTS.md` §18.2).
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, 1]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
+            .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -845,16 +876,21 @@ mod tests {
         // (`AGENTS.md` §2.2 / §18.1).
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
         assert_eq!(node.id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
         // The input device sits in slot 1 (base = 0x0A00_0000 + 0x200),
-        // and carries its coherent DMA grant alongside the window.
+        // and carries its coherent DMA grant and IRQ alongside the window.
         assert_eq!(
             node.resources(),
-            &[HwResource::mmio(0x0A00_0200, 0x200), HwResource::dma(0, 0)]
+            &[
+                HwResource::mmio(0x0A00_0200, 0x200),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
+            ]
         );
     }
 
@@ -864,17 +900,26 @@ mod tests {
         // discovered window, so a keyboard and a pointer are never merged.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID + 1);
         assert_eq!(
             sink.nodes[0].resources(),
-            &[HwResource::mmio(0x0A00_0000, 0x200), HwResource::dma(0, 0)]
+            &[
+                HwResource::mmio(0x0A00_0000, 0x200),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
+            ]
         );
         assert_eq!(
             sink.nodes[1].resources(),
-            &[HwResource::mmio(0x0A00_0200, 0x200), HwResource::dma(0, 0)]
+            &[
+                HwResource::mmio(0x0A00_0200, 0x200),
+                HwResource::dma(0, 0),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
+            ]
         );
     }
 
@@ -899,7 +944,8 @@ mod tests {
 
         let kbd_bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut kbd = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&kbd_bus, &mut kbd).expect("enumerate");
+        observe_virtio_mmio_input_devices(&kbd_bus, &|_| Some(TEST_INPUT_INTID), &mut kbd)
+            .expect("enumerate");
         assert_eq!(kbd.nodes.len(), 1);
         assert_eq!(kbd.nodes[0].parent(), HW_NODE_ROOT_ID);
         assert!(
@@ -917,8 +963,20 @@ mod tests {
         let bus = FakeBus::with(&devices);
         let mut sink = CollectingSink::default();
         assert_eq!(
-            observe_virtio_mmio_input_devices(&bus, &mut sink),
+            observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink),
             Err(DriverError::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn an_input_slot_without_a_resolvable_irq_is_skipped_fail_closed() {
+        // A user-space virtio-input driver is interrupt-driven, so a slot
+        // whose interrupt line the arch `slot_irq` cannot resolve is left
+        // undiscovered rather than emitted without the IRQ its driver parks
+        // on (`AGENTS.md` §5.4 / §2.9 / §18.4).
+        let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(&bus, &|_| None, &mut sink).expect("enumerate");
+        assert!(sink.nodes.is_empty());
     }
 }

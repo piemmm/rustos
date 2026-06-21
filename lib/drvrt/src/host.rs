@@ -65,6 +65,12 @@ pub struct RtDriverHost<S: GrantSyscalls> {
     dma_pool: PoolId,
     next_slot: Cell<usize>,
     coherency: Option<SlabCoherencyFn>,
+    /// The kernel-issued [`rustos_abi::IrqHandle`] for this driver's granted
+    /// interrupt line, bound lazily on the first [`VirtioHost::notify_wait`]
+    /// and cached so the line is bound at most once. `0`
+    /// ([`rustos_abi::IrqHandle::INVALID`]) is the unbound sentinel — a real
+    /// handle is always `≥ 1` (`AGENTS.md` §2.16 — no repeated bind syscall).
+    irq_handle: Cell<u64>,
 }
 
 impl<S: GrantSyscalls> RtDriverHost<S> {
@@ -200,6 +206,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             dma_pool: PoolId::fresh(),
             next_slot: Cell::new(0),
             coherency,
+            irq_handle: Cell::new(0),
         }
     }
 
@@ -261,6 +268,21 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             .iter()
             .flatten()
             .find(|slot| slot.resource.kind() == Some(HwResourceKind::Dma))
+    }
+
+    /// The interrupt line of the driver's [`HwResourceKind::Irq`] grant, if it
+    /// was granted one (`AGENTS.md` §18.3). [`HwResource::base`] holds the
+    /// first line of an IRQ resource; an out-of-range line value is refused
+    /// fail-closed (a `u32` line cannot exceed the kernel's bind ceiling once
+    /// truncated — the kernel re-validates on the far side of the trap,
+    /// `AGENTS.md` §5.4).
+    fn irq_line(&self) -> Option<u32> {
+        let slot = self
+            .grants
+            .iter()
+            .flatten()
+            .find(|slot| slot.resource.kind() == Some(HwResourceKind::Irq))?;
+        u32::try_from(slot.resource.base()).ok()
     }
 }
 
@@ -338,12 +360,45 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
 
 impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
     fn notify_wait(&self, _queue_index: u16) {
-        // This host serves a polling / interrupt-driven driver (the xHCI
-        // keyboard path polls; an interrupt-driven driver parks on `irq_wait`
-        // directly). It deliberately provides no virtio queue-completion wait,
-        // exactly like the in-kernel frame-allocator DMA host: a driver that
-        // needs queue notifications uses the IRQ syscalls, never a spin here
-        // (`AGENTS.md` §2.1). `bus_usb` never calls this.
+        // Park the driver on its granted device interrupt line until the
+        // device signals queue activity (`AGENTS.md` §2.1 / §2.16 — an
+        // interrupt-driven driver parks, never busy-spins). A virtio device
+        // raises one MSI/MMIO line (not per-queue), so `queue_index` is not
+        // part of the wait key: the driver re-scans every used ring on wake.
+        //
+        // The line is bound lazily on the first call and cached, so the bind
+        // syscall runs at most once (`AGENTS.md` §2.16). The kernel re-arms
+        // the line across each park on the driver's behalf — the driver holds
+        // no controller access (§4) — so this just `irq_wait`s the bound
+        // handle. A driver granted no IRQ line (or lacking `CAP_IRQ_BIND`)
+        // returns without parking; its caller then re-polls and yields
+        // (`AGENTS.md` §2.9 — fail safe, never a wedged wait).
+        let mut handle = self.irq_handle.get();
+        if handle == 0 {
+            // Capability before the trap (`AGENTS.md` §5.4); the kernel
+            // re-checks `CAP_IRQ_BIND` regardless.
+            if !self.caps.contains(CapabilityId::IRQ_BIND) {
+                return;
+            }
+            let Some(line) = self.irq_line() else {
+                return;
+            };
+            let ret = self.syscalls.irq_bind(line);
+            if ret <= 0 {
+                return;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            // `ret > 0` checked above; it is a kernel-minted handle.
+            let bound = ret as u64;
+            self.irq_handle.set(bound);
+            handle = bound;
+        }
+        // Unbounded wait: the loop terminates on a fire, a binding release
+        // (a spurious wake the caller tolerates by re-scanning), or never —
+        // the device is the only thing that completes a virtio request. The
+        // terminal outcome is intentionally discarded; the trait returns `()`
+        // and the caller re-checks its rings on return.
+        let _ = self.syscalls.irq_wait(handle, u64::MAX);
     }
 }
 

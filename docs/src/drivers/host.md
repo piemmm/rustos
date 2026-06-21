@@ -332,47 +332,40 @@ function lives in the kernel binary — the one layer that may name both
 path drives once the root volume that backs the store is mounted in
 production (`plans/PI.md` P10 5d-2-ii "Remaining").
 
-`rustos_kernel::driver_autoload::autoload_from_mounted_root(fs, store_root,
-…)` is the thin production glue that drives `autoload_drivers` straight off a
-**mounted volume**. Given the volume's filesystem driver `fs` and the
-`store_root` the store sits at on it, it sources both halves of the scan from
-`fs` itself through one `SystemFileService::open(fs, store_root)`: it lists
-the store with `service.list_store(…)` for the bundle paths, then reads each
-winning bundle's bytes back through the *same* service (its `ImageSource`).
-The service holds the one `&mut` borrow of `fs`, but its `list_store` and
-read are strictly sequential and single-threaded — the store is listed once,
-then one bundle is read at a time — so the borrow never overlaps. It adds no
-policy and fails closed (returning `VfsError`) only if
-the private root mount cannot be built; a store that is missing, empty, or
-full of malformed bundles simply binds nothing and returns `Ok` (§18.4 /
-§2.9).
-
-Under design B (`plans/PI.md`) this composition runs **before** the
-encrypted-root passphrase prompt, off the read-only `/System` volume:
-`rustos_kernel::root_mount::autoload_system_drivers` mounts that volume
-read-only and runs the unlock kthread's `AutoloadHook` against it (passing
-`SYSTEM_VOLUME_STORE_PATH`), so the keyboard driver is up in user space in
-time to type the unlock secret. The keyboard cannot be autoloaded *from* the
-encrypted root, because that volume is not mounted until the passphrase is
-entered — and the passphrase needs the keyboard (chicken-and-egg). The
-`/System` volume holds no secrets; its store's integrity rests on the
-per-bundle Ed25519 signatures the load gate verifies (§18.6).
+Under Design D (`plans/PI.md`) matching *policy* lives in the long-running
+user-space `devmgr` service, and the kernel keeps only the *mechanism*: the
+disk-owning unlock kthread mounts the read-only `/System` volume and serves
+its signed driver store over a capability-gated IPC endpoint (`list` / read,
+fail-closed, §5.4), and exposes the discovered hardware tree
+(`hw_tree_read` / `hw_tree_wait`). `devmgr` reads the tree, lists the store
+over the service, resolves each node against the decoded candidates with the
+shared `lib/devmatch` policy (§18.3), and asks the kernel to load each
+winner; the kernel re-runs the full signed `Host::load` gate and spawns the
+verified payload through `rustos_kernel::driver_spawn_loader::SpawnDriverLoader`,
+minting one device-resource grant per `HwResource` the matched node requested
+— and nothing more (§18.3 / §4). The `/System` volume holds no secrets; its
+store's integrity rests on the per-bundle Ed25519 signatures the load gate
+verifies (§18.6).
 
 The `tests/integration/autoload_input_qemu_aarch64` `-M virt` vertical
 proves this end to end on the production boot path: it plants a kernel-signed
 `virtio_kbd` driver bundle in the read-only `/System` volume's `Drivers/`
 store (the `rustos-test-autoload-root-image` fixture) and attaches a
-`virtio-keyboard` device. **Before** any passphrase is typed,
-`autoload_system_drivers` mounts `/System` and `autoload_from_mounted_root`
-discovers and signature-verifies the bundle, matches it to the discovered
-virtio-input node, and spawns it into its own user-space process; the
-injected keystroke is decoded and delivered to the input-focus arbiter, and
-the run passes on the one-shot `AuditEvent::InputDelivered` witness
-(`EventId(4050)`, `AGENTS.md` §20). The autoload caller presents
-`unlock_service::autoload_caps` (the kthread's minimal `service_caps` plus
-`CAP_INPUT_INJECT`), so the input driver's manifest∩caller intersection grants
-exactly the injection authority `key_inject` requires and nothing the kthread
-holds ambiently (§5.2 / §5.4).
+`virtio-keyboard` device. The discovered virtio-input node carries its
+register window, a coherent DMA constraint, and its discovered GICv2
+interrupt line as grant requests (§18.3); `devmgr` matches the signed bundle
+to it and requests the load, the kernel signature-verifies and spawns it into
+its own user-space process, and the autoloaded driver maps its window, brings
+the device up, **binds its granted interrupt line and parks on `irq_wait`**
+(interrupt-driven, never a busy poll — §2.1 / §2.16). The injected keystroke
+is decoded and delivered to the input-focus arbiter, and the run passes on the
+one-shot `AuditEvent::InputDelivered` witness (`EventId(4050)`, `AGENTS.md`
+§20). The load presents `unlock_service::autoload_caps` (the kthread's minimal
+`service_caps` plus `CAP_INPUT_INJECT` and `CAP_IRQ_BIND`), so the input
+driver's manifest∩caller intersection grants exactly the injection authority
+`key_inject` requires and the `irq_bind`/`irq_wait` authority its
+interrupt-driven event loop parks on — and nothing the kthread holds ambiently
+(§5.2 / §5.4).
 
 ### Audit sink
 

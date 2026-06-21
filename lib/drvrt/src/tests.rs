@@ -26,6 +26,11 @@ use rustos_abi::{
 };
 use rustos_caps::CapabilitySet;
 
+/// The three shared `irq_*` observers a test clones out of the mock before it
+/// moves into the host: `(last bound line, irq_bind call count, irq_wait call
+/// count)`.
+type IrqObservers = (Rc<Cell<u32>>, Rc<Cell<u32>>, Rc<Cell<u32>>);
+
 /// One programmed response for a grant handle: a heap buffer the mock maps,
 /// plus the device-visible base it reports for a DMA carve.
 struct Backing {
@@ -48,6 +53,16 @@ struct MockSyscalls {
     /// When `Some`, `resource_grants` returns this `-errno` instead of
     /// serialising `delivered` (to model a kernel refusal).
     grants_error: Cell<Option<Errno>>,
+    /// The last line passed to `irq_bind` (`0` if never called). Shared so a
+    /// test can read it after the mock moves into the host.
+    irq_line_bound: Rc<Cell<u32>>,
+    /// How many times `irq_bind` was called (the cache must bind once).
+    irq_bind_calls: Rc<Cell<u32>>,
+    /// How many times `irq_wait` was called.
+    irq_wait_calls: Rc<Cell<u32>>,
+    /// The raw signed result `irq_bind` returns: a positive handle by
+    /// default, or `-errno` to model a refused bind.
+    irq_bind_result: Cell<i64>,
 }
 
 impl MockSyscalls {
@@ -58,7 +73,26 @@ impl MockSyscalls {
             dma_calls: Rc::new(Cell::new(0)),
             delivered: RefCell::new(Vec::new()),
             grants_error: Cell::new(None),
+            irq_line_bound: Rc::new(Cell::new(0)),
+            irq_bind_calls: Rc::new(Cell::new(0)),
+            irq_wait_calls: Rc::new(Cell::new(0)),
+            irq_bind_result: Cell::new(7),
         }
+    }
+
+    /// Make `irq_bind` fail with `-err` instead of returning a handle.
+    fn fail_irq_bind(&self, err: Errno) {
+        self.irq_bind_result.set(-i64::from(err.as_i32()));
+    }
+
+    /// Shared observers a test reads after the mock moves into the host: the
+    /// last bound line, the `irq_bind` call count, and the `irq_wait` count.
+    fn irq_observers(&self) -> IrqObservers {
+        (
+            Rc::clone(&self.irq_line_bound),
+            Rc::clone(&self.irq_bind_calls),
+            Rc::clone(&self.irq_wait_calls),
+        )
     }
 
     /// Add `grant` to the set `resource_grants` will deliver.
@@ -131,6 +165,17 @@ impl GrantSyscalls for MockSyscalls {
             buf[off..off + GrantedResource::WIRE_LEN].copy_from_slice(&grant.to_le_bytes());
         }
         total as i64
+    }
+
+    fn irq_bind(&self, line: u32) -> i64 {
+        self.irq_line_bound.set(line);
+        self.irq_bind_calls.set(self.irq_bind_calls.get() + 1);
+        self.irq_bind_result.get()
+    }
+
+    fn irq_wait(&self, _handle: u64, _timeout_ns: u64) -> i64 {
+        self.irq_wait_calls.set(self.irq_wait_calls.get() + 1);
+        0
     }
 }
 
@@ -551,4 +596,85 @@ fn resources_is_empty_for_an_unbound_driver() {
     let mock = MockSyscalls::new();
     let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
     assert_eq!(host.resources().count(), 0);
+}
+
+// --- `notify_wait`: interrupt-driven park on a granted IRQ line ----------
+
+/// An interrupt-line grant: handle `4`, GICv2 SPI line `34`.
+const IRQ_HANDLE: u64 = 4;
+const IRQ_LINE: u32 = 34;
+
+fn irq_grant() -> GrantedResource {
+    GrantedResource::new(IRQ_HANDLE, HwResource::irq(u64::from(IRQ_LINE), 1))
+}
+
+#[test]
+fn notify_wait_binds_the_granted_line_once_then_parks_each_call() {
+    // An interrupt-driven driver (e.g. the user-space virtio-input keyboard)
+    // parks on its granted device interrupt rather than busy-polling
+    // (`AGENTS.md` §2.1 / §2.16). The first `notify_wait` binds the line the
+    // node granted; every call (the first included) parks on `irq_wait`. The
+    // bind is cached, so a second call binds no second time.
+    let mock = MockSyscalls::new();
+    let (line, binds, waits) = mock.irq_observers();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
+
+    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+
+    assert_eq!(line.get(), IRQ_LINE, "binds the node's granted line");
+    assert_eq!(binds.get(), 1, "the line is bound exactly once (cached)");
+    assert_eq!(waits.get(), 2, "every call parks on irq_wait");
+}
+
+#[test]
+fn notify_wait_without_an_irq_grant_is_a_noop() {
+    // A driver granted no IRQ line cannot park on one; `notify_wait` returns
+    // without binding or waiting, and its caller falls back to a polling
+    // re-scan + yield (`AGENTS.md` §2.9 — fail safe, never a wedged wait).
+    let mock = MockSyscalls::new();
+    let (_, binds, waits) = mock.irq_observers();
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::IRQ_BIND, CapabilityId::MEM_DMA]),
+        mock,
+        &[dma_grant()],
+        None,
+    )
+    .unwrap();
+
+    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    assert_eq!(binds.get(), 0);
+    assert_eq!(waits.get(), 0);
+}
+
+#[test]
+fn notify_wait_without_the_bind_capability_is_a_noop() {
+    // Capability before the trap (`AGENTS.md` §5.4): a driver lacking
+    // `CAP_IRQ_BIND` never issues the bind, even with an IRQ grant present.
+    let mock = MockSyscalls::new();
+    let (_, binds, waits) = mock.irq_observers();
+    let host = RtDriverHost::new(caps(&[]), mock, &[irq_grant()], None).unwrap();
+
+    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    assert_eq!(binds.get(), 0);
+    assert_eq!(waits.get(), 0);
+}
+
+#[test]
+fn notify_wait_does_not_park_when_the_bind_is_refused() {
+    // A refused bind (the kernel rejects the line) must not be papered over
+    // with a wait on an unbound handle: `notify_wait` returns and the bind is
+    // retried on the next call (`AGENTS.md` §2.9 — fail closed, no cached
+    // bogus handle).
+    let mock = MockSyscalls::new();
+    mock.fail_irq_bind(Errno::PermissionDenied);
+    let (_, binds, waits) = mock.irq_observers();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::IRQ_BIND]), mock, &[irq_grant()], None).unwrap();
+
+    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
+    assert_eq!(binds.get(), 2, "a refused bind is retried, never cached");
+    assert_eq!(waits.get(), 0, "never parks on an unbound handle");
 }

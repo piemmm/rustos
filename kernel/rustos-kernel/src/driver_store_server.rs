@@ -516,10 +516,14 @@ mod tests {
         out
     }
 
+    /// One recorded `spawn_driver`: the bundle bytes, the granted capability
+    /// set, and the matched node's resource grants.
+    type RecordedSpawn = (Vec<u8>, CapabilitySet, Vec<HwResource>);
+
     /// Records every `spawn_driver` so a test can assert the gate forwarded
     /// exactly the matched node's grants.
     struct RecordingSpawn {
-        calls: RefCell<Vec<(Vec<u8>, CapabilitySet, Vec<HwResource>)>>,
+        calls: RefCell<Vec<RecordedSpawn>>,
     }
 
     impl RecordingSpawn {

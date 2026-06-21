@@ -153,6 +153,12 @@ const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
 /// `ipc_call` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
 
+/// `irq_bind` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_IRQ_BIND: u64 = SyscallNumber::IRQ_BIND.as_u16() as u64;
+
+/// `irq_wait` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_IRQ_WAIT: u64 = SyscallNumber::IRQ_WAIT.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -721,6 +727,60 @@ pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
     // device-visible base; the kernel validates it against the caller's own
     // address space before writing.
     let ret = unsafe { raw_syscall(NUM_DMA_ALLOC, [handle, len as u64, ptr, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Bind interrupt `line` to the calling task, minting an unforgeable
+/// [`rustos_abi::IrqHandle`] (`SyscallNumber::IRQ_BIND`, `AGENTS.md` §5.2).
+///
+/// `line` is the architecture interrupt-line identifier the driver received
+/// as an [`HwResourceKind::Irq`](rustos_abi::hwtree::HwResourceKind) grant on
+/// its matched node (`AGENTS.md` §18.3) — a discovered value, never a board
+/// constant. The call carries `CAP_IRQ_BIND` (enforced by the kernel before
+/// any state is touched); the minted handle is re-keyed to the calling task,
+/// so only this task can `irq_wait` on it (`AGENTS.md` §5.4).
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the raw `IrqHandle`, and a
+/// negative value is `-errno` (recover the [`rustos_abi::Errno`] discriminant
+/// as `-ret`). The wrapper surfaces that raw signed value; it adds no
+/// authority and hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 irq_bind-result encoding (handle ≥ 0, else -errno).
+pub fn irq_bind(line: u32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). `irq_bind`
+    // dereferences no user pointer; it records the binding and returns a
+    // handle.
+    let ret = unsafe { raw_syscall(NUM_IRQ_BIND, [u64::from(line), 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Park the calling task until the interrupt bound to `handle` fires, the
+/// `timeout_ns` deadline elapses, or the binding disappears
+/// (`SyscallNumber::IRQ_WAIT`, `AGENTS.md` §5.2).
+///
+/// `handle` is the [`rustos_abi::IrqHandle`] a prior [`irq_bind`] minted for
+/// this task; the kernel re-checks the binding owner-side on every call
+/// (`AGENTS.md` §5.4) and parks the task off the run queue between polls (no
+/// busy-wait, `AGENTS.md` §2.1). Pass `u64::MAX` for an effectively unbounded
+/// wait. The kernel re-arms the bound line on the driver's behalf across the
+/// park (the driver holds no controller access, §4), so an interrupt-driven
+/// driver loops `irq_wait` → drain → `irq_wait` without touching hardware
+/// interrupt-controller state.
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: `0` on a fire, and a negative value is `-errno`
+/// (`Errno::TimedOut` on the deadline, `Errno::NotFound` for a forged or
+/// released handle — recover the discriminant as `-ret`). The wrapper
+/// surfaces that raw signed value and hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 irq_wait-result encoding (0, else -errno).
+pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the handle owner-side on the far side of the trap (`AGENTS.md` §5.4).
+    // `irq_wait` dereferences no user pointer.
+    let ret = unsafe { raw_syscall(NUM_IRQ_WAIT, [handle, timeout_ns, 0, 0, 0, 0]) };
     ret as i64
 }
 

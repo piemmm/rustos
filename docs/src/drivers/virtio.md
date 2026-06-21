@@ -175,6 +175,35 @@ The 64-bit queue-address registers (`QueueDesc`, `QueueDriver`,
 `QueueDevice`) are written as `Low`/`High` `u32` pairs, and
 `QueueReady` is set to `1` to bring a programmed queue online.
 
+## Virtqueue memory ordering
+
+`SplitQueue` issues the virtio 1.1 §2.7.13.3 ordering barriers around the
+shared driver/device ring memory, so the device always observes a
+consistent ring snapshot:
+
+- **Publish** (`add_chain`): a `fence(Release)` separates the
+  descriptor-table and avail-ring *entry* stores from the avail-`idx`
+  store that exposes them, so a device that sees the new index cannot read
+  a not-yet-written descriptor.
+- **Notify** (`kick`): a `fence(SeqCst)` precedes the `QueueNotify` write,
+  so the published avail-`idx` is globally visible before the device is
+  notified.
+- **Consume** (`poll_used`): a `fence(Acquire)` follows the used-`idx`
+  read, so the used-ring *entry* read cannot be reordered ahead of the
+  index that announced it.
+
+These barriers are mandatory, not advisory. A **synchronous** backend
+(virtio-blk, which QEMU drains on the same `notify` the guest issues, in
+the issuing context) happens to tolerate their omission; an
+**asynchronous** device does not. The motivating case is virtio-input: it
+pops an eventq buffer when an input event arrives out of band, reading the
+ring from a different context, so without the publish/notify barriers it
+observes an empty avail ring and reports queue-full, and without the
+consume barrier the driver reads a stale used-`idx` and never drains. The
+barriers are also required on real hardware with weakly-ordered memory and
+non-synchronous DMA. The `tests/integration/autoload_input_qemu_aarch64`
+vertical is the regression guard (it never delivers a key without them).
+
 ## Packed virtqueue
 
 `PackedQueue` (`lib/virtio/src/packed.rs`) implements the packed-ring

@@ -74,14 +74,16 @@ fn main() {
     let rxe = build_and_convert_driver(manifest_dir, &out_dir, &driver_dir);
 
     // The bundle the kernel autoloads: the driver's own §18.3 bind table, the
-    // capabilities it needs (mapped register window, coherent DMA, keyboard
-    // injection), signed with the kernel's driver-signing seed.
+    // capabilities it needs (mapped register window, coherent DMA, the device
+    // interrupt line it parks on, and keyboard injection), signed with the
+    // kernel's driver-signing seed.
     let signed = build_signed_driver_image(
         &build_support::KERNEL_DRIVER_SIGNING_SEED,
         DriverKind::UserSpace,
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
             CapabilityId::INPUT_INJECT,
         ],
         rustos_drv_input_virtio_input::BIND_KEYS,

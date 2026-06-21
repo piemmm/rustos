@@ -386,7 +386,7 @@ mod tests {
     fn load_request_round_trips() {
         let req = StoreRequest::Load {
             bundle_id: 0x0102_0304,
-            node_id: 0x1300_2,
+            node_id: 0x0001_3002,
         };
         let mut buf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut buf).expect("encodes");

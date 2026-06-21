@@ -83,7 +83,8 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
         Self { inner }
     }
 
-    /// Re-arm (unmask) `line` at the GIC distributor after a completion.
+    /// Unmask `line` at the GIC distributor after a completion (an
+    /// already-routed line; the routing is set once at bind time).
     ///
     /// [`IrqTable::fire`] masks the line before a waiter observes the wake
     /// (mask-before-wake, `docs/src/security/irq.md`), so a level- or
@@ -91,24 +92,34 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
     /// completion queue. Once the driver has handled the completion the
     /// line must be re-enabled for the *next* one, and that re-enable is an
     /// *arch* operation ([`rustos_arch_api::IrqController::unmask`]) the
-    /// kernel-side [`rustos_kernel_irq::IrqController`] trait deliberately
-    /// does not expose (it carries only `mask`, the one operation
-    /// [`IrqTable::fire`] needs). The re-arm therefore lives here, in the
-    /// bin layer that owns the GIC (`AGENTS.md` §17.4), exactly as the
-    /// `-M virt` IRQ vertical re-arms through its `GicBridge`. It adds no
-    /// policy of its own — it delegates to the range-checked
-    /// [`GicController`] (`AGENTS.md` §2.2).
+    /// kernel-side [`rustos_kernel_irq::IrqController`] trait's [`mask`] half
+    /// deliberately does not expose. The in-kernel block path's
+    /// [`crate::aarch64::root_unlock`] waiter calls this directly (it routes
+    /// the SPI itself, once, at setup); the user-space `irq_wait` park path
+    /// goes through the trait [`rearm`](IrqController::rearm), which *also*
+    /// routes. Both delegate to the range-checked [`GicController`]
+    /// (`AGENTS.md` §2.2).
     ///
     /// # Errors
     ///
     /// Surfaces [`rustos_arch_api::IrqControlError`] verbatim — an
     /// out-of-range line fails closed without touching the distributor
     /// (`AGENTS.md` §5.4.5).
-    pub fn rearm(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
+    pub fn unmask_line(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
         use rustos_arch_api::IrqController as ArchIrqController;
         ArchIrqController::unmask(&self.inner, line)
     }
 }
+
+/// GICv2 distributor target byte selecting the boot CPU (CPU interface 0).
+///
+/// Production is single-CPU today (`BootInfo::new(BOOT_CPU, 1, …)`), so a
+/// device SPI is routed to CPU 0; secondary-core routing is selected from
+/// the discovered core count when SMP bring-up lands (`AGENTS.md` §24.1).
+/// Defined once here so the in-kernel block path and the user-space-driver
+/// re-arm path route through the same value (`AGENTS.md` §2.2).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub const CPU0_TARGET: u8 = 0b0000_0001;
 
 /// The `'static` [`IrqTable`] the kernel core published in
 /// [`crate::Phase::Irq`](rustos_kernel_core::Phase::Irq) through
@@ -143,6 +154,33 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
     fn mask(&self, line: u32) -> Result<(), MaskError> {
         use rustos_arch_api::{IrqControlError, IrqController as ArchIrqController};
         match ArchIrqController::mask(&self.inner, line) {
+            Ok(()) => Ok(()),
+            Err(IrqControlError::OutOfRange) => Err(MaskError::OutOfRange),
+        }
+    }
+
+    /// Route `line` to the boot CPU and unmask it at the distributor.
+    ///
+    /// This is the re-arm the user-space `irq_wait` park path drives on an
+    /// interrupt-driven driver's behalf (the driver holds no GIC access): it
+    /// routes the SPI to [`CPU0_TARGET`] (idempotent — re-routing an
+    /// already-targeted line is a plain register write) and then clears its
+    /// enable mask through the same range-checked, fence-ordered
+    /// [`GicController`] unmask the in-kernel block path uses (`AGENTS.md`
+    /// §2.2). An out-of-range line fails closed as [`MaskError::OutOfRange`]
+    /// without touching the distributor.
+    fn rearm(&self, line: u32) -> Result<(), MaskError> {
+        use rustos_arch_api::{IrqControlError, IrqController as ArchIrqController};
+        // SAFETY: the GICv2 distributor bases were configured from the device
+        // tree and the controller brought up (`install_device_irq_dispatch`
+        // → `gic::init`) before any line is bound, so the target-register
+        // write addresses live, identity-mapped distributor MMIO. `route_spi`
+        // ignores SGIs/PPIs and only writes the SPI target byte.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        unsafe {
+            rustos_arch_aarch64::gic::route_spi(line, CPU0_TARGET);
+        }
+        match ArchIrqController::unmask(&self.inner, line) {
             Ok(()) => Ok(()),
             Err(IrqControlError::OutOfRange) => Err(MaskError::OutOfRange),
         }
