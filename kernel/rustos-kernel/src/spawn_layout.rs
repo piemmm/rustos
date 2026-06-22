@@ -93,6 +93,10 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
             CapabilityId::CONSOLE_READ,
             CapabilityId::PROC_SPAWN,
             CapabilityId::USERS_READ,
+            // Emit its structured diagnostics through the kernel diagnostic
+            // log (serial UART on a debug build) rather than fd 2
+            // (`AGENTS.md` §19.4 / §20).
+            CapabilityId::LOG_EMIT,
         ],
         args: &[b"login"],
     },
@@ -103,18 +107,19 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
     // hardware view, §16.6 / §18.4) for `hw_tree_read`/`hw_tree_wait`,
     // `CAP_DRV_LOAD` (the §5.2 authority the restricted driver-store
     // `ipc_call` endpoint requires and the kernel re-checks at the §8 load
-    // gate), and `CAP_CONSOLE_WRITE` to log to its inherited diagnostic
-    // stream (fd 2, §20) — nothing more. It never holds a console-read or
-    // any resource capability: the kernel mints a loaded driver's grants
-    // from its matched node, never from this caller (`AGENTS.md` §4 / §5.2 —
-    // least privilege, no ambient authority).
+    // gate), and `CAP_LOG_EMIT` to emit its structured diagnostics through
+    // the kernel diagnostic log — the serial UART on a debug build (§19.4 /
+    // §20) — nothing more. It writes no standard stream, so it holds no
+    // `CAP_CONSOLE_WRITE`/`READ`, and no resource capability: the kernel
+    // mints a loaded driver's grants from its matched node, never from this
+    // caller (`AGENTS.md` §4 / §5.2 — least privilege, no ambient authority).
     EmbeddedProgram {
         path: DEVMGR_PATH,
         rxe: DEVMGR_RXE,
         caps: &[
-            CapabilityId::CONSOLE_WRITE,
             CapabilityId::SYSINFO_HW,
             CapabilityId::DRV_LOAD,
+            CapabilityId::LOG_EMIT,
         ],
         args: &[b"devmgr"],
     },

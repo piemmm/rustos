@@ -1701,10 +1701,41 @@ order (one fully-gated increment each):
            `BufferTooSmall` (grow-before-fail, §24.1; the tree is a discovered
            capacity, not a ceiling), so the whole tree is read and the mailbox
            node is matched and loaded. Host-proven (new `service` growth tests +
-           a `run`-over-an-oversized-tree end-to-end test); metal re-verify
-           expects `id=7001 driver loaded .../bus_mailbox/vcmailbox/Run`.
-         - **Remaining (metal-only, §0.4):** confirm the above autoload on
-           hardware; then the **vl805 user-space migration** (run the
+           a `run`-over-an-oversized-tree end-to-end test). A second metal run
+           then confirmed `devmgr` reaches the matched node and issues the
+           `Load`, but the in-kernel store-load gate refused it with
+           `id=7006 capability escalation`: the signed `vcmailbox` manifest
+           requests `CAP_IPC_BIND_PRIVILEGED` (to bind its restricted-sender
+           `MAILBOX_ENDPOINT`), which the autoload gate's delegatable superset
+           `unlock_service::autoload_caps()` did not carry, so
+           `requested.is_subset_of(caller_caps)` failed. **Fixed:**
+           `autoload_caps()` now also inserts `CAP_IPC_BIND_PRIVILEGED`
+           (alongside `CAP_INPUT_INJECT`/`CAP_IRQ_BIND`) so a signed bus
+           *service* driver can be granted it; the per-driver manifest∩superset
+           intersection still binds (§5.2 / §18.3 / §4 — no ambient authority).
+           Host-proven (rewritten `autoload_caps` unit test). A third metal run
+           confirmed the load succeeds (`id=7001 driver loaded
+           .../bus_mailbox/vcmailbox/Run`) and the USB keyboard works — but
+           boot-to-login took ~37 minutes, so the `Root passphrase:` prompt
+           looked unresponsive. Root cause (a §20/§2.16 log-spam defect, not an
+           input-path bug): `devmgr`'s reactive loop re-matches the whole
+           hardware-tree snapshot on every generation advance (§18.4), and
+           `autoload::match_and_load` re-emitted the `NODE_UNBOUND` audit line
+           for every unmatched node on every re-evaluation — ~118 nodes ×
+           many reactions × ~116 ms/UART-line ≈ the observed ~37 min. **Fixed:**
+           `devmgr` now carries per-node decision memory
+           (`autoload::ReportedNodes`/`NodeReport`) and logs a node only on its
+           first decision and on a *change* (`Unbound`→`Bound` when the late
+           catalogue arrives); a settled re-evaluation is silent and a node
+           already recorded `LoadFailed` is not re-attempted against the static
+           store (§2.16). First-pass logging (each node once) is unchanged.
+           Host-proven (`a_reaction_does_not_relog_an_unchanged_unbound_node`).
+         - **Remaining (metal-only, §0.4):** confirm fast boot + a responsive
+           `Root passphrase:` prompt on hardware; investigate (if still seen on a
+           settled system) why the tree generation advances repeatedly after boot
+           (now harmless/silent) and whether `login` parks on `users_db_wait`
+           rather than retrying `users_db_read`; then the **vl805 user-space
+           migration** (run the
            firmware-reload driver over `host.mailbox()`) with retirement of the
            in-kernel scaffold (`bring_up_keyboard`/`KernelMailboxChannel`,
            §2.14/§2.17) — the prompt's "D5". The scaffold stays the live keyboard

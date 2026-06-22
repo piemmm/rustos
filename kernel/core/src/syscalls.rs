@@ -77,8 +77,9 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
-    CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags, RandomFlags,
-    ResourceLimit, StreamMode, SyscallNumber, CONSOLE_INHERIT, RANDOM_REQUEST_MAX_BYTES,
+    decode_log_record, CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags,
+    RandomFlags, ResourceLimit, StreamMode, SyscallNumber, CONSOLE_INHERIT, LOG_FIELDS_MAX,
+    LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -93,7 +94,7 @@ use rustos_kernel_mem::{
 use rustos_kernel_sched_api::Priority;
 use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
-use rustos_log::{Field, Sink};
+use rustos_log::{Event, EventId, Field, Level, Sink};
 use rustos_sync::RwLock;
 use rustos_util::fmt::format_hex_u64;
 use zeroize::Zeroize;
@@ -120,6 +121,24 @@ use crate::spawn::{
 };
 use crate::users::{UsersDbSource, NULL_USERS_DB};
 
+/// A no-op diagnostic [`Sink`] — the fail-closed default for the
+/// `log_emit` handler's `log_sink` until the boot path installs the real
+/// arch diagnostic sink (`AGENTS.md` §2.9 / §19.4).
+///
+/// Dropping a record rather than touching an uninstalled sink keeps a
+/// pre-install `log_emit` harmless; the dispatcher's capability check still
+/// runs, so the inert build never widens authority.
+struct NullLogSink;
+
+impl Sink for NullLogSink {
+    fn write_event(&self, _event: &Event<'_>) {}
+}
+
+/// The shared no-op diagnostic sink the `log_emit` handler holds until the
+/// boot path installs the real one through
+/// [`KernelSyscallHandlers::with_log_sink`].
+static NULL_LOG_SINK: NullLogSink = NullLogSink;
+
 /// Production [`SyscallHandlers`] implementation.
 ///
 /// Construct once at boot, after `KernelState` has assembled the
@@ -135,6 +154,18 @@ where
     caps: &'a RwLock<CapTable>,
     arch: &'a A,
     audit: &'a (dyn Sink + Sync),
+    /// The kernel's **diagnostic** log sink — the same sink the kernel emits
+    /// its own boot/runtime records through (`kernel/arch/*` routes it to the
+    /// serial UART on a debug build, the video console on release). The
+    /// `log_emit` handler emits a capability-gated, validated user-space
+    /// record through this sink, attributed to the calling task (`AGENTS.md`
+    /// §19.4 / §20). It is **never** the hash-chained security audit sink
+    /// ([`Self::audit`]), which stays kernel-only, so user space can neither
+    /// forge nor truncate an audit entry. Defaults to the no-op
+    /// `NULL_LOG_SINK` so that until the boot path installs the real sink
+    /// through [`Self::with_log_sink`] a `log_emit` is silently dropped
+    /// rather than touching an uninstalled sink (`AGENTS.md` §2.9).
+    log_sink: &'a (dyn Sink + Sync),
     irq: &'a IrqTable,
     /// Controller-mask seam consumed by [`IrqTable::fire`] from the
     /// architecture port's trap path. Held here so the per-trap
@@ -321,6 +352,11 @@ where
             caps,
             arch,
             audit,
+            // Diagnostic log sink unwired until the boot path installs the
+            // arch serial/console sink (`AGENTS.md` §19.4 / §20): until then a
+            // `log_emit` is silently dropped through the no-op `NULL_LOG_SINK`
+            // rather than touching an uninstalled sink (`AGENTS.md` §2.9).
+            log_sink: &NULL_LOG_SINK,
             irq,
             irq_controller,
             ipc,
@@ -397,6 +433,25 @@ where
     #[must_use]
     pub const fn with_consoles(mut self, consoles: &'static [ConsoleDevice]) -> Self {
         self.consoles = consoles;
+        self
+    }
+
+    /// Install the kernel's diagnostic log sink the `log_emit` syscall emits
+    /// user-space records through, consuming and returning `self`
+    /// (`AGENTS.md` §19.4 / §20).
+    ///
+    /// Called once by the boot path with the same arch diagnostic sink the
+    /// kernel routes its own records through (the serial UART on a debug
+    /// build, the video console on release). Until this is called the handler
+    /// holds the no-op `NULL_LOG_SINK` and a `log_emit` is silently dropped
+    /// (`AGENTS.md` §2.9). The sink must be `'static` because the boot path
+    /// leaks it alongside `KernelState`, which lives for the lifetime of the
+    /// running kernel. This is the **diagnostic** sink only; the security
+    /// audit sink stays the kernel-owned `audit` borrow user space can never
+    /// reach (`AGENTS.md` §19.4).
+    #[must_use]
+    pub const fn with_log_sink(mut self, log_sink: &'a (dyn Sink + Sync)) -> Self {
+        self.log_sink = log_sink;
         self
     }
 
@@ -2398,6 +2453,67 @@ where
         crate::waitq::call_wake();
         Ok(0)
     }
+
+    fn log_emit(&self, caller: &CallerContext<'_>, record: u64, len: usize) -> SyscallResult {
+        // The dispatcher has already checked `CAP_LOG_EMIT` and that
+        // `record` is a non-null `UserPtr` (`AGENTS.md` §5.4). A valid
+        // encoded record never exceeds `LOG_RECORD_MAX`, so a larger `len`
+        // is malformed and is rejected before copying — a hostile `len`
+        // cannot drive a large kernel allocation (`AGENTS.md` §4 / §24.4).
+        if len == 0 || len > LOG_RECORD_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+
+        // Copy the encoded record in through the validated boundary before
+        // touching the sink. A faulting pointer — or a caller with no
+        // registered address space — fails closed with `BadAddress`, never
+        // an oracle distinguishing the cause (`AGENTS.md` §19.1).
+        let mut payload = alloc::vec![0u8; len];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(record), &mut payload)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Fully validate the record (lengths, slice bounds, UTF-8) before
+        // building an event from it (`AGENTS.md` §5.4 / §2.9).
+        let decoded = decode_log_record(&payload)?;
+
+        // Attribute the record to the calling task with a kernel-supplied
+        // `task` field the caller cannot forge — the trusted origin marker
+        // (`AGENTS.md` §5.4.1 / §19.4). It is prepended to the caller's own
+        // fields, which the decoder bounds to `LOG_FIELDS_MAX`, so the
+        // fixed array never overflows.
+        let mut task_hex = [0u8; 16];
+        let task_str = format_hex_u64(caller.task_id.0, &mut task_hex);
+        let mut fields_buf = [Field { key: "", value: "" }; LOG_FIELDS_MAX + 1];
+        fields_buf[0] = Field {
+            key: "task",
+            value: task_str,
+        };
+        let mut field_count = 1;
+        for (key, value) in decoded.fields() {
+            fields_buf[field_count] = Field { key, value };
+            field_count += 1;
+        }
+
+        // The level byte was validated `<= LOG_LEVEL_MAX` by the decoder, so
+        // `from_u8` always succeeds; `unwrap_or` keeps the path panic-free
+        // (`AGENTS.md` §2.9).
+        let event = Event {
+            level: Level::from_u8(decoded.level()).unwrap_or(Level::Info),
+            id: EventId(decoded.event_id()),
+            message: decoded.message(),
+            fields: &fields_buf[..field_count],
+        };
+        // Emit through the kernel's diagnostic sink only — never the audit
+        // sink (`AGENTS.md` §19.4). Below the active level threshold the
+        // record is dropped in O(1) (`AGENTS.md` §2.16).
+        rustos_log::log(self.log_sink, &event);
+        Ok(0)
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -2884,6 +3000,21 @@ where
     #[must_use]
     pub fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
         self.handlers = self.handlers.with_hw_tree(hw_tree);
+        self
+    }
+
+    /// Install the kernel's diagnostic log sink the `log_emit` syscall emits
+    /// user-space records through, consuming and returning `self`
+    /// (`AGENTS.md` §19.4 / §20).
+    ///
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_log_sink`]:
+    /// called once by the boot path with the same arch diagnostic sink the
+    /// kernel routes its own records through. A boot path that installs no
+    /// sink leaves the no-op default and a `log_emit` is silently dropped
+    /// (`AGENTS.md` §2.9).
+    #[must_use]
+    pub fn with_log_sink(mut self, log_sink: &'a (dyn Sink + Sync)) -> Self {
+        self.handlers = self.handlers.with_log_sink(log_sink);
         self
     }
 
@@ -3392,6 +3523,140 @@ mod tests {
         let msg = port.recv().expect("a message was delivered");
         assert_eq!(msg.sender, 2);
         assert_eq!(msg.payload.as_slice(), &payload);
+    }
+
+    /// `log_emit` copies the encoded record in, decodes it, and emits it to
+    /// the kernel's **diagnostic** `log_sink` — attributed to the calling
+    /// task with a kernel-supplied `task` field the caller cannot forge
+    /// (`AGENTS.md` §19.4 / §20). The caller's own fields follow.
+    #[test]
+    fn log_emit_emits_the_decoded_record_with_task_attribution() {
+        install_trace_filter();
+        let audit = make_sink();
+        let log_sink = TestSink::new();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+
+        let mut record = [0u8; LOG_RECORD_MAX];
+        let len = rustos_abi::encode_log_record(
+            &mut record,
+            Level::Info.as_u8(),
+            7030,
+            "bundle accepted",
+            &[("driver", "vcmailbox")],
+        )
+        .expect("encodes within bounds");
+
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &record[..len]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::LOG_EMIT], audit);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, audit, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_log_sink(&log_sink);
+        assert_eq!(h.log_emit(&ctx, 0x1000, len), Ok(0));
+
+        let events = log_sink.snapshot();
+        assert_eq!(events.len(), 1, "exactly one record reached the log sink");
+        let event = &events[0];
+        assert_eq!(event.level, Level::Info);
+        assert_eq!(event.id, EventId(7030));
+        assert_eq!(event.message, "bundle accepted");
+        // The kernel-supplied attribution comes first and names the caller.
+        assert_eq!(event.fields[0].0, "task");
+        // The caller's own field is preserved after the attribution.
+        assert!(event
+            .fields
+            .iter()
+            .any(|(k, v)| k == "driver" && v == "vcmailbox"));
+    }
+
+    /// `log_emit` rejects a `len` larger than any valid encoded record
+    /// before copying — a hostile length cannot drive a large kernel
+    /// allocation (`AGENTS.md` §4 / §24.4) — and emits nothing.
+    #[test]
+    fn log_emit_rejects_an_oversize_length_fail_closed() {
+        install_trace_filter();
+        let audit = make_sink();
+        let log_sink = TestSink::new();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::LOG_EMIT], audit);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, audit, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_log_sink(&log_sink);
+        assert_eq!(
+            h.log_emit(&ctx, 0x1000, LOG_RECORD_MAX + 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert!(log_sink.snapshot().is_empty(), "no record was emitted");
+    }
+
+    /// `log_emit` copies in a record whose level byte is out of range and
+    /// fails closed at decode, emitting nothing (`AGENTS.md` §2.9 / §5.4).
+    #[test]
+    fn log_emit_rejects_a_malformed_record_fail_closed() {
+        install_trace_filter();
+        let audit = make_sink();
+        let log_sink = TestSink::new();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+
+        // A well-formed header byte length but an invalid level byte (99).
+        let mut record = [0u8; 8];
+        record[0] = 99;
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &record);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::LOG_EMIT], audit);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, audit, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_log_sink(&log_sink);
+        assert_eq!(
+            h.log_emit(&ctx, 0x1000, record.len()),
+            Err(Errno::OutOfRange)
+        );
+        assert!(log_sink.snapshot().is_empty(), "no record was emitted");
     }
 
     /// `ipc_send` to a bound endpoint with a faulting user pointer fails

@@ -99,6 +99,7 @@ const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
 const NUM_CALL_CREATE: u64 = SyscallNumber::CALL_CREATE.as_u16() as u64;
 const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
+const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -828,6 +829,25 @@ pub extern "C" fn sys_call_reply(
     }
 }
 
+/// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
+/// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
+/// diagnostic log sink (`SyscallNumber::LOG_EMIT`, `AGENTS.md` §19.4 / §20).
+/// Requires `ROS_CAP_LOG_EMIT`; the kernel validates and attributes the
+/// record to the calling task. Returns a `ROS_E_*` code (`0` on success).
+#[must_use]
+#[export_name = "ros_sys_log_emit"]
+pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the record `(ptr, len)`
+    // pair against the caller's address space before reading it (`AGENTS.md`
+    // §5.4).
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_LOG_EMIT,
+            [ptr_arg(record), len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +899,7 @@ mod tests {
         (NUM_CALL_CREATE, "call_create", 6),
         (NUM_CALL_RECV, "call_recv", 4),
         (NUM_CALL_REPLY, "call_reply", 4),
+        (NUM_LOG_EMIT, "log_emit", 2),
     ];
 
     #[test]
@@ -1182,6 +1203,21 @@ mod tests {
             assert_eq!(sys_hw_tree_read(ptr, len), len as u64);
         });
         assert_eq!(number, NUM_HW_TREE_READ);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn log_emit_marshals_pointer_and_len() {
+        let mut record = [0u8; 16];
+        let ptr = record.as_mut_ptr().cast::<c_void>();
+        let len = record.len();
+        // `0` is the success return (the record was accepted).
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_log_emit(ptr, len), 0);
+        });
+        assert_eq!(number, NUM_LOG_EMIT);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], len as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);

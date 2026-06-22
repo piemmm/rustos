@@ -59,6 +59,7 @@ extern "C" {
 #define ROS_SYS_CALL_RECV 33u
 #define ROS_SYS_CALL_REPLY 34u
 #define ROS_SYS_USERS_DB_WAIT 35u
+#define ROS_SYS_LOG_EMIT 36u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -97,6 +98,7 @@ int32_t ros_sys_call_create(uint64_t a0, void * a1, void * a2, uintptr_t a3, uin
 uint64_t ros_sys_call_recv(uint64_t a0, void * a1, uintptr_t a2, void * a3);
 int32_t ros_sys_call_reply(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 int32_t ros_sys_users_db_wait(uint64_t a0);
+int32_t ros_sys_log_emit(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

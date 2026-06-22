@@ -25,7 +25,7 @@ use rustos_abi::{Errno, HwNode, HwTreeHeader};
 use rustos_devmatch::DriverCandidate;
 use rustos_log::{log as log_event, Event, Level, Sink};
 
-use crate::autoload::{match_and_load, LoadedBundles};
+use crate::autoload::{match_and_load, AutoloadState};
 use crate::events;
 use crate::observe::for_each_node;
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
@@ -132,7 +132,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
-    loaded: &mut LoadedBundles,
+    state: &mut AutoloadState,
     tree_buf: &mut Vec<u8>,
     reply_buf: &mut [u8],
     sink: &dyn Sink,
@@ -173,7 +173,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     let drivers: &[CatalogueDriver] = catalogue.as_deref().unwrap_or(&[]);
     let candidates: Vec<DriverCandidate<'_>> =
         drivers.iter().map(CatalogueDriver::candidate).collect();
-    match_and_load(&nodes, drivers, &candidates, store, reply_buf, loaded, sink);
+    match_and_load(&nodes, drivers, &candidates, store, reply_buf, state, sink);
     Ok(header.generation())
 }
 
@@ -216,7 +216,13 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     budget: Option<u32>,
 ) -> Result<(), Errno> {
     let mut catalogue: Option<Vec<CatalogueDriver>> = None;
-    let mut loaded = LoadedBundles::new();
+    // The loaded-bundle cache plus the per-node decision memory: a
+    // re-evaluation of a settled tree re-emits no audit line (`AGENTS.md`
+    // §20 / §2.16). The device manager re-matches the whole snapshot on every
+    // generation advance, and without the decision memory each pass would
+    // re-log every unbound node, flooding the slow diagnostic serial line and
+    // stalling the boot.
+    let mut state = AutoloadState::default();
     // The snapshot buffer the service owns for its lifetime: it starts
     // empty and `read_tree_growing` sizes it to the discovered tree on the
     // first read, growing it later only if the tree ever grows past it
@@ -227,7 +233,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         tree,
         store,
         &mut catalogue,
-        &mut loaded,
+        &mut state,
         &mut tree_buf,
         reply_buf,
         sink,
@@ -242,7 +248,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             tree,
             store,
             &mut catalogue,
-            &mut loaded,
+            &mut state,
             &mut tree_buf,
             reply_buf,
             sink,
@@ -522,6 +528,48 @@ mod tests {
         // the appeared network node loads bundle 8 on the reaction.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2), (8, 3)]);
         assert_eq!(tree.waited_on, vec![1]);
+    }
+
+    #[test]
+    fn a_reaction_does_not_relog_an_unchanged_unbound_node() {
+        let unmatched = HwMatchKey::virtio(0xFFFF);
+        let first = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, unmatched),
+            ],
+        );
+        // The same node set at a later generation: a genuine re-evaluation
+        // (the tree generation advanced) that changes nothing about node 2.
+        let second = encode(
+            2,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, unmatched),
+            ],
+        );
+        let mut tree = ScriptedTree::new(vec![first, second]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, HwMatchKey::virtio(0x1234))])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+
+        // Node 2 is unbound in both evaluations, but the unbound decision is
+        // logged exactly once — a re-evaluation of a settled tree must not
+        // re-flood the diagnostic log (`AGENTS.md` §20 / §2.16 / §18.4).
+        assert_eq!(
+            sink.ids()
+                .iter()
+                .filter(|&&id| id == events::NODE_UNBOUND.0)
+                .count(),
+            1,
+            "an unchanged unbound node must not be re-logged on re-evaluation"
+        );
     }
 
     #[test]

@@ -31,6 +31,14 @@ rustos-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 # deduplicated lock the workspace shares (`AGENTS.md` §2.2, §6).
 rustos-sync = { path = "../sync", version = "=0.0.0" }
 
+# The structured `Event`/`Sink`/`Level` logging vocabulary the `LogSink`
+# implements: a first-party program builds `rustos_log::Event`s and the
+# `LogSink` marshals each through the `log_emit` syscall to the kernel's
+# diagnostic sink, so a service's diagnostics reach the same log the kernel's
+# do (the serial UART on a debug build) instead of fd 2 (`AGENTS.md` §19.4 /
+# §20). The one logging vocabulary the workspace shares (`AGENTS.md` §2.2).
+rustos-log = { path = "../log", version = "=0.0.0" }
+
 # The host trap seam used to assert the wrappers' marshalling without a kernel
 # (`AGENTS.md` §7). Enabled only for this crate's own tests, so the
 # `std`-pulling seam never reaches a shipping build.

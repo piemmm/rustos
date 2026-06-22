@@ -283,15 +283,18 @@ pub fn service_caps() -> CapabilitySet {
 /// *own* minimal bring-up authority, §5.4): the kthread, standing in for
 /// `devmgr`, must be able to hand an autoloaded driver the resource
 /// capabilities its class needs, but never holds them ambiently itself. It is
-/// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`] and
-/// [`CapabilityId::IRQ_BIND`], so an autoloaded input driver (e.g. the
-/// virtio-input keyboard) can be granted the keyboard-injection authority
-/// `key_inject` requires and the `irq_bind`/`irq_wait` authority its
-/// interrupt-driven event loop parks on, while a storage or other driver —
-/// whose manifest does not request them — receives nothing extra (the
-/// per-driver intersection still binds, `AGENTS.md` §18.3 / §4 — no ambient
-/// authority). The driver never receives `CAP_DRV_LOAD`: it is the *caller's*
-/// key to the gate, not a capability any driver's manifest requests.
+/// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`],
+/// [`CapabilityId::IRQ_BIND`], and [`CapabilityId::IPC_BIND_PRIVILEGED`], so an
+/// autoloaded driver whose signed manifest requests one of them can be granted
+/// it: an input driver (e.g. the virtio-input keyboard) the keyboard-injection
+/// authority `key_inject` requires and the `irq_bind`/`irq_wait` authority its
+/// interrupt-driven event loop parks on, and a bus *service* driver (e.g. the
+/// `VideoCore` `vcmailbox` mailbox) the privilege to bind the restricted-sender
+/// endpoint its consumers call it through. A storage or other driver — whose
+/// manifest does not request them — receives nothing extra (the per-driver
+/// intersection still binds, `AGENTS.md` §18.3 / §4 — no ambient authority).
+/// The driver never receives `CAP_DRV_LOAD`: it is the *caller's* key to the
+/// gate, not a capability any driver's manifest requests.
 ///
 /// Architecture-neutral (`AGENTS.md` §2.2): every port's unlock kthread
 /// autoloads under the same delegatable set.
@@ -305,6 +308,14 @@ pub fn autoload_caps() -> CapabilitySet {
     // a driver that does not request it receives nothing extra (`AGENTS.md`
     // §18.3 / §4 — no ambient authority).
     caps.insert(CapabilityId::IRQ_BIND);
+    // A user-space *service* driver (the VideoCore `vcmailbox` mailbox, whose
+    // consumers reach it through a restricted-sender call endpoint) must hold
+    // `CAP_IPC_BIND_PRIVILEGED` to bind that endpoint (`kernel/ipc` requires it
+    // for any non-empty required-sender set). The delegatable set carries it so
+    // such a signed driver can be granted it; the per-driver manifest
+    // intersection still binds, so a driver that does not request it receives
+    // nothing extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
+    caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
     caps
 }
 
@@ -623,18 +634,26 @@ mod tests {
     }
 
     #[test]
-    fn autoload_caps_extends_service_caps_with_input_inject_only() {
+    fn autoload_caps_extends_service_caps_with_the_delegatable_resource_caps() {
         // The autoload gate's delegatable superset is the kthread's own
-        // minimal caps plus `CAP_INPUT_INJECT` — so an autoloaded input
-        // driver's manifest∩caller intersection can grant the keyboard
-        // injection authority `key_inject` requires (`AGENTS.md` §5.2 /
-        // §18.3), while the kthread's own `service_caps` never holds it
-        // (§5.4 — no ambient authority for the bring-up context).
+        // minimal caps plus the resource caps an autoloaded driver's
+        // manifest∩caller intersection may legitimately grant: `INPUT_INJECT`
+        // and `IRQ_BIND` for an input driver, and `IPC_BIND_PRIVILEGED` for a
+        // bus service driver that binds a restricted-sender endpoint (the
+        // VideoCore `vcmailbox`) — none of which the kthread's own
+        // `service_caps` hold (§5.4 — no ambient authority for the bring-up
+        // context; the per-driver intersection still binds, §5.2 / §18.3).
         let service = service_caps();
         let autoload = autoload_caps();
-        assert!(!service.contains(CapabilityId::INPUT_INJECT));
-        assert!(autoload.contains(CapabilityId::INPUT_INJECT));
-        // Every bring-up capability is still present; nothing else is added.
+        for cap in [
+            CapabilityId::INPUT_INJECT,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+        ] {
+            assert!(!service.contains(cap));
+            assert!(autoload.contains(cap));
+        }
+        // Every bring-up capability is still present.
         assert!(autoload.contains(CapabilityId::MMIO_MAP));
         assert!(autoload.contains(CapabilityId::MEM_DMA));
         assert!(autoload.contains(CapabilityId::DRV_LOAD));

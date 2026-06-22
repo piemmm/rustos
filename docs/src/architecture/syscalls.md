@@ -89,6 +89,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  33 | `call_recv`    | `IpcEndpoint`, `user_ptr` (buf), `len`, `user_ptr` (ticket out) | `u64` (bytes) | — | no |
 |  34 | `call_reply`   | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len`      | `errno` | — | no |
 |  35 | `users_db_wait`| `u64 timeout_ns`                        | `errno` | `CAP_USERS_READ`  | no      |
+|  36 | `log_emit`     | `user_ptr` (record), `len`              | `errno` | `CAP_LOG_EMIT`    | no      |
 
 ### Capability matrix
 
@@ -110,6 +111,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`                |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
+| `CAP_LOG_EMIT`     | `log_emit`                 |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in

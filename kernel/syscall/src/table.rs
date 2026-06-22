@@ -772,6 +772,27 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Emit a structured diagnostic record to the kernel's diagnostic log
+    /// sink (`AGENTS.md` §19.4 / §20).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::LOG_EMIT`] and that `record` is a non-null `UserPtr`.
+    /// The implementation copies in at most [`rustos_abi::LOG_RECORD_MAX`]
+    /// bytes through the validated boundary, fully validates the record with
+    /// [`rustos_abi::decode_log_record`] (`AGENTS.md` §5.4), and emits it
+    /// through the kernel's **diagnostic** `log_sink` — never the
+    /// hash-chained security audit log (`AGENTS.md` §19.4) — attributing it
+    /// to the calling task (the caller cannot forge that attribution).
+    /// Returns `Ok(0)` once accepted; a malformed record fails closed
+    /// (`AGENTS.md` §2.9).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn log_emit(&self, _caller: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1069,6 +1090,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let reply_len = decode_len(args.0[3])?;
                 self.handlers
                     .call_reply(caller, args.0[0], args.0[1], args.0[2], reply_len)
+            }
+            SyscallNumber::LOG_EMIT => {
+                // args[0] is the non-null record `UserPtr` (dispatcher-
+                // checked); args[1] is its byte length (`AGENTS.md` §19.4 /
+                // §20).
+                let len = decode_len(args.0[1])?;
+                self.handlers.log_emit(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1622,6 +1650,11 @@ mod tests {
             self.record("call_reply");
             Ok(0)
         }
+
+        fn log_emit(&self, _c: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
+            self.record("log_emit");
+            Ok(0)
+        }
     }
 
     #[test]
@@ -1648,6 +1681,7 @@ mod tests {
                 CapabilityId::MMIO_MAP,
                 CapabilityId::MEM_DMA,
                 CapabilityId::SYSINFO_HW,
+                CapabilityId::LOG_EMIT,
             ],
             &sink,
         );

@@ -256,6 +256,22 @@ impl CapabilityId {
     /// checks before state touches): an ordinary task cannot drive the
     /// firmware mailbox.
     pub const MAILBOX: Self = Self(25);
+    /// Emit a structured diagnostic record to the system log through the
+    /// `log_emit` syscall (`abi-v1` number 36, `AGENTS.md` §19.4 / §20).
+    ///
+    /// The gate on the user-space logging path: a holder hands the kernel a
+    /// bounded, validated [`crate::LogRecordRef`] which the kernel attributes
+    /// to the calling task and emits through its **diagnostic** log sink (the
+    /// serial UART on a debug build, the video console on release). This is
+    /// **not** the hash-chained security audit log — that channel
+    /// ([`AUDIT_WRITE`](Self::AUDIT_WRITE)) stays kernel-only, so a holder of
+    /// this capability can never write, forge, or truncate an audit entry
+    /// (`AGENTS.md` §19.4). Emitting to the system console is privileged
+    /// rather than ambient (`AGENTS.md` §4 — no ambient authority; §5.4 —
+    /// capability checks before state touches): only trusted system services
+    /// (the device manager, login) are granted it, so an ordinary app cannot
+    /// scribble diagnostics onto the captured serial line.
+    pub const LOG_EMIT: Self = Self(26);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -293,6 +309,7 @@ impl CapabilityId {
         (Self::DISPLAY, "CAP_DISPLAY"),
         (Self::INPUT_READ, "CAP_INPUT_READ"),
         (Self::MAILBOX, "CAP_MAILBOX"),
+        (Self::LOG_EMIT, "CAP_LOG_EMIT"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -412,6 +429,8 @@ mod tests {
         assert_eq!(CapabilityId::INPUT_INJECT.as_u16(), 22);
         assert_eq!(CapabilityId::DISPLAY.as_u16(), 23);
         assert_eq!(CapabilityId::INPUT_READ.as_u16(), 24);
+        assert_eq!(CapabilityId::MAILBOX.as_u16(), 25);
+        assert_eq!(CapabilityId::LOG_EMIT.as_u16(), 26);
     }
 
     #[test]
@@ -443,9 +462,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=24 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=26 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=24 {
+        for raw in 1..=26 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

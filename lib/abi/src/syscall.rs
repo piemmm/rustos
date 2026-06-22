@@ -598,6 +598,26 @@ impl SyscallNumber {
     /// [`crate::Errno::NotImplemented`] (`AGENTS.md` §2.9).
     pub const USERS_DB_WAIT: Self = Self(35);
 
+    /// Emit a structured diagnostic record to the kernel's system log
+    /// (`AGENTS.md` §19.4 / §20).
+    ///
+    /// Arguments: `record: *const u8` — a non-null pointer to an encoded
+    /// [`crate::LogRecordRef`] wire image (see [`crate::log`]); `len: usize`
+    /// — its length. Returns `0`, or `-errno`.
+    ///
+    /// Gated by [`crate::CapabilityId::LOG_EMIT`]: the kernel verifies the
+    /// capability, copies in at most [`crate::LOG_RECORD_MAX`] bytes, and
+    /// fully validates the record before touching state (`AGENTS.md` §5.4).
+    /// It then emits the record through its **diagnostic** log sink (the
+    /// serial UART on a debug build, the video console on release),
+    /// attributing it to the calling task — the caller cannot forge that
+    /// attribution. This never reaches the hash-chained security audit log,
+    /// which stays kernel-only (`AGENTS.md` §19.4). A malformed record fails
+    /// closed with the decoder's [`crate::Errno`] (`AGENTS.md` §2.9); the
+    /// record is best-effort and below the active level threshold is dropped
+    /// in O(1) (`AGENTS.md` §2.16).
+    pub const LOG_EMIT: Self = Self(36);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -708,6 +728,7 @@ mod tests {
         assert_eq!(SyscallNumber::CALL_RECV.as_u16(), 33);
         assert_eq!(SyscallNumber::CALL_REPLY.as_u16(), 34);
         assert_eq!(SyscallNumber::USERS_DB_WAIT.as_u16(), 35);
+        assert_eq!(SyscallNumber::LOG_EMIT.as_u16(), 36);
     }
 
     #[test]

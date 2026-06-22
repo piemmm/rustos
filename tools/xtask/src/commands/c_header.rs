@@ -58,15 +58,16 @@ use rustos_abi::{
     HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
     HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
     KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED, KIND_PRESSED, KIND_RELEASED, LIBREF_MAX,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, MACHINE_ID_LEN, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
-    MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC,
-    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
-    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RESOURCE_LIMITS_REPORT_LEN,
-    RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, STDINFO_FD,
-    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
-    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN,
+    LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN,
+    MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX,
+    MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, NANOS_PER_SEC, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
+    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
+    SEG_FLAG_WRITE, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS,
+    SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
     SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     SYSTEM_LIBRARIES_DIR,
 };
@@ -298,6 +299,73 @@ fn generate_random() -> String {
     out.push('\n');
 
     out.push_str("#endif /* ROS_RANDOM_H */\n");
+    out
+}
+
+/// `rustos_log.h` — the `log_emit` diagnostic-record ABI (`AGENTS.md`
+/// §19.4 / §20).
+///
+/// Declares the bounds of a `log_emit` record (the wire image
+/// `ros_sys_log_emit` consumes) so a non-Rust program can build one: the
+/// highest valid level byte, the message and field-count caps, the per-field
+/// key/value caps, the fixed header length, and the maximum encoded size.
+/// The byte caps are register-width quantities (`uintptr_t`), matching the
+/// `Len` mapping in [`c_type`]; the level cap is a single byte. The wire
+/// layout itself is documented inline.
+fn generate_log() -> String {
+    use std::fmt::Write as _;
+    let mut out = banner("log_emit diagnostic-record ABI (AGENTS.md sec.19.4 / sec.20).");
+    out.push_str("#ifndef ROS_LOG_H\n#define ROS_LOG_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+
+    out.push_str(
+        "/*\n\
+         \x20* Wire layout of a log_emit record (all scalars little-endian):\n\
+         \x20*   offset 0: uint8_t  level        (0..=ROS_LOG_LEVEL_MAX)\n\
+         \x20*   offset 1: uint8_t  field_count  (<= ROS_LOG_FIELDS_MAX)\n\
+         \x20*   offset 2: uint16_t message_len  (<= ROS_LOG_MESSAGE_MAX)\n\
+         \x20*   offset 4: uint32_t event_id\n\
+         \x20*   offset 8: message bytes (message_len, UTF-8)\n\
+         \x20*   then field_count records: uint8_t key_len, uint8_t value_len,\n\
+         \x20*        key bytes, value bytes (both UTF-8).\n\
+         \x20*/\n",
+    );
+
+    out.push_str("/* Highest valid level byte (the Error discriminant). */\n");
+    let _ = writeln!(out, "#define ROS_LOG_LEVEL_MAX ((uint8_t){LOG_LEVEL_MAX}u)");
+    out.push_str("/* Maximum message length, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOG_MESSAGE_MAX ((uintptr_t){LOG_MESSAGE_MAX}u)"
+    );
+    out.push_str("/* Maximum number of structured key/value fields. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOG_FIELDS_MAX ((uintptr_t){LOG_FIELDS_MAX}u)"
+    );
+    out.push_str("/* Maximum field key length, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOG_FIELD_KEY_MAX ((uintptr_t){LOG_FIELD_KEY_MAX}u)"
+    );
+    out.push_str("/* Maximum field value length, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOG_FIELD_VALUE_MAX ((uintptr_t){LOG_FIELD_VALUE_MAX}u)"
+    );
+    out.push_str("/* Fixed record header length, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOG_RECORD_HEADER_LEN ((uintptr_t){LOG_RECORD_HEADER_LEN}u)"
+    );
+    out.push_str("/* Maximum encoded record length, in bytes. */\n");
+    let _ = writeln!(
+        out,
+        "#define ROS_LOG_RECORD_MAX ((uintptr_t){LOG_RECORD_MAX}u)"
+    );
+    out.push('\n');
+
+    out.push_str("#endif /* ROS_LOG_H */\n");
     out
 }
 
@@ -1939,6 +2007,7 @@ fn generate_umbrella() -> String {
     out.push_str("#include \"rustos_capability.h\"\n");
     out.push_str("#include \"rustos_time.h\"\n");
     out.push_str("#include \"rustos_random.h\"\n");
+    out.push_str("#include \"rustos_log.h\"\n");
     out.push_str("#include \"rustos_rlimit.h\"\n");
     out.push_str("#include \"rustos_memory.h\"\n");
     out.push_str("#include \"rustos_hwtree.h\"\n");
@@ -1979,6 +2048,10 @@ pub fn generate_all() -> Vec<GeneratedHeader> {
         GeneratedHeader {
             file_name: "rustos_random.h",
             body: generate_random(),
+        },
+        GeneratedHeader {
+            file_name: "rustos_log.h",
+            body: generate_log(),
         },
         GeneratedHeader {
             file_name: "rustos_rlimit.h",
@@ -2135,6 +2208,7 @@ mod tests {
             "rustos_capability.h",
             "rustos_time.h",
             "rustos_random.h",
+            "rustos_log.h",
             "rustos_rlimit.h",
             "rustos_memory.h",
             "rustos_hwtree.h",

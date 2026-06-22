@@ -171,6 +171,9 @@ const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 /// `call_reply` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 
+/// `log_emit` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -1107,6 +1110,98 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(reply.len()))
+}
+
+/// Emit one pre-encoded diagnostic [`rustos_abi::LogRecordRef`] wire image to
+/// the kernel's diagnostic log sink (`SyscallNumber::LOG_EMIT`, `AGENTS.md`
+/// §19.4 / §20).
+///
+/// Most callers use the higher-level [`LogSink`] rather than this raw form.
+/// The kernel verifies the caller holds `CAP_LOG_EMIT`, copies and fully
+/// validates the record, and emits it through the same sink it routes its own
+/// records through (the serial UART on a debug build, the video console on
+/// release), attributing it to the calling task.
+///
+/// Returns `0` on success, or the raw negative kernel result (`-errno`): a
+/// missing `CAP_LOG_EMIT` (`PermissionDenied`), a malformed or oversize
+/// record (`LengthOutOfRange` / `OutOfRange`), or a faulting pointer
+/// (`BadAddress`). The wrapper hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn log_emit(record: &[u8]) -> i64 {
+    let ptr = record.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(ptr, len)` pair against the caller's address space before reading
+    // it (`AGENTS.md` §5.4). `record` is a live shared `&[u8]` for the
+    // duration of the call.
+    let ret = unsafe { raw_syscall(NUM_LOG_EMIT, [ptr, record.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Clamp `s` to at most `max` bytes at a UTF-8 character boundary.
+///
+/// The diagnostic log is best-effort (`AGENTS.md` §20): rather than drop a
+/// whole record whose message or field exceeds the `abi-v1` bound, [`LogSink`]
+/// trims it to the largest valid prefix so the line still reaches the log.
+fn clamp_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// A [`rustos_log::Sink`] that marshals each structured event to the kernel's
+/// diagnostic log sink through [`log_emit`].
+///
+/// This is how a first-party service routes its `rustos_log` diagnostics to
+/// the system log — the serial UART on a debug build — instead of writing
+/// them to `stderr` (fd 2), which on a framebuffer-console board lands on the
+/// screen rather than the captured serial line (`AGENTS.md` §19.4 / §20). The
+/// emitting task must hold `CAP_LOG_EMIT`; without it the kernel refuses the
+/// call and the record is dropped (the sink is best-effort and never panics,
+/// `AGENTS.md` §2.9).
+///
+/// A message or field that exceeds the `abi-v1` record bounds is clamped to
+/// the largest valid prefix and excess fields past
+/// [`rustos_abi::LOG_FIELDS_MAX`] are dropped, so an over-long record still
+/// reaches the log rather than being discarded whole.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct LogSink;
+
+impl rustos_log::Sink for LogSink {
+    fn write_event(&self, event: &rustos_log::Event<'_>) {
+        // Marshal the borrowed fields into the `(key, value)` pairs the
+        // encoder takes, clamping each to its bound and dropping any past
+        // `LOG_FIELDS_MAX` (best-effort, `AGENTS.md` §20).
+        let mut pairs: [(&str, &str); rustos_abi::LOG_FIELDS_MAX] =
+            [("", ""); rustos_abi::LOG_FIELDS_MAX];
+        let field_count = event.fields.len().min(rustos_abi::LOG_FIELDS_MAX);
+        for (slot, field) in pairs.iter_mut().zip(event.fields.iter()).take(field_count) {
+            *slot = (
+                clamp_utf8(field.key, rustos_abi::LOG_FIELD_KEY_MAX),
+                clamp_utf8(field.value, rustos_abi::LOG_FIELD_VALUE_MAX),
+            );
+        }
+        let message = clamp_utf8(event.message, rustos_abi::LOG_MESSAGE_MAX);
+
+        let mut buf = [0u8; rustos_abi::LOG_RECORD_MAX];
+        if let Ok(len) = rustos_abi::encode_log_record(
+            &mut buf,
+            event.level.as_u8(),
+            event.id.0,
+            message,
+            &pairs[..field_count],
+        ) {
+            // Best-effort: a refused or faulting emit drops the record rather
+            // than surfacing an error a `Sink` cannot return (`AGENTS.md`
+            // §2.9 / §20).
+            let _ = log_emit(&buf[..len]);
+        }
+    }
 }
 
 /// Create and register a kernel-owned synchronous call endpoint the calling

@@ -33,17 +33,26 @@ pub const NODE_LOAD_FAILED: EventId = EventId(13_004);
 /// manager loads nothing but keeps observing the hardware tree — never an
 /// error (fail-soft, `AGENTS.md` §18.4 / §2.9).
 pub const DRIVER_STORE_UNAVAILABLE: EventId = EventId(13_005);
+/// A hardware-tree snapshot was read: its generation and node count. Emitted
+/// at `Debug` (verbose boot/hotplug diagnostics, filtered out by default).
+pub const TREE_OBSERVED: EventId = EventId(13_006);
+/// One node of the observed hardware tree: its id, parent, class, and match-
+/// key count. Emitted at `Debug` (one record per node, filtered out by
+/// default — lower the level to trace what reached the device manager).
+pub const NODE_OBSERVED: EventId = EventId(13_007);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 5] = [
+    const ALL: [EventId; 7] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
         NODE_LOAD_FAILED,
         DRIVER_STORE_UNAVAILABLE,
+        TREE_OBSERVED,
+        NODE_OBSERVED,
     ];
 
     #[test]

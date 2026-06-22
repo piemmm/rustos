@@ -731,7 +731,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 #[allow(clippy::type_complexity)]
 fn run_phases<A: KernelArch>(
     boot: BootInfo<'_, A>,
-    log_sink: &(dyn Sink + Sync),
+    log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
 ) -> Result<
     (
@@ -945,7 +945,15 @@ fn run_phases<A: KernelArch>(
         // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
         // `hw_tree_wait` fail-closed when no inventory was seeded
         // (`AGENTS.md` §2.9 / §18.4).
-        .with_hw_tree(hw_tree),
+        .with_hw_tree(hw_tree)
+        // Serve the user-space `log_emit` syscall through the *same*
+        // diagnostic sink the kernel routes its own records through (the
+        // serial UART on a debug build, the video console on release), so a
+        // capability-gated service's diagnostics land where the kernel's do
+        // (`AGENTS.md` §19.4 / §20). The default no-op sink would silently
+        // drop them; this is the diagnostic sink only — the audit sink stays
+        // kernel-only.
+        .with_log_sink(log_sink),
     ));
     dispatcher_callback_slot
         .install_dispatcher(hook)

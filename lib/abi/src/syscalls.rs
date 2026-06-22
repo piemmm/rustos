@@ -897,6 +897,33 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::USERS_READ),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::LOG_EMIT,
+        name: "log_emit",
+        arg_count: 2,
+        args: [
+            // The encoded `LogRecordRef` wire image pointer, then its length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` once the record is accepted,
+        // else `-errno` for a malformed record (`AGENTS.md` §2.9).
+        ret: AbiType::Errno,
+        // Emitting a diagnostic record to the system console log is a
+        // privileged grant (`CAP_LOG_EMIT`), held only by trusted system
+        // services so an ordinary app cannot scribble on the captured serial
+        // line (`AGENTS.md` §4 / §5.4 / §20). NOT audited per call: this is
+        // the diagnostic log, not the hash-chained security audit log, and a
+        // service emits records at volume — auditing each one would drown the
+        // audit log (`AGENTS.md` §5.4.4 / §19.4); a refused capability is
+        // audited by the dispatcher regardless.
+        required_capability: Some(CapabilityId::LOG_EMIT),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1178,6 +1205,13 @@ mod tests {
         let ipc_call = spec_for(SyscallNumber::IPC_CALL).unwrap();
         assert_eq!(ipc_call.required_capability, None);
         assert!(ipc_call.audit, "ipc_call must be audited");
+        // log_emit is gated on the privileged CAP_LOG_EMIT — the system
+        // console log is never ambient (`AGENTS.md` §4 / §20) — and, as a
+        // high-volume diagnostic channel (not the hash-chained audit log),
+        // is NOT audited per call (`AGENTS.md` §5.4.4 / §19.4).
+        let log_emit = spec_for(SyscallNumber::LOG_EMIT).unwrap();
+        assert_eq!(log_emit.required_capability, Some(CapabilityId::LOG_EMIT));
+        assert!(!log_emit.audit, "log_emit must not audit per call");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

@@ -55,8 +55,9 @@ mod program {
     use rustos_abi::driver_store::DRIVER_STORE_ENDPOINT;
     use rustos_abi::hwtree::HwDeviceClass;
     use rustos_abi::{Errno, HwNode, HwTreeHeader};
-    use rustos_devmgr::{DriverStoreCall, HwTreeService};
-    use rustos_log::{Event, Sink};
+    use rustos_devmgr::{events, DriverStoreCall, HwTreeService};
+    use rustos_log::{log, Event, Field, Level};
+    use rustos_rt::LogSink;
     use rustos_util::fmt::{format_hex_u64, format_usize};
 
     /// Buffer the catalogue and each `Load` reply are received into, sized to
@@ -64,20 +65,6 @@ mod program {
     /// truncated (`AGENTS.md` §2.9 / §24.1). Disjoint from the tree buffer so
     /// a load can run while a tree snapshot is being decoded.
     const REPLY_BUF_LEN: usize = 64 * 1024;
-
-    /// Write all of `bytes` to standard error (fd 2 — diagnostics,
-    /// `AGENTS.md` §20), looping over short writes. A write that accepts
-    /// zero bytes means the stream will accept no more; the loop stops
-    /// rather than spinning (`AGENTS.md` §2.1).
-    fn write_all_stderr(mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            let written = rustos_rt::stderr(bytes);
-            if written == 0 {
-                break;
-            }
-            bytes = &bytes[written.min(bytes.len())..];
-        }
-    }
 
     /// The stable name of a node's device class for the log line. An
     /// unknown (un-modelled) discriminant is reported as `?`, never
@@ -113,8 +100,9 @@ mod program {
     /// The production [`HwTreeService`] backing: the reactive observe loop
     /// ([`rustos_devmgr::run`]) reads, waits, and reports through this seam,
     /// which binds the `hw_tree_read` / `hw_tree_wait` `abi-v1` syscalls and
-    /// writes each node report to the inherited diagnostic stream (fd 2,
-    /// `AGENTS.md` §20). The loop's control flow is host-tested in
+    /// emits each tree/node report through the kernel's diagnostic log via
+    /// [`LogSink`] (the serial UART on a debug build, `AGENTS.md` §19.4 /
+    /// §20) — never `stderr`. The loop's control flow is host-tested in
     /// `rustos_devmgr::service`; this is the freestanding I/O it binds
     /// (`AGENTS.md` §2.2).
     struct RtTreeService;
@@ -138,34 +126,69 @@ mod program {
         }
 
         fn on_header(&mut self, header: &HwTreeHeader) {
-            let mut count = [0u8; 12];
+            // Verbose boot/hotplug diagnostics: emitted at `Debug` so they are
+            // filtered out by default and surface only when the level is
+            // lowered (`AGENTS.md` §20). Routed through the kernel diagnostic
+            // log, never `stderr`.
             let mut gen = [0u8; 16];
-            write_all_stderr(b"devmgr: hardware tree generation ");
-            write_all_stderr(format_hex_u64(header.generation(), &mut gen).as_bytes());
-            write_all_stderr(b" nodes ");
-            write_all_stderr(format_usize(header.node_count() as usize, &mut count).as_bytes());
-            write_all_stderr(b"\n");
+            let mut count = [0u8; 12];
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Debug,
+                    id: events::TREE_OBSERVED,
+                    message: "hardware tree snapshot observed",
+                    fields: &[
+                        Field {
+                            key: "generation",
+                            value: format_hex_u64(header.generation(), &mut gen),
+                        },
+                        Field {
+                            key: "nodes",
+                            value: format_usize(header.node_count() as usize, &mut count),
+                        },
+                    ],
+                },
+            );
         }
 
         fn on_node(&mut self, node: &HwNode) {
             let mut id = [0u8; 12];
             let mut parent = [0u8; 12];
             let mut keys = [0u8; 12];
-            write_all_stderr(b"devmgr: node ");
-            write_all_stderr(format_usize(node.id() as usize, &mut id).as_bytes());
-            write_all_stderr(b" parent ");
             // The root has no parent (the all-ones sentinel); name it `root`
             // rather than render a meaningless huge number.
-            if node.is_root() {
-                write_all_stderr(b"root");
+            let parent_str = if node.is_root() {
+                "root"
             } else {
-                write_all_stderr(format_usize(node.parent() as usize, &mut parent).as_bytes());
-            }
-            write_all_stderr(b" class ");
-            write_all_stderr(class_name(node.class()).as_bytes());
-            write_all_stderr(b" keys ");
-            write_all_stderr(format_usize(node.match_keys().len(), &mut keys).as_bytes());
-            write_all_stderr(b"\n");
+                format_usize(node.parent() as usize, &mut parent)
+            };
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Debug,
+                    id: events::NODE_OBSERVED,
+                    message: "hardware tree node observed",
+                    fields: &[
+                        Field {
+                            key: "id",
+                            value: format_usize(node.id() as usize, &mut id),
+                        },
+                        Field {
+                            key: "parent",
+                            value: parent_str,
+                        },
+                        Field {
+                            key: "class",
+                            value: class_name(node.class()),
+                        },
+                        Field {
+                            key: "keys",
+                            value: format_usize(node.match_keys().len(), &mut keys),
+                        },
+                    ],
+                },
+            );
         }
     }
 
@@ -183,29 +206,6 @@ mod program {
             // `ipc_call` returns the raw `-errno` on failure; recover the
             // typed `Errno` and surface it fail-closed (`AGENTS.md` §2.9).
             rustos_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(errno_from)
-        }
-    }
-
-    /// The production audit [`Sink`]: renders each match/load decision to the
-    /// inherited diagnostic stream (fd 2, `AGENTS.md` §20). The reactive
-    /// loop's audit records are host-tested in `rustos_devmgr::autoload`;
-    /// this is the freestanding rendering it binds (`AGENTS.md` §2.2).
-    struct StderrSink;
-
-    impl Sink for StderrSink {
-        fn write_event(&self, event: &Event<'_>) {
-            let mut id = [0u8; 12];
-            write_all_stderr(b"devmgr: [");
-            write_all_stderr(format_usize(event.id.0 as usize, &mut id).as_bytes());
-            write_all_stderr(b"] ");
-            write_all_stderr(event.message.as_bytes());
-            for field in event.fields {
-                write_all_stderr(b" ");
-                write_all_stderr(field.key.as_bytes());
-                write_all_stderr(b"=");
-                write_all_stderr(field.value.as_bytes());
-            }
-            write_all_stderr(b"\n");
         }
     }
 
@@ -227,7 +227,7 @@ mod program {
         match rustos_devmgr::run(
             &mut RtTreeService,
             &mut RtStoreCall,
-            &StderrSink,
+            &LogSink,
             &mut reply_buf,
             None,
         ) {

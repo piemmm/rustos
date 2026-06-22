@@ -741,10 +741,12 @@ fn finish_unlock<B: Block + 'static>(
     // keeps in its trusted base (Design D D2b-2c): the driver-signing trust
     // anchor, the delegatable `autoload_caps` gate superset (`CAP_DRV_LOAD`
     // to pass the §8 gate plus the resource caps an autoloaded driver's class
-    // may request — including `CAP_INPUT_INJECT` for an input driver,
-    // intersected per driver with its signed manifest request, `AGENTS.md`
-    // §5.2 / §18.3), the aarch64 process-spawn seam, and the discovered tree a
-    // matched `node_id` is resolved against to mint exactly that node's
+    // may request — `CAP_INPUT_INJECT`/`CAP_IRQ_BIND` for an input driver and
+    // `CAP_IPC_BIND_PRIVILEGED` for a bus service driver such as the VideoCore
+    // `vcmailbox`, intersected per driver with its signed manifest request,
+    // `AGENTS.md` §5.2 / §18.3), the aarch64 process-spawn seam, and the
+    // discovered tree a matched `node_id` is resolved against to mint exactly
+    // that node's
     // grants (§4 — no ambient authority). The user-space `devmgr` owns the
     // matching *policy*; this kthread serves the *mechanism* over the
     // capability-gated store endpoint below.

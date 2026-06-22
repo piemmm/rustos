@@ -1132,6 +1132,11 @@ the service binds.
   `DriverManifest` requesting `CAP_MMIO_MAP` + `CAP_MEM_DMA` +
   `CAP_IPC_BIND_PRIVILEGED`, signed with the kernel's driver-signing seed — so
   the booted kernel admits it through the §8 / §18.6 signed load gate. The
+  autoload gate's delegatable superset (`unlock_service::autoload_caps`) carries
+  `CAP_IPC_BIND_PRIVILEGED` precisely so a signed bus *service* driver like this
+  one can be granted the privilege to bind its restricted-sender endpoint; the
+  per-driver manifest∩superset intersection still binds, so a driver that does
+  not request it receives nothing extra (`AGENTS.md` §5.2 / §18.3). The
   ELF→`rxe` converter and signer are the shared definitions the kernel
   `build.rs` and the autoload fixtures also use (`AGENTS.md` §2.2);
   `tools/mkimage` only plants the bytes (`build_rpi_image`'s `drivers`

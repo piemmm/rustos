@@ -3768,8 +3768,10 @@ table, so a new board is match **data**, not new code. Sub-increments
           signs it via the shared `rustos_itest_harness::driver_image` composer
           with `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
           `BIND_KEYS` + caps (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/`CAP_INPUT_INJECT`).
-          The autoload caller now presents `unlock_service::autoload_caps`
-          (`service_caps` + `CAP_INPUT_INJECT`), so an autoloaded input driver's
+          The autoload caller presents the delegatable
+          `unlock_service::autoload_caps` superset (`service_caps` +
+          `CAP_INPUT_INJECT` + `CAP_IRQ_BIND` + `CAP_IPC_BIND_PRIVILEGED`), so an
+          autoloaded input driver's
           manifest∩caller intersection can grant the injection authority while
           the unlock kthread's own context stays minimal (§5.2 / §5.4). The
           seed-hoist and one-shot `InputDelivered` witness prerequisites are

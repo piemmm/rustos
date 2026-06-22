@@ -25,6 +25,7 @@ pub mod hwtree;
 pub mod input;
 pub mod ipc;
 pub(crate) mod le;
+pub mod log;
 pub mod mailbox_ipc;
 pub mod manifest;
 pub mod memory;
@@ -67,6 +68,11 @@ pub use input::{
     POINTER_INPUT_MAGIC,
 };
 pub use ipc::{IpcMessageHeader, PortName, IPC_MESSAGE_HEADER_MAGIC, PORT_NAME_MAX_LEN};
+pub use log::{
+    decode_record as decode_log_record, encode_record as encode_log_record, LogFieldIter,
+    LogRecordRef, LOG_FIELDS_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,
+    LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX,
+};
 pub use manifest::{
     decode_capability_ids, ManifestHeader, MANIFEST_MAGIC, MANIFEST_MAX_CAPABILITIES,
 };

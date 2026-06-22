@@ -1280,6 +1280,7 @@ dependencies = [
  "rustos-abi",
  "rustos-abi-trap",
  "rustos-caps",
+ "rustos-log",
  "rustos-sync",
 ]
 

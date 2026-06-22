@@ -50,11 +50,11 @@
 #[cfg(freestanding)]
 mod program {
     use rustos_abi::Errno;
-    use rustos_log::{Event, Sink};
     use rustos_login::{
         supervise, AuthenticatedUser, Authenticator, DbLoad, Login, LoginConfig, LoginError,
         Prompt, SessionKind, SessionLauncher, SessionOutcome,
     };
+    use rustos_rt::LogSink;
     use rustos_users::{UsersDb, MAX_DB_LEN};
 
     /// Authentication attempts per login round before the round fails
@@ -83,18 +83,6 @@ mod program {
     fn write_all_stdout(mut bytes: &[u8]) {
         while !bytes.is_empty() {
             let written = rustos_rt::stdout(bytes);
-            if written == 0 {
-                break;
-            }
-            bytes = &bytes[written.min(bytes.len())..];
-        }
-    }
-
-    /// Write all of `bytes` to standard error, looping over short writes
-    /// (see [`write_all_stdout`]).
-    fn write_all_stderr(mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            let written = rustos_rt::stderr(bytes);
             if written == 0 {
                 break;
             }
@@ -215,21 +203,6 @@ mod program {
         }
     }
 
-    /// Audit sink for the login process: each security-relevant decision is
-    /// written as one terse line on standard error (fd 2 — diagnostics,
-    /// `AGENTS.md` §20). The hash-chained system audit log (§19.4) is
-    /// kernel-side; a userland audit transport is future work, and silently
-    /// discarding the records until then would hide security decisions.
-    struct StderrSink;
-
-    impl Sink for StderrSink {
-        fn write_event(&self, event: &Event<'_>) {
-            write_all_stderr(b"login: ");
-            write_all_stderr(event.message.as_bytes());
-            write_all_stderr(b"\n");
-        }
-    }
-
     /// Read the user database through the capability-gated `users_db_read`
     /// syscall and classify it for [`supervise`] as a [`DbLoad`].
     ///
@@ -282,7 +255,7 @@ mod program {
     /// completion against `authenticator`. Returns `true` to open another
     /// round, `false` when the console is dead and the process should exit
     /// (PID 1 relaunches it).
-    fn login_round(authenticator: &dyn Authenticator, sink: &StderrSink) -> bool {
+    fn login_round(authenticator: &dyn Authenticator, sink: &LogSink) -> bool {
         let prompt = RtPrompt;
         let launcher = RtLauncher;
         let login = Login::new(LoginConfig {
@@ -319,7 +292,11 @@ mod program {
     /// (`plans/PI.md` P11). It returns only when a round reports the console
     /// dead; PID 1 relaunches `login`.
     fn main() -> i32 {
-        let sink = StderrSink;
+        // Route each security-relevant decision through the kernel
+        // diagnostic log (the serial UART on a debug build, `AGENTS.md`
+        // §19.4 / §20) rather than fd 2. The hash-chained system audit log
+        // (§19.4) stays kernel-side; this is the diagnostic channel.
+        let sink = LogSink;
         // While the database read is `Pending` (the encrypted root is still
         // being unlocked) `supervise` calls this to **block** until the
         // database becomes available, so the in-kernel unlock kthread runs

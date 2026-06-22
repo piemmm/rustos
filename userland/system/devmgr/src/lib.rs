@@ -54,7 +54,7 @@ pub mod observe;
 pub mod service;
 pub mod store;
 
-pub use autoload::{match_and_load, LoadedBundles};
+pub use autoload::{match_and_load, AutoloadState, LoadedBundles, NodeReport, ReportedNodes};
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
 pub use service::{run, HwTreeService};
 pub use store::{fetch_catalogue, load_driver, CatalogueDriver, DriverStoreCall};

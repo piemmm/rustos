@@ -159,6 +159,15 @@ The drvhost gate's own `7000`-range records interleave with these on a
 shared sink, giving audit consumers the full causal chain from match
 to load decision.
 
+The reactive `rustos_devmgr::run` loop re-matches the whole tree snapshot on
+every generation advance (§18.4), but a node's decision is logged only the
+**first** time it is reached and again only when it *changes* (e.g. `13002`
+`NODE_UNBOUND` → `13001` `NODE_BOUND` once the late-bound catalogue arrives):
+the loop carries a per-node `ReportedNodes`/`NodeReport` memory, so
+re-evaluating a settled tree emits no record and the diagnostic log is never
+re-flooded with identical lines (`AGENTS.md` §20 / §2.16). An unbound node is
+thus *logged*, not re-logged.
+
 ## Match-key emission
 
 On aarch64 the match keys arrive through the **generic** hardware-tree
