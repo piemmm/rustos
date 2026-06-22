@@ -59,14 +59,6 @@ mod program {
     use rustos_log::{Event, Sink};
     use rustos_util::fmt::{format_hex_u64, format_usize};
 
-    /// Buffer the discovered tree is read into. Sized as a generous §24.2
-    /// headroom default — a `HwNode` is `HwNode::WIRE_LEN` (572) bytes, so
-    /// 64 KiB holds ~114 nodes, far more than any discovered floor tree —
-    /// not a hard ceiling on the inventory. An over-large tree fails closed
-    /// (`Errno::BufferTooSmall`, `AGENTS.md` §2.9 / §24.1) rather than
-    /// truncating the inventory.
-    const READ_BUF_LEN: usize = 64 * 1024;
-
     /// Buffer the catalogue and each `Load` reply are received into, sized to
     /// the endpoint's `DRIVER_STORE_MAX_REPLY` so a full catalogue is never
     /// truncated (`AGENTS.md` §2.9 / §24.1). Disjoint from the tree buffer so
@@ -224,18 +216,18 @@ mod program {
     /// loop returns only on a fail-closed tree-seam error; PID 1 `init`
     /// supervises and relaunches the service.
     fn main() -> i32 {
-        // Two persistent stack buffers: the tree snapshot and the
-        // catalogue/load reply. The §16.5 stack sizing
-        // (`spawn_layout::USER_STACK_PAGES`, ~1.1 MiB) covers both 64 KiB
-        // buffers comfortably; they are disjoint so a load reply never
-        // clobbers the tree snapshot mid-decode (`AGENTS.md` §2.16).
-        let mut tree_buf = [0u8; READ_BUF_LEN];
+        // The catalogue/load reply buffer. The tree snapshot is read into a
+        // separate, service-owned buffer that grows to fit the discovered
+        // tree (`rustos_devmgr::run`, `AGENTS.md` §24.1) — a real board's
+        // firmware tree dwarfs QEMU `virt`'s, so a fixed stack buffer here
+        // would be a scaling cliff. The §16.5 stack sizing
+        // (`spawn_layout::USER_STACK_PAGES`, ~1.1 MiB) covers this 64 KiB
+        // reply buffer comfortably (`AGENTS.md` §2.16).
         let mut reply_buf = [0u8; REPLY_BUF_LEN];
         match rustos_devmgr::run(
             &mut RtTreeService,
             &mut RtStoreCall,
             &StderrSink,
-            &mut tree_buf,
             &mut reply_buf,
             None,
         ) {

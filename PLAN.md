@@ -1686,11 +1686,27 @@ order (one fully-gated increment each):
            Host-tested: mkimage plants and reads the bundle back from the
            read-only `/System` store; the image builds end to end in the CI image
            gate.
-         - **Remaining (metal-only, §0.4):** `devmgr` autoloading the installed
-           bundle against the real discovered BCM2711 mailbox node (granting the
-           doorbell + DMA resources); and the **vl805 user-space migration** (run
-           the firmware-reload driver over `host.mailbox()`) with retirement of
-           the in-kernel scaffold (`bring_up_keyboard`/`KernelMailboxChannel`,
+         - **Metal autoload — install + scan confirmed; load fixed, re-verify
+           pending.** On a real Pi 4 the kernel store scan finds and accepts the
+           installed bundle as an autoload candidate (`id=4042 drivers=1`,
+           `id=7030 .../bus_mailbox/vcmailbox/Run`), but the user-space `devmgr`
+           never issued the matching `StoreRequest::Load` and was relaunched in a
+           loop. Root cause (a §24.1 fixed-capacity defect): `devmgr` read the
+           discovered hardware tree into a hand-picked 64 KiB buffer
+           (~114 `HwNode`s) — ample for QEMU `virt` but far too small for a real
+           Pi's full firmware tree — so `hw_tree_read` returned `BufferTooSmall`,
+           the reactive loop treated it as fatal, and `init` relaunched the
+           service. **Fixed:** `devmgr` now owns a *growable* tree buffer
+           (`service::read_tree_growing`) that doubles and retries on
+           `BufferTooSmall` (grow-before-fail, §24.1; the tree is a discovered
+           capacity, not a ceiling), so the whole tree is read and the mailbox
+           node is matched and loaded. Host-proven (new `service` growth tests +
+           a `run`-over-an-oversized-tree end-to-end test); metal re-verify
+           expects `id=7001 driver loaded .../bus_mailbox/vcmailbox/Run`.
+         - **Remaining (metal-only, §0.4):** confirm the above autoload on
+           hardware; then the **vl805 user-space migration** (run the
+           firmware-reload driver over `host.mailbox()`) with retirement of the
+           in-kernel scaffold (`bring_up_keyboard`/`KernelMailboxChannel`,
            §2.14/§2.17) — the prompt's "D5". The scaffold stays the live keyboard
            path until that flip.
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;

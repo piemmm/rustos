@@ -58,6 +58,57 @@ pub trait HwTreeService {
     fn on_node(&mut self, node: &HwNode);
 }
 
+/// Initial size of the growable hardware-tree snapshot buffer.
+///
+/// This is a *starting capacity*, never a ceiling (`AGENTS.md` §24.1 /
+/// §24.4): [`read_tree_growing`] doubles the buffer and retries whenever the
+/// kernel reports the discovered tree does not fit, so a machine whose
+/// device tree is larger than this — a real board's full firmware tree has
+/// far more nodes than QEMU `virt`'s handful — is read in full rather than
+/// failing. It is sized as a generous one-read fit for a typical discovered
+/// tree (a `HwNode` is `HwNode::WIRE_LEN` bytes), so the common case takes a
+/// single read and only an unusually large tree pays for a grow.
+const INITIAL_TREE_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+/// Read the current hardware-tree snapshot into `buf`, **growing** `buf`
+/// until the whole snapshot fits.
+///
+/// `hw_tree_read` returns the entire snapshot or [`Errno::BufferTooSmall`]
+/// — it never truncates (`AGENTS.md` §2.9) and does not report the size it
+/// needs — so a buffer too small for the discovered tree is doubled and the
+/// read retried until it fits. The hardware tree is a *discovered capacity*,
+/// not a fixed ceiling: the device manager grows before it fails
+/// (`AGENTS.md` §24.1), so a board with a larger tree than
+/// [`INITIAL_TREE_SNAPSHOT_BYTES`] is read in full rather than aborting the
+/// service. Genuine exhaustion still fails closed — the underlying
+/// allocation failure surfaces as the runtime's OOM, and an arithmetic
+/// overflow of the doubling is [`Errno::OutOfRange`] (`AGENTS.md` §24.1).
+///
+/// # Errors
+///
+/// Any [`Errno`] other than [`Errno::BufferTooSmall`] from
+/// [`HwTreeService::read_tree`] is propagated fail-closed; only
+/// `BufferTooSmall` triggers a grow-and-retry.
+fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Result<usize, Errno> {
+    loop {
+        if buf.is_empty() {
+            buf.resize(INITIAL_TREE_SNAPSHOT_BYTES, 0);
+        }
+        match tree.read_tree(buf.as_mut_slice()) {
+            Ok(len) => return Ok(len),
+            Err(Errno::BufferTooSmall) => {
+                // Double and retry. `buf` is non-empty here (resized above),
+                // so the new length is strictly larger; an overflow of the
+                // doubling fails closed rather than wrapping (`AGENTS.md`
+                // §24.1 / §5.4).
+                let grown = buf.len().checked_mul(2).ok_or(Errno::OutOfRange)?;
+                buf.resize(grown, 0);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// (Re)fetch the catalogue while it has not yet been obtained, then read the
 /// current tree through `tree` (reporting and collecting its nodes) and
 /// match-and-load each node through `store`, returning the generation the
@@ -82,7 +133,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     store: &mut C,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
     loaded: &mut LoadedBundles,
-    tree_buf: &mut [u8],
+    tree_buf: &mut Vec<u8>,
     reply_buf: &mut [u8],
     sink: &dyn Sink,
 ) -> Result<u64, Errno> {
@@ -106,7 +157,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
             }
         }
     }
-    let len = tree.read_tree(tree_buf)?;
+    let len = read_tree_growing(tree, tree_buf)?;
     // Decode the snapshot once: report each node and collect it (`HwNode`
     // is `Copy`), so the immutable borrow of `tree_buf` ends before the
     // match-and-load pass writes into the disjoint `reply_buf`.
@@ -133,10 +184,11 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
 /// * `tree` — the hardware-tree read/wait seam.
 /// * `store` — the driver-store catalogue/load seam.
 /// * `sink` — the audit sink every match/load decision is logged through.
-/// * `tree_buf` — the buffer the tree snapshot is read into.
 /// * `reply_buf` — the buffer the catalogue and each load reply are received
-///   into (disjoint from `tree_buf`, so a load can run while a snapshot is
-///   decoded).
+///   into. The tree snapshot is read into a separate, service-owned
+///   buffer that grows to fit the discovered tree (`read_tree_growing`,
+///   `AGENTS.md` §24.1), so the caller never picks a tree-size ceiling and a
+///   load (writing `reply_buf`) never clobbers the snapshot mid-decode.
 /// * `budget` — bounds the number of *reactions* (re-reads after a change):
 ///   [`None`] runs for the life of the service (the production device
 ///   manager waits forever), while [`Some(n)`](Some) returns [`Ok`] after
@@ -160,19 +212,23 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     sink: &dyn Sink,
-    tree_buf: &mut [u8],
     reply_buf: &mut [u8],
     budget: Option<u32>,
 ) -> Result<(), Errno> {
     let mut catalogue: Option<Vec<CatalogueDriver>> = None;
     let mut loaded = LoadedBundles::new();
+    // The snapshot buffer the service owns for its lifetime: it starts
+    // empty and `read_tree_growing` sizes it to the discovered tree on the
+    // first read, growing it later only if the tree ever grows past it
+    // (`AGENTS.md` §24.1 — no caller-picked ceiling).
+    let mut tree_buf: Vec<u8> = Vec::new();
 
     let mut last_generation = react_once(
         tree,
         store,
         &mut catalogue,
         &mut loaded,
-        tree_buf,
+        &mut tree_buf,
         reply_buf,
         sink,
     )?;
@@ -187,7 +243,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             store,
             &mut catalogue,
             &mut loaded,
-            tree_buf,
+            &mut tree_buf,
             reply_buf,
             sink,
         )?;
@@ -352,18 +408,9 @@ mod tests {
             loads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 4096];
         let mut reply_buf = [0u8; 4096];
 
-        run(
-            &mut tree,
-            &mut store,
-            &sink,
-            &mut tree_buf,
-            &mut reply_buf,
-            Some(0),
-        )
-        .expect("the initial cycle runs");
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
 
         // Node 2 matched bundle 7 and was loaded for that node id.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
@@ -389,18 +436,9 @@ mod tests {
             loads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 4096];
         let mut reply_buf = [0u8; 4096];
 
-        run(
-            &mut tree,
-            &mut store,
-            &sink,
-            &mut tree_buf,
-            &mut reply_buf,
-            Some(0),
-        )
-        .expect("the initial cycle runs");
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
 
         assert!(store.loads.borrow().is_empty(), "no node matched");
         assert!(sink.ids().contains(&events::NODE_UNBOUND.0));
@@ -431,18 +469,9 @@ mod tests {
             loads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 8192];
         let mut reply_buf = [0u8; 4096];
 
-        run(
-            &mut tree,
-            &mut store,
-            &sink,
-            &mut tree_buf,
-            &mut reply_buf,
-            Some(0),
-        )
-        .expect("the initial cycle runs");
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0)).expect("the initial cycle runs");
 
         // The shared bundle 4 is loaded once (for the first matched node),
         // but both nodes are reported bound.
@@ -485,18 +514,9 @@ mod tests {
             loads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 8192];
         let mut reply_buf = [0u8; 4096];
 
-        run(
-            &mut tree,
-            &mut store,
-            &sink,
-            &mut tree_buf,
-            &mut reply_buf,
-            Some(1),
-        )
-        .expect("one reaction");
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
 
         // The keyboard (bundle 7) is loaded only once across both cycles;
         // the appeared network node loads bundle 8 on the reaction.
@@ -516,18 +536,10 @@ mod tests {
         let mut tree = ScriptedTree::new(vec![snapshot]);
         let mut store = FailingCatalogue;
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 4096];
         let mut reply_buf = [0u8; 4096];
 
-        run(
-            &mut tree,
-            &mut store,
-            &sink,
-            &mut tree_buf,
-            &mut reply_buf,
-            Some(0),
-        )
-        .expect("a failed catalogue fetch does not abort the loop");
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0))
+            .expect("a failed catalogue fetch does not abort the loop");
 
         // The store-unavailable event is logged and the node is observed and
         // (with an empty catalogue) left unbound — never an error.
@@ -544,17 +556,9 @@ mod tests {
             loads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 4096];
         let mut reply_buf = [0u8; 4096];
         assert_eq!(
-            run(
-                &mut tree,
-                &mut store,
-                &sink,
-                &mut tree_buf,
-                &mut reply_buf,
-                None
-            ),
+            run(&mut tree, &mut store, &sink, &mut reply_buf, None),
             Err(Errno::NotFound)
         );
         assert!(tree.waited_on.is_empty());
@@ -570,18 +574,130 @@ mod tests {
             loads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
-        let mut tree_buf = [0u8; 4096];
         let mut reply_buf = [0u8; 4096];
         assert_eq!(
-            run(
-                &mut tree,
-                &mut store,
-                &sink,
-                &mut tree_buf,
-                &mut reply_buf,
-                None
-            ),
+            run(&mut tree, &mut store, &sink, &mut reply_buf, None),
             Err(Errno::NotImplemented)
+        );
+    }
+
+    /// A hardware-tree seam serving one fixed snapshot: it fails closed with
+    /// [`Errno::BufferTooSmall`] (without consuming anything) until the
+    /// caller's buffer is large enough, then copies the whole snapshot out —
+    /// the double for exercising [`read_tree_growing`]'s grow-and-retry
+    /// (`AGENTS.md` §24.1). `reads` counts every `read_tree` call so a test
+    /// can assert a grow actually happened.
+    struct FixedSnapshotTree {
+        snapshot: Vec<u8>,
+        reads: usize,
+    }
+
+    impl HwTreeService for FixedSnapshotTree {
+        fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.reads += 1;
+            if buf.len() < self.snapshot.len() {
+                return Err(Errno::BufferTooSmall);
+            }
+            buf[..self.snapshot.len()].copy_from_slice(&self.snapshot);
+            Ok(self.snapshot.len())
+        }
+
+        fn wait_for_change(&mut self, _last_generation: u64) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn on_header(&mut self, _header: &HwTreeHeader) {}
+
+        fn on_node(&mut self, _node: &HwNode) {}
+    }
+
+    /// A hardware-tree seam whose `read_tree` always fails with a non-
+    /// `BufferTooSmall` error — to prove [`read_tree_growing`] propagates it
+    /// fail-closed rather than looping (`AGENTS.md` §2.9).
+    struct ErroringTree(Errno);
+
+    impl HwTreeService for ErroringTree {
+        fn read_tree(&mut self, _buf: &mut [u8]) -> Result<usize, Errno> {
+            Err(self.0)
+        }
+
+        fn wait_for_change(&mut self, _last_generation: u64) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn on_header(&mut self, _header: &HwTreeHeader) {}
+
+        fn on_node(&mut self, _node: &HwNode) {}
+    }
+
+    #[test]
+    fn read_tree_growing_grows_a_too_small_buffer_until_the_snapshot_fits() {
+        // A snapshot far larger than the buffer we start with, so the read
+        // must grow several times before it fits (`AGENTS.md` §24.1 — grow
+        // before you fail; the tree is a discovered capacity, not a ceiling).
+        let mut nodes = vec![HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)];
+        for id in 2..50u32 {
+            nodes.push(input_node(id, HwMatchKey::virtio(id)));
+        }
+        let snapshot = encode(1, &nodes);
+        let mut tree = FixedSnapshotTree {
+            snapshot: snapshot.clone(),
+            reads: 0,
+        };
+        let mut buf = vec![0u8; 64];
+        let len = read_tree_growing(&mut tree, &mut buf).expect("the read grows to fit");
+        assert_eq!(len, snapshot.len());
+        assert!(buf.len() >= snapshot.len());
+        assert!(tree.reads > 1, "the read had to grow at least once");
+    }
+
+    #[test]
+    fn read_tree_growing_propagates_a_non_buffer_error_fail_closed() {
+        let mut tree = ErroringTree(Errno::NotImplemented);
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_tree_growing(&mut tree, &mut buf),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    #[test]
+    fn run_reads_a_tree_larger_than_the_initial_buffer_and_loads_the_match() {
+        // The metal scaling case: a real board's full firmware tree is far
+        // larger than QEMU `virt`'s handful of nodes, so the service's own
+        // snapshot buffer (which starts empty, sizes to
+        // `INITIAL_TREE_SNAPSHOT_BYTES`, then grows) must grow before the
+        // discovered tree fits — and still load the matched node, rather than
+        // failing closed and being relaunched (`AGENTS.md` §24.1).
+        let target = HwMatchKey::virtio(0x9999);
+        let mut nodes = vec![HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)];
+        for id in 2..220u32 {
+            nodes.push(input_node(id, HwMatchKey::virtio(0x1_0000 + id)));
+        }
+        nodes.push(input_node(900, target));
+        let snapshot = encode(1, &nodes);
+        assert!(
+            snapshot.len() > INITIAL_TREE_SNAPSHOT_BYTES,
+            "the test tree must exceed the initial buffer to exercise the grow"
+        );
+        let mut tree = FixedSnapshotTree { snapshot, reads: 0 };
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, target)])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        // Heap-allocated (not a 64 KiB stack array) so the test matches the
+        // production reply-buffer size without a large-stack-array lint.
+        let mut reply_buf = vec![0u8; 64 * 1024];
+
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(0))
+            .expect("the cycle runs after the buffer grows to fit the tree");
+
+        // The one matching node (900) loaded bundle 7; the grow happened.
+        assert_eq!(store.loads.borrow().as_slice(), &[(7, 900)]);
+        assert!(
+            tree.reads > 1,
+            "the snapshot should not have fit the initial buffer"
         );
     }
 }
