@@ -77,6 +77,30 @@ mod state {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct CallTicket(pub u64);
 
+/// The outcome of a server-side [`CallEndpoint::recv_call`].
+///
+/// `recv_call` is *size-bounded*: it dequeues the front request only when it
+/// fits the server's buffer, so a too-small buffer never silently drops a
+/// queued request (`AGENTS.md` §2.9). The in-kernel server passes
+/// [`usize::MAX`] and so only ever observes [`RecvCall::Empty`] or
+/// [`RecvCall::Received`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecvCall {
+    /// No request is pending; the server should park and retry (this never
+    /// blocks).
+    Empty,
+    /// The front request is larger than the server's buffer; it is left
+    /// queued and `request_len` is reported so the server can resize and
+    /// retry (or fail the call closed). The kernel surfaces this as
+    /// [`Errno::BufferTooSmall`].
+    TooLarge {
+        /// Byte length of the front request the buffer could not hold.
+        request_len: usize,
+    },
+    /// A request was dequeued for service.
+    Received(ReceivedCall),
+}
+
 /// A request handed to the server by [`CallEndpoint::recv_call`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceivedCall {
@@ -168,6 +192,10 @@ pub struct CallEndpoint {
     max_request: u32,
     max_reply: u32,
     capacity: usize,
+    /// Task that created and serves this endpoint. The kernel tears the
+    /// endpoint down when this task exits so in-flight callers are released
+    /// fail-closed rather than blocked forever (`AGENTS.md` §2.9 / §5.4).
+    owner: u64,
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
     inner: rustos_sync::SpinLock<Inner>,
@@ -245,6 +273,7 @@ impl CallEndpoint {
             max_request,
             max_reply,
             capacity,
+            owner: creator.task().0,
             state: AtomicU32::new(state::OPEN),
             inner: rustos_sync::SpinLock::new(Inner {
                 next_ticket: 0,
@@ -283,6 +312,15 @@ impl CallEndpoint {
     #[must_use]
     pub fn required_recv_caps(&self) -> &CapabilitySet {
         &self.required_recv_caps
+    }
+
+    /// Task id that created and serves this endpoint.
+    ///
+    /// The call-endpoint registry indexes by this so a task's endpoints can
+    /// be torn down when it exits (`AGENTS.md` §2.9).
+    #[must_use]
+    pub fn owner(&self) -> u64 {
+        self.owner
     }
 
     /// `true` once [`Self::destroy`] has run.
@@ -442,20 +480,37 @@ impl CallEndpoint {
         Ok(CallTicket(ticket))
     }
 
-    /// Dequeue the oldest pending request for the server to service.
+    /// Dequeue the oldest pending request for the server to service, if it
+    /// fits a buffer of `max_copy` bytes.
     ///
-    /// Returns [`None`] when no request is pending (the server should park
-    /// and retry — this never blocks). The returned call is moved into the
-    /// in-service table keyed by its ticket, so a later [`reply`](Self::reply)
-    /// can match it. Performs no capability check: the server's authority is
-    /// fixed at [`create`](Self::create) time (`AGENTS.md` §5.2), exactly like
-    /// [`Port::recv`](crate::port::Port::recv).
+    /// Returns [`RecvCall::Empty`] when no request is pending (the server
+    /// should park and retry — this never blocks), [`RecvCall::TooLarge`]
+    /// when the front request exceeds `max_copy` (left queued so no request
+    /// is lost, `AGENTS.md` §2.9), or [`RecvCall::Received`] with the call
+    /// moved into the in-service table keyed by its ticket so a later
+    /// [`reply`](Self::reply) can match it. Performs no capability check: the
+    /// server's authority is fixed at [`create`](Self::create) time
+    /// (`AGENTS.md` §5.2), exactly like [`Port::recv`](crate::port::Port::recv);
+    /// the syscall layer gates the caller against
+    /// [`required_recv_caps`](Self::required_recv_caps).
     #[must_use]
-    pub fn recv_call(&self) -> Option<ReceivedCall> {
+    pub fn recv_call(&self, max_copy: usize) -> RecvCall {
         let mut g = self.inner.lock();
-        let call = g.pending.pop_front()?;
+        let Some(front) = g.pending.front() else {
+            return RecvCall::Empty;
+        };
+        // Refuse to dequeue a request the server's buffer cannot hold: leave
+        // it queued and report its size so the server can resize (the kernel
+        // maps this to `BufferTooSmall`). Without this the bounded copy would
+        // have to drop the request after popping it (`AGENTS.md` §2.9).
+        if front.request.len() > max_copy {
+            return RecvCall::TooLarge {
+                request_len: front.request.len(),
+            };
+        }
+        let call = g.pending.pop_front().expect("front was present");
         g.in_service.insert(call.ticket, call.sender);
-        Some(ReceivedCall {
+        RecvCall::Received(ReceivedCall {
             ticket: CallTicket(call.ticket),
             sender: call.sender,
             request: call.request,
@@ -613,6 +668,17 @@ mod tests {
             sink,
         )
         .expect("unrestricted endpoint")
+    }
+
+    /// Unbounded receive for the tests: the test buffers are never the
+    /// constraint, so map the size-bounded [`CallEndpoint::recv_call`] onto
+    /// the simple `Option` the round-trip assertions read.
+    fn recv_one(ep: &CallEndpoint) -> Option<ReceivedCall> {
+        match ep.recv_call(usize::MAX) {
+            RecvCall::Received(call) => Some(call),
+            RecvCall::Empty => None,
+            RecvCall::TooLarge { .. } => unreachable!("usize::MAX bounds nothing"),
+        }
     }
 
     #[test]
@@ -861,7 +927,7 @@ mod tests {
         // Before the server receives it, the caller sees Pending.
         assert_eq!(ep.take_reply(7, ticket), ReplyOutcome::Pending);
 
-        let received = ep.recv_call().expect("a pending call");
+        let received = recv_one(&ep).expect("a pending call");
         assert_eq!(received.ticket, ticket);
         assert_eq!(received.sender, 7);
         assert_eq!(received.request, b"ping");
@@ -886,14 +952,53 @@ mod tests {
         let sink = RecordingSink::new();
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
-        assert!(ep.recv_call().is_none());
+        assert!(recv_one(&ep).is_none());
 
         let t1 = ep.post(&caller, b"1", &sink).expect("1");
         let t2 = ep.post(&caller, b"2", &sink).expect("2");
         assert_ne!(t1, t2);
-        assert_eq!(ep.recv_call().expect("first").ticket, t1);
-        assert_eq!(ep.recv_call().expect("second").ticket, t2);
-        assert!(ep.recv_call().is_none());
+        assert_eq!(recv_one(&ep).expect("first").ticket, t1);
+        assert_eq!(recv_one(&ep).expect("second").ticket, t2);
+        assert!(recv_one(&ep).is_none());
+    }
+
+    #[test]
+    fn recv_call_too_large_leaves_the_request_queued() {
+        let sink = RecordingSink::new();
+        let ep = open_endpoint(&sink);
+        let caller = task_with(7, &[]);
+        let ticket = ep.post(&caller, b"four", &sink).expect("posted");
+
+        // A buffer too small for the front request reports its size and does
+        // not dequeue it (`AGENTS.md` §2.9 — no lost request).
+        assert_eq!(ep.recv_call(3), RecvCall::TooLarge { request_len: 4 });
+        assert_eq!(ep.outstanding(), 1);
+
+        // A buffer that fits then receives the very same call.
+        match ep.recv_call(4) {
+            RecvCall::Received(call) => assert_eq!(call.ticket, ticket),
+            other => panic!("expected the queued call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn owner_reports_the_creating_task() {
+        let sink = RecordingSink::new();
+        let creator = task_with(0x4242, &[]);
+        let ep = CallEndpoint::create(
+            EndpointId(0xF),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 16,
+                max_reply: 16,
+                capacity: 2,
+            },
+            &sink,
+        )
+        .expect("created");
+        assert_eq!(ep.owner(), 0x4242);
     }
 
     #[test]
@@ -909,7 +1014,7 @@ mod tests {
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
         let ticket = ep.post(&caller, b"q", &sink).expect("posted");
-        ep.recv_call().expect("received");
+        recv_one(&ep).expect("received");
         ep.reply(ticket, b"r", &sink).expect("replied");
 
         // A different task may not claim it, and learns nothing.
@@ -926,7 +1031,7 @@ mod tests {
         let ticket = ep.post(&caller, b"q", &sink).expect("posted");
         // A non-poster polling the ticket while it is pending learns nothing.
         assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
-        ep.recv_call().expect("received");
+        recv_one(&ep).expect("received");
         assert_eq!(ep.take_reply(8, ticket), ReplyOutcome::Unknown);
     }
 
@@ -947,7 +1052,7 @@ mod tests {
         let ep = open_endpoint(&sink);
         let caller = task_with(7, &[]);
         let ticket = ep.post(&caller, b"q", &sink).expect("posted");
-        ep.recv_call().expect("received");
+        recv_one(&ep).expect("received");
         ep.reply(ticket, b"r", &sink).expect("first reply");
         // The ticket left the in-service table on the first reply.
         let err = ep.reply(ticket, b"r2", &sink).expect_err("second reply");
@@ -973,7 +1078,7 @@ mod tests {
         .expect("ok");
         let caller = task_with(7, &[]);
         let ticket = ep.post(&caller, b"q", &sink).expect("posted");
-        ep.recv_call().expect("received");
+        recv_one(&ep).expect("received");
         let err = ep
             .reply(ticket, b"too long", &sink)
             .expect_err("oversize reply");
@@ -998,8 +1103,8 @@ mod tests {
         let t_done = ep.post(&caller, b"d", &sink).expect("done");
         let t_in_service = ep.post(&caller, b"s", &sink).expect("in service");
         let t_pending = ep.post(&caller, b"p", &sink).expect("pending");
-        assert_eq!(ep.recv_call().expect("first").ticket, t_done);
-        assert_eq!(ep.recv_call().expect("second").ticket, t_in_service);
+        assert_eq!(recv_one(&ep).expect("first").ticket, t_done);
+        assert_eq!(recv_one(&ep).expect("second").ticket, t_in_service);
         ep.reply(t_done, b"r", &sink).expect("reply the first");
         assert_eq!(ep.outstanding(), 3);
 

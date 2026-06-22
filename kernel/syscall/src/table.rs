@@ -662,6 +662,94 @@ pub trait SyscallHandlers {
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Create and register a kernel-owned synchronous call endpoint the
+    /// calling task then serves (`AGENTS.md` §5.2 / §5.4; Design D D3 — the
+    /// server half of [`Self::ipc_call`]).
+    ///
+    /// The dispatcher has already checked `send_caps` and `recv_caps` are
+    /// non-null `UserPtr`s. The implementation copies both
+    /// [`rustos_abi::CapabilitySet`] wire images in through the validated
+    /// boundary, builds the endpoint with the caller as creator (the
+    /// bind-time `CAP_IPC_BIND_PRIVILEGED` check for a restricted sender runs
+    /// inside the endpoint constructor, `AGENTS.md` §5.2), and binds it under
+    /// `endpoint` — failing closed with [`Errno::AlreadyExists`] if the id is
+    /// live. Returns `Ok(0)` on success.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9); the real handler is
+    /// installed in `kernel/core`.
+    // Six `abi-v1` arguments plus the kernel-trusted caller context: the
+    // shape is the syscall's own (endpoint id, two `CapabilitySet` pointers,
+    // and the three payload/capacity bounds), not an accidental parameter
+    // pile, so the count is intrinsic (`AGENTS.md` §15.10 — justified allow).
+    #[allow(clippy::too_many_arguments)]
+    fn call_create(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _send_caps: u64,
+        _recv_caps: u64,
+        _max_request: usize,
+        _max_reply: usize,
+        _capacity: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Receive the next request posted to a call endpoint the calling task
+    /// owns, blocking until one arrives (`AGENTS.md` §5.4; Design D D3 — the
+    /// server-side receive half).
+    ///
+    /// The dispatcher has already checked `buf` and `ticket_out` are non-null
+    /// `UserPtr`s. The implementation resolves `endpoint`, enforces the
+    /// endpoint's required **receive** capability against the caller before
+    /// touching state (`AGENTS.md` §5.4), and either copies one request out
+    /// (returning its byte length and writing its ticket to `ticket_out`) or
+    /// blocks cooperatively until one is posted (never busy-spinning,
+    /// `AGENTS.md` §2.1). A request larger than `buf_cap` fails closed with
+    /// [`Errno::BufferTooSmall`] and is left queued (`AGENTS.md` §2.9).
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_recv(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _buf: u64,
+        _buf_cap: usize,
+        _ticket_out: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Answer one received call on an endpoint the calling task owns, waking
+    /// the blocked caller (`AGENTS.md` §5.4; Design D D3 — the server-side
+    /// reply half).
+    ///
+    /// The dispatcher has already checked `reply` is a non-null `UserPtr`.
+    /// The implementation resolves `endpoint`, enforces the endpoint's
+    /// required **receive** capability against the caller, copies the reply
+    /// in through the validated boundary, and completes `ticket` (waking the
+    /// caller blocked in [`Self::ipc_call`]). A reply larger than the
+    /// endpoint's `max_reply`, an unknown or already-answered ticket, or an
+    /// unknown endpoint each fail closed (`AGENTS.md` §2.9). Returns
+    /// `Ok(0)` on success.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn call_reply(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _reply: u64,
+        _reply_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -920,6 +1008,40 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                     args.0[3],
                     reply_cap,
                 )
+            }
+            SyscallNumber::CALL_CREATE => {
+                // args[0] is the endpoint id; args[1]/args[2] are non-null
+                // `UserPtr`s to the send/recv `CapabilitySet` wire images
+                // (dispatcher-checked); args[3..6] are the payload + capacity
+                // bounds.
+                let max_request = decode_len(args.0[3])?;
+                let max_reply = decode_len(args.0[4])?;
+                let capacity = decode_len(args.0[5])?;
+                self.handlers.call_create(
+                    caller,
+                    args.0[0],
+                    args.0[1],
+                    args.0[2],
+                    max_request,
+                    max_reply,
+                    capacity,
+                )
+            }
+            SyscallNumber::CALL_RECV => {
+                // args[0] is the endpoint id; args[1]/args[3] are non-null
+                // `UserPtr`s (request buffer, ticket-out, dispatcher-checked);
+                // args[2] is the request-buffer capacity.
+                let buf_cap = decode_len(args.0[2])?;
+                self.handlers
+                    .call_recv(caller, args.0[0], args.0[1], buf_cap, args.0[3])
+            }
+            SyscallNumber::CALL_REPLY => {
+                // args[0] is the endpoint id; args[1] the ticket; args[2] is a
+                // non-null reply `UserPtr` (dispatcher-checked); args[3] the
+                // reply length.
+                let reply_len = decode_len(args.0[3])?;
+                self.handlers
+                    .call_reply(caller, args.0[0], args.0[1], args.0[2], reply_len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1422,6 +1544,48 @@ mod tests {
             // the dispatcher decoded the five arguments without wiring a real
             // call-endpoint registry / scheduler here.
             Ok(request_len as u64)
+        }
+
+        #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
+        fn call_create(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _send_caps: u64,
+            _recv_caps: u64,
+            _max_request: usize,
+            _max_reply: usize,
+            _capacity: usize,
+        ) -> SyscallResult {
+            self.record("call_create");
+            Ok(0)
+        }
+
+        fn call_recv(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _buf: u64,
+            buf_cap: usize,
+            _ticket_out: u64,
+        ) -> SyscallResult {
+            self.record("call_recv");
+            // Echo the buffer capacity so the reachability test can assert the
+            // dispatcher decoded the four arguments without wiring a real
+            // endpoint / scheduler here.
+            Ok(buf_cap as u64)
+        }
+
+        fn call_reply(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _reply: u64,
+            _reply_len: usize,
+        ) -> SyscallResult {
+            self.record("call_reply");
+            Ok(0)
         }
     }
 

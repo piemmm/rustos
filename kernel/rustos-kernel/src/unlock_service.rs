@@ -474,6 +474,12 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             if read > 0 {
                 return Ok(read);
             }
+            #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+            {
+                use core::fmt::Write as _;
+                let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
+                let _ = write!(w, "JDBG CONSREAD yield\r\n");
+            }
             self.yielder.yield_now();
         }
     }

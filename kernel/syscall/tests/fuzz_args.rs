@@ -241,6 +241,42 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    #[allow(clippy::too_many_arguments)] // Matches the trait declaration's justified count.
+    fn call_create(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _send_caps: u64,
+        _recv_caps: u64,
+        _max_request: usize,
+        _max_reply: usize,
+        _capacity: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn call_recv(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _buf: u64,
+        _buf_cap: usize,
+        _ticket_out: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn call_reply(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _reply: u64,
+        _reply_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

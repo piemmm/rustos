@@ -564,6 +564,29 @@ pub fn send_sgi(target: CpuId) {
     unsafe { volatile_gic() }.send_sgi(target);
 }
 
+/// TEMP DIAG: read the ISPENDR bit for `intid` (1 = pending).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn dbg_ispendr(intid: u32) -> u32 {
+    let off = 0x200 + ((intid / 32) as usize) * 4;
+    (VolatileGicMmio.gicd_read(off) >> (intid % 32)) & 1
+}
+
+/// TEMP DIAG: read the ISENABLER bit for `intid` (1 = enabled).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn dbg_isenabler(intid: u32) -> u32 {
+    (VolatileGicMmio.gicd_read(isenabler_offset(intid)) >> (intid % 32)) & 1
+}
+
+/// TEMP DIAG: read the ITARGETSR byte for `intid`.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn dbg_itargetsr(intid: u32) -> u32 {
+    let word = VolatileGicMmio.gicd_read(0x800 + ((intid / 4) as usize) * 4);
+    (word >> ((intid % 4) * 8)) & 0xFF
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

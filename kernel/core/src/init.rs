@@ -578,7 +578,25 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             match self.scheduler.step(cpu) {
                 // A task ran. Keep dispatching while live tasks remain;
                 // stop once every task has exited so `kernel_main` halts.
-                Ok(StepOutcome::Ran(_)) => {
+                Ok(StepOutcome::Ran(tid)) => {
+                    {
+                        use core::sync::atomic::{AtomicU64, Ordering};
+                        static N: AtomicU64 = AtomicU64::new(0);
+                        let n = N.fetch_add(1, Ordering::Relaxed);
+                        if n % 2_000_000 == 0 {
+                            let mut buf = [0u8; 16];
+                            let tidhex = rustos_util::fmt::format_hex_u64(tid as u64, &mut buf);
+                            self.audit.write_event(&rustos_log::Event {
+                                level: Level::Info,
+                                id: rustos_log::EventId(60001),
+                                message: "JDBG step Ran",
+                                fields: &[Field {
+                                    key: "tid",
+                                    value: tidhex,
+                                }],
+                            });
+                        }
+                    }
                     if self.scheduler.live_task_count() == 0 {
                         break;
                     }

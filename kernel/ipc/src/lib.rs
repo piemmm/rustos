@@ -55,7 +55,9 @@ pub mod registry;
 pub mod shmem;
 
 pub use audit::AuditEvent;
-pub use call::{CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, ReplyOutcome};
+pub use call::{
+    CallEndpoint, CallEndpointLimits, CallTicket, ReceivedCall, RecvCall, ReplyOutcome,
+};
 pub use notify::{NotificationChannel, NotificationFlags};
 pub use port::{EndpointId, Message, Port};
 pub use registry::PortRegistry;

@@ -799,6 +799,78 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::CALL_CREATE,
+        name: "call_create",
+        arg_count: 6,
+        args: [
+            // endpoint id, send-caps ptr, recv-caps ptr, max_request,
+            // max_reply, capacity.
+            AbiType::IpcEndpoint,
+            AbiType::UserPtr,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Len,
+            AbiType::Len,
+        ],
+        // `Errno` register convention: `Ok(0)` on a bind, else `-errno`.
+        ret: AbiType::Errno,
+        // No flat dispatcher gate: binding a *restricted-sender* endpoint
+        // requires `CAP_IPC_BIND_PRIVILEGED`, but an unrestricted (open)
+        // endpoint needs none, so the gate is conditional and enforced
+        // inside the handler/`CallEndpoint::create` (`AGENTS.md` §5.2),
+        // exactly as port binding gates conditionally. Audited: binding a
+        // service endpoint is a security-relevant, low-volume event
+        // (`AGENTS.md` §19.4).
+        required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_RECV,
+        name: "call_recv",
+        arg_count: 4,
+        args: [
+            // endpoint id, request buffer ptr, request buffer cap,
+            // ticket-out ptr.
+            AbiType::IpcEndpoint,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the request-bytes-written-or-`-errno` register
+        // convention `ipc_recv` / `ipc_call` use.
+        ret: AbiType::U64,
+        // Gated by the endpoint's required *receive* capability against the
+        // caller (enforced in the handler, `AGENTS.md` §5.4), not a flat
+        // dispatcher gate. Not audited per call: a server's receive loop is
+        // high-volume, and a refused capability is audited by the dispatcher
+        // regardless (mirrors `ipc_recv`).
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CALL_REPLY,
+        name: "call_reply",
+        arg_count: 4,
+        args: [
+            // endpoint id, ticket, reply ptr, reply len.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` on a reply, else `-errno`.
+        ret: AbiType::Errno,
+        // Gated like `call_recv` by the endpoint's required receive
+        // capability (the same task that receives answers). Not audited per
+        // call for the same high-volume reason.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

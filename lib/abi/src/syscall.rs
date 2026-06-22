@@ -497,6 +497,79 @@ impl SyscallNumber {
     /// wired fails closed with [`crate::Errno::NotImplemented`].
     pub const IPC_CALL: Self = Self(31);
 
+    /// Create and register a kernel-owned synchronous **call endpoint** the
+    /// calling task then *serves*, so a user-space system service can answer
+    /// [`SyscallNumber::IPC_CALL`] requests (Design D D3 — the server half of
+    /// the synchronous IPC primitive; `.junie/next-pi-prompt.md`).
+    ///
+    /// [`SyscallNumber::IPC_CALL`] is the caller half and was, until now,
+    /// answerable only by a kernel-resident service (the disk-owning
+    /// driver-store kthread). This trio — `call_create` / `call_recv` /
+    /// `call_reply` — lets an ordinary user-space process be the *callee*, so
+    /// a driver service (the autoloaded `vcmailbox` mailbox service, future
+    /// `appmgr`/shell services) can serve the one synchronous primitive
+    /// rather than a hand-rolled convention over two async ports
+    /// (`AGENTS.md` §2.2).
+    ///
+    /// Arguments: `endpoint: u64` — the call-endpoint id to bind (a
+    /// well-known reserved id the service publishes); `send_caps: *const u8`
+    /// and `recv_caps: *const u8` — two [`crate::CapabilitySet`] wire images
+    /// ([`crate::CapabilitySet::WIRE_LEN`] bytes each) naming the capability a
+    /// *caller* must hold to post (`AGENTS.md` §5.2) and the capability a
+    /// *server* must hold to [`SyscallNumber::CALL_RECV`]/
+    /// [`SyscallNumber::CALL_REPLY`]; `max_request`, `max_reply`, `capacity:
+    /// usize` — the endpoint payload and outstanding-call bounds (a
+    /// fail-closed memory bound, `AGENTS.md` §24.4). Returns `0`, or `-errno`.
+    ///
+    /// Binding a **restricted-sender** endpoint (non-empty `send_caps`)
+    /// requires [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] (`AGENTS.md`
+    /// §5.2), enforced before any state is touched; an id already bound fails
+    /// closed with [`crate::Errno::AlreadyExists`] so the kernel never
+    /// re-points a live endpoint (`AGENTS.md` §5.4). The endpoint is owned by
+    /// the creating task and torn down (in-flight callers released
+    /// fail-closed) when that task exits (`AGENTS.md` §2.9). A build with no
+    /// call-endpoint registry wired fails closed with
+    /// [`crate::Errno::NotImplemented`].
+    pub const CALL_CREATE: Self = Self(32);
+
+    /// Receive the next request posted to a call endpoint the calling task
+    /// owns, blocking until one arrives (Design D D3 — the server-side
+    /// receive half; `.junie/next-pi-prompt.md`).
+    ///
+    /// Arguments: `endpoint: u64` — the bound call-endpoint id; `buf: *mut u8`
+    /// and `buf_cap: usize` — the buffer the request payload is copied into;
+    /// `ticket_out: *mut u64` — receives the opaque per-call ticket the
+    /// server must answer with via [`SyscallNumber::CALL_REPLY`]. Returns the
+    /// number of request bytes written (`>= 0`), or `-errno`.
+    ///
+    /// The kernel enforces the endpoint's required **receive** capability
+    /// against the caller's effective set before touching any state
+    /// (`AGENTS.md` §5.2 / §5.4 — no ambient authority), validates both
+    /// pointers against the caller's address space, and blocks the caller
+    /// cooperatively until a request is posted (the same park shape as
+    /// [`SyscallNumber::IPC_CALL`]), never busy-spinning (`AGENTS.md` §2.1). A
+    /// request larger than `buf_cap` fails closed with
+    /// [`crate::Errno::BufferTooSmall`] and is left queued (`AGENTS.md`
+    /// §2.9); an unknown endpoint, a missing capability, or the endpoint
+    /// being destroyed each fail closed.
+    pub const CALL_RECV: Self = Self(33);
+
+    /// Answer one received call on an endpoint the calling task owns,
+    /// releasing the blocked caller (Design D D3 — the server-side reply
+    /// half; `.junie/next-pi-prompt.md`).
+    ///
+    /// Arguments: `endpoint: u64` — the bound call-endpoint id; `ticket: u64`
+    /// — the ticket from [`SyscallNumber::CALL_RECV`]; `reply: *const u8` and
+    /// `reply_len: usize` — the reply payload. Returns `0`, or `-errno`.
+    ///
+    /// The kernel enforces the endpoint's required **receive** capability
+    /// against the caller before touching state (`AGENTS.md` §5.4), validates
+    /// the buffer, and wakes the caller blocked in [`SyscallNumber::IPC_CALL`]
+    /// for that ticket. A reply larger than the endpoint's `max_reply`, an
+    /// unknown or already-answered ticket, or an unknown endpoint each fail
+    /// closed (`AGENTS.md` §2.9).
+    pub const CALL_REPLY: Self = Self(34);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -603,6 +676,9 @@ mod tests {
         assert_eq!(SyscallNumber::HW_TREE_READ.as_u16(), 29);
         assert_eq!(SyscallNumber::HW_TREE_WAIT.as_u16(), 30);
         assert_eq!(SyscallNumber::IPC_CALL.as_u16(), 31);
+        assert_eq!(SyscallNumber::CALL_CREATE.as_u16(), 32);
+        assert_eq!(SyscallNumber::CALL_RECV.as_u16(), 33);
+        assert_eq!(SyscallNumber::CALL_REPLY.as_u16(), 34);
     }
 
     #[test]

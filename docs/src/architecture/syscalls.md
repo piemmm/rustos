@@ -84,6 +84,10 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  28 | `resource_grants` | `user_ptr` (buf), `len`              | `u64` (bytes) | —                 | no      |
 |  29 | `hw_tree_read` | `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_SYSINFO_HW`  | no      |
 |  30 | `hw_tree_wait` | `u64 last_generation`, `u64 timeout_ns` | `errno` | `CAP_SYSINFO_HW`        | no      |
+|  31 | `ipc_call`     | `IpcEndpoint`, `user_ptr` (req), `len`, `user_ptr` (reply), `len` | `u64` (bytes) | — | yes |
+|  32 | `call_create`  | `IpcEndpoint`, `user_ptr` (send caps), `user_ptr` (recv caps), `len`, `len`, `len` | `errno` | — | yes |
+|  33 | `call_recv`    | `IpcEndpoint`, `user_ptr` (buf), `len`, `user_ptr` (ticket out) | `u64` (bytes) | — | no |
+|  34 | `call_reply`   | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len`      | `errno` | — | no |
 
 ### Capability matrix
 
@@ -220,6 +224,37 @@ Rust wrappers are `rustos_rt::hw_tree_read` / `hw_tree_wait`; the C stubs are
 (`userland/system/devmgr`) reads the tree, then waits and re-reads on every
 change — the reactive observe loop behind the `rustos_devmgr::HwTreeService`
 seam.
+
+`ipc_call` (no. 31), `call_create` (no. 32), `call_recv` (no. 33), and
+`call_reply` (no. 34) are the two halves of the **synchronous** request/reply
+IPC primitive (`AGENTS.md` §5.2 / §5.4) — a first-class call/reply endpoint,
+not a convention layered over two async `ipc_send`/`ipc_recv` ports. A caller
+posts a request and blocks for exactly one matching reply with `ipc_call`; a
+server task owns the answering endpoint. `call_create` builds and registers a
+`kernel/ipc::CallEndpoint` under a well-known id, with the calling task as its
+owner and two `CapabilitySet` wire images naming the capability a caller must
+hold to post (`send_caps`) and the capability the server must hold to serve
+(`recv_caps`); binding a restricted-sender endpoint (non-empty `send_caps`)
+requires `CAP_IPC_BIND_PRIVILEGED`, and an id already bound fails closed with
+`AlreadyExists` (the kernel never re-points a live endpoint). `call_recv`
+blocks until a request is posted, copies it into the server's buffer (a
+request larger than the buffer is left queued and refused `BufferTooSmall`,
+never lost), and writes the per-call ticket; `call_reply` completes that
+ticket and wakes the blocked caller. Both server calls resolve the endpoint
+and gate the caller against its `recv_caps` **and** owner identity before
+touching state (`AGENTS.md` §5.4); a server that exits has its endpoints torn
+down so blocked callers abandon fail-closed rather than hang (`AGENTS.md`
+§2.9). The four are dispatcher-**ungated** (the per-call authority is the
+endpoint's own send/recv capability check, like `ipc_send` over a port);
+`ipc_call`/`call_create` are audited (a synchronous system call / a service
+bind), `call_recv`/`call_reply` are not (a server's high-volume serve loop).
+The kernel-resident driver-store file service is one `ipc_call` callee
+(`lib/abi::driver_store`); the server trio lets an ordinary user-space service
+be the callee — the autoloaded `vcmailbox` mailbox service (Design D D3) is
+its production consumer. The first-party Rust wrappers are
+`rustos_rt::{ipc_call, call_create, call_recv, call_reply}`; the C stubs are
+`ros_sys_ipc_call` / `ros_sys_call_create` / `ros_sys_call_recv` /
+`ros_sys_call_reply`.
 
 `mem_map` / `mem_unmap` are deliberately **ungated** (no row above). They
 grow and shrink the caller's *own* hardware-isolated address space with

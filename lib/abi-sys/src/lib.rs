@@ -95,6 +95,9 @@ const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
 const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
+const NUM_CALL_CREATE: u64 = SyscallNumber::CALL_CREATE.as_u16() as u64;
+const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
+const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -715,6 +718,96 @@ pub extern "C" fn sys_ipc_call(
     }
 }
 
+/// `call_create`: create and register a kernel-owned synchronous call
+/// endpoint the calling task then serves (`SyscallNumber::CALL_CREATE`,
+/// `AGENTS.md` §5.2 / §5.4; the server half of `ros_sys_ipc_call`).
+///
+/// `send_caps` and `recv_caps` each point at a 32-byte `ros_capability_set_t`
+/// wire image (the capability a caller must hold to post, and the capability
+/// this task must hold to receive/reply). Binding a restricted-sender
+/// endpoint requires `ROS_CAP_IPC_BIND_PRIVILEGED`. Returns a `ROS_E_*` code
+/// (`0` on success).
+#[must_use]
+#[export_name = "ros_sys_call_create"]
+pub extern "C" fn sys_call_create(
+    endpoint: u64,
+    send_caps: *mut c_void,
+    recv_caps: *mut c_void,
+    max_request: usize,
+    max_reply: usize,
+    capacity: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `CapabilitySet`
+    // pointers against the caller's address space before reading them
+    // (`AGENTS.md` §5.4).
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CALL_CREATE,
+            [
+                endpoint,
+                ptr_arg(send_caps),
+                ptr_arg(recv_caps),
+                max_request as u64,
+                max_reply as u64,
+                capacity as u64,
+            ],
+        ))
+    }
+}
+
+/// `call_recv`: receive the next request posted to an endpoint this task owns,
+/// blocking until one arrives (`SyscallNumber::CALL_RECV`). The request is
+/// copied into the `buf_cap`-byte buffer at `buf`, the per-call ticket is
+/// written to `*ticket_out`, and the request byte count is returned (or a
+/// `ROS_E_*` code reinterpreted into the result).
+#[must_use]
+#[export_name = "ros_sys_call_recv"]
+pub extern "C" fn sys_call_recv(
+    endpoint: u64,
+    buf: *mut c_void,
+    buf_cap: usize,
+    ticket_out: *mut c_void,
+) -> u64 {
+    // SAFETY: see `sys_ipc_call`; the kernel validates both pointers against
+    // the caller's address space before touching them (`AGENTS.md` §5.4).
+    unsafe {
+        raw_syscall(
+            NUM_CALL_RECV,
+            [
+                endpoint,
+                ptr_arg(buf),
+                buf_cap as u64,
+                ptr_arg(ticket_out),
+                0,
+                0,
+            ],
+        )
+    }
+}
+
+/// `call_reply`: answer one received call on an endpoint this task owns,
+/// releasing the blocked caller (`SyscallNumber::CALL_REPLY`). `ticket` is the
+/// value `ros_sys_call_recv` wrote; `reply_len` bytes at `reply` are the reply
+/// payload. Returns a `ROS_E_*` code (`0` on success).
+#[must_use]
+#[export_name = "ros_sys_call_reply"]
+pub extern "C" fn sys_call_reply(
+    endpoint: u64,
+    ticket: u64,
+    reply: *mut c_void,
+    reply_len: usize,
+) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the reply `(ptr, len)`
+    // pair against the caller's address space before reading it (`AGENTS.md`
+    // §5.4).
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CALL_REPLY,
+            [endpoint, ticket, ptr_arg(reply), reply_len as u64, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +855,9 @@ mod tests {
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
         (NUM_HW_TREE_WAIT, "hw_tree_wait", 2),
         (NUM_IPC_CALL, "ipc_call", 5),
+        (NUM_CALL_CREATE, "call_create", 6),
+        (NUM_CALL_RECV, "call_recv", 4),
+        (NUM_CALL_REPLY, "call_reply", 4),
     ];
 
     #[test]

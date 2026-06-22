@@ -180,6 +180,12 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
         unsafe {
             rustos_arch_aarch64::gic::route_spi(line, CPU0_TARGET);
         }
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            use core::fmt::Write as _;
+            let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
+            let _ = write!(w, "JDBG REARM line={line:#x}\r\n");
+        }
         match ArchIrqController::unmask(&self.inner, line) {
             Ok(()) => Ok(()),
             Err(IrqControlError::OutOfRange) => Err(MaskError::OutOfRange),
@@ -251,6 +257,12 @@ pub fn gic_irq_routing() -> IrqRouting {
 /// `Phase::Irq`, strictly before any SPI is routed) returns silently.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub extern "C" fn production_device_irq_dispatch(intid: u32) {
+    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+    {
+        use core::fmt::Write as _;
+        let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
+        let _ = write!(w, "JDBG DEVIRQ intid={intid:#x}\r\n");
+    }
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
         return;
     };

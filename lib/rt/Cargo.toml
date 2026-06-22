@@ -16,6 +16,11 @@ workspace = true
 # syscall numbers the wrappers marshal.
 rustos-abi = { path = "../abi", version = "=0.0.0" }
 
+# The `CapabilitySet` wire image (`to_le_bytes`/`WIRE_LEN`) the `call_create`
+# server-side wrapper marshals to the kernel — the one capability-set type the
+# workspace shares (`AGENTS.md` §2.2).
+rustos-caps = { path = "../caps", version = "=0.0.0" }
+
 # The single per-architecture syscall trap (`AGENTS.md` §2.2): the wrappers
 # marshal into register form and hand off to the shared `raw_syscall`, so the
 # trap assembly is not duplicated here.

@@ -159,6 +159,15 @@ const NUM_IRQ_BIND: u64 = SyscallNumber::IRQ_BIND.as_u16() as u64;
 /// `irq_wait` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_IRQ_WAIT: u64 = SyscallNumber::IRQ_WAIT.as_u16() as u64;
 
+/// `call_create` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CALL_CREATE: u64 = SyscallNumber::CALL_CREATE.as_u16() as u64;
+
+/// `call_recv` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
+
+/// `call_reply` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -1064,6 +1073,126 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(reply.len()))
+}
+
+/// Create and register a kernel-owned synchronous call endpoint the calling
+/// task then *serves* (`SyscallNumber::CALL_CREATE`, `AGENTS.md` §5.2 / §5.4;
+/// Design D D3 — the server half of [`ipc_call`]).
+///
+/// `endpoint` is the well-known id callers name in [`ipc_call`]; `send_caps`
+/// is the capability a caller must hold to post and `recv_caps` the
+/// capability this task must hold to [`call_recv`]/[`call_reply`];
+/// `max_request`/`max_reply`/`capacity` bound the endpoint. Binding a
+/// restricted-sender endpoint (non-empty `send_caps`) requires
+/// `CAP_IPC_BIND_PRIVILEGED`, enforced kernel-side.
+///
+/// Returns `0` on success, or the raw negative kernel result (`-errno`): a
+/// missing bind capability (`PermissionDenied`), an id already bound
+/// (`AlreadyExists`), oversize bounds (`LengthOutOfRange`), or no
+/// call-endpoint registry wired (`NotImplemented`). The wrapper hides no
+/// error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn call_create(
+    endpoint: u64,
+    send_caps: &rustos_caps::CapabilitySet,
+    recv_caps: &rustos_caps::CapabilitySet,
+    max_request: usize,
+    max_reply: usize,
+    capacity: usize,
+) -> i64 {
+    // Marshal both capability sets to their fixed `WIRE_LEN` images on the
+    // stack and hand the kernel their pointers; the kernel copies them in
+    // through the validated boundary (`AGENTS.md` §5.4).
+    let send_bytes = send_caps.to_le_bytes();
+    let recv_bytes = recv_caps.to_le_bytes();
+    let send_ptr = send_bytes.as_ptr() as usize as u64;
+    let recv_ptr = recv_bytes.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both `CapabilitySet` pointers against the caller's address space before
+    // reading them (`AGENTS.md` §5.4). `send_bytes`/`recv_bytes` live for the
+    // duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_CREATE,
+            [
+                endpoint,
+                send_ptr,
+                recv_ptr,
+                max_request as u64,
+                max_reply as u64,
+                capacity as u64,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Receive the next request posted to a call endpoint this task owns,
+/// blocking until one arrives (`SyscallNumber::CALL_RECV`, `AGENTS.md` §5.4;
+/// Design D D3 — the server-side receive half).
+///
+/// On success the request payload is copied into `buf`, the per-call ticket
+/// (to answer with [`call_reply`]) is written to `ticket_out`, and the number
+/// of request bytes is returned. The kernel parks the caller cooperatively
+/// until a request is posted, never busy-spinning (`AGENTS.md` §2.1).
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`): a request larger than
+/// `buf` (`BufferTooSmall`, left queued), a missing receive capability or a
+/// foreign endpoint (`PermissionDenied`), or an unknown/destroyed endpoint
+/// (`NotFound`). The wrapper hides no error (`AGENTS.md` §2.9).
+pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<usize, i64> {
+    let buf_ptr = buf.as_mut_ptr() as usize as u64;
+    let ticket_ptr = (ticket_out as *mut u64) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // both pointers against the caller's address space before touching them
+    // (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` and
+    // `ticket_out` a live `&mut u64` for the duration of the call.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_RECV,
+            [endpoint, buf_ptr, buf.len() as u64, ticket_ptr, 0, 0],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Defence in depth: clamp the kernel's count to the buffer so a buggy
+    // count can never drive an out-of-bounds slice (`AGENTS.md` §5.4).
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    Ok((ret as usize).min(buf.len()))
+}
+
+/// Answer one received call on an endpoint this task owns, releasing the
+/// blocked caller (`SyscallNumber::CALL_REPLY`, `AGENTS.md` §5.4; Design D D3
+/// — the server-side reply half).
+///
+/// `ticket` is the value [`call_recv`] wrote; `reply` is the reply payload.
+/// Returns `0` on success, or the raw negative kernel result (`-errno`): a
+/// reply larger than the endpoint's `max_reply` (`MessageTooLarge`), an
+/// unknown or already-answered ticket or unknown endpoint (`NotFound`), or a
+/// missing receive capability / foreign endpoint (`PermissionDenied`). The
+/// wrapper hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn call_reply(endpoint: u64, ticket: u64, reply: &[u8]) -> i64 {
+    let reply_ptr = reply.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // reply `(ptr, len)` pair against the caller's address space before
+    // reading it (`AGENTS.md` §5.4). `reply` is a live shared `&[u8]` for the
+    // duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CALL_REPLY,
+            [endpoint, ticket, reply_ptr, reply.len() as u64, 0, 0],
+        )
+    };
+    ret as i64
 }
 
 /// Define the program's entry point.

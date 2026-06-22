@@ -32,9 +32,11 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use rustos_abi::Errno;
 use rustos_kernel_ipc::{CallEndpoint, EndpointId};
+use rustos_log::Sink;
 use rustos_sync::SpinLock;
 
 /// The global call-endpoint registry (set-up by the boot path's kthread
@@ -74,6 +76,37 @@ pub fn lookup(id: EndpointId) -> Option<Arc<CallEndpoint>> {
 /// any) so the caller can [`CallEndpoint::destroy`] it. Idempotent.
 pub fn unregister(id: EndpointId) -> Option<Arc<CallEndpoint>> {
     CALL_ENDPOINTS.lock().remove(&id)
+}
+
+/// Tear down every endpoint owned by the exiting task `owner`: unbind it and
+/// [`CallEndpoint::destroy`] it (cancelling its in-flight calls), returning
+/// how many were torn down.
+///
+/// A user-space service may exit (cleanly, by fault, or killed) while callers
+/// are blocked in `ipc_call` awaiting its replies. Without this, those
+/// callers would park forever on a dead endpoint; destroying the endpoint
+/// flips every outstanding call to [`rustos_kernel_ipc::ReplyOutcome::Cancelled`]
+/// so the next poll abandons fail-closed (`AGENTS.md` §2.9 / §5.4). The
+/// caller wakes the parked callers (via [`crate::waitq::call_wake`]) when the
+/// return value is non-zero — kept out of this registry function so it stays
+/// pure registry mechanics.
+pub fn unregister_owned_by(owner: u64, audit: &dyn Sink) -> usize {
+    // Collect-then-remove under one lock acquisition: gather the owned ids,
+    // then drop the lock before destroying (each `destroy` takes the
+    // endpoint's *own* interior lock, never this registry lock).
+    let removed: Vec<Arc<CallEndpoint>> = {
+        let mut map = CALL_ENDPOINTS.lock();
+        let ids: Vec<EndpointId> = map
+            .iter()
+            .filter(|(_, ep)| ep.owner() == owner)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+    };
+    for ep in &removed {
+        ep.destroy(audit);
+    }
+    removed.len()
 }
 
 /// `true` if `id` is currently bound. Diagnostic / test observer.

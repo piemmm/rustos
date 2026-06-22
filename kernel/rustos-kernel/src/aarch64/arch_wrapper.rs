@@ -97,6 +97,12 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn halt(&self) -> ! {
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            use core::fmt::Write as _;
+            let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
+            let _ = write!(w, "JDBG HALT dispatch-loop-exited\r\n");
+        }
         halt_current_cpu()
     }
 
@@ -118,6 +124,12 @@ impl KernelArch for Aarch64BinArch {
         // EL1, so this is a benign no-op (the loop re-steps immediately).
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
+            use core::fmt::Write as _;
+            let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
+            let pend = rustos_arch_aarch64::gic::dbg_ispendr(78);
+            let en = rustos_arch_aarch64::gic::dbg_isenabler(78);
+            let tgt = rustos_arch_aarch64::gic::dbg_itargetsr(78);
+            let _ = write!(w, "JDBG WFI pend78={pend} en78={en} tgt78={tgt:#x}\r\n");
             use rustos_arch_aarch64::exceptions;
             // SAFETY: `wfi`/`enable_irq`/`mask_irq` are the documented
             // race-free idle-wait sequence; the vector table and the GICv2

@@ -45,7 +45,7 @@ use rustos_crypto::Ed25519PublicKey;
 use rustos_devmgr::DriverLoader;
 use rustos_drvhost::store::{scan_store, DriverStore};
 use rustos_kernel_core::{CooperativeYield, SYSTEM_VOLUME_STORE_PATH};
-use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId};
+use rustos_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
 
@@ -324,7 +324,10 @@ pub fn serve_pending<F>(
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    let Some(call) = endpoint.recv_call() else {
+    // The in-kernel server owns the request `Vec` directly, so it imposes no
+    // buffer bound: `usize::MAX` never yields `TooLarge`, and an empty queue
+    // means the kthread should park (`AGENTS.md` §2.1).
+    let RecvCall::Received(call) = endpoint.recv_call(usize::MAX) else {
         return false;
     };
     let reply = build_reply(service, ctx, &call.request, audit);

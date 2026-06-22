@@ -1637,6 +1637,30 @@ order (one fully-gated increment each):
                autoload vertical to the devmgr path. The parked-kthread/EMMC2
                interaction is a metal checklist (§0.9).
        - **D3 — `vcmailbox` IPC service driver + user-space `vl805`.**
+         - **Prerequisite — server-side synchronous-IPC ABI — DONE (host-proven;
+           gate pending).** A user-space service must answer *synchronous*
+           `ipc_call`s, but the `CallEndpoint` (D2b-2a) was callee-only inside
+           the kernel. Operator chose (b): add the first-class server-side
+           primitive (not a convention over async ports). Landed: `abi-v1`
+           syscalls **`call_create` (32) / `call_recv` (33) / `call_reply` (34)**
+           (`lib/abi`, regenerated C header + `abi-sys` stubs); `kernel/ipc`
+           `CallEndpoint` gains an `owner` + a size-bounded `recv_call(max_copy)
+           -> RecvCall` (no lost request on a small buffer); `kernel/core`
+           handlers (gate on `required_recv_caps` **and** owner, park on
+           `SERVE_WAITQ`, wake `CALL_WAITQ`) + task-exit teardown
+           (`callreg::unregister_owned_by`, so a dead server releases blocked
+           callers fail-closed, §2.9); `lib/rt` wrappers. Host-tested
+           (`kernel/ipc` + `kernel/core` round-trip + fail-closed paths); doc
+           `docs/src/architecture/syscalls.md` rows 31–34. The production
+           consumer is the `vcmailbox` service below (the `hw_tree_read`/`wait`
+           staging shape, §2.3).
+         - **Remaining:** the `lib/abi` mailbox wire protocol + well-known
+           endpoint id; the user-space `vcmailbox` service driver (maps the
+           mailbox MMIO/buffer from its node grants, serves the endpoint via
+           the new ABI); `lib/drvrt::RtDriverHost::mailbox()` IPC client (so the
+           existing `vl805` `MailboxChannel` driver runs in user space); the
+           discovered mailbox node + signed bundle + `devmgr` autoload.
+           Metal-only-verifiable (§0.4); scaffold stays live until D5 (§2.17).
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +
          `CAP_HW_EMIT` with these consumers.
