@@ -70,7 +70,13 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     let kernel_elf = std::fs::read(&rpi.kernel)
         .map_err(|e| format!("cannot read kernel ELF {}: {e}", rpi.kernel.display()))?;
 
-    let built = build_rpi_image(&kernel_elf, &firmware, &mut HostEntropy, rpi.profile)
+    // The low-level CLI installs no autoloaded driver bundles: cross-compiling
+    // and signing the `/System/Drivers/` store is the orchestrator's job (it
+    // needs to drive `cargo` for the freestanding driver builds), so the
+    // canonical `cargo xtask image` path supplies them. A directly-scripted
+    // CLI image therefore ships an empty store (the kernel leaves every node
+    // unbound, fail-closed — `AGENTS.md` §18.4), exactly as before.
+    let built = build_rpi_image(&kernel_elf, &firmware, &mut HostEntropy, rpi.profile, &[])
         .map_err(|e| e.to_string())?;
 
     if let Some(parent) = rpi.out.parent() {

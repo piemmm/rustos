@@ -314,6 +314,18 @@ pub struct RpiImage {
 /// ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap re-derives the key
 /// from the passphrase before mounting (`AGENTS.md` §11).
 ///
+/// `drivers` is the set of signed `.rxe` driver bundles to install into the
+/// read-only `/System/Drivers/` store, each as `(components, bytes)` where
+/// `components` is the bundle's leaf path **relative to the `/System` volume
+/// root** (for example `&[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"]`)
+/// and `bytes` is the bundle exactly as the §18.6 store scan reads it back.
+/// The caller cross-compiles and signs each bundle (this crate stays pure —
+/// it never drives `cargo`); `build_rpi_image` only plants the bytes. The
+/// kernel verifies every bundle against its embedded trust anchor at load, so
+/// a tampered read-only store fails closed (`AGENTS.md` §18.6). An empty slice
+/// produces an image with no autoloaded drivers (every node left unbound,
+/// `AGENTS.md` §18.4).
+///
 /// # Errors
 ///
 /// Any [`MkimageError`] from the kernel conversion, descriptor
@@ -324,6 +336,7 @@ pub fn build_rpi_image(
     firmware: &[FirmwareFile],
     entropy: &mut dyn EntropySource,
     profile: ImageProfile,
+    drivers: &[(&[&[u8]], &[u8])],
 ) -> Result<RpiImage, MkimageError> {
     let users_db = match profile {
         ImageProfile::Debug => Some(debug_users_db(entropy)?),
@@ -350,7 +363,7 @@ pub fn build_rpi_image(
         &kernel8,
         &descriptor,
     )?;
-    let system = rootfs::build_system_partition(u64::from(SYSTEM_PART_SECTORS), entropy)?;
+    let system = rootfs::build_system_partition(u64::from(SYSTEM_PART_SECTORS), entropy, drivers)?;
     let root = rootfs::build_root_partition(
         u64::from(ROOT_PART_SECTORS),
         &root_key,
@@ -490,6 +503,7 @@ mod tests {
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Installer,
+            &[],
         )
         .expect("image builds");
         assert_eq!(built.image.len(), IMAGE_SECTORS as usize * SECTOR_BYTES);
@@ -557,6 +571,7 @@ mod tests {
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Installer,
+            &[],
         )
         .expect("image builds");
 
@@ -594,12 +609,56 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_driver_bundle_reads_back_from_the_readonly_system_store() {
+        use rustos_drv_fs_rustfs::SYSTEM_VOLUME_KEY;
+        use rustos_partition::{parse_partition_table, PartitionBlock, PartitionType};
+
+        // A synthetic bundle blob: this test proves the *planting* (path +
+        // bytes + intermediate-directory creation), not signature validity —
+        // the signed-bundle composition is exercised where it is built
+        // (`AGENTS.md` §2.2). The store path mirrors the real mailbox
+        // service-driver install (`Drivers/<class>/<leaf>/Run`).
+        const BUNDLE: &[u8] = b"a signed .rxe driver bundle's bytes (synthetic)";
+        let store_path: &[&[u8]] = &[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"];
+
+        let built = build_rpi_image(
+            &test_kernel_elf(),
+            &test_firmware(),
+            &mut TestEntropy(9),
+            ImageProfile::Installer,
+            &[(store_path, BUNDLE)],
+        )
+        .expect("image builds");
+
+        // Mount the read-only `/System` volume and read the planted bundle
+        // back at its store path, byte-for-byte — the shape the §18.6 store
+        // scan reads.
+        let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let system = table
+            .first_of_type(PartitionType::RustFsSystem)
+            .expect("a /System partition is present");
+        let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
+        let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
+            .expect("/System mounts read-only under the public key");
+
+        let mut node = sys.root();
+        for component in store_path {
+            node = sys.lookup(node, component).expect("store path component");
+        }
+        let mut buf = vec![0u8; BUNDLE.len() + 16];
+        let read = sys.read_at(node, 0, &mut buf).expect("bundle reads back");
+        assert_eq!(&buf[..read], BUNDLE);
+    }
+
+    #[test]
     fn the_root_only_mounts_under_the_passphrase_derived_key() {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Installer,
+            &[],
         )
         .expect("image builds");
         let descriptor = read_unlock_descriptor(&built.image);
@@ -625,6 +684,7 @@ mod tests {
             &test_firmware(),
             &mut TestEntropy(9),
             ImageProfile::Debug,
+            &[],
         )
         .expect("image builds");
 
@@ -665,7 +725,8 @@ mod tests {
             b"not an elf",
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer
+            ImageProfile::Installer,
+            &[],
         )
         .is_err());
     }

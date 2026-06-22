@@ -122,6 +122,51 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
 
+/// Plant a regular file at `components` (a path of directory names ending in
+/// the file name) under `parent`, creating each intermediate directory that
+/// does not already exist.
+///
+/// The single definition of the store-planting helper (`AGENTS.md` §2.2):
+/// the image builder (`tools/mkimage`) lays the signed driver bundles into a
+/// `/System` volume's `Drivers/` store with it, and the image-fixture crates
+/// reuse the same routine so the test images and the real installation give
+/// the §18.3 / §18.6 autoload scan an identical on-disk shape. `components`
+/// is the path *under `parent`* of the bundle's leaf file (for example,
+/// relative to the `/System` volume root,
+/// `&[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"]`). The bytes are the
+/// signed `.rxe` bundle exactly as the store scanner reads it back.
+///
+/// # Errors
+///
+/// Propagates any [`DriverError`] from the underlying create/write, or
+/// [`DriverError::Unsupported`] for an empty `components` path. A short write
+/// surfaces as [`DriverError::DeviceFault`] (`AGENTS.md` §2.9 — never a
+/// truncated bundle).
+pub fn plant_nested_file<B>(
+    fs: &mut RustFs<B>,
+    parent: NodeId,
+    components: &[&[u8]],
+    bytes: &[u8],
+) -> Result<(), DriverError>
+where
+    B: Block,
+{
+    let (file_name, dirs) = components.split_last().ok_or(DriverError::Unsupported)?;
+    let mut node = parent;
+    for dir in dirs {
+        node = match fs.lookup(node, dir) {
+            Ok(existing) => existing,
+            Err(_) => fs.create(node, dir, NodeKind::Directory)?,
+        };
+    }
+    fs.create(node, file_name, NodeKind::RegularFile)?;
+    let written = fs.write_at(node, file_name, 0, bytes)?;
+    if written != bytes.len() {
+        return Err(DriverError::DeviceFault);
+    }
+    Ok(())
+}
+
 /// Largest block size the driver stages through its on-stack scratch
 /// buffers. No Tier-1 block device exceeds 4096 bytes per block.
 const MAX_BLOCK_SIZE: usize = 4096;

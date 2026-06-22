@@ -1663,13 +1663,36 @@ order (one fully-gated increment each):
            `docs/src/architecture/syscalls.md` rows 31–34. The production
            consumer is the `vcmailbox` service below (the `hw_tree_read`/`wait`
            staging shape, §2.3).
-         - **Remaining:** the `lib/abi` mailbox wire protocol + well-known
-           endpoint id; the user-space `vcmailbox` service driver (maps the
-           mailbox MMIO/buffer from its node grants, serves the endpoint via
-           the new ABI); `lib/drvrt::RtDriverHost::mailbox()` IPC client (so the
-           existing `vl805` `MailboxChannel` driver runs in user space); the
-           discovered mailbox node + signed bundle + `devmgr` autoload.
-           Metal-only-verifiable (§0.4); scaffold stays live until D5 (§2.17).
+         - **Mailbox service + protocol + client — DONE (host-proven).** The
+           `lib/abi::mailbox_ipc` wire protocol + well-known `MAILBOX_ENDPOINT`
+           (`CAP_MAILBOX` send gate, id 25); the user-space `vcmailbox` service
+           driver (`drivers/bus/mailbox/vcmailbox`: maps the mailbox MMIO/buffer
+           from its node grants, serves the endpoint via `call_create`/
+           `call_recv`/`call_reply`); `lib/drvrt::RtDriverHost::mailbox()` IPC
+           client (so the existing `vl805` `MailboxChannel` driver runs in user
+           space); the discovered mailbox node carries the doorbell + DMA
+           requests; bind identity is one definition in `lib/vcmailbox`.
+         - **Image install (the "D4" step) — DONE (host-proven).** `cargo xtask
+           image` cross-compiles the `vcmailbox` driver PIE, converts it to an
+           `rxe` (`USER_IMAGE_BIAS` + `SYSCALL_TABLE_HASH`), signs it as a
+           `kind = UserSpace` `DriverManifest` (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/
+           `CAP_IPC_BIND_PRIVILEGED`, `lib/vcmailbox::BIND_KEYS`, kernel
+           driver-signing seed), and installs it into the read-only
+           `/System/Drivers/bus_mailbox/vcmailbox/Run` store. `tools/mkimage`
+           stays pure (`build_rpi_image`'s `drivers` seam plants bytes only); the
+           ELF→`rxe` converter and signer are the shared `rustos_itest_harness`
+           definitions the kernel `build.rs` uses (§2.2); the store-planting
+           routine is the single `rustos_drv_fs_rustfs::plant_nested_file`.
+           Host-tested: mkimage plants and reads the bundle back from the
+           read-only `/System` store; the image builds end to end in the CI image
+           gate.
+         - **Remaining (metal-only, §0.4):** `devmgr` autoloading the installed
+           bundle against the real discovered BCM2711 mailbox node (granting the
+           doorbell + DMA resources); and the **vl805 user-space migration** (run
+           the firmware-reload driver over `host.mailbox()`) with retirement of
+           the in-kernel scaffold (`bring_up_keyboard`/`KernelMailboxChannel`,
+           §2.14/§2.17) — the prompt's "D5". The scaffold stays the live keyboard
+           path until that flip.
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +
          `CAP_HW_EMIT` with these consumers.

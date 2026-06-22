@@ -16,6 +16,7 @@ mod cfg_check;
 mod deps_check;
 mod fssoak;
 mod fuzz;
+mod image_drivers;
 mod linkcheck;
 mod model_check;
 mod parallel;
@@ -1182,11 +1183,20 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         )
     })?;
 
+    // Cross-compile and sign the autoloaded `/System/Drivers/` bundles the
+    // image ships, then install them into the read-only `/System` store. The
+    // VideoCore mailbox service driver runs in user space (the §18.6 floor
+    // stays storage-only), so `devmgr` autoloads it against the discovered
+    // BCM2711 mailbox node (`plans/PI.md` P10 D4).
+    let vcmailbox = image_drivers::build_vcmailbox_bundle(ctx)?;
+    let drivers: [(&[&[u8]], &[u8]); 1] = [(image_drivers::VCMAILBOX_STORE_PATH, &vcmailbox)];
+
     let built = rustos_mkimage::build_rpi_image(
         &kernel_elf,
         &firmware,
         &mut rustos_mkimage::HostEntropy,
         profile,
+        &drivers,
     )
     .map_err(|e| format!("image: {e}"))?;
 

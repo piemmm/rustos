@@ -33,7 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::block::{Block, BlockGeometry};
-use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_abi::DriverError;
 use rustos_caps::CapabilitySet;
 use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, VOLUME_KEY_LEN};
@@ -291,49 +291,11 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
     Ok(fs.into_block().into_bytes())
 }
 
-/// Plant a regular file at `components` (a path of directory names ending in
-/// the file name) under `parent`, creating each intermediate directory that
-/// does not already exist.
-///
-/// The shared driver-bundle plant helper (`AGENTS.md` §2.2): the design-B
-/// `/System` volume builder (`rustos_test_encrypted_root_image`) uses it to
-/// lay signed driver bundles into that volume's `Drivers/` store — the
-/// on-disk shape a real installation gives the §18.3 / §18.6 autoload scan
-/// (`rustos_kernel::driver_autoload::autoload_from_mounted_root`,
-/// `plans/PI.md` design B). `components` is the path *under `parent`* of the
-/// bundle's leaf file (for example, relative to the `/System` volume root,
-/// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`). The bytes are the
-/// signed `.rxe` bundle exactly as the store scanner reads it back.
-///
-/// # Errors
-///
-/// Propagates any [`DriverError`] from the driver, or [`DriverError::Unsupported`]
-/// for an empty `components` path. A short write surfaces as
-/// [`DriverError::DeviceFault`].
-pub fn plant_nested_file<B>(
-    fs: &mut RustFs<B>,
-    parent: NodeId,
-    components: &[&[u8]],
-    bytes: &[u8],
-) -> Result<(), DriverError>
-where
-    B: Block,
-{
-    let (file_name, dirs) = components.split_last().ok_or(DriverError::Unsupported)?;
-    let mut node = parent;
-    for dir in dirs {
-        node = match fs.lookup(node, dir) {
-            Ok(existing) => existing,
-            Err(_) => fs.create(node, dir, NodeKind::Directory)?,
-        };
-    }
-    fs.create(node, file_name, NodeKind::RegularFile)?;
-    let written = fs.write_at(node, file_name, 0, bytes)?;
-    if written != bytes.len() {
-        return Err(DriverError::DeviceFault);
-    }
-    Ok(())
-}
+/// Re-export of the single store-planting helper (`AGENTS.md` §2.2). The
+/// definition lives in the rustfs driver (`rustos_drv_fs_rustfs`) so the
+/// image builder (`tools/mkimage`) and these fixtures share one routine that
+/// gives the §18.3 / §18.6 autoload scan an identical on-disk shape.
+pub use rustos_drv_fs_rustfs::plant_nested_file;
 
 impl VecBlock {
     /// Consume the device, yielding its raw image bytes.

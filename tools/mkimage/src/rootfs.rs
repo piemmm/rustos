@@ -18,7 +18,9 @@
 //! image.
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
-use rustos_drv_fs_rustfs::{EntropySource, RustFs, VolumeKey, SYSTEM_VOLUME_KEY};
+use rustos_drv_fs_rustfs::{
+    plant_nested_file, EntropySource, RustFs, VolumeKey, SYSTEM_VOLUME_KEY,
+};
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -113,12 +115,24 @@ pub fn build_root_partition(
 pub fn build_system_partition(
     sectors: u64,
     entropy: &mut dyn EntropySource,
+    drivers: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
     let mut fs = RustFs::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
         .map_err(MkimageError::SystemPartition)?;
     let root = fs.root();
     create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
+    // Lay each signed driver bundle into the read-only `/System` store at its
+    // volume-relative path (`Drivers/<class>/<leaf>/Run`), creating any
+    // intermediate directory the §16.2 skeleton did not (the `Drivers`
+    // directory already exists, so the shared planter reuses it). This is the
+    // on-disk shape the §18.3 / §18.6 autoload scan reads back; the bundle is
+    // already Ed25519-signed against the kernel's trust anchor, so a tampered
+    // read-only store fails the load gate closed (`AGENTS.md` §18.6).
+    for (components, bytes) in drivers {
+        plant_nested_file(&mut fs, root, components, bytes)
+            .map_err(MkimageError::SystemPartition)?;
+    }
     fs.flush().map_err(MkimageError::SystemPartition)?;
     Ok(fs.into_block().into_bytes())
 }

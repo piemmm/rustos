@@ -3970,10 +3970,14 @@ keyboard never regresses (§2.17), until the final flip:
   autoload path, lay the signed input-driver bundle into the `/System`
   volume signed against the finalised production anchor, delete
   `keyboard_service.rs` + `usb_keyboard.rs`, and evict `usb_hid` from
-  `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6). Until the bundle is
-  laid, the metal `/System/Drivers/` store is empty (`4042` `drivers=0`) and
-  `devmgr` leaves every node unbound — the in-kernel scaffold keyboard stays
-  the live driver, so the flip and the bundle must land together (§2.17).
+  `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6). The image now installs
+  the signed user-space `vcmailbox` service bundle (P10 D4) into the store, so
+  it is no longer empty; but it still carries **no input-driver bundle** until
+  this flip, so `devmgr` leaves the HID node unbound and the in-kernel scaffold
+  keyboard stays the live driver — the flip and the input bundle must land
+  together (§2.17). The image installer (`tools/mkimage` `build_rpi_image`'s
+  `drivers` seam + `cargo xtask` `commands/image_drivers.rs`) is the reusable
+  path that lays this input bundle too (P10 D4).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

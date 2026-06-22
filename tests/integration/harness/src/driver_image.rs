@@ -2,7 +2,7 @@
 //! integration fixtures that lay a kernel-trusted driver into the system
 //! (`AGENTS.md` §2.2).
 //!
-//! A signed driver bundle is a [`DriverManifest`] header, the manifest's
+//! A signed driver bundle is a [`rustos_abi::DriverManifest`] header, the manifest's
 //! capability body, its bind table, and the program payload, with the
 //! manifest's Ed25519 signature taken over
 //! `header[..WIRE_LEN-64] || cap_body || bind_table || payload` — exactly

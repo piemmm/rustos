@@ -41,6 +41,18 @@ board-neutral protocol logic lives once in `lib/abi::mailbox_ipc::serve_request`
 
 It runs in user space (no `CAP_DRV_KERNEL`).
 
+## Install
+
+`cargo xtask image --target aarch64-rpi` cross-compiles this crate
+position-independent for `aarch64-unknown-none` (its own `Run.ld`), converts
+the linked PIE ELF to an `rxe`, and wraps it as a signed `kind = UserSpace`
+`DriverManifest` (the capabilities above, the crate's `lib/vcmailbox::BIND_KEYS`
+bind table, signed with the kernel's driver-signing seed). The bundle is
+planted into the image's read-only `/System/Drivers/` store at
+`bus_mailbox/vcmailbox/Run`, where the booted kernel's signed §18.6 load gate
+admits it and `devmgr` autoloads it against the discovered mailbox node. See
+`docs/src/platform/aarch64.md` ("VideoCore mailbox service").
+
 ## Limitations
 
 - Single-board: BCM2711 only. Other VideoCore generations (Pi 3 BCM2837, Pi 5

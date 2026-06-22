@@ -76,3 +76,17 @@ rustos-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # image pipeline is ordinary Rust driven by the same xtask entry point as
 # every other build step (AGENTS.md §12).
 rustos-mkimage = { path = "../mkimage", version = "=0.0.0" }
+# `image` cross-compiles and signs the autoloaded `/System/Drivers/` bundles
+# the flashable Pi image ships (`plans/PI.md` P10 D4). The signed-bundle
+# composer and the ELF->rxe converter live in the shared harness — the single
+# definition the kernel `build.rs` and the autoload fixtures also use
+# (`AGENTS.md` §2.2) — so `image` reuses them rather than re-rolling the wire
+# layout. Host-only build glue (`AGENTS.md` §1 / §12); the `driver-image`
+# feature pulls in the Ed25519 signer.
+rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
+    "driver-image",
+] }
+# The mailbox service-driver's own canonical §18.3 bind table, copied verbatim
+# into its signed bundle so the autoload match data never drifts from the
+# driver (`AGENTS.md` §2.2 / §18.3).
+rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }

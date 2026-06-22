@@ -1123,11 +1123,29 @@ the service binds.
   `BIND_KEYS` are one definition in `lib/vcmailbox` (`MAILBOX_COMPATIBLE`), so
   the discovery key here and the autoload match key can never diverge
   (`AGENTS.md` §2.2).
+- **Install (P10 D4).** The signed bundle ships in the flashable image's
+  read-only `/System/Drivers/` store at `Drivers/bus_mailbox/vcmailbox/Run`.
+  `cargo xtask image` cross-compiles the driver position-independent for
+  `aarch64-unknown-none` (its own `Run.ld`), converts the linked PIE ELF to an
+  `rxe` relocated for the production user-image bias and stamped with the
+  kernel's `SYSCALL_TABLE_HASH`, and wraps it as a `kind = UserSpace`
+  `DriverManifest` requesting `CAP_MMIO_MAP` + `CAP_MEM_DMA` +
+  `CAP_IPC_BIND_PRIVILEGED`, signed with the kernel's driver-signing seed — so
+  the booted kernel admits it through the §8 / §18.6 signed load gate. The
+  ELF→`rxe` converter and signer are the shared definitions the kernel
+  `build.rs` and the autoload fixtures also use (`AGENTS.md` §2.2);
+  `tools/mkimage` only plants the bytes (`build_rpi_image`'s `drivers`
+  argument), it never drives `cargo`. The store-planting routine is the single
+  `rustos_drv_fs_rustfs::plant_nested_file`.
 
 Metal-only (`plans/PI.md` §0.4): QEMU `virt` models no `VideoCore` mailbox, so
 the wire protocol, the client channel, and the server transform are host-tested
-(`lib/abi`, `lib/drvrt`, `lib/vcmailbox`); the in-kernel scaffold below stays
-the live keyboard path until the USB-driver migration (D5) lands.
+(`lib/abi`, `lib/drvrt`, `lib/vcmailbox`), and the install is host-tested
+(`tools/mkimage` plants and reads the bundle back from the read-only `/System`
+store; the image builds end to end in the CI image gate). `devmgr` autoloading
+the bundle against the real discovered BCM2711 mailbox node, and the in-kernel
+scaffold below staying the live keyboard path until the USB-driver migration
+(D5) lands, are verified on hardware.
 
 ## USB-keyboard service (video-console keyboard backing, P10)
 
