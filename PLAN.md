@@ -1713,33 +1713,37 @@ order (one fully-gated increment each):
            (alongside `CAP_INPUT_INJECT`/`CAP_IRQ_BIND`) so a signed bus
            *service* driver can be granted it; the per-driver manifest∩superset
            intersection still binds (§5.2 / §18.3 / §4 — no ambient authority).
-           Host-proven (rewritten `autoload_caps` unit test). A third metal run
-           confirmed the load succeeds (`id=7001 driver loaded
-           .../bus_mailbox/vcmailbox/Run`) and the USB keyboard works — but
-           boot-to-login took ~37 minutes, so the `Root passphrase:` prompt
-           looked unresponsive. Root cause (a §20/§2.16 log-spam defect, not an
-           input-path bug): `devmgr`'s reactive loop re-matches the whole
-           hardware-tree snapshot on every generation advance (§18.4), and
-           `autoload::match_and_load` re-emitted the `NODE_UNBOUND` audit line
-           for every unmatched node on every re-evaluation — ~118 nodes ×
-           many reactions × ~116 ms/UART-line ≈ the observed ~37 min. **Fixed:**
-           `devmgr` now carries per-node decision memory
-           (`autoload::ReportedNodes`/`NodeReport`) and logs a node only on its
-           first decision and on a *change* (`Unbound`→`Bound` when the late
-           catalogue arrives); a settled re-evaluation is silent and a node
-           already recorded `LoadFailed` is not re-attempted against the static
-           store (§2.16). First-pass logging (each node once) is unchanged.
-           Host-proven (`a_reaction_does_not_relog_an_unchanged_unbound_node`).
-         - **Remaining (metal-only, §0.4):** confirm fast boot + a responsive
+           Host-proven (rewritten `autoload_caps` unit test); metal confirmed
+           the load succeeds (`id=7001 driver loaded .../bus_mailbox/vcmailbox/Run`)
+           and the USB keyboard works. Two §20/§2.16 log-spam defects then made
+           the `Root passphrase:` prompt look unresponsive (not an input-path
+           bug): `devmgr` re-matches the whole tree snapshot on every generation
+           advance (§18.4), and each unmatched node emitted an `Info`
+           `NODE_UNBOUND` line over the Pi's flow-blocked debug UART
+           (~116 ms/line) — with ~120 mostly-driverless device-tree nodes this
+           starved the keyboard report pump for tens of seconds. **Fixed in two
+           parts:** (1) per-node decision memory
+           (`autoload::ReportedNodes`/`NodeReport`) so a node is logged only on
+           its first decision and on a *change* (`Unbound`→`Bound`), making a
+           settled re-evaluation silent; (2) `NODE_UNBOUND` is logged at `Debug`
+           (not `Info`) in both the user-space `match_and_load` and the
+           kernel-side `DeviceManager::autoload` sibling (§2.2), so the routine
+           unbound nodes are dropped in O(1) by the default `Info` level filter
+           *before* any `log_emit` syscall — even on the first pass — while still
+           logged with their stable id when diagnostics are enabled (§18.4).
+           `NODE_BOUND`/tie/load-failure stay visible (`Info`/`Warn`). Host-proven
+           (`a_reaction_does_not_relog_an_unchanged_unbound_node`; the four
+           unbound-asserting tests lower the level to observe the `Debug` record).
+         - **Remaining (metal-only, §0.4):** confirm a fast boot + responsive
            `Root passphrase:` prompt on hardware; investigate (if still seen on a
            settled system) why the tree generation advances repeatedly after boot
            (now harmless/silent) and whether `login` parks on `users_db_wait`
            rather than retrying `users_db_read`; then the **vl805 user-space
-           migration** (run the
-           firmware-reload driver over `host.mailbox()`) with retirement of the
-           in-kernel scaffold (`bring_up_keyboard`/`KernelMailboxChannel`,
-           §2.14/§2.17) — the prompt's "D5". The scaffold stays the live keyboard
-           path until that flip.
+           migration** (run the firmware-reload driver over `host.mailbox()`)
+           with retirement of the in-kernel scaffold
+           (`bring_up_keyboard`/`KernelMailboxChannel`, §2.14/§2.17) — the
+           prompt's "D5". The scaffold stays the live keyboard path until that
+           flip.
        - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
          `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +
          `CAP_HW_EMIT` with these consumers.

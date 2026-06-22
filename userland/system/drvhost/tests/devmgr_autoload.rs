@@ -79,6 +79,9 @@ fn decode_bind_table(source: &MemSource, path: &str) -> Vec<DriverBindKey> {
 
 #[test]
 fn autoload_matches_and_loads_through_the_real_gate() {
+    // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
+    // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+    rustos_log::set_max_level(rustos_log::Level::Trace);
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
 

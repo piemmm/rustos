@@ -111,8 +111,20 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
         let id = node.id();
         match resolve(node.match_keys(), candidates) {
             MatchResolution::Unmatched => {
+                // An unmatched node is the routine, high-volume case: on a
+                // real device tree most nodes (clocks, pinctrl, thermal, …)
+                // have no driver, so emitting one record per unbound node at
+                // `Info` floods the slow diagnostic UART and starves boot (a
+                // §20 progress-spam / §2.16 defect — it once delayed the Pi's
+                // `Root passphrase:` prompt by tens of seconds). It is logged
+                // at `Debug` instead — still logged with its stable id when
+                // diagnostics are enabled (`AGENTS.md` §18.4), but dropped in
+                // O(1) by the default `Info` filter before any `log_emit`
+                // syscall. A *binding* (`NODE_BOUND`), a packaging tie, or a
+                // load refusal stays visible — those are the actionable
+                // outcomes. Mirrors `events::NODE_OBSERVED`.
                 if changed(&mut state.reported, id, NodeReport::Unbound) {
-                    audit_node(sink, events::NODE_UNBOUND, Level::Info, id, &[]);
+                    audit_node(sink, events::NODE_UNBOUND, Level::Debug, id, &[]);
                 }
             }
             MatchResolution::Tie { priority } => {

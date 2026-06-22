@@ -429,6 +429,9 @@ mod tests {
 
     #[test]
     fn an_unmatched_node_is_left_unbound_and_never_loaded() {
+        // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
+        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        rustos_log::set_max_level(rustos_log::Level::Trace);
         let snapshot = encode(
             1,
             &[
@@ -532,6 +535,9 @@ mod tests {
 
     #[test]
     fn a_reaction_does_not_relog_an_unchanged_unbound_node() {
+        // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
+        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        rustos_log::set_max_level(rustos_log::Level::Trace);
         let unmatched = HwMatchKey::virtio(0xFFFF);
         let first = encode(
             1,
@@ -574,6 +580,9 @@ mod tests {
 
     #[test]
     fn a_failed_catalogue_fetch_is_fail_soft_and_still_observes() {
+        // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
+        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        rustos_log::set_max_level(rustos_log::Level::Trace);
         let snapshot = encode(
             1,
             &[

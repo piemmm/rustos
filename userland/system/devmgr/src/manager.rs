@@ -124,7 +124,14 @@ impl<'m> DeviceManager<'m> {
             }
             match resolve(node.match_keys(), candidates) {
                 MatchResolution::Unmatched => {
-                    self.audit_node(events::NODE_UNBOUND, Level::Info, node.id(), &[]);
+                    // Routine, high-volume case: most nodes on a real device
+                    // tree have no driver, so this is logged at `Debug` (not
+                    // `Info`) to keep the slow diagnostic UART from drowning in
+                    // one line per unbound node — still logged with its stable
+                    // id when diagnostics are enabled (`AGENTS.md` §18.4 / §20
+                    // / §2.16). Kept identical to the user-space sibling
+                    // (`crate::autoload::match_and_load`, `AGENTS.md` §2.2).
+                    self.audit_node(events::NODE_UNBOUND, Level::Debug, node.id(), &[]);
                     report.unbound += 1;
                 }
                 MatchResolution::Tie { priority } => {
@@ -368,6 +375,9 @@ mod tests {
 
     #[test]
     fn winner_is_loaded_and_bound_and_unmatched_node_stays_unbound() {
+        // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
+        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        rustos_log::set_max_level(rustos_log::Level::Trace);
         let emmc = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
         let candidates = [DriverCandidate {
             path: "/System/Drivers/emmc2",

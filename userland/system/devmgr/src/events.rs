@@ -19,7 +19,12 @@ pub const DEVMGR_RANGE_END: u32 = 14_000;
 /// A hardware-tree node was bound: its winning driver is loaded.
 pub const NODE_BOUND: EventId = EventId(13_001);
 /// A hardware-tree node matched no driver bind table and was left
-/// unbound — never an error (`AGENTS.md` §18.4).
+/// unbound — never an error (`AGENTS.md` §18.4). Emitted at `Debug`: an
+/// unmatched node is the routine, high-volume case (most nodes on a real
+/// device tree have no driver), so it is filtered out by the default
+/// `Info` threshold and never floods the slow diagnostic UART — lower the
+/// level to trace which nodes were left unbound (`AGENTS.md` §20 / §2.16).
+/// A *binding*, a packaging tie, or a load refusal stays visible.
 pub const NODE_UNBOUND: EventId = EventId(13_002);
 /// Two or more drivers matched a node at the same highest priority; the
 /// unbroken tie is a packaging defect, so the node is refused a binding

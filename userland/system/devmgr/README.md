@@ -42,7 +42,10 @@ fail-closed (`AGENTS.md` §5.4):
 Reserved `EventId` range `13000..14000`:
 
 - `13001 NODE_BOUND` — node bound; fields `node`, `path`, `handle` (Info).
-- `13002 NODE_UNBOUND` — no matching driver (Info, §18.4).
+- `13002 NODE_UNBOUND` — no matching driver (Debug, §18.4 / §20): the
+  routine, high-volume case (most nodes on a real device tree have no
+  driver), filtered out by the default `Info` threshold so it never
+  floods the slow diagnostic UART; lower the level to trace it.
 - `13003 NODE_TIE_REJECTED` — unbroken priority tie refused; field
   `priority` (Warn).
 - `13004 NODE_LOAD_FAILED` — load gate refused the winner; fields

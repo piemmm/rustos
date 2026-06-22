@@ -151,7 +151,7 @@ range (`rustos_devmgr::events`):
 | Event id | Meaning |
 |----------|---------|
 | `13001` `NODE_BOUND` | a node was bound; fields: `node`, `path`, `handle` |
-| `13002` `NODE_UNBOUND` | no driver matched; never an error (§18.4) |
+| `13002` `NODE_UNBOUND` | no driver matched; never an error (§18.4). Emitted at **`Debug`** — the routine, high-volume case (most nodes have no driver), filtered out by the default `Info` threshold so it never floods the slow diagnostic UART (§20 / §2.16) |
 | `13003` `NODE_TIE_REJECTED` | unbroken highest-priority tie refused; field: `priority` |
 | `13004` `NODE_LOAD_FAILED` | the load gate refused the winner; fields: `path`, `errno` |
 
@@ -167,6 +167,17 @@ the loop carries a per-node `ReportedNodes`/`NodeReport` memory, so
 re-evaluating a settled tree emits no record and the diagnostic log is never
 re-flooded with identical lines (`AGENTS.md` §20 / §2.16). An unbound node is
 thus *logged*, not re-logged.
+
+The routine `NODE_UNBOUND` decision is additionally logged at **`Debug`**
+(unlike the `Info` `NODE_BOUND` / `Warn` tie / load-failure decisions), so on
+a default-`Info` boot the unbound nodes are dropped in O(1) by the level
+filter *before* any `log_emit` syscall and never reach the serial line at
+all — even on the first pass. On a real Raspberry Pi the firmware device tree
+has ~120 nodes, almost all driverless; emitting one `Info` line each over the
+flow-blocked debug UART (~116 ms/line) once delayed the `Root passphrase:`
+prompt by tens of seconds by starving the keyboard report pump. The unbound
+fact is still logged with its stable id when diagnostics are enabled (lower
+the threshold), satisfying §18.4 without the boot-time flood (§20 / §2.16).
 
 ## Match-key emission
 
