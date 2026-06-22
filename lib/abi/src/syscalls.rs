@@ -871,6 +871,32 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::USERS_DB_WAIT,
+        name: "users_db_wait",
+        arg_count: 1,
+        args: [
+            // `timeout_ns` (`u64::MAX` for an unbounded wait).
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention `hw_tree_wait` uses: `Ok(0)` once the
+        // database is no longer pending, `-TimedOut` on deadline.
+        ret: AbiType::Errno,
+        // Same privilege as reading the database — waiting for it to become
+        // available is the reactive half of the same access (`AGENTS.md`
+        // §5.1). NOT audited per call: it is a blocking wait, not a state
+        // change, and a refused capability is audited by the dispatcher
+        // regardless (the same pattern `hw_tree_wait` uses). Auditing the
+        // wait per call is what flooded the boot log when `login` polled
+        // `users_db_read` instead (`AGENTS.md` §5.4.4 / §19.4).
+        required_capability: Some(CapabilityId::USERS_READ),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

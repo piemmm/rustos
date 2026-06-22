@@ -120,6 +120,9 @@ const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 /// `users_db_read` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 
+/// `users_db_wait` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
+
 /// `console_count` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
@@ -1022,6 +1025,37 @@ pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
     ret as i64
 }
 
+/// Block until the system user database leaves its *pending*
+/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`,
+/// `AGENTS.md` §5.1, `plans/PI.md` P11 — the reactive companion to
+/// [`users_db_read`]).
+///
+/// Under design B `login` is spawned before the in-kernel unlock kthread
+/// mounts the encrypted root, so an early [`users_db_read`] reports
+/// `WouldBlock` — the live-but-not-ready signal. Rather than re-reading in
+/// a yield loop (a busy spin that audited one ERROR per poll, `AGENTS.md`
+/// §2.1), the caller blocks here: the kernel parks it off the run queue and
+/// wakes it the instant the unlock reaches a terminal outcome (a database is
+/// installed, or the unlock gives up), so the next [`users_db_read`] returns
+/// the database or the inert `NotImplemented`. `timeout_ns` bounds the wait
+/// (`u64::MAX` for an effectively unbounded block). Gated kernel-side on
+/// [`rustos_abi::CapabilityId::USERS_READ`], the same privilege as reading
+/// the database; the wrapper adds no authority.
+///
+/// Returns `0` once the database is no longer pending (the caller re-reads
+/// and re-classifies it), or `-errno` (recover the [`rustos_abi::Errno`]
+/// discriminant as `-ret`): `-TimedOut` if the deadline elapses first. The
+/// wrapper hides no error (`AGENTS.md` §2.9).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn users_db_wait(timeout_ns: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap (`AGENTS.md` §5.4). The single
+    // argument is a scalar; the call reads no caller memory.
+    let ret = unsafe { raw_syscall(NUM_USERS_DB_WAIT, [timeout_ns, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Make a synchronous capability-checked call to the kernel-owned IPC call
 /// endpoint `endpoint`: post `request`, block until the reply arrives, and
 /// copy it into `reply` (`SyscallNumber::IPC_CALL`, `AGENTS.md` §5.2 / §5.4;
@@ -1736,6 +1770,28 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(hw_tree_wait(3, 0), want);
+        });
+    }
+
+    #[test]
+    fn users_db_wait_marshals_the_timeout() {
+        let (number, args) = capture(0, || {
+            assert_eq!(users_db_wait(u64::MAX), 0);
+        });
+        assert_eq!(number, NUM_USERS_DB_WAIT);
+        assert_eq!(args[0], u64::MAX);
+        // No memory operand; the only argument is the scalar timeout.
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn users_db_wait_surfaces_negative_errno_encoding() {
+        // `TimedOut` is encoded as the two's-complement negation; the
+        // wrapper hands that signed value back unchanged.
+        let want = -i64::from(rustos_abi::Errno::TimedOut.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(users_db_wait(0), want);
         });
     }
 

@@ -19,7 +19,8 @@
 //!    would fight over the one keyboard. So while the unlock is still
 //!    running, `users_db_read` reports [`DbLoad::Pending`] (the kernel's
 //!    `Errno::WouldBlock`); `login` then **waits** ([`supervise`] calls the
-//!    injected `wait`, e.g. `rustos_rt::yield_now`) and does not prompt,
+//!    injected `wait`, e.g. `rustos_rt::users_db_wait`, which parks the task
+//!    off the run queue until the unlock resolves) and does not prompt,
 //!    leaving the console to the unlock until it resolves.
 //! 2. **Stale "no database".** A `login` that read the database **once** at
 //!    startup would cache the pre-unlock answer and refuse every credential
@@ -60,9 +61,11 @@ pub enum DbLoad {
 /// `load_db` is invoked before each round to obtain the current state of
 /// the `/System/Security/Users` database ([`DbLoad`]). `wait` is called
 /// when the database is [`DbLoad::Pending`] (the encrypted root is still
-/// being unlocked); it should yield the CPU (e.g. `rustos_rt::yield_now`)
-/// so the in-kernel unlock kthread runs — `login` neither prompts nor reads
-/// the console while pending, so it cannot steal the passphrase bytes.
+/// being unlocked); it should **block** until the database becomes
+/// available (e.g. `rustos_rt::users_db_wait`, which parks the task off the
+/// run queue rather than busy-yielding, `AGENTS.md` §2.1) so the in-kernel
+/// unlock kthread runs — `login` neither prompts nor reads the console
+/// while pending, so it cannot steal the passphrase bytes.
 /// `run_round` runs one prompt → authenticate → launch round against the
 /// supplied authenticator and returns `true` to open another round or
 /// `false` when the console is dead and the supervisor should return
@@ -84,8 +87,9 @@ where
     loop {
         match load_db() {
             // The unlock has not finished: do not prompt (it would race the
-            // `Root passphrase:` prompt for the console). Yield and re-check
-            // — never a busy spin, `wait` parks the CPU (`AGENTS.md` §2.1).
+            // `Root passphrase:` prompt for the console). Block until it
+            // resolves, then re-check — never a busy spin, `wait` parks the
+            // task off the run queue (`AGENTS.md` §2.1).
             DbLoad::Pending => wait(),
             DbLoad::Present(db) => {
                 if !run_round(&UsersAuthenticator::new(&db)) {

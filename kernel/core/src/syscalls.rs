@@ -1994,6 +1994,86 @@ where
         result
     }
 
+    fn users_db_wait(&self, caller: &CallerContext<'_>, timeout_ns: u64) -> SyscallResult {
+        // The dispatcher already checked `CAP_USERS_READ`. Block the caller
+        // while the user database is still *pending* — a real holder is
+        // being unlocked but has not yet been published or given up on
+        // (`UsersDbSource::is_pending`, the `Errno::WouldBlock` signal) — or
+        // until the deadline elapses. The caller *parks* off the run queue
+        // (`AGENTS.md` §2.1 — no busy yield, the bug this syscall fixes:
+        // `login` previously re-read `users_db_read` in a yield loop,
+        // flooding the audit log with one ERROR per poll). It is woken by
+        // `crate::waitq::users_db_wake` the instant the unlock reaches a
+        // terminal outcome (`LateUsersDb::install`/`resolve`) or, with a
+        // finite timeout, by the architecture one-shot's per-tick sweep
+        // (`crate::waitq::timed_wake_sweep`), and re-checks the pending
+        // condition after every wake.
+        //
+        // The deadline is one saturating add from the first clock reading,
+        // so a `u64::MAX` timeout stays `NO_DEADLINE` (no timed wake, only
+        // an explicit one) rather than wrapping to a tiny value (`AGENTS.md`
+        // §5.4.5 — fail closed); `monotonic_ns` is non-decreasing per CPU
+        // and the handler does not migrate mid-wait.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let task = caller.task_id.0;
+
+        // Fast paths, checked before registering so the common
+        // already-resolved / zero-timeout cases allocate nothing and never
+        // touch the wait-queue (`AGENTS.md` §2.16). A build with no
+        // users-database service wired is never pending, so the wait returns
+        // immediately and the subsequent `users_db_read` fails closed with
+        // `NotImplemented` (`AGENTS.md` §2.9).
+        let now = self.arch.monotonic_ns(cpu);
+        let deadline_ns = now.saturating_add(timeout_ns);
+        if !self.users_db.is_pending() {
+            return Ok(0);
+        }
+        if deadline_ns != crate::waitq::NO_DEADLINE && now >= deadline_ns {
+            return Err(Errno::TimedOut);
+        }
+
+        // Must block: register so a waker can find and `unpark` us, then
+        // loop check → arm one-shot → park. The wake-pending token in the
+        // scheduler closes the check/park race, so a terminal unlock outcome
+        // or timeout arriving in that window is never lost (`AGENTS.md`
+        // §2.1) — mirrors `hw_tree_wait` exactly (`AGENTS.md` §2.2).
+        crate::waitq::USERS_DB_WAITQ.register(task, deadline_ns);
+        let result = loop {
+            if !self.users_db.is_pending() {
+                break Ok(0);
+            }
+            if deadline_ns != crate::waitq::NO_DEADLINE
+                && self.arch.monotonic_ns(cpu) >= deadline_ns
+            {
+                break Err(Errno::TimedOut);
+            }
+            // Arm the timed-wake one-shot to the nearest pending deadline so
+            // a finite timeout fires even on an otherwise-idle CPU
+            // (`AGENTS.md` §17.1 — the nearest armed wakeup).
+            self.arch
+                .set_wakeup(crate::waitq::USERS_DB_WAITQ.earliest_deadline());
+            // Park off the run queue until woken. `reschedule_current`
+            // returns `false` only when the caller is not a resumable user
+            // kthread (host tests with no live dispatch loop); fall back to
+            // a cooperative yield then, mirroring `hw_tree_wait`, so a
+            // degenerate caller never busy-spins (§2.1).
+            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
+                match self.sched.yield_current(task) {
+                    Ok(()) | Err(SchedError::InvalidState) => {}
+                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
+                    Err(_) => break Err(Errno::OutOfRange),
+                }
+            }
+        };
+        // Leave the wait set and re-point the one-shot at whatever deadline
+        // any *remaining* waiter needs (or clear it if none) so a finished
+        // wait never leaves a stale arming behind (`AGENTS.md` §17.1).
+        crate::waitq::USERS_DB_WAITQ.deregister(task);
+        self.arch
+            .set_wakeup(crate::waitq::USERS_DB_WAITQ.earliest_deadline());
+        result
+    }
+
     fn ipc_call(
         &self,
         caller: &CallerContext<'_>,
@@ -8132,6 +8212,17 @@ mod tests {
         }
     }
 
+    /// A wired [`UsersDbSource`] still in its *pending* state: the unlock is
+    /// in flight, so `text` returns the live-but-not-ready
+    /// [`Errno::WouldBlock`] and [`UsersDbSource::is_pending`] is `true`.
+    /// This is the only state `users_db_wait` blocks on.
+    struct PendingUsersDb;
+    impl UsersDbSource for PendingUsersDb {
+        fn text(&self) -> Result<&[u8], Errno> {
+            Err(Errno::WouldBlock)
+        }
+    }
+
     /// Stand-in database text the handler tests serve. The handler copies
     /// the held text verbatim (the caller re-parses it), so the double
     /// does not need to be a full valid `users-v1` document.
@@ -8241,6 +8332,93 @@ mod tests {
         )
         .with_users_db(source);
         assert_eq!(h.users_db_read(&ctx, 0x1000, 4096), Err(Errno::NotFound));
+    }
+
+    /// `users_db_wait` with no holder wired returns `Ok(0)` immediately —
+    /// an inert database is never *pending*, so `login` does not block and
+    /// its subsequent `users_db_read` fails closed (`AGENTS.md` §2.9).
+    #[test]
+    fn users_db_wait_without_holder_returns_ok_immediately() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        // `NULL_USERS_DB` is `NotImplemented`, not pending: wake immediately.
+        assert_eq!(h.users_db_wait(&ctx, u64::MAX), Ok(0));
+    }
+
+    /// `users_db_wait` returns `Ok(0)` immediately once the database has
+    /// resolved (absent or present) — only the in-flight *pending* state
+    /// blocks.
+    #[test]
+    fn users_db_wait_returns_ok_when_already_resolved() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let absent: &'static AbsentUsersDb = Box::leak(Box::new(AbsentUsersDb));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(absent);
+        assert_eq!(h.users_db_wait(&ctx, u64::MAX), Ok(0));
+    }
+
+    /// `users_db_wait` with a zero timeout while the database is still
+    /// pending returns `TimedOut` without busy-spinning (`AGENTS.md` §2.1).
+    #[test]
+    fn users_db_wait_times_out_while_pending() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::USERS_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let pending: &'static PendingUsersDb = Box::leak(Box::new(PendingUsersDb));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_users_db(pending);
+        // Still pending and a zero deadline: report the timeout rather than
+        // parking forever in the host test (no live dispatch loop).
+        assert_eq!(h.users_db_wait(&ctx, 0), Err(Errno::TimedOut));
     }
 
     /// An undersized buffer is refused whole with `BufferTooSmall` — a

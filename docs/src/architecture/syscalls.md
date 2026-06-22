@@ -88,6 +88,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  32 | `call_create`  | `IpcEndpoint`, `user_ptr` (send caps), `user_ptr` (recv caps), `len`, `len`, `len` | `errno` | — | yes |
 |  33 | `call_recv`    | `IpcEndpoint`, `user_ptr` (buf), `len`, `user_ptr` (ticket out) | `u64` (bytes) | — | no |
 |  34 | `call_reply`   | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len`      | `errno` | — | no |
+|  35 | `users_db_wait`| `u64 timeout_ns`                        | `errno` | `CAP_USERS_READ`  | no      |
 
 ### Capability matrix
 
@@ -102,7 +103,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_CONSOLE_WRITE`| `stream_write`, `console_count` |
 | `CAP_PROC_SPAWN`   | `spawn`                    |
 | `CAP_CONSOLE_READ` | `stream_read`, `stream_echo` |
-| `CAP_USERS_READ`   | `users_db_read`            |
+| `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
 | `CAP_INPUT_INJECT` | `key_inject`               |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`            |
@@ -325,6 +326,23 @@ credential database is never truncated, `AGENTS.md` §2.9); a buffer sized
 at the format's 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always
 suffices. The first-party Rust wrapper is `rustos_rt::users_db_read`; the
 C stub is `ros_sys_users_db_read`.
+
+`users_db_wait` (no. 35) is the **blocking** companion to `users_db_read`:
+it parks the caller while the database is in that `WouldBlock` *pending*
+state and returns `0` the instant the unlock reaches a terminal outcome —
+a database is installed, or the unlock gives up — or `TimedOut` if
+`timeout_ns` elapses first. It replaces `login` re-reading `users_db_read`
+in a yield loop while pending, which audited one `SYSCALL_HANDLER_REJECTED`
+(ERROR, id 5004) per poll and flooded the boot log for the whole unlock.
+The handler parks on the `kernel/core` `USERS_DB_WAITQ` and is woken by
+`LateUsersDb::install` / `resolve` (the terminal unlock transitions), the
+same park/wake shape as `hw_tree_wait` (`AGENTS.md` §2.1 / §2.2). It is
+gated on the same **`CAP_USERS_READ`** as the read but is **unaudited** —
+it is a blocking wait, not a state change, and the capability denial is
+audited by the dispatcher regardless. A build with no users-database
+service wired is never pending, so the wait returns `0` immediately and the
+following read fails closed (`AGENTS.md` §2.9). The first-party Rust wrapper
+is `rustos_rt::users_db_wait`; the C stub is `ros_sys_users_db_wait`.
 
 `console_count` (no. 20) reports how many system text consoles the boot
 path installed (`AGENTS.md` §20, `plans/PI.md` P11) — the index space

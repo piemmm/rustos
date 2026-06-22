@@ -229,6 +229,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn users_db_wait(&self, _c: &CallerContext<'_>, _timeout_ns: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn ipc_call(
         &self,
         _c: &CallerContext<'_>,

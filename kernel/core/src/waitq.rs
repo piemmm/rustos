@@ -330,6 +330,33 @@ pub fn hw_tree_wake() {
     }
 }
 
+/// The wait-queue holding `users_db_wait` callers (`plans/PI.md` P11). A
+/// `login` spawned before the encrypted root is unlocked parks here off the
+/// run queue (`AGENTS.md` §2.1 — **no** busy yield) instead of re-reading
+/// `users_db_read` in a yield loop, which flooded the audit log with one
+/// ERROR per poll. It is woken by [`users_db_wake`] the instant the unlock
+/// reaches a terminal outcome — [`LateUsersDb::install`] published a
+/// database, or [`LateUsersDb::resolve`] gave up with none — or, with a
+/// finite timeout, by the timed [`WaitQueue::sweep`] below. Each woken
+/// waiter re-checks whether the database is still pending and either returns
+/// or parks again, so a wake is harmless if it was spurious (`AGENTS.md`
+/// §2.16) and the check-then-park race is closed by the scheduler's
+/// wake-pending token (the same interlock `hw_tree_wait` uses).
+///
+/// [`LateUsersDb::install`]: crate::users::LateUsersDb::install
+/// [`LateUsersDb::resolve`]: crate::users::LateUsersDb::resolve
+pub static USERS_DB_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every `users_db_wait` caller because the user database left its
+/// pending state (a database was installed, or the unlock gave up); each
+/// re-checks the pending condition and either returns or parks again. A
+/// fail-safe no-op before the arch hook is installed (`AGENTS.md` §2.9).
+pub fn users_db_wake() {
+    if let Some(arch) = wait_arch() {
+        USERS_DB_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding `ipc_call` callers (Design D D2b). A caller parks
 /// here after posting its request to a [`rustos_kernel_ipc::call::CallEndpoint`]
 /// and is woken by [`call_wake`] when the bound server replies (`AGENTS.md`
@@ -361,6 +388,7 @@ pub fn timed_wake_sweep() {
         HW_TREE_WAITQ.sweep(arch, now);
         IRQ_WAITQ.sweep(arch, now);
         CONSOLE_WAITQ.sweep(arch, now);
+        USERS_DB_WAITQ.sweep(arch, now);
         // Re-arm to the soonest pending deadline across *every* timed
         // wait-queue, so no finite timeout is dropped because another queue
         // armed a later one-shot (`AGENTS.md` §17.1 — the nearest armed
@@ -370,16 +398,17 @@ pub fn timed_wake_sweep() {
 }
 
 /// The soonest finite deadline pending across **every** timed wait-queue
-/// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`), or [`None`] if none has
-/// one. A park site arms the one-shot to this so registering a *later*
-/// deadline never delays an already-pending earlier wake (`AGENTS.md`
-/// §17.1).
+/// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`), or
+/// [`None`] if none has one. A park site arms the one-shot to this so
+/// registering a *later* deadline never delays an already-pending earlier
+/// wake (`AGENTS.md` §17.1).
 #[must_use]
 pub fn nearest_timed_deadline() -> Option<u64> {
     [
         HW_TREE_WAITQ.earliest_deadline(),
         IRQ_WAITQ.earliest_deadline(),
         CONSOLE_WAITQ.earliest_deadline(),
+        USERS_DB_WAITQ.earliest_deadline(),
     ]
     .into_iter()
     .flatten()

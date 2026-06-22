@@ -74,6 +74,22 @@ pub trait UsersDbSource: Sync {
     /// [`NullUsersDbSource`] returns [`Errno::NotImplemented`] to mark
     /// an inert interface (`AGENTS.md` §2.9).
     fn text(&self) -> Result<&[u8], Errno>;
+
+    /// Whether the database is still in its *pending* state: a real
+    /// holder is being unlocked but has not yet been published or given
+    /// up on, so [`text`](Self::text) returns the live-but-not-ready
+    /// [`Errno::WouldBlock`] signal (only [`LateUsersDb`] is ever
+    /// pending).
+    ///
+    /// This is the condition the `users_db_wait` syscall parks on: a
+    /// caller blocks while it is `true` and is released the instant a
+    /// terminal unlock outcome flips it `false` (`AGENTS.md` §2.1 — park,
+    /// never busy-poll). The default decodes it from [`text`](Self::text)
+    /// so an inert source ([`NullUsersDbSource`], [`HeldUsersDbSource`])
+    /// is never pending without overriding anything.
+    fn is_pending(&self) -> bool {
+        matches!(self.text(), Err(Errno::WouldBlock))
+    }
 }
 
 /// The users-database source installed before any real holder exists.
@@ -272,7 +288,14 @@ impl LateUsersDb {
         // `OnceCell::set` hands the rejected value back in its error; drop
         // it (zeroing the duplicate credential bytes) instead of
         // surfacing it.
-        self.held.set(source).map_err(|_| UsersDbAlreadyInstalled)
+        self.held.set(source).map_err(|_| UsersDbAlreadyInstalled)?;
+        // Release any task parked in `users_db_wait`: the database left its
+        // pending state, so a blocked `login` re-reads and authenticates
+        // (`AGENTS.md` §2.1 — the wake that closes the park). A no-op
+        // before the wait-queue arch hook is installed (host tests), so it
+        // is always safe to call here.
+        crate::waitq::users_db_wake();
+        Ok(())
     }
 
     /// Whether a database has been installed.
@@ -293,6 +316,12 @@ impl LateUsersDb {
     /// `held` regardless of this flag.
     pub fn resolve(&self) {
         self.resolved.store(true, Ordering::Release);
+        // Release any task parked in `users_db_wait`: the unlock gave up
+        // with no database, so a blocked `login` re-reads, sees the inert
+        // `NotImplemented`, and runs its fail-closed deny-all prompt
+        // (`AGENTS.md` §5.4.5). A no-op before the wait-queue arch hook is
+        // installed (host tests).
+        crate::waitq::users_db_wake();
     }
 
     /// Whether the unlock has reached a terminal outcome — either a

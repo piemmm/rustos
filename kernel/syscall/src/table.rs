@@ -630,6 +630,28 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Block the calling task until the system user database leaves its
+    /// pending (still-being-unlocked) state (`AGENTS.md` §5.1, `plans/PI.md`
+    /// P11 — the reactive companion to [`Self::users_db_read`]).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::USERS_READ`]. The implementation returns `Ok(0)` once
+    /// the database is no longer pending — the unlock installed one, or gave
+    /// up with none — and [`Errno::TimedOut`] if `timeout_ns` elapses first,
+    /// blocking cooperatively in between (the same shape as
+    /// [`Self::hw_tree_wait`]), never busy-spinning (`AGENTS.md` §2.1). It is
+    /// what replaces `login` re-reading [`Self::users_db_read`] in a yield
+    /// loop, which audited one ERROR per poll.
+    ///
+    /// The default implementation returns `Ok(0)` immediately: a build with
+    /// no users-database service wired is never pending, so the caller's
+    /// subsequent [`Self::users_db_read`] fails closed with
+    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9). The real handler is
+    /// installed in `kernel/core`.
+    fn users_db_wait(&self, _caller: &CallerContext<'_>, _timeout_ns: u64) -> SyscallResult {
+        Ok(0)
+    }
+
     /// Make a synchronous capability-checked call to a kernel-owned IPC call
     /// endpoint: post the request, block until the reply arrives, and copy it
     /// out (`AGENTS.md` §5.2 / §5.4; Design D D2b).
@@ -993,6 +1015,11 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[0] is the last observed generation, args[1] the
                 // timeout in nanoseconds (`u64::MAX` for unbounded).
                 self.handlers.hw_tree_wait(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::USERS_DB_WAIT => {
+                // args[0] is the timeout in nanoseconds (`u64::MAX` for an
+                // effectively unbounded wait).
+                self.handlers.users_db_wait(caller, args.0[0])
             }
             SyscallNumber::IPC_CALL => {
                 // args[0] is the call-endpoint id; args[1]/args[3] are non-null
@@ -1528,6 +1555,14 @@ mod tests {
             // dispatcher decoded `(last_generation, timeout_ns)` without
             // wiring a real store / scheduler here.
             Ok(last_generation)
+        }
+
+        fn users_db_wait(&self, _c: &CallerContext<'_>, timeout_ns: u64) -> SyscallResult {
+            self.record("users_db_wait");
+            // Echo the timeout back so the reachability test can assert the
+            // dispatcher decoded the single `timeout_ns` argument without
+            // wiring a real users-database source / scheduler here.
+            Ok(timeout_ns)
         }
 
         fn ipc_call(

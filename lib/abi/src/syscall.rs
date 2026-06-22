@@ -570,6 +570,34 @@ impl SyscallNumber {
     /// closed (`AGENTS.md` §2.9).
     pub const CALL_REPLY: Self = Self(34);
 
+    /// Block the calling task until the system user database leaves its
+    /// *pending* (still-being-unlocked) state (`AGENTS.md` §5.1,
+    /// `plans/PI.md` P11 — the reactive companion to
+    /// [`SyscallNumber::USERS_DB_READ`]).
+    ///
+    /// Argument: `timeout_ns: u64` (`u64::MAX` for an effectively unbounded
+    /// wait). Under design B `login` is spawned **before** the in-kernel
+    /// unlock kthread mounts the encrypted root, so an early
+    /// [`SyscallNumber::USERS_DB_READ`] reports [`crate::Errno::WouldBlock`]
+    /// — the live-but-not-ready signal. Rather than re-reading in a yield
+    /// loop (a busy spin, `AGENTS.md` §2.1), `login` calls this once: the
+    /// kernel parks it off the run queue and wakes it the instant the unlock
+    /// reaches a terminal outcome — a database is installed, or the unlock
+    /// gives up with none — so the next read returns the database
+    /// ([`crate::Errno`]-free) or the inert [`crate::Errno::NotImplemented`].
+    /// Returns `Ok(0)` once the database is no longer pending (so the caller
+    /// re-reads and re-classifies), or [`crate::Errno::TimedOut`] if the
+    /// deadline elapses first. The kernel blocks cooperatively (the same park
+    /// shape as [`SyscallNumber::HW_TREE_WAIT`]), never busy-spinning.
+    ///
+    /// Gated by [`crate::CapabilityId::USERS_READ`] — the same privilege as
+    /// reading the database; only the authentication principal (login) waits
+    /// on it (`AGENTS.md` §4 — no ambient authority). A build with no
+    /// users-database service wired is never pending, so the wait returns
+    /// `Ok(0)` immediately and the subsequent read fails closed with
+    /// [`crate::Errno::NotImplemented`] (`AGENTS.md` §2.9).
+    pub const USERS_DB_WAIT: Self = Self(35);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -679,6 +707,7 @@ mod tests {
         assert_eq!(SyscallNumber::CALL_CREATE.as_u16(), 32);
         assert_eq!(SyscallNumber::CALL_RECV.as_u16(), 33);
         assert_eq!(SyscallNumber::CALL_REPLY.as_u16(), 34);
+        assert_eq!(SyscallNumber::USERS_DB_WAIT.as_u16(), 35);
     }
 
     #[test]

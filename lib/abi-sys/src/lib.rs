@@ -83,6 +83,7 @@ const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
+const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -653,6 +654,25 @@ pub extern "C" fn sys_hw_tree_read(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_HW_TREE_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `users_db_wait`: block until the system user database leaves its pending
+/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`,
+/// `AGENTS.md` §5.1) — the blocking companion to `ros_sys_users_db_read`.
+/// Returns a `ROS_E_*` code.
+///
+/// `timeout_ns` bounds the wait (`UINT64_MAX` for an effectively unbounded
+/// block). Returns `0` once the database is no longer pending (the caller
+/// re-reads it with `ros_sys_users_db_read`), or `ROS_E_TIMED_OUT` if the
+/// deadline elapses first. Gated kernel-side on `ROS_CAP_USERS_READ`, the
+/// same privilege as reading the database; a build with no users-database
+/// service wired is never pending, so the wait returns `0` immediately.
+#[must_use]
+#[export_name = "ros_sys_users_db_wait"]
+pub extern "C" fn sys_users_db_wait(timeout_ns: u64) -> i32 {
+    // SAFETY: see `sys_yield`. The single argument is a scalar; the call
+    // reads no caller memory.
+    unsafe { ret_i32(raw_syscall(NUM_USERS_DB_WAIT, [timeout_ns, 0, 0, 0, 0, 0])) }
+}
+
 /// `hw_tree_wait`: block until the discovered hardware tree changes past
 /// `last_generation` (`SyscallNumber::HW_TREE_WAIT`, `AGENTS.md` §18.4 —
 /// reactive re-match and hotplug). Returns a `ROS_E_*` code.
@@ -843,6 +863,7 @@ mod tests {
         (NUM_RLIMIT_GET, "rlimit_get", 2),
         (NUM_RLIMIT_SET, "rlimit_set", 2),
         (NUM_USERS_DB_READ, "users_db_read", 2),
+        (NUM_USERS_DB_WAIT, "users_db_wait", 1),
         (NUM_CONSOLE_COUNT, "console_count", 0),
         (NUM_STREAM_ECHO, "stream_echo", 2),
         (NUM_KEY_INJECT, "key_inject", 2),
@@ -1177,6 +1198,18 @@ mod tests {
         assert_eq!(args[0], 7);
         assert_eq!(args[1], u64::MAX);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn users_db_wait_marshals_the_timeout() {
+        // `0` is the success return (the database is no longer pending); the
+        // only argument is the scalar timeout bound.
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_users_db_wait(u64::MAX), 0);
+        });
+        assert_eq!(number, NUM_USERS_DB_WAIT);
+        assert_eq!(args[0], u64::MAX);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
     }
 
     #[test]

@@ -232,6 +232,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn users_db_wait(&self, _c: &CallerContext<'_>, _timeout_ns: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn ipc_call(
         &self,
         _c: &CallerContext<'_>,

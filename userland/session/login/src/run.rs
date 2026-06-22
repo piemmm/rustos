@@ -63,6 +63,17 @@ mod program {
     /// forever; the supervising loop itself is the retry path.
     const MAX_ATTEMPTS: u32 = 3;
 
+    /// Bound on a single `users_db_wait` park while the database is
+    /// [`DbLoad::Pending`] (the encrypted root is still being unlocked).
+    ///
+    /// The kernel wakes the wait the instant the unlock reaches a terminal
+    /// outcome, so this is only a safety net: should a wake ever be missed,
+    /// the wait returns `TimedOut` and [`supervise`] re-reads and re-parks
+    /// rather than blocking forever. Five seconds is far longer than an
+    /// unlock takes yet short enough to recover promptly; the wait parks the
+    /// CPU throughout, so a long bound costs nothing (`AGENTS.md` §2.1).
+    const DB_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
+
     /// Write all of `bytes` to standard output, looping over short writes.
     ///
     /// A write that accepts zero bytes means the stream will accept no more
@@ -310,12 +321,22 @@ mod program {
     fn main() -> i32 {
         let sink = StderrSink;
         // While the database read is `Pending` (the encrypted root is still
-        // being unlocked) `supervise` calls this to yield the CPU, so the
-        // in-kernel unlock kthread runs and `login` neither prompts nor
-        // reads the console — never a busy spin (`AGENTS.md` §2.1).
-        supervise(load_users_db, rustos_rt::yield_now, |authenticator| {
-            login_round(authenticator, &sink)
-        });
+        // being unlocked) `supervise` calls this to **block** until the
+        // database becomes available, so the in-kernel unlock kthread runs
+        // and `login` neither prompts nor reads the console. The kernel
+        // parks the task off the run queue and wakes it the instant the
+        // unlock resolves (`users_db_wait`) — never the busy yield loop that
+        // flooded the boot log with one `users_db_read` rejection per poll
+        // (`AGENTS.md` §2.1). The wait's result is advisory: `supervise`
+        // re-reads the database on the next round regardless of whether the
+        // wait was woken or timed out.
+        supervise(
+            load_users_db,
+            || {
+                let _ = rustos_rt::users_db_wait(DB_WAIT_TIMEOUT_NS);
+            },
+            |authenticator| login_round(authenticator, &sink),
+        );
         1
     }
 
