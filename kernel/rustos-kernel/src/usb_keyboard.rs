@@ -105,6 +105,19 @@ const USB_KEYBOARD_PUMP_ERROR: EventId = EventId(4130);
 /// [`KeyboardPumpDiagnostics::MAX_HEARTBEATS`] so the log stays finite.
 /// Polls climbing while events/errors stay zero proves the loop is alive
 /// but the keyboard delivers no reports.
+///
+/// Emitted at [`Level::Debug`], **not** `Info`: it is the routine, periodic
+/// case, and the report pump emits it *synchronously* from its own kthread.
+/// On a debug build the diagnostic sink is the flow-blocked serial UART
+/// (~116 ms/line), so an `Info` heartbeat once blocked the pump for ~72 %
+/// of the `Root passphrase:` window — starving key delivery so typed keys
+/// were slow or dropped (a §20 progress-spam / §2.16 defect, the same class
+/// as `devmgr`'s `NODE_UNBOUND` flood). At `Debug` it is dropped in O(1) by
+/// the default `Info` filter *before* the sink write, so the pump never
+/// blocks on it, while the heartbeat is still captured when diagnostics
+/// lower the threshold. The one-shot [`USB_KEYBOARD_FIRST_REPORT`] (`Info`)
+/// proves the path is live, and [`USB_KEYBOARD_PUMP_ERROR`] (`Error`) keeps
+/// real faults visible — those are the actionable events.
 const USB_KEYBOARD_POLL_HEARTBEAT: EventId = EventId(4131);
 
 /// The boot-tree publication seam the [`ChainHost`] forwards
@@ -202,10 +215,13 @@ fn log_stage_err(sink: &dyn Sink, message: &'static str, err: DriverError) {
 /// Bounded diagnostics for the forever-running keyboard poll loop.
 ///
 /// Folds each `pump_once` result into cumulative counts and emits three
-/// bounded audit events — a one-shot first-report (`4129`), an on-change
-/// capped pump error (`4130`), and a capped heartbeat (`4131`) — so the log
-/// stays finite while still pinning where the report path stalls. Holds no
-/// authority; logging only.
+/// bounded audit events — a one-shot first-report (`4129`, `Info`), an
+/// on-change capped pump error (`4130`, `Error`), and a capped heartbeat
+/// (`4131`, `Debug`) — so the log stays finite while still pinning where the
+/// report path stalls. The heartbeat is `Debug` so it is filtered out on a
+/// default-`Info` boot and never blocks the pump on the slow serial UART
+/// (see the `USB_KEYBOARD_POLL_HEARTBEAT` event). Holds no authority;
+/// logging only.
 #[derive(Debug, Default)]
 pub struct KeyboardPumpDiagnostics {
     polls: u64,
@@ -341,7 +357,7 @@ impl KeyboardPumpDiagnostics {
         log(
             sink,
             &Event {
-                level: Level::Info,
+                level: Level::Debug,
                 id: USB_KEYBOARD_POLL_HEARTBEAT,
                 message: "usb-keyboard: keyboard poll-loop heartbeat",
                 fields: &[
@@ -1025,6 +1041,9 @@ mod tests {
 
     #[test]
     fn pump_diagnostics_emits_a_bounded_heartbeat() {
+        // The heartbeat is a `Debug` record (filtered out on a default `Info`
+        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        rustos_log::set_max_level(rustos_log::Level::Trace);
         let sink = RecordingSink::new();
         let mut diag = KeyboardPumpDiagnostics::new();
         let interval = KeyboardPumpDiagnostics::HEARTBEAT_POLLS;

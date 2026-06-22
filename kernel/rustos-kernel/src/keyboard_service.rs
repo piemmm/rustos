@@ -1213,8 +1213,9 @@ mod metal {
     ///
     /// The kthread polls the keyboard forever, yielding between polls so
     /// PID 1 keeps running; a `pump_once` error is non-fatal and folded into
-    /// the bounded pump diagnostics (`4129` first report, `4130` pump error,
-    /// `4131` heartbeat). The controller is **not** brought up here — that
+    /// the bounded pump diagnostics (`4129` first report `Info`, `4130` pump
+    /// error `Error`, `4131` heartbeat `Debug`). The controller is **not**
+    /// brought up here — that
     /// happened once on the boot CPU — so this never touches the VL805 a
     /// second time (`plans/PI.md` B3 / `AGENTS.md` §2.16).
     #[must_use]
@@ -1226,7 +1227,9 @@ mod metal {
             // Poll the keyboard forever, yielding between polls so PID 1
             // keeps running. A `pump_once` error is non-fatal. The result is
             // folded into `diagnostics`, which emits bounded audit events
-            // (`4129` first report, `4130` pump error, `4131` heartbeat).
+            // (`4129` first report `Info`, `4130` pump error `Error`, `4131`
+            // heartbeat `Debug` — the heartbeat is filtered out on a default
+            // `Info` boot so it never blocks this pump on the slow UART).
             loop {
                 let result = pump_once(keyboard.keyboard_mut(), &mut console, &mut sink);
                 diagnostics.record(result, &SERIAL_SINK);

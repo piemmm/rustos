@@ -1734,6 +1734,17 @@ order (one fully-gated increment each):
            `NODE_BOUND`/tie/load-failure stay visible (`Info`/`Warn`). Host-proven
            (`a_reaction_does_not_relog_an_unchanged_unbound_node`; the four
            unbound-asserting tests lower the level to observe the `Debug` record).
+           A third, same-class spam source then surfaced on metal: the in-kernel
+           keyboard report pump emitted its periodic liveness *heartbeat*
+           (`usb_keyboard` id `4131`) at `Info`, ~32× at a ~160 ms cadence, and
+           the pump emits it *synchronously* — over the ~116 ms/line debug UART
+           that blocked the pump for the bulk of the `Root passphrase:` window,
+           so typed keys were slow/dropped and the first attempt failed. **Fixed:**
+           the heartbeat is now `Debug` (the one-shot first-report stays `Info`,
+           the pump error `Error`), so it is filtered in O(1) on a default-`Info`
+           boot and never blocks the pump; it is still captured when diagnostics
+           lower the threshold. Host-proven (`pump_diagnostics_emits_a_bounded_heartbeat`
+           lowers the level to observe the `Debug` record).
          - **Remaining (metal-only, §0.4):** confirm a fast boot + responsive
            `Root passphrase:` prompt on hardware; investigate (if still seen on a
            settled system) why the tree generation advances repeatedly after boot
