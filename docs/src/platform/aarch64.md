@@ -1089,6 +1089,46 @@ and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
 with its `dma-ranges` and outbound `ranges`, fail-closed cases) and
 exercised by the port's `passes_arch_hal_conformance_suite`.
 
+## VideoCore mailbox service (user space, P10 D3)
+
+The `VideoCore` firmware property mailbox is a **user-space service driver**
+(`drivers/bus/mailbox/vcmailbox`, `AGENTS.md` §4): the §18.6 bootstrap floor
+stays storage-only and the mailbox is reached, like every other device,
+through discovery and a capability-gated service. The discovered mailbox node
+above (the doorbell `reg` window plus its one-page `Dma` carve request) is what
+the service binds.
+
+- **The service.** Autoloaded by `devmgr` when the mailbox node is discovered,
+  it builds an `RtDriverHost` from its kernel-issued grants, maps the doorbell
+  window (`sole_register_window` + `mmio_map`), carves the property buffer
+  (`dma_alloc`), and builds the BCM2711 transport (`lib/vcmailbox::MmioMailbox`)
+  over them. The kernel carves coherent DMA, so the program supplies no
+  architecture-specific cache shim and names no board address (`AGENTS.md`
+  §2.20). It then `call_create`s a restricted-sender call endpoint and serves
+  forever: `call_recv` → exchange → `call_reply`.
+- **The protocol.** `lib/abi::mailbox_ipc` is the wire contract for the
+  well-known `MAILBOX_ENDPOINT`: a request is the 32-word property buffer
+  little-endian, a reply is a status word followed by the firmware's response
+  buffer (a fail-closed status-framed error otherwise, `AGENTS.md` §5.4 / §2.9).
+  The board-neutral server transform (`mailbox_ipc::serve_request`) lives once
+  in `lib/abi` and is shared by the service (`AGENTS.md` §2.2).
+- **The client.** A driver that needs a firmware exchange — the VL805 USB
+  firmware reload (`drivers/bus/usb/vl805`) — obtains a `MailboxChannel` from
+  its host (`DriverHost::mailbox`); the rt-backed `RtDriverHost` implements it
+  by marshalling `exchange` over `ipc_call(MAILBOX_ENDPOINT, …)`, so the VL805
+  driver runs unchanged in user space. The endpoint's send gate (`CAP_MAILBOX`)
+  is enforced kernel-side; a caller without it fails closed (`AGENTS.md` §5.2 /
+  §5.4).
+- **Bind identity.** The mailbox `compatible` string and the service's
+  `BIND_KEYS` are one definition in `lib/vcmailbox` (`MAILBOX_COMPATIBLE`), so
+  the discovery key here and the autoload match key can never diverge
+  (`AGENTS.md` §2.2).
+
+Metal-only (`plans/PI.md` §0.4): QEMU `virt` models no `VideoCore` mailbox, so
+the wire protocol, the client channel, and the server transform are host-tested
+(`lib/abi`, `lib/drvrt`, `lib/vcmailbox`); the in-kernel scaffold below stays
+the live keyboard path until the USB-driver migration (D5) lands.
+
 ## USB-keyboard service (video-console keyboard backing, P10)
 
 The video console's read half is fed by a directly attached USB keyboard

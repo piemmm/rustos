@@ -43,6 +43,11 @@ use crate::fdt::{
 use rustos_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
 use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_fdt::{name_stem, read_cells, Node};
+// The single source of the mailbox `compatible` match identity lives in the
+// device's own client crate (`lib/vcmailbox`) so the discovery key here and
+// the `vcmailbox` service driver's `BIND_KEYS` can never diverge
+// (`AGENTS.md` §2.2).
+use rustos_vcmailbox::MAILBOX_COMPATIBLE;
 
 /// Exclusive upper bound of the 30-bit `VideoCore` SDRAM aperture: the
 /// highest ARM-physical address (plus one) the BCM2711 firmware can DMA
@@ -57,12 +62,6 @@ const VIDEOCORE_APERTURE_LIMIT: u64 = 0x4000_0000;
 /// holds the 128-byte, 16-byte-aligned property message the firmware
 /// protocol exchanges (`drivers/display/rpi_hvs::mailbox`).
 const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
-
-/// `compatible` string of the BCM283x/BCM2711 `VideoCore` firmware
-/// mailbox (the Pi 4 device tree names the BCM2711 doorbell block with
-/// the original BCM2835 binding) — the one node whose emission is
-/// augmented with the DMA property-buffer carve request above.
-const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 
 /// `compatible` string of the BCM2711 `PCIe` root complex — the host
 /// bridge the Pi 4's USB-A ports sit behind (the VL805 xHCI controller,

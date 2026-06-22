@@ -4,8 +4,10 @@ use core::cell::Cell;
 use core::ptr::NonNull;
 
 use rustos_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
+use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
+use rustos_abi::mailbox_ipc;
 use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
     RegisterWindow,
@@ -402,6 +404,39 @@ impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
     }
 }
 
+impl<S: GrantSyscalls> MailboxChannel for RtDriverHost<S> {
+    /// Marshal one [`MAILBOX_PROPERTY_WORDS`]-word property exchange over the
+    /// kernel's synchronous call surface to the user-space mailbox service
+    /// ([`mailbox_ipc::MAILBOX_ENDPOINT`]): encode the request, `ipc_call`,
+    /// and decode the firmware's response back into `message` in place.
+    ///
+    /// The host owns no doorbell registers and no DMA buffer here — the
+    /// `vcmailbox` service does — so this is purely the client side of the
+    /// IPC (`AGENTS.md` §4 / §17.4). The kernel gates the call by the
+    /// endpoint's required send capability (`CAP_MAILBOX`) and copies both
+    /// buffers through the validated boundary; this host adds no authority
+    /// (`AGENTS.md` §5.4). Every failure path fails closed to a
+    /// [`DriverError`] (`AGENTS.md` §2.9), never a panic.
+    fn exchange(&self, message: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
+        let mut request = [0u8; mailbox_ipc::REQUEST_LEN];
+        mailbox_ipc::encode_request(&mut request, message)
+            .map_err(|_| DriverError::BufferTooSmall)?;
+        let mut reply = [0u8; mailbox_ipc::REPLY_LEN];
+        let ret = self
+            .syscalls
+            .ipc_call(mailbox_ipc::MAILBOX_ENDPOINT, &request, &mut reply);
+        if ret < 0 {
+            return Err(decode_errno(ret).map_or(DriverError::DeviceFault, ipc_driver_error));
+        }
+        // `ret >= 0` checked above; the result is then clamped to `reply.len()`,
+        // so any truncation on a 32-bit target cannot drive an out-of-bounds
+        // slice (`AGENTS.md` §5.4 — defence in depth).
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let n = (ret as usize).min(reply.len());
+        mailbox_ipc::decode_reply(&reply[..n], message).map_err(ipc_driver_error)
+    }
+}
+
 impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
     fn has_capability(&self, cap: CapabilityId) -> bool {
         self.caps.contains(cap)
@@ -420,6 +455,15 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
     }
 
     fn dma_host(&self) -> Option<&dyn DmaHost> {
+        Some(self)
+    }
+
+    fn mailbox(&self) -> Option<&dyn MailboxChannel> {
+        // Every rt-backed host can reach the firmware-mailbox service through
+        // the kernel's call surface; whether a given driver *may* is enforced
+        // kernel-side by the endpoint's `CAP_MAILBOX` send gate, not here
+        // (`AGENTS.md` §5.4). A driver without the capability simply has its
+        // `exchange` fail closed.
         Some(self)
     }
 }
@@ -471,6 +515,23 @@ fn grants_query_error(ret: i64) -> DriverError {
     match decode_errno(ret) {
         Some(Errno::BufferTooSmall) => DriverError::LengthOutOfRange,
         _ => DriverError::Unsupported,
+    }
+}
+
+/// Map an [`Errno`] surfaced by the mailbox `ipc_call` (a transport `-errno`
+/// or the service's status-framed reply) to a [`DriverError`] the
+/// [`MailboxChannel`] reports.
+///
+/// `PermissionDenied` (the caller lacks `CAP_MAILBOX`) and `NotFound` (no
+/// service is serving the endpoint) keep their identity; everything else —
+/// including the service's own `NotImplemented` image of a device fault /
+/// timeout (`DriverError::as_errno`) — folds to [`DriverError::DeviceFault`]
+/// so the exchange fails closed (`AGENTS.md` §2.9).
+fn ipc_driver_error(errno: Errno) -> DriverError {
+    match errno {
+        Errno::PermissionDenied => DriverError::PermissionDenied,
+        Errno::NotFound => DriverError::NotFound,
+        _ => DriverError::DeviceFault,
     }
 }
 

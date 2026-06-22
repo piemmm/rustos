@@ -42,10 +42,41 @@
 
 use rustos_abi::driver::display::DisplayFormat;
 use rustos_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
-use rustos_abi::{DriverError, RegisterWindow};
+use rustos_abi::{DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
 
 #[cfg(test)]
 mod tests;
+
+/// Device-tree `compatible` string of the `BCM283x` / `BCM2711` `VideoCore`
+/// firmware mailbox.
+///
+/// The Pi 4 device tree names the BCM2711 doorbell block with the original
+/// BCM2835 binding. This is the single source of the mailbox match identity
+/// (`AGENTS.md` §2.2): the aarch64 platform discovery emits the mailbox node
+/// with this `compatible` key, and the `vcmailbox` service driver's
+/// [`BIND_KEYS`] match it — both name this one definition rather than each
+/// spelling the string themselves.
+pub const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
+
+/// The §18.3 bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
+/// match ranks above a generic class-wildcard driver.
+const BIND_PRIORITY: u16 = 10;
+
+/// The `VideoCore` mailbox service driver's hardware bind table (`AGENTS.md`
+/// §18.3): the BCM2711 firmware mailbox, matched by its device-tree
+/// [`MAILBOX_COMPATIBLE`] string. The single source of truth the signed
+/// `vcmailbox` bundle's bind table is authored from and `devmgr` resolves a
+/// discovered mailbox node against (`AGENTS.md` §2.2).
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    BIND_PRIORITY,
+    match HwMatchKey::compatible(MAILBOX_COMPATIBLE) {
+        Ok(key) => key,
+        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
+        // too-long literal would be a compile-time const-eval error here,
+        // never a runtime panic (`AGENTS.md` §2.9).
+        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+    },
+)];
 
 #[cfg(any(test, feature = "mock-firmware"))]
 pub mod mock;

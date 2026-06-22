@@ -63,6 +63,14 @@ struct MockSyscalls {
     /// The raw signed result `irq_bind` returns: a positive handle by
     /// default, or `-errno` to model a refused bind.
     irq_bind_result: Cell<i64>,
+    /// The endpoint captured by the last `ipc_call`.
+    ipc_endpoint: Cell<u64>,
+    /// The request bytes captured by the last `ipc_call`.
+    ipc_request: RefCell<Vec<u8>>,
+    /// The reply bytes `ipc_call` copies back to the caller on success.
+    ipc_reply: RefCell<Vec<u8>>,
+    /// When `Some`, `ipc_call` returns this `-errno` instead of replying.
+    ipc_error: Cell<Option<Errno>>,
 }
 
 impl MockSyscalls {
@@ -77,7 +85,21 @@ impl MockSyscalls {
             irq_bind_calls: Rc::new(Cell::new(0)),
             irq_wait_calls: Rc::new(Cell::new(0)),
             irq_bind_result: Cell::new(7),
+            ipc_endpoint: Cell::new(0),
+            ipc_request: RefCell::new(Vec::new()),
+            ipc_reply: RefCell::new(Vec::new()),
+            ipc_error: Cell::new(None),
         }
+    }
+
+    /// Program the bytes `ipc_call` copies back as the reply.
+    fn set_ipc_reply(&self, reply: &[u8]) {
+        *self.ipc_reply.borrow_mut() = reply.to_vec();
+    }
+
+    /// Make `ipc_call` fail with `-err` instead of replying.
+    fn fail_ipc_call(&self, err: Errno) {
+        self.ipc_error.set(Some(err));
     }
 
     /// Make `irq_bind` fail with `-err` instead of returning a handle.
@@ -176,6 +198,18 @@ impl GrantSyscalls for MockSyscalls {
     fn irq_wait(&self, _handle: u64, _timeout_ns: u64) -> i64 {
         self.irq_wait_calls.set(self.irq_wait_calls.get() + 1);
         0
+    }
+
+    fn ipc_call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> i64 {
+        self.ipc_endpoint.set(endpoint);
+        *self.ipc_request.borrow_mut() = request.to_vec();
+        if let Some(err) = self.ipc_error.get() {
+            return -i64::from(err.as_i32());
+        }
+        let src = self.ipc_reply.borrow();
+        let n = src.len().min(reply.len());
+        reply[..n].copy_from_slice(&src[..n]);
+        n as i64
     }
 }
 
@@ -677,4 +711,75 @@ fn notify_wait_does_not_park_when_the_bind_is_refused() {
     rustos_abi::driver::virtio::VirtioHost::notify_wait(&host, 0);
     assert_eq!(binds.get(), 2, "a refused bind is retried, never cached");
     assert_eq!(waits.get(), 0, "never parks on an unbound handle");
+}
+
+// --- `mailbox`: client-side firmware property exchange over `ipc_call` ---
+
+#[test]
+fn mailbox_exchange_marshals_to_the_endpoint_and_decodes_the_reply() {
+    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+    use rustos_abi::mailbox_ipc;
+
+    // The host's `MailboxChannel` is purely the client side of the IPC: it
+    // encodes the request, posts it to the well-known mailbox endpoint, and
+    // decodes the service's response back into the caller's buffer in place
+    // (`AGENTS.md` §17.4).
+    let mut request = [0u32; MAILBOX_PROPERTY_WORDS];
+    for (i, word) in request.iter_mut().enumerate() {
+        *word = 0x2000_0000 + u32::try_from(i).expect("index fits u32");
+    }
+    let mut response = [0u32; MAILBOX_PROPERTY_WORDS];
+    for (i, word) in response.iter_mut().enumerate() {
+        *word = 0x3000_0000 + u32::try_from(i).expect("index fits u32");
+    }
+    let mut reply_bytes = [0u8; mailbox_ipc::REPLY_LEN];
+    mailbox_ipc::encode_reply(&mut reply_bytes, &response).expect("encodes");
+
+    let mock = MockSyscalls::new();
+    mock.set_ipc_reply(&reply_bytes);
+    let host = RtDriverHost::new(caps(&[CapabilityId::MAILBOX]), mock, &[], None).unwrap();
+
+    let mut message = request;
+    MailboxChannel::exchange(&host, &mut message).expect("exchange succeeds");
+    assert_eq!(message, response, "the reply buffer is decoded in place");
+}
+
+#[test]
+fn mailbox_exchange_fails_closed_on_a_transport_error() {
+    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+
+    // A missing `CAP_MAILBOX` (or any other kernel refusal of the call) is
+    // surfaced as a `DriverError`, never papered over (`AGENTS.md` §2.9).
+    let mock = MockSyscalls::new();
+    mock.fail_ipc_call(Errno::PermissionDenied);
+    let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
+
+    let mut message = [0u32; MAILBOX_PROPERTY_WORDS];
+    assert_eq!(
+        MailboxChannel::exchange(&host, &mut message),
+        Err(DriverError::PermissionDenied)
+    );
+}
+
+#[test]
+fn mailbox_exchange_surfaces_a_service_error_reply() {
+    use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
+    use rustos_abi::mailbox_ipc;
+
+    // A status-framed error reply (the service mapped its `DriverError` to an
+    // `Errno`) fails the exchange closed: a firmware fault / timeout
+    // (`NotImplemented` image) folds to `DeviceFault`.
+    let mut reply_bytes = [0u8; mailbox_ipc::REPLY_LEN];
+    let n =
+        mailbox_ipc::encode_error_reply(&mut reply_bytes, Errno::NotImplemented).expect("encodes");
+
+    let mock = MockSyscalls::new();
+    mock.set_ipc_reply(&reply_bytes[..n]);
+    let host = RtDriverHost::new(caps(&[CapabilityId::MAILBOX]), mock, &[], None).unwrap();
+
+    let mut message = [0u32; MAILBOX_PROPERTY_WORDS];
+    assert_eq!(
+        MailboxChannel::exchange(&host, &mut message),
+        Err(DriverError::DeviceFault)
+    );
 }

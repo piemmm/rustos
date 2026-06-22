@@ -242,6 +242,20 @@ impl CapabilityId {
     /// leaking, so a task without the capability — or one reading when the
     /// arbiter holds no desktop focus — sees nothing.
     pub const INPUT_READ: Self = Self(24);
+    /// Call the user-space firmware property-mailbox service
+    /// (`plans/PI.md` P10 D3).
+    ///
+    /// The send-side gate on the `VideoCore` mailbox call endpoint
+    /// ([`crate::mailbox_ipc::MAILBOX_ENDPOINT`]): a driver that needs a
+    /// firmware property exchange — e.g. the VL805 USB firmware reload
+    /// (`drivers/bus/usb/vl805`) — holds this capability, and the
+    /// `vcmailbox` service creates the endpoint with it as the required
+    /// sender capability. The mailbox reconfigures hardware (framebuffer,
+    /// clocks, PCIe firmware), so reaching it is privileged rather than
+    /// ambient (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// checks before state touches): an ordinary task cannot drive the
+    /// firmware mailbox.
+    pub const MAILBOX: Self = Self(25);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -278,6 +292,7 @@ impl CapabilityId {
         (Self::INPUT_INJECT, "CAP_INPUT_INJECT"),
         (Self::DISPLAY, "CAP_DISPLAY"),
         (Self::INPUT_READ, "CAP_INPUT_READ"),
+        (Self::MAILBOX, "CAP_MAILBOX"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an

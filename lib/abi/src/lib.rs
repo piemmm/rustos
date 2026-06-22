@@ -25,6 +25,7 @@ pub mod hwtree;
 pub mod input;
 pub mod ipc;
 pub(crate) mod le;
+pub mod mailbox_ipc;
 pub mod manifest;
 pub mod memory;
 pub mod process;

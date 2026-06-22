@@ -58,6 +58,18 @@ pub trait GrantSyscalls {
     ///
     /// Mirrors [`rustos_rt::irq_wait`].
     fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64;
+
+    /// Make a synchronous capability-checked call to the kernel-owned call
+    /// endpoint `endpoint`: post `request`, block until the reply arrives,
+    /// and copy it into `reply`, returning the number of reply bytes written
+    /// (or `-errno`). The host uses this only to reach the firmware
+    /// property-mailbox service ([`MailboxChannel`](rustos_abi::driver::MailboxChannel)
+    /// over [`rustos_abi::mailbox_ipc::MAILBOX_ENDPOINT`]); the kernel gates
+    /// the call by the endpoint's required send capability and copies both
+    /// buffers through the validated boundary (`AGENTS.md` §5.4).
+    ///
+    /// Mirrors [`rustos_rt::ipc_call`].
+    fn ipc_call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> i64;
 }
 
 /// The production [`GrantSyscalls`]: forward to `rustos_rt`'s wrappers.
@@ -93,5 +105,16 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64 {
         rustos_rt::irq_wait(handle, timeout_ns)
+    }
+
+    #[inline]
+    fn ipc_call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> i64 {
+        // `rustos_rt::ipc_call` already clamps a non-negative count to the
+        // reply buffer; surface the raw signed result for the host to decode.
+        #[allow(clippy::cast_possible_wrap)]
+        match rustos_rt::ipc_call(endpoint, request, reply) {
+            Ok(count) => count as i64,
+            Err(errno) => errno,
+        }
     }
 }

@@ -44,5 +44,6 @@
 #define ROS_CAP_INPUT_INJECT ((uint16_t)22u)
 #define ROS_CAP_DISPLAY ((uint16_t)23u)
 #define ROS_CAP_INPUT_READ ((uint16_t)24u)
+#define ROS_CAP_MAILBOX ((uint16_t)25u)
 
 #endif /* ROS_CAPABILITY_H */

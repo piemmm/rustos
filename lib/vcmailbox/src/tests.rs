@@ -877,3 +877,28 @@ fn mailbox_errors_map_to_driver_errors() {
         DriverError::LengthOutOfRange
     );
 }
+
+// --- Driver bind table (§18.3 autoload) --------------------------------
+
+#[test]
+fn bind_keys_match_the_discovered_mailbox_node_compatible() {
+    // The `vcmailbox` service driver's single bind key resolves a discovered
+    // mailbox node by its device-tree `compatible` string — the exact
+    // autoload decision `devmgr` makes (`AGENTS.md` §18.3). The aarch64
+    // discovery emits the node carrying this same `compatible` (the shared
+    // `MAILBOX_COMPATIBLE`), so the two can never diverge (`AGENTS.md` §2.2).
+    assert_eq!(BIND_KEYS.len(), 1, "the service binds exactly one device");
+    let node_key = HwMatchKey::compatible(MAILBOX_COMPATIBLE).expect("fits HW_COMPATIBLE_MAX");
+    assert!(
+        BIND_KEYS[0].key.matches(&node_key),
+        "the bind key matches the discovered mailbox node"
+    );
+}
+
+#[test]
+fn bind_keys_do_not_match_an_unrelated_node() {
+    // A node advertising a different `compatible` matches nothing — the
+    // service binds only its declared device (`AGENTS.md` §18.3 / §18.4).
+    let other = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
+    assert!(!BIND_KEYS[0].key.matches(&other));
+}
