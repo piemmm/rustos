@@ -93,7 +93,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel::aarch64::boot as boot_aarch64;
     use rustos_kernel_core::AuditEvent;
     use rustos_log::{Event, Sink};
@@ -115,8 +115,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
     /// allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
     /// to QEMU the instant the one-shot first-input-delivery witness appears —

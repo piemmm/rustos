@@ -20,7 +20,7 @@ use rustos_arch_riscv64::{
     handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
     SERIAL_SINK,
 };
-use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use rustos_kernel_core::{
     reschedule_current, spawn_image, spawn_kthread, spawn_user_kthread, RescheduleAction,
     SpawnRequest, Yielder,
@@ -136,8 +136,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 /// Page-table pool backing the U-mode address space's Sv39 hierarchy.
 static PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();

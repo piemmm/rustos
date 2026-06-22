@@ -2763,6 +2763,9 @@ pub fn build_all(ctx: &Context) -> Result<(), String> {
             .filter(|t| t.target == target)
             .map(|t| t.package)
             .collect();
+        if packages.is_empty() {
+            continue;
+        }
         let mut cmd = ctx.cargo();
         cmd.args(["build", "--locked", "--target", target]);
         for pkg in &packages {
@@ -2806,10 +2809,8 @@ fn build_targets() -> Vec<&'static str> {
 pub fn run_once(ctx: &Context) -> Result<(), String> {
     let target_dir = ctx.target_dir();
     let budget = parallel::host_parallelism();
-    let only = std::env::var("JUNIE_QEMU_ONLY").ok();
     let jobs: Vec<Job> = TESTS
         .iter()
-        .filter(|t| only.as_deref().is_none_or(|o| t.package.contains(o)))
         .map(|t| {
             let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
             let weight = usize::try_from(t.cpus).unwrap_or(1);

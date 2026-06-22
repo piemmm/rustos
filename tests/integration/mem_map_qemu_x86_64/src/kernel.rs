@@ -14,8 +14,10 @@ use rustos_arch_api::EnterUser;
 use rustos_arch_x86_64::paging::{self, KERNEL_VMA_BASE};
 use rustos_arch_x86_64::userentry::UserMode;
 use rustos_arch_x86_64::{fault, qemu_exit, syscall_entry};
-use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
+use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
+use rustos_kernel::{
+    boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
+};
 use rustos_kernel_core::{spawn_image, MemMap, SpawnRequest};
 use rustos_kernel_mem::{
     map_anonymous, page_count_for, unmap_anonymous, AddressSpace, AnonError, DirectPhysMap, Frame,
@@ -75,8 +77,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 /// Page-table pool backing the new address space (lives in `.bss`).
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();

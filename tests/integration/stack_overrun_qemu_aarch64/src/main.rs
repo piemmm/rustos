@@ -93,8 +93,8 @@ mod kernel {
     use rustos_arch_api::mmu::AddressSpace as _;
     use rustos_arch_api::tlb::TlbShootdown as _;
     use rustos_arch_api::CpuId;
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
     use rustos_fdt::Fdt;
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
     use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
     use rustos_log::{log, Event, EventId, Field, Level};
@@ -184,8 +184,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
     /// allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// A kthread kernel stack carved from the arena, laid out
     /// `[guard page | usable stack]` exactly like the production

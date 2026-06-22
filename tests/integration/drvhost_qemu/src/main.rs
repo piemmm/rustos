@@ -40,9 +40,9 @@ mod kernel {
     use rustos_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::{
-        boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
+        boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use rustos_log::{Event, EventId, Sink};
 
@@ -56,10 +56,10 @@ mod kernel {
 
     /// Global allocator backed by [`HEAP`]. The pointer to `HEAP`
     /// outlives the binary, and the allocator is the only consumer
-    /// (`AGENTS.md` §4 — deterministic OOM via `BumpAllocator`).
+    /// (`AGENTS.md` §4 — deterministic OOM via `FreeListAllocator`).
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// `EventId(4004)` — `AuditEvent::BootCompleted`. Pinned by the
     /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.
@@ -120,7 +120,7 @@ mod kernel {
             spawner: &spawner,
             sink: &SerialSink::new(),
             // Stage 4.D Item 0-tail: this integration runs against a
-            // bumpalloc-backed kernel that has no kernel-side
+            // kalloc-backed kernel that has no kernel-side
             // `DmaPool` yet (the per-process DMA facility is wired
             // separately in the production binary). `None` keeps the
             // pre-Item-0-tail behaviour: the mock driver loaded

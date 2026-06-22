@@ -232,6 +232,49 @@ pub trait KernelArch: SchedulerArch {
     /// it while at least one task is live and will re-evaluate after every
     /// return.
     fn wait_for_interrupt(&self) {}
+
+    /// Service any interrupt that is pending-but-masked, then return with
+    /// the interrupt-mask state unchanged.
+    ///
+    /// The dispatch loop is non-preemptible (`AGENTS.md` §4): every entry
+    /// into it is via an exception that masked the PE's IRQ taking, so the
+    /// loop runs its scheduler `step`s with device interrupts *masked*. A
+    /// device interrupt that asserts while the loop is busy dispatching
+    /// runnable tasks therefore stays pending and is only *taken* when the
+    /// loop next reaches the idle [`Self::wait_for_interrupt`]. When some
+    /// task is (even transiently) runnable on every `step`, that idle point
+    /// is never reached, and a parked driver waiting on its device line
+    /// (an interrupt-driven user-space driver, or a `login` reader blocked
+    /// on console input) is woken only when scheduling happens to quiesce —
+    /// a timing-dependent, flaky delivery (`AGENTS.md` §7 no flaky tests).
+    ///
+    /// This is the loop's **interrupt poll point**: called *between*
+    /// scheduler steps — with no kernel lock held and no scheduler critical
+    /// section in flight — it briefly opens the IRQ window so a
+    /// pending-but-masked device interrupt is taken and its handler runs
+    /// (waking the parked waiter), then restores the masked invariant. It
+    /// makes device-interrupt servicing independent of reaching idle, so a
+    /// busy run queue can never starve an interrupt-driven waiter.
+    ///
+    /// # Contract
+    ///
+    /// * It runs the pending interrupt's handler at most; it never blocks,
+    ///   spins (`AGENTS.md` §2.1), or context-switches the current task.
+    /// * It must leave the CPU's interrupt-mask state exactly as it found
+    ///   it, so the non-preemptible loop it returns into is unchanged
+    ///   (`AGENTS.md` §4).
+    /// * It must never panic (`AGENTS.md` §2.9).
+    /// * The caller invokes it only between steps (no lock held), so the
+    ///   handler's waiter-wake (which takes the scheduler/run-queue lock)
+    ///   cannot deadlock against a lock the interrupted code holds.
+    ///
+    /// # Default
+    ///
+    /// A no-op: a port whose dispatch loop does not run with device IRQs
+    /// masked (the `TestArch` mock, and ports that service device IRQs
+    /// during EL0/user execution without an EL1-masked window) needs no
+    /// poll point and inherits zero work (`AGENTS.md` §2.16).
+    fn poll_interrupts(&self) {}
 }
 
 /// IRQ routing handed from the architecture port to the kernel core

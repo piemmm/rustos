@@ -13,7 +13,7 @@ The crate ships a hybrid `[lib]` + `[[bin]]`:
 |-----------------------|-------------------------------------------------------------------|
 | `src/lib.rs`          | Library half — boot pipeline reused by both bins.                 |
 | `src/main.rs`         | Production `rustos-kernel` binary.                                |
-| `src/bumpalloc.rs`    | Forward-only bump allocator + `GlobalAlloc` impl.                 |
+| `src/kalloc.rs`       | Freeing (coalescing free-list) `GlobalAlloc` impl.                |
 | `src/arch_wrapper.rs` | `BinArch` — local `KernelArch` impl around `X86_64Arch`.          |
 | `src/dispatch.rs`     | Production syscall-dispatch callback + `DISPATCH_SLOT` (Stage 2.7 (f5)). |
 | `src/serial_sink.rs`  | COM1-backed `rustos_log::Sink`.                                   |
@@ -29,23 +29,27 @@ QEMU's `isa-debug-exit` device to success on observing
 
 ## Allocator
 
-The crate uses a forward-only **bump allocator** with a static
-16 MiB heap (`src/bumpalloc.rs`). The allocator never frees; its
-sole purpose is to support the `Arc`/`Vec`/`BTreeMap` traffic the
-`kernel/core` init sequence produces during boot. A real
-slab/per-process allocator lands in the `kernel/mem` sub-stage that
-activates the scheduler dispatch loop.
+The crate registers the shared `rustos_kalloc::FreeListAllocator`
+(`lib/kalloc`) over a per-binary static `Heap` as its
+`#[global_allocator]` (re-exported through `src/kalloc.rs`). It is a
+coalescing first-fit free-list allocator: it serves the
+`Arc`/`Vec`/`BTreeMap` traffic the `kernel/core` init sequence and the
+long-lived kernel services produce, and reclaims on `dealloc`.
 
-Documented limits:
+Documented properties:
 
-* **No reclamation** — `GlobalAlloc::dealloc` is a no-op.
-* **Hard cap** — exhausting the 16 MiB heap returns `null_mut` per the
-  `GlobalAlloc` contract; the caller (and `panic = "abort"`) reports
-  the failure.
-* **Thread-safe** — the cursor is a CAS-driven `AtomicUsize`.
+* **Reclaims** — `GlobalAlloc::dealloc` returns the block to the free
+  list and coalesces it with its physical neighbours, so steady
+  allocate/free traffic runs in bounded memory.
+* **Deterministic OOM** — exhausting the heap returns `null_mut` per the
+  `GlobalAlloc` contract; allocation failure is never a panic
+  (`AGENTS.md` §4).
+* **Thread-safe** — the free list is guarded by an inline spin lock.
+* **Bounds-checked** — every hole stays within `[heap_base,
+  heap_base + heap_len)` by construction (`AGENTS.md` §4).
 * **One `static mut`** — the heap arena. `AGENTS.md` §2 reserves
-  `static mut` for the per-CPU bootstrap area; the boot heap is the
-  documented exception until the production allocator lands.
+  `static mut` for the per-CPU bootstrap area; the kernel heap is the
+  documented exception.
 
 ## Production dispatch callback
 

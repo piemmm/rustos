@@ -45,7 +45,7 @@ path = "src/main.rs"
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # The device manager (autoload policy) + the driver host (the signed load

@@ -81,9 +81,9 @@ mod kernel {
     use rustos_abi::{CapabilityId, SyscallNumber, SYSCALL_MAX_ARGS};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_arch_x86_64::syscall_entry;
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::{
-        boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
+        boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use rustos_log::{Event, EventId, Sink};
 
@@ -92,7 +92,7 @@ mod kernel {
     // Mirrors the production `rustos-kernel` bin and the
     // `rustos-test-syscall-dispatch-qemu` test bin: `#[global_allocator]`
     // is a per-binary attribute, so each freestanding bin declares its
-    // own over the shared `bumpalloc` heap.
+    // own over the shared `kalloc` heap.
 
     /// Static heap for the bump allocator.
     ///
@@ -107,8 +107,8 @@ mod kernel {
     /// `HEAP` static outlives the binary and the allocator is its only
     /// consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     // --- Stable audit identifiers --------------------------------
 

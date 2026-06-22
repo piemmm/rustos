@@ -1112,12 +1112,21 @@ order (one fully-gated increment each):
              virtio-input node → verify against `KERNEL_DRIVER_SIGNER_PUBKEY` →
              spawn into a user-space process → a typed keystroke reaches the
              input-focus arbiter via `key_inject` (PASS on
-             `AuditEvent::InputDelivered` `EventId(4050)`). Both prerequisites
-             are landed: `KERNEL_DRIVER_SIGNING_SEED` is the single source in
-             `build_support.rs` that both the kernel build and the fixture sign
-             from (§2.2), and the one-shot `InputDelivered` witness is the
-             `InputFocus::note_first_delivery` first-delivery latch emitted once,
-             carrying no key content/timing (§20/§23.1).
+             `AuditEvent::InputDelivered` `EventId(4050)`). The signing/witness
+             prerequisites are landed (`KERNEL_DRIVER_SIGNING_SEED`
+             single-sources both the kernel build and the fixture, §2.2; the
+             one-shot `InputDelivered` witness is the
+             `InputFocus::note_first_delivery` latch, carrying no key
+             content/timing, §20/§23.1). The blocking-wait subsystem this and
+             the interactive UART login depend on is landed: the freeing
+             `rustos-kalloc` allocator (§4 deterministic OOM), `KernelProcessWait`
+             and `BlockingConsoleRead` true parks (`PROCWAIT_WAITQ` /
+             `CONSOLE_WAITQ`, §2.1), and a reliable device-IRQ-delivery path —
+             console input is poll-backed (`UartConsoleRead::read` drains the
+             PL011 FIFO from the reader's context before parking), the RX ISR
+             clears-then-rechecks (no lost wakeup), and the non-preemptible
+             dispatch loop runs an interrupt poll point (`KernelArch::poll_interrupts`)
+             between steps so a device IRQ is taken promptly, not only at idle.
            **Remaining — re-scoped under design B (operator-approved).** The
            metal keyboard is needed to type the *encrypted-root* unlock
            passphrase, so it cannot be autoloaded from the encrypted root

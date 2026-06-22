@@ -94,12 +94,12 @@ Status keys: `planned` / `in progress` / `done` / `blocked`.
 
 ### Stage W1 — `lib/*` — Status: planned
 
-All shared crates in `lib/` (e.g. `abi`, `abi-sys`, `abi-trap`, `bumpalloc`,
+All shared crates in `lib/` (e.g. `abi`, `abi-sys`, `abi-trap`,
 `caps`, `collections`, `compress`, `crt0`, `crypto`, `curses`, `cursor`,
-`fdt`, `font`, `geometry`, `icon`, `input`, `log`, `procinfo`, `raster`,
+`fdt`, `font`, `geometry`, `icon`, `input`, `kalloc`, `log`, `procinfo`, `raster`,
 `rng`, `rt`, `svg`, `sync`, `termcap`, `theme`, `util`, `virtio`, `vt`).
 These carry the densest rustdoc surface (public ABI/library items, §6) and the
-`// SAFETY:` cores (`bumpalloc`, `sync`, `raster`, `crypto`) — strict §1 keep
+`// SAFETY:` cores (`kalloc`, `sync`, `raster`, `crypto`) — strict §1 keep
 rules apply.
 
 ### Stage W2 — `kernel/*` — Status: planned

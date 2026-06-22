@@ -89,9 +89,9 @@ mod kernel {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use rustos_arch_x86_64::qemu_exit;
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::{
-        boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
+        boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use rustos_log::{Event, EventId, Sink};
 
@@ -107,8 +107,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
     /// allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// `EventId` the spawn caller emits once a ring-3 image is built. Pinned
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`. PASS

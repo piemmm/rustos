@@ -18,8 +18,10 @@ use rustos_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use rustos_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use rustos_arch_x86_64::userentry::UserMode;
 use rustos_arch_x86_64::{qemu_exit, smp, syscall_entry};
-use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
+use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
+use rustos_kernel::{
+    boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
+};
 use rustos_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnRequest, Yielder,
 };
@@ -99,8 +101,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 /// Per-space page-table pools (one per EL0 address space). Each backs a PML4
 /// hierarchy whose root [`activate_user_root`] reloads (via CR3) before every

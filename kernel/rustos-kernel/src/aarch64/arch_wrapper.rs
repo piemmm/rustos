@@ -97,12 +97,6 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn halt(&self) -> ! {
-        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-        {
-            use core::fmt::Write as _;
-            let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
-            let _ = write!(w, "JDBG HALT dispatch-loop-exited\r\n");
-        }
         halt_current_cpu()
     }
 
@@ -124,12 +118,6 @@ impl KernelArch for Aarch64BinArch {
         // EL1, so this is a benign no-op (the loop re-steps immediately).
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
-            use core::fmt::Write as _;
-            let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
-            let pend = rustos_arch_aarch64::gic::dbg_ispendr(78);
-            let en = rustos_arch_aarch64::gic::dbg_isenabler(78);
-            let tgt = rustos_arch_aarch64::gic::dbg_itargetsr(78);
-            let _ = write!(w, "JDBG WFI pend78={pend} en78={en} tgt78={tgt:#x}\r\n");
             use rustos_arch_aarch64::exceptions;
             // SAFETY: `wfi`/`enable_irq`/`mask_irq` are the documented
             // race-free idle-wait sequence; the vector table and the GICv2
@@ -139,6 +127,36 @@ impl KernelArch for Aarch64BinArch {
             unsafe {
                 exceptions::wait_for_interrupt();
                 exceptions::enable_irq();
+                exceptions::mask_irq();
+            }
+        }
+    }
+
+    fn poll_interrupts(&self) {
+        // The dispatch-loop interrupt poll point (`AGENTS.md` §4 / §7):
+        // briefly clear the PE IRQ mask so a device interrupt that asserted
+        // while the loop ran a task with `DAIF.I` set is *taken* now — its
+        // handler runs in EL1 (`CUR_SPX_IRQ`), and a device IRQ never
+        // preempts the kernel there (only a timer tick from EL0 does), so
+        // the current task is not switched away (`exceptions::handle_irq`).
+        // The `isb` after the unmask is a context-synchronisation barrier
+        // so a pending interrupt is taken before the re-mask, closing the
+        // window deterministically; the re-mask restores the loop's
+        // non-preemptible invariant exactly as it was found. On a host
+        // build there is no EL1, so this is a benign no-op.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            use rustos_arch_aarch64::exceptions;
+            // SAFETY: `enable_irq`/`mask_irq` only toggle `DAIF.I`, and the
+            // vector table + GICv2 are installed by this point
+            // (`install_irq_dispatch` ran), so a taken interrupt dispatches
+            // through a valid EL1 handler that returns here; the `isb`
+            // (context synchronisation) has no architectural side effect
+            // beyond ordering the unmask before the taken interrupt. The
+            // sequence leaves IRQs masked exactly as it found them.
+            unsafe {
+                exceptions::enable_irq();
+                core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
                 exceptions::mask_irq();
             }
         }
@@ -228,11 +246,75 @@ impl ConsoleRead for UartConsole {
     }
 }
 
-/// The single `'static` [`UartConsole`] the boot path lists in the
-/// [`rustos_kernel_core::BootInfo::with_consoles`] console list.
-/// Zero-sized, so it has no `.bss`/`.data` footprint — mirroring
-/// [`rustos_arch_aarch64::SERIAL_SINK`].
+/// The single `'static` [`UartConsole`] the boot path lists as the UART
+/// console's **write** half (and the in-kernel root-unlock kthread's
+/// passphrase **poll** source). Zero-sized, so it has no `.bss`/`.data`
+/// footprint — mirroring [`rustos_arch_aarch64::SERIAL_SINK`].
 pub static UART_CONSOLE: UartConsole = UartConsole;
+
+/// The UART console's receive type-ahead queue — the software RX ring the
+/// interrupt-driven serial path fills.
+///
+/// Once console 0 is handed to `login`
+/// ([`crate::aarch64::gic_irq::enable_uart_console_irq`]) the PL011 receive
+/// interrupt is unmasked; its handler
+/// ([`crate::aarch64::gic_irq::production_device_irq_dispatch`]) drains the
+/// hardware FIFO and `push`es the bytes here, which wakes the `login` reader
+/// parked in kernel-core's `BlockingConsoleRead` the instant input arrives
+/// (`AGENTS.md` §2.1 / §20 — the backing parks rather than polls). It is the
+/// UART analogue of [`VIDEO_KEYBOARD`]: the same `'static` backs both the
+/// console's [`rustos_kernel_core::ConsoleRead`] half (drained by the login's
+/// `stream_read`) and its [`rustos_kernel_core::ConsoleInput`] half (the
+/// interrupt's push target), so the push reaches the parked reader.
+///
+/// Before that handoff the queue stays empty: the root-unlock kthread reads
+/// the passphrase by polling [`UART_CONSOLE`]'s FIFO directly (it
+/// cooperatively yields, so the CPU never idles and the poll suffices), and
+/// the receive interrupt is masked so it cannot steal those bytes.
+pub static UART_INPUT: rustos_kernel_core::ConsoleInputQueue =
+    rustos_kernel_core::ConsoleInputQueue::new();
+
+/// The UART console's **read** half: drains the interrupt-fed [`UART_INPUT`]
+/// queue and, after freeing space, re-enables the receive line if the ISR
+/// masked it on a full queue
+/// ([`crate::aarch64::gic_irq::rearm_uart_rx_if_masked`] — the consumer side
+/// of the receive flow control). A zero-sized adapter; the queue's
+/// [`rustos_kernel_core::ConsoleInput`] (push) half stays the raw
+/// [`UART_INPUT`], which the interrupt fills.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct UartConsoleRead;
+
+impl ConsoleRead for UartConsoleRead {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
+        // Pull any byte already in the hardware FIFO into the queue *first*,
+        // from this reader's own context, so console input is **poll-backed**
+        // rather than solely interrupt-driven: the reader sees a byte that is
+        // physically present even if the CPU has not yet taken its receive
+        // interrupt (it is busy in the masked EL1 dispatch loop) or the byte
+        // is a sub-trigger FIFO tail still awaiting the PL011 receive-timeout.
+        // The reader therefore only ever parks when the FIFO *and* the queue
+        // are genuinely empty, closing every residual device-IRQ-delivery
+        // race; the interrupt remains only the wake that unparks it once
+        // parked (`AGENTS.md` §2.1 — a genuine park, never a busy-poll). Runs
+        // in an EL1 syscall with IRQ taking masked, so it cannot race the ISR
+        // on this single console (`AGENTS.md` §2.2 — one shared drain body).
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        crate::aarch64::gic_irq::poll_uart_into_console_queue();
+        let read = UART_INPUT.read(buf)?;
+        // Draining the queue may have freed the space the ISR was blocked on:
+        // re-enable the receive line if it masked itself on a full queue, so
+        // input resumes (flow control released). A cheap flag check on the
+        // common path; freestanding-only because the GIC re-enable is
+        // meaningful solely on the target (`AGENTS.md` §2.16).
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        crate::aarch64::gic_irq::rearm_uart_rx_if_masked();
+        Ok(read)
+    }
+}
+
+/// The single `'static` [`UartConsoleRead`] the console list installs as the
+/// UART console's read half (wrapped, for console 0, in the unlock gate).
+pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 
 /// The video (framebuffer) console device — the **primary** console the
 /// boot path lists when the P7b framebuffer boot console is configured
@@ -320,9 +402,13 @@ static GATED_VIDEO_READ: crate::unlock_service::GatedConsoleRead =
 /// The console-0 read half of the UART console, gated on the same unlock
 /// ownership latch as [`GATED_VIDEO_READ`] for the UART-only (QEMU `virt`,
 /// headless Pi) layout where the UART *is* the primary console.
+///
+/// It reads the interrupt-fed [`UART_INPUT`] queue (not the raw FIFO): once
+/// the gate opens the receive interrupt is unmasked and a parked `login`
+/// reader is woken by the queue push, never left polling (`AGENTS.md` §2.1).
 static GATED_UART_READ: crate::unlock_service::GatedConsoleRead =
     crate::unlock_service::GatedConsoleRead::new(
-        &UART_CONSOLE,
+        &UART_CONSOLE_READ,
         &crate::unlock_service::CONSOLE0_GATE,
     );
 
@@ -339,16 +425,17 @@ pub static VIDEO_AND_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 2] = [
         &GATED_VIDEO_READ,
         &VIDEO_KEYBOARD,
     ),
-    rustos_kernel_core::ConsoleDevice::new(&UART_CONSOLE, &UART_CONSOLE),
+    rustos_kernel_core::ConsoleDevice::with_input(&UART_CONSOLE, &UART_CONSOLE_READ, &UART_INPUT),
 ];
 
 /// The console list installed when no display came up (QEMU `virt`, a
 /// headless Pi): the discovered UART is the only console, so it is the
 /// primary console and its read half is gated on the unlock latch.
 pub static UART_ONLY_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
-    [rustos_kernel_core::ConsoleDevice::new(
+    [rustos_kernel_core::ConsoleDevice::with_input(
         &UART_CONSOLE,
         &GATED_UART_READ,
+        &UART_INPUT,
     )];
 
 #[cfg(test)]

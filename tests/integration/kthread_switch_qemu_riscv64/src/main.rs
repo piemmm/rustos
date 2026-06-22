@@ -71,7 +71,7 @@ mod kernel {
     use rustos_arch_riscv64::{
         handle_panic_via_serial, qemu_exit, RiscvArch, RiscvArchStorage, SERIAL_SINK,
     };
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel_core::spawn_kthread;
     use rustos_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
     use rustos_log::{log, Event, EventId, Level};
@@ -124,8 +124,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
     /// allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Forward to the shared riscv64 panic bridge (parks the hart; the run
     /// then times out and the harness reports the failure).

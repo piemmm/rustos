@@ -45,7 +45,7 @@ const HEAP_BYTES: usize = 8 * 1024 * 1024;
 struct Heap([u8; HEAP_BYTES]);
 
 // SAFETY of `static mut`: this is the binary's only mutable static,
-// accessed exclusively through `BumpAllocator::alloc`. The allocator
+// accessed exclusively through `FreeListAllocator::alloc`. The allocator
 // serialises access through `cursor: AtomicUsize`; the heap bytes are
 // never aliased because each allocation hands out a disjoint slice.
 static mut HEAP: Heap = Heap([0; HEAP_BYTES]);

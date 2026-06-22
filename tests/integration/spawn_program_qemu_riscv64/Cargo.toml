@@ -40,7 +40,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }

@@ -29,11 +29,11 @@ use rustos_arch_aarch64::gic::{
 };
 use rustos_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use rustos_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
-use rustos_bumpalloc::BumpAllocator;
 use rustos_caps::CapabilitySet;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
 use rustos_fdt::Fdt;
+use rustos_kalloc::FreeListAllocator;
 use rustos_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
 use rustos_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use rustos_kernel_mem::{
@@ -84,8 +84,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
 
 // --- Static DMA frame pool -------------------------------------------
 

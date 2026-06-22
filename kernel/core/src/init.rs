@@ -361,6 +361,17 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
         SchedulerArch::set_wakeup(self.arch, deadline_ns);
     }
+
+    fn current_task(
+        &self,
+        cpu: rustos_kernel_sched_api::CpuId,
+    ) -> Option<rustos_kernel_sched_api::TaskId> {
+        // The live scheduler's per-CPU current-task slot — the same slot the
+        // dispatch hook reads to identify a syscall caller (`AGENTS.md`
+        // §5.4.1). A console-read backing parks the *current* task without
+        // being handed its id, so it resolves it here.
+        self.scheduler.current_task(cpu)
+    }
 }
 
 /// Leak a [`SchedWaitQueueArch`] over the boot-leaked `KernelState` and
@@ -578,28 +589,25 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             match self.scheduler.step(cpu) {
                 // A task ran. Keep dispatching while live tasks remain;
                 // stop once every task has exited so `kernel_main` halts.
-                Ok(StepOutcome::Ran(tid)) => {
-                    {
-                        use core::sync::atomic::{AtomicU64, Ordering};
-                        static N: AtomicU64 = AtomicU64::new(0);
-                        let n = N.fetch_add(1, Ordering::Relaxed);
-                        if n % 2_000_000 == 0 {
-                            let mut buf = [0u8; 16];
-                            let tidhex = rustos_util::fmt::format_hex_u64(tid as u64, &mut buf);
-                            self.audit.write_event(&rustos_log::Event {
-                                level: Level::Info,
-                                id: rustos_log::EventId(60001),
-                                message: "JDBG step Ran",
-                                fields: &[Field {
-                                    key: "tid",
-                                    value: tidhex,
-                                }],
-                            });
-                        }
-                    }
+                Ok(StepOutcome::Ran(_)) => {
                     if self.scheduler.live_task_count() == 0 {
                         break;
                     }
+                    // Interrupt poll point (`AGENTS.md` §4 / §7): the loop
+                    // dispatched a runnable task with device IRQs masked
+                    // (the non-preemptible kernel runs `step` with the PE's
+                    // IRQ taking masked). Between steps — no kernel lock
+                    // held, no scheduler critical section in flight — open
+                    // the IRQ window so a device interrupt that asserted
+                    // while the loop was busy is *taken* and its handler
+                    // wakes the parked waiter (an interrupt-driven driver,
+                    // a `login` reader blocked on console input), rather
+                    // than waiting for the loop to quiesce to the idle
+                    // `wait_for_interrupt`. Without it, a perpetually
+                    // runnable task starves device-IRQ delivery — a
+                    // timing-dependent, flaky wake (§2.1 no busy-wait,
+                    // §17.1). A no-op on ports that need no poll point.
+                    self.arch.poll_interrupts();
                 }
                 // No runnable task this step. If every live task has
                 // exited, the system is finished — break so `kernel_main`

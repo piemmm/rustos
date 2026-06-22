@@ -69,6 +69,44 @@ const PL011_FR_TXFF: u32 = 1 << 5;
 /// available to read.
 const PL011_FR_RXFE: u32 = 1 << 4;
 
+/// PL011 interrupt mask set/clear register (`UARTIMSC`) offset. Writing a
+/// bit set unmasks (enables) that interrupt source.
+const PL011_IMSC: usize = 0x38;
+/// `UARTIMSC.RXIM` — receive interrupt (bit 4): fires when the receive FIFO
+/// crosses its trigger level.
+const PL011_IMSC_RXIM: u32 = 1 << 4;
+/// `UARTIMSC.RTIM` — receive-timeout interrupt (bit 6): fires when received
+/// bytes sit below the trigger level for the timeout, so a single typed
+/// byte still raises an interrupt regardless of the FIFO trigger.
+const PL011_IMSC_RTIM: u32 = 1 << 6;
+/// PL011 control register (`UARTCR`) offset.
+const PL011_CR: usize = 0x30;
+/// `UARTCR.UARTEN` (bit 0) — UART enable.
+const PL011_CR_UARTEN: u32 = 1 << 0;
+/// `UARTCR.RXE` (bit 9) — receiver enable (a received byte is only latched,
+/// and thus only raises a receive interrupt, while this is set).
+const PL011_CR_RXE: u32 = 1 << 9;
+/// PL011 interrupt-clear register (`UARTICR`) offset. Write-1-to-clear: a
+/// set bit clears the corresponding latched interrupt.
+const PL011_ICR: usize = 0x44;
+/// `UARTICR.RXIC` (bit 4) and `UARTICR.RTIC` (bit 6) — clear the receive and
+/// receive-timeout interrupt latches. The receive-timeout latch in
+/// particular is *not* cleared merely by emptying the FIFO, so an ISR that
+/// drained an empty FIFO must write these or the line re-asserts forever.
+const PL011_ICR_RXIC_RTIC: u32 = (1 << 4) | (1 << 6);
+/// PL011 interrupt FIFO level-select register (`UARTIFLS`) offset.
+const PL011_IFLS: usize = 0x34;
+/// `UARTIFLS.RXIFLSEL` — receive FIFO trigger select (bits 5:3). Clearing it
+/// selects the lowest (1/8-full) trigger so the receive interrupt fires as
+/// promptly as the FIFO allows.
+const PL011_IFLS_RXSEL: u32 = 0b111 << 3;
+
+/// Mini-UART interrupt-enable register (`AUX_MU_IER_REG`) offset, relative
+/// to the device-tree `reg` base.
+const MINIUART_IER: usize = 0x04;
+/// `AUX_MU_IER_REG` bit 0 — enable the receive interrupt.
+const MINIUART_IER_RX: u32 = 0x01;
+
 /// Mini-UART data register (`AUX_MU_IO_REG`) offset, relative to the
 /// device-tree `reg` base.
 const MINIUART_IO: usize = 0x00;
@@ -177,6 +215,109 @@ impl ConsoleModel {
             Self::Pl011 => status & PL011_FR_RXFE == 0,
             Self::MiniUart => status & MINIUART_LSR_DATA_READY != 0,
         }
+    }
+
+    /// The read-modify-write steps that switch this UART from poll-only to
+    /// **receive-interrupt-driven**, in order.
+    ///
+    /// The freestanding applier (`serial::enable_rx_interrupt`)
+    /// performs each non-empty step as `*reg = (*reg & !clear) | set` against
+    /// the model's documented registers; an empty step ([`RxIntRmw::is_noop`])
+    /// is skipped, so the fixed-length array carries the longer PL011 sequence
+    /// and pads the shorter mini-UART one. Keeping the register/bit policy here
+    /// (beside the offset/readiness helpers) and the MMIO in `crate::serial`
+    /// is the same pure-policy / freestanding-driver split the rest of this
+    /// module uses (`AGENTS.md` §2.2), so the sequence is host-tested without
+    /// touching MMIO.
+    ///
+    /// - **PL011:** select the lowest receive FIFO trigger (`UARTIFLS`), enable
+    ///   the UART and receiver (`UARTCR`), then unmask the receive and
+    ///   receive-timeout interrupts (`UARTIMSC`) — the timeout source ensures a
+    ///   single typed byte interrupts even below the FIFO trigger.
+    /// - **Mini-UART:** set the receive-interrupt-enable bit (`AUX_MU_IER_REG`).
+    #[must_use]
+    pub const fn rx_interrupt_sequence(self) -> [RxIntRmw; 3] {
+        match self {
+            Self::Pl011 => [
+                RxIntRmw {
+                    offset: PL011_IFLS,
+                    clear: PL011_IFLS_RXSEL,
+                    set: 0,
+                },
+                RxIntRmw {
+                    offset: PL011_CR,
+                    clear: 0,
+                    set: PL011_CR_UARTEN | PL011_CR_RXE,
+                },
+                RxIntRmw {
+                    offset: PL011_IMSC,
+                    clear: 0,
+                    set: PL011_IMSC_RXIM | PL011_IMSC_RTIM,
+                },
+            ],
+            Self::MiniUart => [
+                RxIntRmw {
+                    offset: MINIUART_IER,
+                    clear: 0,
+                    set: MINIUART_IER_RX,
+                },
+                RxIntRmw::NOOP,
+                RxIntRmw::NOOP,
+            ],
+        }
+    }
+
+    /// The write that clears this UART's latched receive / receive-timeout
+    /// interrupt, as `(offset, value)` for the register at `offset` from the
+    /// MMIO base, or [`None`] when the model has no write-1-to-clear register
+    /// and the latch is cleared simply by emptying the FIFO.
+    ///
+    /// A receive ISR that drains the FIFO **empty** must apply this (when
+    /// present): the PL011's receive-timeout latch is not cleared by reading
+    /// data once the FIFO is empty, so without the `UARTICR` write the line
+    /// stays asserted and the ISR re-fires forever (an interrupt storm). The
+    /// mini-UART's receive interrupt clears when the data register is read, so
+    /// it needs no separate clear ([`None`]).
+    #[must_use]
+    pub const fn rx_interrupt_clear(self) -> Option<(usize, u32)> {
+        match self {
+            Self::Pl011 => Some((PL011_ICR, PL011_ICR_RXIC_RTIC)),
+            Self::MiniUart => None,
+        }
+    }
+}
+
+/// One read-modify-write applied to a console register when enabling the
+/// receive interrupt: `*reg = (*reg & !clear) | set`, where `reg` is the
+/// register at byte `offset` from the console MMIO base.
+///
+/// Produced by [`ConsoleModel::rx_interrupt_sequence`] and applied by the
+/// freestanding `serial::enable_rx_interrupt`. A [`RxIntRmw::NOOP`]
+/// (both masks zero) is a padding entry the applier skips.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct RxIntRmw {
+    /// Byte offset of the target register from the console MMIO base.
+    pub offset: usize,
+    /// Bits to clear before OR-ing in [`Self::set`].
+    pub clear: u32,
+    /// Bits to set.
+    pub set: u32,
+}
+
+impl RxIntRmw {
+    /// A do-nothing step: both masks zero, so the applier skips it. Pads the
+    /// fixed-length sequence for models that need fewer than three writes.
+    pub const NOOP: Self = Self {
+        offset: 0,
+        clear: 0,
+        set: 0,
+    };
+
+    /// Whether this step changes nothing (both masks zero) and is skipped by
+    /// the applier.
+    #[must_use]
+    pub const fn is_noop(self) -> bool {
+        self.clear == 0 && self.set == 0
     }
 }
 
@@ -421,6 +562,87 @@ mod tests {
         // Other LSR bits (e.g. TX-empty bit 5) do not mark RX ready.
         assert!(!m.rx_ready(0x20));
         assert!(m.rx_ready(0x21));
+    }
+
+    #[test]
+    fn pl011_rx_interrupt_sequence_enables_rx_and_timeout() {
+        let seq = ConsoleModel::Pl011.rx_interrupt_sequence();
+        // Three live steps, none padding: IFLS trigger, CR enable, IMSC unmask.
+        assert!(seq.iter().all(|s| !s.is_noop()));
+        // IFLS: clear the receive trigger-select field (select 1/8), set nothing.
+        assert_eq!(
+            seq[0],
+            RxIntRmw {
+                offset: 0x34,
+                clear: 0b111 << 3,
+                set: 0
+            }
+        );
+        // CR: enable the UART (bit 0) and the receiver (bit 9).
+        assert_eq!(
+            seq[1],
+            RxIntRmw {
+                offset: 0x30,
+                clear: 0,
+                set: (1 << 0) | (1 << 9)
+            }
+        );
+        // IMSC: unmask the receive (bit 4) and receive-timeout (bit 6) sources.
+        assert_eq!(
+            seq[2],
+            RxIntRmw {
+                offset: 0x38,
+                clear: 0,
+                set: (1 << 4) | (1 << 6)
+            }
+        );
+    }
+
+    #[test]
+    fn miniuart_rx_interrupt_sequence_sets_the_ier_bit_and_pads() {
+        let seq = ConsoleModel::MiniUart.rx_interrupt_sequence();
+        // One live step (IER RX-enable) followed by two skipped padding steps.
+        assert_eq!(
+            seq[0],
+            RxIntRmw {
+                offset: 0x04,
+                clear: 0,
+                set: 0x01
+            }
+        );
+        assert!(seq[1].is_noop());
+        assert!(seq[2].is_noop());
+    }
+
+    #[test]
+    fn rx_interrupt_clear_targets_icr_for_pl011_and_none_for_miniuart() {
+        // PL011: write RXIC|RTIC (bits 4 and 6) to UARTICR (0x44) to clear the
+        // latched receive / receive-timeout interrupt.
+        assert_eq!(
+            ConsoleModel::Pl011.rx_interrupt_clear(),
+            Some((0x44, (1 << 4) | (1 << 6)))
+        );
+        // Mini-UART: the receive interrupt clears on a data-register read, so
+        // no separate clear write is needed.
+        assert_eq!(ConsoleModel::MiniUart.rx_interrupt_clear(), None);
+    }
+
+    #[test]
+    fn rx_int_rmw_noop_is_recognised() {
+        assert!(RxIntRmw::NOOP.is_noop());
+        assert!(!RxIntRmw {
+            offset: 0,
+            clear: 0,
+            set: 1
+        }
+        .is_noop());
+        // A clear-only step still changes the register, so it is not a no-op.
+        assert!(!RxIntRmw {
+            offset: 0,
+            clear: 1,
+            set: 0
+        }
+        .is_noop());
     }
 
     #[test]

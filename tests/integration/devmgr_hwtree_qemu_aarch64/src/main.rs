@@ -76,7 +76,7 @@ mod kernel {
 
     use rustos_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel::aarch64::boot as boot_aarch64;
     use rustos_kernel::hwtree_store::HW_TREE;
     use rustos_kernel_core::waitq::HW_TREE_WAITQ;
@@ -109,8 +109,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
     /// allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Sink state machine: `ARMED` until `devmgr` is observed parked,
     /// `BUMPED` after the generation bump is delivered, then PASS.

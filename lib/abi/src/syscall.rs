@@ -513,8 +513,8 @@ impl SyscallNumber {
     ///
     /// Arguments: `endpoint: u64` — the call-endpoint id to bind (a
     /// well-known reserved id the service publishes); `send_caps: *const u8`
-    /// and `recv_caps: *const u8` — two [`crate::CapabilitySet`] wire images
-    /// ([`crate::CapabilitySet::WIRE_LEN`] bytes each) naming the capability a
+    /// and `recv_caps: *const u8` — two `CapabilitySet` wire images
+    /// (`CapabilitySet::WIRE_LEN` bytes each) naming the capability a
     /// *caller* must hold to post (`AGENTS.md` §5.2) and the capability a
     /// *server* must hold to [`SyscallNumber::CALL_RECV`]/
     /// [`SyscallNumber::CALL_REPLY`]; `max_request`, `max_reply`, `capacity:

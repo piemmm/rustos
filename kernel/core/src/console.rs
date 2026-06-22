@@ -317,6 +317,21 @@ impl ConsoleInputQueue {
         take
     }
 
+    /// Free space, in bytes, currently available in the ring.
+    ///
+    /// An interrupt-driven producer (a UART receive ISR draining a hardware
+    /// FIFO into this queue) reads it to apply **lossless backpressure**:
+    /// dequeue from the FIFO only what the ring can accept, leaving the rest
+    /// in the FIFO for the next interrupt rather than reading bytes it would
+    /// have to drop (`AGENTS.md` §2.1 — the software analogue of the FIFO's
+    /// own flow control). A snapshot: with a concurrent drain the true free
+    /// space can only grow, so a producer that trusts this never overfills.
+    #[must_use]
+    pub fn free_capacity(&self) -> usize {
+        let ring = self.ring.lock();
+        CONSOLE_INPUT_QUEUE_CAPACITY - ring.len
+    }
+
     /// Enqueue as many of `bytes` as fit, returning the number accepted
     /// (a short push when the ring fills; the producer retries the
     /// remainder and never blocks, `AGENTS.md` §2.1).
@@ -348,7 +363,17 @@ impl ConsoleRead for ConsoleInputQueue {
 
 impl ConsoleInput for ConsoleInputQueue {
     fn push(&self, bytes: &[u8]) -> Result<usize, Errno> {
-        Ok(self.enqueue(bytes))
+        let pushed = self.enqueue(bytes);
+        // Wake any reader parked in `BlockingConsoleRead` the instant input
+        // lands, so a keyboard-backed console delivers without waiting for
+        // the bounded re-poll deadline (`AGENTS.md` §2.16 — event-driven
+        // where a wake source exists; the timed re-poll is only the polled
+        // UART fallback). A fail-safe no-op before the wait-arch hook is
+        // installed.
+        if pushed > 0 {
+            crate::waitq::console_wake();
+        }
+        Ok(pushed)
     }
 }
 
@@ -613,25 +638,81 @@ where
         if buf.is_empty() {
             return Ok(0);
         }
+        let cpu = self.arch.current_cpu();
+        // The current caller to register on `CONSOLE_WAITQ` so a producer can
+        // `unpark` it, when a scheduler waker hook is installed. [`None`] on a
+        // host build of an unrelated path (no scheduler): such a caller can
+        // still drain immediately-available bytes, but an empty poll fails
+        // closed rather than busy-spinning, since it cannot park (`AGENTS.md`
+        // §2.9), exactly as the process-wait producer does.
+        let parkable: Option<_> = crate::waitq::wait_arch().and_then(|hook| hook.current_task(cpu));
         loop {
-            // Poll the device first, parking only when it had nothing: a
-            // read with pending input never reschedules (`AGENTS.md`
-            // §2.16 — no needless work on the hot path). An inner error
-            // propagates immediately, fail closed (`AGENTS.md` §2.9).
-            let read = self.inner.read(buf)?;
+            // Register **before** polling so a push arriving in the window
+            // between the empty poll and the park is not lost: the producer's
+            // [`crate::waitq::console_wake`] then `unpark`s this task and the
+            // scheduler's wake-pending token converts a concurrent park commit
+            // into a re-ready (this mirrors `irq_wait` / `hw_tree_wait`
+            // exactly — `AGENTS.md` §2.1 / §2.2, one park discipline). A bare
+            // register-after-poll would lose the wake for the final bytes of a
+            // fast input burst (a producer pushing the tail of a line between
+            // the reader's last empty poll and its park), wedging the
+            // line-oriented reader; registering first closes that race.
+            if let Some(task) = parkable {
+                crate::waitq::CONSOLE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+            }
+            let read = match self.inner.read(buf) {
+                Ok(read) => read,
+                Err(e) => {
+                    // An inner-device error propagates immediately, fail
+                    // closed (`AGENTS.md` §2.9); leave the wait set first so
+                    // no stale registration lingers.
+                    if let Some(task) = parkable {
+                        crate::waitq::CONSOLE_WAITQ.deregister(task);
+                    }
+                    return Err(e);
+                }
+            };
             if read > 0 {
+                if let Some(task) = parkable {
+                    crate::waitq::CONSOLE_WAITQ.deregister(task);
+                }
                 return Ok(read);
             }
-            // Park the caller back on the scheduler; control returns here
-            // when it is next dispatched, after which we re-poll. A
-            // `false` means no resumable user kthread is published on
-            // this CPU — the caller is not a parkable user task, so fail
-            // closed rather than busy-spin (`AGENTS.md` §2.1 / §2.9 /
-            // §5.4.5), exactly as the process-wait producer does.
-            let cpu = self.arch.current_cpu();
-            if !reschedule_current(cpu, RescheduleAction::Yield) {
+            // Empty poll: **park** the caller off the run queue until input
+            // arrives (`AGENTS.md` §2.1 — never a busy-yield). A re-enqueuing
+            // yield here would loop in EL1 with IRQs masked, so the dispatch
+            // loop could never reach its idle `wait_for_interrupt` and a
+            // device IRQ (e.g. the interrupt-driven keyboard or UART driver
+            // whose edge *produces* this console's next byte) would be
+            // starved.
+            //
+            // The wait is **event-driven, with no timed re-poll**: a
+            // [`crate::waitq::console_wake`] from a keyboard- or UART-backed
+            // console's input push unparks the reader the instant a byte
+            // lands. A bounded timed re-poll was deliberately *not* used:
+            // arming the per-CPU one-shot here perturbs the transitional
+            // in-kernel block waiter's `wfi` (`crate::aarch64::root_unlock` —
+            // it re-arms its GIC line on every wake and a spurious timer wake
+            // corrupts a multi-block read), which livelocked the one-time
+            // driver-store bundle read. Registering with [`NO_DEADLINE`] arms
+            // no one-shot.
+            //
+            // With no waker hook there is no scheduler to park on, so fail
+            // closed rather than busy-spin (`AGENTS.md` §2.1 / §2.9 / §5.4.5).
+            let Some(task) = parkable else {
+                return Err(Errno::NotImplemented);
+            };
+            let parked = reschedule_current(cpu, RescheduleAction::Park);
+            crate::waitq::CONSOLE_WAITQ.deregister(task);
+            // A `false` means no resumable user kthread is published on this
+            // CPU — fail closed rather than busy-spin, as the process-wait
+            // producer does.
+            if !parked {
                 return Err(Errno::NotImplemented);
             }
+            // Loop: re-register, then re-poll. A push in the narrow window
+            // between this `deregister` and the next `register` is not lost —
+            // the immediate re-poll drains it before any further park.
         }
     }
 }
@@ -955,6 +1036,27 @@ mod tests {
         let mut one = [0u8; 1];
         assert_eq!(queue.read(&mut one), Ok(1));
         assert_eq!(queue.push(b"y"), Ok(1));
+    }
+
+    #[test]
+    fn input_queue_free_capacity_tracks_fill_and_drain() {
+        let queue = ConsoleInputQueue::new();
+        // Empty: the whole capacity is free.
+        assert_eq!(queue.free_capacity(), CONSOLE_INPUT_QUEUE_CAPACITY);
+        // A push shrinks the free space by exactly the bytes accepted, so an
+        // interrupt-driven producer can dequeue only `free_capacity` bytes
+        // from a hardware FIFO and never overfill (lossless backpressure).
+        assert_eq!(queue.push(b"abcd"), Ok(4));
+        assert_eq!(queue.free_capacity(), CONSOLE_INPUT_QUEUE_CAPACITY - 4);
+        // A drain restores it.
+        let mut two = [0u8; 2];
+        assert_eq!(queue.read(&mut two), Ok(2));
+        assert_eq!(queue.free_capacity(), CONSOLE_INPUT_QUEUE_CAPACITY - 2);
+        // Full: no free space, so the producer leaves bytes in the FIFO.
+        let full = [b'x'; CONSOLE_INPUT_QUEUE_CAPACITY];
+        let _ = queue.read(&mut [0u8; CONSOLE_INPUT_QUEUE_CAPACITY]);
+        assert_eq!(queue.push(&full), Ok(CONSOLE_INPUT_QUEUE_CAPACITY));
+        assert_eq!(queue.free_capacity(), 0);
     }
 
     #[test]

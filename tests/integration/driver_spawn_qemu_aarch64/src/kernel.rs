@@ -22,12 +22,12 @@ use rustos_arch_aarch64::{
     Aarch64ArchStorage, SERIAL_SINK,
 };
 use rustos_arch_api::CpuId;
-use rustos_bumpalloc::BumpAllocator;
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_devmgr::{DeviceManager, DriverCandidate};
 use rustos_drvhost::ImageSource;
 use rustos_fdt::Fdt;
+use rustos_kalloc::FreeListAllocator;
 use rustos_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use rustos_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use rustos_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
@@ -134,8 +134,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
 
 /// Page-table pool backing the boot identity space the test switches to so
 /// the MMU is on before any atomic read-modify-write runs (the allocator,

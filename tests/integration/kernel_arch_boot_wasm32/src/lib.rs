@@ -49,7 +49,7 @@ mod kernel {
     use rustos_arch_wasm32::console::write_line;
     use rustos_arch_wasm32::isolation::{live_memory_region, AddressSpace, MemoryRegion};
     use rustos_arch_wasm32::{handle_panic_via_console, preempt, smp, WasmArch};
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
 
     /// The main browser thread is logical CPU 0; the spawned worker is 1.
@@ -78,8 +78,8 @@ mod kernel {
     /// SAFETY: the `HEAP` static outlives the instance and the allocator
     /// is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// This instance's published `Scheduler<WasmArch>` raw pointer, which
     /// the frame-tick and IPI callbacks consult. Each instance publishes

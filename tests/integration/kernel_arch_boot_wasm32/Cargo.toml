@@ -34,7 +34,7 @@ path = "src/lib.rs"
 rustos-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }
 rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 rustos-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 
 [build-dependencies]
 rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

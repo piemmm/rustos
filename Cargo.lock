@@ -526,10 +526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-bumpalloc"
-version = "0.0.0"
-
-[[package]]
 name = "rustos-caps"
 version = "0.0.0"
 dependencies = [
@@ -950,6 +946,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-kalloc"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-kernel"
 version = "0.0.0"
 dependencies = [
@@ -959,7 +959,6 @@ dependencies = [
  "rustos-arch-api",
  "rustos-arch-riscv64",
  "rustos-arch-x86_64",
- "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
  "rustos-devmatch",
@@ -979,6 +978,7 @@ dependencies = [
  "rustos-fdt",
  "rustos-hid",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-ipc",
  "rustos-kernel-irq",
@@ -1391,8 +1391,8 @@ name = "rustos-test-autoload-input-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-log",
@@ -1420,9 +1420,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-cc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",
@@ -1436,9 +1436,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-cc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",
@@ -1513,8 +1513,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-log",
@@ -1535,13 +1535,13 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
  "rustos-devmgr",
  "rustos-drvhost",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-ipc",
@@ -1654,7 +1654,6 @@ dependencies = [
  "ed25519-dalek",
  "rustos-abi",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
  "rustos-drv-display-framebuffer",
@@ -1662,6 +1661,7 @@ dependencies = [
  "rustos-fdt",
  "rustos-itest-fwcfg",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-mem",
  "rustos-kernel-sec",
  "rustos-kernel-virtio",
@@ -1676,12 +1676,12 @@ dependencies = [
  "ed25519-dalek",
  "rustos-abi",
  "rustos-arch-wasm32",
- "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
  "rustos-drv-display-framebuffer",
  "rustos-drvhost",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-log",
 ]
 
@@ -1710,9 +1710,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -1770,9 +1770,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-irq",
  "rustos-kernel-sched-eevdf",
@@ -1787,8 +1787,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-irq",
  "rustos-kernel-sec",
  "rustos-log",
@@ -1823,8 +1823,8 @@ name = "rustos-test-kernel-arch-boot-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -1834,8 +1834,8 @@ name = "rustos-test-kernel-arch-boot-riscv64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-log",
  "rustos-test-riscv64-boot",
 ]
@@ -1846,8 +1846,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-api",
  "rustos-arch-wasm32",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-sched-mlfq",
 ]
 
@@ -1857,9 +1857,9 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-sched-eevdf",
  "rustos-log",
@@ -1871,8 +1871,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-sched-eevdf",
  "rustos-log",
@@ -1904,9 +1904,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -1921,8 +1921,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",
@@ -1988,9 +1988,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2017,9 +2017,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2034,8 +2034,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2096,8 +2096,8 @@ name = "rustos-test-root-unlock-admission-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -2148,9 +2148,9 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-sched-mlfq",
  "rustos-log",
 ]
@@ -2161,8 +2161,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-sched-mlfq",
  "rustos-log",
 ]
@@ -2191,8 +2191,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2223,9 +2223,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2240,8 +2240,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2270,8 +2270,8 @@ name = "rustos-test-spawn-init-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -2281,8 +2281,8 @@ name = "rustos-test-spawn-init-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -2304,8 +2304,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",
@@ -2319,8 +2319,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-syscall",
@@ -2354,8 +2354,8 @@ name = "rustos-test-spawn-session-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-log",
 ]
@@ -2367,8 +2367,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2433,9 +2433,9 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-sched-eevdf",
  "rustos-log",
@@ -2447,8 +2447,8 @@ version = "0.0.0"
 dependencies = [
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-sched-eevdf",
  "rustos-log",
@@ -2625,7 +2625,6 @@ dependencies = [
  "rustos-arch-api",
  "rustos-arch-riscv64",
  "rustos-arch-x86_64",
- "rustos-bumpalloc",
  "rustos-caps",
  "rustos-crypto",
  "rustos-drv-bus-mmio",
@@ -2638,6 +2637,7 @@ dependencies = [
  "rustos-drvhost",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel",
  "rustos-kernel-core",
  "rustos-kernel-irq",
@@ -2668,9 +2668,9 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-aarch64",
  "rustos-arch-api",
- "rustos-bumpalloc",
  "rustos-fdt",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",
@@ -2687,8 +2687,8 @@ dependencies = [
  "rustos-abi",
  "rustos-arch-api",
  "rustos-arch-riscv64",
- "rustos-bumpalloc",
  "rustos-itest-harness",
+ "rustos-kalloc",
  "rustos-kernel-core",
  "rustos-kernel-mem",
  "rustos-kernel-sched-eevdf",

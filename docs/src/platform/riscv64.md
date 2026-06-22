@@ -73,8 +73,8 @@ a 64 MiB `.heap` (NOLOAD) section the linker places *after*
 `__kernel_end`, so the trampoline does not zero it and the usable
 physical-memory map excludes it.
 
-> The 64 MiB boot bump allocator itself lives in the shared
-> `lib/bumpalloc` crate (`rustos-bumpalloc`), registered as the test
+> The 64 MiB kernel heap allocator itself lives in the shared
+> `lib/kalloc` crate (`rustos-kalloc`), registered as the test
 > binary's `#[global_allocator]` — the same allocator the x86_64 boot
 > bins use, defined once (`AGENTS.md` §2.2, §6).
 

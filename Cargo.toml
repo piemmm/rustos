@@ -33,7 +33,7 @@ members = [
     "lib/abi",
     "lib/abi-sys",
     "lib/abi-trap",
-    "lib/bumpalloc",
+    "lib/kalloc",
     "lib/caps",
     "lib/collections",
     "lib/compress",

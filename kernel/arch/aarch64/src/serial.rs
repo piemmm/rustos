@@ -168,6 +168,78 @@ fn getchar() -> Option<u8> {
     None
 }
 
+/// Switch the currently-configured console UART from poll-only receive to
+/// **receive-interrupt-driven**: apply [`ConsoleModel::rx_interrupt_sequence`]
+/// to the device so a received byte raises an interrupt.
+///
+/// The kernel binary calls this once, when console 0 is handed to `login`
+/// (`crate::aarch64::gic_irq::enable_uart_console_irq`): before that the
+/// in-kernel root-unlock kthread reads the passphrase by *polling* the FIFO
+/// (it cooperatively yields, keeping the CPU busy), so the receive interrupt
+/// must stay masked or it would drain those bytes out from under the poll.
+/// After the handoff `login` parks off the run queue, the CPU idles, and this
+/// interrupt is what wakes it when a byte arrives (`AGENTS.md` §2.1 / §20 —
+/// the stream backing owns blocking, and it does so by parking, not polling).
+///
+/// Freestanding-only: the register writes are meaningful solely on the
+/// target. The host build is a no-op (the sequence itself is host-tested in
+/// [`crate::console`]).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn enable_rx_interrupt() {
+    let (base, model) = console::current();
+    for step in model.rx_interrupt_sequence() {
+        if step.is_noop() {
+            continue;
+        }
+        let reg = (base + step.offset) as *mut u32;
+        // SAFETY: `base` is the discovered console UART's MMIO base (the
+        // `virt` PL011 default or the device-tree value) and `step.offset` is
+        // the model's documented register offset, so `reg` is a
+        // naturally-aligned 32-bit device register. The read-modify-write
+        // preserves every bit outside the step's masks and touches no
+        // Rust-managed memory.
+        unsafe {
+            let cur = core::ptr::read_volatile(reg);
+            core::ptr::write_volatile(reg, (cur & !step.clear) | step.set);
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn enable_rx_interrupt() {}
+
+/// Clear the console UART's latched receive / receive-timeout interrupt.
+///
+/// A receive ISR ([`crate::aarch64::gic_irq`]) calls this after it has
+/// drained the hardware FIFO **empty**: on the PL011 the receive-timeout
+/// latch is not cleared merely by emptying the FIFO, so without the
+/// `UARTICR` write the line stays asserted and the ISR re-fires forever (an
+/// interrupt storm that starves every other task). A model whose latch
+/// clears on a data-register read ([`ConsoleModel::rx_interrupt_clear`]
+/// returns [`None`], the mini-UART) needs nothing here.
+///
+/// Freestanding-only: the register write is meaningful solely on the target;
+/// the host build is a no-op (the clear policy is host-tested in
+/// [`crate::console`]).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn clear_rx_interrupt() {
+    let (base, model) = console::current();
+    if let Some((offset, value)) = model.rx_interrupt_clear() {
+        let reg = (base + offset) as *mut u32;
+        // SAFETY: `base` is the discovered console UART's MMIO base and
+        // `offset` is the model's documented write-1-to-clear interrupt-clear
+        // register; a naturally-aligned 32-bit store of the clear mask touches
+        // no Rust-managed memory. The register is write-1-to-clear, so a plain
+        // store of exactly the bits to clear is correct (no read-modify-write).
+        unsafe {
+            core::ptr::write_volatile(reg, value);
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn clear_rx_interrupt() {}
+
 /// Fill `buf` with whatever console input is **immediately available**,
 /// returning the number of bytes read (`0..=buf.len()`).
 ///

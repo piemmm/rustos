@@ -56,7 +56,7 @@
 // discovered worker count (`AGENTS.md` §24.1), so it lives in an
 // allocator-backed boxed slice rather than a fixed array. The
 // freestanding wasm image links the binary's `#[global_allocator]`
-// (`lib/bumpalloc`); the host test build uses `std`'s allocator below.
+// (`lib/kalloc`); the host test build uses `std`'s allocator below.
 extern crate alloc;
 
 // Host unit tests use `std` (e.g. `std::vec::Vec` in fixtures). The

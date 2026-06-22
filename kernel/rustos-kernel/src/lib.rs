@@ -18,7 +18,7 @@
 //!
 //! | Module          | Role                                                                              |
 //! | --------------- | --------------------------------------------------------------------------------- |
-//! | [`bumpalloc`]   | Forward-only bump allocator + the `GlobalAlloc` impl shared by every bin.         |
+//! | [`kalloc`]      | Freeing (coalescing free-list) `GlobalAlloc` impl shared by every bin.        |
 //! | `dispatch_core` | Arch-neutral syscall-dispatch helpers shared by every port (host-tested).         |
 //! | `spawn_layout`  | Shared user-space layout constants for every port's spawn seam/producer (§2.2).   |
 //! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `virtio_boot`, `driver_host`, `panic_ctx`, `serial_sink`. |
@@ -81,7 +81,7 @@ extern crate std;
 // virtio bring-up, the fail-closed syscall-dispatch callback) compiles
 // whenever the target instruction set is x86_64 — the CI host included,
 // so its host unit tests run under `cargo test`.
-pub mod bumpalloc;
+pub mod kalloc;
 
 // The architecture-neutral syscall-dispatch helpers (frame read, errno
 // encoding, slot forwarding) shared by every port's `production_dispatch`
@@ -328,7 +328,7 @@ mod build_support;
 #[cfg(test)]
 mod test_support;
 
-pub use bumpalloc::BumpAllocator;
+pub use kalloc::FreeListAllocator;
 
 #[cfg(kernel_isa = "aarch64")]
 pub use aarch64::arch_wrapper::{Aarch64BinArch, UartConsole, UART_CONSOLE};

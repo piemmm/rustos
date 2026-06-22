@@ -43,10 +43,23 @@
 //! non-timer INTID the GIC delivers — which cannot occur until a line is
 //! routed — so the metal-confirmed boot is unaffected.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use rustos_arch_aarch64::gic::{GicController, GicMmio};
 use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
 use rustos_sync::once::OnceCell;
+
+/// Set while the console UART's receive line is **masked at the GIC because
+/// its receive queue was full** (`drain_uart_into_console_queue`): the ISR
+/// applies flow control by disabling the line rather than spinning on a full
+/// queue (which would storm the CPU and starve the very reader that drains
+/// it). [`rearm_uart_rx_if_masked`] re-enables the line once the reader frees
+/// queue space, so input resumes exactly like a hardware FIFO releasing its
+/// own flow control (`AGENTS.md` §2.1 / §2.16). A plain flag, not a queue of
+/// state: the line is either masked-for-full or not.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static UART_RX_MASKED: AtomicBool = AtomicBool::new(false);
 
 /// Preemption-quantum rate, in hertz (a ~10 ms time slice).
 ///
@@ -180,12 +193,6 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
         unsafe {
             rustos_arch_aarch64::gic::route_spi(line, CPU0_TARGET);
         }
-        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-        {
-            use core::fmt::Write as _;
-            let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
-            let _ = write!(w, "JDBG REARM line={line:#x}\r\n");
-        }
         match ArchIrqController::unmask(&self.inner, line) {
             Ok(()) => Ok(()),
             Err(IrqControlError::OutOfRange) => Err(MaskError::OutOfRange),
@@ -202,6 +209,29 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
 /// [`OnceCell`] enforces the one-shot-publish invariant (`AGENTS.md`
 /// §2.1 — no global mutable state; this is a publish-once pointer).
 static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
+
+/// Set-once slot for the console UART's discovered GIC SPI INTID (the
+/// `arm,pl011` / mini-UART node's `interrupts`, decoded from the firmware
+/// device tree — a discovered value, never a board constant, `AGENTS.md`
+/// §18.1 / §2.20).
+///
+/// The boot path records it ([`set_uart_console_intid`]) when it parses the
+/// device tree, and the unlock kthread's console handoff
+/// ([`enable_uart_console_irq`]) routes + unmasks it once the passphrase
+/// poll is over. [`production_device_irq_dispatch`] reads it from interrupt
+/// context to recognise the console's receive interrupt and feed the bytes
+/// to the login reader rather than the `irq_wait` table. Empty until the
+/// boot path discovers a console interrupt (a UART-less or interrupt-less
+/// tree simply leaves `login` on the polled path — fail closed, §2.9).
+static UART_RX_INTID: OnceCell<u32> = OnceCell::new();
+
+/// Record the console UART's discovered receive-interrupt INTID so the
+/// console handoff can route it and the device-IRQ dispatcher can recognise
+/// it. Idempotent: a second call (there is only ever one console) is a
+/// no-op (`AGENTS.md` §2.1 — publish-once).
+pub fn set_uart_console_intid(intid: u32) {
+    let _ = UART_RX_INTID.set(intid);
+}
 
 /// The `'static` GICv2-backed controller every [`IrqTable::fire`] masks
 /// through.
@@ -257,11 +287,15 @@ pub fn gic_irq_routing() -> IrqRouting {
 /// `Phase::Irq`, strictly before any SPI is routed) returns silently.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub extern "C" fn production_device_irq_dispatch(intid: u32) {
-    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-    {
-        use core::fmt::Write as _;
-        let mut w = rustos_arch_aarch64::serial::ConsoleWriter;
-        let _ = write!(w, "JDBG DEVIRQ intid={intid:#x}\r\n");
+    // The console UART's receive interrupt is a kernel-internal source, not an
+    // `irq_wait` binding: drain the hardware FIFO into the console receive
+    // queue and wake the parked `login` reader. Draining the FIFO clears the
+    // receive-interrupt condition, so the line stays enabled for the next byte
+    // with no mask/re-arm dance (`AGENTS.md` §2.16). Checked first so the
+    // console line never reaches the `irq_wait` table it was never bound on.
+    if UART_RX_INTID.get().ok().flatten().copied() == Some(intid) {
+        drain_uart_into_console_queue();
+        return;
     }
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
         return;
@@ -274,6 +308,163 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     // and parks again (`AGENTS.md` §2.1 / §2.16). Wait-free and
     // allocation-free, safe from this interrupt context.
     rustos_kernel_core::irq_wake();
+}
+
+/// Drain the console UART's hardware receive FIFO into the UART console's
+/// receive queue, waking the parked `login` reader.
+///
+/// Invoked from interrupt context by [`production_device_irq_dispatch`] when
+/// the console's receive interrupt fires. Each `push` enqueues the bytes and
+/// wakes any reader parked in kernel-core's `BlockingConsoleRead`
+/// ([`rustos_kernel_core::ConsoleInputQueue::push`] →
+/// `crate::waitq::console_wake`). It is **bounded** by the console queue's
+/// free space (at most one queue capacity per interrupt) and **lossless**:
+/// it dequeues from the FIFO only what the queue can accept and leaves any
+/// surplus in the FIFO, so the level-sensitive receive interrupt re-fires as
+/// the reader drains the queue (`AGENTS.md` §2.1 / §2.16). Wait-free and
+/// allocation-free.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+fn drain_uart_into_console_queue() {
+    use rustos_kernel_core::ConsoleInput as _;
+    let queue = &crate::aarch64::arch_wrapper::UART_INPUT;
+    loop {
+        // Lossless backpressure: dequeue from the hardware FIFO only what the
+        // console queue can accept this instant. Reading more would force the
+        // surplus to be dropped (the bytes leave the FIFO but the queue's
+        // `push` is short), which truncates a `login` line — including its
+        // terminating newline — and wedges the line-oriented reader. Leaving
+        // the surplus in the FIFO keeps the receive interrupt asserted; it
+        // re-fires once `login` drains the queue and frees space, so input
+        // streams through a sliding window with no byte lost (the software
+        // analogue of the FIFO's own flow control, `AGENTS.md` §2.1). `login`
+        // is already runnable (the first push woke it), so it drains promptly
+        // and the re-fire is progress, not a storm (`AGENTS.md` §2.16).
+        let free = queue.free_capacity();
+        if free == 0 {
+            // The console queue is full and the reader has not yet drained
+            // it. Spinning here (re-reading a full queue) would storm the CPU
+            // and starve the reader, so apply flow control: **mask** the
+            // receive line at the GIC and leave the surplus in the hardware
+            // FIFO. [`rearm_uart_rx_if_masked`], called from the reader's
+            // drain path, re-enables the line once space frees, and the
+            // level-sensitive line re-asserts on the bytes still in the FIFO
+            // — the software analogue of a hardware FIFO releasing flow
+            // control, with no byte lost and no storm (`AGENTS.md` §2.1).
+            if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
+                let _ = GIC_IRQ_CONTROLLER.mask(intid);
+                UART_RX_MASKED.store(true, Ordering::Release);
+            }
+            break;
+        }
+        let mut buf = [0u8; 32];
+        let want = free.min(buf.len());
+        let n = rustos_arch_aarch64::serial::read_console_bytes(&mut buf[..want]);
+        if n == 0 {
+            // The FIFO read empty: clear the latched receive / receive-timeout
+            // interrupt so the line deasserts. The PL011 receive-timeout latch
+            // is *not* cleared by emptying the FIFO, so without this the line
+            // stays asserted and this ISR re-fires forever, starving every
+            // other task (`AGENTS.md` §2.1 / §2.16).
+            rustos_arch_aarch64::serial::clear_rx_interrupt();
+            // Clear-then-recheck (no lost byte): a byte the device latched in
+            // the window *between* the empty read above and the clear just
+            // issued would have had its interrupt cleared with it — stranding
+            // it in the FIFO with no re-fire, which wedges the parked
+            // line-oriented `login` reader forever (the lost-wakeup race
+            // `AGENTS.md` §2.1 forbids). So read once more: a byte that raced
+            // in before the clear is drained now, and any byte that arrives
+            // *after* the clear latches a fresh, uncleared interrupt that
+            // re-fires this ISR. Only a genuinely still-empty FIFO ends the
+            // drain.
+            let n2 = rustos_arch_aarch64::serial::read_console_bytes(&mut buf[..want]);
+            if n2 == 0 {
+                break;
+            }
+            // `n2 <= want <= free`: the raced-in chunk fits and its push wakes
+            // the parked reader. Loop to keep draining (and to re-clear on the
+            // next genuine empty).
+            let _ = queue.push(&buf[..n2]);
+            continue;
+        }
+        // `n <= want <= free`, so the whole chunk fits and the push wakes the
+        // parked reader (`ConsoleInputQueue::push` → `console_wake`).
+        let _ = queue.push(&buf[..n]);
+    }
+}
+
+/// Synchronously drain the console UART's hardware receive FIFO into the
+/// receive queue from the **reader's** context (a `stream_read` syscall),
+/// not interrupt context.
+///
+/// Called by [`crate::aarch64::arch_wrapper::UartConsoleRead::read`] on the
+/// path that is about to park an empty-handed reader. It makes console input
+/// **poll-backed**, not solely interrupt-driven: the reader pulls any byte
+/// already sitting in the hardware FIFO directly, so it only ever parks when
+/// the FIFO *and* the software queue are genuinely empty. That closes every
+/// residual device-IRQ-delivery race — a receive interrupt the CPU has not
+/// yet taken (it is busy in the masked EL1 dispatch loop), or a sub-trigger
+/// FIFO tail still awaiting the PL011 receive-timeout — because the reader no
+/// longer *depends* on the interrupt to see a byte that is already in the
+/// FIFO; the interrupt remains only the wake that unparks it once it has
+/// parked (`AGENTS.md` §2.1 — the park is genuine, never a busy-poll: a byte
+/// arriving after this drain raises the interrupt that wakes the parked task).
+///
+/// Runs in an EL1 syscall with IRQ taking masked, so it cannot race the ISR
+/// ([`drain_uart_into_console_queue`]) on this single console; the shared
+/// drain body is the one definition both entry points reuse (`AGENTS.md`
+/// §2.2).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub fn poll_uart_into_console_queue() {
+    drain_uart_into_console_queue();
+}
+
+/// Re-enable the console UART's receive line if the ISR masked it on a full
+/// queue ([`drain_uart_into_console_queue`]).
+///
+/// Called from the reader's drain path
+/// ([`crate::aarch64::arch_wrapper::UartConsoleRead`]) after it frees queue
+/// space: re-routing + unmasking the line lets the level-sensitive PL011
+/// re-assert on the bytes it left in the FIFO, resuming delivery — the
+/// software analogue of a hardware FIFO releasing flow control. A cheap
+/// `Acquire` load on the common (not-masked) path, so it adds no cost to a
+/// normal read (`AGENTS.md` §2.16).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub fn rearm_uart_rx_if_masked() {
+    if !UART_RX_MASKED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
+        let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
+    }
+}
+
+/// Enable the console UART's receive interrupt and route + unmask its GIC
+/// line, switching `login`'s console input from polled to interrupt-driven.
+///
+/// Called once, from the root-unlock console handoff
+/// ([`crate::unlock_service`] / `crate::aarch64::root_unlock`), *after* the
+/// in-kernel kthread has finished polling the passphrase off the FIFO
+/// ([`rustos_arch_aarch64::serial::enable_rx_interrupt`] documents why the
+/// interrupt must stay masked until then). A console whose interrupt the boot
+/// path could not discover leaves the slot empty and this a no-op — `login`
+/// stays on the polled path rather than failing (fail closed, `AGENTS.md`
+/// §2.9).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub fn enable_uart_console_irq() {
+    let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() else {
+        return;
+    };
+    // Enable the receive interrupt at the device first, then route + unmask it
+    // at the GIC, so the first delivered edge already has a drain target.
+    rustos_arch_aarch64::serial::enable_rx_interrupt();
+    // SAFETY: the GIC distributor + CPU interface are up (the core's `irq`
+    // phase ran `gic::init`) and the EL1 vectors + device dispatch are
+    // installed, so a routed line is delivered to a valid handler; this routes
+    // the discovered console SPI to the boot CPU.
+    unsafe {
+        rustos_arch_aarch64::gic::route_spi(intid, CPU0_TARGET);
+    }
+    let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
 }
 
 /// Publish `table` and register [`production_device_irq_dispatch`] with

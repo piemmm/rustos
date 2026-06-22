@@ -33,7 +33,7 @@ path = "src/lib.rs"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-wasm32 = { path = "../../../kernel/arch/wasm32", version = "=0.0.0" }
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }

@@ -668,8 +668,8 @@ pub trait SyscallHandlers {
     /// server half of [`Self::ipc_call`]).
     ///
     /// The dispatcher has already checked `send_caps` and `recv_caps` are
-    /// non-null `UserPtr`s. The implementation copies both
-    /// [`rustos_abi::CapabilitySet`] wire images in through the validated
+    /// non-null `UserPtr`s. The implementation copies both `CapabilitySet`
+    /// wire images in through the validated
     /// boundary, builds the endpoint with the caller as creator (the
     /// bind-time `CAP_IPC_BIND_PRIVILEGED` check for a restricted sender runs
     /// inside the endpoint constructor, `AGENTS.md` §5.2), and binds it under

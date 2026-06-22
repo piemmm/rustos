@@ -59,13 +59,13 @@ mod kernel {
     use rustos_arch_wasm32::bindings::{host_has_display, host_present_framebuffer};
     use rustos_arch_wasm32::console::write_line;
     use rustos_arch_wasm32::handle_panic_via_console;
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
     use rustos_caps::CapabilitySet;
     use rustos_crypto::Ed25519PublicKey;
     use rustos_drv_display_framebuffer::{register as fb_register, Framebuffer, FramebufferConfig};
     use rustos_drvhost::{
         DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
     };
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 
     use crate::fixture::{FB_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
@@ -98,8 +98,8 @@ mod kernel {
     /// SAFETY: the `HEAP` static outlives the instance and the allocator
     /// is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     // --- Static scan-out surface -------------------------------------
 

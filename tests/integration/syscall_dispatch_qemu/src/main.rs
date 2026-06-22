@@ -100,9 +100,9 @@ mod kernel {
     use rustos_abi::{CapabilityId, SyscallNumber};
     use rustos_arch_x86_64::qemu_exit;
     use rustos_caps::CapabilitySet;
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::{
-        boot, handle_panic_via_kernel_core, BinArch, BumpAllocator, SerialSink, SERIAL_SINK,
+        boot, handle_panic_via_kernel_core, BinArch, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
 
     use rustos_kernel_core::{
@@ -135,8 +135,8 @@ mod kernel {
     /// page-aligned `HEAP` static outlives the binary, the allocator
     /// is the only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     // --- Stable audit identifiers --------------------------------
 

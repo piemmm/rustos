@@ -49,12 +49,12 @@ path = "src/main.rs"
 
 [dependencies]
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-# The boot-heap bump allocator lives in `lib/bumpalloc` so the
+# The boot-heap bump allocator lives in `lib/kalloc` so the
 # production bin, the QEMU integration test bins, and the architecture
 # ports' boot harnesses all register the identical implementation
 # (`AGENTS.md` §2.2 — no duplication, §6 — shared code lives in `lib/`).
-# The `bumpalloc` module re-exports it under the historical path.
-rustos-bumpalloc = { path = "../../lib/bumpalloc", version = "=0.0.0" }
+# The `kalloc` module re-exports it under the historical path.
+rustos-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../lib/caps", version = "=0.0.0" }
 # The `virtio_boot` wiring config names `Ed25519PublicKey` for the
 # driver-host trust-anchor list (`drvhost::HostConfig::trusted_signers`).

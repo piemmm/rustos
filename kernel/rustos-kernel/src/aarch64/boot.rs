@@ -1061,5 +1061,17 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     // declares, so secondary-core bring-up issues `CPU_ON` over the
     // board's conduit rather than an assumed one (`AGENTS.md` §17.2).
     out.psci_method = fdt::psci_method(&fdt);
+    // Record the console UART's receive-interrupt line so the root-unlock
+    // console handoff can switch `login`'s input from polled to
+    // interrupt-driven (`crate::aarch64::gic_irq::enable_uart_console_irq`).
+    // Done here (post-MMU) rather than beside the MMU-off console-base
+    // discovery because storing it flips an atomic `OnceCell`, which is only
+    // sound with the MMU on; and unconditionally, so the no-disk path (which
+    // never runs the unlock kthread) still gets it. A tree without a
+    // representable console interrupt leaves `login` on the polled path (fail
+    // closed, `AGENTS.md` §2.9 — `login` then keeps re-polling, never errors).
+    if let Some(intid) = crate::aarch64::root_unlock::console_spi(&fdt) {
+        crate::aarch64::gic_irq::set_uart_console_intid(intid);
+    }
     out
 }

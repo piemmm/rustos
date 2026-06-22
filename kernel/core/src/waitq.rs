@@ -35,7 +35,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_kernel_sched_api::TaskId;
+use rustos_kernel_sched_api::{CpuId, TaskId};
 use rustos_sync::once::OnceCell;
 use rustos_sync::SpinLock;
 
@@ -64,6 +64,19 @@ pub trait WaitQueueArch: Sync {
     /// Arm (or clear, with `None`) the calling CPU's timed-wake one-shot to
     /// the nearest pending deadline (`rustos_arch_api::SchedulerArch::set_wakeup`).
     fn set_wakeup(&self, deadline_ns: Option<u64>);
+
+    /// The scheduler task currently switched in on `cpu`, or [`None`] if no
+    /// task is running there (or `cpu` is out of range). Used by a blocking
+    /// syscall handler that must register the *current* caller on a
+    /// [`WaitQueue`] before parking it but is not itself handed the caller's
+    /// id (the console-read backing, `crate::console::BlockingConsoleRead`).
+    /// The default returns [`None`] so an uninstalled hook (host tests of
+    /// unrelated paths) fails closed rather than parking an unknown task
+    /// (`AGENTS.md` §2.9).
+    fn current_task(&self, cpu: CpuId) -> Option<TaskId> {
+        let _ = cpu;
+        None
+    }
 }
 
 /// One registered waiter: the task to wake and the absolute monotonic-ns
@@ -224,6 +237,52 @@ pub fn serve_wake() {
     }
 }
 
+/// The wait-queue holding `stream_read` callers blocked on an empty
+/// console (`crate::console::BlockingConsoleRead`). A login reading an
+/// as-yet-silent console parks here off the run queue (`AGENTS.md` §2.1 —
+/// **no** busy yield) so the CPU can idle and service device interrupts
+/// (e.g. an interrupt-driven keyboard driver), and is woken either by
+/// [`console_wake`] the instant input is pushed to a keyboard-backed
+/// console's input queue, or by the timed [`WaitQueue::sweep`] re-poll its
+/// bounded deadline arms (so a *polled* UART backing, which has no push, is
+/// re-checked). Each woken reader re-polls its device and either returns
+/// bytes or parks again, so a wake for a different reader is a harmless
+/// spurious wake (`AGENTS.md` §2.16) and the check-then-park race is closed
+/// by the scheduler's wake-pending token (the same interlock `irq_wait` /
+/// `hw_tree_wait` use).
+pub static CONSOLE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every parked console reader because input was pushed to a
+/// keyboard-backed console's input queue; each re-polls its device and
+/// either returns the bytes or parks again. A fail-safe no-op before the
+/// arch hook is installed (`AGENTS.md` §2.9).
+pub fn console_wake() {
+    if let Some(arch) = wait_arch() {
+        CONSOLE_WAITQ.wake_all(arch);
+    }
+}
+
+/// The wait-queue holding `wait` (process-reap) callers blocked on a child
+/// that has not yet exited (`crate::procwait::KernelProcessWait`). A parent
+/// blocked in `wait` parks here off the run queue (`AGENTS.md` §2.1 — **no**
+/// busy yield) so the CPU can idle and service device interrupts; it is
+/// woken by [`procwait_wake`] the instant any task records its exit, then
+/// re-polls its child table and either reaps or parks again. Reaping is an
+/// explicit event (a child exit), never a timeout, so every waiter
+/// registers with [`NO_DEADLINE`]; the check-then-park race is closed by the
+/// scheduler's wake-pending token (the same interlock `irq_wait` /
+/// `hw_tree_wait` use).
+pub static PROCWAIT_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake every parent parked in `wait` because a task recorded its exit;
+/// each re-checks its child table and either reaps or parks again. A
+/// fail-safe no-op before the arch hook is installed (`AGENTS.md` §2.9).
+pub fn procwait_wake() {
+    if let Some(arch) = wait_arch() {
+        PROCWAIT_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding `irq_wait` callers (Design D — the user-space
 /// device-driver IRQ path). A task that bound an IRQ line with `irq_bind`
 /// and called `irq_wait` parks here off the run queue (`AGENTS.md` §2.1 —
@@ -301,19 +360,30 @@ pub fn timed_wake_sweep() {
         let now = arch.now_ns();
         HW_TREE_WAITQ.sweep(arch, now);
         IRQ_WAITQ.sweep(arch, now);
+        CONSOLE_WAITQ.sweep(arch, now);
         // Re-arm to the soonest pending deadline across *every* timed
-        // wait-queue, so neither a `hw_tree_wait` nor an `irq_wait` finite
-        // timeout is dropped because the other queue armed a later one-shot
-        // (`AGENTS.md` §17.1 — the nearest armed wakeup).
-        let next = match (
-            HW_TREE_WAITQ.earliest_deadline(),
-            IRQ_WAITQ.earliest_deadline(),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        arch.set_wakeup(next);
+        // wait-queue, so no finite timeout is dropped because another queue
+        // armed a later one-shot (`AGENTS.md` §17.1 — the nearest armed
+        // wakeup).
+        arch.set_wakeup(nearest_timed_deadline());
     }
+}
+
+/// The soonest finite deadline pending across **every** timed wait-queue
+/// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`), or [`None`] if none has
+/// one. A park site arms the one-shot to this so registering a *later*
+/// deadline never delays an already-pending earlier wake (`AGENTS.md`
+/// §17.1).
+#[must_use]
+pub fn nearest_timed_deadline() -> Option<u64> {
+    [
+        HW_TREE_WAITQ.earliest_deadline(),
+        IRQ_WAITQ.earliest_deadline(),
+        CONSOLE_WAITQ.earliest_deadline(),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 #[cfg(test)]

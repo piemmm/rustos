@@ -117,6 +117,30 @@ pub(crate) fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     None
 }
 
+/// Find the GICv2 INTID of the console UART node — the same node
+/// [`rustos_arch_aarch64::console::find_console`] selects (`arm,pl011`
+/// preferred, the BCM2835 AUX mini-UART as fallback) — decoded through
+/// [`gic_device_intid`], a discovered value and never a board constant
+/// (`AGENTS.md` §18.1 / §2.20).
+///
+/// [`None`] when no console node carries a representable `interrupts`
+/// specifier (fail closed, `AGENTS.md` §2.9 / §18.4): the console then stays
+/// on the polled path, and `login`'s reader keeps parking until the polled
+/// re-check delivers — never an error.
+pub(crate) fn console_spi(fdt: &Fdt<'_>) -> Option<u32> {
+    let mut mini: Option<u32> = None;
+    for node in fdt.nodes() {
+        let node = node.ok()?;
+        if node.is_compatible("arm,pl011") {
+            return gic_device_intid(&node);
+        }
+        if node.is_compatible("brcm,bcm2835-aux-uart") && mini.is_none() {
+            mini = gic_device_intid(&node);
+        }
+    }
+    mini
+}
+
 /// A blocking [`IrqWaiter`] for the unlock kthread: it **re-arms** the
 /// device's GIC line, then parks on a race-free `wfi` until the next
 /// completion.
@@ -200,6 +224,13 @@ impl IrqWaiter for RearmingIrqWaiter {
 fn release_console0_to_login() {
     CONSOLE0_GATE.open();
     LATE_USERS_DB.resolve();
+    // The passphrase poll is over, so switch the UART console from polled to
+    // interrupt-driven: a `login` reader now parks off the run queue and the
+    // receive interrupt wakes it (`AGENTS.md` §2.1 / §20). A no-op when the
+    // boot path discovered no console interrupt (the console then stays on the
+    // polled path) or when the console is the video keyboard rather than the
+    // UART (`crate::aarch64::gic_irq::enable_uart_console_irq`).
+    crate::aarch64::gic_irq::enable_uart_console_irq();
 }
 
 /// Admit the in-kernel root-unlock kthread if the boot path bound a

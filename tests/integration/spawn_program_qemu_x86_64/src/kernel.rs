@@ -10,8 +10,10 @@ use rustos_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS}
 use rustos_arch_x86_64::paging::{self, KERNEL_VMA_BASE};
 use rustos_arch_x86_64::userentry::UserMode;
 use rustos_arch_x86_64::{qemu_exit, syscall_entry};
-use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK};
+use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
+use rustos_kernel::{
+    boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
+};
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -29,8 +31,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 /// `EventId` emitted when every boot init phase completed.
 const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);

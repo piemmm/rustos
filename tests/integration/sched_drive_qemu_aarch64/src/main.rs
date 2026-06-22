@@ -85,8 +85,8 @@ mod kernel {
         Aarch64Arch, SERIAL_SINK,
     };
     use rustos_arch_api::{CpuId, SchedulerArch};
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
     use rustos_fdt::Fdt;
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use rustos_log::{log, Event, EventId, Level};
 
@@ -158,8 +158,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
     /// allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Published `Scheduler<Aarch64Arch>` raw pointer the IRQ-path
     /// callbacks consult. The boot core stores it (from a leaked `Arc`)

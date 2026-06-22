@@ -58,7 +58,7 @@ use crate::common::{
     carve_dma_map, drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
-use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
@@ -77,8 +77,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary; the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 // --- Stable identifiers ----------------------------------------------
 

@@ -32,7 +32,7 @@ rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 

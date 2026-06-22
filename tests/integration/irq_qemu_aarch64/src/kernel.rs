@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use rustos_abi::IrqHandle;
 use rustos_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
 use rustos_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
-use rustos_bumpalloc::BumpAllocator;
+use rustos_kalloc::FreeListAllocator;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
 use rustos_kernel_sec::TaskId;
 use rustos_log::{log, Event, EventId, Level};
@@ -30,8 +30,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
 
 // --- PL031 RTC (the `virt` board's GICv2 SPI device) --------------
 

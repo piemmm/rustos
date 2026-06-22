@@ -1,6 +1,6 @@
 [package]
-name = "rustos-bumpalloc"
-description = "RustOS shared no_std forward-only bump allocator for freestanding boot heaps."
+name = "rustos-kalloc"
+description = "RustOS shared no_std freeing (coalescing free-list) kernel heap allocator for freestanding images."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

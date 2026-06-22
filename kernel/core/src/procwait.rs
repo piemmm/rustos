@@ -299,6 +299,10 @@ where
 
     fn record_exit(&self, task: TaskId, code: i32) {
         self.table.lock().record_exit(task, code);
+        // Wake every parent parked in `wait`: the exiting task may be the
+        // child one is blocked on (`AGENTS.md` §2.1 — a real park woken by
+        // the exit event). The lock is released above before the wake.
+        crate::waitq::procwait_wake();
     }
 
     fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno> {
@@ -312,14 +316,27 @@ where
                 Reap::Ready(child) => return Ok(child),
                 Reap::NoChild => return Err(Errno::NotFound),
                 Reap::Blocked => {
-                    // Park the caller back on the scheduler; control returns
-                    // here when it is next dispatched, after which we re-poll.
-                    // A `false` means no resumable user kthread is published
-                    // on this CPU — the caller is not a parkable user task,
-                    // so fail closed rather than busy-spin (`AGENTS.md` §2.1 /
-                    // §2.9 / §5.4.5).
+                    // **Park** the caller off the run queue until a child
+                    // exits (`AGENTS.md` §2.1 — never a busy-yield): a
+                    // re-enqueuing yield here would keep the run queue
+                    // non-empty forever, so the dispatch loop could never
+                    // reach its idle `wait_for_interrupt` and a device IRQ
+                    // (e.g. an interrupt-driven driver PID 1 spawned) would be
+                    // starved. Register on `PROCWAIT_WAITQ` *before* parking
+                    // so an exit racing the park is not lost: `record_exit`'s
+                    // `procwait_wake` unparks this task and the scheduler's
+                    // wake-pending token converts a concurrent park into a
+                    // re-ready (the same interlock `irq_wait` / `hw_tree_wait`
+                    // use). Reaping is an explicit event, so the registration
+                    // carries `NO_DEADLINE` (no timed wake). A `false`
+                    // reschedule means no resumable user kthread is published
+                    // on this CPU — fail closed rather than busy-spin
+                    // (`AGENTS.md` §2.9 / §5.4.5).
                     let cpu = self.arch.current_cpu();
-                    if !reschedule_current(cpu, RescheduleAction::Yield) {
+                    crate::waitq::PROCWAIT_WAITQ.register(parent.0, crate::waitq::NO_DEADLINE);
+                    let parked = reschedule_current(cpu, RescheduleAction::Park);
+                    crate::waitq::PROCWAIT_WAITQ.deregister(parent.0);
+                    if !parked {
                         return Err(Errno::NotImplemented);
                     }
                 }

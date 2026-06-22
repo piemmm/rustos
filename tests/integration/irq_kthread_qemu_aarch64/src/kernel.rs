@@ -46,8 +46,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: rustos_bumpalloc::BumpAllocator = unsafe {
-    rustos_bumpalloc::BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
+static ALLOCATOR: rustos_kalloc::FreeListAllocator = unsafe {
+    rustos_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
 };
 
 // --- PL031 RTC (the `virt` board's GICv2 SPI device) --------------

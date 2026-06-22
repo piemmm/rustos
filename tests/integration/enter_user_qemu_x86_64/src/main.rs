@@ -82,9 +82,9 @@ mod kernel {
     use rustos_arch_api::{EnterUser, UserEntry};
     use rustos_arch_x86_64::userentry::UserMode;
     use rustos_arch_x86_64::{paging, qemu_exit, syscall_entry};
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::{
-        boot, handle_panic_via_kernel_core, BumpAllocator, SerialSink, SERIAL_SINK,
+        boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
     use rustos_log::{Event, EventId, Sink};
 
@@ -97,8 +97,8 @@ mod kernel {
     /// `HEAP` static outlives the binary and the allocator is its only
     /// consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// `EventId` emitted when every boot init phase completed.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);

@@ -46,7 +46,7 @@ rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The boot heap the `kernel_core::kernel_main` allocations (the leaked
 # `KernelState`, the scheduler, the spawned address spaces) draw from.
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

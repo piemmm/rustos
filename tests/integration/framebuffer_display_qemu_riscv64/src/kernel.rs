@@ -28,7 +28,7 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use rustos_log::{Event, EventId, Sink};
 use rustos_test_riscv64_boot::boot;
 
@@ -42,8 +42,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 /// `EventId(4004)` — `AuditEvent::BootCompleted`. Pinned by the
 /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.

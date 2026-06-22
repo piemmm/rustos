@@ -12,7 +12,7 @@ use rustos_arch_aarch64::{
     enable_fp_el1, exceptions, handle_panic_via_serial, qemu_exit, syscall_entry,
     userentry::UserMode, SERIAL_SINK,
 };
-use rustos_bumpalloc::BumpAllocator;
+use rustos_kalloc::FreeListAllocator;
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -38,8 +38,8 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
 
 /// Exit code the C program returns when every abi-v1 check and both syscall
 /// round-trips pass (`csrc/main.c` `EXIT_OK`).

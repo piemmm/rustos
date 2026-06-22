@@ -26,7 +26,7 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zer
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 rustos-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
-rustos-bumpalloc = { path = "../../../lib/bumpalloc", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 rustos-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 rustos-drvhost = { path = "../../../userland/system/drvhost", version = "=0.0.0" }

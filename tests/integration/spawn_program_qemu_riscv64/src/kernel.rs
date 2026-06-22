@@ -10,7 +10,7 @@ use rustos_arch_riscv64::{
     handle_panic_via_serial, paging, qemu_exit, syscall_entry, trap, userentry::UserMode,
     SERIAL_SINK,
 };
-use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use rustos_kernel_core::{spawn_and_enter, SpawnRequest};
 use rustos_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -30,8 +30,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 /// Decimal argument the program is spawned with and the exit code it must
 /// therefore return. A small positive value distinct from crt0's reserved

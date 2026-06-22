@@ -48,8 +48,8 @@ pub use rustos_kernel::{SerialSink as HarnessSerialSink, SERIAL_SINK as HARNESS_
 #[doc(hidden)]
 pub use rustos_log::{Event as HarnessEvent, EventId as HarnessEventId, Sink as HarnessSink};
 
-use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-use rustos_kernel::BumpAllocator;
+use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
+use rustos_kernel::FreeListAllocator;
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
@@ -62,8 +62,8 @@ static mut HEAP: Heap = Heap::ZERO;
 /// SAFETY: the `HEAP` static outlives the binary; the allocator is the
 /// only consumer. Identical justification to the other QEMU test bins.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator =
-    unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
 // --- Stable identifiers ----------------------------------------------
 

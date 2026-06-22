@@ -52,7 +52,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use rustos_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use rustos_bumpalloc::{BumpAllocator, Heap, HEAP_BYTES};
+    use rustos_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use rustos_kernel::aarch64::boot as boot_aarch64;
     use rustos_log::{Event, EventId, Sink};
 
@@ -78,8 +78,8 @@ mod kernel {
     /// SAFETY: the page-aligned `HEAP` static outlives the binary and
     /// the allocator is its only consumer.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// `EventId` emitted by `kernel_core::kernel_main` once every init
     /// phase completed. Pinned by the `event_ids_are_unique` test in

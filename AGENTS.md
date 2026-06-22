@@ -420,7 +420,6 @@ rustos/
 │   │                    #   lib/abi-trap, for NON-Rust programs (§9, §16.4).
 │   ├── abi-trap/        # The single per-arch user->kernel syscall trap
 │   │                    #   carve-out (§1), shared by abi-sys and lib/rt (§2.2).
-│   ├── bumpalloc/       # Boot-heap bump allocator shared by boot bins.
 │   ├── caps/            # Capability primitives.
 │   ├── collections/     # no_std collections not in core/alloc.
 │   ├── compress/        # First-party LZ codec; RustFS compresses every record
@@ -455,6 +454,9 @@ rustos/
 │   ├── input/           # Shared pointer input-event vocabulary
 │   │                    #   (PointerButton/InputEvent) routed by the WM and
 │   │                    #   taskbar (§17.4).
+│   ├── kalloc/          # Freeing kernel heap allocator (coalescing free-list)
+│   │                    #   shared by every freestanding bin's #[global_allocator]
+│   │                    #   (§4 — deterministic OOM, never a panic).
 │   ├── keymap/          # Shared terminal key map: the one Key+Modifiers ->
 │   │                    #   console (tty) byte encoder a keyboard driver's
 │   │                    #   console_input producer uses, over lib/vt (§2.2).

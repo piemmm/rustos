@@ -22,8 +22,8 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::{boot, handle_panic_via_kernel_core, BumpAllocator, SERIAL_SINK};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SERIAL_SINK};
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
 
@@ -43,11 +43,11 @@ mod kernel {
     /// `Heap` type is `#[repr(C, align(4096))]`) and the storage
     /// lives for the lifetime of the binary because `HEAP` is a
     /// `static`. The allocator is not exposed through any other
-    /// API, so it satisfies the `BumpAllocator::new` uniqueness
+    /// API, so it satisfies the `FreeListAllocator::new` uniqueness
     /// requirement.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     // --- Panic handler --------------------------------------------
 
@@ -91,8 +91,8 @@ mod kernel {
 
     use rustos_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
     use rustos_kernel::aarch64::boot;
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
-    use rustos_kernel::BumpAllocator;
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::FreeListAllocator;
 
     /// Static boot heap for the bump allocator.
     ///
@@ -109,11 +109,11 @@ mod kernel {
     /// `const` context; the pointer is page-aligned (`Heap` is
     /// `#[repr(C, align(4096))]`) and the storage lives for the lifetime
     /// of the binary because `HEAP` is a `static`. The allocator is not
-    /// exposed through any other API, satisfying `BumpAllocator::new`'s
+    /// exposed through any other API, satisfying `FreeListAllocator::new`'s
     /// uniqueness requirement.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Forward to the shared aarch64 panic bridge (parks the CPU).
     #[panic_handler]
@@ -147,9 +147,9 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use rustos_arch_riscv64::{handle_panic_via_serial, SERIAL_SINK};
-    use rustos_kernel::bumpalloc::{Heap, HEAP_BYTES};
+    use rustos_kernel::kalloc::{Heap, HEAP_BYTES};
     use rustos_kernel::riscv64::boot;
-    use rustos_kernel::BumpAllocator;
+    use rustos_kernel::FreeListAllocator;
 
     /// Static boot heap for the bump allocator.
     ///
@@ -170,11 +170,11 @@ mod kernel {
     /// `const` context; the pointer is page-aligned (`Heap` is
     /// `#[repr(C, align(4096))]`) and the storage lives for the lifetime
     /// of the binary because `HEAP` is a `static`. The allocator is not
-    /// exposed through any other API, satisfying `BumpAllocator::new`'s
+    /// exposed through any other API, satisfying `FreeListAllocator::new`'s
     /// uniqueness requirement.
     #[global_allocator]
-    static ALLOCATOR: BumpAllocator =
-        unsafe { BumpAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    static ALLOCATOR: FreeListAllocator =
+        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
     /// Forward to the shared riscv64 panic bridge (parks the hart).
     #[panic_handler]
@@ -211,5 +211,5 @@ fn _suppress_unused_lib() {
     // Reference the library half from the host build so cargo's
     // dead-code lint stays quiet without an `#[allow]` on the lib
     // itself.
-    let _ = rustos_kernel::BumpAllocator::used;
+    let _ = rustos_kernel::FreeListAllocator::used;
 }
