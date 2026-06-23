@@ -333,11 +333,27 @@ services its source and returns to the *same* task; only a timer tick taken
 from EL0/U-mode/ring 3 reschedules (each port gates preemption on the
 interrupted privilege).
 
+A port whose console transmit is buffered (the aarch64 PL011 — §20) keeps
+its in-memory transmit ring draining through
+[`KernelArch::pump_console_tx`], a non-blocking top-up the dispatch loop
+calls on **every** iteration: after each successful dispatch (in
+`service_between_dispatches`, alongside the deferred-wake drain) and again
+just before the idle park. This is what keeps the log flowing even while a
+perpetually-runnable in-kernel kthread (the polled USB-keyboard report pump,
+which yields every poll but never parks) holds the loop off its idle branch
+forever — an idle-only drain would freeze the log the instant such a kthread
+exists, and the transmit-FIFO "has-room" interrupt cannot be relied on to
+self-sustain the drain on real silicon (the Raspberry Pi 4's flow-blocked
+UART). Output therefore flows at the loop's dispatch rate, independent of
+idle and of the transmit interrupt. The seam defaults to a no-op, so ports
+with synchronous console output (riscv64 SBI, x86_64 COM1) inherit nothing.
+
 The idle CPU itself sleeps through [`KernelArch::wait_for_interrupt`]: when
 the dispatch loop finds no runnable task but a live task is still parked
 (e.g. a perpetual service blocked in a blocking-wait syscall), the loop
-masks device interrupts, drains any pending wake once more, and — if nothing
-became runnable — parks the CPU on the port's race-free idle wait (`wfi` on
+masks device interrupts, drains any pending wake once more, tops up the
+buffered console transmit one last time, and — if nothing became runnable —
+parks the CPU on the port's race-free idle wait (`wfi` on
 aarch64/riscv64, `sti; hlt; cli` on x86_64) rather than halting, then
 re-enables interrupts; the armed wakeup one-shot or a device IRQ wakes a
 waiter and the loop re-steps and dispatches it. Masking across the park and

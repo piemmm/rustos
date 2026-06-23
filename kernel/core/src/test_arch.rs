@@ -91,6 +91,13 @@ pub struct TestArch {
     ticks: AtomicU64,
     halts: AtomicU64,
     ipis: AtomicU64,
+    /// Number of [`KernelArch::pump_console_tx`] calls observed.
+    ///
+    /// The dispatch loop calls the buffered-console-transmit hook on every
+    /// iteration (after each dispatch and before the idle park), so a test
+    /// asserts numerically that the per-dispatch servicing reached the seam
+    /// rather than relying on timing.
+    pump_tx_calls: AtomicU64,
     /// Monotonic-ns counter backing [`KernelArch::monotonic_ns`].
     ///
     /// Each call increments the counter and returns the new value, so
@@ -113,6 +120,7 @@ impl TestArch {
             ticks: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
+            pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
         }
     }
@@ -139,6 +147,15 @@ impl TestArch {
     #[must_use]
     pub fn ipi_count(&self) -> u64 {
         self.ipis.load(Ordering::Relaxed)
+    }
+
+    /// Number of times [`KernelArch::pump_console_tx`] was reached.
+    ///
+    /// Lets a test assert the dispatch loop tops up the buffered console
+    /// transmit on every iteration, not only when it idles.
+    #[must_use]
+    pub fn pump_console_tx_count(&self) -> u64 {
+        self.pump_tx_calls.load(Ordering::Relaxed)
     }
 
     /// Stage the value the *next* [`KernelArch::monotonic_ns`] call
@@ -190,5 +207,12 @@ impl KernelArch for TestArch {
         // "monotonically-non-decreasing" contract documented on
         // [`KernelArch::monotonic_ns`].
         self.monotonic_ns.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn pump_console_tx(&self) {
+        // The host mock has no buffered device; it only records that the
+        // dispatch loop reached the seam so a test can assert the
+        // per-dispatch console-transmit top-up happens.
+        self.pump_tx_calls.fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -18,7 +18,7 @@
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
 
-use crate::{regs, BringUpFault, BringUpStage, Emmc2};
+use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci};
 
 /// Map the discovered EMMC2 register window and bring the card online.
 ///
@@ -47,10 +47,16 @@ use crate::{regs, BringUpFault, BringUpStage, Emmc2};
 ///
 /// Requires [`CapabilityId::MMIO_MAP`] in addition to the load-time
 /// [`CapabilityId::DRV_LOAD`] [`crate::register`] checked.
-pub fn open_discovered(
+///
+/// `waiter` is the completion seam the engine parks on instead of
+/// busy-spinning a status register (`AGENTS.md` §17.1): the metal kernel
+/// supplies one that blocks the calling task on the controller's bound GIC
+/// interrupt line, while a host test supplies a no-op (`AGENTS.md` §2.2).
+pub fn open_discovered<W: CompletionWait>(
     host: &dyn DriverHost,
     regs_phys: u64,
-) -> Result<Emmc2<rustos_abi::RegisterWindow>, BringUpFault> {
+    waiter: W,
+) -> Result<Emmc2<IrqSdhci<W>>, BringUpFault> {
     if !host.has_capability(CapabilityId::MMIO_MAP) {
         return Err(BringUpFault {
             stage: BringUpStage::MapWindow,
@@ -67,5 +73,5 @@ pub fn open_discovered(
             stage: BringUpStage::MapWindow,
             error: MmioMapError::as_driver_error(e),
         })?;
-    Emmc2::open(window)
+    Emmc2::open(IrqSdhci::new(window, waiter))
 }

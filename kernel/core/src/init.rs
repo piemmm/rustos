@@ -460,6 +460,31 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             process_wait,
         }
     }
+
+    /// Service the work the dispatch loop owes between two task dispatches,
+    /// once the just-run task has suspended and no kernel lock or scheduler
+    /// critical section is in flight.
+    ///
+    /// Two things, in order:
+    ///
+    /// 1. Perform any wake a device-IRQ / timer handler deferred while the
+    ///    task ran. The handler is lock-free and only flagged the wake; the
+    ///    real `unpark` runs here, where taking the scheduler/run-queue locks
+    ///    is safe (`AGENTS.md` §17.1).
+    /// 2. Top up the buffered console transmit
+    ///    ([`KernelArch::pump_console_tx`]). The loop calls this on **every**
+    ///    successful dispatch, not only when it idles, so a port whose
+    ///    transmit is buffered keeps draining even while a perpetually
+    ///    runnable in-kernel kthread (e.g. the polled USB-keyboard report
+    ///    pump) keeps the loop from ever reaching its idle park — the output
+    ///    then flows at the loop's dispatch rate, independent of the
+    ///    transmit-FIFO interrupt the silicon may not self-sustain
+    ///    (`AGENTS.md` §2.16 / §20). A no-op on ports with synchronous
+    ///    console output.
+    fn service_between_dispatches(&self) {
+        let _ = crate::waitq::drain_pending_wakes();
+        self.arch.pump_console_tx();
+    }
 }
 
 impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
@@ -606,12 +631,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                     if self.scheduler.live_task_count() == 0 {
                         break;
                     }
-                    // Perform any wake a device-IRQ / timer handler deferred
-                    // while the task ran (the handler is lock-free and only
-                    // flagged the wake; the real `unpark` runs here — no
-                    // kernel lock held, no scheduler critical section in
-                    // flight, so the scheduler/run-queue locks are safe).
-                    let _ = crate::waitq::drain_pending_wakes();
+                    // Service the per-dispatch background work (deferred
+                    // wakes + buffered console transmit) now that the task
+                    // has suspended and no kernel lock / scheduler critical
+                    // section is in flight.
+                    self.service_between_dispatches();
                 }
                 // No runnable task this step. If every live task has
                 // exited, the system is finished — break so `kernel_main`
@@ -628,13 +652,17 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                     // so a wake a handler flagged just before we commit to
                     // sleep is observed and re-dispatched rather than slept
                     // through (`AGENTS.md` §2.1 — no lost wake-up). If
-                    // nothing became runnable, `wait_for_interrupt` parks on
-                    // a `wfi`-class instruction that still wakes on the
+                    // nothing became runnable, top up the buffered console
+                    // transmit one last time (so a port whose transmit FIFO
+                    // is the `wfi` wake source has it armed against the
+                    // remaining backlog, §20) and `wait_for_interrupt` parks
+                    // on a `wfi`-class instruction that still wakes on the
                     // pending-but-masked interrupt; re-enabling IRQs then
                     // *takes* it, its handler flags the wake, and the loop
                     // re-steps and drains it.
                     self.arch.set_device_irqs(false);
                     if !crate::waitq::drain_pending_wakes() {
+                        self.arch.pump_console_tx();
                         self.arch.wait_for_interrupt();
                     }
                     self.arch.set_device_irqs(true);
@@ -1278,6 +1306,41 @@ mod tests {
         assert!(second.is_some());
         assert_ne!(first, second);
         assert_eq!(state.scheduler.live_task_count(), before + 2);
+    }
+
+    #[test]
+    fn service_between_dispatches_tops_up_the_console_transmit() {
+        // Regression for the Pi 4 metal serial stall: the dispatch loop's
+        // Ran arm must top up the buffered console transmit on **every**
+        // dispatch, not only when it reaches the idle park — otherwise a
+        // perpetually-runnable in-kernel kthread (the polled USB-keyboard
+        // report pump) keeps the loop from ever idling and the log freezes
+        // on real silicon (the transmit-FIFO interrupt does not self-sustain
+        // the drain). Before the fix the Ran arm only drained deferred wakes
+        // and never pumped, so this count stayed `0` (`AGENTS.md` §17.1 /
+        // §2.16 / §20).
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let ctx = KernelInitSpawner::new(
+            &state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+        );
+
+        assert_eq!(state.arch.pump_console_tx_count(), 0);
+        // Each per-dispatch servicing pumps the console transmit exactly
+        // once (on top of draining any deferred wake).
+        ctx.service_between_dispatches();
+        assert_eq!(state.arch.pump_console_tx_count(), 1);
+        ctx.service_between_dispatches();
+        assert_eq!(state.arch.pump_console_tx_count(), 2);
     }
 
     /// A [`ProcessSpawn`] recording the `rxe`, capability set, and argument

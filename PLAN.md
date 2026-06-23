@@ -362,10 +362,13 @@ deferred to later stages (not stubbed, §15.1).
   `storage/virtio_blk`, `network/virtio_net`. Each emulable driver has a
   `load → use → unload → reload` QEMU vertical; the shared `fw_cfg`/ramfb DMA
   protocol lives once in `rustos-itest-fwcfg` (§2.2). The Pi 4 EMMC2
-  SD-host driver (`drivers/storage/emmc2`, an Arasan/SDHCI-5.1 PIO block
-  driver) ships its read and write paths host-tested against a
-  register-level mock; it has no QEMU vertical (QEMU models no Pi EMMC2)
-  and its metal acceptance is the `plans/PI.md` P8 checklist.
+  SD-host driver (`drivers/storage/emmc2`, an Arasan/SDHCI-5.1 SD block
+  driver: PIO data transfer, **interrupt-driven completion** — the
+  command/transfer waits park on the controller's bound GIC line through a
+  `CompletionWait` seam rather than busy-spinning, §17.1/§2.16) ships its
+  read and write paths host-tested against a register-level mock; it has no
+  QEMU vertical (QEMU models no Pi EMMC2) and its metal acceptance is the
+  `plans/PI.md` P8 checklist.
 - DMA goes through `kernel/sec::dma` (`CAP_MMIO_MAP`/`MEM_DMA` checked, audited);
   MMIO is reached only through the capability-gated `KernelMmioMapper`.
 
@@ -1163,14 +1166,22 @@ order (one fully-gated increment each):
              the Pi 4 UART log shows the keyboard up at the init seam
              (`4129`/`4131`) and `devmgr` `13002` unbound records for the HID
              node;
-           - **B4 — DONE (host + metal).** The aarch64 unlock kthread
-             dispatches on the bound floor block driver (`run_unlock` →
-             `virtio_blk_unlock` / `emmc2_unlock`): the EMMC2 arm admits
-             `rustos-drv-storage-emmc2` through the signed §8 gate, maps the
-             matched node's sole SDHCI register window under `CAP_MMIO_MAP`
-             through a minimal in-kernel MMIO-only `Emmc2Host`, and feeds the
-             opened `Block` to the shared `finish_unlock` tail virtio-blk also
-             uses (§2.2). On a real Pi 4 it mounts `/System` (4140) and unlocks
+           - **B4 — DONE (host; metal acceptance pending).** The aarch64
+             unlock kthread dispatches on the bound floor block driver
+             (`run_unlock` → `virtio_blk_unlock` / `emmc2_unlock`): the EMMC2
+             arm admits `rustos-drv-storage-emmc2` through the signed §8 gate,
+             maps the matched node's sole SDHCI register window under
+             `CAP_MMIO_MAP` through a minimal in-kernel MMIO-only `Emmc2Host`,
+             **discovers the controller's GIC SPI from the firmware device tree
+             (`emmc2_spi`) and binds/routes/arms it on the published IRQ table**,
+             and feeds the opened `Block` to the shared `finish_unlock` tail
+             virtio-blk also uses (§2.2). The SD command/transfer completion
+             waits **park on that bound line** through an `Emmc2Completion`
+             `CompletionWait` over the same re-arming `wfi` waiter the virtio
+             path uses (`RearmingIrqWaiter`, §2.2), never busy-spinning a status
+             register (§17.1/§2.16 — a polled driver must not monopolise the CPU
+             and starve the serial drain during `/System` autoload). On a real
+             Pi 4 it mounts `/System` (4140) and unlocks
              the encrypted root (4133 → users db 4040 → 4136). Two SD defects
              fixed to get there are the load-bearing facts of the driver:
              `reset_and_clock` powers the card rail (3.3 V via `CONTROL0`,
@@ -1686,15 +1697,109 @@ order (one fully-gated increment each):
                    build, and the full `cargo xtask test --qemu` matrix passes
                    (devmgr park/wake, `wait`, `irq`, `uart-console`,
                    `root-unlock-login`, `preempt_el0` on every arch).
+                 - **Residual cooperative reader removed (the metal stall cause).**
+                   P-5 made the *dispatch loop* preemptive, but the interactive
+                   root-unlock kthread still read the passphrase through a
+                   **cooperative busy-poll** (`KthreadConsoleRead` looped
+                   `yield_now` over an RX-masked raw-FIFO poll), so that kthread
+                   was always runnable, the loop never reached idle, `pump_tx`
+                   never ran, and on metal (where the PL011 TX "FIFO-has-room"
+                   interrupt does not self-sustain the drain) console output only
+                   advanced when a keystroke's echo incidentally flushed the FIFO
+                   — "type → progress → stall". Fixed: the unlock kthread now
+                   reads the **interrupt-fed** console queue (`UART_CONSOLE_READ`
+                   over `UART_INPUT`, or the video keyboard queue) and **parks**
+                   off the run queue between empty polls — it registers its
+                   scheduler id (`set_unlock_console_task`/`unlock_console_task`)
+                   on `CONSOLE_WAITQ` (register-before-poll lost-wakeup interlock)
+                   and the console RX interrupt's `console_wake` unparks it. The
+                   UART branch enables RX for the unlock window
+                   (`enable_uart_console_irq`, now idempotent with the `login`
+                   handoff); the video branch needs no RX enable (keyboard
+                   injection wakes it). The loop now idles while waiting for the
+                   passphrase, so `pump_tx` and tickless idle run and the console
+                   drains. Host-proven (`KthreadConsoleRead` parks, never
+                   busy-yields).
+                 - **Buffered serial drain decoupled from idle (the second metal
+                   stall cause).** Even with the unlock reader parking, the debug
+                   log still froze the instant `Root passphrase:` appeared: the
+                   USB-keyboard **report-pump kthread** (`keyboard_service::
+                   spawn_pump`) runs `loop { pump_once(); yield_now(); }` — it is
+                   *perpetually runnable*, so the dispatch loop never reaches its
+                   `Idle` arm, where `pump_tx` (the buffered-UART top-up) was the
+                   only reliable drain on metal (the PL011 TX "has-room" interrupt
+                   does not self-sustain the drain). Fixed structurally, not by
+                   touching the keyboard pump: the buffered console transmit now
+                   drains on **every** dispatch-loop iteration through a new
+                   default-no-op `KernelArch::pump_console_tx()` seam — called in
+                   the Ran arm (`KernelInitSpawner::service_between_dispatches`,
+                   alongside `drain_pending_wakes`) *and* before the idle `wfi`.
+                   aarch64 overrides it with the non-blocking `serial::pump_tx`
+                   (moved out of `wait_for_interrupt`, now a pure park); riscv64/
+                   x86_64 inherit the no-op (synchronous console output). Output
+                   now flows at the loop's dispatch rate regardless of idle and
+                   independent of the transmit interrupt. Host-proven
+                   (`service_between_dispatches_tops_up_the_console_transmit`:
+                   the count was `0` before the fix, increments per dispatch now).
+                 - **PL011 transmit interrupt fires when the FIFO runs dry (the
+                   third metal stall cause).** The transmit interrupt was only
+                   *unmasked* (`TXIM`); its FIFO trigger level was never
+                   programmed, so it sat at the PL011 reset default of 1/2 full.
+                   On the Pi 4's flow-blocked UART a small ring drain never lifts
+                   the transmit FIFO above 1/2, so it never transitions back down
+                   through the trigger and the level-based transmit interrupt
+                   never re-asserts — the background drain (`service_uart_tx_irq`)
+                   stalls until something else pushes bytes. **Fixed:**
+                   `ConsoleModel::tx_interrupt_enable` now first lowers the
+                   transmit trigger to its lowest level (`UARTIFLS.TXIFLSEL` →
+                   1/8 full) and then unmasks `TXIM`, so the interrupt fires the
+                   moment the hardware FIFO runs dry and reliably re-arms the
+                   refill ISR; `serial::enable_tx_interrupt` applies the 2-step
+                   sequence (mirroring the RX `IFLS`-then-`IMSC` shape, §2.2). The
+                   mini-UART needs no trigger step (its TX interrupt already fires
+                   on "holding register empty"). Host-proven
+                   (`tx_interrupt_enable_lowers_the_trigger_then_unmasks_only_tx`).
+                 - **EMMC2 SD reads are interrupt-driven, not busy-spun (the
+                   structural §17.1 cause of the residual ~15 s stall).** The SD
+                   driver's completion waits (`wait_interrupt`) busy-spun the
+                   SDHCI status register with `core::hint::spin_loop()` up to the
+                   poll budget, never yielding. Because the kernel is
+                   non-preemptible for in-kernel kthreads, every SD read froze the
+                   dispatch loop for the whole disk-I/O span, so `pump_tx` could
+                   not run — and around the passphrase prompt the driver-store
+                   serve loop hammers `/System` to satisfy `devmgr`'s autoloads,
+                   so that burst of busy-spun reads was the ~15 s the log stalled
+                   for. **Fixed (operator-directed, the more-correct option):**
+                   `reset_and_clock` enables the controller's completion-signal
+                   sources (`IRPT_EN`), and `wait_interrupt` now **parks** on the
+                   controller's interrupt through a `SdhciHost::await_irq` /
+                   `CompletionWait` seam between status re-reads — never a
+                   busy-spin (§17.1/§2.16). The kernel supplies that seam:
+                   `emmc2_unlock` discovers the EMMC2 GIC SPI (`emmc2_spi`),
+                   binds/routes/arms it on the published IRQ table, and parks the
+                   kthread on it through the same re-arming `wfi` waiter the virtio
+                   path uses (`Emmc2Completion` over `RearmingIrqWaiter`, §2.2).
+                   The identification-only handshakes that have no completion
+                   source (reset, clock-stable) still spin, each poll-budget
+                   bounded and fail-closed (§2.1). Host-proven
+                   (`interrupt_driven_read_parks_until_the_controller_signals`,
+                   `reset_enables_the_completion_interrupt_signal`); metal
+                   re-confirmation pending (QEMU models no Pi EMMC2, §0.4).
                  - **Remaining:** (a) a dedicated QEMU vertical that proves the
                    in-kernel case directly — a long in-kernel kthread observes a
-                   timer/device IRQ fire *during* its busy span; (b) metal
+                   timer/device IRQ fire *during* its busy span (QEMU's TX IRQ
+                   self-sustains, so it cannot reproduce the metal drain stall the
+                   `pump_console_tx` seam and the FIFO-dry trigger fix); (b) metal
                    re-confirmation on a real Pi 4 that boot stays responsive
-                   through the slow PCIe read-back (§0.9); (c) once metal-confirmed
-                   good, deleting the debug-only `pcie_brcm` MISC read-backs
+                   through the slow PCIe read-back *and* that the debug log keeps
+                   flowing past the passphrase prompt (§0.9); (c) once
+                   metal-confirmed good,
+                   deleting the debug-only `pcie_brcm` MISC read-backs
                    (`4111`/`4119`/`4120`) they no longer freeze anything (§2.14).
-                   The dispatch-loop `pump_tx` idle top-up stays (it arms `TXIM`
-                   so the background TX ISR is the event that wakes the park).
+                   The polled USB-keyboard pump remains CPU-hungry (it yields but
+                   never parks); making xHCI HID interrupt-driven so it parks is a
+                   separate §2.16 efficiency follow-up, not a correctness blocker
+                   now that the serial drain no longer depends on the loop idling.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass
@@ -2099,9 +2204,11 @@ spec §18.
   policy — proven end to end on `-M virt` by the `root_unlock_login` (policy)
   and `root_unlock_admission` (full kthread-admission boot) verticals. It
   dispatches on the bound floor block driver (`run_unlock` →
-  `virtio_blk_unlock` over the device-IRQ path, or `emmc2_unlock` over
-  programmed I/O); the EMMC2 arm is wired and host-tested at the driver level,
-  with its live SD-card mount metal-gated (`raspi4b` cannot model EMMC2, §0.4 /
+  `virtio_blk_unlock` over the device-IRQ path, or `emmc2_unlock` — which
+  brings the SD host up over its own bound GIC interrupt line, parking on
+  completion rather than busy-spinning the SDHCI status register, §17.1/§2.16);
+  the EMMC2 arm is wired and host-tested at the driver level, with its live
+  SD-card mount metal-gated (`raspi4b` cannot model EMMC2, §0.4 /
   P8 / B4). The login
   `Run` binary ships at
   `/System/Services/login`

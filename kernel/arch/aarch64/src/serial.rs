@@ -89,24 +89,35 @@
 //! The ring drains **without ever blocking the CPU on the slow UART**:
 //!
 //! 1. **The transmit interrupt drains it in the background**
-//!    (`service_uart_tx_irq`). The device raises it whenever the transmit
-//!    FIFO has room, so the ISR refills the FIFO from the ring (`drain_ready`,
-//!    no spin) and re-arms `TXIM` to the remaining backlog, and a `wfi` is
-//!    woken by it — so a queued backlog flows at the UART's real throughput
-//!    with the CPU asleep in `wfi` between FIFO refills, never busy-waiting.
-//!    The single shared GIC line carries both directions; reading the masked
-//!    interrupt status (`ConsoleModel::tx_interrupt_fired` /
-//!    `rx_interrupt_fired`) keeps the ISR from ever draining receive bytes the
-//!    passphrase poll still owns.
-//! 2. **The idle park tops up the FIFO before sleeping** (`pump_tx`, from
-//!    `KernelArch::wait_for_interrupt`). This is a **non-blocking** push of
-//!    whatever the FIFO accepts right now plus a `TXIM` re-arm — never a
-//!    per-byte spin — so a queued backlog has its transmit interrupt armed
-//!    before the CPU parks, guaranteeing the ISR is the event that wakes the
+//!    (`service_uart_tx_irq`). The ISR refills the FIFO from the ring
+//!    (`drain_ready`, no spin) and re-arms `TXIM` to the remaining backlog,
+//!    and a `wfi` is woken by it — so a queued backlog flows at the UART's
+//!    real throughput with the CPU asleep in `wfi` between FIFO refills, never
+//!    busy-waiting. Crucially, `enable_tx_interrupt` first programs the
+//!    PL011 transmit FIFO trigger to its lowest level (`UARTIFLS.TXIFLSEL` →
+//!    1/8 full), so the interrupt fires **as soon as the hardware FIFO runs
+//!    dry**: at the reset-default 1/2 trigger a small ring drain never lifts
+//!    the FIFO above the level, so it never transitions back down through it
+//!    and the transmit interrupt never re-asserts — the drain stalls on the
+//!    Pi 4's flow-blocked UART. The lowest trigger guarantees the FIFO-empty
+//!    event always raises the interrupt that refills it. The single shared GIC
+//!    line carries both directions; reading the masked interrupt status
+//!    (`ConsoleModel::tx_interrupt_fired` / `rx_interrupt_fired`) keeps the ISR
+//!    from ever draining receive bytes the passphrase poll still owns.
+//! 2. **The dispatch loop tops up the FIFO on every iteration** (`pump_tx`,
+//!    through the `KernelArch::pump_console_tx` seam the loop calls after each
+//!    dispatched task and again before the idle `wfi`). This is a
+//!    **non-blocking** push of whatever the FIFO accepts right now plus a
+//!    `TXIM` re-arm — never a per-byte spin — so the backlog drains at the
+//!    loop's dispatch rate independently of the interrupt, a belt-and-braces
+//!    that keeps output flowing even while a perpetually-runnable in-kernel
+//!    kthread (the polled USB-keyboard report pump, which yields every poll
+//!    but never parks) holds the loop off its idle branch. Topping up every
+//!    iteration also arms `TXIM` (at the FIFO-dry trigger above) before the
+//!    CPU parks, so the transmit ISR remains the event that wakes the idle
 //!    `wfi` and drains the rest. The fully preemptive dispatch loop
 //!    (`AGENTS.md` §17.1) runs with device IRQs enabled, so the transmit ISR
-//!    also fires *while* an in-kernel task runs — output no longer waits for
-//!    the loop to reach idle.
+//!    may *also* fire while a task runs where the silicon delivers it.
 //!
 //! An earlier revision drained the dispatch loop with a **blocking** per-byte
 //! `putchar` spin (and refused to `wfi` while a backlog remained), so on this
@@ -477,17 +488,22 @@ fn pump(ring: &mut SerialRing) {
 /// Top up the transmit FIFO from the buffered ring **without ever blocking
 /// on the UART** — the dispatch loop's serial-drain helper.
 ///
-/// Called before the idle `wfi` (`KernelArch::wait_for_interrupt`,
-/// `crate::aarch64::arch_wrapper`). It pushes only the bytes the
-/// FIFO has room for right now and arms the transmit interrupt to the rest
-/// (`pump`); it never busy-waits at the UART's byte rate. The backlog then
-/// drains in the background through the transmit interrupt
-/// ([`service_uart_tx_irq`]), which a `wfi` is woken by — so a large backlog
-/// flows at the UART's real rate with the CPU asleep between FIFO refills,
-/// rather than spinning in `putchar` and starving real work (the regression
-/// that turned a ~300 ms PCIe read-back into seconds and made the prompt
-/// lethargic). A no-op when the ring is momentarily locked by a producer (it
-/// arms `TXIM` itself on exit).
+/// Called by the dispatch loop on **every** iteration — after each
+/// dispatched task and again before the idle `wfi` — through the
+/// `KernelArch::pump_console_tx` seam (`crate::aarch64::arch_wrapper`). It
+/// pushes only the bytes the FIFO has room for right now and arms the
+/// transmit interrupt to the rest (`pump`); it never busy-waits at the UART's
+/// byte rate. Draining every iteration (not only at idle) is what keeps the
+/// log flowing on real silicon: the PL011 transmit "FIFO-has-room" interrupt
+/// does not reliably self-sustain the drain on the Pi 4's flow-blocked UART,
+/// and a perpetually-runnable in-kernel kthread (the polled USB-keyboard
+/// report pump) can keep the loop from ever reaching its idle branch — so an
+/// idle-only top-up froze the log the instant the `Root passphrase:` prompt
+/// appeared. The remaining backlog still drains in the background through the
+/// transmit interrupt ([`service_uart_tx_irq`]) where the silicon delivers
+/// it, and the pre-`wfi` top-up arms `TXIM` so that interrupt is the event
+/// that wakes the idle `wfi`. A no-op when the ring is momentarily locked by
+/// a producer (it arms `TXIM` itself on exit).
 pub fn pump_tx() {
     SERIAL_RING.try_with(pump);
 }
@@ -603,14 +619,16 @@ fn getchar() -> Option<u8> {
 /// **receive-interrupt-driven**: apply [`ConsoleModel::rx_interrupt_sequence`]
 /// to the device so a received byte raises an interrupt.
 ///
-/// The kernel binary calls this once, when console 0 is handed to `login`
-/// (`crate::aarch64::gic_irq::enable_uart_console_irq`): before that the
-/// in-kernel root-unlock kthread reads the passphrase by *polling* the FIFO
-/// (it cooperatively yields, keeping the CPU busy), so the receive interrupt
-/// must stay masked or it would drain those bytes out from under the poll.
-/// After the handoff `login` parks off the run queue, the CPU idles, and this
-/// interrupt is what wakes it when a byte arrives (`AGENTS.md` §2.1 / §20 —
-/// the stream backing owns blocking, and it does so by parking, not polling).
+/// The kernel binary calls this (through
+/// `crate::aarch64::gic_irq::enable_uart_console_irq`) at the start of the
+/// interactive session — the root-unlock kthread enables it for its
+/// passphrase prompt, and the `login` handoff calls it again idempotently.
+/// Both the unlock kthread and `login` then read the interrupt-fed
+/// `UART_INPUT` queue and **park** off the run queue between keystrokes; this
+/// interrupt is what drains the FIFO into that queue and wakes the parked
+/// reader when a byte arrives (`AGENTS.md` §2.1 / §17.1 / §20 — the stream
+/// backing owns blocking, and it does so by parking, never busy-polling the
+/// raw FIFO).
 ///
 /// Freestanding-only: the register writes are meaningful solely on the
 /// target. The host build is a no-op (the sequence itself is host-tested in
@@ -684,21 +702,28 @@ pub fn clear_rx_interrupt() {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn clear_rx_interrupt() {}
 
-/// Unmask the console UART's **transmit** interrupt so the device raises an
-/// interrupt while its transmit FIFO has room, driving
+/// Switch the console UART into **transmit-interrupt-driven** mode so the
+/// device raises an interrupt as its transmit FIFO drains, driving
 /// [`service_uart_tx_irq`] to refill the FIFO from the buffered ring at the
 /// UART's real throughput — independent of the scheduler ever reaching its
 /// idle wait (`AGENTS.md` §2.16 / §20: logging must never stall a task).
 ///
-/// Touches only the transmit-interrupt-enable bit (PL011 `UARTIMSC.TXIM`,
-/// mini-UART `AUX_MU_IER_REG` bit 1), never the receive bits, so it is safe
-/// to call during the passphrase FIFO-poll window when the receive interrupt
-/// is deliberately masked. Idempotent. Freestanding-only; the host build is a
-/// no-op (the register policy is host-tested in [`crate::console`]).
+/// Applies [`ConsoleModel::tx_interrupt_enable`]: on the PL011 it first lowers
+/// the transmit FIFO trigger to 1/8 full (`UARTIFLS.TXIFLSEL`) so the
+/// interrupt fires the moment the FIFO runs dry — without this the Pi 4's
+/// flow-blocked PL011 never transitions down through the reset-default 1/2
+/// trigger on a small ring drain and the transmit interrupt never re-asserts
+/// — then unmasks the transmit interrupt (`UARTIMSC.TXIM`). It touches no
+/// receive bits (PL011) so it is safe to call during the passphrase
+/// FIFO-poll window when the receive interrupt is deliberately masked.
+/// Idempotent. Freestanding-only; the host build is a no-op (the register
+/// policy is host-tested in [`crate::console`]).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn enable_tx_interrupt() {
     let (base, model) = console::current();
-    apply_reg_rmw(base, model.tx_interrupt_enable());
+    for step in model.tx_interrupt_enable() {
+        apply_reg_rmw(base, step);
+    }
 }
 
 /// Inert on the host build (no UART MMIO).

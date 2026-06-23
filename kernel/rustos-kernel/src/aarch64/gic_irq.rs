@@ -293,10 +293,14 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     // into the FIFO (`service_uart_tx_irq`, the interrupt-driven drain that
     // keeps logging flowing without stalling any task — `AGENTS.md` §2.16 /
     // §20), and drain the receive FIFO into the console queue **only** when a
-    // receive interrupt actually fired. While the receive source is masked
-    // (the passphrase FIFO-poll window) it never fires, so the poll keeps its
-    // bytes; after the login handoff enables it, draining wakes the parked
-    // `login` reader. Checked first so the console line never reaches the
+    // receive interrupt actually fired. Receive is interrupt-driven for the
+    // whole interactive session (enabled by the root-unlock kthread for its
+    // passphrase prompt and again at the `login` handoff), so draining wakes
+    // whichever reader is parked on `CONSOLE_WAITQ` — the unlock kthread's
+    // `KthreadConsoleRead` or, after the handoff, `login`'s
+    // `BlockingConsoleRead`. While the receive source is still masked (no
+    // interactive reader yet) it never fires, so this returns without
+    // draining. Checked first so the console line never reaches the
     // `irq_wait` table it was never bound on.
     if UART_RX_INTID.get().ok().flatten().copied() == Some(intid) {
         let rx_pending = rustos_arch_aarch64::serial::service_uart_tx_irq();
@@ -447,16 +451,19 @@ pub fn rearm_uart_rx_if_masked() {
 }
 
 /// Enable the console UART's receive interrupt and route + unmask its GIC
-/// line, switching `login`'s console input from polled to interrupt-driven.
+/// line, so console input is interrupt-driven and parked readers are woken
+/// by a keystroke rather than busy-polling the FIFO (`AGENTS.md` §2.1 /
+/// §17.1).
 ///
-/// Called once, from the root-unlock console handoff
-/// ([`crate::unlock_service`] / `crate::aarch64::root_unlock`), *after* the
-/// in-kernel kthread has finished polling the passphrase off the FIFO
-/// ([`rustos_arch_aarch64::serial::enable_rx_interrupt`] documents why the
-/// interrupt must stay masked until then). A console whose interrupt the boot
-/// path could not discover leaves the slot empty and this a no-op — `login`
-/// stays on the polled path rather than failing (fail closed, `AGENTS.md`
-/// §2.9).
+/// Idempotent, and called at the start of the interactive session: the
+/// in-kernel root-unlock kthread calls it before its passphrase prompt (so
+/// the parked `KthreadConsoleRead` is woken by RX), and the `login` handoff
+/// ([`crate::aarch64::root_unlock::release_console0_to_login`]) calls it
+/// again — a second call is a harmless re-enable, and the fail-closed paths
+/// that open the gate without ever running the unlock kthread still enable it
+/// here for `login`. A console whose interrupt the boot path could not
+/// discover leaves the slot empty and this a no-op — the reader stays on the
+/// poll-backed path rather than failing (fail closed, `AGENTS.md` §2.9).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub fn enable_uart_console_irq() {
     let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() else {

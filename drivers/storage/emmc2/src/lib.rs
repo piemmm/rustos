@@ -133,16 +133,75 @@ pub trait SdhciHost {
     /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
     /// register window.
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError>;
+
+    /// Park the calling task until the controller raises its interrupt
+    /// line, then return so the engine re-reads `INTERRUPT`.
+    ///
+    /// This is the seam that keeps the engine off the CPU while a slow SD
+    /// completion is outstanding (`AGENTS.md` §17.1 / §2.16 — a driver poll
+    /// must never busy-spin a status register and monopolise the CPU). The
+    /// metal host ([`IrqSdhci`]) parks on the controller's bound GIC line
+    /// through a [`CompletionWait`]; the host-test register mock returns
+    /// immediately because its completions appear inline in the model, so
+    /// the engine's next `INTERRUPT` read already observes the bit.
+    fn await_irq(&mut self);
 }
 
-impl SdhciHost for RegisterWindow {
+/// Park-until-completion seam the metal [`IrqSdhci`] host drives
+/// ([`SdhciHost::await_irq`]).
+///
+/// The eMMC2 driver is generic over `lib/abi` only (`AGENTS.md` §3 / §17.4),
+/// so it cannot name the kernel's IRQ-wait machinery. This one-method trait
+/// is the inversion point: the kernel binary supplies an implementation that
+/// blocks the calling task on the controller's bound interrupt line and is
+/// resumed by its ISR (mirroring the virtio host's `notify_wait`,
+/// `AGENTS.md` §2.2), while a host test supplies a no-op. It returns `()` so
+/// a spurious wake-up cannot be mistaken for a retriable failure
+/// (`AGENTS.md` §2.1) — the engine re-reads the status register on return.
+pub trait CompletionWait {
+    /// Block until the controller signals a completion on its interrupt
+    /// line; the caller re-reads `INTERRUPT` on return.
+    fn await_irq(&self);
+}
+
+/// The metal SDHCI host: the capability-gated [`RegisterWindow`] paired with
+/// a [`CompletionWait`] that parks on the controller's GIC interrupt line.
+///
+/// Splitting register access from the completion wait mirrors the virtio
+/// driver's transport/host split (`AGENTS.md` §2.2): `read32`/`write32` go to
+/// the mapped window, and [`await_irq`](SdhciHost::await_irq) parks the task
+/// on the controller's interrupt rather than busy-spinning (`AGENTS.md`
+/// §17.1). Built by [`open_discovered`](crate::wiring::open_discovered)
+/// from the discovered register window and a kernel-supplied waiter.
+pub struct IrqSdhci<W: CompletionWait> {
+    window: RegisterWindow,
+    waiter: W,
+}
+
+impl<W: CompletionWait> IrqSdhci<W> {
+    /// Pair a mapped register `window` with the completion `waiter` that
+    /// parks on the controller's interrupt line.
+    #[must_use]
+    pub fn new(window: RegisterWindow, waiter: W) -> Self {
+        Self { window, waiter }
+    }
+}
+
+impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
     fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        self.read_u32(offset).map_err(WindowError::as_driver_error)
+        self.window
+            .read_u32(offset)
+            .map_err(WindowError::as_driver_error)
     }
 
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
-        self.write_u32(offset, value)
+        self.window
+            .write_u32(offset, value)
             .map_err(WindowError::as_driver_error)
+    }
+
+    fn await_irq(&mut self) {
+        self.waiter.await_irq();
     }
 }
 
@@ -339,11 +398,22 @@ impl<H: SdhciHost> Emmc2<H> {
         Err(DriverError::DeviceFault)
     }
 
-    /// Wait for the `INTERRUPT` register to assert `wanted`, failing
-    /// closed on any error bit or on exceeding the budget.
+    /// Wait for the `INTERRUPT` register to assert `wanted`, **parking the
+    /// task on the controller's interrupt** between checks rather than
+    /// busy-spinning the CPU, and failing closed on any error bit.
     ///
     /// The wanted bits are cleared (write-1-to-clear) before returning so
-    /// the next wait starts from a clean status word.
+    /// the next wait starts from a clean status word — which also de-asserts
+    /// the controller's level-sensitive interrupt line, so the following
+    /// [`SdhciHost::await_irq`] re-arms cleanly for the next completion.
+    ///
+    /// Each iteration reads the status once and, if neither `wanted` nor an
+    /// error bit is set yet, parks via [`SdhciHost::await_irq`] until the
+    /// controller signals — never a busy-spin (`AGENTS.md` §17.1 / §2.16: a
+    /// driver poll must not monopolise the CPU and starve interrupt-driven
+    /// work). `poll_budget` bounds the number of parks as a fail-closed
+    /// backstop against a storm of spurious wake-ups; the metal completion
+    /// itself arrives in one or two iterations (`AGENTS.md` §2.1).
     fn wait_interrupt(&mut self, wanted: u32) -> Result<(), DriverError> {
         for _ in 0..self.poll_budget {
             let status = self.host.read32(regs::REG_INTERRUPT)?;
@@ -357,7 +427,7 @@ impl<H: SdhciHost> Emmc2<H> {
                 self.host.write32(regs::REG_INTERRUPT, wanted)?;
                 return Ok(());
             }
-            core::hint::spin_loop();
+            self.host.await_irq();
         }
         Err(DriverError::DeviceFault)
     }
@@ -389,10 +459,17 @@ impl<H: SdhciHost> Emmc2<H> {
         let with_sd_clock = self.host.read32(regs::REG_CONTROL1)? | regs::CONTROL1_CLK_EN;
         self.host.write32(regs::REG_CONTROL1, with_sd_clock)?;
 
-        // Latch every status bit (we poll them) but raise no CPU
-        // interrupt line (PIO bring-up, `plans/PI.md` P8).
+        // Latch every status bit in the status-enable register so the
+        // engine can read them back, and enable the completion sources the
+        // engine parks on (plus every error bit) in the signal-enable
+        // register so the controller raises its CPU interrupt line on each
+        // completion — the engine waits on the interrupt rather than
+        // busy-spinning (`AGENTS.md` §17.1 / §2.16). The shared GIC line is
+        // routed + unmasked, and the parked task woken, by the kernel-side
+        // [`CompletionWait`] the metal host carries.
         self.host.write32(regs::REG_IRPT_MASK, regs::INT_ALL)?;
-        self.host.write32(regs::REG_IRPT_EN, 0)?;
+        self.host
+            .write32(regs::REG_IRPT_EN, regs::INT_SIGNAL_ENABLE)?;
         Ok(())
     }
 

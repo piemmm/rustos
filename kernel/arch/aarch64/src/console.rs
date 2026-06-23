@@ -100,6 +100,15 @@ const PL011_IFLS: usize = 0x34;
 /// selects the lowest (1/8-full) trigger so the receive interrupt fires as
 /// promptly as the FIFO allows.
 const PL011_IFLS_RXSEL: u32 = 0b111 << 3;
+/// `UARTIFLS.TXIFLSEL` — transmit FIFO trigger select (bits 2:0). Clearing it
+/// selects the lowest trigger, so the transmit interrupt asserts as soon as
+/// the transmit FIFO drains to (at or below) 1/8 full — i.e. the moment the
+/// hardware FIFO runs dry. On the Pi 4's flow-blocked PL011 a small ring drain
+/// never lifts the FIFO above the reset-default 1/2 trigger, so it never
+/// transitions down through that level and the transmit interrupt never
+/// re-asserts; the lowest trigger guarantees the FIFO-empty event always
+/// raises the interrupt that refills it (`AGENTS.md` §2.16 / §20).
+const PL011_IFLS_TXSEL: u32 = 0b111;
 /// `UARTIMSC.TXIM` — transmit interrupt (bit 5): asserts while the transmit
 /// FIFO is at or below its trigger level (i.e. has room), so unmasking it
 /// drives an ISR that refills the FIFO from the software ring until the ring
@@ -324,32 +333,55 @@ impl ConsoleModel {
         }
     }
 
-    /// The read-modify-write that **unmasks** this UART's transmit interrupt,
-    /// applied by the freestanding `serial::enable_tx_interrupt`.
+    /// The read-modify-write steps that switch this UART into
+    /// **transmit-interrupt-driven** mode, in order, applied by the
+    /// freestanding `serial::enable_tx_interrupt`.
     ///
-    /// The transmit interrupt asserts while the transmit FIFO has room (at or
-    /// below its trigger level), so once it is unmasked the ISR refills the
-    /// FIFO from the software ring until the ring drains and then re-masks it
+    /// The transmit interrupt asserts while the transmit FIFO is at or below
+    /// its trigger level, so once it is unmasked the ISR refills the FIFO from
+    /// the software ring until the ring drains and then re-masks it
     /// ([`Self::tx_interrupt_disable`]). This is the interrupt-driven transmit
     /// path that keeps buffered output flowing at the UART's real throughput
     /// without coupling the drain to the scheduler reaching idle (`AGENTS.md`
-    /// §2.16 / §20). It touches only the interrupt-enable register
-    /// (PL011 `UARTIMSC.TXIM`, mini-UART `AUX_MU_IER_REG` bit 1) and never the
-    /// receive bits, so unmasking transmit leaves the receive line exactly as
-    /// the boot/login path set it.
+    /// §2.16 / §20).
+    ///
+    /// - **PL011:** first select the lowest transmit FIFO trigger
+    ///   (`UARTIFLS.TXIFLSEL` → 1/8 full) so the interrupt fires the moment the
+    ///   FIFO runs dry, then unmask the transmit interrupt (`UARTIMSC.TXIM`).
+    ///   The trigger step is essential on the Pi 4's flow-blocked PL011: a
+    ///   small ring drain never lifts the FIFO above the reset-default 1/2
+    ///   trigger, so without lowering it the FIFO never transitions down
+    ///   through the level and the transmit interrupt never re-asserts (the
+    ///   metal drain stall). Neither step touches the receive bits, so this is
+    ///   safe to call during the passphrase FIFO-poll window where the receive
+    ///   interrupt is deliberately masked.
+    /// - **Mini-UART:** set the transmit-interrupt-enable bit
+    ///   (`AUX_MU_IER_REG` bit 1); its transmit interrupt already fires on
+    ///   "holding register empty", so it needs no trigger-level step and the
+    ///   second slot pads.
     #[must_use]
-    pub const fn tx_interrupt_enable(self) -> RegRmw {
+    pub const fn tx_interrupt_enable(self) -> [RegRmw; 2] {
         match self {
-            Self::Pl011 => RegRmw {
-                offset: PL011_IMSC,
-                clear: 0,
-                set: PL011_IMSC_TXIM,
-            },
-            Self::MiniUart => RegRmw {
-                offset: MINIUART_IER,
-                clear: 0,
-                set: MINIUART_IER_TX,
-            },
+            Self::Pl011 => [
+                RegRmw {
+                    offset: PL011_IFLS,
+                    clear: PL011_IFLS_TXSEL,
+                    set: 0,
+                },
+                RegRmw {
+                    offset: PL011_IMSC,
+                    clear: 0,
+                    set: PL011_IMSC_TXIM,
+                },
+            ],
+            Self::MiniUart => [
+                RegRmw {
+                    offset: MINIUART_IER,
+                    clear: 0,
+                    set: MINIUART_IER_TX,
+                },
+                RegRmw::NOOP,
+            ],
         }
     }
 
@@ -774,26 +806,41 @@ mod tests {
     }
 
     #[test]
-    fn tx_interrupt_enable_unmasks_only_the_tx_source() {
-        // PL011: set UARTIMSC.TXIM (bit 5), touching no receive bit, so the
-        // passphrase FIFO-poll's masked receive line is undisturbed.
+    fn tx_interrupt_enable_lowers_the_trigger_then_unmasks_only_tx() {
+        let seq = ConsoleModel::Pl011.tx_interrupt_enable();
+        // PL011 step 1 — IFLS: clear the transmit trigger-select field (bits
+        // 2:0) so the interrupt fires as the FIFO runs dry (1/8 full), setting
+        // nothing and leaving the receive trigger bits (5:3) untouched.
         assert_eq!(
-            ConsoleModel::Pl011.tx_interrupt_enable(),
+            seq[0],
+            RegRmw {
+                offset: 0x34,
+                clear: 0b111,
+                set: 0
+            }
+        );
+        // PL011 step 2 — IMSC: set UARTIMSC.TXIM (bit 5), touching no receive
+        // bit, so the passphrase FIFO-poll's masked receive line is undisturbed.
+        assert_eq!(
+            seq[1],
             RegRmw {
                 offset: 0x38,
                 clear: 0,
                 set: 1 << 5
             }
         );
-        // Mini-UART: set AUX_MU_IER_REG bit 1 (TX), again leaving the RX bit.
+        // Mini-UART: set AUX_MU_IER_REG bit 1 (TX), again leaving the RX bit;
+        // it needs no trigger-level step, so the second slot pads.
+        let mini = ConsoleModel::MiniUart.tx_interrupt_enable();
         assert_eq!(
-            ConsoleModel::MiniUart.tx_interrupt_enable(),
+            mini[0],
             RegRmw {
                 offset: 0x04,
                 clear: 0,
                 set: 0x02
             }
         );
+        assert!(mini[1].is_noop());
     }
 
     #[test]

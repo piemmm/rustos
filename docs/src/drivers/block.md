@@ -101,7 +101,7 @@ driving the device from an arbitrary caller's context.
 | Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `rustos-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
-| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write host-tested; wired into root-unlock; metal-confirmed (Pi 4) |
+| Raspberry Pi 4 EMMC2                      | `rustos-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | read + write host-tested; interrupt-driven; wired into root-unlock; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
 prerequisites enumerated in `.junie/next-session-prompt.md` (kernel
@@ -152,9 +152,21 @@ documented bring-up checklist. `Emmc2::open` runs the standard SD
 identification (`CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`CMD16`)
 and derives geometry from the card CSD; only high-capacity,
 block-addressed (SDHC/SDXC, CSD v2) cards are supported and anything
-else is rejected fail-closed. Every controller wait is bounded by a poll
-budget and fails closed with `DriverError::DeviceFault` rather than
-spinning (`AGENTS.md` §2.1).
+else is rejected fail-closed.
+
+Command- and transfer-completion waits **park on the controller's
+interrupt** through a `CompletionWait` seam (`SdhciHost::await_irq`) rather
+than busy-spinning a status register, so a slow SD operation never
+monopolises the CPU and starves interrupt-driven work (`AGENTS.md` §17.1 /
+§2.16) — the defect that froze the boot UART log while `/System` was being
+read during driver autoload. `reset_and_clock` enables the controller's
+completion-signal sources (`IRPT_EN`) so it raises its CPU interrupt line
+on each completion and on every error bit; the kernel supplies the
+`CompletionWait` that binds, routes, arms, and parks on that GIC line
+(`emmc2_unlock`, below). The remaining identification-only register
+handshakes that have no completion source (reset, clock-stable) still spin,
+and every wait is bounded by a poll budget that fails closed with
+`DriverError::DeviceFault` rather than waiting forever (`AGENTS.md` §2.1).
 
 Bring-up resets the host controller and then **powers the card rail**
 (SD Bus Power on, 3.3 V) through the power-control byte of `CONTROL0`
@@ -191,9 +203,16 @@ the root-storage bind gate binds the `brcm,bcm2711-emmc2` node, the aarch64
 root-unlock kthread (`crate::aarch64::root_unlock::emmc2_unlock`) maps the
 node's sole SDHCI register window under `CAP_MMIO_MAP` through a minimal
 in-kernel MMIO-only DriverHost, admits the driver through the signed §8
-load gate, opens the card, and feeds the resulting `Block` to the same
-mount + `/System` autoload + interactive-unlock tail as virtio-blk
-(`finish_unlock`, §2.2). On a bring-up failure it logs the failing
+load gate, **discovers the controller's GIC SPI from the firmware device
+tree (`emmc2_spi`) and binds, routes, and arms it on the published IRQ
+table** — supplying the driver a `CompletionWait` (`Emmc2Completion`) that
+parks the kthread on that line through the same re-arming `wfi` waiter the
+virtio bring-up uses (`RearmingIrqWaiter`, §2.2) — opens the card, and feeds
+the resulting `Block` to the same mount + `/System` autoload +
+interactive-unlock tail as virtio-blk (`finish_unlock`, §2.2). With no EMMC2
+interrupt in the device tree the bring-up fails closed rather than parking
+on a line that can never fire (`AGENTS.md` §2.9 / §18.4). On a bring-up
+failure it logs the failing
 `BringUpStage` as the `stage=` field of the `EventId(4139)` unlock-service
 error line together with the underlying `DriverError` as an `error=` field,
 so the metal UART log names both the SD command the card stalled at and how

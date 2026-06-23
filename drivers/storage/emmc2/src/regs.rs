@@ -91,6 +91,17 @@ pub const INT_ERROR: u32 = 1 << 15;
 /// Mask covering every error bit (the upper half of `INTERRUPT`).
 pub const INT_ERROR_MASK: u32 = 0xFFFF_0000;
 
+/// The `IRPT_EN` signal-enable mask the driver programs so the controller
+/// asserts its CPU interrupt line on each completion the engine parks for
+/// (`AGENTS.md` §17.1 — a driver must wait on the interrupt, never busy-spin
+/// a status register). It enables exactly the sources the engine waits on —
+/// command complete, data-transfer complete, the PIO buffer-ready events —
+/// plus every error bit, so a faulted transfer also wakes the parked task
+/// rather than wedging it. The status-enable register (`IRPT_MASK`) latches
+/// the same bits so the engine can read them back (`AGENTS.md` §2.2).
+pub const INT_SIGNAL_ENABLE: u32 =
+    INT_CMD_DONE | INT_DATA_DONE | INT_WRITE_RDY | INT_READ_RDY | INT_ERROR_MASK;
+
 /// Every bit set: used to clear the whole `INTERRUPT` register
 /// (write-1-to-clear) and to unmask every status bit.
 pub const INT_ALL: u32 = 0xFFFF_FFFF;

@@ -19,11 +19,16 @@ The SDHCI command/response and block-transfer state machine (`Emmc2`) is
 written against the `SdhciHost` register seam, not a concrete memory
 mapping:
 
-- **Metal** drives it over a capability-gated `RegisterWindow`
-  (`SdhciHost` is implemented for it), mapped from the discovered node by
-  `wiring::open_discovered`.
+- **Metal** drives it over `IrqSdhci`: a capability-gated `RegisterWindow`
+  for `read32`/`write32` paired with a `CompletionWait` for `await_irq`,
+  both supplied by `wiring::open_discovered` from the discovered node. The
+  kernel's `CompletionWait` re-arms and parks on the controller's GIC line;
+  the driver crate is generic over `lib/abi` only (`AGENTS.md` §3 / §17.4),
+  so this inversion point keeps the kernel's IRQ-wait machinery out of the
+  driver (mirrors the virtio host's `notify_wait`, `AGENTS.md` §2.2).
 - **Host tests** drive it over `MockSdhci`, a register-level model of the
-  controller plus a small backing card.
+  controller plus a small backing card; its `await_irq` is a no-op because
+  the model surfaces completions inline.
 
 This mirrors the `rpi_hvs` mailbox seam (`AGENTS.md` §2.2): the protocol
 layer is proven host-side, the register block below it on metal. There is
@@ -104,14 +109,24 @@ through the same shared `lib/devmatch` policy the user-space `devmgr` uses
   host's `MmioMapper`, never a pointer the driver synthesises
   (`AGENTS.md` §4 — no ambient authority).
 
-## Bounded waits
+## Completion waits
 
-Every controller wait (reset, clock-stable, command-complete,
-buffer-ready, transfer-complete, `ACMD41` power-up) is bounded by a poll
-budget (`DEFAULT_POLL_BUDGET`). Exceeding it fails closed with
-`DriverError::DeviceFault` rather than spinning forever (`AGENTS.md`
-§2.1); the budget is a defence bound, not a scalable capacity
+The command-complete and transfer-complete waits (`wait_interrupt`) **park**
+on the controller's interrupt through `SdhciHost::await_irq` between status
+re-reads rather than busy-spinning the CPU (`AGENTS.md` §17.1 / §2.16). The
+identification-only register polls that have no completion source — the
+reset and clock-stable handshakes (`wait_clear`/`wait_set`) — still spin
+briefly, but each is bounded by a poll budget (`DEFAULT_POLL_BUDGET`).
+Every wait fails closed with `DriverError::DeviceFault` rather than waiting
+forever (`AGENTS.md` §2.1): the budget bounds the spins, and it also caps
+the number of completion parks as a fail-closed backstop against a storm of
+spurious wake-ups. The budget is a defence bound, not a scalable capacity
 (`AGENTS.md` §24.4).
+
+`reset_and_clock` programs the controller's signal-enable register
+(`IRPT_EN`) so it raises its CPU interrupt line on each completion (and on
+every error bit); the kernel binds, routes, and arms that GIC line and
+wakes the parked task (`crate::aarch64::root_unlock::emmc2_unlock`).
 
 ## Test surface
 
@@ -135,6 +150,11 @@ budget (`DEFAULT_POLL_BUDGET`). Exceeding it fails closed with
   `GoIdle` stage, proving the engine depends on the bus-power write.
 - Every `BringUpStage` maps to a distinct, non-empty name and
   `BringUpFault` converts to its `DriverError`.
+- A read parks on the completion interrupt until the controller signals,
+  proving the engine never busy-spins the status register
+  (`interrupt_driven_read_parks_until_the_controller_signals`).
+- Bring-up programs the completion-signal enable so the controller raises
+  its interrupt line (`reset_enables_the_completion_interrupt_signal`).
 - The `wiring` capability / mapper gate (failing at the `MapWindow` stage).
 - The `BIND_KEYS` table matches the `brcm,bcm2711-emmc2` node and rejects
   the sibling `brcm,bcm2711-pcie` node (`AGENTS.md` §18.3).

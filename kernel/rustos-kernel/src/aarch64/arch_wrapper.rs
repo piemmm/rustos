@@ -118,16 +118,11 @@ impl KernelArch for Aarch64BinArch {
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             use rustos_arch_aarch64::exceptions;
-            // Top up the transmit FIFO from the buffered serial ring before
-            // sleeping — **non-blocking**: push only what the FIFO accepts
-            // now and arm the console transmit interrupt for the rest
-            // (`serial::pump_tx`), never a per-byte spin (`AGENTS.md` §2.16 /
-            // §20). Arming `TXIM` is what makes the transmit interrupt the
-            // event that wakes this `wfi`: once the loop re-enables IRQs the
-            // transmit ISR refills the FIFO, so a queued backlog flows at the
-            // UART's real rate with the CPU asleep between refills, then
-            // tickless idle resumes once it drains.
-            serial::pump_tx();
+            // The dispatch loop topped up the buffered serial transmit
+            // through `pump_console_tx` (below) just before calling this, so
+            // `TXIM` is already armed against any backlog — the event that
+            // wakes this `wfi`. This method only parks.
+            //
             // SAFETY: `wfi` parks until a pending interrupt and has no other
             // architectural effect; it is called with `DAIF.I` masked, where
             // it still wakes on a pending-but-masked interrupt. The loop
@@ -137,6 +132,25 @@ impl KernelArch for Aarch64BinArch {
             unsafe {
                 exceptions::wait_for_interrupt();
             }
+        }
+    }
+
+    fn pump_console_tx(&self) {
+        // Non-blocking top-up of the buffered serial transmit ring: push
+        // only what the PL011 FIFO accepts right now and arm the console
+        // transmit interrupt (`TXIM`) for the rest (`serial::pump_tx`), never
+        // a per-byte spin (`AGENTS.md` §2.16 / §20). The dispatch loop calls
+        // this on **every** iteration — after each dispatched task and again
+        // before the idle `wfi` — so the log drains at the loop's rate even
+        // while a perpetually-runnable in-kernel kthread (the polled
+        // USB-keyboard report pump) keeps the loop from ever idling, and
+        // independent of whether the PL011 transmit interrupt self-sustains
+        // the drain on real silicon (it does not reliably on the Pi 4's
+        // flow-blocked UART — the metal stall this fixes). On a host build
+        // there is no PL011, so this is a benign no-op.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            serial::pump_tx();
         }
     }
 
@@ -263,22 +277,24 @@ pub static UART_CONSOLE: UartConsole = UartConsole;
 /// The UART console's receive type-ahead queue — the software RX ring the
 /// interrupt-driven serial path fills.
 ///
-/// Once console 0 is handed to `login`
-/// ([`crate::aarch64::gic_irq::enable_uart_console_irq`]) the PL011 receive
-/// interrupt is unmasked; its handler
+/// The PL011 receive interrupt is unmasked once for the whole interactive
+/// session — by the root-unlock kthread at the start of its passphrase
+/// prompt, and (idempotently) again at the `login` handoff
+/// ([`crate::aarch64::gic_irq::enable_uart_console_irq`]). Its handler
 /// ([`crate::aarch64::gic_irq::production_device_irq_dispatch`]) drains the
-/// hardware FIFO and `push`es the bytes here, which wakes the `login` reader
-/// parked in kernel-core's `BlockingConsoleRead` the instant input arrives
+/// hardware FIFO and `push`es the bytes here, which wakes the reader parked
+/// in kernel-core's `BlockingConsoleRead` (the `login` reader) or the
+/// root-unlock kthread's `KthreadConsoleRead` the instant input arrives
 /// (`AGENTS.md` §2.1 / §20 — the backing parks rather than polls). It is the
 /// UART analogue of [`VIDEO_KEYBOARD`]: the same `'static` backs both the
-/// console's [`rustos_kernel_core::ConsoleRead`] half (drained by the login's
-/// `stream_read`) and its [`rustos_kernel_core::ConsoleInput`] half (the
-/// interrupt's push target), so the push reaches the parked reader.
+/// console's [`rustos_kernel_core::ConsoleRead`] half (drained by the
+/// reader's `stream_read`) and its [`rustos_kernel_core::ConsoleInput`] half
+/// (the interrupt's push target), so the push reaches the parked reader.
 ///
-/// Before that handoff the queue stays empty: the root-unlock kthread reads
-/// the passphrase by polling [`UART_CONSOLE`]'s FIFO directly (it
-/// cooperatively yields, so the CPU never idles and the poll suffices), and
-/// the receive interrupt is masked so it cannot steal those bytes.
+/// Both the unlock kthread and `login` therefore read this interrupt-fed
+/// queue and **park** for input rather than busy-polling the raw FIFO; the
+/// console-0 gate keeps `login` from reading until the unlock resolves, so
+/// the two never contend (`plans/PI.md` P11).
 pub static UART_INPUT: rustos_kernel_core::ConsoleInputQueue =
     rustos_kernel_core::ConsoleInputQueue::new();
 

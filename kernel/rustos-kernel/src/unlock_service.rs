@@ -388,6 +388,37 @@ pub fn store_service_task() -> Option<rustos_kernel_sched_api::TaskId> {
     *STORE_SERVICE_TASK.lock()
 }
 
+/// The scheduler task id of the interactive root-unlock kthread, published
+/// once at admission so its passphrase reader can register on
+/// [`rustos_kernel_core::CONSOLE_WAITQ`] and be unparked when a keystroke
+/// arrives.
+///
+/// The unlock kthread reads the passphrase by genuinely **parking** off the
+/// run queue (`AGENTS.md` §2.1 / §17.1 — never a busy-yield), so the
+/// console RX interrupt's [`rustos_kernel_core::console_wake`] must be able
+/// to unpark it **by id**. The init seam learns the id only when
+/// [`rustos_kernel_core::InitSpawnCtx::spawn_kernel_service`] returns (after
+/// the body that runs the read loop was already built), so it is stashed
+/// here and read once when that body constructs its reader. Single producer
+/// (the admission seam) writes it once before the body ever runs; the body
+/// only reads — the lock never contends. Mirrors `STORE_SERVICE_TASK`
+/// (`AGENTS.md` §2.2 — one published-kthread-id discipline).
+static UNLOCK_CONSOLE_TASK: SpinLock<Option<rustos_kernel_sched_api::TaskId>> = SpinLock::new(None);
+
+/// Publish the interactive root-unlock kthread's scheduler task id, so its
+/// passphrase reader can register on [`rustos_kernel_core::CONSOLE_WAITQ`]
+/// to be unparked by the console RX interrupt (see `UNLOCK_CONSOLE_TASK`).
+pub fn set_unlock_console_task(id: rustos_kernel_sched_api::TaskId) {
+    *UNLOCK_CONSOLE_TASK.lock() = Some(id);
+}
+
+/// The interactive root-unlock kthread's scheduler task id, or [`None`]
+/// before admission published it (see `UNLOCK_CONSOLE_TASK`).
+#[must_use]
+pub fn unlock_console_task() -> Option<rustos_kernel_sched_api::TaskId> {
+    *UNLOCK_CONSOLE_TASK.lock()
+}
+
 /// Log an unlock-service lifecycle decision onto the service's audit sink
 /// under the shared [`UNLOCK_SERVICE`] event id (`AGENTS.md` §19.4).
 pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
@@ -442,36 +473,59 @@ pub fn note_stage(
     );
 }
 
-/// A cooperative blocking console reader for the unlock kthread.
+/// An interrupt-driven blocking console reader for the unlock kthread.
 ///
 /// The kthread analogue of kernel-core's `BlockingConsoleRead` (which parks
 /// only a *user* kthread, via `reschedule_current`): an empty device poll
-/// suspends the kthread through its shared [`CooperativeYield`] cell and
-/// re-polls on the next dispatch, so the passphrase prompt blocks for input
-/// without busy-spinning (`AGENTS.md` §2.1) and never fabricates an end of
-/// input. It drives the kthread's single
-/// [`YieldHandle`](rustos_kernel_core::YieldHandle) through the
-/// [`CooperativeYield`] cell the port's bring-up lends it (`!Sync`, never
-/// shared across CPUs); the device-IRQ wait parks separately, so the
-/// console poll and the block-I/O wait do not share a suspend mechanism.
+/// **parks** the kthread off the run queue through its shared
+/// [`CooperativeYield`] cell, and the console RX interrupt's
+/// [`rustos_kernel_core::console_wake`] unparks it the instant a byte lands.
+/// It is a genuine park, never a busy-yield (`AGENTS.md` §2.1 / §17.1): while
+/// the kthread waits for a keystroke the dispatch loop reaches idle, so the
+/// buffered-serial transmit drain (`pump_tx`, §20) and the tickless idle
+/// (§17.1) run and the CPU sleeps — the cooperative busy-poll this replaces
+/// kept a task perpetually runnable, so the loop never idled and console
+/// output stalled until the next keystroke incidentally flushed it.
 ///
-/// Architecture-neutral (`AGENTS.md` §2.2): the one cooperative
-/// console-read shape every port's unlock kthread reads the passphrase
-/// through — the device backing differs, the blocking discipline does not.
+/// `task` is the kthread's own scheduler id (published by
+/// [`set_unlock_console_task`] at admission); the reader registers it on
+/// [`rustos_kernel_core::CONSOLE_WAITQ`] **before** each poll so a
+/// `console_wake` arriving in the window between an empty poll and the park
+/// is not lost — the scheduler's wake-pending token converts a concurrent
+/// park into a re-ready, exactly the lost-wakeup interlock
+/// `BlockingConsoleRead` and `serve_system_store` rely on (`AGENTS.md`
+/// §2.1 / §2.2). The device backing must be the interrupt-fed console queue
+/// (the UART's `UART_INPUT`-backed read half, or the video keyboard queue),
+/// not a raw hardware-FIFO poll, so the wake source exists.
+///
+/// Architecture-neutral (`AGENTS.md` §2.2): the one blocking console-read
+/// shape every port's unlock kthread reads the passphrase through — the
+/// device backing differs, the park-and-wake discipline does not.
 pub struct KthreadConsoleRead<'a> {
     inner: &'static (dyn ConsoleRead + Sync + 'static),
     yielder: &'a CooperativeYield<'a>,
+    task: Option<rustos_kernel_sched_api::TaskId>,
 }
 
 impl<'a> KthreadConsoleRead<'a> {
-    /// Wrap the raw console-input device `inner`, suspending the kthread
-    /// through `yielder` between empty polls.
+    /// Wrap the interrupt-fed console-input device `inner`, parking the
+    /// kthread through `yielder` between empty polls and registering `task`
+    /// on [`rustos_kernel_core::CONSOLE_WAITQ`] so the RX interrupt unparks
+    /// it. `task` is the kthread's scheduler id from
+    /// [`unlock_console_task`]; [`None`] (the id not yet published) degrades
+    /// to a cooperative yield rather than parking a task no wake could
+    /// reach (`AGENTS.md` §2.9).
     #[must_use]
     pub fn new(
         inner: &'static (dyn ConsoleRead + Sync + 'static),
         yielder: &'a CooperativeYield<'a>,
+        task: Option<rustos_kernel_sched_api::TaskId>,
     ) -> Self {
-        Self { inner, yielder }
+        Self {
+            inner,
+            yielder,
+            task,
+        }
     }
 }
 
@@ -481,11 +535,45 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             return Ok(0);
         }
         loop {
-            let read = self.inner.read(buf)?;
+            // Register before polling so a `console_wake` arriving between an
+            // empty poll and the park is not lost (the register-before-poll
+            // interlock, `AGENTS.md` §2.1 / §2.2).
+            if let Some(task) = self.task {
+                rustos_kernel_core::CONSOLE_WAITQ.register(task, rustos_kernel_core::NO_DEADLINE);
+            }
+            let read = match self.inner.read(buf) {
+                Ok(read) => read,
+                Err(e) => {
+                    // Leave the wait set first so no stale registration
+                    // lingers, then propagate fail-closed (`AGENTS.md` §2.9).
+                    if let Some(task) = self.task {
+                        rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
+                    }
+                    return Err(e);
+                }
+            };
             if read > 0 {
+                if let Some(task) = self.task {
+                    rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
+                }
                 return Ok(read);
             }
-            self.yielder.yield_now();
+            match self.task {
+                // Genuine park: suspend off the run queue until the RX
+                // interrupt's `console_wake` unparks this id, then re-poll.
+                // The CPU idles meanwhile (`AGENTS.md` §2.1 / §17.1).
+                Some(task) => {
+                    self.yielder.park();
+                    rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
+                }
+                // The kthread's scheduler id was not published (a degenerate
+                // build that did not go through admission). A parked task
+                // with no registration could never be woken, so cooperatively
+                // yield and re-poll on the next dispatch instead — bounded,
+                // since the id is published before the body runs
+                // (`AGENTS.md` §2.9).
+                None => self.yielder.yield_now(),
+            }
         }
     }
 }
@@ -707,53 +795,66 @@ mod tests {
         }
     }
 
-    /// A [`YieldHandle`](rustos_kernel_core::YieldHandle) that counts
-    /// cooperative yields; it must never park — the kthread console reader
-    /// only ever yields between empty polls (`AGENTS.md` §2.1).
-    struct CountingYielder {
-        yields: u32,
+    /// A [`YieldHandle`](rustos_kernel_core::YieldHandle) that counts genuine
+    /// **parks**; it must never busy-yield. With its scheduler id published,
+    /// the kthread console reader parks off the run queue between empty
+    /// polls (the RX interrupt's `console_wake` unparks it in production),
+    /// never spinning the CPU (`AGENTS.md` §2.1 / §17.1).
+    struct ParkCountingYielder {
+        parks: u32,
     }
 
-    impl rustos_kernel_core::YieldHandle for CountingYielder {
+    impl rustos_kernel_core::YieldHandle for ParkCountingYielder {
         fn yield_now(&mut self) {
-            self.yields += 1;
+            panic!("the kthread console reader parks, never busy-yields, once its id is published");
         }
 
         fn park(&mut self) {
-            panic!("the kthread console reader yields, never parks");
+            self.parks += 1;
         }
     }
 
+    /// The fixed scheduler id the reader-under-test registers on
+    /// `CONSOLE_WAITQ` (any value works — registration is pure data here).
+    fn reader_task() -> rustos_kernel_sched_api::TaskId {
+        0x5b4
+    }
+
     #[test]
-    fn the_kthread_reader_blocks_across_empty_polls_then_returns_the_byte() {
+    fn the_kthread_reader_parks_across_empty_polls_then_returns_the_byte() {
         static INNER: DelayedByte = DelayedByte {
             remaining_empty: core::sync::atomic::AtomicUsize::new(3),
         };
-        let mut yielder = CountingYielder { yields: 0 };
+        let mut yielder = ParkCountingYielder { parks: 0 };
         {
             let coop = CooperativeYield::new(&mut yielder);
-            let reader = KthreadConsoleRead::new(&INNER, &coop);
+            let reader = KthreadConsoleRead::new(&INNER, &coop, Some(reader_task()));
             let mut buf = [0u8; 4];
-            // Blocks across the three empty polls (yielding each time) and
-            // returns the byte on the fourth — never a fabricated EOF.
+            // Parks across the three empty polls (registered on
+            // `CONSOLE_WAITQ`, unparked by the RX interrupt in production)
+            // and returns the byte on the fourth — never a fabricated EOF,
+            // never a busy-yield.
             assert_eq!(reader.read(&mut buf), Ok(1));
             assert_eq!(buf[0], b'k');
         }
-        assert_eq!(yielder.yields, 3);
+        assert_eq!(yielder.parks, 3);
+        // The reader deregistered itself once it had the byte; clearing any
+        // residual registration keeps this shared global clean for siblings.
+        rustos_kernel_core::CONSOLE_WAITQ.deregister(reader_task());
     }
 
     #[test]
-    fn the_kthread_reader_reports_zero_for_an_empty_buffer_without_yielding() {
+    fn the_kthread_reader_reports_zero_for_an_empty_buffer_without_parking() {
         static INNER: DelayedByte = DelayedByte {
             remaining_empty: core::sync::atomic::AtomicUsize::new(0),
         };
-        let mut yielder = CountingYielder { yields: 0 };
+        let mut yielder = ParkCountingYielder { parks: 0 };
         {
             let coop = CooperativeYield::new(&mut yielder);
-            let reader = KthreadConsoleRead::new(&INNER, &coop);
+            let reader = KthreadConsoleRead::new(&INNER, &coop, Some(reader_task()));
             let mut empty: [u8; 0] = [];
             assert_eq!(reader.read(&mut empty), Ok(0));
         }
-        assert_eq!(yielder.yields, 0);
+        assert_eq!(yielder.parks, 0);
     }
 }

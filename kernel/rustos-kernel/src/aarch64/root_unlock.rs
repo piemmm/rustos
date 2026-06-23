@@ -43,6 +43,7 @@ use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use rustos_drv_bus_virtio::MmioTransport;
+use rustos_drv_storage_emmc2::CompletionWait;
 use rustos_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use rustos_fdt::Fdt;
 use rustos_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
@@ -53,7 +54,9 @@ use rustos_kernel_sec::identity::UserId;
 use rustos_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use rustos_log::{Level, Sink};
 
-use crate::aarch64::arch_wrapper::{UART_CONSOLE, VIDEO_CONSOLE, VIDEO_KEYBOARD};
+use crate::aarch64::arch_wrapper::{
+    UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
+};
 use crate::aarch64::gic_irq::{published_irq_table, CPU0_TARGET, GIC_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::AARCH64_PROCESS_SPAWN;
 use crate::driver_catalog::{EMMC2_PATH, KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
@@ -141,6 +144,25 @@ pub(crate) fn console_spi(fdt: &Fdt<'_>) -> Option<u32> {
     mini
 }
 
+/// Find the GICv2 INTID of the EMMC2 SD host node (`brcm,bcm2711-emmc2`,
+/// the same node the hardware tree's Storage device is discovered from),
+/// decoded through [`gic_device_intid`] — a discovered value, never a board
+/// constant (`AGENTS.md` §18.1 / §2.20).
+///
+/// [`None`] when no EMMC2 node carries a representable `interrupts`
+/// specifier (fail closed, `AGENTS.md` §2.9 / §18.4): the SD bring-up then
+/// refuses rather than parking forever on a line that can never fire, since
+/// the interrupt-driven driver depends on a bound completion line.
+pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
+    for node in fdt.nodes() {
+        let node = node.ok()?;
+        if node.is_compatible("brcm,bcm2711-emmc2") {
+            return gic_device_intid(&node);
+        }
+    }
+    None
+}
+
 /// A blocking [`IrqWaiter`] for the unlock kthread: it **re-arms** the
 /// device's GIC line, then parks on a race-free `wfi` until the next
 /// completion.
@@ -206,6 +228,30 @@ impl IrqWaiter for RearmingIrqWaiter {
             rustos_arch_aarch64::exceptions::enable_irq();
         }
         Ok(())
+    }
+}
+
+/// The EMMC2 driver's completion seam ([`CompletionWait`]) over the same
+/// [`RearmingIrqWaiter`] park the virtio host uses (`AGENTS.md` §2.2 — one
+/// wait shape, no second park implementation).
+///
+/// The SDHCI engine calls [`await_irq`](CompletionWait::await_irq) whenever
+/// a command/transfer completion is outstanding; it re-arms the controller's
+/// bound GIC line and parks the kthread on a race-free `wfi` until the ISR
+/// signals, so the driver never busy-spins a status register and monopolises
+/// the CPU (`AGENTS.md` §17.1 / §2.16). The inner waiter owns the `'static`
+/// IRQ table, handle, and line, so the completion is `'static` and the opened
+/// [`Emmc2`] it lives in can be shared for life behind the block layer.
+struct Emmc2Completion {
+    waiter: RearmingIrqWaiter,
+}
+
+impl CompletionWait for Emmc2Completion {
+    fn await_irq(&self) {
+        // `RearmingIrqWaiter::yield_now` is infallible (it returns `Ok` after
+        // the re-arm + race-free `wfi` park); the engine re-reads `INTERRUPT`
+        // on return, so a spurious wake is harmless.
+        let _ = self.waiter.yield_now();
     }
 }
 
@@ -378,7 +424,7 @@ fn run_unlock(
 
     match binding.driver_path {
         VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, dtb, frames, env),
-        EMMC2_PATH => emmc2_unlock(&coop, caller, binding, env),
+        EMMC2_PATH => emmc2_unlock(&coop, caller, binding, dtb, env),
         _ => Err("root-unlock: bound block driver is not a known floor driver"),
     }
 }
@@ -534,22 +580,28 @@ fn virtio_blk_unlock<'a>(
     finish_unlock(blk, coop, env)
 }
 
-/// Bring the Raspberry Pi 4 EMMC2 SD host up over programmed I/O and hand
-/// it to the shared [`finish_unlock`] tail (`plans/PI.md` P8/B4).
+/// Bring the Raspberry Pi 4 EMMC2 SD host up over its interrupt-driven SDHCI
+/// path and hand it to the shared [`finish_unlock`] tail (`plans/PI.md`
+/// P8/B4).
 ///
-/// EMMC2 transfers are programmed-I/O (the driver polls the SDHCI
-/// buffer-data port), so — unlike the virtio path — there is no DMA pool
-/// and no device interrupt to bind: the only resource is the SDHCI register
-/// window, which is the matched node's sole register-window grant
-/// (`AGENTS.md` §18.3) and never a board constant (`AGENTS.md` §18.1 /
-/// §2.20). The window is mapped under `CAP_MMIO_MAP` through the kernel
-/// mapper and the driver brought up over it; `raspi4b` cannot model EMMC2
-/// (`plans/PI.md` §0.4), so this path is host-tested at the driver level
-/// and metal-gated here.
+/// Unlike the virtio path there is no DMA pool — EMMC2 transfers move data
+/// through the SDHCI buffer-data port (programmed I/O) — but the controller's
+/// completions are taken on its **bound GIC interrupt line**, never by
+/// busy-spinning a status register (`AGENTS.md` §17.1 / §2.16). Two
+/// resources are therefore wired: the SDHCI register window (the matched
+/// node's sole register-window grant, `AGENTS.md` §18.3) is mapped under
+/// `CAP_MMIO_MAP` through the kernel mapper, and the controller's GIC SPI —
+/// discovered from the firmware device tree ([`emmc2_spi`]), never a board
+/// constant (`AGENTS.md` §18.1 / §2.20) — is bound, routed, and armed on the
+/// published IRQ table so the driver parks on completion through the shared
+/// [`RearmingIrqWaiter`] ([`Emmc2Completion`], `AGENTS.md` §2.2). `raspi4b`
+/// cannot model EMMC2 (`plans/PI.md` §0.4), so this path is host-tested at
+/// the driver level and metal-gated here.
 fn emmc2_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
     caller: &'static TaskCapabilities,
     binding: &RootBlockBinding,
+    dtb: u64,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
@@ -566,6 +618,49 @@ fn emmc2_unlock<'a>(
     // than guessing an address.
     let (regs_phys, _len) = sole_register_window(binding.node.resources())
         .map_err(|_| "root-unlock: emmc2 register window")?;
+
+    // Resolve, bind, route, and arm the EMMC2 controller's GIC SPI on the
+    // table the kernel core published (the same production device-IRQ path the
+    // virtio bring-up uses). The driver parks on this line for every command
+    // and block-transfer completion instead of busy-spinning a status
+    // register (`AGENTS.md` §17.1 / §2.16); with no interrupt the driver would
+    // park forever, so fail closed (`AGENTS.md` §2.9 / §18.4).
+    if dtb == 0 {
+        return Err("root-unlock: no device tree; emmc2 root unbound");
+    }
+    // SAFETY: on the boot hand-off `dtb` is the firmware/loader device-tree
+    // pointer (`boot.s` preserves x0), identity-mapped and immutable for the
+    // life of the kernel. `Fdt::from_ptr` validates the magic and bounds the
+    // blob by its own `totalsize` before any read.
+    let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }
+        .map_err(|_| "root-unlock: device tree unreadable; emmc2 root unbound")?;
+    let intid = emmc2_spi(&fdt).ok_or("root-unlock: no emmc2 interrupt in DTB")?;
+    let table: &'static IrqTable =
+        published_irq_table().ok_or("root-unlock: no published IRQ table")?;
+    let bind = table
+        .bind(intid, UNLOCK_TASK)
+        .map_err(|_| "root-unlock: bind emmc2 SPI")?;
+    let handle: IrqHandle = bind.handle;
+    // SAFETY: the GIC distributor + CPU interface are up (the kernel-core
+    // `irq` phase brought them up via `gic_irq::install_device_irq_dispatch`
+    // -> `gic::init`), and the EL1 vectors + device dispatch are installed;
+    // this routes + enables the bound SPI on CPU 0.
+    unsafe {
+        gic::route_spi(intid, CPU0_TARGET);
+    }
+    // Arm the line for the first completion; the waiter re-arms it after each
+    // subsequent one.
+    let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
+    // The completion seam the SDHCI engine parks on, over the shared re-arming
+    // `wfi` waiter (`AGENTS.md` §2.2). Owns only `'static`/`Copy` state, so the
+    // opened `Emmc2` it lives in is `'static` and shareable for life.
+    let waiter = Emmc2Completion {
+        waiter: RearmingIrqWaiter {
+            table,
+            handle,
+            line: intid,
+        },
+    };
 
     // A throwaway *bookkeeping* page table for the register-window map
     // (device access is via the boot identity map through `phys`; the window
@@ -597,23 +692,25 @@ fn emmc2_unlock<'a>(
     let blk = {
         let mapper = KernelMmioMapper::new(mmio, caller, audit);
         let host = Emmc2Host::new(*caller.effective(), &mapper);
-        rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys).map_err(|fault| {
-            // `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so the metal
-            // UART log is the only signal that localises an SD bring-up
-            // failure: record which identification step the card stalled at
-            // *and* how it failed, so a controller/command fault is told
-            // apart from a decode rejection at the same step (e.g. CMD9
-            // `SEND_CSD` timing out vs. returning an unsupported CSD)
-            // (`AGENTS.md` §19.4 / §2.16 — measure, do not guess).
-            note_stage(
-                audit,
-                Level::Error,
-                "root-unlock: emmc2 open failed during SD bring-up",
-                fault.stage.as_str(),
-                driver_error_name(fault.error),
-            );
-            "root-unlock: emmc2 open"
-        })?
+        rustos_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys, waiter).map_err(
+            |fault| {
+                // `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so the metal
+                // UART log is the only signal that localises an SD bring-up
+                // failure: record which identification step the card stalled at
+                // *and* how it failed, so a controller/command fault is told
+                // apart from a decode rejection at the same step (e.g. CMD9
+                // `SEND_CSD` timing out vs. returning an unsupported CSD)
+                // (`AGENTS.md` §19.4 / §2.16 — measure, do not guess).
+                note_stage(
+                    audit,
+                    Level::Error,
+                    "root-unlock: emmc2 open failed during SD bring-up",
+                    fault.stage.as_str(),
+                    driver_error_name(fault.error),
+                );
+                "root-unlock: emmc2 open"
+            },
+        )?
     };
     finish_unlock(blk, coop, env)
 }
@@ -675,18 +772,37 @@ fn finish_unlock<B: Block + 'static>(
     let unlock_body = move |yielder: &mut dyn YieldHandle| {
         let coop = CooperativeYield::new(yielder);
         // Primary console (index 0): the video console + its keyboard queue
-        // when a framebuffer console is active, else the discovered UART. The
-        // unlock reads the *raw* device directly (bypassing the console-0 gate
-        // `login` reads through), wrapped in the kthread blocking reader.
+        // when a framebuffer console is active, else the discovered UART.
+        // Both input halves are interrupt-fed console queues (the keyboard
+        // injection queue, or the UART's `UART_INPUT`-backed read half) whose
+        // `push` wakes `CONSOLE_WAITQ` (`console_wake`), so the kthread reader
+        // parks for input rather than busy-polling a raw FIFO (`AGENTS.md`
+        // §2.1 / §17.1 — nothing cooperative). It reads the raw device behind
+        // the console-0 gate `login` reads through (the gate stays closed
+        // until this unlock resolves), so the two never contend.
         let (console_write, raw_read): (
             &'static dyn ConsoleWrite,
             &'static (dyn ConsoleRead + Sync + 'static),
         ) = if video::is_active() {
             (&VIDEO_CONSOLE, &VIDEO_KEYBOARD)
         } else {
-            (&UART_CONSOLE, &UART_CONSOLE)
+            // Switch the UART console to interrupt-driven receive for the
+            // unlock window so a keystroke wakes the parked reader
+            // (`console_wake`) — the RX ISR drains the FIFO into `UART_INPUT`,
+            // which `UART_CONSOLE_READ` reads (and which `pump_tx` then drains
+            // the transmit backlog around, the loop now reaching idle).
+            // Idempotent with the `release_console0_to_login` handoff enable.
+            crate::aarch64::gic_irq::enable_uart_console_irq();
+            (&UART_CONSOLE, &UART_CONSOLE_READ)
         };
-        let reader = KthreadConsoleRead::new(raw_read, &coop);
+        // The kthread's own scheduler id (published at admission), so the
+        // reader registers on `CONSOLE_WAITQ` and the RX interrupt unparks it
+        // by id (`AGENTS.md` §2.1).
+        let reader = KthreadConsoleRead::new(
+            raw_read,
+            &coop,
+            crate::unlock_service::unlock_console_task(),
+        );
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
@@ -708,20 +824,26 @@ fn finish_unlock<B: Block + 'static>(
         // §5.4.5). The unlock task then ends (the disk stays alive — it is
         // `'static`-leaked — and this task's window borrow ends with it).
     };
-    if ctx
-        .spawn_kernel_service(alloc::boxed::Box::new(unlock_body))
-        .is_none()
-    {
+    match ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {
+        // Publish the interactive unlock kthread's scheduler id so its
+        // passphrase reader can register on `CONSOLE_WAITQ` and the console
+        // RX interrupt can unpark it by id (`AGENTS.md` §2.1). This seam is
+        // single-CPU and continues straight to the driver-store serve loop
+        // (parking only later), so the id is published before the spawned
+        // body ever runs and constructs its reader.
+        Some(unlock_task) => crate::unlock_service::set_unlock_console_task(unlock_task),
         // The unlock task could not be admitted: nothing will prompt for the
         // passphrase or open the console-0 gate, so open it here (login still
         // refuses, as no database is installed) and serve the store anyway so
         // `devmgr` can load drivers (`AGENTS.md` §2.9).
-        note(
-            audit,
-            Level::Error,
-            "root-unlock: unlock task not admitted; console gate opened, store still served",
-        );
-        release_console0_to_login();
+        None => {
+            note(
+                audit,
+                Level::Error,
+                "root-unlock: unlock task not admitted; console gate opened, store still served",
+            );
+            release_console0_to_login();
+        }
     }
 
     // The driver-signing trust anchor the autoload load gate verifies each

@@ -278,6 +278,41 @@ pub trait KernelArch: SchedulerArch {
     fn set_device_irqs(&self, enabled: bool) {
         let _ = enabled;
     }
+
+    /// Top up any buffered console output to the device **without ever
+    /// blocking** — the dispatch loop's per-iteration serial-drain hook.
+    ///
+    /// A port whose console transmit is buffered (the aarch64 PL011, whose
+    /// flow-blocked Pi 4 UART would otherwise freeze the calling task for a
+    /// whole line, §2.16 / §20) copies producer bytes into an in-memory ring
+    /// and drains it opportunistically. That ring must keep draining even
+    /// when the dispatch loop never reaches its idle
+    /// [`Self::wait_for_interrupt`] park — a perpetually-runnable in-kernel
+    /// kthread (e.g. the polled USB-keyboard report pump, which yields every
+    /// poll but never parks) keeps a task runnable forever, so an idle-only
+    /// drain would stall the log the instant such a kthread exists, and the
+    /// transmit-FIFO "has-room" interrupt cannot be relied on to self-sustain
+    /// the drain on real silicon. The dispatch loop therefore calls this on
+    /// **every** iteration — after each successful dispatch and again before
+    /// it parks — so buffered output flows at the loop's rate regardless of
+    /// idle and independent of the transmit interrupt (`AGENTS.md` §17.1 — no
+    /// service is starved by a busy in-kernel task).
+    ///
+    /// # Contract
+    ///
+    /// * It **must not** block or busy-wait on the device (`AGENTS.md`
+    ///   §2.16): push only what the transmitter accepts right now and return.
+    /// * It must be safe to call with device IRQs either enabled or masked,
+    ///   and must leave the CPU's interrupt-mask state unchanged.
+    /// * It must never panic (`AGENTS.md` §2.9).
+    ///
+    /// # Default
+    ///
+    /// A no-op: the `TestArch` mock and ports whose console transmit is
+    /// **synchronous** with no buffered ring (the riscv64 SBI console, the
+    /// x86_64 COM1 sink) have nothing to top up and inherit zero work; the
+    /// aarch64 port overrides it with its non-blocking `serial::pump_tx`.
+    fn pump_console_tx(&self) {}
 }
 
 /// IRQ routing handed from the architecture port to the kernel core

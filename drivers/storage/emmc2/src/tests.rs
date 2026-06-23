@@ -76,6 +76,21 @@ struct MockSdhci {
     // Fault injection.
     error_on_index: Option<u8>,
     stall: bool,
+
+    // Interrupt-delivery model. With `defer` set, completion bits are
+    // *staged* by the controller and only become visible in `INTERRUPT`
+    // when `await_irq` runs — i.e. the engine cannot observe a completion
+    // without parking on the interrupt. `await_calls` counts those parks so
+    // a regression test can prove the engine is interrupt-driven and never
+    // busy-spins a status register (`AGENTS.md` §17.1).
+    defer: bool,
+    staged: u32,
+    await_calls: u32,
+
+    // When set, `write32` asserts the driver programs `IRPT_EN` with the
+    // completion + error signal-enable mask (`AGENTS.md` §17.1), guarding
+    // the regression where a zero `IRPT_EN` left the interrupt line dead.
+    assert_irpt_en: bool,
 }
 
 impl MockSdhci {
@@ -105,6 +120,31 @@ impl MockSdhci {
             write_end: 0,
             error_on_index: None,
             stall: false,
+            defer: false,
+            staged: 0,
+            await_calls: 0,
+            assert_irpt_en: false,
+        }
+    }
+
+    /// A healthy card that delivers every completion only through its
+    /// interrupt: completion bits are staged and revealed to `INTERRUPT`
+    /// when the engine parks on [`SdhciHost::await_irq`]. Proves the engine
+    /// is interrupt-driven and never busy-spins (`AGENTS.md` §17.1).
+    fn healthy_deferred(c_size: u32) -> Self {
+        Self {
+            defer: true,
+            ..Self::healthy(c_size)
+        }
+    }
+
+    /// Raise completion `bits`: visible immediately in normal mode, or
+    /// staged until the next `await_irq` in the interrupt-delivery model.
+    fn raise(&mut self, bits: u32) {
+        if self.defer {
+            self.staged |= bits;
+        } else {
+            self.interrupt |= bits;
         }
     }
 
@@ -156,9 +196,9 @@ impl MockSdhci {
         self.read_cursor += 4;
         if (self.read_cursor - self.read_start) % BLOCK_SIZE as usize == 0 {
             if self.read_cursor < self.read_end {
-                self.interrupt |= regs::INT_READ_RDY;
+                self.raise(regs::INT_READ_RDY);
             } else {
-                self.interrupt |= regs::INT_DATA_DONE;
+                self.raise(regs::INT_DATA_DONE);
             }
         }
         value
@@ -178,9 +218,9 @@ impl MockSdhci {
         self.write_cursor += 4;
         if (self.write_cursor - self.write_start) % BLOCK_SIZE as usize == 0 {
             if self.write_cursor < self.write_end {
-                self.interrupt |= regs::INT_WRITE_RDY;
+                self.raise(regs::INT_WRITE_RDY);
             } else {
-                self.interrupt |= regs::INT_DATA_DONE;
+                self.raise(regs::INT_DATA_DONE);
             }
         }
     }
@@ -201,7 +241,7 @@ impl MockSdhci {
             return;
         }
         if self.error_on_index == Some(index) {
-            self.interrupt |= regs::INT_ERROR | (1 << 16);
+            self.raise(regs::INT_ERROR | (1 << 16));
             return;
         }
 
@@ -236,7 +276,7 @@ impl MockSdhci {
                 self.read_cursor = start;
                 self.read_end = start + block_count * BLOCK_SIZE as usize;
                 self.resp[0] = 0;
-                self.interrupt |= regs::INT_READ_RDY;
+                self.raise(regs::INT_READ_RDY);
             }
             24 | 25 => {
                 let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
@@ -245,11 +285,11 @@ impl MockSdhci {
                 self.write_cursor = start;
                 self.write_end = start + block_count * BLOCK_SIZE as usize;
                 self.resp[0] = 0;
-                self.interrupt |= regs::INT_WRITE_RDY;
+                self.raise(regs::INT_WRITE_RDY);
             }
             _ => {}
         }
-        self.interrupt |= regs::INT_CMD_DONE;
+        self.raise(regs::INT_CMD_DONE);
     }
 }
 
@@ -277,6 +317,18 @@ impl SdhciHost for MockSdhci {
         Ok(value)
     }
 
+    fn await_irq(&mut self) {
+        // Model the controller's interrupt firing: reveal any staged
+        // completion bits to `INTERRUPT`. In normal mode completions are
+        // already visible, so this only counts the park; in the
+        // interrupt-delivery model (`healthy_deferred`) the engine cannot
+        // make progress without it, proving it parks on the interrupt and
+        // never busy-spins (`AGENTS.md` §17.1 / §2.2).
+        self.await_calls += 1;
+        self.interrupt |= self.staged;
+        self.staged = 0;
+    }
+
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
         match offset {
             // The host-controller reset bit self-clears once reset is
@@ -296,6 +348,13 @@ impl SdhciHost for MockSdhci {
             regs::REG_BLKSIZECNT => self.blksizecnt = value,
             regs::REG_CMDTM => self.process_command(value),
             regs::REG_DATA => self.accept_data_word(value),
+            regs::REG_IRPT_EN if self.assert_irpt_en => {
+                assert_eq!(
+                    value,
+                    regs::INT_SIGNAL_ENABLE,
+                    "bring-up must enable the completion + error interrupt sources"
+                );
+            }
             _ => {}
         }
         Ok(())
@@ -339,6 +398,41 @@ fn read_multiple_blocks_returns_contiguous_data() {
         &buf[2 * bs..3 * bs],
         MockSdhci::expected_block(0x90).as_slice()
     );
+}
+
+#[test]
+fn interrupt_driven_read_parks_until_the_controller_signals() {
+    // The controller delivers every completion only through its interrupt
+    // (`healthy_deferred`): a completion bit is invisible in `INTERRUPT`
+    // until the engine parks on `await_irq`. A successful read therefore
+    // proves the engine waits on the interrupt for each of CMD_DONE,
+    // READ_RDY, and DATA_DONE — it never busy-spins a status register
+    // (`AGENTS.md` §17.1 / §2.16). Under the previous busy-spin code
+    // `await_irq` was never called, so the read would spin to the poll
+    // budget and fail closed instead of completing.
+    let mut mock = MockSdhci::healthy_deferred(7);
+    mock.fill_block(5, 0x20);
+    let mut dev = Emmc2::open(mock).expect("identification");
+    let before = dev.host().await_calls;
+
+    let mut buf = [0u8; BLOCK_SIZE as usize];
+    dev.read_blocks(5, &mut buf).expect("read");
+    assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x20).as_slice());
+    assert!(
+        dev.host().await_calls > before,
+        "the read must park on the controller interrupt, not busy-spin"
+    );
+}
+
+#[test]
+fn reset_enables_the_completion_interrupt_signal() {
+    // Bring-up programs `IRPT_EN` with the completion + error sources so the
+    // controller actually raises its CPU line for the events the engine
+    // parks on (`AGENTS.md` §17.1); a zero `IRPT_EN` (the old PIO bring-up)
+    // would leave the line dead and every `await_irq` parked forever.
+    let mut mock = MockSdhci::healthy(7);
+    mock.assert_irpt_en = true;
+    let _dev = Emmc2::open(mock).expect("identification");
 }
 
 #[test]
@@ -544,6 +638,14 @@ fn write_command_error_fails_closed() {
 
 // --- `wiring` capability gate ---------------------------------------------
 
+/// A no-op [`CompletionWait`] for the `wiring` capability tests: those
+/// return at the capability/mapper gate before the engine ever parks, so
+/// the waiter is never driven (`AGENTS.md` §5.4).
+struct NoIrq;
+impl crate::CompletionWait for NoIrq {
+    fn await_irq(&self) {}
+}
+
 /// Minimal RAM-backed mapper for the `wiring` capability tests. The full
 /// register chain is proven through [`MockSdhci`]; this only exercises the
 /// capability / mapper gate (`AGENTS.md` §5.4).
@@ -623,7 +725,7 @@ fn open_discovered_requires_mmio_map() {
         }),
     };
     assert_eq!(
-        wiring::open_discovered(&host, EMMC2_PHYS).err(),
+        wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).err(),
         Some(BringUpFault {
             stage: BringUpStage::MapWindow,
             error: DriverError::PermissionDenied,
@@ -639,7 +741,7 @@ fn open_discovered_without_mapper_is_unsupported() {
         mapper: None,
     };
     assert_eq!(
-        wiring::open_discovered(&host, EMMC2_PHYS).err(),
+        wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).err(),
         Some(BringUpFault {
             stage: BringUpStage::MapWindow,
             error: DriverError::Unsupported,
