@@ -1,61 +1,58 @@
 # `rustos-drv-bus-usb-vl805`
 
-Raspberry Pi 4 (BCM2711) **VL805** xHCI USB host-controller device driver.
+Autoloaded **user-space** Raspberry Pi 4 (BCM2711) **VL805** USB bus driver.
 
 Stability tier: **experimental**.
 
 ## What it is
 
+The `Run` entry-point binary of the VL805 USB bus-driver bundle, installed
+under `/System/Drivers/` and autoloaded into user space by `devmgr` when the
+VL805 PCI node is discovered (`AGENTS.md` §18; `plans/PI.md` P10 D5c).
+
 The Pi 4's USB-A ports hang off a VIA **VL805** PCIe-to-USB3 xHCI host
 controller behind the BCM2711 PCIe root complex. On boards without the SPI
-EEPROM (Pi 4 rev 1.4 and later) the VL805 carries **no resident firmware**:
-the `VideoCore` co-processor loads it at power-on, and a PCIe `PERST#` —
-which the root-complex bring-up asserts — drops it. Only the `VideoCore` can
-(re)load it, over a firmware property-channel `NOTIFY_XHCI_RESET` request.
+EEPROM (Pi 4 rev 1.4 and later) the VL805 carries no resident firmware: the
+`VideoCore` co-processor loads it at power-on, and the PCIe `PERST#` the
+root-complex bring-up asserts drops it. This driver is the device-specific
+link in the chain:
 
-That firmware reload is the **one** thing specific to this device, so it is
-its own driver — deliberately **separate** from, and not intertwined with:
+1. the PCIe root-complex bus driver (`drivers/bus/pcie_brcm`) trains the
+   link, enumerates the VL805, assigns its register BAR, and publishes it as
+   a VL805 PCI node (`node A`) carrying that BAR (CPU-physical) and the
+   inbound-DMA constraint as grant requests;
+2. **this driver** binds node A, reloads the VL805 firmware over the
+   `VideoCore` mailbox IPC, and publishes the controller as `node B` — an
+   `usb,xhci` node **forwarding** node A's BAR + DMA grants; and
+3. the controller driver (`drivers/input/usb_kbd`) binds node B, maps the
+   BAR, brings the controller up, and pumps input.
 
-* the generic PCIe root-complex driver `drivers/bus/pcie_brcm` (trains the
-  link), and
-* the generic xHCI host-controller driver `drivers/bus/usb/xhci` (brings the
-  controller up and enumerates devices).
+Firmware-before-bring-up holds **by construction**: node B does not exist
+until this driver runs the reload.
 
-A different board may need the PCIe driver without USB at all, or an xHCI
-controller that needs no firmware reload. Keeping the three drivers separate
-is the correct modular shape (`AGENTS.md` §2.2 / §2.20 / §8 / §17.4).
+## Capabilities — least privilege
 
-## Supported hardware
+This driver holds **only** `CAP_MAILBOX` (reload the firmware over the
+`VideoCore` mailbox service) and `CAP_HW_EMIT` (publish node B). It is
+deliberately **not** granted `CAP_MMIO_MAP` / `CAP_MEM_DMA`: it forwards the
+BAR + DMA grants to the controller driver without ever mapping them itself
+(`AGENTS.md` §4 — no ambient authority). Every trap is re-checked kernel-side
+(`AGENTS.md` §5.4).
 
-* VIA VL805 USB 3.0 host controller (PCI `1106:3483`) on the Raspberry Pi 4
-  (BCM2711), reached through the BCM2711 PCIe root complex.
+## Layering & purity
 
-## Public surface
-
-Per `AGENTS.md` §8 the only public *function* is `register`. The firmware
-policy is `reload_firmware` and `probe_firmware_revision`, both composed by
-the host over the board-neutral `rustos_abi::driver::mailbox::MailboxChannel`
-seam; `BIND_KEYS` is the §18.3 bind table (exact PCI `1106:3483`).
-
-## Capabilities
-
-Loading requires `CAP_DRV_LOAD`. The mailbox doorbell and property-buffer
-access are gated **host-side** by the `MailboxChannel` implementation
-(`AGENTS.md` §5.4); this driver holds no ambient authority and names no board
-address (`AGENTS.md` §4 / §2.20).
-
-## Layering
-
-A device-specific (`AGENTS.md` §2.20 carve-out) `drivers/*` crate: it knows
-the VL805/BCM2711 but reaches the firmware mailbox **only** through
-`MailboxChannel` — never a doorbell address, a property-buffer carve, or a
-`kernel/*` dependency (`AGENTS.md` §17.4). The property-message layout lives
-once in `lib/vcmailbox`; this driver only sequences the policy
-(`AGENTS.md` §2.2).
+A **pure-Rust** program (`AGENTS.md` §1): it links the userland runtime
+`rustos-rt` (never the C ABI, §16.4) and depends only on `lib/*` crates, so
+the §17.4 layering holds (no `drivers/*`→`drivers/*` edge). The
+reload-and-publish composition and the firmware policy live in `lib/vl805`
+(`wiring`, host-tested against `DriverHost` doubles); this binary is the thin
+freestanding wiring that builds the rt-backed host and drives it. It names no
+board address and maps nothing, so it stays platform-neutral (`coherency =
+None`, §2.20). On the host it is an inert stub.
 
 ## Limitations / testing
 
-QEMU models no `VideoCore`, so the policy is proven host-side against the
-protocol-faithful `lib/vcmailbox` mock firmware (`AGENTS.md` §2.1 / §2.2).
-The live firmware reload is the on-metal acceptance item
-(`plans/PI.md` Increment C).
+QEMU models no `VideoCore` mailbox or Pi USB timing (`AGENTS.md` §0.4), so
+the composition and its fail-closed paths are proven by the `lib/vl805` host
+tests; the live reload → publish chain is the on-metal acceptance item
+(`plans/PI.md` P10).

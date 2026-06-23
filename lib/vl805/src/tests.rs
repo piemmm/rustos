@@ -1,4 +1,4 @@
-//! Unit tests for the VL805 device driver: the §8 `register` gate, the
+//! Unit tests for the VL805 firmware policy: the §8 `register` gate, the
 //! §18.3 `BIND_KEYS` match table, and the firmware-reset policy run over a
 //! [`MailboxChannel`].
 //!

@@ -2150,10 +2150,35 @@ order (one fully-gated increment each):
              PCI-config-level and independent of xHCI firmware, expected safe but
              a metal-gated acceptance point (§0.9). The bundle is not yet
              installed into the image — that is the D5d flip.
-           - **D5c — `vl805` user-space bin (NEXT)** (bind node A → reload fw over
-             the mailbox IPC → emit `usb,xhci` node B forwarding the BAR+DMA
-             grants) + `usb_kbd` bind-table retarget onto node B.
-           - **D5d — the flip.** Install the four signed bundles
+           - **D5c — `vl805` user-space bin + `usb_kbd` bind retarget — DONE
+             (whole gate green).** The VL805 firmware policy moved out of the
+             kernel-linked `drivers/bus/usb/vl805` crate into the new
+             device-support library `lib/vl805` (`rustos-vl805`, the §2.20
+             carve-out / `lib/pcie_brcm` precedent) — forced for the same reason
+             as D5a/D5b.1: a `rustos-rt`-linking bin cannot share a
+             kernel-linked `drivers/*` crate. `lib/vl805` holds `register`,
+             `reload_firmware`/`probe_firmware_revision`, the firmware
+             outcomes/constants, node-A `BIND_KEYS` (exact PCI `1106:3483`), and
+             a host-tested `wiring`: `build_xhci_node` (node B = an
+             `rustos_usb::XHCI_COMPATIBLE` `usb,xhci` node forwarding the
+             received BAR+DMA grants) and `reload_firmware_and_publish` (reload
+             over `host.mailbox()` *then* emit, so firmware-before-bring-up
+             holds by construction). `drivers/bus/usb/vl805` became the
+             freestanding `Run` bin (links `rustos-rt`+`rustos-drvrt`+`lib/vl805`;
+             inert host stub): `from_grants_query` → `build_xhci_node` →
+             `reload_firmware_and_publish` → park. Caps `CAP_MAILBOX`+`CAP_HW_EMIT`
+             **only** — it forwards the BAR/DMA grants without ever mapping them
+             (§4 least privilege). `usb_kbd`'s bind table is
+             `rustos_hid::KEYBOARD_BIND_KEYS` (exact `compatible("usb,xhci")`,
+             priority 10), so `usb_kbd` binds node B and brings the whole xHCI
+             controller up itself (the `Xhci` object can't cross a process
+             boundary). The shared `XHCI_COMPATIBLE` lives once in `lib/usb`
+             (§2.2). The in-kernel scaffold (`usb_keyboard.rs`) + kernel
+             Cargo.toml were retargeted onto `rustos_vl805`; it stays the live
+             metal keyboard until D5d (§2.17). The bundle is **not** yet
+             installed into the image — that is D5d. **Metal note:** carries
+             D5b.2b's BAR-before-firmware-reload reordering; metal-gated (§0.9).
+           - **D5d — the flip (NEXT).** Install the four signed bundles
              (`pcie_brcm`/`vcmailbox`/`vl805`/`usb_kbd`) into `/System/Drivers/`;
              delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
              `usb_hid`/`pcie_brcm`/`bus_usb` from

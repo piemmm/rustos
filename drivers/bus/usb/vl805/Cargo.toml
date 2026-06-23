@@ -1,6 +1,6 @@
 [package]
 name = "rustos-drv-bus-usb-vl805"
-description = "RustOS Raspberry Pi 4 (BCM2711) VL805 xHCI controller device driver: VideoCore-mailbox firmware reload."
+description = "RustOS autoloaded user-space Raspberry Pi 4 (BCM2711) VL805 USB bus driver: binds the discovered VL805 PCI node, reloads the controller firmware over the VideoCore mailbox IPC, and publishes the controller as a bindable xHCI node forwarding the BAR + DMA grants (AGENTS.md §4 / §18; plans/PI.md P10 D5c)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,24 +8,38 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[dependencies]
-rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
-# The BCM2711 VideoCore property-channel client (`AGENTS.md` §2.20 device
-# carve-out): the VL805 firmware-reload (`NOTIFY_XHCI_RESET`) and
-# firmware-revision property-message layout live here once; this driver
-# encodes/decodes those messages and runs them over the board-neutral
-# `lib/abi` `MailboxChannel` seam, never re-deriving the layout
-# (`AGENTS.md` §2.2). It is a `lib/*` crate, so this `drivers/*` driver may
-# depend on it (`AGENTS.md` §17.4 — `drivers/* → lib/*`).
-rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
-
-[dev-dependencies]
-# Protocol-faithful mock firmware (`mock-firmware` feature) backing the
-# host-test `MailboxChannel`, so the driver's policy is proven against the
-# real property semantics rather than a hand-faked response (`AGENTS.md`
-# §2.1 / §2.2). QEMU models no VideoCore, so the live doorbell is the
-# on-metal acceptance item (`plans/PI.md` Increment C).
-rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0", features = ["mock-firmware"] }
-
 [lints]
 workspace = true
+
+# The crate is **only** a binary: the `Run` entry point of the VL805 USB
+# bus-driver bundle, installed under `/System/Drivers/` and autoloaded into user
+# space by `devmgr` when the VL805 PCI node is discovered (`AGENTS.md` §18). It
+# links the userland runtime `rustos-rt`, so it is a separate crate from the
+# kernel-linked `lib/vl805` engine (the kernel must not pull in the userland
+# `_start` / panic handler), and depends only on `lib/*` crates so the §17.4
+# layering holds (no `drivers/*`→`drivers/*` edge). The reload-and-publish
+# composition is host-tested in `lib/vl805` (`wiring`), so this binary is a thin
+# freestanding wiring on the native Tier-1 targets and an inert host stub
+# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/bus/pcie_brcm`
+# (`AGENTS.md` §2.2).
+
+# Everything the freestanding program links is pulled in only for the bare-metal
+# targets the binary is actually built for; on the host the binary is an inert
+# stub with no dependencies.
+[target.'cfg(target_os = "none")'.dependencies]
+# The frozen `abi-v1` surface (`CapabilityId`, `DriverError`).
+rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The capability-set type the rt-backed `DriverHost` is built over (§5.2).
+rustos-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
+# The VL805 device-support crate: the firmware-reload policy and the
+# host-tested `wiring` (`build_xhci_node` + `reload_firmware_and_publish`) and
+# `BIND_KEYS` — a `lib/*` crate, so the §17.4 layering holds (the §2.20
+# device-support carve-out).
+rustos-vl805 = { path = "../../../../lib/vl805", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource grants
+# into the `DriverHost` (`resource_grants` / `ipc_call` for the mailbox /
+# `hw_emit_node` over the syscall surface, §5.4).
+rustos-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# canary §19.2, the panic handler, the syscall wrappers, and `yield_now`.
+rustos-rt = { path = "../../../../lib/rt", version = "=0.0.0" }

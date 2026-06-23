@@ -410,14 +410,17 @@ rustos/
 │   ├── network/
 │   ├── storage/
 │   └── bus/             # virtio, mmio, usb/ (the USB bus-class folder):
-│                        #   usb/xhci (generic xHCI host) + usb/vl805 (Pi 4
-│                        #   VL805 firmware reload), and pcie_brcm (the Pi 4
-│                        #   PCIe root-complex bus-driver bin: trains the link,
-│                        #   enumerates the VL805, emits its xHCI node). PCI
-│                        #   config-access mechanism logic is lib/pci and the
-│                        #   BCM2711 link-train engine + the host-tested
-│                        #   emit_vl805_node composition are lib/pcie_brcm
-│                        #   (§2.20 carve-out / §17.4).
+│                        #   usb/xhci (generic xHCI host) + usb/vl805 (the Pi 4
+│                        #   VL805 USB bus-driver bin: binds the VL805 PCI node,
+│                        #   reloads its firmware over the vcmailbox IPC, emits
+│                        #   the usb,xhci node forwarding the BAR+DMA grants),
+│                        #   and pcie_brcm (the Pi 4 PCIe root-complex bus-driver
+│                        #   bin: trains the link, enumerates the VL805, emits
+│                        #   its xHCI node). PCI config-access mechanism logic is
+│                        #   lib/pci, the BCM2711 link-train engine + host-tested
+│                        #   emit_vl805_node composition are lib/pcie_brcm, and
+│                        #   the VL805 firmware-reload policy + reload-and-publish
+│                        #   wiring are lib/vl805 (§2.20 carve-out / §17.4).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -529,6 +532,13 @@ rustos/
 │   │                    #   shared by the kernel verticals and the user-space
 │   │                    #   input driver (§2.2/§17.4 — the virtio analogue of
 │   │                    #   lib/hid ↔ drivers/input/usb_hid).
+│   ├── vl805/           # BCM2711 (Pi 4) VL805 xHCI USB host-controller
+│   │                    #   device support: the VideoCore-mailbox firmware
+│   │                    #   reload policy + BIND_KEYS + the host-tested
+│   │                    #   reload-and-publish wiring (build_xhci_node +
+│   │                    #   reload_firmware_and_publish), shared by the kernel
+│   │                    #   boot scaffold and the user-space drivers/bus/usb/vl805
+│   │                    #   bin (§2.20 single-device support carve-out / §17.4).
 │   └── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
 │                        #   one control/SGR/colour/screen-op definition with an
 │                        #   emitter + streaming parser over the same tables (§2.2).

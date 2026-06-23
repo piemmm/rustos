@@ -2061,8 +2061,8 @@ real hardware per a recorded checklist — pending hardware.
 **Landed — Increment C (the full swap): the kernel sequences the floor
 crates over `DriverHost`.** The in-kernel `usb_keyboard::bring_up_keyboard`
 composition now drives the three separate floor crates over the
-`lib/abi::DriverHost` contract — `drivers/bus/pcie_brcm` trains the link,
-the `drivers/bus/usb/vl805` device driver reloads VL805 firmware over
+`lib/abi::DriverHost` contract — `lib/pcie_brcm` trains the link,
+the `lib/vl805` device-support library reloads VL805 firmware over
 `host.mailbox()`, and `drivers/bus/usb/xhci`'s
 `wiring::bring_up_boot_input` maps the BAR, carves DMA, enumerates the boot
 keyboard, and publishes it through `host.emit_node()` (forwarded to the

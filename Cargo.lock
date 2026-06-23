@@ -695,7 +695,10 @@ name = "rustos-drv-bus-usb-vl805"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-vcmailbox",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-rt",
+ "rustos-vl805",
 ]
 
 [[package]]
@@ -974,7 +977,6 @@ dependencies = [
  "rustos-devmgr",
  "rustos-drv-bus-mmio",
  "rustos-drv-bus-usb",
- "rustos-drv-bus-usb-vl805",
  "rustos-drv-bus-virtio",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
@@ -1006,6 +1008,7 @@ dependencies = [
  "rustos-util",
  "rustos-vcmailbox",
  "rustos-virtio-input",
+ "rustos-vl805",
  "zeroize",
 ]
 
@@ -2824,6 +2827,15 @@ dependencies = [
  "rustos-input",
  "rustos-keymap",
  "rustos-virtio",
+]
+
+[[package]]
+name = "rustos-vl805"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-usb",
+ "rustos-vcmailbox",
 ]
 
 [[package]]

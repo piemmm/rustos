@@ -46,14 +46,14 @@ use rustos_log::{log, Event, EventId, Field, Level, Sink};
 pub use rustos_pcie_brcm::wiring::PcieBringup;
 use rustos_usb::device::UsbDevice;
 use rustos_util::fmt::format_hex_u64;
-// The VL805 firmware-reset *policy* lives in the device's own driver crate
-// (`drivers/bus/usb/vl805`), reached over the board-neutral `lib/abi`
-// `MailboxChannel` seam (`AGENTS.md` §2.20 / §2.2 / §17.4); the xHCI
-// controller bring-up + boot-keyboard enumeration + child-node emission
+// The VL805 firmware-reset *policy* lives in the device's own support crate
+// (`lib/vl805`, the §2.20 device carve-out), reached over the board-neutral
+// `lib/abi` `MailboxChannel` seam (`AGENTS.md` §2.20 / §2.2 / §17.4); the
+// xHCI controller bring-up + boot-keyboard enumeration + child-node emission
 // lives in the generic `drivers/bus/usb` floor entry. This composition only
 // sequences the floor drivers over the `DriverHost` contract.
 use rustos_drv_bus_usb::wiring::bring_up_boot_input;
-use rustos_drv_bus_usb_vl805::{self as vl805, FirmwareResetOutcome};
+use rustos_vl805::{self as vl805, FirmwareResetOutcome};
 
 /// Audit event: a progress/failure milestone of the VL805 USB-keyboard
 /// bring-up chain (PCIe link training, xHCI bring-up, root-hub
@@ -824,12 +824,12 @@ mod tests {
     use rustos_abi::driver::mmio::MmioMapError;
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
+    use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
     // The discovered-node parse the orchestration tests build a `PcieBringup`
     // from now lives in the PCIe device support crate `lib/pcie_brcm`
     // (`AGENTS.md` §2.2 / §2.21).
-    use rustos_drv_bus_usb_vl805::FirmwareResetFailure;
-    use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
     use rustos_pcie_brcm::wiring::pcie_bringup_from_node;
+    use rustos_vl805::FirmwareResetFailure;
 
     /// A [`Sink`] that records the `(level, id)` of every event it
     /// receives, so a test can assert the bring-up emitted its staged

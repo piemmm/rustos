@@ -54,6 +54,12 @@ build on the *same* engine without depending on each other — exactly the split
   lays the region out, so every host that carves it — the PCI bus driver's
   wiring (`drivers/bus/usb`) and the arch-neutral keyboard driver
   (`drivers/input/usb_hid`) — shares one definition (§2.2).
+- `XHCI_COMPATIBLE` — the `compatible` identity (`usb,xhci`) a discovered xHCI
+  controller node carries (§18.1). An xHCI-protocol identity (not a board or
+  vendor name), so it lives here as the single definition the emitting bus
+  driver (`drivers/bus/usb/vl805`, which publishes the controller node under
+  it) and the binding controller driver (`drivers/input/usb_kbd`'s
+  `KEYBOARD_BIND_KEYS`) share (§2.2 / §2.20).
 
 ## Design
 

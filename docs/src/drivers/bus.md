@@ -15,7 +15,8 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
 | `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + HID enumeration (host-proven) |
-| `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | Firmware reload over the mailbox seam (host-proven); metal pending |
+| `lib/vl805`              | Pi 4 (VL805 device)   | Firmware-reload policy + reload-and-publish wiring (host-proven); metal pending |
+| `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | User-space bus-driver bin: reload firmware → emit `usb,xhci` node B (host-proven via `lib/vl805`); metal pending |
 
 ## Capability model
 
@@ -542,48 +543,70 @@ the mock controller — plus the fail-closed paths (forged residual,
 stalled class request, empty port, double enumeration, undersized or
 misaligned DMA region).
 
-## VL805 device driver — `drivers/bus/usb/vl805`
+## VL805 USB bus driver — `lib/vl805` + `drivers/bus/usb/vl805`
 
 The VL805 firmware (re)load is the one thing specific to that *device*,
 so it is its own driver — separate from, and not intertwined with, the
-generic PCIe root-complex driver (`lib/pcie_brcm`, which trains
-the link) and the generic xHCI host driver (`drivers/bus/usb/xhci`, which
-brings the controller up and enumerates devices). A different board may
-need the PCIe driver without USB at all, or an xHCI controller that needs
-no firmware reload; keeping the three drivers separate is the correct
-modular shape (`AGENTS.md` §2.2 / §2.20 / §8 / §17.4).
+generic PCIe root-complex driver (`lib/pcie_brcm`, which trains the link)
+and the generic xHCI host engine (`lib/usb`, which brings the controller
+up and enumerates devices). A different board may need the PCIe driver
+without USB at all, or an xHCI controller that needs no firmware reload;
+keeping the three separate is the correct modular shape (`AGENTS.md`
+§2.2 / §2.20 / §8 / §17.4).
+
+The firmware policy and the controller-node wiring live in the
+device-support library `lib/vl805` (the §2.20 single-device carve-out,
+the `lib/vcmailbox` / `lib/pcie_brcm` precedent), so two consumers share
+one definition: the autoloaded user-space bus-driver bin
+`drivers/bus/usb/vl805` (which links the userland runtime `rustos-rt`)
+and the transitional in-kernel keyboard scaffold (`rustos-kernel`). A
+`rustos-rt`-linking bin cannot share a kernel-linked `drivers/*` crate,
+so the shared logic is `lib/*` and neither consumer crosses a
+`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
 
 On a Pi 4 without the SPI EEPROM (rev 1.4+), the VL805 carries no
 resident firmware: the `VideoCore` loads it at power-on and a PCIe
 `PERST#` drops it, so only `VideoCore` can reload it over a
-`NOTIFY_XHCI_RESET` firmware-property request. The driver is
-device-specific (`AGENTS.md` §2.20 carve-out) — it may know the
+`NOTIFY_XHCI_RESET` firmware-property request. `lib/vl805` may know the
 VL805/BCM2711 — but it reaches the firmware mailbox **only** through the
 board-neutral `rustos_abi::driver::mailbox::MailboxChannel` seam, never a
 doorbell address or a `kernel/*` dependency (`AGENTS.md` §17.4). Its
 public surface is the §8 `register` entry, the §18.3 `BIND_KEYS` bind
 table (exact PCI `1106:3483`, ranked above the generic class-wildcard
-xHCI driver), and two policy functions composed by the host over a
-`MailboxChannel`:
+xHCI driver), two firmware-policy functions composed over a
+`MailboxChannel` —
 
 - `probe_firmware_revision` — a benign firmware-revision liveness read
   that separates a broken mailbox path from `VideoCore` dropping the
   reset tag (`AGENTS.md` §15.7), and
 - `reload_firmware` — the `NOTIFY_XHCI_RESET` reload, fail-closed: an
   unverified firmware ack is treated as a failure, never a success
-  (`AGENTS.md` §5.4).
+  (`AGENTS.md` §5.4) —
+
+and the `wiring` composition the bin runs: `build_xhci_node` publishes
+the controller as `node B`, an `usb,xhci` hardware-tree node (the shared
+`rustos_usb::XHCI_COMPATIBLE` identity) **forwarding** the register BAR +
+DMA grants the bin received on the VL805 PCI node (`node A`), and
+`reload_firmware_and_publish` reloads the firmware then emits node B —
+so firmware-before-bring-up holds by construction (node B does not exist
+until the reload runs). The bin holds only `CAP_MAILBOX` + `CAP_HW_EMIT`:
+it forwards the BAR/DMA grants without ever mapping them (`AGENTS.md` §4
+— least privilege), and `drivers/input/usb_kbd` binds node B
+(`rustos_hid::KEYBOARD_BIND_KEYS`) to bring the controller up.
 
 The property-message *layout* lives once in `lib/vcmailbox`
 (`encode_xhci_reset` / `decode_xhci_reset_response` and the
-firmware-revision pair); the driver only sequences the policy, never
+firmware-revision pair); `lib/vl805` only sequences the policy, never
 re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
 discovered doorbell window, the DMA-aliased property buffer, the cache
-coherency, and the `4121`/`4122` diagnostics) stays kernel-side: the
-in-kernel keyboard composition supplies a `MailboxChannel` that owns the
-`MmioMailbox` and runs the driver's policy over it. QEMU models no
-`VideoCore`, so the policy is host-proven against the protocol-faithful
-`lib/vcmailbox` mock firmware and the live reload is the on-metal
-acceptance item (`plans/PI.md` Increment C).
+coherency) lives behind the `MailboxChannel`: the user-space bin reaches
+the `drivers/bus/mailbox/vcmailbox` service over the kernel call surface,
+while the transitional in-kernel scaffold supplies an in-kernel
+`MailboxChannel` owning the `MmioMailbox`. QEMU models no `VideoCore`, so
+the policy is host-proven against the protocol-faithful `lib/vcmailbox`
+mock firmware and the reload-and-publish wiring against `DriverHost`
+doubles; the live reload → publish chain is the on-metal acceptance item
+(`plans/PI.md` P10).
 
 ## Register-window hand-off
 

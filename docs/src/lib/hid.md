@@ -79,6 +79,20 @@ and mock `DriverHost`:
 - Grant derivation: the Pi 4 shape (`BusWindow` BAR + translated `Dma`) and the
   `virt` shape (`Mmio` BAR + untranslated `Dma`) decode to the right bounds; an
   IRQ grant is ignored; missing / ambiguous / zero-length grants fail closed.
+- Bind table: `KEYBOARD_BIND_KEYS` matches the published xHCI controller node
+  (`rustos_usb::XHCI_COMPATIBLE`) and rejects a different `compatible` string.
+
+## Bind table
+
+`KEYBOARD_BIND_KEYS` is the §18.3 bind table for the user-space USB
+boot-keyboard driver (`drivers/input/usb_kbd`): an exact `compatible`-string
+match on `rustos_usb::XHCI_COMPATIBLE` (`usb,xhci`), the identity the VL805 USB
+bus driver publishes the controller node under (`drivers/bus/usb/vl805`'s
+`node B`). The keyboard driver brings the whole xHCI controller up itself — the
+`Xhci` controller object cannot cross a process boundary — so it binds the
+controller node directly rather than a separately-emitted HID-interface node.
+The table lives here, beside the orchestration the driver runs, as the single
+source the signed manifest is authored from (`AGENTS.md` §2.2 / §18.3).
 
 ## Stability
 

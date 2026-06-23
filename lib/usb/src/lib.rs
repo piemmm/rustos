@@ -98,6 +98,20 @@ const _: () = assert!(XHCI_DMA_BYTES >= 160 * 1024);
 /// on one definition (`AGENTS.md` §2.2).
 pub const XHCI_BAR_INDEX: u8 = 0;
 
+/// The device-tree-style `compatible` identity a discovered xHCI USB
+/// host-controller node carries (`AGENTS.md` §18.1).
+///
+/// A bus driver that brings an xHCI controller up publishes the controller
+/// into the hardware tree under this `compatible` string, and the
+/// controller's driver binds it with a matching
+/// [`HwMatchKey::compatible`](rustos_abi::HwMatchKey::compatible) bind key.
+/// It is an xHCI-protocol identity (the controller class), not a board or
+/// vendor name, so it lives here beside the controller engine as the single
+/// definition both the emitting bus driver (`drivers/bus/usb/vl805`) and the
+/// binding controller driver (`drivers/input/usb_kbd`) depend on, never a
+/// copy in each (`AGENTS.md` §2.2 / §2.20).
+pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
+
 /// Highest doorbell target value (§5.6: endpoint IDs 1..=31 for device
 /// doorbells; 0 is the command-ring target on doorbell 0).
 const DOORBELL_TARGET_MAX: u32 = 31;

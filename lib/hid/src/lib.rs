@@ -74,7 +74,8 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::input::{InputEvent, InputEventKind};
-use rustos_abi::DriverError;
+use rustos_abi::{DriverBindKey, DriverError, HwMatchKey};
+use rustos_usb::XHCI_COMPATIBLE;
 
 pub mod console;
 pub mod keyboard;
@@ -91,6 +92,36 @@ pub use rustos_abi::driver::input::ReportSource;
 pub use service::{
     bring_up_boot_keyboard, derive_keyboard_resources, KeyboardResources, KeyboardSource,
 };
+
+/// The §18.3 bind priority [`KEYBOARD_BIND_KEYS`] carries.
+///
+/// An exact `compatible`-string match for the controller node, mirroring the
+/// other `compatible`-keyed drivers (`lib/pcie_brcm`, `drivers/storage/emmc2`,
+/// priority 10).
+const KEYBOARD_BIND_PRIORITY: u16 = 10;
+
+/// The user-space USB boot-keyboard driver's hardware bind table
+/// (`AGENTS.md` §18.3): the xHCI USB host controller, matched by the
+/// [`XHCI_COMPATIBLE`] `compatible` string the
+/// bus driver publishes the controller node under (`drivers/bus/usb/vl805`'s
+/// `node B`). The single source of truth the `drivers/input/usb_kbd` signed
+/// manifest's bind table is authored from and `devmgr` resolves the
+/// controller node against (`AGENTS.md` §2.2).
+///
+/// The keyboard driver brings the whole xHCI controller up itself — the
+/// `Xhci` controller object cannot cross a process boundary, so it binds the
+/// controller node directly rather than a separately-emitted HID-interface
+/// node (`plans/PI.md` P10 D5).
+pub const KEYBOARD_BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
+    KEYBOARD_BIND_PRIORITY,
+    match HwMatchKey::compatible(XHCI_COMPATIBLE) {
+        Ok(key) => key,
+        // Unreachable: `XHCI_COMPATIBLE` is well within `HW_COMPATIBLE_MAX`.
+        // A too-long literal would be a compile-time const-eval error here,
+        // never a runtime panic (`AGENTS.md` §2.9).
+        Err(_) => panic!("XHCI_COMPATIBLE fits HW_COMPATIBLE_MAX"),
+    },
+)];
 
 /// `code` value for the X axis in the platform-neutral
 /// [`InputEventKind::Pointer`] / [`InputEventKind::Scroll`] encoding
