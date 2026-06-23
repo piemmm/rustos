@@ -1012,6 +1012,16 @@ an update to this section.
 
 ## 14. Commit / PR Discipline
 
+- **AI agents are FORBIDDEN from committing to git or pushing.** An AI agent
+  MUST NOT run `git commit`, `git push`, or any other command that writes a
+  commit or publishes to a remote (e.g. `git commit --amend`, `git rebase`,
+  `git merge`, `git tag`, `git push --force`, or a `git` alias/hook that does
+  any of these). Creating commits and pushing are reserved exclusively for the
+  human contributor, who reviews the agent's working-tree changes first. The
+  agent's deliverable is the modified working tree plus its completion report
+  (§23.5), never a commit or a push. This is binding and as non-negotiable as
+  §2; circumventing it (staging-and-committing in one command, scripting git,
+  or asking another tool to commit) is a §2.1 hack and a review blocker.
 - One logical change per commit.
 - Commit message format:
   ```
@@ -1119,6 +1129,15 @@ You are not exempt from any rule above. In addition:
     If there is no shared home yet, create or extend one (§6, §17.2); if that
     is too large for this change, stop and ask (§15.7) — do not duplicate it
     "for now" (§2.19).
+16. **Never commit to git or push (§14).** You are FORBIDDEN from running
+    `git commit`, `git push`, or any command that writes a commit or publishes
+    to a remote (including `git commit --amend`, `git rebase`, `git merge`,
+    `git tag`, `git push --force`, and any git alias/hook/script that does so).
+    You leave your changes in the working tree for the human contributor to
+    review and commit. Do not stage-and-commit in one command, script git to
+    commit, or delegate the commit to another tool — that is the §2.1 hack this
+    rule forbids. Your deliverable is the modified tree plus the §23.5
+    completion report, never a commit or a push.
 
 ---
 

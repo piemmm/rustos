@@ -3332,3 +3332,11 @@ can see *why* a rule exists without diffing the charter's history.
   conformance on metal — is too large for this charter change, so it is staged
   and surfaced as PLAN **P-5** (§2.18/§2.19/§15.7), the immediate next work.
   Charter + plan + next-pi-prompt only; no code changed in this amendment.
+
+- **2026-06-23 — AI agents may not commit or push to git.** Added a §14 rule
+  and agent instruction §15.16 forbidding an AI agent from running `git commit`,
+  `git push`, or any commit-writing/remote-publishing command (amend, rebase,
+  merge, tag, force-push, or git aliases/hooks/scripts that do so). Creating
+  commits and pushing are reserved for the human contributor who reviews the
+  agent's working-tree changes first; the agent's deliverable is the modified
+  tree plus its §23.5 completion report. Documentation only.
