@@ -879,3 +879,239 @@ fn bring_up_from_node_reaches_the_root_port_check_over_a_mapped_window() {
         Some(DriverError::DeviceFault)
     );
 }
+
+// --- VL805 enumerate-and-publish composition ------------------------------
+//
+// `publish_usb_function` is the post-link half of the user-space bus driver
+// (`emit_vl805_node`): QEMU models no Pi PCIe link timing (`AGENTS.md`
+// §0.4), so the link training itself is metal-only, but this half — find the
+// USB function, assign/map its BAR, translate it to CPU-physical, and publish
+// the node — is host-testable against a mock bus.
+
+use core::cell::RefCell;
+use rustos_abi::driver::bus::{Bus, BusDevice};
+use rustos_abi::driver::pci::PciBus;
+use rustos_abi::{HwMatchKey, HwResourceKind};
+use rustos_pci::USB_CONTROLLER_CLASS;
+use rustos_usb::XHCI_DMA_BYTES;
+
+/// Bus-local address of the lone USB function the [`StubPciBus`] reports.
+const USB_BDF: u64 = 0x0001_0000;
+/// BAR window length the stub's `map_bar_window` reports.
+const STUB_BAR_LEN: usize = 0x1000;
+
+/// A mock [`PciBus`] for the publish composition: it reports a single
+/// USB-class function, records the assign/enable/map call order, maps its
+/// BAR at a configurable PCIe-bus base, and describes it as a VL805 node.
+struct StubPciBus {
+    /// Whether the bus carries a USB-class function at all.
+    has_usb: bool,
+    /// The PCIe-bus base `map_bar_window` reports for the BAR (so a test can
+    /// place it inside or outside the outbound window).
+    bar_bus_base: u64,
+    /// The assign/enable/map call sequence, in order.
+    calls: RefCell<Vec<&'static str>>,
+}
+
+impl StubPciBus {
+    fn new(bar_bus_base: u64) -> Self {
+        Self {
+            has_usb: true,
+            bar_bus_base,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Bus for StubPciBus {
+    fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+        if !self.has_usb || out.is_empty() {
+            return Ok(0);
+        }
+        out[0] = BusDevice {
+            vendor: 0x1106,
+            device: 0x3483,
+            class: USB_CONTROLLER_CLASS,
+            reserved0: 0,
+            address: USB_BDF,
+        };
+        Ok(1)
+    }
+}
+
+impl PciBus for StubPciBus {
+    fn map_bar_window(
+        &self,
+        _bdf: u64,
+        _bar_index: u8,
+        mapper: &dyn MmioMapper,
+    ) -> Result<RegisterWindow, DriverError> {
+        self.calls.borrow_mut().push("map");
+        mapper
+            .map_window(self.bar_bus_base, STUB_BAR_LEN)
+            .map_err(MmioMapError::as_driver_error)
+    }
+
+    fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
+        self.calls.borrow_mut().push("enable");
+        Ok(())
+    }
+
+    fn assign_bar(
+        &self,
+        _bdf: u64,
+        _bar_index: u8,
+        window_base: u64,
+        _window_size: u64,
+    ) -> Result<u64, DriverError> {
+        self.calls.borrow_mut().push("assign");
+        Ok(window_base)
+    }
+
+    fn read_config(&self, _bdf: u64, _offset: u16) -> Result<u32, DriverError> {
+        Ok(0)
+    }
+
+    fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
+        // Identity is unassigned (the kernel sets it on publish, D5b.2a); the
+        // node carries the VL805's `vendor:device:class` match key.
+        let mut node = HwNode::new(0, rustos_abi::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
+        node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30))
+            .map_err(|_| DriverError::DeviceFault)?;
+        Ok(node)
+    }
+}
+
+/// A [`DriverHost`] double that maps BARs through a granting [`MockMapper`]
+/// and captures the node published through [`DriverHost::emit_node`].
+struct RecordingHost {
+    emit_ok: bool,
+    mapper: MockMapper,
+    emitted: RefCell<Option<HwNode>>,
+}
+
+impl RecordingHost {
+    fn new(emit_ok: bool) -> Self {
+        Self {
+            emit_ok,
+            mapper: MockMapper { grant: true },
+            emitted: RefCell::new(None),
+        }
+    }
+}
+
+impl DriverHost for RecordingHost {
+    fn has_capability(&self, cap: CapabilityId) -> bool {
+        matches!(cap, CapabilityId::MMIO_MAP | CapabilityId::HW_EMIT)
+    }
+
+    fn kind(&self) -> DriverKind {
+        DriverKind::UserSpace
+    }
+
+    fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
+        Some(&self.mapper)
+    }
+
+    fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
+        if !self.emit_ok {
+            return Err(DriverError::PermissionDenied);
+        }
+        *self.emitted.borrow_mut() = Some(node);
+        Ok(())
+    }
+}
+
+#[test]
+fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
+    // The BAR is assigned the bottom of the Pi 4 outbound PCIe window, so its
+    // CPU-physical address is the outbound CPU base.
+    let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
+    let host = RecordingHost::new(true);
+    let node = wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
+
+    // The shared `lib/pci` primitive drove assign → enable → map in order.
+    assert_eq!(bus.calls.borrow().as_slice(), &["assign", "enable", "map"]);
+
+    // The published node carries the function's match key plus exactly two
+    // grant requests: the BAR as a CPU-physical `Mmio` window (inside the
+    // outbound CPU window, so the kernel's BusWindow→Mmio coverage admits it)
+    // and the inbound DMA aperture sized for the xHCI working set.
+    let emitted = host.emitted.borrow();
+    let emitted = emitted.as_ref().expect("a node was emitted");
+    assert_eq!(emitted.match_keys().len(), 1);
+    let mmio = emitted
+        .resources()
+        .iter()
+        .find(|r| r.kind() == Some(HwResourceKind::Mmio))
+        .expect("an Mmio BAR grant");
+    assert_eq!(mmio.base(), PI_WINDOWS.outbound_cpu_base);
+    assert_eq!(mmio.length(), STUB_BAR_LEN as u64);
+    let dma = emitted
+        .resources()
+        .iter()
+        .find(|r| r.kind() == Some(HwResourceKind::Dma))
+        .expect("a Dma constraint grant");
+    assert_eq!(
+        dma.base(),
+        PI_WINDOWS.inbound_pcie_base + PI_WINDOWS.inbound_size
+    );
+    assert_eq!(dma.length(), XHCI_DMA_BYTES as u64);
+    // The returned node equals the published one (the kernel owns identity).
+    assert_eq!(*emitted, node);
+}
+
+#[test]
+fn publish_usb_function_without_a_usb_function_fails_closed_not_found() {
+    let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
+    bus.has_usb = false;
+    let host = RecordingHost::new(true);
+    assert_eq!(
+        wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
+        Some(DriverError::NotFound)
+    );
+    assert!(host.emitted.borrow().is_none());
+}
+
+#[test]
+fn publish_usb_function_fails_closed_when_the_bar_is_outside_the_outbound_window() {
+    // A BAR below the outbound PCIe base has no CPU-physical translation in
+    // the bridge window, so the publish is refused rather than emitting a
+    // grant the kernel could not cover (`AGENTS.md` §5.4).
+    let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base - 0x1000);
+    let host = RecordingHost::new(true);
+    assert_eq!(
+        wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
+        Some(DriverError::OutOfRange)
+    );
+    assert!(host.emitted.borrow().is_none());
+}
+
+#[test]
+fn publish_usb_function_propagates_a_refused_emit() {
+    // A host that refuses the node publish (no `CAP_HW_EMIT`, or the node
+    // requests an uncovered resource) surfaces the refusal — fail closed.
+    let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
+    let host = RecordingHost::new(false);
+    assert_eq!(
+        wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
+        Some(DriverError::PermissionDenied)
+    );
+}
+
+#[test]
+fn emit_vl805_node_reaches_the_link_bringup_over_a_mapped_window() {
+    // `emit_vl805_node` first trains the link via `open_discovered`; over the
+    // inert zeroed mock window the root-port check fails closed with
+    // DeviceFault — the on-metal boundary. That it reached this proves the
+    // composition mapped the controller window and drove the engine.
+    let host = MockHost {
+        mmio_map: true,
+        mapper: Some(MockMapper { grant: true }),
+    };
+    let bringup = wiring::pcie_bringup_from_node(&pcie_node()).expect("complete node");
+    assert_eq!(
+        wiring::emit_vl805_node(&host, &bringup, &NoDelay).err(),
+        Some(DriverError::DeviceFault)
+    );
+}

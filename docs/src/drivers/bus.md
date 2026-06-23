@@ -866,21 +866,37 @@ hardware tree at runtime (`AGENTS.md` §18.1 / §18.3): each device it
 finds becomes a child `HwNode` carrying the match keys a driver's signed
 bind table resolves against, so a device behind the bus autoloads its
 driver as match **data** rather than by a hand-wired composition module
-(`AGENTS.md` §2.2 / §18.5). `PciBus::describe_function(bdf, parent_id,
-node_id)` is that seam: it reads the function's `vendor:device` and its
-**full 24-bit class code** `(base_class << 16) | (sub_class << 8) |
-prog_if` — the prog-if kept so an xHCI host (`0x0C_03_30`) is told apart
-from the older OHCI/UHCI/EHCI USB host classes that share `0x0C_03`,
-exactly what the generic xHCI driver's wildcard bind key needs — and
-returns an `HwNode` parented at `parent_id` with a single
-`HwMatchKey::pci`. The node's `HwDeviceClass` is derived from the PCI
-base class (serial-bus and bridge → `Bus`); driver binding is decided by
-the match key, not the class. An absent function (the all-ones vendor
-sentinel) fails closed with `NotFound`, never a fabricated node
-(`AGENTS.md` §2.9). The tree owner allocates the ids and attaches no
-resource capabilities here — those are minted at the load gate
-(`AGENTS.md` §4 / §5.4). This is the PCI half of `plans/PI.md`
-Stage 4.HW item 5b.
+(`AGENTS.md` §2.2 / §18.5). `PciBus::describe_function(bdf)` is that
+seam: it reads the function's `vendor:device` and its **full 24-bit class
+code** `(base_class << 16) | (sub_class << 8) | prog_if` — the prog-if
+kept so an xHCI host (`0x0C_03_30`) is told apart from the older
+OHCI/UHCI/EHCI USB host classes that share `0x0C_03`, exactly what the
+generic xHCI driver's wildcard bind key needs — and returns an `HwNode`
+carrying a single `HwMatchKey::pci`. The node's `HwDeviceClass` is derived
+from the PCI base class (serial-bus and bridge → `Bus`); driver binding is
+decided by the match key, not the class. An absent function (the all-ones
+vendor sentinel) fails closed with `NotFound`, never a fabricated node
+(`AGENTS.md` §2.9). The node's **identity is kernel-assigned on publish**:
+`describe_function` returns it with placeholder id/parent, and the
+`hw_emit_node` syscall stamps a fresh, collision-free id and the emitter's
+own matched node as parent, so a bus driver can neither forge its tree
+position nor collide with an existing id (`AGENTS.md` §4 / §5.4 / §18.1).
+No resource capabilities are attached here either — those are minted at
+the load gate. This is the PCI half of `plans/PI.md` Stage 4.HW item 5b.
+
+The user-space BCM2711 PCIe bus driver (`drivers/bus/pcie_brcm`) drives
+this seam end to end: it binds the discovered `brcm,bcm2711-pcie` node,
+trains the link, locates the VL805 with the shared
+`rustos_pci::find_function_by_class` scan, assigns/enables/maps its BAR
+with `rustos_pci::assign_and_map_bar` (the one primitive the xHCI driver
+also uses, `AGENTS.md` §2.2), resolves the BAR to its CPU-physical address
+with `rustos_pci::bus_to_cpu_phys`, and publishes the controller as an
+xHCI `HwNode` carrying that BAR (an `Mmio` window inside the bridge's
+outbound `BusWindow` grant, so the kernel's grant-coverage check admits
+it) and a DMA constraint. The composition lives — and is host-tested
+against a mock bus — in `lib/pcie_brcm` (`wiring::emit_vl805_node` /
+`wiring::publish_usb_function`), so the driver binary is a thin
+freestanding stub.
 
 The USB host driver does the same one level down, for the HID device it
 enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).

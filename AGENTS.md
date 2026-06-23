@@ -409,11 +409,15 @@ rustos/
 │   ├── input/
 │   ├── network/
 │   ├── storage/
-│   └── bus/             # virtio, mmio, and usb/ (the USB bus-class folder):
+│   └── bus/             # virtio, mmio, usb/ (the USB bus-class folder):
 │                        #   usb/xhci (generic xHCI host) + usb/vl805 (Pi 4
-│                        #   VL805 firmware reload). PCI config-access mechanism
-│                        #   logic is lib/pci and the BCM2711 PCIe root-complex
-│                        #   bring-up is lib/pcie_brcm (§2.20 carve-out / §17.4).
+│                        #   VL805 firmware reload), and pcie_brcm (the Pi 4
+│                        #   PCIe root-complex bus-driver bin: trains the link,
+│                        #   enumerates the VL805, emits its xHCI node). PCI
+│                        #   config-access mechanism logic is lib/pci and the
+│                        #   BCM2711 link-train engine + the host-tested
+│                        #   emit_vl805_node composition are lib/pcie_brcm
+│                        #   (§2.20 carve-out / §17.4).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -471,13 +475,17 @@ rustos/
 │   │                    #   arch (§2.2, §5.4, §24.4).
 │   ├── pci/             # PCI/PCIe configuration-access mechanism library
 │   │                    #   (mechanism #1 / ECAM / BCM2711-windowed) + the
-│   │                    #   Bus/VirtioPciBus/MsixBus/PciBus seams, so a
-│   │                    #   user-space bus driver enumerates/assigns BARs
-│   │                    #   without a drivers/*->drivers/* edge (§2.2/§17.4).
+│   │                    #   Bus/VirtioPciBus/MsixBus/PciBus seams + the shared
+│   │                    #   find_function_by_class / assign_and_map_bar /
+│   │                    #   bus_to_cpu_phys locate primitives, so a user-space
+│   │                    #   bus driver enumerates/assigns BARs without a
+│   │                    #   drivers/*->drivers/* edge (§2.2/§17.4).
 │   ├── pcie_brcm/       # BCM2711 (Pi 4) PCIe root-complex bring-up: the
 │   │                    #   discovered-window reset/SerDes/link-train state
-│   │                    #   machine + BIND_KEYS, shared by the kernel boot
-│   │                    #   scaffold and a user-space bus-driver bin
+│   │                    #   machine + BIND_KEYS + the host-tested
+│   │                    #   emit_vl805_node discover-and-publish composition,
+│   │                    #   shared by the kernel boot scaffold and the
+│   │                    #   user-space drivers/bus/pcie_brcm bin
 │   │                    #   (§2.20 single-device support carve-out / §17.4).
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).

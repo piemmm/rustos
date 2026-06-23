@@ -1,9 +1,12 @@
 # `rustos-pci`
 
 **Stability tier: stable.** The public surface is the three
-`mechanism_*` constructors and the frozen `abi-v1` bus/transport seams
-(`Bus`, `VirtioPciBus`, `MsixBus`, `PciBus`) they return; changing it
-is governed by `AGENTS.md` §9.
+`mechanism_*` constructors, the frozen `abi-v1` bus/transport seams
+(`Bus`, `VirtioPciBus`, `MsixBus`, `PciBus`) they return, and the shared
+bus-driver locate primitives (`find_function_by_class`,
+`assign_and_map_bar`, `bus_to_cpu_phys`, and the `USB_CONTROLLER_CLASS`
+PCI class code) the xHCI driver and the BCM2711 PCIe bus driver both use;
+changing the seam surface is governed by `AGENTS.md` §9.
 
 PCI/PCIe configuration-access **library** (`lib/*`, not a driver crate):
 it enumerates devices and walks each function's capability list to
@@ -107,6 +110,10 @@ pointer).
   mock MMIO mapper (including the capability-denial path).
 - BAR assignment inside a bridge outbound window + `describe_function`
   child-node synthesis.
+- The shared locate primitives: `find_function_by_class` (first match /
+  fail-closed not-found), `assign_and_map_bar` (assign → enable → map
+  order), and `bus_to_cpu_phys` (outbound-window translation, in-window
+  and fail-closed-out-of-window).
 
 ## License
 

@@ -48,12 +48,21 @@ use rustos_abi::{DriverError, HwNode, MmioMapper, MsiMessage, PortIo, RegisterWi
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
+mod locate;
 pub(crate) mod mech_brcm;
 pub(crate) mod mech_ecam;
 pub(crate) mod mech_one;
 
 #[cfg(test)]
 mod tests;
+
+// The shared bus-driver locate/BAR primitives (`locate.rs`): the one
+// definition the generic xHCI driver and a root-complex bus driver both
+// reach (`AGENTS.md` §2.2 / §17.4), re-exported at the crate root beside the
+// `mechanism_*` constructors.
+pub use locate::{
+    assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, USB_CONTROLLER_CLASS,
+};
 
 // --- Real-hardware construction seam --------------------------------------
 

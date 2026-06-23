@@ -91,6 +91,7 @@ members = [
     # Drivers — bus
     "drivers/bus/usb/xhci",
     "drivers/bus/usb/vl805",
+    "drivers/bus/pcie_brcm",
     "drivers/bus/mailbox/vcmailbox",
     "drivers/bus/virtio",
     "drivers/bus/mmio",

@@ -671,10 +671,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-drv-bus-pcie-brcm"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-pcie-brcm",
+ "rustos-rt",
+]
+
+[[package]]
 name = "rustos-drv-bus-usb"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-pci",
  "rustos-usb",
 ]
 
@@ -1230,6 +1242,8 @@ name = "rustos-pcie-brcm"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-pci",
+ "rustos-usb",
 ]
 
 [[package]]

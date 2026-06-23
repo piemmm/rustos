@@ -25,7 +25,8 @@ use rustos_abi::{
     MmioMapper, PciBus, RegisterWindow,
 };
 
-use super::{bring_up_boot_input, map_controller, open_discovered, USB_CONTROLLER_CLASS};
+use super::{bring_up_boot_input, map_controller, open_discovered};
+use rustos_pci::USB_CONTROLLER_CLASS;
 
 /// A no-op [`Delay`] for the host tests (QEMU models no controller
 /// timing; the live waits are the metal-acceptance item).

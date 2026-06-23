@@ -25,25 +25,15 @@
 //! fail-closed paths up to the controller hand-off; the live
 //! controller bring-up is the on-metal acceptance item.
 
-use rustos_abi::driver::bus::BusDevice;
 use rustos_abi::driver::dma::{DmaHost, DmaSlab};
 use rustos_abi::{
     CapabilityId, Delay, DriverError, DriverHost, HwNode, HwResource, MmioMapper, PciBus,
     RegisterWindow,
 };
 
+use rustos_pci::{assign_and_map_bar, find_function_by_class, USB_CONTROLLER_CLASS};
 use rustos_usb::device::UsbDevice;
-use rustos_usb::{Xhci, DEFAULT_POLL_BUDGET};
-
-/// PCI base-class + sub-class identifying a USB host controller
-/// (PCI Local Bus 3.0 Appendix D: base `0x0C` Serial Bus Controller,
-/// sub-class `0x03` USB). The VL805 exposes its xHCI as the single USB
-/// function behind the Pi 4's `PCIe` bridge.
-pub const USB_CONTROLLER_CLASS: u16 = 0x0C03;
-
-/// BAR slot carrying the xHCI register block (xHCI 1.2 §5.2.1: the
-/// memory BAR at offset `0x10`, i.e. BAR0).
-pub const XHCI_BAR_INDEX: u8 = 0;
+use rustos_usb::{Xhci, DEFAULT_POLL_BUDGET, XHCI_BAR_INDEX};
 
 /// Bytes carved for the controller's device-shared DMA structures.
 ///
@@ -51,14 +41,6 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// definition shared with the arch-neutral keyboard driver that also
 /// carves a controller's DMA region (`AGENTS.md` §2.2).
 pub use rustos_usb::XHCI_DMA_BYTES;
-
-/// Upper bound on functions scanned while locating the USB controller.
-///
-/// A defence bound (`AGENTS.md` §24.4), not a capacity: the VL805 sits
-/// alone behind the Pi 4 bridge, so the controller is found in the
-/// first handful of entries; the cap stops a malfunctioning bus from
-/// driving an unbounded scan.
-const MAX_ENUMERATION: usize = 32;
 
 /// Bring the discovered xHCI controller online from `bus`.
 ///
@@ -289,7 +271,10 @@ pub fn map_controller(
     // gave a non-virtio driver a DMA seam of its own).
     let dma_host: &dyn DmaHost = host.dma_host().ok_or(DriverError::Unsupported)?;
 
-    let bdf = find_usb_controller(bus)?;
+    // Locate the single USB-class function behind the bridge through the
+    // shared bus-driver scan (`AGENTS.md` §2.2 — one definition in
+    // `lib/pci`, reused by the root-complex bus driver too).
+    let bdf = find_function_by_class(bus, USB_CONTROLLER_CLASS)?;
 
     // Carve the device-shared DMA region first and verify it lies
     // wholly below the discovered inbound-DMA aperture before any
@@ -305,53 +290,18 @@ pub fn map_controller(
         return Err(DriverError::OutOfRange);
     }
 
-    // Firmware normally assigns the controller's BAR, but after the OS
-    // resets and re-enumerates the root complex the VL805's BAR0 reads
-    // unassigned (address bits zero); mapping it would target physical
-    // address 0 and be refused. Place it inside the bridge's outbound
-    // PCIe window first (a no-op if firmware already based it), so the
-    // map resolves to a real CPU address (`AGENTS.md` §5.4).
-    let (outbound_base, outbound_size) = outbound_window;
-    bus.assign_bar(bdf, XHCI_BAR_INDEX, outbound_base, outbound_size)?;
-
-    // The controller issues upstream DMA into the region above, so its
-    // Bus Master Enable bit must be set before it runs (firmware leaves
-    // it clear, `AGENTS.md` — PCI Local Bus 3.0 §6.2.2).
-    bus.enable_bus_master(bdf)?;
-    let window = bus.map_bar_window(bdf, XHCI_BAR_INDEX, mapper)?;
+    // Assign (when firmware left it unassigned), enable bus-mastering on,
+    // and map the controller's register BAR. Firmware normally assigns
+    // the BAR, but after the OS resets and re-enumerates the root complex
+    // the VL805's BAR0 reads unassigned (address bits zero); the shared
+    // primitive places it inside the bridge's outbound PCIe window first
+    // (a no-op if firmware already based it) and sets the Bus Master
+    // Enable bit the controller's upstream DMA needs, so the map resolves
+    // to a real CPU address and the controller can reach its rings
+    // (`AGENTS.md` §5.4 / §2.2 — one definition in `lib/pci`).
+    let window = assign_and_map_bar(bus, bdf, XHCI_BAR_INDEX, outbound_window, mapper)?;
 
     Ok(MappedXhci { window, dma })
-}
-
-/// Locate the bus-local address of the first USB-class function on
-/// `bus`.
-///
-/// Enumerates into a bounded buffer and matches
-/// [`USB_CONTROLLER_CLASS`]; a [`DriverError::BufferTooSmall`] from the
-/// bus still fills the buffer, so the populated entries are searched
-/// either way.
-fn find_usb_controller(bus: &dyn PciBus) -> Result<u64, DriverError> {
-    let mut devices = [BusDevice {
-        vendor: 0,
-        device: 0,
-        class: 0,
-        reserved0: 0,
-        address: 0,
-    }; MAX_ENUMERATION];
-    let found = match bus.enumerate(&mut devices) {
-        Ok(n) => n,
-        // The bus filled the buffer before reporting the overflow; the
-        // controller is in the first handful of functions on the Pi 4,
-        // so the populated prefix is searched rather than failing the
-        // whole bring-up on an oversized bus.
-        Err(DriverError::BufferTooSmall) => devices.len(),
-        Err(other) => return Err(other),
-    };
-    devices[..found]
-        .iter()
-        .find(|d| d.class == USB_CONTROLLER_CLASS)
-        .map(|d| d.address)
-        .ok_or(DriverError::NotFound)
 }
 
 #[cfg(test)]

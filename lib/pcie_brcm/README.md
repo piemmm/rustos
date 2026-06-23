@@ -10,9 +10,12 @@ values, and trains the link.
 It is a `lib/*` crate, not a `drivers/*` crate, even though it is
 board-specific: it is the **single device's own support code** the
 `AGENTS.md` §2.20 carve-out places in `lib/` (the `lib/vcmailbox`
-precedent), so the in-kernel boot scaffold and a user-space
-`drivers/bus/*` bin can both compose it without a forbidden
-`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
+precedent), so the in-kernel boot scaffold and the user-space
+`drivers/bus/pcie_brcm` bin can both compose it without a forbidden
+`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4). The crate also hosts the
+user-space bus driver's whole discover-and-publish composition
+(`wiring::emit_vl805_node`), so that logic is host-tested here against a
+mock bus and the binary stays a thin freestanding stub.
 
 **Stability tier:** `experimental`. The reset/SerDes/window/link state
 machine is complete and host-tested; the live link training on a real Pi
@@ -126,7 +129,13 @@ recorded in `plans/PI.md` P10. It requires a physical Pi 4.
 
 The surface a composing host drives is the `BrcmPcieRc` bring-up engine
 (constructed through `wiring::open_discovered` / `wiring::bring_up_from_node`)
-and the `BIND_KEYS` match table. `register` is the thin `AGENTS.md` §8
+and the `BIND_KEYS` match table. For the user-space bus driver the crate also
+exposes the whole composition: `wiring::pcie_bringup_from_resources` (parse
+the granted RC resources into the bring-up windows),
+`wiring::publish_usb_function` (the host-tested post-link half — enumerate the
+USB controller, assign/enable/map its BAR, translate it to CPU-physical, and
+publish the node with its grant requests), and `wiring::emit_vl805_node` (link
+training + `publish_usb_function`). `register` is the thin `AGENTS.md` §8
 driver entry the kernel's §18.6 bootstrap-floor catalogue invokes to gate
 loading (`CAP_DRV_LOAD`); it touches no hardware. The host never reaches
 into `BrcmPcieRc` beyond recovering the brought-up register window

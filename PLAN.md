@@ -2122,27 +2122,37 @@ order (one fully-gated increment each):
              `kernel/rustos-kernel` (`publish_child` unique-id + the load path
              threading `Some(node_id)`). The in-kernel scaffold's separate
              `augment_boot_tree` path is untouched (deleted at D5d).
-           - **D5b.2b — `pcie_brcm` user-space bin (NEXT)** + emit-VL805-node
-             wiring + host tests. A new `drivers/bus/pcie_brcm` bin crate
-             (`rustos-rt` + `rustos-drvrt` + `lib/pcie_brcm` + `lib/pci`, all
-             `lib/*`): `from_grants_query` over the RC node's grants →
-             `open_discovered` (train link) → `rustos_pci::mechanism_brcm` →
-             find the USB-class fn → `assign_bar`/`enable_bus_master` → map BAR
-             for its CPU-phys → `describe_function(bdf)` node A + push
-             `Mmio(bar_cpu_phys,bar_len)` + `Dma(aperture_top,XHCI_DMA_BYTES)`
-             → `emit_node` (the kernel assigns the node's id + parent, D5b.2a).
-             Caps `CAP_MMIO_MAP`+`CAP_HW_EMIT`. Shared `find-USB-fn` +
-             `assign/enable/map-BAR` primitives must be hoisted into `lib/pci`/
-             `lib/usb` (retargeting the xhci driver wiring) so the bin reuses one
-             definition without a `drivers/*→drivers/*` edge (§2.2). **Metal note:**
-             this moves the BAR assignment *ahead* of the VL805 firmware reload
-             (the proven in-kernel order reloads firmware before the xHCI
-             floor entry assigns the BAR). BAR assignment is PCI-config-level
-             and independent of xHCI firmware, so it is expected safe, but it
-             is a reorder of proven metal behaviour and is a metal-gated
-             acceptance point (§0.9).
-           - **D5c — `vl805` user-space bin** (reload fw → emit `usb,xhci`
-             node) + `usb_kbd` bind-table retarget.
+           - **D5b.2b — `pcie_brcm` user-space bin — DONE (whole gate green).**
+             The new `drivers/bus/pcie_brcm` bin crate (a freestanding `Run`
+             binary linking `rustos-rt` + `rustos-drvrt` + `lib/pcie_brcm`, with
+             an inert host stub): `from_grants_query` →
+             `pcie_bringup_from_resources` over the RC node's grants →
+             `emit_vl805_node`, then it parks resident. Caps
+             `CAP_MMIO_MAP`+`CAP_HW_EMIT`; binds the RC node via
+             `rustos_pcie_brcm::BIND_KEYS`. The discover-and-publish composition
+             lives in `lib/pcie_brcm::wiring` (`emit_vl805_node` =
+             `open_discovered` → `mechanism_brcm` → `publish_usb_function`;
+             `publish_usb_function` = `find_function_by_class` →
+             `assign_and_map_bar` → `bus_to_cpu_phys` → `describe_function` →
+             push `Mmio(bar_cpu_phys,bar_len)` + `Dma(aperture_top,XHCI_DMA_BYTES)`
+             → `emit_node`), host-tested against a mock bus (happy-path grant
+             shapes, no-USB / BAR-outside-window / refused-emit fail-closed, and
+             the link boundary). The shared `find_function_by_class` /
+             `assign_and_map_bar` / `bus_to_cpu_phys` / `USB_CONTROLLER_CLASS`
+             primitives were hoisted into `lib/pci` and `XHCI_BAR_INDEX` into
+             `lib/usb`; the xHCI driver wiring was retargeted onto them, so the
+             two bus drivers share one definition (§2.2). The published node's
+             BAR is resolved to its **CPU-physical** address so it sits inside
+             the bridge's outbound `BusWindow` grant the kernel coverage check
+             tests against (`HwResource::covers`, BusWindow→Mmio). **Metal
+             note:** this assigns the BAR *ahead* of the VL805 firmware reload
+             (D5c), reversing the proven in-kernel order; BAR assignment is
+             PCI-config-level and independent of xHCI firmware, expected safe but
+             a metal-gated acceptance point (§0.9). The bundle is not yet
+             installed into the image — that is the D5d flip.
+           - **D5c — `vl805` user-space bin (NEXT)** (bind node A → reload fw over
+             the mailbox IPC → emit `usb,xhci` node B forwarding the BAR+DMA
+             grants) + `usb_kbd` bind-table retarget onto node B.
            - **D5d — the flip.** Install the four signed bundles
              (`pcie_brcm`/`vcmailbox`/`vl805`/`usb_kbd`) into `/System/Drivers/`;
              delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict

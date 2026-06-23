@@ -87,6 +87,17 @@ pub const XHCI_DMA_BYTES: usize = 256 * 1024;
 // the carve must comfortably exceed that for every reported geometry.
 const _: () = assert!(XHCI_DMA_BYTES >= 160 * 1024);
 
+/// BAR slot carrying the xHCI register block (xHCI 1.2 §5.2.1: the memory
+/// BAR at offset `0x10`, i.e. BAR0).
+///
+/// An xHCI-protocol fact, not a board or device identity: it lives here,
+/// beside the controller engine, so every host that maps an xHCI
+/// controller's register BAR — the PCI bus driver's wiring
+/// (`drivers/bus/usb`) and the root-complex bus driver that resolves the
+/// controller's BAR before publishing it (`drivers/bus/pcie_brcm`) — depends
+/// on one definition (`AGENTS.md` §2.2).
+pub const XHCI_BAR_INDEX: u8 = 0;
+
 /// Highest doorbell target value (§5.6: endpoint IDs 1..=31 for device
 /// doorbells; 0 is the command-ring target on doorbell 0).
 const DOORBELL_TARGET_MAX: u32 = 31;

@@ -24,8 +24,14 @@
 
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, HwNode, HwResourceKind, MmioMapper, RegisterWindow,
+    CapabilityId, DriverError, DriverHost, HwNode, HwResource, HwResourceKind, MmioMapper, PciBus,
+    RegisterWindow,
 };
+use rustos_pci::{
+    assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_brcm,
+    USB_CONTROLLER_CLASS,
+};
+use rustos_usb::{XHCI_BAR_INDEX, XHCI_DMA_BYTES};
 
 use crate::{regs, BrcmPcieRc, Delay, PcieWindows};
 
@@ -87,12 +93,54 @@ impl BringupError {
 /// A [`BringupError`] naming the first missing resource; the inputs are
 /// never partially assembled (`AGENTS.md` §5.4).
 pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError> {
-    let resources = node.resources();
-    let find = |kind| resources.iter().find(|r| r.kind() == Some(kind));
+    pcie_bringup_from_resources(node.resources())
+}
 
-    let regs = find(HwResourceKind::Mmio).ok_or(BringupError::NoControllerWindow)?;
-    let inbound = find(HwResourceKind::Dma).ok_or(BringupError::NoInboundAperture)?;
-    let outbound = find(HwResourceKind::BusWindow).ok_or(BringupError::NoOutboundWindow)?;
+/// Assemble the bring-up inputs from the discovered resources of a
+/// `brcm,bcm2711-pcie` node — the same three resources
+/// [`pcie_bringup_from_node`] reads, but over any iterator of
+/// [`HwResource`]s.
+///
+/// This is the form the **user-space** BCM2711 PCIe bus driver uses
+/// (`plans/PI.md` D5b.2b): an autoloaded driver does not hold the matched
+/// [`HwNode`] itself — the kernel mints it one device-resource grant per
+/// resource the node requested and it learns them through the
+/// `resource_grants` syscall (`AGENTS.md` §18.3), exposed by its
+/// `rustos_drvrt::RtDriverHost::resources`. The node-taking form delegates
+/// here, so the two callers parse the same three resources through one
+/// definition (`AGENTS.md` §2.2).
+///
+/// The first [`Mmio`](HwResourceKind::Mmio), [`Dma`](HwResourceKind::Dma),
+/// and [`BusWindow`](HwResourceKind::BusWindow) resources supply the
+/// controller register window, the inbound viewport, and the outbound
+/// window respectively (see [`pcie_bringup_from_node`] for the field
+/// meanings).
+///
+/// # Errors
+///
+/// A [`BringupError`] naming the first missing resource; the inputs are
+/// never partially assembled (`AGENTS.md` §5.4).
+pub fn pcie_bringup_from_resources<'a, I>(resources: I) -> Result<PcieBringup, BringupError>
+where
+    I: IntoIterator<Item = &'a HwResource>,
+{
+    let mut regs: Option<&HwResource> = None;
+    let mut inbound: Option<&HwResource> = None;
+    let mut outbound: Option<&HwResource> = None;
+    // One pass: a grant iterator is consumed once, and a node's resource
+    // ordering is not guaranteed, so latch the first of each kind.
+    for resource in resources {
+        match resource.kind() {
+            Some(HwResourceKind::Mmio) if regs.is_none() => regs = Some(resource),
+            Some(HwResourceKind::Dma) if inbound.is_none() => inbound = Some(resource),
+            Some(HwResourceKind::BusWindow) if outbound.is_none() => outbound = Some(resource),
+            _ => {}
+        }
+    }
+
+    let regs = regs.ok_or(BringupError::NoControllerWindow)?;
+    let inbound = inbound.ok_or(BringupError::NoInboundAperture)?;
+    let outbound = outbound.ok_or(BringupError::NoOutboundWindow)?;
 
     Ok(PcieBringup {
         regs_phys: regs.base(),
@@ -185,4 +233,147 @@ pub fn open_discovered(
         .map_window(regs_phys, regs::REGS_LEN_BYTES)
         .map_err(MmioMapError::as_driver_error)?;
     BrcmPcieRc::open(window, delay, windows)
+}
+
+/// Train the BCM2711 root-complex link, enumerate the USB host controller
+/// behind the bridge, assign and enable its register BAR, and publish it
+/// into the live hardware tree as a bindable child [`HwNode`].
+///
+/// This is the user-space BCM2711 PCIe bus driver's whole job
+/// (`plans/PI.md` D5b.2b): the device manager autoloads the driver against
+/// the discovered `brcm,bcm2711-pcie` node, mints it one grant per resource
+/// that node requested (the controller register window, the inbound-DMA
+/// aperture, and the outbound bus window, `AGENTS.md` §18.3), and this
+/// composition turns those grants — supplied as `bringup`
+/// ([`pcie_bringup_from_resources`]) — into a published USB-host node the
+/// manager then autoloads the next driver against. It talks to the kernel
+/// solely through the [`DriverHost`] contract (`AGENTS.md` §17.4); the
+/// concrete driver bin (`drivers/bus/pcie_brcm`) supplies an
+/// `rustos_drvrt::RtDriverHost` and an `rustos_rt::ClockDelay`.
+///
+/// On success the returned [`HwNode`] is the node already published through
+/// [`DriverHost::emit_node`] — its kernel-assigned id/parent are still the
+/// placeholders the emitter built it with (the kernel owns identity on
+/// publish, `AGENTS.md` §4 / §18.1; D5b.2a), so the value is returned only
+/// for the caller to log/inspect, never to re-address the tree.
+///
+/// # Errors
+///
+/// Every failure is fail-closed (`AGENTS.md` §5.4); nothing is left
+/// half-published:
+///
+/// * every error of [`open_discovered`] (no [`CapabilityId::MMIO_MAP`], no
+///   [`MmioMapper`], an unmappable window, or a link that never trains —
+///   the live link training is the on-metal acceptance item, `AGENTS.md`
+///   §0.4); and
+/// * every error of [`publish_usb_function`].
+///
+/// # Capabilities
+///
+/// Requires [`CapabilityId::MMIO_MAP`] (the controller register window and
+/// the BAR probe) and `CAP_HW_EMIT` (the node publish, enforced kernel-side
+/// by [`DriverHost::emit_node`], `AGENTS.md` §5.4).
+pub fn emit_vl805_node(
+    host: &dyn DriverHost,
+    bringup: &PcieBringup,
+    delay: &dyn Delay,
+) -> Result<HwNode, DriverError> {
+    let rc = open_discovered(host, bringup.regs_phys, &bringup.windows, delay)?;
+    // The windowed configuration accessor over the trained register window:
+    // it forwards config only to the single device on the secondary bus, so a
+    // scan never TLPs an absent target (which would CPU-abort on the SoC bus,
+    // `AGENTS.md` §5.4 / §2.9).
+    let bus = mechanism_brcm(rc.into_regs(), regs::RC_SECONDARY_BUS);
+    publish_usb_function(host, &bus, &bringup.windows)
+}
+
+/// Enumerate the USB host controller on the trained `bus`, assign/enable/map
+/// its register BAR, and publish it as a bindable child [`HwNode`] carrying
+/// exactly the two device-resource grant *requests* the matched downstream
+/// xHCI driver needs and no more (`AGENTS.md` §4 / §18.3).
+///
+/// Split out from [`emit_vl805_node`] so the post-link logic — the part QEMU
+/// can model (the link training itself is metal-only, `AGENTS.md` §0.4) — is
+/// host-tested against a mock [`PciBus`]. The two emitted grants are:
+///
+/// * an [`HwResource::mmio`] of the controller's BAR resolved to its
+///   **CPU-physical** address ([`bus_to_cpu_phys`] over the discovered
+///   outbound window) — so it lies inside the bridge's outbound `BusWindow`
+///   grant and the kernel's grant-coverage check admits it
+///   (`HwResource::covers`, the BusWindow→Mmio case), and the matched driver
+///   maps the live BAR rather than re-training the bus; and
+/// * an [`HwResource::dma`] declaring the device-visible inbound aperture top
+///   (`inbound_pcie_base + inbound_size`) and the [`XHCI_DMA_BYTES`] working
+///   set the matched driver may carve, the same shape the kernel's
+///   `dma_alloc` serves today (an untranslated constraint, `AGENTS.md`
+///   §18.1 — the Pi 4 `dma-ranges` PCIe base is 0).
+///
+/// The BAR is mapped only transiently here, to learn its assigned base and
+/// size; the window is dropped immediately (the matched user-space driver
+/// re-maps the live BAR from its grant, `AGENTS.md` §2.16).
+///
+/// # Errors
+///
+/// Fail-closed (`AGENTS.md` §5.4): [`DriverError::NotFound`] if the bus
+/// carries no USB-class function; [`DriverError::Unsupported`] if the host
+/// exposes no [`MmioMapper`]; [`DriverError::OutOfRange`] if the BAR lies
+/// outside the outbound window or the inbound aperture top overflows;
+/// [`DriverError::NoSpace`] if the node cannot carry its grant requests;
+/// plus any error of [`assign_and_map_bar`], [`PciBus::describe_function`],
+/// or [`DriverHost::emit_node`].
+pub fn publish_usb_function(
+    host: &dyn DriverHost,
+    bus: &dyn PciBus,
+    windows: &PcieWindows,
+) -> Result<HwNode, DriverError> {
+    let bdf = find_function_by_class(bus, USB_CONTROLLER_CLASS)?;
+    let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(DriverError::Unsupported)?;
+
+    // Assign (when firmware left it unassigned), enable bus-mastering on, and
+    // map the controller's BAR — the shared `lib/pci` primitive both this
+    // driver and the xHCI driver use (`AGENTS.md` §2.2). The map is a
+    // transient probe: `phys_base` is the BAR's assigned base in the address
+    // space the mapper maps (PCIe-bus space, since the bridge mapper
+    // translates) and `len` its probed size.
+    let outbound_window = (windows.outbound_pcie_base, windows.outbound_size);
+    let window = assign_and_map_bar(bus, bdf, XHCI_BAR_INDEX, outbound_window, mapper)?;
+    let bar_pcie_base = window.phys_base();
+    let bar_len = window.len() as u64;
+    // The map was a transient probe to learn the BAR's assigned base and
+    // size; the window is not retained (it falls out of scope here). The
+    // matched user-space driver re-maps the live BAR from the grant below
+    // (`AGENTS.md` §2.16).
+
+    // Resolve the BAR to its CPU-physical address through the discovered
+    // outbound window, so the published `Mmio` grant lies inside the bridge's
+    // outbound `BusWindow` grant the kernel coverage check tests against
+    // (`HwResource::covers`, `AGENTS.md` §4 / §18.1).
+    let bar_cpu_phys = bus_to_cpu_phys(
+        (
+            windows.outbound_cpu_base,
+            windows.outbound_pcie_base,
+            windows.outbound_size,
+        ),
+        bar_pcie_base,
+    )
+    .ok_or(DriverError::OutOfRange)?;
+
+    // The device-visible exclusive top of the inbound aperture the bridge
+    // lets the controller DMA through; the matched driver bounds its carve
+    // below it. Overflow is a malformed discovery, refused fail-closed.
+    let dma_aperture_top = windows
+        .inbound_pcie_base
+        .checked_add(windows.inbound_size)
+        .ok_or(DriverError::OutOfRange)?;
+
+    // The node carries the function's `vendor:device:class` match key
+    // (`describe_function`) — its identity is kernel-assigned on publish
+    // (`AGENTS.md` §4 / §18.1; D5b.2a) — plus the two grant requests.
+    let mut node = bus.describe_function(bdf)?;
+    node.push_resource(HwResource::mmio(bar_cpu_phys, bar_len))
+        .map_err(|_| DriverError::NoSpace)?;
+    node.push_resource(HwResource::dma(dma_aperture_top, XHCI_DMA_BYTES as u64))
+        .map_err(|_| DriverError::NoSpace)?;
+    host.emit_node(node)?;
+    Ok(node)
 }

@@ -17,6 +17,12 @@ rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # §17.4 — `drivers/* → lib/*` only). This crate adds the concrete PCI
 # discovery / BAR / DMA wiring and the §8 `register` entry on top of it.
 rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
+# The PCI/PCIe configuration-access mechanism + the shared bus-driver
+# locate/BAR primitives (`find_function_by_class`, `assign_and_map_bar`)
+# live in `lib/pci` so this driver and the root-complex bus driver
+# (`drivers/bus/pcie_brcm`) share one definition without a forbidden
+# `drivers/* → drivers/*` edge (`AGENTS.md` §2.2 / §17.4).
+rustos-pci = { path = "../../../../lib/pci", version = "=0.0.0" }
 
 [lints]
 workspace = true
