@@ -156,8 +156,16 @@ list (§18, §18.6). The kernel admits a published node only when every
 `HwResource` it requests is covered by one of the **emitting driver's** own
 minted grants (`HwResource::covers`): a bus driver can hand a child only
 authority it already holds, so the recursion can never escalate privilege
-(§4 — no ambient authority; §18.3). The bootstrap floor (§18.6) seeds only
-the first nodes needed to reach the driver store; everything below a
+(§4 — no ambient authority; §18.3). Coverage is decided per resource kind:
+an `Mmio`/`Port`/`Irq` window or line range must lie wholly inside a grant
+of the same kind; a `Dma` constraint may be no wider; a `BusWindow`
+sub-window must keep the parent's exact CPU↔bus translation. The one
+cross-kind rule is the central PCI(e) case: a host bridge holds its
+outbound window as a `BusWindow` grant and authorises every CPU access
+within it, so it covers a child device's register **BAR** — an `Mmio`
+window the bridge's enumeration has already resolved to a CPU-physical
+address *inside* that outbound window. The bootstrap floor (§18.6) seeds
+only the first nodes needed to reach the driver store; everything below a
 discovered bus is published by that bus's user-space driver.
 
 ## Audit surface

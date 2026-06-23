@@ -639,8 +639,9 @@ impl HwResource {
     /// type whose semantics it depends on (`AGENTS.md` §2.2), so the kernel
     /// never re-decides per-kind containment.
     ///
-    /// Coverage always requires the same [`HwResourceKind`] and identical
-    /// `flags`. Beyond that the rule follows each kind's meaning:
+    /// Coverage always requires identical `flags`, and — for every pairing
+    /// but one — the same [`HwResourceKind`]. Beyond that the rule follows
+    /// each kind's meaning:
     ///
     /// * [`Mmio`](HwResourceKind::Mmio), [`Port`](HwResourceKind::Port), and
     ///   [`Irq`](HwResourceKind::Irq) are untranslated `[base, base+len)`
@@ -648,10 +649,21 @@ impl HwResource {
     ///   the parent's (checked arithmetic — a length overflow is refused,
     ///   never wrapped, `AGENTS.md` §2.9).
     /// * [`BusWindow`](HwResourceKind::BusWindow) is a translated outbound
-    ///   window: the child's CPU-side interval must lie within the parent's
-    ///   **and** carry the identical CPU↔bus translation delta, so a child
-    ///   sub-window keeps the parent's addressing exactly and cannot
+    ///   window: a child `BusWindow` sub-window's CPU-side interval must lie
+    ///   within the parent's **and** carry the identical CPU↔bus translation
+    ///   delta, so it keeps the parent's addressing exactly and cannot
     ///   re-point the far side elsewhere.
+    /// * **`BusWindow` parent → `Mmio` child** is the one cross-kind pairing,
+    ///   and the central case of recursive PCI(e) discovery (`AGENTS.md`
+    ///   §18.1): a host bridge holds its outbound window as a `BusWindow`
+    ///   grant and authorises *every* CPU access within its CPU-side
+    ///   `[base, base+len)` interval. When the bridge driver enumerates a
+    ///   device behind it, that device's register BAR has already been
+    ///   resolved to a CPU-physical [`Mmio`](HwResourceKind::Mmio) window
+    ///   inside that interval, so the bridge legitimately grants it to the
+    ///   child. Coverage is exactly CPU-side containment of the child window
+    ///   in the parent's — never wider (`AGENTS.md` §4 — no ambient
+    ///   authority): the child receives a window the bridge already owns.
     /// * [`Dma`](HwResourceKind::Dma) is an addressing *constraint* (an
     ///   exclusive address ceiling `base` and an extent `len`), not a mapped
     ///   window: the child may be no more permissive — no higher ceiling, no
@@ -662,22 +674,32 @@ impl HwResource {
             // An undecodable discriminant on either side fails closed.
             return false;
         };
-        if parent_kind != child_kind || self.flags != child.flags {
+        if self.flags != child.flags {
             return false;
         }
-        match parent_kind {
-            HwResourceKind::Dma => {
+        match (parent_kind, child_kind) {
+            (HwResourceKind::Dma, HwResourceKind::Dma) => {
                 self.xlate == child.xlate && child.base <= self.base && child.len <= self.len
             }
-            HwResourceKind::BusWindow => {
+            (HwResourceKind::BusWindow, HwResourceKind::BusWindow) => {
                 // The CPU↔bus translation delta must match exactly so the
                 // contained sub-window maps to the contained far-side range.
                 self.xlate.wrapping_sub(self.base) == child.xlate.wrapping_sub(child.base)
                     && interval_contains(self.base, self.len, child.base, child.len)
             }
-            HwResourceKind::Mmio | HwResourceKind::Port | HwResourceKind::Irq => {
+            (HwResourceKind::BusWindow, HwResourceKind::Mmio) => {
+                // A host bridge's outbound window covers a child register BAR
+                // resolved to a CPU-physical window inside it (PCI(e)
+                // discovery): pure CPU-side containment, no wider.
                 interval_contains(self.base, self.len, child.base, child.len)
             }
+            (HwResourceKind::Mmio, HwResourceKind::Mmio)
+            | (HwResourceKind::Port, HwResourceKind::Port)
+            | (HwResourceKind::Irq, HwResourceKind::Irq) => {
+                interval_contains(self.base, self.len, child.base, child.len)
+            }
+            // Every other kind pairing fails closed (`AGENTS.md` §2.9 / §5.4).
+            _ => false,
         }
     }
 
@@ -1363,8 +1385,36 @@ mod tests {
         assert!(parent.covers(&HwResource::bus_window(0x6_0000_1000, 0x1000, 0xF800_1000)));
         // Same CPU sub-window but a re-pointed far side -> rejected.
         assert!(!parent.covers(&HwResource::bus_window(0x6_0000_0000, 0x1000, 0xF900_0000)));
-        // A plain MMIO window of the same numbers is a different kind.
-        assert!(!parent.covers(&HwResource::mmio(0x6_0000_0000, 0x1000)));
+    }
+
+    #[test]
+    fn covers_lets_a_bridge_window_cover_a_child_bar_inside_it() {
+        // The central recursive-PCI(e) case (`AGENTS.md` §18.1): a host
+        // bridge holds its outbound window as a `BusWindow` grant and grants
+        // an enumerated device's register BAR — a CPU-physical `Mmio` window
+        // the bridge already owns — to the child driver. Coverage is exactly
+        // CPU-side containment of the BAR in the bridge's CPU window.
+        let bridge = HwResource::bus_window(0x6_0000_0000, 0x400_0000, 0xF800_0000);
+        // A BAR resolved to a CPU window inside the bridge's outbound window
+        // is covered (the whole window, a sub-window, a zero-length probe).
+        assert!(bridge.covers(&HwResource::mmio(0x6_0000_0000, 0x400_0000)));
+        assert!(bridge.covers(&HwResource::mmio(0x6_0010_0000, 0x1_0000)));
+        assert!(bridge.covers(&HwResource::mmio(0x6_0000_0000, 0)));
+        // A BAR that starts below the bridge window or runs past its end is
+        // never minted to the child (`AGENTS.md` §4 — no ambient authority).
+        assert!(!bridge.covers(&HwResource::mmio(0x5_FFFF_F000, 0x1000)));
+        assert!(!bridge.covers(&HwResource::mmio(0x6_03FF_F000, 0x2000)));
+        // A length that would overflow the address space is refused, never
+        // wrapped into a spuriously-contained range (`AGENTS.md` §2.9).
+        assert!(!bridge.covers(&HwResource::mmio(0x6_0000_0000, u64::MAX)));
+        // The reverse direction is NOT symmetric: a plain MMIO grant never
+        // confers a translating bus window on a child (fails closed).
+        let plain = HwResource::mmio(0x6_0000_0000, 0x400_0000);
+        assert!(!plain.covers(&HwResource::bus_window(0x6_0000_0000, 0x1000, 0xF800_0000)));
+        // Nor does a bridge window confer a port range or an IRQ line on a
+        // child by mere numeric containment (only the BAR/`Mmio` pairing).
+        assert!(!bridge.covers(&HwResource::port(0x6_0000_0000, 0x10)));
+        assert!(!bridge.covers(&HwResource::irq(0x6_0000_0000, 1)));
     }
 
     #[test]

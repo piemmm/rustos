@@ -9264,6 +9264,61 @@ mod tests {
         assert_eq!(published[0], node, "the exact node reached the store");
     }
 
+    /// The central recursive-PCI(e) case (`AGENTS.md` §18.1): a bus driver
+    /// holding its host bridge's outbound window as a `BusWindow` grant
+    /// publishes an enumerated child whose register BAR is an `Mmio` window
+    /// resolved to a CPU address *inside* that bridge window. The
+    /// `BusWindow`→`Mmio` coverage rule admits it, so the device behind the
+    /// bridge autoloads — without the bridge ever minting authority it does
+    /// not already hold (`AGENTS.md` §4).
+    #[test]
+    fn hw_emit_node_covers_a_child_bar_under_a_bridge_window() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The child's BAR is `mmio(0xFE98_0000, 0x4000)` (see `emit_child_node`).
+        let node = emit_child_node();
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The bridge's outbound window — CPU side [0xFE00_0000, 0xFF00_0000) —
+        // contains the child's BAR, so the bridge legitimately grants it.
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::HwResource::bus_window(0xFE00_0000, 0x100_0000, 0x6_0000_0000),
+        );
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            Ok(0)
+        );
+        assert_eq!(
+            source.published.read().len(),
+            1,
+            "the child BAR inside the bridge window was published"
+        );
+    }
+
     /// With no store wired `hw_emit_node` fails closed with
     /// `NotImplemented` even for a resourceless node (`AGENTS.md` §2.9).
     #[test]

@@ -2019,15 +2019,37 @@ order (one fully-gated increment each):
            `emit_node` forward + refusal). The bootstrap floor (§18.6) seeds
            only the nodes needed to reach the store; everything below a
            discovered bus is published by that bus's user-space driver.
+         - **D4-covers — `BusWindow`→`Mmio` bridge-BAR coverage — DONE
+           (host-proven + whole gate).** The shipped `HwResource::covers`
+           security spine handled only same-kind containment, so it wrongly
+           fail-closed-*rejected* the central recursive-PCI(e) case the
+           user-space consumers need: a bus driver holds its host bridge's
+           outbound window as a `BusWindow` grant, but an enumerated child's
+           register BAR is an `Mmio` window resolved to a CPU address inside
+           that bridge window. `covers` now decides per kind and admits the one
+           cross-kind pairing — a `BusWindow` parent covers an `Mmio` child by
+           CPU-side containment, never wider (§4 — the child only receives a
+           window the bridge already owns). Restructured to tuple-match
+           `(parent_kind, child_kind)` with a fail-closed default; all
+           same-kind rules unchanged. Host-tested in `lib/abi`
+           (`covers_lets_a_bridge_window_cover_a_child_bar_inside_it`:
+           accept contained BAR, reject below/past-end/overflow, reject the
+           non-symmetric `Mmio`→`BusWindow` and `BusWindow`→`Port`/`Irq`) and
+           through the real syscall consumer in `kernel/core`
+           (`hw_emit_node_covers_a_child_bar_under_a_bridge_window`). Docs:
+           `drivers/hardware-detection.md` recursive-discovery section.
          - **Remaining — the user-space bus-driver consumers.** Turn
            `drivers/bus/pcie_brcm` + the `lib/usb`-backed USB host into
            autoloaded user-space driver **binaries** (the `usb_kbd`/`virtio_kbd`
            pattern) that, over the rt-backed `DriverHost`, train/enumerate and
-           `emit_node()` their children (the VL805 xHCI controller, then the HID
-           keyboard). Add `hw_remove_node` for hotplug removal (the `bus_usb`
-           port-unplug path). No `-M virt` Pi-USB vertical exists (§0.4); the
-           live enumerate→emit→autoload chain is metal-gated. The in-kernel
-           scaffold stays the live metal keyboard until D5 (§2.17).
+           `emit_node()` their children (the VL805 xHCI controller — whose BAR
+           is now coverable under the bridge's outbound-window grant by
+           D4-covers — then the HID keyboard). Add `hw_remove_node` for hotplug
+           removal (the `bus_usb` port-unplug path). No `-M virt` Pi-USB vertical
+           exists (§0.4); the live enumerate→emit→autoload chain, and the atomic
+           floor-RC-node-emit + scaffold-delete that activates it, are
+           metal-gated. The in-kernel scaffold stays the live metal keyboard
+           until D5 (§2.17).
        - **D5 — the atomic flip.** `usb_kbd` autoloads onto the emitted HID node;
          delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
          `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the compiled-in
