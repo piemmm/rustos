@@ -2065,12 +2065,16 @@ order (one fully-gated increment each):
            5. **usb_kbd** (binds node B; `CAP_MMIO_MAP`+`CAP_MEM_DMA`+
               `CAP_INPUT_INJECT`): maps the BAR, brings up xHCI, enumerates,
               pumps. Bind retargeted to `compatible("usb,xhci")`.
-           The PCI config/BAR mechanism could not be reached by a user-space
-           driver bin while it lived in the `drivers/bus/pci` *driver* crate (a
-           `drivers/*→drivers/*` edge §17.4/deps-check forbids); D5a moved it to
-           `lib/pci` to unblock the chain. The work is staged as gate-green
-           increments, each leaving the tree clean (no parallel old/new code —
-           not a §2.13 compat migration):
+           A user-space driver bin (a `drivers/*` or `userland/*` crate) may
+           depend only on `lib/*` (deps-check `layer_allows`), and it cannot
+           share a crate with the kernel-linked lib (that would pull
+           `rustos-rt`'s `_start`/allocator into the kernel's bare-metal
+           graph). So **both** the PCI config/BAR mechanism *and* the BCM2711
+           RC bring-up had to move out of their `drivers/bus/*` driver crates
+           into `lib/*` before the chain could be built — the same forced
+           extraction `lib/usb`/`lib/virtio` set the precedent for. The work is
+           staged as gate-green increments, each leaving the tree clean (no
+           parallel old/new code — not a §2.13 compat migration):
            - **D5a — extract `lib/pci` — DONE (whole gate green).** The PCI
              config/enumerate/BAR/mechanism (`mechanism_one/ecam/brcm`,
              `describe_function`, the `Bus`/`VirtioPciBus`/`MsixBus`/`PciBus`
@@ -2082,7 +2086,35 @@ order (one fully-gated increment each):
              scaffold + the `virtio_qemu_support` test were retargeted onto
              `rustos_pci`; workspace + §3 updated. Pure relayering, no behaviour
              change.
-           - **D5b — `pcie_brcm` user-space bin** + emit-VL805-node wiring.
+           - **D5b.1 — extract `lib/pcie_brcm` — DONE (whole gate green).**
+             The BCM2711 RC bring-up (the `BrcmPcieRc` reset/SerDes/window/
+             link-train state machine, `PcieRegs`/`Delay` seams, `PcieWindows`/
+             `BringUpTiming`/`InboundWindowReadback`, `wiring::open_discovered`/
+             `bring_up_from_node`/`pcie_bringup_from_node`, the `regs` module,
+             `BIND_KEYS`, and the thin §8 floor `register`) moved wholesale
+             from the `drivers/bus/pcie_brcm` *driver* crate into `lib/pcie_brcm`
+             (`rustos-pcie-brcm`) — the §2.20 single-device-support carve-out,
+             the `lib/vcmailbox` precedent. The kernel scaffold/catalogue/
+             build.rs were retargeted onto `rustos_pcie_brcm`; workspace + §3 +
+             docs updated. Pure relayering, no behaviour change — so a
+             user-space `pcie_brcm` bin can now compose it with `lib/pci`
+             without a `drivers/*→drivers/*` edge. `drivers/bus/pcie_brcm` no
+             longer exists; D5b.2 recreates it as the user-space bin.
+           - **D5b.2 — `pcie_brcm` user-space bin (NEXT)** + emit-VL805-node
+             wiring + host tests. A new `drivers/bus/pcie_brcm` bin crate
+             (`rustos-rt` + `rustos-drvrt` + `lib/pcie_brcm` + `lib/pci`, all
+             `lib/*`): `from_grants_query` over the RC node's grants →
+             `open_discovered` (train link) → `rustos_pci::mechanism_brcm` →
+             find the USB-class fn → `assign_bar`/`enable_bus_master` → map BAR
+             for its CPU-phys → `describe_function` node A + push
+             `Mmio(bar_cpu_phys,bar_len)` + `Dma(aperture_top,XHCI_DMA_BYTES)`
+             → `emit_node`. Caps `CAP_MMIO_MAP`+`CAP_HW_EMIT`. **Metal note:**
+             this moves the BAR assignment *ahead* of the VL805 firmware reload
+             (the proven in-kernel order reloads firmware before the xHCI
+             floor entry assigns the BAR). BAR assignment is PCI-config-level
+             and independent of xHCI firmware, so it is expected safe, but it
+             is a reorder of proven metal behaviour and is a metal-gated
+             acceptance point (§0.9).
            - **D5c — `vl805` user-space bin** (reload fw → emit `usb,xhci`
              node) + `usb_kbd` bind-table retarget.
            - **D5d — the flip.** Install the four signed bundles

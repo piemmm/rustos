@@ -1,11 +1,18 @@
-# `rustos-drv-bus-pcie-brcm` — BCM2711 PCIe root-complex bring-up
+# `rustos-pcie-brcm` — BCM2711 PCIe root-complex bring-up
 
 `plans/PI.md` P10 deliverable (VL805 track). Brings up the Broadcom
 BCM2711 (Raspberry Pi 4) PCIe root complex so the VL805 xHCI USB host
 controller behind it becomes reachable. The root complex ships out of
-reset with its link **down**; this driver resets it, powers the SerDes,
+reset with its link **down**; this crate resets it, powers the SerDes,
 programs its inbound/outbound address windows from device-tree-discovered
 values, and trains the link.
+
+It is a `lib/*` crate, not a `drivers/*` crate, even though it is
+board-specific: it is the **single device's own support code** the
+`AGENTS.md` §2.20 carve-out places in `lib/` (the `lib/vcmailbox`
+precedent), so the in-kernel boot scaffold and a user-space
+`drivers/bus/*` bin can both compose it without a forbidden
+`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
 
 **Stability tier:** `experimental`. The reset/SerDes/window/link state
 machine is complete and host-tested; the live link training on a real Pi
@@ -40,7 +47,7 @@ brcm,bcm2711-pcie node (hwtree)
 BrcmPcieRc::open  ──►  link up
         │  into_regs()  (recover the same window)
         ▼
-rustos_drv_bus_pci::mechanism_brcm(window)  ──►  &dyn PciBus
+rustos_pci::mechanism_brcm(window)  ──►  &dyn PciBus
         │
         ▼
 rustos_drv_bus_usb::wiring::open_discovered  ──►  VL805 xHCI
@@ -48,9 +55,10 @@ rustos_drv_bus_usb::wiring::open_discovered  ──►  VL805 xHCI
 
 This crate performs **only** the link bring-up. Configuration-space
 access to downstream functions is the BCM2711 *windowed* ECAM mechanism
-(`rustos_drv_bus_pci::mechanism_brcm`); enumeration, BAR sizing, and bus
-mastering are the generic PCI core. This crate therefore never depends on
-another driver crate (`AGENTS.md` §8 / §17.4).
+(`rustos_pci::mechanism_brcm`, a `lib/*` crate); enumeration, BAR sizing,
+and bus mastering are the generic PCI core. As a `lib/*` crate it depends
+only on `lib/abi`, so a consumer composes it with `lib/pci` and the USB
+stack without any `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
 
 ## Supported hardware
 
@@ -96,7 +104,7 @@ item 5).
 
 ## Test surface
 
-`cargo test -p rustos-drv-bus-pcie-brcm` exercises:
+`cargo test -p rustos-pcie-brcm` exercises:
 
 - The full reset → SerDes → window → link-up sequence over the mock,
   asserting the programmed register state (PERST# released, misc-control
@@ -116,7 +124,10 @@ recorded in `plans/PI.md` P10. It requires a physical Pi 4.
 
 ## Public surface
 
-`AGENTS.md` §8 — the only public *function* is `register`. The
-`BrcmPcieRc` type is re-exported so the driver host can construct an
-instance through `wiring::open_discovered`; the host never reaches into it
-beyond recovering the brought-up register window (`into_regs`).
+The surface a composing host drives is the `BrcmPcieRc` bring-up engine
+(constructed through `wiring::open_discovered` / `wiring::bring_up_from_node`)
+and the `BIND_KEYS` match table. `register` is the thin `AGENTS.md` §8
+driver entry the kernel's §18.6 bootstrap-floor catalogue invokes to gate
+loading (`CAP_DRV_LOAD`); it touches no hardware. The host never reaches
+into `BrcmPcieRc` beyond recovering the brought-up register window
+(`into_regs`).

@@ -11,7 +11,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 | Crate                    | Platform              | Status   |
 | ------------------------ | --------------------- | -------- |
 | `lib/pci`                | x86_64 (PIO) / PCIe ECAM / BCM2711 windowed | Shipped (library) |
-| `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | P10 link bring-up (host-proven); metal pending |
+| `lib/pcie_brcm`  | Pi 4 (BCM2711 RC)     | P10 link bring-up (host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
 | `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + HID enumeration (host-proven) |
@@ -108,7 +108,7 @@ enumeration, BAR-sizing, and capability walk above it are unchanged.
 access that lands outside the mapped window, or any function but `00.0`
 on the root bus, resolves to the same `0xFFFF_FFFF` sentinel
 (`AGENTS.md` §5.4). The link behind the bridge must be **up** before any
-downstream access — the `drivers/bus/pcie_brcm` root-complex bring-up
+downstream access — the `lib/pcie_brcm` root-complex bring-up
 (below) guarantees that before handing its register window here.
 
 The BCM2711 root port is a **single-device** link, so the accessor
@@ -178,12 +178,12 @@ decodes. The BAR *size* probe depends on hardware read-only BAR bits
 and is covered by the mechanism-#1 fixtures, not the plain-memory
 ECAM backing.
 
-## BCM2711 PCIe root-complex bring-up — `drivers/bus/pcie_brcm`
+## BCM2711 PCIe root-complex bring-up — `lib/pcie_brcm`
 
 The Pi 4's VL805 xHCI sits behind the BCM2711 PCIe root complex, which
 ships out of reset with its link **down**. Before the windowed
 configuration access above can reach the VL805, the root complex must
-be brought up. `drivers/bus/pcie_brcm` performs that bring-up over the
+be brought up. `lib/pcie_brcm` performs that bring-up over the
 BCM2711 root-complex registers.
 
 ### Seams
@@ -546,7 +546,7 @@ misaligned DMA region).
 
 The VL805 firmware (re)load is the one thing specific to that *device*,
 so it is its own driver — separate from, and not intertwined with, the
-generic PCIe root-complex driver (`drivers/bus/pcie_brcm`, which trains
+generic PCIe root-complex driver (`lib/pcie_brcm`, which trains
 the link) and the generic xHCI host driver (`drivers/bus/usb/xhci`, which
 brings the controller up and enumerates devices). A different board may
 need the PCIe driver without USB at all, or an xHCI controller that needs

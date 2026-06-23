@@ -53,6 +53,7 @@ members = [
     "lib/log",
     "lib/partition",
     "lib/pci",
+    "lib/pcie_brcm",
     "lib/procinfo",
     "lib/raster",
     "lib/rng",
@@ -88,7 +89,6 @@ members = [
     "drivers/input/virtio_kbd",
 
     # Drivers — bus
-    "drivers/bus/pcie_brcm",
     "drivers/bus/usb/xhci",
     "drivers/bus/usb/vl805",
     "drivers/bus/mailbox/vcmailbox",

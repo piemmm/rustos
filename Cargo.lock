@@ -671,13 +671,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-drv-bus-pcie-brcm"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
-]
-
-[[package]]
 name = "rustos-drv-bus-usb"
 version = "0.0.0"
 dependencies = [
@@ -968,7 +961,6 @@ dependencies = [
  "rustos-devmatch",
  "rustos-devmgr",
  "rustos-drv-bus-mmio",
- "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
  "rustos-drv-bus-virtio",
@@ -993,6 +985,7 @@ dependencies = [
  "rustos-log",
  "rustos-partition",
  "rustos-pci",
+ "rustos-pcie-brcm",
  "rustos-sync",
  "rustos-test-encrypted-root-image",
  "rustos-test-rustfs-image",
@@ -1227,6 +1220,13 @@ dependencies = [
 
 [[package]]
 name = "rustos-pci"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
+]
+
+[[package]]
+name = "rustos-pcie-brcm"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",

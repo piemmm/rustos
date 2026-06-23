@@ -301,7 +301,7 @@ These are absolute. They override any local convenience.
       driver stays platform-neutral and never special-cases a board.
     - **Carve-out — a device's own driver/support crate may know its device.**
       A crate whose entire purpose is one piece of hardware (e.g.
-      `drivers/display/rpi_hvs`, `drivers/bus/pcie_brcm`, `lib/vcmailbox`)
+      `drivers/display/rpi_hvs`, `lib/pcie_brcm`, `lib/vcmailbox`)
       legitimately targets that hardware; that is its job. But it is *reached
       only through the discovery/match path* (§18.3) and never leaks its board
       into a shared, generic, or arch-neutral path — and it lives in its own
@@ -409,10 +409,11 @@ rustos/
 │   ├── input/
 │   ├── network/
 │   ├── storage/
-│   └── bus/             # pcie_brcm (BCM2711 RC bring-up), virtio, mmio, and
-│                        #   usb/ (the USB bus-class folder): usb/xhci (generic
-│                        #   xHCI host) + usb/vl805 (Pi 4 VL805 firmware reload).
-│                        #   PCI config-access mechanism logic is lib/pci (§17.4).
+│   └── bus/             # virtio, mmio, and usb/ (the USB bus-class folder):
+│                        #   usb/xhci (generic xHCI host) + usb/vl805 (Pi 4
+│                        #   VL805 firmware reload). PCI config-access mechanism
+│                        #   logic is lib/pci and the BCM2711 PCIe root-complex
+│                        #   bring-up is lib/pcie_brcm (§2.20 carve-out / §17.4).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -473,6 +474,11 @@ rustos/
 │   │                    #   Bus/VirtioPciBus/MsixBus/PciBus seams, so a
 │   │                    #   user-space bus driver enumerates/assigns BARs
 │   │                    #   without a drivers/*->drivers/* edge (§2.2/§17.4).
+│   ├── pcie_brcm/       # BCM2711 (Pi 4) PCIe root-complex bring-up: the
+│   │                    #   discovered-window reset/SerDes/link-train state
+│   │                    #   machine + BIND_KEYS, shared by the kernel boot
+│   │                    #   scaffold and a user-space bus-driver bin
+│   │                    #   (§2.20 single-device support carve-out / §17.4).
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
@@ -794,7 +800,7 @@ an update to this section.
 - **A vendor or chip name is permitted *only* as the leaf directory** of a
   driver whose entire purpose is that one specific part — the driver's own
   crate/bundle directory, which holds the driver file(s) inside it (e.g. the
-  source crate `drivers/bus/pcie_brcm/`, `drivers/display/rpi_hvs/`, and the
+  source crate `drivers/bus/usb/vl805/`, `drivers/display/rpi_hvs/`, and the
   installed `/System/Drivers/bus_usb/broadcom_chip_1234/<driver>`). The
   vendor/chip name is the *directory* that contains the driver module, never a
   segment of the class/bus namespace above it. The leaf names the concrete

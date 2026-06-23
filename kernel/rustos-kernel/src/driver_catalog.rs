@@ -46,7 +46,7 @@ use rustos_drvhost::DriverEntry;
 include!(concat!(env!("OUT_DIR"), "/driver_images.rs"));
 
 /// Logical image path of the BCM2711 PCIe root-complex driver
-/// (`drivers/bus/pcie_brcm`).
+/// (`lib/pcie_brcm`, the §2.20 single-device support carve-out).
 ///
 /// The `/System/Drivers/` tree is organised `<class>/<vendor>/<driver>` so
 /// the bus class (`pcie`) is never tied to a vendor: a vendor-specific
@@ -113,9 +113,9 @@ pub const IN_KERNEL_DRIVER_COUNT: usize = 5;
 pub static IN_KERNEL_DRIVERS: [InKernelDriver; IN_KERNEL_DRIVER_COUNT] = [
     InKernelDriver {
         path: PCIE_BRCM_PATH,
-        bind_keys: rustos_drv_bus_pcie_brcm::BIND_KEYS,
+        bind_keys: rustos_pcie_brcm::BIND_KEYS,
         image: PCIE_BRCM_IMAGE,
-        register: rustos_drv_bus_pcie_brcm::register,
+        register: rustos_pcie_brcm::register,
         provides_root_block: false,
     },
     InKernelDriver {
@@ -298,10 +298,7 @@ mod tests {
         // The registry must borrow each driver's own published table, so the
         // match data can never drift from the signed-manifest source
         // (`AGENTS.md` §2.2 / §18.3).
-        assert_eq!(
-            IN_KERNEL_DRIVERS[0].bind_keys,
-            rustos_drv_bus_pcie_brcm::BIND_KEYS
-        );
+        assert_eq!(IN_KERNEL_DRIVERS[0].bind_keys, rustos_pcie_brcm::BIND_KEYS);
         assert_eq!(
             IN_KERNEL_DRIVERS[1].bind_keys,
             rustos_drv_bus_usb::BIND_KEYS

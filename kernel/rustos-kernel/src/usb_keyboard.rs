@@ -3,9 +3,10 @@
 //! On the Pi 4 (BCM2711) the USB-A ports hang off a VL805 xHCI controller
 //! behind the `SoC`'s PCIe root complex, whose link ships **down** and
 //! whose config space is windowed (not flat ECAM). Bringing a keyboard to
-//! the video-console login composes four loadable driver crates:
+//! the video-console login composes four building blocks (the BCM2711
+//! PCIe + PCI pieces are `lib/*`, the USB/HID pieces are driver crates):
 //!
-//! 1. [`rustos_drv_bus_pcie_brcm`] resets the root complex and trains its
+//! 1. [`rustos_pcie_brcm`] resets the root complex and trains its
 //!    link with the discovered address windows;
 //! 2. [`rustos_pci::mechanism_brcm`] enumerates the VL805 over the
 //!    windowed config accessor;
@@ -33,16 +34,16 @@ use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, HwNode, MmioMapper, RegisterWindow,
 };
 use rustos_caps::CapabilitySet;
-use rustos_drv_bus_pcie_brcm::{self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback};
-// The discovered-node parsing now lives in the PCIe device's own driver
-// crate (`drivers/bus/pcie_brcm`), beside the link-training engine it feeds
+use rustos_pcie_brcm::{self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback};
+// The discovered-node parsing now lives in the PCIe device's own support
+// crate (`lib/pcie_brcm`), beside the link-training engine it feeds
 // (`AGENTS.md` §2.2 / §2.21 — it is hwtree parsing, not kernel
 // orchestration). Re-exported so the composition keeps one definition; the
 // autonomous `wiring::bring_up_from_node` floor entry consumes it directly.
-pub use rustos_drv_bus_pcie_brcm::wiring::PcieBringup;
 use rustos_hid::{BootKeyboard, ConsoleSink};
 use rustos_kernel_core::InputFocus;
 use rustos_log::{log, Event, EventId, Field, Level, Sink};
+pub use rustos_pcie_brcm::wiring::PcieBringup;
 use rustos_usb::device::UsbDevice;
 use rustos_util::fmt::format_hex_u64;
 // The VL805 firmware-reset *policy* lives in the device's own driver crate
@@ -824,10 +825,11 @@ mod tests {
     use rustos_abi::input::{KeyValue, Modifiers};
     use rustos_abi::{HwDeviceClass, HwResource};
     // The discovered-node parse the orchestration tests build a `PcieBringup`
-    // from now lives in the PCIe device crate (`AGENTS.md` §2.2 / §2.21).
-    use rustos_drv_bus_pcie_brcm::wiring::pcie_bringup_from_node;
+    // from now lives in the PCIe device support crate `lib/pcie_brcm`
+    // (`AGENTS.md` §2.2 / §2.21).
     use rustos_drv_bus_usb_vl805::FirmwareResetFailure;
     use rustos_kernel_core::{ConsoleInputQueue, ConsoleRead};
+    use rustos_pcie_brcm::wiring::pcie_bringup_from_node;
 
     /// A [`Sink`] that records the `(level, id)` of every event it
     /// receives, so a test can assert the bring-up emitted its staged

@@ -1,0 +1,15 @@
+[package]
+name = "rustos-pcie-brcm"
+description = "RustOS Broadcom BCM2711 (Raspberry Pi 4) PCIe root-complex bring-up library: the discovered-window-driven reset/SerDes/link-train state machine + BIND_KEYS, shared by the kernel boot scaffold and (next) a user-space bus-driver bin without a drivers/*->drivers/* edge (AGENTS.md §2.20 device-support carve-out / §17.4)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[lints]
+workspace = true

@@ -52,7 +52,7 @@ thin `drivers/input/usb_hid` crate keeps only the §8 `register` entry and the
 vocabulary), `lib/keymap` (the `Key`→record map), and `lib/usb` (the
 bus-agnostic xHCI protocol) — so it satisfies §17.4 and names no board, PCI, or
 SoC detail (`AGENTS.md` §2.20). The board PCIe root-complex bring-up and BAR
-assignment stay in the board bus drivers (`drivers/bus/pcie_brcm` +
+assignment stay in the board bus drivers (`lib/pcie_brcm` +
 `drivers/bus/usb`); `lib/hid` maps a register window by address and carves a
 DMA region by constraint.
 

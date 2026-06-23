@@ -124,7 +124,7 @@ The chain is split across **three** floor crates, each strictly its own
 device, with no driver naming another (`AGENTS.md` §8 / §17.4 / §2.20):
 
 * the board-specific PCIe root-complex steps live in the device's own
-  `drivers/bus/pcie_brcm` (the §2.20 carve-out that may know the BCM2711)
+  `lib/pcie_brcm` (the §2.20 carve-out that may know the BCM2711)
   — link reset, SerDes, window programming, link training;
 * the VL805-specific `VideoCore`-mailbox firmware reload lives in its own
   device crate `drivers/bus/usb/vl805` (it is a VL805 operation and must
@@ -138,7 +138,7 @@ The kernel's bootstrap-floor catalogue sequences the autonomous entries
 on another.
 
 The board-specific PCIe half is the landed
-`rustos_drv_bus_pcie_brcm::wiring::bring_up_from_node`: it reads the
+`rustos_pcie_brcm::wiring::bring_up_from_node`: it reads the
 controller register window + the inbound/outbound address windows off the
 discovered `brcm,bcm2711-pcie` `HwNode` (`pcie_bringup_from_node`, never a
 compiled-in board constant — `AGENTS.md` §18.1), maps the window

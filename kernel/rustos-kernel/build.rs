@@ -217,7 +217,7 @@ fn emit_signed_driver_manifests() {
     let images = [
         DriverImage {
             const_name: "PCIE_BRCM_IMAGE",
-            bind_keys: rustos_drv_bus_pcie_brcm::BIND_KEYS,
+            bind_keys: rustos_pcie_brcm::BIND_KEYS,
         },
         DriverImage {
             const_name: "BUS_USB_IMAGE",

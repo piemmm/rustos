@@ -96,15 +96,17 @@ rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
 # The VL805/xHCI USB-keyboard composition (`src/usb_keyboard.rs`,
-# `plans/PI.md` P10) wires four loadable driver crates into one in-kernel
-# chain: BCM2711 PCIe root-complex bring-up, the BCM2711 windowed PCI
-# config mechanism, the xHCI controller engine, and the HID
-# boot-keyboard → console-byte producer. `rustos-kernel` is the
-# image-assembly seam (`Layer::Tooling`), the only crate permitted to
-# name driver crates across strata (`AGENTS.md` §17.4 / §8); the engine
-# is architecture-neutral (it consumes only the `lib/abi` driver seams),
+# `plans/PI.md` P10) wires the in-kernel chain over `lib/*` building
+# blocks plus the leaf USB/HID driver crates: the BCM2711 PCIe
+# root-complex bring-up (`lib/pcie_brcm`, the §2.20 single-device
+# support carve-out), the BCM2711 windowed PCI config mechanism
+# (`lib/pci`), the xHCI controller engine, and the HID boot-keyboard →
+# console-byte producer. `rustos-kernel` is the image-assembly seam
+# (`Layer::Tooling`), the only crate permitted to name driver crates
+# across strata (`AGENTS.md` §17.4 / §8); the engine is
+# architecture-neutral (it consumes only the `lib/abi` driver seams),
 # so it compiles — and its host tests run — on the CI host.
-rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
+rustos-pcie-brcm = { path = "../../lib/pcie_brcm", version = "=0.0.0" }
 rustos-pci = { path = "../../lib/pci", version = "=0.0.0" }
 rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 # The Raspberry Pi 4 VL805 device driver (`drivers/bus/usb/vl805`): the
@@ -274,7 +276,7 @@ rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # embeds. Host-only build glue (`AGENTS.md` §1, §12); the production image
 # stays Rust-only.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
+rustos-pcie-brcm = { path = "../../lib/pcie_brcm", version = "=0.0.0" }
 rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }

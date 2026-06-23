@@ -5,7 +5,7 @@
 //! [`DriverHost`](rustos_abi::DriverHost) halves the chain needs on the Pi
 //! 4 — a capability-gated [`MmioMapper`] over the identity map and a
 //! per-driver DMA host over the frame allocator — plus a
-//! generic-timer-backed [`Delay`](rustos_drv_bus_pcie_brcm::Delay), and
+//! generic-timer-backed [`Delay`](rustos_pcie_brcm::Delay), and
 //! runs the chain as a kthread that brings the VL805 up once then polls it.
 //!
 //! # Why the identity map
@@ -415,10 +415,10 @@ mod metal {
     use rustos_arch_aarch64::platform::{PcieDiscovery, PCIE_COMPATIBLE};
     use rustos_arch_aarch64::SERIAL_SINK;
     use rustos_devmatch::MatchResolution;
-    use rustos_drv_bus_pcie_brcm::{Delay, PcieWindows};
     use rustos_hid::{pump_once, KeyboardConsole};
     use rustos_kernel_core::{InitSpawnCtx, YieldHandle};
     use rustos_log::{log, Event, EventId, Field, Level};
+    use rustos_pcie_brcm::{Delay, PcieWindows};
     use rustos_sync::SpinLock;
     use rustos_util::fmt::format_hex_u64;
     use rustos_vcmailbox::{

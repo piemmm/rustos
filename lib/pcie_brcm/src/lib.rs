@@ -4,7 +4,16 @@
 //! complex, which ships with its link **down**: reaching the VL805's
 //! config space requires resetting the root complex, powering its SerDes,
 //! programming its address windows, and training its link (`plans/PI.md`
-//! P10). This driver performs that bring-up.
+//! P10). This crate performs that bring-up.
+//!
+//! It is a `lib/*` crate, not a `drivers/*` crate, even though it is
+//! board-specific: it is the **single device's own support code** the
+//! `AGENTS.md` §2.20 carve-out places in `lib/` (the `lib/vcmailbox`
+//! precedent), so both the in-kernel boot scaffold and a user-space
+//! `drivers/bus/*` bin can compose it without a forbidden
+//! `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4). It names BCM2711
+//! detail legitimately because that is its entire purpose; nothing
+//! generic depends on it.
 //!
 //! # Layered seams
 //!
@@ -22,11 +31,14 @@
 //!
 //! # Public surface & capabilities
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`];
-//! [`BrcmPcieRc`] is instantiated through [`wiring::open_discovered`].
-//! Loading requires [`CapabilityId::DRV_LOAD`]; mapping the register window
-//! requires [`CapabilityId::MMIO_MAP`]. Runs in user space (no
-//! `CAP_DRV_KERNEL`).
+//! The bring-up engine ([`BrcmPcieRc`], instantiated through
+//! [`wiring::open_discovered`] / [`wiring::bring_up_from_node`]) and the
+//! [`BIND_KEYS`] match table are the surface a composing host drives.
+//! [`register`] is the thin `AGENTS.md` §8 driver entry the kernel's
+//! §18.6 bootstrap-floor catalogue invokes to gate loading; it checks
+//! [`CapabilityId::DRV_LOAD`] and touches no hardware. Mapping the
+//! register window requires [`CapabilityId::MMIO_MAP`]. Runs in user
+//! space (no `CAP_DRV_KERNEL`).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

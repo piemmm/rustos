@@ -44,7 +44,7 @@ the node's match keys (`HwMatchKey::matches`) — same kind first, then:
   never force a broader match (fail closed, `AGENTS.md` §5.4).
 
 Drivers declare their canonical bind tables as a `pub const BIND_KEYS`
-in the driver crate (e.g. `rustos_drv_bus_pcie_brcm::BIND_KEYS`,
+in the driver crate (e.g. `rustos_pcie_brcm::BIND_KEYS`,
 `rustos_drv_bus_usb::BIND_KEYS`, `rustos_drv_input_usb_hid::BIND_KEYS`) —
 the single source of truth the signed-manifest bind table is authored
 from (`AGENTS.md` §18.3).
