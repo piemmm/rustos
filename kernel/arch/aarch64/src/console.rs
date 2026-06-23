@@ -100,12 +100,50 @@ const PL011_IFLS: usize = 0x34;
 /// selects the lowest (1/8-full) trigger so the receive interrupt fires as
 /// promptly as the FIFO allows.
 const PL011_IFLS_RXSEL: u32 = 0b111 << 3;
+/// `UARTIMSC.TXIM` — transmit interrupt (bit 5): asserts while the transmit
+/// FIFO is at or below its trigger level (i.e. has room), so unmasking it
+/// drives an ISR that refills the FIFO from the software ring until the ring
+/// drains, then re-masks it (`crate::serial`).
+const PL011_IMSC_TXIM: u32 = 1 << 5;
+/// PL011 masked interrupt-status register (`UARTMIS`) offset: the raw
+/// interrupt state masked by `UARTIMSC`, so a bit is set only for a source
+/// that is both pending *and* unmasked. The ISR reads it to act on exactly
+/// the sources that fired (`AGENTS.md` §5.4 — never drain receive bytes the
+/// poll path still owns: while `RXIM` is masked, `RXMIS` reads clear).
+const PL011_MIS: usize = 0x40;
+/// `UARTMIS.RXMIS` (bit 4) — a receive interrupt is pending and unmasked.
+const PL011_MIS_RXMIS: u32 = 1 << 4;
+/// `UARTMIS.TXMIS` (bit 5) — a transmit interrupt is pending and unmasked.
+const PL011_MIS_TXMIS: u32 = 1 << 5;
+/// `UARTMIS.RTMIS` (bit 6) — a receive-timeout interrupt is pending and
+/// unmasked.
+const PL011_MIS_RTMIS: u32 = 1 << 6;
+/// `UARTICR.TXIC` (bit 5) — clear the latched transmit interrupt. Masking
+/// `TXIM` already removes it from `UARTMIS`; this clears the underlying latch
+/// so a later re-enable starts from a clean state.
+const PL011_ICR_TXIC: u32 = 1 << 5;
 
 /// Mini-UART interrupt-enable register (`AUX_MU_IER_REG`) offset, relative
 /// to the device-tree `reg` base.
 const MINIUART_IER: usize = 0x04;
 /// `AUX_MU_IER_REG` bit 0 — enable the receive interrupt.
 const MINIUART_IER_RX: u32 = 0x01;
+/// `AUX_MU_IER_REG` bit 1 — enable the transmit interrupt (asserts while the
+/// transmit holding register/FIFO can accept a byte).
+const MINIUART_IER_TX: u32 = 0x02;
+/// Mini-UART interrupt-identify register (`AUX_MU_IIR_REG`) offset, relative
+/// to the device-tree `reg` base: the mini-UART's analogue of the PL011's
+/// `UARTMIS` — it reports which enabled source is pending. Bit 0 is *clear*
+/// while an interrupt is pending, and bits 2:1 identify it.
+const MINIUART_IIR: usize = 0x08;
+/// `AUX_MU_IIR_REG` bits 2:1 isolate the pending-interrupt identity.
+const MINIUART_IIR_ID: u32 = 0b110;
+/// `AUX_MU_IIR_REG` bits 2:1 == `0b01` — transmit holding register empty
+/// (the transmit interrupt).
+const MINIUART_IIR_TX: u32 = 0b010;
+/// `AUX_MU_IIR_REG` bits 2:1 == `0b10` — receiver holds a valid byte (the
+/// receive interrupt).
+const MINIUART_IIR_RX: u32 = 0b100;
 
 /// Mini-UART data register (`AUX_MU_IO_REG`) offset, relative to the
 /// device-tree `reg` base.
@@ -222,7 +260,7 @@ impl ConsoleModel {
     ///
     /// The freestanding applier (`serial::enable_rx_interrupt`)
     /// performs each non-empty step as `*reg = (*reg & !clear) | set` against
-    /// the model's documented registers; an empty step ([`RxIntRmw::is_noop`])
+    /// the model's documented registers; an empty step ([`RegRmw::is_noop`])
     /// is skipped, so the fixed-length array carries the longer PL011 sequence
     /// and pads the shorter mini-UART one. Keeping the register/bit policy here
     /// (beside the offset/readiness helpers) and the MMIO in `crate::serial`
@@ -236,33 +274,33 @@ impl ConsoleModel {
     ///   single typed byte interrupts even below the FIFO trigger.
     /// - **Mini-UART:** set the receive-interrupt-enable bit (`AUX_MU_IER_REG`).
     #[must_use]
-    pub const fn rx_interrupt_sequence(self) -> [RxIntRmw; 3] {
+    pub const fn rx_interrupt_sequence(self) -> [RegRmw; 3] {
         match self {
             Self::Pl011 => [
-                RxIntRmw {
+                RegRmw {
                     offset: PL011_IFLS,
                     clear: PL011_IFLS_RXSEL,
                     set: 0,
                 },
-                RxIntRmw {
+                RegRmw {
                     offset: PL011_CR,
                     clear: 0,
                     set: PL011_CR_UARTEN | PL011_CR_RXE,
                 },
-                RxIntRmw {
+                RegRmw {
                     offset: PL011_IMSC,
                     clear: 0,
                     set: PL011_IMSC_RXIM | PL011_IMSC_RTIM,
                 },
             ],
             Self::MiniUart => [
-                RxIntRmw {
+                RegRmw {
                     offset: MINIUART_IER,
                     clear: 0,
                     set: MINIUART_IER_RX,
                 },
-                RxIntRmw::NOOP,
-                RxIntRmw::NOOP,
+                RegRmw::NOOP,
+                RegRmw::NOOP,
             ],
         }
     }
@@ -285,17 +323,125 @@ impl ConsoleModel {
             Self::MiniUart => None,
         }
     }
+
+    /// The read-modify-write that **unmasks** this UART's transmit interrupt,
+    /// applied by the freestanding `serial::enable_tx_interrupt`.
+    ///
+    /// The transmit interrupt asserts while the transmit FIFO has room (at or
+    /// below its trigger level), so once it is unmasked the ISR refills the
+    /// FIFO from the software ring until the ring drains and then re-masks it
+    /// ([`Self::tx_interrupt_disable`]). This is the interrupt-driven transmit
+    /// path that keeps buffered output flowing at the UART's real throughput
+    /// without coupling the drain to the scheduler reaching idle (`AGENTS.md`
+    /// §2.16 / §20). It touches only the interrupt-enable register
+    /// (PL011 `UARTIMSC.TXIM`, mini-UART `AUX_MU_IER_REG` bit 1) and never the
+    /// receive bits, so unmasking transmit leaves the receive line exactly as
+    /// the boot/login path set it.
+    #[must_use]
+    pub const fn tx_interrupt_enable(self) -> RegRmw {
+        match self {
+            Self::Pl011 => RegRmw {
+                offset: PL011_IMSC,
+                clear: 0,
+                set: PL011_IMSC_TXIM,
+            },
+            Self::MiniUart => RegRmw {
+                offset: MINIUART_IER,
+                clear: 0,
+                set: MINIUART_IER_TX,
+            },
+        }
+    }
+
+    /// The read-modify-write that **masks** this UART's transmit interrupt —
+    /// the inverse of [`Self::tx_interrupt_enable`], applied by
+    /// `serial::disable_tx_interrupt` once the ring drains so an empty FIFO
+    /// does not re-fire the ISR forever.
+    #[must_use]
+    pub const fn tx_interrupt_disable(self) -> RegRmw {
+        match self {
+            Self::Pl011 => RegRmw {
+                offset: PL011_IMSC,
+                clear: PL011_IMSC_TXIM,
+                set: 0,
+            },
+            Self::MiniUart => RegRmw {
+                offset: MINIUART_IER,
+                clear: MINIUART_IER_TX,
+                set: 0,
+            },
+        }
+    }
+
+    /// Byte offset of the register the ISR reads to learn which interrupt
+    /// sources are pending **and unmasked**: PL011 `UARTMIS`, mini-UART
+    /// `AUX_MU_IIR_REG`.
+    ///
+    /// Reading exactly the masked status is what lets one shared interrupt
+    /// line carry both transmit and receive without the ISR ever draining
+    /// receive bytes the poll path still owns: while the receive source is
+    /// masked it never appears here, so the passphrase FIFO-poll keeps its
+    /// bytes (`AGENTS.md` §5.4 — fail closed by construction).
+    #[must_use]
+    pub const fn interrupt_status_offset(self) -> usize {
+        match self {
+            Self::Pl011 => PL011_MIS,
+            Self::MiniUart => MINIUART_IIR,
+        }
+    }
+
+    /// Decode an [`Self::interrupt_status_offset`] read into "the transmit
+    /// interrupt fired". PL011: `UARTMIS.TXMIS`. Mini-UART: the
+    /// pending-identity field (`AUX_MU_IIR_REG` bits 2:1) equals the
+    /// transmit code.
+    #[must_use]
+    pub const fn tx_interrupt_fired(self, status: u32) -> bool {
+        match self {
+            Self::Pl011 => status & PL011_MIS_TXMIS != 0,
+            Self::MiniUart => status & MINIUART_IIR_ID == MINIUART_IIR_TX,
+        }
+    }
+
+    /// Decode an [`Self::interrupt_status_offset`] read into "a receive
+    /// interrupt fired" (data available or receive-timeout). PL011:
+    /// `UARTMIS.RXMIS | RTMIS`. Mini-UART: the pending-identity field equals
+    /// the receive code. Reads clear while the receive source is masked, so
+    /// this is `false` throughout the passphrase poll window.
+    #[must_use]
+    pub const fn rx_interrupt_fired(self, status: u32) -> bool {
+        match self {
+            Self::Pl011 => status & (PL011_MIS_RXMIS | PL011_MIS_RTMIS) != 0,
+            Self::MiniUart => status & MINIUART_IIR_ID == MINIUART_IIR_RX,
+        }
+    }
+
+    /// The write that clears this UART's latched **transmit** interrupt, as
+    /// `(offset, value)`, or [`None`] when the model needs none.
+    ///
+    /// Masking [`Self::tx_interrupt_disable`] already removes the source from
+    /// the masked status, so this is belt-and-braces for the PL011 (clear the
+    /// `UARTICR.TXIC` latch so a later re-enable starts clean). The mini-UART
+    /// clears its transmit interrupt when the identify register is read, so it
+    /// needs no separate write ([`None`]).
+    #[must_use]
+    pub const fn tx_interrupt_clear(self) -> Option<(usize, u32)> {
+        match self {
+            Self::Pl011 => Some((PL011_ICR, PL011_ICR_TXIC)),
+            Self::MiniUart => None,
+        }
+    }
 }
 
-/// One read-modify-write applied to a console register when enabling the
-/// receive interrupt: `*reg = (*reg & !clear) | set`, where `reg` is the
-/// register at byte `offset` from the console MMIO base.
+/// One read-modify-write applied to a console register:
+/// `*reg = (*reg & !clear) | set`, where `reg` is the register at byte
+/// `offset` from the console MMIO base.
 ///
-/// Produced by [`ConsoleModel::rx_interrupt_sequence`] and applied by the
-/// freestanding `serial::enable_rx_interrupt`. A [`RxIntRmw::NOOP`]
+/// Produced by the model's interrupt-control accessors
+/// ([`ConsoleModel::rx_interrupt_sequence`], [`ConsoleModel::tx_interrupt_enable`])
+/// and applied by the freestanding `serial` MMIO helpers. A [`RegRmw::NOOP`]
 /// (both masks zero) is a padding entry the applier skips.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct RxIntRmw {
+pub struct RegRmw {
     /// Byte offset of the target register from the console MMIO base.
     pub offset: usize,
     /// Bits to clear before OR-ing in [`Self::set`].
@@ -304,7 +450,7 @@ pub struct RxIntRmw {
     pub set: u32,
 }
 
-impl RxIntRmw {
+impl RegRmw {
     /// A do-nothing step: both masks zero, so the applier skips it. Pads the
     /// fixed-length sequence for models that need fewer than three writes.
     pub const NOOP: Self = Self {
@@ -572,7 +718,7 @@ mod tests {
         // IFLS: clear the receive trigger-select field (select 1/8), set nothing.
         assert_eq!(
             seq[0],
-            RxIntRmw {
+            RegRmw {
                 offset: 0x34,
                 clear: 0b111 << 3,
                 set: 0
@@ -581,7 +727,7 @@ mod tests {
         // CR: enable the UART (bit 0) and the receiver (bit 9).
         assert_eq!(
             seq[1],
-            RxIntRmw {
+            RegRmw {
                 offset: 0x30,
                 clear: 0,
                 set: (1 << 0) | (1 << 9)
@@ -590,7 +736,7 @@ mod tests {
         // IMSC: unmask the receive (bit 4) and receive-timeout (bit 6) sources.
         assert_eq!(
             seq[2],
-            RxIntRmw {
+            RegRmw {
                 offset: 0x38,
                 clear: 0,
                 set: (1 << 4) | (1 << 6)
@@ -604,7 +750,7 @@ mod tests {
         // One live step (IER RX-enable) followed by two skipped padding steps.
         assert_eq!(
             seq[0],
-            RxIntRmw {
+            RegRmw {
                 offset: 0x04,
                 clear: 0,
                 set: 0x01
@@ -628,16 +774,98 @@ mod tests {
     }
 
     #[test]
+    fn tx_interrupt_enable_unmasks_only_the_tx_source() {
+        // PL011: set UARTIMSC.TXIM (bit 5), touching no receive bit, so the
+        // passphrase FIFO-poll's masked receive line is undisturbed.
+        assert_eq!(
+            ConsoleModel::Pl011.tx_interrupt_enable(),
+            RegRmw {
+                offset: 0x38,
+                clear: 0,
+                set: 1 << 5
+            }
+        );
+        // Mini-UART: set AUX_MU_IER_REG bit 1 (TX), again leaving the RX bit.
+        assert_eq!(
+            ConsoleModel::MiniUart.tx_interrupt_enable(),
+            RegRmw {
+                offset: 0x04,
+                clear: 0,
+                set: 0x02
+            }
+        );
+    }
+
+    #[test]
+    fn tx_interrupt_disable_is_the_inverse_of_enable() {
+        // PL011: clear UARTIMSC.TXIM.
+        assert_eq!(
+            ConsoleModel::Pl011.tx_interrupt_disable(),
+            RegRmw {
+                offset: 0x38,
+                clear: 1 << 5,
+                set: 0
+            }
+        );
+        // Mini-UART: clear AUX_MU_IER_REG bit 1.
+        assert_eq!(
+            ConsoleModel::MiniUart.tx_interrupt_disable(),
+            RegRmw {
+                offset: 0x04,
+                clear: 0x02,
+                set: 0
+            }
+        );
+    }
+
+    #[test]
+    fn interrupt_status_decode_separates_tx_and_rx_per_model() {
+        // PL011 reads UARTMIS (0x40); TXMIS=bit5, RXMIS=bit4, RTMIS=bit6.
+        assert_eq!(ConsoleModel::Pl011.interrupt_status_offset(), 0x40);
+        assert!(ConsoleModel::Pl011.tx_interrupt_fired(1 << 5));
+        assert!(!ConsoleModel::Pl011.rx_interrupt_fired(1 << 5));
+        assert!(ConsoleModel::Pl011.rx_interrupt_fired(1 << 4));
+        assert!(ConsoleModel::Pl011.rx_interrupt_fired(1 << 6));
+        assert!(!ConsoleModel::Pl011.tx_interrupt_fired(1 << 4));
+        // A masked source never appears in UARTMIS, so a zero read fires
+        // neither — the property the passphrase poll relies on.
+        assert!(!ConsoleModel::Pl011.tx_interrupt_fired(0));
+        assert!(!ConsoleModel::Pl011.rx_interrupt_fired(0));
+
+        // Mini-UART reads AUX_MU_IIR_REG (0x08); the identity is bits 2:1.
+        assert_eq!(ConsoleModel::MiniUart.interrupt_status_offset(), 0x08);
+        assert!(ConsoleModel::MiniUart.tx_interrupt_fired(0b010));
+        assert!(!ConsoleModel::MiniUart.rx_interrupt_fired(0b010));
+        assert!(ConsoleModel::MiniUart.rx_interrupt_fired(0b100));
+        assert!(!ConsoleModel::MiniUart.tx_interrupt_fired(0b100));
+        // "No interrupt pending" (identity 0b00) fires neither.
+        assert!(!ConsoleModel::MiniUart.tx_interrupt_fired(0b001));
+        assert!(!ConsoleModel::MiniUart.rx_interrupt_fired(0b001));
+    }
+
+    #[test]
+    fn tx_interrupt_clear_targets_icr_for_pl011_and_none_for_miniuart() {
+        // PL011: write TXIC (bit 5) to UARTICR (0x44) to clear the latch.
+        assert_eq!(
+            ConsoleModel::Pl011.tx_interrupt_clear(),
+            Some((0x44, 1 << 5))
+        );
+        // Mini-UART: the transmit interrupt clears on an identify-register
+        // read, so no separate clear write is needed.
+        assert_eq!(ConsoleModel::MiniUart.tx_interrupt_clear(), None);
+    }
+
+    #[test]
     fn rx_int_rmw_noop_is_recognised() {
-        assert!(RxIntRmw::NOOP.is_noop());
-        assert!(!RxIntRmw {
+        assert!(RegRmw::NOOP.is_noop());
+        assert!(!RegRmw {
             offset: 0,
             clear: 0,
             set: 1
         }
         .is_noop());
         // A clear-only step still changes the register, so it is not a no-op.
-        assert!(!RxIntRmw {
+        assert!(!RegRmw {
             offset: 0,
             clear: 1,
             set: 0

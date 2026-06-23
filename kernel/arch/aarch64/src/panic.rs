@@ -26,6 +26,12 @@ use crate::serial::ConsoleWriter;
 /// Always returns `!`: emits one record on the configured console, then
 /// parks the CPU via [`halt_current_cpu`].
 pub fn handle_panic_via_serial(info: &PanicInfo<'_>) -> ! {
+    // Flush the buffered serial ring first so the diagnostic context
+    // that led up to the panic reaches a serial capture before the panic
+    // record and the park (`crate::serial::SerialSink` buffers UART output
+    // off the producer's hot path — `AGENTS.md` §2.16 / §20). Blocking is
+    // fine here: the CPU is about to stop running the dispatch loop.
+    crate::serial::flush_serial_blocking();
     let mut w = ConsoleWriter;
     let _ = writeln!(w, "[rustos-kernel] aarch64 panic: {info}");
     halt_current_cpu()

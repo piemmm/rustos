@@ -119,11 +119,25 @@ impl KernelArch for Aarch64BinArch {
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             use rustos_arch_aarch64::exceptions;
+            // Opportunistically push any buffered serial bytes the slow UART
+            // could not accept yet — defence in depth (`AGENTS.md` §2.16 /
+            // §20). Buffered output is now drained *primarily* by the console
+            // UART's transmit interrupt (`serial::service_uart_tx_irq`),
+            // which refills the transmit FIFO as it drains at the UART's real
+            // throughput **and** wakes the `wfi` below the moment the FIFO has
+            // room. So a deep sleep here can no longer strand the backlog —
+            // the defect the previous `serial_pending` no-deep-sleep loop
+            // papered over (it dribbled one FIFO-load out per incidental
+            // wake). This drain only covers the narrow pre-GIC window, before
+            // that interrupt line is live; it is bounded, so it cannot extend
+            // the idle wait.
+            serial::drain_serial();
             // SAFETY: `wfi`/`enable_irq`/`mask_irq` are the documented
             // race-free idle-wait sequence; the vector table and the GICv2
             // are installed by this point (`install_irq_dispatch` ran), so a
-            // taken interrupt dispatches through a valid handler, and the
-            // sequence leaves IRQs masked exactly as it found them.
+            // taken interrupt — including the UART transmit interrupt that
+            // drains buffered output — dispatches through a valid handler,
+            // and the sequence leaves IRQs masked exactly as it found them.
             unsafe {
                 exceptions::wait_for_interrupt();
                 exceptions::enable_irq();

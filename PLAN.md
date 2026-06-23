@@ -1745,6 +1745,60 @@ order (one fully-gated increment each):
            boot and never blocks the pump; it is still captured when diagnostics
            lower the threshold. Host-proven (`pump_diagnostics_emits_a_bounded_heartbeat`
            lowers the level to observe the `Debug` record).
+           The structural defect behind all three was then fixed (the
+           level-demotions papered over it): the aarch64 `SerialSink` wrote
+           each line *synchronously* to the UART via `console::tx_wait`,
+           blocking the calling task — single-CPU, the whole core — for the
+           line's transmit time, so *any* task's logging (devmgr's flood via
+           `log_emit`, a kthread heartbeat, or program console output) could
+           starve the keyboard pump. **Fixed (the design `lib/log` always
+           documented):** `serial.rs` buffers **all** UART output — the
+           diagnostic log sink *and* `write_console_bytes` (the
+           `stream_write`/`ConsoleWrite` backing) — through one ~4 KiB byte
+           ring guarded by a self-contained try-lock (`RingLock`;
+           `lib/sync::SpinLock` would feature-unify `alloc` onto this port's
+           allocator-less QEMU test bins, §2.2 carve-out). A producer copies
+           its bytes and returns; at the end of each write the ring drains
+           opportunistically (whatever the FIFO accepts now, no spin). It
+           block-flushes only when the ring fills (operator-directed: bound
+           memory) and goes lossy only when the UART is genuinely wedged
+           (`tx_wait` drops, never hangs, §2.1); the panic bridge
+           `flush_serial_blocking`s buffered context out before parking. Boot
+           beacons stay on the direct lock-free `putchar` path (MMU-off, must
+           trace immediately).
+           The ring buffers **any** serial output, not just the log, so its
+           types/API are named generically — `SerialRing` (the buffer),
+           `serial::drain_serial` / `serial::flush_serial_blocking`, no
+           `log`-specific names (operator-directed). The `serial` module is
+           host-compiled (full host stubs), so its ring + console-model logic
+           is host-unit-tested.
+           **Draining is transmit-interrupt-driven (the proper, decoupled
+           fix).** Earlier the ring drained only opportunistically at a
+           producer's write-end and at the tickless idle `wait_for_interrupt`,
+           so during a busy-but-not-producing window (and in deep idle) the
+           FIFO emptied and was refilled only ~one FIFO-load per scheduler
+           visit — the "10–20 chars then a multi-second pause". Now the
+           console UART's TX interrupt is enabled while the ring holds a
+           backlog: `serial::service_uart_tx_irq` (driven from the
+           `gic_irq` device dispatcher on the shared console INTID) refills the
+           FIFO as it drains, at the UART's real throughput, regardless of
+           scheduler state, and wakes `wfi`. The single shared GIC line is
+           routed+unmasked at GIC bring-up with the device sources masked at
+           reset (additive, §2.17); a producer arms `TXIM` after its
+           opportunistic drain (`sync_tx_irq_to_backlog`), the ISR re-syncs it
+           to the remaining backlog and disarms on empty. The ISR reads the
+           masked status (`ConsoleModel::tx_interrupt_fired` /
+           `rx_interrupt_fired`) so it drains receive bytes only when the
+           receive source actually fired — the passphrase FIFO-poll keeps its
+           bytes while RX stays masked (§5.4, fail closed by construction).
+           `wait_for_interrupt` is back to a plain `wfi` (the TX interrupt
+           wakes it); the bounded idle `drain_serial` remains only as
+           defence-in-depth for the pre-GIC window. The TX register policy is
+           in `ConsoleModel` for both PL011 (`UARTIMSC.TXIM`/`UARTMIS`/`TXIC`)
+           and mini-UART (`IER`/`IIR`), host-tested. riscv64/x86_64 do not
+           share the flow-blocked-PL011 defect (SBI-console / COM1 transmit),
+           so this stays genuinely aarch64 glue, not stranded common logic
+           (§2.21).
          - **Remaining (metal-only, §0.4):** confirm a fast boot + responsive
            `Root passphrase:` prompt on hardware; investigate (if still seen on a
            settled system) why the tree generation advances repeatedly after boot

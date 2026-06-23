@@ -287,14 +287,22 @@ pub fn gic_irq_routing() -> IrqRouting {
 /// `Phase::Irq`, strictly before any SPI is routed) returns silently.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub extern "C" fn production_device_irq_dispatch(intid: u32) {
-    // The console UART's receive interrupt is a kernel-internal source, not an
-    // `irq_wait` binding: drain the hardware FIFO into the console receive
-    // queue and wake the parked `login` reader. Draining the FIFO clears the
-    // receive-interrupt condition, so the line stays enabled for the next byte
-    // with no mask/re-arm dance (`AGENTS.md` §2.16). Checked first so the
-    // console line never reaches the `irq_wait` table it was never bound on.
+    // The console UART is a kernel-internal source on a single shared GIC
+    // line carrying both directions, not an `irq_wait` binding. Service it by
+    // reading the masked interrupt status once: push buffered transmit bytes
+    // into the FIFO (`service_uart_tx_irq`, the interrupt-driven drain that
+    // keeps logging flowing without stalling any task — `AGENTS.md` §2.16 /
+    // §20), and drain the receive FIFO into the console queue **only** when a
+    // receive interrupt actually fired. While the receive source is masked
+    // (the passphrase FIFO-poll window) it never fires, so the poll keeps its
+    // bytes; after the login handoff enables it, draining wakes the parked
+    // `login` reader. Checked first so the console line never reaches the
+    // `irq_wait` table it was never bound on.
     if UART_RX_INTID.get().ok().flatten().copied() == Some(intid) {
-        drain_uart_into_console_queue();
+        let rx_pending = rustos_arch_aarch64::serial::service_uart_tx_irq();
+        if rx_pending {
+            drain_uart_into_console_queue();
+        }
         return;
     }
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
@@ -503,6 +511,32 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         // boot-CPU bring-up `gic::init` documents.
         unsafe {
             rustos_arch_aarch64::gic::init();
+        }
+
+        // Bring the console UART's shared interrupt line up now — route it to
+        // the boot CPU and unmask it at the GIC — so buffered serial output is
+        // **transmit-interrupt-driven** from the first boot phase
+        // (`crate::aarch64::arch_wrapper`'s ring + `serial::service_uart_tx_irq`),
+        // draining at the UART's real throughput regardless of scheduler state
+        // (`AGENTS.md` §2.16 / §20). This stays additive (§2.17): the
+        // device-level sources are masked at reset, so no interrupt fires
+        // until a producer arms the transmit source (`serial::enable_tx_interrupt`)
+        // or the login handoff enables receive (`enable_uart_console_irq`).
+        // `prime_tx_irq` arms the transmit source if early-boot log output is
+        // already buffered, so it starts draining without waiting for the next
+        // producer. A UART-less / interrupt-less tree left the slot empty — then
+        // this is skipped and output drains on the idle fallback
+        // (`serial::drain_serial`), fail closed (`AGENTS.md` §2.9).
+        if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
+            // SAFETY: the GICv2 distributor bases were configured from the
+            // device tree and `gic::init` ran just above, so routing this
+            // discovered console SPI to the boot CPU addresses live,
+            // identity-mapped distributor MMIO.
+            unsafe {
+                rustos_arch_aarch64::gic::route_spi(intid, CPU0_TARGET);
+            }
+            let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
+            rustos_arch_aarch64::serial::prime_tx_irq();
         }
     }
 }

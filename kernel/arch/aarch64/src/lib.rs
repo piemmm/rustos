@@ -163,7 +163,12 @@ pub mod video;
 pub mod entry;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod panic;
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+/// PL011 / mini-UART-backed `rustos_log::Sink` plus the buffered,
+/// non-blocking serial transmit ring shared by the diagnostic log and the
+/// `stream_write` console backing. The MMIO transmit/receive primitives
+/// are gated to the bare-metal target (host stubs make them inert), so the
+/// pure ring discipline and the buffered-drain decision logic are
+/// host-unit-tested under `cargo test` (`AGENTS.md` §7).
 pub mod serial;
 
 pub use kernel_arch::{Aarch64Arch, Aarch64ArchStorage};
