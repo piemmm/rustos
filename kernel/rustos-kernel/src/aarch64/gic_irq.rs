@@ -525,8 +525,8 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         // `prime_tx_irq` arms the transmit source if early-boot log output is
         // already buffered, so it starts draining without waiting for the next
         // producer. A UART-less / interrupt-less tree left the slot empty — then
-        // this is skipped and output drains on the idle fallback
-        // (`serial::drain_serial`), fail closed (`AGENTS.md` §2.9).
+        // this is skipped and output drains on the dispatch loop's non-blocking
+        // top-up (`serial::pump_tx`), fail closed (`AGENTS.md` §2.9).
         if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
             // SAFETY: the GICv2 distributor bases were configured from the
             // device tree and `gic::init` ran just above, so routing this

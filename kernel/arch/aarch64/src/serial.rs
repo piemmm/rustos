@@ -86,26 +86,39 @@
 //! (whatever the FIFO accepts now, no spin) and then arms the UART's
 //! **transmit interrupt** to whatever the FIFO could not take.
 //!
-//! That transmit interrupt is the primary drain (`service_uart_tx_irq`):
-//! the device raises it whenever the transmit FIFO has room, so the ISR
-//! refills the FIFO from the ring as it drains — at the UART's real
-//! throughput, regardless of what the scheduler is running, and it even
-//! wakes the CPU out of `wfi`. The drain is therefore not coupled to the
-//! scheduler ever reaching its idle wait, which is what made earlier
-//! attempts dribble the backlog out one FIFO-load per incidental wake (the
-//! "10–20 characters, then a multi-second pause"). The single shared GIC
-//! line carries both directions; reading the masked interrupt status
-//! (`ConsoleModel::tx_interrupt_fired` / `rx_interrupt_fired`) keeps the ISR
-//! from ever draining receive bytes the passphrase poll still owns. When the
-//! ring fills, a producer block-flushes (`flush_blocking`) to bound memory;
-//! when the UART is genuinely wedged that flush drops bytes rather than
-//! hanging (lossy — §2.1). The idle wait keeps a bounded opportunistic
-//! `drain_serial` as defence in depth for the narrow pre-GIC window before
-//! the transmit interrupt is live. The boot beacons stay on the direct,
-//! lock-free path (`beacon`) because they run with the MMU off, where the
-//! ring's lock is unusable, and must trace a hang *immediately*. This is the
-//! design `lib/log` always documented ("sinks copy the event into a ring
-//! buffer consumed by an async drainer").
+//! The ring drains **without ever blocking the CPU on the slow UART**:
+//!
+//! 1. **The transmit interrupt drains it in the background**
+//!    (`service_uart_tx_irq`). The device raises it whenever the transmit
+//!    FIFO has room, so the ISR refills the FIFO from the ring (`drain_ready`,
+//!    no spin) and re-arms `TXIM` to the remaining backlog, and a `wfi` is
+//!    woken by it — so a queued backlog flows at the UART's real throughput
+//!    with the CPU asleep in `wfi` between FIFO refills, never busy-waiting.
+//!    The single shared GIC line carries both directions; reading the masked
+//!    interrupt status (`ConsoleModel::tx_interrupt_fired` /
+//!    `rx_interrupt_fired`) keeps the ISR from ever draining receive bytes the
+//!    passphrase poll still owns.
+//! 2. **The dispatch loop tops up the FIFO each pass** (`pump_tx`), from
+//!    `KernelArch::poll_interrupts` and before the idle `wfi`. This is a
+//!    **non-blocking** push of whatever the FIFO accepts right now plus a
+//!    `TXIM` re-arm — never a per-byte spin — so it guarantees forward
+//!    progress independent of interrupt delivery without starving anything.
+//!
+//! An earlier revision drained the dispatch loop with a **blocking** per-byte
+//! `putchar` spin (and refused to `wfi` while a backlog remained), so on this
+//! cooperative, effectively single-CPU boot the CPU spent burst windows
+//! busy-waiting at the UART's byte rate instead of doing real work — turning a
+//! ~300 ms PCIe read-back into seconds and making the `Root passphrase:` /
+//! login prompts lethargic. Draining must never block the CPU; only a **full**
+//! ring blocks, and only the producer.
+//!
+//! When the ring fills, a producer block-flushes (`flush_blocking`) to bound
+//! memory (operator-directed: block when full); when the UART is genuinely
+//! wedged that flush drops bytes rather than hanging (lossy — §2.1). The boot
+//! beacons stay on the direct, lock-free path (`beacon`) because they run with
+//! the MMU off, where the ring's lock is unusable, and must trace a hang
+//! *immediately*. This is the design `lib/log` always documented ("sinks copy
+//! the event into a ring buffer consumed by an async drainer").
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -371,9 +384,9 @@ fn flush_blocking(ring: &mut SerialRing) {
 /// Pop up to `max` queued bytes and transmit each through the budgeted,
 /// wedged-aware [`putchar`].
 ///
-/// The single per-byte drain both the whole-ring [`flush_blocking`] and
-/// the bounded idle [`drain_serial`] chunk share, so the wedged-aware policy
-/// lives in one place (`AGENTS.md` §2.2). Unlike the opportunistic
+/// The per-byte drain the whole-ring [`flush_blocking`] uses, so the
+/// wedged-aware policy lives in one place (`AGENTS.md` §2.2). Unlike the
+/// opportunistic
 /// [`drain_ready`] (which pushes only what the FIFO has room for *right
 /// now* and never updates the wedged state), each [`putchar`] here waits
 /// **boundedly** for FIFO room — so a healthy-but-slow UART makes
@@ -417,11 +430,12 @@ fn buffered_uart_write(bytes: &[u8]) {
         for &byte in bytes {
             enqueue_byte(ring, byte);
         }
-        drain_ready(ring);
-        // Arm the transmit interrupt to whatever the FIFO could not take, so
-        // the transmit ISR drains the remainder at the UART's real throughput
-        // without this caller spinning on the device (`AGENTS.md` §2.16).
-        sync_tx_irq_to_backlog(ring);
+        // Push what the FIFO accepts now and arm the transmit interrupt to
+        // the rest, so the ISR drains the remainder at the UART's real
+        // throughput without this caller spinning on the device
+        // (`AGENTS.md` §2.16). Same non-blocking step the dispatch-loop
+        // pump and the ISR use (`pump`, §2.2).
+        pump(ring);
     });
     if buffered.is_none() {
         for &byte in bytes {
@@ -434,7 +448,7 @@ fn buffered_uart_write(bytes: &[u8]) {
 /// **right now**, without spinning: stop at the first byte the FIFO is not
 /// ready for (or when the ring empties). Never blocks the caller, so it is
 /// safe both on the hot path (end of each [`SerialSink::write_event`]) and
-/// at the tickless idle point ([`drain_serial`]).
+/// at the dispatch-loop pump ([`pump_tx`]).
 fn drain_ready(ring: &mut SerialRing) {
     while !ring.is_empty() && tx_ready_now() {
         if let Some(byte) = ring.pop_byte() {
@@ -443,37 +457,41 @@ fn drain_ready(ring: &mut SerialRing) {
     }
 }
 
-/// One idle-drain chunk: the number of buffered bytes [`drain_serial`] pushes
-/// per call before returning so the dispatch loop can re-step and service
-/// interrupts.
+/// One non-blocking drain step: push whatever the transmit FIFO accepts
+/// right now ([`drain_ready`]) and re-arm the transmit interrupt to whatever
+/// it could not take ([`sync_tx_irq_to_backlog`]).
 ///
-/// Small enough that interrupt delivery (a keypress echo, a timed wake) is
-/// never delayed by more than a chunk's transmit time, large enough that the
-/// per-call loop overhead is negligible — a few PL011 FIFO-loads
-/// (`AGENTS.md` §2.16).
-const IDLE_DRAIN_CHUNK: usize = 64;
+/// The single definition the producer ([`buffered_uart_write`]), the transmit
+/// ISR ([`service_uart_tx_irq`]) and the dispatch-loop pump ([`pump_tx`]) all
+/// share, so the "push now, defer the rest to the interrupt" policy lives in
+/// one place (`AGENTS.md` §2.2). Never spins on the device.
+fn pump(ring: &mut SerialRing) {
+    drain_ready(ring);
+    sync_tx_irq_to_backlog(ring);
+}
 
-/// Opportunistically push a bounded chunk (`IDLE_DRAIN_CHUNK`) of buffered
-/// serial bytes to the UART from the tickless idle wait.
+/// Top up the transmit FIFO from the buffered ring **without ever blocking
+/// on the UART** — the dispatch loop's serial-drain helper.
 ///
-/// This is **defence in depth**, not the primary drain: buffered output now
-/// flows through the transmit interrupt ([`service_uart_tx_irq`]), which
-/// refills the FIFO as it drains at the UART's real throughput regardless of
-/// scheduler state, and wakes the CPU out of `wfi` when there is room. This
-/// idle drain only covers the narrow window before the GIC console line is
-/// live (the early boot phases, where no transmit interrupt is delivered yet)
-/// and is harmless once it is — it pushes a bounded chunk, blocking boundedly
-/// per byte through the wedged-aware `flush_n`, and returns so the dispatch
-/// loop re-steps. A no-op when the ring is momentarily locked by a producer
-/// (its own `drain_ready` / transmit interrupt covers that line).
-pub fn drain_serial() {
-    SERIAL_RING.try_with(|ring| flush_n(ring, IDLE_DRAIN_CHUNK));
+/// Called from `KernelArch::poll_interrupts` (every busy pass) and before the
+/// idle `wfi` (`crate::aarch64::arch_wrapper`). It pushes only the bytes the
+/// FIFO has room for right now and arms the transmit interrupt to the rest
+/// (`pump`); it never busy-waits at the UART's byte rate. The backlog then
+/// drains in the background through the transmit interrupt
+/// ([`service_uart_tx_irq`]), which a `wfi` is woken by — so a large backlog
+/// flows at the UART's real rate with the CPU asleep between FIFO refills,
+/// rather than spinning in `putchar` and starving real work (the regression
+/// that turned a ~300 ms PCIe read-back into seconds and made the prompt
+/// lethargic). A no-op when the ring is momentarily locked by a producer (it
+/// arms `TXIM` itself on exit).
+pub fn pump_tx() {
+    SERIAL_RING.try_with(pump);
 }
 
 /// Block until every buffered serial byte has been pushed to the UART
 /// (or dropped, if the transmitter is wedged — `flush_blocking`).
 ///
-/// Unlike [`drain_serial`] this waits for the FIFO, so it is reserved for
+/// Unlike [`pump_tx`] / `drain_ready` this waits for the FIFO, so it is reserved for
 /// terminal paths that are about to stop running the dispatch loop — the
 /// panic bridge (`crate::panic::handle_panic_via_serial`) — where the
 /// buffered diagnostic context that led up to the panic must reach a
@@ -754,10 +772,7 @@ pub fn service_uart_tx_irq() -> bool {
     // that touches no Rust-managed memory.
     let status = unsafe { core::ptr::read_volatile(status_reg) };
     if model.tx_interrupt_fired(status) {
-        SERIAL_RING.try_with(|ring| {
-            drain_ready(ring);
-            sync_tx_irq_to_backlog(ring);
-        });
+        SERIAL_RING.try_with(pump);
     }
     model.rx_interrupt_fired(status)
 }
@@ -1081,6 +1096,25 @@ mod tests {
             SERIAL_RING.try_with(|ring| ring.is_empty()).unwrap(),
             "a blocking flush drains the ring"
         );
+    }
+
+    #[test]
+    fn pump_never_blocks_and_keeps_bytes_when_no_transmitter_is_ready() {
+        // `pump` is the one non-blocking drain step the producer, the
+        // transmit ISR and the dispatch-loop `pump_tx` all share: push what
+        // the FIFO accepts now and arm the transmit interrupt for the rest.
+        // On the host build `tx_ready_now` is always "not ready" and the
+        // interrupt arm/disarm is inert, so it must leave the queued bytes
+        // intact (never spinning on the UART) — the property that makes the
+        // dispatch loop's `pump_tx` non-blocking. Exercised on a local ring
+        // so it never races the `SERIAL_RING` static.
+        let mut ring = SerialRing::new();
+        for &byte in b"queued" {
+            assert!(ring.push_byte(byte));
+        }
+        pump(&mut ring);
+        assert_eq!(ring.len, b"queued".len());
+        assert_eq!(ring.pop_byte(), Some(b'q'));
     }
 
     #[test]

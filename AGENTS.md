@@ -1373,6 +1373,31 @@ as non-negotiable as §2.
   target: a CPU-bound task that issues no syscall and never yields is
   involuntarily preempted and correctly resumed. A port that does not
   demonstrate this cannot ship.
+- **No cooperative dispatch loop, ever — interrupt delivery must never
+  depend on a task yielding.** A port MUST NOT run its EL1/S-mode/M-mode
+  dispatch loop (or any in-kernel task) with interrupts masked for the
+  whole duration a task or in-kernel operation runs, "polling" for
+  interrupts only at voluntary yield points. That is the cooperative
+  model this charter forbids: a long-running in-kernel operation (a slow
+  MMIO bring-up read, a driver poll, a busy service) then monopolises the
+  CPU and starves *everything* that depends on an interrupt being taken —
+  the preemption timer, the console-transmit drain (§20), every
+  interrupt-driven driver and waiter. The observed real-hardware symptom
+  is the whole system "grinding to a halt" or output dribbling out one
+  FIFO-load per incidental yield while a single in-kernel read stalls for
+  seconds. Interrupts (the preemption tick and device IRQs alike) MUST be
+  *deliverable while in-kernel code runs*, taken promptly by the PE, not
+  deferred to the next yield. Non-preemptibility of the kernel (§4 — a
+  held lock or in-flight syscall is never abandoned) is enforced
+  **narrowly**, by masking interrupts only around the genuine critical
+  section (the run-queue/context-switch window, a held `lib/sync` lock),
+  never by masking them across the entire span a task executes. A device
+  IRQ taken while an in-kernel task runs services its source and returns
+  to that task without rescheduling it; only the timer-driven preemption
+  point (§17.1) reschedules, and only where preemption is permitted. A
+  dispatch loop that masks interrupts for the whole task run and drains
+  device work only at yield points is a defect to be fixed, not a
+  configuration (§2.1, §2.16, §2.17) — see `PLAN.md` (immediate work).
 - **Tickless (NO_HZ) is mandatory — no fixed-frequency periodic timer
   interrupt.** RustOS is a tickless kernel. No CPU may be driven by a
   fixed-frequency periodic timer interrupt (a "scheduler tick" / `HZ`):

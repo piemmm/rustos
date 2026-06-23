@@ -1639,6 +1639,57 @@ order (one fully-gated increment each):
                    further timer interrupt (the disarm). `scheduler_stress_qemu`
                    uses busy self-terminating witnesses per CPU to drive each CPU's
                    one-shot to its per-CPU preemption threshold under contention.
+               - **P-5 — fully-preemptive kernel: no cooperative dispatch loop
+                 (IMMEDIATE — `AGENTS.md` §17.1, 2026-06-23 amendment).** P-4
+                 made the *timer* tickless and one-shot, but the bare-metal EL1
+                 dispatch loop still runs every task/kthread with `DAIF.I`
+                 **masked** for the whole span the task executes, taking device
+                 interrupts only at voluntary yield/poll points
+                 (`poll_interrupts`, the idle `wfi`). That is the cooperative
+                 model §17.1 now forbids, and it is the structural cause of the
+                 long serial-stall saga: on a real Pi 4 a single in-kernel
+                 `pcie_brcm` inbound/outbound MISC read-back stalls ~4.3 s with
+                 IRQs masked, and because the loop is effectively single-CPU and
+                 cooperative, *nothing else runs* during it — not the preemption
+                 one-shot, not the buffered serial drain (§20), not the keyboard
+                 report pump or `login` — so the system "grinds to a halt" and
+                 buffered output dribbles one FIFO-load per incidental yield. The
+                 buffered-serial work (the ring + TX-interrupt drain) treated the
+                 symptom; this removes the cause.
+                 - **Deliverable:** EL1 (and the equivalent S-mode/M-mode loops)
+                   run in-kernel tasks with **device interrupts enabled**, so the
+                   preemption one-shot and every device IRQ (the console TX drain
+                   included) are *taken promptly while in-kernel code runs*, not
+                   deferred to a yield. Non-preemptibility (§4 — a held lock / an
+                   in-flight syscall is never abandoned) is enforced **narrowly**:
+                   mask IRQs only around the genuine critical section
+                   (run-queue/context-switch window, a held `lib/sync` lock), not
+                   across a whole task run. A device IRQ taken mid-task services
+                   its source and returns to the same task without rescheduling
+                   it; only the timer-driven EL0 preemption point (P-4)
+                   reschedules.
+                 - **Lock-discipline audit (the risk):** with IRQs enabled during
+                   EL1 execution an interrupt handler must never deadlock against
+                   a `lib/sync` lock the interrupted task holds. Audit every
+                   device-IRQ handler (`dispatch_device_irq` → `kernel/irq`
+                   mask-before-wake, the timer/IPI paths, the serial TX ISR — the
+                   serial ring is already a re-entrant-safe try-lock) and either
+                   make it IRQ-safe or mask that specific IRQ across the matching
+                   critical section. This is the largest part and must be done
+                   honestly, not by re-masking globally "for now" (§2.19).
+                 - **Once preemptive, retire the symptom-level scaffolding** that
+                   only existed to fight the cooperative loop, if it is then dead
+                   (§2.14): the dispatch-loop `pump_tx` top-ups become belt-and-
+                   suspenders behind a genuinely background TX drain, and the slow
+                   debug-only `pcie_brcm` MISC read-backs (`4111`/`4119`/`4120`)
+                   — pure bring-up diagnostics that no longer freeze anything —
+                   are candidates to delete once bring-up stays confirmed.
+                 - **Proof:** the §17.1 conformance vertical (a CPU-bound EL0 task
+                   that never yields is involuntarily preempted) already passes in
+                   QEMU; P-5 adds the in-kernel case (a long in-kernel operation
+                   does not block device-IRQ delivery — serial keeps flowing, the
+                   keyboard pump keeps draining) and is re-confirmed on metal
+                   (§0.9): boot stays responsive *through* the slow PCIe read-back.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass
@@ -1768,43 +1819,58 @@ order (one fully-gated increment each):
            trace immediately).
            The ring buffers **any** serial output, not just the log, so its
            types/API are named generically — `SerialRing` (the buffer),
-           `serial::drain_serial` / `serial::flush_serial_blocking`, no
+           `serial::pump_tx` / `serial::flush_serial_blocking`, no
            `log`-specific names (operator-directed). The `serial` module is
            host-compiled (full host stubs), so its ring + console-model logic
            is host-unit-tested.
-           **Draining is transmit-interrupt-driven (the proper, decoupled
-           fix).** Earlier the ring drained only opportunistically at a
-           producer's write-end and at the tickless idle `wait_for_interrupt`,
-           so during a busy-but-not-producing window (and in deep idle) the
-           FIFO emptied and was refilled only ~one FIFO-load per scheduler
-           visit — the "10–20 chars then a multi-second pause". Now the
-           console UART's TX interrupt is enabled while the ring holds a
-           backlog: `serial::service_uart_tx_irq` (driven from the
-           `gic_irq` device dispatcher on the shared console INTID) refills the
-           FIFO as it drains, at the UART's real throughput, regardless of
-           scheduler state, and wakes `wfi`. The single shared GIC line is
-           routed+unmasked at GIC bring-up with the device sources masked at
-           reset (additive, §2.17); a producer arms `TXIM` after its
-           opportunistic drain (`sync_tx_irq_to_backlog`), the ISR re-syncs it
-           to the remaining backlog and disarms on empty. The ISR reads the
-           masked status (`ConsoleModel::tx_interrupt_fired` /
-           `rx_interrupt_fired`) so it drains receive bytes only when the
-           receive source actually fired — the passphrase FIFO-poll keeps its
-           bytes while RX stays masked (§5.4, fail closed by construction).
-           `wait_for_interrupt` is back to a plain `wfi` (the TX interrupt
-           wakes it); the bounded idle `drain_serial` remains only as
-           defence-in-depth for the pre-GIC window. The TX register policy is
-           in `ConsoleModel` for both PL011 (`UARTIMSC.TXIM`/`UARTMIS`/`TXIC`)
-           and mini-UART (`IER`/`IIR`), host-tested. riscv64/x86_64 do not
-           share the flow-blocked-PL011 defect (SBI-console / COM1 transmit),
-           so this stays genuinely aarch64 glue, not stranded common logic
-           (§2.21).
-         - **Remaining (metal-only, §0.4):** confirm a fast boot + responsive
-           `Root passphrase:` prompt on hardware; investigate (if still seen on a
-           settled system) why the tree generation advances repeatedly after boot
-           (now harmless/silent) and whether `login` parks on `users_db_wait`
-           rather than retrying `users_db_read`; then the **vl805 user-space
-           migration** (run the firmware-reload driver over `host.mailbox()`)
+           **Draining never blocks the CPU; the TX interrupt + `wfi`-wake do
+           it in the background (the real fix).** The operator saw the stall
+           persist and the whole system feel lethargic (the `Root passphrase:`
+           wait too), and was right that it was "something else": an earlier
+           revision drained the dispatch loop with a **blocking** per-byte
+           `putchar` spin (and refused to `wfi` while a backlog remained), so
+           on this cooperative, effectively single-CPU boot the CPU spent the
+           burst-heavy boot busy-waiting at the UART's byte rate instead of
+           doing real work — a regression that turned a ~300 ms PCIe
+           inbound-window read-back into ~4.3 s and made the prompts laggy.
+           Logging must never block the CPU. **Fixed:** one shared
+           non-blocking drain step (`pump` = `drain_ready` + arm `TXIM`) is used
+           by the producer, the transmit ISR, and the dispatch loop
+           (`pump_tx`, §2.2). `poll_interrupts` and the idle `wait_for_interrupt`
+           call `pump_tx` (push what the FIFO accepts now, arm the transmit
+           interrupt for the rest) then `wfi` plainly — no per-byte spin, no
+           backlog re-step. The backlog drains in the background through the
+           console TX interrupt (`serial::service_uart_tx_irq`), which a `wfi`
+           is woken by the moment the FIFO has room, so a queued backlog flows
+           at the UART's real rate with the CPU asleep between refills, then
+           tickless idle (§17.1) resumes. The TX line is routed+unmasked at GIC
+           bring-up with device sources masked at reset (additive, §2.17); the
+           ISR reads the masked status (`ConsoleModel::tx_interrupt_fired`/
+           `rx_interrupt_fired`) so it drains receive bytes only when RX
+           actually fired — the passphrase FIFO-poll keeps its bytes while RX
+           stays masked (§5.4, fail closed). Only a **full** ring blocks, and
+           only the producer (`flush_blocking`, operator-directed: bound
+           memory); a wedged UART drops bytes rather than hanging (lossy, §2.1).
+           The TX register policy is in `ConsoleModel` for both PL011
+           (`UARTIMSC.TXIM`/`UARTMIS`/`TXIC`) and mini-UART (`IER`/`IIR`),
+           host-tested. riscv64/x86_64 do not share the flow-blocked-PL011
+           defect (SBI-console / COM1 transmit), so this stays genuinely
+           aarch64 glue, not stranded common logic (§2.21).
+         - **Remaining (metal-only, §0.4):** confirm serial output now flows
+           smoothly at the UART's real rate *throughout* boot and idle (no
+           chunk-then-pause) and the `Root passphrase:`/login prompts stay
+           responsive, the CPU no longer being starved by the serial drain.
+           Separately, the in-kernel `pcie_brcm` **inbound-window read-back**
+           diagnostic (`4119`/`4120`/`4111`, `usb_keyboard.rs`) measures ~4.3 s
+           of MISC-register MMIO on metal *after* the link is trained (it was
+           masked by the old synchronous-serial timing); this is intrinsic
+           BCM2711 bus latency, not the serial drain — once the bring-up is
+           confirmed good these debug-only read-backs are candidates to delete
+           (§2.14). `login` correctly parks on `users_db_wait` (woken by
+           `users_db_wake` on db install); the 5 s metal cadence was just the
+           wait timing out while the operator was still typing. Then the
+           **vl805 user-space migration** (run the firmware-reload driver over
+           `host.mailbox()`)
            with retirement of the in-kernel scaffold
            (`bring_up_keyboard`/`KernelMailboxChannel`, §2.14/§2.17) — the
            prompt's "D5". The scaffold stays the live keyboard path until that
@@ -3072,3 +3138,23 @@ can see *why* a rule exists without diffing the charter's history.
   ports + Pi metal re-confirm) to land in this charter change, so it is staged
   and surfaced as PLAN P-4 (§2.18/§2.19/§15.7) rather than left silent. Charter
   + plan + docs only; the timer-arming code change is P-4.
+
+- **2026-06-23 — No cooperative dispatch loop; the kernel must be fully
+  preemptive (operator decision).** Added a §17.1 rule: a port MUST NOT run its
+  EL1/S-mode/M-mode dispatch loop (or any in-kernel task) with interrupts
+  masked for the whole span a task/operation runs, taking interrupts only at
+  voluntary yield points. Metal on the Pi 4 ground to a halt mid-line because a
+  single in-kernel `pcie_brcm` MISC read stalls ~4.3 s with IRQs masked, and on
+  this cooperative, effectively single-CPU loop *nothing else ran* — not the
+  preemption timer, not the buffered serial drain (§20), not the keyboard pump
+  or login. Interrupts (the preemption tick and device IRQs alike) must be
+  *deliverable while in-kernel code runs*; non-preemptibility (§4) is enforced
+  **narrowly**, masking IRQs only around the genuine critical section
+  (run-queue/context-switch, a held `lib/sync` lock), never across a whole task
+  run. This is the structural cause behind the long serial-stall saga (the
+  buffered-serial work treated the symptom). The kernel-wide rework — make EL1
+  run with device interrupts enabled, audit lock discipline so an IRQ taken
+  mid-task cannot deadlock, and prove the §17.1 CPU-bound-task preemption
+  conformance on metal — is too large for this charter change, so it is staged
+  and surfaced as PLAN **P-5** (§2.18/§2.19/§15.7), the immediate next work.
+  Charter + plan + next-pi-prompt only; no code changed in this amendment.
