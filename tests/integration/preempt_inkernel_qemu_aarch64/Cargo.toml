@@ -1,0 +1,56 @@
+[package]
+name = "rustos-test-preempt-inkernel-qemu-aarch64"
+description = "P-5 QEMU integration test (plans/PI.md / AGENTS.md §17.1): prove the fully-preemptive kernel delivers a device/timer interrupt WHILE a long in-kernel kthread runs, yet never preempts the kernel itself. Where the preempt-el0 verticals prove a runaway EL0 task IS preempted, this proves the dual property the serial-stall saga turned on: a busy in-kernel kthread that never yields still takes the generic-timer IRQ mid-span (the EL1 handler runs and accounts the tick), but the interrupt returns to the SAME task without rescheduling (the kernel is non-preemptible, §4) — so the EL0-preemption callback never fires. The old cooperative dispatch loop ran in-kernel tasks with device IRQs masked, so this test would time out under it; the P-5 fix enables device IRQs while in-kernel code runs, so the tick is taken and the kthread completes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# P-5 deliverable (`plans/PI.md` / `AGENTS.md` §17.1 2026-06-23 amendment): the
+# aarch64 in-kernel interrupt-delivery / non-preemption vertical. It boots the
+# `virt` board, brings up the EL1 vectors + GICv2, registers the production
+# `rustos_arch_aarch64::preempt` surface verbatim (`AGENTS.md` §2.2 — a per-CPU
+# `PreemptStorage`, the EL0-preemption callback, a timer-tick callback, and the
+# enabled generic-timer PPI), builds a live eevdf `Scheduler`, and admits ONE
+# in-kernel kthread whose body arms the generic-timer one-shot and then
+# busy-loops issuing no `yield` and no syscall. With device IRQs enabled at the
+# PE (`exceptions::enable_irq`, the aarch64 backing of
+# `KernelArch::set_device_irqs(true)`), the timer fires WHILE the kthread runs
+# in EL1: the IRQ path runs `on_timer_interrupt` (the tick callback increments
+# the observed-tick count), but because the interrupt was taken from EL1 it does
+# NOT drive `on_el0_preempt_point`, so the running task is never rescheduled.
+# PASS once (a) at least one timer tick was taken during the busy span AND (b)
+# the EL0-preemption callback fired zero times (the kernel was never preempted)
+# AND (c) the kthread resumed correctly after the interrupt and ran to its
+# voluntary completion. Under the old cooperative loop (IRQs masked across the
+# whole task run) no tick would ever be taken and the kthread would spin
+# forever, so the run fails loudly — by a failure code or the harness
+# `Outcome::Timeout` (`AGENTS.md` §7).
+#
+# The `test-hooks` feature is on by default. Release builds that enable it are
+# rejected by the `compile_error!` guard in `src/main.rs` (AGENTS.md §1 — no
+# hacks; §5.4.5 — fail closed), mirroring the other aarch64 verticals.
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "rustos-test-preempt-inkernel-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+rustos-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+rustos-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+rustos-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+rustos-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+rustos-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+rustos-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+rustos-itest-harness = { path = "../harness", version = "=0.0.0" }

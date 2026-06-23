@@ -1603,6 +1603,43 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // PLAN.md P-5 (`AGENTS.md` §17.1 2026-06-23 amendment): the aarch64
+    // in-kernel interrupt-delivery / non-preemption vertical — the dual of the
+    // `preempt-el0` tests. Where those prove a runaway **EL0** task IS
+    // involuntarily preempted, this proves the property the serial-stall saga
+    // turned on: a busy **in-kernel** kthread that issues no `yield` and no
+    // syscall still takes the generic-timer IRQ *during* its span (the EL1 IRQ
+    // path runs `on_timer_interrupt` and the tick callback records it), but
+    // because the tick was taken from EL1 the running task is NOT rescheduled
+    // (the kernel is non-preemptible, §4), so the EL0-preemption callback never
+    // fires. It reads the GICv2 base + timer rate from the embedded `virt` DTB,
+    // brings up the EL1 vectors + GICv2, registers the production
+    // `rustos_arch_aarch64::preempt` surface verbatim (`AGENTS.md` §2.2 — a
+    // per-CPU `PreemptStorage`, the EL0-preemption callback, a timer-tick
+    // callback, and the enabled generic-timer PPI), builds a live eevdf
+    // `Scheduler`, admits one in-kernel kthread that arms the timer one-shot and
+    // busy-loops, and enables device IRQs at the PE (`exceptions::enable_irq`,
+    // the aarch64 backing of `KernelArch::set_device_irqs(true)`). PASS once a
+    // tick was taken during the busy span AND the EL0-preemption callback fired
+    // zero times AND the kthread resumed and ran to its voluntary completion.
+    // Under the old cooperative loop (device IRQs masked across the whole task
+    // run) no tick would ever be taken and the kthread would spin forever, so
+    // the run fails loudly — a failure finisher or the harness timeout
+    // (`AGENTS.md` §7). Single CPU; a 120-second budget covers the busy loop
+    // under QEMU TCG.
+    QemuTest {
+        package: "rustos-test-preempt-inkernel-qemu-aarch64",
+        binary: "rustos-test-preempt-inkernel-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
     // script compiles the pure-Rust driver-stub fixture

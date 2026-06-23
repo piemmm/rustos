@@ -1651,8 +1651,8 @@ order (one fully-gated increment each):
                    uses busy self-terminating witnesses per CPU to drive each CPU's
                    one-shot to its per-CPU preemption threshold under contention.
                - **P-5 — fully-preemptive kernel: no cooperative dispatch loop
-                 — DONE (host + all QEMU verticals green; metal re-confirmation +
-                 a dedicated in-kernel vertical pending).** The bare-metal
+                 — DONE (host + all QEMU verticals green, incl. the dedicated
+                 in-kernel vertical; metal re-confirmation pending).** The bare-metal
                  dispatch loop no longer runs in-kernel tasks/kthreads with device
                  interrupts masked (the cooperative model §17.1 forbids, and the
                  structural cause of the serial-stall saga). Shape as built:
@@ -1696,7 +1696,8 @@ order (one fully-gated increment each):
                    `waitq::request_wake*` cases), all three bare-metal targets
                    build, and the full `cargo xtask test --qemu` matrix passes
                    (devmgr park/wake, `wait`, `irq`, `uart-console`,
-                   `root-unlock-login`, `preempt_el0` on every arch).
+                   `root-unlock-login`, `preempt_el0` on every arch, and the
+                   in-kernel `preempt_inkernel_qemu_aarch64` vertical).
                  - **Residual cooperative reader removed (the metal stall cause).**
                    P-5 made the *dispatch loop* preemptive, but the interactive
                    root-unlock kthread still read the passphrase through a
@@ -1785,21 +1786,35 @@ order (one fully-gated increment each):
                    (`interrupt_driven_read_parks_until_the_controller_signals`,
                    `reset_enables_the_completion_interrupt_signal`); metal
                    re-confirmation pending (QEMU models no Pi EMMC2, §0.4).
-                 - **Remaining:** (a) a dedicated QEMU vertical that proves the
-                   in-kernel case directly — a long in-kernel kthread observes a
-                   timer/device IRQ fire *during* its busy span (QEMU's TX IRQ
-                   self-sustains, so it cannot reproduce the metal drain stall the
-                   `pump_console_tx` seam and the FIFO-dry trigger fix); (b) metal
-                   re-confirmation on a real Pi 4 that boot stays responsive
-                   through the slow PCIe read-back *and* that the debug log keeps
-                   flowing past the passphrase prompt (§0.9); (c) once
-                   metal-confirmed good,
-                   deleting the debug-only `pcie_brcm` MISC read-backs
-                   (`4111`/`4119`/`4120`) they no longer freeze anything (§2.14).
-                   The polled USB-keyboard pump remains CPU-hungry (it yields but
-                   never parks); making xHCI HID interrupt-driven so it parks is a
-                   separate §2.16 efficiency follow-up, not a correctness blocker
-                   now that the serial drain no longer depends on the loop idling.
+                 - **In-kernel preemption vertical — DONE (QEMU-proven).** The
+                   dedicated QEMU vertical that proves the in-kernel case directly
+                   is `tests/integration/preempt_inkernel_qemu_aarch64` (enrolled
+                   in the `cargo xtask ci` matrix). It boots the `virt` board,
+                   installs the production `rustos_arch_aarch64::preempt` surface
+                   verbatim (§2.2 — `PreemptStorage`, the EL0-preempt callback, a
+                   timer-tick callback, the enabled generic-timer PPI), builds a
+                   live eevdf `Scheduler`, and admits ONE in-kernel kthread that
+                   arms the timer one-shot and then busy-loops issuing no `yield`
+                   and no syscall, with device IRQs enabled at the PE
+                   (`exceptions::enable_irq` — the aarch64 backing of
+                   `KernelArch::set_device_irqs(true)`). It PASSes once a timer IRQ
+                   was taken *during* the busy span (the EL1 tick callback fired),
+                   the EL0-preempt callback fired **zero** times (the kernel itself
+                   was never preempted, §4), and the kthread resumed and ran to its
+                   voluntary completion. Under the old cooperative loop (device
+                   IRQs masked across the whole task run) no tick would be taken and
+                   the kthread would spin forever, so the test fails loud (a
+                   finisher code or the harness timeout, §7). The debug-only
+                   `pcie_brcm` MISC read-backs the metal stall blamed are already
+                   deleted (metal bring-up confirmed, §2.14).
+                 - **Remaining (metal only):** metal re-confirmation on a real Pi 4
+                   that boot stays responsive through the slow PCIe read-back *and*
+                   that the debug log keeps flowing past the passphrase prompt
+                   (§0.9). The polled USB-keyboard pump remains CPU-hungry (it
+                   yields but never parks); making xHCI HID interrupt-driven so it
+                   parks is a separate §2.16 efficiency follow-up, not a correctness
+                   blocker now that the serial drain no longer depends on the loop
+                   idling.
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass

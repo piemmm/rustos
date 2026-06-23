@@ -331,7 +331,13 @@ transmit drain (§20), or an interrupt-driven waiter. The kernel stays
 **non-preemptible** (§4): a device IRQ taken while an in-kernel task runs
 services its source and returns to the *same* task; only a timer tick taken
 from EL0/U-mode/ring 3 reschedules (each port gates preemption on the
-interrupted privilege).
+interrupted privilege). The `preempt_inkernel_qemu_aarch64` integration
+vertical proves both halves directly: a busy in-kernel kthread that issues
+no `yield` and no syscall still takes the generic-timer IRQ *during* its
+span (the EL1 tick callback fires), yet the EL0-preemption callback fires
+zero times and the kthread runs to its voluntary completion — under the old
+cooperative loop (device IRQs masked across the whole task run) no tick
+would be taken and it would spin forever.
 
 A port whose console transmit is buffered (the aarch64 PL011 — §20) keeps
 its in-memory transmit ring draining through
