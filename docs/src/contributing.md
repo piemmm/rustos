@@ -33,8 +33,8 @@ rules, it points to them.
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 
-Other subcommands (`build`, `clean`, `coverage`) exist for development
-and release flows; they are documented by `cargo xtask --help`.
+Other subcommands (`build`, `clean`, `prune`, `coverage`) exist for
+development and release flows; they are documented by `cargo xtask --help`.
 
 `cargo xtask clean` reclaims the `target/` directory, which grows into
 tens of gigabytes per target because `-Z build-std` rebuilds the whole
@@ -42,6 +42,17 @@ standard library for each of the four bare-metal Tier-1 targets. It
 delegates to `cargo clean` (honouring `$CARGO_TARGET_DIR`), forwards the
 usual cargo selectors (`--release`, `--doc`, `--target <triple>`,
 `-p <crate>`) to scope the clean, and reports how much space was freed.
+
+`cargo xtask prune` reclaims only the *superseded* build-script output
+that dominates that growth. The `rustos-kernel` build script compiles the
+embedded userland programs — each a roughly 1 GB `-Z build-std` tree —
+into an `OUT_DIR` cargo keys by build-script fingerprint, so every
+`build.rs` change strands the previous tree under
+`target/<triple>/<profile>/build/` forever. `prune` keeps the newest
+`build/<pkg>-<hash>` directory per package (the live one) and removes the
+older siblings and their `.fingerprint` entries. Unlike `clean` it never
+touches the current build, so the next compile stays incremental — which
+is why it runs automatically before every `build` and `image`.
 
 [agents]: https://github.com/rustos-project/rustos/blob/main/AGENTS.md
 [plan]: https://github.com/rustos-project/rustos/blob/main/PLAN.md

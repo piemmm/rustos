@@ -10,11 +10,20 @@
 //!
 //! - `build`        — `cargo build --workspace --all-targets`;
 //!   `--target aarch64-rpi` instead builds the flashable platform image
-//!   (the `image` pipeline below)
+//!   (the `image` pipeline below). Runs `prune` first so the superseded
+//!   build-script output an earlier build orphaned does not accumulate
 //! - `clean`        — `cargo clean` to reclaim `target/` disk space (a full
 //!   multi-arch `-Z build-std` tree runs to tens of GB per target); cargo
 //!   selectors are forwarded (`--release`, `--doc`, `--target <triple>`,
 //!   `-p <crate>`) and the reclaimed size is reported
+//! - `prune`        — reclaim only the *superseded* build-script output the
+//!   `rustos-kernel` build script orphans: it compiles the embedded userland
+//!   programs (each a ~1 GB `-Z build-std` tree) into an `OUT_DIR` cargo keys
+//!   by build-script fingerprint, so every `build.rs` change strands the
+//!   previous tree forever. Keeps the newest `build/<pkg>-<hash>` per package
+//!   and removes the older siblings; run automatically before every `build`
+//!   and `image`, and on demand. Unlike `clean` it never touches the live
+//!   build, so the next compile is still incremental
 //! - `test`         — `cargo test --workspace --all-targets`; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
 //!   flaky tests (§7), defaulting to one run; `--soak` (tuned by `--secs N`)
