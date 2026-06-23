@@ -53,7 +53,7 @@ use transport::{MmioRead, VolatileMmioRead};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///
-/// Mirrors the convention introduced by `drivers/bus/pci`:
+/// Mirrors the convention introduced by `lib/pci`:
 /// the host re-issues a host-local handle when binding the driver
 /// into its load table; this constant is the on-the-wire signal
 /// that every load-time gate cleared.
@@ -152,7 +152,7 @@ fn virtio_mmio_aperture(dtb: &Fdt<'_>) -> Result<Option<(u64, u64)>, DriverError
 /// crate-private (`AGENTS.md` §8) — so the ring-0
 /// `provision_virtio_mmio` walk can drive it as `&dyn VirtioMmioBus`.
 ///
-/// This is the MMIO analogue of `rustos_drv_bus_pci::mechanism_one`:
+/// This is the MMIO analogue of `rustos_pci::mechanism_one`:
 /// it is the sanctioned way for a `virt`-board boot pipeline to obtain
 /// the bus without naming the driver's internals.
 ///

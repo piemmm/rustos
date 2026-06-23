@@ -671,13 +671,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-drv-bus-pci"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
-]
-
-[[package]]
 name = "rustos-drv-bus-pcie-brcm"
 version = "0.0.0"
 dependencies = [
@@ -975,7 +968,6 @@ dependencies = [
  "rustos-devmatch",
  "rustos-devmgr",
  "rustos-drv-bus-mmio",
- "rustos-drv-bus-pci",
  "rustos-drv-bus-pcie-brcm",
  "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
@@ -1000,6 +992,7 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-partition",
+ "rustos-pci",
  "rustos-sync",
  "rustos-test-encrypted-root-image",
  "rustos-test-rustfs-image",
@@ -1230,6 +1223,13 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-fuzzseed",
+]
+
+[[package]]
+name = "rustos-pci"
+version = "0.0.0"
+dependencies = [
+ "rustos-abi",
 ]
 
 [[package]]
@@ -2654,7 +2654,6 @@ dependencies = [
  "rustos-caps",
  "rustos-crypto",
  "rustos-drv-bus-mmio",
- "rustos-drv-bus-pci",
  "rustos-drv-bus-virtio",
  "rustos-drv-fs-fat32",
  "rustos-drv-fs-rustfs",
@@ -2672,6 +2671,7 @@ dependencies = [
  "rustos-kernel-virtio",
  "rustos-log",
  "rustos-net-icmp",
+ "rustos-pci",
  "rustos-test-fat32-image",
  "rustos-test-riscv64-boot",
  "rustos-test-rustfs-image",

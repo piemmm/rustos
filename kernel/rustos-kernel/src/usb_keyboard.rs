@@ -7,7 +7,7 @@
 //!
 //! 1. [`rustos_drv_bus_pcie_brcm`] resets the root complex and trains its
 //!    link with the discovered address windows;
-//! 2. [`rustos_drv_bus_pci::mechanism_brcm`] enumerates the VL805 over the
+//! 2. [`rustos_pci::mechanism_brcm`] enumerates the VL805 over the
 //!    windowed config accessor;
 //! 3. [`rustos_drv_bus_usb`] maps the BAR, carves DMA, and brings xHCI up;
 //! 4. [`rustos_hid`] decodes reports into [`KeyInput`] records
@@ -729,7 +729,7 @@ pub fn bring_up_keyboard(
     // trained register window. It forwards config only to the single device
     // on the secondary bus, so the floor xHCI scan below never TLPs an
     // absent target (which would CPU-abort and wedge the boot).
-    let bus = rustos_drv_bus_pci::mechanism_brcm(rc.into_regs(), pcie_brcm::regs::RC_SECONDARY_BUS);
+    let bus = rustos_pci::mechanism_brcm(rc.into_regs(), pcie_brcm::regs::RC_SECONDARY_BUS);
     // The link bring-up asserted `PERST#`, which drops the VL805's
     // VideoCore-loaded firmware on EEPROM-less Pi 4 boards. Ask the device's
     // own driver to reload it over the board-neutral mailbox seam *before*

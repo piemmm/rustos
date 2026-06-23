@@ -134,7 +134,7 @@ pub mod percpu;
 #[cfg(feature = "sched-arch")]
 pub mod percpu_hal;
 /// x86_64 implementation of the Arch HAL port-I/O seams: the 32-bit
-/// [`rustos_abi::PortIo`] backend the `drivers/bus/pci` bus driver
+/// [`rustos_abi::PortIo`] backend the `lib/pci` PCI mechanism
 /// consumes for PCI configuration access, and the 8-bit
 /// [`rustos_abi::PortIo8`](rustos_abi::driver::port_io::PortIo8) backend
 /// the `drivers/input/ps2` i8042 driver consumes — both reached only

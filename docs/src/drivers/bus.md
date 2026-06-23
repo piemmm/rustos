@@ -10,7 +10,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 
 | Crate                    | Platform              | Status   |
 | ------------------------ | --------------------- | -------- |
-| `drivers/bus/pci`        | x86_64 (PIO) / PCIe ECAM / BCM2711 windowed | Shipped  |
+| `lib/pci`                | x86_64 (PIO) / PCIe ECAM / BCM2711 windowed | Shipped (library) |
 | `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | P10 link bring-up (host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
@@ -39,7 +39,7 @@ direct consequence of `AGENTS.md` §4 ("memory isolation is enforced
 by hardware") — the bus driver is not in the trust path for memory
 mapping.
 
-## PCI driver — `drivers/bus/pci`
+## PCI configuration-access library — `lib/pci`
 
 ### Configuration access
 
@@ -833,8 +833,8 @@ supertrait of `Bus`) is that seam:
 `map_bar_window` / `enable_bus_master` / `assign_bar` / `read_config`; `route_msix` calls the same
 `enable_bus_master`, so the activation has one definition
 (`AGENTS.md` §2.2). A device-class driver reaches the bus only through
-`&dyn PciBus`, never naming the concrete `drivers/bus/pci` crate
-(`AGENTS.md` §8 / §17.4).
+`&dyn PciBus`, never naming the concrete `lib/pci` crate
+(`AGENTS.md` §17.4).
 
 The xHCI driver consumes it in `rustos_drv_bus_usb::wiring`. A
 `devmgr`/host composition maps the discovered `brcm,bcm2711-pcie`
@@ -910,7 +910,7 @@ wiring (item 5c) closes the data-driven path that supersedes the
 ## Constructing the real-hardware bus
 
 The boot pipeline reaches PCI through a single public constructor,
-`rustos_drv_bus_pci::mechanism_one(pio)`. It builds the bus over
+`rustos_pci::mechanism_one(pio)`. It builds the bus over
 configuration **mechanism #1** — the `0xCF8` address word / `0xCFC`
 data word port pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
 `impl VirtioPciBus + MsixBus + PciBus`. All three traits have `Bus` as

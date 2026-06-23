@@ -7,7 +7,7 @@
 //! `plans/PI.md` P10). A `devmgr`/host composition maps that window and
 //! calls [`open_discovered`] to reset the root complex and train its
 //! link; once it returns, the same register window is handed to
-//! `rustos_drv_bus_pci::mechanism_brcm` to enumerate the VL805 xHCI
+//! `rustos_pci::mechanism_brcm` to enumerate the VL805 xHCI
 //! controller behind the bridge.
 //!
 //! This is the only seam that maps memory: [`open_discovered`] checks
@@ -117,7 +117,7 @@ pub fn pcie_bringup_from_node(node: &HwNode) -> Result<PcieBringup, BringupError
 /// compiled-in board constant (`AGENTS.md` §2.20 / §18.1) — then maps the
 /// window and trains the link over it ([`open_discovered`]). On success
 /// the returned [`BrcmPcieRc`] owns the mapped window with the link up,
-/// ready for `rustos_drv_bus_pci::mechanism_brcm` to enumerate behind the
+/// ready for `rustos_pci::mechanism_brcm` to enumerate behind the
 /// bridge.
 ///
 /// # Errors
@@ -155,7 +155,7 @@ pub fn bring_up_from_node(
 /// On success the returned [`BrcmPcieRc`] owns the mapped window with the
 /// link up; the caller recovers the window with
 /// [`BrcmPcieRc::into_regs`] and builds the windowed configuration
-/// accessor (`rustos_drv_bus_pci::mechanism_brcm`) over it.
+/// accessor (`rustos_pci::mechanism_brcm`) over it.
 ///
 /// # Errors
 ///

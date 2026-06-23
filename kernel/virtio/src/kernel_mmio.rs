@@ -1,6 +1,6 @@
 //! In-kernel [`MmioMapper`] backed by a per-process [`MmioMap`].
 //!
-//! Stage 4.D Item 3 wiring: a bus driver (`drivers/bus/pci`,
+//! Stage 4.D Item 3 wiring: a bus driver (`lib/pci`,
 //! `drivers/bus/mmio`) reaches a device's register block through the
 //! [`MmioMapper`] ABI seam. The always-available path is this
 //! [`KernelMmioMapper`], which routes every request through the

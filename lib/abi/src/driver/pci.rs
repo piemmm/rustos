@@ -7,11 +7,11 @@
 //! address registers (BARs), and the function's bus-mastering bit set
 //! so it may issue the upstream DMA its rings live in.
 //!
-//! [`PciBus`] is that surface. The PCI bus driver (`drivers/bus/pci`)
-//! implements it; a device-class driver (`drivers/bus/usb`, …) reaches
-//! the bus through a `&dyn PciBus` rather than depending on the
-//! concrete bus crate (`AGENTS.md` §8 / §17.4 — a driver crate's only
-//! public surface is `register`, and one driver never names another).
+//! [`PciBus`] is that surface. The PCI configuration-access library
+//! (`lib/pci`) implements it; a device-class driver (`drivers/bus/usb`,
+//! …) or a composing host reaches the bus through a `&dyn PciBus` rather
+//! than naming the concrete bus type (`AGENTS.md` §17.4 — PCI config
+//! access is shared `lib/*` logic, and one driver never names another).
 //! [`Bus`] is a supertrait so a single trait object can both enumerate
 //! the bus (to pick the function) and provision it.
 //!

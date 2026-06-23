@@ -10,7 +10,7 @@
 //!
 //! The boot-time PCI walk that turns those capabilities into windows
 //! lives in ring 0, but ring 0 must stay driver-agnostic: it may not
-//! name the concrete `drivers/bus/pci` types (`AGENTS.md` §8 — a
+//! name the concrete `lib/pci` types (`AGENTS.md` §17.4 — a
 //! driver crate's only public surface is `register`). This module is
 //! the versioned ABI seam that breaks the tension: the PCI bus driver
 //! implements [`VirtioPciBus`] and the kernel calls it through a
@@ -51,7 +51,7 @@ pub const VIRTIO_PCI_CFG_PCI: u8 = 5;
 /// [`Bus`] is a supertrait so the kernel walk can enumerate the bus
 /// (to pick the virtio function) and provision its windows through a
 /// single `&dyn VirtioPciBus`, without depending on the concrete
-/// `drivers/bus/pci` crate (`AGENTS.md` §8).
+/// `lib/pci` crate (`AGENTS.md` §17.4).
 ///
 /// # Capabilities
 ///

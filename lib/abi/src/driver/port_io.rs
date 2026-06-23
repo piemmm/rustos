@@ -1,7 +1,7 @@
 //! Legacy port-I/O access seam (`abi-v1`).
 //!
 //! A [`PortIo`] is the host↔driver ABI seam through which a bus driver
-//! that depends on architectural port I/O — today only `drivers/bus/pci`
+//! that depends on architectural port I/O — today only `lib/pci`
 //! reaching PCI configuration space through mechanism #1 (PCI Local Bus
 //! 3.0 §3.2.2.3.2: the address word at I/O port `0xCF8` and the data word
 //! at `0xCFC`) — issues 32-bit reads and writes against an I/O port.

@@ -41,7 +41,7 @@ rustos-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 rustos-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
 rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
 rustos-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
-rustos-drv-bus-pci = { path = "../../../drivers/bus/pci", version = "=0.0.0" }
+rustos-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 rustos-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-network-virtio-net = { path = "../../../drivers/network/virtio_net", version = "=0.0.0" }

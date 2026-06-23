@@ -105,7 +105,7 @@ rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 # is architecture-neutral (it consumes only the `lib/abi` driver seams),
 # so it compiles — and its host tests run — on the CI host.
 rustos-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
-rustos-drv-bus-pci = { path = "../../drivers/bus/pci", version = "=0.0.0" }
+rustos-pci = { path = "../../lib/pci", version = "=0.0.0" }
 rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
 # The Raspberry Pi 4 VL805 device driver (`drivers/bus/usb/vl805`): the
 # board-specific VideoCore-mailbox firmware reload + firmware-version gate

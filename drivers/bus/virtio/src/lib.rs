@@ -71,7 +71,7 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 ///
-/// Mirrors the convention of `drivers/bus/pci` and
+/// Mirrors the convention of `lib/pci` and
 /// `drivers/bus/mmio`: the driver host re-issues a host-local handle
 /// when binding this driver into its load table; this constant is
 /// the on-the-wire signal that the load-time gates cleared

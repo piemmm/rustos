@@ -1,0 +1,15 @@
+[package]
+name = "rustos-pci"
+description = "RustOS PCI/PCIe configuration-access mechanism library (mechanism #1, ECAM, BCM2711 windowed) and the bus/transport seams over it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustos-abi = { path = "../abi", version = "=0.0.0" }
+
+[lints]
+workspace = true

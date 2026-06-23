@@ -7,7 +7,7 @@
 //! `rustos_abi::hwtree` (a `Bus` node whose ECAM-access window and
 //! inbound-DMA aperture are device-tree-discovered, never compiled-in,
 //! `AGENTS.md` §18.1); a `devmgr`/host composition maps that window,
-//! constructs the bus driver over it (`rustos_drv_bus_pci::mechanism_ecam`),
+//! constructs the bus driver over it (`rustos_pci::mechanism_ecam`),
 //! and hands the resulting [`PciBus`] to [`open_discovered`].
 //!
 //! [`open_discovered`] enumerates the bus for the USB-class function,
@@ -15,7 +15,7 @@
 //! [`CapabilityId::MMIO_MAP`], carves a DMA region under the host's
 //! DMA facility bounded by the discovered inbound-DMA aperture, and
 //! brings the controller up through [`Xhci::open`] + [`UsbDevice::start`].
-//! The PCI walk lives in `drivers/bus/pci` and the controller protocol
+//! The PCI walk lives in `lib/pci` and the controller protocol
 //! in this crate; the wiring composes them through the `lib/abi`
 //! [`PciBus`] seam so neither driver crate names the other
 //! (`AGENTS.md` §8 / §17.4).
@@ -63,7 +63,7 @@ const MAX_ENUMERATION: usize = 32;
 /// Bring the discovered xHCI controller online from `bus`.
 ///
 /// `bus` is the PCI bus driver built over the discovered ECAM-access
-/// window (`rustos_drv_bus_pci::mechanism_ecam`). `dma_aperture_top` is
+/// window (`rustos_pci::mechanism_ecam`). `dma_aperture_top` is
 /// the *exclusive* upper bound, in the **device-visible** (PCIe-space)
 /// address space, of the inbound window the bridge lets devices behind
 /// it reach (`inbound_pcie_base + inbound_size`, derived from the

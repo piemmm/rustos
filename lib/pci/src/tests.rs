@@ -8,9 +8,9 @@
 //! can assert the same exact list this host-side test does, with no
 //! divergence between mock and real hardware.
 //!
-//! Per `AGENTS.md` §8 the production driver crate exposes only
-//! `register`; the test module reaches into the `pub(crate)`
-//! enumeration core directly.
+//! The tests reach into the `pub(crate)` enumeration core directly,
+//! alongside the public [`crate::mechanism_one`] / [`crate::mechanism_ecam`]
+//! / [`crate::mechanism_brcm`] constructors.
 
 extern crate alloc;
 
@@ -21,10 +21,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
-use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, MsiMessage,
-    RegisterWindow,
-};
+use rustos_abi::{DriverError, MmioMapError, MmioMapper, MsiMessage, RegisterWindow};
 
 use crate::config::{
     BarKind, Capability, ConfigAddress, ConfigSpace, VIRTIO_CFG_COMMON, VIRTIO_CFG_DEVICE,
@@ -74,21 +71,6 @@ impl MmioMapper for MockMapper {
         // window minted here, and no other reference aliases it while
         // the window is live.
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
-    }
-}
-
-// ---- Mock host -----------------------------------------------------------
-
-struct MockHost {
-    granted: bool,
-}
-
-impl DriverHost for MockHost {
-    fn has_capability(&self, cap: CapabilityId) -> bool {
-        self.granted && cap == CapabilityId::DRV_LOAD
-    }
-    fn kind(&self) -> DriverKind {
-        DriverKind::UserSpace
     }
 }
 
@@ -289,15 +271,6 @@ fn q35_fixture() -> MockConfigSpace {
 }
 
 // ---- Tests ---------------------------------------------------------------
-
-#[test]
-fn register_requires_drv_load_capability() {
-    let denied = MockHost { granted: false };
-    assert_eq!(crate::register(&denied), Err(DriverError::PermissionDenied));
-    let allowed = MockHost { granted: true };
-    let h = crate::register(&allowed).expect("granted host registers cleanly");
-    assert_ne!(h.as_u64(), 0);
-}
 
 #[test]
 fn q35_enumeration_matches_exact_device_list() {

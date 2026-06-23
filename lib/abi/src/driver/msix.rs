@@ -11,7 +11,7 @@
 //!
 //! As with [`VirtioPciBus`](super::virtio_pci::VirtioPciBus), the boot
 //! walk that performs this lives in ring 0, which must stay
-//! driver-agnostic and may not name the concrete `drivers/bus/pci`
+//! driver-agnostic and may not name the concrete `lib/pci`
 //! types (`AGENTS.md` §8). This module is the versioned seam that
 //! breaks the tension: the PCI bus driver implements [`MsixBus`] and
 //! the kernel calls it through a `&dyn MsixBus`, handing it the
@@ -55,7 +55,7 @@ pub struct MsiMessage {
 /// [`Bus`] is a supertrait so the kernel walk can enumerate the bus
 /// (to pick the device function) and route its interrupt through a
 /// single `&dyn MsixBus`, without depending on the concrete
-/// `drivers/bus/pci` crate (`AGENTS.md` §8).
+/// `lib/pci` crate (`AGENTS.md` §17.4).
 ///
 /// # Capabilities
 ///

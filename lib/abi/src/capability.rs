@@ -70,7 +70,7 @@ impl CapabilityId {
     /// Map a device's memory-mapped register window into a driver's
     /// address space.
     ///
-    /// Granted to user-space bus drivers (`drivers/bus/pci`,
+    /// Granted to user-space bus drivers (`drivers/bus/pcie_brcm`,
     /// `drivers/bus/mmio`) that must read and write a device's
     /// register block (a PCI memory BAR, a virtio-MMIO transport
     /// slot). Holders may call the kernel's MMIO-map facility, which

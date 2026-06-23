@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(classify("kernel/arch/api"), Layer::ArchApi);
         assert_eq!(classify("kernel/sched"), Layer::SchedImpl);
         assert_eq!(classify("kernel/mem"), Layer::KernelSubsystem);
-        assert_eq!(classify("drivers/bus/pci"), Layer::Driver);
+        assert_eq!(classify("drivers/bus/mmio"), Layer::Driver);
         assert_eq!(classify("userland/gui/wm"), Layer::UserGui);
         assert_eq!(classify("userland/system/init"), Layer::Userland);
         assert_eq!(classify("tools/xtask"), Layer::Tooling);
@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn normalize_join_resolves_parents() {
         assert_eq!(
-            normalize_join("drivers/bus/pci", "../../../lib/abi").as_deref(),
+            normalize_join("drivers/bus/mmio", "../../../lib/abi").as_deref(),
             Some("lib/abi")
         );
         assert_eq!(

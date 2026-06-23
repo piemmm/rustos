@@ -1,36 +1,40 @@
-//! RustOS PCI/PCIe bus driver.
+//! RustOS PCI/PCIe configuration-access mechanism library.
 //!
-//! Implements the bus enumeration class trait
-//! ([`rustos_abi::driver::bus::Bus`]) on top of the x86_64
-//! configuration-access **mechanism #1** (PCI Local Bus 3.0 §3.2.2.3.2):
-//! the 32-bit configuration address word at I/O port `0xCF8` selects
-//! a `(bus, device, function, register)` tuple and the 32-bit data
-//! word at I/O port `0xCFC` reads or writes the corresponding
-//! configuration dword.
+//! A `no_std` `lib/*` crate (`AGENTS.md` §6 / §17.4): it implements the
+//! `abi-v1` PCI/PCIe bus and transport seams
+//! ([`rustos_abi::driver::bus::Bus`], [`VirtioPciBus`], [`MsixBus`],
+//! [`PciBus`]) over three configuration-access mechanisms, and exposes them
+//! through the [`mechanism_one`] / [`mechanism_ecam`] / [`mechanism_brcm`]
+//! constructors. The concrete `Pci<C>` type stays crate-private — every
+//! caller borrows the result as `&dyn Bus` / `&dyn VirtioPciBus` /
+//! `&dyn MsixBus` / `&dyn PciBus` and never names it.
 //!
-//! Per `AGENTS.md` §8 the only public surface of a driver crate is
-//! `pub fn register(host) -> Result<DriverHandle, DriverError>`.
-//! Everything below is intentionally `pub(crate)` and tested through
-//! the in-crate `#[cfg(test)]` module against a mock
-//! `ConfigSpace` fixture that mirrors QEMU's `q35` default PCI
-//! topology (LPC bridge, `SMBus` controller, plus the virtio-net
-//! function the driver-host integration test will attach later).
+//! It lives in `lib/` (not `drivers/`) because PCI configuration access is
+//! shared *bus-protocol* logic, not a single device's driver: the kernel's
+//! ring-0 boot pipeline, a user-space bus driver (`drivers/bus/pcie_brcm`),
+//! and the host-side integration tests all compose it through the public
+//! seams above — a `drivers/*` crate may not depend on another `drivers/*`
+//! crate (`AGENTS.md` §17.4), so a user-space driver reaches the mechanism
+//! here, never through a sibling driver. This mirrors the `lib/usb` ↔
+//! `drivers/bus/usb` and `lib/virtio` ↔ `drivers/bus/virtio` split.
 //!
-//! Per the Stage 4 sub-bullet on bus drivers in `PLAN.md`, MSI / MSI-X
-//! capabilities are *discovered* but never enabled here — actual
-//! interrupt routing is the responsibility of the `virtio_blk` /
-//! `virtio_net` drivers in Stage 4.D. The BAR walker likewise
-//! produces `BarDescriptor` records but never invokes the kernel
-//! memory capability: callers route the mapping request through the
-//! driver host once 4.D wires up the host-side memory facility.
+//! The three mechanisms are: x86_64 **mechanism #1** (PCI Local Bus 3.0
+//! §3.2.2.3.2 — the `0xCF8`/`0xCFC` address/data port pair), **ECAM**
+//! (PCI Express Base 3.0 §7.2.2 — flat MMIO configuration space), and the
+//! **BCM2711 windowed** mechanism (the Raspberry Pi 4 root complex's
+//! index/data window pair). MSI / MSI-X capabilities are *discovered* and
+//! routed through [`MsixBus::route_msix`]; the BAR walker maps a BAR only
+//! through the supplied [`MmioMapper`], which enforces
+//! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) kernel-side
+//! (`AGENTS.md` §4 — no ambient authority).
 //!
 //! # Safety
 //!
-//! This crate contains no `unsafe`: the `in`/`out` instructions that
-//! reach I/O ports `0xCF8`/`0xCFC` live in the architecture port behind
-//! the [`rustos_abi::PortIo`] seam (`AGENTS.md` §17.2). The driver only
-//! ever drives that seam through `mech_one::PortIoConfigSpace`, which
-//! the unit tests exercise against a recording mock.
+//! This crate contains no `unsafe`: the `in`/`out` instructions that reach
+//! I/O ports `0xCF8`/`0xCFC` live in the architecture port behind the
+//! [`rustos_abi::PortIo`] seam (`AGENTS.md` §17.2), driven only through
+//! `mech_one::PortIoConfigSpace`, which the unit tests exercise against a
+//! recording mock.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -40,10 +44,7 @@ use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::pci::PciBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
-use rustos_abi::{
-    CapabilityId, DriverError, DriverHandle, DriverHost, HwNode, MmioMapper, MsiMessage, PortIo,
-    RegisterWindow,
-};
+use rustos_abi::{DriverError, HwNode, MmioMapper, MsiMessage, PortIo, RegisterWindow};
 
 pub(crate) mod config;
 pub(crate) mod enumerate;
@@ -53,37 +54,6 @@ pub(crate) mod mech_one;
 
 #[cfg(test)]
 mod tests;
-
-/// Per-driver `DriverHandle` marker returned by [`register`].
-///
-/// The driver host re-issues a host-local handle when binding this
-/// driver into its load table; this constant is the on-the-wire
-/// signal that `register` cleared every gate (`AGENTS.md` §8).
-const REGISTER_HANDLE_MARKER: u64 = 0x5043_4900_0000_0001;
-
-/// Driver entry point (`AGENTS.md` §8).
-///
-/// Verifies the host already granted [`CapabilityId::DRV_LOAD`] and
-/// returns the registration marker handle. No hardware probe runs
-/// here; enumeration is driven by the host once it dispatches into
-/// [`Bus::enumerate`] on the per-driver [`Bus`] trait object.
-///
-/// # Errors
-///
-/// * [`DriverError::PermissionDenied`] if the host did not grant
-///   [`CapabilityId::DRV_LOAD`].
-/// * [`DriverError::OutOfRange`] is impossible by construction: the
-///   marker is non-zero.
-///
-/// # Capabilities
-///
-/// Requires [`CapabilityId::DRV_LOAD`].
-pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
-    if !host.has_capability(CapabilityId::DRV_LOAD) {
-        return Err(DriverError::PermissionDenied);
-    }
-    DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
-}
 
 // --- Real-hardware construction seam --------------------------------------
 
@@ -134,7 +104,8 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 ///
 /// `window` is the kernel-mapped [`RegisterWindow`] over the host
 /// bridge's configuration region, obtained from the MMIO-map facility
-/// after a [`CapabilityId::MMIO_MAP`] check (`AGENTS.md` §4). Its base
+/// after a [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
+/// check (`AGENTS.md` §4). Its base
 /// is the physical base of `(bus 0, device 0, function 0, register 0)`
 /// and its length bounds the buses the enumeration can reach: an
 /// access past the window resolves to the PCI "no device" sentinel, so
@@ -171,7 +142,8 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 /// controller's register block — the very window the BCM2711 PCIe
 /// host-bridge bring-up driver (`drivers/bus/pcie_brcm`) trained the
 /// link through — obtained from the MMIO-map facility after a
-/// [`CapabilityId::MMIO_MAP`] check (`AGENTS.md` §4). The link must be
+/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) check
+/// (`AGENTS.md` §4). The link must be
 /// up before any downstream configuration access, or the controller
 /// raises a CPU abort; the bring-up driver guarantees this before
 /// handing the window here.
@@ -205,11 +177,11 @@ pub fn mechanism_brcm(
     Pci::new(mech_brcm::BrcmConfigSpace::new(window, secondary_bus))
 }
 
-// --- Public re-exports through the `Bus` trait ----------------------------
+// --- Trait-object seams over the concrete `Pci<C>` ------------------------
 //
-// The trait impl below is the only post-`register` surface a host may
-// reach; it is reached through `&dyn Bus`, never through the concrete
-// type, satisfying `AGENTS.md` §8.
+// The impls below are the surface a composing host reaches; each is
+// reached through `&dyn Bus` / `&dyn VirtioPciBus` / `&dyn MsixBus` /
+// `&dyn PciBus`, never through the crate-private concrete `Pci<C>` type.
 
 use config::ConfigSpace;
 use enumerate::Pci;

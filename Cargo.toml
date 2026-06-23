@@ -52,6 +52,7 @@ members = [
     "lib/keymap",
     "lib/log",
     "lib/partition",
+    "lib/pci",
     "lib/procinfo",
     "lib/raster",
     "lib/rng",
@@ -87,7 +88,6 @@ members = [
     "drivers/input/virtio_kbd",
 
     # Drivers — bus
-    "drivers/bus/pci",
     "drivers/bus/pcie_brcm",
     "drivers/bus/usb/xhci",
     "drivers/bus/usb/vl805",

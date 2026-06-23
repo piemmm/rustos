@@ -4,16 +4,15 @@
 //! [`crate::enumerate`] and the mechanism-#1 PIO bridge in
 //! [`crate::mech_one`] both depend on a single source of truth for
 //! the on-wire layout. Nothing here is re-exported outside the
-//! crate (`AGENTS.md` §8); the test module exercises every type
-//! directly.
+//! crate; the test module exercises every type directly.
 //
-// `dead_code` is muted at the module level because the public surface
-// of this driver crate is, by `AGENTS.md` §8, a single `register`
-// function — every other item here is reached only through `dyn Bus`
-// dispatch which the driver host wires up at load time and through
-// the in-crate `#[cfg(test)]` module that exercises each item
-// directly. Without this annotation a non-test build of the lib
-// half warns about every helper.
+// `dead_code` is muted at the module level because the crate's public
+// surface is the `mechanism_*` constructors and the `dyn Bus` /
+// `dyn PciBus` / `dyn VirtioPciBus` / `dyn MsixBus` trait objects they
+// return — every config-space helper here is reached only through that
+// dispatch (a composing host wires it up) and through the in-crate
+// `#[cfg(test)]` module that exercises each item directly. Without this
+// annotation a non-test build warns about every helper.
 #![allow(dead_code)]
 
 /// A `(bus, device, function, register)` quadruple addressing one

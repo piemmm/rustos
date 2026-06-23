@@ -2038,24 +2038,66 @@ order (one fully-gated increment each):
            through the real syscall consumer in `kernel/core`
            (`hw_emit_node_covers_a_child_bar_under_a_bridge_window`). Docs:
            `drivers/hardware-detection.md` recursive-discovery section.
-         - **Remaining — the user-space bus-driver consumers.** Turn
-           `drivers/bus/pcie_brcm` + the `lib/usb`-backed USB host into
+         - **Remaining — the user-space bus-driver chain (the D5 flip).** Turn
+           the in-kernel `bring_up_keyboard` composition into a reactive chain of
            autoloaded user-space driver **binaries** (the `usb_kbd`/`virtio_kbd`
-           pattern) that, over the rt-backed `DriverHost`, train/enumerate and
-           `emit_node()` their children (the VL805 xHCI controller — whose BAR
-           is now coverable under the bridge's outbound-window grant by
-           D4-covers — then the HID keyboard). Add `hw_remove_node` for hotplug
-           removal (the `bus_usb` port-unplug path). No `-M virt` Pi-USB vertical
-           exists (§0.4); the live enumerate→emit→autoload chain, and the atomic
-           floor-RC-node-emit + scaffold-delete that activates it, are
-           metal-gated. The in-kernel scaffold stays the live metal keyboard
-           until D5 (§2.17).
-       - **D5 — the atomic flip.** `usb_kbd` autoloads onto the emitted HID node;
-         delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
-         `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the compiled-in
-         list is the storage bootstrap floor only (§18.6); repoint `init_spawn`;
-         update §3 / docs. Metal acceptance (§0.9): top-down autoload from
-         `/System`, a keystroke with the scaffold gone, and hotplug bind/unbind.
+           pattern) over the rt-backed `DriverHost`. The hardware forbids the
+           plan's earlier "`bus_usb` emits a HID node, `usb_kbd` binds it" split:
+           BAR assignment needs the live trained `PciBus` and the `Xhci`
+           controller object cannot cross a process boundary, so `usb_kbd` maps
+           the BAR *by address* and does the whole xHCI bring-up + enumerate +
+           pump itself. Operator-confirmed decomposition (each driver its own
+           job, no `drivers/*→drivers/*` edge, ordering enforced by the emit
+           chain, least-privilege caps):
+           1. `FdtDiscovery` already emits the RC node (`brcm,bcm2711-pcie`,
+              Mmio+Dma+BusWindow) + mailbox node (`brcm,bcm2835-mbox`).
+           2. **pcie_brcm** (binds RC node; `CAP_MMIO_MAP`+`CAP_HW_EMIT`): trains
+              the link, builds the `PciBus`, assigns+enables the VL805 BAR, and
+              emits node A `pci(1106,3483,0C0330)` carrying `Mmio(bar_cpu_phys,
+              bar_len)` + `Dma(aperture_top, XHCI_DMA_BYTES)`.
+           3. **vcmailbox** (binds mailbox; done) serves `MAILBOX_ENDPOINT`.
+           4. **vl805** (binds node A; `CAP_MAILBOX`+`CAP_HW_EMIT` **only** — it
+              cannot map the forwarded BAR/DMA, least privilege): reloads
+              firmware over the mailbox IPC (mailbox-only, never touches the
+              BAR), then emits node B `compatible("usb,xhci")` forwarding the
+              same BAR+DMA grants. Firmware-before-bring-up is enforced *by
+              construction*: node B does not exist until vl805 has run.
+           5. **usb_kbd** (binds node B; `CAP_MMIO_MAP`+`CAP_MEM_DMA`+
+              `CAP_INPUT_INJECT`): maps the BAR, brings up xHCI, enumerates,
+              pumps. Bind retargeted to `compatible("usb,xhci")`.
+           The PCI config/BAR mechanism could not be reached by a user-space
+           driver bin while it lived in the `drivers/bus/pci` *driver* crate (a
+           `drivers/*→drivers/*` edge §17.4/deps-check forbids); D5a moved it to
+           `lib/pci` to unblock the chain. The work is staged as gate-green
+           increments, each leaving the tree clean (no parallel old/new code —
+           not a §2.13 compat migration):
+           - **D5a — extract `lib/pci` — DONE (whole gate green).** The PCI
+             config/enumerate/BAR/mechanism (`mechanism_one/ecam/brcm`,
+             `describe_function`, the `Bus`/`VirtioPciBus`/`MsixBus`/`PciBus`
+             impls) now lives in `lib/pci` (`rustos-pci`), mirroring
+             `lib/usb`↔`drivers/bus/usb`, so a user-space bus driver bin can
+             build a `PciBus` without a `drivers/*→drivers/*` edge. The dead §8
+             `register` entry (no floor-catalogue entry, no consumer) and the
+             old `drivers/bus/pci` driver crate were deleted (§2.14); the kernel
+             scaffold + the `virtio_qemu_support` test were retargeted onto
+             `rustos_pci`; workspace + §3 updated. Pure relayering, no behaviour
+             change.
+           - **D5b — `pcie_brcm` user-space bin** + emit-VL805-node wiring.
+           - **D5c — `vl805` user-space bin** (reload fw → emit `usb,xhci`
+             node) + `usb_kbd` bind-table retarget.
+           - **D5d — the flip.** Install the four signed bundles
+             (`pcie_brcm`/`vcmailbox`/`vl805`/`usb_kbd`) into `/System/Drivers/`;
+             delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
+             `usb_hid`/`pcie_brcm`/`bus_usb` from
+             `driver_catalog::IN_KERNEL_DRIVERS` so the compiled-in list is the
+             storage bootstrap floor only (§18.6); repoint `init_spawn`; add
+             `hw_remove_node` for hotplug; update §3 / docs.
+           No `-M virt` Pi-USB vertical exists (§0.4); the live
+           enumerate→emit→autoload chain and the scaffold deletion are
+           metal-gated (§0.9). The in-kernel scaffold stays the live metal
+           keyboard until D5d (§2.17). Metal acceptance: top-down autoload from
+           `/System`, a keystroke with the scaffold gone, and hotplug
+           bind/unbind.
 
 ---
 

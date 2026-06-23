@@ -21,7 +21,7 @@ What lives here:
 - `wiring` — the driver-host composition `open_discovered(host, bus,
   dma_aperture_top, outbound_window)`: given the PCI bus built over the
   discovered `brcm,bcm2711-pcie` ECAM window
-  (`rustos_drv_bus_pci::mechanism_ecam`, reached through the `lib/abi`
+  (`rustos_pci::mechanism_ecam`, reached through the `lib/abi`
   `PciBus` seam so this crate never names the PCI crate, `AGENTS.md`
   §17.4), it enumerates for the USB-class function, carves the
   device-shared DMA region and verifies it lies below the discovered

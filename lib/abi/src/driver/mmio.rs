@@ -1,7 +1,7 @@
 //! Capability-checked memory-mapped register windows (`abi-v1`).
 //!
 //! A [`RegisterWindow`] is the host↔driver ABI seam through which a
-//! bus driver (`drivers/bus/pci`, `drivers/bus/mmio`) reaches a
+//! bus driver (`lib/pci`, `drivers/bus/mmio`) reaches a
 //! device's register block. It lives in `lib/abi` for the same
 //! reason [`DmaSlab`](super::DmaSlab) does: the [`DriverHost`] trait
 //! and the bus-class drivers all have to be able to name it without

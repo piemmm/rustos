@@ -1628,7 +1628,7 @@ master-aborts a request the RC itself can refuse; a *forwarded* TLP
 instead waits for a completion that never arrives, and the timeout
 manifests as a CPU external abort that hangs the boot CPU. The fix is in
 the windowed configuration accessor
-(`rustos_drv_bus_pci::mechanism_brcm`): the BCM2711 root port is a
+(`rustos_pci::mechanism_brcm`): the BCM2711 root port is a
 single-device link, so the accessor now forwards a configuration
 transaction **only** to `device 0` on the secondary bus and resolves
 every other downstream target to the PCI "no device" sentinel *without*

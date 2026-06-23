@@ -17,7 +17,7 @@
 //!   (a generic-timer delay on metal, a no-op in tests).
 //!
 //! Once the link is up the register window is handed to
-//! `rustos_drv_bus_pci::mechanism_brcm`; this crate never enumerates
+//! `rustos_pci::mechanism_brcm`; this crate never enumerates
 //! (`AGENTS.md` §17.4).
 //!
 //! # Public surface & capabilities

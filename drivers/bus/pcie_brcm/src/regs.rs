@@ -221,7 +221,7 @@ pub const RC_SECONDARY_BUS: u8 = 1;
 /// would not reach more hardware (there is no on-board PCIe switch) and
 /// would let the root port forward configuration to buses that no device
 /// answers — a transaction the windowed accessor already refuses to
-/// issue (`rustos_drv_bus_pci::mechanism_brcm`), but the bridge bound is
+/// issue (`rustos_pci::mechanism_brcm`), but the bridge bound is
 /// kept honest to the topology too (`AGENTS.md` §2.3 — no speculative
 /// width for a switch this platform does not have).
 pub const RC_SUBORDINATE_BUS: u8 = RC_SECONDARY_BUS;

@@ -790,7 +790,7 @@ pub trait DriverHost {
     /// Returns the per-driver MMIO-map facility, if the driver host
     /// has minted one for this driver module.
     ///
-    /// Bus drivers (`drivers/bus/pci`, `drivers/bus/mmio`) call this
+    /// Bus drivers (`drivers/bus/pcie_brcm`, `drivers/bus/mmio`) call this
     /// once they have discovered a device's register block and need
     /// a [`RegisterWindow`] over it. The returned [`MmioMapper`]
     /// enforces [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP)

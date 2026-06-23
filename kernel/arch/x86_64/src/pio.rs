@@ -5,7 +5,7 @@
 //! (`AGENTS.md` §17.2 / §17.4). It encapsulates the `in`/`out`
 //! instructions — the only way to reach the legacy PCI configuration
 //! ports `0xCF8`/`0xCFC` (PCI Local Bus 3.0 §3.2.2.3.2) — behind the safe
-//! trait so the `drivers/bus/pci` bus driver consumes it without naming
+//! trait so the `lib/pci` PCI mechanism consumes it without naming
 //! this architecture port and without a `cfg(target_arch …)` gate of its
 //! own. The bus driver receives an `X86PortIo` by value from the ring-0
 //! bring-up path and reaches it only through `&dyn PortIo`.
@@ -22,7 +22,7 @@ pub struct X86PortIo;
 
 /// Construct the x86_64 port-I/O backend for the PCI bus driver.
 ///
-/// The result is handed to `rustos_drv_bus_pci::mechanism_one` so the
+/// The result is handed to `rustos_pci::mechanism_one` so the
 /// bus driver can issue PCI configuration accesses through the
 /// [`PortIo`] seam without depending on this crate.
 #[must_use]
@@ -202,7 +202,7 @@ mod tests {
     /// and cannot be exercised from a host unit test, so this asserts
     /// only the construction and the trait-object coercion; the
     /// address/data interleaving is covered against a mock backend in
-    /// `drivers/bus/pci`.
+    /// `lib/pci`.
     #[test]
     fn backend_is_zero_sized_and_coerces_to_the_seam() {
         assert_eq!(core::mem::size_of::<X86PortIo>(), 0);

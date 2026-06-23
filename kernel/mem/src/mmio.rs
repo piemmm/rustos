@@ -1,6 +1,6 @@
 //! Per-process memory-mapped-I/O register-window mapper.
 //!
-//! A bus driver (`drivers/bus/pci`, `drivers/bus/mmio`) that has
+//! A bus driver (`lib/pci`, `drivers/bus/mmio`) that has
 //! discovered a device's register block needs that block mapped into
 //! its address space before it can touch a single register. This
 //! module owns the architecture-neutral half of that mapping: it

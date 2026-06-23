@@ -409,9 +409,10 @@ rustos/
 │   ├── input/
 │   ├── network/
 │   ├── storage/
-│   └── bus/             # pci, pcie_brcm (BCM2711 RC bring-up), virtio, mmio, and
+│   └── bus/             # pcie_brcm (BCM2711 RC bring-up), virtio, mmio, and
 │                        #   usb/ (the USB bus-class folder): usb/xhci (generic
-│                        #   xHCI host) + usb/vl805 (Pi 4 VL805 firmware reload)
+│                        #   xHCI host) + usb/vl805 (Pi 4 VL805 firmware reload).
+│                        #   PCI config-access mechanism logic is lib/pci (§17.4).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -467,6 +468,11 @@ rustos/
 │   │                    #   definition the mkimage author and the kernel
 │   │                    #   root-mount reader share across MBR/GPT on every
 │   │                    #   arch (§2.2, §5.4, §24.4).
+│   ├── pci/             # PCI/PCIe configuration-access mechanism library
+│   │                    #   (mechanism #1 / ECAM / BCM2711-windowed) + the
+│   │                    #   Bus/VirtioPciBus/MsixBus/PciBus seams, so a
+│   │                    #   user-space bus driver enumerates/assigns BARs
+│   │                    #   without a drivers/*->drivers/* edge (§2.2/§17.4).
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
