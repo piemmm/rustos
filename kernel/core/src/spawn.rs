@@ -315,6 +315,13 @@ pub trait InitSpawnCtx {
     /// context that wires no scheduler offers no driver spawn rather than
     /// pretending to, mirroring [`spawn_kernel_service`](Self::spawn_kernel_service)
     /// returning [`None`] and [`ProcessSpawn::spawn_with`]'s own default.
+    ///
+    /// `node_id` is the discovered hardware-tree node the driver was matched
+    /// for (`AGENTS.md` §18.3); it is recorded against the child so the
+    /// child's later `hw_emit_node` calls parent published children under
+    /// exactly that node, and the emitter cannot forge its tree position
+    /// (`AGENTS.md` §4 / §5.4). [`None`] when the spawn is not a node-matched
+    /// driver load.
     fn spawn_driver_process(
         &self,
         spawn: &dyn ProcessSpawn,
@@ -322,8 +329,9 @@ pub trait InitSpawnCtx {
         caps: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
+        node_id: Option<u32>,
     ) -> Result<u64, Errno> {
-        let _ = (spawn, rxe, caps, grants, args);
+        let _ = (spawn, rxe, caps, grants, args, node_id);
         Err(Errno::NotImplemented)
     }
 }
@@ -1137,6 +1145,7 @@ mod tests {
             CapabilitySet::empty(),
             &[],
             &[],
+            None,
         );
         assert_eq!(result, Err(Errno::NotImplemented));
     }

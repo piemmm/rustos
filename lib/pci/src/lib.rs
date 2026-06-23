@@ -267,12 +267,7 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
         Ok(Pci::read_config(self, bdf, offset))
     }
 
-    fn describe_function(
-        &self,
-        bdf: u64,
-        parent_id: u32,
-        node_id: u32,
-    ) -> Result<HwNode, DriverError> {
-        Pci::describe_function(self, bdf, parent_id, node_id)
+    fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError> {
+        Pci::describe_function(self, bdf)
     }
 }

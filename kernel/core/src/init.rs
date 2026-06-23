@@ -716,6 +716,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         caps: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
+        node_id: Option<u32>,
     ) -> Result<u64, Errno> {
         // Build the production runtime-spawn context over the same live
         // subsystems PID-1 admission uses and drive the architecture's
@@ -751,6 +752,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             self.process_wait,
             DescriptorTable::closed(),
             grants,
+            node_id,
         );
         spawn.spawn_with(rxe, &ctx, caps, args)
     }
@@ -1413,7 +1415,7 @@ mod tests {
         let args: [&[u8]; 1] = [b"reply-endpoint"];
 
         let pid = ctx
-            .spawn_driver_process(&producer, rxe, caps, &[], &args)
+            .spawn_driver_process(&producer, rxe, caps, &[], &args, Some(7))
             .expect("the recording producer admits the driver");
         assert_eq!(pid, 0x4242);
 

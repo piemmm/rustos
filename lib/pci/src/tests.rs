@@ -1356,10 +1356,10 @@ fn describe_function_emits_the_vl805_child_node() {
     .pack_bdf();
     let pci = crate::mechanism_ecam(window);
     let node = (&pci as &dyn PciBus)
-        .describe_function(vl805, 4, 11)
+        .describe_function(vl805)
         .expect("describes the VL805");
-    assert_eq!(node.id(), 11);
-    assert_eq!(node.parent(), 4);
+    // Identity (id/parent) is unassigned here — the `hw_emit_node` publish
+    // path assigns it (`AGENTS.md` §4 / §18.1); only the match key matters.
     // A serial-bus (USB host) controller is a bus to further devices.
     assert_eq!(node.class(), Some(HwDeviceClass::Bus));
     assert_eq!(node.match_keys().len(), 1);
@@ -1392,7 +1392,7 @@ fn describe_function_rejects_an_absent_function() {
     .pack_bdf();
     let pci = crate::mechanism_ecam(window);
     assert!(matches!(
-        (&pci as &dyn PciBus).describe_function(absent, 4, 11),
+        (&pci as &dyn PciBus).describe_function(absent),
         Err(DriverError::NotFound)
     ));
 }

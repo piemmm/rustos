@@ -168,6 +168,22 @@ address *inside* that outbound window. The bootstrap floor (§18.6) seeds
 only the first nodes needed to reach the driver store; everything below a
 discovered bus is published by that bus's user-space driver.
 
+The kernel **owns the published node's identity** — the emitter never names
+it (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
+caller-supplied). A driver builds the node's class, match keys, and resource
+requests and leaves `id`/`parent` unassigned (`PciBus::describe_function`
+returns a placeholder identity); on publish the kernel (1) assigns a fresh
+`id` one past the largest live node id, so an emitter-chosen id can never
+collide with an existing node, and (2) sets the parent to the **emitter's own
+matched node** — looked up kernel-side from the calling task, recorded when
+the driver was loaded for that node — so a driver can neither forge its
+position in the tree nor publish a child under a node it was not loaded for.
+The unique id is load-bearing, not cosmetic: the driver-store load path
+resolves a matched node by its id to mint the loaded driver's grants, so a
+collision would mint the wrong driver's authority. A task with no recorded
+loaded node (an ordinary process, or a driver not loaded for a node) may
+publish nothing — `hw_emit_node` fails closed with `PermissionDenied`.
+
 ## Audit surface
 
 Every match, load, skip, and failure is logged through `lib/log` with

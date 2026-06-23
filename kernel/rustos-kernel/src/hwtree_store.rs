@@ -28,6 +28,7 @@
 
 use alloc::vec::Vec;
 
+use rustos_abi::hwtree::HW_NODE_ROOT;
 use rustos_abi::{Errno, HwNode, HwTreeHeader};
 use rustos_kernel_core::HwTreeSource;
 use rustos_sync::SpinLock;
@@ -96,6 +97,50 @@ impl HwTreeStore {
         }
         // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]).
         rustos_kernel_core::hw_tree_wake();
+    }
+
+    /// Publish a user-space-emitted child `node` under parent `parent_id`,
+    /// assigning it a fresh, collision-free [`HwNode::id`] and recording the
+    /// kernel-resolved parent, then appending it and bumping the generation.
+    /// Returns the assigned id.
+    ///
+    /// This is the store side of the `hw_emit_node` syscall (the
+    /// [`HwTreeSource::publish`] implementation). The kernel **owns
+    /// identity** (`AGENTS.md` §4 / §5.4): the emitter supplies a node's
+    /// class, match keys, and resource requests, but never its id or parent.
+    /// The id is `max(existing non-root id) + 1`, so it can never collide
+    /// with a seeded or previously published node — load-bearing, because the
+    /// driver-store load path resolves a matched node by its id (a collision
+    /// would mint the wrong driver's grants). `parent_id` is the emitter's
+    /// own matched node (resolved kernel-side from the caller's task id), so a
+    /// driver cannot forge its position in the tree.
+    ///
+    /// The id scan is `O(n)` over the current node set, but a publish is a
+    /// rare discovery event (a handful per boot), never a hot path
+    /// (`AGENTS.md` §2.16); the scan and the append happen under one lock so
+    /// the assigned id cannot race a concurrent publish.
+    pub fn publish_child(&self, parent_id: u32, mut node: HwNode) -> u32 {
+        let id = {
+            let mut inner = self.inner.lock();
+            // The next free id is one past the largest live non-root id; the
+            // root sentinel (`HW_NODE_ROOT`, `u32::MAX`) never participates.
+            // An empty tree starts emitted ids at 1.
+            let max_id = inner
+                .nodes
+                .iter()
+                .map(HwNode::id)
+                .filter(|&id| id != HW_NODE_ROOT)
+                .max();
+            let id = max_id.map_or(1, |m| m.saturating_add(1));
+            node.set_identity(id, parent_id);
+            inner.nodes.push(node);
+            inner.generation += 1;
+            id
+        };
+        // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
+        // done after the inner lock is dropped (`AGENTS.md` §2.1).
+        rustos_kernel_core::hw_tree_wake();
+        id
     }
 
     /// Bump the generation **without** changing the node set, waking every
@@ -213,15 +258,18 @@ impl HwTreeSource for HwTreeStoreSource {
         Ok(HW_TREE.encode_snapshot())
     }
 
-    fn publish(&self, node: HwNode) -> Result<(), Errno> {
-        // Append the user-space-emitted child into the one authoritative
-        // inventory; `append` bumps the generation and wakes every parked
-        // `hw_tree_wait` caller, so the device manager re-reads and
-        // autoloads the matching driver (`AGENTS.md` §18.1 / §18.3). The
-        // `hw_emit_node` handler has already verified the caller's
-        // `CAP_HW_EMIT` and that every requested resource is covered by one
-        // of its grants (`AGENTS.md` §4), so the store only records it.
-        HW_TREE.append(&node);
+    fn publish(&self, parent_id: u32, node: HwNode) -> Result<(), Errno> {
+        // Publish the user-space-emitted child under `parent_id` into the one
+        // authoritative inventory; `publish_child` assigns it a fresh,
+        // collision-free id, sets its parent to the emitter's own node, bumps
+        // the generation, and wakes every parked `hw_tree_wait` caller, so the
+        // device manager re-reads and autoloads the matching driver
+        // (`AGENTS.md` §18.1 / §18.3). The `hw_emit_node` handler has already
+        // verified the caller's `CAP_HW_EMIT`, resolved `parent_id` to the
+        // caller's own matched node, and checked that every requested resource
+        // is covered by one of its grants (`AGENTS.md` §4), so the store only
+        // assigns identity and records it.
+        HW_TREE.publish_child(parent_id, node);
         Ok(())
     }
 }
@@ -285,6 +333,34 @@ mod tests {
         assert_eq!(snap[0], seed[0], "existing nodes keep their order");
         assert_eq!(snap[1], seed[1]);
         assert_eq!(snap[2], hid, "the enumerated child lands last");
+    }
+
+    #[test]
+    fn publish_child_assigns_a_fresh_id_and_the_resolved_parent() {
+        let store = HwTreeStore::new();
+        store.seed(&seed_tree()); // ids 1 (root) and 2 (bus)
+
+        // The emitter supplies a node whose id/parent are placeholders; the
+        // store owns identity and overwrites both (`AGENTS.md` §4 / §18.1).
+        let mut emitted = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input);
+        emitted
+            .push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+            .expect("match key fits");
+        let id = store.publish_child(2, emitted);
+        // `max(non-root id) + 1` = 3, parented under the resolved node 2.
+        assert_eq!(
+            id, 3,
+            "the first emitted id is one past the largest live id"
+        );
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[2].id(), 3, "the store assigned the id");
+        assert_eq!(snap[2].parent(), 2, "parented under the resolved parent");
+        assert_eq!(snap[2].match_keys().len(), 1, "the emitter's data is kept");
+
+        // A second publish never reuses an id, even under the same parent.
+        let id2 = store.publish_child(2, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input));
+        assert_eq!(id2, 4, "ids are monotonic and collision-free");
     }
 
     #[test]

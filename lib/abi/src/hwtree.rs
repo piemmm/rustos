@@ -918,6 +918,23 @@ impl HwNode {
         self.id
     }
 
+    /// Assign this node's kernel-owned identity: its [`id`](Self::id) and
+    /// [`parent`](Self::parent).
+    ///
+    /// A node published into the live tree through the `hw_emit_node`
+    /// syscall does **not** carry an emitter-chosen id/parent: the kernel
+    /// assigns a fresh, collision-free id and sets the parent to the
+    /// emitting driver's own matched node, so a driver can neither forge its
+    /// position in the tree nor collide with an existing node's id
+    /// (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
+    /// caller-supplied; §18.1). The store calls this on the decoded node
+    /// before it is recorded; an emitter builds the node (class, match keys,
+    /// resources) and leaves the identity to the kernel.
+    pub fn set_identity(&mut self, id: u32, parent: u32) {
+        self.id = id;
+        self.parent = parent;
+    }
+
     /// Parent node id, or [`HW_NODE_ROOT`] for a root node.
     #[must_use]
     pub const fn parent(&self) -> u32 {

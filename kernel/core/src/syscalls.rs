@@ -1457,6 +1457,9 @@ where
             // path from the matched node's requests (`AGENTS.md` §4 — no
             // ambient authority; §18.3).
             &[],
+            // …and it is not a node-matched driver load, so the child has no
+            // loaded node and may publish no `hw_emit_node` child (§4 / §5.4).
+            None,
         );
         self.spawn_service.spawn(program, &ctx)
     }
@@ -2546,29 +2549,47 @@ where
         let decoded = rustos_abi::HwNode::from_bytes(&bytes)?;
 
         // Security spine of recursive, user-space hardware discovery
-        // (`AGENTS.md` §4 — no ambient authority; §18.3): the calling bus
-        // driver may publish a child node requesting only resources covered
-        // by its *own* minted grants, so an autoloaded child driver can
-        // never be granted authority its emitter lacks. Every requested
-        // resource must be covered; one that is not fails the whole publish
-        // closed (`AGENTS.md` §2.9 — never partially apply). `caller.task_id`
-        // is kernel-trusted, never caller-supplied (§5.4). The read guard is
-        // held only for the containment check.
-        {
+        // (`AGENTS.md` §4 — no ambient authority; §18.3). Two checks, both
+        // against kernel-trusted state keyed by `caller.task_id` (never a
+        // caller-supplied value, §5.4), under one read guard held only for
+        // the duration of these checks:
+        //
+        // 1. The caller must be an autoloaded driver bound to a matched node
+        //    — its *own* node, the parent the published child is attached
+        //    under. A task with no loaded node (an ordinary process, or a
+        //    driver not loaded for a node) may publish nothing: it cannot
+        //    name a position in the tree, so it fails closed. This is what
+        //    makes the tree topology trustworthy — a driver cannot forge its
+        //    parent (`AGENTS.md` §4 / §5.4).
+        // 2. Every resource the child requests must be covered by one of the
+        //    caller's *own* minted grants, so an autoloaded child driver can
+        //    never be granted authority its emitter lacks. One uncovered
+        //    resource fails the whole publish closed (`AGENTS.md` §2.9 —
+        //    never partially apply).
+        let parent_id = {
             let aspaces = self.aspaces.read();
+            let Some(parent_id) = aspaces.loaded_node(caller.task_id) else {
+                return Err(Errno::PermissionDenied);
+            };
             for resource in decoded.resources() {
                 if !aspaces.grant_covers(caller.task_id, resource) {
                     return Err(Errno::PermissionDenied);
                 }
             }
-        }
+            parent_id
+        };
 
-        // Publish into the live hardware tree, bumping the generation that
-        // wakes the device manager's reactive autoload (the same change
-        // channel `hw_tree_wait` observes). A build with no store wired
-        // fails closed with `NotImplemented` (`AGENTS.md` §2.9). Returns
-        // `Ok(0)` once published (the `Errno`-return ABI shape).
-        self.hw_tree.publish(decoded).map(|()| 0)
+        // Publish under the emitter's own node into the live hardware tree,
+        // bumping the generation that wakes the device manager's reactive
+        // autoload (the same change channel `hw_tree_wait` observes). The
+        // store owns identity: it assigns the published node a fresh,
+        // collision-free id and sets its parent to `parent_id`, so an
+        // emitter-chosen id can never collide with an existing node
+        // (`AGENTS.md` §5.4 — load-bearing, the driver-store load path
+        // resolves a matched node by id). A build with no store wired fails
+        // closed with `NotImplemented` (`AGENTS.md` §2.9). Returns `Ok(0)`
+        // once published (the `Errno`-return ABI shape).
+        self.hw_tree.publish(parent_id, decoded).map(|()| 0)
     }
 }
 
@@ -2641,6 +2662,14 @@ where
     /// cannot grant device windows to a child (§5.2 — delegation never
     /// widens authority).
     grants: &'a [HwResource],
+    /// The discovered hardware-tree node the spawned **driver** was matched
+    /// and loaded for, recorded against the child so its `hw_emit_node` calls
+    /// parent published children under it (`AGENTS.md` §18.3). [`None`] for
+    /// an ordinary `spawn` and for any spawn that is not a node-matched
+    /// driver load, so such a task has no loaded node and may publish no
+    /// child (fail closed, `AGENTS.md` §4 / §5.4). Kernel-sourced (the
+    /// matched node the device manager resolved), never caller-supplied.
+    node_id: Option<u32>,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -2679,6 +2708,7 @@ where
         process_wait: &'static (dyn ProcessWait + 'static),
         streams: DescriptorTable,
         grants: &'a [HwResource],
+        node_id: Option<u32>,
     ) -> Self {
         Self {
             frames,
@@ -2692,6 +2722,7 @@ where
             process_wait,
             streams,
             grants,
+            node_id,
         }
     }
 }
@@ -2832,10 +2863,18 @@ where
         // an empty slice and mints nothing. Minted only after the child is
         // fully admitted, under one write lock, so a `resource_grants` from
         // the child observes the complete set.
-        if !self.grants.is_empty() {
+        if !self.grants.is_empty() || self.node_id.is_some() {
             let mut aspaces = self.aspaces.write();
             for resource in self.grants {
                 aspaces.mint_grant(sec_id, *resource);
+            }
+            // Record the matched node the driver was loaded for, beside its
+            // grants and under the same write lock, so a later `hw_emit_node`
+            // from this driver parents its published child under exactly this
+            // node (`AGENTS.md` §4 / §18.3 — the emitter cannot forge its
+            // tree position). `None` (an ordinary `spawn`) records nothing.
+            if let Some(node_id) = self.node_id {
+                aspaces.set_loaded_node(sec_id, node_id);
             }
         }
 
@@ -5889,6 +5928,8 @@ mod tests {
             &NULL_PROCESS_WAIT,
             DescriptorTable::standard(),
             &requested,
+            // The matched node the driver was loaded for (`AGENTS.md` §18.3).
+            Some(0x55),
         );
 
         let program = EmbeddedProgram {
@@ -5904,6 +5945,13 @@ mod tests {
             .spawn(&program, &ctx)
             .expect("driver child admitted");
         let child = SecTaskId(pid);
+
+        // The driver's matched node is recorded against it, so a later
+        // `hw_emit_node` parents its published child under exactly this node
+        // (`AGENTS.md` §4 / §18.3 — the emitter cannot forge its position).
+        assert_eq!(aspaces.read().loaded_node(child), Some(0x55));
+        // A different task has no loaded node (owner-bound, fail closed §5.4).
+        assert_eq!(aspaces.read().loaded_node(SecTaskId(pid + 1)), None);
 
         // One handle per requested resource, monotonic from 1, in order.
         assert_eq!(aspaces.read().grant(child, 1), Some(regs));
@@ -8824,7 +8872,7 @@ mod tests {
     struct StaticHwTree {
         generation: u64,
         blob: alloc::vec::Vec<u8>,
-        published: RwLock<alloc::vec::Vec<rustos_abi::HwNode>>,
+        published: RwLock<alloc::vec::Vec<(u32, rustos_abi::HwNode)>>,
     }
 
     impl StaticHwTree {
@@ -8844,8 +8892,11 @@ mod tests {
         fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(self.blob.clone())
         }
-        fn publish(&self, node: rustos_abi::HwNode) -> Result<(), Errno> {
-            self.published.write().push(node);
+        fn publish(&self, parent_id: u32, node: rustos_abi::HwNode) -> Result<(), Errno> {
+            // Record the kernel-resolved parent the handler passed alongside
+            // the node, so a test can assert the child is parented under the
+            // emitter's own loaded node (`AGENTS.md` §18.1).
+            self.published.write().push((parent_id, node));
             Ok(())
         }
     }
@@ -9194,6 +9245,9 @@ mod tests {
             SecTaskId(2),
             rustos_abi::HwResource::mmio(0x3F20_0000, 0x1000),
         );
+        // The caller is a driver loaded for a node, so it passes the
+        // loaded-node gate and the test exercises the *coverage* refusal.
+        aspaces.write().set_loaded_node(SecTaskId(2), 1);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -9214,6 +9268,58 @@ mod tests {
         assert!(
             source.published.read().is_empty(),
             "a denied node is never published"
+        );
+    }
+
+    /// An emitter that is **not** an autoloaded driver bound to a node
+    /// (no loaded node recorded) is refused with `PermissionDenied` and
+    /// publishes nothing, even when it holds a covering grant: a task that
+    /// cannot name its own position in the tree may not place a child there
+    /// (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
+    /// caller-supplied).
+    #[test]
+    fn hw_emit_node_without_a_loaded_node_is_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let node = emit_child_node();
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // A grant that *would* cover the resource — but no loaded node is
+        // recorded, so the emitter still cannot publish.
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
+        );
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(
+            source.published.read().is_empty(),
+            "a task with no loaded node never publishes"
         );
     }
 
@@ -9242,6 +9348,9 @@ mod tests {
             SecTaskId(2),
             rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
+        // The emitter is a driver loaded for node 9; its published child is
+        // parented under exactly that node (`AGENTS.md` §18.1).
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -9261,7 +9370,10 @@ mod tests {
         );
         let published = source.published.read();
         assert_eq!(published.len(), 1, "the covered node was published");
-        assert_eq!(published[0], node, "the exact node reached the store");
+        // The handler passes the node unchanged and the emitter's own loaded
+        // node (9) as the parent; the store assigns the final id/parent.
+        assert_eq!(published[0].0, 9, "parented under the emitter's own node");
+        assert_eq!(published[0].1, node, "the exact node reached the store");
     }
 
     /// The central recursive-PCI(e) case (`AGENTS.md` §18.1): a bus driver
@@ -9295,6 +9407,9 @@ mod tests {
             SecTaskId(2),
             rustos_abi::HwResource::bus_window(0xFE00_0000, 0x100_0000, 0x6_0000_0000),
         );
+        // The bridge driver is loaded for its own node; the child is parented
+        // under it (`AGENTS.md` §18.1).
+        aspaces.write().set_loaded_node(SecTaskId(2), 1);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
@@ -9340,6 +9455,10 @@ mod tests {
             .write()
             .register(SecTaskId(2), space, physmap)
             .expect("registration succeeds");
+        // A driver loaded for a node, so the publish reaches the store (which
+        // here is the inert `NULL_HW_TREE`) rather than failing the
+        // loaded-node gate first.
+        aspaces.write().set_loaded_node(SecTaskId(2), 2);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);

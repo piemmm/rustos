@@ -246,8 +246,17 @@ per-task `AddressSpaceRegistry` grant table `resource_grants` reads). A bus
 driver therefore can never mint a child more authority than it holds itself —
 a resource outside its grants fails the whole publish closed with
 `PermissionDenied`, never partially applied (`AGENTS.md` §4 — no ambient
-authority; §2.9). On success the node is appended to the live tree, bumping
-the generation that wakes every parked `hw_tree_wait` caller (the reactive
+authority; §2.9). The kernel also **owns the published node's identity**: it
+resolves the caller's *own* matched node (the kernel-side task→node record
+made when the driver was loaded) as the child's parent — a caller with no
+matched node may publish nothing and fails closed with `PermissionDenied` —
+and the store assigns the node a fresh id one past the largest live node id,
+so an emitter-chosen id can never collide with an existing node. This is
+load-bearing, not cosmetic: the driver-store load path resolves a matched node
+by its id, so a collision would mint the wrong driver's grants (`AGENTS.md`
+§4 / §5.4 — identity is kernel-provided, never caller-supplied). On success
+the node is appended to the live tree under that parent, bumping the
+generation that wakes every parked `hw_tree_wait` caller (the reactive
 autoload above). It is gated on **`CAP_HW_EMIT`** — held only by an
 autoloaded bus driver, never an ordinary task — and **audited** per call
 (admitting a node that drives an autoload and carries resource grants is a

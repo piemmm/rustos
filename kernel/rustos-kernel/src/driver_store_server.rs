@@ -289,7 +289,12 @@ where
         .find(|node| !node.is_root() && node.id() == node_id)
         .ok_or(Errno::NotFound)?;
     let resources = node.resources();
-    let mut loader = SpawnDriverLoader::new(ctx.trusted, service, audit, ctx.spawn, &[]);
+    // Thread the matched node's id into the loader so the kernel records it
+    // against the spawned driver: a child the driver later publishes through
+    // `hw_emit_node` is parented under *this* node, and the driver cannot
+    // forge its tree position (`AGENTS.md` §4 / §18.3).
+    let mut loader =
+        SpawnDriverLoader::new(ctx.trusted, service, audit, ctx.spawn, &[], Some(node_id));
     let handle = loader.load(driver.path(), resources, &ctx.caps)?;
     Ok(handle.as_u64())
 }
@@ -520,8 +525,9 @@ mod tests {
     }
 
     /// One recorded `spawn_driver`: the bundle bytes, the granted capability
-    /// set, and the matched node's resource grants.
-    type RecordedSpawn = (Vec<u8>, CapabilitySet, Vec<HwResource>);
+    /// set, the matched node's resource grants, and the matched node id the
+    /// load threaded for the kernel to record against the child (§18.3).
+    type RecordedSpawn = (Vec<u8>, CapabilitySet, Vec<HwResource>, Option<u32>);
 
     /// Records every `spawn_driver` so a test can assert the gate forwarded
     /// exactly the matched node's grants.
@@ -544,10 +550,11 @@ mod tests {
             granted: CapabilitySet,
             grants: &[HwResource],
             _args: &[&[u8]],
+            node_id: Option<u32>,
         ) -> Result<u64, Errno> {
             self.calls
                 .borrow_mut()
-                .push((rxe.to_vec(), granted, grants.to_vec()));
+                .push((rxe.to_vec(), granted, grants.to_vec(), node_id));
             Ok(0x4242)
         }
     }
@@ -561,6 +568,7 @@ mod tests {
             _granted: CapabilitySet,
             _grants: &[HwResource],
             _args: &[&[u8]],
+            _node_id: Option<u32>,
         ) -> Result<u64, Errno> {
             panic!("the load must fail closed before spawning");
         }
@@ -726,6 +734,11 @@ mod tests {
                 HwResource::dma(0x3fff_ffff, 0x1000)
             ],
             "the matched node's resource requests are minted, and nothing more"
+        );
+        assert_eq!(
+            calls[0].3,
+            Some(2),
+            "the matched node id is threaded so the kernel records it against the child (§18.3)"
         );
     }
 

@@ -114,6 +114,21 @@ pub struct AddressSpaceRegistry {
     /// [`Self::grant`] resolves to `None` — fail closed (§5.4): a task can
     /// map only the windows it was actually granted.
     grants: BTreeMap<TaskId, TaskGrants>,
+    /// The discovered hardware-tree node each autoloaded **driver** task was
+    /// loaded for (`AGENTS.md` §18.3). Recorded when a driver is spawned for
+    /// a matched node, beside its grants, and keyed by the same kernel-trusted
+    /// [`TaskId`]; an ordinary `spawn` (no matched node) records nothing.
+    ///
+    /// This is the security spine of `hw_emit_node`'s tree placement
+    /// (`AGENTS.md` §4 / §5.4): when a driver publishes a discovered child,
+    /// the kernel sets the child's parent to *this* node — the emitter's own —
+    /// so a driver can neither forge its position in the tree nor parent a
+    /// child under a node it was not loaded for. A task with no entry resolves
+    /// to `None` via [`Self::loaded_node`], so a non-driver task (or one with
+    /// no matched node) cannot emit a child at all (fail closed, §5.4).
+    /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
+    /// dead driver's node.
+    loaded_nodes: BTreeMap<TaskId, u32>,
 }
 
 /// One task's device-resource grants: the handles it may pass to
@@ -144,6 +159,7 @@ impl AddressSpaceRegistry {
             streams: BTreeMap::new(),
             limits: BTreeMap::new(),
             grants: BTreeMap::new(),
+            loaded_nodes: BTreeMap::new(),
         }
     }
 
@@ -219,7 +235,35 @@ impl AddressSpaceRegistry {
         let had_streams = self.streams.remove(&task).is_some();
         let had_limits = self.limits.remove(&task).is_some();
         let had_grants = self.grants.remove(&task).is_some();
-        self.tasks.remove(&task).is_some() || had_streams || had_limits || had_grants
+        let had_node = self.loaded_nodes.remove(&task).is_some();
+        self.tasks.remove(&task).is_some() || had_streams || had_limits || had_grants || had_node
+    }
+
+    /// Record that the autoloaded driver `task` was loaded for the discovered
+    /// hardware-tree node `node_id` (`AGENTS.md` §18.3).
+    ///
+    /// Called by the privileged driver-spawn path beside
+    /// [`mint_grant`](Self::mint_grant), under the same write lock, so a
+    /// driver's matched node and its grants are established together. The
+    /// `node_id` is kernel-sourced (the matched node the device manager
+    /// resolved), never caller-supplied (`AGENTS.md` §5.4). The ordinary
+    /// `spawn` path records nothing, so a non-driver task has no loaded node
+    /// and cannot publish a child (fail closed, §5.4).
+    pub fn set_loaded_node(&mut self, task: TaskId, node_id: u32) {
+        self.loaded_nodes.insert(task, node_id);
+    }
+
+    /// The discovered hardware-tree node `task` was loaded for, or `None`
+    /// when `task` is not an autoloaded driver bound to a node.
+    ///
+    /// The security spine of `hw_emit_node`'s parent assignment
+    /// (`AGENTS.md` §4 / §18.1): the kernel parents a driver's published
+    /// child under *this* node, and a `task` with no loaded node may publish
+    /// nothing (fail closed, §5.4). The `task` argument is the kernel-trusted
+    /// caller id, never caller-supplied.
+    #[must_use]
+    pub fn loaded_node(&self, task: TaskId) -> Option<u32> {
+        self.loaded_nodes.get(&task).copied()
     }
 
     /// Mint a device-resource grant for `task`, returning the unforgeable,

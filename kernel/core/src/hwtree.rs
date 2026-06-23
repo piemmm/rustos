@@ -57,26 +57,33 @@ pub trait HwTreeSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
     fn snapshot(&self) -> Result<Vec<u8>, Errno>;
 
-    /// Publish a discovered child `node` into the live tree, bumping the
-    /// generation so every parked `hw_tree_wait` caller (the device
-    /// manager) re-reads and re-evaluates it (`AGENTS.md` §18.1 / §18.3 —
-    /// recursive, user-space hardware discovery).
+    /// Publish a discovered child `node` under parent `parent_id` into the
+    /// live tree, bumping the generation so every parked `hw_tree_wait`
+    /// caller (the device manager) re-reads and re-evaluates it
+    /// (`AGENTS.md` §18.1 / §18.3 — recursive, user-space hardware
+    /// discovery).
     ///
     /// This is the store side of the `hw_emit_node` syscall: the handler in
     /// [`crate::syscalls`] has already verified the calling driver holds
-    /// [`rustos_abi::CapabilityId::HW_EMIT`] and that every
+    /// [`rustos_abi::CapabilityId::HW_EMIT`], resolved `parent_id` to the
+    /// emitter's *own* matched node (so a driver cannot forge its tree
+    /// position), and checked that every
     /// [`rustos_abi::hwtree::HwResource`] the node requests is covered by
     /// one of the caller's minted grants (`AGENTS.md` §4 — no ambient
-    /// authority), so this method only appends the validated node. The node
-    /// is always added, never dropped — a duplicate is a no-op for matching
-    /// (the device manager dedups), and only the generation advances.
+    /// authority). The store **owns identity**: it assigns the node a
+    /// fresh, collision-free [`id`](rustos_abi::HwNode::id) and sets its
+    /// parent to `parent_id` ([`HwNode::set_identity`]) before recording
+    /// it, so an emitter-chosen id can never collide with an existing node
+    /// (`AGENTS.md` §5.4) — load-bearing, since the driver-store load path
+    /// resolves a matched node by its id. The node is always added, never
+    /// dropped, and only the generation advances.
     ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
     /// build with no store wired never accepts a published node
     /// (`AGENTS.md` §2.9 / §5.4).
-    fn publish(&self, node: HwNode) -> Result<(), Errno>;
+    fn publish(&self, parent_id: u32, node: HwNode) -> Result<(), Errno>;
 }
 
 /// The hardware-tree source installed before any real store is wired.
@@ -96,7 +103,7 @@ impl HwTreeSource for NullHwTreeSource {
         Err(Errno::NotImplemented)
     }
 
-    fn publish(&self, _node: HwNode) -> Result<(), Errno> {
+    fn publish(&self, _parent_id: u32, _node: HwNode) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }

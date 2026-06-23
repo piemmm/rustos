@@ -75,12 +75,19 @@ pub trait DriverProcessSpawn {
     /// exhaustion, `BadMagic` on an `rxe` that fails the CFI-tag re-parse,
     /// `AlreadyExists` on a registration conflict) — never a panic
     /// (`AGENTS.md` §2.9).
+    ///
+    /// `node_id` is the discovered hardware-tree node the driver was matched
+    /// for (`AGENTS.md` §18.3); the kernel records it against the child so a
+    /// later `hw_emit_node` parents the published child under exactly that
+    /// node and the emitter cannot forge its tree position (`AGENTS.md`
+    /// §4 / §5.4).
     fn spawn_driver(
         &self,
         rxe: &[u8],
         granted: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
+        node_id: Option<u32>,
     ) -> Result<u64, Errno>;
 }
 
@@ -128,9 +135,10 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
         granted: CapabilitySet,
         grants: &[HwResource],
         args: &[&[u8]],
+        node_id: Option<u32>,
     ) -> Result<u64, Errno> {
         self.init_ctx
-            .spawn_driver_process(self.producer, rxe, granted, grants, args)
+            .spawn_driver_process(self.producer, rxe, granted, grants, args, node_id)
     }
 }
 
@@ -169,6 +177,11 @@ struct SpawningDriverSpawner<'a> {
     /// (`rustos_rt::arg`) — e.g. the reply-endpoint id it announces
     /// readiness over.
     args: &'a [&'a [u8]],
+    /// The matched hardware-tree node the driver was loaded for
+    /// (`AGENTS.md` §18.3); recorded against the child so its `hw_emit_node`
+    /// children are parented under it. [`None`] when the load is not
+    /// node-matched.
+    node_id: Option<u32>,
 }
 
 impl DriverSpawner for SpawningDriverSpawner<'_> {
@@ -183,7 +196,13 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
         // no resource the node did not expose.
         let pid = self
             .spawn
-            .spawn_driver(ctx.payload, ctx.granted, self.grants, self.args)
+            .spawn_driver(
+                ctx.payload,
+                ctx.granted,
+                self.grants,
+                self.args,
+                self.node_id,
+            )
             .map_err(|e| SpawnRegisterError::Register(spawn_errno_as_driver_error(e)))?;
         // The spawned process id doubles as the driver's reported handle;
         // the host mints its own unforgeable handle on success, so this is
@@ -220,6 +239,11 @@ pub struct SpawnDriverLoader<'a> {
     /// Startup-argument vector handed to every spawned driver — e.g. the
     /// reply-endpoint id it announces readiness over.
     args: &'a [&'a [u8]],
+    /// The matched hardware-tree node id the driver is loaded for
+    /// (`AGENTS.md` §18.3), recorded against the spawned child so its
+    /// `hw_emit_node` children are parented under it. [`None`] when the load
+    /// is not node-matched.
+    node_id: Option<u32>,
 }
 
 impl<'a> SpawnDriverLoader<'a> {
@@ -233,6 +257,7 @@ impl<'a> SpawnDriverLoader<'a> {
         sink: &'a dyn Sink,
         spawn: &'a dyn DriverProcessSpawn,
         args: &'a [&'a [u8]],
+        node_id: Option<u32>,
     ) -> Self {
         Self {
             trusted,
@@ -240,6 +265,7 @@ impl<'a> SpawnDriverLoader<'a> {
             sink,
             spawn,
             args,
+            node_id,
         }
     }
 }
@@ -259,6 +285,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
             spawn: self.spawn,
             grants: resources,
             args: self.args,
+            node_id: self.node_id,
         };
         let mut host = Host::new(HostConfig {
             trusted_signers: self.trusted,
@@ -326,6 +353,7 @@ mod tests {
             granted: CapabilitySet,
             grants: &[HwResource],
             _args: &[&[u8]],
+            _node_id: Option<u32>,
         ) -> Result<u64, Errno> {
             self.calls
                 .borrow_mut()
@@ -382,6 +410,7 @@ mod tests {
             spawn: &spawn,
             grants: &grants,
             args: &args,
+            node_id: Some(0x42),
         };
         let manifest = stub_manifest();
         let host = StubHost {
@@ -414,6 +443,7 @@ mod tests {
             spawn: &spawn,
             grants: &[],
             args: &[],
+            node_id: None,
         };
         let manifest = stub_manifest();
         let host = StubHost {
@@ -537,6 +567,7 @@ mod tests {
             caps: CapabilitySet,
             grants: &[HwResource],
             args: &[&[u8]],
+            _node_id: Option<u32>,
         ) -> Result<u64, Errno> {
             *self.recorded.borrow_mut() = Some((
                 rxe.to_vec(),
@@ -581,7 +612,7 @@ mod tests {
         let args: [&[u8]; 1] = [b"reply-endpoint"];
 
         let pid = adapter
-            .spawn_driver(b"driver-rxe", granted, &grants, &args)
+            .spawn_driver(b"driver-rxe", granted, &grants, &args, Some(3))
             .expect("the recording seam admits the driver");
         assert_eq!(pid, 0x7fff);
 

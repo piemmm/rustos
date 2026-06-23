@@ -523,7 +523,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
     let args: [&[u8]; 2] = [b"drvstub", REPLY_ENDPOINT_ARG];
-    let mut loader = SpawnDriverLoader::new(&trusted, &source, &SERIAL_SINK, &spawn, &args);
+    // The matched node id (the device node, id 2) the kernel records against
+    // the spawned driver so its `hw_emit_node` children parent under it
+    // (`AGENTS.md` §18.3).
+    let mut loader =
+        SpawnDriverLoader::new(&trusted, &source, &SERIAL_SINK, &spawn, &args, Some(2));
 
     // The §18.3 autoload walk: match each node against the candidates, run
     // the signed `Host::load` gate on the winner, and spawn it with the

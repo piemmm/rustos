@@ -2100,15 +2100,41 @@ order (one fully-gated increment each):
              user-space `pcie_brcm` bin can now compose it with `lib/pci`
              without a `drivers/*→drivers/*` edge. `drivers/bus/pcie_brcm` no
              longer exists; D5b.2 recreates it as the user-space bin.
-           - **D5b.2 — `pcie_brcm` user-space bin (NEXT)** + emit-VL805-node
+           - **D5b.2a — kernel-owned emitted-node identity — DONE (whole gate
+             green).** A load-bearing prerequisite the bin uncovered: a node
+             published through `hw_emit_node` must get a *unique* id (the
+             driver-store load path resolves a matched node by `node.id()`, so a
+             collision would mint the wrong driver's grants) and a *trustworthy*
+             parent. The emitter no longer names identity (§4 / §5.4 — identity
+             is kernel-provided, never caller-supplied): `PciBus::describe_function`
+             dropped its `parent_id`/`node_id` params and returns a placeholder
+             identity; `HwNode::set_identity` is the kernel's. The kernel records
+             a task→matched-node map (`AddressSpaceRegistry::set_loaded_node`,
+             threaded `node_id: Option<u32>` through `DriverLoader`/
+             `SpawnDriverLoader`→`DriverProcessSpawn`→`InitSpawnCtx::spawn_driver_process`
+             →`KernelSpawnCtx`→admit, recorded beside grant minting). `hw_emit_node`
+             now resolves the caller's *own* loaded node as the parent (fail-closed
+             `PermissionDenied` if the caller has none), keeps the per-resource
+             coverage check, and `HwTreeSource::publish(parent, node)` →
+             `HwTreeStore::publish_child` assigns id = max-live-non-root-id + 1 and
+             sets the parent. Host-tested across `lib/abi`, `lib/pci`, `kernel/core`
+             (publish/coverage/no-loaded-node fail-closed/parent assertions), and
+             `kernel/rustos-kernel` (`publish_child` unique-id + the load path
+             threading `Some(node_id)`). The in-kernel scaffold's separate
+             `augment_boot_tree` path is untouched (deleted at D5d).
+           - **D5b.2b — `pcie_brcm` user-space bin (NEXT)** + emit-VL805-node
              wiring + host tests. A new `drivers/bus/pcie_brcm` bin crate
              (`rustos-rt` + `rustos-drvrt` + `lib/pcie_brcm` + `lib/pci`, all
              `lib/*`): `from_grants_query` over the RC node's grants →
              `open_discovered` (train link) → `rustos_pci::mechanism_brcm` →
              find the USB-class fn → `assign_bar`/`enable_bus_master` → map BAR
-             for its CPU-phys → `describe_function` node A + push
+             for its CPU-phys → `describe_function(bdf)` node A + push
              `Mmio(bar_cpu_phys,bar_len)` + `Dma(aperture_top,XHCI_DMA_BYTES)`
-             → `emit_node`. Caps `CAP_MMIO_MAP`+`CAP_HW_EMIT`. **Metal note:**
+             → `emit_node` (the kernel assigns the node's id + parent, D5b.2a).
+             Caps `CAP_MMIO_MAP`+`CAP_HW_EMIT`. Shared `find-USB-fn` +
+             `assign/enable/map-BAR` primitives must be hoisted into `lib/pci`/
+             `lib/usb` (retargeting the xhci driver wiring) so the bin reuses one
+             definition without a `drivers/*→drivers/*` edge (§2.2). **Metal note:**
              this moves the BAR assignment *ahead* of the VL805 firmware reload
              (the proven in-kernel order reloads firmware before the xHCI
              floor entry assigns the BAR). BAR assignment is PCI-config-level

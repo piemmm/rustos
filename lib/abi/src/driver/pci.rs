@@ -157,11 +157,16 @@ pub trait PciBus: Bus {
     /// distinguished from the older USB host classes, exactly as the
     /// generic xHCI driver's bind key requires.
     ///
-    /// `parent_id` is the id of the bus's own node (the new node's
-    /// parent); `node_id` is the id the tree owner assigns to the child.
-    /// The bus driver synthesises neither — the tree owner allocates ids
-    /// — and attaches no resource capabilities here (those are minted at
-    /// the load gate, `AGENTS.md` §4 / §5.4).
+    /// The returned node carries **no** identity: its id and parent are
+    /// unassigned placeholders ([`HwNode::set_identity`] is the kernel's
+    /// to call). A bus driver does not name the child's id or its own
+    /// node id — when the node is published through the `hw_emit_node`
+    /// syscall the kernel assigns a fresh, collision-free id and sets the
+    /// parent to the emitting driver's own matched node, so a driver can
+    /// neither forge its tree position nor collide with an existing id
+    /// (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
+    /// caller-supplied; §18.1 / §18.3). No resource capabilities are
+    /// attached here either; those are minted at the load gate.
     ///
     /// # Errors
     ///
@@ -171,12 +176,7 @@ pub trait PciBus: Bus {
     ///   §2.9 / §18.5).
     /// * [`DriverError::DeviceFault`] if the configuration read cannot be
     ///   completed by the bus transport, or the node cannot be assembled.
-    fn describe_function(
-        &self,
-        bdf: u64,
-        parent_id: u32,
-        node_id: u32,
-    ) -> Result<HwNode, DriverError>;
+    fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError>;
 }
 
 #[cfg(test)]
@@ -286,13 +286,11 @@ mod tests {
             }
         }
 
-        fn describe_function(
-            &self,
-            _bdf: u64,
-            parent_id: u32,
-            node_id: u32,
-        ) -> Result<HwNode, DriverError> {
-            let mut node = HwNode::new(node_id, parent_id, HwDeviceClass::Bus);
+        fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
+            // Identity is unassigned: the kernel sets it on publish. Build
+            // the node with placeholder id/parent the publish path
+            // overwrites (`AGENTS.md` §4 / §18.1).
+            let mut node = HwNode::new(0, crate::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
             node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30))
                 .map_err(|_| DriverError::DeviceFault)?;
             Ok(node)
@@ -370,11 +368,8 @@ mod tests {
         let bus = bus();
         let dyn_bus: &dyn PciBus = &bus;
         let node = dyn_bus
-            .describe_function(0x0001_0000, 7, 9)
+            .describe_function(0x0001_0000)
             .expect("describes the function");
-        assert_eq!(node.id(), 9);
-        assert_eq!(node.parent(), 7);
-        assert!(!node.is_root());
         // The lone key is the function's vendor:device:24-bit class, so a
         // generic xHCI bind key (class `0x0C_03_30`, vendor/device
         // wildcard) resolves against it (`AGENTS.md` §18.3).

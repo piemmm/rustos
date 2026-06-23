@@ -92,9 +92,15 @@ the published node only when every `HwResource` it requests is covered by
 one of the calling driver's own minted grants (`HwResource::covers`), so an
 emitted child can never carry more authority than its emitter — the security
 spine of recursive, user-space discovery (`AGENTS.md` §4 / §18.3, see
-[Syscalls](../architecture/syscalls.md)). A refused publish surfaces as
-`DriverError::PermissionDenied`; the in-kernel floor host still attaches the
-node to the boot tree directly.
+[Syscalls](../architecture/syscalls.md)). The kernel also **owns the node's
+identity**: a driver leaves the node's `id`/`parent` unassigned, and on
+publish the kernel assigns a fresh, collision-free id and sets the parent to
+the emitter's own matched node (resolved kernel-side from the calling task),
+so a driver can neither forge its tree position nor collide with an existing
+node id (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
+caller-supplied). A task with no matched node may publish nothing. A refused
+publish surfaces as `DriverError::PermissionDenied`; the in-kernel floor host
+still attaches the node to the boot tree directly.
 
 These four facility accessors are `abi-v1` *internal* additions: like
 `virtio_host()` before them, each carries a default body so every

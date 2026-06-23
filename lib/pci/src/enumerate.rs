@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 use rustos_abi::driver::bus::BusDevice;
+use rustos_abi::hwtree::HW_NODE_ROOT;
 use rustos_abi::{
     DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
     RegisterWindow, WindowError,
@@ -823,14 +824,16 @@ impl<C: ConfigSpace> Pci<C> {
         (dword >> 8) & 0x00FF_FFFF
     }
 
-    /// Describe the function at `bdf` as a discovered child
-    /// [`HwNode`] parented at `parent_id` and assigned `node_id`.
+    /// Describe the function at `bdf` as a discovered child [`HwNode`].
     ///
     /// The node carries one [`HwMatchKey::pci`] of the function's
     /// `vendor:device` and its full 24-bit class
     /// ([`read_class_24`](Self::read_class_24)), so `devmgr` resolves a
     /// driver's signed bind table against it (`AGENTS.md` §18.3). The
-    /// node's [`HwDeviceClass`] is derived from the PCI base class.
+    /// node's [`HwDeviceClass`] is derived from the PCI base class. Its
+    /// identity (id/parent) is left unassigned: the `hw_emit_node` publish
+    /// path assigns a fresh, collision-free id and the emitter's own node
+    /// as parent (`AGENTS.md` §4 / §18.1).
     ///
     /// # Errors
     ///
@@ -838,12 +841,7 @@ impl<C: ConfigSpace> Pci<C> {
     ///   vendor id reads the all-ones sentinel) — fail closed, never a
     ///   fabricated node (`AGENTS.md` §2.9 / §18.5).
     /// * [`DriverError::DeviceFault`] if the match key cannot be pushed.
-    pub fn describe_function(
-        &self,
-        bdf: u64,
-        parent_id: u32,
-        node_id: u32,
-    ) -> Result<HwNode, DriverError> {
+    pub fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError> {
         let addr = unpack_bdf(bdf, 0);
         let id = self.config.read32(addr);
         let vendor = low_u16(id);
@@ -855,7 +853,11 @@ impl<C: ConfigSpace> Pci<C> {
         // The base class is byte 3 of config dword 2 (bits 16..24 of the
         // 24-bit code); `low_u8` masks to 8 bits, so the cast is lossless.
         let base_class = low_u8(class24 >> 16);
-        let mut node = HwNode::new(node_id, parent_id, device_class_from_base(base_class));
+        // Identity is unassigned: the `hw_emit_node` publish path assigns a
+        // fresh, collision-free id and the emitter's own node as parent
+        // (`AGENTS.md` §4 / §18.1). Build with placeholder id/parent it
+        // overwrites.
+        let mut node = HwNode::new(0, HW_NODE_ROOT, device_class_from_base(base_class));
         node.push_match_key(HwMatchKey::pci(vendor, device, class24))
             .map_err(|_| DriverError::DeviceFault)?;
         Ok(node)

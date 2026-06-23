@@ -180,16 +180,13 @@ impl PciBus for MockPciBus {
         Ok(0)
     }
 
-    fn describe_function(
-        &self,
-        _bdf: u64,
-        parent_id: u32,
-        node_id: u32,
-    ) -> Result<HwNode, DriverError> {
+    fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
         // The mock carries only the 16-bit base+sub-class; promote it
-        // to the 24-bit code (prog-if 0) for the emitted key.
+        // to the 24-bit code (prog-if 0) for the emitted key. Identity
+        // (id/parent) is unassigned: the kernel assigns it on publish
+        // (`AGENTS.md` §4 / §18.1).
         let class24 = u32::from(self.class) << 8;
-        let mut node = HwNode::new(node_id, parent_id, HwDeviceClass::Bus);
+        let mut node = HwNode::new(0, rustos_abi::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
         node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, class24))
             .map_err(|_| DriverError::DeviceFault)?;
         Ok(node)
