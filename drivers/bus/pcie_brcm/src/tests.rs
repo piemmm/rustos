@@ -401,37 +401,6 @@ fn bring_up_enables_memory_space_and_bus_master_on_the_bridge() {
 }
 
 #[test]
-fn outbound_window_readback_reports_the_programmed_window() {
-    // The read-back is the metal diagnostic for the BAR master-abort:
-    // config reads succeed yet the mapped BAR aborts, isolating the fault
-    // to the outbound (CPU→PCIe) translation path, so the read-back must
-    // surface exactly what `program_outbound_window` wrote and the live
-    // link status.
-    let regs0 = MockRegs::new(true, 1);
-    let mut rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
-    let rb = rc.outbound_window_readback();
-    // The PCIe-space base the window maps to: low/high dwords of
-    // 0xc000_0000.
-    assert_eq!(rb.mem_win0_lo, low32(PI_WINDOWS.outbound_pcie_base));
-    assert_eq!(rb.mem_win0_hi, high32(PI_WINDOWS.outbound_pcie_base));
-    // The CPU base 0x6_0000_0000 is 0x6000 MiB; the low base field only
-    // holds bits [4..16) of the MiB count, so the high 0x6 lands in
-    // BASE_HI (and the limit's high bits in LIMIT_HI). The base/limit dword
-    // itself must carry the limit low field in its high half: `0x3ff00000`
-    // for the Pi's 1 GiB window.
-    assert_eq!(rb.mem_win0_base_limit, 0x3ff0_0000);
-    let cpu_base_mb = PI_WINDOWS.outbound_cpu_base / 0x10_0000;
-    let high_shift = regs::MEM_WIN0_BASE_LIMIT_BASE_MASK.count_ones();
-    assert_eq!(rb.mem_win0_base_hi, low32(cpu_base_mb >> high_shift));
-    let cpu_limit_mb = (PI_WINDOWS.outbound_cpu_base + PI_WINDOWS.outbound_size - 1) / 0x10_0000;
-    assert_eq!(rb.mem_win0_limit_hi, low32(cpu_limit_mb >> high_shift));
-    // The link reads up: root-port + data-link-active + phy-link-up.
-    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_PORT_MASK, 0);
-    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_DL_ACTIVE_MASK, 0);
-    assert_ne!(rb.pcie_status & regs::PCIE_STATUS_PHYLINKUP_MASK, 0);
-}
-
-#[test]
 fn inbound_window_readback_reports_the_programmed_viewport() {
     // The read-back is the metal diagnostic for the honoured-but-no-op
     // VideoCore VL805-firmware reload: that load runs over an inbound DMA

@@ -254,13 +254,19 @@ read the bridge command back as `0x0000` and left the VL805 BAR
 master-aborting to `0xdead_dead`. All windows are device-tree-discovered, never compiled-in
 (`AGENTS.md` §18.1).
 
-`inbound_window_readback` reads the inbound (PCIe→system-memory) viewport
-registers back (`RC_BAR1_LO`, `RC_BAR2_LO`/`HI`, `RC_BAR3_LO`) for a
-read-only, fail-closed metal diagnostic (`outbound_window_readback` is its
-outbound twin). On the Pi 4 the boot firmware's VL805 handoff may depend on
-this inbound DMA window; the read-back lets a metal run compare it with
-the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`
-(`AGENTS.md` §15.7).
+`entry_inbound_window` exposes the inbound (PCIe→system-memory) viewport
+registers (`RC_BAR1_LO`, `RC_BAR2_LO`/`HI`, `RC_BAR3_LO`) **as the previous
+boot stage left them**, captured read-only and fail-closed during `bring_up`
+before `RC_BAR2` is reprogrammed. On the Pi 4 the boot firmware's VL805
+handoff depends on that inbound DMA window, so the capture both drives the
+"don't reprogram a firmware-configured window" decision in `bring_up` and
+lets a metal run compare it with the known-good
+`IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` (`AGENTS.md` §15.7). The
+post-bring-up window read-backs that once logged the trained register block
+were removed: on real BCM2711 silicon reading those MISC registers after the
+link trains stalls for seconds while the in-kernel bring-up holds the CPU,
+and with the link confirmed up they added no functional value
+(`AGENTS.md` §2.14 / §2.16).
 
 ### Composition
 

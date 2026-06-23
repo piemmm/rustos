@@ -2518,21 +2518,25 @@ keyboard service kthread**:
 - **Inbound-window lead (raspberrypi/firmware #1617, then pftf/RPi4 #1495)
   — IN PROGRESS (metal capture pending).** #1617 suggested `VideoCore`
   loads the VL805 firmware over PCIe **through an inbound DMA window**. The
-  `4119` capture (`BrcmPcieRc::inbound_window_readback`, post-program) reads
-  `rc_bar2_hi=0x4`, size `0x12` (8 GiB), `RC_BAR1`/`RC_BAR3` disabled —
-  byte-identical to the known-good **runtime** window
-  `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. But #1495 shows the
+  bring-up read-back of that inbound window was byte-identical to the
+  known-good **runtime** window `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`.
+  But #1495 shows the
   `NOTIFY_XHCI_RESET` load *assumes* a particular `RC_BAR2` state instead of
   reading it back, and the blob is **not** loaded at runtime, so
   matching its runtime window does not prove the window matches what
-  `VideoCore` assumes at the load moment. Two changes pursue this (host-proven;
-  decisive datapoint is metal):
+  `VideoCore` assumes at the load moment. The standing change pursues this
+  (host-proven; decisive datapoint is metal):
   - `BrcmPcieRc::entry_inbound_window` captures `RC_BAR2`/`RC_BAR1`/`RC_BAR3`
     **as `start4.elf` left them**, before bring-up touches them, logged
-    one-shot as `EventId(4120)` (`log_entry_inbound_window`); comparing `4120`
-    vs the post-program `4119` shows whether our reprogramming diverged. Tests:
+    one-shot as `EventId(4120)` (`log_entry_inbound_window`), so a metal run
+    sees the firmware's own inbound window. Tests:
     `entry_inbound_window_reports_the_state_before_bring_up_programs_it` /
-    `..._logs_one_4120_record`.
+    `..._logs_one_4120_record`. (The matching post-program window read-backs —
+    a former `EventId(4119)`/`4111` and `BrcmPcieRc::inbound_window_readback`/
+    `outbound_window_readback` — were removed once bring-up was metal-confirmed:
+    reading those MISC registers after the link trains stalls for seconds on
+    real BCM2711 silicon while the in-kernel bring-up holds the CPU, and they
+    add no functional value with the link up — `AGENTS.md` §2.14/§2.16.)
   - `bring_up` now **preserves a firmware-configured `RC_BAR2`** (a non-zero
     size field) rather than overwriting it, honouring VideoCore's assumed
     state; it only programs the inbound window from discovery when the firmware
@@ -3005,17 +3009,16 @@ keyboard service kthread**:
     VL805 firmware once after PCIe config, or a `start4.elf`/`config.txt`
     change keeping PCIe up across the handoff) as the only remaining path.
     Metal-only either way (QEMU models no Pi PCIe/USB, §0.4).
-- **`4111` outbound-window read-back — measure the memory path (§15.7).**
-  Rather than guess, `bring_up_keyboard` now logs one-shot `EventId(4111)`
-  before consuming the trained window: `BrcmPcieRc::outbound_window_readback`
-  reads `MEM_WIN0_LO/HI`, `BASE_LIMIT`, `BASE_HI`, `LIMIT_HI` and
-  `MISC_PCIE_STATUS` back (fail-closed per-field sentinel, §2.9). The metal
-  capture **pinned the root cause**: `mem_win0_base_limit=0x00003ff0`, which
-  under the BCM2711 field order decodes to CPU base `0x6_3ff00000` *above*
-  limit `0x6_00000000` — an inverted, empty window (see the root-cause bullet
-  below). Host-proven:
-  `outbound_window_readback_reports_the_programmed_window` (pcie_brcm) +
-  `outbound_window_readback_logs_one_4111_record` (usb_keyboard).
+- **Outbound-window read-back diagnostic — removed (done, §2.14/§2.16).** A
+  one-shot outbound-window read-back (a former `EventId(4111)` over
+  `BrcmPcieRc::outbound_window_readback`) originally **pinned the root cause**
+  below (`mem_win0_base_limit=0x00003ff0` = an inverted, empty window). It and
+  its inbound twin (`EventId(4119)`/`inbound_window_readback`) were removed once
+  bring-up was metal-confirmed: reading those MISC registers after the link
+  trains stalls for seconds on real BCM2711 silicon while the in-kernel
+  bring-up holds the CPU, and they add no functional value with the link up.
+  The inverted-window fix is permanent and guarded by the kept driver test
+  `outbound_window_decodes_a_non_empty_range_covering_the_cpu_window` (below).
 - **Resolved (superseded) — reset the controller before touching MISC,
   unconditionally.** `0xdead_dead` is the **BCM2711 root complex's master-abort
   poison** (distinct from RustOS's all-ones `0xffff_ffff` sentinel) — returned
@@ -3061,7 +3064,7 @@ keyboard service kthread**:
   but `MEM_WIN0_BASE_LIMIT_BASE_MASK`/`..._LIMIT_MASK` were
   defined with the halves transposed, so `program_outbound_window` wrote the
   base into the limit's half and vice-versa. For the Pi 4 window that yielded
-  the metal `4111` value `0x00003ff0` = base `0x6_3ff00000` *above* limit
+  the metal-captured value `0x00003ff0` = base `0x6_3ff00000` *above* limit
   `0x6_00000000`: an inverted, empty window decoding nothing, so every BAR
   read master-aborted to `dead_dead` regardless of firmware. The fix swaps the
   two mask constants; the expected Pi read-back is

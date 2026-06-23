@@ -650,11 +650,9 @@ and the bring-up fails closed at `Xhci::open`.
 
 **Inbound-window lead (raspberrypi/firmware #1617, then #1495).** A
 maintainer report (#1617) suggested `VideoCore` loads the VL805 firmware
-over PCIe **through an inbound DMA window**, so the `4119` event
-(`BrcmPcieRc::inbound_window_readback`: `rc_bar1_lo`, `rc_bar2_lo`/`hi`,
-`rc_bar3_lo`) read the **post-program** window: `rc_bar2_hi=0x4` (PCIe
-base `0x4_0000_0000`), `rc_bar2_lo` size field `0x12` (8 GiB), `RC_BAR1`/
-`RC_BAR3` disabled — byte-identical to the known-good *runtime*
+over PCIe **through an inbound DMA window**. A now-removed post-program
+read-back of that window (a former `4119` event) read it back
+byte-identical to the known-good *runtime*
 `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. But matching that *runtime*
 window does not prove the window matches what `VideoCore` assumes at the
 **firmware-load** moment: pftf/RPi4 issue #1495 establishes that the
@@ -662,17 +660,19 @@ window does not prove the window matches what `VideoCore` assumes at the
 reading it back, so a window bring-up reprograms away from what `start4.elf`
 set at power-on makes the reload honoured-but-no-op (or, with newer
 co-processor firmware, makes the mailbox exchange itself time out — the
-`4108 … reason=timeout` symptom). Two changes pursue this lead: a one-shot
-`4120` capture of the inbound window **as the previous boot stage left it**
-(`BrcmPcieRc::entry_inbound_window`, sampled before bring-up touches
-`RC_BAR2`), so a metal run compares the firmware's own window against the
-post-program `4119` read-back; and bring-up now **preserves a
-firmware-configured `RC_BAR2`** (a non-zero size field) rather than
-overwriting it, honouring `VideoCore`'s assumed state for the load.
-Decisive metal datapoints: `4120` differing from `4119` would confirm our
-reprogramming diverged (and the preserve path now closes that gap), while
-`4120`/`4119` identical with `4118 fw_version=0` still pins the residual on
-the firmware handoff below.
+`4108 … reason=timeout` symptom). The standing change for this lead: a
+one-shot `4120` capture of the inbound window **as the previous boot stage
+left it** (`BrcmPcieRc::entry_inbound_window`, sampled before bring-up
+touches `RC_BAR2`), which both lets a metal run see the firmware's own
+window and drives bring-up to **preserve a firmware-configured `RC_BAR2`**
+(a non-zero size field) rather than overwriting it, honouring `VideoCore`'s
+assumed state for the load. (The matching post-program read-backs were
+removed once bring-up was metal-confirmed: on real BCM2711 silicon reading
+those MISC registers after the link trains stalls for seconds while the
+in-kernel bring-up holds the CPU, and with the link up they added no
+functional value — `AGENTS.md` §2.14 / §2.16.) Decisive metal datapoint:
+the `4120` capture identical to the known-good runtime window with
+`4118 fw_version=0` pins the residual on the firmware handoff below.
 
 The residual is therefore **outside the PCI path**, in the firmware
 handoff. RustOS's own aarch64 boot/arch code never writes
@@ -743,7 +743,7 @@ firmware-load reaches system memory through this inbound window, so the
 unprogrammed `SCB0_SIZE` is a grounded reason the reload completes yet the
 firmware never becomes resident. `bring_up` now programs `SCB0_SIZE`
 (`encode_scb_size`, `0x11` for the Pi's 4 GiB viewport, matching the `RC_BAR2`
-size encoding) and the inbound read-back (`4119`/`4120`) gains a `misc_ctrl_hex`
+size encoding) and the `4120` inbound capture carries a `misc_ctrl_hex`
 field so a metal capture confirms it. Decisive metal datapoint: `fw_version`
 (`4118`/`4114` `0x50`) going non-zero — or the keyboard enumerating — proves
 the undersized inbound window was the blocker and the in-tree path is complete;
@@ -1257,9 +1257,7 @@ on-change capped error, and a capped heartbeat), so the log stays finite
 | `4101` | `usb_keyboard::bring_up_keyboard` | each bring-up stage: link-training start, root-complex link trained, xHCI online, and — at `Error` level with an `err=` field — the stage that refused (PCIe link, xHCI, or root-hub enumeration). An xHCI open failure also carries `stage` (`capability`, `halted_before_reset`, `reset_self_clear`, or `controller_ready_after_reset`) plus `usbcmd_hex`/`usbsts_hex`, so a valid capability block followed by `device_fault` is localised to the exact stuck reset condition. |
 | `4105` | `keyboard_service::IdentityMmioMapper` | one map-window decision: `phys_base_hex`/`len_hex` (the address the PCI driver asked the bridge to map — for the BAR, the value the VL805's BAR register holds), `resolved_cpu_hex` (the backed CPU address, or the `ffff_ffff_ffff_ffff` sentinel when refused), and the accepted-window bounds (`regs_base/end`, `outbound_pcie_base/end`). Logged at `Error` when refused. Two lines on a healthy bring-up: the controller regs block (identity) and the VL805 BAR (bus→CPU translated). |
 | `4108` | `usb_keyboard::bring_up_keyboard` | the outcome of the per-boot VL805 firmware reload (`NOTIFY_XHCI_RESET`), issued once after the link trains (its `PERST#` drops the VL805's `VideoCore`-loaded firmware on EEPROM-less Pi 4 boards): `skipped because no videocore mailbox is available` (`NotAvailable`), the honoured reload (`Reloaded`), or — at `Error` level — `reload via the videocore mailbox failed reason=<window\|timeout\|firmware_error\|malformed_response\|bad_aperture\|bad_geometry\|unknown>`. The VL805 device driver (`drivers/bus/usb/vl805`) runs the reload over `DriverHost::mailbox` from inside the floor xHCI bring-up; best-effort, the authoritative liveness gate is `Xhci::open`. A `reason=timeout` is expanded by the `4121` record, which says *where* the mailbox exchange timed out. |
-| `4111` | `usb_keyboard::bring_up_keyboard` | a one-shot read-back of the controller's outbound (CPU→PCIe) memory-translation registers and link status, off the trained register block before the windowed config accessor is built (`BrcmPcieRc::outbound_window_readback`): `mem_win0_lo_hex`/`mem_win0_hi_hex` (the PCIe-space base the window maps to), `mem_win0_base_limit_hex` + `mem_win0_base_hi_hex`/`mem_win0_limit_hi_hex` (the CPU-side base/limit, MiB-encoded), and `pcie_status_hex` (root-port/data-link-active/phy-link-up bits). This event **pinned the root cause**: the metal capture read `mem_win0_base_limit_hex=0x3ff00000`, which under the BCM2711's field order decodes to CPU base `0x6_3ff00000` **above** limit `0x6_00000000` — an inverted, empty window. The `BASE`/`LIMIT` field masks were defined swapped (see the root-cause section), so the window decoded nothing and every BAR read master-aborted to `dead_dead`. A faulting read renders the all-ones sentinel; always `Info`. |
-| `4119` | `usb_keyboard::bring_up_keyboard` | a one-shot read-back of the controller's **inbound** (PCIe→system-memory) viewport registers off the trained register block (`BrcmPcieRc::inbound_window_readback`): `rc_bar1_lo_hex` and `rc_bar3_lo_hex` (the unused PCIe→GISB / PCIe→SCB inbound windows, which bring-up disables by clearing their size field), `rc_bar2_lo_hex`/`rc_bar2_hi_hex` (the active PCIe→system-memory viewport — offset bits plus the encoded size in the low field), `misc_ctrl_hex` (the inbound-path `MISC_MISC_CTRL`, whose `SCB0_SIZE` field in bits `[31:27]` sizes the inbound SCB→memory decode window — bring-up now programs it to match the `RC_BAR2` size, e.g. `0x11`, so VideoCore's VL805 firmware-load DMA is not silently dropped by an undersized inbound window), and `pcie_status_hex` for correlation. On the Pi 4 the boot firmware's VL805 handoff may depend on this inbound DMA window; the event lets a metal run compare our inbound translation with the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` rather than guessing the next change (`AGENTS.md` §15.7). A faulting read renders the all-ones sentinel; always `Info`. |
-| `4120` | `usb_keyboard::bring_up_keyboard` | the same inbound-viewport registers as `4119`, but captured **as the previous boot stage (`start4.elf`) left them**, before bring-up programs `RC_BAR2` (`BrcmPcieRc::entry_inbound_window`). raspberrypi/firmware #1495: `VideoCore`'s `NOTIFY_XHCI_RESET` firmware load *assumes* the `RC_BAR2` state it set at power-on, so comparing this `4120` capture with the post-program `4119` read-back tells a metal run whether bring-up diverged from that state (bring-up now **preserves** a firmware-configured `RC_BAR2` rather than overwriting it). A faulting read renders the all-ones sentinel; always `Info`. |
+| `4120` | `usb_keyboard::bring_up_keyboard` | a one-shot capture of the controller's **inbound** (PCIe→system-memory) viewport registers **as the previous boot stage (`start4.elf`) left them**, sampled before bring-up programs `RC_BAR2` (`BrcmPcieRc::entry_inbound_window`): `rc_bar1_lo_hex`/`rc_bar3_lo_hex` (the unused PCIe→GISB / PCIe→SCB inbound windows), `rc_bar2_lo_hex`/`rc_bar2_hi_hex` (the active PCIe→system-memory viewport — offset bits plus the encoded size in the low field), `misc_ctrl_hex` (the inbound-path `MISC_MISC_CTRL`, whose `SCB0_SIZE` field in bits `[31:27]` sizes the inbound SCB→memory decode window), and `pcie_status_hex` for correlation. raspberrypi/firmware #1495: `VideoCore`'s `NOTIFY_XHCI_RESET` firmware load *assumes* the `RC_BAR2` state it set at power-on, so this capture both drives bring-up's "preserve a firmware-configured `RC_BAR2`" decision and lets a metal run compare the firmware's own inbound window against the known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. A faulting read renders the all-ones sentinel; always `Info`. |
 | `4121` | `keyboard_service::KernelMailboxChannel` | one-shot diagnostics from each VL805 firmware-reload mailbox exchange (`MmioMailbox::last_exchange_stats`), logged by the channel after every `exchange` whether it succeeded or failed: `timeout_stage` (`post_room` = the firmware never accepted the request; `response` = it accepted but never replied; `none` = no timeout), `posted_word_hex`, `post_room_polls_hex`/`response_reads_hex`, `foreign_channel_reads_hex`, `last_status_hex`, plus `wait_elapsed_us_hex` (the `CNTPCT_EL0`-measured wall time the exchange took) and `poll_budget_hex` (`FIRMWARE_RELOAD_POLL_BUDGET`). A bare `4108 reason=timeout` cannot tell a transport fault from `VideoCore` dropping the tag; this localises it. Always `Info`. |
 | `4116` | `keyboard_service::bring_up_keyboard_into_tree` | a one-shot **bring-up delay timing measurement**, logged once right after the VL805 bring-up chain returns. `requested_us_hex` is the total the code *asked* its `GenericTimerDelay` to wait across the whole chain (over `delay_calls_hex` calls); `counter_elapsed_us_hex` is the same span measured by `CNTPCT_EL0` against `CNTFRQ_EL0` (also echoed as `timer_hz_hex`). The metal capture read `requested_us_hex=0x57030` (≈356 ms / `0x103`=259 calls) yet `counter_elapsed_us_hex≈14.3 s` at the correct `timer_hz_hex=0x337_f980` — so ≈14 s of *real* time elapsed with only ≈356 ms of it in `busy_delay_us`: the counter is sound, the seconds are code-side. `4116` cannot split *where* in the chain they go; the per-line `[t=<ms>ms]` timestamps and `4117` do. The earlier guess that the ≈14 s was the 256 caps-readiness polls (`4109`) was **wrong**: a timestamped capture showed the caps wait is only ~0.35 s (the wall-time `wait_for_caps_ready` bound works; the master-abort returns the poison fast, not ~54 ms) and ~11 s of the pause is inside `BrcmPcieRc::bring_up` (`4117`). Always `Info`. |
 | `4117` | `usb_keyboard::bring_up_keyboard` | a one-shot per-phase wall-time split of the PCIe root-complex `bring_up`, logged right after the link-trained line: `reset_swinit_us_hex` (releasing the always-accessible `RGR1_SW_INIT_1` `0x9210` bridge `sw_init` reset the previous boot stage left asserted, run **first**; `train_link` deasserts the already-asserted `PERST#`, and that deassert edge re-triggers the `VideoCore` VL805 firmware reload), `reset_settle_us_hex` (the post-de-reset MISC settle — the gentlest no-touch-probe bring-up does **not** toggle the SerDes IDDQ or re-assert a fundamental reset, either of which could drop the resident VL805 firmware), `config_us_hex`, `linkwait_us_hex`, `link_polls_hex`, and `entry_rgr1_sw_init_hex`. The BCM2711 holds the controller core off until the RGR1 bridge `sw_init` reset is cycled, so the bring-up releases that reset **before** any MISC access (matching the BCM2711 PCIe bring-up sequence); the metal capture confirmed `reset_swinit_us`/`reset_settle_us` collapse to microseconds (the ~11 s pause is gone). `entry_rgr1_sw_init_hex` is the raw `RGR1_SW_INIT_1` register sampled at bring-up entry **before** the reset cycles it (the always-accessible RGR1 block needs no link/MISC). The metal capture read `0x3` (both `PERST#` bit 0 and the bridge `sw_init` bit set), i.e. the previous boot stage handed off with PCIe held in fundamental reset — RustOS never writes this register outside its own reset, so it is the firmware handoff state, not something RustOS asserted, and is the same cold-reset state the BCM2711 bring-up handles (so **not** itself the fault). The persistent `dead_dead`/`vl805_fw_version_hex=0` is instead explained by the root-port bridge command not latching Memory Space Enable when written pre-link (see the bridge-command section) — which blocks both our BAR reads and `VideoCore`'s firmware-load writes over the same bus — now enabled after link-up. The `*_us` spans sum to the whole bring-up; `BringUpTiming` and both the release-before-MISC ordering and the no-re-assert / `PERST#`-deassert-edge invariant are host-tested in `rustos_drv_bus_pcie_brcm` (`AGENTS.md` §15.7). Always `Info`. |
@@ -1856,34 +1854,28 @@ reload returns `response=0` with no effect, exactly the captured state.
 The live BAR read (and the firmware version going non-zero) is the
 remaining on-metal acceptance item — QEMU models no Pi PCIe/USB.
 
-### The outbound-window read-back (`4111`) — measuring the memory path
+### The outbound-window inverted-mask root cause — measuring the memory path
 
-Rather than guess the next change (`AGENTS.md` §15.7), `EventId(4111)` reads
-the outbound (CPU→PCIe) translation registers back off the trained register
-block, right after the link trains and before the windowed config accessor
-is built over it: `mem_win0_lo`/`mem_win0_hi` (the PCIe-space base the
-window maps to), `mem_win0_base_limit` + `mem_win0_base_hi` /
-`mem_win0_limit_hi` (the CPU-side base/limit, MiB-encoded), and
-`pcie_status` (the link/role bits). It is read-only and fail-closed — a
-faulting read renders the all-ones sentinel and is never propagated
-(`AGENTS.md` §2.9) — produced by
-`BrcmPcieRc::outbound_window_readback` and logged one-shot, never on the
-poll path (`AGENTS.md` §2.16 / §19.4). Host-tested by
-`outbound_window_readback_reports_the_programmed_window` (driver) and
-`outbound_window_readback_logs_one_4111_record` (the log line).
-
-The metal `4111` capture carried the value that **pinned the root cause**:
-`mem_win0_lo_hex=…c0000000` (PCIe base `0xc000_0000`) and
-`pcie_status_hex=…b0` (data-link-active + phy-link-up) were right, but
-`mem_win0_base_limit_hex=0x00003ff0` was **not** — under the BCM2711's
-field order that decodes to a CPU base of `0x6_3ff00000` sitting *above*
-the limit `0x6_00000000`, an inverted and empty window (see the root-cause
-section below). With the outbound translation window decoding nothing,
-every CPU access to the BAR master-aborted to `dead_dead` regardless of
-firmware. That the same `dead_dead` reproduced on a **known-good board
-whose USB works under other operating systems** confirmed the fault was *not* the
-board and *not* the firmware — it was systematic in this kernel, in a
-register we program.
+A now-removed one-shot outbound-window read-back diagnostic (a former
+`EventId(4111)` produced by an `outbound_window_readback` method, both since
+deleted — `AGENTS.md` §2.14/§2.16) **pinned the root cause** during bring-up:
+it read the outbound (CPU→PCIe) translation registers back off the trained
+register block and carried `mem_win0_lo_hex=…c0000000` (PCIe base
+`0xc000_0000`) and `pcie_status_hex=…b0` (data-link-active + phy-link-up)
+right, but `mem_win0_base_limit_hex=0x00003ff0` **wrong** — under the
+BCM2711's field order that decodes to a CPU base of `0x6_3ff00000` sitting
+*above* the limit `0x6_00000000`, an inverted and empty window (see the
+root-cause section below). With the outbound translation window decoding
+nothing, every CPU access to the BAR master-aborted to `dead_dead`
+regardless of firmware. That the same `dead_dead` reproduced on a
+**known-good board whose USB works under other operating systems** confirmed
+the fault was *not* the board and *not* the firmware — it was systematic in
+this kernel, in a register we program. The `BASE`/`LIMIT` field-mask fix is
+permanent and guarded by the driver regression test
+`outbound_window_decodes_a_non_empty_range_covering_the_cpu_window`, which
+reads the programmed window straight out of the mock register block; the
+read-back log event was only a metal-diagnostic and was removed once
+bring-up was confirmed.
 
 ### Drive the `PERST#` cycle; reload firmware only as a fallback
 
@@ -1944,9 +1936,9 @@ optional fallback, so a metal capture shows whether firmware became resident
 and whether the BAR decoded after the single safe reload attempt.
 
 The latest captures show that the outbound-window fix moved the failure past
-the BAR-decode stage: `4111` now reads the expected
-`mem_win0_base_limit_hex=0x3ff00000`, `4109` reports a live xHCI capability
-header (`caplength_hciversion_hex=0x01000020`, `ready_hex=1`), and `4107`
+the BAR-decode stage: with the window now decoding correctly
+(`mem_win0_base_limit` programmed to `0x3ff00000`), `4109` reports a live xHCI
+capability header (`caplength_hciversion_hex=0x01000020`, `ready_hex=1`), and `4107`
 reads plausible controller dwords (`HCSPARAMS1=0x05000420`,
 `HCCPARAMS1=0x002841eb`, `DBOFF=0x100`, `RTSOFF=0x200`). The following
 diagnostic then localised the remaining `4101 … err=device_fault` to
@@ -1982,7 +1974,7 @@ packs the window **limit** in bits `[31:20]` and the **base** in bits
 halves transposed (`0xfff0_0000` / `0xfff0`), so
 `program_outbound_window` wrote the base into the limit's half and
 vice-versa. For the Pi 4 window (CPU `0x6_0000_0000`, 1 GiB) that produced
-the metal `4111` value `0x00003ff0`, decoding to base `0x6_3ff00000`
+the metal-captured value `0x00003ff0`, decoding to base `0x6_3ff00000`
 **above** limit `0x6_00000000`: an inverted, empty window that decoded no
 address, so every CPU access to the VL805's BAR master-aborted to
 `dead_dead` regardless of the firmware state. The field positions are now correct; the expected Pi read-back is

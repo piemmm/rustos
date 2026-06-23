@@ -33,9 +33,7 @@ use rustos_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, HwNode, MmioMapper, RegisterWindow,
 };
 use rustos_caps::CapabilitySet;
-use rustos_drv_bus_pcie_brcm::{
-    self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback, OutboundWindowReadback,
-};
+use rustos_drv_bus_pcie_brcm::{self as pcie_brcm, BringUpTiming, Delay, InboundWindowReadback};
 // The discovered-node parsing now lives in the PCIe device's own driver
 // crate (`drivers/bus/pcie_brcm`), beside the link-training engine it feeds
 // (`AGENTS.md` §2.2 / §2.21 — it is hwtree parsing, not kernel
@@ -68,13 +66,6 @@ const USB_KEYBOARD_BRINGUP: EventId = EventId(4101);
 /// stop bring-up; the authoritative fail-closed liveness gate is
 /// `Xhci::open` inside the xHCI floor entry (`AGENTS.md` §2.9).
 const USB_KEYBOARD_FW_RESET: EventId = EventId(4108);
-
-/// Audit event: a read-back of the outbound (CPU→PCIe) memory-window
-/// registers (`MEM_WIN0_LO`/`HI`, `BASE_LIMIT`, `BASE_HI`, `LIMIT_HI`) and
-/// link `STATUS` after the link trains, to show whether the window holds
-/// the programmed CPU/PCIe bases and the link is up. A faulting read
-/// renders an all-ones sentinel and is not propagated.
-const USB_KEYBOARD_OUTBOUND: EventId = EventId(4111);
 
 /// Audit event: the per-phase wall-time breakdown of the PCIe
 /// root-complex `bring_up`, in microseconds, so a capture pins any stall
@@ -141,21 +132,14 @@ pub trait BootTreeEmitter {
     fn emit_node(&self, node: &HwNode) -> Result<(), DriverError>;
 }
 
-/// Audit event: read-back of the **inbound** (PCIe→system-memory) viewport
-/// registers after bring-up, to compare our translation against the
-/// known-good `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. A faulting read
-/// renders the all-ones sentinel and is never propagated. One-shot at
-/// bring-up (`AGENTS.md` §15.7 / §2.9 / §19.4).
-const USB_KEYBOARD_INBOUND: EventId = EventId(4119);
-
 /// Audit event: the **inbound** viewport registers **as the previous boot
 /// stage (`start4.elf`) left them**, sampled before bring-up programs
 /// `RC_BAR2`. `VideoCore`'s `NOTIFY_XHCI_RESET` load assumes a particular
-/// `RC_BAR2` state (raspberrypi/firmware #1495), so comparing this entry
-/// capture against the post-program `4119` read-back shows whether our
-/// reprogramming diverges from that assumption. Faulting reads render the
-/// all-ones sentinel. One-shot at bring-up (`AGENTS.md` §15.7 / §2.9 /
-/// §19.4).
+/// `RC_BAR2` state (raspberrypi/firmware #1495), so this entry capture
+/// shows whether the previous boot stage already configured the inbound
+/// window the way `VideoCore` assumes for the firmware load. Faulting
+/// reads render the all-ones sentinel. One-shot at bring-up (`AGENTS.md`
+/// §15.7 / §2.9 / §19.4).
 const USB_KEYBOARD_INBOUND_ENTRY: EventId = EventId(4120);
 
 /// Stable, allocation-free name for a [`DriverError`], for logging the
@@ -422,94 +406,14 @@ fn log_firmware_reset(sink: &dyn Sink, outcome: FirmwareResetOutcome) {
     }
 }
 
-/// Log the controller's outbound (CPU→PCIe) memory-window registers
-/// (`MEM_WIN0_LO`/`HI`, `BASE_LIMIT`, `BASE_HI`, `LIMIT_HI`) and link
-/// `STATUS`, to show whether the window holds the programmed bases and the
-/// link is up — memory takes the outbound path while config (which reads
-/// back fine) takes the internal `EXT_CFG` window. Values produced
-/// fail-closed by [`pcie_brcm::BrcmPcieRc::outbound_window_readback`].
-fn log_outbound_window(sink: &dyn Sink, rb: OutboundWindowReadback) {
-    let mut lo_buf = [0u8; 16];
-    let mut hi_buf = [0u8; 16];
-    let mut bl_buf = [0u8; 16];
-    let mut bhi_buf = [0u8; 16];
-    let mut lhi_buf = [0u8; 16];
-    let mut status_buf = [0u8; 16];
-    log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: USB_KEYBOARD_OUTBOUND,
-            message: "usb-keyboard: pcie outbound (cpu->pcie) window read-back",
-            fields: &[
-                Field {
-                    key: "mem_win0_lo_hex",
-                    value: format_hex_u64(u64::from(rb.mem_win0_lo), &mut lo_buf),
-                },
-                Field {
-                    key: "mem_win0_hi_hex",
-                    value: format_hex_u64(u64::from(rb.mem_win0_hi), &mut hi_buf),
-                },
-                Field {
-                    key: "mem_win0_base_limit_hex",
-                    value: format_hex_u64(u64::from(rb.mem_win0_base_limit), &mut bl_buf),
-                },
-                Field {
-                    key: "mem_win0_base_hi_hex",
-                    value: format_hex_u64(u64::from(rb.mem_win0_base_hi), &mut bhi_buf),
-                },
-                Field {
-                    key: "mem_win0_limit_hi_hex",
-                    value: format_hex_u64(u64::from(rb.mem_win0_limit_hi), &mut lhi_buf),
-                },
-                Field {
-                    key: "pcie_status_hex",
-                    value: format_hex_u64(u64::from(rb.pcie_status), &mut status_buf),
-                },
-            ],
-        },
-    );
-}
-
-/// Log the controller's inbound (PCIe→system-memory) viewport registers
-/// (`RC_BAR1_LO`, `RC_BAR2_LO`/`HI`, `RC_BAR3_LO`) plus link `STATUS`
-/// (`4119`), so a capture can compare the translation with the known-good
-/// `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`. Values produced fail-closed
-/// by [`pcie_brcm::BrcmPcieRc::inbound_window_readback`].
-fn log_inbound_window(sink: &dyn Sink, rb: InboundWindowReadback) {
-    log_inbound_readback(
-        sink,
-        USB_KEYBOARD_INBOUND,
-        "usb-keyboard: pcie inbound (pcie->memory) viewport read-back",
-        rb,
-    );
-}
-
-/// Log the inbound viewport registers **as the previous boot stage left
-/// them**, before bring-up programs `RC_BAR2` (`4120`). Comparing the
-/// firmware's own `RC_BAR2` against the post-program read-back (`4119`,
-/// [`log_inbound_window`]) shows whether bring-up moves the inbound window
-/// away from the state `VideoCore` assumes for the firmware load. Values
-/// produced fail-closed by [`pcie_brcm::BrcmPcieRc::entry_inbound_window`].
+/// Log the inbound (PCIe→system-memory) viewport registers **as the
+/// previous boot stage left them**, sampled before bring-up programs
+/// `RC_BAR2` (`4120`): the firmware's own `RC_BAR2` state a metal run
+/// compares to detect a divergence from the state `VideoCore` assumes for
+/// the firmware load. Renders `rb`'s `RC_BAR1`/`RC_BAR2`/`RC_BAR3` and
+/// link-status registers; values produced fail-closed by
+/// [`pcie_brcm::BrcmPcieRc::entry_inbound_window`].
 fn log_entry_inbound_window(sink: &dyn Sink, rb: InboundWindowReadback) {
-    log_inbound_readback(
-        sink,
-        USB_KEYBOARD_INBOUND_ENTRY,
-        "usb-keyboard: pcie inbound (pcie->memory) viewport as firmware left it (pre-program)",
-        rb,
-    );
-}
-
-/// Shared body for the inbound-viewport diagnostics: render `rb`'s
-/// `RC_BAR1`/`RC_BAR2`/`RC_BAR3` and link-status registers under
-/// `id`/`message`. One definition for both the entry (`4120`) and
-/// post-program (`4119`) captures (`AGENTS.md` §2.2).
-fn log_inbound_readback(
-    sink: &dyn Sink,
-    id: EventId,
-    message: &'static str,
-    rb: InboundWindowReadback,
-) {
     let mut bar1_buf = [0u8; 16];
     let mut bar2lo_buf = [0u8; 16];
     let mut bar2hi_buf = [0u8; 16];
@@ -520,8 +424,8 @@ fn log_inbound_readback(
         sink,
         &Event {
             level: Level::Info,
-            id,
-            message,
+            id: USB_KEYBOARD_INBOUND_ENTRY,
+            message: "usb-keyboard: pcie inbound (pcie->memory) viewport as firmware left it (pre-program)",
             fields: &[
                 Field {
                     key: "rc_bar1_lo_hex",
@@ -794,7 +698,7 @@ pub fn bring_up_keyboard(
         sink,
         "usb-keyboard: training brcm,bcm2711-pcie root-complex link",
     );
-    let mut rc = match pcie_brcm::wiring::open_discovered(
+    let rc = match pcie_brcm::wiring::open_discovered(
         host,
         bringup.regs_phys,
         &bringup.windows,
@@ -811,16 +715,16 @@ pub fn bring_up_keyboard(
         }
     };
     log_stage(sink, "usb-keyboard: pcie root-complex link trained");
-    // Diagnostics: split the bring-up wall time across its phases, and read
-    // the outbound (CPU→PCIe) and inbound (PCIe→memory) windows back off the
-    // trained register block. The inbound window is read both as the prior
-    // boot stage left it (`4120`) and after bring-up (`4119`), since the
-    // VideoCore firmware handoff assumes the `RC_BAR2` state it set at
-    // power-on.
+    // Diagnostics: split the bring-up wall time across its phases, and log
+    // the inbound (PCIe→memory) viewport as the prior boot stage left it
+    // (`4120`), since the VideoCore firmware handoff assumes the `RC_BAR2`
+    // state it set at power-on. The post-bring-up window read-backs are not
+    // logged: on real BCM2711 silicon reading those MISC registers after the
+    // link trains stalls for seconds, and with the link confirmed up they add
+    // no functional value (`AGENTS.md` §2.14 / §2.16 — removed once metal
+    // bring-up was confirmed).
     log_bring_up_timing(sink, rc.bring_up_timing());
-    log_outbound_window(sink, rc.outbound_window_readback());
     log_entry_inbound_window(sink, rc.entry_inbound_window());
-    log_inbound_window(sink, rc.inbound_window_readback());
     // Reach the VL805 through the BCM2711 windowed config accessor over the
     // trained register window. It forwards config only to the single device
     // on the secondary bus, so the floor xHCI scan below never TLPs an
@@ -1318,56 +1222,11 @@ mod tests {
     }
 
     #[test]
-    fn outbound_window_readback_logs_one_4111_record() {
-        // The outbound-window read-back emits exactly one `4111` record at
-        // `Info` — the measurement a metal `dead_dead` BAR-abort capture
-        // needs to confirm the CPU→PCIe translation window holds the
-        // programmed bases (`AGENTS.md` §15.7 / §23.4).
-        let sink = RecordingSink::new();
-        log_outbound_window(
-            &sink,
-            OutboundWindowReadback {
-                mem_win0_lo: 0xc000_0000,
-                mem_win0_hi: 0,
-                mem_win0_base_limit: 0x3ff0_0000,
-                mem_win0_base_hi: 6,
-                mem_win0_limit_hi: 6,
-                pcie_status: 0xb0,
-            },
-        );
-        assert_eq!(sink.count(USB_KEYBOARD_OUTBOUND), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
-    fn inbound_window_readback_logs_one_4119_record() {
-        // The inbound-window read-back emits exactly one `4119` record at
-        // `Info` — the measurement a metal capture needs to compare our
-        // inbound DMA (VideoCore VL805-firmware) window with the known-good
-        // translation (raspberrypi/firmware #1617; `AGENTS.md` §15.7 / §23.4).
-        let sink = RecordingSink::new();
-        log_inbound_window(
-            &sink,
-            InboundWindowReadback {
-                rc_bar1_lo: 0,
-                rc_bar2_lo: 0x11,
-                rc_bar2_hi: 4,
-                rc_bar3_lo: 0,
-                misc_ctrl: 0x8800_3000,
-                pcie_status: 0xb0,
-            },
-        );
-        assert_eq!(sink.count(USB_KEYBOARD_INBOUND), 1);
-        assert_eq!(sink.errors(), 0);
-    }
-
-    #[test]
     fn entry_inbound_window_logs_one_4120_record() {
         // The pre-program inbound-window capture emits exactly one `4120`
-        // record at `Info`, distinct from the post-program `4119` record —
-        // the firmware-left `RC_BAR2` state a metal run compares to detect a
-        // divergence from VideoCore's assumption (raspberrypi/firmware
-        // #1495; `AGENTS.md` §15.7 / §23.4).
+        // record at `Info` — the firmware-left `RC_BAR2` state a metal run
+        // compares to detect a divergence from VideoCore's assumption
+        // (raspberrypi/firmware #1495; `AGENTS.md` §15.7 / §23.4).
         let sink = RecordingSink::new();
         log_entry_inbound_window(
             &sink,
@@ -1381,7 +1240,6 @@ mod tests {
             },
         );
         assert_eq!(sink.count(USB_KEYBOARD_INBOUND_ENTRY), 1);
-        assert_eq!(sink.count(USB_KEYBOARD_INBOUND), 0);
         assert_eq!(sink.errors(), 0);
     }
 

@@ -174,39 +174,9 @@ pub struct PcieWindows {
     pub outbound_size: u64,
 }
 
-/// A read-back of the controller's outbound (CPU→PCIe) memory-window
-/// registers and link status, produced by
-/// [`BrcmPcieRc::outbound_window_readback`] for a bring-up diagnostic.
-///
-/// Each field is the raw 32-bit register as it reads back on metal, or
-/// the all-ones sentinel if the read faulted (`AGENTS.md` §2.9). The
-/// caller (the kernel image-assembly binary) logs them; the driver does
-/// not depend on a logging facility.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct OutboundWindowReadback {
-    /// Low 32 bits of the PCIe-space base the window maps to
-    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_LO`]).
-    pub mem_win0_lo: u32,
-    /// High 32 bits of that PCIe-space base
-    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_HI`]).
-    pub mem_win0_hi: u32,
-    /// CPU-side base and limit, in MiB, packed into one register
-    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT`]).
-    pub mem_win0_base_limit: u32,
-    /// High bits of the CPU-side base
-    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI`]).
-    pub mem_win0_base_hi: u32,
-    /// High bits of the CPU-side limit
-    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI`]).
-    pub mem_win0_limit_hi: u32,
-    /// Link/role status ([`regs::MISC_PCIE_STATUS`]): root-port,
-    /// data-link-active and phy-link-up bits.
-    pub pcie_status: u32,
-}
-
-/// A read-back of the controller's **inbound** (PCIe→system-memory)
-/// viewport registers, produced by
-/// [`BrcmPcieRc::inbound_window_readback`] for a bring-up diagnostic.
+/// The controller's **inbound** (PCIe→system-memory) viewport registers,
+/// captured by [`BrcmPcieRc::entry_inbound_window`] as the previous boot
+/// stage left them (it seeds the capture during `bring_up`).
 ///
 /// On the Raspberry Pi 4 the `VideoCore` co-processor loads the VL805's
 /// xHCI firmware over PCIe **through an inbound DMA window** (the "xHCI
@@ -418,31 +388,14 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
         self.entry_inbound
     }
 
-    /// Read the outbound (CPU→PCIe) memory-window registers
-    /// ([`regs::MISC_CPU_2_PCIE_MEM_WIN0_LO`] and friends) and link status
-    /// ([`regs::MISC_PCIE_STATUS`]) back, so a capture shows whether the
-    /// window holds the programmed bases and the link is up — memory takes
-    /// the outbound path while config (which reads back fine) takes the
-    /// internal `EXT_CFG` window. Read-only; a faulting read renders the
-    /// all-ones sentinel.
-    #[must_use]
-    pub fn outbound_window_readback(&mut self) -> OutboundWindowReadback {
-        OutboundWindowReadback {
-            mem_win0_lo: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_LO),
-            mem_win0_hi: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_HI),
-            mem_win0_base_limit: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT),
-            mem_win0_base_hi: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI),
-            mem_win0_limit_hi: self.read_or_sentinel(regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI),
-            pcie_status: self.read_or_sentinel(regs::MISC_PCIE_STATUS),
-        }
-    }
-
-    /// Read back the inbound (PCIe→system-memory) viewport registers as
-    /// they stand after bring-up, so a capture can compare against the
-    /// known-good inbound translation `VideoCore`'s firmware load expects.
+    /// Read the inbound (PCIe→system-memory) viewport registers
+    /// (`RC_BAR1`/`RC_BAR2`/`RC_BAR3` + `MISC_CTRL` + link status), used by
+    /// `bring_up` to capture the viewport **as the previous boot stage left
+    /// it** before reprogramming `RC_BAR2` (see [`Self::entry_inbound_window`]
+    /// and the `firmware_inbound_configured` decision in `bring_up`).
     /// Read-only; a faulting read renders the all-ones sentinel.
     #[must_use]
-    pub fn inbound_window_readback(&mut self) -> InboundWindowReadback {
+    fn inbound_window_readback(&mut self) -> InboundWindowReadback {
         InboundWindowReadback {
             rc_bar1_lo: self.read_or_sentinel(regs::MISC_RC_BAR1_CONFIG_LO),
             rc_bar2_lo: self.read_or_sentinel(regs::MISC_RC_BAR2_CONFIG_LO),
