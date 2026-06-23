@@ -404,10 +404,44 @@ impl KernelArch for BinArch {
             // SAFETY: `sti; hlt; cli` is the canonical race-free idle wait;
             // the IDT and LAPIC are installed by this point, so a taken
             // interrupt dispatches through a valid handler, and `cli`
-            // leaves `IF` clear exactly as the dispatch loop expects.
+            // leaves `IF` clear exactly as the dispatch loop expects after
+            // the park (the loop re-enables it with `set_device_irqs`).
+            // `hlt` only wakes with `IF == 1`, so unlike the aarch64/riscv64
+            // `wfi` this primitive must itself enable interrupts across the
+            // halt; the `sti`-then-`hlt` pair is atomic so a pending
+            // interrupt is taken during `hlt` and no wake is lost (§2.1).
             unsafe {
                 core::arch::asm!("sti; hlt; cli", options(nomem, nostack, preserves_flags));
             }
+        }
+    }
+
+    fn set_device_irqs(&self, enabled: bool) {
+        // Toggle this CPU's maskable-interrupt flag (`RFLAGS.IF`) so the
+        // ring-0 dispatch loop runs in-kernel tasks/kthreads with device
+        // interrupts enabled (`AGENTS.md` §17.1 — the fully preemptive
+        // kernel), masking them only around the idle park and before halt.
+        // Enabling `IF` in ring 0 is safe: the LAPIC-timer ISR gates
+        // preemption on the interrupted `CS` (a ring-0 tick runs lock-free
+        // accounting but never reschedules the kernel, §4), and an IO-APIC
+        // device IRQ forwards to the lock-free dispatcher. On a host build
+        // there is no ring 0, so this is a benign no-op.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            // SAFETY: `sti`/`cli` toggle only `RFLAGS.IF`; the IDT and LAPIC
+            // are installed by the time the dispatch loop runs, so a taken
+            // interrupt dispatches through a valid handler.
+            unsafe {
+                if enabled {
+                    core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                } else {
+                    core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+                }
+            }
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            let _ = enabled;
         }
     }
 

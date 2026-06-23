@@ -98,11 +98,15 @@
 //!    interrupt status (`ConsoleModel::tx_interrupt_fired` /
 //!    `rx_interrupt_fired`) keeps the ISR from ever draining receive bytes the
 //!    passphrase poll still owns.
-//! 2. **The dispatch loop tops up the FIFO each pass** (`pump_tx`), from
-//!    `KernelArch::poll_interrupts` and before the idle `wfi`. This is a
-//!    **non-blocking** push of whatever the FIFO accepts right now plus a
-//!    `TXIM` re-arm — never a per-byte spin — so it guarantees forward
-//!    progress independent of interrupt delivery without starving anything.
+//! 2. **The idle park tops up the FIFO before sleeping** (`pump_tx`, from
+//!    `KernelArch::wait_for_interrupt`). This is a **non-blocking** push of
+//!    whatever the FIFO accepts right now plus a `TXIM` re-arm — never a
+//!    per-byte spin — so a queued backlog has its transmit interrupt armed
+//!    before the CPU parks, guaranteeing the ISR is the event that wakes the
+//!    `wfi` and drains the rest. The fully preemptive dispatch loop
+//!    (`AGENTS.md` §17.1) runs with device IRQs enabled, so the transmit ISR
+//!    also fires *while* an in-kernel task runs — output no longer waits for
+//!    the loop to reach idle.
 //!
 //! An earlier revision drained the dispatch loop with a **blocking** per-byte
 //! `putchar` spin (and refused to `wfi` while a backlog remained), so on this
@@ -462,7 +466,7 @@ fn drain_ready(ring: &mut SerialRing) {
 /// it could not take ([`sync_tx_irq_to_backlog`]).
 ///
 /// The single definition the producer ([`buffered_uart_write`]), the transmit
-/// ISR ([`service_uart_tx_irq`]) and the dispatch-loop pump ([`pump_tx`]) all
+/// ISR ([`service_uart_tx_irq`]) and the idle-park pump ([`pump_tx`]) all
 /// share, so the "push now, defer the rest to the interrupt" policy lives in
 /// one place (`AGENTS.md` §2.2). Never spins on the device.
 fn pump(ring: &mut SerialRing) {
@@ -473,8 +477,8 @@ fn pump(ring: &mut SerialRing) {
 /// Top up the transmit FIFO from the buffered ring **without ever blocking
 /// on the UART** — the dispatch loop's serial-drain helper.
 ///
-/// Called from `KernelArch::poll_interrupts` (every busy pass) and before the
-/// idle `wfi` (`crate::aarch64::arch_wrapper`). It pushes only the bytes the
+/// Called before the idle `wfi` (`KernelArch::wait_for_interrupt`,
+/// `crate::aarch64::arch_wrapper`). It pushes only the bytes the
 /// FIFO has room for right now and arms the transmit interrupt to the rest
 /// (`pump`); it never busy-waits at the UART's byte rate. The backlog then
 /// drains in the background through the transmit interrupt

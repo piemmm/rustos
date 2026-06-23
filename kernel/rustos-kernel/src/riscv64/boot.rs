@@ -229,24 +229,48 @@ impl KernelArch for RiscvBinArch {
     }
 
     fn wait_for_interrupt(&self) {
-        // The tickless idle wait (`AGENTS.md` §17.1): the S-mode dispatch
-        // loop runs with `sstatus.SIE == 0` (the kernel is non-preemptible,
-        // §4), so a wake delivered between the loop's `step` and here stays
-        // *pending* rather than being taken, and no edge is lost (the
-        // race-free park, §2.1). `idle_wait` `wfi`s on that pending-but-
-        // untaken interrupt, briefly enables `sstatus.SIE` so the
-        // timer/PLIC handler is taken (unparking a waiter), then clears
-        // `SIE` to restore the masked loop invariant before returning. On a
-        // host build there is no S-mode, so this is a benign no-op.
+        // The tickless idle park (`AGENTS.md` §17.1). The dispatch loop
+        // calls this with `sstatus.SIE` already cleared (it masked S-mode
+        // interrupts to close the park/wake race and drained any
+        // already-flagged wake), so `wfi` parks the hart until an interrupt
+        // becomes pending — it wakes on a pending-but-untaken interrupt
+        // even with `SIE == 0`, so no edge is lost (§2.1). The loop
+        // re-enables interrupts after we return, *taking* the pending one
+        // then (its lock-free handler flags the deferred wake the next
+        // `drain_pending_wakes` consumes). On a host build there is no
+        // S-mode, so this is a benign no-op.
         #[cfg(all(freestanding, kernel_isa = "riscv64"))]
         {
             // SAFETY: the trap vector is installed (`enable_mmu_and_vectors`)
-            // and the timer source armed by this point, and the dispatch
-            // loop holds `sstatus.SIE` clear on entry, exactly `idle_wait`'s
-            // contract.
+            // and the timer source armed by this point; `wfi` parks until a
+            // pending interrupt and leaves `sstatus.SIE` unchanged (masked).
             unsafe {
-                trap::idle_wait();
+                trap::wait_for_interrupt();
             }
+        }
+    }
+
+    fn set_device_irqs(&self, enabled: bool) {
+        // Toggle this hart's S-mode interrupt taking (`sstatus.SIE`) so the
+        // dispatch loop runs in-kernel tasks/kthreads with interrupts
+        // enabled (`AGENTS.md` §17.1 — the fully preemptive kernel), masking
+        // them only around the idle park and before halt. Enabling `SIE` in
+        // S-mode is safe: a timer tick taken in S-mode runs lock-free
+        // accounting but never reschedules the kernel (the trap handler
+        // gates preemption on the saved `SPP`, §4), and a PLIC external
+        // interrupt forwards to the lock-free dispatcher. On a host build
+        // there is no S-mode, so this is a benign no-op.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            // SAFETY: toggles only `sstatus.SIE`; the trap vector is
+            // installed by the time the dispatch loop runs.
+            unsafe {
+                trap::set_supervisor_interrupts(enabled);
+            }
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+        {
+            let _ = enabled;
         }
     }
 

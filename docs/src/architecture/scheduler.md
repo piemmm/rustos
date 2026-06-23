@@ -321,15 +321,28 @@ and re-arms the one-shot to the next deadline. `set_wakeup` defaults to a
 no-op, so the host `TestArch` and any non-preemptive port inherit the
 explicit-wake path only.
 
+The dispatch loop runs with **device interrupts enabled** — RustOS is a
+fully preemptive kernel (`AGENTS.md` §17.1). `admit_init` calls
+[`KernelArch::set_device_irqs(true)`] once before steady-state dispatching,
+so every in-kernel task and kthread it runs executes with interrupts
+deliverable: a long in-kernel operation can no longer mask interrupts for
+its whole span and starve the preemption one-shot, the buffered-serial
+transmit drain (§20), or an interrupt-driven waiter. The kernel stays
+**non-preemptible** (§4): a device IRQ taken while an in-kernel task runs
+services its source and returns to the *same* task; only a timer tick taken
+from EL0/U-mode/ring 3 reschedules (each port gates preemption on the
+interrupted privilege).
+
 The idle CPU itself sleeps through [`KernelArch::wait_for_interrupt`]: when
 the dispatch loop finds no runnable task but a live task is still parked
 (e.g. a perpetual service blocked in a blocking-wait syscall), the loop
-parks the CPU on the port's race-free idle wait (`wfi` on aarch64/riscv64,
-`sti; hlt; cli` on x86_64) rather than halting, so the armed wakeup one-shot
-or a device IRQ wakes a waiter and the loop re-steps and dispatches it. The
-dispatch loop runs with interrupts masked (the kernel is non-preemptible,
-§4), so a wake delivered between `step` and the idle wait stays pending and
-no edge is lost. PID 1 `init` now launches the perpetual
+masks device interrupts, drains any pending wake once more, and — if nothing
+became runnable — parks the CPU on the port's race-free idle wait (`wfi` on
+aarch64/riscv64, `sti; hlt; cli` on x86_64) rather than halting, then
+re-enables interrupts; the armed wakeup one-shot or a device IRQ wakes a
+waiter and the loop re-steps and dispatches it. Masking across the park and
+draining before the `wfi`/`hlt` closes the park/wake race, so no edge is
+lost. PID 1 `init` now launches the perpetual
 `/System/Services/devmgr` service (a `service` directive in its startup
 config, supervised alongside the per-console login sessions), which reads
 the discovered hardware tree and parks in `hw_tree_wait` for the life of
@@ -360,16 +373,23 @@ An ISR-driven `step` would deadlock against the same CPU's in-
 progress `spawn` (writer-held registry lock) or a mid-
 `drain_overflow_to` (held overflow lock).
 
-The cooperative `step` loop — driven by every CPU's kernel-thread
-context — remains the only writer of run-queue state. The ISR's
-job today is purely observational: bump the counter, return, EOI.
-The integration test's per-CPU `preemption_count >= N` assertion
-is what proves the timer is actually firing on every CPU.
-
-A future commit that lands IRQ-safe locks (an `irq::SpinLock` from
-`lib/sync`, plus an IRQ-safe `RwLock`) can extend
-`on_timer_tick` to drive a real preemption step without changing
-its public signature.
+The dispatcher (running in kernel-thread context with device interrupts
+enabled) remains the only writer of run-queue state. An interrupt handler
+**never** takes a scheduler lock: it does its work lock-free and, when it
+needs to wake a waiter, only sets an atomic flag
+(`WaitQueue::request_wake` / the `timed_wake_sweep` pending bit), mirroring
+`rustos_kernel_irq::IrqTable::fire`. The real `unpark` — which reads the
+registry `RwLock` and the run-queue lock — runs at the next
+dispatcher-context safe point (`waitq::drain_pending_wakes`, between steps
+and before idle), so the scheduler's locks are never acquired with
+interrupts disabled and an ISR can never deadlock against an in-progress
+`spawn` / `dispatch` on the interrupted task. A woken task cannot run until
+the current in-kernel task yields anyway (the kernel is non-preemptible),
+so deferring the unpark to that point costs no responsiveness. Involuntary
+preemption of a *user* task is the separate privilege-gated path: a timer
+tick taken from EL0/U-mode/ring 3 suspends the running user task back to the
+scheduler via the port's preempt callback. The integration test's per-CPU
+`preemption_count >= N` assertion proves the timer is firing on every CPU.
 
 #### Trait neutrality
 
@@ -387,8 +407,12 @@ primitive is `kernel/core::waitq::WaitQueue`: a waiter registers (with an
 optional absolute monotonic-ns deadline), then suspends with
 `RescheduleAction::Park`; it is woken either by an **explicit event**
 (`WaitQueue::wake_all`) or, with a deadline, by the **timed sweep**
-(`WaitQueue::sweep`, driven from the arch timer ISR's per-tick sweep and the
-`set_wakeup` one-shot above). The first consumer is the `hw_tree_wait`
+(`WaitQueue::sweep`). An interrupt-reachable wake never touches the
+wait-queue or scheduler locks: the device-IRQ dispatcher and the timer
+one-shot only flag a pending wake (`WaitQueue::request_wake` /
+`timed_wake_sweep`), and the actual `wake_all` / deadline sweep + `unpark`
+runs at the next dispatcher-context `waitq::drain_pending_wakes` (between
+scheduler steps and before idle). The first consumer is the `hw_tree_wait`
 syscall, whose waiters `HW_TREE_WAITQ` holds and the discovered-hardware
 store wakes on every generation bump (`AGENTS.md` §18.4). Waking a parked
 waiter, reading the clock, and arming the one-shot all route through one

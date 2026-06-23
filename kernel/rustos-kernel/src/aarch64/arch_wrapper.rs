@@ -105,86 +105,68 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn wait_for_interrupt(&self) {
-        // The tickless idle wait (`AGENTS.md` §17.1): the EL1 dispatch loop
-        // runs with IRQs masked (the kernel is non-preemptible, §4 — every
-        // return into the loop is via an exception that masked `DAIF.I`),
-        // so a wake delivered between the loop's `step` and here stays
-        // *pending* rather than being taken, and no edge is lost (the
-        // race-free park, §2.1). `wfi` wakes on that pending-but-masked
-        // interrupt; `enable_irq` then lets it actually be taken, running
-        // the timer/device ISR that unparks a waiter; `mask_irq` restores
-        // the masked loop invariant before returning so the loop re-steps
-        // and dispatches the now-runnable task. On a host build there is no
-        // EL1, so this is a benign no-op (the loop re-steps immediately).
+        // The tickless idle park (`AGENTS.md` §17.1). The dispatch loop
+        // calls this with device IRQs already **masked** (it masked them to
+        // close the park/wake race and drained any already-flagged wake), so
+        // `wfi` parks the CPU until an interrupt becomes pending — it wakes
+        // on a *pending-but-masked* interrupt, so an edge that asserts after
+        // the drain but before this call is not lost (§2.1). The loop
+        // re-enables IRQs after we return, *taking* the pending interrupt
+        // then (its lock-free handler flags the deferred wake the next
+        // `drain_pending_wakes` consumes). On a host build there is no EL1,
+        // so this is a benign no-op (the loop re-steps immediately).
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             use rustos_arch_aarch64::exceptions;
             // Top up the transmit FIFO from the buffered serial ring before
             // sleeping — **non-blocking**: push only what the FIFO accepts
-            // now and arm the console transmit interrupt to the rest
+            // now and arm the console transmit interrupt for the rest
             // (`serial::pump_tx`), never a per-byte spin (`AGENTS.md` §2.16 /
-            // §20). The backlog then drains in the background: `wfi` is woken
-            // by that transmit interrupt the moment the FIFO has room, the
-            // `enable_irq` below takes it, and `serial::service_uart_tx_irq`
-            // refills the FIFO — so a queued backlog flows at the UART's real
-            // rate with the CPU asleep between refills, then tickless idle
-            // resumes once it drains (`AGENTS.md` §17.1). An earlier revision
-            // instead blocked the CPU draining the ring byte-by-byte here
-            // (and refused to `wfi` while a backlog remained); on this
-            // cooperative, single-CPU boot that busy-wait at the UART's byte
-            // rate starved real work — the lethargy this replaces. Logging
-            // must never block the CPU.
+            // §20). Arming `TXIM` is what makes the transmit interrupt the
+            // event that wakes this `wfi`: once the loop re-enables IRQs the
+            // transmit ISR refills the FIFO, so a queued backlog flows at the
+            // UART's real rate with the CPU asleep between refills, then
+            // tickless idle resumes once it drains.
             serial::pump_tx();
-            // SAFETY: `wfi`/`enable_irq`/`mask_irq` are the documented
-            // race-free idle-wait sequence; the vector table and the GICv2
-            // are installed by this point (`install_irq_dispatch` ran), so a
-            // taken interrupt — including the UART transmit interrupt that
-            // drains buffered output — dispatches through a valid handler,
-            // and the sequence leaves IRQs masked exactly as it found them.
+            // SAFETY: `wfi` parks until a pending interrupt and has no other
+            // architectural effect; it is called with `DAIF.I` masked, where
+            // it still wakes on a pending-but-masked interrupt. The loop
+            // re-enables IRQs (`set_device_irqs(true)`) after we return, so
+            // the interrupt is taken then. The mask state is left exactly as
+            // found (masked).
             unsafe {
                 exceptions::wait_for_interrupt();
-                exceptions::enable_irq();
-                exceptions::mask_irq();
             }
         }
     }
 
-    fn poll_interrupts(&self) {
-        // The dispatch-loop interrupt poll point (`AGENTS.md` §4 / §7):
-        // briefly clear the PE IRQ mask so a device interrupt that asserted
-        // while the loop ran a task with `DAIF.I` set is *taken* now — its
-        // handler runs in EL1 (`CUR_SPX_IRQ`), and a device IRQ never
-        // preempts the kernel there (only a timer tick from EL0 does), so
-        // the current task is not switched away (`exceptions::handle_irq`).
-        // The `isb` after the unmask is a context-synchronisation barrier
-        // so a pending interrupt is taken before the re-mask, closing the
-        // window deterministically; the re-mask restores the loop's
-        // non-preemptible invariant exactly as it was found. On a host
-        // build there is no EL1, so this is a benign no-op.
+    fn set_device_irqs(&self, enabled: bool) {
+        // Toggle this CPU's PE-level IRQ taking (`DAIF.I`) so the dispatch
+        // loop runs in-kernel tasks/kthreads with device interrupts enabled
+        // (`AGENTS.md` §17.1 — the fully preemptive kernel), and masks them
+        // only around the idle park and before halt. On a host build there
+        // is no `DAIF`, so this is a benign no-op.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             use rustos_arch_aarch64::exceptions;
-            // SAFETY: `enable_irq`/`mask_irq` only toggle `DAIF.I`, and the
-            // vector table + GICv2 are installed by this point
-            // (`install_irq_dispatch` ran), so a taken interrupt dispatches
-            // through a valid EL1 handler that returns here; the `isb`
-            // (context synchronisation) has no architectural side effect
-            // beyond ordering the unmask before the taken interrupt. The
-            // sequence leaves IRQs masked exactly as it found them.
+            // SAFETY: `enable_irq`/`mask_irq` only toggle `DAIF.I`; the
+            // vector table + GICv2 are installed by the time the dispatch
+            // loop runs (`install_irq_dispatch` ran in the boot `irq`
+            // phase), so a taken interrupt dispatches through a valid EL1
+            // handler. A device IRQ taken in EL1 services its source and
+            // returns without rescheduling the current task (the kernel is
+            // non-preemptible, §4); only the EL0 timer tick preempts.
             unsafe {
-                exceptions::enable_irq();
-                core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
-                exceptions::mask_irq();
+                if enabled {
+                    exceptions::enable_irq();
+                } else {
+                    exceptions::mask_irq();
+                }
             }
-            // Top up the transmit FIFO from the buffered serial ring on the
-            // busy dispatch path too, not only at idle — **non-blocking**
-            // (`serial::pump_tx`: push what the FIFO accepts now, arm the
-            // transmit interrupt for the rest, never a per-byte spin). The
-            // `enable_irq` above already lets the console transmit ISR run
-            // and refill the FIFO; this is the belt-and-suspenders top-up
-            // that keeps forward progress without ever blocking the loop on
-            // the slow UART (`AGENTS.md` §2.16).
-            serial::pump_tx();
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            let _ = enabled;
         }
     }
 

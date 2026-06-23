@@ -1640,56 +1640,61 @@ order (one fully-gated increment each):
                    uses busy self-terminating witnesses per CPU to drive each CPU's
                    one-shot to its per-CPU preemption threshold under contention.
                - **P-5 — fully-preemptive kernel: no cooperative dispatch loop
-                 (IMMEDIATE — `AGENTS.md` §17.1, 2026-06-23 amendment).** P-4
-                 made the *timer* tickless and one-shot, but the bare-metal EL1
-                 dispatch loop still runs every task/kthread with `DAIF.I`
-                 **masked** for the whole span the task executes, taking device
-                 interrupts only at voluntary yield/poll points
-                 (`poll_interrupts`, the idle `wfi`). That is the cooperative
-                 model §17.1 now forbids, and it is the structural cause of the
-                 long serial-stall saga: on a real Pi 4 a single in-kernel
-                 `pcie_brcm` inbound/outbound MISC read-back stalls ~4.3 s with
-                 IRQs masked, and because the loop is effectively single-CPU and
-                 cooperative, *nothing else runs* during it — not the preemption
-                 one-shot, not the buffered serial drain (§20), not the keyboard
-                 report pump or `login` — so the system "grinds to a halt" and
-                 buffered output dribbles one FIFO-load per incidental yield. The
-                 buffered-serial work (the ring + TX-interrupt drain) treated the
-                 symptom; this removes the cause.
-                 - **Deliverable:** EL1 (and the equivalent S-mode/M-mode loops)
-                   run in-kernel tasks with **device interrupts enabled**, so the
-                   preemption one-shot and every device IRQ (the console TX drain
-                   included) are *taken promptly while in-kernel code runs*, not
-                   deferred to a yield. Non-preemptibility (§4 — a held lock / an
-                   in-flight syscall is never abandoned) is enforced **narrowly**:
-                   mask IRQs only around the genuine critical section
-                   (run-queue/context-switch window, a held `lib/sync` lock), not
-                   across a whole task run. A device IRQ taken mid-task services
-                   its source and returns to the same task without rescheduling
-                   it; only the timer-driven EL0 preemption point (P-4)
-                   reschedules.
-                 - **Lock-discipline audit (the risk):** with IRQs enabled during
-                   EL1 execution an interrupt handler must never deadlock against
-                   a `lib/sync` lock the interrupted task holds. Audit every
-                   device-IRQ handler (`dispatch_device_irq` → `kernel/irq`
-                   mask-before-wake, the timer/IPI paths, the serial TX ISR — the
-                   serial ring is already a re-entrant-safe try-lock) and either
-                   make it IRQ-safe or mask that specific IRQ across the matching
-                   critical section. This is the largest part and must be done
-                   honestly, not by re-masking globally "for now" (§2.19).
-                 - **Once preemptive, retire the symptom-level scaffolding** that
-                   only existed to fight the cooperative loop, if it is then dead
-                   (§2.14): the dispatch-loop `pump_tx` top-ups become belt-and-
-                   suspenders behind a genuinely background TX drain, and the slow
-                   debug-only `pcie_brcm` MISC read-backs (`4111`/`4119`/`4120`)
-                   — pure bring-up diagnostics that no longer freeze anything —
-                   are candidates to delete once bring-up stays confirmed.
-                 - **Proof:** the §17.1 conformance vertical (a CPU-bound EL0 task
-                   that never yields is involuntarily preempted) already passes in
-                   QEMU; P-5 adds the in-kernel case (a long in-kernel operation
-                   does not block device-IRQ delivery — serial keeps flowing, the
-                   keyboard pump keeps draining) and is re-confirmed on metal
-                   (§0.9): boot stays responsive *through* the slow PCIe read-back.
+                 — DONE (host + all QEMU verticals green; metal re-confirmation +
+                 a dedicated in-kernel vertical pending).** The bare-metal
+                 dispatch loop no longer runs in-kernel tasks/kthreads with device
+                 interrupts masked (the cooperative model §17.1 forbids, and the
+                 structural cause of the serial-stall saga). Shape as built:
+                 - **Loop runs with device IRQs enabled.** `kernel/core`'s
+                   `admit_init` dispatch loop calls the new
+                   `KernelArch::set_device_irqs(true)` once before steady-state
+                   dispatching, so every in-kernel task/kthread it runs executes
+                   with interrupts deliverable — a long in-kernel operation (the
+                   `pcie_brcm` MISC read-back, a busy driver poll) can no longer
+                   mask interrupts for its whole span and starve the preemption
+                   one-shot, the buffered-serial TX drain (§20), or an
+                   interrupt-driven waiter. The loop masks only around the idle
+                   park (race-free: mask → drain → `wfi`/`hlt` → unmask) and
+                   before halt. Each port backs `set_device_irqs` with its PE-level
+                   primitive (`DAIF.I` / `sstatus.SIE` / `RFLAGS.IF`); the idle
+                   `wait_for_interrupt` is a pure `wfi` (aarch64/riscv64) or the
+                   atomic `sti;hlt;cli` (x86_64, since `hlt` needs `IF=1`).
+                 - **Non-preemptible kernel preserved (§4).** A device IRQ taken
+                   while an in-kernel task runs services its source and returns to
+                   the *same* task; only a timer tick taken from EL0/U-mode/ring 3
+                   reschedules — every port already gates preemption on the
+                   interrupted privilege (`from_el0` / saved `SPP` / `cs_is_ring3`),
+                   so enabling interrupts in EL1/S-mode/ring 0 never preempts the
+                   kernel itself.
+                 - **Lock-discipline: ISR handlers are lock-free; the unpark is
+                   deferred (operator-approved design).** Rather than make the
+                   scheduler's locks IRQ-safe (an IRQ-safe `RwLock` + IRQ-off on
+                   the hottest scheduler path, §2.16), the interrupt-reachable
+                   wakes (`console_wake`, `irq_wake`, `timed_wake_sweep`) are now
+                   **lock-free**: each only sets an atomic flag
+                   (`WaitQueue::request_wake` / `TIMED_SWEEP_PENDING`, mirroring
+                   `IrqTable::fire`). The real `WaitQueue::wake_all` / deadline
+                   sweep + scheduler `unpark` runs at a safe dispatcher-context
+                   point (`waitq::drain_pending_wakes`, called between steps and
+                   before idle), where taking the scheduler/run-queue locks cannot
+                   deadlock against an interrupted task. A woken task cannot run
+                   until the current in-kernel task yields anyway (§4), so
+                   deferring the unpark costs no responsiveness. No scheduler lock
+                   is ever taken with interrupts disabled.
+                 - **Validation:** `kernel/core` host tests (incl. new
+                   `waitq::request_wake*` cases), all three bare-metal targets
+                   build, and the full `cargo xtask test --qemu` matrix passes
+                   (devmgr park/wake, `wait`, `irq`, `uart-console`,
+                   `root-unlock-login`, `preempt_el0` on every arch).
+                 - **Remaining:** (a) a dedicated QEMU vertical that proves the
+                   in-kernel case directly — a long in-kernel kthread observes a
+                   timer/device IRQ fire *during* its busy span; (b) metal
+                   re-confirmation on a real Pi 4 that boot stays responsive
+                   through the slow PCIe read-back (§0.9); (c) once metal-confirmed
+                   good, deleting the debug-only `pcie_brcm` MISC read-backs
+                   (`4111`/`4119`/`4120`) they no longer freeze anything (§2.14).
+                   The dispatch-loop `pump_tx` idle top-up stays (it arms `TXIM`
+                   so the background TX ISR is the event that wakes the park).
                Then the original D2b-2b tail continues: the `CallEndpoint`-served
                `/System` file-read request loop on the parked store-service
                kthread + `driver_store_load`, delete the in-kernel single-pass

@@ -34,6 +34,7 @@
 //! leaves the explicit-wake / timed-wake helpers as fail-safe no-ops.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_kernel_sched_api::{CpuId, TaskId};
 use rustos_sync::once::OnceCell;
@@ -98,6 +99,24 @@ struct Waiter {
 /// (`AGENTS.md` §2.2).
 pub struct WaitQueue {
     waiters: SpinLock<Vec<Waiter>>,
+    /// Lock-free "an explicit wake was requested for this queue" flag.
+    ///
+    /// A wake delivered from **interrupt context** (a device-IRQ
+    /// dispatcher, the timer ISR's sweep) must never take a lock a
+    /// task interrupted on this CPU may already hold — the fully
+    /// preemptive kernel runs in-kernel tasks with device IRQs enabled
+    /// (`AGENTS.md` §17.1), so an ISR can fire while a task is inside
+    /// [`Self::register`]. [`Self::request_wake`] therefore only sets
+    /// this single atomic (it takes no lock and never blocks, exactly
+    /// like `rustos_kernel_irq::IrqTable::fire`); the real
+    /// [`Self::wake_all`] — which collects waiter ids under the lock and
+    /// then calls the scheduler's `unpark` — runs later at a safe
+    /// dispatcher-context point via [`drain_pending_wakes`]. A woken
+    /// task cannot run until the current in-kernel task yields anyway
+    /// (the kernel is non-preemptible, §4), so deferring the *unpark* to
+    /// that yield point costs no responsiveness while keeping every ISR
+    /// lock-free.
+    wake_pending: AtomicBool,
 }
 
 impl WaitQueue {
@@ -107,7 +126,29 @@ impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             waiters: SpinLock::new(Vec::new()),
+            wake_pending: AtomicBool::new(false),
         }
+    }
+
+    /// Request an explicit wake of every waiter **from any context,
+    /// including an interrupt handler**, without taking the wait-queue
+    /// lock or the scheduler's locks.
+    ///
+    /// Lock-free: it only sets the `wake_pending` flag. The
+    /// actual `unpark` is performed later by [`drain_pending_wakes`] in
+    /// dispatcher context (`AGENTS.md` §17.1 — ISRs stay lock-free; the
+    /// scheduler is never locked with IRQs disabled). `Release` so the
+    /// data the wake advertises (a byte pushed to a console queue, an
+    /// `IrqTable` ready flag) is visible before the flag the drain
+    /// observes with `Acquire`.
+    pub fn request_wake(&self) {
+        self.wake_pending.store(true, Ordering::Release);
+    }
+
+    /// Consume a pending wake request, returning whether one was set.
+    /// `AcqRel` pairs with [`Self::request_wake`]'s `Release`.
+    fn take_wake_pending(&self) -> bool {
+        self.wake_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Register `task` as waiting, with an absolute monotonic-ns
@@ -252,14 +293,18 @@ pub fn serve_wake() {
 /// `hw_tree_wait` use).
 pub static CONSOLE_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake every parked console reader because input was pushed to a
-/// keyboard-backed console's input queue; each re-polls its device and
-/// either returns the bytes or parks again. A fail-safe no-op before the
-/// arch hook is installed (`AGENTS.md` §2.9).
+/// Request a wake of every parked console reader because input was pushed
+/// to a keyboard-backed console's input queue.
+///
+/// Called from the UART receive ISR (interrupt context) as well as the
+/// input-focus arbiter (task context), so it is **lock-free**: it only
+/// flags the queue ([`WaitQueue::request_wake`]); the real `unpark` runs
+/// at the next dispatcher-context [`drain_pending_wakes`]. The woken
+/// reader cannot run until the current in-kernel task yields anyway (the
+/// kernel is non-preemptible, `AGENTS.md` §4), so deferring the unpark to
+/// that point keeps the ISR lock-free without delaying delivery.
 pub fn console_wake() {
-    if let Some(arch) = wait_arch() {
-        CONSOLE_WAITQ.wake_all(arch);
-    }
+    CONSOLE_WAITQ.request_wake();
 }
 
 /// The wait-queue holding `wait` (process-reap) callers blocked on a child
@@ -296,24 +341,24 @@ pub fn procwait_wake() {
 /// scheduler's wake-pending token (the same interlock `hw_tree_wait` uses).
 pub static IRQ_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake every parked `irq_wait` caller because a bound IRQ line fired; each
-/// re-checks its own line and either returns [`Ready`] or parks again. A
-/// fail-safe no-op before the arch hook is installed (`AGENTS.md` §2.9).
+/// Request a wake of every parked `irq_wait` caller because a bound IRQ
+/// line fired; each woken waiter re-checks its own line and either returns
+/// [`Ready`] or parks again, so a fire for a different line is a harmless
+/// spurious wake (`AGENTS.md` §2.16).
 ///
 /// Called from the production device-IRQ dispatch path immediately after
-/// [`rustos_kernel_irq::IrqTable::fire`] sets the per-line ready flag
-/// (mask-before-wake is preserved: `fire` masks the line and sets `ready`
-/// *before* this wake, so a woken waiter that consumes `ready` observes the
-/// mask). Safe from interrupt context: [`WaitQueue::wake_all`] collects the
-/// waiter ids under a short spin-lock, releases it, then `unpark`s — it
-/// takes no scheduler lock while holding the wait-queue lock (`AGENTS.md`
-/// §2.1).
+/// [`rustos_kernel_irq::IrqTable::fire`] sets the per-line ready flag, so
+/// it is **lock-free**: it only flags the queue
+/// ([`WaitQueue::request_wake`]) and is safe to call from the device-IRQ
+/// dispatcher while a task it interrupted holds the wait-queue or
+/// scheduler locks (`AGENTS.md` §17.1). The real `unpark` runs at the next
+/// dispatcher-context [`drain_pending_wakes`]; mask-before-wake still holds
+/// because `fire` masked the line and set `ready` *before* this flag, and
+/// the drain's `unpark` re-readies the waiter that then consumes `ready`.
 ///
 /// [`Ready`]: rustos_kernel_irq::WaitOutcome::Ready
 pub fn irq_wake() {
-    if let Some(arch) = wait_arch() {
-        IRQ_WAITQ.wake_all(arch);
-    }
+    IRQ_WAITQ.request_wake();
 }
 
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
@@ -377,24 +422,76 @@ pub fn call_wake() {
     }
 }
 
-/// Release any timed waiters whose deadline has elapsed and re-arm the
-/// one-shot to the next pending deadline. Called from the arch timer ISR's
-/// per-tick sweep (every tick, EL0 or idle EL1) so a finite-timeout wait is
-/// honoured even when the CPU has no runnable task to preempt (`AGENTS.md`
-/// §17.1). A fail-safe no-op before the arch hook is installed.
+/// Lock-free "the timed-wake one-shot fired and a deadline sweep is owed"
+/// flag, set by [`timed_wake_sweep`] in the timer ISR and consumed by
+/// [`drain_pending_wakes`] in dispatcher context (`AGENTS.md` §17.1 — the
+/// ISR stays lock-free; the scheduler's `unpark` runs at a safe point).
+static TIMED_SWEEP_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Request a timed-wake sweep because the architecture one-shot fired.
+///
+/// Called from the arch timer ISR (every armed one-shot expiry) so a
+/// finite-timeout wait is honoured even when the CPU has no runnable task
+/// to preempt (`AGENTS.md` §17.1). **Lock-free**: it only sets
+/// `TIMED_SWEEP_PENDING`; the real per-queue [`WaitQueue::sweep`] +
+/// `unpark` + one-shot re-arm runs at the next dispatcher-context
+/// [`drain_pending_wakes`], never in the ISR (which must not take the
+/// wait-queue or scheduler locks a task it interrupted may hold).
 pub fn timed_wake_sweep() {
-    if let Some(arch) = wait_arch() {
-        let now = arch.now_ns();
-        HW_TREE_WAITQ.sweep(arch, now);
-        IRQ_WAITQ.sweep(arch, now);
-        CONSOLE_WAITQ.sweep(arch, now);
-        USERS_DB_WAITQ.sweep(arch, now);
-        // Re-arm to the soonest pending deadline across *every* timed
-        // wait-queue, so no finite timeout is dropped because another queue
-        // armed a later one-shot (`AGENTS.md` §17.1 — the nearest armed
-        // wakeup).
-        arch.set_wakeup(nearest_timed_deadline());
+    TIMED_SWEEP_PENDING.store(true, Ordering::Release);
+}
+
+/// Perform the actual deadline sweep across every timed wait-queue and
+/// re-arm the one-shot to the next pending deadline. Runs only in
+/// dispatcher context, out of [`drain_pending_wakes`].
+fn run_timed_sweep(arch: &dyn WaitQueueArch) {
+    let now = arch.now_ns();
+    HW_TREE_WAITQ.sweep(arch, now);
+    IRQ_WAITQ.sweep(arch, now);
+    CONSOLE_WAITQ.sweep(arch, now);
+    USERS_DB_WAITQ.sweep(arch, now);
+    // Re-arm to the soonest pending deadline across *every* timed
+    // wait-queue, so no finite timeout is dropped because another queue
+    // armed a later one-shot (`AGENTS.md` §17.1 — the nearest armed
+    // wakeup).
+    arch.set_wakeup(nearest_timed_deadline());
+}
+
+/// Perform every wake the interrupt handlers deferred, at a safe
+/// dispatcher-context point.
+///
+/// The fully preemptive kernel runs in-kernel tasks with device IRQs
+/// enabled (`AGENTS.md` §17.1), so an ISR must never take the wait-queue
+/// or scheduler locks a task it interrupted may hold. Instead the ISR
+/// flags a pending wake ([`WaitQueue::request_wake`] / [`timed_wake_sweep`])
+/// and the dispatch loop calls this between scheduler steps and before it
+/// idles, where taking those locks is safe. It performs the real
+/// [`WaitQueue::wake_all`] for every edge-flagged queue and the deadline
+/// `run_timed_sweep`, unparking the affected tasks.
+///
+/// Returns `true` if any wake was owed (a task may now be runnable), so
+/// the caller re-steps the scheduler rather than idling. A fail-safe
+/// no-op before the arch hook is installed (`AGENTS.md` §2.9).
+pub fn drain_pending_wakes() -> bool {
+    let Some(arch) = wait_arch() else {
+        return false;
+    };
+    let mut woke = false;
+    // Edge wakes flagged from interrupt context (device IRQ, UART receive).
+    if CONSOLE_WAITQ.take_wake_pending() {
+        CONSOLE_WAITQ.wake_all(arch);
+        woke = true;
     }
+    if IRQ_WAITQ.take_wake_pending() {
+        IRQ_WAITQ.wake_all(arch);
+        woke = true;
+    }
+    // Deadline sweep flagged by the timer one-shot.
+    if TIMED_SWEEP_PENDING.swap(false, Ordering::AcqRel) {
+        run_timed_sweep(arch);
+        woke = true;
+    }
+    woke
 }
 
 /// The soonest finite deadline pending across **every** timed wait-queue
@@ -533,5 +630,43 @@ mod tests {
         arch.set_wakeup(None);
         assert_eq!(*arch.last_wakeup.borrow(), None);
         assert_eq!(*arch.wakeup_calls.borrow(), 2);
+    }
+
+    #[test]
+    fn request_wake_is_a_lock_free_one_shot_flag() {
+        // The interrupt-context wake request sets a flag without touching
+        // the waiter lock; the dispatcher consumes it exactly once
+        // (`AGENTS.md` §17.1 — the ISR is lock-free, the unpark deferred).
+        let q = WaitQueue::new();
+        assert!(!q.take_wake_pending(), "fresh queue owes no wake");
+        q.request_wake();
+        // Idempotent set: a second request before a drain does not stack.
+        q.request_wake();
+        assert!(q.take_wake_pending(), "the flagged wake is observed once");
+        assert!(
+            !q.take_wake_pending(),
+            "the flag is cleared by the consuming drain"
+        );
+    }
+
+    #[test]
+    fn request_wake_does_not_itself_unpark() {
+        // Requesting a wake only flags it; no waiter is unparked until a
+        // dispatcher-context drain runs `wake_all`. (Here we observe that
+        // `request_wake` performs no `unpark` by checking it leaves the
+        // waiter set untouched and only sets the flag.)
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(5, NO_DEADLINE);
+        q.request_wake();
+        assert!(
+            arch.unparked.borrow().is_empty(),
+            "the request defers the unpark"
+        );
+        // The deferred drain (modelled here by the take + wake_all the
+        // real `drain_pending_wakes` performs) does the actual unpark.
+        assert!(q.take_wake_pending());
+        q.wake_all(&arch);
+        assert_eq!(*arch.unparked.borrow(), alloc::vec![5]);
     }
 }

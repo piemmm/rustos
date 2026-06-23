@@ -219,11 +219,14 @@ Three implementations exist:
 * **`irq_wait` syscall handler** (`kernel/core::syscalls`): registers
   the caller on `rustos_kernel_core::IRQ_WAITQ` *before* the first
   poll, then **parks** off the run queue (`SyscallIrqWaiter` calls
-  `reschedule_current(Park)` — `AGENTS.md` §2.1, no busy yield). It is
-  woken by `irq_wake` the instant the device-IRQ dispatch path runs
-  `IrqTable::fire`, or, with a finite timeout, by the architecture
-  one-shot's per-tick `timed_wake_sweep`; it re-checks its own bound
-  line after every wake and deregisters when the wait ends. The
+  `reschedule_current(Park)` — `AGENTS.md` §2.1, no busy yield). The
+  device-IRQ dispatch path's `irq_wake` (after `IrqTable::fire`) and the
+  architecture one-shot's `timed_wake_sweep` are **lock-free**: they only
+  flag a pending wake on `IRQ_WAITQ`, and the actual `unpark` runs at the
+  next dispatcher-context `waitq::drain_pending_wakes` (the fully preemptive
+  kernel runs in-kernel code with device IRQs enabled, so an ISR must never
+  take the scheduler lock — `AGENTS.md` §17.1). The waiter re-checks its own
+  bound line after every wake and deregisters when the wait ends. The
   register-before-poll order plus the scheduler wake-pending token
   closes the park/unpark race, exactly as `hw_tree_wait` does
   (`AGENTS.md` §2.2). In host-side tests (no live dispatch loop)

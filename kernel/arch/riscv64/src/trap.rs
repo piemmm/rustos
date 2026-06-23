@@ -266,38 +266,63 @@ pub unsafe fn init_traps() {
     }
 }
 
-/// Park the hart on `wfi` until the next enabled interrupt, take it, then
-/// return with `sstatus.SIE` cleared — the tickless idle wait
-/// (`AGENTS.md` §17.1).
+/// Enable (`enabled = true`) or mask (`enabled = false`) S-mode interrupt
+/// taking on the calling hart by toggling `sstatus.SIE`.
 ///
-/// The S-mode dispatch loop runs with `sstatus.SIE == 0` (the kernel is
-/// non-preemptible, §4), so a supervisor interrupt that becomes pending
-/// between the loop's `step` and this call is **not taken** — it stays
-/// latched, and no edge is lost (the race-free park, §2.1). `wfi` wakes on
-/// that pending-but-untaken interrupt even with `SIE == 0`; setting
-/// `sstatus.SIE` then lets it actually be taken, running the timer/PLIC
-/// handler that unparks a waiter; clearing `SIE` again restores the
-/// non-preemptible idle-loop invariant before returning so the loop
-/// re-steps and dispatches the now-runnable task.
+/// This is the riscv64 backing of
+/// `rustos_kernel_core::KernelArch::set_device_irqs`: the scheduler
+/// dispatch loop enables S-mode interrupts so it runs every in-kernel
+/// task/kthread preemptively (`AGENTS.md` §17.1), and masks them only
+/// around the idle park and before halt. Enabling `sstatus.SIE` in S-mode
+/// is safe because [`rustos_riscv64_trap_handler`] gates preemption on the
+/// saved `SPP` — a timer tick taken in S-mode runs its (lock-free)
+/// accounting but never reschedules the kernel (§4), and a supervisor
+/// external interrupt forwards to the lock-free PLIC dispatcher.
 ///
 /// # Safety
 ///
-/// `wfi` is a hint with no architectural side effects, and toggling
-/// `sstatus.SIE` only changes the global interrupt-enable. The caller
-/// must hold `sstatus.SIE` clear on entry (the idle-loop invariant) and
-/// have installed the trap vector ([`init_traps`] / [`install_trap_vector`])
-/// and the timer source, so a taken interrupt dispatches through a valid
-/// handler.
+/// Toggling `sstatus.SIE` only changes the global S-mode interrupt-enable.
+/// The caller must have installed the trap vector ([`init_traps`] /
+/// [`install_trap_vector`]) before enabling, so a taken interrupt
+/// dispatches through a valid handler.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub unsafe fn idle_wait() {
-    // SAFETY: see the function contract — `wfi` suspends until a pending
-    // enabled interrupt, and the `csrs`/`csrc` pair briefly enables S-mode
-    // interrupt taking so the pending one is serviced, then restores
-    // `SIE == 0`. None has memory side effects beyond the named CSRs.
+pub unsafe fn set_supervisor_interrupts(enabled: bool) {
+    // SAFETY: `csrs`/`csrc sstatus` set/clear only `SSTATUS_SIE`, with no
+    // memory side effects beyond the named CSR.
+    unsafe {
+        if enabled {
+            core::arch::asm!("csrs sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
+        } else {
+            core::arch::asm!("csrc sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
+        }
+    }
+}
+
+/// Park the hart on `wfi` until the next interrupt becomes pending, then
+/// return with the interrupt-mask state unchanged — the tickless idle
+/// park (`AGENTS.md` §17.1).
+///
+/// The dispatch loop calls this with `sstatus.SIE` already cleared (it
+/// masked S-mode interrupts to close the park/wake race and drained any
+/// already-flagged wake). `wfi` wakes on a pending interrupt even with
+/// `SIE == 0`, so an edge that asserts after the drain but before this
+/// call is not lost (§2.1); the loop then re-enables interrupts
+/// ([`set_supervisor_interrupts`]), *taking* the pending one — its
+/// lock-free handler flags the deferred wake the next
+/// `drain_pending_wakes` consumes.
+///
+/// # Safety
+///
+/// `wfi` is a hint with no architectural side effects. The caller must
+/// have installed the trap vector ([`init_traps`] /
+/// [`install_trap_vector`]) and a timer source so an interrupt can become
+/// pending and wake the hart.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub unsafe fn wait_for_interrupt() {
+    // SAFETY: `wfi` suspends until a pending interrupt and has no memory
+    // side effects; it leaves `sstatus.SIE` unchanged (masked as found).
     unsafe {
         core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
-        core::arch::asm!("csrs sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
-        core::arch::asm!("csrc sstatus, {}", in(reg) SSTATUS_SIE, options(nomem, nostack));
     }
 }
 

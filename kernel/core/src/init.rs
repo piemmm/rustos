@@ -585,6 +585,19 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // method's contract); the `pre_resume` hook keeps the correct root
         // active across every later switch into a user kthread.
         let _ = task_id;
+        // Run the dispatch loop with device IRQs **enabled** so RustOS is
+        // fully preemptive (`AGENTS.md` §17.1): every in-kernel task and
+        // kthread the loop dispatches executes with interrupts deliverable,
+        // so a long in-kernel operation (a slow MMIO bring-up read, a busy
+        // driver poll) can no longer mask interrupts for its whole span and
+        // starve the preemption one-shot, the buffered-serial transmit
+        // drain (§20), or an interrupt-driven waiter — the cooperative
+        // dispatch loop §17.1 forbids. A device IRQ taken mid-task services
+        // its source and returns to the same task (the kernel stays
+        // non-preemptible, §4); its lock-free handler flags a deferred wake
+        // that `drain_pending_wakes` performs here, in dispatcher context,
+        // where taking the scheduler/run-queue locks is safe.
+        self.arch.set_device_irqs(true);
         loop {
             match self.scheduler.step(cpu) {
                 // A task ran. Keep dispatching while live tasks remain;
@@ -593,40 +606,45 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                     if self.scheduler.live_task_count() == 0 {
                         break;
                     }
-                    // Interrupt poll point (`AGENTS.md` §4 / §7): the loop
-                    // dispatched a runnable task with device IRQs masked
-                    // (the non-preemptible kernel runs `step` with the PE's
-                    // IRQ taking masked). Between steps — no kernel lock
-                    // held, no scheduler critical section in flight — open
-                    // the IRQ window so a device interrupt that asserted
-                    // while the loop was busy is *taken* and its handler
-                    // wakes the parked waiter (an interrupt-driven driver,
-                    // a `login` reader blocked on console input), rather
-                    // than waiting for the loop to quiesce to the idle
-                    // `wait_for_interrupt`. Without it, a perpetually
-                    // runnable task starves device-IRQ delivery — a
-                    // timing-dependent, flaky wake (§2.1 no busy-wait,
-                    // §17.1). A no-op on ports that need no poll point.
-                    self.arch.poll_interrupts();
+                    // Perform any wake a device-IRQ / timer handler deferred
+                    // while the task ran (the handler is lock-free and only
+                    // flagged the wake; the real `unpark` runs here — no
+                    // kernel lock held, no scheduler critical section in
+                    // flight, so the scheduler/run-queue locks are safe).
+                    let _ = crate::waitq::drain_pending_wakes();
                 }
                 // No runnable task this step. If every live task has
                 // exited, the system is finished — break so `kernel_main`
                 // halts fail-closed (`AGENTS.md` §2.9). Otherwise the live
                 // tasks are all **parked** (a perpetual service blocked in
                 // a blocking-wait syscall, e.g. `devmgr` on `hw_tree_wait`):
-                // sleep on the arch idle-wait until the next interrupt (the
-                // armed timed-wake one-shot or a device IRQ) wakes a waiter,
-                // then re-step and dispatch it — never busy-spin
-                // (`AGENTS.md` §2.1 / §17.1 tickless idle).
+                // park the CPU until the next interrupt, then re-step —
+                // never busy-spin (`AGENTS.md` §2.1 / §17.1 tickless idle).
                 Ok(StepOutcome::Idle) => {
                     if self.scheduler.live_task_count() == 0 {
                         break;
                     }
-                    self.arch.wait_for_interrupt();
+                    // Race-free park: mask device IRQs, then drain once more
+                    // so a wake a handler flagged just before we commit to
+                    // sleep is observed and re-dispatched rather than slept
+                    // through (`AGENTS.md` §2.1 — no lost wake-up). If
+                    // nothing became runnable, `wait_for_interrupt` parks on
+                    // a `wfi`-class instruction that still wakes on the
+                    // pending-but-masked interrupt; re-enabling IRQs then
+                    // *takes* it, its handler flags the wake, and the loop
+                    // re-steps and drains it.
+                    self.arch.set_device_irqs(false);
+                    if !crate::waitq::drain_pending_wakes() {
+                        self.arch.wait_for_interrupt();
+                    }
+                    self.arch.set_device_irqs(true);
                 }
                 Err(_) => break,
             }
         }
+        // Leave device IRQs masked before returning to `kernel_main`'s
+        // fail-closed halt: there is no dispatcher left to service them.
+        self.arch.set_device_irqs(false);
     }
 
     fn spawn_kernel_service(

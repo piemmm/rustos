@@ -207,20 +207,26 @@ pub trait KernelArch: SchedulerArch {
     /// wait*: when the dispatch loop finds no runnable task but live tasks
     /// are still **parked** (e.g. a perpetual service blocked in a
     /// blocking-wait syscall), the CPU sleeps on the lowest-power
-    /// wait-for-event instruction with interrupts **enabled** for the
-    /// duration of the wait, so the armed one-shot
-    /// ([`SchedulerArch::set_wakeup`]) or a device IRQ can fire, run its
-    /// handler (waking a parked waiter), and let this method return so the
-    /// loop re-steps and dispatches the now-runnable task (`AGENTS.md`
-    /// §17.1 tickless idle).
+    /// wait-for-event instruction until the armed one-shot
+    /// ([`SchedulerArch::set_wakeup`]) or a device IRQ fires.
+    ///
+    /// The loop calls this **with device IRQs masked** (it has just called
+    /// [`Self::set_device_irqs(false)`](Self::set_device_irqs) and drained
+    /// any already-flagged wake) to close the park/wake race: a `wfi`-class
+    /// instruction wakes on a *pending-but-masked* interrupt, so an IRQ that
+    /// asserts after the drain but before this call still wakes the CPU
+    /// rather than being lost (`AGENTS.md` §2.1 — no lost wake-up). The
+    /// loop then re-enables IRQs ([`Self::set_device_irqs(true)`](Self::set_device_irqs)),
+    /// at which point the pending interrupt is *taken* and its lock-free
+    /// handler flags the deferred wake the next
+    /// [`drain_pending_wakes`](crate::waitq::drain_pending_wakes) consumes.
     ///
     /// # Contract
     ///
-    /// * It **must** return after handling at least the next interrupt;
-    ///   it must never spin (`AGENTS.md` §2.1) or busy-wait.
-    /// * It must leave the CPU's interrupt-mask state as it found it once
-    ///   it returns, so the non-preemptible kernel dispatch loop it
-    ///   returns into is unchanged (`AGENTS.md` §4).
+    /// * It **must** return after the next interrupt becomes pending; it
+    ///   must never spin (`AGENTS.md` §2.1) or busy-wait.
+    /// * It must leave the CPU's interrupt-mask state exactly as it found
+    ///   it (masked) — re-enabling is the loop's job, not this method's.
     /// * It must never panic (`AGENTS.md` §2.9).
     ///
     /// # Default
@@ -233,48 +239,45 @@ pub trait KernelArch: SchedulerArch {
     /// return.
     fn wait_for_interrupt(&self) {}
 
-    /// Service any interrupt that is pending-but-masked, then return with
-    /// the interrupt-mask state unchanged.
+    /// Enable (`enabled = true`) or mask (`enabled = false`) device-IRQ
+    /// taking at the processing element for the calling CPU.
     ///
-    /// The dispatch loop is non-preemptible (`AGENTS.md` §4): every entry
-    /// into it is via an exception that masked the PE's IRQ taking, so the
-    /// loop runs its scheduler `step`s with device interrupts *masked*. A
-    /// device interrupt that asserts while the loop is busy dispatching
-    /// runnable tasks therefore stays pending and is only *taken* when the
-    /// loop next reaches the idle [`Self::wait_for_interrupt`]. When some
-    /// task is (even transiently) runnable on every `step`, that idle point
-    /// is never reached, and a parked driver waiting on its device line
-    /// (an interrupt-driven user-space driver, or a `login` reader blocked
-    /// on console input) is woken only when scheduling happens to quiesce —
-    /// a timing-dependent, flaky delivery (`AGENTS.md` §7 no flaky tests).
+    /// This is what makes RustOS a **fully preemptive** kernel
+    /// (`AGENTS.md` §17.1): the scheduler dispatch loop calls
+    /// `set_device_irqs(true)` once it begins steady-state dispatching, so
+    /// every in-kernel task and kthread it runs executes with device
+    /// interrupts *enabled*. A long in-kernel operation (a slow MMIO
+    /// bring-up read, a busy driver poll) can therefore no longer mask
+    /// interrupts for its whole span and starve the preemption one-shot,
+    /// the buffered-serial transmit drain (§20), or an interrupt-driven
+    /// waiter — the cooperative dispatch loop §17.1 forbids. A device IRQ
+    /// taken while an in-kernel task runs services its source and returns
+    /// to the *same* task without rescheduling it (the kernel stays
+    /// non-preemptible, §4; only the timer-driven EL0 preemption point
+    /// reschedules); its handler is lock-free and flags a deferred wake
+    /// (see [`drain_pending_wakes`](crate::waitq::drain_pending_wakes)),
+    /// so it can never deadlock against a lock the interrupted task holds.
     ///
-    /// This is the loop's **interrupt poll point**: called *between*
-    /// scheduler steps — with no kernel lock held and no scheduler critical
-    /// section in flight — it briefly opens the IRQ window so a
-    /// pending-but-masked device interrupt is taken and its handler runs
-    /// (waking the parked waiter), then restores the masked invariant. It
-    /// makes device-interrupt servicing independent of reaching idle, so a
-    /// busy run queue can never starve an interrupt-driven waiter.
+    /// The loop masks again around the idle park (see
+    /// [`Self::wait_for_interrupt`]) so the park/wake race is closed, and
+    /// before [`Self::halt`].
     ///
     /// # Contract
     ///
-    /// * It runs the pending interrupt's handler at most; it never blocks,
-    ///   spins (`AGENTS.md` §2.1), or context-switches the current task.
-    /// * It must leave the CPU's interrupt-mask state exactly as it found
-    ///   it, so the non-preemptible loop it returns into is unchanged
-    ///   (`AGENTS.md` §4).
+    /// * Toggles only this CPU's PE-level IRQ mask; it never touches the
+    ///   interrupt controller's per-line masks (those are the
+    ///   mask-before-wake contract, `docs/src/security/irq.md`).
     /// * It must never panic (`AGENTS.md` §2.9).
-    /// * The caller invokes it only between steps (no lock held), so the
-    ///   handler's waiter-wake (which takes the scheduler/run-queue lock)
-    ///   cannot deadlock against a lock the interrupted code holds.
     ///
     /// # Default
     ///
-    /// A no-op: a port whose dispatch loop does not run with device IRQs
-    /// masked (the `TestArch` mock, and ports that service device IRQs
-    /// during EL0/user execution without an EL1-masked window) needs no
-    /// poll point and inherits zero work (`AGENTS.md` §2.16).
-    fn poll_interrupts(&self) {}
+    /// A no-op: the `TestArch` mock and the `wasm32` port (which has no
+    /// asynchronous PE interrupt mask to toggle) inherit zero work; a real
+    /// bare-metal port overrides it with its `DAIF` / `sstatus.SIE` /
+    /// `RFLAGS.IF` primitive.
+    fn set_device_irqs(&self, enabled: bool) {
+        let _ = enabled;
+    }
 }
 
 /// IRQ routing handed from the architecture port to the kernel core
