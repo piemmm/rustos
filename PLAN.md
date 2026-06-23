@@ -2000,9 +2000,34 @@ order (one fully-gated increment each):
            (`bring_up_keyboard`/`KernelMailboxChannel`, §2.14/§2.17) — the
            prompt's "D5". The scaffold stays the live keyboard path until that
            flip.
-       - **D4 — user-space `pcie_brcm` + `bus_usb`/xhci** (emit children;
-         `bus_usb` handles port hotplug). Adds `hw_emit_node`/`hw_remove_node` +
-         `CAP_HW_EMIT` with these consumers.
+       - **D4 — recursive, user-space hardware discovery.**
+         - **D4-keystone — `hw_emit_node` + `CAP_HW_EMIT` — DONE (host-proven).**
+           The ABI+kernel mechanism a user-space bus driver uses to publish a
+           discovered child into the live hardware tree so `devmgr` autoloads
+           the matching driver in turn. `abi-v1` syscall **`hw_emit_node`**
+           (no. 37, gated on new **`CAP_HW_EMIT`** (27), audited) decodes the
+           emitted `HwNode` fail-closed and admits it **only** when every
+           requested `HwResource` is covered by one of the calling task's own
+           minted grants (`HwResource::covers` — the security spine, §4 no
+           ambient authority / §18.3), then appends it to `HwTreeStore` via the
+           new `HwTreeSource::publish`, bumping the generation that wakes the
+           reactive `devmgr` loop. Wired end to end: `rustos_rt::hw_emit_node`,
+           `RtDriverHost::emit_node` (over the `GrantSyscalls` seam),
+           `ros_sys_hw_emit_node` C stub + regenerated header. Host-tested
+           (`covers` accept/reject per kind; kernel handler no-store / wrong-len
+           / uncovered→`PermissionDenied` / covered→published; drvrt
+           `emit_node` forward + refusal). The bootstrap floor (§18.6) seeds
+           only the nodes needed to reach the store; everything below a
+           discovered bus is published by that bus's user-space driver.
+         - **Remaining — the user-space bus-driver consumers.** Turn
+           `drivers/bus/pcie_brcm` + the `lib/usb`-backed USB host into
+           autoloaded user-space driver **binaries** (the `usb_kbd`/`virtio_kbd`
+           pattern) that, over the rt-backed `DriverHost`, train/enumerate and
+           `emit_node()` their children (the VL805 xHCI controller, then the HID
+           keyboard). Add `hw_remove_node` for hotplug removal (the `bus_usb`
+           port-unplug path). No `-M virt` Pi-USB vertical exists (§0.4); the
+           live enumerate→emit→autoload chain is metal-gated. The in-kernel
+           scaffold stays the live metal keyboard until D5 (§2.17).
        - **D5 — the atomic flip.** `usb_kbd` autoloads onto the emitted HID node;
          delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
          `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` so the compiled-in

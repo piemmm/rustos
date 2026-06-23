@@ -56,7 +56,15 @@ bus driver's `register()` consumes:
   queue-completion wait: the host serves a polling / `irq_wait`-driven driver.
 - **`DriverHost`** — reports the load-time capability set
   (`has_capability`), `DriverKind::UserSpace`, and hands its own `MmioMapper` /
-  `VirtioHost` back through `mmio_mapper()` / `virtio_host()`.
+  `VirtioHost` back through `mmio_mapper()` / `virtio_host()`. Its `emit_node`
+  forwards to the `hw_emit_node` syscall, so a user-space **bus** driver
+  publishes each device it enumerates into the live hardware tree and the
+  device manager autoloads the matching driver in turn (recursive,
+  data-driven discovery — `AGENTS.md` §18.1 / §18.3). The host adds no
+  authority: the kernel admits the node only when every requested
+  `HwResource` is covered by one of this driver's own grants, so a child can
+  never carry more authority than its emitter (§4); a refusal surfaces as
+  `DriverError::PermissionDenied`.
 
 ## Not a privileged path
 
@@ -80,12 +88,13 @@ uses.
 
 ## Testing seam
 
-The three syscalls (`resource_grants`, `mmio_map`, `dma_alloc`) live behind the
-`GrantSyscalls` trait, so the host's grant delivery decode, grant resolution,
-bus→CPU translation, map-once caching, and every fail-closed path are
+The syscalls (`resource_grants`, `mmio_map`, `dma_alloc`, `irq_bind` /
+`irq_wait`, `ipc_call`, and `hw_emit_node`) live behind the `GrantSyscalls`
+trait, so the host's grant delivery decode, grant resolution, bus→CPU
+translation, map-once caching, node publishing, and every fail-closed path are
 unit-tested on the host without a kernel (§7). Production driver processes use
-`RtGrantSyscalls`, which forwards to `rustos_rt`'s `resource_grants` /
-`mmio_map` / `dma_alloc` wrappers — the one syscall trap (§2.2).
+`RtGrantSyscalls`, which forwards to the matching `rustos_rt` wrappers — the
+one syscall trap (§2.2).
 
 ## Stability
 

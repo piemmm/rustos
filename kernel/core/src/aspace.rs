@@ -288,6 +288,23 @@ impl AddressSpaceRegistry {
         out
     }
 
+    /// Returns `true` iff one of `task`'s minted device-resource grants
+    /// fully covers `resource` (`HwResource::covers`, `AGENTS.md` §18.3).
+    ///
+    /// This is the security spine of `hw_emit_node` (`AGENTS.md` §18.1): a
+    /// user-space bus driver may publish a child node requesting `resource`
+    /// only when it already holds a grant covering it, so an autoloaded
+    /// child can never be minted authority its emitter lacks (`AGENTS.md`
+    /// §4 — no ambient authority). A `task` with no grants covers nothing,
+    /// so an ungranted task fails closed. The `task` argument is the
+    /// kernel-trusted caller id, never a caller-supplied value (§5.4).
+    #[must_use]
+    pub fn grant_covers(&self, task: TaskId, resource: &HwResource) -> bool {
+        self.grants
+            .get(&task)
+            .is_some_and(|entry| entry.by_handle.values().any(|grant| grant.covers(resource)))
+    }
+
     /// Establish `task`'s standard-stream descriptor table (`AGENTS.md`
     /// §20).
     ///

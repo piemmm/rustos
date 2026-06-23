@@ -212,6 +212,18 @@ impl HwTreeSource for HwTreeStoreSource {
     fn snapshot(&self) -> Result<Vec<u8>, Errno> {
         Ok(HW_TREE.encode_snapshot())
     }
+
+    fn publish(&self, node: HwNode) -> Result<(), Errno> {
+        // Append the user-space-emitted child into the one authoritative
+        // inventory; `append` bumps the generation and wakes every parked
+        // `hw_tree_wait` caller, so the device manager re-reads and
+        // autoloads the matching driver (`AGENTS.md` §18.1 / §18.3). The
+        // `hw_emit_node` handler has already verified the caller's
+        // `CAP_HW_EMIT` and that every requested resource is covered by one
+        // of its grants (`AGENTS.md` §4), so the store only records it.
+        HW_TREE.append(&node);
+        Ok(())
+    }
 }
 
 /// The shared [`HwTreeStoreSource`] the boot path installs through

@@ -793,6 +793,31 @@ pub trait SyscallHandlers {
     fn log_emit(&self, _caller: &CallerContext<'_>, _record: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Publish a discovered child device node into the live hardware tree
+    /// (`AGENTS.md` §18.1 / §18.3 — recursive, user-space hardware discovery).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::HW_EMIT`] and that `node` is a non-null `UserPtr`. The
+    /// implementation copies in at most [`rustos_abi::hwtree::HwNode::WIRE_LEN`]
+    /// bytes through the validated boundary, fully decodes the node with the
+    /// fail-closed [`rustos_abi::HwNode::from_bytes`] parser (`AGENTS.md`
+    /// §5.4), and admits it **only** when every
+    /// [`rustos_abi::hwtree::HwResource`] it requests is wholly contained
+    /// within a device-resource grant the calling task already holds — so an
+    /// emitted child can never carry more authority than its emitter
+    /// (`AGENTS.md` §4 — no ambient authority; §18.3). On success it appends
+    /// the node to the live hardware tree, bumping the generation that wakes
+    /// the device manager's reactive autoload. A malformed node, an unknown
+    /// parent, or an out-of-grant resource fails closed (`AGENTS.md` §2.9).
+    /// Returns `Ok(0)` once published.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn hw_emit_node(&self, _caller: &CallerContext<'_>, _node: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1097,6 +1122,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // §20).
                 let len = decode_len(args.0[1])?;
                 self.handlers.log_emit(caller, args.0[0], len)
+            }
+            SyscallNumber::HW_EMIT_NODE => {
+                // args[0] is the non-null encoded `HwNode` `UserPtr`
+                // (dispatcher-checked); args[1] is its byte length
+                // (`AGENTS.md` §18.1 / §18.3).
+                let len = decode_len(args.0[1])?;
+                self.handlers.hw_emit_node(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1655,6 +1687,11 @@ mod tests {
             self.record("log_emit");
             Ok(0)
         }
+
+        fn hw_emit_node(&self, _c: &CallerContext<'_>, _node: u64, _len: usize) -> SyscallResult {
+            self.record("hw_emit_node");
+            Ok(0)
+        }
     }
 
     #[test]
@@ -1682,6 +1719,7 @@ mod tests {
                 CapabilityId::MEM_DMA,
                 CapabilityId::SYSINFO_HW,
                 CapabilityId::LOG_EMIT,
+                CapabilityId::HW_EMIT,
             ],
             &sink,
         );

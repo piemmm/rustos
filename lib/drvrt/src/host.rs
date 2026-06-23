@@ -466,6 +466,21 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         // `exchange` fail closed.
         Some(self)
     }
+
+    fn emit_node(&self, node: rustos_abi::HwNode) -> Result<(), DriverError> {
+        // Publish the enumerated child through the `hw_emit_node` syscall so
+        // the device manager autoloads its driver in turn (`AGENTS.md` §18.1
+        // / §18.3). The host adds no authority: the kernel gates the call by
+        // `CAP_HW_EMIT` and admits the node only when every resource it
+        // requests is covered by one of this driver's own grants (`AGENTS.md`
+        // §4 — no ambient authority). A refusal fails closed (`AGENTS.md`
+        // §2.9).
+        let ret = self.syscalls.hw_emit_node(&node);
+        if ret < 0 {
+            return Err(decode_errno(ret).map_or(DriverError::DeviceFault, emit_node_error));
+        }
+        Ok(())
+    }
 }
 
 /// Map a non-positive `mmio_map` result to a [`MmioMapError`].
@@ -531,6 +546,20 @@ fn ipc_driver_error(errno: Errno) -> DriverError {
     match errno {
         Errno::PermissionDenied => DriverError::PermissionDenied,
         Errno::NotFound => DriverError::NotFound,
+        _ => DriverError::DeviceFault,
+    }
+}
+
+/// Map an [`Errno`] surfaced by a refused `hw_emit_node` to a [`DriverError`].
+///
+/// `PermissionDenied` (the driver lacks `CAP_HW_EMIT`, or the node requests a
+/// resource outside its grants) keeps its identity so the bus driver sees the
+/// authority refusal; everything else — a malformed node, an unknown parent, a
+/// build with no store wired — folds to [`DriverError::DeviceFault`] so the
+/// publish fails closed (`AGENTS.md` §2.9).
+fn emit_node_error(errno: Errno) -> DriverError {
+    match errno {
+        Errno::PermissionDenied => DriverError::PermissionDenied,
         _ => DriverError::DeviceFault,
     }
 }

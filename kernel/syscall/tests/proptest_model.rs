@@ -288,6 +288,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn hw_emit_node(&self, _c: &CallerContext<'_>, _node: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

@@ -618,6 +618,31 @@ impl SyscallNumber {
     /// in O(1) (`AGENTS.md` §2.16).
     pub const LOG_EMIT: Self = Self(36);
 
+    /// Publish a discovered child device node into the live hardware tree
+    /// (`AGENTS.md` §18.1 / §18.3 — recursive, user-space hardware discovery).
+    ///
+    /// Arguments: `node: *const u8` — a non-null pointer to a wire-encoded
+    /// [`crate::HwNode`] (see [`crate::hwtree`]); `len: usize` — its length.
+    /// Returns `0`, or `-errno`.
+    ///
+    /// Gated by [`crate::CapabilityId::HW_EMIT`]: the kernel verifies the
+    /// capability, copies in at most [`crate::hwtree::HwNode::WIRE_LEN`]
+    /// bytes, and fully decodes and validates the node before touching state
+    /// (`AGENTS.md` §5.4). A user-space **bus** driver (PCIe, USB) calls this
+    /// to publish each device it enumerates, so the device manager autoloads
+    /// the matching driver in turn — discovery is data-driven, never a
+    /// compiled-in list (`AGENTS.md` §18). The node is admitted **only** when
+    /// every [`crate::hwtree::HwResource`] it requests is wholly contained
+    /// within a device-resource grant the calling driver already holds, so an
+    /// emitted child can never carry more authority than its emitter
+    /// (`AGENTS.md` §4 — no ambient authority; §18.3 — a driver receives only
+    /// its matched node's resources). Any malformed node, an unknown parent,
+    /// or an out-of-grant resource fails closed (`AGENTS.md` §2.9 / §5.4); a
+    /// successful publish bumps the hardware-tree generation, waking the
+    /// device manager's reactive autoload (the same change channel
+    /// [`SyscallNumber::HW_TREE_WAIT`] observes).
+    pub const HW_EMIT_NODE: Self = Self(37);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -729,6 +754,7 @@ mod tests {
         assert_eq!(SyscallNumber::CALL_REPLY.as_u16(), 34);
         assert_eq!(SyscallNumber::USERS_DB_WAIT.as_u16(), 35);
         assert_eq!(SyscallNumber::LOG_EMIT.as_u16(), 36);
+        assert_eq!(SyscallNumber::HW_EMIT_NODE.as_u16(), 37);
     }
 
     #[test]

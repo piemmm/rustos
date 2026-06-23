@@ -2514,6 +2514,62 @@ where
         rustos_log::log(self.log_sink, &event);
         Ok(0)
     }
+
+    fn hw_emit_node(&self, caller: &CallerContext<'_>, node: u64, len: usize) -> SyscallResult {
+        // The dispatcher has already checked `CAP_HW_EMIT` and that `node`
+        // is a non-null `UserPtr` (`AGENTS.md` §5.4). A wire-encoded
+        // `HwNode` is exactly `HwNode::WIRE_LEN` bytes, so any other `len`
+        // is malformed and is rejected before copying — a hostile `len`
+        // cannot drive a large copy, and a short one cannot decode
+        // (`AGENTS.md` §4 / §24.4 / §2.9).
+        if len != rustos_abi::HwNode::WIRE_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+
+        // Copy the encoded node in through the validated boundary before
+        // touching any state. A faulting pointer — or a caller with no
+        // registered address space — fails closed with `BadAddress`, never
+        // an oracle distinguishing the cause (`AGENTS.md` §19.1). The buffer
+        // is a fixed `WIRE_LEN` stack array (no allocation, §2.16).
+        let mut bytes = [0u8; rustos_abi::HwNode::WIRE_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(node), &mut bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Fully decode and validate the node (lengths, discriminants,
+        // bounded match-key / resource counts) before touching state
+        // (`AGENTS.md` §5.4 / §2.9).
+        let decoded = rustos_abi::HwNode::from_bytes(&bytes)?;
+
+        // Security spine of recursive, user-space hardware discovery
+        // (`AGENTS.md` §4 — no ambient authority; §18.3): the calling bus
+        // driver may publish a child node requesting only resources covered
+        // by its *own* minted grants, so an autoloaded child driver can
+        // never be granted authority its emitter lacks. Every requested
+        // resource must be covered; one that is not fails the whole publish
+        // closed (`AGENTS.md` §2.9 — never partially apply). `caller.task_id`
+        // is kernel-trusted, never caller-supplied (§5.4). The read guard is
+        // held only for the containment check.
+        {
+            let aspaces = self.aspaces.read();
+            for resource in decoded.resources() {
+                if !aspaces.grant_covers(caller.task_id, resource) {
+                    return Err(Errno::PermissionDenied);
+                }
+            }
+        }
+
+        // Publish into the live hardware tree, bumping the generation that
+        // wakes the device manager's reactive autoload (the same change
+        // channel `hw_tree_wait` observes). A build with no store wired
+        // fails closed with `NotImplemented` (`AGENTS.md` §2.9). Returns
+        // `Ok(0)` once published (the `Errno`-return ABI shape).
+        self.hw_tree.publish(decoded).map(|()| 0)
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -8761,11 +8817,24 @@ mod tests {
         assert_eq!(h.users_db_read(&ctx, 0x1000, 4096), Err(Errno::BadAddress));
     }
 
-    /// A test [`HwTreeSource`] holding a fixed generation and a
-    /// pre-encoded snapshot blob.
+    /// A test [`HwTreeSource`] holding a fixed generation, a pre-encoded
+    /// snapshot blob, and a record of every node published through
+    /// [`HwTreeSource::publish`] so a `hw_emit_node` test can assert what
+    /// reached the store.
     struct StaticHwTree {
         generation: u64,
         blob: alloc::vec::Vec<u8>,
+        published: RwLock<alloc::vec::Vec<rustos_abi::HwNode>>,
+    }
+
+    impl StaticHwTree {
+        fn new(generation: u64, blob: alloc::vec::Vec<u8>) -> Self {
+            Self {
+                generation,
+                blob,
+                published: RwLock::new(alloc::vec::Vec::new()),
+            }
+        }
     }
 
     impl HwTreeSource for StaticHwTree {
@@ -8774,6 +8843,10 @@ mod tests {
         }
         fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(self.blob.clone())
+        }
+        fn publish(&self, node: rustos_abi::HwNode) -> Result<(), Errno> {
+            self.published.write().push(node);
+            Ok(())
         }
     }
 
@@ -8819,10 +8892,7 @@ mod tests {
             rustos_abi::HwNode::new(2, 1, rustos_abi::HwDeviceClass::Bus),
         ];
         let blob = encode_hw_snapshot(7, &nodes);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
-            generation: 7,
-            blob: blob.clone(),
-        }));
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(7, blob.clone())));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -8905,10 +8975,7 @@ mod tests {
             rustos_abi::HwDeviceClass::Root,
         )];
         let blob = encode_hw_snapshot(1, &nodes);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
-            generation: 1,
-            blob: blob.clone(),
-        }));
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(1, blob.clone())));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -8950,10 +9017,7 @@ mod tests {
         };
 
         let blob = encode_hw_snapshot(1, &[]);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
-            generation: 1,
-            blob,
-        }));
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(1, blob)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -8982,10 +9046,8 @@ mod tests {
             caps: &caps,
         };
 
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
-            generation: 5,
-            blob: encode_hw_snapshot(5, &[]),
-        }));
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(5, encode_hw_snapshot(5, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -9014,10 +9076,8 @@ mod tests {
             caps: &caps,
         };
 
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree {
-            generation: 3,
-            blob: encode_hw_snapshot(3, &[]),
-        }));
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(3, encode_hw_snapshot(3, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -9052,6 +9112,191 @@ mod tests {
         );
         assert_eq!(
             h.hw_tree_wait(&ctx, 0, u64::MAX),
+            Err(Errno::NotImplemented)
+        );
+    }
+
+    // ---- hw_emit_node ------------------------------------------------
+
+    /// An emitted single-resource [`rustos_abi::HwNode`] (an MMIO child
+    /// keyed by a USB-class match key), used by the publish tests.
+    fn emit_child_node() -> rustos_abi::HwNode {
+        let mut node = rustos_abi::HwNode::new(3, 2, rustos_abi::HwDeviceClass::Input);
+        node.push_match_key(rustos_abi::HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+            .expect("match key fits");
+        node.push_resource(rustos_abi::HwResource::mmio(0xFE98_0000, 0x4000))
+            .expect("resource fits");
+        node
+    }
+
+    /// `hw_emit_node` rejects a `len` that is not exactly the node wire
+    /// size before copying anything, so a hostile length cannot drive a
+    /// large copy and a short one cannot decode (`AGENTS.md` §2.9 / §24.4).
+    #[test]
+    fn hw_emit_node_rejects_a_wrong_length() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN - 1),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert!(source.published.read().is_empty(), "nothing was published");
+    }
+
+    /// An emitted node requesting a resource **not** covered by any of the
+    /// calling driver's grants is refused with `PermissionDenied`, and
+    /// nothing is published — a bus driver can never mint a child more
+    /// authority than it holds (`AGENTS.md` §4 / §18.3).
+    #[test]
+    fn hw_emit_node_without_a_covering_grant_is_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let node = emit_child_node();
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The driver holds a grant for a *different* window, so the emitted
+        // node's resource is not covered.
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::HwResource::mmio(0x3F20_0000, 0x1000),
+        );
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(
+            source.published.read().is_empty(),
+            "a denied node is never published"
+        );
+    }
+
+    /// An emitted node whose every resource is covered by one of the
+    /// driver's grants is published into the live tree (`Ok(0)`), and the
+    /// exact node reaches the store (`AGENTS.md` §18.1 / §18.3).
+    #[test]
+    fn hw_emit_node_with_a_covering_grant_publishes() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let node = emit_child_node();
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // A grant whose window contains the emitted resource fully covers it.
+        aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
+        );
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
+            Ok(0)
+        );
+        let published = source.published.read();
+        assert_eq!(published.len(), 1, "the covered node was published");
+        assert_eq!(published[0], node, "the exact node reached the store");
+    }
+
+    /// With no store wired `hw_emit_node` fails closed with
+    /// `NotImplemented` even for a resourceless node (`AGENTS.md` §2.9).
+    #[test]
+    fn hw_emit_node_without_store_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A resourceless node passes the (empty) grant check, so the publish
+        // reaches the inert `NULL_HW_TREE`.
+        let node = rustos_abi::HwNode::new(3, 2, rustos_abi::HwDeviceClass::Input);
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
     }

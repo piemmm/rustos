@@ -142,6 +142,24 @@ own discovered requests, §18.3). The
 board (a virtio node stands in for the metal controller, since no
 Pi-board QEMU vertical exists).
 
+### Recursive, user-space discovery (`hw_emit_node`)
+
+Discovery does not stop at the nodes the kernel's boot-time walk produced.
+A **bus** driver — a PCIe root complex, a USB host — runs in user space too
+(§4), enumerates the devices behind it, and publishes each as a child node
+into the live hardware tree through the `hw_emit_node` syscall (no. 37,
+gated on `CAP_HW_EMIT`; the rt-backed `DriverHost::emit_node`). That bumps
+the tree generation, the reactive `devmgr` loop re-reads and re-matches, and
+the child's driver is autoloaded in turn — so the *set of loadable drivers*
+and the *device topology* both grow at runtime, never from a compiled-in
+list (§18, §18.6). The kernel admits a published node only when every
+`HwResource` it requests is covered by one of the **emitting driver's** own
+minted grants (`HwResource::covers`): a bus driver can hand a child only
+authority it already holds, so the recursion can never escalate privilege
+(§4 — no ambient authority; §18.3). The bootstrap floor (§18.6) seeds only
+the first nodes needed to reach the driver store; everything below a
+discovered bus is published by that bus's user-space driver.
+
 ## Audit surface
 
 Every match, load, skip, and failure is logged through `lib/log` with

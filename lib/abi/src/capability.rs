@@ -272,6 +272,25 @@ impl CapabilityId {
     /// (the device manager, login) are granted it, so an ordinary app cannot
     /// scribble diagnostics onto the captured serial line.
     pub const LOG_EMIT: Self = Self(26);
+    /// Publish a discovered child device node into the live hardware tree
+    /// through the `hw_emit_node` syscall (`abi-v1` number 37, `AGENTS.md`
+    /// §18.1 / §18.3).
+    ///
+    /// The gate on recursive, user-space hardware discovery: a user-space
+    /// **bus** driver (a PCIe root complex, a USB host) enumerates the
+    /// devices behind it and emits each as a child [`crate::HwNode`] so the
+    /// device manager autoloads the matching driver in turn (`AGENTS.md`
+    /// §18 — discovery is data-driven, never a compiled-in list). It confers
+    /// **no** authority by itself: the kernel admits an emitted node only
+    /// when every [`crate::hwtree::HwResource`] it requests is wholly
+    /// contained within a device-resource grant the emitting driver already
+    /// holds, so a bus driver can never mint a child more authority than it
+    /// was granted (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// and bound checks before state touches; §18.3 — a driver receives only
+    /// its matched node's resources). Publishing into the global hardware
+    /// inventory is privileged rather than ambient: only an autoloaded bus
+    /// driver is granted it, never an ordinary task.
+    pub const HW_EMIT: Self = Self(27);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -310,6 +329,7 @@ impl CapabilityId {
         (Self::INPUT_READ, "CAP_INPUT_READ"),
         (Self::MAILBOX, "CAP_MAILBOX"),
         (Self::LOG_EMIT, "CAP_LOG_EMIT"),
+        (Self::HW_EMIT, "CAP_HW_EMIT"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -431,6 +451,7 @@ mod tests {
         assert_eq!(CapabilityId::INPUT_READ.as_u16(), 24);
         assert_eq!(CapabilityId::MAILBOX.as_u16(), 25);
         assert_eq!(CapabilityId::LOG_EMIT.as_u16(), 26);
+        assert_eq!(CapabilityId::HW_EMIT.as_u16(), 27);
     }
 
     #[test]
@@ -462,9 +483,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=26 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=27 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=26 {
+        for raw in 1..=27 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

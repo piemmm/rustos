@@ -85,6 +85,17 @@ driver will receive. The §18.3 match/autoload path then sees a bindable
 node like any other discovered device, and the driver requests only what
 its enumeration found — no ambient authority (`AGENTS.md` §4).
 
+For a **user-space** bus driver this is no longer a no-op default: the
+rt-backed host `rustos_drvrt::RtDriverHost` forwards `emit_node` to the
+`hw_emit_node` syscall (no. 37, gated on `CAP_HW_EMIT`). The kernel admits
+the published node only when every `HwResource` it requests is covered by
+one of the calling driver's own minted grants (`HwResource::covers`), so an
+emitted child can never carry more authority than its emitter — the security
+spine of recursive, user-space discovery (`AGENTS.md` §4 / §18.3, see
+[Syscalls](../architecture/syscalls.md)). A refused publish surfaces as
+`DriverError::PermissionDenied`; the in-kernel floor host still attaches the
+node to the boot tree directly.
+
 These four facility accessors are `abi-v1` *internal* additions: like
 `virtio_host()` before them, each carries a default body so every
 existing host impl stays source-compatible, and the public `register`

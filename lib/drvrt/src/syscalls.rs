@@ -70,6 +70,17 @@ pub trait GrantSyscalls {
     ///
     /// Mirrors [`rustos_rt::ipc_call`].
     fn ipc_call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> i64;
+
+    /// Publish a discovered child device `node` into the live hardware tree,
+    /// returning `0` once published, else `-errno`. A user-space **bus**
+    /// driver calls this for each device it enumerates so the device manager
+    /// autoloads the matching driver in turn; the kernel admits the node only
+    /// when every resource it requests is covered by one of the calling
+    /// driver's own grants, so a child can never carry more authority than
+    /// its emitter (`AGENTS.md` §4 / §18.1 / §18.3).
+    ///
+    /// Mirrors [`rustos_rt::hw_emit_node`].
+    fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64;
 }
 
 /// The production [`GrantSyscalls`]: forward to `rustos_rt`'s wrappers.
@@ -116,5 +127,10 @@ impl GrantSyscalls for RtGrantSyscalls {
             Ok(count) => count as i64,
             Err(errno) => errno,
         }
+    }
+
+    #[inline]
+    fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64 {
+        rustos_rt::hw_emit_node(node)
     }
 }

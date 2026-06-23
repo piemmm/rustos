@@ -57,8 +57,8 @@
 
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
-    LimitKind, MapFlags, ResourceLimit, SyscallNumber, CONSOLE_INHERIT, STDERR, STDIN, STDINFO,
-    STDOUT,
+    HwNode, LimitKind, MapFlags, ResourceLimit, SyscallNumber, CONSOLE_INHERIT, STDERR, STDIN,
+    STDINFO, STDOUT,
 };
 use rustos_abi_trap::raw_syscall;
 
@@ -173,6 +173,9 @@ const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 
 /// `log_emit` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
+
+/// `hw_emit_node` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -429,6 +432,34 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
     // it (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Publish a discovered child device `node` into the live hardware tree
+/// (`SyscallNumber::HW_EMIT_NODE`, `AGENTS.md` §18.1 / §18.3), returning the
+/// raw signed register: `0` once published, else `-errno`.
+///
+/// A user-space **bus** driver (a PCIe root complex, a USB host) calls this
+/// once per device it enumerates, so the device manager autoloads the
+/// matching driver in turn — recursive, data-driven discovery, never a
+/// compiled-in list (`AGENTS.md` §18). It is gated by
+/// [`rustos_abi::CapabilityId::HW_EMIT`], and the kernel admits the node only
+/// when every [`rustos_abi::hwtree::HwResource`] it requests is covered by one
+/// of the calling driver's own minted grants, so a child can never carry more
+/// authority than its emitter (`AGENTS.md` §4 — no ambient authority). A
+/// malformed node, an unknown parent, or an out-of-grant resource fails closed
+/// with `-errno` (`AGENTS.md` §2.9 / §5.4).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
+pub fn hw_emit_node(node: &HwNode) -> i64 {
+    let bytes = node.to_le_bytes();
+    let ptr = bytes.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_HW_EMIT` and reads the `(ptr, len)` pair against the caller's
+    // address space before decoding it (`AGENTS.md` §5.4). `bytes` is a live
+    // owned array for the duration of the call, so the pair denotes readable
+    // memory.
+    let ret = unsafe { raw_syscall(NUM_HW_EMIT_NODE, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 

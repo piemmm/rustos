@@ -71,6 +71,12 @@ struct MockSyscalls {
     ipc_reply: RefCell<Vec<u8>>,
     /// When `Some`, `ipc_call` returns this `-errno` instead of replying.
     ipc_error: Cell<Option<Errno>>,
+    /// Every node passed to `hw_emit_node`, in call order. Shared so a test
+    /// can read it after the mock moves into the host.
+    emitted: Rc<RefCell<Vec<rustos_abi::HwNode>>>,
+    /// The raw signed result `hw_emit_node` returns (`0` published by
+    /// default, or `-errno` to model a kernel refusal).
+    emit_result: Cell<i64>,
 }
 
 impl MockSyscalls {
@@ -89,7 +95,20 @@ impl MockSyscalls {
             ipc_request: RefCell::new(Vec::new()),
             ipc_reply: RefCell::new(Vec::new()),
             ipc_error: Cell::new(None),
+            emitted: Rc::new(RefCell::new(Vec::new())),
+            emit_result: Cell::new(0),
         }
+    }
+
+    /// Make `hw_emit_node` fail with `-err` instead of publishing.
+    fn fail_emit_node(&self, err: Errno) {
+        self.emit_result.set(-i64::from(err.as_i32()));
+    }
+
+    /// A shared handle to the recorded `hw_emit_node` nodes, read after the
+    /// mock moves into the host.
+    fn emitted(&self) -> Rc<RefCell<Vec<rustos_abi::HwNode>>> {
+        Rc::clone(&self.emitted)
     }
 
     /// Program the bytes `ipc_call` copies back as the reply.
@@ -210,6 +229,11 @@ impl GrantSyscalls for MockSyscalls {
         let n = src.len().min(reply.len());
         reply[..n].copy_from_slice(&src[..n]);
         n as i64
+    }
+
+    fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64 {
+        self.emitted.borrow_mut().push(*node);
+        self.emit_result.get()
     }
 }
 
@@ -781,5 +805,46 @@ fn mailbox_exchange_surfaces_a_service_error_reply() {
     assert_eq!(
         MailboxChannel::exchange(&host, &mut message),
         Err(DriverError::DeviceFault)
+    );
+}
+
+#[test]
+fn emit_node_publishes_the_child_through_the_syscall() {
+    use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode};
+
+    // A bus driver publishes an enumerated child; the host forwards the
+    // encoded node through `hw_emit_node` and reports success (`AGENTS.md`
+    // §18.1 / §18.3). The kernel — not the host — enforces `CAP_HW_EMIT` and
+    // the grant-coverage check, so the host adds no authority of its own.
+    let mock = MockSyscalls::new();
+    let emitted = mock.emitted();
+    let host = RtDriverHost::new(caps(&[CapabilityId::HW_EMIT]), mock, &[], None).unwrap();
+
+    let mut child = HwNode::new(3, 2, HwDeviceClass::Input);
+    child
+        .push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+        .expect("match key fits");
+    assert_eq!(DriverHost::emit_node(&host, child), Ok(()));
+
+    // The exact node reached the syscall seam.
+    assert_eq!(emitted.borrow().len(), 1);
+    assert_eq!(emitted.borrow()[0], child);
+}
+
+#[test]
+fn emit_node_surfaces_a_kernel_refusal_fail_closed() {
+    use rustos_abi::hwtree::{HwDeviceClass, HwNode};
+
+    // A kernel refusal — the driver lacks `CAP_HW_EMIT`, or the node requests
+    // a resource outside its grants — is surfaced as `PermissionDenied`,
+    // never papered over (`AGENTS.md` §2.9 / §5.4).
+    let mock = MockSyscalls::new();
+    mock.fail_emit_node(Errno::PermissionDenied);
+    let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
+
+    let child = HwNode::new(3, 2, HwDeviceClass::Input);
+    assert_eq!(
+        DriverHost::emit_node(&host, child),
+        Err(DriverError::PermissionDenied)
     );
 }

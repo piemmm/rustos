@@ -466,6 +466,24 @@ pub struct HwResource {
     xlate: u64,
 }
 
+/// Returns `true` iff the half-open window `[child_base, child_base+child_len)`
+/// lies wholly within `[parent_base, parent_base+parent_len)`.
+///
+/// Both ends are computed with checked arithmetic so a length that would
+/// overflow the address space is refused (`false`) rather than wrapping into
+/// a spuriously-contained range (`AGENTS.md` §2.9 / §5.4). A zero-length
+/// child is contained as long as its base lies within the parent's closed
+/// span. Used by [`HwResource::covers`] for the interval-containment kinds.
+fn interval_contains(parent_base: u64, parent_len: u64, child_base: u64, child_len: u64) -> bool {
+    let (Some(parent_end), Some(child_end)) = (
+        parent_base.checked_add(parent_len),
+        child_base.checked_add(child_len),
+    ) else {
+        return false;
+    };
+    child_base >= parent_base && child_end <= parent_end
+}
+
 impl HwResource {
     /// Encoded size on the wire.
     pub const WIRE_LEN: usize = 32;
@@ -604,6 +622,62 @@ impl HwResource {
             Some(HwResourceKind::Mmio) => Some(self.base),
             Some(HwResourceKind::BusWindow) => Some(self.xlate),
             _ => None,
+        }
+    }
+
+    /// Returns `true` iff `self` — a device-resource grant the emitter
+    /// already holds — fully covers `child`, a resource that an emitted
+    /// hardware-tree node requests.
+    ///
+    /// This is the security spine of recursive, user-space hardware
+    /// discovery (`AGENTS.md` §18.1 / §18.3): the `hw_emit_node` syscall
+    /// admits a published child node **only** when every resource it
+    /// requests is covered by one of the emitting bus driver's own grants,
+    /// so an autoloaded child driver can never be minted more authority than
+    /// the driver that discovered it (`AGENTS.md` §4 — no ambient authority;
+    /// §2.17 — never widen a defence). It is defined once here, beside the
+    /// type whose semantics it depends on (`AGENTS.md` §2.2), so the kernel
+    /// never re-decides per-kind containment.
+    ///
+    /// Coverage always requires the same [`HwResourceKind`] and identical
+    /// `flags`. Beyond that the rule follows each kind's meaning:
+    ///
+    /// * [`Mmio`](HwResourceKind::Mmio), [`Port`](HwResourceKind::Port), and
+    ///   [`Irq`](HwResourceKind::Irq) are untranslated `[base, base+len)`
+    ///   windows / line ranges: the child interval must lie wholly within
+    ///   the parent's (checked arithmetic — a length overflow is refused,
+    ///   never wrapped, `AGENTS.md` §2.9).
+    /// * [`BusWindow`](HwResourceKind::BusWindow) is a translated outbound
+    ///   window: the child's CPU-side interval must lie within the parent's
+    ///   **and** carry the identical CPU↔bus translation delta, so a child
+    ///   sub-window keeps the parent's addressing exactly and cannot
+    ///   re-point the far side elsewhere.
+    /// * [`Dma`](HwResourceKind::Dma) is an addressing *constraint* (an
+    ///   exclusive address ceiling `base` and an extent `len`), not a mapped
+    ///   window: the child may be no more permissive — no higher ceiling, no
+    ///   larger extent, and the same bus translation.
+    #[must_use]
+    pub fn covers(&self, child: &HwResource) -> bool {
+        let (Some(parent_kind), Some(child_kind)) = (self.kind(), child.kind()) else {
+            // An undecodable discriminant on either side fails closed.
+            return false;
+        };
+        if parent_kind != child_kind || self.flags != child.flags {
+            return false;
+        }
+        match parent_kind {
+            HwResourceKind::Dma => {
+                self.xlate == child.xlate && child.base <= self.base && child.len <= self.len
+            }
+            HwResourceKind::BusWindow => {
+                // The CPU↔bus translation delta must match exactly so the
+                // contained sub-window maps to the contained far-side range.
+                self.xlate.wrapping_sub(self.base) == child.xlate.wrapping_sub(child.base)
+                    && interval_contains(self.base, self.len, child.base, child.len)
+            }
+            HwResourceKind::Mmio | HwResourceKind::Port | HwResourceKind::Irq => {
+                interval_contains(self.base, self.len, child.base, child.len)
+            }
         }
     }
 
@@ -1255,6 +1329,57 @@ mod tests {
         let mut bytes = HwResource::mmio(0, 0).to_le_bytes();
         put_u16(&mut bytes, 0, 9);
         assert_eq!(HwResource::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn covers_accepts_a_contained_sub_window_and_rejects_escapes() {
+        // An MMIO grant covers a sub-window inside it, the whole window, and
+        // a zero-length probe at its base, but not a window that starts
+        // below it, extends past its end, or is a different kind.
+        let parent = HwResource::mmio(0x1000_0000, 0x1_0000);
+        assert!(parent.covers(&HwResource::mmio(0x1000_0000, 0x1_0000)));
+        assert!(parent.covers(&HwResource::mmio(0x1000_1000, 0x1000)));
+        assert!(parent.covers(&HwResource::mmio(0x1000_0000, 0)));
+        assert!(!parent.covers(&HwResource::mmio(0x0FFF_F000, 0x1000)));
+        assert!(!parent.covers(&HwResource::mmio(0x1000_F000, 0x2000)));
+        assert!(!parent.covers(&HwResource::irq(0x1000_0000, 1)));
+        // A length that would overflow the address space is refused, never
+        // wrapped into a spuriously-contained range (`AGENTS.md` §2.9).
+        assert!(!parent.covers(&HwResource::mmio(0x1000_0000, u64::MAX)));
+    }
+
+    #[test]
+    fn covers_requires_a_matching_bus_window_translation() {
+        // An outbound bus window covers a CPU-side sub-window that keeps the
+        // identical CPU↔bus translation delta, but not one that re-points the
+        // far side (a child cannot reach a different bus address).
+        let parent = HwResource::bus_window(0x6_0000_0000, 0x400_0000, 0xF800_0000);
+        assert!(parent.covers(&HwResource::bus_window(
+            0x6_0000_0000,
+            0x10_0000,
+            0xF800_0000
+        )));
+        // Same delta (cpu and bus both advanced by 0x1000) -> still covered.
+        assert!(parent.covers(&HwResource::bus_window(0x6_0000_1000, 0x1000, 0xF800_1000)));
+        // Same CPU sub-window but a re-pointed far side -> rejected.
+        assert!(!parent.covers(&HwResource::bus_window(0x6_0000_0000, 0x1000, 0xF900_0000)));
+        // A plain MMIO window of the same numbers is a different kind.
+        assert!(!parent.covers(&HwResource::mmio(0x6_0000_0000, 0x1000)));
+    }
+
+    #[test]
+    fn covers_treats_dma_as_a_no_wider_constraint() {
+        // A DMA grant covers a child with no higher ceiling, no larger
+        // extent, and the same translation; anything more permissive fails.
+        let parent = HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0x0);
+        assert!(parent.covers(&HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0x0)));
+        assert!(parent.covers(&HwResource::dma_translated(0xB000_0000, 0x1000_0000, 0x0)));
+        // Higher ceiling -> rejected.
+        assert!(!parent.covers(&HwResource::dma_translated(0xC100_0000, 0x1000, 0x0)));
+        // Larger extent -> rejected.
+        assert!(!parent.covers(&HwResource::dma_translated(0xC000_0000, 0x5000_0000, 0x0)));
+        // Different translation -> rejected.
+        assert!(!parent.covers(&HwResource::dma_translated(0xC000_0000, 0x1000, 0x1_0000)));
     }
 
     #[test]

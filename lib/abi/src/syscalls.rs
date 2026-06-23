@@ -924,6 +924,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::LOG_EMIT),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::HW_EMIT_NODE,
+        name: "hw_emit_node",
+        arg_count: 2,
+        args: [
+            // The encoded `HwNode` wire image pointer, then its length.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` once the node is published,
+        // else `-errno` for a malformed node, an unknown parent, or a
+        // resource outside the caller's grants (`AGENTS.md` §2.9 / §5.4).
+        ret: AbiType::Errno,
+        // Publishing a discovered child into the global hardware tree is a
+        // privileged grant (`CAP_HW_EMIT`), held only by an autoloaded
+        // user-space bus driver (`AGENTS.md` §4 / §18.3). It IS audited per
+        // call (`AGENTS.md` §5.4.4): admitting a node that drives the device
+        // manager to autoload a further driver — and that carries
+        // device-resource grants — is a security-relevant event, and it is
+        // low-volume (once per enumerated device), so the record cannot
+        // drown the log.
+        required_capability: Some(CapabilityId::HW_EMIT),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -1212,6 +1240,17 @@ mod tests {
         let log_emit = spec_for(SyscallNumber::LOG_EMIT).unwrap();
         assert_eq!(log_emit.required_capability, Some(CapabilityId::LOG_EMIT));
         assert!(!log_emit.audit, "log_emit must not audit per call");
+        // hw_emit_node publishes a discovered child into the global hardware
+        // tree, gated on the privileged CAP_HW_EMIT (`AGENTS.md` §4 / §18.3 —
+        // never ambient) and IS audited per call: admitting a node that drives
+        // an autoload and carries device-resource grants is a low-volume,
+        // security-relevant event (`AGENTS.md` §5.4.4 / §18.6).
+        let hw_emit_node = spec_for(SyscallNumber::HW_EMIT_NODE).unwrap();
+        assert_eq!(
+            hw_emit_node.required_capability,
+            Some(CapabilityId::HW_EMIT)
+        );
+        assert!(hw_emit_node.audit, "hw_emit_node must be audited");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

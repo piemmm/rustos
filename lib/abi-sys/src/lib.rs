@@ -100,6 +100,7 @@ const NUM_CALL_CREATE: u64 = SyscallNumber::CALL_CREATE.as_u16() as u64;
 const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
+const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -848,6 +849,27 @@ pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
     }
 }
 
+/// `hw_emit_node`: publish one wire-encoded `rustos_abi::HwNode` (`len` bytes
+/// at `node`) into the live hardware tree (`SyscallNumber::HW_EMIT_NODE`,
+/// `AGENTS.md` §18.1 / §18.3). A user-space bus driver calls this for each
+/// device it enumerates so the device manager autoloads the matching driver.
+/// Requires `ROS_CAP_HW_EMIT`; the kernel decodes and validates the node and
+/// admits it only when every resource it requests is covered by one of the
+/// calling driver's own grants. Returns a `ROS_E_*` code (`0` on success).
+#[must_use]
+#[export_name = "ros_sys_hw_emit_node"]
+pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates the node `(ptr, len)`
+    // pair against the caller's address space before reading it (`AGENTS.md`
+    // §5.4).
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_HW_EMIT_NODE,
+            [ptr_arg(node), len as u64, 0, 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,6 +922,7 @@ mod tests {
         (NUM_CALL_RECV, "call_recv", 4),
         (NUM_CALL_REPLY, "call_reply", 4),
         (NUM_LOG_EMIT, "log_emit", 2),
+        (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
     ];
 
     #[test]

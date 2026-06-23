@@ -90,6 +90,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  34 | `call_reply`   | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len`      | `errno` | — | no |
 |  35 | `users_db_wait`| `u64 timeout_ns`                        | `errno` | `CAP_USERS_READ`  | no      |
 |  36 | `log_emit`     | `user_ptr` (record), `len`              | `errno` | `CAP_LOG_EMIT`    | no      |
+|  37 | `hw_emit_node` | `user_ptr` (node), `len`                | `errno` | `CAP_HW_EMIT`     | yes     |
 
 ### Capability matrix
 
@@ -112,6 +113,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_MEM_DMA`      | `dma_alloc`                |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
+| `CAP_HW_EMIT`      | `hw_emit_node`             |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -227,6 +229,34 @@ Rust wrappers are `rustos_rt::hw_tree_read` / `hw_tree_wait`; the C stubs are
 (`userland/system/devmgr`) reads the tree, then waits and re-reads on every
 change — the reactive observe loop behind the `rustos_devmgr::HwTreeService`
 seam.
+
+`hw_emit_node` (no. 37) is the **write** side of the same hardware tree:
+recursive, user-space hardware discovery (`AGENTS.md` §18.1 / §18.3). A
+user-space **bus** driver (a PCIe root complex, a USB host) enumerates the
+devices behind it and calls this once per device to publish a discovered
+child `rustos_abi::HwNode`, so the device manager autoloads the matching
+driver in turn — discovery is data-driven, never a compiled-in list (§18).
+The handler copies the encoded node in (rejecting any `len` that is not
+exactly `HwNode::WIRE_LEN` before copying, so a hostile length drives no
+large copy), decodes it fail-closed, and then enforces the keystone security
+rule: it admits the node **only** when every `rustos_abi::hwtree::HwResource`
+the node requests is wholly covered by one of the **calling task's** own
+minted device-resource grants (`HwResource::covers`, checked against the same
+per-task `AddressSpaceRegistry` grant table `resource_grants` reads). A bus
+driver therefore can never mint a child more authority than it holds itself —
+a resource outside its grants fails the whole publish closed with
+`PermissionDenied`, never partially applied (`AGENTS.md` §4 — no ambient
+authority; §2.9). On success the node is appended to the live tree, bumping
+the generation that wakes every parked `hw_tree_wait` caller (the reactive
+autoload above). It is gated on **`CAP_HW_EMIT`** — held only by an
+autoloaded bus driver, never an ordinary task — and **audited** per call
+(admitting a node that drives an autoload and carries resource grants is a
+low-volume, security-relevant event, §5.4.4 / §18.6). It serves the same
+`kernel/core` `HwTreeSource` seam (`HwTreeSource::publish`); until a store is
+installed it fails closed with `NotImplemented` through `NULL_HW_TREE`. The
+first-party Rust wrapper is `rustos_rt::hw_emit_node` (the user-space driver
+host `rustos_drvrt::RtDriverHost` forwards `DriverHost::emit_node` to it); the
+C stub is `ros_sys_hw_emit_node`.
 
 `ipc_call` (no. 31), `call_create` (no. 32), `call_recv` (no. 33), and
 `call_reply` (no. 34) are the two halves of the **synchronous** request/reply
