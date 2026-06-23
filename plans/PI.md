@@ -428,7 +428,14 @@ monotonic `CNTPCT_EL0`-derived `[t=<ms>ms]` stamp (`kernel_arch::uptime_ms`,
 so a capture reads the real wall time between any two lines), and `build.rs`
 emits `KERNEL_BUILD_ID` (git short hash + `+dirty` + `SOURCE_DATE_EPOCH`-aware
 build epoch, §19.3), logged as `build_id` on the `4097` line so a capture
-proves which build is running. The timestamped capture (with `build_id`
+proves which build is running. That stamp is regenerated on **every** build:
+`build.rs` declares no narrow `rerun-if-changed` and always re-runs (a metal
+reflash therefore always shows a fresh epoch / current `+dirty` hash), because
+the old narrow git-only rerun inputs left the id stale through a dirty-tree
+edit so a reflash reported an old id for new code (`SOURCE_DATE_EPOCH` still
+pins it for a reproducible build, §19.3; the embedded `init`/driver fixtures
+are re-validated by the same always-run, their `build-std` relink gated on an
+actual `Run.ld` change). The timestamped capture (with `build_id`
 confirming the current image) was **decisive** and corrected the earlier
 un-timestamped guess: the caps-readiness wait (`4108`→`4109`) is only
 ~0.35 s — the `wait_for_caps_ready` *elapsed-wall-time* bound

@@ -111,6 +111,25 @@ pub fn is_freestanding(target_os: &str, target_arch: &str) -> bool {
 /// embedded trust anchor.
 pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-kernel-driver-signing/v1!";
 
+/// Parse a `SOURCE_DATE_EPOCH` value into whole seconds, or `None` when it is
+/// absent/malformed so the build script falls back to the current wall-clock
+/// second.
+///
+/// `SOURCE_DATE_EPOCH` is the standard reproducible-build input (`AGENTS.md`
+/// §19.3): when a pinned build sets it, the build provenance id's epoch is
+/// this fixed value, so two reproducible builds stamp an identical id (and
+/// hence a byte-identical image); otherwise the id carries the real build
+/// second, the freshness signal an operator reads off the UART to confirm a
+/// reflash actually changed. Surrounding whitespace is tolerated; a negative,
+/// empty, or non-numeric value is rejected (`None`) rather than guessed
+/// (`AGENTS.md` §5.4 — fail closed to the wall-clock fallback). Alloc-free so
+/// it compiles both into the `no_std` crate's host test build and into the
+/// `std` build script.
+#[must_use]
+pub fn parse_source_date_epoch(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +180,25 @@ mod tests {
         assert_eq!(kernel_isa("wasm32"), None);
         assert!(!is_freestanding("none", "wasm32"));
         assert_eq!(linker_script_for("wasm32-unknown-unknown"), None);
+    }
+
+    #[test]
+    fn source_date_epoch_is_honoured_when_well_formed_and_rejected_otherwise() {
+        // A pinned reproducible build (`AGENTS.md` §19.3): the exact second is
+        // used, surrounding whitespace tolerated.
+        assert_eq!(parse_source_date_epoch("1782181959"), Some(1_782_181_959));
+        assert_eq!(
+            parse_source_date_epoch("  1782181959\n"),
+            Some(1_782_181_959)
+        );
+        assert_eq!(parse_source_date_epoch("0"), Some(0));
+        // Malformed / empty / negative values fall back (None) rather than
+        // being guessed, so the id carries the real wall-clock second instead
+        // of a wrong fixed one (`AGENTS.md` §5.4 — fail closed).
+        assert_eq!(parse_source_date_epoch(""), None);
+        assert_eq!(parse_source_date_epoch("not-a-number"), None);
+        assert_eq!(parse_source_date_epoch("-1"), None);
+        assert_eq!(parse_source_date_epoch("12.5"), None);
     }
 
     #[test]

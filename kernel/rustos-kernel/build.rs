@@ -97,8 +97,6 @@ struct Program {
     fixture: &'static str,
     /// Prefix for the emitted `const`s (`<PREFIX>_RXE`, `<PREFIX>_USER_BIAS`).
     prefix: &'static str,
-    /// Extra source files (relative to the crate dir) to re-run the build on.
-    rerun: &'static [&'static str],
 }
 
 /// The embedded programs every production boot path spawns: PID 1 `init`, and
@@ -113,7 +111,6 @@ const PROGRAMS: &[Program] = &[
         rel_dir: "../../userland/system/init",
         fixture: "init_rxe.rs",
         prefix: "INIT",
-        rerun: &["src/run.rs", "src/startup.rs", "Run.ld", "Cargo.toml"],
     },
     Program {
         pkg: "rustos-shell",
@@ -121,7 +118,6 @@ const PROGRAMS: &[Program] = &[
         rel_dir: "../../userland/shell/shell",
         fixture: "shell_rxe.rs",
         prefix: "SHELL",
-        rerun: &["src/run.rs", "Run.ld", "Cargo.toml", "build.rs"],
     },
     Program {
         pkg: "rustos-login",
@@ -129,7 +125,6 @@ const PROGRAMS: &[Program] = &[
         rel_dir: "../../userland/session/login",
         fixture: "login_rxe.rs",
         prefix: "LOGIN",
-        rerun: &["src/run.rs", "Run.ld", "Cargo.toml", "build.rs"],
     },
     Program {
         pkg: "rustos-devmgr",
@@ -137,17 +132,30 @@ const PROGRAMS: &[Program] = &[
         rel_dir: "../../userland/system/devmgr",
         fixture: "devmgr_rxe.rs",
         prefix: "DEVMGR",
-        rerun: &[
-            "src/run.rs",
-            "src/observe.rs",
-            "Run.ld",
-            "Cargo.toml",
-            "build.rs",
-        ],
     },
 ];
 
 fn main() {
+    // This build script always re-runs. Every output it produces must reflect
+    // the *current* build, and none can be captured by a narrow
+    // `rerun-if-changed` input: the build provenance id
+    // (`KERNEL_BUILD_ID`) carries the build epoch and a `+dirty` working-tree
+    // marker, and the embedded program/driver fixtures must never lag their
+    // sources. Cargo's `rerun-if-changed` narrowing previously let both go
+    // stale — a dirty-tree edit (the day-to-day dev loop) changed neither the
+    // tracked git files nor the env, so the script did not re-run, the
+    // recompiled kernel embedded a *stale* `build_id.rs`, and a metal reflash
+    // reported an old id for new code (the §15.7 provenance datapoint
+    // silently lying). Naming a path that never exists is the documented way
+    // to force a re-run on every build; the expensive work behind it is still
+    // cheap because it is itself cached (a host build emits inert fixtures,
+    // and a freestanding build's nested `cargo` invocations no-op when their
+    // sources are unchanged). Cargo only *recompiles* the crate when a
+    // generated file's bytes actually change, so a pinned reproducible build
+    // (`SOURCE_DATE_EPOCH`, `AGENTS.md` §19.3) still produces identical output
+    // and does not churn.
+    println!("cargo:rerun-if-changed=__rustos_always_rerun_build_id__");
+
     println!("cargo:rustc-check-cfg=cfg(freestanding)");
     println!("cargo:rustc-check-cfg=cfg(kernel_isa, values(\"x86_64\", \"aarch64\", \"riscv64\"))");
 
@@ -158,7 +166,6 @@ fn main() {
     if let Some(linker_script) = linker_script_for(&target) {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let linker_script = format!("{}/{linker_script}", manifest_dir.trim_end_matches('/'));
-        println!("cargo:rerun-if-changed={linker_script}");
         println!("cargo:rustc-link-arg=-T{linker_script}");
     }
 
@@ -348,13 +355,17 @@ fn emit_byte_slice(out: &mut String, name: &str, bytes: &[u8]) {
 /// build epoch in seconds. The epoch honours `SOURCE_DATE_EPOCH` when set
 /// (the standard reproducible-build input, so a pinned build stays
 /// bit-reproducible — `AGENTS.md` §19.3), falling back to the current
-/// wall-clock second otherwise. `git`'s own metadata is registered as a
-/// rerun input so a commit refreshes the id.
+/// wall-clock second otherwise.
+///
+/// This is regenerated on *every* build (`main` declares no narrow
+/// `rerun-if-changed` input — see its rationale), so the `+dirty` hash and
+/// the epoch always track the image actually produced. Tracking only git's
+/// metadata as a rerun input — the previous design — left the id stale
+/// through a dirty-tree edit, so a metal reflash reported an old id for new
+/// code (`AGENTS.md` §2.18). The `SOURCE_DATE_EPOCH` parsing this relies on
+/// is the host-unit-tested [`build_support::parse_source_date_epoch`].
 fn emit_build_id() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/index");
 
     let source = git_source_id();
     let epoch = build_epoch_secs();
@@ -403,7 +414,7 @@ fn git_source_id() -> String {
 /// current wall-clock second.
 fn build_epoch_secs() -> u64 {
     if let Ok(epoch) = std::env::var("SOURCE_DATE_EPOCH") {
-        if let Ok(secs) = epoch.trim().parse::<u64>() {
+        if let Some(secs) = build_support::parse_source_date_epoch(&epoch) {
             return secs;
         }
     }
@@ -444,9 +455,6 @@ fn emit_program_rxes(target: &str) {
 /// Build one [`Program`] and write its generated fixture under `OUT_DIR`.
 fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &Program) {
     let prog_dir = format!("{manifest_dir}/{}", program.rel_dir);
-    for rel in program.rerun {
-        println!("cargo:rerun-if-changed={prog_dir}/{rel}");
-    }
 
     let rxe = match program_rustflags_var(target) {
         Some(rustflags_var) => build_and_convert(
@@ -461,6 +469,36 @@ fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &P
     };
     let fixture_path = PathBuf::from(out_dir).join(program.fixture);
     write_fixture(&fixture_path, program, &rxe);
+}
+
+/// Wipe a program's private `target_dir` — forcing a clean relink — when its
+/// `Run.ld` content has changed since the last build, and otherwise leave it
+/// intact so the nested `cargo` builds incrementally.
+///
+/// Cargo fingerprints the linker script by *path* (through the RUSTFLAGS
+/// string), not content, so a `Run.ld` edit would otherwise leave a stale
+/// linked ELF in place. The previous in-tree `Run.ld` of every program is
+/// kept as a sidecar copy under `OUT_DIR`; the wipe fires only on a real
+/// content change (or first build / missing sidecar), so this build script
+/// re-running on every build does not rebuild `build-std` each time
+/// (`AGENTS.md` §2.16). A read failure compares as different and simply
+/// forces the (correct, safe) clean rebuild — fail safe, never silently stale
+/// (`AGENTS.md` §2.9).
+fn wipe_target_dir_on_linker_change(
+    run_ld: &str,
+    target_dir: &str,
+    out_dir: &str,
+    program: &Program,
+) {
+    let current = fs::read(run_ld).ok();
+    let sidecar = PathBuf::from(out_dir).join(format!("{}.run_ld", program.pkg));
+    let previous = fs::read(&sidecar).ok();
+    if current.is_none() || current != previous {
+        let _ = fs::remove_dir_all(target_dir);
+        if let Some(bytes) = &current {
+            let _ = fs::write(&sidecar, bytes);
+        }
+    }
 }
 
 /// Compile a program's `Run` bin PIE for the given freestanding `target` and
@@ -481,12 +519,18 @@ fn build_and_convert(
 
     // Cargo fingerprints the RUSTFLAGS *string* (which names the linker
     // script by path) but not the script's *content*, so a `Run.ld` edit
-    // would not by itself trigger a relink and the converter could read a
-    // stale ELF. `build.rs` only reruns when its `rerun-if-changed` inputs
-    // (including `Run.ld`) actually change, so wiping the private target
-    // directory here forces a clean rebuild against the current script
-    // without churning ordinary incremental builds.
-    let _ = fs::remove_dir_all(&target_dir);
+    // alone would not trigger a relink and the converter could read a stale
+    // ELF. This build script always re-runs (see `main`), so we cannot lean
+    // on a `rerun-if-changed` to fire only on a `Run.ld` change; instead
+    // detect that change ourselves against a sidecar copy under `OUT_DIR` and
+    // wipe the private target directory — forcing a clean rebuild against the
+    // current script — *only* then. An unchanged script leaves the directory
+    // intact so the nested `cargo` no-ops incrementally rather than rebuilding
+    // `build-std` on every outer build (`AGENTS.md` §2.16). The program's own
+    // source changes need no help here: because the outer script always
+    // re-runs, the nested `cargo` is always invoked and fingerprints them
+    // itself.
+    wipe_target_dir_on_linker_change(&run_ld, &target_dir, out_dir, program);
 
     // The program links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
     // roots the `rustos-rt` runtime trampoline; it is built
