@@ -779,30 +779,48 @@ pub unsafe fn enable_fp_el1() {
     }
 }
 
-/// Park the calling CPU forever on `wfi` with interrupts disabled.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn park() -> ! {
-    // SAFETY: `msr DAIFSet, #0xf` masks all interrupts; `wfi` is a
-    // well-defined wait-for-interrupt hint. The loop defends against a
-    // spurious wake. This is the aarch64 form of the `AGENTS.md` §2
-    // "never silently reset" contract.
-    unsafe {
-        core::arch::asm!("msr DAIFSet, #0xf", options(nomem, nostack));
-    }
-    loop {
-        // SAFETY: `wfi` is a hint with no architectural side effects.
-        unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
-        }
-    }
-}
-
 /// Park the calling CPU forever (the panic bridge and the downstream
 /// `KernelArch` wrapper's `halt` both forward here). Masks interrupts
 /// and spins on `wfi`.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+///
+/// Available on every target — the bare-metal build parks on `wfi`, the
+/// host build spin-waits — so the host-compiled `KernelArch` wrapper and
+/// GIC IRQ fail-closed paths can forward here exactly as the x86_64 sibling
+/// forwards to [`crate::kernel_arch`]'s `halt` (`AGENTS.md` §2.21 — one
+/// shape across ports, no `cfg(freestanding)` indirection in the bin crate).
+///
+/// # SAFETY-INVARIANT
+///
+/// This function never returns. The `!` return type encodes the invariant
+/// at the type level (`AGENTS.md` §2.10).
 pub fn halt_current_cpu() -> ! {
-    park()
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: `msr DAIFSet, #0xf` masks all interrupts; `wfi` is a
+        // well-defined wait-for-interrupt hint. The loop defends against a
+        // spurious wake. This is the aarch64 form of the `AGENTS.md` §2
+        // "never silently reset" contract.
+        unsafe {
+            core::arch::asm!("msr DAIFSet, #0xf", options(nomem, nostack));
+        }
+        loop {
+            // SAFETY: `wfi` is a hint with no architectural side effects.
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    {
+        // Host fallback: spin-wait forever. Host tests never invoke this
+        // function — the compile-time `const _` assertion in the test
+        // module proves the `-> !` signature without calling it
+        // (`AGENTS.md` §7 — no host-side blocking), mirroring the x86_64
+        // `halt` host fallback.
+        loop {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1026,4 +1044,12 @@ mod tests {
             &crate::percpu_hal::PerCpuStorage::new(),
         );
     }
+
+    /// Compile-time proof that [`halt_current_cpu`] has the `-> !`
+    /// signature the `KernelArch::halt` impl and the panic bridge forward
+    /// to. Calling it would block the test runner; coercing the function
+    /// pointer is enough to surface a mismatched return type at build time
+    /// (`AGENTS.md` §2.10 — encode the invariant in the type system), the
+    /// x86_64 `_HALT_RETURNS_NEVER` sibling (`AGENTS.md` §2.21).
+    const _HALT_RETURNS_NEVER: fn() -> ! = halt_current_cpu;
 }

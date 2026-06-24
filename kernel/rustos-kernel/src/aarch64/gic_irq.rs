@@ -43,9 +43,17 @@
 //! non-timer INTID the GIC delivers — which cannot occur until a line is
 //! routed — so the metal-confirmed boot is unaffected.
 
+// `AtomicBool`/`Ordering` back the freestanding-only UART receive
+// flow-control flag, and `IrqRouting` is returned only by the
+// freestanding `gic_irq_routing`; on a host build neither is used (the
+// host `KernelArch::irq_routing` returns the unsupported default from
+// `arch_wrapper`), so both imports are gated to where they compile rather
+// than left unused under clippy's `-D warnings` (`AGENTS.md` §7).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rustos_arch_aarch64::gic::{GicController, GicMmio};
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
 use rustos_sync::once::OnceCell;
@@ -752,9 +760,6 @@ mod tests {
         // A line above the controller's ceiling fails closed without
         // touching the distributor (`AGENTS.md` §5.4.5).
         let c = controller(47);
-        assert_eq!(
-            c.rearm(48),
-            Err(rustos_arch_api::IrqControlError::OutOfRange)
-        );
+        assert_eq!(c.rearm(48), Err(MaskError::OutOfRange));
     }
 }
