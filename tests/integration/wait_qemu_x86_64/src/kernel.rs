@@ -273,6 +273,25 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             note(TEST_FAIL, "X4 test: parent exited without a verified reap");
             qemu_exit::exit_failure();
         }
+        // A child exited: re-ready the parent on *this* vertical's own
+        // scheduler. `record_exit` above asks for the wake through the global
+        // `procwait_wake` hook, but the boot pipeline already bound that hook
+        // to the *production* scheduler it built
+        // (`kernel_core::init::publish_wait_queue_arch`, a set-once
+        // `OnceCell`), which knows nothing of the scheduler `run_wait` leaks
+        // here. Without this the producer parks a parent whose `wait` ran
+        // before the child exited and nothing ever wakes it, so the workload
+        // drains with the parent stuck parked — the intermittent
+        // "drained without a verified reap" failure. Driving `unpark` on this
+        // scheduler is the harness's equivalent of the production wait path's
+        // wake (`SchedWaitQueueArch::unpark`), so the parent resumes from its
+        // cooperative park (the X4 deliverable). `unpark` is cancellation-safe
+        // (`AGENTS.md` §2.1): on a parent not yet parked it records a
+        // wake-pending token its next park commit consumes, and an
+        // already-reaped/exited parent id is a benign no-op.
+        if let Some(sched) = *SCHED.lock() {
+            let _ = sched.unpark(PARENT_TID.load(Ordering::SeqCst));
+        }
         // The child (or a parent on the failure path): reap the caller. This
         // switches back to the dispatcher and never resumes the task.
         let _ = reschedule_current(BOOT_CPU, RescheduleAction::Exit);
