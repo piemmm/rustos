@@ -15,6 +15,7 @@
 //! | 5002 | Error | `SYSCALL_UNKNOWN`             | The supplied syscall number is outside the `abi-v1` table. |
 //! | 5003 | Error | `SYSCALL_BAD_ARGUMENTS`       | One or more arguments failed type-specific validation. |
 //! | 5004 | Error | `SYSCALL_HANDLER_REJECTED`    | The owning subsystem rejected the call after the dispatcher checks passed. |
+//! | 5005 | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | The owning subsystem had nothing to return yet and the caller may retry (`Errno::WouldBlock`). Not a rejection: recorded at `Debug` so a routine poll-while-pending cannot flood the log. |
 //!
 //! Adding a new event takes the next free identifier in this file and a
 //! row in `docs/src/architecture/syscalls.md`.
@@ -38,6 +39,21 @@ pub enum AuditEvent {
     SyscallBadArguments,
     /// The owning subsystem rejected the call.
     SyscallHandlerRejected,
+    /// The owning subsystem had nothing to return yet and the caller may
+    /// retry (the handler returned [`Errno::WouldBlock`]).
+    ///
+    /// This is **not** a rejection — the dispatcher's capability and
+    /// argument checks all passed and no security decision was taken; the
+    /// call simply made no progress (the `abi-v1` `EAGAIN`/`EWOULDBLOCK`
+    /// retry signal, e.g. `users_db_read` while the encrypted root is still
+    /// being unlocked, or a non-blocking `ipc_recv` on an empty mailbox).
+    /// It is recorded at [`Level::Debug`] so a caller that legitimately
+    /// polls-while-pending cannot flood the log with errors, while the
+    /// record remains available for flood/DoS forensics when the level is
+    /// lowered (`AGENTS.md` §2.1 / §19.4).
+    ///
+    /// [`Errno::WouldBlock`]: rustos_abi::Errno::WouldBlock
+    SyscallHandlerWouldBlock,
 }
 
 impl AuditEvent {
@@ -50,6 +66,7 @@ impl AuditEvent {
             Self::SyscallUnknown => 5002,
             Self::SyscallBadArguments => 5003,
             Self::SyscallHandlerRejected => 5004,
+            Self::SyscallHandlerWouldBlock => 5005,
         })
     }
 
@@ -66,6 +83,8 @@ impl AuditEvent {
             | Self::SyscallUnknown
             | Self::SyscallBadArguments
             | Self::SyscallHandlerRejected => Level::Error,
+            // A benign "nothing yet, retry" outcome — not an error.
+            Self::SyscallHandlerWouldBlock => Level::Debug,
         }
     }
 
@@ -78,6 +97,7 @@ impl AuditEvent {
             Self::SyscallUnknown => "syscall denied: unknown number",
             Self::SyscallBadArguments => "syscall denied: invalid arguments",
             Self::SyscallHandlerRejected => "syscall rejected by handler",
+            Self::SyscallHandlerWouldBlock => "syscall pending; caller may retry",
         }
     }
 }
@@ -105,7 +125,7 @@ pub(crate) fn record<S: Sink + ?Sized>(sink: &S, event: AuditEvent, fields: &[Fi
 #[cfg(test)]
 mod tests {
     use super::AuditEvent;
-    use rustos_log::EventId;
+    use rustos_log::{EventId, Level};
 
     #[test]
     fn ids_are_frozen_and_in_range() {
@@ -115,6 +135,7 @@ mod tests {
             AuditEvent::SyscallUnknown,
             AuditEvent::SyscallBadArguments,
             AuditEvent::SyscallHandlerRejected,
+            AuditEvent::SyscallHandlerWouldBlock,
         ] {
             let EventId(raw) = ev.id();
             assert!(
@@ -127,5 +148,23 @@ mod tests {
         assert_eq!(AuditEvent::SyscallUnknown.id(), EventId(5002));
         assert_eq!(AuditEvent::SyscallBadArguments.id(), EventId(5003));
         assert_eq!(AuditEvent::SyscallHandlerRejected.id(), EventId(5004));
+        assert_eq!(AuditEvent::SyscallHandlerWouldBlock.id(), EventId(5005));
+    }
+
+    #[test]
+    fn a_would_block_outcome_is_recorded_below_error() {
+        // The benign "nothing yet, retry" outcome must never surface at the
+        // error level a genuine rejection does — otherwise a caller that
+        // legitimately polls while pending (e.g. `login` reading
+        // `users_db_read` while the encrypted root unlocks) floods the boot
+        // log with errors (`AGENTS.md` §2.1 / §19.4). It is `Debug`, below
+        // the default `Info` filter, so it is dropped unless the level is
+        // lowered for forensics.
+        assert_eq!(AuditEvent::SyscallHandlerWouldBlock.level(), Level::Debug);
+        assert!(
+            AuditEvent::SyscallHandlerWouldBlock.level()
+                < AuditEvent::SyscallHandlerRejected.level()
+        );
+        assert!(AuditEvent::SyscallHandlerWouldBlock.level() < Level::Info);
     }
 }

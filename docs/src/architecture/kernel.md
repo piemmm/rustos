@@ -258,10 +258,18 @@ volume key from the passphrase (PBKDF2-HMAC-SHA256), holding it in a
 `zeroize` crate, no hand-rolled primitive); mounts the encrypted root
 (`RustFs::open`), a wrong passphrase refused with `PermissionDenied` and no
 plaintext fallback (§4 / §5.4); then runs `load_users_db_source`. Every
-refusal is audited (the bin-crate ids `4133` `ROOT_MOUNT_UNLOCKED` /
-`4134` `ROOT_MOUNT_REJECTED`, in the shared `4_000` range; no passphrase,
-key, or volume byte is ever logged, §19.4) and yields **no** database, so a
-root that cannot be unlocked serves none (§5.4.5).
+refusal is audited (the bin-crate ids in the shared `4_000` range; no
+passphrase, key, or volume byte is ever logged, §19.4) and yields **no**
+database, so a root that cannot be unlocked serves none (§5.4.5). A
+**structural** refusal — an unreadable/invalid descriptor, a
+missing/malformed partition table or partition, a non-rustfs volume, or a
+device fault — is the ERROR-level `4134` `ROOT_MOUNT_REJECTED`. A **wrong
+passphrase** is not a system error: it is recorded as the below-`Info`
+`4142` `ROOT_UNLOCK_KEY_REJECTED` (`Debug`), so the silent blank-passphrase
+probe of a non-blank image — which fails on *every* normal boot (§11) — and
+routine interactive retries cannot flood the boot log, while the record
+stays available for brute-force forensics when the level is lowered
+(`AGENTS.md` §2.1 / §19.4).
 
 The first of those three inputs — the plaintext `root.unlock`
 key-derivation descriptor — is recovered off the FAT boot partition by

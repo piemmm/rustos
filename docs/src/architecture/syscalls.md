@@ -409,9 +409,14 @@ C stub is `ros_sys_users_db_read`.
 it parks the caller while the database is in that `WouldBlock` *pending*
 state and returns `0` the instant the unlock reaches a terminal outcome —
 a database is installed, or the unlock gives up — or `TimedOut` if
-`timeout_ns` elapses first. It replaces `login` re-reading `users_db_read`
-in a yield loop while pending, which audited one `SYSCALL_HANDLER_REJECTED`
-(ERROR, id 5004) per poll and flooded the boot log for the whole unlock.
+`timeout_ns` elapses first. It replaces `login` busy-re-reading
+`users_db_read` in a yield loop while pending; `login` now parks on this
+wait between reads (one advisory re-read per wake). Either way a
+`users_db_read` that returns the expected `WouldBlock` (pending) is
+audited as the benign `SYSCALL_HANDLER_WOULD_BLOCK` (Debug, id 5005), not
+the ERROR-level `SYSCALL_HANDLER_REJECTED` (id 5004) a genuine refusal
+gets — so a poll-while-pending never floods the boot log with errors
+(`AGENTS.md` §2.1 / §19.4).
 The handler parks on the `kernel/core` `USERS_DB_WAITQ` and is woken by
 `LateUsersDb::install` / `resolve` (the terminal unlock transitions), the
 same park/wake shape as `hw_tree_wait` (`AGENTS.md` §2.1 / §2.2). It is
@@ -558,7 +563,8 @@ declared arity.
 
 `kernel/syscall` reserves the `5_000..6_000` `EventId` range. Successful
 dispatches of *security-relevant* syscalls (`SyscallSpec::audit == true`)
-emit `SYSCALL_INVOKED`; refusals always emit, regardless of audit flag.
+emit `SYSCALL_INVOKED`; the pre-dispatch refusals (`PERMISSION_DENIED`,
+`UNKNOWN`, `BAD_ARGUMENTS`) always emit, regardless of the audit flag.
 
 | ID    | Level | Name                          | When |
 | ----: | ----- | ----------------------------- | ---- |
@@ -567,6 +573,7 @@ emit `SYSCALL_INVOKED`; refusals always emit, regardless of audit flag.
 | 5002  | Error | `SYSCALL_UNKNOWN`             | Number was outside the `abi-v1` table. |
 | 5003  | Error | `SYSCALL_BAD_ARGUMENTS`       | Argument validation failed. |
 | 5004  | Error | `SYSCALL_HANDLER_REJECTED`    | Owning subsystem rejected the call. |
+| 5005  | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | An audited handler returned `WouldBlock` — the `abi-v1` "nothing yet, retry" signal (not a rejection: every check passed, no security decision was taken). Recorded at `Debug`, below the default `Info` filter, so a caller that legitimately polls while pending cannot flood the log; available for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
 
 Adding an event takes the next free identifier and a new row in this
 table.

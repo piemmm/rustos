@@ -936,6 +936,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         // §5.4 step 5: audit emission for security-relevant calls.
         match &outcome {
             Ok(_) if spec.audit => self.audit_invoked(caller, spec),
+            // `WouldBlock` is the `abi-v1` "nothing yet, retry" signal, not a
+            // rejection: the capability and argument checks all passed and no
+            // security decision was taken. Record it below the error level so
+            // a caller that legitimately polls while pending (e.g. `login`
+            // reading `users_db_read` while the encrypted root unlocks) cannot
+            // flood the log with errors (`AGENTS.md` §2.1 / §19.4).
+            Err(Errno::WouldBlock) if spec.audit => self.audit_would_block(caller, spec),
             Err(_) if spec.audit => self.audit_rejected(caller, spec, outcome.as_ref().err()),
             _ => {}
         }
@@ -1240,6 +1247,24 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         record(
             self.audit,
             AuditEvent::SyscallInvoked,
+            &[
+                Field {
+                    key: "task",
+                    value: format_hex_u64(caller.task_id.0, &mut t),
+                },
+                Field {
+                    key: "sc",
+                    value: spec.name,
+                },
+            ],
+        );
+    }
+
+    fn audit_would_block(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
+        let mut t = [0u8; 16];
+        record(
+            self.audit,
+            AuditEvent::SyscallHandlerWouldBlock,
             &[
                 Field {
                     key: "task",
@@ -1973,6 +1998,37 @@ mod tests {
             Err(Errno::NotFound)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerRejected.id().0]);
+    }
+
+    #[test]
+    fn a_would_block_outcome_is_audited_as_pending_not_rejected() {
+        // `WouldBlock` is the `abi-v1` "nothing yet, retry" signal, not a
+        // rejection: an audited syscall returning it must emit the benign,
+        // below-error `SyscallHandlerWouldBlock` (id 5005) rather than the
+        // ERROR-level `SyscallHandlerRejected` (id 5004) a genuine refusal
+        // gets — otherwise a caller that legitimately polls while pending
+        // (e.g. `login` reading `users_db_read` while the encrypted root
+        // unlocks) floods the boot log with errors (`AGENTS.md` §2.1 / §19.4).
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers {
+            force_err: Some(Errno::WouldBlock),
+            ..Default::default()
+        };
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = 0x2000;
+        args.0[2] = 4;
+        assert_eq!(
+            d.dispatch(&ctx, SyscallNumber::IPC_SEND.as_u16(), args),
+            Err(Errno::WouldBlock)
+        );
+        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerWouldBlock.id().0]);
     }
 
     #[test]

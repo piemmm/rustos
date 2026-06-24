@@ -4037,6 +4037,39 @@ keyboard never regresses (§2.17), until the final flip:
     `root_mount::the_console_is_released_on_every_unlock_outcome` (Installed
     + GaveUp) and the `root_unlock_login` vertical now asserts the release
     fired on success.
+  - **`users_db_read` pending poll no longer logs as an error.** With login
+    working end-to-end, the boot log still showed a `[ERROR] id=5004
+    SYSCALL_HANDLER_REJECTED … users_db_read err=19` every ~5 s while the
+    encrypted root unlocked: `WouldBlock` (the `abi-v1` "nothing yet, retry"
+    signal `login` legitimately gets while pending) was audited as a genuine
+    ERROR-level rejection. The dispatcher now records an audited handler's
+    `WouldBlock` as the distinct, below-`Info` `SYSCALL_HANDLER_WOULD_BLOCK`
+    (Debug, id 5005) instead of `SYSCALL_HANDLER_REJECTED` (id 5004) — it is
+    not a rejection (every check passed, no security decision was taken), so a
+    poll-while-pending cannot flood the log, while the record stays available
+    for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 /
+    §19.4). Regressions in `kernel/syscall` (`audit`: id/level frozen;
+    `table`: `WouldBlock` → 5005, a real rejection still → 5004).
+  - **The silent blank-passphrase probe no longer logs as an error.** With
+    the `users_db_read` poll quietened, the one remaining boot `[ERROR]` was
+    `id=4134 ROOT_MOUNT_REJECTED … cause=unlock_refused`: `root_mount`'s
+    interactive unlock tries the **blank** passphrase silently first (so a
+    fresh installer image boots with no prompt, §11), and on a non-blank
+    image that probe fails `Mount(PermissionDenied)` on *every* boot — an
+    expected fail-closed authentication non-match, but `reject()` logged it
+    at ERROR. A wrong passphrase is now classified (`rejection_record`) as
+    the below-`Info` `4142` `ROOT_UNLOCK_KEY_REJECTED` (Debug); `4134`
+    `ROOT_MOUNT_REJECTED` (Error) is narrowed to *structural* refusals
+    (unreadable/invalid descriptor, missing/malformed table or partition,
+    non-rustfs volume, device fault). The interactive wrong-attempt audit
+    stays `4137` `ROOT_UNLOCK_RETRY` (Warn) and give-up `4138` (Error). So
+    neither the per-boot probe nor routine retries flood the log, while the
+    record stays available for brute-force forensics when the level is
+    lowered (`AGENTS.md` §2.1 / §19.4). Regressions in
+    `kernel/rustos-kernel` `root_mount`: the two wrong-passphrase tests
+    assert no `4134`, a new classifier test pins
+    wrong-passphrase → (4142, Debug) and every structural refusal →
+    (4134, Error).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

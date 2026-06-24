@@ -101,13 +101,31 @@ impl<T: FilesystemRead + FilesystemSecurity + ?Sized> RootVolume for T {}
 /// [`load_users_db_source`] (`UsersDbLoaded` / `UsersDbRejected`).
 const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
 
-/// Audit event: the root unlock was refused before a database could be
-/// served — the on-FAT descriptor failed to decode, or the derived key
-/// did not unlock the volume (a wrong passphrase, a non-rustfs volume, or
-/// a device fault). The `stage` field names which check refused; no
-/// secret (passphrase, key, or volume bytes) is ever logged (`AGENTS.md`
-/// §4 / §19.4). The decision fails closed: no database is held (§5.4.5).
+/// Audit event: the root unlock was refused by a **structural** failure
+/// before a database could be served — the on-FAT descriptor could not be
+/// read or failed to decode, the partition table or a partition was
+/// missing/malformed, the volume was not rustfs, or the device faulted.
+/// The `cause` field names which check refused; no secret (passphrase,
+/// key, or volume bytes) is ever logged (`AGENTS.md` §4 / §19.4). The
+/// decision fails closed: no database is held (§5.4.5).
+///
+/// A *wrong passphrase* is **not** one of these — that is an expected
+/// authentication non-match recorded at [`ROOT_UNLOCK_KEY_REJECTED`], not
+/// a system error.
 const ROOT_MOUNT_REJECTED: EventId = EventId(4134);
+
+/// Audit event: the passphrase-derived key did not unlock the encrypted
+/// root volume — a wrong passphrase, *including* the silent blank-passphrase
+/// probe of a non-blank image that [`unlock_root_disk_interactively`] runs
+/// on **every** normal boot (`AGENTS.md` §11). This is an expected
+/// fail-closed authentication non-match, not a system error: the master key
+/// simply never unwrapped and there is no oracle either way (`AGENTS.md`
+/// §5.4). It is recorded at [`Level::Debug`] — below the default
+/// [`Level::Info`] filter — so the per-boot probe and routine interactive
+/// retries cannot flood the boot log, while the record stays available for
+/// brute-force forensics when the level is lowered (`AGENTS.md` §2.1 /
+/// §19.4). No secret (passphrase, key, or volume byte) is ever logged.
+const ROOT_UNLOCK_KEY_REJECTED: EventId = EventId(4142);
 
 /// Audit event: the read-only, signed-bundle `/System` volume (the
 /// design-B pre-unlock driver store, `plans/PI.md`) was discovered and
@@ -949,18 +967,54 @@ fn gave_up(audit: &dyn Sink, cause: &'static str) {
     );
 }
 
-/// Emit the [`ROOT_MOUNT_REJECTED`] record for a refused unlock, naming
-/// the failing `stage` with a secret-free cause string. The database load
-/// stage audits itself, so this helper reports a partition-table parse,
-/// partition lookup/window, descriptor read, descriptor decode, or mount
-/// refusal.
+/// Classify a refused unlock into the audit record it is logged as.
+///
+/// A *wrong passphrase* — `Mount(PermissionDenied)`, the case the silent
+/// blank-passphrase probe of a non-blank image hits on **every** normal
+/// boot and the case a mistyped interactive passphrase hits — is an
+/// expected fail-closed authentication non-match, not a system error: the
+/// derived key simply never unwrapped the master key and there is no oracle
+/// either way (`AGENTS.md` §5.4). It maps to the below-`Info`
+/// [`ROOT_UNLOCK_KEY_REJECTED`] so the per-boot probe and routine retries
+/// cannot flood the boot log, while the record stays available for
+/// brute-force forensics when the level is lowered (`AGENTS.md` §2.1 /
+/// §19.4). Every other refusal is a genuine structural failure (a
+/// corrupt/missing descriptor, a missing/malformed partition table or
+/// partition, a non-rustfs volume, a device fault) and maps to the
+/// `Error`-level [`ROOT_MOUNT_REJECTED`].
+///
+/// A pure mapping so the audit level/event a refusal earns can be asserted
+/// directly, without depending on the global log threshold (`AGENTS.md`
+/// §2.2 / §7).
+fn rejection_record(error: RootMountError) -> (EventId, Level, &'static str) {
+    match error {
+        RootMountError::Mount(DriverError::PermissionDenied) => (
+            ROOT_UNLOCK_KEY_REJECTED,
+            Level::Debug,
+            "root-mount: derived key did not unlock the volume (wrong passphrase)",
+        ),
+        _ => (
+            ROOT_MOUNT_REJECTED,
+            Level::Error,
+            "root-mount: root volume unlock refused; no users database served",
+        ),
+    }
+}
+
+/// Audit a refused unlock, naming the failing stage with a secret-free
+/// cause string. The database load stage audits itself, so this helper
+/// reports a partition-table parse, partition lookup/window, descriptor
+/// read, descriptor decode, or mount refusal. The event and level are
+/// chosen by [`rejection_record`]: a structural refusal is an `Error`, a
+/// wrong passphrase a below-`Info` `Debug` (it is no error, §5.4).
 fn reject(audit: &dyn Sink, error: RootMountError) {
+    let (id, level, message) = rejection_record(error);
     log(
         audit,
         &Event {
-            level: Level::Error,
-            id: ROOT_MOUNT_REJECTED,
-            message: "root-mount: root volume unlock refused; no users database served",
+            level,
+            id,
+            message,
             fields: &[Field {
                 key: "cause",
                 value: error.cause(),
@@ -1166,8 +1220,23 @@ mod tests {
 
         assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
         assert_eq!(err.cause(), "unlock_refused");
-        // The refusal is audited and the volume never unlocked.
-        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        // A wrong passphrase is an expected fail-closed authentication
+        // non-match, not a system error, so it must NOT surface as the
+        // ERROR-level `ROOT_MOUNT_REJECTED` (4134) a structural refusal
+        // gets — otherwise the silent blank-passphrase probe floods the
+        // boot log on every non-blank boot (`AGENTS.md` §2.1 / §19.4). It
+        // maps to the below-`Info` `ROOT_UNLOCK_KEY_REJECTED` (4142),
+        // dropped at the default threshold (so absent from this sink) and
+        // available for brute-force forensics when the level is lowered.
+        assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert_eq!(
+            rejection_record(err),
+            (
+                ROOT_UNLOCK_KEY_REJECTED,
+                Level::Debug,
+                "root-mount: derived key did not unlock the volume (wrong passphrase)"
+            )
+        );
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
     }
 
@@ -1207,6 +1276,47 @@ mod tests {
         assert!(matches!(err, RootMountError::Mount(_)), "{err:?}");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_wrong_passphrase_is_classified_below_error_every_structural_refusal_is_an_error() {
+        // The pure audit classification (`AGENTS.md` §2.1 / §19.4): a wrong
+        // passphrase is an expected fail-closed authentication non-match —
+        // recorded below the default `Info` filter so the silent
+        // blank-passphrase probe and routine retries cannot flood the boot
+        // log — while every genuine structural refusal stays an ERROR a
+        // boot operator sees. Asserting the mapping directly is independent
+        // of the global log threshold (so it cannot be perturbed by another
+        // test lowering it, `AGENTS.md` §7).
+        assert_eq!(
+            rejection_record(RootMountError::Mount(DriverError::PermissionDenied)),
+            (
+                ROOT_UNLOCK_KEY_REJECTED,
+                Level::Debug,
+                "root-mount: derived key did not unlock the volume (wrong passphrase)"
+            )
+        );
+        assert!(
+            Level::Debug < Level::Info,
+            "the probe outcome is below the default filter"
+        );
+
+        // Every other refusal — including a non-rustfs volume or a device
+        // fault, which are *also* `Mount(_)` but not a wrong passphrase — is
+        // the ERROR-level structural rejection.
+        for error in [
+            RootMountError::Mount(DriverError::BadMagic),
+            RootMountError::Mount(DriverError::DeviceFault),
+            RootMountError::DescriptorRead(DriverError::NotFound),
+            RootMountError::Descriptor(DriverError::BadMagic),
+            RootMountError::NoBootPartition,
+            RootMountError::NoRootPartition,
+            RootMountError::PartitionWindow(DriverError::OutOfRange),
+        ] {
+            let (id, level, _) = rejection_record(error);
+            assert_eq!(id, ROOT_MOUNT_REJECTED, "{error:?}");
+            assert_eq!(level, Level::Error, "{error:?}");
+        }
     }
 
     // --- read_root_unlock_descriptor ----------------------------------
@@ -1448,7 +1558,11 @@ mod tests {
             .expect_err("a wrong passphrase must be refused");
 
         assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
-        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        // Through the full composition too, a wrong passphrase is the
+        // below-`Info` authentication non-match, never the ERROR-level
+        // structural rejection (`AGENTS.md` §2.1 / §19.4).
+        assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert_eq!(rejection_record(err).0, ROOT_UNLOCK_KEY_REJECTED);
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
     }
 
