@@ -23,14 +23,22 @@ crate owns that protocol once:
   protocol-faithful mock and the doorbell is the on-metal acceptance item
   (`AGENTS.md` §2.1).
 
-## Why it lives in `lib/`
+## Why it lives in `lib/` (the §2.20 / §2.22 carve-out, legitimately)
 
-Two independent consumers speak this protocol: the aarch64 port's
-framebuffer boot console (`kernel/arch/aarch64`, P7b) and the HVS display
-driver (`drivers/display/rpi_hvs`, P7). A driver crate may not be a kernel
-dependency (`AGENTS.md` §17.4), so the shared definition belongs in `lib/*`
-(`AGENTS.md` §6, §2.2). It depends only on `lib/abi` (the `DisplayFormat` /
-`RegisterWindow` / `DriverError` vocabulary).
+This is single-device support — it knows the BCM2711 `VideoCore` — yet it
+**stays** in `lib/*`, unlike the VL805 / BCM2711-PCIe device logic, which was
+collapsed into its driver crate (`AGENTS.md` §2.22). The difference is the
+second consumer: two independent consumers speak this protocol — the aarch64
+port's framebuffer boot console (`kernel/arch/aarch64`, P7b) and the HVS
+display driver (`drivers/display/rpi_hvs`, P7). The boot console is a
+**charter-legal non-driver** consumer (a genuine early-boot need, not a
+removable scaffold), so the §2.20 carve-out applies and the shared definition
+belongs in `lib/*` (`AGENTS.md` §2.22 / §6 / §2.2); a driver crate may not be
+a kernel dependency (`AGENTS.md` §17.4). By contrast the VL805 / PCIe device
+logic had only a `drivers/*` consumer (its illegitimate second consumer was a
+removed in-kernel scaffold), so it has no `lib/*` home. This crate depends
+only on `lib/abi` (the `DisplayFormat` / `RegisterWindow` / `DriverError`
+vocabulary).
 
 ## Stability tier
 

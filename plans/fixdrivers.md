@@ -76,12 +76,10 @@ Apply the §1 test to each crate:
   VL805-specific firmware-reload policy and the `build_xhci_node` /
   `reload_firmware_and_publish` wiring. Delete the obsolete crate, remove it
   from `Cargo.toml`, §3, §16.4, and `PLAN.md` (§2.14).
-- **`lib/pcie_brcm`** — apply the same test. If its only honest consumer is
-  `drivers/bus/pcie_brcm`, fold it in. If PCIe root-complex bring-up is a
-  *genuine* floor item (e.g. storage-on-PCIe must come up before the driver
-  store is reachable, §18.6), keep a **minimal** shared crate but document the
-  **floor justification per §18.6** (not "boot scaffold"). Decide this from the
-  real consumer graph, not assumption (§15.7 if unclear).
+- **`lib/pcie_brcm`** — applied the same test. Decided from the real consumer
+  graph: PCIe root-complex bring-up is **not** a floor item (the §18.6 floor is
+  storage-only — virtio-blk + EMMC2 on aarch64, neither on PCIe), so its only
+  honest consumer was `drivers/bus/pcie_brcm`. Folded in (its `lib` target).
 - **`lib/vcmailbox`** — **stays in `lib/*`** (legitimate two-consumer split:
   aarch64 framebuffer boot console + `drivers/display/rpi_hvs`). Update its
   README to state *why* it qualifies under the amended rule and the others do
@@ -122,5 +120,12 @@ do not assume it (§2.19).
 
 ## 6. Status
 
-**planned** — not started. Open fork in §4 to confirm with the User
-(minimal fix vs. structural §17.4 change) before treating any of it as done.
+**done** — the minimal fix (§1 default; the User confirmed path A, not the §4
+structural option). The in-kernel keyboard scaffold was already gone (the D5d
+flip), so `lib/vl805` and `lib/pcie_brcm` each had only their sibling
+`drivers/bus/...` crate as a consumer and were folded into them as
+host-testable `lib` targets and deleted; `lib/vcmailbox` stays. §2.22 was added
+to `AGENTS.md` (with the §2.20 / §17.4 / §3 / §16.4 cross-references) and logged
+in `PLAN.md` "Charter Amendments"; `lib/hid` / `lib/usb` / `lib/virtio*` were
+re-checked and remain legitimate shared protocol crates (no single-device
+logic). Workspace, `tools/xtask`, and all `docs/src` pages were updated.

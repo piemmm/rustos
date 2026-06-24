@@ -17,7 +17,7 @@ other driver.
 
 - BCM2711 PCIe root complex (Raspberry Pi 4 / Pi 400). Binds by the
   device-tree `compatible` string `brcm,bcm2711-pcie` (the crate's
-  `rustos_pcie_brcm::BIND_KEYS`).
+  `rustos_drv_bus_pcie_brcm::BIND_KEYS`).
 
 The controller register window, the inbound-DMA aperture, and the outbound
 MMIO window are **discovered** values threaded from the matched
@@ -40,9 +40,23 @@ carrying exactly two device-resource grant *requests* and no more
 
 The node's identity (id/parent) is **kernel-assigned** on publish; the driver
 does not name it (`AGENTS.md` §4 / §18.1). The composition lives — and is
-host-tested against a mock bus — in `lib/pcie_brcm`
-(`wiring::emit_vl805_node` / `wiring::publish_usb_function`); this crate is the
-thin freestanding `Run` binary.
+host-tested against a mock bus — in this crate's own `lib` target
+(`crate::wiring::emit_vl805_node` / `crate::wiring::publish_usb_function`,
+`src/lib.rs`); `src/main.rs` is the thin freestanding `Run` binary that links
+it.
+
+## Crate shape — device logic is co-located here, not in `lib/*`
+
+This crate has two targets: a host-testable **`lib` target** (`src/lib.rs`,
+`src/regs.rs`, `src/wiring.rs`) holding the BCM2711 PCIe bring-up engine
+(`BrcmPcieRc`), the §18.3 `BIND_KEYS`, and the `wiring`; and the **`Run`
+binary** (`src/main.rs`) that builds the rt-backed host and drives it. The
+device logic lives **in the driver**, not a `lib/*` device-support crate,
+because the §2.20 carve-out only permits the latter when a charter-legal
+*non-driver* consumer (a §18.6 bootstrap-floor path, or a driver of a
+different class) shares it — and PCIe root-complex bring-up sits above the
+bootstrap floor (the kernel floor is the storage path only), so its only
+consumer is this crate's own `Run` binary (`AGENTS.md` §2.22 / §2.2 / §2.14).
 
 ## Required capabilities
 
@@ -63,11 +77,11 @@ unbrought-up rather than wedged (`AGENTS.md` §2.9).
 
 ## Install
 
-The signed-bundle install into the image's `/System/Drivers/` store is staged
-for the D5d flip (`plans/PI.md`), which lands the four-bundle chain
-(`pcie_brcm` → `vcmailbox` → `vl805` → `usb_kbd`) and retires the in-kernel
-keyboard scaffold. Until then the in-kernel scaffold remains the live metal
-keyboard (`AGENTS.md` §2.17).
+The signed bundle is installed into the image's `/System/Drivers/` store
+(`tools/xtask` builds and signs it; `tools/mkimage` plants it). It is the head
+of the autoloaded four-bundle Pi 4 USB chain (`pcie_brcm` → `vcmailbox` →
+`vl805` → `usb_kbd`); there is no in-kernel keyboard scaffold (`AGENTS.md`
+§18.5).
 
 ## Limitations
 
@@ -75,8 +89,8 @@ keyboard (`AGENTS.md` §2.17).
 - Verifiable on metal only: QEMU `virt` models no Pi PCIe link timing
   (`plans/PI.md` §0.4), so there is no QEMU integration vertical; the
   enumerate → assign-BAR → publish composition and its fail-closed paths are
-  host-tested in `lib/pcie_brcm`, and the live link training is the on-metal
-  acceptance item.
+  host-tested in this crate's `lib` target, and the live link training is the
+  on-metal acceptance item.
 - The BAR is assigned **before** the VL805 firmware reload (the next driver,
   `drivers/bus/usb/vl805`), whereas the proven in-kernel order reloaded
   firmware first; BAR assignment is PCI-config-level (independent of the xHCI

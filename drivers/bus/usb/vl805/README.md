@@ -39,20 +39,38 @@ BAR + DMA grants to the controller driver without ever mapping them itself
 (`AGENTS.md` §4 — no ambient authority). Every trap is re-checked kernel-side
 (`AGENTS.md` §5.4).
 
-## Layering & purity
+## Crate shape — device logic is co-located here, not in `lib/*`
 
-A **pure-Rust** program (`AGENTS.md` §1): it links the userland runtime
-`rustos-rt` (never the C ABI, §16.4) and depends only on `lib/*` crates, so
-the §17.4 layering holds (no `drivers/*`→`drivers/*` edge). The
-reload-and-publish composition and the firmware policy live in `lib/vl805`
-(`wiring`, host-tested against `DriverHost` doubles); this binary is the thin
-freestanding wiring that builds the rt-backed host and drives it. It names no
-board address and maps nothing, so it stays platform-neutral (`coherency =
-None`, §2.20). On the host it is an inert stub.
+This crate has two targets:
+
+* a **`lib` target** (`src/lib.rs`, `src/wiring.rs`) holding the host-testable
+  device logic — the VL805 firmware-reload policy (`reload_firmware`,
+  `probe_firmware_revision`), the §18.3 `BIND_KEYS` match table (exact PCI
+  `1106:3483`), and the `wiring` (`build_xhci_node` publishes the controller
+  as an `rustos_usb::XHCI_COMPATIBLE` node forwarding the BAR + DMA grants;
+  `reload_firmware_and_publish` is the reload-then-publish composition); and
+* the **`Run` binary** (`src/main.rs`), the freestanding pure-Rust program
+  that builds the rt-backed host and drives that logic.
+
+The device logic lives **in the driver**, not in a `lib/*` device-support
+crate, because the §2.20 carve-out only permits the latter when a
+charter-legal *non-driver* consumer (a §18.6 bootstrap-floor path, or a driver
+of a different class) shares it — and a VL805 USB driver, which sits above the
+bootstrap floor and is discovered/autoloaded into user space (§18.5), has
+none. Its only consumer is this crate's own `Run` binary, so there is no
+second crate to keep in sync (`AGENTS.md` §2.22 / §2.2 / §2.14).
+
+A **pure-Rust** program (`AGENTS.md` §1): the binary links the userland
+runtime `rustos-rt` (never the C ABI, §16.4) and depends only on `lib/*`
+crates, so the §17.4 layering holds (no `drivers/*`→`drivers/*` edge). It
+names no board address and maps nothing, so it stays platform-neutral
+(`coherency = None`, §2.20). On the host the binary is an inert stub and only
+the `lib` target (and its host tests) compiles.
 
 ## Limitations / testing
 
 QEMU models no `VideoCore` mailbox or Pi USB timing (`AGENTS.md` §0.4), so
-the composition and its fail-closed paths are proven by the `lib/vl805` host
-tests; the live reload → publish chain is the on-metal acceptance item
-(`plans/PI.md` P10).
+the composition and its fail-closed paths are proven by this crate's own host
+tests (against the protocol-faithful `lib/vcmailbox` mock firmware and
+`DriverHost` doubles, §2.1 / §2.2); the live reload → publish chain is the
+on-metal acceptance item (`plans/PI.md` P10).

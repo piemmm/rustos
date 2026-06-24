@@ -2,14 +2,15 @@
 
 `lib/hid` is the arch-neutral, transport-agnostic HID boot-protocol logic the
 USB-HID keyboard/mouse driver is built from: the report decoders, the
-console-input producer, and the xHCI boot-keyboard orchestration. It lives in
-`lib/*` — not in a driver crate — so **both** the transitional in-kernel
-keyboard scaffold and the user-space keyboard driver process
-(`drivers/input/usb_kbd`) compose it without a `drivers/*`→`drivers/*`
-dependency (`AGENTS.md` §17.4 / §2.2), exactly as the bus-agnostic xHCI
-protocol lives in [`rustos-usb`](./usb.md) rather than the xHCI driver. The
-thin `drivers/input/usb_hid` crate keeps only the §8 `register` entry and the
-§18.3 bind table.
+console-input producer, and the xHCI boot-keyboard orchestration. It is
+**generic** HID-protocol code (it names no device, board, PCI id, or SoC), so
+it lives in `lib/*` as shared common code (`AGENTS.md` §6 / §2.2) — *not*
+under the §2.20 / §2.22 single-device carve-out. The user-space keyboard
+driver process (`drivers/input/usb_kbd`) and the thin `drivers/input/usb_hid`
+crate (which keeps only the §8 `register` entry and the §18.3 bind table) both
+compose it without a `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 /
+§2.2), exactly as the bus-agnostic xHCI protocol lives in
+[`rustos-usb`](./usb.md) rather than the xHCI driver.
 
 ## What it provides
 
@@ -52,7 +53,7 @@ thin `drivers/input/usb_hid` crate keeps only the §8 `register` entry and the
 vocabulary), `lib/keymap` (the `Key`→record map), and `lib/usb` (the
 bus-agnostic xHCI protocol) — so it satisfies §17.4 and names no board, PCI, or
 SoC detail (`AGENTS.md` §2.20). The board PCIe root-complex bring-up and BAR
-assignment stay in the board bus drivers (`lib/pcie_brcm` +
+assignment stay in the board bus drivers (`drivers/bus/pcie_brcm` +
 `drivers/bus/usb`); `lib/hid` maps a register window by address and carves a
 DMA region by constraint.
 

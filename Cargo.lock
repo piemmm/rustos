@@ -681,8 +681,9 @@ dependencies = [
  "rustos-abi",
  "rustos-caps",
  "rustos-drvrt",
- "rustos-pcie-brcm",
+ "rustos-pci",
  "rustos-rt",
+ "rustos-usb",
 ]
 
 [[package]]
@@ -702,7 +703,8 @@ dependencies = [
  "rustos-caps",
  "rustos-drvrt",
  "rustos-rt",
- "rustos-vl805",
+ "rustos-usb",
+ "rustos-vcmailbox",
 ]
 
 [[package]]
@@ -1236,15 +1238,6 @@ name = "rustos-pci"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
-]
-
-[[package]]
-name = "rustos-pcie-brcm"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
- "rustos-pci",
- "rustos-usb",
 ]
 
 [[package]]
@@ -2829,15 +2822,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-vl805"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
- "rustos-usb",
- "rustos-vcmailbox",
-]
-
-[[package]]
 name = "rustos-vt"
 version = "0.0.0"
 dependencies = [
@@ -2863,19 +2847,19 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-crypto",
+ "rustos-drv-bus-pcie-brcm",
+ "rustos-drv-bus-usb-vl805",
  "rustos-fuzzseed",
  "rustos-hid",
  "rustos-itest-harness",
  "rustos-kernel-syscall",
  "rustos-mkimage",
- "rustos-pcie-brcm",
  "rustos-qemu",
  "rustos-test-autoload-root-image",
  "rustos-test-encrypted-root-image",
  "rustos-test-fat32-image",
  "rustos-test-rustfs-image",
  "rustos-vcmailbox",
- "rustos-vl805",
 ]
 
 [[package]]

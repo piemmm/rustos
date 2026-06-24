@@ -522,7 +522,7 @@ through one path with no `cfg(board)` fork (`AGENTS.md` §17.2 / §2.2).
 > `4125`/`4126` and the `open_controller`/`wait_for_caps_ready`/
 > `VideoCoreFirmwareReset` symbols from the live path. The PCIe-side findings
 > (timer rate, the outbound-window root cause, the post-link-up bridge enable)
-> remain accurate for `lib/pcie_brcm`.
+> remain accurate for `drivers/bus/pcie_brcm`.
 
 The same resolved rate drives every `kernel_arch::busy_delay_us` settle
 the in-kernel bring-up uses (the BCM2711 PCIe reset/SerDes/link-training
@@ -1206,7 +1206,7 @@ item (§0.9).
 > diagnostics the chronicle below references (events in the `4101`–`4126`
 > range) were emitted by the now-deleted in-kernel scaffold. They are gone
 > from the live kernel path; the chronicle is retained only for the **PCIe
-> root-cause findings** that still apply to `lib/pcie_brcm` and the
+> root-cause findings** that still apply to `drivers/bus/pcie_brcm` and the
 > user-space bring-up.
 
 ### Discovery and bring-up logging (metal diagnostics)
@@ -1584,7 +1584,7 @@ BCM2711 ships its root port's type-1 bridge bus-number register
 (`PCI_PRIMARY_BUS`, config offset `0x18`) at 0, so the port forwarded no
 configuration transactions to the secondary bus and the VL805 on bus 1
 never answered a read. The root-complex bring-up
-(`rustos_pcie_brcm::BrcmPcieRc::bring_up`) now programs that
+(`rustos_drv_bus_pcie_brcm::BrcmPcieRc::bring_up`) now programs that
 register (primary 0, secondary 1) so configuration reaches bus 1.
 
 Enabling that forwarding, however, exposed a second defect that **wedged
@@ -1936,7 +1936,7 @@ firmware, redirected the search to the **outbound (CPU→PCIe) translation
 window** — the one path config reads (which take the RC's internal `EXT_CFG`
 route) do not exercise.
 
-The defect was in `rustos_pcie_brcm::regs`: the BCM2711
+The defect was in `rustos_drv_bus_pcie_brcm::regs`: the BCM2711
 **proprietary** `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` register (`0x4070`)
 packs the window **limit** in bits `[31:20]` and the **base** in bits
 `[15:4]`. But

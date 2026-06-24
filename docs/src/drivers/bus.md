@@ -11,12 +11,11 @@ is `pub(crate)` per `AGENTS.md` §8.
 | Crate                    | Platform              | Status   |
 | ------------------------ | --------------------- | -------- |
 | `lib/pci`                | x86_64 (PIO) / PCIe ECAM / BCM2711 windowed | Shipped (library) |
-| `lib/pcie_brcm`  | Pi 4 (BCM2711 RC)     | P10 link bring-up (host-proven); metal pending |
+| `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | User-space bus-driver crate (link bring-up engine + `Run` bin; host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
 | `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + HID enumeration (host-proven) |
-| `lib/vl805`              | Pi 4 (VL805 device)   | Firmware-reload policy + reload-and-publish wiring (host-proven); metal pending |
-| `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | User-space bus-driver bin: reload firmware → emit `usb,xhci` node B (host-proven via `lib/vl805`); metal pending |
+| `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | User-space bus-driver crate: firmware-reload policy + `Run` bin (reload firmware → emit `usb,xhci` node B; host-proven); metal pending |
 
 ## Capability model
 
@@ -109,7 +108,7 @@ enumeration, BAR-sizing, and capability walk above it are unchanged.
 access that lands outside the mapped window, or any function but `00.0`
 on the root bus, resolves to the same `0xFFFF_FFFF` sentinel
 (`AGENTS.md` §5.4). The link behind the bridge must be **up** before any
-downstream access — the `lib/pcie_brcm` root-complex bring-up
+downstream access — the `drivers/bus/pcie_brcm` root-complex bring-up
 (below) guarantees that before handing its register window here.
 
 The BCM2711 root port is a **single-device** link, so the accessor
@@ -179,13 +178,17 @@ decodes. The BAR *size* probe depends on hardware read-only BAR bits
 and is covered by the mechanism-#1 fixtures, not the plain-memory
 ECAM backing.
 
-## BCM2711 PCIe root-complex bring-up — `lib/pcie_brcm`
+## BCM2711 PCIe root-complex bring-up — `drivers/bus/pcie_brcm`
 
 The Pi 4's VL805 xHCI sits behind the BCM2711 PCIe root complex, which
 ships out of reset with its link **down**. Before the windowed
 configuration access above can reach the VL805, the root complex must
-be brought up. `lib/pcie_brcm` performs that bring-up over the
-BCM2711 root-complex registers.
+be brought up. The `drivers/bus/pcie_brcm` driver crate's `lib` target
+performs that bring-up over the BCM2711 root-complex registers. (The
+bring-up engine is co-located in that driver crate, not a `lib/*`
+device-support crate: PCIe root-complex bring-up sits above the §18.6
+bootstrap floor, so it has no charter-legal non-driver consumer for the
+§2.20 carve-out, `AGENTS.md` §2.22.)
 
 ### Seams
 
@@ -542,29 +545,31 @@ the mock controller — plus the fail-closed paths (forged residual,
 stalled class request, empty port, double enumeration, undersized or
 misaligned DMA region).
 
-## VL805 USB bus driver — `lib/vl805` + `drivers/bus/usb/vl805`
+## VL805 USB bus driver — `drivers/bus/usb/vl805`
 
 The VL805 firmware (re)load is the one thing specific to that *device*,
 so it is its own driver — separate from, and not intertwined with, the
-generic PCIe root-complex driver (`lib/pcie_brcm`, which trains the link)
-and the generic xHCI host engine (`lib/usb`, which brings the controller
-up and enumerates devices). A different board may need the PCIe driver
-without USB at all, or an xHCI controller that needs no firmware reload;
-keeping the three separate is the correct modular shape (`AGENTS.md`
-§2.2 / §2.20 / §8 / §17.4).
+generic PCIe root-complex driver (`drivers/bus/pcie_brcm`, which trains the
+link) and the generic xHCI host engine (`lib/usb`, which brings the
+controller up and enumerates devices). A different board may need the PCIe
+driver without USB at all, or an xHCI controller that needs no firmware
+reload; keeping the three separate is the correct modular shape
+(`AGENTS.md` §2.2 / §8 / §17.4).
 
-The firmware policy and the controller-node wiring live in the
-device-support library `lib/vl805` (the §2.20 single-device carve-out,
-the `lib/vcmailbox` / `lib/pcie_brcm` precedent), consumed by the
-autoloaded user-space bus-driver bin `drivers/bus/usb/vl805` (which links
-the userland runtime `rustos-rt`). The policy lives in `lib/*` rather than
-the bin so it is host-unit-tested without a kernel and so the bin crosses
-no `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
+The firmware policy and the controller-node wiring live **in the driver
+crate** `drivers/bus/usb/vl805`, as a host-testable `lib` target
+(`src/lib.rs` + `src/wiring.rs`) that the crate's freestanding `Run` binary
+(`src/main.rs`, which links the userland runtime `rustos-rt`) links. The
+logic is co-located here, not in a `lib/*` device-support crate: a VL805
+USB driver sits above the §18.6 bootstrap floor and so has no charter-legal
+non-driver consumer for the §2.20 carve-out (`AGENTS.md` §2.22). Putting it
+in a `lib` target keeps it host-unit-tested without a kernel and the binary
+crosses no `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2).
 
 On a Pi 4 without the SPI EEPROM (rev 1.4+), the VL805 carries no
 resident firmware: the `VideoCore` loads it at power-on and a PCIe
 `PERST#` drops it, so only `VideoCore` can reload it over a
-`NOTIFY_XHCI_RESET` firmware-property request. `lib/vl805` may know the
+`NOTIFY_XHCI_RESET` firmware-property request. The driver may know the
 VL805/BCM2711 — but it reaches the firmware mailbox **only** through the
 board-neutral `rustos_abi::driver::mailbox::MailboxChannel` seam, never a
 doorbell address or a `kernel/*` dependency (`AGENTS.md` §17.4). Its
@@ -593,15 +598,16 @@ it forwards the BAR/DMA grants without ever mapping them (`AGENTS.md` §4
 
 The property-message *layout* lives once in `lib/vcmailbox`
 (`encode_xhci_reset` / `decode_xhci_reset_response` and the
-firmware-revision pair); `lib/vl805` only sequences the policy, never
+firmware-revision pair); the VL805 driver only sequences the policy, never
 re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
 discovered doorbell window, the DMA-aliased property buffer, the cache
 coherency) lives behind the `MailboxChannel`: the user-space bin reaches
 the autoloaded `drivers/bus/mailbox/vcmailbox` service over the kernel
 call surface (the `ipc_call` endpoint, gated by `CAP_MAILBOX`). QEMU
 models no `VideoCore`, so
-the policy is host-proven against the protocol-faithful `lib/vcmailbox`
-mock firmware and the reload-and-publish wiring against `DriverHost`
+the policy is host-proven (in the driver crate's `lib` target) against the
+protocol-faithful `lib/vcmailbox` mock firmware and the reload-and-publish
+wiring against `DriverHost`
 doubles; the live reload → publish chain is the on-metal acceptance item
 (`plans/PI.md` P10).
 
@@ -913,9 +919,9 @@ with `rustos_pci::bus_to_cpu_phys`, and publishes the controller as an
 xHCI `HwNode` carrying that BAR (an `Mmio` window inside the bridge's
 outbound `BusWindow` grant, so the kernel's grant-coverage check admits
 it) and a DMA constraint. The composition lives — and is host-tested
-against a mock bus — in `lib/pcie_brcm` (`wiring::emit_vl805_node` /
-`wiring::publish_usb_function`), so the driver binary is a thin
-freestanding stub.
+against a mock bus — in the driver crate's own `lib` target
+(`wiring::emit_vl805_node` / `wiring::publish_usb_function`), so the driver
+binary is a thin freestanding stub.
 
 The USB host driver does the same one level down, for the HID device it
 enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).

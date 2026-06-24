@@ -11,31 +11,55 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is **only** a binary: the `Run` entry point of the VL805 USB
-# bus-driver bundle, installed under `/System/Drivers/` and autoloaded into user
-# space by `devmgr` when the VL805 PCI node is discovered (`AGENTS.md` §18). It
-# links the userland runtime `rustos-rt`, so it is a separate crate from the
-# kernel-linked `lib/vl805` engine (the kernel must not pull in the userland
-# `_start` / panic handler), and depends only on `lib/*` crates so the §17.4
-# layering holds (no `drivers/*`→`drivers/*` edge). The reload-and-publish
-# composition is host-tested in `lib/vl805` (`wiring`), so this binary is a thin
-# freestanding wiring on the native Tier-1 targets and an inert host stub
-# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/bus/pcie_brcm`
-# (`AGENTS.md` §2.2).
+# This driver crate has two targets. The host-testable device logic — the
+# VL805 firmware-reload policy, the §18.3 `BIND_KEYS` match table, and the
+# `wiring` (`build_xhci_node` + `reload_firmware_and_publish`) — lives in the
+# `lib` target (`src/lib.rs`), co-located *in the driver* because a VL805 USB
+# driver sits above the §18.6 bootstrap floor and so has no charter-legal
+# non-driver consumer for a `lib/*` device-support crate (`AGENTS.md` §2.22).
+# The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
+# `/System/Drivers/` and autoloaded into user space by `devmgr` when the VL805
+# PCI node is discovered (`AGENTS.md` §18). It links the userland runtime
+# `rustos-rt`, so those bin-only deps are pulled in **only** for the bare-metal
+# targets the binary is built for; on the host the binary is an inert stub and
+# only the `lib` target (and its host tests) compiles (`AGENTS.md` §2.2).
 
-# Everything the freestanding program links is pulled in only for the bare-metal
-# targets the binary is actually built for; on the host the binary is an inert
-# stub with no dependencies.
-[target.'cfg(target_os = "none")'.dependencies]
-# The frozen `abi-v1` surface (`CapabilityId`, `DriverError`).
+# The device-logic dependencies the `lib` target needs on every target (host
+# tests + the freestanding build alike).
+[dependencies]
+# The frozen `abi-v1` surface: the `DriverHost` / `MailboxChannel` seams the
+# firmware policy runs over, the `HwNode` / `HwResource` / `HwMatchKey`
+# vocabulary the controller node is published with, and the `CapabilityId` /
+# `DriverError` types it fails closed with — one ABI definition (§2.2).
 rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The BCM2711 VideoCore property-channel client (`AGENTS.md` §2.20 device
+# carve-out): the VL805 firmware-reload (`NOTIFY_XHCI_RESET`) and
+# firmware-revision property-message layout live there once; this crate
+# encodes/decodes those messages and runs them over the board-neutral
+# `lib/abi` `MailboxChannel` seam, never re-deriving the layout (§2.2).
+rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0" }
+# The bus-agnostic xHCI controller crate: the single definition of the
+# controller's `compatible` identity (`XHCI_COMPATIBLE`) the published node
+# carries and its DMA working-set size (`XHCI_DMA_BYTES`), shared with the
+# controller driver that binds the node (§2.2).
+rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
+
+[dev-dependencies]
+# Protocol-faithful mock firmware (`mock-firmware` feature) backing the
+# host-test `MailboxChannel`, so the firmware policy is proven against the
+# real property semantics rather than a hand-faked response (§2.1 / §2.2).
+# QEMU models no VideoCore, so the live doorbell is the on-metal acceptance
+# item (`plans/PI.md` Increment C).
+rustos-vcmailbox = { path = "../../../../lib/vcmailbox", version = "=0.0.0", features = [
+    "mock-firmware",
+] }
+
+# Everything the freestanding program links beyond the device logic is pulled
+# in only for the bare-metal targets the binary is actually built for; on the
+# host the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over (§5.2).
 rustos-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
-# The VL805 device-support crate: the firmware-reload policy and the
-# host-tested `wiring` (`build_xhci_node` + `reload_firmware_and_publish`) and
-# `BIND_KEYS` — a `lib/*` crate, so the §17.4 layering holds (the §2.20
-# device-support carve-out).
-rustos-vl805 = { path = "../../../../lib/vl805", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` (`resource_grants` / `ipc_call` for the mailbox /
 # `hw_emit_node` over the syscall surface, §5.4).

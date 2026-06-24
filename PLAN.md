@@ -2045,172 +2045,73 @@ order (one fully-gated increment each):
            through the real syscall consumer in `kernel/core`
            (`hw_emit_node_covers_a_child_bar_under_a_bridge_window`). Docs:
            `drivers/hardware-detection.md` recursive-discovery section.
-         - **Remaining — the user-space bus-driver chain (the D5 flip).** Turn
-           the in-kernel `bring_up_keyboard` composition into a reactive chain of
+         - **The user-space bus-driver chain (the D5 flip) — DONE.** The
+           in-kernel `bring_up_keyboard` composition is now a reactive chain of
            autoloaded user-space driver **binaries** (the `usb_kbd`/`virtio_kbd`
            pattern) over the rt-backed `DriverHost`. The hardware forbids the
            plan's earlier "`bus_usb` emits a HID node, `usb_kbd` binds it" split:
            BAR assignment needs the live trained `PciBus` and the `Xhci`
            controller object cannot cross a process boundary, so `usb_kbd` maps
            the BAR *by address* and does the whole xHCI bring-up + enumerate +
-           pump itself. Operator-confirmed decomposition (each driver its own
-           job, no `drivers/*→drivers/*` edge, ordering enforced by the emit
-           chain, least-privilege caps):
-           1. `FdtDiscovery` already emits the RC node (`brcm,bcm2711-pcie`,
-              Mmio+Dma+BusWindow) + mailbox node (`brcm,bcm2835-mbox`).
-           2. **pcie_brcm** (binds RC node; `CAP_MMIO_MAP`+`CAP_HW_EMIT`): trains
-              the link, builds the `PciBus`, assigns+enables the VL805 BAR, and
-              emits node A `pci(1106,3483,0C0330)` carrying `Mmio(bar_cpu_phys,
-              bar_len)` + `Dma(aperture_top, XHCI_DMA_BYTES)`.
-           3. **vcmailbox** (binds mailbox; done) serves `MAILBOX_ENDPOINT`.
-           4. **vl805** (binds node A; `CAP_MAILBOX`+`CAP_HW_EMIT` **only** — it
-              cannot map the forwarded BAR/DMA, least privilege): reloads
-              firmware over the mailbox IPC (mailbox-only, never touches the
-              BAR), then emits node B `compatible("usb,xhci")` forwarding the
-              same BAR+DMA grants. Firmware-before-bring-up is enforced *by
-              construction*: node B does not exist until vl805 has run.
-           5. **usb_kbd** (binds node B; `CAP_MMIO_MAP`+`CAP_MEM_DMA`+
-              `CAP_INPUT_INJECT`): maps the BAR, brings up xHCI, enumerates,
-              pumps. Bind retargeted to `compatible("usb,xhci")`.
+           pump itself.
+
            A user-space driver bin (a `drivers/*` or `userland/*` crate) may
            depend only on `lib/*` (deps-check `layer_allows`), and it cannot
-           share a crate with the kernel-linked lib (that would pull
-           `rustos-rt`'s `_start`/allocator into the kernel's bare-metal
-           graph). So **both** the PCI config/BAR mechanism *and* the BCM2711
-           RC bring-up had to move out of their `drivers/bus/*` driver crates
-           into `lib/*` before the chain could be built — the same forced
-           extraction `lib/usb`/`lib/virtio` set the precedent for. The work is
-           staged as gate-green increments, each leaving the tree clean (no
-           parallel old/new code — not a §2.13 compat migration):
-           - **D5a — extract `lib/pci` — DONE (whole gate green).** The PCI
-             config/enumerate/BAR/mechanism (`mechanism_one/ecam/brcm`,
-             `describe_function`, the `Bus`/`VirtioPciBus`/`MsixBus`/`PciBus`
-             impls) now lives in `lib/pci` (`rustos-pci`), mirroring
-             `lib/usb`↔`drivers/bus/usb`, so a user-space bus driver bin can
-             build a `PciBus` without a `drivers/*→drivers/*` edge. The dead §8
-             `register` entry (no floor-catalogue entry, no consumer) and the
-             old `drivers/bus/pci` driver crate were deleted (§2.14); the kernel
-             scaffold + the `virtio_qemu_support` test were retargeted onto
-             `rustos_pci`; workspace + §3 updated. Pure relayering, no behaviour
-             change.
-           - **D5b.1 — extract `lib/pcie_brcm` — DONE (whole gate green).**
-             The BCM2711 RC bring-up (the `BrcmPcieRc` reset/SerDes/window/
-             link-train state machine, `PcieRegs`/`Delay` seams, `PcieWindows`/
-             `BringUpTiming`/`InboundWindowReadback`, `wiring::open_discovered`/
-             `bring_up_from_node`/`pcie_bringup_from_node`, the `regs` module,
-             `BIND_KEYS`, and the thin §8 floor `register`) moved wholesale
-             from the `drivers/bus/pcie_brcm` *driver* crate into `lib/pcie_brcm`
-             (`rustos-pcie-brcm`) — the §2.20 single-device-support carve-out,
-             the `lib/vcmailbox` precedent. The kernel scaffold/catalogue/
-             build.rs were retargeted onto `rustos_pcie_brcm`; workspace + §3 +
-             docs updated. Pure relayering, no behaviour change — so a
-             user-space `pcie_brcm` bin can now compose it with `lib/pci`
-             without a `drivers/*→drivers/*` edge. `drivers/bus/pcie_brcm` no
-             longer exists; D5b.2 recreates it as the user-space bin.
-           - **D5b.2a — kernel-owned emitted-node identity — DONE (whole gate
-             green).** A load-bearing prerequisite the bin uncovered: a node
-             published through `hw_emit_node` must get a *unique* id (the
-             driver-store load path resolves a matched node by `node.id()`, so a
-             collision would mint the wrong driver's grants) and a *trustworthy*
-             parent. The emitter no longer names identity (§4 / §5.4 — identity
-             is kernel-provided, never caller-supplied): `PciBus::describe_function`
-             dropped its `parent_id`/`node_id` params and returns a placeholder
-             identity; `HwNode::set_identity` is the kernel's. The kernel records
-             a task→matched-node map (`AddressSpaceRegistry::set_loaded_node`,
-             threaded `node_id: Option<u32>` through `DriverLoader`/
-             `SpawnDriverLoader`→`DriverProcessSpawn`→`InitSpawnCtx::spawn_driver_process`
-             →`KernelSpawnCtx`→admit, recorded beside grant minting). `hw_emit_node`
-             now resolves the caller's *own* loaded node as the parent (fail-closed
-             `PermissionDenied` if the caller has none), keeps the per-resource
-             coverage check, and `HwTreeSource::publish(parent, node)` →
-             `HwTreeStore::publish_child` assigns id = max-live-non-root-id + 1 and
-             sets the parent. Host-tested across `lib/abi`, `lib/pci`, `kernel/core`
-             (publish/coverage/no-loaded-node fail-closed/parent assertions), and
-             `kernel/rustos-kernel` (`publish_child` unique-id + the load path
-             threading `Some(node_id)`). The in-kernel scaffold's separate
-             `augment_boot_tree` path is untouched (deleted at D5d).
-           - **D5b.2b — `pcie_brcm` user-space bin — DONE (whole gate green).**
-             The new `drivers/bus/pcie_brcm` bin crate (a freestanding `Run`
-             binary linking `rustos-rt` + `rustos-drvrt` + `lib/pcie_brcm`, with
-             an inert host stub): `from_grants_query` →
-             `pcie_bringup_from_resources` over the RC node's grants →
-             `emit_vl805_node`, then it parks resident. Caps
-             `CAP_MMIO_MAP`+`CAP_HW_EMIT`; binds the RC node via
-             `rustos_pcie_brcm::BIND_KEYS`. The discover-and-publish composition
-             lives in `lib/pcie_brcm::wiring` (`emit_vl805_node` =
-             `open_discovered` → `mechanism_brcm` → `publish_usb_function`;
-             `publish_usb_function` = `find_function_by_class` →
-             `assign_and_map_bar` → `bus_to_cpu_phys` → `describe_function` →
-             push `Mmio(bar_cpu_phys,bar_len)` + `Dma(aperture_top,XHCI_DMA_BYTES)`
-             → `emit_node`), host-tested against a mock bus (happy-path grant
-             shapes, no-USB / BAR-outside-window / refused-emit fail-closed, and
-             the link boundary). The shared `find_function_by_class` /
-             `assign_and_map_bar` / `bus_to_cpu_phys` / `USB_CONTROLLER_CLASS`
-             primitives were hoisted into `lib/pci` and `XHCI_BAR_INDEX` into
-             `lib/usb`; the xHCI driver wiring was retargeted onto them, so the
-             two bus drivers share one definition (§2.2). The published node's
-             BAR is resolved to its **CPU-physical** address so it sits inside
-             the bridge's outbound `BusWindow` grant the kernel coverage check
-             tests against (`HwResource::covers`, BusWindow→Mmio). **Metal
-             note:** this assigns the BAR *ahead* of the VL805 firmware reload
-             (D5c), reversing the proven in-kernel order; BAR assignment is
-             PCI-config-level and independent of xHCI firmware, expected safe but
-             a metal-gated acceptance point (§0.9). The bundle is not yet
-             installed into the image — that is the D5d flip.
-           - **D5c — `vl805` user-space bin + `usb_kbd` bind retarget — DONE
-             (whole gate green).** The VL805 firmware policy moved out of the
-             kernel-linked `drivers/bus/usb/vl805` crate into the new
-             device-support library `lib/vl805` (`rustos-vl805`, the §2.20
-             carve-out / `lib/pcie_brcm` precedent) — forced for the same reason
-             as D5a/D5b.1: a `rustos-rt`-linking bin cannot share a
-             kernel-linked `drivers/*` crate. `lib/vl805` holds `register`,
-             `reload_firmware`/`probe_firmware_revision`, the firmware
-             outcomes/constants, node-A `BIND_KEYS` (exact PCI `1106:3483`), and
-             a host-tested `wiring`: `build_xhci_node` (node B = an
-             `rustos_usb::XHCI_COMPATIBLE` `usb,xhci` node forwarding the
-             received BAR+DMA grants) and `reload_firmware_and_publish` (reload
-             over `host.mailbox()` *then* emit, so firmware-before-bring-up
-             holds by construction). `drivers/bus/usb/vl805` became the
-             freestanding `Run` bin (links `rustos-rt`+`rustos-drvrt`+`lib/vl805`;
-             inert host stub): `from_grants_query` → `build_xhci_node` →
-             `reload_firmware_and_publish` → park. Caps `CAP_MAILBOX`+`CAP_HW_EMIT`
-             **only** — it forwards the BAR/DMA grants without ever mapping them
-             (§4 least privilege). `usb_kbd`'s bind table is
-             `rustos_hid::KEYBOARD_BIND_KEYS` (exact `compatible("usb,xhci")`,
-             priority 10), so `usb_kbd` binds node B and brings the whole xHCI
-             controller up itself (the `Xhci` object can't cross a process
-             boundary). The shared `XHCI_COMPATIBLE` lives once in `lib/usb`
-             (§2.2).
-           - **D5d — the flip — DONE (whole gate green).** All four signed
-             bundles are installed into the image `/System/Drivers/` store
-             (`tools/xtask` `image_drivers`: `bus_mailbox/vcmailbox`,
-             `bus_pcie/bcm2711`, `bus_usb/vl805`, `input/usb_kbd`, each a
-             freestanding `rustos-rt` `Run` bin cross-compiled, ELF→rxe'd, and
-             signed with the kernel's driver-signing seed). The in-kernel
-             keyboard scaffold (`usb_keyboard.rs` + `keyboard_service.rs`, the
-             init-seam `bring_up_keyboard_into_tree`/`spawn_pump` call, the
-             boot `record_discovery`/`record_mailbox_doorbell` stash, and
-             `unlock_service::augment_boot_tree`) is **deleted** (§2.14).
-             `driver_catalog::IN_KERNEL_DRIVERS` is now the storage bootstrap
-             floor **only** — virtio-blk + EMMC2 (§18.6); `pcie_brcm`,
-             `bus_usb`, and `usb_hid` are gone from it and from the kernel's
-             deps/`build.rs` images. The keyboard now comes up entirely in user
-             space: `FdtDiscovery` already seeds the discovered
-             `brcm,bcm2711-pcie` + VideoCore mailbox nodes into `HW_TREE`, and
-             `devmgr` autoloads the recursive chain (pcie_brcm binds the
-             bridge → emits the VL805 PCI function → vl805 reloads firmware over
-             the mailbox + emits the `usb,xhci` node → usb_kbd binds it, brings
-             the controller up, pumps key edges). `autoload_caps` gained
-             `CAP_HW_EMIT` + `CAP_MAILBOX` so the bus bundles can emit nodes /
-             call the mailbox (per-driver manifest∩ still binds, §5.2). The
-             `hw_remove_node` syscall (no. 38, `CAP_HW_EMIT`, audited) landed
-             as the mirror of `hw_emit_node`: a bus driver retires a node it
-             published — and its subtree — kernel-side ownership-checked,
-             fail-closed; the device-manager unload reaction is Design D D4
-             (the bus port-watcher consumer). No `-M virt` Pi-USB vertical
-             exists (§0.4); the live enumerate→emit→autoload chain is
-             metal-gated (§0.9). **Metal acceptance:** top-down autoload from
-             `/System` and a keystroke with the scaffold gone.
+           share a crate with the kernel-linked lib. The genuinely-shared,
+           board-neutral mechanism therefore lives in `lib/*` — `lib/pci` (PCI
+           config/enumerate/BAR/mechanism, `mechanism_one/ecam/brcm`, the
+           `Bus`/`VirtioPciBus`/`MsixBus`/`PciBus` seams, and the shared
+           `find_function_by_class`/`assign_and_map_bar`/`bus_to_cpu_phys`
+           locate primitives) and `lib/usb` (the bus-agnostic xHCI protocol +
+           `XHCI_COMPATIBLE`/`XHCI_DMA_BYTES`/`XHCI_BAR_INDEX`), the
+           `lib/usb`↔`drivers/bus/usb` precedent. Each device's **own** logic,
+           by contrast, lives **in its driver crate** as a host-testable `lib`
+           target the `Run` binary links (§2.22), since a driver above the
+           §18.6 floor has no charter-legal non-driver consumer for a `lib/*`
+           device-support crate.
+
+           **Status: DONE.** The chain is five autoloaded user-space pieces,
+           each its own job, no `drivers/*→drivers/*` edge, ordering enforced by
+           the `hw_emit_node` chain, least-privilege caps:
+           1. `FdtDiscovery` seeds the RC node (`brcm,bcm2711-pcie`,
+              Mmio+Dma+BusWindow) + mailbox node (`brcm,bcm2835-mbox`) into
+              `HW_TREE`.
+           2. **`drivers/bus/pcie_brcm`** (`CAP_MMIO_MAP`+`CAP_HW_EMIT`): binds
+              the RC node, trains the link, builds the `PciBus` over `lib/pci`,
+              assigns+enables the VL805 BAR, and emits node A
+              `pci(1106,3483,0C0330)` carrying `Mmio(bar_cpu_phys,bar_len)` +
+              `Dma(aperture_top,XHCI_DMA_BYTES)`. The BCM2711 bring-up engine
+              (`BrcmPcieRc`, the `regs`/`wiring`, `BIND_KEYS`) is its own `lib`
+              target.
+           3. **`drivers/bus/mailbox/vcmailbox`** serves `MAILBOX_ENDPOINT`; the
+              property-message layout is the genuinely-shared `lib/vcmailbox`
+              (its other consumer is the aarch64 framebuffer boot console, so it
+              stays in `lib/*`, §2.22).
+           4. **`drivers/bus/usb/vl805`** (`CAP_MAILBOX`+`CAP_HW_EMIT` **only**):
+              reloads firmware over the mailbox IPC, then emits node B
+              `compatible("usb,xhci")` forwarding the BAR+DMA grants. The VL805
+              firmware policy (`reload_firmware`/`probe_firmware_revision`,
+              `BIND_KEYS`, `build_xhci_node`/`reload_firmware_and_publish`) is
+              its own `lib` target. Firmware-before-bring-up holds by
+              construction (node B does not exist until vl805 runs).
+           5. **`drivers/input/usb_kbd`** (`CAP_MMIO_MAP`+`CAP_MEM_DMA`+
+              `CAP_INPUT_INJECT`): binds node B (`rustos_hid::KEYBOARD_BIND_KEYS`,
+              exact `compatible("usb,xhci")`), maps the BAR, brings up xHCI
+              (the `Xhci` object can't cross a process boundary, so it does the
+              whole bring-up), enumerates, and pumps key edges.
+
+           The kernel owns every emitted node's identity (`hw_emit_node`
+           assigns a unique id and the caller's own loaded node as parent,
+           fail-closed; per-resource `HwResource::covers` coverage, including
+           the `BusWindow`→`Mmio` bridge-BAR case). `hw_remove_node` (no. 38,
+           `CAP_HW_EMIT`, audited) is the mirror that retires a published node +
+           subtree. `driver_catalog::IN_KERNEL_DRIVERS` is the storage bootstrap
+           floor **only** (virtio-blk + EMMC2, §18.6); the in-kernel keyboard
+           scaffold is deleted (§2.14) and the four bundles are installed into
+           the image `/System/Drivers/` store, signed with the kernel's
+           driver-signing seed. No `-M virt` Pi-USB vertical exists (§0.4); the
+           live enumerate→emit→autoload chain + a keystroke is the on-metal
+           acceptance item (§0.9).
 
 ---
 
@@ -3495,3 +3396,17 @@ can see *why* a rule exists without diffing the charter's history.
   commits and pushing are reserved for the human contributor who reviews the
   agent's working-tree changes first; the agent's deliverable is the modified
   tree plus its §23.5 completion report. Documentation only.
+
+- **2026-06-24 — Device-driver logic lives in the driver, not `lib/*`.** Added
+  §2.22 (cross-referenced from the §2.20 carve-out and §17.4): a `lib/*`
+  device-support crate is permitted *only* when a charter-legal **non-driver**
+  consumer shares it (a §18.6 bootstrap-floor path, or a driver of a *different*
+  class); a transitional in-kernel scaffold is **not** a valid second consumer
+  — it is the §18.5 defect to remove. A device-support crate that loses its
+  last non-driver consumer collapses into its single `drivers/*` consumer as a
+  host-testable `lib` target the `Run` binary links (§2.2, §2.14). Applied the
+  rule: with the in-kernel keyboard scaffold gone (D5d), `lib/vl805` and
+  `lib/pcie_brcm` had only their sibling driver bins as consumers, so both were
+  folded into `drivers/bus/usb/vl805` and `drivers/bus/pcie_brcm` and deleted;
+  `lib/vcmailbox` stays (its non-driver consumer, the aarch64 framebuffer boot
+  console, is genuine). Charter + §3/§16.4 + docs + the fold.

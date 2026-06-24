@@ -11,31 +11,46 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is **only** a binary: the `Run` entry point of the BCM2711 PCIe
-# bus-driver bundle, installed under `/System/Drivers/` and autoloaded into user
-# space by `devmgr` when the `brcm,bcm2711-pcie` node is discovered (`AGENTS.md`
-# §18). It links the userland runtime `rustos-rt`, so it is a separate crate
-# from the kernel-linked `lib/pcie_brcm` engine (the kernel must not pull in the
-# userland `_start` / panic handler), and depends only on `lib/*` crates so the
-# §17.4 layering holds (no `drivers/*`→`drivers/*` edge). The discover-and-publish
-# composition is host-tested in `lib/pcie_brcm` (`emit_vl805_node`), so this
-# binary is a thin freestanding wiring on the native Tier-1 targets and an inert
-# host stub elsewhere (`src/main.rs` / `build.rs`), mirroring
-# `drivers/bus/mailbox/vcmailbox` (`AGENTS.md` §2.2).
+# This driver crate has two targets. The host-testable device logic — the
+# BCM2711 PCIe root-complex bring-up engine (`BrcmPcieRc`), the §18.3
+# `BIND_KEYS` match table, and the `wiring` (`pcie_bringup_from_resources` +
+# `emit_vl805_node`) — lives in the `lib` target (`src/lib.rs`), co-located *in
+# the driver* because a BCM2711 PCIe bus driver sits above the §18.6 bootstrap
+# floor (the kernel floor is the storage path only) and so has no charter-legal
+# non-driver consumer for a `lib/*` device-support crate (`AGENTS.md` §2.22).
+# The `Run` entry-point binary (`src/main.rs`) is the bundle installed under
+# `/System/Drivers/` and autoloaded into user space by `devmgr` when the
+# `brcm,bcm2711-pcie` node is discovered (`AGENTS.md` §18). It links the
+# userland runtime `rustos-rt`, so those bin-only deps are pulled in **only**
+# for the bare-metal targets the binary is built for; on the host the binary is
+# an inert stub and only the `lib` target (and its host tests) compiles
+# (`AGENTS.md` §2.2).
 
-# Everything the freestanding program links is pulled in only for the bare-metal
-# targets the binary is actually built for; on the host the binary is an inert
-# stub with no dependencies.
-[target.'cfg(target_os = "none")'.dependencies]
-# The frozen `abi-v1` surface (`CapabilityId`, `DriverError`).
+# The device-logic dependencies the `lib` target needs on every target (host
+# tests + the freestanding build alike).
+[dependencies]
+# The frozen `abi-v1` surface: the `DriverHost` / `RegisterWindow` / `MmioMapper`
+# seams the bring-up runs over, the `HwNode` / `HwResource` / `HwMatchKey`
+# vocabulary the controller node is published with, and the `CapabilityId` /
+# `DriverError` types it fails closed with — one ABI definition (§2.2).
 rustos-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The PCI/PCIe configuration-access mechanism + shared bus-driver locate/BAR
+# primitives (`mechanism_brcm`, `find_function_by_class`, `assign_and_map_bar`,
+# `bus_to_cpu_phys`, `USB_CONTROLLER_CLASS`) the `emit_vl805_node` composition
+# drives once the link trains. `lib/* → lib/*`, no cycle.
+rustos-pci = { path = "../../../lib/pci", version = "=0.0.0" }
+# The xHCI-protocol facts the published node's grants are sized by:
+# `XHCI_BAR_INDEX` (the controller's register BAR) and `XHCI_DMA_BYTES` (the
+# downstream driver's DMA working set), one definition shared with the xHCI
+# driver (`AGENTS.md` §2.2).
+rustos-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+
+# Everything the freestanding program links beyond the device logic is pulled
+# in only for the bare-metal targets the binary is actually built for; on the
+# host the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over (§5.2).
 rustos-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The BCM2711 PCIe device-support crate: `pcie_bringup_from_resources` (parse
-# the granted RC resources), `emit_vl805_node` (the host-tested train-link →
-# enumerate → assign BAR → publish composition), and `BIND_KEYS` — a `lib/*`
-# crate, so the §17.4 layering holds (the §2.20 device-support carve-out).
-rustos-pcie-brcm = { path = "../../../lib/pcie_brcm", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` (`mmio_map` / `resource_grants` / `hw_emit_node` over
 # the syscall surface, §5.4).

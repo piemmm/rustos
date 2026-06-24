@@ -54,7 +54,6 @@ members = [
     "lib/log",
     "lib/partition",
     "lib/pci",
-    "lib/pcie_brcm",
     "lib/procinfo",
     "lib/raster",
     "lib/rng",
@@ -69,7 +68,6 @@ members = [
     "lib/vcmailbox",
     "lib/virtio",
     "lib/virtio_input",
-    "lib/vl805",
     "lib/vt",
 
     # Drivers — display

@@ -105,54 +105,55 @@ still attaches the node to the boot tree directly.
 These four facility accessors are `abi-v1` *internal* additions: like
 `virtio_host()` before them, each carries a default body so every
 existing host impl stays source-compatible, and the public `register`
-entry point is unchanged. They are the host surface the **autonomous
-floor bring-up** consumes (see below).
+entry point is unchanged. They are the host surface the **autoloaded
+user-space bus-driver chain** consumes (see below).
 
-#### Autonomous floor bring-up entry
+#### The recursive user-space bus-driver chain
 
-`register(host)` is *reactive* — the host calls it to instantiate a
-driver against an already-discovered node. The bootstrap-floor bus
-chain, by contrast, must run **before** any node for the devices behind
-it exists: it has to train the PCIe root complex, reload the device's
-firmware over the mailbox, bring up the xHCI controller, enumerate the
-boot device, and only then `emit_node()` the discovered children. That
-work is exposed as a distinct, documented floor entry point a compiled-in
-floor driver provides and the kernel's bootstrap-floor catalogue
-(`AGENTS.md` §18.6) drives directly, talking to the kernel solely through
-this `DriverHost` contract (no `kernel/*` dependency — `AGENTS.md` §17.4).
-The autonomous entry consumes `mmio_mapper()` (map the discovered
-register window), `dma_host()` (stage controller DMA), `mailbox()`
-(firmware reload), and `emit_node()` (publish the enumerated child),
-keeping the floor driver free of ambient authority and of any board
-name in the generic layers above it.
+The Pi 4 USB-keyboard path is **not** a bootstrap-floor driver. The §18.6
+floor is storage-only (virtio-blk + EMMC2 — the path that must be up before
+`/System/Drivers/` is readable); a PCIe/USB/HID stack sits *above* the floor
+and so is discovered and autoloaded into user space (`AGENTS.md` §18.5), each
+link its own signed `/System/Drivers/` bundle. There is no compiled-in
+in-kernel scaffold (the former one was deleted at `plans/PI.md` P10 D5d).
 
-The chain is split across **three** floor crates, each strictly its own
-device, with no driver naming another (`AGENTS.md` §8 / §17.4 / §2.20):
+The chain is sequenced not by a kernel catalogue but by the hardware tree
+itself: each driver `register()`s reactively against the node the previous
+driver published, and grows the tree with `emit_node()` so the next driver
+autoloads. It is split across **four** autoloaded crates, each strictly its
+own device, with no driver naming another (`AGENTS.md` §8 / §17.4 / §2.22),
+all talking to the kernel solely through this `DriverHost` contract (no
+`kernel/*` dependency — `AGENTS.md` §17.4) and consuming `mmio_mapper()`
+(map the discovered register window), `dma_host()` (stage controller DMA),
+`mailbox()` (firmware reload), and `emit_node()` (publish the enumerated
+child), each free of ambient authority:
 
-* the board-specific PCIe root-complex steps live in the device's own
-  `lib/pcie_brcm` (the §2.20 carve-out that may know the BCM2711)
-  — link reset, SerDes, window programming, link training;
-* the VL805-specific `VideoCore`-mailbox firmware reload lives in its own
-  device crate `drivers/bus/usb/vl805` (it is a VL805 operation and must
-  **not** leak into either the PCIe driver or the generic USB layer); and
-* the board-neutral xHCI bring-up, enumeration, and HID-node emission live
-  in `drivers/bus/usb/xhci`.
+* **`drivers/bus/pcie_brcm`** binds the `brcm,bcm2711-pcie` node, trains the
+  link, enumerates the VL805, assigns its BAR, and emits the VL805 PCI node.
+  The BCM2711 bring-up logic is co-located **in that driver crate** (a
+  host-testable `lib` target), not a `lib/*` device-support crate, since it
+  has no charter-legal non-driver consumer (`AGENTS.md` §2.22).
+* **`drivers/bus/mailbox/vcmailbox`** serves the `VideoCore` mailbox; the
+  property-message layout lives in the genuinely-shared `lib/vcmailbox`
+  (its other consumer is the aarch64 framebuffer boot console, so it stays
+  in `lib/*` — `AGENTS.md` §2.22).
+* **`drivers/bus/usb/vl805`** binds the VL805 PCI node, reloads its firmware
+  over `mailbox()`, and emits the `usb,xhci` controller node forwarding the
+  BAR + DMA grants. The VL805 firmware policy is co-located in that driver
+  crate's `lib` target (`AGENTS.md` §2.22); the board-neutral xHCI protocol
+  it builds on is the shared `lib/usb` / `drivers/bus/usb/xhci`.
+* **`drivers/input/usb_kbd`** binds the `usb,xhci` node, brings the
+  controller up, enumerates the boot keyboard, and pumps key edges.
 
-The kernel's bootstrap-floor catalogue sequences the autonomous entries
-(PCIe link → VL805 firmware reload over `mailbox()` → xHCI bring-up +
-`emit_node()`) and the hardware tree decouples them, so no crate depends
-on another.
-
-The board-specific PCIe half is the landed
-`rustos_pcie_brcm::wiring::bring_up_from_node`: it reads the
-controller register window + the inbound/outbound address windows off the
-discovered `brcm,bcm2711-pcie` `HwNode` (`pcie_bringup_from_node`, never a
-compiled-in board constant — `AGENTS.md` §18.1), maps the window
-(`mmio_mapper()`), and trains the link over it, failing closed
-(`DriverError::NotFound`) on an incomplete node. QEMU models no Pi PCIe
-link timing, so its host tests prove the composition up to the
-root-port / link-up check; the live link training is the on-metal
-acceptance item.
+The board-specific PCIe half is `rustos_drv_bus_pcie_brcm::wiring`: it reads
+the controller register window + the inbound/outbound address windows off the
+discovered `brcm,bcm2711-pcie` `HwNode` (`pcie_bringup_from_resources`, never
+a compiled-in board constant — `AGENTS.md` §18.1), maps the window
+(`mmio_mapper()`), trains the link, and `emit_node()`s the VL805 PCI node,
+failing closed (`DriverError::NotFound`) on an incomplete node. QEMU models no
+Pi PCIe link timing, so its host tests (in the driver crate's `lib` target)
+prove the composition up to the root-port / link-up check; the live link
+training is the on-metal acceptance item.
 
 The board-neutral USB half is the landed
 `rustos_drv_bus_usb::wiring::bring_up_boot_input`: it maps the controller

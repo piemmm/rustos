@@ -11,26 +11,26 @@
 //!
 //! That firmware reload is the **one** thing specific to *this device*. It
 //! is therefore its own driver, separate from the generic PCIe root-complex
-//! driver (`drivers/bus/pcie_brcm` / `lib/pcie_brcm`, which trains the link)
-//! and the generic xHCI host-controller engine (`lib/usb`, which brings the
-//! controller up and enumerates devices). None of those is a part of
-//! another: a different board may need the PCIe driver without USB at all,
-//! or an xHCI controller that needs no firmware reload. Keeping them
-//! separate is the correct modular shape (`AGENTS.md` §2.2 / §2.20 / §8 /
-//! §17.4).
+//! driver (`drivers/bus/pcie_brcm`, which trains the link) and the generic
+//! xHCI host-controller engine (`lib/usb`, which brings the controller up
+//! and enumerates devices). None of those is a part of another: a different
+//! board may need the PCIe driver without USB at all, or an xHCI controller
+//! that needs no firmware reload. Keeping them separate is the correct
+//! modular shape (`AGENTS.md` §2.2 / §8 / §17.4).
 //!
-//! # Why a `lib/*` crate
+//! # Why this lives in the driver crate, not `lib/*`
 //!
-//! This is the §2.20 single-device support carve-out (the `lib/vcmailbox` /
-//! `lib/pcie_brcm` precedent): the firmware policy and the controller-node
-//! wiring live here so two consumers depend on **one** definition
-//! (`AGENTS.md` §2.2) — the autoloaded user-space VL805 bus driver
-//! (`drivers/bus/usb/vl805`, which links the userland runtime `rustos-rt`)
-//! and the transitional in-kernel keyboard scaffold (`rustos-kernel`). A
-//! `rustos-rt`-linking bin cannot share a kernel-linked `drivers/*` crate
-//! (the userland `_start`/allocator would enter the kernel graph), so the
-//! shared logic lives in `lib/*` and both reach it without a
-//! `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
+//! This is the VL805's device-specific firmware-reload policy and the
+//! controller-node wiring: pure driver logic. It is **not** in a `lib/*`
+//! crate, because the §2.20 device-support carve-out only permits that when a
+//! *charter-legal non-driver* consumer (a §18.6 bootstrap-floor path, or a
+//! driver of a different class) shares it — and this driver has none. A VL805
+//! USB driver sits **above** the §18.6 bootstrap floor (it is discovered and
+//! autoloaded into user space, §18.5), so the firmware policy's only consumer
+//! is this crate's own `Run` binary. The logic therefore lives here, in the
+//! driver, as a host-testable `lib` target the freestanding bin links — there
+//! is no second crate and no `lib/*` device-support crate to keep in sync
+//! (`AGENTS.md` §2.22 / §2.2 / §2.14).
 //!
 //! # Layering
 //!

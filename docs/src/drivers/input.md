@@ -272,7 +272,7 @@ host-proven and the hardware delivery is a checklist.
 The `service` module is the composition a **user-space** USB boot-keyboard
 driver runs at start-up (`plans/PI.md` P10 chunk 5d-2-ii). It is
 arch-neutral: the board `PCIe` root-complex bring-up and BAR assignment stay
-in the separate board bus driver (`lib/pcie_brcm` +
+in the separate board bus driver (`drivers/bus/pcie_brcm` +
 `drivers/bus/usb`); the keyboard driver is autoloaded against the discovered
 HID node, granted **only** the resources its matched node requested — its
 already-assigned xHCI register BAR and a DMA constraint (`AGENTS.md` §18.3) —

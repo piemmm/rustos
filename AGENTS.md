@@ -300,12 +300,15 @@ These are absolute. They override any local convenience.
       matched node requests (§4, §18.1). The generic framework *above* the
       driver stays platform-neutral and never special-cases a board.
     - **Carve-out — a device's own driver/support crate may know its device.**
-      A crate whose entire purpose is one piece of hardware (e.g.
-      `drivers/display/rpi_hvs`, `lib/pcie_brcm`, `lib/vcmailbox`)
-      legitimately targets that hardware; that is its job. But it is *reached
-      only through the discovery/match path* (§18.3) and never leaks its board
-      into a shared, generic, or arch-neutral path — and it lives in its own
-      device-specific crate, never inside a core framework.
+      A crate (or driver-crate `lib` target) whose entire purpose is one piece
+      of hardware (e.g. the `drivers/bus/pcie_brcm` / `drivers/bus/usb/vl805`
+      driver crates, `drivers/display/rpi_hvs`, `lib/vcmailbox`) legitimately
+      targets that hardware; that is its job. But it is *reached only through
+      the discovery/match path* (§18.3) and never leaks its board into a
+      shared, generic, or arch-neutral path — and the device logic lives in
+      that device's own driver crate (or, only when a charter-legal non-driver
+      consumer shares it, a `lib/*` device-support crate, §2.22), never inside
+      a core framework.
     - This makes §17.2 / §17.4 absolute for generated code: platform
       neutrality is not "preferred", it is mandatory. If a clean generic
       solution seems impossible without naming a platform, the HAL (§17.2) is
@@ -349,6 +352,25 @@ These are absolute. They override any local convenience.
       the `lib/*` crate (§6, updating §3 and `PLAN.md`) so the one definition is
       shared. If that is genuinely too large for the current change, stop and
       ask (§15.7); never settle for a per-arch copy "for now" (§2.19).
+22. **Device-driver logic lives in `drivers/<class>/<leaf>/`, not in `lib/*`.**
+    A device's bring-up/firmware/quirk/register logic belongs in its own driver
+    crate. A `lib/*` device-support crate (the §2.20 single-device carve-out)
+    is permitted **only** when a non-driver consumer that is itself
+    charter-legal shares it — a `kernel/arch/<target>/` bootstrap-floor path
+    justified per §18.6, or a driver of a *different* class. "A transitional
+    in-kernel scaffold also links it" is **not** a valid second consumer: that
+    scaffold is the §18.5 defect to be removed, not a justification for
+    hoisting device logic into `lib/*`. A `lib/*` device-support crate that
+    loses its last charter-legal non-driver consumer is **collapsed into its
+    single `drivers/*` consumer** (§2.2, §2.14) — co-located as a host-testable
+    `lib` target the driver's `Run` binary links, so the device logic and its
+    `register`/`BIND_KEYS`/wiring live in one place with no second crate to
+    keep in sync. This binds the §2.20 carve-out / §17.4 layering interaction:
+    when device logic would have *both* a `drivers/*` consumer and an
+    illegitimate kernel-scaffold consumer, the fix is to remove the scaffold
+    (§18.5), not to keep the logic in `lib/*`. (`lib/vcmailbox` stays in
+    `lib/*` legitimately: its non-driver consumer is the aarch64 framebuffer
+    boot console, a genuine early-boot need, not a removable scaffold.)
 
 ---
 
@@ -411,16 +433,18 @@ rustos/
 │   ├── storage/
 │   └── bus/             # virtio, mmio, usb/ (the USB bus-class folder):
 │                        #   usb/xhci (generic xHCI host) + usb/vl805 (the Pi 4
-│                        #   VL805 USB bus-driver bin: binds the VL805 PCI node,
+│                        #   VL805 USB bus-driver crate: binds the VL805 PCI node,
 │                        #   reloads its firmware over the vcmailbox IPC, emits
 │                        #   the usb,xhci node forwarding the BAR+DMA grants),
 │                        #   and pcie_brcm (the Pi 4 PCIe root-complex bus-driver
-│                        #   bin: trains the link, enumerates the VL805, emits
+│                        #   crate: trains the link, enumerates the VL805, emits
 │                        #   its xHCI node). PCI config-access mechanism logic is
-│                        #   lib/pci, the BCM2711 link-train engine + host-tested
-│                        #   emit_vl805_node composition are lib/pcie_brcm, and
-│                        #   the VL805 firmware-reload policy + reload-and-publish
-│                        #   wiring are lib/vl805 (§2.20 carve-out / §17.4).
+│                        #   lib/pci; each Pi-4 driver's own device logic (the
+│                        #   BCM2711 link-train engine + emit_vl805_node, and the
+│                        #   VL805 firmware-reload + reload-and-publish wiring)
+│                        #   is a host-testable lib target *in that driver crate*
+│                        #   — not lib/*, as it has no non-driver consumer
+│                        #   (§2.22 / §18.5).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -490,13 +514,6 @@ rustos/
 │   │                    #   bus_to_cpu_phys locate primitives, so a user-space
 │   │                    #   bus driver enumerates/assigns BARs without a
 │   │                    #   drivers/*->drivers/* edge (§2.2/§17.4).
-│   ├── pcie_brcm/       # BCM2711 (Pi 4) PCIe root-complex bring-up: the
-│   │                    #   discovered-window reset/SerDes/link-train state
-│   │                    #   machine + BIND_KEYS + the host-tested
-│   │                    #   emit_vl805_node discover-and-publish composition,
-│   │                    #   shared by the kernel boot scaffold and the
-│   │                    #   user-space drivers/bus/pcie_brcm bin
-│   │                    #   (§2.20 single-device support carve-out / §17.4).
 │   ├── procinfo/        # Shared System Information API client helpers
 │   │                    #   (request seams, process-list paging + render).
 │   ├── raster/          # Shared software rasterisation: premultiplied-alpha
@@ -527,7 +544,10 @@ rustos/
 │   ├── vcmailbox/       # BCM2711 VideoCore firmware mailbox property-channel
 │   │                    #   client (framebuffer + display-size queries), shared
 │   │                    #   by the aarch64 framebuffer boot console and the
-│   │                    #   rpi_hvs display driver (§2.2).
+│   │                    #   rpi_hvs display driver. A legitimate lib/* device-
+│   │                    #   support crate: its non-driver consumer (the boot
+│   │                    #   console) is a genuine early-boot need, so the §2.20
+│   │                    #   carve-out applies (§2.2 / §2.22).
 │   ├── virtio/          # Bus-agnostic virtio split-virtqueue protocol
 │   │                    #   (Transport trait, queues, DMA slabs) + the
 │   │                    #   concrete virtio-MMIO transport, so a user-space
@@ -539,13 +559,6 @@ rustos/
 │   │                    #   shared by the kernel verticals and the user-space
 │   │                    #   input driver (§2.2/§17.4 — the virtio analogue of
 │   │                    #   lib/hid ↔ drivers/input/usb_hid).
-│   ├── vl805/           # BCM2711 (Pi 4) VL805 xHCI USB host-controller
-│   │                    #   device support: the VideoCore-mailbox firmware
-│   │                    #   reload policy + BIND_KEYS + the host-tested
-│   │                    #   reload-and-publish wiring (build_xhci_node +
-│   │                    #   reload_firmware_and_publish), shared by the kernel
-│   │                    #   boot scaffold and the user-space drivers/bus/usb/vl805
-│   │                    #   bin (§2.20 single-device support carve-out / §17.4).
 │   └── vt/              # Shared ANSI/VT/xterm vocabulary (plans/CURSES.md C1):
 │                        #   one control/SGR/colour/screen-op definition with an
 │                        #   emitter + streaming parser over the same tables (§2.2).

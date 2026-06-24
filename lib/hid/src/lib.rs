@@ -97,8 +97,8 @@ pub use service::{
 /// The §18.3 bind priority [`KEYBOARD_BIND_KEYS`] carries.
 ///
 /// An exact `compatible`-string match for the controller node, mirroring the
-/// other `compatible`-keyed drivers (`lib/pcie_brcm`, `drivers/storage/emmc2`,
-/// priority 10).
+/// other `compatible`-keyed drivers (`drivers/bus/pcie_brcm`,
+/// `drivers/storage/emmc2`, priority 10).
 const KEYBOARD_BIND_PRIORITY: u16 = 10;
 
 /// The user-space USB boot-keyboard driver's hardware bind table

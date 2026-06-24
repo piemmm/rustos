@@ -6,14 +6,19 @@
 //! programming its address windows, and training its link (`plans/PI.md`
 //! P10). This crate performs that bring-up.
 //!
-//! It is a `lib/*` crate, not a `drivers/*` crate, even though it is
-//! board-specific: it is the **single device's own support code** the
-//! `AGENTS.md` §2.20 carve-out places in `lib/` (the `lib/vcmailbox`
-//! precedent), so both the in-kernel boot scaffold and a user-space
-//! `drivers/bus/*` bin can compose it without a forbidden
-//! `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4). It names BCM2711
-//! detail legitimately because that is its entire purpose; nothing
-//! generic depends on it.
+//! This is the `lib` target of the BCM2711 PCIe bus driver crate, **not** a
+//! `lib/*` crate. It is board-specific single-device support, but it lives
+//! *in the driver* rather than under `lib/*`: the §2.20 device-support
+//! carve-out only permits a `lib/*` home when a charter-legal *non-driver*
+//! consumer (a §18.6 bootstrap-floor path, or a driver of a different class)
+//! shares it, and a BCM2711 PCIe bus driver has none. PCIe root-complex
+//! bring-up sits **above** the §18.6 bootstrap floor (the kernel floor is the
+//! storage path only — virtio-blk + EMMC2), so this engine's only consumer is
+//! this crate's own `Run` binary (`src/main.rs`). It is therefore a
+//! host-testable `lib` target the freestanding bin links, with no `lib/*`
+//! device-support crate to keep in sync (`AGENTS.md` §2.22 / §2.2 / §2.14).
+//! It names BCM2711 detail legitimately because that is its entire purpose;
+//! nothing generic depends on it.
 //!
 //! # Layered seams
 //!
@@ -33,9 +38,8 @@
 //!
 //! The bring-up engine ([`BrcmPcieRc`], instantiated through
 //! [`wiring::open_discovered`] / [`wiring::bring_up_from_node`]) and the
-//! [`BIND_KEYS`] match table are the surface a composing host drives.
-//! [`register`] is the thin `AGENTS.md` §8 driver entry the kernel's
-//! §18.6 bootstrap-floor catalogue invokes to gate loading; it checks
+//! [`BIND_KEYS`] match table are the surface the `Run` binary drives.
+//! [`register`] is the thin `AGENTS.md` §8 driver entry that checks
 //! [`CapabilityId::DRV_LOAD`] and touches no hardware. Mapping the
 //! register window requires [`CapabilityId::MMIO_MAP`]. Runs in user
 //! space (no `CAP_DRV_KERNEL`).

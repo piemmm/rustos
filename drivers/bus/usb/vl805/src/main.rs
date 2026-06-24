@@ -26,10 +26,14 @@
 //! until this program runs the reload, so the driver that binds node B can
 //! never bring the controller up before its firmware is loaded.
 //!
-//! The whole reload-and-publish composition lives in `lib/vl805`
-//! (`wiring::{build_xhci_node, reload_firmware_and_publish}`), where it is
-//! host-tested against `DriverHost` doubles; this binary is the thin
-//! freestanding wiring that builds the real host and drives it. Every
+//! The whole reload-and-publish composition lives in this crate's own
+//! device-support library (`crate::wiring::{build_xhci_node,
+//! reload_firmware_and_publish}` — `src/lib.rs`), where it is host-tested
+//! against `DriverHost` doubles; this binary is the thin freestanding wiring
+//! that builds the real host and drives it. The device logic is co-located
+//! here, in the driver, rather than in `lib/*`: a VL805 USB driver sits above
+//! the §18.6 bootstrap floor, so it has no charter-legal non-driver consumer
+//! and the §2.20 carve-out does not apply (`AGENTS.md` §2.22). Every
 //! capability and bound is re-checked kernel-side, on the far side of each
 //! trap (`AGENTS.md` §5.4); the driver adds no authority, and the kernel owns
 //! the published node's identity (`AGENTS.md` §4 / §18.1).
@@ -55,8 +59,9 @@
 //! # No QEMU vertical
 //!
 //! QEMU models no `VideoCore` mailbox or Pi USB timing (`AGENTS.md` §0.4), so
-//! the live reload → publish chain is the on-metal acceptance item; the host
-//! tests in `lib/vl805` prove the composition and its fail-closed paths.
+//! the live reload → publish chain is the on-metal acceptance item; this
+//! crate's own host tests (`src/lib.rs`, `src/wiring.rs`) prove the
+//! composition and its fail-closed paths.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -67,8 +72,8 @@
 mod program {
     use rustos_abi::CapabilityId;
     use rustos_caps::CapabilitySet;
+    use rustos_drv_bus_usb_vl805::wiring::{build_xhci_node, reload_firmware_and_publish};
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_vl805::wiring::{build_xhci_node, reload_firmware_and_publish};
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the

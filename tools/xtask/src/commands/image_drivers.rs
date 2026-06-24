@@ -141,8 +141,9 @@ pub fn build_vcmailbox_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// It maps its discovered register window (`CAP_MMIO_MAP`), trains the link,
 /// assigns the VL805 BAR, and publishes the enumerated USB host function into
 /// the live hardware tree (`CAP_HW_EMIT`) — and nothing more (`AGENTS.md`
-/// §4 — no ambient authority; §18.3). Carries `rustos_pcie_brcm::BIND_KEYS`,
-/// so it autoloads against the discovered `brcm,bcm2711-pcie` node.
+/// §4 — no ambient authority; §18.3). Carries
+/// `rustos_drv_bus_pcie_brcm::BIND_KEYS`, so it autoloads against the
+/// discovered `brcm,bcm2711-pcie` node.
 ///
 /// # Errors
 ///
@@ -152,7 +153,7 @@ pub fn build_pcie_brcm_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
         ctx,
         "rustos-drv-bus-pcie-brcm",
         &[CapabilityId::MMIO_MAP, CapabilityId::HW_EMIT],
-        rustos_pcie_brcm::BIND_KEYS,
+        rustos_drv_bus_pcie_brcm::BIND_KEYS,
     )
 }
 
@@ -163,8 +164,8 @@ pub fn build_pcie_brcm_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// forwarding the BAR + DMA grants it received (`CAP_HW_EMIT`) — and nothing
 /// more. It holds neither `CAP_MMIO_MAP` nor `CAP_MEM_DMA`: it forwards the
 /// grants without mapping them (`AGENTS.md` §4 least privilege). Carries
-/// `rustos_vl805::BIND_KEYS`, so it autoloads against the VL805 PCI node the
-/// PCIe driver emitted.
+/// `rustos_drv_bus_usb_vl805::BIND_KEYS`, so it autoloads against the VL805
+/// PCI node the PCIe driver emitted.
 ///
 /// # Errors
 ///
@@ -174,7 +175,7 @@ pub fn build_vl805_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
         ctx,
         "rustos-drv-bus-usb-vl805",
         &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT],
-        rustos_vl805::BIND_KEYS,
+        rustos_drv_bus_usb_vl805::BIND_KEYS,
     )
 }
 

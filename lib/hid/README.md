@@ -2,11 +2,13 @@
 
 Arch-neutral, transport-agnostic HID boot-protocol logic: the keyboard/mouse
 report decoders, the console-input producer, and the xHCI boot-keyboard
-orchestration. It lives in `lib/*` so both the transitional in-kernel keyboard
-scaffold and the user-space keyboard driver process (`drivers/input/usb_kbd`)
-compose it without a `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 /
-§2.2). The thin `drivers/input/usb_hid` crate keeps only the §8 `register`
-entry and the §18.3 bind table.
+orchestration. This is **generic** HID-protocol code — it names no device,
+board, PCI id, or SoC — so it lives in `lib/*` as shared common code
+(`AGENTS.md` §6 / §2.2), *not* under the §2.20 / §2.22 single-device
+carve-out. The user-space keyboard driver process (`drivers/input/usb_kbd`)
+and the thin `drivers/input/usb_hid` crate (which keeps only the §8 `register`
+entry and the §18.3 bind table) both compose it without a
+`drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2).
 
 See `docs/src/lib/hid.md` for the full description and test surface.
 
