@@ -173,6 +173,14 @@ bitflags_like! {
         const USER      = 0b0000_1000;
         /// Page is mapped with caching disabled (MMIO).
         const NO_CACHE  = 0b0001_0000;
+        /// Page backs a buffer shared with a DMA-capable device that must
+        /// stay coherent with it without per-access cache maintenance (the
+        /// HAL [`PageFlags::DMA_COHERENT`]). On a non-I/O-coherent platform
+        /// (the BCM2711 PCIe root complex) the port maps it Normal
+        /// Non-Cacheable; on a coherent platform it is ordinary cacheable
+        /// RAM. Distinct from [`Self::NO_CACHE`] (Device/MMIO): a DMA buffer
+        /// is accessed with ordinary loads/stores (`AGENTS.md` §4).
+        const DMA_COHERENT = 0b0010_0000;
     }
 }
 
@@ -247,6 +255,9 @@ fn to_page_flags(flags: MapFlags) -> PageFlags {
     if flags.contains(MapFlags::NO_CACHE) {
         out = out | PageFlags::DEVICE;
     }
+    if flags.contains(MapFlags::DMA_COHERENT) {
+        out = out | PageFlags::DMA_COHERENT;
+    }
     out
 }
 
@@ -268,6 +279,9 @@ fn from_page_flags(flags: PageFlags) -> MapFlags {
     }
     if flags.contains(PageFlags::DEVICE) {
         out = out | MapFlags::NO_CACHE;
+    }
+    if flags.contains(PageFlags::DMA_COHERENT) {
+        out = out | MapFlags::DMA_COHERENT;
     }
     out
 }

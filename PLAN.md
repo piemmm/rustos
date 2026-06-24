@@ -777,13 +777,17 @@ order (one fully-gated increment each):
        half — landed.** New `abi-v1` syscall **`dma_alloc`** (no. 27,
        `CAP_MEM_DMA`, audited): it resolves an owner-checked **`Dma`-kind**
        grant through the per-task grant table, validates the constraint
-       (`devres::dma_constraint`; rejects zero/over-max length and a
-       translating inbound viewport — that rides the metal VL805 item), and
+       (`devres::dma_constraint`; rejects zero/over-max length), and
        carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by
        the grant's `addr_limit` into the caller's own live space through the
        `devres::DmaAllocFacility` producer, returning the CPU-VA and copying
-       the device-visible base (CPU-physical for the coherent/`virt` case) out
-       to a user pointer. The guarded carve has one definition: `kernel/mem`'s
+       the device-visible base out to a user pointer. The device-visible base
+       is resolved by `devres::translate_device_addr`: the CPU-physical base
+       for a coherent constraint, or — for a translating inbound viewport
+       (`HwResource::dma_translated`, the Pi 4 PCIe `IB MEM 0x0..0x1ffffffff ->
+       0x4_0000_0000` `dma-ranges`) — that base re-based onto the far side of
+       the viewport, checked/fail-closed (§18.1). The guarded carve has one
+       definition: `kernel/mem`'s
        borrowed `DmaWindowMap`, with `DmaPool` re-expressed as its owning
        wrapper (§2.2); `LiveSpace` gained `alloc_dma` + a DMA window and
        reclaims (zeroes + frees) every live DMA block on `Drop` at task exit
@@ -1323,9 +1327,12 @@ order (one fully-gated increment each):
          `append` / `snapshot`, growable §24.1) is the single authoritative
          discovered-hardware inventory (§18.1/§2.2), replacing the
          leak-a-new-`&'static`-slice stash in `unlock_service`: `record_boot`
-         seeds it, the floor `augment_boot_tree` emitter appends to it, and the
-         unlock kthread reads `boot_tree_snapshot()` for autoload — same order,
-         no metal-behaviour change. The reactive generation counter +
+         seeds it, a user-space bus driver appends discovered children at
+         runtime through `hw_emit_node` (`publish_child`), and every reader —
+         `hw_tree_read`/`hw_tree_wait` and the driver-store load gate's
+         matched-node grant resolution (`resolve_resources`) — reads the one
+         live store directly, never a frozen snapshot (§18.4). The generation
+         counter +
          `hw_tree_wait`, node removal, and the `hw_*` syscalls are deferred to
          D2/D4 with their first user-space consumers (§2.3/§2.4). Gate: `cargo
          fmt --all --check`, `cargo xtask ci` (both Pi images built, no
@@ -2173,24 +2180,37 @@ order (one fully-gated increment each):
              priority 10), so `usb_kbd` binds node B and brings the whole xHCI
              controller up itself (the `Xhci` object can't cross a process
              boundary). The shared `XHCI_COMPATIBLE` lives once in `lib/usb`
-             (§2.2). The in-kernel scaffold (`usb_keyboard.rs`) + kernel
-             Cargo.toml were retargeted onto `rustos_vl805`; it stays the live
-             metal keyboard until D5d (§2.17). The bundle is **not** yet
-             installed into the image — that is D5d. **Metal note:** carries
-             D5b.2b's BAR-before-firmware-reload reordering; metal-gated (§0.9).
-           - **D5d — the flip (NEXT).** Install the four signed bundles
-             (`pcie_brcm`/`vcmailbox`/`vl805`/`usb_kbd`) into `/System/Drivers/`;
-             delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14); evict
-             `usb_hid`/`pcie_brcm`/`bus_usb` from
-             `driver_catalog::IN_KERNEL_DRIVERS` so the compiled-in list is the
-             storage bootstrap floor only (§18.6); repoint `init_spawn`; add
-             `hw_remove_node` for hotplug; update §3 / docs.
-           No `-M virt` Pi-USB vertical exists (§0.4); the live
-           enumerate→emit→autoload chain and the scaffold deletion are
-           metal-gated (§0.9). The in-kernel scaffold stays the live metal
-           keyboard until D5d (§2.17). Metal acceptance: top-down autoload from
-           `/System`, a keystroke with the scaffold gone, and hotplug
-           bind/unbind.
+             (§2.2).
+           - **D5d — the flip — DONE (whole gate green).** All four signed
+             bundles are installed into the image `/System/Drivers/` store
+             (`tools/xtask` `image_drivers`: `bus_mailbox/vcmailbox`,
+             `bus_pcie/bcm2711`, `bus_usb/vl805`, `input/usb_kbd`, each a
+             freestanding `rustos-rt` `Run` bin cross-compiled, ELF→rxe'd, and
+             signed with the kernel's driver-signing seed). The in-kernel
+             keyboard scaffold (`usb_keyboard.rs` + `keyboard_service.rs`, the
+             init-seam `bring_up_keyboard_into_tree`/`spawn_pump` call, the
+             boot `record_discovery`/`record_mailbox_doorbell` stash, and
+             `unlock_service::augment_boot_tree`) is **deleted** (§2.14).
+             `driver_catalog::IN_KERNEL_DRIVERS` is now the storage bootstrap
+             floor **only** — virtio-blk + EMMC2 (§18.6); `pcie_brcm`,
+             `bus_usb`, and `usb_hid` are gone from it and from the kernel's
+             deps/`build.rs` images. The keyboard now comes up entirely in user
+             space: `FdtDiscovery` already seeds the discovered
+             `brcm,bcm2711-pcie` + VideoCore mailbox nodes into `HW_TREE`, and
+             `devmgr` autoloads the recursive chain (pcie_brcm binds the
+             bridge → emits the VL805 PCI function → vl805 reloads firmware over
+             the mailbox + emits the `usb,xhci` node → usb_kbd binds it, brings
+             the controller up, pumps key edges). `autoload_caps` gained
+             `CAP_HW_EMIT` + `CAP_MAILBOX` so the bus bundles can emit nodes /
+             call the mailbox (per-driver manifest∩ still binds, §5.2). The
+             `hw_remove_node` syscall (no. 38, `CAP_HW_EMIT`, audited) landed
+             as the mirror of `hw_emit_node`: a bus driver retires a node it
+             published — and its subtree — kernel-side ownership-checked,
+             fail-closed; the device-manager unload reaction is Design D D4
+             (the bus port-watcher consumer). No `-M virt` Pi-USB vertical
+             exists (§0.4); the live enumerate→emit→autoload chain is
+             metal-gated (§0.9). **Metal acceptance:** top-down autoload from
+             `/System` and a keystroke with the scaffold gone.
 
 ---
 

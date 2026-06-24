@@ -291,31 +291,21 @@ impl InitSpawn for Aarch64InitSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // Design B (B3, `plans/PI.md`) / Increment C: the bootstrap-floor
-        // bus chain (`pcie_brcm` → `vl805` firmware reload over
-        // `DriverHost::mailbox` → `bus_usb` xHCI) brings the VL805 controller
-        // up **once**, here on the boot CPU, enumerates the HID keyboard
-        // behind it, and publishes it as a discovered child node through
-        // `DriverHost::emit_node` — which the in-kernel host attaches to the
-        // boot hardware tree *before* the unlock kthread reads it (below), so
-        // the §18 pre-unlock autoload sees the keyboard like every other
-        // discovered device (`AGENTS.md` §18.2). Its signed driver bundle is
-        // not in the store until the B5 flip, so `devmgr` leaves the node
-        // unbound (§18.4) and the in-kernel report pump keeps driving the
-        // keyboard so the working metal path never regresses (`AGENTS.md`
-        // §2.17). The controller is brought up exactly once; the pump kthread
-        // only polls (`AGENTS.md` §2.16). With no discovered
-        // `brcm,bcm2711-pcie` bridge (the QEMU `virt` shape) the bring-up
-        // yields `None` and PID 1 runs unchanged (§18.4). The pump kthread is
-        // admitted onto the boot CPU's run queue *before* `admit_init`
-        // diverges into the dispatch loop, so the loop then dispatches it
-        // alongside PID 1.
-        if let Some(keyboard) = crate::keyboard_service::bring_up_keyboard_into_tree(ctx) {
-            let _pump_started = crate::keyboard_service::spawn_pump(ctx, keyboard);
-        }
+        // The VL805 USB keyboard now comes up entirely in user space: the
+        // boot path's `FdtDiscovery` already emits the discovered
+        // `brcm,bcm2711-pcie` node (with its register window + outbound
+        // bus-window + inbound DMA grants) and the VideoCore mailbox node into
+        // the hardware tree, and `devmgr` autoloads the signed
+        // `/System/Drivers/` bundles against them — the PCIe root-complex
+        // driver binds the bridge and emits the VL805 PCI function, the VL805
+        // driver reloads the controller firmware over the mailbox and emits
+        // the `usb,xhci` node, and the keyboard driver binds that, brings the
+        // controller up, and pumps key edges into the input arbiter (`plans/PI.md`
+        // P10 D5d, `AGENTS.md` §18 / §4 — drivers in user space). There is no
+        // in-kernel keyboard bring-up to start here.
 
-        // Start the in-kernel root-unlock service alongside PID 1 and the
-        // keyboard service (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)).
+        // Start the in-kernel root-unlock service alongside PID 1
+        // (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)).
         // Admitted onto the boot CPU's run queue *before* `admit_init`
         // diverges into the dispatch loop, the kthread brings up the bound
         // root block device over the production device-IRQ path, prompts

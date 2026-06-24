@@ -59,6 +59,14 @@ pub const CONTROL0_BUS_POWER: u32 = 1 << 8;
 /// 3-bit voltage field `[11:9]` of the power-control byte.
 pub const CONTROL0_BUS_VOLTAGE_3V3: u32 = 0b111 << 9;
 
+// --- `CONTROL0` host-control bits (byte `[7:0]`) --------------------------
+
+/// Data Transfer Width = 4-bit (`CONTROL0[1]`). Set after the card is
+/// switched to the 4-bit bus with `ACMD6`, so the controller drives all
+/// four DAT lines: a 4× transfer-rate improvement over the 1-bit reset
+/// default. Cleared means the 1-bit bus.
+pub const CONTROL0_DATA_WIDTH_4BIT: u32 = 1 << 1;
+
 // --- `CONTROL1` bits ------------------------------------------------------
 
 /// Internal clock enable.

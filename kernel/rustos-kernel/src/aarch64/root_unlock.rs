@@ -33,7 +33,7 @@ use core::convert::Infallible;
 use rustos_abi::driver::block::Block;
 use rustos_abi::driver::dma::PoolId;
 use rustos_abi::driver::sole_register_window;
-use rustos_abi::{CapabilityId, DriverHost, DriverKind, HwNode, IrqHandle, MmioMapper};
+use rustos_abi::{CapabilityId, DriverHost, DriverKind, IrqHandle, MmioMapper};
 use rustos_arch_aarch64::fdt::gic_device_intid;
 use rustos_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
@@ -332,15 +332,8 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     };
 
     let dtb = boot.dtb;
-    // The discovered hardware tree the kthread matches against the signed
-    // driver store once the root mounts (`AGENTS.md` §18.1 / §18.3). A
-    // `'static` snapshot of the authoritative inventory store (taken *after*
-    // the floor bring-up has appended its enumerated children), so the
-    // `'static + Send` kthread body captures it by value (Design D, D1 —
-    // `crate::hwtree_store`).
-    let tree = crate::unlock_service::boot_tree_snapshot();
     let caps = service_caps();
-    let env = UnlockEnv { ctx, audit, tree };
+    let env = UnlockEnv { ctx, audit };
     let body = move |yielder: &mut dyn YieldHandle| {
         // On success the root-unlock service never returns: it parks for life
         // as the persistent driver-store service (Design D D2a-2), having
@@ -430,19 +423,20 @@ fn run_unlock(
 }
 
 /// The `'static` boot environment a root-unlock bring-up threads through:
-/// the init-spawn context (the per-arch driver-spawn seam), the audit sink,
-/// and the discovered hardware tree the pre-unlock autoload matches against.
+/// the init-spawn context (the per-arch driver-spawn seam) and the audit
+/// sink. The matched-node grants a driver load mints are resolved from the
+/// live [`crate::hwtree_store::HW_TREE`] inventory directly (`AGENTS.md`
+/// §18.4), so no boot-tree snapshot rides along here.
 ///
-/// Grouped because all three travel together from the kthread body through
-/// the per-device bring-up into the shared [`finish_unlock`] tail; passing
-/// one cohesive `Copy` value rather than re-listing three `'static`
-/// references in every signature keeps the seams readable and below the
-/// argument-count bar (`AGENTS.md` §2.2).
+/// Grouped because both travel together from the kthread body through the
+/// per-device bring-up into the shared [`finish_unlock`] tail; passing one
+/// cohesive `Copy` value rather than re-listing two `'static` references in
+/// every signature keeps the seams readable and below the argument-count bar
+/// (`AGENTS.md` §2.2).
 #[derive(Clone, Copy)]
 struct UnlockEnv {
     ctx: &'static (dyn InitSpawnCtx + Sync),
     audit: &'static (dyn Sink + Sync),
-    tree: &'static [HwNode],
 }
 
 /// Bring the virtio-blk root device up over the production device-IRQ path
@@ -484,9 +478,8 @@ fn virtio_blk_unlock<'a>(
     // (the driver-store serve task and the encrypted-root unlock task, see
     // `finish_unlock`), so its backing must outlive both frames. Leaking is
     // the sanctioned "kernel state is never freed" pattern
-    // (`kernel/core/src/spawn.rs`; cf. `crate::unlock_service::boot_tree_snapshot`)
-    // and uses only safe `Box::leak`, never an `unsafe` lifetime cast
-    // (`AGENTS.md` §4).
+    // (`kernel/core/src/spawn.rs`) and uses only safe `Box::leak`, never an
+    // `unsafe` lifetime cast (`AGENTS.md` §4).
     let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
         DirectPhysMap::identity(identity_limit()),
     ));
@@ -748,7 +741,7 @@ fn finish_unlock<B: Block + 'static>(
     coop: &CooperativeYield<'_>,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
-    let UnlockEnv { ctx, audit, tree } = env;
+    let UnlockEnv { ctx, audit } = env;
 
     // The one brought-up disk, boot-leaked to `'static` behind the
     // block-sharing layer so two independent preemptive tasks drive it through
@@ -867,16 +860,20 @@ fn finish_unlock<B: Block + 'static>(
     // `CAP_IPC_BIND_PRIVILEGED` for a bus service driver such as the VideoCore
     // `vcmailbox`, intersected per driver with its signed manifest request,
     // `AGENTS.md` §5.2 / §18.3), the aarch64 process-spawn seam, and the
-    // discovered tree a matched `node_id` is resolved against to mint exactly
-    // that node's
-    // grants (§4 — no ambient authority). The user-space `devmgr` owns the
-    // matching *policy*; this kthread serves the *mechanism* over the
-    // capability-gated store endpoint below.
+    // **live** hardware inventory (`crate::hwtree_store::HW_TREE`) a matched
+    // `node_id` is resolved against to mint exactly that node's grants (§4 —
+    // no ambient authority). Resolving against the live store (not a frozen
+    // boot snapshot) is what lets a node a user-space bus driver publishes at
+    // runtime through `hw_emit_node` be loaded the moment it appears
+    // (`AGENTS.md` §18.4) — the recursive bus chain (pcie → vl805 → usb_kbd)
+    // depends on it. The user-space `devmgr` owns the matching *policy*; this
+    // kthread serves the *mechanism* over the capability-gated store endpoint
+    // below.
     let serve_ctx = crate::driver_store_server::StoreServeContext {
         trusted: &trusted,
         caps: autoload_caps(),
         spawn: &driver_spawn,
-        tree,
+        nodes: &crate::hwtree_store::HW_TREE,
     };
 
     // This task is now the persistent driver-store service: it binds and

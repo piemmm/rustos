@@ -209,9 +209,24 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
 ///
 /// SD identification must run at or below 400 kHz. The exact base clock
 /// is board-specific, so a conservative divisor keeps the identification
-/// clock in range on the Pi 4's EMMC2 base clock; the PIO bring-up does
-/// not retune (`plans/PI.md` P8).
+/// clock in range on the Pi 4's EMMC2 base clock.
 const IDENT_CLOCK_DIVISOR: u32 = 0x80;
+
+/// SD-clock frequency-select divisor used for data transfers, once the
+/// card has been identified and selected.
+///
+/// The SDHCI 8-bit divided-clock relation is `SDCLK = base / (2 · divisor)`,
+/// so this divisor is `IDENT_CLOCK_DIVISOR / 32` and the data clock is
+/// therefore exactly **32× the identification clock**. The identification
+/// clock is held at or below 400 kHz (the SD spec ceiling encoded by
+/// [`IDENT_CLOCK_DIVISOR`]), so the data clock stays at or below
+/// `32 · 400 kHz = 12.8 MHz` for *any* base clock at which identification
+/// was in range — comfortably within SD Default Speed's 25 MHz limit, so no
+/// high-speed mode switch or tuning is required (`AGENTS.md` §2.16). It is
+/// derived from the identification divisor rather than a base-clock constant
+/// precisely so it carries no board assumption of its own (`AGENTS.md`
+/// §2.20): whatever base makes identification legal makes this legal too.
+const DATA_CLOCK_DIVISOR: u32 = IDENT_CLOCK_DIVISOR / 32;
 
 /// Data-timeout-counter value (`CONTROL1[19:16]`): the controller's
 /// maximum data-line timeout, the conservative bring-up setting.
@@ -254,6 +269,10 @@ pub enum BringUpStage {
     SelectCard,
     /// `CMD16` `SET_BLOCKLEN`.
     SetBlockLen,
+    /// `ACMD6` `SET_BUS_WIDTH` and the controller-side 4-bit width bit.
+    SetBusWidth,
+    /// Raising the SD clock from the identification to the data rate.
+    RaiseClock,
 }
 
 impl BringUpStage {
@@ -276,6 +295,8 @@ impl BringUpStage {
             BringUpStage::SendCsd => "CMD9 SEND_CSD",
             BringUpStage::SelectCard => "CMD7 SELECT_CARD",
             BringUpStage::SetBlockLen => "CMD16 SET_BLOCKLEN",
+            BringUpStage::SetBusWidth => "ACMD6 SET_BUS_WIDTH",
+            BringUpStage::RaiseClock => "raise SD clock to data rate",
         }
     }
 }
@@ -513,6 +534,53 @@ impl<H: SdhciHost> Emmc2<H> {
         self.issue(acmd, arg, 0)
     }
 
+    /// Switch the selected card and the controller to the 4-bit DAT bus.
+    ///
+    /// `ACMD6` puts the card on its four DAT lines, then the controller's
+    /// [`regs::CONTROL0_DATA_WIDTH_4BIT`] bit is set so the host drives the
+    /// same width — a 4× transfer-rate gain over the 1-bit reset default.
+    /// The controller bit is set with a read-modify-write so the SD-bus
+    /// power and voltage bits the same register holds are preserved.
+    fn set_bus_width_4bit(&mut self) -> Result<(), DriverError> {
+        self.issue_app(
+            command::SET_BUS_WIDTH,
+            command::BUS_WIDTH_4BIT_ARG,
+            self.rca,
+        )?;
+        let control0 = self.host.read32(regs::REG_CONTROL0)?;
+        self.host.write32(
+            regs::REG_CONTROL0,
+            control0 | regs::CONTROL0_DATA_WIDTH_4BIT,
+        )?;
+        Ok(())
+    }
+
+    /// Raise the SD clock from the identification rate to the data rate
+    /// ([`DATA_CLOCK_DIVISOR`]) now that the card is identified and
+    /// selected.
+    ///
+    /// Follows the SDHCI clock-change sequence: stop `SDCLK` (clear
+    /// [`regs::CONTROL1_CLK_EN`]) before reprogramming the frequency-select
+    /// divisor — changing it while the clock runs is undefined — re-arm the
+    /// internal clock and wait for [`regs::CONTROL1_CLK_STABLE`], then
+    /// re-enable `SDCLK` at the new frequency. The timeout field is kept at
+    /// the bring-up value.
+    fn raise_data_clock(&mut self) -> Result<(), DriverError> {
+        let running = self.host.read32(regs::REG_CONTROL1)?;
+        self.host
+            .write32(regs::REG_CONTROL1, running & !regs::CONTROL1_CLK_EN)?;
+
+        let control1 = (DATA_CLOCK_DIVISOR << regs::CONTROL1_CLK_FREQ_SHIFT)
+            | (DATA_TIMEOUT_VALUE << regs::CONTROL1_TIMEOUT_SHIFT)
+            | regs::CONTROL1_CLK_INTLEN;
+        self.host.write32(regs::REG_CONTROL1, control1)?;
+        self.wait_set(regs::REG_CONTROL1, regs::CONTROL1_CLK_STABLE)?;
+
+        let with_sd_clock = self.host.read32(regs::REG_CONTROL1)? | regs::CONTROL1_CLK_EN;
+        self.host.write32(regs::REG_CONTROL1, with_sd_clock)?;
+        Ok(())
+    }
+
     /// Run the SD identification sequence and derive the geometry.
     ///
     /// Each fallible step tags its [`DriverError`] with the
@@ -586,6 +654,19 @@ impl<H: SdhciHost> Emmc2<H> {
             .map_err(|e| BringUpFault::new(BringUpStage::SelectCard, e))?;
         self.issue(command::SET_BLOCKLEN, BLOCK_SIZE, 0)
             .map_err(|e| BringUpFault::new(BringUpStage::SetBlockLen, e))?;
+
+        // The card is now selected in the transfer state at the slow
+        // identification clock on the 1-bit bus. Widen the bus to 4-bit and
+        // raise the clock to the data rate before any block transfer — both
+        // are pure speed steps the read/write path then inherits, turning
+        // the ~50 KB/s identification-clock 1-bit path into the ~6 MB/s
+        // Default-Speed 4-bit path (`AGENTS.md` §2.16). Bus width is widened
+        // first so the clock change (and every later transfer) runs on the
+        // final width.
+        self.set_bus_width_4bit()
+            .map_err(|e| BringUpFault::new(BringUpStage::SetBusWidth, e))?;
+        self.raise_data_clock()
+            .map_err(|e| BringUpFault::new(BringUpStage::RaiseClock, e))?;
         Ok(())
     }
 

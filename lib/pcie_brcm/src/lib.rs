@@ -172,11 +172,21 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PcieWindows {
     /// Lowest PCIe-space address system memory is viewed at, from
-    /// `dma-ranges` (the inbound viewport offset; `0` on the Pi 4).
+    /// `dma-ranges` (the inbound viewport's far-side base — the
+    /// `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` translation on the Pi 4).
     pub inbound_pcie_base: u64,
     /// Total system-memory size the inbound viewport must cover, from
     /// `dma-ranges`. Rounded up to a power of two when encoded.
     pub inbound_size: u64,
+    /// Exclusive CPU-physical upper bound a device behind the bridge may
+    /// reach through the inbound viewport, from `dma-ranges` (the discovered
+    /// grant's `addr_limit`; `0x2_0000_0000` on the Pi 4). The viewport's
+    /// CPU-side base is `inbound_cpu_top - inbound_size`, and the inbound
+    /// translation maps that CPU base onto `inbound_pcie_base`. Forwarded
+    /// verbatim onto the published xHCI node so the kernel's DMA-grant
+    /// coverage check and `dma_alloc` translation agree on one aperture
+    /// (`AGENTS.md` §18.1).
+    pub inbound_cpu_top: u64,
     /// CPU-physical base of the outbound MMIO window (the high PCIe
     /// MMIO aperture, e.g. `0x6_0000_0000` on the Pi 4), from `ranges`.
     pub outbound_cpu_base: u64,

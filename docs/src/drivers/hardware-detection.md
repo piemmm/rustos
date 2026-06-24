@@ -65,9 +65,9 @@ The resolution across drivers is deterministic (`AGENTS.md` §18.3):
 This resolution policy (`resolve`, `best_bind_priority`, `DriverCandidate`,
 `MatchResolution`) lives in the shared **`lib/devmatch`** crate, the single
 §18.3 definition. `rustos-devmgr` re-exports it unchanged, and the kernel's
-interim in-kernel driver-candidate catalogue
-(`kernel/rustos-kernel::driver_catalog`, see [Remaining
-work](#remaining-stage-4hw-work)) resolves against the same crate — the
+in-kernel bootstrap-floor driver-candidate catalogue
+(`kernel/rustos-kernel::driver_catalog` — the storage floor only, §18.6, see
+[Remaining work](#remaining-stage-4hw-work)) resolves against the same crate — the
 kernel cannot depend on the `userland/*` device manager (`AGENTS.md` §17.4),
 so the policy is shared, never duplicated (§2.2).
 
@@ -233,16 +233,20 @@ discovery](../platform/aarch64.md#platform-discovery-hardware-tree)).
 
 ## Remaining Stage 4.HW work
 
-The Pi-4 USB-keyboard chain's bind tables already live in the driver
-crates (above), and the in-kernel **driver-candidate catalogue**
-(`kernel/rustos-kernel::driver_catalog`) now pairs each with its
-`/System/Drivers/` path and resolves the discovered `brcm,bcm2711-pcie`
-node against them through `lib/devmatch`: the chain's bring-up is **gated
-on a catalogue match** (`keyboard_service::resolve_discovered_bridge`,
-audit `EventId(4112)`) rather than running because a bridge address was
-found (Stage 4.HW item 5 / `plans/PI.md` P10 5c-i). The remaining work,
-tracked in `PLAN.md` Stage 4.HW, is the hotplug/removal runtime path,
-routing the in-kernel load through the signed-manifest `Host::load` gate
-with the enumerated-HID-child re-match (5c-ii), and ultimately the
-user-space keyboard service autoloaded by `DeviceManager::autoload` over
-the driver-host-IPC surface (5d).
+The Pi-4 USB-keyboard chain is now **entirely user space** (`plans/PI.md`
+P10 D5d): the boot walk seeds the discovered `brcm,bcm2711-pcie` root
+complex and VideoCore mailbox nodes, and `devmgr` autoloads the signed
+`/System/Drivers/` bundles against them — the PCIe root-complex driver
+binds the bridge and emits the VL805 PCI function, the VL805 driver reloads
+the controller firmware over the mailbox and emits the `usb,xhci` node, and
+the keyboard driver binds that and pumps key edges. Nothing of the chain is
+compiled into the kernel: the in-kernel driver-candidate catalogue
+(`kernel/rustos-kernel::driver_catalog`) is now the storage **bootstrap
+floor only** — virtio-blk + EMMC2, the block drivers that must be up before
+the signed store is reachable (§18.6). The remaining work, tracked in
+`PLAN.md`, is the hotplug **removal** runtime path: the kernel side landed
+(the `hw_remove_node` syscall, the mirror of `hw_emit_node` — a bus driver
+retires a node it published and its subtree, ownership-checked and
+fail-closed), and the producer/reactor — a bus driver's port-watcher that
+calls it on a hot-remove, and the `devmgr` reaction that unloads the bound
+driver — is Design D D4.

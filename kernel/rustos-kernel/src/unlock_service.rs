@@ -8,8 +8,7 @@
 //! `login` can authenticate (the loaded database is published into
 //! [`crate::root_mount::LATE_USERS_DB`]). A blocking console read before
 //! the dispatch loop runs would deadlock, so the unlock runs as a
-//! **scheduler kthread** admitted at the init seam, exactly like the
-//! USB-keyboard service ([`crate::keyboard_service`]).
+//! **scheduler kthread** admitted at the init seam, alongside PID 1.
 //!
 //! This module is the host-compiled, host-tested, device-independent core
 //! (`AGENTS.md` §2.2): the post-MMU boot stash ([`record_boot`] /
@@ -25,8 +24,6 @@
 //! (virtio-blk-MMIO for the QEMU `virt` path, and the Raspberry Pi 4 EMMC2
 //! SD host for the Pi-metal root), so this arch-neutral core names no
 //! architecture (`AGENTS.md` §17.2 / §2.20).
-
-use alloc::boxed::Box;
 
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
@@ -80,9 +77,8 @@ impl UnlockBoot {
 ///
 /// Set once after the MMU is enabled (the `SpinLock`'s atomic
 /// read-modify-write is UNPREDICTABLE on the MMU-off Device memory the
-/// boot CPU runs on, `plans/PI.md` P6c-2 — the same constraint as
-/// [`crate::keyboard_service`]'s discovery stash), read once at the init
-/// seam. Single producer, single consumer, so the lock never contends.
+/// boot CPU runs on, `plans/PI.md` P6c-2), read once at the init seam.
+/// Single producer, single consumer, so the lock never contends.
 static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 
 /// Record the resolved root binding and the firmware DTB pointer for the
@@ -90,11 +86,16 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 /// ([`crate::hwtree_store::HW_TREE`]) with the discovered `tree`.
 ///
 /// `tree` is the full discovered hardware tree the kthread matches against
-/// the signed driver store during autoload (`AGENTS.md` §18.1 / §18.3). It
-/// is copied into the store (the single source of truth, `AGENTS.md` §2.2),
-/// so the boot path no longer needs to leak it to `'static`; later
-/// bus-enumerated children are appended through [`augment_boot_tree`] and
-/// the autoload reader takes a [`boot_tree_snapshot`].
+/// the signed driver store during autoload (`AGENTS.md` §18.1 / §18.3) — it
+/// already carries the bus root nodes `FdtDiscovery` emits (the
+/// `brcm,bcm2711-pcie` root complex, the `VideoCore` mailbox), against which
+/// `devmgr` autoloads the user-space bus chain. It is copied into the store
+/// (the single source of truth, `AGENTS.md` §2.2), so the boot path no longer
+/// needs to leak it to `'static`; a user-space bus driver appends its
+/// enumerated children at runtime through `hw_emit_node`
+/// ([`crate::hwtree_store::HwTreeStore::publish_child`]), and the autoload
+/// load gate resolves a matched node's grants from the live store directly
+/// (`AGENTS.md` §18.4).
 ///
 /// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT` and
 /// [`crate::hwtree_store`]).
@@ -107,47 +108,6 @@ pub fn record_boot(binding: Option<RootBlockBinding>, dtb: u64, tree: &[HwNode])
 #[must_use]
 pub fn take_boot() -> UnlockBoot {
     *UNLOCK_BOOT.lock()
-}
-
-/// An owned-then-leaked `'static` view of the current hardware inventory
-/// ([`crate::hwtree_store::HW_TREE`]), for the `'static + Send` autoload
-/// reader (the unlock kthread captures it by value).
-///
-/// Snapshotting *after* the floor bring-up has [`augment_boot_tree`]d its
-/// enumerated children yields the full discovered tree the autoload walk
-/// matches against the signed store. The one-shot leak is the boot publish
-/// the boot path used to perform itself, not a per-event allocation
-/// (`AGENTS.md` §2.1).
-///
-/// MUST be called **after** the MMU is enabled (see [`crate::hwtree_store`]).
-#[must_use]
-pub fn boot_tree_snapshot() -> &'static [HwNode] {
-    Box::leak(crate::hwtree_store::HW_TREE.snapshot().into_boxed_slice())
-}
-
-/// Append one bus-enumerated child `node` to the discovered hardware
-/// inventory ([`crate::hwtree_store::HW_TREE`]), so the pre-unlock autoload
-/// (reading [`boot_tree_snapshot`]) matches it against the signed
-/// `/System/Drivers/` store like every other discovered device
-/// (`AGENTS.md` §18.2 — bus children are enumerated by the floor bus
-/// drivers and attached to the tree as further nodes).
-///
-/// Design B (`plans/PI.md` B3): the bootstrap-floor USB bring-up enumerates
-/// the HID keyboard behind the VL805 controller **once** and emits its
-/// [`describe_device`](rustos_abi::hwtree) node here, *before* the unlock
-/// kthread snapshots the inventory, so the §18 discovery path sees the
-/// keyboard rather than it living only inside the imperative bring-up. The
-/// keyboard's signed driver bundle is not in the store until the D5 flip,
-/// so `devmgr` leaves the node unbound (`AGENTS.md` §18.4) and the in-kernel
-/// bring-up keeps driving the keyboard (`AGENTS.md` §2.17) until then.
-///
-/// The append never drops a node and grows the store on demand (`AGENTS.md`
-/// §24.1).
-///
-/// MUST be called **after** the MMU is enabled and **before** the unlock
-/// kthread snapshots the inventory (see [`record_boot`] / [`boot_tree_snapshot`]).
-pub fn augment_boot_tree(node: &HwNode) {
-    crate::hwtree_store::HW_TREE.append(node);
 }
 
 /// The console-0 input ownership gate (`plans/PI.md` P11 Chunk B-2 item 5).
@@ -316,6 +276,30 @@ pub fn autoload_caps() -> CapabilitySet {
     // intersection still binds, so a driver that does not request it receives
     // nothing extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
     caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
+    // A user-space *bus* driver (the `pcie_brcm` root complex, the `vl805` USB
+    // host) publishes the devices it enumerates into the live hardware tree
+    // with `hw_emit_node`, so the device manager autoloads each in turn — the
+    // recursive, data-driven discovery chain (`AGENTS.md` §18.1 / §18.3). That
+    // requires `CAP_HW_EMIT`, so the delegatable set carries it; a driver whose
+    // manifest does not request it (a storage or input leaf) receives nothing
+    // extra (the per-driver intersection still binds, §5.2).
+    caps.insert(CapabilityId::HW_EMIT);
+    // The `vl805` USB-host bus driver reloads its controller's firmware over
+    // the VideoCore property mailbox before bring-up, reaching the `vcmailbox`
+    // service's restricted-sender call endpoint, which requires the caller to
+    // hold `CAP_MAILBOX` (`crate::driver_store_server` / `lib/abi`
+    // `MAILBOX_ENDPOINT`). The delegatable set carries it so such a signed
+    // driver can be granted it; a driver that does not request it receives
+    // nothing extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
+    caps.insert(CapabilityId::MAILBOX);
+    // An autoloaded user-space driver emits its structured diagnostics
+    // (e.g. the USB boot-keyboard driver's one-shot bring-up failure record)
+    // through `log_emit`, which the kernel gates on `CAP_LOG_EMIT`
+    // (`AGENTS.md` §19.4 / §15.7). The delegatable set carries it so such a
+    // signed driver can be granted it; the per-driver manifest intersection
+    // still binds, so a driver that does not request it receives nothing
+    // extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
+    caps.insert(CapabilityId::LOG_EMIT);
     caps
 }
 
@@ -644,14 +628,15 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_stash_and_inventory_round_trip_through_seed_and_augment() {
+    fn the_boot_stash_and_inventory_round_trip_through_seed_and_snapshot() {
         use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT};
 
-        // `record_boot` stashes the binding + DTB and seeds the
-        // authoritative inventory with a minimal discovered tree (a root +
-        // a discovered bus), as the floor leaves it before the USB bring-up
-        // enumerates a child. (The single test touching the `HW_TREE` /
-        // `UNLOCK_BOOT` globals, so it never races a sibling.)
+        // `record_boot` stashes the binding + DTB and seeds the authoritative
+        // inventory with the discovered tree `FdtDiscovery` built — here a
+        // root plus a discovered bus (the `brcm,bcm2711-pcie` root complex
+        // stands in), against which `devmgr` autoloads the user-space bus
+        // chain. (The single test touching the `HW_TREE` / `UNLOCK_BOOT`
+        // globals, so it never races a sibling.)
         let seed = [
             HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
             HwNode::new(2, 1, HwDeviceClass::Bus),
@@ -661,20 +646,27 @@ mod tests {
         assert!(boot.binding.is_none());
         assert_eq!(boot.dtb, 0xDEAD_0000);
 
-        // The bus-enumerated HID child (`AGENTS.md` §18.2), keyed by the USB
-        // interface-class match key the bring-up reads (never fabricated,
-        // §18.5), is appended last; the snapshot the autoload reader takes
-        // reflects seed + child in discovery order.
-        let mut hid = HwNode::new(3, 2, HwDeviceClass::Input);
-        hid.push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
-            .expect("match key fits");
-        augment_boot_tree(&hid);
-
-        let snap = boot_tree_snapshot();
-        assert_eq!(snap.len(), 3, "the child is appended, nothing dropped");
+        // The live inventory snapshot reflects exactly the seeded tree; a
+        // user-space bus driver's enumerated children are added at runtime
+        // through `hw_emit_node` (`publish_child`) and observed through the
+        // reactive `hw_tree_wait` generation (`AGENTS.md` §18.1 / §18.3).
+        let snap = crate::hwtree_store::HW_TREE.snapshot();
+        assert_eq!(snap.len(), 2, "the seeded discovered tree, nothing dropped");
         assert_eq!(snap[0], seed[0], "existing nodes keep their order");
         assert_eq!(snap[1], seed[1]);
-        assert_eq!(snap[2], hid, "the enumerated child lands last");
+
+        // A child published at runtime (the user-space bus driver's
+        // `hw_emit_node`) lands in the live store under the bus, keyed by its
+        // match key, and is seen by a fresh snapshot.
+        let mut child = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input);
+        child
+            .push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
+            .expect("match key fits");
+        let id = crate::hwtree_store::HW_TREE.publish_child(2, child);
+        let snap = crate::hwtree_store::HW_TREE.snapshot();
+        assert_eq!(snap.len(), 3, "the runtime child is added, nothing dropped");
+        assert_eq!(snap[2].id(), id, "the store assigned the published id");
+        assert_eq!(snap[2].parent(), 2, "parented under the emitter's node");
     }
 
     /// A [`Sink`] that records each logged event's id and message so a test
@@ -737,6 +729,14 @@ mod tests {
             CapabilityId::INPUT_INJECT,
             CapabilityId::IRQ_BIND,
             CapabilityId::IPC_BIND_PRIVILEGED,
+            // A user-space bus driver (`pcie_brcm`, `vl805`) publishes
+            // enumerated devices with `hw_emit_node` (`CAP_HW_EMIT`), and
+            // `vl805` reloads its controller firmware over the `vcmailbox`
+            // restricted-sender endpoint (`CAP_MAILBOX`) — both delegatable to
+            // a signed manifest that requests them, neither held by the
+            // kthread itself (§5.4 — no ambient authority).
+            CapabilityId::HW_EMIT,
+            CapabilityId::MAILBOX,
         ] {
             assert!(!service.contains(cap));
             assert!(autoload.contains(cap));

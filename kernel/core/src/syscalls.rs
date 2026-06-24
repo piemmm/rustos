@@ -106,8 +106,8 @@ use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::devres::{
-    dma_constraint, mappable_window, DmaAllocFacility, MmioMapFacility, NULL_DMA_ALLOC_FACILITY,
-    NULL_MMIO_MAP_FACILITY,
+    dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, MmioMapFacility,
+    NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
@@ -1654,7 +1654,13 @@ where
         result
     }
 
-    fn mmio_map(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
+    fn mmio_map(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        offset: u64,
+        len: usize,
+    ) -> SyscallResult {
         // §5.4 step 2 (capability) was enforced by the dispatcher: the
         // `mmio_map` spec carries `CAP_MMIO_MAP`. Step 3 (validate every
         // input) is here, and it is the security spine of this syscall: we
@@ -1669,11 +1675,18 @@ where
         let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
             return Err(Errno::NotFound);
         };
-        // The grant must name a memory window of this driver's, and its
-        // length must be a real, non-overflowing region; reject any other
-        // kind/shape before touching a page table (`AGENTS.md` §5.4 — fail
-        // closed rather than mapping the wrong thing).
-        let (phys_base, len) = mappable_window(&resource)?;
+        // The grant must name a memory window of this driver's, and the
+        // requested `[offset, offset + len)` sub-region must lie wholly
+        // inside it; reject any other kind/shape, a zero/overflowing length,
+        // or a sub-region that escapes the grant before touching a page
+        // table (`AGENTS.md` §5.4 — fail closed rather than mapping the wrong
+        // thing; §4 — a driver maps only inside a region it was granted).
+        // Mapping a bounded sub-region (not the whole grant) is what lets a
+        // driver granted a large outbound bus aperture map just the single
+        // BAR it enumerated, instead of the whole 1 GiB window — the latter
+        // would exhaust the per-task MMIO virtual window and fail closed with
+        // `OutOfMemory` (`AGENTS.md` §24.1).
+        let (phys_base, len) = mappable_subwindow(&resource, offset, len)?;
         // Mechanism: the installed producer maps only that region —
         // caching disabled, never executable — into the caller's own live
         // address space and returns its base virtual address. The default
@@ -1720,21 +1733,21 @@ where
         if constraint.max_len != 0 && (len as u64) > constraint.max_len {
             return Err(Errno::OutOfRange);
         }
-        // A translating inbound viewport (`dma_translated`) needs the bus
-        // bridge programmed before a device-visible address can be derived;
-        // that bring-up rides the live metal VL805 acceptance item
-        // (`plans/PI.md` 5d-0-ii (c), §18.1). Until then only an
-        // untranslated (coherent) constraint is served — fail closed rather
-        // than handing back an unprogrammed translation (`AGENTS.md` §2.9).
-        if constraint.translated_base != 0 {
-            return Err(Errno::NotImplemented);
-        }
         // Mechanism: the installed producer carves a physically-contiguous,
         // zeroed, coherent block bounded by the grant's `addr_limit` into the
         // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
         // fails closed with `NotImplemented` (`AGENTS.md` §2.9); frame
         // exhaustion surfaces as `OutOfMemory` (deterministic OOM, §4).
         let carve = self.dma_alloc_facility.alloc(len, constraint.addr_limit)?;
+        // Resolve the device-visible base the driver programs into its
+        // hardware. For a coherent (untranslated) constraint it is the carved
+        // CPU-physical base; for a translating inbound viewport
+        // (`dma_translated`, e.g. the Pi 4's `IB MEM 0x0..0x1ffffffff ->
+        // 0x4_0000_0000`) it is that base re-based onto the far side of the
+        // viewport — checked, never wrapped (`AGENTS.md` §18.1 / §2.9). The
+        // carve already lies below `addr_limit`, so this only re-bases it; a
+        // base outside the viewport's CPU window fails closed.
+        let device_addr = translate_device_addr(&constraint, carve.device_addr)?;
         // The carve grew the caller's live space; re-freeze the registry
         // snapshot before the copy below so the new DMA window is visible to
         // the copy path (`AGENTS.md` §5.4).
@@ -1747,7 +1760,7 @@ where
         // reclaimed when the task's live space is dropped on exit
         // (`LiveSpace::drop`), so a driver that passes a bad pointer self-DoSes
         // a buffer at worst — it never widens authority.
-        let device_bytes = carve.device_addr.to_ne_bytes();
+        let device_bytes = device_addr.to_ne_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(device_out), &device_bytes)
         }) {
@@ -2590,6 +2603,44 @@ where
         // closed with `NotImplemented` (`AGENTS.md` §2.9). Returns `Ok(0)`
         // once published (the `Errno`-return ABI shape).
         self.hw_tree.publish(parent_id, decoded).map(|()| 0)
+    }
+
+    fn hw_remove_node(&self, caller: &CallerContext<'_>, node_id: u64) -> SyscallResult {
+        // The dispatcher has already checked `CAP_HW_EMIT` — the same
+        // privilege publishing requires, since removing a child is the exact
+        // counterpart of emitting one (`AGENTS.md` §5.4 / §18.4). `node_id` is
+        // a plain `u64`, copied in nothing: a `HwNode::id` is a `u32`, so a
+        // value outside that range names no node and fails closed at the
+        // resolution below (`AGENTS.md` §2.9) — never an out-of-band copy.
+        let Ok(node_id) = u32::try_from(node_id) else {
+            return Err(Errno::NotFound);
+        };
+
+        // Security spine, identical to `hw_emit_node` (`AGENTS.md` §4 — no
+        // ambient authority): resolve the caller's *own* matched node from
+        // kernel-trusted state keyed by `caller.task_id` (never a
+        // caller-supplied value, §5.4). A task with no loaded node (an
+        // ordinary process, or a driver not loaded for a node) owns nothing in
+        // the tree and may remove nothing — it fails closed. The store then
+        // removes `node_id` only when its parent is exactly this node, so a
+        // driver can never retire a node it did not itself publish.
+        let parent_id = {
+            let aspaces = self.aspaces.read();
+            let Some(parent_id) = aspaces.loaded_node(caller.task_id) else {
+                return Err(Errno::PermissionDenied);
+            };
+            parent_id
+        };
+
+        // Remove the child (and its whole subtree) from the live hardware
+        // tree, bumping the generation that wakes the device manager's
+        // reactive watch so it unloads the driver bound to the vanished node
+        // (the same change channel `hw_tree_wait` observes, `AGENTS.md`
+        // §18.4). The store enforces the ownership check (`node_id`'s parent
+        // must be `parent_id`) and fails closed `NotFound` otherwise; a build
+        // with no store wired fails closed `NotImplemented` (`AGENTS.md`
+        // §2.9). Returns `Ok(0)` once removed (the `Errno`-return ABI shape).
+        self.hw_tree.remove(parent_id, node_id).map(|()| 0)
     }
 }
 
@@ -7436,7 +7487,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.mmio_map(&ctx, 7), Err(Errno::NotFound));
+        assert_eq!(h.mmio_map(&ctx, 7, 0, 0x10), Err(Errno::NotFound));
     }
 
     /// The grant is owner-bound: a handle minted for another task, or an
@@ -7470,7 +7521,10 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        assert_eq!(h.mmio_map(&owner, handle + 1), Err(Errno::NotFound));
+        assert_eq!(
+            h.mmio_map(&owner, handle + 1, 0, 0x10),
+            Err(Errno::NotFound)
+        );
 
         // Right handle value, wrong (foreign) task → NotFound: a driver
         // cannot reach another driver's window by reusing its handle.
@@ -7478,7 +7532,7 @@ mod tests {
             task_id: SecTaskId(3),
             caps: &caps,
         };
-        assert_eq!(h.mmio_map(&foreign, handle), Err(Errno::NotFound));
+        assert_eq!(h.mmio_map(&foreign, handle, 0, 0x10), Err(Errno::NotFound));
 
         // Neither refusal touched the mapping mechanism.
         assert!(facility.last.lock().is_none());
@@ -7513,9 +7567,11 @@ mod tests {
         )
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, handle), Ok(0x9000_0000));
-        // Exactly the granted window reached the mechanism — base and
-        // length both from the grant, not from any caller-supplied value.
+        assert_eq!(h.mmio_map(&ctx, handle, 0, 0x4000), Ok(0x9000_0000));
+        // Exactly the requested sub-region reached the mechanism — its base
+        // is the grant base plus the offset, and its length the request,
+        // never a caller-supplied physical address (here offset 0, full
+        // length: the whole granted window).
         assert_eq!(*facility.last.lock(), Some((0xFE98_0000, 0x4000)));
     }
 
@@ -7543,7 +7599,10 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        assert_eq!(h.mmio_map(&ctx, handle), Err(Errno::NotImplemented));
+        assert_eq!(
+            h.mmio_map(&ctx, handle, 0, 0x4000),
+            Err(Errno::NotImplemented)
+        );
     }
 
     /// A grant of a non-window kind (a DMA constraint) is refused with
@@ -7575,8 +7634,62 @@ mod tests {
         )
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, handle), Err(Errno::OutOfRange));
+        assert_eq!(h.mmio_map(&ctx, handle, 0, 0x10), Err(Errno::OutOfRange));
         // The wrong-kind grant was refused before the mechanism ran.
+        assert!(facility.last.lock().is_none());
+    }
+
+    /// Regression (`AGENTS.md` §24.1): a driver granted a large outbound bus
+    /// window maps only the small `[offset, offset + len)` sub-region it
+    /// names (e.g. one enumerated BAR), never the whole 1 GiB aperture. The
+    /// mechanism receives the sub-region's absolute base (`grant base +
+    /// offset`) and the request length — not the grant's full extent — so the
+    /// map cannot exhaust the per-task MMIO virtual window and fail closed
+    /// with `OutOfMemory` (the keyboard-chain defect this fix closes). A
+    /// sub-region escaping the grant is refused with `OutOfRange`, before the
+    /// mechanism runs.
+    #[test]
+    fn mmio_map_maps_only_the_requested_sub_region_of_a_bus_window() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        // A 1 GiB outbound bus window (the BCM2711 PCIe geometry): CPU base
+        // 0x6_0000_0000, PCIe-space base 0xC000_0000.
+        let handle = aspaces.write().mint_grant(
+            SecTaskId(2),
+            rustos_abi::hwtree::HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000),
+        );
+        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
+            last: rustos_sync::SpinLock::new(None),
+            ret: Ok(0x9000_0000),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mmio_map_facility(facility);
+
+        // A 4 KiB BAR 0x3D50_0000 into the window maps exactly 4 KiB at the
+        // absolute base `0x6_0000_0000 + 0x3D50_0000` — never the 1 GiB grant.
+        assert_eq!(
+            h.mmio_map(&ctx, handle, 0x3D50_0000, 0x1000),
+            Ok(0x9000_0000)
+        );
+        assert_eq!(*facility.last.lock(), Some((0x6_3D50_0000, 0x1000)));
+
+        // A sub-region running past the grant's end is refused before the
+        // mechanism (fail closed, `AGENTS.md` §5.4).
+        *facility.last.lock() = None;
+        assert_eq!(
+            h.mmio_map(&ctx, handle, 0x3FFF_F000, 0x2000),
+            Err(Errno::OutOfRange)
+        );
         assert!(facility.last.lock().is_none());
     }
 
@@ -7702,13 +7815,17 @@ mod tests {
         assert!(facility.last.lock().is_none());
     }
 
-    /// A translating inbound-viewport DMA grant (`dma_translated`) is refused
-    /// with `NotImplemented` before the carve: the bus-bridge programming
-    /// rides the metal VL805 acceptance item, so the kernel fails closed
-    /// rather than handing back an unprogrammed translation
-    /// (`AGENTS.md` §2.9; `plans/PI.md` 5d-0-ii (c)).
+    /// A translating inbound-viewport DMA grant (`dma_translated`, e.g. the
+    /// Pi 4's `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) now reaches the
+    /// carve mechanism: it is no longer rejected pre-carve. The carve runs
+    /// bounded by the grant's CPU-side `addr_limit` (never a caller-supplied
+    /// bound, §18.3); with no caller address space registered the
+    /// device-address copy-out then fails closed with `BadAddress` (the same
+    /// fault `wait`'s copy-out produces, §19.1). The translation arithmetic
+    /// itself is unit-tested directly on `translate_device_addr`
+    /// (`kernel/core::devres`).
     #[test]
-    fn dma_alloc_translated_grant_is_not_implemented() {
+    fn dma_alloc_translated_grant_reaches_the_mechanism() {
         let sink = make_sink();
         let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
         let sched = make_sched(arch.clone());
@@ -7721,13 +7838,17 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             SecTaskId(2),
-            rustos_abi::hwtree::HwResource::dma_translated(0xC000_0000, 0x1_0000, 0x4_0000_0000),
+            rustos_abi::hwtree::HwResource::dma_translated(
+                0x2_0000_0000,
+                0x2_0000_0000,
+                0x4_0000_0000,
+            ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: rustos_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
                 cpu_va: 0xD000_0000,
-                device_addr: 0x4000_0000,
+                device_addr: 0x10_0000,
             }),
         }));
         let h = KernelSyscallHandlers::new(
@@ -7735,11 +7856,17 @@ mod tests {
         )
         .with_dma_alloc_facility(facility);
 
+        // No address space registered for task 2 → the (translated)
+        // device-address copy-out fails closed; the point is the carve ran
+        // rather than the grant being rejected pre-carve.
         assert_eq!(
             h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
-            Err(Errno::NotImplemented)
+            Err(Errno::BadAddress)
         );
-        assert!(facility.last.lock().is_none());
+        // The carve ran with the request length and the grant's CPU-side
+        // addressing limit — proving the translated grant is no longer
+        // refused before the mechanism.
+        assert_eq!(*facility.last.lock(), Some((0x1000, 0x2_0000_0000)));
     }
 
     /// A zero-length request and an over-the-grant-maximum request are both
@@ -8873,6 +9000,12 @@ mod tests {
         generation: u64,
         blob: alloc::vec::Vec<u8>,
         published: RwLock<alloc::vec::Vec<(u32, rustos_abi::HwNode)>>,
+        // Every `(parent_id, node_id)` removed through `HwTreeSource::remove`,
+        // so a `hw_remove_node` test can assert what the handler passed.
+        removed: RwLock<alloc::vec::Vec<(u32, u32)>>,
+        // Node ids this double rejects with `NotFound` (a node the caller does
+        // not own / an absent node), so a test can drive the fail-closed arm.
+        unremovable: RwLock<alloc::vec::Vec<u32>>,
     }
 
     impl StaticHwTree {
@@ -8881,6 +9014,8 @@ mod tests {
                 generation,
                 blob,
                 published: RwLock::new(alloc::vec::Vec::new()),
+                removed: RwLock::new(alloc::vec::Vec::new()),
+                unremovable: RwLock::new(alloc::vec::Vec::new()),
             }
         }
     }
@@ -8897,6 +9032,16 @@ mod tests {
             // the node, so a test can assert the child is parented under the
             // emitter's own loaded node (`AGENTS.md` §18.1).
             self.published.write().push((parent_id, node));
+            Ok(())
+        }
+        fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+            // Model the store's fail-closed ownership gate: a node listed as
+            // unremovable (unknown / not owned by the caller) is `NotFound`
+            // and is never recorded as removed (`AGENTS.md` §5.4).
+            if self.unremovable.read().contains(&node_id) {
+                return Err(Errno::NotFound);
+            }
+            self.removed.write().push((parent_id, node_id));
             Ok(())
         }
     }
@@ -9473,6 +9618,204 @@ mod tests {
             h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
             Err(Errno::NotImplemented)
         );
+    }
+
+    /// An autoloaded bus driver (a loaded node recorded) removes a child it
+    /// owns: the handler resolves the caller's own loaded node as the parent
+    /// and passes it with the target id to the store, which removes the
+    /// subtree (`AGENTS.md` §18.4). `Ok(0)` on success.
+    #[test]
+    fn hw_remove_node_with_a_loaded_node_removes_the_child() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // The caller is the bus driver loaded for node 9; it owns the
+        // children parented under 9 and may retire them (`AGENTS.md` §18.4).
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(h.hw_remove_node(&ctx, 42), Ok(0));
+        let removed = source.removed.read();
+        assert_eq!(removed.len(), 1, "the owned node was removed");
+        // The handler passes the emitter's own loaded node (9) as the
+        // ownership parent and the requested target id.
+        assert_eq!(
+            removed[0],
+            (9, 42),
+            "removal is scoped to the caller's own node (`AGENTS.md` §4)"
+        );
+    }
+
+    /// A caller that is **not** an autoloaded driver bound to a node (no
+    /// loaded node recorded) cannot remove anything: it owns no position in
+    /// the tree, so the handler fails closed with `PermissionDenied` and the
+    /// store is never reached (`AGENTS.md` §4 / §5.4 — identity is
+    /// kernel-provided, never caller-supplied). Mirrors the emit gate.
+    #[test]
+    fn hw_remove_node_without_a_loaded_node_is_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        // Deliberately no `set_loaded_node`: the caller owns nothing.
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(h.hw_remove_node(&ctx, 42), Err(Errno::PermissionDenied));
+        assert!(
+            source.removed.read().is_empty(),
+            "a task with no loaded node removes nothing"
+        );
+    }
+
+    /// A node the caller does not own (or an absent id) is surfaced as the
+    /// store's fail-closed `NotFound`, even though the caller passed the
+    /// loaded-node gate (`AGENTS.md` §5.4).
+    #[test]
+    fn hw_remove_node_for_an_unowned_node_is_not_found() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        // Node 7 is not removable (models a node the caller does not own).
+        source.unremovable.write().push(7);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(h.hw_remove_node(&ctx, 7), Err(Errno::NotFound));
+        assert!(
+            source.removed.read().is_empty(),
+            "a node the caller does not own is never removed"
+        );
+    }
+
+    /// A `node_id` above the `u32` range names no node and fails closed
+    /// `NotFound` before the store is reached (`AGENTS.md` §2.9).
+    #[test]
+    fn hw_remove_node_rejects_an_out_of_range_id() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 9);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_remove_node(&ctx, u64::from(u32::MAX) + 1),
+            Err(Errno::NotFound)
+        );
+        assert!(source.removed.read().is_empty(), "nothing was removed");
+    }
+
+    /// With no store wired `hw_remove_node` fails closed with
+    /// `NotImplemented` (`AGENTS.md` §2.9), like every hardware-tree op.
+    #[test]
+    fn hw_remove_node_without_store_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces.write().set_loaded_node(SecTaskId(2), 2);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.hw_remove_node(&ctx, 2), Err(Errno::NotImplemented));
     }
 
     // ---- ipc_call ----------------------------------------------------

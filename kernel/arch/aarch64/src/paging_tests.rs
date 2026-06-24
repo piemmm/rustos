@@ -288,10 +288,65 @@ fn tcr_value_encodes_a_39_bit_region() {
 }
 
 #[test]
-fn mair_pairs_normal_and_device() {
-    // Attr0 = 0xFF (Normal WB RW-allocate), Attr1 = 0x04 (Device-nGnRE).
+fn mair_pairs_normal_device_and_normal_nc() {
+    // Attr0 = 0xFF (Normal WB RW-allocate), Attr1 = 0x04 (Device-nGnRE),
+    // Attr2 = 0x44 (Normal Non-Cacheable, the coherent-DMA memory type).
     assert_eq!(MAIR_VALUE & 0xFF, 0xFF);
     assert_eq!((MAIR_VALUE >> 8) & 0xFF, 0x04);
+    assert_eq!((MAIR_VALUE >> 16) & 0xFF, 0x44);
+}
+
+#[test]
+fn el0_dma_coherent_leaf_is_unprivileged_normal_non_cacheable() {
+    const AP_MASK: u64 = 0b11 << 6;
+    // The coherent-DMA buffer leaf (a user-space driver's DMA carve): EL0
+    // read/write (AP=0b01), Normal Non-Cacheable MAIR index (so the device
+    // and CPU stay coherent without cache maintenance), execute-never at
+    // both ELs, a page descriptor with the access flag set.
+    let dma = el0_dma_coherent_leaf_attrs();
+    assert_eq!(dma & AP_MASK, attrs::AP_RW_EL0);
+    assert_eq!(dma & (0b111 << 2), attrs::ATTR_IDX_NORMAL_NC);
+    assert_ne!(dma & attrs::PXN, 0);
+    assert_ne!(dma & attrs::UXN, 0);
+    assert_eq!(dma & 0b11, 0b11);
+    assert_ne!(dma & attrs::AF, 0);
+    // Distinct memory type from both Normal-WB and Device.
+    assert_ne!(dma & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_ne!(dma & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
+}
+
+#[test]
+fn leaf_attrs_for_dma_coherent_user_is_normal_non_cacheable() {
+    // A `DMA_COHERENT | USER | WRITE` mapping (the DMA carve) selects the
+    // Normal-NC EL0 leaf, never the cacheable `el0_data` leaf — otherwise a
+    // non-I/O-coherent device would never see the driver's descriptors
+    // (`AGENTS.md` §4). `DMA_COHERENT` takes precedence over the generic
+    // user-data leaf.
+    assert_eq!(
+        AddressSpace::leaf_attrs_for(
+            PageFlags::DMA_COHERENT | PageFlags::USER | PageFlags::READ | PageFlags::WRITE
+        ),
+        el0_dma_coherent_leaf_attrs()
+    );
+}
+
+#[test]
+fn page_flags_round_trip_through_the_dma_coherent_leaf() {
+    // The Normal-NC leaf decodes back to a `DMA_COHERENT` user RW page —
+    // not `DEVICE`, and not a bare cacheable page (the [4:2] attr-index
+    // decode must distinguish index 2 from index 0/1).
+    let decoded = page_flags_from_leaf(el0_dma_coherent_leaf_attrs());
+    assert!(decoded.contains(PageFlags::DMA_COHERENT));
+    assert!(decoded.contains(PageFlags::USER));
+    assert!(decoded.contains(PageFlags::WRITE));
+    assert!(!decoded.contains(PageFlags::DEVICE));
+    assert!(!decoded.contains(PageFlags::EXEC));
+    // A cacheable user-data leaf must *not* decode as coherent-DMA.
+    assert!(!page_flags_from_leaf(el0_data_leaf_attrs()).contains(PageFlags::DMA_COHERENT));
+    // …and a device leaf decodes as DEVICE, not DMA_COHERENT.
+    let dev = page_flags_from_leaf(el0_device_leaf_attrs());
+    assert!(dev.contains(PageFlags::DEVICE));
+    assert!(!dev.contains(PageFlags::DMA_COHERENT));
 }
 
 #[test]

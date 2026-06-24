@@ -90,7 +90,8 @@ pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
 pub use rustos_abi::driver::input::ReportSource;
 pub use service::{
-    bring_up_boot_keyboard, derive_keyboard_resources, KeyboardResources, KeyboardSource,
+    bring_up_boot_keyboard, bring_up_boot_keyboard_diagnostic, derive_keyboard_resources,
+    BringupPhase, KeyboardBringupError, KeyboardResources, KeyboardSource,
 };
 
 /// The §18.3 bind priority [`KEYBOARD_BIND_KEYS`] carries.

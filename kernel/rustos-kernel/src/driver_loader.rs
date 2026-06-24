@@ -25,10 +25,11 @@
 //! signed image carries no program payload — there is no separate binary to
 //! spawn — but it carries the driver's real signed manifest (kind,
 //! capability request, and the driver crate's own bind table), so the
-//! *trust decision* is identical to the user-space load path. The real
+//! *trust decision* is identical to the user-space load path. For the
+//! remaining in-kernel floor — the bootstrap storage drivers — the real
 //! register-window mapping and DMA carve run afterwards over the consuming
-//! service's own capability-gated host (e.g.
-//! [`crate::usb_keyboard::bring_up_keyboard`]), not this admission view.
+//! service's own capability-gated host (`crate::aarch64::root_unlock`), not
+//! this admission view.
 //!
 //! The baked, signed manifest images and the build's driver-signing public
 //! key are produced by `build.rs` (`emit_signed_driver_manifests`) and

@@ -85,11 +85,22 @@ pub mod attrs {
     pub const ATTR_IDX_NORMAL: u64 = 0 << 2;
     /// `MAIR_EL1` attribute index for Device-nGnRE memory (index 1).
     pub const ATTR_IDX_DEVICE: u64 = 1 << 2;
+    /// `MAIR_EL1` attribute index for Normal **Non-Cacheable** memory
+    /// (index 2). The memory type for a buffer shared with a DMA master
+    /// that does not snoop the CPU caches (the BCM2711 PCIe root complex):
+    /// the CPU bypasses its caches, so a descriptor it writes is visible to
+    /// the device, and an event the device writes is visible to the CPU,
+    /// with no explicit cache maintenance. Unlike Device-nGnRE it permits
+    /// ordinary (including unaligned) loads/stores, so the xHCI ring and
+    /// context structures the driver reads/writes behave normally
+    /// (`AGENTS.md` §4).
+    pub const ATTR_IDX_NORMAL_NC: u64 = 2 << 2;
 }
 
 /// `MAIR_EL1` value pairing attribute index 0 = Normal write-back
-/// read/write-allocate and index 1 = Device-nGnRE (ARM ARM D13.2.95).
-pub const MAIR_VALUE: u64 = 0xFF | (0x04 << 8);
+/// read/write-allocate, index 1 = Device-nGnRE, and index 2 = Normal
+/// Non-Cacheable (outer + inner non-cacheable, `0x44`) (ARM ARM D13.2.95).
+pub const MAIR_VALUE: u64 = 0xFF | (0x04 << 8) | (0x44 << 16);
 
 /// `TCR_EL1` value for a 39-bit TTBR0 region, 4 KiB granule, inner/outer
 /// write-back cacheable, inner-shareable walks, with the upper (TTBR1)
@@ -248,6 +259,29 @@ pub const fn el0_data_leaf_attrs() -> u64 {
         | attrs::SH_INNER
         | attrs::AP_RW_EL0
         | attrs::ATTR_IDX_NORMAL
+        | attrs::PXN
+        | attrs::UXN
+}
+
+/// Lower attributes for an **EL0-accessible** Normal **Non-Cacheable**
+/// page leaf: read/write at EL1 and EL0 (`AP_RW_EL0`), execute-never at
+/// both ELs (`PXN | UXN`), Normal Non-Cacheable memory type (MAIR index
+/// 2). Used for a DMA buffer a **user-space driver** shares with a
+/// non-I/O-coherent device (the [`PageFlags::DMA_COHERENT`] leaf, the
+/// coherent-DMA analogue of [`el0_data_leaf_attrs`]): the buffer is
+/// coherent with the device without per-access cache maintenance, and the
+/// driver still accesses it with ordinary loads/stores (Device memory
+/// would forbid the unaligned ring accesses). The output is a page
+/// descriptor (`TABLE_OR_PAGE`); DMA buffers are mapped at 4 KiB
+/// granularity.
+#[must_use]
+pub const fn el0_dma_coherent_leaf_attrs() -> u64 {
+    attrs::VALID
+        | attrs::TABLE_OR_PAGE
+        | attrs::AF
+        | attrs::SH_INNER
+        | attrs::AP_RW_EL0
+        | attrs::ATTR_IDX_NORMAL_NC
         | attrs::PXN
         | attrs::UXN
 }
@@ -1160,6 +1194,15 @@ impl AddressSpace {
             } else {
                 device_leaf_attrs(false)
             }
+        } else if flags.contains(PageFlags::DMA_COHERENT) {
+            // A buffer shared with a non-I/O-coherent DMA master (the
+            // BCM2711 PCIe root complex): Normal Non-Cacheable so the device
+            // and CPU see each other's writes without cache maintenance,
+            // while ordinary ring/context loads/stores still work (Device
+            // memory would forbid them). Always EL0-accessible RW,
+            // execute-never — the only consumer is a user-space driver's DMA
+            // carve (`AGENTS.md` §4 / §2.20).
+            el0_dma_coherent_leaf_attrs()
         } else if flags.contains(PageFlags::USER) {
             if flags.contains(PageFlags::EXEC) {
                 el0_code_leaf_attrs()
@@ -1554,8 +1597,14 @@ fn page_flags_from_leaf(desc: u64) -> PageFlags {
     } else if desc & attrs::PXN == 0 {
         out = out | PageFlags::EXEC;
     }
-    if desc & attrs::ATTR_IDX_DEVICE != 0 {
+    // The `MAIR` attribute index (bits [4:2]) selects the memory type:
+    // index 1 = Device-nGnRE, index 2 = Normal Non-Cacheable (a coherent
+    // DMA buffer), index 0 = cacheable Normal (no attribute bit).
+    let attr_idx = desc & (0b111 << 2);
+    if attr_idx == attrs::ATTR_IDX_DEVICE {
         out = out | PageFlags::DEVICE;
+    } else if attr_idx == attrs::ATTR_IDX_NORMAL_NC {
+        out = out | PageFlags::DMA_COHERENT;
     }
     out
 }

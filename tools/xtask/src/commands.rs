@@ -1226,12 +1226,24 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     })?;
 
     // Cross-compile and sign the autoloaded `/System/Drivers/` bundles the
-    // image ships, then install them into the read-only `/System` store. The
-    // VideoCore mailbox service driver runs in user space (the §18.6 floor
-    // stays storage-only), so `devmgr` autoloads it against the discovered
-    // BCM2711 mailbox node (`plans/PI.md` P10 D4).
+    // image ships, then install them into the read-only `/System` store. They
+    // all run in user space (the §18.6 floor stays storage-only), so `devmgr`
+    // autoloads each against its discovered node — and the bus chain is
+    // recursive: the PCIe root-complex driver binds the discovered
+    // `brcm,bcm2711-pcie` node and emits the VL805 PCI function; the VL805
+    // driver binds that, reloads the controller firmware over the mailbox, and
+    // emits the `usb,xhci` node; the keyboard driver binds that and pumps key
+    // edges into the input arbiter (`plans/PI.md` P10 D5d, `AGENTS.md` §18).
     let vcmailbox = image_drivers::build_vcmailbox_bundle(ctx)?;
-    let drivers: [(&[&[u8]], &[u8]); 1] = [(image_drivers::VCMAILBOX_STORE_PATH, &vcmailbox)];
+    let pcie_brcm = image_drivers::build_pcie_brcm_bundle(ctx)?;
+    let vl805 = image_drivers::build_vl805_bundle(ctx)?;
+    let usb_kbd = image_drivers::build_usb_kbd_bundle(ctx)?;
+    let drivers: [(&[&[u8]], &[u8]); 4] = [
+        (image_drivers::VCMAILBOX_STORE_PATH, &vcmailbox),
+        (image_drivers::PCIE_BRCM_STORE_PATH, &pcie_brcm),
+        (image_drivers::VL805_STORE_PATH, &vl805),
+        (image_drivers::USB_KBD_STORE_PATH, &usb_kbd),
+    ];
 
     let built = rustos_mkimage::build_rpi_image(
         &kernel_elf,

@@ -95,37 +95,6 @@ rustos-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # both ports' boot paths, so it is a common dependency.
 rustos-util = { path = "../../lib/util", version = "=0.0.0" }
 
-# The VL805/xHCI USB-keyboard composition (`src/usb_keyboard.rs`,
-# `plans/PI.md` P10) wires the in-kernel chain over `lib/*` building
-# blocks plus the leaf USB/HID driver crates: the BCM2711 PCIe
-# root-complex bring-up (`lib/pcie_brcm`, the §2.20 single-device
-# support carve-out), the BCM2711 windowed PCI config mechanism
-# (`lib/pci`), the xHCI controller engine, and the HID boot-keyboard →
-# console-byte producer. `rustos-kernel` is the image-assembly seam
-# (`Layer::Tooling`), the only crate permitted to name driver crates
-# across strata (`AGENTS.md` §17.4 / §8); the engine is
-# architecture-neutral (it consumes only the `lib/abi` driver seams),
-# so it compiles — and its host tests run — on the CI host.
-rustos-pcie-brcm = { path = "../../lib/pcie_brcm", version = "=0.0.0" }
-rustos-pci = { path = "../../lib/pci", version = "=0.0.0" }
-rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
-# The Raspberry Pi 4 VL805 device-support library (`lib/vl805`): the
-# board-specific VideoCore-mailbox firmware reload the in-kernel keyboard
-# composition runs over the `lib/abi` `MailboxChannel` seam (`AGENTS.md`
-# §2.20 device carve-out / §17.4). It is a `lib/*` crate (not the
-# `rustos-rt`-linking `drivers/bus/usb/vl805` bin, which the kernel must not
-# pull in); arch-neutral (it consumes only `lib/abi` + `lib/vcmailbox` +
-# `lib/usb`), so its host tests run on the CI host.
-rustos-vl805 = { path = "../../lib/vl805", version = "=0.0.0" }
-# The bus-agnostic xHCI protocol engine (`lib/usb`): `usb_keyboard.rs`
-# names `rustos_usb::{Xhci, device::UsbDevice}` directly, alongside the
-# `drivers/bus/usb` wiring that composes the PCI bring-up over it
-# (`AGENTS.md` §2.2 / §17.4 — the protocol is a `lib/*` crate).
-rustos-usb = { path = "../../lib/usb", version = "=0.0.0" }
-rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
-rustos-hid = { path = "../../lib/hid", version = "=0.0.0" }
-rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
-
 # The production root-volume unlock + users-database load composition
 # (`src/root_mount.rs`, `plans/PI.md` P11): the boot path mounts the
 # encrypted root through the real `RustFs` driver under the
@@ -229,11 +198,12 @@ rustos-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", def
 # console base (`plans/PI.md` P2).
 rustos-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 # The signed-manifest driver-load gate (`AGENTS.md` §8 / §9; `plans/PI.md`
-# P10 5c-ii): the aarch64 keyboard service admits each statically-linked
-# chain driver through `drvhost::Host::load` (Ed25519 signature +
-# `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before the bring-up runs, exactly as
-# the x86_64 `virtio_boot` path does. `drvhost` stays free of `kernel/*`
-# deps (`AGENTS.md` §17.4); the in-kernel resource hosts live elsewhere.
+# P10 5c-ii): the root-storage bring-up admits each statically-linked
+# bootstrap-floor block driver through `drvhost::Host::load` (Ed25519
+# signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it reads the volume,
+# exactly as the x86_64 `virtio_boot` path does. `drvhost` stays free of
+# `kernel/*` deps (`AGENTS.md` §17.4); the in-kernel resource hosts live
+# elsewhere.
 rustos-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 # The virtio-MMIO bus + transport the in-kernel root-unlock service
 # (`unlock_service`) provisions the bootstrap virtio-blk root device from
@@ -269,18 +239,18 @@ rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0
 rustos-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # The build script also bakes the signed driver-manifest images the
 # in-kernel `driver_loader` admits through `drvhost::Host::load`
-# (`plans/PI.md` P10 5c-ii). It encodes each chain driver's `DriverManifest`
-# from the one ABI definition (`rustos-abi`), stamps the kernel's compiled-in
-# `SYSCALL_TABLE_HASH` (`rustos-kernel-syscall`), copies the driver crate's
-# own canonical `BIND_KEYS` into the signed bind table (so the match data
-# never drifts, `AGENTS.md` §2.2 / §18.3), and signs with the build's
-# deterministic Ed25519 driver-signing key — the trust anchor the kernel
-# embeds. Host-only build glue (`AGENTS.md` §1, §12); the production image
-# stays Rust-only.
+# (`plans/PI.md` P10 5c-ii). It encodes each bootstrap-floor block driver's
+# `DriverManifest` from the one ABI definition (`rustos-abi`), stamps the
+# kernel's compiled-in `SYSCALL_TABLE_HASH` (`rustos-kernel-syscall`), copies
+# the driver crate's own canonical `BIND_KEYS` into the signed bind table (so
+# the match data never drifts, `AGENTS.md` §2.2 / §18.3), and signs with the
+# build's deterministic Ed25519 driver-signing key — the trust anchor the
+# kernel embeds. The compiled-in floor is storage-only (`AGENTS.md` §18.6):
+# the bus chain (`pcie_brcm` / `vl805` / `usb_kbd`) is installed as signed
+# `/System/Drivers/` bundles by the image pipeline (`tools/xtask`), not baked
+# here. Host-only build glue (`AGENTS.md` §1, §12); the production image stays
+# Rust-only.
 rustos-abi = { path = "../../lib/abi", version = "=0.0.0" }
-rustos-pcie-brcm = { path = "../../lib/pcie_brcm", version = "=0.0.0" }
-rustos-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
-rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
 rustos-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 rustos-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
 # Deterministic Ed25519 signing of the baked driver manifests. The same

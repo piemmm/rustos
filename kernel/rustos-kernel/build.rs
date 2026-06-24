@@ -214,19 +214,12 @@ fn emit_signed_driver_manifests() {
     let signing_key = SigningKey::from_bytes(&KERNEL_DRIVER_SIGNING_SEED);
     let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
 
+    // The compiled-in floor is storage-only (`AGENTS.md` §18.6): the block
+    // drivers that read the volume holding the signed driver store. The
+    // BCM2711 PCIe / VL805 USB / USB-keyboard drivers are installed as signed
+    // `/System/Drivers/` bundles and autoloaded into user space, so their
+    // manifests are baked by the image pipeline (`tools/xtask`), not here.
     let images = [
-        DriverImage {
-            const_name: "PCIE_BRCM_IMAGE",
-            bind_keys: rustos_pcie_brcm::BIND_KEYS,
-        },
-        DriverImage {
-            const_name: "BUS_USB_IMAGE",
-            bind_keys: rustos_drv_bus_usb::BIND_KEYS,
-        },
-        DriverImage {
-            const_name: "USB_HID_IMAGE",
-            bind_keys: rustos_drv_input_usb_hid::BIND_KEYS,
-        },
         DriverImage {
             const_name: "VIRTIO_BLK_IMAGE",
             bind_keys: rustos_drv_storage_virtio_blk::BIND_KEYS,

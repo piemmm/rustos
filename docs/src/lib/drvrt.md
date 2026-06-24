@@ -3,9 +3,10 @@
 `lib/drvrt` is the **user-space driver runtime host**: the rt-backed
 `DriverHost` a first-party driver process links so it can run in user space
 (the `AGENTS.md` §4 microkernel goal) instead of in the kernel. It is the
-user-space counterpart of the in-kernel keyboard service's `IdentityMmioMapper`
-+ frame-allocator DMA host, built on the `resource_grants` / `mmio_map` /
-`dma_alloc` syscall surface delivered in `plans/PI.md` P10 chunks 5d-0 / 5d-2.
+analogue of an in-kernel driver host that maps device memory directly, but
+maps and carves without ambient authority, built on the `resource_grants` /
+`mmio_map` / `dma_alloc` syscall surface delivered in `plans/PI.md` P10
+chunks 5d-0 / 5d-2.
 
 ## Why it exists
 

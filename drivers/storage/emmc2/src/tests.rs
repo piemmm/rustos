@@ -41,6 +41,7 @@ const TEST_RCA: u32 = 0xAAAA;
 /// that reason (`AGENTS.md` §15.10).
 #[allow(clippy::struct_excessive_bools)]
 struct MockSdhci {
+    control0: u32,
     control1: u32,
     interrupt: u32,
     arg: u32,
@@ -55,6 +56,11 @@ struct MockSdhci {
     // prove the engine depends on the power-on write.
     power_on: bool,
     power_wired: bool,
+
+    // The `ACMD6 SET_BUS_WIDTH` argument the engine last issued (the
+    // 4-bit-bus speed step), so a test can assert the card was switched to
+    // the 4-bit bus.
+    acmd6_arg: Option<u32>,
 
     // Card identity / capability the model presents.
     c_size: u32,
@@ -97,6 +103,7 @@ impl MockSdhci {
     /// A healthy high-capacity v2 card whose CSD reports `c_size`.
     fn healthy(c_size: u32) -> Self {
         Self {
+            control0: 0,
             control1: 0,
             interrupt: 0,
             arg: 0,
@@ -105,6 +112,7 @@ impl MockSdhci {
             app_cmd: false,
             power_on: false,
             power_wired: true,
+            acmd6_arg: None,
             c_size,
             high_capacity: true,
             csd_structure_v2: true,
@@ -254,6 +262,12 @@ impl MockSdhci {
                 self.app_cmd = true;
                 self.resp[0] = 0;
             }
+            6 if was_app => {
+                // ACMD6 SET_BUS_WIDTH: record the requested width so a
+                // test can assert the 4-bit switch; the R1 response is 0.
+                self.acmd6_arg = Some(self.arg);
+                self.resp[0] = 0;
+            }
             41 if was_app => {
                 self.acmd41_count += 1;
                 let mut ocr = 0x00FF_8000;
@@ -296,6 +310,7 @@ impl MockSdhci {
 impl SdhciHost for MockSdhci {
     fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
         let value = match offset {
+            regs::REG_CONTROL0 => self.control0,
             regs::REG_CONTROL1 => {
                 if self.control1 & regs::CONTROL1_CLK_INTLEN != 0 {
                     self.control1 | regs::CONTROL1_CLK_STABLE
@@ -335,12 +350,19 @@ impl SdhciHost for MockSdhci {
             // complete.
             regs::REG_CONTROL1 => self.control1 = value & !regs::CONTROL1_SRST_HC,
             // The host-controller reset clears SD Bus Power; the driver
-            // re-powers the rail here. A rail that cannot come up
-            // (`power_wired == false`) drops the write, leaving the bus dark.
+            // re-powers the rail here.
             regs::REG_CONTROL0 => {
-                if self.power_wired {
-                    self.power_on = value & regs::CONTROL0_BUS_POWER != 0;
-                }
+                // Model the full register so the driver's read-modify-write
+                // (e.g. setting the 4-bit width bit) preserves the power and
+                // voltage bits, exactly as it would on metal. A rail that
+                // cannot come up (`power_wired == false`) never latches the
+                // power bit, leaving the bus dark.
+                self.control0 = if self.power_wired {
+                    value
+                } else {
+                    value & !regs::CONTROL0_BUS_POWER
+                };
+                self.power_on = self.control0 & regs::CONTROL0_BUS_POWER != 0;
             }
             // The interrupt register is write-1-to-clear.
             regs::REG_INTERRUPT => self.interrupt &= !value,
@@ -367,6 +389,56 @@ fn open_runs_identification_and_reports_geometry() {
     let geo = dev.geometry().expect("geometry");
     assert_eq!(geo.block_size, 512);
     assert_eq!(geo.block_count, (7 + 1) * 1024);
+}
+
+#[test]
+fn bring_up_switches_to_the_4bit_bus_and_data_clock() {
+    // After identification the engine must leave the card on the 4-bit bus
+    // at the data clock, not the 1-bit identification-clock path bring-up
+    // selects — the difference between ~50 KB/s and ~6 MB/s (`AGENTS.md`
+    // §2.16). This is the regression for the slow Pi-4 boot where the store
+    // scan and every bundle read ran at the identification clock.
+    let dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
+
+    // The card was told to use the 4-bit bus (ACMD6 arg `0b10`) and the
+    // controller's data-width bit is set to match.
+    assert_eq!(dev.host().acmd6_arg, Some(command::BUS_WIDTH_4BIT_ARG));
+    assert_ne!(
+        dev.host().control0 & regs::CONTROL0_DATA_WIDTH_4BIT,
+        0,
+        "the controller drives the 4-bit bus"
+    );
+
+    // The SD clock was reprogrammed from the identification divisor to the
+    // (much smaller) data divisor and left enabled.
+    let freq_sel = (dev.host().control1 >> regs::CONTROL1_CLK_FREQ_SHIFT) & 0xFF;
+    assert_eq!(
+        freq_sel, DATA_CLOCK_DIVISOR,
+        "the SD clock runs at the data-rate divisor, not the identification one"
+    );
+    assert_ne!(
+        dev.host().control1 & regs::CONTROL1_CLK_EN,
+        0,
+        "SDCLK is re-enabled after the frequency change"
+    );
+
+    // The speed step must not have disturbed the SD bus power the same
+    // CONTROL0 register holds.
+    assert!(
+        dev.host().power_on,
+        "the 4-bit width read-modify-write preserved SD bus power"
+    );
+}
+
+#[test]
+fn the_data_clock_stays_within_sd_default_speed() {
+    // The data divisor is derived from the identification divisor so the
+    // data clock is exactly 32× the (≤400 kHz) identification clock, i.e.
+    // ≤12.8 MHz — within SD Default Speed's 25 MHz ceiling, so no high-speed
+    // mode switch is needed (`AGENTS.md` §2.16 / §24.4: a format-driven
+    // bound, derived not guessed).
+    assert_eq!(DATA_CLOCK_DIVISOR * 32, IDENT_CLOCK_DIVISOR);
+    assert_ne!(DATA_CLOCK_DIVISOR, 0, "the divisor must clock the bus");
 }
 
 #[test]
@@ -787,6 +859,8 @@ fn bring_up_stage_names_every_step_distinctly() {
         BringUpStage::SendCsd,
         BringUpStage::SelectCard,
         BringUpStage::SetBlockLen,
+        BringUpStage::SetBusWidth,
+        BringUpStage::RaiseClock,
     ];
     let names: BTreeSet<&'static str> = stages.iter().map(|s| s.as_str()).collect();
     assert_eq!(names.len(), stages.len());

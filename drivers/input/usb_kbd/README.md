@@ -17,17 +17,24 @@ USB host (`AGENTS.md` §18, `plans/PI.md` P10 chunk 5d-2-ii). This is the
    delivered grants with `rustos_hid::derive_keyboard_resources` over
    `RtDriverHost::resources()` — no second `resource_grants` syscall, no
    build-time board constant (`AGENTS.md` §2.16 / §2.20).
-3. Runs `rustos_hid::bring_up_boot_keyboard` to carve DMA, map the BAR, bring
-   the controller up, and enumerate the boot keyboard.
+3. Runs `rustos_hid::bring_up_boot_keyboard_diagnostic` to carve DMA, map the
+   BAR, bring the controller up, and enumerate the boot keyboard.
 4. Loops `rustos_hid::pump_once`, injecting each decoded key edge into the
    kernel input-focus arbiter through the `key_inject` syscall and yielding
    between polls (`AGENTS.md` §2.1).
 
 Every capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); the
-host adds no authority. A bring-up failure exits with a reserved fail-closed
-code (`80` no host, `81` no resources, `82` bring-up failed), leaving the
-console without a keyboard rather than wedged (`AGENTS.md` §2.9); the spawning
-supervisor decides whether to relaunch.
+host adds no authority. A bring-up failure emits a **one-shot structured
+diagnostic** (`log_emit`, event `4126`) naming the phase that stalled and the
+controller state observed there — the reset sub-stage + `USBCMD`/`USBSTS` for a
+controller-open stall, or the `stage`/`completion`/`reject`/`evtype`
+breadcrumbs + root-port `PORTSC` for an enumeration stall (`AGENTS.md` §15.7) —
+then exits with a reserved fail-closed code (`80` no host, `81` no resources,
+`82` bring-up failed), leaving the console without a keyboard rather than
+wedged (`AGENTS.md` §2.9); the spawning supervisor decides whether to
+relaunch. QEMU models no Pi USB, so this diagnostic is how an on-metal capture
+localises the stall (`AGENTS.md` §0.4) — it is the user-space replacement for
+the deleted in-kernel scaffold's per-stage logging.
 
 ## Why a separate crate
 
@@ -50,8 +57,8 @@ models no Pi USB timing (`AGENTS.md` §0.4).
 ## Capabilities
 
 Granted at spawn from its matched node's requested resources: `CAP_MMIO_MAP`
-(the register BAR), `CAP_MEM_DMA` (the DMA region), and `CAP_INPUT_INJECT`
-(`key_inject`).
+(the register BAR), `CAP_MEM_DMA` (the DMA region), `CAP_INPUT_INJECT`
+(`key_inject`), and `CAP_LOG_EMIT` (the one-shot bring-up diagnostic, §19.4).
 
 ## Tests
 

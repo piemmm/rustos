@@ -43,9 +43,26 @@ controller reset → **power the card rail** (SD Bus Power on, 3.3 V via the
 `CONTROL0` power-control byte) → identification clock → `CMD0` (idle) → `CMD8`
 (interface condition, v2 check pattern) → `ACMD41` (operating conditions,
 polled to power-up) → `CMD2`/`CMD3` (CID / RCA) → `CMD9` (CSD) → `CMD7`
-(select) → `CMD16` (512-byte block length). The block geometry is derived
+(select) → `CMD16` (512-byte block length) → **`ACMD6` (4-bit bus)** →
+**raise the SD clock to the data rate**. The block geometry is derived
 from the card's CSD (structure v2 / high-capacity), never assumed
 (`AGENTS.md` §18.5).
+
+Identification runs at the SD identification clock (≤400 kHz) on the 1-bit
+bus the controller resets to. Once the card is selected in the transfer
+state, two pure speed steps run before any block transfer: `ACMD6` switches
+the card to the 4-bit bus and the controller's `CONTROL0` data-width bit is
+set to match (4×), and the SD clock is raised from the identification
+divisor to the data divisor (`DATA_CLOCK_DIVISOR`, derived as
+`IDENT_CLOCK_DIVISOR / 32` so the data clock is 32× the identification
+clock — ≤12.8 MHz, within SD Default Speed's 25 MHz ceiling, so no
+high-speed mode switch or tuning is needed). Together these turn the
+~50 KB/s identification-clock 1-bit path into the ~6 MB/s Default-Speed
+4-bit path (`AGENTS.md` §2.16); the divisor is derived from the
+identification divisor rather than a base-clock constant so it carries no
+board assumption of its own (`AGENTS.md` §2.20). The clock change follows
+the SDHCI sequence: stop `SDCLK`, reprogram the frequency-select divisor,
+wait for clock-stable, re-enable `SDCLK`.
 
 The full host-controller reset clears SD Bus Power, and the standard
 register block gates all command/data activity on it, so the power-on
@@ -74,7 +91,7 @@ Because there is no Pi-board QEMU vertical, a failed bring-up on a real Pi
 pairing the `DriverError` with a `BringUpStage` naming the exact step that
 stalled (`MapWindow` / `ResetClock` / `GoIdle` / `SendIfCond` / `OpCond` /
 `AllSendCid` / `SendRelativeAddr` / `SendCsd` / `SelectCard` /
-`SetBlockLen`). `BringUpStage::as_str` gives the stable operator-facing
+`SetBlockLen` / `SetBusWidth` / `RaiseClock`). `BringUpStage::as_str` gives the stable operator-facing
 name the in-kernel root-unlock path logs as a `stage=` field, alongside the
 `DriverError` as an `error=` field that distinguishes a controller/command
 fault from a decode rejection at the same step; a consumer that only needs
@@ -136,6 +153,13 @@ wakes the parked task (`crate::aarch64::root_unlock::emmc2_unlock`).
   right-aligned register positions, including that a structure value placed
   above the field is not mistaken for v2 (`command`).
 - Full identification and reported geometry over `MockSdhci`.
+- Bring-up leaves the card on the 4-bit bus at the data clock: `ACMD6`
+  carries the 4-bit argument, the `CONTROL0` data-width bit is set, the
+  `CONTROL1` frequency-select is reprogrammed to `DATA_CLOCK_DIVISOR` with
+  `SDCLK` re-enabled, and the SD bus power the same `CONTROL0` register
+  holds is preserved across the width read-modify-write
+  (`bring_up_switches_to_the_4bit_bus_and_data_clock`); the data clock
+  stays within Default Speed (`the_data_clock_stays_within_sd_default_speed`).
 - Single-block and multi-block reads returning the card's data.
 - Single-block and multi-block writes read back through the same mock
   card, with neighbouring blocks proven untouched.

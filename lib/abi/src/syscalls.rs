@@ -644,11 +644,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::MMIO_MAP,
         name: "mmio_map",
-        arg_count: 1,
+        arg_count: 3,
         args: [
             AbiType::Handle,
-            AbiType::Unit,
-            AbiType::Unit,
+            AbiType::Len,
+            AbiType::Len,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -660,8 +660,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Mapping a device's register block is privileged, never ambient
         // (`AGENTS.md` §4): only a driver granted the matched node's MMIO
         // resource holds `CAP_MMIO_MAP`, and the kernel additionally maps
-        // only the region named by the unforgeable grant handle the driver
-        // owns (§18.3). It IS audited per call (`AGENTS.md` §5.4.4) —
+        // only the `[offset, offset + len)` sub-region — bounded inside the
+        // unforgeable grant handle the driver owns — so a driver granted a
+        // large outbound bus aperture maps just the one BAR it enumerated,
+        // never the whole window (§18.3 / §24.1). It IS audited per call
+        // (`AGENTS.md` §5.4.4) —
         // handing a principal direct access to hardware registers is a
         // security-relevant grant and is low-volume (once per window at
         // driver init), so the record cannot drown the log.
@@ -949,6 +952,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // device-resource grants — is a security-relevant event, and it is
         // low-volume (once per enumerated device), so the record cannot
         // drown the log.
+        required_capability: Some(CapabilityId::HW_EMIT),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::HW_REMOVE_NODE,
+        name: "hw_remove_node",
+        arg_count: 1,
+        args: [
+            // The `HwNode::id` of the node to remove.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Errno` register convention: `Ok(0)` once the node (and its
+        // subtree) is removed, else `-errno` for an unknown id or a node the
+        // caller does not own (`AGENTS.md` §2.9 / §5.4).
+        ret: AbiType::Errno,
+        // Removing a discovered child from the global hardware tree is the
+        // exact mirror of publishing it: the same privileged grant
+        // (`CAP_HW_EMIT`), held only by an autoloaded user-space bus driver
+        // reporting a device it owns has gone (`AGENTS.md` §4 / §18.4). It IS
+        // audited per call (`AGENTS.md` §5.4.4): retiring a node drives the
+        // device manager to unload the driver bound to it, a security-relevant
+        // event, and it is low-volume (once per hot-removed device), so the
+        // record cannot drown the log — symmetric with `hw_emit_node`.
         required_capability: Some(CapabilityId::HW_EMIT),
         audit: true,
     },
@@ -1251,6 +1282,16 @@ mod tests {
             Some(CapabilityId::HW_EMIT)
         );
         assert!(hw_emit_node.audit, "hw_emit_node must be audited");
+        // hw_remove_node is the exact mirror of hw_emit_node: the same
+        // privileged CAP_HW_EMIT gate and the same per-call audit (retiring a
+        // node drives an unload, a low-volume security-relevant event,
+        // `AGENTS.md` §5.4.4 / §18.4).
+        let hw_remove_node = spec_for(SyscallNumber::HW_REMOVE_NODE).unwrap();
+        assert_eq!(
+            hw_remove_node.required_capability,
+            Some(CapabilityId::HW_EMIT)
+        );
+        assert!(hw_remove_node.audit, "hw_remove_node must be audited");
         // Pure observers must remain ungated.
         for n in [
             SyscallNumber::YIELD,

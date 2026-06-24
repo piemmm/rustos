@@ -206,9 +206,8 @@ analogue).
 `rustos-drv-input-usb-hid` is the §8 driver identity — the `register` entry and
 the §18.3 `BIND_KEYS` bind table. The reusable decode/console/orchestration
 logic described below lives in the [`rustos-hid`](../lib/hid.md) library
-(`lib/hid`), shared by the in-kernel scaffold and the user-space keyboard
-driver process without a `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 /
-§2.2).
+(`lib/hid`), so the user-space keyboard driver process consumes it without a
+`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2).
 
 The USB-HID logic decodes the two **boot-protocol** report formats
 (USB HID 1.11 Appendix B) — the fixed 8-byte keyboard report and the
@@ -329,7 +328,8 @@ edge into the kernel input-focus arbiter through the `key_inject` syscall and
 yielding between polls (`AGENTS.md` §2.1). The host adds no authority — every
 capability and bound is re-checked kernel-side (`AGENTS.md` §5.4) — and a
 bring-up failure exits with a reserved fail-closed code, leaving the console
-without a keyboard rather than wedged (`AGENTS.md` §2.9). The production boot
-wiring that runs `DeviceManager::autoload` against the discovered hardware
-tree and spawns this binary, plus the metal acceptance run, are the next
-chunk; until then the in-kernel scaffold drives the metal keyboard.
+without a keyboard rather than wedged (`AGENTS.md` §2.9). This bundle is
+installed into the image `/System/Drivers/` store and autoloaded by `devmgr`
+against the discovered `usb,xhci` node the VL805 bus driver emits (the
+recursive bus chain, `plans/PI.md` P10 D5d); QEMU models no Pi USB, so the
+live autoload + keystroke is the metal acceptance item (`AGENTS.md` §0.9).

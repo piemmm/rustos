@@ -24,7 +24,11 @@ use rustos_abi::{
     RegisterWindow,
 };
 
-use super::{bring_up_boot_keyboard, derive_keyboard_resources, KeyboardResources};
+use super::{
+    bring_up_boot_keyboard, bring_up_boot_keyboard_diagnostic, derive_keyboard_resources,
+    BringupPhase, KeyboardResources,
+};
+use rustos_usb::XhciOpenStage;
 
 /// The controller's register BAR base/len the keyboard driver maps (the
 /// metal VL805 BAR0 is 4 KiB).
@@ -203,6 +207,40 @@ fn reaches_the_controller_hand_off() {
         bring_up(&host, APERTURE_TOP).err(),
         Some(DriverError::DeviceFault)
     );
+}
+
+#[test]
+fn diagnostic_localises_the_controller_open_stall() {
+    // The diagnostic variant reaches the controller hand-off (carve fits, BAR
+    // maps) and the inert zeroed window fails `Xhci::open` at the capability
+    // stage. The structured error must name the `ControllerOpen` phase and
+    // the `Capability` reset sub-stage, so a metal capture localises the
+    // stall rather than seeing a bare `DeviceFault` (`AGENTS.md` §15.7).
+    let host = host_with(DMA_PHYS_IN_APERTURE, true, true, true);
+    let err = bring_up_boot_keyboard_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
+        .err()
+        .expect("an inert controller window fails closed");
+    assert_eq!(err.phase, BringupPhase::ControllerOpen);
+    assert_eq!(err.error, DriverError::DeviceFault);
+    assert_eq!(err.open_stage, Some(XhciOpenStage::Capability));
+    // The plain wrapper drops the breadcrumb and surfaces only the coarse
+    // error — the two agree on the error.
+    assert_eq!(bring_up(&host, APERTURE_TOP).err(), Some(err.error));
+}
+
+#[test]
+fn diagnostic_localises_a_setup_stall() {
+    // A host with no mapper fails fail-closed before any controller state
+    // exists: the structured error names the `Setup` phase and carries no
+    // controller snapshot (`AGENTS.md` §15.7 / §2.9).
+    let host = host_with(DMA_PHYS_IN_APERTURE, true, false, true);
+    let err = bring_up_boot_keyboard_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
+        .err()
+        .expect("a host with no mapper fails closed");
+    assert_eq!(err.phase, BringupPhase::Setup);
+    assert_eq!(err.error, DriverError::Unsupported);
+    assert_eq!(err.open_stage, None);
+    assert_eq!(err.enum_stage, None);
 }
 
 #[test]

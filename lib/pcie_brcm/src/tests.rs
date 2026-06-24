@@ -26,6 +26,7 @@ use super::*;
 const PI_WINDOWS: PcieWindows = PcieWindows {
     inbound_pcie_base: 0,
     inbound_size: 0xc000_0000,
+    inbound_cpu_top: 0xc000_0000,
     outbound_cpu_base: 0x6_0000_0000,
     outbound_pcie_base: 0xc000_0000,
     outbound_size: 0x4000_0000,
@@ -743,6 +744,7 @@ fn bringup_inputs_are_assembled_from_the_node() {
     assert_eq!(bringup.regs_phys, REGS_PHYS);
     assert_eq!(bringup.windows.inbound_pcie_base, 0);
     assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
+    assert_eq!(bringup.windows.inbound_cpu_top, APERTURE_TOP);
     assert_eq!(bringup.windows.outbound_cpu_base, OUTBOUND_CPU);
     assert_eq!(bringup.windows.outbound_pcie_base, OUTBOUND_PCIE);
     assert_eq!(bringup.windows.outbound_size, OUTBOUND_SIZE);
@@ -770,6 +772,7 @@ fn bringup_carries_a_nonzero_inbound_pcie_base() {
     let bringup = wiring::pcie_bringup_from_node(&node).expect("resources present");
     assert_eq!(bringup.windows.inbound_pcie_base, 0x4000_0000);
     assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
+    assert_eq!(bringup.windows.inbound_cpu_top, APERTURE_TOP);
 }
 
 #[test]
@@ -893,7 +896,6 @@ use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::pci::PciBus;
 use rustos_abi::{HwMatchKey, HwResourceKind};
 use rustos_pci::USB_CONTROLLER_CLASS;
-use rustos_usb::XHCI_DMA_BYTES;
 
 /// Bus-local address of the lone USB function the [`StubPciBus`] reports.
 const USB_BDF: u64 = 0x0001_0000;
@@ -1036,7 +1038,9 @@ fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
     // The published node carries the function's match key plus exactly two
     // grant requests: the BAR as a CPU-physical `Mmio` window (inside the
     // outbound CPU window, so the kernel's BusWindow→Mmio coverage admits it)
-    // and the inbound DMA aperture sized for the xHCI working set.
+    // and the bridge's inbound DMA aperture forwarded verbatim — same
+    // ceiling, extent, and far-side translation the bridge driver itself
+    // holds, so the kernel's Dma→Dma coverage admits it exactly.
     let emitted = host.emitted.borrow();
     let emitted = emitted.as_ref().expect("a node was emitted");
     assert_eq!(emitted.match_keys().len(), 1);
@@ -1052,11 +1056,9 @@ fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
         .iter()
         .find(|r| r.kind() == Some(HwResourceKind::Dma))
         .expect("a Dma constraint grant");
-    assert_eq!(
-        dma.base(),
-        PI_WINDOWS.inbound_pcie_base + PI_WINDOWS.inbound_size
-    );
-    assert_eq!(dma.length(), XHCI_DMA_BYTES as u64);
+    assert_eq!(dma.base(), PI_WINDOWS.inbound_cpu_top);
+    assert_eq!(dma.length(), PI_WINDOWS.inbound_size);
+    assert_eq!(dma.translated_base(), PI_WINDOWS.inbound_pcie_base);
     // The returned node equals the published one (the kernel owns identity).
     assert_eq!(*emitted, node);
 }
@@ -1097,6 +1099,46 @@ fn publish_usb_function_propagates_a_refused_emit() {
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::PermissionDenied)
     );
+}
+
+#[test]
+fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
+    // The real Pi 4 inbound viewport is `IB MEM 0x0..0x1ffffffff ->
+    // 0x4_0000_0000`: a non-zero far-side base. The emitted child DMA grant
+    // must carry that exact translation (`HwResource::dma_translated`) so the
+    // kernel's `Dma`→`Dma` coverage rule — which requires the identical
+    // translation — admits it against the bridge driver's own grant. (The
+    // earlier defect emitted an untranslated `dma(...)`, whose `xlate == 0`
+    // failed coverage and was refused `PermissionDenied`.)
+    let windows = PcieWindows {
+        inbound_pcie_base: 0x4_0000_0000,
+        inbound_size: 0x2_0000_0000,
+        inbound_cpu_top: 0x2_0000_0000,
+        outbound_cpu_base: 0x6_0000_0000,
+        outbound_pcie_base: 0xc000_0000,
+        outbound_size: 0x4000_0000,
+    };
+    let bus = StubPciBus::new(windows.outbound_pcie_base);
+    let host = RecordingHost::new(true);
+    wiring::publish_usb_function(&host, &bus, &windows).expect("publishes");
+
+    let emitted = host.emitted.borrow();
+    let emitted = emitted.as_ref().expect("a node was emitted");
+    let dma = emitted
+        .resources()
+        .iter()
+        .find(|r| r.kind() == Some(HwResourceKind::Dma))
+        .expect("a Dma constraint grant");
+    // The child grant is the parent aperture, verbatim.
+    let parent = HwResource::dma_translated(
+        windows.inbound_cpu_top,
+        windows.inbound_size,
+        windows.inbound_pcie_base,
+    );
+    assert_eq!(*dma, parent);
+    // …and the bridge driver's own grant covers it (the kernel's
+    // `hw_emit_node` admission check, `AGENTS.md` §18.3).
+    assert!(parent.covers(dma));
 }
 
 #[test]

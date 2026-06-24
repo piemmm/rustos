@@ -266,7 +266,7 @@ last tag shown.
 | `2c/6: ram gigapage mask configured` | `identity_ram_mask` built + `configure_ram_gigapages` stored it | RAM-mask construction / the atomic mask store |
 | `3/6: identity map built, enabling mmu` | Device + RAM gigapage masks built | identity-map mask construction |
 | `4/6: mmu on` (or `mmu enable FAILED`) | translation is live | **the MMU enable itself** — a mis-typed identity map (the metal Pi 4B hang) |
-| `4a/6: pcie discovery recorded (post-mmu)` | `keyboard_service::record_discovery` returned | recording the PCIe windows — a `SpinLock` `compare_exchange` (an atomic RMW), deferred to post-MMU because it is UNPREDICTABLE on MMU-off memory |
+| `4a/6: pcie discovery logged (post-mmu)` | the discovered `brcm,bcm2711-pcie` windows were logged | a metal diagnostic of the PCIe root-complex windows; the windows themselves reach the user-space `pcie_brcm` driver as grants on the discovered node, not a kernel stash |
 | `5/6: post-mmu …discovered` | post-MMU `/memory`/timer/PSCI walk done | the full-tree FDT walk that needs the MMU |
 | `6/6: entering kernel core` (or `handover REJECTED`) | hand-off assembled | memory-map build / `BootInfo` assembly |
 
@@ -1063,12 +1063,18 @@ per-device augmentation only the platform's tree can size:
     PCI address kept as the inbound viewport's far-side base). It is
     emitted as `HwResource::dma_translated(top, len, pcie_base)` where
     `top` is the *exclusive* upper bound of the reachable CPU-physical
-    window (`0xC000_0000` — the low 3 GiB of SDRAM — on the Pi 4), `len`
-    its extent, and `pcie_base` the PCIe-space address the inbound BAR is
-    programmed at (`0` on the Pi 4: memory is viewed at PCIe address 0),
-    carried in the resource's translation field; the VL805 wiring carves
-    its xHCI DMA region below `top` and programs the inbound BAR from
-    `pcie_base`/`len`.
+    window, `len` its extent, and `pcie_base` the PCIe-space address the
+    inbound viewport is programmed at, carried in the resource's
+    translation field. On a real Pi 4 this viewport is **translating**
+    (`IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`: a non-zero `pcie_base`),
+    not anchored at PCIe address 0 — so the inbound DMA path is the
+    translated case, not a special one. The `pcie_brcm` wiring forwards
+    this aperture **verbatim** onto the published VL805 node so the
+    kernel's grant-coverage check admits it (the `Dma`→`Dma` rule requires
+    the identical translation) and the matched driver's `dma_alloc`
+    resolves a device-visible bus address through the same viewport
+    (`kernel/core::devres::translate_device_addr`); bring-up programs the
+    inbound BAR from `pcie_base`/`len`.
   - the **outbound MMIO window** it forwards to PCIe memory space, from
     the node's `ranges` (`fdt::outbound_mmio_window`: the first
     memory-space entry's `phys.hi` space code is checked, the 64-bit
@@ -1148,96 +1154,60 @@ the wire protocol, the client channel, and the server transform are host-tested
 (`lib/abi`, `lib/drvrt`, `lib/vcmailbox`), and the install is host-tested
 (`tools/mkimage` plants and reads the bundle back from the read-only `/System`
 store; the image builds end to end in the CI image gate). `devmgr` autoloading
-the bundle against the real discovered BCM2711 mailbox node, and the in-kernel
-scaffold below staying the live keyboard path until the USB-driver migration
-(D5) lands, are verified on hardware.
+the bundle against the real discovered BCM2711 mailbox node, and the user-space
+USB-keyboard chain below, are verified on hardware (`plans/PI.md` §0.9).
 
-## USB-keyboard service (video-console keyboard backing, P10)
+## USB-keyboard chain (video-console keyboard backing, P10 D5d)
 
 The video console's read half is fed by a directly attached USB keyboard
 on the Pi 4: the VL805 xHCI controller behind the BCM2711 PCIe root
-complex. The boot path brings that chain up as an **in-kernel keyboard
-service kthread** (the interim before the `devmgr`-autoloaded userland
-keyboard service, `plans/PI.md` P10):
+complex. That chain comes up **entirely in user space** as autoloaded
+signed `/System/Drivers/` bundles — there is **no** in-kernel keyboard
+service (the former scaffold was deleted at `plans/PI.md` P10 D5d, §2.14).
+The boot path's only role is discovery and Device-typing the windows:
 
-- **Discovery (pre-MMU).** `platform::pcie_bringup` resolves the
-  `brcm,bcm2711-pcie` node's three windows — the controller `reg`, the
-  inbound `dma-ranges` aperture, and the outbound `ranges` window — with a
-  single early-returning `scan_translated` walk that reads only the matched
-  node's own properties, so it is safe with the MMU still off (like the
-  console/GIC/video walks). A tree with no such node (the QEMU `virt`
-  shape) yields `None` and no service is started (§18.4).
+- **Discovery.** `platform::FdtDiscovery` emits the `brcm,bcm2711-pcie`
+  root complex into the hardware tree carrying its three windows as
+  capability-grant *requests* — the controller `reg` (`Mmio`), the inbound
+  `dma-ranges` aperture (`Dma`), and the outbound `ranges` window
+  (`BusWindow`) — and the VideoCore mailbox node carrying its DMA property
+  buffer. A tree with no such node (the QEMU `virt` shape) emits neither and
+  the chain simply never autoloads (§18.4).
 - **Identity Device mapping.** `boot_aarch64` folds the discovered
   controller-register and outbound-MMIO-window gigapages into the identity
   `Device` mask (`identity_device_mask`) **before** enabling the MMU, so
-  the controller block and the enumerated VL805 BAR are identity-mapped
-  Device memory once translation is on. PID 1's address space — sized from
-  `configured_identity_gigapages` — therefore also covers them.
-- **The `DriverHost` halves** (`kernel/rustos-kernel::keyboard_service`):
-  an `IdentityMmioMapper` mints a `RegisterWindow` after checking
-  `CAP_MMIO_MAP` and resolving the request to a region the boot path
-  already identity-mapped as Device memory — it edits no live page table
-  (§5.4 / §2.16). It is **bridge-aware**: a request inside the controller
-  register block is CPU-physical and maps identity, while a VL805 BAR — read
-  from PCI configuration space as a *PCIe-bus* address in the outbound
-  window — is translated through the bridge's outbound `ranges`
-  (`outbound_cpu_base + (bus − outbound_pcie_base)`) to its identity-mapped
-  CPU address (the generic PCI walk knows only bus addresses; resolving them
-  is the host bridge's job). On the Pi 4 the SoC regs island
-  (`0xfd50_0000`) sits numerically inside the outbound PCIe window, so the
-  regs block is resolved first and a request that only partially overlaps it
-  is refused fail-closed rather than mis-translated (§5.4). A `FrameDmaHost`
-  carves the 16 KiB xHCI
-  region with `FrameAllocator::alloc_order`, bounds the frame's
-  **CPU-physical** span against the bridge's inbound CPU window
-  `[inbound_cpu_base, dma_aperture_top)`, then translates it to the
-  device-visible address through the inbound viewport (§5.4). The bound is
-  applied in CPU space, never on the translated device address: the Pi 4
-  inbound viewport lifts the device address into PCIe
-  `[0x4_0000_0000, …)`, far above the CPU top, so a device-vs-CPU-top
-  comparison would reject every valid carve. `GenericTimerDelay` busy-waits on
-  `CNTPCT_EL0` (`kernel_arch::busy_delay_us`) for the link-training settle
-  delays.
-- **Floor bring-up + report-pump kthread (design B / B3).** The PID 1
-  spawn seam calls `keyboard_service::bring_up_keyboard_into_tree` *before*
-  it drives the dispatch loop: it runs the `usb_keyboard::bring_up_keyboard`
-  chain **once, on the boot CPU** (`pcie_brcm` link train →
-  `mechanism_brcm` → `bus_usb` → enumerate), emits the enumerated HID
-  device as a discovered `HwNode` (`UsbDevice::describe_device`), and
-  returns it with the live keyboard wrapped in a one-shot-exclusive-owner
-  `SendKeyboard`. The seam attaches the node to the boot hardware tree via
-  `unlock_service::augment_boot_tree` **before** the unlock kthread reads
-  it, so the §18 pre-unlock autoload sees the keyboard like every other
-  discovered device (`AGENTS.md` §18.2; its signed bundle is not in the
-  store until the B5 flip, so `devmgr` leaves the node unbound, §18.4),
-  then hands the keyboard to `keyboard_service::spawn_pump`. That kthread —
-  admitted via the `kernel/core` `InitSpawnCtx::spawn_kernel_service` seam
-  (which admits a `spawn_kthread` whose body drives an object-safe
-  `YieldHandle`) — loops `usb_hid::pump_once`, feeding decoded key presses
-  to the input-focus arbiter (`ArbiterConsoleSink`) and yielding between
-  polls so PID 1 keeps running. The controller is brought up exactly once;
-  the pump never re-brings it up (`AGENTS.md` §2.16), so the working metal
-  keyboard never regresses (§2.17) until the B5 flip. A bring-up failure
-  fails closed (the video login simply parks with no keyboard, §2.9).
+  those windows are Device-typed once translation is on (the user-space
+  driver maps them into its own address space through `mmio_map`).
+- **User-space autoload.** `devmgr` autoloads each signed bundle against its
+  discovered node: `pcie_brcm` binds the bridge, trains the link, assigns
+  the VL805 BAR, and emits the VL805 PCI function (`hw_emit_node`); `vl805`
+  binds that, reloads the controller firmware over the VideoCore mailbox,
+  and emits the `usb,xhci` node; `usb_kbd` binds that, maps the BAR, carves
+  DMA, brings the controller up, enumerates the boot keyboard, and pumps
+  decoded key edges into the input-focus arbiter through `key_inject`. Each
+  driver is granted only the resources its matched node requested (§18.3),
+  reached through its rt-backed `DriverHost`. The bridge→CPU BAR translation
+  is resolved in user space (`pcie_brcm` emits the BAR as a CPU-physical
+  `Mmio` grant inside the bridge's outbound window), while the **inbound-DMA
+  translation** — turning a carved CPU-physical buffer into the device-visible
+  bus address the bridge maps back (the Pi 4 `IB MEM 0x0..0x1ffffffff ->
+  0x4_0000_0000` viewport) — is resolved kernel-side in `dma_alloc`
+  (`devres::translate_device_addr`), since only the kernel knows the carve's
+  physical base. The bridge forwards its inbound aperture verbatim onto the
+  VL805 node, so the grant the xHCI driver receives carries the same
+  translation the bridge holds (`AGENTS.md` §18.1).
 
-QEMU models no Pi USB (§0.4), so the host tests cover the discovery
-decoder and the two `DriverHost` halves' capability/bounds decisions; the
-live bring-up (a real BAR, link training, a keyboard driving the login) is
-the on-metal acceptance item.
+QEMU models no Pi USB (§0.4), so the engines are host-tested up to the
+controller hand-off and the live enumerate→emit→autoload chain (a real BAR,
+link training, a keyboard driving the login) is the on-metal acceptance
+item (§0.9).
 
-> **Increment C (the full-swap, `plans/PI.md`):** the in-kernel composition now
-> *sequences the floor driver crates* — `pcie_brcm` trains the link, the VL805
-> device driver (`drivers/bus/usb/vl805`) reloads firmware over
-> `DriverHost::mailbox`, and the generic xHCI floor entry
-> (`rustos_drv_bus_usb::wiring::bring_up_boot_input`) maps the BAR, enumerates the
-> boot keyboard, and publishes it through `DriverHost::emit_node`. The deep
-> per-register xHCI/firmware diagnostics that used to live in the in-kernel
-> `open_controller` (events `4102`/`4104`/`4106`/`4107`/`4109`/`4110`/`4114`/`4118`/
-> `4122`/`4123`/`4124`/`4125`/`4126`) now live inside those floor crates, so the
-> live kernel path emits only the orchestration-level events listed below. The
-> historical bring-up chronicle further down references some of those removed
-> events; it is retained for the **PCIe root-cause findings** that still apply to
-> `lib/pcie_brcm`.
+> **Note (`plans/PI.md` P10 D5d):** the per-register PCIe/xHCI/firmware
+> diagnostics the chronicle below references (events in the `4101`–`4126`
+> range) were emitted by the now-deleted in-kernel scaffold. They are gone
+> from the live kernel path; the chronicle is retained only for the **PCIe
+> root-cause findings** that still apply to `lib/pcie_brcm` and the
+> user-space bring-up.
 
 ### Discovery and bring-up logging (metal diagnostics)
 
@@ -1991,6 +1961,50 @@ asserts the window is non-empty and covers the outbound CPU range — it fails
 before the fix (`base 0x6_3ff00000 > limit 0x6_00000000`) and passes after.
 The live keyboard coming up is the remaining on-metal acceptance item (QEMU
 models no Pi PCIe/USB, `AGENTS.md` §0.4).
+
+### The D5d user-space move regressed two things — DMA coherency and the diagnostics
+
+Moving the keyboard bring-up out of the in-kernel scaffold into the
+autoloaded user-space `drivers/input/usb_kbd` process (the §4 steady state)
+silently dropped two things the metal-debugged scaffold relied on:
+
+1. **DMA coherency.** The BCM2711 PCIe root complex is **not** I/O-coherent
+   (it does not snoop the CPU caches). The in-kernel scaffold's
+   `keyboard_service::FrameDmaHost` therefore wired aarch64
+   `clean_invalidate_dcache_range` into every device-shared `DmaSlab`, but
+   the user-space `RtDriverHost` carved its DMA with `coherency = None` — and
+   EL0 cannot do cache maintenance (`SCTLR_EL1.UCI` is clear), so it could
+   not have anyway. The carve was plain cacheable RAM, so the first
+   command-ring TRB the driver wrote sat in a dirty cache line the controller
+   never saw: `UsbDevice::enumerate_boot_keyboard` stalled on the very first
+   Enable Slot (no completion ⇒ the budget-poll timeout), so the onboard
+   hub's downstream ports were never powered — the "no device power" metal
+   symptom, the chain exiting ~644 ms after the last syscall with no `delay`
+   ever reached. Fixed structurally and arch-neutrally: the kernel DMA carve
+   (`kernel/mem::dma`) maps the device-shared buffer with the new
+   `PageFlags::DMA_COHERENT` (the W5b-4 HAL attribute), which on aarch64 is
+   **Normal Non-Cacheable** (`MAIR` index 2). The buffer is coherent by
+   construction with no per-access maintenance and no EL0 privilege, the
+   driver stays platform-neutral (`AGENTS.md` §2.20), and Normal-NC — unlike
+   Device-nGnRE — still permits the ordinary ring/context accesses the engine
+   makes. x86_64/riscv64 are coherent and map it cacheable.
+2. **The per-stage diagnostics.** The scaffold logged `4101`/`4106`/`4126`
+   per-stage records; the user-space driver exited silently with code `82`.
+   Restored as a user-space one-shot structured `log_emit` record:
+   `rustos_hid::bring_up_boot_keyboard_diagnostic` returns a
+   `KeyboardBringupError` (the failing `BringupPhase` plus the `Xhci::open`
+   reset sub-stage + `USBCMD`/`USBSTS`, or the enumeration
+   `stage`/`completion`/`reject`/`evtype` breadcrumbs + root-port `PORTSC`),
+   which `usb_kbd` emits as event `4126` (and a `4101` "controller up"
+   beacon) through `rustos_rt::LogSink`, gated on `CAP_LOG_EMIT`
+   (`AGENTS.md` §15.7 / §19.4). A non-I/O-coherent stall now reads
+   `phase=enumerate stage_hex=2 completion_hex=0` — the historical
+   DMA-not-visible signature — instead of a blind exit.
+
+Both are host-proven (the coherent-DMA leaf in `kernel/arch/aarch64`'s
+`paging_tests`, the diagnostic surface in `lib/hid`'s `service_tests`); the
+live keyboard coming up over the user-space chain is the on-metal acceptance
+item (QEMU models no Pi PCIe/USB, `AGENTS.md` §0.4).
 
 ## Per-CPU storage (`TPIDR_EL1`)
 

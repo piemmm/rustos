@@ -79,7 +79,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  23 | `display_acquire` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
 |  24 | `display_release` | —                                    | `errno` | `CAP_DISPLAY`           | yes     |
 |  25 | `keyboard_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_INPUT_READ`  | no      |
-|  26 | `mmio_map`     | `Handle handle`                         | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
+|  26 | `mmio_map`     | `Handle handle`, `len offset`, `len`    | `u64` (base vaddr) | `CAP_MMIO_MAP` | yes  |
 |  27 | `dma_alloc`    | `Handle handle`, `len`, `user_ptr` (device_out) | `u64` (base vaddr) | `CAP_MEM_DMA` | yes |
 |  28 | `resource_grants` | `user_ptr` (buf), `len`              | `u64` (bytes) | —                 | no      |
 |  29 | `hw_tree_read` | `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_SYSINFO_HW`  | no      |
@@ -91,6 +91,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  35 | `users_db_wait`| `u64 timeout_ns`                        | `errno` | `CAP_USERS_READ`  | no      |
 |  36 | `log_emit`     | `user_ptr` (record), `len`              | `errno` | `CAP_LOG_EMIT`    | no      |
 |  37 | `hw_emit_node` | `user_ptr` (node), `len`                | `errno` | `CAP_HW_EMIT`     | yes     |
+|  38 | `hw_remove_node` | `u64 node_id`                         | `errno` | `CAP_HW_EMIT`     | yes     |
 
 ### Capability matrix
 
@@ -113,7 +114,7 @@ is exhaustive — anything not listed below is ungated:
 | `CAP_MEM_DMA`      | `dma_alloc`                |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
-| `CAP_HW_EMIT`      | `hw_emit_node`             |
+| `CAP_HW_EMIT`      | `hw_emit_node`, `hw_remove_node` |
 
 The `CAP_IRQ_BIND` rationale, the wake-up contract, and the failure
 modes are documented in
@@ -128,8 +129,9 @@ calling driver's own address space (`plans/PI.md` P10 chunk 5d-0 — the
 not pass a raw physical address: its `handle` argument is an unforgeable,
 kernel-issued device-resource grant it received for the hardware-tree node
 it binds (one grant per `rustos_abi::hwtree::HwResource` the node requested,
-`AGENTS.md` §18.3). The handler resolves the handle **against the calling
-task** through the per-task device-resource grant table that lives in
+`AGENTS.md` §18.3), and its `offset` / `len` arguments name the sub-region
+*within* that grant to map. The handler resolves the handle **against the
+calling task** through the per-task device-resource grant table that lives in
 `kernel/core::aspace::AddressSpaceRegistry` (minted at driver admission via
 `AddressSpaceRegistry::mint_grant`, resolved by `AddressSpaceRegistry::grant`,
 and reclaimed when the task is withdrawn on exit — the same per-process
@@ -137,11 +139,18 @@ lifecycle as the task's streams and limits) — a handle minted for another
 task, or an unknown handle, resolves to nothing and is refused with
 `NotFound`, exactly the forgery defence `irq_wait` applies to its binding
 (`AGENTS.md` §5.4) — confirms the grant names a memory window
-(`HwResourceKind::Mmio` / `BusWindow`, else `OutOfRange`), and maps **only**
-that region — caching disabled — through the architecture
+(`HwResourceKind::Mmio` / `BusWindow`, else `OutOfRange`), confirms
+`[offset, offset + len)` lies wholly inside that window
+(`kernel/core::devres::mappable_subwindow`, else `OutOfRange`), and maps
+**only** that sub-region — caching disabled — through the architecture
 `kernel/core::devres::MmioMapFacility` producer, returning its base user
-virtual address. A driver therefore never reaches physical memory the
-kernel did not grant it (`AGENTS.md` §4 — no ambient authority). It is
+virtual address. Mapping a bounded sub-region rather than the whole grant is
+what lets a driver granted a large outbound bus aperture (the BCM2711 PCIe
+1 GiB outbound window) map just the single BAR it enumerated, instead of the
+whole window — which would exhaust the per-task MMIO virtual window and fail
+closed with `OutOfMemory` (`AGENTS.md` §24.1). A driver therefore never
+reaches physical memory the kernel did not grant it (`AGENTS.md` §4 — no
+ambient authority). It is
 gated on `CAP_MMIO_MAP` and **audited** (a low-volume, security-relevant
 grant of direct hardware access). A task with no minted grant resolves to
 nothing (`NotFound`), and the mapping mechanism defaults to a fail-closed
@@ -161,18 +170,24 @@ kernel-issued device-resource grant `handle` (here a
 the calling task** through the same per-task grant table (a forged or
 foreign handle → `NotFound`, `AGENTS.md` §5.4). It then validates the
 constraint (`kernel/core::devres::dma_constraint`), refuses a zero-length
-or over-the-grant-maximum request (`LengthOutOfRange` / `OutOfRange`) and a
-translating inbound viewport (`NotImplemented` — the bus-bridge programming
-rides the metal VL805 acceptance item, §18.1), and carves a
-physically-contiguous, zeroed, coherent block — mapped `RW`,
+or over-the-grant-maximum request (`LengthOutOfRange` / `OutOfRange`), and
+carves a physically-contiguous, zeroed, coherent block — mapped `RW`,
 non-executable, guard-bracketed — into the caller's own live address space
 through the architecture `kernel/core::devres::DmaAllocFacility` producer,
-bounded so the block lies wholly below the grant's addressing limit
-(`AGENTS.md` §4 / §18.3). It returns the buffer's base user virtual address
-and writes the **device-visible** base (the CPU-physical base for the
-coherent / QEMU `virt` case) to the `device_out` user pointer through the
-validated copy-out boundary, exactly as `wait` writes its status. The
-backing frames are zeroed and returned to the allocator when the task's
+bounded so the block lies wholly below the grant's CPU-side addressing
+limit (`AGENTS.md` §4 / §18.3). It returns the buffer's base user virtual
+address and writes the **device-visible** base to the `device_out` user
+pointer through the validated copy-out boundary, exactly as `wait` writes
+its status. The device-visible base is resolved by
+`kernel/core::devres::translate_device_addr`: for a coherent (untranslated)
+constraint it is the CPU-physical base itself (the QEMU `virt` /
+coherent-bus case); for a **translating inbound viewport**
+(`HwResource::dma_translated`, e.g. the Pi 4 PCIe root complex's
+`IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` `dma-ranges`) the CPU-physical
+base is re-based onto the far side of the viewport — checked, never wrapped
+(`OutOfRange` if it escapes the aperture, `AGENTS.md` §18.1 / §2.9) — so the
+device issues the bus address the bridge translates back to the carved RAM.
+The backing frames are zeroed and returned to the allocator when the task's
 live space is dropped on exit (`LiveSpace::drop` — zero-on-free, §4). It is
 gated on **`CAP_MEM_DMA`** and **audited** (a low-volume, security-relevant
 grant of hardware-reachable memory); the carve mechanism defaults to a
@@ -266,6 +281,28 @@ installed it fails closed with `NotImplemented` through `NULL_HW_TREE`. The
 first-party Rust wrapper is `rustos_rt::hw_emit_node` (the user-space driver
 host `rustos_drvrt::RtDriverHost` forwards `DriverHost::emit_node` to it); the
 C stub is `ros_sys_hw_emit_node`.
+
+`hw_remove_node` (no. 38) is the exact **mirror** of `hw_emit_node`: hotplug
+removal (`AGENTS.md` §18.4). When a device a bus driver published goes away
+(a USB port-down, a PCIe hot-remove) the driver calls this with the
+`HwNode::id` it wants retired, so the device manager unloads the driver bound
+to the vanished node. It is gated on the **same** `CAP_HW_EMIT`, and the
+kernel bounds it exactly like publication (`AGENTS.md` §4 — no ambient
+authority): it resolves the caller's *own* matched node (the same kernel-side
+task→node record `hw_emit_node` uses) and removes the target **only** when
+its parent is that node — a child the caller itself published — together
+with its whole subtree, so a driver can never retire a node it does not own
+and no stale descendant outlives its parent. An unknown id, or a node the
+caller does not own, fails closed (`NotFound` / `PermissionDenied`,
+indistinguishable so the failure leaks nothing about the rest of the tree,
+§5.4). On success the node set shrinks and the generation bumps, waking every
+parked `hw_tree_wait` caller; like `hw_emit_node` it adds/removes the node
+and leaves the driver *load*/*unload* to the device manager (the microkernel
+policy/mechanism split, §4). It is **audited** per call (a low-volume,
+security-relevant event that drives an unload). It serves the
+`HwTreeSource::remove` seam; until a store is installed it fails closed with
+`NotImplemented` through `NULL_HW_TREE`. The first-party Rust wrapper is
+`rustos_rt::hw_remove_node`; the C stub is `ros_sys_hw_remove_node`.
 
 `ipc_call` (no. 31), `call_create` (no. 32), `call_recv` (no. 33), and
 `call_reply` (no. 34) are the two halves of the **synchronous** request/reply
@@ -565,8 +602,8 @@ re-validates arguments — the dispatcher does that first.
 | `rlimit_set`    | copies the encoded `ResourceLimit` in through `copy_from_user`, validates `kind` + the `soft <= hard` pair, and — when the request raises a hard bound above the inherited ceiling — refuses unless the caller holds `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3). The default trait method fails closed until L2 | Unassigned `kind` / malformed pair → `OutOfRange`. Raising a hard bound without the capability → `PermissionDenied`. No service wired → `NotImplemented`. Faulting buffer → `BadAddress`. Otherwise `Ok(0)`. |
 | `console_count` | returns the installed console list's length (`with_consoles`) — the index space `spawn`'s `console` argument selects from (`AGENTS.md` §20, `plans/PI.md` P11) | No console list wired → `NotImplemented`. Otherwise `Ok(count)`. |
 | `stream_echo`   | resolves `fd` against the caller's per-process descriptor table (direction first), then the descriptor's console index against the installed console list, and toggles that console's echo flag (`ConsoleDevice::set_echo`, which also resets the line-discipline column) so a subsequent `stream_read` echoes the consumed bytes back to the console write half (`AGENTS.md` §20 — terminal local echo); `stream_read` performs the echo itself, rendering a bare CR/LF as CR-LF and rubbing out the previous character (column-bounded `BS SP BS`) on a Backspace/Delete | `fd` not a readable inherited stream → `NotFound`. No console installed at the descriptor's index → `NotImplemented`. Otherwise `Ok(0)`. |
-| `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window (`devres::mappable_window` — `Mmio` / `BusWindow`, non-zero, non-overflowing), then maps **only** that `(phys_base, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window or malformed grant → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
-| `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len` and a translating inbound viewport, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`) and copies the device-visible base out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit → `OutOfRange`. Translating viewport → `NotImplemented`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
+| `mmio_map`      | resolves `handle` against the caller (`AddressSpaceRegistry::grant(caller.task_id, handle)`, owner-checked per-task grant table; a task with no minted grant resolves to nothing), validates the granted resource is a memory window and the `[offset, offset + len)` sub-region lies wholly inside it (`devres::mappable_subwindow` — `Mmio` / `BusWindow`, non-zero `len`, in-bounds, non-overflowing), then maps **only** that sub-region `(grant_base + offset, len)` into the caller's own address space through the installed `MmioMapFacility` (`with_mmio_map_facility`; default `NULL_MMIO_MAP_FACILITY`), returning its base virtual address — so a large outbound bus-window grant maps just one enumerated BAR, not the whole window (`AGENTS.md` §24.1; `plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-window grant or a sub-region escaping it → `OutOfRange` / `LengthOutOfRange`. No map facility wired → `NotImplemented`. Frame/virtual-window exhaustion → `OutOfMemory`. Otherwise `Ok(base)`. |
+| `dma_alloc`     | resolves `handle` against the caller (same owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`), rejects a zero / over-the-grant-maximum `len`, then carves a physically-contiguous, zeroed, coherent `RW` buffer bounded by the grant's CPU-side `addr_limit` into the caller's own address space through the installed `DmaAllocFacility` (`with_dma_alloc_facility`; default `NULL_DMA_ALLOC_FACILITY`), resolves the device-visible base via `devres::translate_device_addr` (CPU-physical for a coherent constraint, re-based onto the far side for a translating inbound viewport, `HwResource::dma_translated`), and copies it out to `device_out`, returning the buffer's base virtual address (`plans/PI.md` P10 chunk 5d-0) | Unknown / non-owned handle → `NotFound`. Non-DMA grant → `OutOfRange`. `len == 0` → `LengthOutOfRange`. Over-max / over-limit, or a carve escaping a translating viewport → `OutOfRange`. No DMA facility wired → `NotImplemented`. Frame exhaustion → `OutOfMemory`. Faulting `device_out` → `BadAddress`. Otherwise `Ok(base)`. |
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

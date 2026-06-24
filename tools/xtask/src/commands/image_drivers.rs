@@ -56,6 +56,58 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 /// `Run` entry binary (`AGENTS.md` §8 / §16.2).
 pub const VCMAILBOX_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"];
 
+/// Store path of the BCM2711 PCIe root-complex bus-driver bundle: class `bus`,
+/// subtype `pcie`, the chip leaf `bcm2711` (`AGENTS.md` §8 / §16.2 — the
+/// vendor/chip name appears only at the leaf, the class namespace above it
+/// stays vendor-neutral).
+pub const PCIE_BRCM_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_pcie", b"bcm2711", b"Run"];
+
+/// Store path of the VL805 USB host-controller bus-driver bundle: class `bus`,
+/// subtype `usb`, the chip leaf `vl805` (`AGENTS.md` §8 / §16.2).
+pub const VL805_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"vl805", b"Run"];
+
+/// Store path of the USB boot-keyboard driver bundle: class `input`, the
+/// `usb_kbd` leaf naming the (vendor-neutral) driver (`AGENTS.md` §8 / §16.2).
+pub const USB_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_kbd", b"Run"];
+
+/// Cross-compile `package` for the freestanding aarch64 target, convert the
+/// linked PIE ELF to a production-biased `rxe`, and wrap it as the signed
+/// payload of a `kind = UserSpace` bundle requesting exactly `caps` and
+/// carrying the driver crate's own canonical §18.3 `bind_keys`
+/// (`AGENTS.md` §2.2 / §18.3). The single composer every installed user-space
+/// bundle shares, so the wire layout, the signing seed, and the fail-closed
+/// sanity check live in one place (`AGENTS.md` §2.2).
+///
+/// # Errors
+///
+/// A string describing a failed cross-compile, a missing ELF artefact, an
+/// ELF->rxe conversion failure, or a structurally invalid composed bundle.
+fn build_bundle(
+    ctx: &Context,
+    package: &str,
+    caps: &[CapabilityId],
+    bind_keys: &[rustos_abi::DriverBindKey],
+) -> Result<Vec<u8>, String> {
+    let elf = cross_compile_driver(ctx, package)?;
+    let rxe = elf_to_rxe(
+        &elf,
+        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        USER_IMAGE_BIAS,
+    )
+    .map_err(|e| format!("image: convert {package} driver ELF to rxe: {e}"))?;
+
+    let signed = build_signed_driver_image(
+        &build_support::KERNEL_DRIVER_SIGNING_SEED,
+        DriverKind::UserSpace,
+        caps,
+        bind_keys,
+        rustos_kernel_syscall::SYSCALL_TABLE_HASH,
+        &rxe,
+    );
+    verify_signed_bundle(&signed.image)?;
+    Ok(signed.image)
+}
+
 /// Build and sign the user-space `VideoCore` mailbox service-driver bundle for
 /// installation into the image's `/System/Drivers/` store.
 ///
@@ -72,28 +124,87 @@ pub const VCMAILBOX_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_mailbox", b"vcmai
 /// A string describing a failed cross-compile, a missing ELF artefact, or an
 /// ELF->rxe conversion failure.
 pub fn build_vcmailbox_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
-    let elf = cross_compile_driver(ctx, "rustos-drv-bus-mailbox-vcmailbox")?;
-    let rxe = elf_to_rxe(
-        &elf,
-        &rustos_kernel_syscall::SYSCALL_TABLE_HASH,
-        USER_IMAGE_BIAS,
-    )
-    .map_err(|e| format!("image: convert vcmailbox driver ELF to rxe: {e}"))?;
-
-    let signed = build_signed_driver_image(
-        &build_support::KERNEL_DRIVER_SIGNING_SEED,
-        DriverKind::UserSpace,
+    build_bundle(
+        ctx,
+        "rustos-drv-bus-mailbox-vcmailbox",
         &[
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
             CapabilityId::IPC_BIND_PRIVILEGED,
         ],
         rustos_vcmailbox::BIND_KEYS,
-        rustos_kernel_syscall::SYSCALL_TABLE_HASH,
-        &rxe,
-    );
-    verify_signed_bundle(&signed.image)?;
-    Ok(signed.image)
+    )
+}
+
+/// Build and sign the BCM2711 PCIe root-complex bus-driver bundle.
+///
+/// It maps its discovered register window (`CAP_MMIO_MAP`), trains the link,
+/// assigns the VL805 BAR, and publishes the enumerated USB host function into
+/// the live hardware tree (`CAP_HW_EMIT`) — and nothing more (`AGENTS.md`
+/// §4 — no ambient authority; §18.3). Carries `rustos_pcie_brcm::BIND_KEYS`,
+/// so it autoloads against the discovered `brcm,bcm2711-pcie` node.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pcie_brcm_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-bus-pcie-brcm",
+        &[CapabilityId::MMIO_MAP, CapabilityId::HW_EMIT],
+        rustos_pcie_brcm::BIND_KEYS,
+    )
+}
+
+/// Build and sign the VL805 USB host-controller bus-driver bundle.
+///
+/// It reloads the controller's firmware over the `vcmailbox` property mailbox
+/// (`CAP_MAILBOX`) and then publishes the controller as an xHCI node
+/// forwarding the BAR + DMA grants it received (`CAP_HW_EMIT`) — and nothing
+/// more. It holds neither `CAP_MMIO_MAP` nor `CAP_MEM_DMA`: it forwards the
+/// grants without mapping them (`AGENTS.md` §4 least privilege). Carries
+/// `rustos_vl805::BIND_KEYS`, so it autoloads against the VL805 PCI node the
+/// PCIe driver emitted.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_vl805_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-bus-usb-vl805",
+        &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT],
+        rustos_vl805::BIND_KEYS,
+    )
+}
+
+/// Build and sign the USB boot-keyboard driver bundle.
+///
+/// It maps the xHCI register BAR (`CAP_MMIO_MAP`), carves the controller's DMA
+/// working set (`CAP_MEM_DMA`), brings the controller up, enumerates the boot
+/// keyboard, and injects each decoded key edge into the kernel input-focus
+/// arbiter (`CAP_INPUT_INJECT`) — and nothing more. Carries
+/// `rustos_hid::KEYBOARD_BIND_KEYS`, so it autoloads against the `usb,xhci`
+/// node the VL805 driver emitted.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-input-usb-kbd",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::INPUT_INJECT,
+            // Emit the one-shot structured bring-up diagnostic when the
+            // controller does not come up (`AGENTS.md` §15.7 / §19.4); the
+            // kernel gates `log_emit` on `CAP_LOG_EMIT`.
+            CapabilityId::LOG_EMIT,
+        ],
+        rustos_hid::KEYBOARD_BIND_KEYS,
+    )
 }
 
 /// Fail-closed sanity check on a freshly composed bundle before it is planted
@@ -145,6 +256,9 @@ fn cross_compile_driver(ctx: &Context, package: &str) -> Result<Vec<u8>, String>
     // programming error in the image pipeline, never a runtime input.
     let rel_dir = match package {
         "rustos-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
+        "rustos-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
+        "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
+        "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
     };
     let driver_dir = ctx.workspace_root.join(rel_dir);

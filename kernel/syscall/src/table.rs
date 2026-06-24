@@ -507,19 +507,29 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::MMIO_MAP`]. `handle` is an unforgeable, kernel-issued
     /// device-resource grant the driver received for the hardware-tree node
-    /// it binds; the implementation resolves it **against the calling task**
-    /// (rejecting forgery exactly as `irq_wait` re-checks its binding,
-    /// `AGENTS.md` §5.4), confirms the grant names a memory window, maps
-    /// only that region — caching disabled — into the caller's own address
-    /// space, and returns its base user virtual address. A driver therefore
-    /// never reaches physical memory the kernel did not grant it (§4 — no
-    /// ambient authority).
+    /// it binds, and `[offset, offset + len)` names the sub-region *within*
+    /// that grant to map; the implementation resolves the handle **against
+    /// the calling task** (rejecting forgery exactly as `irq_wait` re-checks
+    /// its binding, `AGENTS.md` §5.4), confirms the grant names a memory
+    /// window and the sub-region lies wholly inside it, maps only that
+    /// sub-region — caching disabled — into the caller's own address space,
+    /// and returns its base user virtual address. A driver therefore never
+    /// reaches physical memory the kernel did not grant it (§4 — no ambient
+    /// authority), and a driver granted a large outbound bus aperture maps
+    /// just the single BAR it enumerated rather than the whole window
+    /// (`AGENTS.md` §24.1).
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with neither a
     /// grant table nor a map facility wired has nothing to map. The real
     /// handler is installed in `kernel/core`.
-    fn mmio_map(&self, _caller: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+    fn mmio_map(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _offset: u64,
+        _len: usize,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -818,6 +828,29 @@ pub trait SyscallHandlers {
     fn hw_emit_node(&self, _caller: &CallerContext<'_>, _node: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Remove a previously-published child device node — and its subtree —
+    /// from the live hardware tree (`AGENTS.md` §18.4 — hotplug removal).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::HW_EMIT`] (the same privilege as
+    /// [`Self::hw_emit_node`]). The implementation resolves the caller's
+    /// *own* matched node and removes `node_id` **only** when its parent is
+    /// that node — a child the caller itself published — together with every
+    /// transitive descendant, so a driver can never retire a node it does not
+    /// own and no stale descendant outlives its parent (`AGENTS.md` §4 — no
+    /// ambient authority). On success it bumps the hardware-tree generation,
+    /// waking the device manager's reactive watch so it unloads the driver
+    /// bound to the vanished node — the symmetric counterpart of
+    /// [`Self::hw_emit_node`]. An unknown id, or a node the caller does not
+    /// own, fails closed (`AGENTS.md` §2.9). Returns `Ok(0)` once removed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn hw_remove_node(&self, _caller: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1034,8 +1067,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
             // handler resolves it against the calling task and the grant
             // table (forgery + ownership are checked there, `AGENTS.md`
-            // §5.4).
-            SyscallNumber::MMIO_MAP => self.handlers.mmio_map(caller, args.0[0]),
+            // §5.4). args[1] is the byte offset of the sub-region within the
+            // granted window and args[2] its length; the handler confirms the
+            // sub-region lies wholly inside the grant (`AGENTS.md` §24.1).
+            SyscallNumber::MMIO_MAP => {
+                let len = decode_len(args.0[2])?;
+                self.handlers.mmio_map(caller, args.0[0], args.0[1], len)
+            }
             SyscallNumber::DMA_ALLOC => {
                 // `validate_arg` accepts args[0] as an opaque `Handle` u64
                 // (resolved against the calling task + grant table in the
@@ -1129,6 +1167,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // (`AGENTS.md` §18.1 / §18.3).
                 let len = decode_len(args.0[1])?;
                 self.handlers.hw_emit_node(caller, args.0[0], len)
+            }
+            SyscallNumber::HW_REMOVE_NODE => {
+                // args[0] is the `HwNode::id` to remove (a plain `u64`,
+                // resolved against the live tree by the handler, `AGENTS.md`
+                // §18.4).
+                self.handlers.hw_remove_node(caller, args.0[0])
             }
             _ => Err(Errno::NotFound),
         }
@@ -1561,12 +1605,19 @@ mod tests {
             Ok(len as u64)
         }
 
-        fn mmio_map(&self, _c: &CallerContext<'_>, handle: u64) -> SyscallResult {
+        fn mmio_map(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            offset: u64,
+            len: usize,
+        ) -> SyscallResult {
             self.record("mmio_map");
-            // Echo the handle back so the reachability test can assert the
-            // dispatcher decoded the `Handle` argument without wiring a
-            // real grant table / map facility here.
-            Ok(handle)
+            // Echo `handle + offset + len` back so the reachability test can
+            // assert the dispatcher decoded all three arguments (handle,
+            // sub-region offset, length) without wiring a real grant table /
+            // map facility here.
+            Ok(handle + offset + len as u64)
         }
 
         fn dma_alloc(
@@ -1690,6 +1741,11 @@ mod tests {
 
         fn hw_emit_node(&self, _c: &CallerContext<'_>, _node: u64, _len: usize) -> SyscallResult {
             self.record("hw_emit_node");
+            Ok(0)
+        }
+
+        fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
+            self.record("hw_remove_node");
             Ok(0)
         }
     }

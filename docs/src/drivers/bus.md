@@ -265,7 +265,7 @@ lets a metal run compare it with the known-good
 `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000` (`AGENTS.md` §15.7). The
 post-bring-up window read-backs that once logged the trained register block
 were removed: on real BCM2711 silicon reading those MISC registers after the
-link trains stalls for seconds while the in-kernel bring-up holds the CPU,
+link trains stalls for seconds while the bring-up holds the CPU,
 and with the link confirmed up they added no functional value
 (`AGENTS.md` §2.14 / §2.16).
 
@@ -295,25 +295,24 @@ carrying the CPU base, size, and far-side PCIe base —
 `kernel/arch/aarch64::fdt::{dma_ranges_aperture,outbound_mmio_window}`,
 `AGENTS.md` §18.1).
 
-The whole chain is composed in `kernel/rustos-kernel::usb_keyboard`
-(the image-assembly seam is the one crate permitted to name the driver
-crates across strata, `AGENTS.md` §17.4 / §8): a `ChainHost` lends the
-floor drivers the kernel's capability-gated MMIO mapper, per-driver DMA
-host, the `VideoCore` `MailboxChannel`, and a boot-tree node emitter, all
-behind the `lib/abi::DriverHost` contract. `bring_up_keyboard` then
-**sequences the three floor crates over that contract** (Increment C, the
-full swap) — `pcie_brcm` trains the link (`open_discovered`), the `vl805`
-device driver reloads firmware over `host.mailbox()`, and
-`usb::wiring::bring_up_boot_input` maps the BAR, carves DMA, brings the
-controller up, enumerates the boot keyboard, and publishes it through
-`host.emit_node()` carrying its xHCI-BAR + DMA `HwResource` grants. The
-returned `BootKeyboard` is polled by the in-kernel report pump, whose
-decoded records reach the input-focus arbiter (`ArbiterConsoleSink`) — the
-live keyboard until the B5 flip (`AGENTS.md` §2.17). No driver names
-another; the hardware tree decouples them. The engine is host-tested up to
-the controller hand-off, where the inert mock register window faults — the
-metal boundary; QEMU models no Pi PCIe link timing or USB, so metal
-acceptance is a checklist (`plans/PI.md` P10 / Increment C).
+The whole chain runs in **user space**, decoupled by the hardware tree —
+no driver names another (`AGENTS.md` §17.4 / §4). The kernel boot walk
+seeds the discovered `brcm,bcm2711-pcie` root complex and VideoCore mailbox
+nodes, and `devmgr` autoloads each signed `/System/Drivers/` bundle against
+its node: the `pcie_brcm` bus driver maps its register window and trains the
+link (`open_discovered`), assigns the VL805 BAR, and publishes the VL805 PCI
+function through `hw_emit_node` (carrying the BAR + DMA grants); the `vl805`
+device driver binds that, reloads the controller firmware over the VideoCore
+mailbox, and publishes the controller as a `usb,xhci` node forwarding those
+grants; and the `usb_kbd` driver binds *that*, maps the BAR, carves DMA,
+brings the controller up (`usb::wiring`), enumerates the boot keyboard, and
+pumps decoded key edges into the input-focus arbiter through `key_inject`.
+Each driver receives only the grants its matched node requested (`AGENTS.md`
+§18.3), reached through its rt-backed `DriverHost`. The engines are
+host-tested up to the controller hand-off, where the inert mock register
+window faults — the metal boundary; QEMU models no Pi PCIe link timing or
+USB, so the live enumerate→emit→autoload chain is the metal acceptance item
+(`plans/PI.md` P10 D5d, `AGENTS.md` §0.9).
 
 ## MMIO driver — `drivers/bus/mmio`
 
@@ -556,13 +555,11 @@ keeping the three separate is the correct modular shape (`AGENTS.md`
 
 The firmware policy and the controller-node wiring live in the
 device-support library `lib/vl805` (the §2.20 single-device carve-out,
-the `lib/vcmailbox` / `lib/pcie_brcm` precedent), so two consumers share
-one definition: the autoloaded user-space bus-driver bin
-`drivers/bus/usb/vl805` (which links the userland runtime `rustos-rt`)
-and the transitional in-kernel keyboard scaffold (`rustos-kernel`). A
-`rustos-rt`-linking bin cannot share a kernel-linked `drivers/*` crate,
-so the shared logic is `lib/*` and neither consumer crosses a
-`drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
+the `lib/vcmailbox` / `lib/pcie_brcm` precedent), consumed by the
+autoloaded user-space bus-driver bin `drivers/bus/usb/vl805` (which links
+the userland runtime `rustos-rt`). The policy lives in `lib/*` rather than
+the bin so it is host-unit-tested without a kernel and so the bin crosses
+no `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4).
 
 On a Pi 4 without the SPI EEPROM (rev 1.4+), the VL805 carries no
 resident firmware: the `VideoCore` loads it at power-on and a PCIe
@@ -600,9 +597,9 @@ firmware-revision pair); `lib/vl805` only sequences the policy, never
 re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
 discovered doorbell window, the DMA-aliased property buffer, the cache
 coherency) lives behind the `MailboxChannel`: the user-space bin reaches
-the `drivers/bus/mailbox/vcmailbox` service over the kernel call surface,
-while the transitional in-kernel scaffold supplies an in-kernel
-`MailboxChannel` owning the `MmioMailbox`. QEMU models no `VideoCore`, so
+the autoloaded `drivers/bus/mailbox/vcmailbox` service over the kernel
+call surface (the `ipc_call` endpoint, gated by `CAP_MAILBOX`). QEMU
+models no `VideoCore`, so
 the policy is host-proven against the protocol-faithful `lib/vcmailbox`
 mock firmware and the reload-and-publish wiring against `DriverHost`
 doubles; the live reload → publish chain is the on-metal acceptance item
@@ -873,11 +870,10 @@ BAR0 inside the outbound window if firmware left it unassigned
 (`assign_bar`), enables bus mastering, and maps BAR0 — these map-prefix
 steps are factored into the public `map_controller`, returning the
 mapped `MappedXhci { window, dma }` — and then brings the controller up
-through `Xhci::open` + `UsbDevice::start`. The split lets the in-kernel
-keyboard service read the controller's capability block and log its
-carve + geometry (the `4106` diagnostic) between the map and the
-bring-up, and report a mapping / open / start failure distinctly,
-without re-mapping the BAR (one window per device, `AGENTS.md` §2.2).
+through `Xhci::open` + `UsbDevice::start`. The split lets the autoloaded
+user-space keyboard driver read the controller's capability block and
+report a mapping / open / start failure distinctly between the map and the
+bring-up, without re-mapping the BAR (one window per device, `AGENTS.md` §2.2).
 QEMU models no Pi USB timing (`AGENTS.md` §0.4), so the host tests prove
 the composition and its fail-closed paths up to the controller hand-off;
 the live controller bring-up is the on-metal acceptance item.
@@ -942,9 +938,10 @@ so `usb_hid::BIND_KEYS`'s class-wildcard keyboard/mouse keys resolve
 against it exactly as `devmgr` will. It fails closed with `NotFound`
 before a device has been enumerated.
 
-Together with the bus-driver `BIND_KEYS` (item 5a), `devmgr` autoload
-wiring (item 5c) closes the data-driven path that supersedes the
-`kernel/rustos-kernel::usb_keyboard` composition scaffold.
+Together with the bus-driver `BIND_KEYS` (item 5a), the `devmgr` autoload
+wiring (item 5c) is the data-driven path that **replaced** the former
+in-kernel `usb_keyboard` composition scaffold (deleted at `plans/PI.md`
+P10 D5d): the whole chain is now autoloaded user-space drivers.
 
 ## Constructing the real-hardware bus
 

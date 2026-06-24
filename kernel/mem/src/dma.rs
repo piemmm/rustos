@@ -471,7 +471,16 @@ impl DmaWindowMap {
             if let Err(e) = space.map(
                 page,
                 frame,
-                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+                // The buffer is shared with a DMA-capable device, so it is
+                // mapped coherent (`DMA_COHERENT`): on a non-I/O-coherent
+                // platform (the BCM2711 PCIe root complex) the port maps it
+                // Normal Non-Cacheable, so a descriptor the driver writes is
+                // visible to the device — and an event the device writes is
+                // visible to the driver — without per-access cache
+                // maintenance the driver could not perform from EL0 anyway
+                // (`AGENTS.md` §4 / §2.20). On a coherent platform it is
+                // ordinary cacheable RAM.
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::DMA_COHERENT,
             ) {
                 self.rollback_partial_map(space, frames, first_data_slot, i, start_frame, order);
                 return Err(DmaError::PageTable(e));

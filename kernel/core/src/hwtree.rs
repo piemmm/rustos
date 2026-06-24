@@ -84,6 +84,34 @@ pub trait HwTreeSource: Sync {
     /// build with no store wired never accepts a published node
     /// (`AGENTS.md` §2.9 / §5.4).
     fn publish(&self, parent_id: u32, node: HwNode) -> Result<(), Errno>;
+
+    /// Remove the child `node_id` — and its whole subtree — from the live
+    /// tree, bumping the generation so every parked `hw_tree_wait` caller
+    /// (the device manager) re-reads and unloads the driver bound to the
+    /// vanished node (`AGENTS.md` §18.4 — hotplug removal).
+    ///
+    /// This is the store side of the `hw_remove_node` syscall and the exact
+    /// mirror of [`Self::publish`]: the handler in [`crate::syscalls`] has
+    /// already verified the calling driver holds
+    /// [`rustos_abi::CapabilityId::HW_EMIT`] and resolved `parent_id` to the
+    /// emitter's *own* matched node (so a driver cannot remove a node it does
+    /// not own, `AGENTS.md` §4 — no ambient authority). The store removes
+    /// `node_id` **only** when its parent is exactly `parent_id` — a child the
+    /// caller itself published — and removes every transitive descendant with
+    /// it, so a stale grandchild can never outlive its parent. The node set
+    /// shrinks and only the generation advances; the device manager performs
+    /// the actual driver unload reacting to the change (the same policy /
+    /// mechanism split as [`Self::publish`], which adds a node and leaves the
+    /// *load* to the manager, `AGENTS.md` §4).
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
+    ///   build with no store wired never removes a node (`AGENTS.md` §2.9).
+    /// * [`Errno::NotFound`] if no live node has id `node_id`, or its parent
+    ///   is not `parent_id` (the caller does not own it) — fail closed,
+    ///   never a hint that distinguishes the two (`AGENTS.md` §5.4).
+    fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno>;
 }
 
 /// The hardware-tree source installed before any real store is wired.
@@ -104,6 +132,10 @@ impl HwTreeSource for NullHwTreeSource {
     }
 
     fn publish(&self, _parent_id: u32, _node: HwNode) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn remove(&self, _parent_id: u32, _node_id: u32) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 }

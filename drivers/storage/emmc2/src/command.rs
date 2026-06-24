@@ -133,6 +133,13 @@ pub const WRITE_MULTIPLE_BLOCK: SdCommand = SdCommand::data(25, ResponseKind::Sh
 pub const APP_CMD: SdCommand = SdCommand::new(55, ResponseKind::Short);
 /// `ACMD41` — `SD_SEND_OP_COND`: negotiate the operating conditions (R3).
 pub const SD_SEND_OP_COND: SdCommand = SdCommand::new(41, ResponseKind::ShortNoCrc);
+/// `ACMD6` — `SET_BUS_WIDTH`: select the card's DAT-line bus width (R1).
+pub const SET_BUS_WIDTH: SdCommand = SdCommand::new(6, ResponseKind::Short);
+
+/// `ACMD6` argument selecting the 4-bit bus width (the 2-bit bus-width
+/// field value `0b10`). The companion controller-side width bit is
+/// [`regs::CONTROL0_DATA_WIDTH_4BIT`].
+pub const BUS_WIDTH_4BIT_ARG: u32 = 0b10;
 
 /// `CMD8` argument: 2.7–3.6 V supply (`0x1`) plus the `0xAA` check
 /// pattern. The card echoes both in its R7 response.

@@ -90,20 +90,6 @@ pub mod kalloc;
 // host, where its unit tests run.
 pub mod dispatch_core;
 
-// The VL805/xHCI USB-keyboard composition (`plans/PI.md` P10): assembles
-// the BCM2711 PCIe root-complex bring-up, the windowed PCI config
-// mechanism, the xHCI controller engine, and the HID boot-keyboard →
-// console-byte producer into one chain feeding a console's input queue.
-// `rustos-kernel` (`Layer::Tooling`) is the one crate permitted to name
-// those driver crates across strata (`AGENTS.md` §17.4 / §8). The engine
-// is architecture-neutral (it consumes only the `lib/abi` driver seams
-// and the discovered `HwNode`), so it is un-gated — it compiles on every
-// target and its host unit tests run on the CI host; the aarch64 boot
-// path supplies the concrete `DriverHost` and generic-timer `Delay` that
-// drive it on metal (`plans/PI.md` P10 "Remaining").
-pub mod keyboard_service;
-pub mod usb_keyboard;
-
 // The production root-volume unlock + users-database load composition
 // (`plans/PI.md` §3 P11 root-mount increment, Chunk A): turns the on-FAT
 // `root.unlock` descriptor, the typed passphrase, and the encrypted root

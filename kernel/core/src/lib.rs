@@ -113,8 +113,9 @@ pub use console::{
     NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
 };
 pub use devres::{
-    dma_constraint, mappable_window, DmaAllocFacility, DmaCarve, DmaConstraint, MmioMapFacility,
-    NullDmaAllocFacility, NullMmioMapFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
+    dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, DmaCarve,
+    DmaConstraint, MmioMapFacility, NullDmaAllocFacility, NullMmioMapFacility,
+    NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,

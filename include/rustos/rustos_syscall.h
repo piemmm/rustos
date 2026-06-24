@@ -61,6 +61,7 @@ extern "C" {
 #define ROS_SYS_USERS_DB_WAIT 35u
 #define ROS_SYS_LOG_EMIT 36u
 #define ROS_SYS_HW_EMIT_NODE 37u
+#define ROS_SYS_HW_REMOVE_NODE 38u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -89,7 +90,7 @@ uint64_t ros_sys_key_inject(void * a0, uintptr_t a1);
 int32_t ros_sys_display_acquire(void);
 int32_t ros_sys_display_release(void);
 uint64_t ros_sys_keyboard_read(void * a0, uintptr_t a1);
-uint64_t ros_sys_mmio_map(uint64_t a0);
+uint64_t ros_sys_mmio_map(uint64_t a0, uintptr_t a1, uintptr_t a2);
 uint64_t ros_sys_dma_alloc(uint64_t a0, uintptr_t a1, void * a2);
 uint64_t ros_sys_resource_grants(void * a0, uintptr_t a1);
 uint64_t ros_sys_hw_tree_read(void * a0, uintptr_t a1);
@@ -101,6 +102,7 @@ int32_t ros_sys_call_reply(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 int32_t ros_sys_users_db_wait(uint64_t a0);
 int32_t ros_sys_log_emit(void * a0, uintptr_t a1);
 int32_t ros_sys_hw_emit_node(void * a0, uintptr_t a1);
+int32_t ros_sys_hw_remove_node(uint64_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

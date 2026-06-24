@@ -345,8 +345,8 @@ its in-memory transmit ring draining through
 calls on **every** iteration: after each successful dispatch (in
 `service_between_dispatches`, alongside the deferred-wake drain) and again
 just before the idle park. This is what keeps the log flowing even while a
-perpetually-runnable in-kernel kthread (the polled USB-keyboard report pump,
-which yields every poll but never parks) holds the loop off its idle branch
+perpetually-runnable in-kernel kthread (any service that yields every pass
+but never parks) holds the loop off its idle branch
 forever — an idle-only drain would freeze the log the instant such a kthread
 exists, and the transmit-FIFO "has-room" interrupt cannot be relied on to
 self-sustain the drain on real silicon (the Raspberry Pi 4's flow-blocked

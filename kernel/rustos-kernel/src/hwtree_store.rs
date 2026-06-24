@@ -28,7 +28,7 @@
 
 use alloc::vec::Vec;
 
-use rustos_abi::hwtree::HW_NODE_ROOT;
+use rustos_abi::hwtree::{HwResource, HW_NODE_ROOT};
 use rustos_abi::{Errno, HwNode, HwTreeHeader};
 use rustos_kernel_core::HwTreeSource;
 use rustos_sync::SpinLock;
@@ -143,6 +143,82 @@ impl HwTreeStore {
         id
     }
 
+    /// Remove the child `node_id` — and its whole subtree — from the
+    /// inventory, but **only** when its parent is exactly `parent_id`, then
+    /// bump the generation. Returns [`Errno::NotFound`] fail-closed if no live
+    /// node has that id, or if it exists but its parent is not `parent_id`.
+    ///
+    /// This is the store side of the `hw_remove_node` syscall and the exact
+    /// counterpart of [`Self::publish_child`]. The `parent_id` check is the
+    /// ownership gate: the `hw_remove_node` handler resolves `parent_id` to
+    /// the caller's *own* matched node kernel-side, so requiring the removed
+    /// node's parent to equal it means a driver can retire **only** a child it
+    /// itself published, never an arbitrary node (`AGENTS.md` §4 — no ambient
+    /// authority; §5.4 — the same caller-trusted identity `publish_child`
+    /// uses). A node the caller does not own and an absent node are
+    /// indistinguishable in the reply (both [`Errno::NotFound`]), so the
+    /// failure leaks nothing about the rest of the tree (`AGENTS.md` §5.4).
+    ///
+    /// The whole subtree rooted at `node_id` is removed — every transitive
+    /// descendant, found by walking the parent links — so a grandchild a
+    /// bus-child driver published can never outlive the parent device that is
+    /// gone (`AGENTS.md` §18.4). The root sentinel can never be a removal
+    /// target (an emitter's `parent_id` is its own non-root node, and the
+    /// root's parent is itself), so the inventory's root is structurally
+    /// safe.
+    ///
+    /// The descendant walk is `O(n·depth)` over the current node set, but a
+    /// removal is a rare discovery event (a handful per hotplug), never a hot
+    /// path (`AGENTS.md` §2.16); the find, the subtree collection, and the
+    /// retain all happen under one lock so the set cannot race a concurrent
+    /// mutation.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if no live node has id `node_id`, or its parent is
+    /// not `parent_id` (fail closed, `AGENTS.md` §2.9 / §5.4).
+    pub fn remove_child(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+        {
+            let mut inner = self.inner.lock();
+            // Ownership gate: the target must exist *and* be a direct child of
+            // the caller's own node. The root sentinel is never a valid
+            // target (a non-root `parent_id` can never equal a root id), so
+            // the inventory root is structurally protected.
+            let owned = inner
+                .nodes
+                .iter()
+                .any(|node| node.id() == node_id && node.parent() == parent_id);
+            if !owned {
+                return Err(Errno::NotFound);
+            }
+
+            // Collect the subtree: the target plus every transitive
+            // descendant. Iterate to a fixed point so any depth is covered
+            // without recursion (no stack growth, `AGENTS.md` §2.16); the node
+            // count bounds the passes, so it always terminates.
+            let mut doomed: Vec<u32> = alloc::vec![node_id];
+            loop {
+                let before = doomed.len();
+                for node in &inner.nodes {
+                    let child = node.id();
+                    if doomed.contains(&node.parent()) && !doomed.contains(&child) {
+                        doomed.push(child);
+                    }
+                }
+                if doomed.len() == before {
+                    break;
+                }
+            }
+
+            inner.nodes.retain(|node| !doomed.contains(&node.id()));
+            inner.generation += 1;
+        }
+        // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
+        // done after the inner lock is dropped (`AGENTS.md` §2.1).
+        rustos_kernel_core::hw_tree_wake();
+        Ok(())
+    }
+
     /// Bump the generation **without** changing the node set, waking every
     /// parked `hw_tree_wait` caller so it re-reads and re-evaluates
     /// (`AGENTS.md` §18.4).
@@ -197,6 +273,28 @@ impl HwTreeStore {
     pub fn snapshot_with_generation(&self) -> (u64, Vec<HwNode>) {
         let inner = self.inner.lock();
         (inner.generation, inner.nodes.clone())
+    }
+
+    /// The resource grants of the live non-root node `node_id`, or `None`
+    /// when no live non-root node has that id (fail closed,
+    /// `AGENTS.md` §5.4).
+    ///
+    /// This is what the driver-store load gate resolves a matched node's
+    /// grants against, read from the **live** inventory under the same lock
+    /// every other reader uses — so a node a user-space bus driver published
+    /// at runtime through `hw_emit_node` ([`Self::publish_child`]) is
+    /// resolvable the instant it appears, not only the boot-seeded nodes a
+    /// one-shot snapshot froze (`AGENTS.md` §18.3 / §18.4). The root sentinel
+    /// is never a load target (a driver is bound to a discovered device, never
+    /// the tree root), so it is excluded here.
+    #[must_use]
+    pub fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {
+        let inner = self.inner.lock();
+        inner
+            .nodes
+            .iter()
+            .find(|node| !node.is_root() && node.id() == node_id)
+            .map(|node| node.resources().to_vec())
     }
 }
 
@@ -271,6 +369,20 @@ impl HwTreeSource for HwTreeStoreSource {
         // assigns identity and records it.
         HW_TREE.publish_child(parent_id, node);
         Ok(())
+    }
+
+    fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
+        // Remove the child `node_id` (and its subtree) from the one
+        // authoritative inventory, but only when its parent is `parent_id` —
+        // the caller's own matched node, resolved kernel-side by the
+        // `hw_remove_node` handler (`AGENTS.md` §4 — no ambient authority).
+        // `remove_child` enforces that ownership gate, removes the whole
+        // subtree, bumps the generation, and wakes every parked
+        // `hw_tree_wait` caller so the device manager re-reads and unloads the
+        // driver bound to the vanished node (`AGENTS.md` §18.4). It fails
+        // closed `NotFound` for an unknown id or a node the caller does not
+        // own; the store only mutates the inventory.
+        HW_TREE.remove_child(parent_id, node_id)
     }
 }
 
@@ -361,6 +473,58 @@ mod tests {
         // A second publish never reuses an id, even under the same parent.
         let id2 = store.publish_child(2, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input));
         assert_eq!(id2, 4, "ids are monotonic and collision-free");
+    }
+
+    #[test]
+    fn remove_child_drops_the_node_and_its_subtree() {
+        let store = HwTreeStore::new();
+        store.seed(&seed_tree()); // ids 1 (root) and 2 (bus)
+                                  // bus 2 publishes child 3; child 3 publishes grandchild 4.
+        let child = store.publish_child(2, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Bus));
+        assert_eq!(child, 3);
+        let grandchild = store.publish_child(3, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input));
+        assert_eq!(grandchild, 4);
+        assert_eq!(store.snapshot().len(), 4);
+
+        // Removing child 3 (owned by bus 2) takes grandchild 4 with it, so a
+        // stale descendant never outlives its parent (`AGENTS.md` §18.4).
+        assert_eq!(store.remove_child(2, 3), Ok(()));
+        let snap = store.snapshot();
+        let ids: Vec<u32> = snap.iter().map(HwNode::id).collect();
+        assert_eq!(ids, alloc::vec![1, 2], "only root and bus remain");
+    }
+
+    #[test]
+    fn remove_child_fails_closed_for_an_unowned_or_absent_node() {
+        let store = HwTreeStore::new();
+        store.seed(&seed_tree()); // ids 1 (root) and 2 (bus)
+        let child = store.publish_child(2, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input));
+        assert_eq!(child, 3);
+
+        // A node that exists but whose parent is not the claimed one: the
+        // caller does not own it, so removal fails closed (`AGENTS.md` §5.4).
+        assert_eq!(store.remove_child(99, 3), Err(Errno::NotFound));
+        // An absent id fails closed identically — the two are
+        // indistinguishable to the caller (`AGENTS.md` §5.4).
+        assert_eq!(store.remove_child(2, 4242), Err(Errno::NotFound));
+        // The failed removals left the inventory untouched.
+        assert_eq!(store.snapshot().len(), 3);
+    }
+
+    #[test]
+    fn remove_child_bumps_the_generation_and_a_failure_does_not() {
+        let store = HwTreeStore::new();
+        store.seed(&seed_tree());
+        let child = store.publish_child(2, HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input));
+        assert_eq!(child, 3);
+        let before = store.generation();
+        // A successful removal advances the generation so a parked
+        // `hw_tree_wait` caller wakes (`AGENTS.md` §18.4).
+        assert_eq!(store.remove_child(2, 3), Ok(()));
+        assert_eq!(store.generation(), before + 1);
+        // A fail-closed removal changes nothing, including the generation.
+        assert_eq!(store.remove_child(2, 3), Err(Errno::NotFound));
+        assert_eq!(store.generation(), before + 1);
     }
 
     #[test]

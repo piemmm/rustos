@@ -1954,6 +1954,26 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.last_reject
     }
 
+    /// Read the controller's `USBCMD` for a one-shot bring-up diagnostic
+    /// (delegates to [`Xhci::read_usbcmd`]), or `None` if the read faults.
+    pub fn read_usbcmd(&mut self) -> Option<u32> {
+        self.xhci.read_usbcmd()
+    }
+
+    /// Read the controller's `USBSTS` for a one-shot bring-up diagnostic
+    /// (delegates to [`Xhci::read_usbsts`]), or `None` if the read faults.
+    pub fn read_usbsts(&mut self) -> Option<u32> {
+        self.xhci.read_usbsts()
+    }
+
+    /// Raw `PORTSC` of root-hub `port` (1-based) for a bring-up diagnostic,
+    /// or `None` if the port is out of range or the read faults. A capture
+    /// of the connect/power/enable/speed bits when enumeration stalls on a
+    /// root port (`AGENTS.md` §15.7).
+    pub fn port_status_raw(&mut self, port: u8) -> Option<u32> {
+        self.xhci.port_status(port).ok().map(crate::PortStatus::raw)
+    }
+
     /// Describe the enumerated HID device as a discovered child
     /// [`HwNode`] parented at `parent_id` and assigned `node_id`.
     ///

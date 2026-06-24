@@ -465,6 +465,30 @@ HAL *modules* compile). Docs:
   `docs/src/platform/riscv64.md`, `PLAN.md`.
 - **Carried forward to W6:** cross-CPU TLB shootdown.
 
+#### Stage W5b-4 — coherent-DMA page attribute (`PageFlags::DMA_COHERENT`)
+
+The MMU HAL `PageFlags` set carries a `DMA_COHERENT` attribute for a buffer
+shared with a DMA-capable device that must stay coherent without per-access
+cache maintenance — distinct from `DEVICE` (a DMA buffer holds ring/context
+structures the driver accesses with ordinary, possibly unaligned, loads and
+stores, which Device-nGnRE memory forbids). The kernel DMA carve
+(`kernel/mem::dma`) maps the device-shared buffer with it, so the buffer is
+coherent by construction and a user-space driver needs no EL0 cache
+maintenance (which is disabled — SCTLR_EL1.UCI clear) and stays arch-neutral
+(§2.20). Per-port leaf: **aarch64** maps it **Normal Non-Cacheable** (a new
+`MAIR_EL1` attribute index 2 = `0x44`, `el0_dma_coherent_leaf_attrs`); on a
+non-I/O-coherent platform (the BCM2711 PCIe root complex, which does not snoop
+the CPU caches) this is what makes a descriptor the driver writes visible to
+the controller. **x86_64 / riscv64** are I/O-coherent, so they ignore the bit
+and map ordinary cacheable RAM; **wasm32** has no page table (n/a). Decoded
+back through `page_flags_from_leaf` (the [4:2] attr-index field distinguishes
+Normal-WB / Device / Normal-NC). Host-proven by the aarch64 `paging_tests`
+(`mair_pairs_normal_device_and_normal_nc`,
+`el0_dma_coherent_leaf_is_unprivileged_normal_non_cacheable`,
+`leaf_attrs_for_dma_coherent_user_is_normal_non_cacheable`,
+`page_flags_round_trip_through_the_dma_coherent_leaf`); the live USB-keyboard
+DMA path that needs it is metal-only (§0.4).
+
 ### Stage W6 — aarch64 SMP secondary-core bring-up + real IPI — ✅ landed
 
 The single largest aarch64 gap, closed by mirroring the riscv64 port-side

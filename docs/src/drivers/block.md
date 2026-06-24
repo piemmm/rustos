@@ -154,6 +154,19 @@ and derives geometry from the card CSD; only high-capacity,
 block-addressed (SDHC/SDXC, CSD v2) cards are supported and anything
 else is rejected fail-closed.
 
+Identification runs at the SD identification clock (≤400 kHz) on the 1-bit
+bus the controller resets to. Once the card is selected, two pure speed
+steps run before any block transfer: `ACMD6` switches the card to the
+4-bit bus (the controller's `CONTROL0` data-width bit set to match, 4×),
+and the SD clock is raised to the data divisor (`DATA_CLOCK_DIVISOR`,
+derived as `IDENT_CLOCK_DIVISOR / 32` so the data clock is 32× the
+identification clock — ≤12.8 MHz, within SD Default Speed's 25 MHz, no
+high-speed switch needed). This turns the ~50 KB/s identification-clock
+1-bit path into the ~6 MB/s Default-Speed 4-bit path the driver-store scan
+and every bundle read inherit (`AGENTS.md` §2.16); the divisor is derived
+from the identification divisor, not a base-clock constant, so it carries
+no board assumption (`AGENTS.md` §2.20).
+
 Command- and transfer-completion waits **park on the controller's
 interrupt** through a `CompletionWait` seam (`SdhciHost::await_irq`) rather
 than busy-spinning a status register, so a slow SD operation never
@@ -193,7 +206,8 @@ a bring-up failure on a real Pi 4 is the UART log. `Emmc2::open` therefore
 fails with a `BringUpFault` that pairs the underlying `DriverError` with a
 `BringUpStage` naming the exact SD-identification step that stalled (map
 register window, reset + SD clock, `CMD0`, `CMD8`, `ACMD41`, `CMD2`, `CMD3`,
-`CMD9`, `CMD7`, `CMD16`). A consumer that only needs the §8 `DriverError`
+`CMD9`, `CMD7`, `CMD16`, `ACMD6` set-bus-width, raise SD clock). A consumer
+that only needs the §8 `DriverError`
 drops the stage with `?` / `DriverError::from`; the in-kernel root-unlock
 path instead logs `BringUpStage::as_str` as a structured `stage=` field
 (`AGENTS.md` §2.16 — measure, do not guess).

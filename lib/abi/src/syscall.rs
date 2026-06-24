@@ -348,22 +348,29 @@ impl SyscallNumber {
     /// P10 chunk 5d-0 — the `DriverHost` MMIO/DMA surface reachable over
     /// IPC).
     ///
-    /// Argument: `handle: u64` — an unforgeable, kernel-issued
+    /// Arguments: `handle: u64` — an unforgeable, kernel-issued
     /// device-resource grant handle the driver received for the matched
     /// hardware-tree node it binds (one handle per [`crate::hwtree::HwResource`]
-    /// the node requested). The kernel resolves the handle **against the
+    /// the node requested); `offset: usize` — the byte offset of the
+    /// sub-region to map *within* that granted window; and `len: usize` —
+    /// its length in bytes. The kernel resolves the handle **against the
     /// calling task** (handle forgery is rejected exactly as
     /// [`SyscallNumber::IRQ_WAIT`] re-checks its binding, `AGENTS.md` §5.4),
     /// confirms the grant names a memory window
-    /// ([`crate::hwtree::HwResourceKind::Mmio`] / `BusWindow`), and maps
-    /// **only** that granted region — caching disabled — into the caller's
+    /// ([`crate::hwtree::HwResourceKind::Mmio`] / `BusWindow`), confirms
+    /// `[offset, offset + len)` lies wholly inside that granted window, and
+    /// maps **only** that sub-region — caching disabled — into the caller's
     /// own hardware-isolated address space, returning its base user virtual
     /// address. A driver can therefore never synthesise a pointer to
-    /// arbitrary physical memory: it maps a region the kernel chose to
-    /// grant it, and nothing more (§4 — no ambient authority). Gated by
+    /// arbitrary physical memory: it maps a region inside one the kernel
+    /// chose to grant it, and nothing more (§4 — no ambient authority).
+    /// Mapping a sub-region (not the whole grant) is what lets a driver
+    /// granted a large outbound bus aperture map just the single BAR it
+    /// enumerated rather than the entire window (`AGENTS.md` §24.1). Gated by
     /// [`crate::CapabilityId::MMIO_MAP`]; an unknown or non-owned handle, a
-    /// grant of the wrong kind, or a build with no map facility wired fails
-    /// closed (`AGENTS.md` §2.9).
+    /// grant of the wrong kind, a sub-region that overflows or escapes the
+    /// granted window, or a build with no map facility wired fails closed
+    /// (`AGENTS.md` §2.9).
     pub const MMIO_MAP: Self = Self(26);
     /// Allocate a DMA-coherent buffer for the calling driver, bounded by a
     /// granted device DMA constraint (`AGENTS.md` §4 / §18.3; `plans/PI.md`
@@ -643,6 +650,33 @@ impl SyscallNumber {
     /// [`SyscallNumber::HW_TREE_WAIT`] observes).
     pub const HW_EMIT_NODE: Self = Self(37);
 
+    /// Remove a previously-published child device node — and its whole
+    /// subtree — from the live hardware tree (`AGENTS.md` §18.4 — hotplug
+    /// removal: a removed node unloads its driver).
+    ///
+    /// Argument: `node_id: u64` — the [`crate::HwNode::id`] of the node to
+    /// remove. Returns `0`, or `-errno`.
+    ///
+    /// Gated by [`crate::CapabilityId::HW_EMIT`], the **same** privilege as
+    /// publishing ([`SyscallNumber::HW_EMIT_NODE`]): a user-space **bus**
+    /// driver that enumerated a device and published it now reports that the
+    /// device has gone (a USB port-down, a PCIe hot-remove). The kernel owns
+    /// the topology, so removal is bounded exactly like publication
+    /// (`AGENTS.md` §4 — no ambient authority): the caller may remove **only**
+    /// a node whose parent is the caller's *own* matched node — a child it
+    /// itself published — never an arbitrary node it does not own. The whole
+    /// subtree rooted at that node is removed (a bus child may itself have
+    /// published grandchildren), so a stale descendant can never outlive its
+    /// parent. An unknown id, or a node the caller does not own, fails closed
+    /// with [`crate::Errno::NotFound`] / [`crate::Errno::PermissionDenied`]
+    /// (`AGENTS.md` §2.9 / §5.4). A successful removal bumps the hardware-tree
+    /// generation, waking the device manager's reactive watch (the same
+    /// change channel [`SyscallNumber::HW_TREE_WAIT`] observes) so it unloads
+    /// the driver bound to the vanished node (`AGENTS.md` §18.4) — the
+    /// symmetric counterpart of [`SyscallNumber::HW_EMIT_NODE`], which adds a
+    /// node and leaves the *load* to the device manager.
+    pub const HW_REMOVE_NODE: Self = Self(38);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -755,6 +789,7 @@ mod tests {
         assert_eq!(SyscallNumber::USERS_DB_WAIT.as_u16(), 35);
         assert_eq!(SyscallNumber::LOG_EMIT.as_u16(), 36);
         assert_eq!(SyscallNumber::HW_EMIT_NODE.as_u16(), 37);
+        assert_eq!(SyscallNumber::HW_REMOVE_NODE.as_u16(), 38);
     }
 
     #[test]

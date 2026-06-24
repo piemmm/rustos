@@ -3325,12 +3325,16 @@ table, so a new board is match **data**, not new code. Sub-increments
     the grant's `addr_limit` over the same retained-live-space +
     owner-checked-grant machinery (`with_current_live_space`, `Dma`-kind
     grant): it resolves the grant owner-checked, validates it via
-    `kernel/core::devres::dma_constraint` (rejecting zero/over-max length and
-    — until the metal VL805 item — a translating inbound viewport), carves a
-    physically-contiguous, zeroed, coherent `RW` buffer below the grant's
-    `addr_limit` through the `devres::DmaAllocFacility` producer, returns the
-    CPU-VA, and copies the device-visible base (CPU-physical for the
-    coherent/`virt` case) out to a user pointer. The guarded carve has one
+    `kernel/core::devres::dma_constraint` (rejecting zero/over-max length),
+    carves a physically-contiguous, zeroed, coherent `RW` buffer below the
+    grant's `addr_limit` through the `devres::DmaAllocFacility` producer,
+    returns the CPU-VA, and copies the device-visible base out to a user
+    pointer. The device-visible base is resolved by
+    `devres::translate_device_addr`: the CPU-physical base for a coherent
+    constraint, or — for a translating inbound viewport
+    (`HwResource::dma_translated`, the Pi 4 PCIe `IB MEM 0x0..0x1ffffffff ->
+    0x4_0000_0000` `dma-ranges`) — that base re-based onto the far side of the
+    viewport, checked/fail-closed (§18.1). The guarded carve has one
     definition — `kernel/mem`'s borrowed `DmaWindowMap`, with the in-kernel
     `DmaPool` re-expressed as its owning wrapper (§2.2); `LiveSpace` gained
     `alloc_dma` + a DMA window and reclaims (zeroes + frees) every live DMA
@@ -3976,20 +3980,28 @@ keyboard never regresses (§2.17), until the final flip:
   (see P11): while the unlock is pending `users_db_read` returns
   `WouldBlock`, so `login` waits without prompting; once it resolves the
   installed database is picked up (or the deny-all prompt runs).
-- **B5 (= 5e/(d)) — the flip. NOW UNBLOCKED — do next.** B1–B4 are
-  metal-confirmed (§0.9), so the flip may land: repoint `init_spawn` off
-  `keyboard_service::bring_up_keyboard_into_tree`/`spawn_pump` to the
-  autoload path, lay the signed input-driver bundle into the `/System`
-  volume signed against the finalised production anchor, delete
-  `keyboard_service.rs` + `usb_keyboard.rs`, and evict `usb_hid` from
-  `driver_catalog::IN_KERNEL_DRIVERS` (§2.14, §18.6). The image now installs
-  the signed user-space `vcmailbox` service bundle (P10 D4) into the store, so
-  it is no longer empty; but it still carries **no input-driver bundle** until
-  this flip, so `devmgr` leaves the HID node unbound and the in-kernel scaffold
-  keyboard stays the live driver — the flip and the input bundle must land
-  together (§2.17). The image installer (`tools/mkimage` `build_rpi_image`'s
-  `drivers` seam + `cargo xtask` `commands/image_drivers.rs`) is the reusable
-  path that lays this input bundle too (P10 D4).
+- **B5 (= 5e / D5d) — the flip — DONE (whole gate green).** The image now
+  installs all four signed bundles into `/System/Drivers/` —
+  `bus_mailbox/vcmailbox`, `bus_pcie/bcm2711`, `bus_usb/vl805`,
+  `input/usb_kbd` — through `tools/xtask` `commands/image_drivers.rs` over the
+  `tools/mkimage` `drivers` seam. The in-kernel keyboard scaffold
+  (`keyboard_service.rs` + `usb_keyboard.rs`, the init-seam bring-up call, the
+  boot PCIe/mailbox stash, and `unlock_service::augment_boot_tree`) is deleted
+  (§2.14), and `driver_catalog::IN_KERNEL_DRIVERS` is the storage bootstrap
+  floor only — virtio-blk + EMMC2 (§18.6); `pcie_brcm`/`bus_usb`/`usb_hid` are
+  evicted from it and the kernel's deps/`build.rs`. The keyboard comes up
+  entirely in user space: `FdtDiscovery` seeds the discovered
+  `brcm,bcm2711-pcie` + VideoCore mailbox nodes, `devmgr` autoloads the
+  recursive chain (pcie_brcm → emits VL805 fn → vl805 reloads firmware + emits
+  `usb,xhci` → usb_kbd binds + pumps), and `autoload_caps` carries
+  `CAP_HW_EMIT` + `CAP_MAILBOX` so the bus bundles can emit nodes / call the
+  mailbox (per-driver manifest∩ still binds, §5.2). The `hw_remove_node`
+  syscall (no. 38) landed as the kernel-side mirror of `hw_emit_node`
+  (ownership-checked subtree removal + generation bump); the device-manager
+  unload reaction is Design D D4 (the bus port-watcher consumer). The live
+  enumerate→emit→autoload chain is metal-gated (§0.9): no `-M virt` Pi-USB
+  vertical exists (§0.4). **Metal acceptance:** top-down autoload from
+  `/System` and a keystroke with the scaffold gone.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

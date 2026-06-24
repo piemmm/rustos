@@ -31,7 +31,7 @@ use rustos_pci::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_brcm,
     USB_CONTROLLER_CLASS,
 };
-use rustos_usb::{XHCI_BAR_INDEX, XHCI_DMA_BYTES};
+use rustos_usb::XHCI_BAR_INDEX;
 
 use crate::{regs, BrcmPcieRc, Delay, PcieWindows};
 
@@ -147,6 +147,7 @@ where
         windows: PcieWindows {
             inbound_pcie_base: inbound.translated_base(),
             inbound_size: inbound.length(),
+            inbound_cpu_top: inbound.base(),
             outbound_cpu_base: outbound.base(),
             outbound_pcie_base: outbound.translated_base(),
             outbound_size: outbound.length(),
@@ -302,11 +303,19 @@ pub fn emit_vl805_node(
 ///   grant and the kernel's grant-coverage check admits it
 ///   (`HwResource::covers`, the BusWindow→Mmio case), and the matched driver
 ///   maps the live BAR rather than re-training the bus; and
-/// * an [`HwResource::dma`] declaring the device-visible inbound aperture top
-///   (`inbound_pcie_base + inbound_size`) and the [`XHCI_DMA_BYTES`] working
-///   set the matched driver may carve, the same shape the kernel's
-///   `dma_alloc` serves today (an untranslated constraint, `AGENTS.md`
-///   §18.1 — the Pi 4 `dma-ranges` PCIe base is 0).
+/// * the bridge's inbound DMA aperture **forwarded verbatim** as an
+///   [`HwResource::dma_translated`] — the same CPU-physical reachability
+///   ceiling (`PcieWindows::inbound_cpu_top`), extent
+///   (`PcieWindows::inbound_size`) and far-side translation
+///   (`PcieWindows::inbound_pcie_base`) the bridge driver itself holds, so
+///   the kernel's DMA-grant coverage check admits it exactly
+///   (`HwResource::covers`, the `Dma`→`Dma` case requires the identical
+///   translation) and the matched driver's `dma_alloc` resolves a
+///   device-visible bus address through the same viewport (`AGENTS.md`
+///   §18.1). On the Pi 4 this aperture is `IB MEM 0x0..0x1ffffffff ->
+///   0x4_0000_0000`, so a non-zero far-side base is the common case, not a
+///   special one; the buffer size the matched driver carves is its own
+///   concern, bounded by the aperture, never re-encoded here.
 ///
 /// The BAR is mapped only transiently here, to learn its assigned base and
 /// size; the window is dropped immediately (the matched user-space driver
@@ -317,7 +326,7 @@ pub fn emit_vl805_node(
 /// Fail-closed (`AGENTS.md` §5.4): [`DriverError::NotFound`] if the bus
 /// carries no USB-class function; [`DriverError::Unsupported`] if the host
 /// exposes no [`MmioMapper`]; [`DriverError::OutOfRange`] if the BAR lies
-/// outside the outbound window or the inbound aperture top overflows;
+/// outside the outbound window;
 /// [`DriverError::NoSpace`] if the node cannot carry its grant requests;
 /// plus any error of [`assign_and_map_bar`], [`PciBus::describe_function`],
 /// or [`DriverHost::emit_node`].
@@ -358,22 +367,18 @@ pub fn publish_usb_function(
     )
     .ok_or(DriverError::OutOfRange)?;
 
-    // The device-visible exclusive top of the inbound aperture the bridge
-    // lets the controller DMA through; the matched driver bounds its carve
-    // below it. Overflow is a malformed discovery, refused fail-closed.
-    let dma_aperture_top = windows
-        .inbound_pcie_base
-        .checked_add(windows.inbound_size)
-        .ok_or(DriverError::OutOfRange)?;
-
     // The node carries the function's `vendor:device:class` match key
     // (`describe_function`) — its identity is kernel-assigned on publish
     // (`AGENTS.md` §4 / §18.1; D5b.2a) — plus the two grant requests.
     let mut node = bus.describe_function(bdf)?;
     node.push_resource(HwResource::mmio(bar_cpu_phys, bar_len))
         .map_err(|_| DriverError::NoSpace)?;
-    node.push_resource(HwResource::dma(dma_aperture_top, XHCI_DMA_BYTES as u64))
-        .map_err(|_| DriverError::NoSpace)?;
+    node.push_resource(HwResource::dma_translated(
+        windows.inbound_cpu_top,
+        windows.inbound_size,
+        windows.inbound_pcie_base,
+    ))
+    .map_err(|_| DriverError::NoSpace)?;
     host.emit_node(node)?;
     Ok(node)
 }

@@ -7,17 +7,20 @@
 //! for a hardware-tree node (`AGENTS.md` §18.3) the kernel mints the driver
 //! one unforgeable handle per [`HwResource`] that node requested — and *no
 //! more* (§4 — no ambient authority). The `mmio_map` syscall takes such a
-//! handle and the kernel resolves it **against the calling task** through
-//! the per-task grant table that lives in
+//! handle (plus the `[offset, offset + len)` sub-region to map) and the
+//! kernel resolves it **against the calling task** through the per-task
+//! grant table that lives in
 //! [`AddressSpaceRegistry`](crate::aspace::AddressSpaceRegistry) (minted at
 //! driver admission, reclaimed when the task is withdrawn on exit — the same
 //! per-process lifecycle as the task's streams and limits, so handle forgery
 //! is rejected exactly as `irq_wait` re-checks its binding, §5.4). This
 //! module owns the two pieces of the handler that are *not* that table:
 //!
-//! * [`mappable_window`] — the input-validation half: confirm a resolved
-//!   grant names a memory window `mmio_map` can map and return its
-//!   `(phys_base, len)`, or a fail-closed [`Errno`] (`AGENTS.md` §5.4).
+//! * [`mappable_subwindow`] — the input-validation half: confirm a resolved
+//!   grant names a memory window `mmio_map` can map and the requested
+//!   sub-region lies wholly inside it, returning that sub-region's
+//!   `(phys_base, len)`, or a fail-closed [`Errno`] (`AGENTS.md` §5.4 /
+//!   §24.1).
 //! * [`MmioMapFacility`] — the *mechanism* half: map a validated physical
 //!   window into the caller's live address space. Naming a port's concrete
 //!   page table and direct physical map is irreducibly architecture-specific
@@ -158,8 +161,10 @@ impl MmioMapFacility for NullMmioMapFacility {
 /// `KernelSyscallHandlers::with_mmio_map_facility`.
 pub static NULL_MMIO_MAP_FACILITY: NullMmioMapFacility = NullMmioMapFacility;
 
-/// Validate that a granted [`HwResource`] is a memory window `mmio_map`
-/// can map, returning the `(phys_base, len)` the [`MmioMapFacility`] takes.
+/// Validate that the caller's `[offset, offset + len)` sub-region of a
+/// granted [`HwResource`] is a memory window `mmio_map` can map, returning
+/// the `(phys_base, len)` the [`MmioMapFacility`] takes (the sub-region's
+/// physical base and length).
 ///
 /// This is the input-validation half of the `mmio_map` handler, kept here
 /// as a pure function so it is exercised directly by unit tests
@@ -172,33 +177,55 @@ pub static NULL_MMIO_MAP_FACILITY: NullMmioMapFacility = NullMmioMapFacility;
 ///   [`HwResourceKind::Irq`], or [`HwResourceKind::Dma`] grant is **not** a
 ///   mappable window and is refused with [`Errno::OutOfRange`], even though
 ///   its required capability may also be `CAP_MMIO_MAP`;
-/// * the length must be non-zero and fit in `usize` on the target;
-/// * `base + len` must not overflow the address space.
+/// * `len` must be non-zero and fit in `usize` on the target;
+/// * `[offset, offset + len)` must lie **wholly inside** the granted
+///   window (`offset + len <= resource.length()`) — a driver maps a
+///   sub-region *inside* its grant, never past it (`AGENTS.md` §4 — no
+///   ambient authority; §18.3). Mapping a bounded sub-region is what lets a
+///   driver granted a large outbound bus aperture map just the single BAR
+///   it enumerated, instead of the whole 1 GiB window (`AGENTS.md` §24.1);
+/// * `base + offset + len` must not overflow the address space.
 ///
 /// # Errors
 ///
 /// * [`Errno::OutOfRange`] — the resource is not a mappable memory window,
-///   or its wire discriminant is unknown.
-/// * [`Errno::LengthOutOfRange`] — the length is zero, exceeds `usize`, or
-///   `base + len` overflows.
-pub fn mappable_window(resource: &HwResource) -> Result<(u64, usize), Errno> {
+///   its wire discriminant is unknown, or the sub-region escapes the
+///   granted window.
+/// * [`Errno::LengthOutOfRange`] — `len` is zero, exceeds `usize`, or the
+///   absolute `base + offset + len` overflows.
+pub fn mappable_subwindow(
+    resource: &HwResource,
+    offset: u64,
+    len: usize,
+) -> Result<(u64, usize), Errno> {
     match resource.kind() {
         Some(HwResourceKind::Mmio | HwResourceKind::BusWindow) => {}
         // A known-but-non-window kind, or an unknown discriminant, is the
         // wrong shape for `mmio_map`; refuse rather than mapping it.
         _ => return Err(Errno::OutOfRange),
     }
-    let base = resource.base();
-    let len_u64 = resource.length();
-    if len_u64 == 0 {
+    if len == 0 {
         return Err(Errno::LengthOutOfRange);
     }
-    let len = usize::try_from(len_u64).map_err(|_| Errno::LengthOutOfRange)?;
-    // The window must lie within the address space: a base + len that
-    // overflows names no real region (`AGENTS.md` §5.4 — validate every
-    // input; fail closed rather than wrapping).
-    base.checked_add(len_u64).ok_or(Errno::LengthOutOfRange)?;
-    Ok((base, len))
+    let len_u64 = u64::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
+    // The requested sub-region must lie wholly inside the granted window:
+    // `offset + len <= grant length`. A sub-region that escapes the grant
+    // would reach memory the driver was never granted, so it is refused
+    // (`AGENTS.md` §5.4 — fail closed; §4 — no ambient authority).
+    let end = offset.checked_add(len_u64).ok_or(Errno::OutOfRange)?;
+    if end > resource.length() {
+        return Err(Errno::OutOfRange);
+    }
+    // The absolute physical base of the sub-region; an overflow names no
+    // real region (`AGENTS.md` §5.4 — validate every input, never wrap).
+    let phys_base = resource
+        .base()
+        .checked_add(offset)
+        .ok_or(Errno::LengthOutOfRange)?;
+    phys_base
+        .checked_add(len_u64)
+        .ok_or(Errno::LengthOutOfRange)?;
+    Ok((phys_base, len))
 }
 
 /// The validated shape of a granted DMA constraint the `dma_alloc` handler
@@ -248,6 +275,54 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
     })
 }
 
+/// Resolve the **device-visible** base address a driver programs into its
+/// hardware from the CPU-physical base the carve produced, honouring the
+/// grant's inbound-viewport translation (`AGENTS.md` §18.1).
+///
+/// This is the output half of the `dma_alloc` handler, kept here as a pure
+/// function so the translation arithmetic is exercised directly by unit
+/// tests (`AGENTS.md` §5.4):
+///
+/// * An **untranslated** (coherent) constraint (`translated_base == 0`) — a
+///   coherent bus, the QEMU `virt` stand-in, the `VideoCore` mailbox carve —
+///   names the device by the CPU-physical base itself, returned unchanged.
+/// * A **translating inbound viewport** (`translated_base != 0`) — a PCIe
+///   root complex's `dma-ranges`, e.g. the Pi 4's `IB MEM 0x0..0x1ffffffff
+///   -> 0x4_0000_0000` — maps the CPU window `[cpu_base, addr_limit)` onto
+///   the bus window `[translated_base, translated_base + max_len)`, where
+///   `cpu_base = addr_limit - max_len`. A buffer carved at CPU-physical
+///   `cpu_phys` is therefore seen by the device at
+///   `translated_base + (cpu_phys - cpu_base)`. The carve was already
+///   bounded below `addr_limit` by the facility, so it cannot exceed the
+///   viewport's top; this only re-bases it onto the far side.
+///
+/// Every step is checked: a `cpu_phys` below the viewport's CPU base, a
+/// base at or past the aperture top, or a far-side overflow fails closed
+/// with [`Errno::OutOfRange`] (`AGENTS.md` §2.9) rather than handing back a
+/// wrapped or out-of-aperture device address.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] when the CPU-physical base does not lie within the
+/// translating viewport's CPU window, or the translated address overflows.
+pub fn translate_device_addr(constraint: &DmaConstraint, cpu_phys: u64) -> Result<u64, Errno> {
+    if constraint.translated_base == 0 {
+        return Ok(cpu_phys);
+    }
+    let cpu_base = constraint
+        .addr_limit
+        .checked_sub(constraint.max_len)
+        .ok_or(Errno::OutOfRange)?;
+    let offset = cpu_phys.checked_sub(cpu_base).ok_or(Errno::OutOfRange)?;
+    if offset >= constraint.max_len {
+        return Err(Errno::OutOfRange);
+    }
+    constraint
+        .translated_base
+        .checked_add(offset)
+        .ok_or(Errno::OutOfRange)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,45 +340,84 @@ mod tests {
     }
 
     #[test]
-    fn mappable_window_accepts_mmio_and_bus_windows() {
+    fn mappable_subwindow_accepts_the_whole_mmio_and_bus_windows() {
+        // Offset 0, full length: the whole granted window (the register-block
+        // case where the request equals the grant).
         let mmio = HwResource::mmio(0xFE98_0000, 0x4000);
-        assert_eq!(mappable_window(&mmio), Ok((0xFE98_0000, 0x4000)));
+        assert_eq!(
+            mappable_subwindow(&mmio, 0, 0x4000),
+            Ok((0xFE98_0000, 0x4000))
+        );
 
         let bus = HwResource::bus_window(0x6000_0000, 0x400_0000, 0xF800_0000);
-        assert_eq!(mappable_window(&bus), Ok((0x6000_0000, 0x400_0000)));
+        assert_eq!(
+            mappable_subwindow(&bus, 0, 0x400_0000),
+            Ok((0x6000_0000, 0x400_0000))
+        );
     }
 
     #[test]
-    fn mappable_window_rejects_non_window_kinds() {
+    fn mappable_subwindow_maps_only_the_requested_sub_region() {
+        // A small BAR inside a large (1 GiB) outbound bus window: the
+        // sub-region's absolute physical base is `grant.base() + offset` and
+        // its length is the request, never the whole 1 GiB grant
+        // (`AGENTS.md` §24.1 — the defect this fixes).
+        let bus = HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000);
+        assert_eq!(
+            mappable_subwindow(&bus, 0x3D50_0000, 0x1000),
+            Ok((0x6_3D50_0000, 0x1000))
+        );
+    }
+
+    #[test]
+    fn mappable_subwindow_rejects_a_sub_region_escaping_the_grant() {
+        // `offset + len` past the granted window would reach memory the
+        // driver was never granted: refused fail-closed (`AGENTS.md` §4).
+        let mmio = HwResource::mmio(0xFE98_0000, 0x4000);
+        assert_eq!(
+            mappable_subwindow(&mmio, 0x3000, 0x2000),
+            Err(Errno::OutOfRange)
+        );
+        // An offset already at the end, any non-zero len: still out of range.
+        assert_eq!(
+            mappable_subwindow(&mmio, 0x4000, 0x1000),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn mappable_subwindow_rejects_non_window_kinds() {
         // A DMA constraint, an IRQ line, and an x86 port range are not
         // memory windows `mmio_map` can map.
         assert_eq!(
-            mappable_window(&HwResource::dma(0x4000_0000, 0)),
+            mappable_subwindow(&HwResource::dma(0x4000_0000, 0), 0, 0x1000),
             Err(Errno::OutOfRange)
         );
         assert_eq!(
-            mappable_window(&HwResource::irq(33, 1)),
+            mappable_subwindow(&HwResource::irq(33, 1), 0, 0x1000),
             Err(Errno::OutOfRange)
         );
         assert_eq!(
-            mappable_window(&HwResource::port(0x3F8, 8)),
+            mappable_subwindow(&HwResource::port(0x3F8, 8), 0, 0x1000),
             Err(Errno::OutOfRange)
         );
     }
 
     #[test]
-    fn mappable_window_rejects_zero_length() {
+    fn mappable_subwindow_rejects_zero_length() {
         assert_eq!(
-            mappable_window(&HwResource::mmio(0xFE00_0000, 0)),
+            mappable_subwindow(&HwResource::mmio(0xFE00_0000, 0x1000), 0, 0),
             Err(Errno::LengthOutOfRange)
         );
     }
 
     #[test]
-    fn mappable_window_rejects_overflowing_window() {
-        // base + len wraps the 64-bit address space: no real region.
+    fn mappable_subwindow_rejects_overflowing_window() {
+        // base + offset + len wraps the 64-bit address space: no real region.
+        // The grant length is large enough that the bound check passes and the
+        // absolute-base overflow is the rejecting condition.
         assert_eq!(
-            mappable_window(&HwResource::mmio(u64::MAX - 0x10, 0x1000)),
+            mappable_subwindow(&HwResource::mmio(u64::MAX - 0x10, u64::MAX), 0, 0x1000),
             Err(Errno::LengthOutOfRange)
         );
     }
@@ -368,6 +482,56 @@ mod tests {
         );
         assert_eq!(
             dma_constraint(&HwResource::port(0x3F8, 8)),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn translate_device_addr_passes_an_untranslated_constraint_through() {
+        // A coherent (untranslated) constraint names the device by the
+        // CPU-physical base unchanged.
+        let coherent = dma_constraint(&HwResource::dma(0x4000_0000, 0x1_0000)).unwrap();
+        assert_eq!(translate_device_addr(&coherent, 0x10_0000), Ok(0x10_0000));
+        // A zero base passes through too.
+        assert_eq!(translate_device_addr(&coherent, 0), Ok(0));
+    }
+
+    #[test]
+    fn translate_device_addr_rebases_a_translating_viewport() {
+        // The Pi 4 inbound viewport: CPU window [0, 0x2_0000_0000) mapped onto
+        // bus window [0x4_0000_0000, 0x6_0000_0000) (cpu_base = top - len = 0).
+        // A buffer carved at CPU-physical 0x10_0000 is seen by the device at
+        // 0x4_0000_0000 + 0x10_0000.
+        let viewport = dma_constraint(&HwResource::dma_translated(
+            0x2_0000_0000,
+            0x2_0000_0000,
+            0x4_0000_0000,
+        ))
+        .unwrap();
+        assert_eq!(
+            translate_device_addr(&viewport, 0x10_0000),
+            Ok(0x4_0010_0000)
+        );
+        // The lowest CPU address maps to the far-side base exactly.
+        assert_eq!(translate_device_addr(&viewport, 0), Ok(0x4_0000_0000));
+    }
+
+    #[test]
+    fn translate_device_addr_rebases_a_nonzero_cpu_base_viewport() {
+        // A viewport whose CPU window does not start at 0: top 0x3000,
+        // extent 0x1000 → cpu_base 0x2000, mapped onto bus base 0x9000_0000.
+        let viewport =
+            dma_constraint(&HwResource::dma_translated(0x3000, 0x1000, 0x9000_0000)).unwrap();
+        assert_eq!(translate_device_addr(&viewport, 0x2000), Ok(0x9000_0000));
+        assert_eq!(translate_device_addr(&viewport, 0x2800), Ok(0x9000_0800));
+        // A base below the viewport's CPU base fails closed (never wraps).
+        assert_eq!(
+            translate_device_addr(&viewport, 0x1000),
+            Err(Errno::OutOfRange)
+        );
+        // A base at the aperture top is out of the viewport.
+        assert_eq!(
+            translate_device_addr(&viewport, 0x3000),
             Err(Errno::OutOfRange)
         );
     }

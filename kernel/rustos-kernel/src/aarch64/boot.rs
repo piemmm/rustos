@@ -284,11 +284,12 @@ pub fn boot(
     let video_doorbell = early.video.map_or(console_base as u64, |v| v.doorbell_base);
     // The BCM2711 PCIe root complex's controller register block and its
     // outbound MMIO window (where the enumerated VL805 BAR lives) are MMIO
-    // the in-kernel USB-keyboard service maps at their identity address
-    // (`crate::keyboard_service`), so their gigapages must be typed Device
-    // like the UART/GIC. Derived from the discovered `brcm,bcm2711-pcie`
-    // node, never assumed; with no such node (the QEMU `virt` shape) the
-    // console base stands in as a harmless duplicate input (§18.4 / §18.5).
+    // the autoloaded user-space PCIe bus driver (`drivers/bus/pcie_brcm`) maps
+    // through `mmio_map` from its node's grants, so their gigapages must be
+    // typed Device like the UART/GIC. Derived from the discovered
+    // `brcm,bcm2711-pcie` node, never assumed; with no such node (the QEMU
+    // `virt` shape) the console base stands in as a harmless duplicate input
+    // (§18.4 / §18.5).
     let (pcie_regs, pcie_outbound) = early
         .pcie
         .map_or((console_base as u64, console_base as u64), |p| {
@@ -351,28 +352,21 @@ pub fn boot(
         "pi-beacon 4/6: mmu enable FAILED (running mmu-off)"
     });
 
-    // Hand the discovered PCIe windows to the PID 1 spawn seam, which
-    // starts the USB-keyboard service kthread once the scheduler is up
-    // (`plans/PI.md` P10). This MUST run *after* the MMU is enabled: the
-    // seam's `SpinLock` uses an exclusive `compare_exchange` (an atomic
-    // RMW) which is UNPREDICTABLE on the MMU-off Device-typed memory the
-    // boot CPU runs on — the same hazard the allocator and scheduler wait
-    // for the MMU to clear (`plans/PI.md` P6c-2). The windows were read
-    // pre-MMU (a `Copy` value already folded into the identity map's
-    // Device mask above) and are only consumed much later at PID 1 spawn,
-    // so recording them here is purely a deferred store. A board with no
-    // bridge (the QEMU `virt` shape) recorded nothing and the keyboard
-    // service is never started — fail closed, boot continues either way
-    // (`AGENTS.md` §2.9 / §18.4).
+    // Log the discovered PCIe root-complex windows once, post-MMU. The
+    // windows themselves reach the autoloaded user-space PCIe bus driver as
+    // resource grants on the discovered `brcm,bcm2711-pcie` hardware-tree
+    // node (emitted by `FdtDiscovery`), not through any kernel-side stash:
+    // `devmgr` autoloads `drivers/bus/pcie_brcm`, which maps the register
+    // window with `mmio_map` and drives the chain (`plans/PI.md` P10 D5d,
+    // `AGENTS.md` §18 / §4). This log is purely a metal diagnostic.
     if let Some(pcie) = early.pcie {
-        // Log the discovered chipset windows once, post-MMU: a metal
-        // capture then shows exactly which BCM2711 PCIe root-complex
-        // register block and inbound/outbound apertures the in-kernel USB
-        // chain will program, so a silent keyboard can be bisected against
-        // the hardware actually found rather than guessed at (the issue's
-        // "discovered chipsets"). Allocation-free hex rendering on the boot
-        // stack, exactly like the consolidated boot line below
-        // (`AGENTS.md` §2.9 — the log path never allocates or panics).
+        // A metal capture then shows exactly which BCM2711 PCIe root-complex
+        // register block and inbound/outbound apertures the discovered node
+        // carries, so a silent keyboard can be bisected against the hardware
+        // actually found rather than guessed at. Allocation-free hex
+        // rendering on the boot stack, exactly like the consolidated boot
+        // line below (`AGENTS.md` §2.9 — the log path never allocates or
+        // panics).
         let mut regs_base_buf = [0u8; 16];
         let mut regs_len_buf = [0u8; 16];
         let mut aperture_top_buf = [0u8; 16];
@@ -424,12 +418,8 @@ pub fn boot(
                 ],
             },
         );
-        crate::keyboard_service::record_discovery(pcie);
-        if let Some(video) = early.video {
-            crate::keyboard_service::record_mailbox_doorbell(video.doorbell_base);
-        }
     }
-    serial::beacon("pi-beacon 4a/6: pcie discovery recorded (post-mmu)");
+    serial::beacon("pi-beacon 4a/6: pcie discovery logged (post-mmu)");
 
     // Discover the rest of the board from the firmware device tree: the
     // `/memory` window, the timer rate, and the PSCI conduit (P3 + P4 +
@@ -716,8 +706,7 @@ impl HwNodeSink for DiscoveredTreeSink {
 }
 
 /// Resolve and audit which discovered storage node binds the bootstrap
-/// root block driver (`AGENTS.md` §18.3 / §18.6), the storage analogue of
-/// the keyboard bind gate ([`crate::keyboard_service`]).
+/// root block driver (`AGENTS.md` §18.3 / §18.6).
 ///
 /// Read-only: it walks the firmware tree (safe with the MMU **on** — the
 /// caller enables it first; a whole-tree traversal faults MMU-off,

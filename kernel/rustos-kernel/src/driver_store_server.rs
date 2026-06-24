@@ -39,7 +39,8 @@ use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
 use rustos_abi::driver_store::{self, StoreRequest, DRIVER_STORE_ENDPOINT, LOAD_REQUEST_LEN};
-use rustos_abi::{Errno, HwNode};
+use rustos_abi::hwtree::HwResource;
+use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
 use rustos_crypto::Ed25519PublicKey;
 use rustos_devmgr::DriverLoader;
@@ -50,6 +51,7 @@ use rustos_kernel_sec::captable::TaskCapabilities;
 use rustos_log::Sink;
 
 use crate::driver_spawn_loader::{DriverProcessSpawn, SpawnDriverLoader};
+use crate::hwtree_store::HwTreeStore;
 use crate::root_mount::RootVolume;
 use crate::system_files::SystemFileService;
 
@@ -111,6 +113,32 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
     )
 }
 
+/// Resolves a matched hardware-tree `node_id` to the resource grants the
+/// loaded driver receives, read from the **live** inventory.
+///
+/// A [`StoreRequest::Load`] names the `node_id` the device manager matched
+/// against the catalogue; the kernel mints exactly that node's grants and
+/// nothing more (`AGENTS.md` §4 — no ambient authority, the grants originate
+/// kernel-side). Resolution MUST consult the live tree, not a boot snapshot:
+/// a user-space bus driver publishes its enumerated children at runtime
+/// through `hw_emit_node`, and the device manager loads a driver for such a
+/// child the instant it appears (`AGENTS.md` §18.3 / §18.4). Resolving
+/// against a frozen snapshot would fail every runtime-emitted node closed and
+/// stall the recursive bus chain.
+pub trait HwNodeResolver {
+    /// The resource grants of the live non-root node `node_id`, or `None`
+    /// when no live non-root node has that id (fail closed, `AGENTS.md`
+    /// §5.4). The returned grants are owned so resolution holds no live-tree
+    /// lock across the spawn.
+    fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>>;
+}
+
+impl HwNodeResolver for HwTreeStore {
+    fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {
+        HwTreeStore::resolve_resources(self, node_id)
+    }
+}
+
 /// The kernel-side mechanism the driver-store server keeps in its trusted
 /// base to serve a [`StoreRequest::Load`] (`AGENTS.md` §4 — only *policy*,
 /// the matching, lives in the user-space device manager).
@@ -118,8 +146,8 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
 /// It bundles the signed-load inputs ([`SpawnDriverLoader`] needs) the
 /// device manager must never see — the driver-signing trust anchors, the
 /// gate capability set, and the architecture process-spawn seam — together
-/// with the discovered hardware tree the server resolves a matched
-/// `node_id` to its resource grants against (`AGENTS.md` §18.3 / §18.1).
+/// with the live hardware tree the server resolves a matched `node_id` to
+/// its resource grants against (`AGENTS.md` §18.3 / §18.1).
 ///
 /// All references are borrowed for the life of the serve loop on the
 /// disk-owning kthread's frame; the context holds no authority of its own.
@@ -135,10 +163,14 @@ pub struct StoreServeContext<'a> {
     /// The architecture process-creation seam each verified driver is
     /// spawned through (`AGENTS.md` §17.1 / §2.2).
     pub spawn: &'a dyn DriverProcessSpawn,
-    /// The discovered hardware tree a matched `node_id` is resolved against
-    /// to mint exactly that node's resource grants (`AGENTS.md` §18.1 /
-    /// §18.3 — no ambient authority, the grants originate kernel-side).
-    pub tree: &'a [HwNode],
+    /// The **live** hardware inventory a matched `node_id` is resolved
+    /// against to mint exactly that node's resource grants (`AGENTS.md`
+    /// §18.1 / §18.3 — no ambient authority, the grants originate
+    /// kernel-side). Backed by [`crate::hwtree_store::HW_TREE`] in
+    /// production, so a node a user-space bus driver emits at runtime is
+    /// resolvable the moment it is published (`AGENTS.md` §18.4) — never a
+    /// frozen boot snapshot.
+    pub nodes: &'a dyn HwNodeResolver,
 }
 
 /// Decode and serve one driver-store [`StoreRequest`] against `service`,
@@ -149,11 +181,18 @@ pub struct StoreServeContext<'a> {
 ///   and the bind table the kernel decoded from its signed manifest
 ///   ([`driver_store::encode_catalogue_reply`], `AGENTS.md` §18.6). No bytes
 ///   and no `/System` path cross to the caller.
-/// * [`StoreRequest::Load`] → re-scan the store, resolve the named
-///   `bundle_id` to its path and the matched `node_id` to its resource
-///   grants, run the full signed §8 load gate, and spawn the driver into its
-///   own process with **only** those grants ([`SpawnDriverLoader`],
-///   `AGENTS.md` §18.3 / §4); the reply carries the loaded driver's handle.
+/// * [`StoreRequest::Load`] → resolve the named `bundle_id` to its path in
+///   the pre-scanned `store` and the matched `node_id` to its resource
+///   grants in the live tree, run the full signed §8 load gate, and spawn
+///   the driver into its own process with **only** those grants
+///   ([`SpawnDriverLoader`], `AGENTS.md` §18.3 / §4); the reply carries the
+///   loaded driver's handle.
+///
+/// `store` is the one scan of the read-only `/System` store performed once
+/// at serve start ([`serve_system_store`]); neither a catalogue nor a load
+/// re-reads or re-verifies the whole store, so serving a request is O(1) in
+/// the number of bundles, not a full re-scan (`AGENTS.md` §2.16). A load
+/// reads only the single matched bundle's bytes to spawn it.
 ///
 /// Every error — a malformed request, an out-of-range `bundle_id`, an
 /// unknown `node_id`, a gate refusal, a reply that will not fit
@@ -164,6 +203,7 @@ pub struct StoreServeContext<'a> {
 pub fn build_reply<F>(
     service: &SystemFileService<'_, F>,
     ctx: &StoreServeContext<'_>,
+    store: &DriverStore,
     request: &[u8],
     audit: &dyn Sink,
 ) -> Vec<u8>
@@ -171,7 +211,7 @@ where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
     let mut buf = alloc::vec![0u8; DRIVER_STORE_MAX_REPLY as usize];
-    let written = encode_reply_into(&mut buf, service, ctx, request, audit);
+    let written = encode_reply_into(&mut buf, service, ctx, store, request, audit);
     buf.truncate(written);
     buf
 }
@@ -186,6 +226,7 @@ fn encode_reply_into<F>(
     buf: &mut [u8],
     service: &SystemFileService<'_, F>,
     ctx: &StoreServeContext<'_>,
+    store: &DriverStore,
     request: &[u8],
     audit: &dyn Sink,
 ) -> usize
@@ -194,9 +235,9 @@ where
 {
     let result = match StoreRequest::decode(request) {
         Err(err) => driver_store::encode_error_reply(buf, err),
-        Ok(StoreRequest::Catalogue) => catalogue_reply(buf, service, audit),
+        Ok(StoreRequest::Catalogue) => catalogue_reply(buf, store),
         Ok(StoreRequest::Load { bundle_id, node_id }) => {
-            load_reply(buf, service, ctx, bundle_id, node_id, audit)
+            load_reply(buf, service, ctx, store, bundle_id, node_id, audit)
         }
     };
     result.unwrap_or_else(|err| {
@@ -206,30 +247,23 @@ where
     })
 }
 
-/// Scan the signed store and frame the catalogue: one `(bundle_id,
+/// Frame the catalogue from the pre-scanned `store`: one `(bundle_id,
 /// bind_keys)` entry per accepted bundle, where `bundle_id` is the bundle's
 /// index in the deterministic scan order (`AGENTS.md` §18.6).
 ///
-/// The scan reads each bundle's bytes through `service` and decodes its bind
-/// table fail-closed; a malformed bundle is skipped inside the scan and
-/// never appears as a candidate (`AGENTS.md` §18.4 / §5.4). No bundle bytes
-/// and no `/System` path leave the kernel — only the opaque id and the
-/// decoded keys the device manager matches against (`AGENTS.md` §4).
-fn catalogue_reply<F>(
-    buf: &mut [u8],
-    service: &SystemFileService<'_, F>,
-    audit: &dyn Sink,
-) -> Result<usize, Errno>
-where
-    F: FilesystemRead + FilesystemSecurity + ?Sized,
-{
-    let store = scan_store_view(service, audit);
+/// `store` is the single scan [`serve_system_store`] performed once over the
+/// read-only `/System` store; framing the catalogue re-reads nothing
+/// (`AGENTS.md` §2.16). No bundle bytes and no `/System` path leave the
+/// kernel — only the opaque id and the decoded keys the device manager
+/// matches against (`AGENTS.md` §4).
+fn catalogue_reply(buf: &mut [u8], store: &DriverStore) -> Result<usize, Errno> {
     let drivers = store.drivers();
     let mut entries: Vec<(u32, &[rustos_abi::DriverBindKey])> = Vec::with_capacity(drivers.len());
     for (index, driver) in drivers.iter().enumerate() {
         // `bundle_id` is the scan-order index; the scan is deterministic over
-        // the static read-only store, so a subsequent `Load` re-scan resolves
-        // the same id to the same bundle (`AGENTS.md` §18.6 / §2.16).
+        // the static read-only store, so a subsequent `Load` resolves the
+        // same id to the same bundle in the same cached scan (`AGENTS.md`
+        // §18.6 / §2.16).
         let bundle_id = u32::try_from(index).map_err(|_| Errno::LengthOutOfRange)?;
         entries.push((bundle_id, driver.bind_keys()));
     }
@@ -247,6 +281,7 @@ fn load_reply<F>(
     buf: &mut [u8],
     service: &SystemFileService<'_, F>,
     ctx: &StoreServeContext<'_>,
+    store: &DriverStore,
     bundle_id: u32,
     node_id: u32,
     audit: &dyn Sink,
@@ -254,22 +289,26 @@ fn load_reply<F>(
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    match load_matched_driver(service, ctx, bundle_id, node_id, audit) {
+    match load_matched_driver(service, ctx, store, bundle_id, node_id, audit) {
         Ok(handle) => driver_store::encode_load_reply(buf, handle),
         Err(err) => driver_store::encode_error_reply(buf, err),
     }
 }
 
 /// The load mechanism behind [`load_reply`]: index `bundle_id` into the
-/// store scan, resolve `node_id`'s grants, and run [`SpawnDriverLoader`].
+/// pre-scanned `store`, resolve `node_id`'s grants from the live tree, and
+/// run [`SpawnDriverLoader`].
 ///
 /// Returns the spawned driver's handle, or the fail-closed [`Errno`] of the
 /// first failed step (`AGENTS.md` §5.4): an out-of-range `bundle_id`
 /// ([`Errno::NotFound`]), an unknown `node_id` ([`Errno::NotFound`]), or the
-/// signed-gate refusal the loader maps from `drvhost::HostError`.
+/// signed-gate refusal the loader maps from `drvhost::HostError`. Only the
+/// one matched bundle's bytes are read (by [`SpawnDriverLoader`]); the store
+/// is not re-scanned (`AGENTS.md` §2.16).
 fn load_matched_driver<F>(
     service: &SystemFileService<'_, F>,
     ctx: &StoreServeContext<'_>,
+    store: &DriverStore,
     bundle_id: u32,
     node_id: u32,
     audit: &dyn Sink,
@@ -277,31 +316,37 @@ fn load_matched_driver<F>(
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    let store = scan_store_view(service, audit);
     let index = usize::try_from(bundle_id).map_err(|_| Errno::NotFound)?;
     let driver = store.drivers().get(index).ok_or(Errno::NotFound)?;
     // The grants the loaded driver receives originate kernel-side, from the
-    // discovered tree's matched node — never from the (untrusted) caller
-    // (`AGENTS.md` §4 — no ambient authority). An unknown node fails closed.
-    let node = ctx
-        .tree
-        .iter()
-        .find(|node| !node.is_root() && node.id() == node_id)
+    // **live** tree's matched node — never from the (untrusted) caller
+    // (`AGENTS.md` §4 — no ambient authority). Resolving against the live
+    // inventory (not a boot snapshot) is what lets a node a user-space bus
+    // driver published at runtime through `hw_emit_node` be loaded the moment
+    // it appears (`AGENTS.md` §18.4). An unknown node fails closed.
+    let resources = ctx
+        .nodes
+        .resolve_resources(node_id)
         .ok_or(Errno::NotFound)?;
-    let resources = node.resources();
     // Thread the matched node's id into the loader so the kernel records it
     // against the spawned driver: a child the driver later publishes through
     // `hw_emit_node` is parented under *this* node, and the driver cannot
     // forge its tree position (`AGENTS.md` §4 / §18.3).
     let mut loader =
         SpawnDriverLoader::new(ctx.trusted, service, audit, ctx.spawn, &[], Some(node_id));
-    let handle = loader.load(driver.path(), resources, &ctx.caps)?;
+    let handle = loader.load(driver.path(), &resources, &ctx.caps)?;
     Ok(handle.as_u64())
 }
 
 /// Run [`scan_store`] over the mounted `/System` store reachable through
 /// `service`, returning the accepted-bundle view both the catalogue and the
 /// load resolve against (`AGENTS.md` §2.2 — one scan definition).
+///
+/// Called **once**, at [`serve_system_store`] start: the `/System` store is
+/// read-only at runtime (`AGENTS.md` §16.2), so its accepted-bundle view is
+/// immutable for the life of the system and is cached rather than rebuilt
+/// per request — every bundle is read and bind-decoded exactly once, not
+/// once per catalogue and once per load (`AGENTS.md` §2.16).
 fn scan_store_view<F>(service: &SystemFileService<'_, F>, audit: &dyn Sink) -> DriverStore
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
@@ -323,6 +368,7 @@ where
 pub fn serve_pending<F>(
     service: &SystemFileService<'_, F>,
     ctx: &StoreServeContext<'_>,
+    store: &DriverStore,
     endpoint: &CallEndpoint,
     audit: &dyn Sink,
 ) -> bool
@@ -335,7 +381,7 @@ where
     let RecvCall::Received(call) = endpoint.recv_call(usize::MAX) else {
         return false;
     };
-    let reply = build_reply(service, ctx, &call.request, audit);
+    let reply = build_reply(service, ctx, store, &call.request, audit);
     // A reply failure (oversize / unknown ticket) is itself fail-closed and
     // audited inside `CallEndpoint::reply`; the caller is still woken so it
     // re-checks and abandons rather than parking forever (`AGENTS.md` §2.9).
@@ -369,10 +415,13 @@ where
 /// metal-proven device-driving model is unchanged).
 ///
 /// `ctx` carries the kernel-side load mechanism (trust anchors, gate
-/// capabilities, the architecture spawn seam) and the discovered hardware
-/// tree a matched `node_id` is resolved against, so a [`StoreRequest::Load`]
-/// runs the signed §8 gate and spawn on this kthread's frame (`AGENTS.md`
-/// §18.3 / §4 — the device manager owns matching policy only).
+/// capabilities, the architecture spawn seam) and the **live** hardware
+/// inventory a matched `node_id` is resolved against, so a
+/// [`StoreRequest::Load`] runs the signed §8 gate and spawn on this
+/// kthread's frame (`AGENTS.md` §18.3 / §4 — the device manager owns
+/// matching policy only). The read-only `/System` store is scanned **once**
+/// here and cached for the life of the serve loop, so no request triggers a
+/// re-scan (`AGENTS.md` §16.2 / §2.16).
 ///
 /// # Errors
 ///
@@ -405,9 +454,17 @@ pub fn serve_system_store(
     // bind would have fail-softed to empty and never retried (`AGENTS.md`
     // §18.4). The node set is unchanged; the re-evaluation is idempotent.
     crate::hwtree_store::HW_TREE.bump();
+    // Scan the read-only `/System` store exactly once: it cannot change at
+    // runtime (`AGENTS.md` §16.2), so its accepted-bundle view is immutable
+    // and is cached for the life of the serve loop. Every catalogue and every
+    // load resolves its `bundle_id` against this one scan; a load reads only
+    // the single matched bundle's bytes to spawn it, never the whole store
+    // again (`AGENTS.md` §2.16 — the per-request full re-scan this replaces
+    // turned each driver load into an O(bundles) re-read).
+    let store = scan_store_view(&service, audit);
     loop {
         // Drain every pending call first.
-        if serve_pending(&service, ctx, &endpoint, audit) {
+        if serve_pending(&service, ctx, &store, &endpoint, audit) {
             continue;
         }
         // Nothing pending: park off the run queue until a request is posted
@@ -422,7 +479,7 @@ pub fn serve_system_store(
                 rustos_kernel_core::SERVE_WAITQ.register(task, rustos_kernel_core::NO_DEADLINE);
                 // Re-check after registering: if a call arrived in the
                 // register window, serve it and skip the park.
-                if serve_pending(&service, ctx, &endpoint, audit) {
+                if serve_pending(&service, ctx, &store, &endpoint, audit) {
                     rustos_kernel_core::SERVE_WAITQ.deregister(task);
                     continue;
                 }
@@ -448,10 +505,10 @@ mod tests {
     use rustos_abi::driver_store::{
         decode_catalogue_reply, decode_load_reply, reply_status, StoreRequest,
     };
-    use rustos_abi::hwtree::HwResource;
+    use rustos_abi::hwtree::{HwResource, HW_NODE_ROOT};
     use rustos_abi::{
-        CapabilityId, DriverBindKey, DriverKind, DriverManifest, HwDeviceClass, HwMatchKey,
-        ABI_VERSION_CURRENT, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, HW_NODE_ROOT,
+        CapabilityId, DriverBindKey, DriverKind, DriverManifest, HwDeviceClass, HwMatchKey, HwNode,
+        ABI_VERSION_CURRENT, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS,
     };
 
     use crate::system_files::SystemFileService;
@@ -609,16 +666,36 @@ mod tests {
         ]
     }
 
+    /// A [`HwNodeResolver`] backed by a fixed `&[HwNode]` slice, standing in
+    /// for the global live [`crate::hwtree_store::HW_TREE`] so a test drives
+    /// the load gate with an explicit node set.
+    struct SliceNodes<'a>(&'a [HwNode]);
+    impl HwNodeResolver for SliceNodes<'_> {
+        fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {
+            self.0
+                .iter()
+                .find(|node| !node.is_root() && node.id() == node_id)
+                .map(|node| node.resources().to_vec())
+        }
+    }
+
+    /// Scan `service` into the cached [`DriverStore`] the serve path builds
+    /// once at startup, so a test resolves `bundle_id`s exactly as production
+    /// (`AGENTS.md` §2.16 — one scan, not one per request).
+    fn store_of(service: &SystemFileService<'_, MockRootFs>) -> DriverStore {
+        scan_store_view(service, &NullSink)
+    }
+
     fn ctx<'a>(
         trusted: &'a [Ed25519PublicKey],
         spawn: &'a dyn DriverProcessSpawn,
-        tree: &'a [HwNode],
+        nodes: &'a dyn HwNodeResolver,
     ) -> StoreServeContext<'a> {
         StoreServeContext {
             trusted,
             caps: gate_caps(),
             spawn,
-            tree,
+            nodes,
         }
     }
 
@@ -626,9 +703,10 @@ mod tests {
         service: &SystemFileService<'_, MockRootFs>,
         ctx: &StoreServeContext<'_>,
     ) -> Vec<u8> {
+        let store = store_of(service);
         let mut req = [0u8; 8];
         let n = StoreRequest::Catalogue.encode(&mut req).expect("encode");
-        build_reply(service, ctx, &req[..n], &NullSink)
+        build_reply(service, ctx, &store, &req[..n], &NullSink)
     }
 
     #[test]
@@ -647,8 +725,8 @@ mod tests {
         );
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
         let spawn = NoSpawn;
-        let tree: [HwNode; 0] = [];
-        let reply = catalogue(&service, &ctx(&[], &spawn, &tree));
+        let nodes = SliceNodes(&[]);
+        let reply = catalogue(&service, &ctx(&[], &spawn, &nodes));
 
         let mut kbuf =
             [DriverBindKey::new(0, HwMatchKey::virtio(0)); DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
@@ -683,8 +761,8 @@ mod tests {
         fs.add_file("/System/Drivers/bad", b"not-a-bundle");
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
         let spawn = NoSpawn;
-        let tree: [HwNode; 0] = [];
-        let reply = catalogue(&service, &ctx(&[], &spawn, &tree));
+        let nodes = SliceNodes(&[]);
+        let reply = catalogue(&service, &ctx(&[], &spawn, &nodes));
         let count = decode_catalogue_reply(&reply).expect("ok frame").count();
         assert_eq!(count, 1, "the malformed bundle is skipped, never fatal");
     }
@@ -704,7 +782,9 @@ mod tests {
         let trusted = [pubkey_of(&sk)];
         let spawn = RecordingSpawn::new();
         let tree = tree_with(key);
-        let serve_ctx = ctx(&trusted, &spawn, &tree);
+        let nodes = SliceNodes(&tree);
+        let serve_ctx = ctx(&trusted, &spawn, &nodes);
+        let store = store_of(&service);
 
         // The single accepted bundle has scan id 0; load it for node 2.
         let req = StoreRequest::Load {
@@ -713,7 +793,7 @@ mod tests {
         };
         let mut rbuf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut rbuf).expect("encode");
-        let reply = build_reply(&service, &serve_ctx, &rbuf[..n], &NullSink);
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
         // The reply carries the load gate's minted driver handle (non-zero);
         // the spawn pid is informational, so the handle value is the host's,
         // not the recording spawn's pid.
@@ -743,6 +823,77 @@ mod tests {
     }
 
     #[test]
+    fn a_load_resolves_a_node_emitted_after_the_scan_against_the_live_tree() {
+        // The chain-breaking regression: a user-space bus driver publishes a
+        // child at runtime (`hw_emit_node`) *after* the store scan, and the
+        // device manager loads a driver for it. Resolving the matched node's
+        // grants against a frozen boot snapshot would fail closed here and
+        // stall the recursive bus chain; resolving against the live tree
+        // (`HwTreeStore`) loads it (`AGENTS.md` §18.3 / §18.4).
+        use crate::hwtree_store::HwTreeStore;
+
+        let key = HwMatchKey::virtio(0x1234);
+        let keys = [DriverBindKey::new(5, key)];
+        let payload = b"runtime-emitted-rxe";
+        let sk = signing_key();
+        let mut fs = MockRootFs::new();
+        fs.add_file(
+            "/System/Drivers/usb_kbd",
+            &build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &keys, payload),
+        );
+        let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
+        let trusted = [pubkey_of(&sk)];
+        let spawn = RecordingSpawn::new();
+        let store = store_of(&service);
+
+        // The live tree at scan time holds only the root — the device node
+        // does not exist yet (a stale `ctx.tree` snapshot would freeze this).
+        let live = HwTreeStore::new();
+        live.seed(&[HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)]);
+
+        // A bus driver publishes the device at runtime; the kernel assigns
+        // its id. Build the requested-resource node exactly as an emitter
+        // would (id is kernel-owned, supplied as 0).
+        let mut emitted = HwNode::new(0, 1, HwDeviceClass::Input);
+        emitted.push_match_key(key).expect("key fits");
+        emitted
+            .push_resource(HwResource::mmio(0x0a00_0000, 0x200))
+            .expect("mmio fits");
+        emitted
+            .push_resource(HwResource::dma(0x3fff_ffff, 0x1000))
+            .expect("dma fits");
+        let node_id = live.publish_child(1, emitted);
+
+        let serve_ctx = ctx(&trusted, &spawn, &live);
+        let req = StoreRequest::Load {
+            bundle_id: 0,
+            node_id,
+        };
+        let mut rbuf = [0u8; LOAD_REQUEST_LEN];
+        let n = req.encode(&mut rbuf).expect("encode");
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
+        let handle = decode_load_reply(&reply)
+            .expect("a node emitted after the scan still resolves against the live tree");
+        assert_ne!(handle, 0, "the runtime-emitted node loads");
+
+        let calls = spawn.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].2,
+            alloc::vec![
+                HwResource::mmio(0x0a00_0000, 0x200),
+                HwResource::dma(0x3fff_ffff, 0x1000)
+            ],
+            "the runtime-emitted node's grants are minted from the live tree, not a snapshot"
+        );
+        assert_eq!(
+            calls[0].3,
+            Some(node_id),
+            "the live node id is threaded so a grandchild it emits is parented under it (§18.3)"
+        );
+    }
+
+    #[test]
     fn a_load_with_an_out_of_range_bundle_id_is_in_band_not_found() {
         let key = HwMatchKey::virtio(0x1234);
         let keys = [DriverBindKey::new(5, key)];
@@ -756,7 +907,9 @@ mod tests {
         let trusted = [pubkey_of(&sk)];
         let spawn = NoSpawn;
         let tree = tree_with(key);
-        let serve_ctx = ctx(&trusted, &spawn, &tree);
+        let nodes = SliceNodes(&tree);
+        let serve_ctx = ctx(&trusted, &spawn, &nodes);
+        let store = store_of(&service);
 
         let req = StoreRequest::Load {
             bundle_id: 99,
@@ -764,7 +917,7 @@ mod tests {
         };
         let mut rbuf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut rbuf).expect("encode");
-        let reply = build_reply(&service, &serve_ctx, &rbuf[..n], &NullSink);
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
         assert_eq!(reply_status(&reply), Err(Errno::NotFound));
     }
 
@@ -782,7 +935,9 @@ mod tests {
         let trusted = [pubkey_of(&sk)];
         let spawn = NoSpawn;
         let tree = tree_with(key);
-        let serve_ctx = ctx(&trusted, &spawn, &tree);
+        let nodes = SliceNodes(&tree);
+        let serve_ctx = ctx(&trusted, &spawn, &nodes);
+        let store = store_of(&service);
 
         let req = StoreRequest::Load {
             bundle_id: 0,
@@ -790,7 +945,7 @@ mod tests {
         };
         let mut rbuf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut rbuf).expect("encode");
-        let reply = build_reply(&service, &serve_ctx, &rbuf[..n], &NullSink);
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
         assert_eq!(reply_status(&reply), Err(Errno::NotFound));
     }
 
@@ -810,7 +965,9 @@ mod tests {
         let trusted = [pubkey_of(&signing_key())];
         let spawn = NoSpawn;
         let tree = tree_with(key);
-        let serve_ctx = ctx(&trusted, &spawn, &tree);
+        let nodes = SliceNodes(&tree);
+        let serve_ctx = ctx(&trusted, &spawn, &nodes);
+        let store = store_of(&service);
 
         let req = StoreRequest::Load {
             bundle_id: 0,
@@ -818,7 +975,7 @@ mod tests {
         };
         let mut rbuf = [0u8; LOAD_REQUEST_LEN];
         let n = req.encode(&mut rbuf).expect("encode");
-        let reply = build_reply(&service, &serve_ctx, &rbuf[..n], &NullSink);
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
         assert!(
             reply_status(&reply).is_err(),
             "an untrusted bundle never loads"
@@ -830,9 +987,11 @@ mod tests {
         let mut fs = service_with(&[]);
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
         let spawn = NoSpawn;
-        let tree: [HwNode; 0] = [];
+        let nodes = SliceNodes(&[]);
+        let store = store_of(&service);
+        let serve_ctx = ctx(&[], &spawn, &nodes);
         // Opcode 0xFF is unknown → OutOfRange (decode), surfaced in band.
-        let reply = build_reply(&service, &ctx(&[], &spawn, &tree), &[0xFF], &NullSink);
+        let reply = build_reply(&service, &serve_ctx, &store, &[0xFF], &NullSink);
         assert_eq!(reply_status(&reply), Err(Errno::OutOfRange));
     }
 
@@ -880,8 +1039,8 @@ mod tests {
         let coop = CooperativeYield::new(&mut yielder);
 
         let spawn = NoSpawn;
-        let tree: [HwNode; 0] = [];
-        let serve_ctx = ctx(&[], &spawn, &tree);
+        let nodes = SliceNodes(&[]);
+        let serve_ctx = ctx(&[], &spawn, &nodes);
         let err = serve_system_store(&mut volume, &serve_ctx, &binder, &coop, &NullSink)
             .expect_err("an unprivileged binder cannot bind the store endpoint");
         assert_eq!(

@@ -293,13 +293,28 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         if handle != GRANT_HANDLE {
             return encode(Err(Errno::NotFound));
         }
-        // Map the granted window into the program's own retained live space:
-        // the producer reads the current CPU's published live space and maps
-        // only that region, caching disabled, never executable (§18.3 / §19.2).
-        // No published space (a task admitted without one) fails closed.
+        // The program names a `[offset, offset + len)` sub-region of its
+        // grant (`args[1]`/`args[2]`); confirm it lies wholly inside the
+        // granted window before mapping, mirroring the production kernel
+        // `mappable_subwindow` check (`AGENTS.md` §24.1 / §5.4 — a driver maps
+        // only inside a region it was granted).
+        let offset = args[1];
+        let sub_len = args[2];
+        let in_bounds = sub_len != 0
+            && offset
+                .checked_add(sub_len)
+                .is_some_and(|end| end <= GRANT_LEN);
+        if !in_bounds {
+            return encode(Err(Errno::OutOfRange));
+        }
+        // Map only the requested sub-region into the program's own retained
+        // live space: the producer reads the current CPU's published live
+        // space and maps that region, caching disabled, never executable
+        // (§18.3 / §19.2). No published space (a task admitted without one)
+        // fails closed.
         let result = match with_current_live_space(BOOT_CPU, |space| {
             #[allow(clippy::cast_possible_truncation)]
-            space.map_device_window(GRANT_PHYS, GRANT_LEN as usize)
+            space.map_device_window(GRANT_PHYS + offset, sub_len as usize)
         }) {
             Some(Ok(va)) => Ok(va),
             Some(Err(_)) => Err(Errno::BadAddress),

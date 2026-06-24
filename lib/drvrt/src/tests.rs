@@ -45,6 +45,9 @@ struct Backing {
 struct MockSyscalls {
     backings: RefCell<Vec<Backing>>,
     mmio_calls: Rc<Cell<usize>>,
+    /// The `(offset, len)` of the most recent `mmio_map` call, so a test can
+    /// assert the host requested only the sub-region (not the whole grant).
+    last_mmio: Rc<Cell<(u64, usize)>>,
     dma_calls: Rc<Cell<usize>>,
     /// The grant set `resource_grants` delivers (the kernel-minted grants the
     /// driver process would learn at start-up). A test populates it before
@@ -84,6 +87,7 @@ impl MockSyscalls {
         Self {
             backings: RefCell::new(Vec::new()),
             mmio_calls: Rc::new(Cell::new(0)),
+            last_mmio: Rc::new(Cell::new((0, 0))),
             dma_calls: Rc::new(Cell::new(0)),
             delivered: RefCell::new(Vec::new()),
             grants_error: Cell::new(None),
@@ -165,14 +169,33 @@ impl MockSyscalls {
     fn mmio_counter(&self) -> Rc<Cell<usize>> {
         Rc::clone(&self.mmio_calls)
     }
+
+    /// A shared handle to the most recent `mmio_map` `(offset, len)`, read
+    /// after the mock moves into the host.
+    fn last_mmio(&self) -> Rc<Cell<(u64, usize)>> {
+        Rc::clone(&self.last_mmio)
+    }
 }
 
 impl GrantSyscalls for MockSyscalls {
-    fn mmio_map(&self, handle: u64) -> i64 {
+    fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
         self.mmio_calls.set(self.mmio_calls.get() + 1);
+        self.last_mmio.set((offset, len));
         let backings = self.backings.borrow();
         match backings.iter().find(|b| b.handle == handle) {
-            Some(b) => b.buffer.as_ptr() as usize as i64,
+            // Mirror the kernel: the `[offset, offset + len)` sub-region must
+            // lie wholly inside the granted backing, and the returned VA is
+            // the sub-region's base (`backing_base + offset`), never the whole
+            // window's base (`AGENTS.md` §24.1 / §5.4).
+            Some(b) => {
+                let Some(end) = offset.checked_add(len as u64) else {
+                    return -i64::from(Errno::LengthOutOfRange.as_i32());
+                };
+                if len == 0 || end > b.buffer.len() as u64 {
+                    return -i64::from(Errno::OutOfRange.as_i32());
+                }
+                b.buffer.as_ptr() as usize as i64 + offset as i64
+            }
             None => -i64::from(Errno::NotFound.as_i32()),
         }
     }
@@ -311,6 +334,7 @@ fn maps_a_sub_window_at_a_nonzero_offset() {
 fn translates_a_bar_inside_the_outbound_bus_window() {
     let mock = MockSyscalls::new();
     let base = mock.back(BUSWIN_HANDLE, OUTBOUND_SIZE as usize, 0);
+    let last_mmio = mock.last_mmio();
     let host = RtDriverHost::new(
         caps(&[CapabilityId::MMIO_MAP]),
         mock,
@@ -328,20 +352,40 @@ fn translates_a_bar_inside_the_outbound_bus_window() {
     // The CPU access lands at the same offset into the mapped CPU window.
     let readback = unsafe { (base as *const u32).byte_add(0x1_0000).read() };
     assert_eq!(readback, 0xCAFE_F00D);
+    // The host asked the kernel to map ONLY the BAR sub-region — its offset
+    // into the outbound window and the BAR length — never the whole (here
+    // 64 MiB, on metal 1 GiB) bus aperture. Mapping the whole grant is the
+    // defect that exhausted the per-task MMIO window and failed closed with
+    // `OutOfMemory` (`AGENTS.md` §24.1).
+    assert_eq!(last_mmio.get(), (0x1_0000, 0x1000));
 }
 
 #[test]
-fn maps_each_window_only_once() {
+fn maps_each_sub_region_offset_only_once() {
     let mock = MockSyscalls::new();
     mock.back(REGS_HANDLE, REGS_LEN as usize, 0);
     let calls = mock.mmio_counter();
     let host =
         RtDriverHost::new(caps(&[CapabilityId::MMIO_MAP]), mock, &[regs_grant()], None).unwrap();
 
+    // Repeated requests for the *same* sub-region offset reuse the cached VA
+    // — exactly one syscall (`AGENTS.md` §2.16). A different length at the
+    // same offset still hits the cache (the offset keys it).
     let _ = host.map_window(REGS_BASE, 0x10).expect("first");
-    let _ = host.map_window(REGS_BASE + 0x40, 0x10).expect("second");
-    let _ = host.map_window(REGS_BASE + 0x80, 0x10).expect("third");
-    assert_eq!(calls.get(), 1, "the granted window is mapped exactly once");
+    let _ = host.map_window(REGS_BASE, 0x20).expect("same offset again");
+    assert_eq!(calls.get(), 1, "the same sub-region offset is mapped once");
+
+    // A request at a *different* offset is a distinct sub-region (e.g. a
+    // second BAR), so it maps afresh rather than aliasing the first
+    // (`AGENTS.md` §24.1 — sub-region mapping, not whole-window).
+    let _ = host
+        .map_window(REGS_BASE + 0x40, 0x10)
+        .expect("second offset");
+    assert_eq!(
+        calls.get(),
+        2,
+        "a distinct sub-region offset maps separately"
+    );
 }
 
 #[test]

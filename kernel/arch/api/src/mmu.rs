@@ -86,6 +86,22 @@ impl PageFlags {
     /// Page maps Device / strongly-ordered memory (MMIO), not cacheable
     /// Normal RAM.
     pub const DEVICE: Self = Self(0b0001_0000);
+    /// Page backs a buffer **shared with a DMA-capable device** that must
+    /// stay coherent with that device without per-access cache maintenance.
+    ///
+    /// On a platform whose DMA masters snoop the CPU caches (x86_64,
+    /// riscv64, the QEMU `virt` boards) this is ordinary cacheable Normal
+    /// memory and a port may ignore the bit. On a platform whose DMA path is
+    /// **not** I/O-coherent (the Raspberry Pi 4 BCM2711 PCIe root complex
+    /// does not snoop the CPU caches), a port maps it Normal **Non-Cacheable**
+    /// so a descriptor the CPU writes is visible to the device — and an event
+    /// the device writes is visible to the CPU — with no `dc civac` dance.
+    /// It is distinct from [`Self::DEVICE`]: a DMA buffer holds ring and
+    /// context structures the driver accesses with ordinary (possibly
+    /// unaligned) loads/stores, which Device-nGnRE memory forbids
+    /// (`AGENTS.md` §4 / §2.20 — the kernel owns the platform coherency, so
+    /// the user-space driver stays arch-neutral).
+    pub const DMA_COHERENT: Self = Self(0b0010_0000);
 
     /// The empty set.
     #[must_use]
@@ -116,7 +132,8 @@ impl PageFlags {
             | PageFlags::WRITE.0
             | PageFlags::EXEC.0
             | PageFlags::USER.0
-            | PageFlags::DEVICE.0;
+            | PageFlags::DEVICE.0
+            | PageFlags::DMA_COHERENT.0;
         if bits & !ALL == 0 {
             Some(Self(bits))
         } else {

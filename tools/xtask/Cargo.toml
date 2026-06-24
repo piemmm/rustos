@@ -86,7 +86,12 @@ rustos-mkimage = { path = "../mkimage", version = "=0.0.0" }
 rustos-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
     "driver-image",
 ] }
-# The mailbox service-driver's own canonical §18.3 bind table, copied verbatim
-# into its signed bundle so the autoload match data never drifts from the
-# driver (`AGENTS.md` §2.2 / §18.3).
+# The autoloaded `/System/Drivers/` bundles' own canonical §18.3 bind tables,
+# copied verbatim into each signed bundle so the autoload match data never
+# drifts from the driver it binds (`AGENTS.md` §2.2 / §18.3): the mailbox
+# service driver, the BCM2711 PCIe root-complex bus driver, the VL805 USB host
+# bus driver, and (via `rustos-hid`) the USB boot-keyboard driver.
 rustos-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
+rustos-pcie-brcm = { path = "../../lib/pcie_brcm", version = "=0.0.0" }
+rustos-vl805 = { path = "../../lib/vl805", version = "=0.0.0" }
+rustos-hid = { path = "../../lib/hid", version = "=0.0.0" }

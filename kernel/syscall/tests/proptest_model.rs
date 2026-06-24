@@ -201,7 +201,13 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn mmio_map(&self, _c: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+    fn mmio_map(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _offset: u64,
+        _len: usize,
+    ) -> SyscallResult {
         self.bump();
         Ok(0)
     }
@@ -289,6 +295,10 @@ impl SyscallHandlers for CountingHandlers {
         Ok(0)
     }
     fn hw_emit_node(&self, _c: &CallerContext<'_>, _node: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
         self.bump();
         Ok(0)
     }

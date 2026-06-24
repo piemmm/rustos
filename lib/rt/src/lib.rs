@@ -177,6 +177,9 @@ const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 /// `hw_emit_node` syscall number (`AGENTS.md` §2.2, as above).
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 
+/// `hw_remove_node` syscall number (`AGENTS.md` §2.2, as above).
+const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -463,6 +466,32 @@ pub fn hw_emit_node(node: &HwNode) -> i64 {
     ret as i64
 }
 
+/// Remove a previously-published child device node — and its whole subtree —
+/// from the live hardware tree (`SyscallNumber::HW_REMOVE_NODE`, `AGENTS.md`
+/// §18.4), returning the raw signed register: `0` once removed, else
+/// `-errno`.
+///
+/// The symmetric counterpart of [`hw_emit_node`]: a user-space **bus** driver
+/// that published a device with [`hw_emit_node`] calls this when the device
+/// goes away (a USB port-down, a PCIe hot-remove), so the device manager
+/// unloads the driver bound to the vanished node (`AGENTS.md` §18.4). It is
+/// gated by the same [`rustos_abi::CapabilityId::HW_EMIT`], and the kernel
+/// retires `node_id` **only** when its parent is the calling driver's own
+/// matched node — a child the caller itself published — together with every
+/// descendant, so a driver can never remove a node it does not own
+/// (`AGENTS.md` §4 — no ambient authority). An unknown id, or a node the
+/// caller does not own, fails closed with `-errno` (`AGENTS.md` §2.9 / §5.4).
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
+pub fn hw_remove_node(node_id: u32) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
+    // side of the trap (`AGENTS.md` §5.4). The call passes no memory operand —
+    // `node_id` is a scalar in arg 0.
+    let ret = unsafe { raw_syscall(NUM_HW_REMOVE_NODE, [u64::from(node_id), 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
 ///
 /// A cooperative reschedule point: the kernel suspends the caller, runs
@@ -711,31 +740,37 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
     ret as i64
 }
 
-/// Map a **granted** device MMIO window into the calling driver's own
-/// address space (`SyscallNumber::MMIO_MAP`, `plans/PI.md` P10 chunk 5d-0).
+/// Map the `[offset, offset + len)` sub-region of a **granted** device MMIO
+/// window into the calling driver's own address space
+/// (`SyscallNumber::MMIO_MAP`, `plans/PI.md` P10 chunk 5d-0).
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant handle —
 /// never a raw physical address (`AGENTS.md` §4): the kernel resolves it
 /// **owner-checked against the calling task**, confirms it names a memory
-/// window, and maps only that region — caching disabled, never executable
+/// window, confirms `[offset, offset + len)` lies wholly inside that window,
+/// and maps only that sub-region — caching disabled, never executable
 /// (`AGENTS.md` §5.4 / §18.3 / §19.2). A forged or another driver's handle
-/// resolves to nothing and is refused. The call carries `CAP_MMIO_MAP`
-/// (enforced by the kernel before any state is touched).
+/// resolves to nothing and is refused, as is a sub-region escaping the grant.
+/// Mapping a bounded sub-region (not the whole grant) is what lets a driver
+/// granted a large outbound bus aperture map just the single BAR it
+/// enumerated rather than the entire window (`AGENTS.md` §24.1). The call
+/// carries `CAP_MMIO_MAP` (enforced by the kernel before any state is
+/// touched).
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the base virtual address of
-/// the newly mapped window, and a negative value is `-errno` (recover the
+/// the newly mapped sub-region, and a negative value is `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
 /// raw signed value so the caller decides how to react; it adds no authority
 /// and hides no error (`AGENTS.md` §2.9).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mmio_map-result encoding (base ≥ 0, else -errno).
-pub fn mmio_map(handle: u64) -> i64 {
+pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap (`AGENTS.md` §5.4). `mmio_map`
     // dereferences no user pointer; it resolves the grant handle and maps the
-    // window into the caller's own space, returning its base.
-    let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, 0, 0, 0, 0, 0]) };
+    // requested sub-region into the caller's own space, returning its base.
+    let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) };
     ret as i64
 }
 

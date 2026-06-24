@@ -39,17 +39,21 @@ pub const MAX_GRANTS: usize = 8;
 /// its host crate.
 pub use rustos_abi::hwtree::GrantedResource;
 
-/// A grant the host can map, plus the lazily-cached base virtual address the
-/// kernel returned when it was first mapped.
+/// A grant the host can map, plus the lazily-cached `(offset, base_va)` of
+/// the sub-region last mapped from it.
 struct GrantSlot {
     handle: u64,
     resource: HwResource,
-    /// The base user VA of this grant's mapped window, or `0` while it has
-    /// not yet been mapped. A real mapping never bases at VA `0` (it is a
-    /// user address above the image bias), so `0` is an unambiguous
-    /// "unmapped" sentinel and the window is mapped at most once
-    /// (`AGENTS.md` §2.16 — no repeated syscall for the same window).
-    mapped_va: Cell<u64>,
+    /// The `(offset, base_va)` of the most recently mapped sub-region of
+    /// this grant, or `None` while none has been mapped. A driver maps a
+    /// bounded `[offset, offset + len)` sub-region of its grant (not the
+    /// whole window, `AGENTS.md` §24.1), so the cache is keyed by `offset`:
+    /// a repeat request for the same sub-region reuses the cached VA, while a
+    /// request at a different offset (a second BAR in the same outbound
+    /// window) maps afresh (`AGENTS.md` §2.16 — no repeated syscall for the
+    /// same window). A real mapping never bases at VA `0` (it is a user
+    /// address above the image bias).
+    mapped: Cell<Option<(u64, u64)>>,
 }
 
 /// The user-space driver host: maps kernel-issued device-resource grants over
@@ -106,7 +110,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             *slot = Some(GrantSlot {
                 handle: granted.handle,
                 resource: granted.resource,
-                mapped_va: Cell::new(0),
+                mapped: Cell::new(None),
             });
         }
         Ok(Self::from_slots(caps, syscalls, slots, coherency))
@@ -173,7 +177,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             *slot = Some(GrantSlot {
                 handle: granted.handle,
                 resource: granted.resource,
-                mapped_va: Cell::new(0),
+                mapped: Cell::new(None),
             });
         }
         Ok(Self::from_slots(caps, syscalls, slots, coherency))
@@ -246,21 +250,34 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         None
     }
 
-    /// Map `slot`'s whole granted window through the `mmio_map` syscall the
-    /// first time it is needed and cache its base VA; reuse the cached base on
-    /// later requests into the same window.
-    fn ensure_mapped(&self, slot: &GrantSlot) -> Result<u64, MmioMapError> {
-        let cached = slot.mapped_va.get();
-        if cached != 0 {
-            return Ok(cached);
+    /// Map the `[offset, offset + len)` sub-region of `slot`'s granted window
+    /// through the `mmio_map` syscall, returning its base VA; reuse the cached
+    /// base on a repeat request for the **same** sub-region offset.
+    ///
+    /// Mapping a bounded sub-region rather than the whole grant is what lets a
+    /// driver granted a large outbound bus aperture map just the single BAR it
+    /// enumerated, instead of the entire window — which would exhaust the
+    /// per-task MMIO virtual window and fail closed with `OutOfMemory`
+    /// (`AGENTS.md` §24.1). The kernel re-validates the sub-region against the
+    /// grant on the far side of the trap (`AGENTS.md` §5.4).
+    fn ensure_mapped(
+        &self,
+        slot: &GrantSlot,
+        offset: u64,
+        len: usize,
+    ) -> Result<u64, MmioMapError> {
+        if let Some((cached_offset, cached_va)) = slot.mapped.get() {
+            if cached_offset == offset {
+                return Ok(cached_va);
+            }
         }
-        let ret = self.syscalls.mmio_map(slot.handle);
+        let ret = self.syscalls.mmio_map(slot.handle, offset, len);
         if ret <= 0 {
             return Err(mmio_error(ret));
         }
         #[allow(clippy::cast_sign_loss)] // `ret > 0` checked above; it is a user VA.
         let va = ret as u64;
-        slot.mapped_va.set(va);
+        slot.mapped.set(Some((offset, va)));
         Ok(va)
     }
 
@@ -300,23 +317,26 @@ impl<S: GrantSyscalls> MmioMapper for RtDriverHost<S> {
         let (slot, offset) = self
             .resolve(phys_base, len)
             .ok_or(MmioMapError::InvalidRegion)?;
-        let base_va = self.ensure_mapped(slot)?;
-        let window_va = base_va
-            .checked_add(offset)
-            .ok_or(MmioMapError::InvalidRegion)?;
+        // Map only the resolved `[offset, offset + len)` sub-region of the
+        // grant — never the whole window — so a BAR inside a large outbound
+        // bus aperture costs `len` bytes of mapping, not the aperture's full
+        // extent (`AGENTS.md` §24.1). The kernel returns the base VA of that
+        // sub-region directly.
+        let window_va = self.ensure_mapped(slot, offset, len)?;
         let addr = usize::try_from(window_va).map_err(|_| MmioMapError::InvalidRegion)?;
         let base = NonNull::new(addr as *mut u8).ok_or(MmioMapError::InvalidRegion)?;
-        // SAFETY: `ensure_mapped` obtained `base_va` from the `mmio_map`
-        // syscall, which mapped exactly `slot`'s granted window
-        // (caching-disabled, user-accessible, never executable, §19.2) into
-        // this process's own address space and kept it valid for the
-        // process's lifetime (longer than the returned window). `resolve`
-        // proved `[phys_base, phys_base + len)` lies wholly inside that
-        // window, so `window_va = base_va + offset` and the `len` bytes from
-        // it are in-bounds, ≥ 4-byte aligned (the kernel maps page-aligned and
-        // a real device offset is register-aligned), and exclusively owned by
-        // this window. `phys_base` is the device-visible base the window
-        // records (`AGENTS.md` §5.4 — the kernel validated the grant).
+        // SAFETY: `ensure_mapped` obtained `window_va` from the `mmio_map`
+        // syscall, which mapped exactly the `[offset, offset + len)`
+        // sub-region of `slot`'s granted window (caching-disabled,
+        // user-accessible, never executable, §19.2) into this process's own
+        // address space and kept it valid for the process's lifetime (longer
+        // than the returned window). `resolve` proved `[phys_base, phys_base +
+        // len)` lies wholly inside that window at `offset`, so the `len` bytes
+        // from `window_va` are in-bounds, ≥ 4-byte aligned (the kernel maps
+        // page-aligned and a real device offset is register-aligned), and
+        // exclusively owned by this window. `phys_base` is the device-visible
+        // base the window records (`AGENTS.md` §5.4 — the kernel validated the
+        // grant and the sub-region bounds).
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
     }
 }

@@ -2,8 +2,7 @@
 //! Chunk B-2): resolve which **discovered** hardware-tree node carries the
 //! bootstrap root block device, and which floor block driver binds it.
 //!
-//! This is the storage analogue of the keyboard bring-up's bind gate
-//! ([`crate::keyboard_service`]): the kernel does not *hunt* for a disk, it
+//! The kernel does not *hunt* for a disk, it
 //! binds a block driver because that driver's signed bind table matched a
 //! discovered node's identity (`AGENTS.md` §18.3 / §18.5). The match is the
 //! one shared `lib/devmatch` policy the user-space `devmgr` autoloader also
@@ -106,8 +105,12 @@ pub struct RootBlockBinding {
 /// ([`driver_catalog::is_root_block_driver`]).
 ///
 /// A node that matches nothing, ties (a packaging defect — fail closed,
-/// §2.9), or binds a non-block floor driver (a bus or HID node) is not a
-/// root block device and yields [`None`].
+/// §2.9), or binds a floor driver that is not a block driver is not a
+/// root block device and yields [`None`] — the [`is_root_block_driver`]
+/// check is kept as defence-in-depth even though the floor is storage-only
+/// today (`AGENTS.md` §18.6 / §2.2).
+///
+/// [`is_root_block_driver`]: driver_catalog::is_root_block_driver
 #[must_use]
 fn classify(node: &HwNode) -> Option<RootBlockBinding> {
     if let MatchResolution::Winner {

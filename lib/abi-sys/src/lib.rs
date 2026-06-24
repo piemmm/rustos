@@ -101,6 +101,7 @@ const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
+const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -480,25 +481,30 @@ pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
-/// `mmio_map`: map a granted device MMIO register window into the calling
-/// driver's own address space (`SyscallNumber::MMIO_MAP`, `AGENTS.md` §4 /
-/// §18.3, `plans/PI.md` P10 chunk 5d-0). Returns the base virtual address of
-/// the mapping, or a `ROS_E_*` code reinterpreted into the result.
+/// `mmio_map`: map the `[offset, offset + len)` sub-region of a granted
+/// device MMIO register window into the calling driver's own address space
+/// (`SyscallNumber::MMIO_MAP`, `AGENTS.md` §4 / §18.3, `plans/PI.md` P10
+/// chunk 5d-0). Returns the base virtual address of the mapped sub-region,
+/// or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant the driver
 /// received for the hardware-tree node it binds — never a raw physical
-/// address. The kernel resolves it against the calling task, confirms it
-/// names a memory window, and maps only that region (caching disabled); a
-/// forged/non-owned handle, a wrong-kind grant, or a build with no map
-/// facility wired fails closed (`AGENTS.md` §2.9 / §5.4). Gated kernel-side
-/// on `ROS_CAP_MMIO_MAP`.
+/// address — and `[offset, offset + len)` names the sub-region of that grant
+/// to map. The kernel resolves the handle against the calling task, confirms
+/// it names a memory window and the sub-region lies wholly inside it, and
+/// maps only that sub-region (caching disabled); a forged/non-owned handle, a
+/// wrong-kind grant, a sub-region escaping the grant, or a build with no map
+/// facility wired fails closed (`AGENTS.md` §2.9 / §5.4). Mapping a bounded
+/// sub-region lets a driver granted a large outbound bus aperture map just
+/// the single BAR it enumerated, not the whole window (`AGENTS.md` §24.1).
+/// Gated kernel-side on `ROS_CAP_MMIO_MAP`.
 #[must_use]
 #[export_name = "ros_sys_mmio_map"]
-pub extern "C" fn sys_mmio_map(handle: u64) -> u64 {
+pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel resolves the grant handle against the caller and returns the
-    // mapped base virtual address.
-    unsafe { raw_syscall(NUM_MMIO_MAP, [handle, 0, 0, 0, 0, 0]) }
+    // mapped sub-region's base virtual address.
+    unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) }
 }
 
 /// `dma_alloc`: carve a coherent DMA buffer for the calling driver, bounded
@@ -870,6 +876,24 @@ pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
     }
 }
 
+/// `hw_remove_node`: remove the previously-published child node `node_id` —
+/// and its whole subtree — from the live hardware tree
+/// (`SyscallNumber::HW_REMOVE_NODE`, `AGENTS.md` §18.4). The symmetric
+/// counterpart of `ros_sys_hw_emit_node`: a user-space bus driver calls it
+/// when a device it published goes away, so the device manager unloads the
+/// driver bound to the vanished node. Requires `ROS_CAP_HW_EMIT`; the kernel
+/// retires the node only when it is a child the caller itself published
+/// (`AGENTS.md` §4 — no ambient authority). Returns a `ROS_E_*` code (`0` on
+/// success).
+#[must_use]
+#[export_name = "ros_sys_hw_remove_node"]
+pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
+    // side of the trap (`AGENTS.md` §5.4). No memory operand is passed.
+    unsafe { ret_i32(raw_syscall(NUM_HW_REMOVE_NODE, [node_id, 0, 0, 0, 0, 0])) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,7 +936,7 @@ mod tests {
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 0),
         (NUM_DISPLAY_RELEASE, "display_release", 0),
         (NUM_KEYBOARD_READ, "keyboard_read", 2),
-        (NUM_MMIO_MAP, "mmio_map", 1),
+        (NUM_MMIO_MAP, "mmio_map", 3),
         (NUM_DMA_ALLOC, "dma_alloc", 3),
         (NUM_RESOURCE_GRANTS, "resource_grants", 2),
         (NUM_HW_TREE_READ, "hw_tree_read", 2),
@@ -923,6 +947,7 @@ mod tests {
         (NUM_CALL_REPLY, "call_reply", 4),
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
+        (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
     ];
 
     #[test]
@@ -1002,13 +1027,15 @@ mod tests {
     }
 
     #[test]
-    fn mmio_map_marshals_the_grant_handle() {
+    fn mmio_map_marshals_the_grant_handle_offset_and_len() {
         let (number, args) = capture(0x9000_0000, || {
-            assert_eq!(sys_mmio_map(0x2A), 0x9000_0000);
+            assert_eq!(sys_mmio_map(0x2A, 0x3D50_0000, 0x1000), 0x9000_0000);
         });
         assert_eq!(number, NUM_MMIO_MAP);
         assert_eq!(args[0], 0x2A);
-        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+        assert_eq!(args[1], 0x3D50_0000);
+        assert_eq!(args[2], 0x1000);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

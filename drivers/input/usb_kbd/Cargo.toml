@@ -41,5 +41,13 @@ rustos-hid = { path = "../../../lib/hid", version = "=0.0.0" }
 rustos-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
 # canary, the panic handler, the syscall wrappers (`key_inject`, `yield`,
-# `clock_get`), and the clock-backed `ClockDelay`.
+# `clock_get`), the clock-backed `ClockDelay`, and the `LogSink` that marshals
+# structured diagnostics to the kernel log over `log_emit` (`AGENTS.md` §19.4).
 rustos-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The structured diagnostic event vocabulary (`Event`/`Field`/`Level`) the
+# driver emits its one-shot bring-up diagnostic through, routed to the kernel
+# log by `rustos_rt::LogSink` (`AGENTS.md` §15.7 / §19.4 / §2.2).
+rustos-log = { path = "../../../lib/log", version = "=0.0.0" }
+# Allocation-free integer→hex formatting for the diagnostic's numeric fields
+# (`format_hex_u64`), shared with the rest of the tree (`AGENTS.md` §2.2).
+rustos-util = { path = "../../../lib/util", version = "=0.0.0" }

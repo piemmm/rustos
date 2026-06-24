@@ -68,9 +68,131 @@ mod program {
     use rustos_caps::CapabilitySet;
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
     use rustos_hid::{
-        bring_up_boot_keyboard, derive_keyboard_resources, pump_once, ConsoleSink, KeyboardConsole,
+        bring_up_boot_keyboard_diagnostic, derive_keyboard_resources, pump_once, BringupPhase,
+        ConsoleSink, KeyboardBringupError, KeyboardConsole,
     };
-    use rustos_rt::ClockDelay;
+    use rustos_log::{log, Event, EventId, Field, Level};
+    use rustos_rt::{ClockDelay, LogSink};
+    use rustos_util::fmt::format_hex_u64;
+
+    /// Diagnostic event id for a one-shot bring-up failure capture, naming
+    /// the phase that stalled and the controller state observed there
+    /// (`AGENTS.md` §15.7). The user-space replacement for the deleted
+    /// in-kernel scaffold's `4126` localisation record, now emitted over
+    /// `log_emit`; the kernel attributes it to this driver task.
+    const USB_KBD_BRINGUP_FAILED: EventId = EventId(4126);
+
+    /// Diagnostic event id for the one-shot "controller up, pumping reports"
+    /// beacon, so a metal capture confirms bring-up reached the report loop
+    /// (the counterpart of the historical enumeration-complete log).
+    const USB_KBD_READY: EventId = EventId(4101);
+
+    /// Emit a one-shot structured diagnostic naming where boot-keyboard
+    /// bring-up stalled, so the on-metal capture pins the failing controller
+    /// step (`AGENTS.md` §15.7 — QEMU models no Pi USB, §0.4). Best-effort:
+    /// a refused or faulting `log_emit` drops the record rather than wedging
+    /// the driver (`AGENTS.md` §2.9 / §20).
+    ///
+    /// For a [`BringupPhase::ControllerOpen`] stall the record carries the
+    /// reset sub-stage and its `USBCMD`/`USBSTS`; for a
+    /// [`BringupPhase::Enumerate`] stall it carries the `stage`/`completion`/
+    /// `reject`/`evtype` breadcrumbs and the root-port `PORTSC` — the
+    /// `stage=N completion=M` signature that historically localised every
+    /// enumeration stall.
+    fn log_bringup_failure(err: &KeyboardBringupError) {
+        let mut err_buf = [0u8; 16];
+        let mut a_buf = [0u8; 16];
+        let mut b_buf = [0u8; 16];
+        let mut c_buf = [0u8; 16];
+        let mut d_buf = [0u8; 16];
+        let mut e_buf = [0u8; 16];
+
+        // Up to `LOG_FIELDS_MAX` (8) fields; populated per phase. `phase` and
+        // the coarse error code are always present.
+        let mut fields: [Field<'_>; 8] = [Field { key: "", value: "" }; 8];
+        let mut n = 0usize;
+        fields[n] = Field {
+            key: "phase",
+            value: err.phase.as_str(),
+        };
+        n += 1;
+        fields[n] = Field {
+            key: "err_hex",
+            // The error is a small non-negative ABI discriminant; widen
+            // without sign-extension for a stable hex rendering.
+            value: format_hex_u64(err.error.as_i32() as u32 as u64, &mut err_buf),
+        };
+        n += 1;
+        match err.phase {
+            BringupPhase::ControllerOpen => {
+                if let Some(stage) = err.open_stage {
+                    fields[n] = Field {
+                        key: "open_stage",
+                        value: stage.as_str(),
+                    };
+                    n += 1;
+                }
+                if let Some(usbcmd) = err.usbcmd {
+                    fields[n] = Field {
+                        key: "usbcmd_hex",
+                        value: format_hex_u64(u64::from(usbcmd), &mut a_buf),
+                    };
+                    n += 1;
+                }
+                if let Some(usbsts) = err.usbsts {
+                    fields[n] = Field {
+                        key: "usbsts_hex",
+                        value: format_hex_u64(u64::from(usbsts), &mut b_buf),
+                    };
+                    n += 1;
+                }
+            }
+            BringupPhase::Enumerate => {
+                let stage = err.enum_stage.map_or(0, |s| s.as_u8());
+                fields[n] = Field {
+                    key: "stage_hex",
+                    value: format_hex_u64(u64::from(stage), &mut a_buf),
+                };
+                n += 1;
+                fields[n] = Field {
+                    key: "completion_hex",
+                    value: format_hex_u64(u64::from(err.last_completion), &mut b_buf),
+                };
+                n += 1;
+                fields[n] = Field {
+                    key: "reject_hex",
+                    value: format_hex_u64(u64::from(err.last_reject), &mut c_buf),
+                };
+                n += 1;
+                fields[n] = Field {
+                    key: "evtype_hex",
+                    value: format_hex_u64(u64::from(err.last_event_type), &mut d_buf),
+                };
+                n += 1;
+                if let Some(portsc) = err.port1_portsc {
+                    fields[n] = Field {
+                        key: "portsc_hex",
+                        value: format_hex_u64(u64::from(portsc), &mut e_buf),
+                    };
+                    n += 1;
+                }
+            }
+            BringupPhase::Setup
+            | BringupPhase::DmaCarve
+            | BringupPhase::DmaAperture
+            | BringupPhase::BarMap
+            | BringupPhase::ControllerStart => {}
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: USB_KBD_BRINGUP_FAILED,
+                message: "usb-keyboard: boot-keyboard bring-up failed",
+                fields: &fields[..n],
+            },
+        );
+    }
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
@@ -100,6 +222,12 @@ mod program {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MMIO_MAP);
         caps.insert(CapabilityId::MEM_DMA);
+        // The driver emits a one-shot structured bring-up diagnostic through
+        // `log_emit` when the controller does not come up, which the kernel
+        // gates on `CAP_LOG_EMIT` (`AGENTS.md` §19.4 / §5.4). The kernel
+        // re-checks every trap regardless; claiming a capability the process
+        // was not granted only fails the trap, never widens authority.
+        caps.insert(CapabilityId::LOG_EMIT);
         caps
     }
 
@@ -147,15 +275,36 @@ mod program {
         // The one userland clock-backed `Delay` for the hardware-dictated
         // hub settle windows (`AGENTS.md` §2.2).
         let delay = ClockDelay::new();
-        let Ok(mut keyboard) = bring_up_boot_keyboard(
+        let mut keyboard = match bring_up_boot_keyboard_diagnostic(
             &host,
             &delay,
             resources.bar_base,
             resources.bar_len,
             resources.dma_aperture_top,
-        ) else {
-            return EXIT_BRINGUP_FAILED;
+        ) {
+            Ok(keyboard) => keyboard,
+            Err(err) => {
+                // Pin the failing controller step on the captured serial log
+                // before exiting fail-closed: QEMU models no Pi USB, so this
+                // one-shot diagnostic is how a metal run localises the stall
+                // (`AGENTS.md` §15.7 / §2.9). The console is left without a
+                // keyboard, never wedged.
+                log_bringup_failure(&err);
+                return EXIT_BRINGUP_FAILED;
+            }
         };
+        // One-shot beacon: bring-up reached the report loop. A metal capture
+        // that shows this but no keystrokes localises the residual to the
+        // pump path rather than bring-up (`AGENTS.md` §15.7).
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: USB_KBD_READY,
+                message: "usb-keyboard: controller up, pumping reports",
+                fields: &[],
+            },
+        );
 
         // Poll the keyboard forever, injecting each decoded key edge into the
         // input-focus arbiter and yielding between polls so PID 1 and every

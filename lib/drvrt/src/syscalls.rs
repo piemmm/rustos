@@ -17,12 +17,17 @@
 /// adds no authority; the kernel validates the grant handle and every bound on
 /// the far side of the trap (`AGENTS.md` §5.4).
 pub trait GrantSyscalls {
-    /// Map the device MMIO window named by the kernel-issued grant `handle`
-    /// into the calling task's own address space, returning the base user
-    /// virtual address of the mapping (or `-errno`).
+    /// Map the `[offset, offset + len)` sub-region of the device MMIO window
+    /// named by the kernel-issued grant `handle` into the calling task's own
+    /// address space, returning the base user virtual address of the mapped
+    /// sub-region (or `-errno`).
+    ///
+    /// Mapping a sub-region (not the whole grant) is what lets a driver
+    /// granted a large outbound bus aperture map just the single BAR it
+    /// enumerated rather than the entire window (`AGENTS.md` §24.1).
     ///
     /// Mirrors [`rustos_rt::mmio_map`].
-    fn mmio_map(&self, handle: u64) -> i64;
+    fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64;
 
     /// Carve a coherent DMA buffer of `len` bytes bounded by the constraint
     /// named by the kernel-issued grant `handle`, write the buffer's
@@ -94,8 +99,8 @@ pub struct RtGrantSyscalls;
 
 impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
-    fn mmio_map(&self, handle: u64) -> i64 {
-        rustos_rt::mmio_map(handle)
+    fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
+        rustos_rt::mmio_map(handle, offset, len)
     }
 
     #[inline]

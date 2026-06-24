@@ -603,6 +603,24 @@ impl<H: XhciHost> Xhci<H> {
         self.csz
     }
 
+    /// Read `USBCMD` for a one-shot bring-up diagnostic, or `None` if the
+    /// register window faults the read.
+    ///
+    /// A driver wraps the engine's coarse [`DriverError`] with its own
+    /// structured diagnostics (the engine holds no logging dependency,
+    /// `AGENTS.md` §17.4 / §2.2); this exposes the operational command
+    /// register so a stuck-controller capture names what the silicon
+    /// reported (`AGENTS.md` §15.7).
+    pub fn read_usbcmd(&mut self) -> Option<u32> {
+        self.read_op(regs::USBCMD).ok()
+    }
+
+    /// Read `USBSTS` for a one-shot bring-up diagnostic, or `None` if the
+    /// register window faults the read (companion of [`Self::read_usbcmd`]).
+    pub fn read_usbsts(&mut self) -> Option<u32> {
+        self.read_op(regs::USBSTS).ok()
+    }
+
     /// Byte offset of the runtime register block within the window
     /// (`RTSOFF`).
     #[must_use]

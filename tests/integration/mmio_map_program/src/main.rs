@@ -148,9 +148,14 @@ mod program {
     /// `0` return is observed by the kernel as `exit(0)` (PASS) and any other
     /// as a failure code.
     fn main() -> i32 {
-        // 1. Map the granted device window by handle. A negative result is the
-        //    `-errno` the kernel returned (a refused or unresolved grant).
-        let base = rustos_rt::mmio_map(GRANT_HANDLE);
+        // 1. Map the sub-region of the granted device window that covers the
+        //    register under test — from offset 0 through `REG_OFFSET + 4` —
+        //    by handle. Mapping a bounded sub-region (not the whole grant) is
+        //    the production contract (`AGENTS.md` §24.1); `mmio_map` returns
+        //    the base VA of that sub-region. A negative result is the
+        //    `-errno` the kernel returned (a refused or unresolved grant, or
+        //    a sub-region escaping it).
+        let base = rustos_rt::mmio_map(GRANT_HANDLE, 0, (REG_OFFSET + 4) as usize);
         if base < 0 {
             return FAIL_MAP;
         }
