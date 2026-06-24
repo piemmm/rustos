@@ -253,6 +253,28 @@ impl EventRingCursor {
         Ok(Some(trb))
     }
 
+    /// Whether the controller has produced the event at the dequeue point —
+    /// the slot's cycle bit matches the consumer cycle state — **without**
+    /// advancing the cursor.
+    ///
+    /// The owner reads this from a first snapshot of the segment to decide
+    /// whether an event is present, issues a DMA read barrier, then re-reads
+    /// the segment and [`pop`](Self::pop)s, so the entry body is observed
+    /// after the cycle bit that announced it (the controller writes the body
+    /// before the cycle bit; on non-coherent DMA memory an unordered read of
+    /// the whole entry can pair a fresh cycle bit with a stale body).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::LengthOutOfRange`] if `trbs` is not the segment this
+    ///   cursor was created for (its length differs).
+    pub fn owned(&self, trbs: &[Trb]) -> Result<bool, DriverError> {
+        if trbs.len() != self.len {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        Ok(trbs[self.dequeue].cycle() == self.cycle)
+    }
+
     /// Index of the slot the next event will be consumed from, for the
     /// owner to program the controller's event-ring dequeue pointer.
     #[must_use]

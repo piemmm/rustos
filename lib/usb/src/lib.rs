@@ -663,6 +663,13 @@ impl<H: XhciHost> Xhci<H> {
         if !prog.is_plausible() {
             return Err(DriverError::OutOfRange);
         }
+        // The caller has already written the DMA structures (DCBAA, command
+        // ring, event segment, ERST, device contexts) this programming points
+        // the controller at. Order those Normal-Non-Cacheable writes ahead of
+        // the register stores below so the controller — a separate,
+        // possibly non-coherent bus master — never reads stale structures
+        // once `RUN` is set (`AGENTS.md` §2.16; see `rustos_dma_barrier`).
+        rustos_dma_barrier::dma_wmb();
         self.write_op(regs::CONFIG, u32::from(self.max_slots))?;
         self.write_op(regs::DCBAAP, low_dword(prog.dcbaap))?;
         self.write_op(regs::DCBAAP + 4, high_dword(prog.dcbaap))?;
@@ -792,6 +799,12 @@ impl<H: XhciHost> Xhci<H> {
         if !valid {
             return Err(DriverError::OutOfRange);
         }
+        // Order every TRB/ring write the caller published ahead of the
+        // doorbell store that hands them to the controller. Without this the
+        // controller can observe the doorbell before the just-written TRBs on
+        // non-coherent DMA memory and act on stale ring contents — the metal
+        // failure this fixes (`AGENTS.md` §2.16; see `rustos_dma_barrier`).
+        rustos_dma_barrier::dma_wmb();
         self.host
             .write32(self.db_base + usize::from(index) * 4, target)
     }

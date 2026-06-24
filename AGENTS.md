@@ -444,6 +444,13 @@ rustos/
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table
 │   │                    #   match policy (§18.3): the one definition shared by
 │   │                    #   userland devmgr and the kernel driver catalogue (§2.2).
+│   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers
+│   │                    #   (dma_wmb/dma_rmb): the single per-arch dsb/dmb (or
+│   │                    #   fence) carve-out ordering a driver's writes to
+│   │                    #   device-shared Normal-NC memory before the MMIO
+│   │                    #   doorbell, and reads of device-written ring entries,
+│   │                    #   on a non-coherent DMA master (§1/§2.2; the lib/usb
+│   │                    #   consumer, host/wasm32 no-op).
 │   ├── drvrt/           # User-space driver runtime host (plans/PI.md P10 5d):
 │   │                    #   the rt-backed DriverHost a driver process links,
 │   │                    #   mapping kernel-issued device-resource grants over the

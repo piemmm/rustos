@@ -2006,6 +2006,35 @@ Both are host-proven (the coherent-DMA leaf in `kernel/arch/aarch64`'s
 live keyboard coming up over the user-space chain is the on-metal acceptance
 item (QEMU models no Pi PCIe/USB, `AGENTS.md` §0.4).
 
+### DMA ordering — the barrier the non-coherent PCIe master needs
+
+Mapping the device-shared buffer Normal **Non-Cacheable** (above) makes it
+*coherent* — no cache maintenance — but **not** *ordered* with respect to the
+controller. On AArch64, Normal-NC stores and the Device-memory doorbell store
+are not mutually ordered for this PE without an explicit barrier, and the
+controller writes an event-ring entry's body before its cycle bit. So the
+user-space driver must, like every OS driver on a non-I/O-coherent master,
+issue a barrier: a store barrier after publishing TRBs and before the
+doorbell, and a load barrier after observing a fresh cycle bit and before
+reading the entry body. With no barrier, the controller could observe a
+doorbell before the TRBs it announces (a stall), and the driver could read a
+new cycle bit paired with the *previous* entry's stale TRB pointer — the metal
+`id=4126 phase=enumerate stage_hex=7 completion_hex=1 reject_hex=2` capture
+(a SUCCESS Transfer Event whose pointer mismatched the awaited status TRB,
+`REJECT_ADDRESS_MISMATCH`). The gap was latent until the EMMC2 speed-up made
+the CPU side outrun the controller's write-back window.
+
+`core::sync::atomic::fence` is **not** the fix: on AArch64 it lowers to an
+*inner*-shareable `dmb ish`, which does not order accesses against the
+outer/system-domain PCIe DMA master. The barriers live in the new
+`rustos-dma-barrier` crate (the user-space analogue of `rustos-abi-trap`'s
+§1 asm carve-out): `dma_wmb()` = `dmb oshst`, `dma_rmb()` = `dmb oshld`. The
+arch-neutral `rustos-usb` engine calls them at the controller-start and
+doorbell handoffs and in `poll_event` (cycle bit first, `dma_rmb`, then the
+entry body). x86_64 (`sfence`/`lfence`) and riscv64 (`fence iorw,iorw`) get
+the equivalent; host/wasm32 are a no-op. The live keyboard is the on-metal
+acceptance item.
+
 ## Per-CPU storage (`TPIDR_EL1`)
 
 The aarch64 port implements the Arch HAL `PerCpu` slice (`AGENTS.md`

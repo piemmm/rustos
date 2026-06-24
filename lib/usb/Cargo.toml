@@ -19,6 +19,12 @@ workspace = true
 # Tier-1 target. This is the USB analogue of `lib/virtio`.
 [dependencies]
 rustos-abi = { path = "../abi", version = "=0.0.0" }
+# DMA memory-ordering barriers (`AGENTS.md` §2.2): the controller is a
+# separate, possibly non-I/O-coherent, bus master, so the driver must order
+# its TRB/ring writes before the doorbell that hands them over, and order the
+# event-ring cycle-bit read before the entry body. Arch-specific instruction,
+# host/wasm32 no-op.
+rustos-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 
 [dev-dependencies]
 # End-to-end seam proof: the boot-protocol decoders polling reports

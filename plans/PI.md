@@ -4002,6 +4002,24 @@ keyboard never regresses (§2.17), until the final flip:
   enumerate→emit→autoload chain is metal-gated (§0.9): no `-M virt` Pi-USB
   vertical exists (§0.4). **Metal acceptance:** top-down autoload from
   `/System` and a keystroke with the scaffold gone.
+  - **DMA ordering (latest metal iteration).** With the EMMC2 store scan sped
+    up (P8 4-bit/data-clock), the keyboard enumeration reached
+    `EnumStage::SetConfiguration` then failed `id=4126 … completion_hex=1
+    reject_hex=2` — a SUCCESS xHCI Transfer Event whose TRB pointer mismatched
+    the awaited status TRB. Root cause: the device-shared DMA buffer is Normal
+    **Non-Cacheable** (coherent) but the user-space driver issued **no memory
+    barriers**, so on the non-I/O-coherent BCM2711 PCIe the controller could
+    observe the doorbell before the published TRBs and the driver could read a
+    fresh event cycle bit with a stale TRB pointer (a torn read). The gap was
+    latent until the faster boot outran the controller's write-back window.
+    Fix: new `lib/dma-barrier` crate (`dma_wmb`/`dma_rmb`, the user-space §1
+    asm carve-out analogous to `lib/abi-trap`; aarch64 `dmb oshst`/`dmb oshld`,
+    x86_64 `sfence`/`lfence`, riscv64 `fence iorw,iorw`, host/wasm32 no-op),
+    wired into `lib/usb` at the controller-start + doorbell handoffs and the
+    `poll_event` read (cycle bit first → `dma_rmb` → entry body). Host/CI-proven;
+    the live keystroke is the metal acceptance item. Same-class gap in
+    `lib/virtio`'s notify/used-ring path is the next consumer to adopt the
+    barrier (§2.18 tracked follow-up).
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

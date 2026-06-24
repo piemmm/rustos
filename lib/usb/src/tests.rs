@@ -1539,6 +1539,34 @@ fn event_cursor_consumes_matching_cycle_only() {
 }
 
 #[test]
+fn event_cursor_owned_peeks_without_advancing() {
+    // `owned` reports producer ownership by the cycle bit alone and must not
+    // advance the cursor — `poll_event` relies on this to read the cycle, then
+    // `dma_rmb`, then re-read and `pop` the entry body (the torn-read fix for
+    // non-coherent DMA, `AGENTS.md` §2.16).
+    let mut segment = [Trb::ZERO; 3];
+    let mut cursor = EventRingCursor::new(3).expect("segment fits");
+    assert_eq!(cursor.owned(&segment), Ok(false), "nothing produced yet");
+    segment[0] = Trb::new(
+        TrbType::CommandCompletion,
+        0x1000,
+        u32::from(CompletionCode::Success.as_u8()) << 24,
+        CONTROL_CYCLE,
+    );
+    assert_eq!(cursor.owned(&segment), Ok(true), "producer owns slot 0 now");
+    // Peeking twice still does not advance: a following `pop` consumes it.
+    assert_eq!(cursor.owned(&segment), Ok(true));
+    assert_eq!(cursor.dequeue_index(), 0, "peek left the cursor put");
+    assert!(cursor.pop(&segment).unwrap().is_some());
+    assert_eq!(cursor.dequeue_index(), 1);
+    // A wrong-length segment is rejected like `pop`.
+    assert_eq!(
+        cursor.owned(&[Trb::ZERO; 4]),
+        Err(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
 fn event_cursor_wraps_and_toggles_expectation() {
     let mut segment = [Trb::ZERO; 2];
     let mut cursor = EventRingCursor::new(2).expect("segment fits");

@@ -652,6 +652,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-dma-barrier"
+version = "0.0.0"
+
+[[package]]
 name = "rustos-drv-bus-mailbox-vcmailbox"
 version = "0.0.0"
 dependencies = [
@@ -2773,6 +2777,7 @@ name = "rustos-usb"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
+ "rustos-dma-barrier",
  "rustos-drv-input-usb-hid",
  "rustos-hid",
 ]

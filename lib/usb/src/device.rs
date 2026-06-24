@@ -1067,6 +1067,33 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// Consume the next controller event, advancing `ERDP` when one
     /// was taken.
     fn poll_event(&mut self) -> Result<Option<Trb>, DriverError> {
+        // First snapshot: decide *whether* the controller has produced the
+        // event at the dequeue point, by its cycle bit alone.
+        let trbs = self.read_event_segment()?;
+        if !self.event_cursor.owned(&trbs)? {
+            return Ok(None);
+        }
+        // An event is owned. The controller writes the entry body before it
+        // sets the cycle bit; on the device-shared Normal-Non-Cacheable DMA
+        // region those two writes are not ordered for this PE without a
+        // barrier, so the first snapshot's body bytes may predate the cycle
+        // bit (a torn read pairing a fresh cycle with a stale TRB pointer —
+        // the metal `REJECT_ADDRESS_MISMATCH` this fixes). Order the body read
+        // after the cycle observation, then re-read and consume (`AGENTS.md`
+        // §2.16; see `rustos_dma_barrier`).
+        rustos_dma_barrier::dma_rmb();
+        let trbs = self.read_event_segment()?;
+        let event = self.event_cursor.pop(&trbs)?;
+        if event.is_some() {
+            let erdp = self.phys_of(self.layout.event_segment)
+                + (self.event_cursor.dequeue_index() * trb::TRB_LEN) as u64;
+            self.xhci.ack_event(erdp)?;
+        }
+        Ok(event)
+    }
+
+    /// Read the whole single-segment event ring out of DMA into TRBs.
+    fn read_event_segment(&mut self) -> Result<[Trb; RING_TRBS], DriverError> {
         let mut bytes = [0u8; RING_TRBS * trb::TRB_LEN];
         self.dma.read(self.layout.event_segment, &mut bytes)?;
         let mut trbs = [Trb::ZERO; RING_TRBS];
@@ -1075,13 +1102,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
             image.copy_from_slice(&bytes[index * trb::TRB_LEN..(index + 1) * trb::TRB_LEN]);
             *slot = Trb::from_bytes(image);
         }
-        let event = self.event_cursor.pop(&trbs)?;
-        if event.is_some() {
-            let erdp = self.phys_of(self.layout.event_segment)
-                + (self.event_cursor.dequeue_index() * trb::TRB_LEN) as u64;
-            self.xhci.ack_event(erdp)?;
-        }
-        Ok(event)
+        Ok(trbs)
     }
 
     /// Reset the per-transfer event diagnostics before a fresh command
