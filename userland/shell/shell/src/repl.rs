@@ -21,12 +21,13 @@
 //!
 //! # End of input
 //!
-//! A zero-length read means the input stream yielded nothing, which the loop
-//! treats as end of input and a clean session end. *Blocking* until a byte
-//! arrives is the stream backing's responsibility, not the program's;
-//! over a UART that does not yet block on receive, the session simply ends
-//! when no input is pending — live interactive receive over silicon is an
-//! on-metal item (`plans/PI.md` P6e-2 / P6e-3a).
+//! *Blocking* until a byte arrives is the stream backing's responsibility, not
+//! the program's: the kernel-core console backing parks an empty-handed reader
+//! and wakes it when UART RX (or any other stream source) delivers bytes, so
+//! an interactive session waits at the prompt rather than spinning. A
+//! zero-length read therefore means the input stream has genuinely ended — a
+//! closed pipe, an exhausted scripted transcript, or no backing at all — which
+//! the loop treats as a clean session end.
 
 use alloc::string::String;
 use alloc::vec::Vec;
