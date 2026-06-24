@@ -391,6 +391,42 @@ These are absolute. They override any local convenience.
     (§18.5), not to keep the logic in `lib/*`. (`lib/vcmailbox` stays in
     `lib/*` legitimately: its non-driver consumer is the aarch64 framebuffer
     boot console, a genuine early-boot need, not a removable scaffold.)
+23. **No busy-waiting or inefficient polling where an event-driven path
+    exists. Block, park, or wait on the event — never spin.** A task, driver,
+    or service that has nothing to do until some event occurs (a device
+    completes a transfer, input arrives, a reply lands, a lock frees, a
+    deadline elapses) MUST give the CPU up and be woken by that event — park
+    on the scheduler (`reschedule_current(Park)` / a `WaitQueue`), wait on the
+    device interrupt (`irq_bind`/`irq_wait`), block on the IPC/console/wait
+    backing, or arm a one-shot timer — never sit in a tight `loop { poll();
+    yield_now() }` (or `loop { poll() }`) that re-runs continuously and pegs a
+    core at 100%. This is the same defect §2.1 names (a "sleep loop,
+    retry-until-it-works") and §17.1's "no cooperative dispatch loop", applied
+    to **every** layer — kernel, drivers, and userland alike, not just the
+    kernel dispatch loop.
+    - **Continuous busy-poll is a defect, not a configuration.** A
+      perpetually-runnable yield loop wastes power, starves nothing only by
+      luck of the scheduler, and is exactly the cooperative anti-pattern the
+      charter forbids. A user-space driver waiting for its device's next event
+      parks on that device's interrupt (the capability-gated `irq_bind`/
+      `irq_wait` pair, §3 `kernel/irq`); it does not spin.
+    - **A periodic re-poll is the fallback, not the default, and is tickless.**
+      Where an event genuinely has no interrupt/wake source (a device that can
+      only be polled), wait the hardware-dictated interval on a one-shot timer
+      (so the CPU sleeps between polls and the kernel stays tickless, §17.1) —
+      never a tight spin. Prefer the event-driven path; justify any polling
+      fallback in the crate's docs.
+    - **The narrow, documented exceptions** are the genuinely unavoidable
+      bounded spins the silicon dictates: a hardware-handshake poll with a
+      bounded budget that fails closed (e.g. a controller-reset or
+      MMIO-readiness wait, `tx_wait`), and a low-level lock's acquire spin
+      (`lib/sync`), both of which spin only briefly and never as a task's
+      steady state. Reaching for one of these to avoid wiring the event-driven
+      path is the defect this rule forbids.
+    - If the event-driven path does not yet exist (an interrupt is not wired
+      through discovery, a wake source is missing), that wiring is part of the
+      change; if it is genuinely too large, stop and ask (§15.7) and stage it
+      (§2.18/§2.19) — never ship the busy-poll "for now".
 
 ---
 
