@@ -4020,6 +4020,23 @@ keyboard never regresses (§2.17), until the final flip:
     the live keystroke is the metal acceptance item. Same-class gap in
     `lib/virtio`'s notify/used-ring path is the next consumer to adopt the
     barrier (§2.18 tracked follow-up).
+  - **Console hand-off after a *successful* unlock (latest metal iteration).**
+    With the keyboard delivering, the unlock succeeded but neither console
+    could be typed into at `Username:` (keyboard *and* serial). Cause: the
+    in-kernel unlock kthread owns console 0 for the passphrase prompt and
+    must release it when the unlock resolves, but only the fail-closed
+    branches called `release_console0_to_login` — the **success** path
+    skipped it, so the console-0 gate stayed latched shut and the UART
+    receive interrupt stayed masked (a successful unlock had no host/CI
+    coverage: the `root_unlock_login` vertical drives the policy, not the
+    kthread). Fix: the release is now coupled to the unlock *resolving* —
+    `unlock_root_disk_interactively` takes an `on_resolved` callback fired
+    exactly once on **every** outcome and internal return path (the kthread
+    passes `release_console0_to_login`, which now also `console_wake`s so
+    type-ahead buffered during the closed window is delivered). Regression
+    `root_mount::the_console_is_released_on_every_unlock_outcome` (Installed
+    + GaveUp) and the `root_unlock_login` vertical now asserts the release
+    fired on success.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded

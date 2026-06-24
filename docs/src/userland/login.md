@@ -134,7 +134,15 @@ supervises (`plans/PI.md` P11). It wires the real seams:
     resolves, so the two prompts never draw over each other and `login`
     cannot steal the passphrase keystrokes (the kernel also gates
     console-0 *input* from `login` until then). The wait yields the CPU; it
-    is never a busy spin (`AGENTS.md` §2.1).
+    is never a busy spin (`AGENTS.md` §2.1). The instant the unlock
+    resolves — a database installed **or** a fail-closed give-up — the
+    kernel hands console 0 back to `login`: it opens the console-0 input
+    gate, arms the UART receive interrupt, and resolves the pending
+    `users_db_read`, so the keyboard and serial `login` both receive input
+    again. That release is bound to the unlock resolving on *every* outcome
+    (the `on_resolved` callback of `unlock_root_disk_interactively`), so a
+    successful unlock can never leave the console latched shut behind a
+    mounted root (`AGENTS.md` §5.4.5).
   - **Present** — a delivered, valid database wires `UsersAuthenticator`
     for the round; `login` authenticates against it. Because the read
     happens per round, the database the unlock installs *after* `login`

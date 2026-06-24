@@ -269,6 +269,16 @@ impl CompletionWait for Emmc2Completion {
 /// fail-closed deny-all (`AGENTS.md` §5.4.5).
 fn release_console0_to_login() {
     CONSOLE0_GATE.open();
+    // Opening the gate is an input-availability edge for any `login` already
+    // parked on the (until now) withheld console-0 read: nudge the console
+    // wait-queue so it re-polls the now-open gate at once, draining any
+    // type-ahead buffered in the console-0 queue during the closed window
+    // rather than waiting for the next keystroke to push and wake it
+    // (`AGENTS.md` §2.1 — the wake that closes the gated-park race). A
+    // no-op before the wait-queue arch hook is installed, and a spurious
+    // wake for a reader on another console is harmless (it re-polls and
+    // re-parks).
+    rustos_kernel_core::console_wake();
     LATE_USERS_DB.resolve();
     // The passphrase poll is over, so switch the UART console from polled to
     // interrupt-driven: a `login` reader now parks off the run queue and the
@@ -796,12 +806,26 @@ fn finish_unlock<B: Block + 'static>(
             &coop,
             crate::unlock_service::unlock_console_task(),
         );
+        // The unlock owns console 0 for the passphrase prompt (its
+        // `GatedConsoleRead` keeps `login` parked). The moment it resolves —
+        // a database installed *or* given up — console 0 must be released to
+        // `login`: open the gate so the primary console's `login` (the video
+        // keyboard on the Pi, the UART on a headless board) can finally read
+        // its input, arm the UART receive interrupt so a serial `login` is
+        // woken by a keystroke, and resolve the `LateUsersDb` pending wait.
+        // `unlock_root_disk_interactively` calls this `on_resolved` callback
+        // exactly once on every internal return path, so a successful unlock
+        // can no longer leave the gate latched shut and the UART RX masked —
+        // the defect that wedged both the keyboard and serial `login` after a
+        // good unlock (`AGENTS.md` §5.4.5 — a failed unlock still installs no
+        // database, so `login` keeps refusing).
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
             &reader,
             &LATE_USERS_DB,
             audit,
+            &release_console0_to_login,
         ) {
             UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
             UnlockOutcome::GaveUp => note(
@@ -810,11 +834,7 @@ fn finish_unlock<B: Block + 'static>(
                 "root-unlock: gave up fail-closed; login refused until reboot",
             ),
         }
-        // The unlock is resolved (installed or fail-closed), so release
-        // console 0 to `login`: the byte-contention window is over
-        // (`plans/PI.md` P11 item 5). A failed unlock installs no users
-        // database, so `login` still refuses every attempt (`AGENTS.md`
-        // §5.4.5). The unlock task then ends (the disk stays alive — it is
+        // The unlock task then ends (the disk stays alive — it is
         // `'static`-leaked — and this task's window borrow ends with it).
     };
     match ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {

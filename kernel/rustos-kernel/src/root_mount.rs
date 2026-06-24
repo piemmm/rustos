@@ -704,6 +704,12 @@ fn finish_install(
 /// * `late_db` — the set-once cell the loaded database is published into.
 /// * `audit` — the sink every decision is logged through (`AGENTS.md`
 ///   §19.4); no passphrase, key, or volume byte is ever logged.
+/// * `on_resolved` — invoked exactly once, after the unlock reaches its
+///   terminal outcome (installed or gave up) and on every internal return
+///   path, so the caller can release the console it lent the prompt. The
+///   in-kernel kthread passes the console-0 hand-off (open the gate, arm
+///   the UART receive interrupt, resolve the `LateUsersDb` pending wait);
+///   coupling it here makes forgetting it impossible (`AGENTS.md` §5.4.5).
 ///
 /// Driver loading is **not** part of this policy: under design B the
 /// user-space `devmgr` loads drivers over the driver-store endpoint served
@@ -712,6 +718,37 @@ fn finish_install(
 /// (user-data) prompt — the store volume is reachable without this
 /// passphrase.
 pub fn unlock_root_disk_interactively<Disk: Block>(
+    disk: Disk,
+    console: &dyn ConsoleWrite,
+    input: &dyn ConsoleRead,
+    late_db: &LateUsersDb,
+    audit: &dyn Sink,
+    on_resolved: &dyn Fn(),
+) -> UnlockOutcome {
+    // Run the interactive unlock to a terminal outcome, then hand the
+    // console back to `login` — *exactly once, on every outcome and every
+    // internal return path*. Coupling the release to the resolution here,
+    // rather than expecting each caller to remember it, is deliberate
+    // (`AGENTS.md` §2.2): the in-kernel unlock kthread owns console 0 for
+    // the duration of the passphrase prompt (its `GatedConsoleRead` keeps
+    // `login` parked), so the moment the unlock resolves — a database
+    // installed *or* given up — the gate must open, the UART receive
+    // interrupt must arm, and the `LateUsersDb` pending wait must resolve,
+    // or no console could ever be typed into even though the root mounted.
+    // A successful unlock previously skipped that release (only the
+    // fail-closed branches ran it), wedging both the keyboard and serial
+    // `login` after a good unlock; threading it through `on_resolved` makes
+    // forgetting it impossible (`AGENTS.md` §5.4.5).
+    let outcome = unlock_root_disk_interactively_impl(disk, console, input, late_db, audit);
+    on_resolved();
+    outcome
+}
+
+/// The interactive-unlock state machine itself (see
+/// [`unlock_root_disk_interactively`], which wraps this with the mandatory
+/// console-release-on-resolution). Split out so the release cannot be
+/// skipped by any of this function's internal return paths.
+fn unlock_root_disk_interactively_impl<Disk: Block>(
     disk: Disk,
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
@@ -1591,8 +1628,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &|| {},
+        );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed(), "the database is published");
@@ -1639,6 +1682,7 @@ mod tests {
             &ScriptInput::failing(),
             &late,
             &sink,
+            &|| {},
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -1674,8 +1718,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &|| {},
+        );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed());
@@ -1694,8 +1744,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &|| {},
+        );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
         assert!(!late.is_installed(), "no database is installed on give-up");
@@ -1728,6 +1784,7 @@ mod tests {
             &input,
             &late,
             &sink,
+            &|| {},
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -1741,6 +1798,54 @@ mod tests {
     }
 
     #[test]
+    fn the_console_is_released_on_every_unlock_outcome() {
+        // Regression (`plans/PI.md` P11): the unlock kthread owns console 0
+        // for the passphrase prompt and must hand it back to `login` the
+        // instant the unlock resolves — on **both** a successful install and
+        // a fail-closed give-up. A successful unlock once skipped that
+        // release, leaving the console-0 gate latched shut and the UART
+        // receive interrupt masked, so neither the keyboard nor the serial
+        // `login` could be typed into even though the root had mounted.
+        // `unlock_root_disk_interactively` now fires `on_resolved` exactly
+        // once on every internal return path; prove it for both outcomes.
+        use core::cell::Cell;
+
+        // Success path (a correct passphrase installs a database).
+        let releases = Cell::new(0u32);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &ScriptInput::new(script(&[PASSPHRASE])),
+            &LateUsersDb::new(),
+            &RecordingSink::new(),
+            &|| releases.set(releases.get() + 1),
+        );
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert_eq!(
+            releases.get(),
+            1,
+            "a successful unlock releases console 0 exactly once"
+        );
+
+        // Give-up path (a structural failure resolves with no database).
+        let releases = Cell::new(0u32);
+        let outcome = unlock_root_disk_interactively(
+            FatVecBlock::new(64),
+            &AcceptConsole,
+            &ScriptInput::new(script(&[PASSPHRASE])),
+            &LateUsersDb::new(),
+            &RecordingSink::new(),
+            &|| releases.set(releases.get() + 1),
+        );
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert_eq!(
+            releases.get(),
+            1,
+            "a fail-closed unlock still releases console 0 exactly once"
+        );
+    }
+
+    #[test]
     fn an_unreadable_console_gives_up_fail_closed() {
         // §2.9: a console whose read faults cannot deliver a passphrase;
         // the unlock fails closed rather than mounting under an empty or
@@ -1749,8 +1854,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &|| {},
+        );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
         assert!(!late.is_installed());
@@ -1772,8 +1883,14 @@ mod tests {
         let late = LateUsersDb::new();
         let sink = RecordingSink::new();
 
-        let outcome =
-            unlock_root_disk_interactively(success_disk(), &AcceptConsole, &input, &late, &sink);
+        let outcome = unlock_root_disk_interactively(
+            success_disk(),
+            &AcceptConsole,
+            &input,
+            &late,
+            &sink,
+            &|| {},
+        );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
         assert!(late.is_installed());

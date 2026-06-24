@@ -12,7 +12,7 @@
 //! installs into a [`LateUsersDb`] cell and authenticates the planted
 //! account while refusing a wrong password.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rustos_abi::driver::virtio::VirtioHost;
 use rustos_abi::Errno;
@@ -100,10 +100,22 @@ fn root_unlock_login(
     // so the unlock's decisions land on the same channel the boot log uses.
     // This vertical proves the unlock *policy* only; driver autoload is the
     // separate pre-unlock `/System`-volume path (design B), not exercised here.
+    //
+    // The `on_resolved` callback is how the production kthread releases
+    // console 0 to `login` once the unlock resolves (`crate::aarch64::
+    // root_unlock`); assert here that it fires on the success path, the
+    // end-to-end witness of the fix that a *successful* unlock hands the
+    // console back (it previously did not, wedging `login`).
+    let released = AtomicBool::new(false);
     let outcome =
-        unlock_root_disk_interactively(blk, &NullConsole, &input, &late, env.audit_sink());
+        unlock_root_disk_interactively(blk, &NullConsole, &input, &late, env.audit_sink(), &|| {
+            released.store(true, Ordering::Release)
+        });
     if outcome != UnlockOutcome::Installed {
         return Err("interactive unlock did not install a database");
+    }
+    if !released.load(Ordering::Acquire) {
+        return Err("successful unlock did not release console 0 to login");
     }
     env.log("root-unlock: passphrase accepted, users database installed");
 
