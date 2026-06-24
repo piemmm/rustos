@@ -7,7 +7,7 @@
 //! It is deliberately self-contained — it does not depend on the
 //! `tests/integration` harness — and keys only off the OS component of the
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
-//! cfg-check` (`AGENTS.md` §17.2) stays clean.
+//! cfg-check` stays clean.
 //!
 //! The consuming vertical (`spawn_session_qemu_riscv64`) sets
 //! `RUSTOS_SPAWN_ROLE` and `RUSTOS_SPAWN_YIELDS` when it compiles this program

@@ -4,7 +4,7 @@
 //! The emitter writes the canonical encoding of each operation over the same
 //! control bytes ([`crate::control`]) and SGR table ([`crate::attr`]) the
 //! [`crate::Parser`] reads, so the two agree by construction: parsing the
-//! emitter's output reproduces the original [`Op`] (`AGENTS.md` §2.2).
+//! emitter's output reproduces the original [`Op`].
 //!
 //! Movement counts are clamped up to `1` (ANSI's default), so even a degenerate
 //! `CursorUp(0)` emits the well-formed `CSI 1 A` and round-trips as `CursorUp(1)`.

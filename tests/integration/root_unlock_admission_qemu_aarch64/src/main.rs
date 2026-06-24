@@ -2,7 +2,7 @@
 //! the production aarch64 `rustos-kernel` pipeline on the `virt` board with
 //! a planted whole-disk encrypted-root image, and prove the **in-kernel
 //! root-unlock kthread admission path** mounts the root so `root`/`root`
-//! authenticates (`AGENTS.md` §18.6, §20).
+//! authenticates.
 //!
 //! ## What this test asserts — and how it differs from its siblings
 //!
@@ -25,8 +25,7 @@
 //!    enumeration (`root_storage::observe_virtio_mmio_block_devices`,
 //!    driven from `boot::audit_root_storage_binding`) probes the populated
 //!    slot's `DeviceID`, attaches the probed virtio-block child node, binds
-//!    the virtio-blk driver, and stashes the binding for the init seam
-//!    (`AGENTS.md` §18.2 / §18.6).
+//!    the virtio-blk driver, and stashes the binding for the init seam.
 //! 2. **Admits the unlock kthread.** The init seam runs
 //!    `unlock_service::spawn_if_present`, which admits the in-kernel
 //!    root-unlock kthread onto the boot CPU's run queue (the console-0
@@ -50,8 +49,7 @@
 //! from `root_unlock_login`, which drives the unlock policy directly). A run
 //! where discovery never binds the disk, the kthread is never admitted, the
 //! device IRQ never wakes it, or the mount fails never reaches that message,
-//! so the harness times out — the documented fail-loud behaviour
-//! (`AGENTS.md` §7).
+//! so the harness times out — the documented fail-loud behaviour.
 //!
 //! The *content* of the installed database — that `root`/`root`
 //! authenticates and a wrong password is refused — is proven over the same
@@ -60,7 +58,7 @@
 //! additionally needs the userland heap to parse the served database, which
 //! rides the production `mem_map` producer (`plans/SPAWN.md` `SP5b`, not yet
 //! landed); until then `login` runs allocation-free and refuses every
-//! attempt (`AGENTS.md` §5.4.5). This vertical therefore keys on the
+//! attempt. This vertical therefore keys on the
 //! install witness, not a `login` success.
 //!
 //! ## Embedded `virt` device tree
@@ -78,7 +76,7 @@
 //! the audit sink. Splitting the audit-observer behaviour into a separate
 //! bin (instead of a Cargo feature on a production crate) prevents feature
 //! unification from leaking the QEMU-exit shortcut into any production build
-//! (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what the
+//! (fail closed; the harness never decides what the
 //! kernel does next).
 
 #![cfg_attr(itest_aarch64, no_std)]
@@ -143,8 +141,7 @@ mod kernel {
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-    /// §7).
+    /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn rustos_root_unlock_admission_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

@@ -1,4 +1,4 @@
-//! Unit tests for the first-party LZ codec (`AGENTS.md` §6, §7).
+//! Unit tests for the first-party LZ codec.
 //!
 //! The suite covers the round-trip identity, a representative corpus, fixed
 //! known-answer vectors that pin the on-disk frame format, the
@@ -187,8 +187,7 @@ fn decompress_rejects_truncated_stream() {
 #[test]
 fn decompress_never_panics_on_arbitrary_bytes() {
     // Exhaustively flip each byte of a valid frame, plus a structured set of
-    // adversarial frames. Every call must return a `Result`, never panic
-    // (`AGENTS.md` §2.9 / §19.6).
+    // adversarial frames. Every call must return a `Result`, never panic.
     let input = b"compress me, then corrupt every byte of the frame".to_vec();
     let mut packed = vec![0u8; max_compressed_len(input.len())];
     let n = compress(&input, &mut packed).expect("compress");

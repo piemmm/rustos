@@ -16,7 +16,7 @@
 //! audit-observer behaviour into a separate bin (instead of a Cargo
 //! feature on the arch crate) prevents feature unification from
 //! leaking the QEMU-exit shortcut into any production build
-//! (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what
+//! (fail closed; the harness never decides what
 //! the kernel does next).
 
 #![cfg_attr(itest_riscv64, no_std)]
@@ -78,7 +78,7 @@ mod kernel {
     /// Forward to the shared riscv64 panic bridge. A panic before
     /// `BootCompleted` parks the hart, the run times out, and the
     /// harness reports `Outcome::Timeout` — the documented fail-loud
-    /// behaviour (`AGENTS.md` §7).
+    /// behaviour.
     #[panic_handler]
     fn rustos_kernel_arch_boot_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

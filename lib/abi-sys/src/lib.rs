@@ -9,30 +9,28 @@
 //! (C first, then any language with a C FFI) links this runtime to reach the
 //! RustOS kernel.
 //!
-//! It is the curated `/System/Libraries/` class *System runtime / C ABI*
-//! (`AGENTS.md` §16.4): deliberately minimal — it marshals to the kernel and
+//! It is the curated `/System/Libraries/` class *System runtime / C ABI*: deliberately minimal — it marshals to the kernel and
 //! nothing more — and dynamically linked, so one security update covers every
 //! consumer. See `plans/CCOMPAT.md` (stage CC2) for the staged build plan and
 //! its security posture.
 //!
 //! # Not a privileged path
 //!
-//! These stubs add **no** authority (`AGENTS.md` §5.4 / `plans/CCOMPAT.md`
-//! §4). Every capability check and every input validation happens kernel-side,
+//! These stubs add **no** authority (`plans/CCOMPAT.md`). Every capability check and every input validation happens kernel-side,
 //! on the far side of the trap, exactly as for a Rust caller; a C program
 //! reaches no syscall it could not reach in Rust and gains nothing by being C.
 //! Because the kernel re-validates every argument and fails closed, no
 //! argument value passed to a `ros_sys_*` function can cause undefined
 //! behaviour, so the stubs are safe `extern "C"` functions.
 //!
-//! # Symbol naming (`AGENTS.md` §9)
+//! # Symbol naming
 //!
 //! Each entry point is pinned to the stable symbol `ros_sys_<name>` with
 //! `#[export_name = …]` so the Rust compiler does not mangle it (`extern "C"`
 //! alone fixes only the calling convention, not the symbol name). The Rust
 //! item names are free to be idiomatic; only the exported symbol is frozen.
 //!
-//! # Panic-free boundary (`AGENTS.md` §2.9)
+//! # Panic-free boundary
 //!
 //! An unwind across an `extern "C"` boundary is undefined behaviour, so every
 //! entry point is panic-free: each performs only constant-index array writes
@@ -42,8 +40,7 @@
 //!
 //! # Targets
 //!
-//! The user→kernel trap itself lives once, in `rustos-abi-trap`
-//! (`AGENTS.md` §2.2): this crate only marshals each call into register form
+//! The user→kernel trap itself lives once, in `rustos-abi-trap`: this crate only marshals each call into register form
 //! and hands it to [`rustos_abi_trap::raw_syscall`]. The trap instruction is
 //! compiled in only for the three native Tier-1 targets (`x86_64`, `aarch64`,
 //! `riscv64`); `wasm32` has no trap instruction and is out of scope for this
@@ -62,7 +59,7 @@ use rustos_abi::{SyscallNumber, SYSCALL_MAX_ARGS};
 use rustos_abi_trap::raw_syscall;
 
 // Syscall numbers, read from the `abi-v1` source of truth so this crate can
-// never disagree with the frozen table (`AGENTS.md` §2.2).
+// never disagree with the frozen table.
 const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 const NUM_EXIT: u64 = SyscallNumber::EXIT.as_u16() as u64;
 const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
@@ -159,8 +156,7 @@ pub extern "C" fn sys_yield() {
 /// This function does not return. A correct kernel never returns control from
 /// `exit`; should it nonetheless do so, the stub must not return to its C
 /// caller (which has no continuation), so it re-issues `exit`. This is a
-/// fail-closed loop over the terminating syscall, not a busy-wait
-/// (`AGENTS.md` §2.1).
+/// fail-closed loop over the terminating syscall, not a busy-wait.
 #[export_name = "ros_sys_exit"]
 pub extern "C" fn sys_exit(code: i32) -> ! {
     loop {
@@ -177,7 +173,7 @@ pub extern "C" fn sys_exit(code: i32) -> ! {
 #[export_name = "ros_sys_ipc_send"]
 pub extern "C" fn sys_ipc_send(endpoint: u64, buf: *mut c_void, len: usize) -> i32 {
     // SAFETY: see `sys_yield`. The kernel validates `(buf, len)` against the
-    // caller's address space before touching it (`AGENTS.md` §5.4).
+    // caller's address space before touching it.
     unsafe {
         ret_i32(raw_syscall(
             NUM_IPC_SEND,
@@ -283,10 +279,9 @@ pub extern "C" fn sys_random_get(buf: *mut c_void, len: usize, flags: u32) -> u6
 /// standard stream `fd` (`SyscallNumber::STREAM_WRITE`). Returns the number
 /// of bytes written.
 ///
-/// The kernel resolves `fd` against the caller's inherited descriptor table
-/// (`AGENTS.md` §20) — the descriptor, not an ambient device, is the
+/// The kernel resolves `fd` against the caller's inherited descriptor table — the descriptor, not an ambient device, is the
 /// authority — and validates the `(buf, len)` pair against the caller's
-/// address space before touching it (`AGENTS.md` §5.4). A short write (fewer
+/// address space before touching it. A short write (fewer
 /// than `len`) is valid, so the caller loops.
 #[must_use]
 #[export_name = "ros_sys_stream_write"]
@@ -304,9 +299,8 @@ pub extern "C" fn sys_stream_write(fd: u32, buf: *mut c_void, len: usize) -> u64
 /// standard stream `fd` into `buf` (`SyscallNumber::STREAM_READ`). Returns
 /// the number of bytes read.
 ///
-/// The kernel resolves `fd` against the caller's inherited descriptor table
-/// (`AGENTS.md` §20) and validates the `(buf, len)` pair against the
-/// caller's address space before writing it (`AGENTS.md` §5.4). The read
+/// The kernel resolves `fd` against the caller's inherited descriptor table and validates the `(buf, len)` pair against the
+/// caller's address space before writing it. The read
 /// counterpart of `stream_write`: a short read (fewer than `len`, possibly
 /// zero when no input is pending) is valid, so the caller loops.
 #[must_use]
@@ -327,10 +321,9 @@ pub extern "C" fn sys_stream_read(fd: u32, buf: *mut c_void, len: usize) -> u64 
 ///
 /// Requires `CAP_PROC_SPAWN`; the kernel validates the capability and the
 /// `(path, path_len)` pair against the caller's address space before
-/// reading it (`AGENTS.md` §5.4). The caller keeps running — this is a
+/// reading it. The caller keeps running — this is a
 /// true concurrent spawn, not an `exec`-style hand-off (`plans/SPAWN.md`
-/// SP3). `console` selects the child's standard-stream attachment
-/// (`AGENTS.md` §20): `ROS_CONSOLE_INHERIT` keeps the child on the
+/// SP3). `console` selects the child's standard-stream attachment: `ROS_CONSOLE_INHERIT` keeps the child on the
 /// caller's own console; any other value names an installed console index
 /// (see `ros_sys_console_count`) and an index with no console fails
 /// closed.
@@ -348,7 +341,7 @@ pub extern "C" fn sys_spawn(path: *mut c_void, path_len: usize, console: u64) ->
 }
 
 /// `console_count`: report how many system text consoles are installed
-/// (`SyscallNumber::CONSOLE_COUNT`, `AGENTS.md` §20). Returns the count,
+/// (`SyscallNumber::CONSOLE_COUNT`). Returns the count,
 /// or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// Gated kernel-side on `ROS_CAP_CONSOLE_WRITE`. The count is the index
@@ -363,15 +356,14 @@ pub extern "C" fn sys_console_count() -> u64 {
 }
 
 /// `stream_echo`: set whether the input stream `fd` echoes the bytes it
-/// reads back to its console (`SyscallNumber::STREAM_ECHO`, `AGENTS.md`
-/// §20 — terminal local echo). `enabled` is `0` to disable, non-zero to
+/// reads back to its console (`SyscallNumber::STREAM_ECHO` — terminal local echo). `enabled` is `0` to disable, non-zero to
 /// enable. Returns a `ROS_E_*` code.
 ///
 /// Gated kernel-side on `ROS_CAP_CONSOLE_READ`; the kernel performs the
 /// echo itself as part of the read line discipline, so no
 /// `ROS_CAP_CONSOLE_WRITE` is needed. Console echo defaults to **on**; a
 /// program suppresses it around a secret it must not render (a password
-/// prompt) and restores it afterwards (`AGENTS.md` §5.4).
+/// prompt) and restores it afterwards.
 #[must_use]
 #[export_name = "ros_sys_stream_echo"]
 pub extern "C" fn sys_stream_echo(fd: u32, enabled: u32) -> i32 {
@@ -386,46 +378,43 @@ pub extern "C" fn sys_stream_echo(fd: u32, enabled: u32) -> i32 {
 
 /// `key_inject`: inject one decoded keyboard key edge at `buf` (a
 /// `ros_key_input_t` record of `len` bytes) into the kernel input-focus
-/// arbiter (`SyscallNumber::KEY_INJECT`, `AGENTS.md` §20, `plans/PI.md`
+/// arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md`
 /// P11 — input follows the surface owner). Returns the number of bytes
 /// consumed, or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
 /// directly attached keyboard into a key edge. Gated kernel-side on
 /// `ROS_CAP_INPUT_INJECT`; the kernel validates the capability and the
-/// `(buf, len)` pair against the caller's address space before reading it
-/// (`AGENTS.md` §5.4), decodes the record fail-closed, and routes it by who
+/// `(buf, len)` pair against the caller's address space before reading it, decodes the record fail-closed, and routes it by who
 /// currently holds input focus — the driver no longer chooses the encoding
-/// or the destination (`AGENTS.md` §17.4).
+/// or the destination.
 #[must_use]
 #[export_name = "ros_sys_key_inject"]
 pub extern "C" fn sys_key_inject(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_INJECT`
     // and the `(buf, len)` pair against the caller's address space before
-    // reading it (`AGENTS.md` §5.4).
+    // reading it.
     unsafe { raw_syscall(NUM_KEY_INJECT, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
 /// `display_acquire`: acquire ownership of the display and claim keyboard
-/// input focus (`SyscallNumber::DISPLAY_ACQUIRE`, `AGENTS.md` §10 / §17.3 /
-/// §20, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on success).
+/// input focus (`SyscallNumber::DISPLAY_ACQUIRE`, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on success).
 ///
 /// The compositing window manager calls this when it takes over the screen:
 /// the kernel input-focus arbiter switches its foreground to the desktop
 /// keyboard channel, so injected key edges are delivered as records the
 /// manager drains with [`sys_keyboard_read`]. Gated kernel-side on
-/// `ROS_CAP_DISPLAY` (`AGENTS.md` §4 — owning the display is privileged).
+/// `ROS_CAP_DISPLAY` (owning the display is privileged).
 #[must_use]
 #[export_name = "ros_sys_display_acquire"]
 pub extern "C" fn sys_display_acquire() -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
-    // validates `CAP_DISPLAY` before touching any state (`AGENTS.md` §5.4).
+    // validates `CAP_DISPLAY` before touching any state.
     unsafe { ret_i32(raw_syscall(NUM_DISPLAY_ACQUIRE, NO_ARGS)) }
 }
 
 /// `display_release`: release the display and return keyboard input focus to
-/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `AGENTS.md` §10 /
-/// §17.3 / §20, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on
+/// the text console (`SyscallNumber::DISPLAY_RELEASE`, `plans/PI.md` P11). Returns a `ROS_E_*` code (`0` on
 /// success).
 ///
 /// The inverse of [`sys_display_acquire`]; gated kernel-side on
@@ -434,35 +423,32 @@ pub extern "C" fn sys_display_acquire() -> i32 {
 #[export_name = "ros_sys_display_release"]
 pub extern "C" fn sys_display_release() -> i32 {
     // SAFETY: see `sys_yield`. The call carries no pointers; the kernel
-    // validates `CAP_DISPLAY` before touching any state (`AGENTS.md` §5.4).
+    // validates `CAP_DISPLAY` before touching any state.
     unsafe { ret_i32(raw_syscall(NUM_DISPLAY_RELEASE, NO_ARGS)) }
 }
 
 /// `keyboard_read`: read one decoded keyboard event from the kernel keyboard
 /// channel into `buf` (a buffer of `len` bytes, at least one
-/// `ros_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `AGENTS.md`
-/// §10, `plans/PI.md` P11). Returns the number of bytes written — one
+/// `ros_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md` P11). Returns the number of bytes written — one
 /// record, or `0` when the channel is momentarily drained — or a `ROS_E_*`
 /// code reinterpreted into the result.
 ///
 /// The principal that owns the display (the window manager) drains the
 /// records the arbiter routed to it while it held focus. Gated kernel-side
 /// on `ROS_CAP_INPUT_READ`; the kernel validates the capability and the
-/// `(buf, len)` pair against the caller's address space before writing it
-/// (`AGENTS.md` §5.4), and a buffer too small to hold a record fails closed
-/// (`AGENTS.md` §2.9).
+/// `(buf, len)` pair against the caller's address space before writing it, and a buffer too small to hold a record fails closed.
 #[must_use]
 #[export_name = "ros_sys_keyboard_read"]
 pub extern "C" fn sys_keyboard_read(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates `CAP_INPUT_READ` and
     // the `(buf, len)` pair against the caller's address space before writing
-    // it (`AGENTS.md` §5.4).
+    // it.
     unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
 /// `resource_grants`: enumerate the device-resource grants the kernel minted
 /// for the calling driver task into `buf` (a buffer of `len` bytes)
-/// (`SyscallNumber::RESOURCE_GRANTS`, `AGENTS.md` §4 / §18.3 / §20,
+/// (`SyscallNumber::RESOURCE_GRANTS`,
 /// `plans/PI.md` P10 chunk 5d-2). Returns the total number of bytes written
 /// — consecutive `ros_granted_resource` records — or a `ROS_E_*` code
 /// reinterpreted into the result.
@@ -470,20 +456,19 @@ pub extern "C" fn sys_keyboard_read(buf: *mut c_void, len: usize) -> u64 {
 /// A driver process calls this once at start-up to learn the unforgeable
 /// handles it passes to [`sys_mmio_map`] / [`sys_dma_alloc`]. It needs no
 /// capability (a task reads only its *own* grants); the kernel validates the
-/// `(buf, len)` pair against the caller's address space before writing it
-/// (`AGENTS.md` §5.4), and a buffer too small for the whole grant set fails
-/// closed (`AGENTS.md` §2.9).
+/// `(buf, len)` pair against the caller's address space before writing it, and a buffer too small for the whole grant set fails
+/// closed.
 #[must_use]
 #[export_name = "ros_sys_resource_grants"]
 pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
     // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
-    // against the caller's address space before writing it (`AGENTS.md` §5.4).
+    // against the caller's address space before writing it.
     unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
 /// `mmio_map`: map the `[offset, offset + len)` sub-region of a granted
 /// device MMIO register window into the calling driver's own address space
-/// (`SyscallNumber::MMIO_MAP`, `AGENTS.md` §4 / §18.3, `plans/PI.md` P10
+/// (`SyscallNumber::MMIO_MAP`, `plans/PI.md` P10
 /// chunk 5d-0). Returns the base virtual address of the mapped sub-region,
 /// or a `ROS_E_*` code reinterpreted into the result.
 ///
@@ -494,9 +479,9 @@ pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
 /// it names a memory window and the sub-region lies wholly inside it, and
 /// maps only that sub-region (caching disabled); a forged/non-owned handle, a
 /// wrong-kind grant, a sub-region escaping the grant, or a build with no map
-/// facility wired fails closed (`AGENTS.md` §2.9 / §5.4). Mapping a bounded
+/// facility wired fails closed. Mapping a bounded
 /// sub-region lets a driver granted a large outbound bus aperture map just
-/// the single BAR it enumerated, not the whole window (`AGENTS.md` §24.1).
+/// the single BAR it enumerated, not the whole window.
 /// Gated kernel-side on `ROS_CAP_MMIO_MAP`.
 #[must_use]
 #[export_name = "ros_sys_mmio_map"]
@@ -508,8 +493,7 @@ pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
 }
 
 /// `dma_alloc`: carve a coherent DMA buffer for the calling driver, bounded
-/// by a granted device DMA constraint (`SyscallNumber::DMA_ALLOC`,
-/// `AGENTS.md` §4 / §18.3, `plans/PI.md` P10 chunk 5d-0). Writes the
+/// by a granted device DMA constraint (`SyscallNumber::DMA_ALLOC`, `plans/PI.md` P10 chunk 5d-0). Writes the
 /// buffer's device-visible base address to `device_out` and returns the base
 /// virtual address of the mapping, or a `ROS_E_*` code reinterpreted into the
 /// result.
@@ -521,14 +505,13 @@ pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
 /// region of `len` bytes whose physical extent lies within the grant's
 /// addressing limit, and maps it `RW`, non-executable, into the caller's own
 /// address space; a forged/non-owned handle, a wrong-kind grant, an
-/// over-limit request, or a build with no DMA facility wired fails closed
-/// (`AGENTS.md` §2.9 / §5.4). Gated kernel-side on `ROS_CAP_MEM_DMA`.
+/// over-limit request, or a build with no DMA facility wired fails closed. Gated kernel-side on `ROS_CAP_MEM_DMA`.
 #[must_use]
 #[export_name = "ros_sys_dma_alloc"]
 pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `device_out`
     // pointer against the caller's address space before writing the
-    // device-visible base to it (`AGENTS.md` §5.4).
+    // device-visible base to it.
     unsafe {
         raw_syscall(
             NUM_DMA_ALLOC,
@@ -542,9 +525,8 @@ pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void
 /// ([`rustos_abi::MapFlags`]) and the placement hint `addr_hint`
 /// (`SyscallNumber::MEM_MAP`). Returns the base address of the new region.
 ///
-/// The kernel validates every argument and fails closed (`AGENTS.md` §5.4);
-/// the region is zeroed before it is visible and is never executable
-/// (`AGENTS.md` §19.2). An out-of-memory condition is reported as a
+/// The kernel validates every argument and fails closed;
+/// the region is zeroed before it is visible and is never executable. An out-of-memory condition is reported as a
 /// `ROS_E_*` code reinterpreted into the result (`plans/SPAWN.md` SP5).
 #[must_use]
 #[export_name = "ros_sys_mem_map"]
@@ -577,7 +559,7 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
 /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_ANY`] to
 /// wait for any child. A process may only wait on its **own** children; the
 /// kernel validates the parent/child relationship and the `status` pointer
-/// before writing to it (`AGENTS.md` §4 / §5.4), and fails closed
+/// before writing to it, and fails closed
 /// (`plans/SPAWN.md` SP6).
 #[must_use]
 #[export_name = "ros_sys_wait"]
@@ -589,8 +571,7 @@ pub extern "C" fn sys_wait(pid: i32, status: *mut c_void) -> u64 {
 
 /// `rlimit_get`: read the calling process's effective limit for resource
 /// `kind`, writing the encoded `ros_resource_limit_t` to `out`
-/// (`SyscallNumber::RLIMIT_GET`). Returns a `ROS_E_*` code (`AGENTS.md`
-/// §24.3).
+/// (`SyscallNumber::RLIMIT_GET`). Returns a `ROS_E_*` code.
 #[must_use]
 #[export_name = "ros_sys_rlimit_get"]
 pub extern "C" fn sys_rlimit_get(kind: u32, out: *mut c_void) -> i32 {
@@ -607,7 +588,7 @@ pub extern "C" fn sys_rlimit_get(kind: u32, out: *mut c_void) -> i32 {
 /// `rlimit_set`: install the calling process's limit for resource `kind`
 /// from the encoded `ros_resource_limit_t` at `value`
 /// (`SyscallNumber::RLIMIT_SET`). Returns a `ROS_E_*` code; raising a hard
-/// bound requires `CAP_RLIMIT_RAISE` (`AGENTS.md` §24.3).
+/// bound requires `CAP_RLIMIT_RAISE`.
 #[must_use]
 #[export_name = "ros_sys_rlimit_set"]
 pub extern "C" fn sys_rlimit_set(kind: u32, value: *mut c_void) -> i32 {
@@ -627,9 +608,9 @@ pub extern "C" fn sys_rlimit_set(kind: u32, value: *mut c_void) -> i32 {
 /// count, or a `ROS_E_*` code reinterpreted into the result.
 ///
 /// Gated kernel-side on `ROS_CAP_USERS_READ` — only the authentication
-/// principal (login) holds it (`AGENTS.md` §4 / §5.4). A buffer smaller
+/// principal (login) holds it. A buffer smaller
 /// than the database is refused whole (`ROS_E_BUFFER_TOO_SMALL`) — a
-/// credential database is never truncated (`AGENTS.md` §2.9); sizing the
+/// credential database is never truncated; sizing the
 /// buffer at the format's 64 KiB maximum always suffices.
 #[must_use]
 #[export_name = "ros_sys_users_db_read"]
@@ -641,7 +622,7 @@ pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
 
 /// `hw_tree_read`: copy the discovered hardware tree the kernel built at
 /// boot into the caller's `(buf, len)` buffer
-/// (`SyscallNumber::HW_TREE_READ`, `AGENTS.md` §16.6 / §18.1 / §18.4).
+/// (`SyscallNumber::HW_TREE_READ`).
 /// Returns the byte count, or a `ROS_E_*` code reinterpreted into the
 /// result.
 ///
@@ -649,11 +630,10 @@ pub extern "C" fn sys_users_db_read(buf: *mut c_void, len: usize) -> u64 {
 /// and node count) followed by that many `ros_hw_node_t` records. The
 /// generation in the header is the value to pass to `ros_sys_hw_tree_wait`
 /// to block until the tree next changes. Gated kernel-side on
-/// `ROS_CAP_SYSINFO_HW` — the privileged global hardware view
-/// (`AGENTS.md` §16.6 / §18.4). The whole inventory is copied or none: a
+/// `ROS_CAP_SYSINFO_HW` — the privileged global hardware view. The whole inventory is copied or none: a
 /// buffer smaller than the snapshot is refused with `ROS_E_BUFFER_TOO_SMALL`
-/// rather than truncated (`AGENTS.md` §2.9), so the caller grows `buf` and
-/// retries (`AGENTS.md` §24.1).
+/// rather than truncated, so the caller grows `buf` and
+/// retries.
 #[must_use]
 #[export_name = "ros_sys_hw_tree_read"]
 pub extern "C" fn sys_hw_tree_read(buf: *mut c_void, len: usize) -> u64 {
@@ -663,8 +643,7 @@ pub extern "C" fn sys_hw_tree_read(buf: *mut c_void, len: usize) -> u64 {
 }
 
 /// `users_db_wait`: block until the system user database leaves its pending
-/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`,
-/// `AGENTS.md` §5.1) — the blocking companion to `ros_sys_users_db_read`.
+/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`) — the blocking companion to `ros_sys_users_db_read`.
 /// Returns a `ROS_E_*` code.
 ///
 /// `timeout_ns` bounds the wait (`UINT64_MAX` for an effectively unbounded
@@ -682,7 +661,7 @@ pub extern "C" fn sys_users_db_wait(timeout_ns: u64) -> i32 {
 }
 
 /// `hw_tree_wait`: block until the discovered hardware tree changes past
-/// `last_generation` (`SyscallNumber::HW_TREE_WAIT`, `AGENTS.md` §18.4 —
+/// `last_generation` (`SyscallNumber::HW_TREE_WAIT` —
 /// reactive re-match and hotplug). Returns a `ROS_E_*` code.
 ///
 /// `last_generation` is the generation last observed through
@@ -708,17 +687,17 @@ pub extern "C" fn sys_hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i32
 /// `ipc_call`: make a synchronous capability-checked call to the kernel-owned
 /// IPC call endpoint `endpoint` — post `request_len` bytes at `request`,
 /// block until the reply arrives, and copy it into the `reply_cap`-byte
-/// buffer at `reply` (`SyscallNumber::IPC_CALL`, `AGENTS.md` §5.2 / §5.4).
+/// buffer at `reply` (`SyscallNumber::IPC_CALL`).
 /// Returns the number of reply bytes written, or a `ROS_E_*` code
 /// reinterpreted into the result.
 ///
 /// The kernel enforces the endpoint's required send capability against the
-/// caller before posting (`AGENTS.md` §5.2 — no ambient authority), copies
+/// caller before posting (no ambient authority), copies
 /// both buffers through the validated boundary, and blocks the caller
 /// cooperatively until the reply arrives, never busy-spinning. A reply larger
 /// than `reply_cap` fails closed with `ROS_E_BUFFER_TOO_SMALL`; a missing
 /// send capability, an unknown or destroyed endpoint, or no call-endpoint
-/// registry wired each fail closed (`AGENTS.md` §2.9).
+/// registry wired each fail closed.
 #[must_use]
 #[export_name = "ros_sys_ipc_call"]
 pub extern "C" fn sys_ipc_call(
@@ -729,8 +708,7 @@ pub extern "C" fn sys_ipc_call(
     reply_cap: usize,
 ) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)` pairs
-    // against the caller's address space before touching them (`AGENTS.md`
-    // §5.4).
+    // against the caller's address space before touching them.
     unsafe {
         raw_syscall(
             NUM_IPC_CALL,
@@ -747,8 +725,7 @@ pub extern "C" fn sys_ipc_call(
 }
 
 /// `call_create`: create and register a kernel-owned synchronous call
-/// endpoint the calling task then serves (`SyscallNumber::CALL_CREATE`,
-/// `AGENTS.md` §5.2 / §5.4; the server half of `ros_sys_ipc_call`).
+/// endpoint the calling task then serves (`SyscallNumber::CALL_CREATE`; the server half of `ros_sys_ipc_call`).
 ///
 /// `send_caps` and `recv_caps` each point at a 32-byte `ros_capability_set_t`
 /// wire image (the capability a caller must hold to post, and the capability
@@ -766,8 +743,7 @@ pub extern "C" fn sys_call_create(
     capacity: usize,
 ) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates both `CapabilitySet`
-    // pointers against the caller's address space before reading them
-    // (`AGENTS.md` §5.4).
+    // pointers against the caller's address space before reading them.
     unsafe {
         ret_i32(raw_syscall(
             NUM_CALL_CREATE,
@@ -797,7 +773,7 @@ pub extern "C" fn sys_call_recv(
     ticket_out: *mut c_void,
 ) -> u64 {
     // SAFETY: see `sys_ipc_call`; the kernel validates both pointers against
-    // the caller's address space before touching them (`AGENTS.md` §5.4).
+    // the caller's address space before touching them.
     unsafe {
         raw_syscall(
             NUM_CALL_RECV,
@@ -826,8 +802,7 @@ pub extern "C" fn sys_call_reply(
     reply_len: usize,
 ) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the reply `(ptr, len)`
-    // pair against the caller's address space before reading it (`AGENTS.md`
-    // §5.4).
+    // pair against the caller's address space before reading it.
     unsafe {
         ret_i32(raw_syscall(
             NUM_CALL_REPLY,
@@ -838,15 +813,14 @@ pub extern "C" fn sys_call_reply(
 
 /// `log_emit`: emit one encoded diagnostic record (a `rustos_abi::log`
 /// `LogRecord` wire image of `len` bytes at `record`) to the kernel's
-/// diagnostic log sink (`SyscallNumber::LOG_EMIT`, `AGENTS.md` §19.4 / §20).
+/// diagnostic log sink (`SyscallNumber::LOG_EMIT`).
 /// Requires `ROS_CAP_LOG_EMIT`; the kernel validates and attributes the
 /// record to the calling task. Returns a `ROS_E_*` code (`0` on success).
 #[must_use]
 #[export_name = "ros_sys_log_emit"]
 pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the record `(ptr, len)`
-    // pair against the caller's address space before reading it (`AGENTS.md`
-    // §5.4).
+    // pair against the caller's address space before reading it.
     unsafe {
         ret_i32(raw_syscall(
             NUM_LOG_EMIT,
@@ -856,8 +830,7 @@ pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
 }
 
 /// `hw_emit_node`: publish one wire-encoded `rustos_abi::HwNode` (`len` bytes
-/// at `node`) into the live hardware tree (`SyscallNumber::HW_EMIT_NODE`,
-/// `AGENTS.md` §18.1 / §18.3). A user-space bus driver calls this for each
+/// at `node`) into the live hardware tree (`SyscallNumber::HW_EMIT_NODE`). A user-space bus driver calls this for each
 /// device it enumerates so the device manager autoloads the matching driver.
 /// Requires `ROS_CAP_HW_EMIT`; the kernel decodes and validates the node and
 /// admits it only when every resource it requests is covered by one of the
@@ -866,8 +839,7 @@ pub extern "C" fn sys_log_emit(record: *mut c_void, len: usize) -> i32 {
 #[export_name = "ros_sys_hw_emit_node"]
 pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the node `(ptr, len)`
-    // pair against the caller's address space before reading it (`AGENTS.md`
-    // §5.4).
+    // pair against the caller's address space before reading it.
     unsafe {
         ret_i32(raw_syscall(
             NUM_HW_EMIT_NODE,
@@ -878,27 +850,26 @@ pub extern "C" fn sys_hw_emit_node(node: *mut c_void, len: usize) -> i32 {
 
 /// `hw_remove_node`: remove the previously-published child node `node_id` —
 /// and its whole subtree — from the live hardware tree
-/// (`SyscallNumber::HW_REMOVE_NODE`, `AGENTS.md` §18.4). The symmetric
+/// (`SyscallNumber::HW_REMOVE_NODE`). The symmetric
 /// counterpart of `ros_sys_hw_emit_node`: a user-space bus driver calls it
 /// when a device it published goes away, so the device manager unloads the
 /// driver bound to the vanished node. Requires `ROS_CAP_HW_EMIT`; the kernel
 /// retires the node only when it is a child the caller itself published
-/// (`AGENTS.md` §4 — no ambient authority). Returns a `ROS_E_*` code (`0` on
+/// (no ambient authority). Returns a `ROS_E_*` code (`0` on
 /// success).
 #[must_use]
 #[export_name = "ros_sys_hw_remove_node"]
 pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
-    // side of the trap (`AGENTS.md` §5.4). No memory operand is passed.
+    // side of the trap. No memory operand is passed.
     unsafe { ret_i32(raw_syscall(NUM_HW_REMOVE_NODE, [node_id, 0, 0, 0, 0, 0])) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The trap seam lives in `rustos-abi-trap` (the single trap home,
-    // `AGENTS.md` §2.2) and is reached here through the `host-seam`
+    // The trap seam lives in `rustos-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
     use rustos_abi::SYSCALLS;
     use rustos_abi_trap::seam;

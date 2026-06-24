@@ -1,10 +1,10 @@
-//! wasm32 side-channel mitigations (`AGENTS.md` §19.1).
+//! wasm32 side-channel mitigations.
 //!
 //! Implements the Arch HAL
 //! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
 //! surface for the
 //! `wasm32-unknown-unknown` browser sandbox. On this target RustOS is a
-//! guest of the JavaScript host (a Chrome-class engine), and the §19.1
+//! guest of the JavaScript host (a Chrome-class engine), and the
 //! microarchitectural defences are owned by that host, not by the
 //! kernel:
 //!
@@ -21,9 +21,9 @@
 //!   `performance.now()` clamping, cross-origin isolation (COOP/COEP) —
 //!   which the guest cannot and must not try to override.
 //!
-//! Every §19.1 mitigation is therefore a justified
+//! Every mitigation is therefore a justified
 //! [`Mitigation::NotVulnerable`](rustos_arch_api::Mitigation::NotVulnerable)
-//! no-op (`AGENTS.md` §19.1 — a no-op is
+//! no-op (a no-op is
 //! permitted where the silicon, here the sandbox, is provably not
 //! vulnerable from the guest's vantage point). The barrier primitives
 //! are empty: there is no instruction to emit and nothing the guest
@@ -53,7 +53,7 @@ impl SideChannel {
         Self
     }
 
-    /// The honest §19.1 declaration for wasm32 (see the module docs).
+    /// The honest declaration for wasm32 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> MitigationProfile {
         MitigationProfile {
@@ -74,7 +74,7 @@ impl SideChannelMitigation for SideChannel {
     // The WebAssembly ISA has no speculation-barrier instruction and the
     // host mediates every privilege transition, so the barrier primitives
     // are empty by design (not stubs): there is nothing for the guest to
-    // emit (`AGENTS.md` §19.1).
+    // emit.
     fn syscall_entry_barrier(&self) {}
     fn syscall_exit_barrier(&self) {}
     fn context_switch_barrier(&self) {}

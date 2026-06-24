@@ -4,41 +4,40 @@
 //! This is the one place that turns the three artefacts a boot path
 //! recovers off the storage device — the plaintext `root.unlock`
 //! key-derivation descriptor (planted on the FAT boot partition by
-//! `tools/mkimage` / the §11 installer), the passphrase the operator
+//! `tools/mkimage` / the installer), the passphrase the operator
 //! typed at the console, and the encrypted root [`Block`] device — into
 //! the validated `users-v1` database the `users_db_read` syscall serves
 //! (`kernel/core::load_users_db_source`). It adds no policy of its own; it
 //! threads the already-landed building blocks together in the one layer
 //! permitted to name both the `rustfs` driver and `kernel/core`
-//! (`rustos-kernel`, `Layer::Tooling`, `AGENTS.md` §17.4).
+//! (`rustos-kernel`, `Layer::Tooling`).
 //!
 //! The composition is, in order:
 //!
 //! 1. [`UnlockDescriptor::decode`] parses the on-FAT descriptor
 //!    fail-closed (bad magic, unknown KDF, out-of-range cost, short
-//!    buffer → refused, never trusted, `AGENTS.md` §5.4.3 / §2.9).
+//!    buffer → refused, never trusted).
 //! 2. [`UnlockDescriptor::derive_volume_key`] derives the volume key from
 //!    the typed passphrase via the descriptor's PBKDF2-HMAC-SHA256
 //!    parameters (`lib/crypto`, `docs/src/filesystem/rustfs-spec.md` §7).
 //!    The derived key is held in a [`Zeroizing`] wrapper so it is wiped on
-//!    drop and never lingers on the boot stack (`AGENTS.md` §4 — secret
-//!    hygiene; the audited `zeroize` crate, not a hand-rolled primitive,
-//!    §2.12).
+//!    drop and never lingers on the boot stack (secret
+//!    hygiene; the audited `zeroize` crate, not a hand-rolled primitive).
 //! 3. [`RustFs::open`] mounts the encrypted root under that key. A wrong
 //!    passphrase never unwraps the master key and the mount is refused
 //!    with [`DriverError::PermissionDenied`] — there is no separate
 //!    "wrong passphrase" oracle and no fallback to a plaintext mount
-//!    (fail closed, `AGENTS.md` §5.4 / §4 — encrypted-by-default).
+//!    (fail closed — encrypted-by-default).
 //! 4. [`load_users_db_source`] reads and validates
 //!    `/System/Security/Users` off the mounted root under the kernel's
-//!    capability-less `uid 0` bootstrap identity (its own §5.3 permission
+//!    capability-less `uid 0` bootstrap identity (its own permission
 //!    check and fail-closed `users-v1` parse), retaining the canonical
 //!    text in a [`HeldUsersDbSource`] the boot path installs through
 //!    `BootInfo::with_users_db`.
 //!
 //! Every refusal is audited and yields **no** database, so a system whose
 //! root cannot be unlocked or whose database cannot be read serves none
-//! rather than inventing accounts (`AGENTS.md` §5.4.5).
+//! rather than inventing accounts.
 //!
 //! [`read_root_unlock_descriptor`] reads the first of those three inputs —
 //! the plaintext `root.unlock` descriptor — back off the FAT boot
@@ -48,13 +47,12 @@
 //! brought-up [`Block`] devices and the typed passphrase it reads the
 //! descriptor, unlocks the root, and returns the served database (so the
 //! boot path neither re-threads the descriptor buffer nor reconciles two
-//! error taxonomies itself, `AGENTS.md` §2.2).
+//! error taxonomies itself).
 //!
 //! [`mount_root_disk_and_load_users`] sits one layer above that seam: it
 //! takes the **single** whole-disk [`Block`] device a board brings up,
 //! parses its partition table (MBR or GPT — scheme- and
-//! architecture-neutral, the same definition `tools/mkimage` writes,
-//! `AGENTS.md` §2.2 / §2.20), locates the FAT boot and `RustFS` root
+//! architecture-neutral, the same definition `tools/mkimage` writes), locates the FAT boot and `RustFS` root
 //! partitions by role, and threads bounds-checked windows onto each into
 //! the composition above.
 //!
@@ -80,15 +78,14 @@ use rustos_partition::{parse_partition_table, PartitionBlock, PartitionError, Pa
 use zeroize::Zeroizing;
 
 /// A mounted root volume, viewed as the read + security surface the
-/// driver-store file service needs (`AGENTS.md` §18.3 / §5.3).
+/// driver-store file service needs.
 ///
 /// Blanket-implemented for every filesystem driver that is both
 /// [`FilesystemRead`] and [`FilesystemSecurity`] (the production `RustFs`
 /// among them), so `&mut dyn RootVolume` is the **object-safe** handle the
 /// continuation passed to [`with_system_volume`] receives — letting the
 /// generic unlock policy hand a freshly mounted, concretely-typed volume to
-/// a continuation without itself naming the concrete filesystem type
-/// (`AGENTS.md` §17.4). Its supertraits are exactly the bound the
+/// a continuation without itself naming the concrete filesystem type. Its supertraits are exactly the bound the
 /// [`SystemFileService`](crate::system_files::SystemFileService) the
 /// driver-store server builds over the volume requires.
 pub trait RootVolume: FilesystemRead + FilesystemSecurity {}
@@ -96,7 +93,7 @@ pub trait RootVolume: FilesystemRead + FilesystemSecurity {}
 impl<T: FilesystemRead + FilesystemSecurity + ?Sized> RootVolume for T {}
 
 /// Audit event: the encrypted root volume was unlocked under the
-/// passphrase-derived key and mounted (`AGENTS.md` §5.4.4 / §19.4). The
+/// passphrase-derived key and mounted. The
 /// subsequent users-database read is audited separately by
 /// [`load_users_db_source`] (`UsersDbLoaded` / `UsersDbRejected`).
 const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
@@ -106,8 +103,8 @@ const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
 /// read or failed to decode, the partition table or a partition was
 /// missing/malformed, the volume was not rustfs, or the device faulted.
 /// The `cause` field names which check refused; no secret (passphrase,
-/// key, or volume bytes) is ever logged (`AGENTS.md` §4 / §19.4). The
-/// decision fails closed: no database is held (§5.4.5).
+/// key, or volume bytes) is ever logged. The
+/// decision fails closed: no database is held.
 ///
 /// A *wrong passphrase* is **not** one of these — that is an expected
 /// authentication non-match recorded at [`ROOT_UNLOCK_KEY_REJECTED`], not
@@ -117,20 +114,18 @@ const ROOT_MOUNT_REJECTED: EventId = EventId(4134);
 /// Audit event: the passphrase-derived key did not unlock the encrypted
 /// root volume — a wrong passphrase, *including* the silent blank-passphrase
 /// probe of a non-blank image that [`unlock_root_disk_interactively`] runs
-/// on **every** normal boot (`AGENTS.md` §11). This is an expected
+/// on **every** normal boot. This is an expected
 /// fail-closed authentication non-match, not a system error: the master key
-/// simply never unwrapped and there is no oracle either way (`AGENTS.md`
-/// §5.4). It is recorded at [`Level::Debug`] — below the default
+/// simply never unwrapped and there is no oracle either way. It is recorded at [`Level::Debug`] — below the default
 /// [`Level::Info`] filter — so the per-boot probe and routine interactive
 /// retries cannot flood the boot log, while the record stays available for
-/// brute-force forensics when the level is lowered (`AGENTS.md` §2.1 /
-/// §19.4). No secret (passphrase, key, or volume byte) is ever logged.
+/// brute-force forensics when the level is lowered. No secret (passphrase, key, or volume byte) is ever logged.
 const ROOT_UNLOCK_KEY_REJECTED: EventId = EventId(4142);
 
 /// Audit event: the read-only, signed-bundle `/System` volume (the
 /// design-B pre-unlock driver store, `plans/PI.md`) was discovered and
 /// mounted read-only over its `lib/partition` window under the non-secret
-/// well-known [`SYSTEM_VOLUME_KEY`] (`AGENTS.md` §18.6 / §19.4). The store
+/// well-known [`SYSTEM_VOLUME_KEY`]. The store
 /// itself is consumed in the later design-B increments; B1 proves the
 /// volume is reachable and read-only.
 const SYSTEM_VOLUME_MOUNTED: EventId = EventId(4140);
@@ -138,15 +133,14 @@ const SYSTEM_VOLUME_MOUNTED: EventId = EventId(4140);
 /// Audit event: no read-only `/System` volume was mounted — the disk
 /// carries no `RustFsSystem` partition, or the volume's window could not be
 /// built or opened read-only. In B1 this is **not** fatal: the encrypted
-/// root still serves the system, so the boot proceeds (`AGENTS.md` §18.4 /
-/// §2.9). The `cause` field names which check declined, secret-free.
+/// root still serves the system, so the boot proceeds. The `cause` field names which check declined, secret-free.
 const SYSTEM_VOLUME_UNAVAILABLE: EventId = EventId(4141);
 
 /// Why [`unlock_root_and_load_users`] produced no users database.
 ///
 /// Each variant carries the underlying error from the first check that
 /// refused; the composition stops at the first failure and returns it
-/// (`AGENTS.md` §2.9 — fail closed, never partially applied).
+/// (fail closed, never partially applied).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RootMountError {
     /// The plaintext `root.unlock` descriptor could not be read off the
@@ -155,20 +149,18 @@ pub enum RootMountError {
     /// it was not a regular file of exactly [`UNLOCK_DESCRIPTOR_LEN`]
     /// bytes, or the device read faulted. The boot path recovers the
     /// descriptor before anything is decrypted, so a missing or malformed
-    /// one yields no database rather than a fabricated default
-    /// (`AGENTS.md` §2.9).
+    /// one yields no database rather than a fabricated default.
     DescriptorRead(DriverError),
     /// The on-FAT `root.unlock` descriptor failed to decode: bad magic,
     /// an unknown KDF id, an out-of-range iteration count, or a short
     /// buffer. The descriptor is plaintext and untrusted, so it is fully
-    /// validated before its parameters drive any key derivation
-    /// (`AGENTS.md` §5.4.3).
+    /// validated before its parameters drive any key derivation.
     Descriptor(DriverError),
     /// The root volume could not be mounted under the derived key:
     /// [`DriverError::PermissionDenied`] for a wrong passphrase (the
     /// master key never unwraps), [`DriverError::BadMagic`] for a volume
     /// that is not rustfs, or a device fault. There is no plaintext-mount
-    /// fallback (`AGENTS.md` §4 — encrypted by default; §5.4 — fail
+    /// fallback (encrypted by default; — fail
     /// closed).
     Mount(DriverError),
     /// The volume mounted but `/System/Security/Users` could not be read
@@ -178,16 +170,16 @@ pub enum RootMountError {
     /// The disk's partition table could not be parsed: no recognised
     /// scheme, a malformed or forged MBR/GPT table, or a device read
     /// fault. The table is untrusted on-disk input, validated fail-closed
-    /// before any partition is trusted (`AGENTS.md` §5.4 / §19.5).
+    /// before any partition is trusted.
     PartitionTable(PartitionError),
     /// The disk carries no FAT boot partition (the partition holding the
     /// `root.unlock` descriptor), so the encrypted root cannot be
-    /// unlocked. No database is served (`AGENTS.md` §2.9).
+    /// unlocked. No database is served.
     NoBootPartition,
     /// The disk carries no `RustFS` root partition to mount.
     NoRootPartition,
     /// A parsed partition extent does not fit the device geometry, so its
-    /// bounds-checked window could not be built (`AGENTS.md` §24.4 — a
+    /// bounds-checked window could not be built (a
     /// fixed extent, validated against the device before any access).
     PartitionWindow(DriverError),
 }
@@ -222,17 +214,17 @@ impl RootMountError {
 /// * `block` — the encrypted root [`Block`] device the board brought up.
 /// * `audit` — the sink the unlock/mount decision and (via
 ///   [`load_users_db_source`]) the database-read decision are logged
-///   through (`AGENTS.md` §19.4).
+///   through.
 ///
 /// On success the returned [`HeldUsersDbSource`] owns the validated
-/// `users-v1` text (zeroed on drop, `AGENTS.md` §4); the boot path
+/// `users-v1` text (zeroed on drop); the boot path
 /// `Box::leak`s it and installs it through `BootInfo::with_users_db`.
 ///
 /// # Errors
 ///
 /// A [`RootMountError`] naming the first check that refused. Every error
 /// path yields no database and is audited; the derived key is wiped
-/// regardless of outcome (`AGENTS.md` §4 / §5.4.5).
+/// regardless of outcome.
 pub fn unlock_root_and_load_users<B: Block>(
     descriptor_bytes: &[u8],
     passphrase: &[u8],
@@ -240,7 +232,7 @@ pub fn unlock_root_and_load_users<B: Block>(
     audit: &dyn Sink,
 ) -> Result<HeldUsersDbSource, RootMountError> {
     // 1. Decode the untrusted on-FAT descriptor fail-closed before its
-    //    parameters drive any key derivation (`AGENTS.md` §5.4.3).
+    //    parameters drive any key derivation.
     let descriptor = match UnlockDescriptor::decode(descriptor_bytes) {
         Ok(descriptor) => descriptor,
         Err(err) => {
@@ -253,12 +245,12 @@ pub fn unlock_root_and_load_users<B: Block>(
     // 2. Derive the volume key from the typed passphrase. The key is the
     //    most sensitive transient on the boot stack: hold it in a
     //    zero-on-drop wrapper so it is wiped the instant it leaves scope,
-    //    whether the mount succeeds or fails (`AGENTS.md` §4).
+    //    whether the mount succeeds or fails.
     let volume_key: Zeroizing<VolumeKey> = Zeroizing::new(descriptor.derive_volume_key(passphrase));
 
     // 3. Mount the encrypted root. A wrong passphrase fails to unwrap the
     //    master key and is refused fail-closed — no plaintext fallback,
-    //    no separate oracle (`AGENTS.md` §4 / §5.4).
+    //    no separate oracle.
     let mut fs = match RustFs::open(block, &volume_key) {
         Ok(fs) => fs,
         Err(err) => {
@@ -290,15 +282,14 @@ pub fn unlock_root_and_load_users<B: Block>(
 /// root-mount increment (Chunk B-2): once the board has brought up the
 /// two block devices and the operator has typed a passphrase at the
 /// console, the boot path calls this one function rather than threading
-/// the descriptor buffer and reconciling two error taxonomies itself
-/// (`AGENTS.md` §2.2). It composes the already-landed building blocks in
+/// the descriptor buffer and reconciling two error taxonomies itself. It composes the already-landed building blocks in
 /// order:
 ///
 /// 1. [`read_root_unlock_descriptor`] reads the fixed-length plaintext
 ///    descriptor off `boot_partition` (B-1). A missing, mis-sized, or
 ///    unreadable descriptor is audited and returned as
 ///    [`RootMountError::DescriptorRead`] — no database is served and the
-///    encrypted root is never touched (`AGENTS.md` §2.9 / §5.4.5).
+///    encrypted root is never touched.
 /// 2. [`unlock_root_and_load_users`] derives the volume key from
 ///    `passphrase`, mounts `root_block`, and loads the validated
 ///    `users-v1` database (Chunk A), auditing its own unlock/mount/read
@@ -309,15 +300,13 @@ pub fn unlock_root_and_load_users<B: Block>(
 /// * `root_block` — the encrypted root [`Block`] device.
 /// * `passphrase` — the bytes the operator typed at the console; used
 ///   only to derive the volume key, never logged or retained.
-/// * `audit` — the sink every decision is logged through (`AGENTS.md`
-///   §19.4).
+/// * `audit` — the sink every decision is logged through.
 ///
 /// # Errors
 ///
 /// A [`RootMountError`] naming the first check that refused. Every error
 /// path yields no database and is audited; no secret is ever logged and
-/// the derived key is wiped regardless of outcome (`AGENTS.md` §4 /
-/// §5.4.5).
+/// the derived key is wiped regardless of outcome.
 pub fn mount_root_and_load_users<Boot, Root>(
     boot_partition: Boot,
     root_block: Root,
@@ -339,8 +328,7 @@ where
     // This two-device entry loads only the users database; driver loading
     // is the design-B `/System`-volume path the `devmgr` drives over the
     // driver-store endpoint ([`with_system_volume`] /
-    // [`crate::driver_store_server`]), independent of this read (`AGENTS.md`
-    // §2.3).
+    // [`crate::driver_store_server`]), independent of this read.
     unlock_root_and_load_users(&descriptor, passphrase, root_block, audit)
 }
 
@@ -355,24 +343,22 @@ where
 /// architecture-neutral: `disk` may be an MBR or a GPT disk
 /// ([`parse_partition_table`] detects which), so the same code reads a
 /// Raspberry Pi MBR image and a UEFI x86_64 GPT disk without a board
-/// `cfg` (`AGENTS.md` §17 / §2.20). The partitions are located by **role**
+/// `cfg`. The partitions are located by **role**
 /// (`FatBoot` / `RustFsRoot`), not by a hard-coded index, and the on-disk
-/// definition is the one `tools/mkimage` writes (`AGENTS.md` §2.2).
+/// definition is the one `tools/mkimage` writes.
 ///
 /// The two partitions are opened **in sequence** over a borrowed `disk`
 /// (one device, never two simultaneous mutable windows, via the
 /// `impl Block for &mut B` forwarding): the FAT boot window is built, the
 /// descriptor read, the window dropped to reclaim the disk, then the
 /// `RustFS` root window is built for the mount. The untrusted on-disk
-/// table is validated fail-closed before any partition is trusted
-/// (`AGENTS.md` §5.4 / §19.5), and a disk missing either partition serves
-/// no database (`AGENTS.md` §2.9).
+/// table is validated fail-closed before any partition is trusted, and a disk missing either partition serves
+/// no database.
 ///
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
 /// * `passphrase` — the bytes the operator typed at the console; used
 ///   only to derive the volume key, never logged or retained.
-/// * `audit` — the sink every decision is logged through (`AGENTS.md`
-///   §19.4).
+/// * `audit` — the sink every decision is logged through.
 ///
 /// Driver loading is **not** part of this read: it is the design-B
 /// `/System`-volume path the user-space `devmgr` drives over the
@@ -385,7 +371,7 @@ where
 /// ([`RootMountError::PartitionTable`], [`RootMountError::NoBootPartition`],
 /// [`RootMountError::NoRootPartition`], [`RootMountError::PartitionWindow`],
 /// or the downstream descriptor/mount/users errors). Every error path
-/// yields no database and is audited (`AGENTS.md` §5.4.5).
+/// yields no database and is audited.
 pub fn mount_root_disk_and_load_users<Disk: Block>(
     mut disk: Disk,
     passphrase: &[u8],
@@ -453,7 +439,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 /// returning whatever `f` returns wrapped in [`Some`].
 ///
 /// This is the one place the `/System` discovery + read-only mount + layout
-/// confirmation lives (`AGENTS.md` §2.2): the Design D persistent
+/// confirmation lives: the Design D persistent
 /// driver-store service
 /// ([`crate::driver_store_server::serve_system_store`]) runs its
 /// never-returning serve loop through it, building a
@@ -463,7 +449,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 /// the [`PartitionBlock`] window which borrows `disk`, all of it lives on
 /// the caller's frame for as long as `f` runs — so a continuation that never
 /// returns (the persistent server) keeps the mount live for the life of the
-/// system without any `'static` promotion (`AGENTS.md` §2.17).
+/// system without any `'static` promotion.
 ///
 /// The disk's partition table is parsed fail-closed; if it carries a
 /// [`PartitionType::RustFsSystem`] partition, a bounds-checked
@@ -471,11 +457,11 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 /// under the non-secret well-known [`SYSTEM_VOLUME_KEY`]
 /// ([`RustFs::open_read_only`] — the volume holds no secrets and its
 /// integrity rests on the per-bundle Ed25519 signatures the load gate
-/// verifies, `AGENTS.md` §18.6). The volume's root is probed for the §16.2
+/// verifies). The volume's root is probed for the
 /// `Drivers` store directory to confirm it is a real `/System` volume, the
 /// mount is audited (`SYSTEM_VOLUME_MOUNTED`), and only then is `f` run.
 ///
-/// **Fail-soft and fail-closed** (`AGENTS.md` §18.4 / §2.9): a disk with no
+/// **Fail-soft and fail-closed**: a disk with no
 /// — or an unopenable — `/System` volume returns [`None`] (each decline
 /// audited `SYSTEM_VOLUME_UNAVAILABLE`) without running `f`, and never
 /// aborts the boot.
@@ -483,8 +469,7 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
 /// * `f` — the continuation run against the mounted read-only `/System`
 ///   volume.
-/// * `audit` — the sink every decision is logged through (`AGENTS.md`
-///   §19.4). No secret is consumed or logged.
+/// * `audit` — the sink every decision is logged through. No secret is consumed or logged.
 pub fn with_system_volume<Disk: Block, R>(
     disk: &mut Disk,
     audit: &dyn Sink,
@@ -498,18 +483,18 @@ pub fn with_system_volume<Disk: Block, R>(
         system_volume_unavailable(audit, "no_system_partition");
         return None;
     };
-    // A bounds-checked window onto the `/System` extent (`AGENTS.md` §24.4).
+    // A bounds-checked window onto the `/System` extent.
     let Ok(window) = PartitionBlock::from_partition(&mut *disk, &extent) else {
         system_volume_unavailable(audit, "system_window_out_of_range");
         return None;
     };
     // Mount read-only under the public key; the volume carries no secrets,
-    // so the kernel can never mutate it (`AGENTS.md` §18.6 / §5.4).
+    // so the kernel can never mutate it.
     let Ok(mut system) = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
         system_volume_unavailable(audit, "system_mount_failed");
         return None;
     };
-    // Confirm it is a real `/System` volume: its root carries the §16.2
+    // Confirm it is a real `/System` volume: its root carries the
     // `Drivers` store directory the continuation reads.
     let root = system.root();
     if system.lookup(root, b"Drivers").is_err() {
@@ -528,8 +513,7 @@ pub fn with_system_volume<Disk: Block, R>(
     Some(f(&mut system))
 }
 
-/// Audit a declined `/System` mount with a stable, secret-free `cause`
-/// (`AGENTS.md` §19.4). Fail-soft, so this is always informational and the
+/// Audit a declined `/System` mount with a stable, secret-free `cause`. Fail-soft, so this is always informational and the
 /// boot proceeds to the passphrase prompt with no driver autoloaded.
 fn system_volume_unavailable(audit: &dyn Sink, cause: &'static str) {
     log(
@@ -548,28 +532,27 @@ fn system_volume_unavailable(audit: &dyn Sink, cause: &'static str) {
 
 /// Audit event: the operator's typed passphrase unlocked the root and the
 /// loaded database was published into the late credential cell — login can
-/// now authenticate (`AGENTS.md` §19.4). No secret is logged.
+/// now authenticate. No secret is logged.
 const ROOT_UNLOCK_INSTALLED: EventId = EventId(4136);
 
 /// Audit event: a wrong passphrase was refused; the unlock will prompt
 /// again because the bounded attempt budget is not yet exhausted
-/// (`AGENTS.md` §2.1 — never loop forever). No passphrase byte is logged.
+/// (never loop forever). No passphrase byte is logged.
 const ROOT_UNLOCK_RETRY: EventId = EventId(4137);
 
 /// Audit event: the interactive unlock gave up fail-closed — the attempt
 /// budget was exhausted, the console could not be read, the disk's
 /// structure was wrong, or the late cell was already populated. No
-/// database is installed and the operator must reboot (`AGENTS.md` §2.9 /
-/// §5.4.5). The `cause` field names which check refused, secret-free.
+/// database is installed and the operator must reboot. The `cause` field names which check refused, secret-free.
 const ROOT_UNLOCK_GAVE_UP: EventId = EventId(4138);
 
 /// Maximum passphrase attempts the interactive unlock allows before it
 /// gives up and the system must be rebooted.
 ///
-/// A bounded budget, not an infinite prompt loop (`AGENTS.md` §2.1):
+/// A bounded budget, not an infinite prompt loop:
 /// after this many wrong passphrases the unlock fails closed and the late
 /// credential cell stays empty, so every login is refused until the next
-/// boot (`AGENTS.md` §5.4.5). The value is the User-chosen policy for the
+/// boot. The value is the User-chosen policy for the
 /// `plans/PI.md` P11 Chunk B-2 root mount.
 pub const MAX_UNLOCK_ATTEMPTS: u32 = 5;
 
@@ -577,8 +560,8 @@ pub const MAX_UNLOCK_ATTEMPTS: u32 = 5;
 ///
 /// A line longer than this is refused as the current attempt (and counts
 /// against [`MAX_UNLOCK_ATTEMPTS`]) rather than silently truncated to a
-/// shorter — and wrong — secret (`AGENTS.md` §5.4.3). It is a fixed input
-/// bound, not a scalable capacity (`AGENTS.md` §24.4): a passphrase is
+/// shorter — and wrong — secret. It is a fixed input
+/// bound, not a scalable capacity: a passphrase is
 /// operator-typed, so a generous fixed ceiling is correct and the read
 /// buffer is a zeroized on-stack array of exactly this size.
 pub const MAX_PASSPHRASE_LEN: usize = 256;
@@ -597,15 +580,14 @@ pub const MAX_PASSPHRASE_LEN: usize = 256;
 ///
 /// Defined here, beside the unlock policy that installs into it, so the
 /// dispatch-hook reference and the kthread's install target are one
-/// definition rather than two that could diverge (`AGENTS.md` §2.2). It is
-/// **not** a global mutable static (`AGENTS.md` §2.1): the cell is set-once
+/// definition rather than two that could diverge. It is
+/// **not** a global mutable static: the cell is set-once
 /// and immutable after the first install, with internal synchronisation,
 /// so the single `&'static` instance is shared safely across the per-CPU
 /// syscall handlers exactly like
 /// [`NULL_USERS_DB`](rustos_kernel_core::NULL_USERS_DB). Until an install
 /// succeeds it fails every read closed, so wiring the dispatch hook at it
-/// changes no boot behaviour over the previous `NULL_USERS_DB` default
-/// (`AGENTS.md` §5.4.5).
+/// changes no boot behaviour over the previous `NULL_USERS_DB` default.
 ///
 /// [`BootInfo::with_users_db`]: rustos_kernel_core::BootInfo::with_users_db
 /// [`UsersDbSource::text`]: rustos_kernel_core::UsersDbSource::text
@@ -618,7 +600,7 @@ pub enum UnlockOutcome {
     /// was installed into the late credential cell. Login can authenticate.
     Installed,
     /// The unlock gave up fail-closed: no database was installed, so every
-    /// login is refused until the next boot (`AGENTS.md` §5.4.5). The
+    /// login is refused until the next boot. The
     /// caller (the unlock kthread) must not retry — the operator reboots.
     GaveUp,
 }
@@ -628,7 +610,7 @@ pub enum UnlockOutcome {
 enum PassphraseReadError {
     /// The console input device failed or could not deliver a line (a
     /// device error, or no input source at all). The unlock fails closed
-    /// rather than treating it as an empty passphrase (`AGENTS.md` §2.9).
+    /// rather than treating it as an empty passphrase.
     Console,
     /// The line exceeded [`MAX_PASSPHRASE_LEN`] before a terminator; the
     /// remainder was drained to the newline so the next read starts clean.
@@ -641,11 +623,10 @@ enum PassphraseReadError {
 /// Shared by both unlock paths — the silent blank-passphrase attempt and
 /// each interactive attempt — so the set-once install, its fail-closed
 /// "already installed" guard, and the [`ROOT_UNLOCK_INSTALLED`] audit line
-/// have exactly one definition (`AGENTS.md` §2.2). The install
+/// have exactly one definition. The install
 /// ([`LateUsersDb::install`]) is set-once: a refusal means a database was
 /// already published (the kthread runs once, so that is a logic error),
-/// and the rejected holder is zeroed inside `install` (`AGENTS.md` §4 /
-/// §5.4).
+/// and the rejected holder is zeroed inside `install`.
 fn finish_install(
     source: HeldUsersDbSource,
     late_db: &LateUsersDb,
@@ -675,26 +656,26 @@ fn finish_install(
 ///
 /// The **blank** passphrase is tried silently first, before any prompt is
 /// drawn. An installer image is provisioned with a blank root passphrase
-/// (`rustos_mkimage::INSTALLER_PASSPHRASE`, `AGENTS.md` §11) so a fresh
-/// install boots straight into the §11 installer rather than stalling
+/// (`rustos_mkimage::INSTALLER_PASSPHRASE`) so a fresh
+/// install boots straight into the installer rather than stalling
 /// behind a `Root passphrase:` prompt the operator cannot answer. Only
 /// when the blank passphrase does **not** unlock the root (a debug or
 /// production image with a non-blank passphrase) is the operator prompted
 /// interactively. A non-blank passphrase failing the silent attempt is no
 /// oracle: the master key simply never unwraps, exactly as for any wrong
-/// passphrase (`AGENTS.md` §5.4).
+/// passphrase.
 ///
 /// This is the device-independent unlock *policy* the in-kernel unlock
 /// kthread runs once the board has brought up the root block device and
 /// the console keyboard is live. It is generic over the [`Block`] disk and
 /// takes the console write/read halves as object-safe seams
 /// ([`ConsoleWrite`] / [`ConsoleRead`]), so it names no architecture or
-/// device type (`AGENTS.md` §17.4) and is host-tested with a mock console
+/// device type and is host-tested with a mock console
 /// over the same MBR + encrypted-`RustFS` disk fixture `tools/mkimage`
-/// writes (`AGENTS.md` §2.2). The kthread passes the **blocking** console
+/// writes. The kthread passes the **blocking** console
 /// read ([`BlockingConsoleRead`](rustos_kernel_core::BlockingConsoleRead))
 /// so an empty poll parks the task on the scheduler rather than
-/// busy-spinning (`AGENTS.md` §2.1); this function only moves bytes.
+/// busy-spinning; this function only moves bytes.
 ///
 /// Each attempt:
 ///
@@ -702,7 +683,7 @@ fn finish_install(
 ///    write error does not by itself abort the attempt).
 /// 2. Reads one line into a zeroized, fixed-length on-stack buffer
 ///    ([`MAX_PASSPHRASE_LEN`]); the passphrase is never heap-allocated,
-///    logged, or retained past the attempt (`AGENTS.md` §4 / §19.4).
+///    logged, or retained past the attempt.
 /// 3. Runs [`mount_root_disk_and_load_users`] under the typed bytes.
 ///
 /// On success the loaded [`HeldUsersDbSource`] is published into `late_db`
@@ -713,21 +694,19 @@ fn finish_install(
 /// structural (no partition table, no boot/root partition, an unreadable
 /// or invalid descriptor, a corrupt database): retrying cannot help, so
 /// the unlock gives up immediately. A console read error also gives up.
-/// Every give-up path leaves `late_db` empty — login stays fail-closed
-/// (`AGENTS.md` §5.4.5).
+/// Every give-up path leaves `late_db` empty — login stays fail-closed.
 ///
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
 /// * `console` — the primary console's byte sink for the prompt.
 /// * `input` — the primary console's (blocking) byte source.
 /// * `late_db` — the set-once cell the loaded database is published into.
-/// * `audit` — the sink every decision is logged through (`AGENTS.md`
-///   §19.4); no passphrase, key, or volume byte is ever logged.
+/// * `audit` — the sink every decision is logged through; no passphrase, key, or volume byte is ever logged.
 /// * `on_resolved` — invoked exactly once, after the unlock reaches its
 ///   terminal outcome (installed or gave up) and on every internal return
 ///   path, so the caller can release the console it lent the prompt. The
 ///   in-kernel kthread passes the console-0 hand-off (open the gate, arm
 ///   the UART receive interrupt, resolve the `LateUsersDb` pending wait);
-///   coupling it here makes forgetting it impossible (`AGENTS.md` §5.4.5).
+///   coupling it here makes forgetting it impossible.
 ///
 /// Driver loading is **not** part of this policy: under design B the
 /// user-space `devmgr` loads drivers over the driver-store endpoint served
@@ -746,8 +725,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // Run the interactive unlock to a terminal outcome, then hand the
     // console back to `login` — *exactly once, on every outcome and every
     // internal return path*. Coupling the release to the resolution here,
-    // rather than expecting each caller to remember it, is deliberate
-    // (`AGENTS.md` §2.2): the in-kernel unlock kthread owns console 0 for
+    // rather than expecting each caller to remember it, is deliberate: the in-kernel unlock kthread owns console 0 for
     // the duration of the passphrase prompt (its `GatedConsoleRead` keeps
     // `login` parked), so the moment the unlock resolves — a database
     // installed *or* given up — the gate must open, the UART receive
@@ -756,7 +734,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     // A successful unlock previously skipped that release (only the
     // fail-closed branches ran it), wedging both the keyboard and serial
     // `login` after a good unlock; threading it through `on_resolved` makes
-    // forgetting it impossible (`AGENTS.md` §5.4.5).
+    // forgetting it impossible.
     let outcome = unlock_root_disk_interactively_impl(disk, console, input, late_db, audit);
     on_resolved();
     outcome
@@ -775,19 +753,18 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
     // `impl Block for &mut B` forwarding, so one device is reused across
-    // retries without re-acquiring it (`AGENTS.md` §2.2).
+    // retries without re-acquiring it.
     let mut disk = disk;
 
     // Try the blank passphrase silently first, before drawing any prompt.
     // An installer image is provisioned with a **blank** root passphrase
-    // (`rustos_mkimage::INSTALLER_PASSPHRASE`, `AGENTS.md` §11): a fresh
-    // install must boot straight into the §11 installer, never stall behind
+    // (`rustos_mkimage::INSTALLER_PASSPHRASE`): a fresh
+    // install must boot straight into the installer, never stall behind
     // a `Root passphrase:` prompt the operator has no value to answer. So
     // if the blank passphrase unlocks the root we install and return with
     // no prompt at all. A debug or production image whose passphrase is
     // non-blank simply fails this attempt — the master key never unwraps,
-    // exactly like any wrong passphrase, so it is no oracle (`AGENTS.md`
-    // §5.4) — and falls through to the interactive prompt below.
+    // exactly like any wrong passphrase, so it is no oracle — and falls through to the interactive prompt below.
     match mount_root_disk_and_load_users(&mut disk, b"", audit) {
         Ok(source) => return finish_install(source, late_db, audit),
         Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
@@ -810,8 +787,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
         write_all(console, b"\r\nRoot passphrase: ");
 
         // A zeroized, fixed-length buffer: the typed secret never reaches
-        // the heap and is wiped when this attempt's buffer drops
-        // (`AGENTS.md` §4).
+        // the heap and is wiped when this attempt's buffer drops.
         let mut passphrase = Zeroizing::new([0u8; MAX_PASSPHRASE_LEN]);
         let len = match read_passphrase_line(input, &mut passphrase[..]) {
             Ok(len) => len,
@@ -823,7 +799,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
             }
             Err(PassphraseReadError::Console) => {
                 // The console could not deliver a line: fail closed rather
-                // than retry against a dead input (`AGENTS.md` §2.9).
+                // than retry against a dead input.
                 gave_up(audit, "console_unreadable");
                 return UnlockOutcome::GaveUp;
             }
@@ -833,8 +809,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
             Ok(source) => return finish_install(source, late_db, audit),
             Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
                 // Wrong passphrase: the master key never unwrapped. Bounded
-                // retry — never an oracle and never an infinite loop
-                // (`AGENTS.md` §2.1 / §5.4). Falls through to the next loop
+                // retry — never an oracle and never an infinite loop. Falls through to the next loop
                 // iteration; the budget check ends it.
                 retry(audit);
             }
@@ -860,7 +835,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
 ///
 /// Best effort: the prompt is advisory, so a console that cannot accept it
 /// does not abort the unlock — the read still parks for input. Never spins
-/// on a stalled device (`AGENTS.md` §2.1).
+/// on a stalled device.
 fn write_all(console: &dyn ConsoleWrite, mut bytes: &[u8]) {
     while !bytes.is_empty() {
         match console.write(bytes) {
@@ -882,8 +857,7 @@ fn write_all(console: &dyn ConsoleWrite, mut bytes: &[u8]) {
 /// # Errors
 ///
 /// [`PassphraseReadError::Console`] if the device read fails, or signals
-/// end of input before any byte of a line arrived (fail closed,
-/// `AGENTS.md` §2.9); [`PassphraseReadError::TooLong`] for an over-length
+/// end of input before any byte of a line arrived (fail closed); [`PassphraseReadError::TooLong`] for an over-length
 /// line.
 fn read_passphrase_line(
     input: &dyn ConsoleRead,
@@ -898,8 +872,7 @@ fn read_passphrase_line(
         if read == 0 {
             // End of input. A line with content is accepted as typed; an
             // empty one means the console closed with nothing — fail closed
-            // rather than mount under an empty passphrase (`AGENTS.md`
-            // §2.9 / §5.4.5).
+            // rather than mount under an empty passphrase.
             return if len == 0 {
                 Err(PassphraseReadError::Console)
             } else {
@@ -923,8 +896,7 @@ fn read_passphrase_line(
 
 /// Drain console input up to and including the next line terminator,
 /// discarding it, so a subsequent read starts on a fresh line. Stops on a
-/// terminator, a zero-length read, or an error (never spins, `AGENTS.md`
-/// §2.1).
+/// terminator, a zero-length read, or an error (never spins).
 fn drain_to_newline(input: &dyn ConsoleRead) {
     loop {
         let mut byte = [0u8; 1];
@@ -937,7 +909,7 @@ fn drain_to_newline(input: &dyn ConsoleRead) {
 }
 
 /// Audit a wrong (or over-long) passphrase attempt that will be retried.
-/// No passphrase byte is logged (`AGENTS.md` §4 / §19.4).
+/// No passphrase byte is logged.
 fn retry(audit: &dyn Sink) {
     log(
         audit,
@@ -951,7 +923,7 @@ fn retry(audit: &dyn Sink) {
 }
 
 /// Audit a fail-closed give-up of the interactive unlock, naming the
-/// secret-free `cause`. No database is installed (`AGENTS.md` §5.4.5).
+/// secret-free `cause`. No database is installed.
 fn gave_up(audit: &dyn Sink, cause: &'static str) {
     log(
         audit,
@@ -974,18 +946,16 @@ fn gave_up(audit: &dyn Sink, cause: &'static str) {
 /// boot and the case a mistyped interactive passphrase hits — is an
 /// expected fail-closed authentication non-match, not a system error: the
 /// derived key simply never unwrapped the master key and there is no oracle
-/// either way (`AGENTS.md` §5.4). It maps to the below-`Info`
+/// either way. It maps to the below-`Info`
 /// [`ROOT_UNLOCK_KEY_REJECTED`] so the per-boot probe and routine retries
 /// cannot flood the boot log, while the record stays available for
-/// brute-force forensics when the level is lowered (`AGENTS.md` §2.1 /
-/// §19.4). Every other refusal is a genuine structural failure (a
+/// brute-force forensics when the level is lowered. Every other refusal is a genuine structural failure (a
 /// corrupt/missing descriptor, a missing/malformed partition table or
 /// partition, a non-rustfs volume, a device fault) and maps to the
 /// `Error`-level [`ROOT_MOUNT_REJECTED`].
 ///
 /// A pure mapping so the audit level/event a refusal earns can be asserted
-/// directly, without depending on the global log threshold (`AGENTS.md`
-/// §2.2 / §7).
+/// directly, without depending on the global log threshold.
 fn rejection_record(error: RootMountError) -> (EventId, Level, &'static str) {
     match error {
         RootMountError::Mount(DriverError::PermissionDenied) => (
@@ -1006,7 +976,7 @@ fn rejection_record(error: RootMountError) -> (EventId, Level, &'static str) {
 /// reports a partition-table parse, partition lookup/window, descriptor
 /// read, descriptor decode, or mount refusal. The event and level are
 /// chosen by [`rejection_record`]: a structural refusal is an `Error`, a
-/// wrong passphrase a below-`Info` `Debug` (it is no error, §5.4).
+/// wrong passphrase a below-`Info` `Debug` (it is no error).
 fn reject(audit: &dyn Sink, error: RootMountError) {
     let (id, level, message) = rejection_record(error);
     log(
@@ -1029,19 +999,17 @@ fn reject(audit: &dyn Sink, error: RootMountError) {
 /// The boot path recovers this descriptor *before* anything is decrypted
 /// and hands its bytes — together with the passphrase the operator types
 /// at the console — to [`unlock_root_and_load_users`]. Reading it through
-/// the same real FAT32 driver that `tools/mkimage` / the §11 installer
-/// authored it with keeps one on-disk definition for both ends
-/// (`AGENTS.md` §2.2); the file name is the shared
+/// the same real FAT32 driver that `tools/mkimage` / the installer
+/// authored it with keeps one on-disk definition for both ends; the file name is the shared
 /// [`ROOT_UNLOCK_NAME`] constant.
 ///
 /// The descriptor is a fixed-length record ([`UNLOCK_DESCRIPTOR_LEN`]
-/// bytes), so the read is strictly bounded and fail-closed (`AGENTS.md`
-/// §5.4 / §24.4): the entry's size is checked to be **exactly** that
+/// bytes), so the read is strictly bounded and fail-closed: the entry's size is checked to be **exactly** that
 /// length *before* a byte is read — rejecting both a truncated and an
 /// over-long file — and the bytes are read into a fixed on-stack buffer.
 /// The returned bytes are still untrusted: [`UnlockDescriptor::decode`]
 /// (inside [`unlock_root_and_load_users`]) validates every field before
-/// they drive any key derivation (`AGENTS.md` §5.4.3).
+/// they drive any key derivation.
 ///
 /// * `boot_partition` — the FAT boot-partition [`Block`] device the board
 ///   brought up (the GPU-firmware-readable partition on a Pi SD card).
@@ -1053,8 +1021,7 @@ fn reject(audit: &dyn Sink, error: RootMountError) {
 /// ([`DriverError::NotFound`]), the entry is not a regular file
 /// ([`DriverError::Unsupported`]), its size is not exactly
 /// [`UNLOCK_DESCRIPTOR_LEN`] ([`DriverError::OutOfRange`]), or the device
-/// read faulted. No partial descriptor is ever returned (`AGENTS.md`
-/// §2.9).
+/// read faulted. No partial descriptor is ever returned.
 pub fn read_root_unlock_descriptor<B: Block>(
     boot_partition: B,
 ) -> Result<[u8; UNLOCK_DESCRIPTOR_LEN], DriverError> {
@@ -1064,7 +1031,7 @@ pub fn read_root_unlock_descriptor<B: Block>(
 
     // Validate shape and size *before* reading: a fixed-length record, so
     // anything that is not exactly one is refused rather than partially
-    // read (`AGENTS.md` §5.4 / §24.4 — a format bound, not a capacity).
+    // read (a format bound, not a capacity).
     let info = fs.node_info(node)?;
     if info.kind != NodeKind::RegularFile {
         return Err(DriverError::Unsupported);
@@ -1101,8 +1068,7 @@ mod tests {
     use rustos_users::UsersDb;
 
     /// Deterministic entropy for provisioning a descriptor's salt in
-    /// tests. A fixed sequence keeps the test reproducible (`AGENTS.md`
-    /// §19.3); it is test scaffolding, never a production source.
+    /// tests. A fixed sequence keeps the test reproducible; it is test scaffolding, never a production source.
     struct SeqEntropy {
         next: u8,
     }
@@ -1142,7 +1108,7 @@ mod tests {
     /// The passphrase the test "operator" types; the volume is provisioned
     /// under the key derived from it. Forwarded from the shared whole-disk
     /// fixture so the in-memory split tests and the `-M virt` QEMU vertical
-    /// type one passphrase (`AGENTS.md` §2.2).
+    /// type one passphrase.
     const PASSPHRASE: &[u8] = disk_image::PASSPHRASE;
 
     /// Provision a descriptor (low cost so the test stays fast under
@@ -1151,7 +1117,7 @@ mod tests {
     fn provision() -> ([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKey) {
         // The policy floor (100k) is the cheapest a descriptor may carry,
         // keeping the per-test PBKDF2 derivations bounded while still
-        // exercising the real key-derivation path (`AGENTS.md` §5.4).
+        // exercising the real key-derivation path.
         let descriptor =
             UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut SeqEntropy { next: 7 })
                 .expect("descriptor provisions");
@@ -1206,7 +1172,7 @@ mod tests {
 
     #[test]
     fn a_wrong_passphrase_is_refused_fail_closed_with_no_oracle() {
-        // §4 / §5.4: the volume is provisioned under the key derived from
+        // the volume is provisioned under the key derived from
         // PASSPHRASE; a *different* passphrase derives a different key that
         // never unwraps the master key, so the mount is refused with
         // PermissionDenied and no database is served.
@@ -1224,7 +1190,7 @@ mod tests {
         // non-match, not a system error, so it must NOT surface as the
         // ERROR-level `ROOT_MOUNT_REJECTED` (4134) a structural refusal
         // gets — otherwise the silent blank-passphrase probe floods the
-        // boot log on every non-blank boot (`AGENTS.md` §2.1 / §19.4). It
+        // boot log on every non-blank boot. It
         // maps to the below-`Info` `ROOT_UNLOCK_KEY_REJECTED` (4142),
         // dropped at the default threshold (so absent from this sink) and
         // available for brute-force forensics when the level is lowered.
@@ -1242,7 +1208,7 @@ mod tests {
 
     #[test]
     fn a_tampered_descriptor_is_refused_before_any_key_derivation() {
-        // §5.4.3: a corrupt descriptor (bad magic) is rejected outright;
+        // a corrupt descriptor (bad magic) is rejected outright;
         // the passphrase is never even consulted and no mount is attempted.
         let (mut descriptor_bytes, key) = provision();
         descriptor_bytes[0] ^= 0xFF; // corrupt the magic
@@ -1261,7 +1227,7 @@ mod tests {
 
     #[test]
     fn a_non_rustfs_volume_is_refused() {
-        // §5.4 / §2.9: a device that is not a rustfs volume (here a zeroed
+        // a device that is not a rustfs volume (here a zeroed
         // image of the right geometry) fails the mount closed rather than
         // being misread; no database is served.
         let (descriptor_bytes, _key) = provision();
@@ -1280,14 +1246,14 @@ mod tests {
 
     #[test]
     fn a_wrong_passphrase_is_classified_below_error_every_structural_refusal_is_an_error() {
-        // The pure audit classification (`AGENTS.md` §2.1 / §19.4): a wrong
+        // The pure audit classification: a wrong
         // passphrase is an expected fail-closed authentication non-match —
         // recorded below the default `Info` filter so the silent
         // blank-passphrase probe and routine retries cannot flood the boot
         // log — while every genuine structural refusal stays an ERROR a
         // boot operator sees. Asserting the mapping directly is independent
         // of the global log threshold (so it cannot be perturbed by another
-        // test lowering it, `AGENTS.md` §7).
+        // test lowering it).
         assert_eq!(
             rejection_record(RootMountError::Mount(DriverError::PermissionDenied)),
             (
@@ -1329,7 +1295,7 @@ mod tests {
     /// 2048 sectors, so this `Block` double is sized for a real FAT32 format
     /// rather than reusing `image::VecBlock` (whose fixed geometry is the
     /// rustfs fixture's). Forwarded from the shared whole-disk fixture so
-    /// the boot-partition size has one definition (`AGENTS.md` §2.2).
+    /// the boot-partition size has one definition.
     const FAT_BOOT_SECTORS: u64 = disk_image::FAT_BOOT_SECTORS;
 
     /// In-memory FAT boot-partition [`Block`] double: a `Vec<u8>` addressed
@@ -1390,7 +1356,7 @@ mod tests {
 
     /// Author a FAT boot partition through the real FAT32 driver and plant
     /// `payload` under [`ROOT_UNLOCK_NAME`] — the exact write `tools/mkimage`
-    /// performs (`AGENTS.md` §2.2). Returns the mounted-and-flushed device,
+    /// performs. Returns the mounted-and-flushed device,
     /// ready to hand straight to [`read_root_unlock_descriptor`].
     fn author_boot_partition(payload: &[u8]) -> FatVecBlock {
         let mut fs = Fat32::format(FatVecBlock::new(FAT_BOOT_SECTORS)).expect("FAT32 formats");
@@ -1416,7 +1382,7 @@ mod tests {
     fn reads_back_the_exact_planted_descriptor() {
         // The on-FAT descriptor round-trips byte-for-byte through the real
         // driver and decodes to the same descriptor it was provisioned as
-        // (`AGENTS.md` §2.2 — author and reader share one definition).
+        // (author and reader share one definition).
         let (descriptor_bytes, _key) = provision();
         let block = author_boot_partition(&descriptor_bytes);
 
@@ -1446,7 +1412,7 @@ mod tests {
 
     #[test]
     fn a_missing_descriptor_is_not_found() {
-        // §2.9: no `root.unlock` on the partition is a fail-closed
+        // no `root.unlock` on the partition is a fail-closed
         // NotFound, never a fabricated descriptor.
         let block = empty_boot_partition();
         assert_eq!(
@@ -1457,7 +1423,7 @@ mod tests {
 
     #[test]
     fn a_truncated_descriptor_is_refused() {
-        // §5.4 / §24.4: a short file is rejected on its size *before* any
+        // a short file is rejected on its size *before* any
         // read, never zero-padded up to the record length.
         let (descriptor_bytes, _key) = provision();
         let block = author_boot_partition(&descriptor_bytes[..UNLOCK_DESCRIPTOR_LEN - 1]);
@@ -1469,7 +1435,7 @@ mod tests {
 
     #[test]
     fn an_over_long_descriptor_is_refused() {
-        // §5.4 / §24.4: a file longer than the fixed record — extra bytes a
+        // a file longer than the fixed record — extra bytes a
         // tampered partition might append — is refused, not truncated to
         // the prefix.
         let (descriptor_bytes, _key) = provision();
@@ -1484,7 +1450,7 @@ mod tests {
 
     #[test]
     fn an_unformatted_partition_does_not_mount() {
-        // §2.9: a device that is not a FAT volume (a zeroed image) fails
+        // a device that is not a FAT volume (a zeroed image) fails
         // the mount closed rather than being misread.
         let block = FatVecBlock::new(FAT_BOOT_SECTORS);
         assert!(
@@ -1523,7 +1489,7 @@ mod tests {
 
     #[test]
     fn a_missing_descriptor_on_the_boot_partition_serves_no_database() {
-        // §2.9 / §5.4.5: no `root.unlock` on the boot partition is a
+        // no `root.unlock` on the boot partition is a
         // fail-closed DescriptorRead(NotFound). The encrypted root is
         // never touched (no unlock audit) and no database is served.
         let (_descriptor_bytes, key) = provision();
@@ -1544,7 +1510,7 @@ mod tests {
 
     #[test]
     fn a_wrong_passphrase_through_the_full_composition_is_refused() {
-        // §4 / §5.4: a readable descriptor but the wrong passphrase derives
+        // a readable descriptor but the wrong passphrase derives
         // a key that never unwraps the master key, so the mount is refused
         // and no database is served — no separate oracle.
         let (descriptor_bytes, key) = provision();
@@ -1560,7 +1526,7 @@ mod tests {
         assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
         // Through the full composition too, a wrong passphrase is the
         // below-`Info` authentication non-match, never the ERROR-level
-        // structural rejection (`AGENTS.md` §2.1 / §19.4).
+        // structural rejection.
         assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
         assert_eq!(rejection_record(err).0, ROOT_UNLOCK_KEY_REJECTED);
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
@@ -1577,8 +1543,7 @@ mod tests {
         // usable users database (`plans/PI.md` P11 Chunk B-2). The disk is
         // the *same* whole-disk image the `-M virt` root-mount->login QEMU
         // vertical plants on its virtio-blk backing, so the in-memory split
-        // test and the live (emulated) board exercise one on-disk layout
-        // (`AGENTS.md` §2.2).
+        // test and the live (emulated) board exercise one on-disk layout.
         let bytes = disk_image::build_image().expect("the whole-disk image assembles");
         let disk = FatVecBlock { store: bytes };
         let sink = RecordingSink::new();
@@ -1600,7 +1565,7 @@ mod tests {
 
     #[test]
     fn a_disk_with_no_partition_table_serves_no_database() {
-        // §2.9 / §5.4: a device with no recognised partition scheme (a
+        // a device with no recognised partition scheme (a
         // blank disk, no MBR signature, no GPT header) is refused whole;
         // the encrypted root is never touched and no database is served.
         let disk = FatVecBlock::new(64);
@@ -1617,7 +1582,7 @@ mod tests {
 
     #[test]
     fn a_disk_without_a_root_partition_serves_no_database() {
-        // §2.9: a valid table that carries a FAT boot partition but no
+        // a valid table that carries a FAT boot partition but no
         // RustFS root partition is fail-closed NoRootPartition — the
         // encrypted root cannot be located, so none is mounted.
         let (descriptor_bytes, _key) = provision();
@@ -1655,7 +1620,7 @@ mod tests {
     /// A console byte sink that accepts everything written to it, so the
     /// prompt never short-writes. The interactive tests assert the audit
     /// trail and the installed state, not the prompt bytes, so a counting
-    /// sink would add nothing (`AGENTS.md` §2.3).
+    /// sink would add nothing.
     struct AcceptConsole;
 
     impl ConsoleWrite for AcceptConsole {
@@ -1726,7 +1691,7 @@ mod tests {
     /// Build the success whole-disk fixture the interactive tests unlock —
     /// the *same* MBR boot+root image (the root encrypted under
     /// [`PASSPHRASE`]'s derived key) the `-M virt` root-mount->login QEMU
-    /// vertical plants on its virtio-blk backing (`AGENTS.md` §2.2).
+    /// vertical plants on its virtio-blk backing.
     fn success_disk() -> FatVecBlock {
         let bytes = disk_image::build_image().expect("the whole-disk image assembles");
         FatVecBlock { store: bytes }
@@ -1778,9 +1743,9 @@ mod tests {
     #[test]
     fn a_blank_passphrase_volume_auto_unlocks_with_no_prompt() {
         // The installer image is provisioned with a **blank** root
-        // passphrase (`AGENTS.md` §11): the unlock must mount it silently,
+        // passphrase: the unlock must mount it silently,
         // with no console read at all, so a fresh install boots straight
-        // into the §11 installer rather than stalling behind a prompt the
+        // into the installer rather than stalling behind a prompt the
         // operator cannot answer (`plans/PI.md` P11). The console input is
         // wired to *fail* on every read, so a successful unlock proves the
         // interactive prompt path was never entered.
@@ -1850,7 +1815,7 @@ mod tests {
 
     #[test]
     fn the_attempt_budget_is_bounded_then_gives_up_fail_closed() {
-        // §2.1 / §5.4.5: after MAX_UNLOCK_ATTEMPTS wrong passphrases the
+        // after MAX_UNLOCK_ATTEMPTS wrong passphrases the
         // unlock gives up rather than looping forever, and the late cell
         // stays empty so every login is refused until reboot.
         let lines = alloc::vec![b"wrong" as &[u8]; MAX_UNLOCK_ATTEMPTS as usize];
@@ -1961,7 +1926,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_console_gives_up_fail_closed() {
-        // §2.9: a console whose read faults cannot deliver a passphrase;
+        // a console whose read faults cannot deliver a passphrase;
         // the unlock fails closed rather than mounting under an empty or
         // fabricated secret, and never touches the disk.
         let input = ScriptInput::failing();
@@ -1989,7 +1954,7 @@ mod tests {
 
     #[test]
     fn an_over_long_line_is_a_wrong_attempt_not_a_truncated_secret() {
-        // §5.4.3: a line longer than MAX_PASSPHRASE_LEN is drained and
+        // a line longer than MAX_PASSPHRASE_LEN is drained and
         // counted as a wrong attempt (audited `4137`), never silently
         // truncated to a shorter secret; the next, correct line unlocks.
         let over_long = alloc::vec![b'a'; MAX_PASSPHRASE_LEN + 16];
@@ -2021,10 +1986,10 @@ mod tests {
 
     #[test]
     fn with_system_volume_runs_the_continuation_and_returns_its_result() {
-        // The one mount seam (`AGENTS.md` §2.2): it mounts the read-only
+        // The one mount seam: it mounts the read-only
         // `/System` volume, runs `f` against the still-open volume, and
         // returns `Some(f(..))`. The volume reads cleanly inside `f` — proven
-        // by reading the §16.2 `Drivers` store directory back out.
+        // by reading the `Drivers` store directory back out.
         let mut disk = success_disk();
         let sink = RecordingSink::new();
 
@@ -2044,7 +2009,7 @@ mod tests {
 
     #[test]
     fn with_system_volume_returns_none_and_never_runs_the_continuation_without_a_volume() {
-        // §18.4 / §2.9: with no recognised partition table there is no
+        // with no recognised partition table there is no
         // `/System` volume, so `with_system_volume` returns `None` without
         // ever running the continuation, audits the unavailable case
         // (`4141`), and never the mounted one (`4140`).

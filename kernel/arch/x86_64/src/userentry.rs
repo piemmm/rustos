@@ -1,5 +1,5 @@
 //! x86_64 implementation of the Arch HAL "enter user mode" surface
-//! ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2).
+//! ([`rustos_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into ring 3 is the `iretq`
 //! sequence: build the interrupt-return frame the CPU pops on `iretq`
@@ -8,7 +8,7 @@
 //! ([`crate::gdt::USER_CS_INDEX`] / [`crate::gdt::USER_DS_INDEX`], both
 //! at RPL 3), place the first-argument value in `rdi` (the System V
 //! AMD64 first integer register), and `iretq`. This is the one
-//! definition of that sequence (`AGENTS.md` §2.2); the CC2/CC3 QEMU
+//! definition of that sequence; the CC2/CC3 QEMU
 //! verticals reach it through the HAL rather than copying the `asm!`
 //! block.
 //!
@@ -94,7 +94,7 @@ const USER_RFLAGS: u64 = (1 << 1) | (1 << 9);
 /// installed. Diverges via `iretq`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
-    // SAFETY: the §1-sanctioned assembly carve-out (no Rust spelling for
+    // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
     // `iretq` or the interrupt-return frame). The five `push`es build
     // the long-mode `iretq` frame on the kernel stack in the order the
     // CPU pops it (RIP last-pushed/first-popped, then CS, RFLAGS, RSP,

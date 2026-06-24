@@ -54,7 +54,7 @@ pub trait FileSystem {
     fn stat(&self, path: &str) -> Result<EntryKind, Errno>;
 
     /// Set the capability gate of `path`: [`Some`] capability installs that
-    /// gate (`AGENTS.md` §5.3), [`None`] clears it so the node has no gate.
+    /// gate, [`None`] clears it so the node has no gate.
     ///
     /// # Errors
     ///

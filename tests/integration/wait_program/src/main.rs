@@ -17,12 +17,11 @@
 //! The vertical asserts the parent reaped the child and exited 0, proving the
 //! `wait` blocking-reap path end to end (the `SP6b` "done when").
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (which provides `_start`, the stack canary, the panic
 //! handler, and the `wait`/`exit` syscall wrappers), never the C ABI
-//! (`crt0` + `abi-sys`), which exists solely for non-Rust programs
-//! (`AGENTS.md` §16.4). It is built position-independent and converted to an
-//! `rxe` blob by the consuming test's build script (`AGENTS.md` §9, §19.2). On
+//! (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
+//! `rxe` blob by the consuming test's build script. On
 //! the host it is an inert stub so `cargo build --workspace`, clippy, and fmt
 //! still cover the crate.
 
@@ -44,7 +43,7 @@ mod program {
     /// The child's exit code, read from `RUSTOS_WAIT_CHILD_CODE` (the value
     /// the consuming vertical's build script pins when it compiles both
     /// roles), falling back to [`DEFAULT_CHILD_CODE`]. The vertical is the
-    /// single source of truth for the code (`AGENTS.md` §2.2).
+    /// single source of truth for the code.
     const CHILD_CODE: i32 = match option_env!("RUSTOS_WAIT_CHILD_CODE") {
         Some(s) => parse_i32(s.as_bytes()),
         None => DEFAULT_CHILD_CODE,
@@ -76,8 +75,7 @@ mod program {
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to [`DEFAULT_CHILD_CODE`] on an empty string, a non-digit
     /// byte, or overflow of the `i32` range. `const` and panic-free so the
-    /// code is fixed into the image with no runtime parsing (`AGENTS.md`
-    /// §2.9 — fail closed to the default).
+    /// code is fixed into the image with no runtime parsing (fail closed to the default).
     const fn parse_i32(bytes: &[u8]) -> i32 {
         let mut acc: i32 = 0;
         let mut i = 0usize;

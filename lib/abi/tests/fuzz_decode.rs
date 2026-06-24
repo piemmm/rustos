@@ -1,7 +1,7 @@
 //! Deterministic fuzz-style integration test for the ABI decoders.
 //!
 //! Every decoder in `lib/abi` accepts an arbitrary byte slice from a
-//! possibly hostile peer; per `AGENTS.md` §10 the right way to drive it is
+//! possibly hostile peer; the right way to drive it is
 //! a fuzz harness. This file is the smoke harness that runs in
 //! `cargo test`: a deterministic 64-bit LCG generates 100 000 short
 //! pseudo-random inputs and asserts the decoders refuse them cleanly
@@ -9,11 +9,10 @@
 //! disagrees with the round-trip encoder.
 //!
 //! The same set of decoder functions is the entry point the `cargo xtask
-//! fuzz` orchestrator drives for its wall-clock budget per PR (`AGENTS.md`
-//! §19.6); the helper [`exercise`] keeps the contract centralised so the two
+//! fuzz` orchestrator drives for its wall-clock budget per PR; the helper [`exercise`] keeps the contract centralised so the two
 //! cannot drift.
 //!
-//! ## Seed and budget (`AGENTS.md` §19.6, §2.2)
+//! ## Seed and budget
 //!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
 //! the shared `rustos_fuzzseed` seam (one definition). A plain `cargo test`
@@ -141,7 +140,7 @@ fn exercise(bytes: &[u8]) {
         assert_eq!(lib, redecoded);
     }
     // The whole-image loader has no single round-trip encoder (the builder is
-    // test-only), so the contract here is the §19.6 "must not panic for any
+    // test-only), so the contract here is the "must not panic for any
     // input"; an accepted image must additionally re-parse deterministically
     // and yield resolvable needed-library references.
     if let Ok(image) = LoadImage::parse(bytes, &FUZZ_CFI_TAG) {
@@ -155,7 +154,7 @@ fn exercise(bytes: &[u8]) {
     exercise_process(bytes);
 }
 
-/// Drive the resource-limit decoder on `bytes` (§19.6).
+/// Drive the resource-limit decoder on `bytes`.
 ///
 /// Split out of [`exercise`] to keep that function within the line budget;
 /// the contract is identical (must not panic; an accepted decode round-trips
@@ -210,7 +209,7 @@ fn exercise_process(bytes: &[u8]) {
     exercise_process_builder(bytes);
 }
 
-/// Drive the production startup-vector *builder* on `bytes` (§19.6).
+/// Drive the production startup-vector *builder* on `bytes`.
 ///
 /// The fuzz bytes are split on `0xFF` into argument/environment strings and
 /// fed to [`rustos_abi::process::write_into`]; an accepted build must parse

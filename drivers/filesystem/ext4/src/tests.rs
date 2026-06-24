@@ -959,7 +959,7 @@ fn mutation_is_refused_on_an_unsupported_feature_set() {
     // The `metadata_csum`/`gdt_csum` and `64bit` feature sets are now
     // mutated in place (see `tests/checksummed.rs`, which validates the
     // maintained checksums against real `mke2fs` images). Mutation still
-    // fails closed (§5.4) on a feature the write path cannot maintain.
+    // fails closed on a feature the write path cannot maintain.
     // `checksum_seed` (incompat 0x2000) is one: it would invalidate the
     // `crc32c(~0, uuid)` seed, so the volume stays read-only.
     let mut data = build_image();

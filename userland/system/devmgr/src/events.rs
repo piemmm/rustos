@@ -1,7 +1,7 @@
 //! Stable [`rustos_log::EventId`] constants emitted by the device
 //! manager.
 //!
-//! Per `lib/log` convention (`AGENTS.md` §2.5) every subsystem owns a
+//! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. The device manager occupies
 //! `13000..14000`. Once shipped the numeric values must never be
 //! re-used or re-numbered — external audit-log consumers rely on them.
@@ -19,24 +19,23 @@ pub const DEVMGR_RANGE_END: u32 = 14_000;
 /// A hardware-tree node was bound: its winning driver is loaded.
 pub const NODE_BOUND: EventId = EventId(13_001);
 /// A hardware-tree node matched no driver bind table and was left
-/// unbound — never an error (`AGENTS.md` §18.4). Emitted at `Debug`: an
+/// unbound — never an error. Emitted at `Debug`: an
 /// unmatched node is the routine, high-volume case (most nodes on a real
 /// device tree have no driver), so it is filtered out by the default
 /// `Info` threshold and never floods the slow diagnostic UART — lower the
-/// level to trace which nodes were left unbound (`AGENTS.md` §20 / §2.16).
+/// level to trace which nodes were left unbound.
 /// A *binding*, a packaging tie, or a load refusal stays visible.
 pub const NODE_UNBOUND: EventId = EventId(13_002);
 /// Two or more drivers matched a node at the same highest priority; the
-/// unbroken tie is a packaging defect, so the node is refused a binding
-/// (`AGENTS.md` §18.3).
+/// unbroken tie is a packaging defect, so the node is refused a binding.
 pub const NODE_TIE_REJECTED: EventId = EventId(13_003);
 /// A node's winning driver failed to load through the driver-host load
-/// gate; the node stays unbound (fail closed, `AGENTS.md` §5.4).
+/// gate; the node stays unbound (fail closed).
 pub const NODE_LOAD_FAILED: EventId = EventId(13_004);
 /// The read-only `/System` driver-store catalogue could not be fetched (the
 /// store endpoint is unbound or the store is unreadable). The device
 /// manager loads nothing but keeps observing the hardware tree — never an
-/// error (fail-soft, `AGENTS.md` §18.4 / §2.9).
+/// error (fail-soft).
 pub const DRIVER_STORE_UNAVAILABLE: EventId = EventId(13_005);
 /// A hardware-tree snapshot was read: its generation and node count. Emitted
 /// at `Debug` (verbose boot/hotplug diagnostics, filtered out by default).

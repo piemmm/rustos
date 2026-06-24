@@ -1,12 +1,12 @@
-//! RustOS `groupadd` — create a group (Stage 6, `AGENTS.md` §3
+//! RustOS `groupadd` — create a group (Stage 6
 //! `userland/apps/`).
 //!
 //! `groupadd` adds a single group to the group database that persists under
-//! `/System/Security/Groups` (`AGENTS.md` §5.1, §16). It names the new group
+//! `/System/Security/Groups`. It names the new group
 //! and an optional numeric id (auto-allocated by the database when omitted),
 //! and hands that record to the database through an injected seam. The group
 //! id is a **decimal** value: RustOS has no name-to-id seam in this tool, so a
-//! name would be interface creep (`AGENTS.md` §2.4), the same choice `chown`
+//! name would be interface creep, the same choice `chown`
 //! and `useradd` make.
 //!
 //! It is the natural sibling of `useradd`: the same parser/seam/error
@@ -32,13 +32,12 @@
 //!
 //! # Not a policy point
 //!
-//! Creating a group is privileged — it needs `CAP_USER_ADMIN`
-//! (`AGENTS.md` §5.2) — but the **database** makes that decision, not this
-//! tool (`AGENTS.md` §5.4). `groupadd` builds and presents a record; an
+//! Creating a group is privileged — it needs `CAP_USER_ADMIN` — but the **database** makes that decision, not this
+//! tool. `groupadd` builds and presents a record; an
 //! unauthorised attempt is refused by the seam and surfaced as
 //! [`GroupaddError::Create`]. The database is likewise the authority on gid
 //! collisions; `groupadd` validates only the syntactic shape of its arguments
-//! and never guesses a default gid (`AGENTS.md` §2.1).
+//! and never guesses a default gid.
 //!
 //! # Fail closed
 //!
@@ -49,8 +48,7 @@
 //! [`GroupaddError::BadId`]; a name already present is a
 //! [`GroupaddError::Exists`]. A database that cannot be consulted surfaces the
 //! underlying [`Errno`](rustos_abi::Errno) as [`GroupaddError::Lookup`], and a
-//! refused or failed creation as [`GroupaddError::Create`]. There is no panic
-//! (`AGENTS.md` §2.9).
+//! refused or failed creation as [`GroupaddError::Create`]. There is no panic.
 //!
 //! # Module map
 //!
@@ -62,10 +60,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -16,16 +16,15 @@
 //! seam (`init_spawn_riscv64.rs`) it does **not** switch the active
 //! translation regime (`satp`) or enter user mode: the spawning caller keeps
 //! running under its own root, and the child runs when the scheduler next
-//! steps it (a true concurrent spawn, not an `exec`-style hand-off,
-//! `AGENTS.md` §4) — the riscv64 sibling of the `Aarch64ProcessSpawn` /
+//! steps it (a true concurrent spawn, not an `exec`-style hand-off) — the riscv64 sibling of the `Aarch64ProcessSpawn` /
 //! x86_64 producers.
 //!
 //! The child's `rxe`, its relocation bias ([`SHELL_USER_BIAS`]), and the
 //! kernel's syscall CFI tag are baked at build time (`build.rs` →
 //! `rustos_itest_harness::elf2rxe`), exactly like PID 1, so there is one
-//! conversion path (`AGENTS.md` §2.2). Spawning is *not* a privileged
+//! conversion path. Spawning is *not* a privileged
 //! bypass: the child receives only the authority its registered program
-//! declares intersected with its user's grants (`AGENTS.md` §4, §16.5);
+//! declares intersected with its user's grants;
 //! this seam only authorises the *act* of spawning under `CAP_PROC_SPAWN`.
 //!
 //! Each spawned child's kernel stack is drawn from the boot-reserved guard
@@ -33,10 +32,9 @@
 //! identity block covering the stack's guard page at 4 KiB granularity in
 //! the *child's own* Sv39 root — which it builds but never switches to — and
 //! unmaps that single page, so an overrun of the child's kernel stack takes
-//! a synchronous store page fault under the child's `satp` (`AGENTS.md` §4 /
-//! §2.17), the cross-port mirror of the aarch64/x86_64 producers. Where no
+//! a synchronous store page fault under the child's `satp`, the cross-port mirror of the aarch64/x86_64 producers. Where no
 //! arena region is available, or the split/unmap fails, it falls back to a
-//! heap-backed software-canary [`BoxStack`] (fail closed, `AGENTS.md` §2.9).
+//! heap-backed software-canary [`BoxStack`] (fail closed).
 
 use alloc::boxed::Box;
 
@@ -71,13 +69,12 @@ use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 /// the scheduler later resumes it through `activate_user_root`.
 /// [`SHELL_USER_BIAS`] (64 GiB) sits far above it, so the program's pages
 /// land on freshly walked Sv39 tables rather than colliding with an identity
-/// gigapage leaf — the same window PID 1 uses (`AGENTS.md` §2.2).
+/// gigapage leaf — the same window PID 1 uses.
 const IDENTITY_GIB: usize = 4;
 
 /// User stack base: the shared [`spawn_layout::USER_STACK_OFFSET`] above
 /// this image's bias, mirroring the PID-1 layout (the layout offsets and
-/// sizes are shared across the ports in [`crate::spawn_layout`],
-/// `AGENTS.md` §2.2).
+/// sizes are shared across the ports in [`crate::spawn_layout`]).
 const USER_STACK_BASE: u64 = SHELL_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
 /// User virtual address the startup-vector block is written at.
 const USER_BLOCK_BASE: u64 = SHELL_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
@@ -100,7 +97,7 @@ const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
-/// pointer (`AGENTS.md` §24.1 / `plans/WIRING.md` W5b-3).
+/// pointer (`plans/WIRING.md` W5b-3).
 ///
 /// It is the **identity** map (`offset == 0`) covering the same
 /// `[0, IDENTITY_GIB GiB)` window each child space identity-maps, because
@@ -108,22 +105,21 @@ const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 /// dereferencing its physical address directly (`paging`: identity), so the
 /// frame view the source hands the port must satisfy `virtual == physical`.
 /// A frame the allocator draws from outside this window fails the translate
-/// and the spawn fails closed (`AGENTS.md` §2.9) rather than building tables
+/// and the spawn fails closed rather than building tables
 /// the walk cannot reach — the same window the child's image data frames
-/// already use (§2.2).
+/// already use.
 static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
 
 /// The single, `'static` allocator-backed page-table frame source every
-/// spawned child's Sv39 hierarchy is built from (`AGENTS.md` §24.1).
+/// spawned child's Sv39 hierarchy is built from.
 ///
 /// Page-table frames come from the kernel's live [`FrameAllocator`] through
 /// [`FrameTableSource`], so the spawn capacity **scales with discovered RAM
 /// and grows on demand**: each child draws only the handful of Sv39 tables
 /// it needs, and the system spawns processes until physical RAM is genuinely
 /// exhausted, when [`FrameTableSource::alloc_table`] returns `None` and the
-/// build fails closed with [`Errno::NoSpace`] (`AGENTS.md` §2.9, §4 —
-/// deterministic OOM, never a panic). The frames are never freed while a
-/// child lives (the monotonic discipline, `AGENTS.md` §2.1); reclaiming a
+/// build fails closed with [`Errno::NoSpace`] (deterministic OOM, never a panic). The frames are never freed while a
+/// child lives (the monotonic discipline); reclaiming a
 /// dead process's page-table frames is a later stage.
 ///
 /// Initialised on the first `spawn` from the boot-threaded `'static`
@@ -132,12 +128,12 @@ static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GI
 static SPAWN_FRAME_SOURCE: Once<FrameTableSource> = Once::new();
 
 /// Borrow the `'static` allocator-backed page-table frame source,
-/// initialising it from `frames` on the first call (`AGENTS.md` §24.1).
+/// initialising it from `frames` on the first call.
 ///
 /// Fails closed with [`Errno::NotImplemented`] if the one-shot initialiser
 /// was poisoned by a panicking earlier attempt — [`FrameTableSource::new`]
 /// cannot panic, so this is unreachable in practice, but it is never
-/// papered over (`AGENTS.md` §2.9).
+/// papered over.
 fn page_table_source(frames: &'static FrameAllocator) -> Result<&'static FrameTableSource, Errno> {
     SPAWN_FRAME_SOURCE
         .call_once_infallible(|| FrameTableSource::new(frames, &SPAWN_TABLE_PHYSMAP))
@@ -154,16 +150,16 @@ pub static RISCV_PROCESS_SPAWN: RiscvProcessSpawn = RiscvProcessSpawn;
 impl ProcessSpawn for RiscvProcessSpawn {
     fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno> {
         // The child's Sv39 hierarchy is drawn from the kernel's live frame
-        // allocator (`AGENTS.md` §24.1): there is no fixed page-table reserve
+        // allocator: there is no fixed page-table reserve
         // and so no hard cap on how many processes can be spawned — the
         // capacity scales with discovered RAM and grows on demand. A build
-        // with no `'static` allocator wired fails closed (`AGENTS.md` §2.9),
+        // with no `'static` allocator wired fails closed,
         // as does genuine RAM exhaustion below.
         let pt_frames = ctx.page_table_allocator().ok_or(Errno::NoSpace)?;
         let table_frames = page_table_source(pt_frames)?;
         // Publish the same `'static` allocator the kthread-stack arena
         // returns idle chained blocks to when a spawned task later exits and
-        // its `ArenaStack` is dropped (`AGENTS.md` §24.1 — the capacity
+        // its `ArenaStack` is dropped (the capacity
         // shrinks as well as grows). Idempotent (set-once); the boot path
         // threads one allocator, so every spawn publishes the same handle.
         crate::stack_arena::publish_reclaim_frames(pt_frames);
@@ -190,7 +186,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // unmap that single page, so an overrun of the child's kernel stack
         // takes a synchronous store page fault under the child's `satp`
         // rather than corrupting the lower-addressed neighbour (the real
-        // guard-page fault-form, `AGENTS.md` §4 / §2.17). Doing it on `arch`
+        // guard-page fault-form). Doing it on `arch`
         // — which is *never switched to* here (the spawning caller keeps its
         // own `satp`) — disturbs no live access: the child pool is in the
         // caller's identity window, so `split_block` only reads/writes the
@@ -199,10 +195,10 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // (the child's root is not active). If no arena region is available,
         // or the split/unmap could not be applied, fall back to a heap-backed
         // software-canary `BoxStack` rather than ever running on an unguarded
-        // stack (fail closed, `AGENTS.md` §2.9 / §2.17).
+        // stack (fail closed).
         // The arena grows on demand by chaining fresh 2 MiB blocks out of
         // the kernel's live frame allocator when its boot-carved block is
-        // exhausted (`AGENTS.md` §24.1), so the number of hardware-guarded
+        // exhausted, so the number of hardware-guarded
         // child stacks scales with discovered RAM rather than capping at
         // the boot block. A chained block is bounded to the identity window
         // so the stack stays mapped in the child's own root.
@@ -226,7 +222,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
         let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
-        // syscall CFI tag (§9 / §19.2). A mismatch fails closed; the registry
+        // syscall CFI tag. A mismatch fails closed; the registry
         // holds bytes that already parsed once at build time, so reaching this
         // is a kernel build defect, surfaced as a stable errno.
         let image =
@@ -255,11 +251,10 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // build reaches the child's tables + frames through the caller's
         // identity window (the pool and frames are in `[0, 4 GiB)`), so the
         // child's space need not be active to be built (the cross-port
-        // producer discipline, §2.2). A returning `Err` reclaims nothing
+        // producer discipline). A returning `Err` reclaims nothing
         // user-visible (the page-table + image frames are handed out
         // monotonically and not reclaimed this stage) and maps to a stable
-        // errno; the cause is already audited by `spawn_image` (`AGENTS.md`
-        // §2.9).
+        // errno; the cause is already audited by `spawn_image`.
         let frames = ctx.frames();
         let entry = unsafe {
             spawn_image(
@@ -277,7 +272,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // SP2): the core runs it on the dispatcher's context immediately
         // before every switch into the child, so it `sret`s into U-mode under
         // its own `satp` root and stays hardware-isolated from the spawning
-        // parent and every sibling (`AGENTS.md` §4). It captures only the
+        // parent and every sibling. It captures only the
         // `u64` root, so it is `Send`. The kernel-stack top it is handed is
         // unused on riscv64: `sscratch` is per-task hardware state armed by
         // `userentry::enter_user` and re-armed by the trap vector from each
@@ -314,8 +309,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // Retain the live, mutable arch space behind the object-safe
         // `LiveUserSpace` boundary so the child's `mem_map` / `mmio_map` /
         // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 producer
-        // (`AGENTS.md` §2.2). The `LiveSpace` composes the audited
+        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 producer. The `LiveSpace` composes the audited
         // anonymous-map mechanism (over the kernel's `'static` frame
         // allocator) and the guarded device-window allocator (over the
         // `[MMIO_WINDOW_BASE, …)` region); it carries the *same* arch space
@@ -323,8 +317,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // through a fresh identity [`DirectPhysMap`] over the same identity
         // window the child runs under. A build context with no `'static`
         // allocator, or a window the allocator rejects, retains no live space
-        // and the child's `mem_map` / `mmio_map` fail closed (`AGENTS.md`
-        // §2.9).
+        // and the child's `mem_map` / `mmio_map` fail closed.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.page_table_allocator() {
             Some(static_frames) => LiveSpace::new(
                 space,
@@ -353,8 +346,8 @@ impl ProcessSpawn for RiscvProcessSpawn {
         // and `live` retains the same arch space `frozen` was taken from —
         // the `admit_process` contract.
         // The child receives exactly its registered program's declared
-        // capability set (`AGENTS.md` §5.2, §16.5) — never the spawning
-        // caller's authority (`AGENTS.md` §4).
+        // capability set — never the spawning
+        // caller's authority.
         unsafe {
             ctx.admit_process(
                 program.capability_set(),
@@ -371,7 +364,7 @@ impl ProcessSpawn for RiscvProcessSpawn {
 }
 
 /// Map a [`SpawnCallerError`] onto a stable [`Errno`] for the `spawn`
-/// syscall's caller (`AGENTS.md` §2.9). The precise cause is already on the
+/// syscall's caller. The precise cause is already on the
 /// audit log via the `ProcessSpawn*` events `spawn_image` emits.
 fn spawn_caller_errno(err: SpawnCallerError) -> Errno {
     match err {
@@ -382,18 +375,18 @@ fn spawn_caller_errno(err: SpawnCallerError) -> Errno {
         // segment, an over-size startup block). One stable resource errno.
         SpawnCallerError::Build(_) => Errno::NoSpace,
         // `SpawnCallerError` is `#[non_exhaustive]`: any future variant fails
-        // closed to the same stable resource errno (`AGENTS.md` §2.9).
+        // closed to the same stable resource errno.
         _ => Errno::NoSpace,
     }
 }
 
-/// Map an [`AdmitError`] onto a stable [`Errno`] (`AGENTS.md` §2.9).
+/// Map an [`AdmitError`] onto a stable [`Errno`].
 fn admit_errno(err: AdmitError) -> Errno {
     match err {
         AdmitError::SchedulerFull => Errno::NoSpace,
         AdmitError::AspaceConflict => Errno::AlreadyExists,
         // `AdmitError` is `#[non_exhaustive]`: any future variant fails
-        // closed to a stable resource errno (`AGENTS.md` §2.9).
+        // closed to a stable resource errno.
         _ => Errno::NoSpace,
     }
 }

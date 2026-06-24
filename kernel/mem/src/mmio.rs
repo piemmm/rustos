@@ -17,9 +17,8 @@
 //!
 //! * Guard pages bracket every mapped window so a driver that walks
 //!   off the end of a register block faults instead of poking a
-//!   neighbouring device (`AGENTS.md` §4).
-//! * Mapping failure is reported through a [`Result`]; no path panics
-//!   (`AGENTS.md` §2.9).
+//!   neighbouring device.
+//! * Mapping failure is reported through a [`Result`]; no path panics.
 //!
 //! The capability check (`CapabilityId::MMIO_MAP`) lives in
 //! `kernel/sec::mmio`, since `kernel/mem` deliberately depends on
@@ -64,7 +63,7 @@ pub enum MmioError {
     /// A region's physical frames fall outside the kernel's direct
     /// physical map, so the CPU cannot reach the registers. Indicates
     /// a mis-sized [`crate::phys::PhysMap`] for the platform; the
-    /// mapper fails closed (`AGENTS.md` §2.9, §4).
+    /// mapper fails closed.
     DirectMap,
     /// The mapper was constructed with an invalid request (zero
     /// capacity, or a virtual base that is not page aligned).
@@ -149,7 +148,7 @@ struct Record {
 /// the per-region guard/data accounting — and never an [`AddressSpace`]. Every
 /// page-table mutation is performed against a **borrowed** `&mut
 /// AddressSpace<P>` the caller passes in, so the same guarded mapping logic
-/// serves two consumers without duplication (`AGENTS.md` §2.2):
+/// serves two consumers without duplication:
 ///
 /// * [`MmioMap`], which bundles a `MmioWindowMap` with an address space it
 ///   *owns* (the in-kernel driver-host register-window mapper); and
@@ -160,11 +159,11 @@ struct Record {
 /// It is the device-window analogue of [`crate::anon::map_anonymous`]: an
 /// architecture-neutral mechanism over a borrowed live `AddressSpace<P>`, with
 /// the capability posture, the choice of virtual window, and the lifecycle
-/// owned by the higher-level caller (`AGENTS.md` §17.4). Unlike the anonymous
+/// owned by the higher-level caller. Unlike the anonymous
 /// mapper it allocates **no** frames — the physical address is fixed by the
 /// hardware (a PCI BAR, a virtio-MMIO slot) — and it brackets every window with
 /// unmapped guard pages so a driver that walks off a register block faults
-/// instead of poking a neighbouring device (`AGENTS.md` §4).
+/// instead of poking a neighbouring device.
 pub struct MmioWindowMap {
     base: VirtAddr,
     capacity_pages: usize,
@@ -202,10 +201,9 @@ impl MmioWindowMap {
     ///
     /// The window is mapped `READ | WRITE | NO_CACHE | USER` — caching
     /// disabled (these are device registers, not RAM) and **never** executable
-    /// (`AGENTS.md` §19.2, W^X for a register window). The map is
+    /// (W^X for a register window). The map is
     /// all-or-nothing: a page-table failure part-way unwinds every page this
-    /// call mapped before returning, leaving `space` unchanged (`AGENTS.md`
-    /// §2.9).
+    /// call mapped before returning, leaving `space` unchanged.
     ///
     /// # Errors
     ///
@@ -419,7 +417,7 @@ impl MmioWindowMap {
 /// in-kernel driver host can map a device's register block into a driver's
 /// address space and hand back a `RegisterWindow`. The guarded mapping
 /// mechanism lives in [`MmioWindowMap`] (shared with the `mmio_map` syscall
-/// facility, `AGENTS.md` §2.2); this type is the thin owning adapter.
+/// facility); this type is the thin owning adapter.
 ///
 /// Generic over [`PageTable`] so the same code is exercised by
 /// `crate::HostPageTable` in unit tests and driven by the

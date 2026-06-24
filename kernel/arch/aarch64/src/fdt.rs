@@ -1,7 +1,7 @@
 //! aarch64 device-tree access.
 //!
 //! The flattened-device-tree parser itself is architecture-neutral and
-//! lives once in [`rustos_fdt`] (`AGENTS.md` §2.2 — no duplication); this
+//! lives once in [`rustos_fdt`] (no duplication); this
 //! module re-exports it and layers the aarch64-specific *queries* the boot
 //! path needs from the `virt` board's device tree:
 //!
@@ -15,10 +15,10 @@
 //!
 //! Devices reach [`rustos_abi::hwtree`] through the *generic* walk in
 //! [`crate::platform`] — no per-device query is needed for a node to be
-//! discovered and matched (`AGENTS.md` §18.2/§18.3).
+//! discovered and matched.
 //!
 //! It also hosts the one bus-aware `reg` decoder the port's tree readers
-//! share (`AGENTS.md` §2.2): per-depth [`crate::fdt::BusLevel`]
+//! share: per-depth [`crate::fdt::BusLevel`]
 //! cell/`ranges` tracking, the ancestor-bus [`crate::fdt::translate`]
 //! step, the per-entry [`crate::fdt::translated_reg`] reader, and the
 //! early-returning [`crate::fdt::scan_translated`] walk the boot-path
@@ -35,10 +35,10 @@ pub use rustos_fdt::{Fdt, FdtError};
 /// Deepest device-tree nesting the shared walks track per-level state
 /// for.
 ///
-/// A validation bound on hostile input (`AGENTS.md` §24.4), not a device
+/// A validation bound on hostile input, not a device
 /// capacity: real boards nest three or four levels deep, so sixteen is
 /// generous, and a deeper tree ends the walk rather than reading state
-/// the walker cannot track (`AGENTS.md` §2.9).
+/// the walker cannot track.
 pub const MAX_WALK_DEPTH: usize = 16;
 
 /// Per-depth walk state: what a node's children need to know about their
@@ -88,7 +88,7 @@ fn cells_property(node: &Node<'_>, name: &str) -> Option<u32> {
 /// An ancestor with an *empty* `ranges` is an identity mapping; an
 /// ancestor with *no* `ranges` cannot translate (the devicetree spec
 /// forbids crossing it), and an address no range entry covers is
-/// likewise refused — `None`, never a guess (`AGENTS.md` §2.9). Nodes
+/// likewise refused — `None`, never a guess. Nodes
 /// directly under the root need no translation.
 #[must_use]
 pub fn translate(levels: &[BusLevel<'_>], depth: usize, addr: u64) -> Option<u64> {
@@ -178,8 +178,7 @@ fn apply_ranges(ranges: &[u8], cells: RangeCells, addr: u64) -> Option<u64> {
 /// is the parent bus's `#address-cells` and `child_size` the bridge's own
 /// `#size-cells`; both must decode to a `u64` (`1..=2`).
 ///
-/// Returns `(top, len, bus_base)` — never an invented aperture
-/// (`AGENTS.md` §2.9) — where `top` is the *exclusive* upper bound of the
+/// Returns `(top, len, bus_base)` — never an invented aperture — where `top` is the *exclusive* upper bound of the
 /// CPU-physical window a device behind the bridge may reach, `len` its
 /// extent, and `bus_base` the bus/PCIe-space address the lowest entry's
 /// viewport starts at (the inbound translation, the counterpart of
@@ -248,8 +247,7 @@ pub fn dma_ranges_aperture(
 /// forwards to PCIe memory space, returned as
 /// `(cpu_base, pcie_base, size)` — the three values the VL805 wiring's
 /// `PcieWindows` outbound fields need, and the
-/// `(base, len, translated_base)` an `HwResource::bus_window` carries
-/// (`AGENTS.md` §18.1).
+/// `(base, len, translated_base)` an `HwResource::bus_window` carries.
 ///
 /// A PCI `ranges` entry is `<child-PCI-address> <parent-address> <size>`.
 /// The child address is the 3-cell PCI triple `phys.hi`/`phys.mid`/
@@ -262,7 +260,7 @@ pub fn dma_ranges_aperture(
 ///
 /// `child_address` must be `3` (a PCI bus); `parent_address` and
 /// `child_size` must each decode to a `u64` (`1..=2`). Returns `None` —
-/// never an invented window (`AGENTS.md` §2.9) — when the node carries no
+/// never an invented window — when the node carries no
 /// `ranges`, a cell count is out of range, the value is not a whole
 /// number of entries, or no entry describes a memory window.
 #[must_use]
@@ -317,8 +315,7 @@ pub fn outbound_mmio_window(
 /// bus's cell counts and translate the base through the ancestor buses'
 /// `ranges`, yielding the CPU-physical `(base, length)` window.
 ///
-/// Returns `None` — never an invented or untranslated window
-/// (`AGENTS.md` §2.9) — when the node carries no `reg`, the parent's
+/// Returns `None` — never an invented or untranslated window — when the node carries no `reg`, the parent's
 /// cell counts are outside the decodable `1..=2` range, the value is not
 /// a whole number of entries, `index` is past the last entry, or an
 /// ancestor bus cannot translate the base.
@@ -353,8 +350,7 @@ pub fn translated_reg(
 /// Number of whole `reg` entries the node at `depth` carries under its
 /// parent bus's cell counts, so a caller can iterate [`translated_reg`]
 /// over every window while still *skipping* the entries an ancestor
-/// cannot translate (a skipped entry is dropped, never invented —
-/// `AGENTS.md` §2.9).
+/// cannot translate (a skipped entry is dropped, never invented ).
 ///
 /// Returns `None` when the node carries no `reg`, the parent's cell
 /// counts are outside the decodable `1..=2` range, or the value is not
@@ -387,7 +383,7 @@ pub fn reg_entry_count(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>]) -
 /// stays safe with the MMU off (`plans/PI.md` P4/P5 watch-out — a
 /// whole-tree scan faults there once the compiler widens the byte
 /// reads). A malformed token or a tree nested beyond [`MAX_WALK_DEPTH`]
-/// ends the walk — fail closed, never a guess (`AGENTS.md` §2.9).
+/// ends the walk — fail closed, never a guess.
 pub fn scan_translated<'a, T>(
     fdt: &Fdt<'a>,
     mut visit: impl FnMut(&Node<'a>, &[BusLevel<'a>], usize) -> Option<T>,
@@ -417,7 +413,7 @@ pub fn scan_translated<'a, T>(
     None
 }
 
-/// The PSCI conduit a platform uses to call firmware (`AGENTS.md` §11 /
+/// The PSCI conduit a platform uses to call firmware (
 /// `plans/WIRING.md` W6).
 ///
 /// Discovered from the `/psci` node's `method` property; selects the
@@ -453,7 +449,7 @@ impl PsciMethod {
 ///
 /// Matches the `/psci` node through the shared `Fdt::nodes` early-return
 /// walk — the same byte-safe traversal [`crate::gic::configure_from_fdt`]
-/// and [`timer_clock_frequency`] use (`AGENTS.md` §2.2) — and reads
+/// and [`timer_clock_frequency`] use — and reads
 /// `method` from that node's own properties. It stops at the first
 /// matching node and never scans the whole tree, so it stays safe with
 /// the MMU off (the secondary-bring-up boot path discovers the conduit
@@ -493,7 +489,7 @@ pub fn timer_clock_frequency(fdt: &Fdt<'_>) -> Option<u32> {
     // Match the generic-timer node by its `compatible` string and read
     // `clock-frequency` from that node's own properties, via the shared
     // `Fdt::nodes` walk — the same early-returning traversal
-    // [`crate::gic::configure_from_fdt`] uses (`AGENTS.md` §2.2). This
+    // [`crate::gic::configure_from_fdt`] uses. This
     // stops at the first matching node and only ever reads that node's
     // properties, never scanning the whole tree.
     let node = fdt
@@ -512,7 +508,7 @@ pub fn timer_clock_frequency(fdt: &Fdt<'_>) -> Option<u32> {
 ///
 /// A zero `clock-frequency` is treated as absent (a board that declares
 /// `0` has not really told us a rate), so the register value is used
-/// rather than a divide-by-zero timer interval (`AGENTS.md` §2.9 — fail
+/// rather than a divide-by-zero timer interval (fail
 /// closed). Pure and host-testable: the register read is the caller's
 /// responsibility (`kernel_arch::timer_frequency_hz` composes the two on
 /// the freestanding target).
@@ -531,7 +527,7 @@ pub const fn effective_timer_hz(tree_clock_frequency: Option<u32>, cntfrq: u64) 
 /// encodes each interrupt as a three-cell tuple `<type number flags>`.
 /// `type` is [`GIC_TYPE_SPI`] (shared peripheral) or [`GIC_TYPE_PPI`]
 /// (private peripheral); any other value is not a GICv2 interrupt this
-/// port understands and is refused (`AGENTS.md` §2.9 — fail closed).
+/// port understands and is refused (fail closed).
 pub const GIC_TYPE_SPI: u32 = 0;
 
 /// First cell of a GIC `interrupts` specifier naming a private-peripheral
@@ -543,8 +539,7 @@ pub const GIC_TYPE_PPI: u32 = 1;
 /// PPIs occupy INTIDs `16..32` (the SGIs below them are software-only and
 /// have no device-tree `interrupts` form), so a binding's PPI `number` is
 /// offset by this base. The SPI base is [`crate::gic::MIN_SPI_INTID`] —
-/// the one definition both this decoder and the GICv2 routing share
-/// (`AGENTS.md` §2.2).
+/// the one definition both this decoder and the GICv2 routing share.
 pub const GIC_PPI_INTID_BASE: u32 = 16;
 
 /// Map a GIC `interrupts` specifier `(kind, number)` pair to its global
@@ -554,7 +549,7 @@ pub const GIC_PPI_INTID_BASE: u32 = 16;
 /// [`GIC_TYPE_PPI`]) and `number` the second. An SPI is offset by
 /// [`crate::gic::MIN_SPI_INTID`] (32) and a PPI by [`GIC_PPI_INTID_BASE`]
 /// (16), matching the kernel Arm GIC binding. Returns `None` — never a
-/// guessed line (`AGENTS.md` §2.9 / §5.4.5) — when:
+/// guessed line — when:
 ///
 /// * `kind` is neither SPI nor PPI (e.g. a GICv3-only extended-SPI
 ///   binding this GICv2 port does not drive),
@@ -576,17 +571,17 @@ pub fn gic_intid_from_cells(kind: u32, number: u32) -> Option<u32> {
 ///
 /// Reads the `<type number flags>` triple through the `lib/fdt` cell
 /// reader ([`Node::property`] + `read_be_u32`) — never a raw byte poke
-/// (`AGENTS.md` §18.5: discovery uses the enumerable source only) — and
+/// (: discovery uses the enumerable source only) — and
 /// maps it through [`gic_intid_from_cells`]. Returns `None` when the node
 /// has no `interrupts` property, the property is shorter than the two
 /// cells the decode needs, or the specifier is not a GICv2 SPI/PPI this
 /// port can route. The caller (the device-IRQ bring-up in
 /// [`crate::platform`] / the kernel binary) then leaves the device
-/// unbound rather than guessing a line (`AGENTS.md` §18.4).
+/// unbound rather than guessing a line.
 ///
 /// Only the first interrupt of a multi-interrupt device is decoded; a
 /// device that raises several lines is served as further specifiers are
-/// needed (no speculative multi-line surface, `AGENTS.md` §2.4).
+/// needed (no speculative multi-line surface).
 #[must_use]
 pub fn gic_device_intid(node: &Node<'_>) -> Option<u32> {
     let interrupts = node.property("interrupts")?;
@@ -707,7 +702,7 @@ mod tests {
     #[test]
     fn pcie_aperture_rejects_a_partial_entry() {
         // A `dma-ranges` value that is not a whole number of 7-cell
-        // entries is refused, never read past its end (`AGENTS.md` §2.9).
+        // entries is refused, never read past its end.
         let mut dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
         dr.truncate(dr.len() - 4);
         with_pcie_dma_ranges(&dr, |aperture| assert_eq!(aperture, None));
@@ -813,7 +808,7 @@ mod tests {
     #[test]
     fn outbound_window_rejects_a_partial_entry() {
         // Not a whole number of 7-cell entries: refused, never read past
-        // its end (`AGENTS.md` §2.9).
+        // its end.
         let mut r = ranges_entry(0x0200_0000, 0xc000_0000, 0x6_0000_0000, 0x4000_0000);
         r.truncate(r.len() - 4);
         with_pcie_ranges(&r, |win| assert_eq!(win, None));
@@ -892,7 +887,7 @@ mod tests {
     #[test]
     fn psci_method_absent_on_a_tree_without_the_node() {
         // A tree with no `/psci` node yields `None`, so the bring-up path
-        // fails closed rather than assuming a conduit (`AGENTS.md` §5.4.5).
+        // fails closed rather than assuming a conduit.
         let mut b = DtbBuilder::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
@@ -1023,7 +1018,7 @@ mod tests {
     #[test]
     fn cell_offset_addition_cannot_overflow() {
         // A hostile `number` near `u32::MAX` must not wrap the addition
-        // (`AGENTS.md` §24.4 — a validation bound, fail closed).
+        // (a validation bound, fail closed).
         assert_eq!(gic_intid_from_cells(GIC_TYPE_SPI, u32::MAX), None);
         assert_eq!(gic_intid_from_cells(GIC_TYPE_PPI, u32::MAX), None);
     }

@@ -1,10 +1,10 @@
-//! Resource-limit ABI (`AGENTS.md` §24).
+//! Resource-limit ABI.
 //!
 //! RustOS sizes resource *capacities* from the hardware discovered at boot
 //! and grows them on demand; it never hard-wires a `const` ceiling that caps
-//! a large machine or wastes a small one (§24.1, §24.2). On top of those
+//! a large machine or wastes a small one. On top of those
 //! discovered defaults a principal may *impose* a lower ceiling on itself or
-//! its children — the RustOS equivalent of POSIX `ulimit`/`rlimit` (§24.3).
+//! its children — the RustOS equivalent of POSIX `ulimit`/`rlimit`.
 //! This module fixes the *contract* for that facility: the closed set of
 //! limited resources ([`LimitKind`]), the soft/hard pair carried for each
 //! ([`ResourceLimit`]), and its little-endian wire encoding. The kernel-side
@@ -19,33 +19,32 @@
 //! Each limited resource has a soft and a hard bound. A process may lower
 //! its own soft bound freely and may lower its hard bound freely, but
 //! *raising* a hard bound — or setting any bound above the inherited
-//! ceiling — requires [`crate::CapabilityId::RLIMIT_RAISE`] (§24.3). Limits
+//! ceiling — requires [`crate::CapabilityId::RLIMIT_RAISE`]. Limits
 //! are inherited across spawn and are *intersected*, never widened, on
 //! delegation ([`ResourceLimit::intersect`]); this mirrors the capability
-//! delegation rule (§5.2).
+//! delegation rule.
 //!
 //! This is a *capacity* limit facility. It must never be used to loosen the
-//! fixed security/format *bounds* on untrusted input (§24.4) — those stay
+//! fixed security/format *bounds* on untrusted input — those stay
 //! fixed and fail closed.
 
 use crate::le::{put_u64, read_u64};
 use crate::Errno;
 
-/// A bound value meaning "no limit imposed" (§24.3).
+/// A bound value meaning "no limit imposed".
 ///
 /// The largest `u64`; a soft or hard bound set to this leaves the resource
-/// governed only by the discovered, growable default policy (§24.1). It is
+/// governed only by the discovered, growable default policy. It is
 /// the resource-limit analogue of POSIX `RLIM_INFINITY`.
 pub const RLIMIT_INFINITY: u64 = u64::MAX;
 
-/// The closed, versioned set of resources a [`ResourceLimit`] can govern
-/// (`AGENTS.md` §24.3).
+/// The closed, versioned set of resources a [`ResourceLimit`] can govern.
 ///
 /// The discriminants are part of the `abi-v1` contract: an existing variant
 /// may not be renumbered or removed, and a new resource takes the next free
 /// discriminant and bumps [`LimitKind::COUNT`]. The set is deliberately
 /// small — only resources whose *capacity* a principal may legitimately cap
-/// below the system default appear here; fixed security/format bounds (§24.4)
+/// below the system default appear here; fixed security/format bounds
 /// never do.
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -54,13 +53,13 @@ pub enum LimitKind {
     /// own address space (the `mem_map` capacity, `plans/SPAWN.md` SP5).
     AddressSpaceBytes = 0,
     /// Maximum number of open standard-stream descriptors the process may
-    /// hold (the descriptor-table capacity, `AGENTS.md` §20).
+    /// hold (the descriptor-table capacity).
     OpenStreams = 1,
     /// Maximum number of live child processes the process may have spawned
     /// (the `spawn` fan-out capacity, `plans/SPAWN.md` SP3).
     Processes = 2,
     /// Maximum size, in bytes, of a single task's stack (the per-task stack
-    /// capacity, §24.2).
+    /// capacity).
     StackBytes = 3,
 }
 
@@ -87,7 +86,7 @@ impl LimitKind {
     /// `ulimit` name.
     ///
     /// Single source of truth for [`name`](Self::name), [`from_name`](Self::from_name),
-    /// and [`from_u32`](Self::from_u32) (`AGENTS.md` §2.2), so the spellings
+    /// and [`from_u32`](Self::from_u32), so the spellings
     /// and the discriminant↔name mapping can never disagree. The names are
     /// part of the frozen `abi-v1` contract.
     const NAMED: [(Self, &'static str); Self::COUNT] = [
@@ -108,7 +107,7 @@ impl LimitKind {
     /// # Errors
     ///
     /// Returns [`Errno::OutOfRange`] if `raw` is not an `abi-v1`
-    /// [`LimitKind`] discriminant (`AGENTS.md` §5.4 — validate every input,
+    /// [`LimitKind`] discriminant (validate every input,
     /// fail closed).
     pub const fn from_u32(raw: u32) -> Result<Self, Errno> {
         match raw {
@@ -128,7 +127,7 @@ impl LimitKind {
     pub fn name(self) -> &'static str {
         // Every variant is present in `NAMED`, so the lookup always
         // succeeds; the fallback never executes but keeps the function
-        // total without a panic (`AGENTS.md` §2.9).
+        // total without a panic.
         Self::NAMED
             .iter()
             .find(|(kind, _)| *kind == self)
@@ -138,7 +137,7 @@ impl LimitKind {
     /// The [`LimitKind`] with canonical `ulimit` name `name`, or [`None`].
     ///
     /// The match is exact and case-sensitive; an unknown name denotes
-    /// nothing (fail closed, `AGENTS.md` §2.1).
+    /// nothing (fail closed).
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::NAMED
@@ -148,12 +147,11 @@ impl LimitKind {
     }
 }
 
-/// A soft/hard resource-limit pair as carried across the ABI (`AGENTS.md`
-/// §24.3).
+/// A soft/hard resource-limit pair as carried across the ABI.
 ///
 /// `soft <= hard` is the well-formedness invariant ([`is_well_formed`]);
 /// [`RLIMIT_INFINITY`] in either field means "no limit". The struct is
-/// `#[repr(C)]` so a non-Rust program (§9) sees the same two little-endian
+/// `#[repr(C)]` so a non-Rust program sees the same two little-endian
 /// `uint64_t` fields the kernel exchanges.
 ///
 /// [`is_well_formed`]: ResourceLimit::is_well_formed
@@ -164,8 +162,7 @@ pub struct ResourceLimit {
     /// may lower it freely; raising it (up to `hard`) needs no capability.
     pub soft: u64,
     /// The hard bound: the ceiling `soft` may not exceed. Lowering it is
-    /// free; raising it requires [`crate::CapabilityId::RLIMIT_RAISE`]
-    /// (§24.3).
+    /// free; raising it requires [`crate::CapabilityId::RLIMIT_RAISE`].
     pub hard: u64,
 }
 
@@ -185,7 +182,7 @@ impl ResourceLimit {
     ///
     /// Returns [`Errno::OutOfRange`] if `soft > hard` — a soft bound above
     /// its hard bound is meaningless and is rejected before it can be stored
-    /// (`AGENTS.md` §5.4 — validate every input, fail closed).
+    /// (validate every input, fail closed).
     pub const fn new(soft: u64, hard: u64) -> Result<Self, Errno> {
         if soft > hard {
             return Err(Errno::OutOfRange);
@@ -204,8 +201,8 @@ impl ResourceLimit {
     ///
     /// Used to inherit/delegate a limit without ever *widening* it: a child
     /// or delegate receives `self.intersect(parent)`, so neither bound can
-    /// exceed the inherited ceiling (§24.3, mirroring the capability
-    /// delegation rule §5.2). The result is well-formed whenever both
+    /// exceed the inherited ceiling (mirroring the capability
+    /// delegation rule). The result is well-formed whenever both
     /// inputs are.
     #[must_use]
     pub const fn intersect(self, other: Self) -> Self {
@@ -241,7 +238,7 @@ impl ResourceLimit {
     ///   (`soft > hard`).
     ///
     /// Both failures are fail-closed: a malformed buffer never yields a
-    /// usable limit (`AGENTS.md` §5.4).
+    /// usable limit.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::LengthOutOfRange);

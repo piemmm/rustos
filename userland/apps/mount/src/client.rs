@@ -23,10 +23,9 @@ usage: mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]
 /// Run one [`Command`].
 ///
 /// A [`Command::List`] pages the mount table through `transport` (the
-/// ungated `MOUNT_LIST` query, `AGENTS.md` §16.6) and writes one line per
+/// ungated `MOUNT_LIST` query) and writes one line per
 /// mount to `out`. A [`Command::Mount`] hands the parsed request to
-/// `mounter`; the capability gate lives in the kernel, not here
-/// (`AGENTS.md` §5.4), so a denied mount comes back as
+/// `mounter`; the capability gate lives in the kernel, not here, so a denied mount comes back as
 /// [`MountError::Mount`]. `mount` writes nothing on a successful attach.
 ///
 /// # Errors

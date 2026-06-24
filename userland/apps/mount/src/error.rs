@@ -9,7 +9,7 @@ use rustos_procinfo::{CallError, ListError};
 /// The variants are deliberately coarse: the CLI surfaces enough to print a
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
-/// set (`AGENTS.md` §2.2).
+/// set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MountError {
     /// The command line carried an unrecognised option or a number of
@@ -22,7 +22,7 @@ pub enum MountError {
     /// The mount operation was refused or failed. Carries the underlying
     /// [`Errno`] — e.g. [`Errno::PermissionDenied`] when the caller lacks
     /// `CAP_FS_MOUNT`, which is the kernel's decision to make, not the
-    /// tool's (`AGENTS.md` §5.4).
+    /// tool's.
     Mount(Errno),
     /// Listing the mount table failed: the transport errored or the reply
     /// did not decode against `sysinfo-v1`. Carries the underlying
@@ -35,7 +35,7 @@ pub enum MountError {
 impl From<CallError> for MountError {
     fn from(err: CallError) -> Self {
         match err {
-            // The mount-list query is ungated (`AGENTS.md` §16.6), so a
+            // The mount-list query is ungated, so a
             // denial is a service-level anomaly rather than a missing
             // capability the user could grant; report it as such.
             CallError::PermissionDenied => Self::Service(Errno::PermissionDenied),

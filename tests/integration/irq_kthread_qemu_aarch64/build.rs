@@ -4,23 +4,22 @@
 //! Two jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the test kernel the aarch64 `virt` linker script the
-//!    architecture port owns (the single per-board script — `AGENTS.md`
-//!    §2.2).
+//!    architecture port owns (the single per-board script).
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it,
 //!    so the test discovers the GICv2 bases, the generic-timer rate, *and*
 //!    the PL031 RTC's GICv2 SPI line from the firmware tree
 //!    (`rustos_arch_aarch64::fdt::gic_device_intid`) rather than hard-coding
-//!    a board constant (`AGENTS.md` §2.20 / §18.2). QEMU's `-kernel <ELF>`
+//!    a board constant. QEMU's `-kernel <ELF>`
 //!    aarch64 path passes no DTB pointer (`x0 = 0`), so the board tree is
 //!    embedded at build time; the dump helper lives in the shared harness
-//!    so no aarch64 build script re-rolls it (`AGENTS.md` §2.2).
+//!    so no aarch64 build script re-rolls it.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it
 //! emits an inert empty DTB so the crate still builds; the kernel body that
 //! consumes it compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -43,7 +42,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");

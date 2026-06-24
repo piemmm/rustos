@@ -31,8 +31,7 @@
 //! # No global mutable state
 //!
 //! The dispatch slot is set-once at boot, backed by an atomic so the
-//! trap path reads it without a lock; a second publish fails closed
-//! (`AGENTS.md` §2.1).
+//! trap path reads it without a lock; a second publish fails closed.
 //!
 //! (`rustos_riscv64_trap_vector`, `init_traps`, and the Rust handler are
 //! gated to the freestanding riscv64 target, so they are plain text on
@@ -122,7 +121,7 @@ pub const SSTATUS_SIE: u64 = 1 << 1;
 /// trap was taken from S-mode, clear when it was taken from U-mode. The
 /// timer-preemption path gates on this so a tick taken in the
 /// non-preemptible kernel never switches a half-completed critical
-/// section away (`AGENTS.md` §4 watch-out).
+/// section away (watch-out).
 pub const SSTATUS_SPP: u64 = 1 << 8;
 
 /// `true` iff a trap whose saved `sstatus` is `sstatus` was taken from
@@ -158,7 +157,7 @@ static TRAP_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetDispatchError {
     /// A dispatcher was already published; the slot is set-once per
-    /// boot (`AGENTS.md` §2.1).
+    /// boot.
     AlreadyInstalled,
 }
 
@@ -185,7 +184,7 @@ pub fn trap_dispatch_addr() -> usize {
 #[cfg(test)]
 fn clear_trap_dispatch_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a dispatcher.
-    // Production code never clears the slot (`AGENTS.md` §2.1).
+    // Production code never clears the slot.
     TRAP_DISPATCH_FN.store(0, Ordering::Release);
 }
 
@@ -213,8 +212,7 @@ extern "C" {
 /// uses it to catch a fault during the paged bring-up and to route the
 /// `ecall` syscall path, mirroring the aarch64 port's vector-only
 /// `exceptions::init_vectors`. A consumer that also wants to take
-/// asynchronous interrupts calls [`init_traps`] instead (`AGENTS.md`
-/// §2.2 — the vector-install logic has one definition).
+/// asynchronous interrupts calls [`init_traps`] instead (the vector-install logic has one definition).
 ///
 /// # Safety
 ///
@@ -222,7 +220,7 @@ extern "C" {
 /// `stvec`/`sscratch` has no memory side effects beyond the named CSRs.
 /// The caller must have installed the syscall dispatch callback
 /// ([`crate::syscall_entry::set_dispatch_callback`]) before user code
-/// can `ecall`, or the handler fails closed (`AGENTS.md` §5.4.5).
+/// can `ecall`, or the handler fails closed.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub unsafe fn install_trap_vector() {
     let base = rustos_riscv64_trap_vector as *const () as usize;
@@ -272,11 +270,11 @@ pub unsafe fn init_traps() {
 /// This is the riscv64 backing of
 /// `rustos_kernel_core::KernelArch::set_device_irqs`: the scheduler
 /// dispatch loop enables S-mode interrupts so it runs every in-kernel
-/// task/kthread preemptively (`AGENTS.md` §17.1), and masks them only
+/// task/kthread preemptively, and masks them only
 /// around the idle park and before halt. Enabling `sstatus.SIE` in S-mode
 /// is safe because [`rustos_riscv64_trap_handler`] gates preemption on the
 /// saved `SPP` — a timer tick taken in S-mode runs its (lock-free)
-/// accounting but never reschedules the kernel (§4), and a supervisor
+/// accounting but never reschedules the kernel, and a supervisor
 /// external interrupt forwards to the lock-free PLIC dispatcher.
 ///
 /// # Safety
@@ -300,13 +298,13 @@ pub unsafe fn set_supervisor_interrupts(enabled: bool) {
 
 /// Park the hart on `wfi` until the next interrupt becomes pending, then
 /// return with the interrupt-mask state unchanged — the tickless idle
-/// park (`AGENTS.md` §17.1).
+/// park.
 ///
 /// The dispatch loop calls this with `sstatus.SIE` already cleared (it
 /// masked S-mode interrupts to close the park/wake race and drained any
 /// already-flagged wake). `wfi` wakes on a pending interrupt even with
 /// `SIE == 0`, so an edge that asserts after the drain but before this
-/// call is not lost (§2.1); the loop then re-enables interrupts
+/// call is not lost; the loop then re-enables interrupts
 /// ([`set_supervisor_interrupts`]), *taking* the pending one — its
 /// lock-free handler flags the deferred wake the next
 /// `drain_pending_wakes` consumes.
@@ -334,14 +332,14 @@ pub unsafe fn wait_for_interrupt() {
 ///   [`crate::syscall_entry`] dispatch callback, after which `sepc` is
 ///   advanced past the 4-byte `ecall` so `sret` resumes at the next
 ///   instruction. If no syscall dispatcher is installed the hart fails
-///   closed (`AGENTS.md` §5.4.5) rather than returning an unspecified
+///   closed rather than returning an unspecified
 ///   value to user space.
 /// * A supervisor external interrupt forwards to the installed PLIC
 ///   dispatcher (claim → `IrqTable::fire` → complete).
 /// * A supervisor timer interrupt drives the scheduler tick.
 /// * Any other synchronous exception is unexpected in this slice and
 ///   fails closed by parking the hart rather than `sret`-looping on the
-///   faulting instruction (`AGENTS.md` §2 — never silently reset).
+///   faulting instruction (never silently reset).
 ///
 /// `frame` is the saved-register frame the asm vector built; the
 /// syscall path reads the user's `a0`–`a7` from it and writes the
@@ -393,7 +391,7 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         // Forward it to the installed fault handler if one is present
         // (the memory-isolation vertical installs one to confirm an
         // attacker faulted on an isolated address); otherwise fail closed
-        // by parking the hart (`AGENTS.md` §2.9).
+        // by parking the hart.
         if let Some(handler) = crate::fault::fault_handler() {
             let stval: u64;
             let sepc: u64;
@@ -417,7 +415,7 @@ unsafe extern "C" fn rustos_riscv64_trap_handler(frame: *mut TrapFrame) {
         // scheduler, exactly as a cooperative `yield` does. The re-arm
         // above already cleared `sip.STIP`, so the context switch happens
         // with no timer line pending. A tick taken from S-mode never
-        // preempts — the kernel is non-preemptible (`AGENTS.md` §4), and
+        // preempts — the kernel is non-preemptible, and
         // the saved `SPP` gate enforces that even if `sstatus.SIE` is ever
         // enabled in S-mode. `frame` is the live saved-register frame.
         // SAFETY: `frame` is the live saved-register frame the asm vector

@@ -1,6 +1,6 @@
 //! Build script for the `rustos-kernel` crate.
 //!
-//! Two responsibilities, both build glue (`AGENTS.md` §17.2 confines
+//! Two responsibilities, both build glue (confines
 //! target-conditional decisions to the architecture ports and the build
 //! glue; a build script is build glue):
 //!
@@ -10,7 +10,7 @@
 //!    Pi 4 boot script `arch/aarch64/link/aarch64-rpi4.ld` (load address
 //!    `0x8_0000`). The QEMU `virt` board's `aarch64-virt.ld` is used only
 //!    by the per-test bins, which carry their own build scripts
-//!    (`AGENTS.md` §2.2 — no duplication; the one legitimate per-board
+//!    (no duplication; the one legitimate per-board
 //!    artefact is the boot stub + linker script per `plans/PI.md` §0.2).
 //!
 //! 2. Emit the conditional-compilation names the crate body gates on:
@@ -20,7 +20,7 @@
 //!      build, host included. The crate body gates each architecture's
 //!      modules (the x86_64 boot pipeline, the aarch64 boot pipeline) on
 //!      these names rather than the target instruction set inline, so
-//!      the choice lives in this one audited place (`AGENTS.md` §17.2;
+//!      the choice lives in this one audited place (
 //!      `cargo xtask cfg-check` forbids the target-conditional predicate
 //!      in the crate body).
 //!
@@ -79,7 +79,7 @@ fn program_rustflags_var(target: &str) -> Option<&'static str> {
 /// same bias to the build caller, and `elf_to_rxe` relocates the image for
 /// it, so the in-memory pointers match where the image is mapped. Each
 /// program lives in its **own** address space, so every program reuses this
-/// one bias (`AGENTS.md` §2.2). Mirrors the proven per-arch
+/// one bias. Mirrors the proven per-arch
 /// `spawn_program_qemu_*` fixtures' bias.
 const USER_BIAS: u64 = 0x10_0000_0000;
 
@@ -102,7 +102,7 @@ struct Program {
 /// The embedded programs every production boot path spawns: PID 1 `init`, and
 /// the `Shell` session program `init` launches (`plans/SPAWN.md` `SP3b`). Both
 /// are pure-Rust `Run` bins built the same way for whichever production target
-/// is active (`AGENTS.md` §2.2 — one build path), differing only in their
+/// is active (one build path), differing only in their
 /// package/paths.
 const PROGRAMS: &[Program] = &[
     Program {
@@ -145,14 +145,14 @@ fn main() {
     // stale — a dirty-tree edit (the day-to-day dev loop) changed neither the
     // tracked git files nor the env, so the script did not re-run, the
     // recompiled kernel embedded a *stale* `build_id.rs`, and a metal reflash
-    // reported an old id for new code (the §15.7 provenance datapoint
+    // reported an old id for new code (the provenance datapoint
     // silently lying). Naming a path that never exists is the documented way
     // to force a re-run on every build; the expensive work behind it is still
     // cheap because it is itself cached (a host build emits inert fixtures,
     // and a freestanding build's nested `cargo` invocations no-op when their
     // sources are unchanged). Cargo only *recompiles* the crate when a
     // generated file's bytes actually change, so a pinned reproducible build
-    // (`SOURCE_DATE_EPOCH`, `AGENTS.md` §19.3) still produces identical output
+    // (`SOURCE_DATE_EPOCH`) still produces identical output
     // and does not churn.
     println!("cargo:rerun-if-changed=__rustos_always_rerun_build_id__");
 
@@ -184,11 +184,11 @@ fn main() {
 
 /// One chain driver to bake a signed manifest for: the emitted `const`
 /// name and the driver crate's own canonical `BIND_KEYS` (so the signed
-/// bind table never drifts from the matcher, `AGENTS.md` §2.2 / §18.3).
+/// bind table never drifts from the matcher).
 struct DriverImage {
     /// `const` name the fixture emits the signed image bytes under.
     const_name: &'static str,
-    /// The driver crate's published bind table (`AGENTS.md` §18.3).
+    /// The driver crate's published bind table.
     bind_keys: &'static [rustos_abi::DriverBindKey],
 }
 
@@ -206,7 +206,7 @@ struct DriverImage {
 /// is empty: the drivers are statically linked, so the in-process spawner
 /// invokes their `register()` directly rather than loading a program image,
 /// and covering an empty payload is a no-op (a user-space driver's non-empty
-/// payload, by contrast, is authenticated, `AGENTS.md` §8 / §2.17).
+/// payload, by contrast, is authenticated).
 fn emit_signed_driver_manifests() {
     use ed25519_dalek::SigningKey;
 
@@ -214,7 +214,7 @@ fn emit_signed_driver_manifests() {
     let signing_key = SigningKey::from_bytes(&KERNEL_DRIVER_SIGNING_SEED);
     let signer_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
 
-    // The compiled-in floor is storage-only (`AGENTS.md` §18.6): the block
+    // The compiled-in floor is storage-only: the block
     // drivers that read the volume holding the signed driver store. The
     // BCM2711 PCIe / VL805 USB / USB-keyboard drivers are installed as signed
     // `/System/Drivers/` bundles and autoloaded into user space, so their
@@ -235,7 +235,7 @@ fn emit_signed_driver_manifests() {
     out.push_str(
         "/// Ed25519 public key the build signed every embedded driver\n\
          /// manifest with — the kernel's driver-load trust anchor\n\
-         /// (`AGENTS.md` §8 / §9; `plans/PI.md` P10 5c-ii).\n",
+         /// (`plans/PI.md` P10 5c-ii).\n",
     );
     emit_byte_array(
         &mut out,
@@ -268,9 +268,8 @@ fn build_signed_driver_image(
     use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};
 
     // The drivers are statically linked; their `register()` only needs
-    // `CAP_DRV_LOAD` (the §8 admission check). `kind = InKernel` makes the
-    // gate additionally require `CAP_DRV_KERNEL` of the caller (`AGENTS.md`
-    // §8). No further capabilities are requested: the real MMIO/DMA work
+    // `CAP_DRV_LOAD` (the admission check). `kind = InKernel` makes the
+    // gate additionally require `CAP_DRV_KERNEL` of the caller. No further capabilities are requested: the real MMIO/DMA work
     // runs over the keyboard service's own capability-gated host, not this
     // admission view.
     let caps = [CapabilityId::DRV_LOAD];
@@ -340,14 +339,14 @@ fn emit_byte_slice(out: &mut String, name: &str, bytes: &[u8]) {
 /// boot path logs once at hand-off, so a serial capture proves *which*
 /// build is running — the provenance datapoint that settles a "does the
 /// running image actually contain this source change?" question without
-/// guessing (`AGENTS.md` §15.7).
+/// guessing.
 ///
 /// The id combines the source identity (`git rev-parse --short HEAD`, plus
 /// a `+dirty` marker when the working tree carries uncommitted changes —
 /// best-effort, `nogit` when git or the checkout is unavailable) with a
 /// build epoch in seconds. The epoch honours `SOURCE_DATE_EPOCH` when set
 /// (the standard reproducible-build input, so a pinned build stays
-/// bit-reproducible — `AGENTS.md` §19.3), falling back to the current
+/// bit-reproducible), falling back to the current
 /// wall-clock second otherwise.
 ///
 /// This is regenerated on *every* build (`main` declares no narrow
@@ -355,7 +354,7 @@ fn emit_byte_slice(out: &mut String, name: &str, bytes: &[u8]) {
 /// the epoch always track the image actually produced. Tracking only git's
 /// metadata as a rerun input — the previous design — left the id stale
 /// through a dirty-tree edit, so a metal reflash reported an old id for new
-/// code (`AGENTS.md` §2.18). The `SOURCE_DATE_EPOCH` parsing this relies on
+/// code. The `SOURCE_DATE_EPOCH` parsing this relies on
 /// is the host-unit-tested [`build_support::parse_source_date_epoch`].
 fn emit_build_id() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
@@ -367,7 +366,7 @@ fn emit_build_id() {
     let fixture = format!(
         "// Auto-generated by build.rs. DO NOT EDIT.\n\
          /// Source + build identity, logged once at boot hand-off so a\n\
-         /// serial capture proves which build is running (`AGENTS.md` §15.7).\n\
+         /// serial capture proves which build is running.\n\
          pub const KERNEL_BUILD_ID: &str = {build_id:?};\n"
     );
     let path = PathBuf::from(&out_dir).join("build_id.rs");
@@ -376,7 +375,7 @@ fn emit_build_id() {
 
 /// `git rev-parse --short HEAD` with a `+dirty` suffix when the working
 /// tree is not clean; `nogit` when git or the checkout is unavailable
-/// (the build must never fail for a missing VCS — `AGENTS.md` §2.9).
+/// (the build must never fail for a missing VCS).
 fn git_source_id() -> String {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let head = Command::new("git")
@@ -403,7 +402,7 @@ fn git_source_id() -> String {
 }
 
 /// The build epoch in whole seconds: `SOURCE_DATE_EPOCH` when set (so a
-/// pinned, reproducible build is stable — `AGENTS.md` §19.3), else the
+/// pinned, reproducible build is stable), else the
 /// current wall-clock second.
 fn build_epoch_secs() -> u64 {
     if let Ok(epoch) = std::env::var("SOURCE_DATE_EPOCH") {
@@ -424,13 +423,13 @@ fn build_epoch_secs() -> u64 {
 /// On a freestanding production target ([`program_rustflags_var`] returns the
 /// target-scoped link var) each program is compiled position-independent
 /// against its own `Run.ld` into a private target directory under `OUT_DIR`
-/// (so it never collides with the outer kernel build — `AGENTS.md` §2.2, one
+/// (so it never collides with the outer kernel build, one
 /// program source built for each target), then the linked PIE ELF is
 /// converted into an `rxe` blob with
 /// [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for
 /// [`USER_BIAS`] and stamping the kernel's compiled-in syscall CFI tag
 /// (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-/// [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2).
+/// [`rustos_abi::rxe::LoadImage::parse`] accepts it.
 ///
 /// On every other target (host `cargo build --workspace`, clippy) each
 /// fixture is an inert empty blob: the boot-path modules that consume them
@@ -473,10 +472,8 @@ fn emit_program_rxe(target: &str, manifest_dir: &str, out_dir: &str, program: &P
 /// linked ELF in place. The previous in-tree `Run.ld` of every program is
 /// kept as a sidecar copy under `OUT_DIR`; the wipe fires only on a real
 /// content change (or first build / missing sidecar), so this build script
-/// re-running on every build does not rebuild `build-std` each time
-/// (`AGENTS.md` §2.16). A read failure compares as different and simply
-/// forces the (correct, safe) clean rebuild — fail safe, never silently stale
-/// (`AGENTS.md` §2.9).
+/// re-running on every build does not rebuild `build-std` each time. A read failure compares as different and simply
+/// forces the (correct, safe) clean rebuild — fail safe, never silently stale.
 fn wipe_target_dir_on_linker_change(
     run_ld: &str,
     target_dir: &str,
@@ -497,8 +494,7 @@ fn wipe_target_dir_on_linker_change(
 /// Compile a program's `Run` bin PIE for the given freestanding `target` and
 /// convert the linked ELF into an `rxe` blob. `rustflags_var` is the
 /// target-scoped `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` variable that carries the
-/// PIE link recipe (one build path for every production target, `AGENTS.md`
-/// §2.2).
+/// PIE link recipe (one build path for every production target).
 fn build_and_convert(
     manifest_dir: &str,
     out_dir: &str,
@@ -519,7 +515,7 @@ fn build_and_convert(
     // wipe the private target directory — forcing a clean rebuild against the
     // current script — *only* then. An unchanged script leaves the directory
     // intact so the nested `cargo` no-ops incrementally rather than rebuilding
-    // `build-std` on every outer build (`AGENTS.md` §2.16). The program's own
+    // `build-std` on every outer build. The program's own
     // source changes need no help here: because the outer script always
     // re-runs, the nested `cargo` is always invoked and fingerprints them
     // itself.
@@ -527,7 +523,7 @@ fn build_and_convert(
 
     // The program links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
     // roots the `rustos-rt` runtime trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2), with `core` /
+    // position-independent, with `core` /
     // `compiler_builtins` / `alloc` built PIC alongside it (`-Z
     // build-std`). `alloc` is required because the program packages name it
     // transitively, even though the banner-printing `Run` binaries never

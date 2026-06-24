@@ -10,14 +10,13 @@
 //! [`PciBus`] is that surface. The PCI configuration-access library
 //! (`lib/pci`) implements it; a device-class driver (`drivers/bus/usb`,
 //! …) or a composing host reaches the bus through a `&dyn PciBus` rather
-//! than naming the concrete bus type (`AGENTS.md` §17.4 — PCI config
+//! than naming the concrete bus type (PCI config
 //! access is shared `lib/*` logic, and one driver never names another).
 //! [`Bus`] is a supertrait so a single trait object can both enumerate
 //! the bus (to pick the function) and provision it.
 //!
-//! Like every other `lib/abi` item the trait is held to the §9 ABI
-//! discipline; while `abi-v1` is unfrozen it may still evolve in place
-//! (`AGENTS.md` §2.13), every caller updated in the same change.
+//! Like every other `lib/abi` item the trait is held to the ABI
+//! discipline; while `abi-v1` is unfrozen it may still evolve in place, every caller updated in the same change.
 
 use super::bus::Bus;
 use super::{DriverError, MmioMapper, RegisterWindow};
@@ -30,7 +29,7 @@ use crate::HwNode;
 /// [`map_bar_window`](Self::map_bar_window) routes through the supplied
 /// [`MmioMapper`], which enforces
 /// [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP); the
-/// implementation synthesises no pointer itself (`AGENTS.md` §4 — no
+/// implementation synthesises no pointer itself (no
 /// ambient authority). [`enable_bus_master`](Self::enable_bus_master)
 /// touches only the function's own configuration space, which the bus
 /// driver already reaches by holding its [`DriverHandle`](crate::driver::DriverHandle).
@@ -43,7 +42,7 @@ pub trait PciBus: Bus {
     /// from configuration space and asks the kernel's MMIO-map facility
     /// for a window over exactly that region. The driver never
     /// synthesises a pointer — the kernel allocates and validates the
-    /// mapping (`AGENTS.md` §4).
+    /// mapping.
     ///
     /// # Errors
     ///
@@ -111,7 +110,7 @@ pub trait PciBus: Bus {
     ///   the function is not a type-0 header.
     /// * [`DriverError::OutOfRange`] — the BAR's size-aligned placement
     ///   does not fit inside the window, or a 32-bit BAR would land
-    ///   above the 4 GiB line (fail closed, `AGENTS.md` §5.4).
+    ///   above the 4 GiB line (fail closed).
     fn assign_bar(
         &self,
         bdf: u64,
@@ -141,14 +140,14 @@ pub trait PciBus: Bus {
 
     /// Describe the function at `bdf` as a discovered child
     /// [`HwNode`] to attach beneath the bus's own
-    /// hardware-tree node (`AGENTS.md` §18.1 / §18.3).
+    /// hardware-tree node.
     ///
     /// A bus that enumerates downstream devices is responsible for
     /// growing the hardware tree at runtime: each device it finds
     /// becomes a child node carrying the match keys a driver's signed
-    /// bind table is resolved against (`AGENTS.md` §18.3), so a device
+    /// bind table is resolved against, so a device
     /// behind the bus autoloads its driver as match **data** rather than
-    /// by hand-wired composition (`AGENTS.md` §2.2 / §18.5). For a PCI
+    /// by hand-wired composition. For a PCI
     /// function the emitted node carries a single
     /// [`HwMatchKey::pci`](crate::HwMatchKey::pci) of the function's
     /// `vendor:device` and its **full 24-bit class code**
@@ -164,16 +163,15 @@ pub trait PciBus: Bus {
     /// syscall the kernel assigns a fresh, collision-free id and sets the
     /// parent to the emitting driver's own matched node, so a driver can
     /// neither forge its tree position nor collide with an existing id
-    /// (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
-    /// caller-supplied; §18.1 / §18.3). No resource capabilities are
+    /// (identity is kernel-provided, never
+    /// caller-supplied;). No resource capabilities are
     /// attached here either; those are minted at the load gate.
     ///
     /// # Errors
     ///
     /// * [`DriverError::NotFound`] if no function responds at `bdf` (an
     ///   absent function reads the all-ones vendor sentinel) — a
-    ///   fail-closed refusal, never a fabricated node (`AGENTS.md`
-    ///   §2.9 / §18.5).
+    ///   fail-closed refusal, never a fabricated node.
     /// * [`DriverError::DeviceFault`] if the configuration read cannot be
     ///   completed by the bus transport, or the node cannot be assembled.
     fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError>;
@@ -289,7 +287,7 @@ mod tests {
         fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
             // Identity is unassigned: the kernel sets it on publish. Build
             // the node with placeholder id/parent the publish path
-            // overwrites (`AGENTS.md` §4 / §18.1).
+            // overwrites.
             let mut node = HwNode::new(0, crate::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
             node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30))
                 .map_err(|_| DriverError::DeviceFault)?;
@@ -372,7 +370,7 @@ mod tests {
             .expect("describes the function");
         // The lone key is the function's vendor:device:24-bit class, so a
         // generic xHCI bind key (class `0x0C_03_30`, vendor/device
-        // wildcard) resolves against it (`AGENTS.md` §18.3).
+        // wildcard) resolves against it.
         assert_eq!(node.match_keys().len(), 1);
         let bind = HwMatchKey::pci(0, 0, 0x0C_03_30);
         assert!(bind.matches(&node.match_keys()[0]));

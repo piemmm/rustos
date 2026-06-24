@@ -112,7 +112,7 @@ const MAX_STEPS: u64 = 200_000_000;
 
 /// The kernel/irq controller bridge over the aarch64 [`GicController`].
 ///
-/// §17.4 forbids the architecture crate from depending on `kernel/irq`, so
+/// the charter forbids the architecture crate from depending on `kernel/irq`, so
 /// this bridge — the same shape as x86_64's `IoApicController` and the
 /// production `GicIrqController` — lives in the test crate (which may
 /// depend on both). `mask` delegates to the HAL
@@ -240,7 +240,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // 1. Discover the board from the embedded `virt` device tree: GICv2
     //    bases, the generic-timer rate, and — the INCREMENT (1) piece under
     //    test — the PL031 RTC's GICv2 SPI line from its `interrupts`
-    //    property (never a hard-coded INTID, `AGENTS.md` §2.20 / §18.2).
+    //    property (never a hard-coded INTID).
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_FDT);
     };
@@ -288,8 +288,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // 5. Build the live eevdf scheduler over the arch port, cloning the
     //    arch handle so the kthread's monotonic clock can read it.
-    // Per-CPU bookkeeping backing for this single-CPU vertical
-    // (`AGENTS.md` §24.1).
+    // Per-CPU bookkeeping backing for this single-CPU vertical.
     static ARCH_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
     let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
     let clock_arch = arch.clone();
@@ -303,7 +302,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     //    the exact path the INCREMENT (2) root-unlock kthread will take. No
     //    deadline (`u64::MAX`): the harness wall-clock budget is the
     //    backstop, so a line that never fires times out and is reported as
-    //    a failure (`AGENTS.md` §7), never a false pass.
+    //    a failure, never a false pass.
     let spawned = spawn_kthread(
         &sched,
         ContextSwitchHal::new(),

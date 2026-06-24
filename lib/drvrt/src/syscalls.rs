@@ -3,10 +3,10 @@
 //!
 //! [`GrantSyscalls`] abstracts the `mmio_map` and `dma_alloc` syscall
 //! wrappers so the host's grant-resolution and address-translation logic is
-//! unit-tested without a kernel (`AGENTS.md` §7) — exactly as the bus drivers
+//! unit-tested without a kernel — exactly as the bus drivers
 //! mock their register windows. Production driver processes use
 //! [`RtGrantSyscalls`], the zero-sized forwarder to `rustos_rt`, so the one
-//! syscall trap is not duplicated (`AGENTS.md` §2.2).
+//! syscall trap is not duplicated.
 
 /// The `mmio_map` / `dma_alloc` syscalls the user-space driver host issues.
 ///
@@ -15,7 +15,7 @@
 /// window or carved buffer, and a negative value is `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`). The host
 /// adds no authority; the kernel validates the grant handle and every bound on
-/// the far side of the trap (`AGENTS.md` §5.4).
+/// the far side of the trap.
 pub trait GrantSyscalls {
     /// Map the `[offset, offset + len)` sub-region of the device MMIO window
     /// named by the kernel-issued grant `handle` into the calling task's own
@@ -24,7 +24,7 @@ pub trait GrantSyscalls {
     ///
     /// Mapping a sub-region (not the whole grant) is what lets a driver
     /// granted a large outbound bus aperture map just the single BAR it
-    /// enumerated rather than the entire window (`AGENTS.md` §24.1).
+    /// enumerated rather than the entire window.
     ///
     /// Mirrors [`rustos_rt::mmio_map`].
     fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64;
@@ -42,7 +42,7 @@ pub trait GrantSyscalls {
     /// calling task into `buf`, returning the total number of bytes written
     /// — consecutive [`rustos_abi::hwtree::GrantedResource`] records — when
     /// non-negative, else `-errno`. A buffer too small for the whole set
-    /// fails closed (`AGENTS.md` §2.9).
+    /// fails closed.
     ///
     /// Mirrors [`rustos_rt::resource_grants`].
     fn resource_grants(&self, buf: &mut [u8]) -> i64;
@@ -59,7 +59,7 @@ pub trait GrantSyscalls {
     /// Park the calling task until the interrupt bound to `handle` fires (or
     /// `timeout_ns` elapses), returning `0` on a fire (or `-errno`). The
     /// kernel re-arms the bound line on the driver's behalf across the park
-    /// (`AGENTS.md` §4 — the driver holds no controller access).
+    /// (the driver holds no controller access).
     ///
     /// Mirrors [`rustos_rt::irq_wait`].
     fn irq_wait(&self, handle: u64, timeout_ns: u64) -> i64;
@@ -71,7 +71,7 @@ pub trait GrantSyscalls {
     /// property-mailbox service ([`MailboxChannel`](rustos_abi::driver::MailboxChannel)
     /// over [`rustos_abi::mailbox_ipc::MAILBOX_ENDPOINT`]); the kernel gates
     /// the call by the endpoint's required send capability and copies both
-    /// buffers through the validated boundary (`AGENTS.md` §5.4).
+    /// buffers through the validated boundary.
     ///
     /// Mirrors [`rustos_rt::ipc_call`].
     fn ipc_call(&self, endpoint: u64, request: &[u8], reply: &mut [u8]) -> i64;
@@ -82,7 +82,7 @@ pub trait GrantSyscalls {
     /// autoloads the matching driver in turn; the kernel admits the node only
     /// when every resource it requests is covered by one of the calling
     /// driver's own grants, so a child can never carry more authority than
-    /// its emitter (`AGENTS.md` §4 / §18.1 / §18.3).
+    /// its emitter.
     ///
     /// Mirrors [`rustos_rt::hw_emit_node`].
     fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64;
@@ -92,8 +92,7 @@ pub trait GrantSyscalls {
 ///
 /// Zero-sized; a driver process constructs one and hands it to
 /// [`RtDriverHost::new`](crate::RtDriverHost::new). It carries no state and no
-/// authority — it only routes through the one shared syscall trap
-/// (`AGENTS.md` §2.2).
+/// authority — it only routes through the one shared syscall trap.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RtGrantSyscalls;
 

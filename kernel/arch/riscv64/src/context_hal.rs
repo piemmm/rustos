@@ -1,4 +1,4 @@
-//! riscv64 context switch (`AGENTS.md` §17.2 "context switch").
+//! riscv64 context switch ("context switch").
 //!
 //! Implements the Arch HAL [`ContextSwitch`](rustos_arch_api::ContextSwitch)
 //! surface for riscv64 over the bare-metal switch primitive in
@@ -9,10 +9,10 @@
 //! ([`ContextSwitch::switch`](rustos_arch_api::ContextSwitch::switch)). The
 //! callee-saved (`ra`/`s0`–`s11`/`a0`) save/restore lives in
 //! [`crate::context`]'s `context.s` assembly — per-hart register work with
-//! no architecture-neutral shape (`AGENTS.md` §2.4) — so this module
+//! no architecture-neutral shape — so this module
 //! reinterprets the neutral [`TaskContext`](rustos_arch_api::TaskContext)
 //! as the port's [`crate::context::TaskCtx`] and forwards, keeping the
-//! switch invoke in exactly one place (`AGENTS.md` §2.2).
+//! switch invoke in exactly one place.
 //!
 //! The neutral [`TaskContext`](rustos_arch_api::TaskContext) and the port's
 //! [`crate::context::TaskCtx`] are both a single `#[repr(C)]` `u64` (the
@@ -41,7 +41,7 @@ impl ContextSwitchHal {
 
 /// The neutral save area and the port's `TaskCtx` must be the same
 /// single-word layout for the pointer reinterpretation in
-/// [`ContextSwitch::switch`] to be sound (`AGENTS.md` §2.2).
+/// [`ContextSwitch::switch`] to be sound.
 const _CONTEXT_LAYOUT_MATCHES: () = {
     assert!(core::mem::size_of::<TaskContext>() == core::mem::size_of::<TaskCtx>());
     assert!(core::mem::align_of::<TaskContext>() == core::mem::align_of::<TaskCtx>());

@@ -1,18 +1,17 @@
-//! RustOS `setcap` — set or clear a file's required-capability gate (Stage 6,
-//! `AGENTS.md` §3 `userland/apps/`).
+//! RustOS `setcap` — set or clear a file's required-capability gate (Stage 6 `userland/apps/`).
 //!
 //! Every inode in the RustOS permission model may carry an **optional
 //! capability requirement**: a capability the caller must hold to reach the
-//! node at all, on top of the mode/ACL checks (`AGENTS.md` §5.3). `setcap`
+//! node at all, on top of the mode/ACL checks. `setcap`
 //! changes that gate. The capability operand is either a canonical `CAP_*`
 //! name (e.g. `CAP_AUDIT_READ`), which sets the gate to that capability, or
 //! the literal `-`, which clears the gate so the node has none. With `-R` a
 //! directory operand is changed and then its contents are changed
 //! recursively. This is the companion to [`getcap`](../getcap/index.html) and
-//! a building block of the §5.3 filesystem permission model.
+//! a building block of the filesystem permission model.
 //!
 //! `setcap` is the policy-*writing* sibling of `chmod`/`chown`: it stores the
-//! gate but makes no permission decision itself (`AGENTS.md` §5.4 — the VFS
+//! gate but makes no permission decision itself (the VFS
 //! is the policy point). Setting a gate is itself a privileged operation; the
 //! filesystem seam refuses an attempt the caller is not authorised to make
 //! (it surfaces as [`SetcapError::Apply`]).
@@ -44,7 +43,7 @@
 //! [`SetcapError::Stat`]; a gate that cannot be applied is
 //! [`SetcapError::Apply`]; a directory whose entries cannot be read during a
 //! recursive descent is [`SetcapError::Read`]. The first failure stops the
-//! run before any later operand, and there is no panic (`AGENTS.md` §2.9).
+//! run before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -57,10 +56,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

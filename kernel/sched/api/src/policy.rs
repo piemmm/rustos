@@ -1,13 +1,13 @@
-//! The [`SchedulerPolicy`] contract (`AGENTS.md` §17.1).
+//! The [`SchedulerPolicy`] contract.
 //!
 //! Every concrete scheduler lives in its own `kernel/sched/<impl>` crate
 //! and implements this trait; no crate outside `kernel/sched/*` and
-//! `kernel/core` may name a concrete scheduler type (§17.1). `kernel/core`
+//! `kernel/core` may name a concrete scheduler type. `kernel/core`
 //! selects exactly one implementation at build time and the rest of the
 //! kernel depends on this trait (or a generic `Scheduler<P: SchedulerPolicy>`),
 //! never on a concrete policy.
 //!
-//! The trait deliberately mirrors the operational surface §17.1 enumerates:
+//! The trait deliberately mirrors the operational surface enumerates:
 //! task admission ([`spawn`](SchedulerPolicy::spawn)), picking the next
 //! runnable task on a CPU ([`step`](SchedulerPolicy::step)), cooperative
 //! yield ([`yield_current`](SchedulerPolicy::yield_current)), block/wake
@@ -57,7 +57,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// `home_cpu`.
     ///
     /// Implementations must never panic on a full home queue; they
-    /// back-pressure or relocate the task instead (`AGENTS.md` §2.9).
+    /// back-pressure or relocate the task instead.
     ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchCpu`] if `home_cpu` is out of range.
@@ -124,7 +124,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// [`TaskId`] of the task currently dispatching on `cpu`, or `None`.
     ///
     /// This is the publication point the syscall entry path reads to
-    /// recover the caller's identity (`AGENTS.md` §5.4 step 1).
+    /// recover the caller's identity (step 1).
     fn current_task(&self, cpu: CpuId) -> Option<TaskId>;
 
     /// Cooperatively yield the currently dispatching task on its CPU.

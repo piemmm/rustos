@@ -12,7 +12,7 @@
 //! The sink is a zero-sized type exposed through the [`SERIAL_SINK`]
 //! `'static` so a bin can hand the same reference to `BootInfo`'s
 //! `log_sink` / `audit_sink` slots without a mutable static
-//! (`AGENTS.md` §2 — no global mutable state beyond the per-CPU
+//! (no global mutable state beyond the per-CPU
 //! bootstrap area). The underlying shared mutable state is the UART
 //! behind the SBI console, not this wrapper.
 
@@ -47,11 +47,11 @@ impl core::fmt::Write for SbiWriter {
 /// translation: each byte reaches the device exactly as the caller
 /// supplied it. It is the verbatim backing the bin crate's system
 /// console device (`stream_write`, fd 1) forwards through, so a program's
-/// output is byte-for-byte what it wrote (`AGENTS.md` §16.4, §20).
+/// output is byte-for-byte what it wrote.
 ///
 /// The legacy `console_putchar` SBI call reports no status and the
 /// busy-wait transmit accepts every byte, so the write is total and
-/// never short, and the path cannot panic (`AGENTS.md` §2.9).
+/// never short, and the path cannot panic.
 #[must_use]
 pub fn write_console_bytes(bytes: &[u8]) -> usize {
     for &byte in bytes {
@@ -84,7 +84,7 @@ impl Sink for SerialSink {
         let mut w = SbiWriter;
         // Ignore write errors: `SbiWriter` is infallible (the SBI
         // console call returns no status). The logging path must not
-        // panic (`AGENTS.md` §2.9).
+        // panic.
         let _ = write!(
             w,
             "[{}] id={} {}",

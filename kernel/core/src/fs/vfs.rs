@@ -1,5 +1,4 @@
-//! The [`Vfs`]: an in-RAM directory tree that enforces the `AGENTS.md`
-//! §16 layout and the §5.3 permission model on every operation.
+//! The [`Vfs`]: an in-RAM directory tree that enforces the layout and the permission model on every operation.
 //!
 //! Each [`Node`] owns its children directly (a directory is a
 //! `BTreeMap<String, Node>`), so resolution is a borrow walk and removal
@@ -73,11 +72,11 @@ impl Vfs {
         }
     }
 
-    /// Construct a VFS pre-populated with the `AGENTS.md` §16 default
+    /// Construct a VFS pre-populated with the default
     /// layout: exactly the four permitted top-level directories
     /// (`/System`, `/Users`, `/Apps`, `/Storage`), the two writable
     /// exceptions under `/System` (`/System/Logs`, `/System/Settings`),
-    /// and the matching mount policy (§16.2, §16.3).
+    /// and the matching mount policy.
     ///
     /// `owner`/`group` own the system directories. The layout is fixed and
     /// correct by construction.
@@ -108,7 +107,7 @@ impl Vfs {
         let mut mounts = MountTable::new(MountFlags::default());
         // The longest-prefix resolution in `MountTable` lets the writable
         // `/System/Logs` and `/System/Settings` child mounts shadow the
-        // read-only `/System` (`AGENTS.md` §16.2 / §16.3).
+        // read-only `/System`.
         let policy = [
             ("/System", MountFlags::READ_ONLY),
             ("/System/Logs", nosuid_nodev_noexec),
@@ -139,7 +138,7 @@ impl Vfs {
     }
 
     /// Read from a file under a driver-backed mount, delegating the I/O to
-    /// `fs` (`AGENTS.md` §2.4 / §5.4).
+    /// `fs`.
     ///
     /// The covering mount must be driver-backed (its
     /// [`backing`](super::MountPoint::backing) is `Some`); the caller maps
@@ -212,10 +211,10 @@ impl Vfs {
     }
 
     /// Create an empty regular file under a driver-backed mount,
-    /// delegating to `fs` (`AGENTS.md` §2.4 / §5.4).
+    /// delegating to `fs`.
     ///
     /// The covering mount must be driver-backed and writable; resolution
-    /// and the §5.3 checks match [`Vfs::read_via`], plus write permission
+    /// and the checks match [`Vfs::read_via`], plus write permission
     /// on the parent directory's template.
     ///
     /// # Errors
@@ -320,8 +319,8 @@ impl Vfs {
     // Per-inode (`FilesystemSecurity`) variants.
     //
     // These mirror the `*_via` methods above but judge every delegated
-    // node against the driver's *own* stored §5.3 record rather than the
-    // uniform mount-point template (`AGENTS.md` §5.3 / §5.4). The kernel
+    // node against the driver's *own* stored record rather than the
+    // uniform mount-point template. The kernel
     // host calls these for a driver such as `rustfs` that stores full
     // per-inode ownership, mode, ACL, and capability gate; the
     // template-based `*_via` methods remain for drivers (e.g. FAT) that
@@ -508,7 +507,7 @@ impl Vfs {
     /// # Errors
     ///
     /// * [`VfsError::ReservedPath`] if `path` is a reserved legacy POSIX
-    ///   top-level name (`AGENTS.md` §16.1).
+    ///   top-level name.
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::PermissionDenied`] if the caller lacks write
     ///   permission on the parent directory.
@@ -640,8 +639,7 @@ impl Vfs {
         Ok(())
     }
 
-    /// Set (or clear) the capability gate on the inode at `path`
-    /// (`AGENTS.md` §5.3). Only the inode's owner may change it.
+    /// Set (or clear) the capability gate on the inode at `path`. Only the inode's owner may change it.
     ///
     /// # Errors
     ///
@@ -676,7 +674,7 @@ impl Vfs {
         }
         let parent_path = path.parent().ok_or(VfsError::InvalidPath)?;
         // Creation mutates the parent directory, so the parent's covering
-        // mount governs writability (`AGENTS.md` §16.2).
+        // mount governs writability.
         if self.mounts.is_read_only(&parent_path) {
             return Err(VfsError::ReadOnly);
         }

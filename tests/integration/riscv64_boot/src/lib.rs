@@ -3,17 +3,16 @@
 //! The arch port (`kernel/arch/riscv64`) is a pure Arch HAL
 //! implementation: it implements `rustos_arch_api::SchedulerArch`, the
 //! monotonic clock, the hart-park primitive, and the PLIC register
-//! driver, but it names no concrete kernel subsystem (`AGENTS.md`
-//! §17.2 / §17.4). The riscv64 boot pipeline that *does* name
+//! driver, but it names no concrete kernel subsystem. The riscv64 boot pipeline that *does* name
 //! `kernel/{core,mem,sec}` and `kernel/sched/api` lives in the
 //! production `rustos-kernel` crate (`rustos_kernel::riscv64::boot`),
 //! mirroring how x86_64 / aarch64 keep their `BinArch` wrapper and
 //! `BootInfo` assembly there. This crate is the test-side wrapper that
-//! consumes that one pipeline (`AGENTS.md` §2.2): it re-exports the
+//! consumes that one pipeline: it re-exports the
 //! production types and adds the device-bring-up observers + the PLIC
 //! `IrqController` bridge the riscv64 QEMU verticals need.
 //!
-//! It is an integration-test (Tooling) crate, so the §17.4 layering is
+//! It is an integration-test (Tooling) crate, so the layering is
 //! relaxed for it; `cargo xtask deps-check` exempts `tests/`.
 //!
 //! # Module map
@@ -34,7 +33,7 @@
 #![deny(missing_docs)]
 
 // Host tests use `std` (the `plic_irq` mock register file). The crate
-// stays `no_std` for the freestanding build (`AGENTS.md` §1 — no hacks).
+// stays `no_std` for the freestanding build (no hacks).
 #[cfg(test)]
 extern crate std;
 

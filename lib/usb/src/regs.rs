@@ -3,12 +3,12 @@
 //! Byte offsets and bit masks for the capability, operational,
 //! runtime (interrupter), and doorbell register blocks the bring-up
 //! and enumeration paths touch. Only registers the driver actually
-//! reads or writes are defined (`AGENTS.md` §2.3).
+//! reads or writes are defined.
 //!
 //! All offsets are relative to the start of the register window the
 //! hardware tree reported for the controller — capability offsets from
 //! the window base, operational offsets from `CAPLENGTH`, doorbell
-//! offsets from `DBOFF` (`AGENTS.md` §18.1 — the base itself is always
+//! offsets from `DBOFF` (the base itself is always
 //! discovered, never a constant).
 
 /// `CAPLENGTH` (byte 0) and `HCIVERSION` (bytes 2..4) share the first
@@ -40,7 +40,7 @@ pub const DBOFF_MASK: u32 = !0x3;
 pub const RTSOFF_MASK: u32 = !0x1F;
 
 /// Minimum legal `CAPLENGTH`: the capability block is at least the
-/// eight defined dwords (§5.3). A smaller value means the operational
+/// eight defined dwords. A smaller value means the operational
 /// block would overlap the capability block — an absent or broken
 /// controller.
 pub const CAPLENGTH_MIN: u8 = 0x20;
@@ -56,13 +56,13 @@ pub const USBCMD: usize = 0x00;
 /// `USBSTS` — operational base + `0x04` (§5.4.2).
 pub const USBSTS: usize = 0x04;
 
-/// `PAGESIZE` — operational base + `0x08` (§5.4.3). A bitmap: if bit
+/// `PAGESIZE` — operational base + `0x08`. A bitmap: if bit
 /// `n` is set the controller supports a page size of `2^(n+12)`; the
 /// scratchpad buffers software reserves are each one such page and
 /// page-aligned. The lowest set bit is the page size in use.
 pub const PAGESIZE: usize = 0x08;
 
-/// `CRCR` — command ring control, operational base + `0x18` (§5.4.5).
+/// `CRCR` — command ring control, operational base + `0x18`.
 /// 64 bits: low dword first, high dword at `+4`.
 pub const CRCR: usize = 0x18;
 
@@ -75,7 +75,7 @@ pub const DCBAAP: usize = 0x30;
 pub const CONFIG: usize = 0x38;
 
 /// `CRCR` Ring Cycle State: the consumer cycle state the controller
-/// starts the command ring with (§5.4.5).
+/// starts the command ring with.
 pub const CRCR_RCS: u32 = 1 << 0;
 
 /// `USBCMD` Run/Stop: `1` runs the controller, `0` halts it.
@@ -88,12 +88,12 @@ pub const USBCMD_HCRST: u32 = 1 << 1;
 pub const USBSTS_HCH: u32 = 1 << 0;
 
 /// `USBSTS` Host System Error: a write-1-to-clear latched controller
-/// error (§5.4.2). The host-controller reset path may observe this when
+/// error. The host-controller reset path may observe this when
 /// firmware left a stale error before RustOS takes ownership.
 pub const USBSTS_HSE: u32 = 1 << 2;
 
 /// `USBSTS` Port Change Detect: a write-1-to-clear latched port-change
-/// status bit (§5.4.2). Firmware handoff can leave it set before RustOS
+/// status bit. Firmware handoff can leave it set before RustOS
 /// resets the controller.
 pub const USBSTS_PCD: u32 = 1 << 4;
 
@@ -181,7 +181,7 @@ pub const fn hcsparams2_max_scratchpad(raw: u32) -> u32 {
 }
 
 /// The page size (in bytes) the controller's `PAGESIZE` register
-/// reports (§5.4.3): `2^(n+12)` for the lowest set bit `n` of the low
+/// reports: `2^(n+12)` for the lowest set bit `n` of the low
 /// 16 bits. Returns `0` when no bit is set (a malformed register), so
 /// the caller fails closed rather than assuming a size.
 #[must_use]

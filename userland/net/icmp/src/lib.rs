@@ -31,7 +31,7 @@
 //! The responder performs no privileged operation itself; it only
 //! transforms bytes. Capability enforcement for [`Net::transmit`] /
 //! [`Net::receive`] (`CAP_NET_RAW`) happens at the driver dispatch
-//! site (`AGENTS.md` §5.4), upstream of this crate. Frames addressed
+//! site, upstream of this crate. Frames addressed
 //! to neither this host nor the broadcast address are ignored, and a
 //! reply is only emitted for a request that is well-formed, correctly
 //! addressed, and (for ICMP) checksum-valid; everything else is

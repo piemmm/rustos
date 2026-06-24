@@ -1,10 +1,9 @@
 //! Stable [`rustos_log::EventId`] constants emitted by `login`.
 //!
-//! Per `lib/log` convention (`AGENTS.md` §2.5) every subsystem owns a
+//! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. Login occupies `10000..11000` (adjacent to
 //! PID 1's `9000..10000`). Once shipped the numeric values must never be
-//! re-used or re-numbered — external audit-log consumers rely on them
-//! (`AGENTS.md` §19.4).
+//! re-used or re-numbered — external audit-log consumers rely on them.
 
 use rustos_log::EventId;
 
@@ -17,24 +16,21 @@ pub const LOGIN_RANGE_START: u32 = 10_000;
 pub const LOGIN_RANGE_END: u32 = 11_000;
 
 /// A user authenticated and a session was launched on their behalf. The
-/// session inherits the user's capability ceiling (`AGENTS.md` §5.2).
+/// session inherits the user's capability ceiling.
 pub const SESSION_STARTED: EventId = EventId(10_001);
 /// An authentication attempt was rejected. A failed credential check is a
-/// security-relevant decision in its own right (`AGENTS.md` §5.4.4,
-/// §19.4); the cause is never disclosed to the caller, only audited.
+/// security-relevant decision in its own right; the cause is never disclosed to the caller, only audited.
 pub const AUTH_FAILED: EventId = EventId(10_002);
 /// The bounded attempt budget was exhausted without a successful
-/// authentication; login fails closed and launches nothing
-/// (`AGENTS.md` §5.4.5).
+/// authentication; login fails closed and launches nothing.
 pub const LOCKED_OUT: EventId = EventId(10_003);
 /// A launched session returned (the user logged out or the session exited).
 pub const SESSION_ENDED: EventId = EventId(10_004);
 /// A user authenticated but the [`SessionLauncher`](crate::SessionLauncher)
-/// refused to start their session; login fails closed rather than retry
-/// (`AGENTS.md` §5.4.5).
+/// refused to start their session; login fails closed rather than retry.
 pub const SESSION_LAUNCH_FAILED: EventId = EventId(10_005);
 /// The controlling terminal could not be read or written. Login cannot run
-/// without a console, so it aborts (`AGENTS.md` §5.4.5 — fail closed).
+/// without a console, so it aborts (fail closed).
 pub const CONSOLE_ERROR: EventId = EventId(10_006);
 
 #[cfg(test)]

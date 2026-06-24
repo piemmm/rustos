@@ -1,7 +1,7 @@
 //! Parsing the version strings `clang --version` / `ld.lld --version` print.
 //!
-//! The exact version is pinned (`AGENTS.md` §12 — version-pinned external
-//! tools; the §19.3 supply-chain discipline), so the wrapper must extract it
+//! The exact version is pinned (version-pinned external
+//! tools; the supply-chain discipline), so the wrapper must extract it
 //! from the tool's banner and compare it to the required value. The banner
 //! format differs slightly between vendors (`Ubuntu clang version 18.1.3
 //! (1ubuntu1)`, `clang version 18.1.3`, `Ubuntu LLD 18.1.3 (compatible with

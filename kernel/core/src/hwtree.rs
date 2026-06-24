@@ -1,5 +1,5 @@
 //! The kernel-held hardware-tree source the `hw_tree_read` /
-//! `hw_tree_wait` syscalls serve (`AGENTS.md` §16.6 / §18.1 / §18.4,
+//! `hw_tree_wait` syscalls serve (
 //! Design D — `.junie/next-pi-prompt.md`).
 //!
 //! The discovered hardware inventory itself lives in the binding kernel
@@ -9,19 +9,18 @@
 //! database. Keeping the seam here, returning an *already wire-encoded*
 //! snapshot, keeps `kernel/core` ignorant of the inventory's storage and
 //! of the `lib/abi` wire layout — the single encoder lives beside the
-//! store it serialises (`AGENTS.md` §2.2).
+//! store it serialises.
 //!
 //! Both reads fail closed: a build with no source installed answers
 //! [`Errno::NotImplemented`] so an early `hw_tree_read` / `hw_tree_wait`
-//! announces an inert interface rather than fabricating a tree
-//! (`AGENTS.md` §2.9 / §5.4).
+//! announces an inert interface rather than fabricating a tree.
 
 use alloc::vec::Vec;
 
 use rustos_abi::{Errno, HwNode};
 
 /// The kernel-held discovered hardware tree the hardware-tree syscalls
-/// serve (`AGENTS.md` §18.1 / §18.4).
+/// serve.
 ///
 /// The boot path installs an implementation backed by the binding
 /// kernel's authoritative `HwTreeStore`; the `hw_tree_read` handler copies
@@ -32,7 +31,7 @@ use rustos_abi::{Errno, HwNode};
 /// `Sync` because the single installed source is shared by the per-CPU
 /// syscall handlers, exactly like [`crate::users::UsersDbSource`].
 pub trait HwTreeSource: Sync {
-    /// The store's current mutation generation (`AGENTS.md` §18.4).
+    /// The store's current mutation generation.
     ///
     /// Monotonically increasing; a `hw_tree_wait` caller blocks while this
     /// equals the value it last observed and wakes when it differs.
@@ -40,7 +39,7 @@ pub trait HwTreeSource: Sync {
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] to
-    /// mark an inert interface (`AGENTS.md` §2.9).
+    /// mark an inert interface.
     fn generation(&self) -> Result<u64, Errno>;
 
     /// An owned, wire-encoded snapshot of the current tree: a
@@ -50,7 +49,7 @@ pub trait HwTreeSource: Sync {
     ///
     /// The generation in the returned header and the node bytes are read
     /// together so a `hw_tree_read` caller's header generation always
-    /// matches the nodes it received (`AGENTS.md` §18.4).
+    /// matches the nodes it received.
     ///
     /// # Errors
     ///
@@ -60,7 +59,7 @@ pub trait HwTreeSource: Sync {
     /// Publish a discovered child `node` under parent `parent_id` into the
     /// live tree, bumping the generation so every parked `hw_tree_wait`
     /// caller (the device manager) re-reads and re-evaluates it
-    /// (`AGENTS.md` §18.1 / §18.3 — recursive, user-space hardware
+    /// (recursive, user-space hardware
     /// discovery).
     ///
     /// This is the store side of the `hw_emit_node` syscall: the handler in
@@ -69,56 +68,53 @@ pub trait HwTreeSource: Sync {
     /// emitter's *own* matched node (so a driver cannot forge its tree
     /// position), and checked that every
     /// [`rustos_abi::hwtree::HwResource`] the node requests is covered by
-    /// one of the caller's minted grants (`AGENTS.md` §4 — no ambient
+    /// one of the caller's minted grants (no ambient
     /// authority). The store **owns identity**: it assigns the node a
     /// fresh, collision-free [`id`](rustos_abi::HwNode::id) and sets its
     /// parent to `parent_id` ([`HwNode::set_identity`]) before recording
-    /// it, so an emitter-chosen id can never collide with an existing node
-    /// (`AGENTS.md` §5.4) — load-bearing, since the driver-store load path
+    /// it, so an emitter-chosen id can never collide with an existing node — load-bearing, since the driver-store load path
     /// resolves a matched node by its id. The node is always added, never
     /// dropped, and only the generation advances.
     ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
-    /// build with no store wired never accepts a published node
-    /// (`AGENTS.md` §2.9 / §5.4).
+    /// build with no store wired never accepts a published node.
     fn publish(&self, parent_id: u32, node: HwNode) -> Result<(), Errno>;
 
     /// Remove the child `node_id` — and its whole subtree — from the live
     /// tree, bumping the generation so every parked `hw_tree_wait` caller
     /// (the device manager) re-reads and unloads the driver bound to the
-    /// vanished node (`AGENTS.md` §18.4 — hotplug removal).
+    /// vanished node (hotplug removal).
     ///
     /// This is the store side of the `hw_remove_node` syscall and the exact
     /// mirror of [`Self::publish`]: the handler in [`crate::syscalls`] has
     /// already verified the calling driver holds
     /// [`rustos_abi::CapabilityId::HW_EMIT`] and resolved `parent_id` to the
     /// emitter's *own* matched node (so a driver cannot remove a node it does
-    /// not own, `AGENTS.md` §4 — no ambient authority). The store removes
+    /// not own — no ambient authority). The store removes
     /// `node_id` **only** when its parent is exactly `parent_id` — a child the
     /// caller itself published — and removes every transitive descendant with
     /// it, so a stale grandchild can never outlive its parent. The node set
     /// shrinks and only the generation advances; the device manager performs
     /// the actual driver unload reacting to the change (the same policy /
     /// mechanism split as [`Self::publish`], which adds a node and leaves the
-    /// *load* to the manager, `AGENTS.md` §4).
+    /// *load* to the manager).
     ///
     /// # Errors
     ///
     /// * [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
-    ///   build with no store wired never removes a node (`AGENTS.md` §2.9).
+    ///   build with no store wired never removes a node.
     /// * [`Errno::NotFound`] if no live node has id `node_id`, or its parent
     ///   is not `parent_id` (the caller does not own it) — fail closed,
-    ///   never a hint that distinguishes the two (`AGENTS.md` §5.4).
+    ///   never a hint that distinguishes the two.
     fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno>;
 }
 
 /// The hardware-tree source installed before any real store is wired.
 ///
 /// Every read fails closed with [`Errno::NotImplemented`] — a kernel build
-/// with no hardware-tree store wired never fabricates an inventory
-/// (`AGENTS.md` §2.9 / §5.4).
+/// with no hardware-tree store wired never fabricates an inventory.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct NullHwTreeSource;
 

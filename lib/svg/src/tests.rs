@@ -117,7 +117,7 @@ fn missing_fill_defaults_to_black() {
 
 #[test]
 fn degenerate_polygon_is_dropped() {
-    // A two-vertex ring covers no area and is silently skipped (§2.9).
+    // A two-vertex ring covers no area and is silently skipped.
     let svg = br##"<svg viewBox="0 0 4 4"><polygon points="0,0 4,4" fill="#fff"/></svg>"##;
     let image = decode(svg).expect("degenerate");
     assert!(image.layers().is_empty());

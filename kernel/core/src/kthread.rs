@@ -2,7 +2,7 @@
 //!
 //! A `kernel/sched` task is admitted with a body closure
 //! `FnMut(&mut TaskContext) -> TaskAction` that the scheduler invokes
-//! once per dispatch step (`AGENTS.md` §17.1). That contract alone has no
+//! once per dispatch step. That contract alone has no
 //! notion of a task that *suspends mid-execution and later resumes*: the
 //! body runs to a `TaskAction` and returns every time. Real multitasking
 //! — and, ultimately, two EL0 user tasks timesharing a CPU
@@ -10,9 +10,9 @@
 //! be parked at an arbitrary point and resumed exactly there.
 //!
 //! This module layers that *on top of* the closure contract without
-//! changing it (the §17.1 / §2.4 modularity guarantee): a **kthread** is a
+//! changing it (the modularity guarantee): a **kthread** is a
 //! resumable kernel thread driven through the Arch HAL context-switch
-//! slice ([`rustos_arch_api::ContextSwitch`], §17.2). The body the
+//! slice ([`rustos_arch_api::ContextSwitch`]). The body the
 //! scheduler sees is a thin **shim** owned here; the task's real work runs
 //! as a stackful coroutine on its own kernel stack.
 //!
@@ -55,8 +55,7 @@
 //! coroutine round-trip is proven by the per-arch QEMU verticals. The host
 //! tests here cover the host-observable contract — the shim's state
 //! machine, the fail-closed `prepare` rejection, and the stack-reclaim /
-//! use-after-free discipline against the `kernel/mem` slab tag check
-//! (`AGENTS.md` §19.10) — exactly as [`rustos_arch_api::context::conformance`]
+//! use-after-free discipline against the `kernel/mem` slab tag check — exactly as [`rustos_arch_api::context::conformance`]
 //! tests only the host-testable `prepare`.
 
 use alloc::boxed::Box;
@@ -72,7 +71,7 @@ use rustos_sync::SpinLock;
 use crate::dispatch_slot::RescheduleAction;
 
 /// Default per-kthread kernel-stack size, in bytes — a **release-tuned
-/// policy value**, not a single worst-case constant (`AGENTS.md` §24.2).
+/// policy value**, not a single worst-case constant.
 ///
 /// A **user** kthread's body does not merely set up a suspension point: once
 /// it `eret`s into EL0, every syscall the task makes is handled *on this
@@ -83,7 +82,7 @@ use crate::dispatch_slot::RescheduleAction;
 ///
 /// The working set of that path depends sharply on the optimisation level:
 /// an unoptimised **debug** build spills generously at every frame, so its
-/// real depth is far above an optimised build's. §24.2 requires a
+/// real depth is far above an optimised build's. The charter requires a
 /// resource sizing to prefer a release-tuned value over a worst-case debug
 /// value where the two differ, so this bound is split by profile rather than
 /// frozen at the debug worst case:
@@ -96,8 +95,7 @@ use crate::dispatch_slot::RescheduleAction;
 /// * **Release**: 32 KiB. An optimised build's deepest dispatch frame is well
 ///   under half the debug working set, so 32 KiB clears it with margin while
 ///   halving the per-stack reservation — doubling how many stacks a given
-///   arena block holds, which matters for the server profile (`AGENTS.md`
-///   §24.2). The production kernel image is a release build, so 32 KiB is the
+///   arena block holds, which matters for the server profile. The production kernel image is a release build, so 32 KiB is the
 ///   value that actually ships.
 ///
 /// Both values are a whole number of 4 KiB pages, so the guard page below the
@@ -105,13 +103,12 @@ use crate::dispatch_slot::RescheduleAction;
 /// profile.
 ///
 /// This bound is **defence in depth**, not the only line of defence: the
-/// [`BoxStack`] places a poison-filled guard page (`AGENTS.md` §4) immediately
+/// [`BoxStack`] places a poison-filled guard page immediately
 /// *below* the usable region, so an overrun runs off the bottom of the stack
 /// into the guard instead of straight into the neighbouring heap allocation.
 /// A contiguous overrun trips the guard's canary, which `dispatch_step`
 /// checks every time the task hands the CPU back, and the task is then failed
-/// closed rather than allowed to run on a corrupt stack (`AGENTS.md` §2.9,
-/// §2.17). The sizing still matters — the guard absorbs an overrun but a
+/// closed rather than allowed to run on a corrupt stack. The sizing still matters — the guard absorbs an overrun but a
 /// generous stack avoids one in the first place — so each profile's bound
 /// must comfortably exceed that profile's deepest syscall-handler call depth.
 #[cfg(debug_assertions)]
@@ -119,8 +116,7 @@ pub const KTHREAD_STACK_BYTES: usize = 64 * 1024;
 
 /// Release-tuned per-kthread kernel-stack size (see the `debug_assertions`
 /// variant above for the full rationale): 32 KiB, half the debug worst case,
-/// so a release image fits twice as many guarded stacks per arena block
-/// (`AGENTS.md` §24.2).
+/// so a release image fits twice as many guarded stacks per arena block.
 #[cfg(not(debug_assertions))]
 pub const KTHREAD_STACK_BYTES: usize = 32 * 1024;
 
@@ -128,13 +124,13 @@ pub const KTHREAD_STACK_BYTES: usize = 32 * 1024;
 ///
 /// The guard sits immediately below the usable stack. Sized at one page so
 /// it matches the on-hardware form this emulates — a single *unmapped* page
-/// below the stack (`AGENTS.md` §4, the same model `kernel/mem`'s slab guard
+/// below the stack (the same model `kernel/mem`'s slab guard
 /// documents) — and absorbs a 4 KiB overrun before it can reach the
 /// lower-addressed neighbour. The deployment form that turns the overrun into
 /// an immediate hardware fault (unmapping this page in the kernel's own page
 /// tables) is staged in `plans/PI.md`; until the page-table split it backs on
 /// lands, the poison-byte emulation below is the real, non-deferred defence
-/// (`AGENTS.md` §2.17 — a guard now, not "later").
+/// (a guard now, not "later").
 const STACK_GUARD_BYTES: usize = 4096;
 
 /// Byte the [`BoxStack`] guard page is filled with (`0xCC`, x86 `int3`),
@@ -150,7 +146,7 @@ const STACK_GUARD_BYTE: u8 = 0xCC;
 /// A kernel stack grows downward and is written contiguously, so an overrun
 /// must cross these bytes first; verifying this small, O(1) window on every
 /// switch-back catches a contiguous overrun without scanning the whole guard
-/// page on the scheduler hot path (`AGENTS.md` §2.16). The full page still
+/// page on the scheduler hot path. The full page still
 /// provides the 4 KiB of absorption.
 const STACK_GUARD_CANARY_BYTES: usize = 64;
 
@@ -160,7 +156,7 @@ const STACK_GUARD_CANARY_BYTES: usize = 64;
 /// Returned by [`KernelStack::check_guard`]. On real hardware the overrun
 /// faults on the unmapped guard page; the software emulation surfaces the
 /// same condition through this value so `dispatch_step` can fail the task
-/// closed identically either way (`AGENTS.md` §2.9, §2.17).
+/// closed identically either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackGuardViolation;
 
@@ -173,7 +169,7 @@ pub struct StackGuardViolation;
 /// which drops the stack — reclaiming it. Because an exited task is never
 /// switched into again (the shim returns [`TaskAction::Exit`] and the
 /// scheduler never re-invokes the body), nothing executes on the stack
-/// after it is freed, so there is no use-after-free (`AGENTS.md` §19.10).
+/// after it is freed, so there is no use-after-free.
 ///
 /// # Safety
 ///
@@ -191,13 +187,13 @@ pub unsafe trait KernelStack {
     /// Returns [`StackGuardViolation`] if the task has run off the bottom of
     /// its usable stack into the guard region. `dispatch_step` calls this
     /// each time the task switches back to the dispatcher and fails the task
-    /// closed on a violation (`AGENTS.md` §2.9, §2.17), so an overrun is
+    /// closed on a violation, so an overrun is
     /// caught at the next reschedule instead of silently corrupting the
     /// lower-addressed neighbour.
     ///
     /// The default returns `Ok(())`: a stack source without a guard (a
     /// slab-backed or static test stack) has nothing to check. [`BoxStack`]
-    /// overrides it with the poison-canary check (`AGENTS.md` §4).
+    /// overrides it with the poison-canary check.
     fn check_guard(&self) -> Result<(), StackGuardViolation> {
         Ok(())
     }
@@ -210,14 +206,13 @@ pub unsafe trait KernelStack {
 /// usable stack; [`Self::top`] is the exclusive upper bound of the *usable*
 /// region. A kernel stack grows *downward* from `top`, so an overrun runs
 /// off the bottom of the usable region into the guard — which is
-/// poison-filled and verified ([`Self::check_guard`], `AGENTS.md` §4) —
+/// poison-filled and verified ([`Self::check_guard`]) —
 /// before it can reach the lower-addressed heap neighbour. The backing
 /// `Box<[u8]>` has a stable address for the box's lifetime and is freed on
 /// drop, reclaiming the stack.
 pub struct BoxStack(Box<[u8]>);
 
-/// The widest ABI stack alignment any target requires (`AGENTS.md`
-/// §17.2); [`ContextSwitch::prepare`] rejects a misaligned `stack_top`.
+/// The widest ABI stack alignment any target requires; [`ContextSwitch::prepare`] rejects a misaligned `stack_top`.
 const STACK_ALIGN: usize = 16;
 
 /// The canary window must fit inside the guard region, and the guard is a
@@ -235,7 +230,7 @@ impl BoxStack {
     /// The backing slice is heap-allocated directly (`vec!` →
     /// `into_boxed_slice`), never built through a `[0u8; _]` stack temporary:
     /// a ~68 KiB array literal would itself risk the very stack overflow this
-    /// type guards against (`AGENTS.md` §2.16). [`Self::top`] rounds the
+    /// type guards against. [`Self::top`] rounds the
     /// exclusive upper bound down to `STACK_ALIGN`, so the heap allocator's
     /// own (byte) alignment is sufficient.
     #[must_use]
@@ -272,7 +267,7 @@ unsafe impl KernelStack for BoxStack {
         // Verify the canary: the top `STACK_GUARD_CANARY_BYTES` of the guard,
         // immediately below the usable base, which a contiguous downward
         // overrun crosses first. Checking just this O(1) window keeps the
-        // scheduler switch-back path cheap (`AGENTS.md` §2.16) while still
+        // scheduler switch-back path cheap while still
         // catching a stack overflow; the full guard page provides absorption.
         let canary = &self.0[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES..STACK_GUARD_BYTES];
         if canary.iter().all(|&b| b == STACK_GUARD_BYTE) {
@@ -289,8 +284,7 @@ unsafe impl KernelStack for BoxStack {
 // concrete stack source — `BoxStack` (the software-canary form) or an
 // arch-built arena stack whose guard page is unmapped in the task's own
 // root — so an arch spawn seam can hand `kernel/core` a stack of either
-// kind without the concrete type leaking into the admission generics
-// (`AGENTS.md` §2.2 / §17.4). The box owns its payload and is `Send`, so the
+// kind without the concrete type leaking into the admission generics. The box owns its payload and is `Send`, so the
 // admitted task may run on any CPU.
 unsafe impl KernelStack for Box<dyn KernelStack + Send> {
     fn top(&self) -> u64 {
@@ -376,10 +370,10 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
 ///
 /// [`Yielder`] is generic over the arch context-switch type `C`, which a
 /// type-erased [`InitSpawnCtx::spawn_kernel_service`](crate::InitSpawnCtx::spawn_kernel_service)
-/// boundary cannot spell (`AGENTS.md` §17.4). A service body is therefore
+/// boundary cannot spell. A service body is therefore
 /// written against `&mut dyn YieldHandle`; the core wraps the concrete
 /// [`Yielder`] in [`YielderHandle`] so the erasure is a thin delegating
-/// shim with exactly one yield definition (`AGENTS.md` §2.2).
+/// shim with exactly one yield definition.
 pub trait YieldHandle {
     /// Cooperatively yield the CPU, resuming here on the next dispatch
     /// (see [`Yielder::yield_now`]).
@@ -422,18 +416,18 @@ impl<C: ContextSwitch + Copy> YieldHandle for YielderHandle<'_, C> {
 /// [`InitSpawnCtx::spawn_kernel_service`](crate::InitSpawnCtx::spawn_kernel_service):
 /// a `Send` coroutine that drives the object-safe [`YieldHandle`] to
 /// suspend cooperatively (`plans/SPAWN.md` SP1). A type alias so the
-/// object-safe boundary's signature stays readable (`AGENTS.md` §2.11).
+/// object-safe boundary's signature stays readable.
 pub type KernelServiceBody = Box<dyn FnMut(&mut dyn YieldHandle) + Send>;
 
 /// Upper bound on the number of CPUs the per-CPU EL0 resume table is
 /// sized for.
 ///
 /// `kernel/core` cannot name an architecture's `MAX_CPUS` (it is a
-/// concrete-port constant, `AGENTS.md` §17.4); this is the core-owned
+/// concrete-port constant); this is the core-owned
 /// bound for the EL0-task resume seam. It is comfortably above every
 /// Tier-1 port's own `MAX_CPUS` (x86_64 = 16, aarch64 = 8); a `cpu`
 /// index at or beyond it makes [`reschedule_current`] fail closed rather
-/// than index out of bounds (`AGENTS.md` §2.9, §5.4.5).
+/// than index out of bounds.
 pub const KTHREAD_MAX_CPUS: usize = 64;
 
 /// A published handle to the EL0 user kthread currently switched in on a
@@ -462,7 +456,7 @@ struct UserResumeHandle {
 /// [`reschedule_current`]. Each CPU touches only its own slot, so the
 /// `SpinLock` never contends across CPUs — it is the minimum interior
 /// mutability + memory-ordering primitive for the publish/observe, not a
-/// contention point (`AGENTS.md` §2.3).
+/// contention point.
 static USER_RESUME: [SpinLock<Option<UserResumeHandle>>; KTHREAD_MAX_CPUS] =
     [const { SpinLock::new(None) }; KTHREAD_MAX_CPUS];
 
@@ -477,7 +471,7 @@ static USER_RESUME: [SpinLock<Option<UserResumeHandle>>; KTHREAD_MAX_CPUS] =
 /// trap (via [`with_current_live_space`]), and a task runs on at most one
 /// CPU at a time — so the pointee is never accessed concurrently or
 /// cross-CPU, and the `&mut` [`with_current_live_space`] hands out is
-/// genuinely exclusive (`AGENTS.md` §4).
+/// genuinely exclusive.
 #[derive(Copy, Clone)]
 struct LiveSpacePtr(*mut (dyn LiveUserSpace + Send));
 
@@ -495,14 +489,14 @@ unsafe impl Send for LiveSpacePtr {}
 /// task switches back — the exact lifecycle as [`USER_RESUME`], so a slot is
 /// `Some` exactly while that CPU is executing the task (in EL0 or one of its
 /// syscall traps). Each CPU touches only its own slot, so the `SpinLock`
-/// never contends across CPUs (`AGENTS.md` §2.3); it is the minimum interior
+/// never contends across CPUs; it is the minimum interior
 /// mutability + memory-ordering primitive for the publish/observe.
 static USER_LIVE_SPACE: [SpinLock<Option<LiveSpacePtr>>; KTHREAD_MAX_CPUS] =
     [const { SpinLock::new(None) }; KTHREAD_MAX_CPUS];
 
 /// Map the dispatch-callback ABI's [`RescheduleAction`] onto the
 /// scheduler's own `TaskAction` at the one boundary that needs it
-/// (`AGENTS.md` §2.2 — the two vocabularies meet here, nowhere else).
+/// (the two vocabularies meet here, nowhere else).
 const fn to_task_action(action: RescheduleAction) -> TaskAction {
     match action {
         RescheduleAction::Yield => TaskAction::Yield,
@@ -516,8 +510,7 @@ const fn to_task_action(action: RescheduleAction) -> TaskAction {
 ///
 /// The `C, S`-monomorphised function pointer a [`UserResumeHandle`] carries:
 /// it reconstructs the task's [`Yielder`] from the control block and reuses
-/// [`Yielder::suspend`] so the switch-back invoke has exactly one definition
-/// (`AGENTS.md` §2.2).
+/// [`Yielder::suspend`] so the switch-back invoke has exactly one definition.
 ///
 /// # Safety
 ///
@@ -580,8 +573,7 @@ where
 /// `false` if no resume handle is published for `cpu`. A `false` is the
 /// fail-closed signal that the caller was **not** a resumable user task (or
 /// `cpu` is out of range): the callback then treats the syscall as an
-/// ordinary return rather than perform an unsound switch (`AGENTS.md` §2.9,
-/// §5.4.5).
+/// ordinary return rather than perform an unsound switch.
 #[must_use = "a false return means no user task was suspended; the caller must fall back to an ordinary syscall return"]
 pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
     let Ok(idx) = usize::try_from(cpu) else {
@@ -593,7 +585,7 @@ pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
     // Lift the handle out from under the lock and release it *before*
     // switching: the switch suspends this task, and holding the slot lock
     // across it would deadlock the dispatcher-side clear that runs when the
-    // task resumes (`AGENTS.md` §2.1 — no lock held across a hand-off).
+    // task resumes (no lock held across a hand-off).
     let handle = *slot.lock();
     let Some(handle) = handle else {
         return false;
@@ -694,7 +686,7 @@ where
     // Take the work out (a transient borrow of the `Option` field, dropped
     // before the work runs). `None` only if the task was somehow entered
     // twice — impossible on the shim's path — so a missing body simply
-    // falls through to the terminal switch-back (fail closed, §2.9).
+    // falls through to the terminal switch-back (fail closed).
     // SAFETY: `ctl` is the live control block per this function's contract.
     let work = unsafe { (*ctl).work.take() };
     if let Some(mut work) = work {
@@ -723,7 +715,7 @@ where
         // Switch back to the dispatcher. The scheduler observes `Exit` and
         // never dispatches this terminal task again, so control never
         // returns here; the loop is a fail-closed guard against an
-        // erroneous resume (`AGENTS.md` §2.9), not an expected path.
+        // erroneous resume, not an expected path.
         // SAFETY: `task_ctx`/`dispatch_ctx` are live, disjoint fields of
         // `*ctl`; `dispatch_ctx` holds the dispatcher's runnable context.
         unsafe {
@@ -743,7 +735,7 @@ where
 /// ([`Yielder::yield_now`] / [`Yielder::park`]); returning from `work`
 /// exits the task. The call returns the new [`TaskId`].
 ///
-/// The scheduler's closure-body contract (`AGENTS.md` §17.1) is preserved:
+/// The scheduler's closure-body contract is preserved:
 /// the body it receives is a thin shim owned here that drives `work`
 /// through the [`ContextSwitch`] HAL.
 ///
@@ -773,7 +765,7 @@ where
 ///
 /// Identical to [`spawn_kthread`] but lets the caller own the stack source
 /// — a guard-paged stack on a real port, a slab-backed stack the
-/// use-after-free tag check covers (`AGENTS.md` §19.10), or a static stack
+/// use-after-free tag check covers, or a static stack
 /// in a freestanding test. [`spawn_kthread`] is the common case
 /// ([`BoxStack`]).
 ///
@@ -806,7 +798,7 @@ where
 /// (`plans/SPAWN.md` SP2). The hook reactivates the task's user address
 /// space — its arch page-table root — so the task `eret`s back into EL0
 /// under the correct translation regime and stays isolated from its
-/// siblings (`AGENTS.md` §4). Its presence also enrols the task in the
+/// siblings. Its presence also enrols the task in the
 /// per-CPU resume table ([`reschedule_current`]), so its syscall trap path
 /// can suspend it back to the scheduler.
 ///
@@ -930,13 +922,13 @@ where
 /// Shared admission path for [`spawn_kthread_with_stack`] and
 /// [`spawn_user_kthread_with_stack`]: build the boxed [`ThreadControl`]
 /// (kernel or user, per `pre_resume`) and hand the scheduler the
-/// owning shim closure (`AGENTS.md` §2.2 — one admission path).
+/// owning shim closure (one admission path).
 ///
 /// Each parameter is a distinct piece of the task's construction (the
 /// scheduler, placement, context-switch handle, stack, body, the optional
 /// user pre-resume hook, and the optional retained live space); bundling
 /// them behind a one-use struct purely to satisfy the arg-count lint would
-/// be the `AGENTS.md` §2.3 wrapper the charter forbids.
+/// be the wrapper the charter forbids.
 #[allow(clippy::too_many_arguments)]
 fn spawn_control<C, A, P, S, W>(
     scheduler: &P,
@@ -1011,7 +1003,7 @@ where
             if prepared.is_err() {
                 // A stack that cannot seed a frame fails the task closed:
                 // mark it terminal and exit rather than switch into an
-                // unrunnable context (`AGENTS.md` §2.9 / §5.4).
+                // unrunnable context.
                 unsafe {
                     (*ctl).state = RunState::Finished;
                 }
@@ -1072,7 +1064,7 @@ where
     // stack overrun — on real hardware the unmapped guard page would already
     // have faulted; the software emulation catches it here. Fail the task
     // closed: mark it terminal and report `Exit` so the scheduler never
-    // switches into its corrupted context again (`AGENTS.md` §2.9, §2.17).
+    // switches into its corrupted context again.
     // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
     if unsafe { (*ctl).stack.check_guard() }.is_err() {
         unsafe {
@@ -1090,7 +1082,7 @@ where
 ///
 /// Out-of-range or unconfigured `cpu` is a silent no-op: the task simply
 /// cannot be rescheduled from its trap and falls closed there, which is the
-/// same outcome [`reschedule_current`] gives (`AGENTS.md` §2.9).
+/// same outcome [`reschedule_current`] gives.
 fn publish_resume<C, S>(cpu: CpuId, ctl: *mut ThreadControl<C, S>)
 where
     C: ContextSwitch + Copy,
@@ -1122,7 +1114,7 @@ fn clear_resume(cpu: CpuId) {
 /// nothing, so its `mem_map` / `mmio_map` fall closed at the producer.
 ///
 /// Out-of-range or unconfigured `cpu` is a silent no-op, exactly as
-/// [`publish_resume`] (`AGENTS.md` §2.9).
+/// [`publish_resume`].
 fn publish_live_space<C, S>(cpu: CpuId, ctl: *mut ThreadControl<C, S>)
 where
     C: ContextSwitch + Copy,
@@ -1158,8 +1150,7 @@ fn clear_live_space(cpu: CpuId) {
 }
 
 /// Run `f` against the live, mutable user address space of the task
-/// currently switched in on `cpu`, returning `None` (fail closed,
-/// `AGENTS.md` §2.9 / §5.4) when that CPU has no published live space.
+/// currently switched in on `cpu`, returning `None` (fail closed) when that CPU has no published live space.
 ///
 /// This is the seam the `mem_map` / `mmio_map` syscall producers reach to
 /// mutate the **caller's own** address space: the syscall handler runs on
@@ -1494,10 +1485,10 @@ mod tests {
         assert_ne!(scheduler.state_of(id), TaskState::Exited);
     }
 
-    // --- Stack reclaim + use-after-free (AGENTS.md §19.10) -------------
+    // --- Stack reclaim + use-after-free -------------
 
     /// A kernel stack carved from a [`Slab`] slot so the slab's software
-    /// use-after-free tag check (`AGENTS.md` §19.10) covers it: freeing the
+    /// use-after-free tag check covers it: freeing the
     /// stack rotates the slot tag, so the stale [`SlabHandle`] the freed
     /// stack held is rejected as a [`SlabError::TagMismatch`].
     struct SlabStack {
@@ -1566,8 +1557,7 @@ mod tests {
         assert_eq!(slab.borrow().live(), 0);
 
         // Re-allocating the slot rotates its tag, so the stale handle the
-        // freed stack held is now a use-after-free the slab rejects
-        // (`AGENTS.md` §19.10) — there is no silent reuse of a dangling
+        // freed stack held is now a use-after-free the slab rejects — there is no silent reuse of a dangling
         // kernel stack.
         let _fresh = slab.borrow_mut().alloc().expect("slot reused");
         assert_eq!(
@@ -1591,7 +1581,7 @@ mod tests {
     #[test]
     fn reschedule_current_without_a_published_handle_is_false() {
         // No user task is running on CPU 63, so the trap path is told to
-        // fall back to an ordinary syscall return (fail closed, §2.9).
+        // fall back to an ordinary syscall return (fail closed).
         assert!(!reschedule_current(63, RescheduleAction::Yield));
         assert!(!reschedule_current(63, RescheduleAction::Exit));
     }
@@ -1673,7 +1663,7 @@ mod tests {
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
     }
 
-    // --- Stack guard page (AGENTS.md §4 / §2.17) -----------------------
+    // --- Stack guard page -----------------------
 
     /// A guardless [`KernelStack`] host double, to prove the default
     /// [`KernelStack::check_guard`] is vacuously `Ok`. The host `switch` is a

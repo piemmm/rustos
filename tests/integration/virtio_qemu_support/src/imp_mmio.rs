@@ -269,7 +269,7 @@ extern "C" fn trap_dispatch() {
 /// restores `SIE`. Clearing `SIE` makes a completion that lands between
 /// the check and the `wfi` *pending* rather than taken, so `wfi` observes
 /// it and wakes — no edge is lost and no bounding timer is needed
-/// (`AGENTS.md` §2 — no unbounded sleep loop, no hack).
+/// (no unbounded sleep loop, no hack).
 struct WfiWaiter {
     plic: &'static PlicIrqController<VolatilePlicMmio>,
     source: u32,

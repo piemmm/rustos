@@ -2,7 +2,7 @@
 //! (Design D P-3, `.junie/next-pi-prompt.md`).
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target, identical to
-//! the spawn-the-session vertical (`AGENTS.md` §2.2):
+//! the spawn-the-session vertical:
 //!
 //! 1. Hand the aarch64 `virt` linker script to `rustc` — the single
 //!    per-board linker script the architecture port owns. (`rustos-kernel`'s
@@ -15,11 +15,10 @@
 //!    (`x0 = 0`); the boot pipeline is handed a pointer to this embedded blob
 //!    so it discovers the console, GIC, `/memory` window, timer rate, and
 //!    PSCI conduit exactly as on real firmware. The dump helper lives in the
-//!    shared harness so no aarch64 build script re-rolls it (`AGENTS.md`
-//!    §2.2).
+//!    shared harness so no aarch64 build script re-rolls it.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;

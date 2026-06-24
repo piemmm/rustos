@@ -8,21 +8,21 @@
 //!
 //! 1. hands the production x86_64 kernel linker script to `rustc` (the test
 //!    boots the real `rustos-kernel` pipeline, so it links exactly like the
-//!    other freestanding x86_64 integration binaries — `AGENTS.md` §2.2);
+//!    other freestanding x86_64 integration binaries);
 //! 2. builds the Rust startup/runtime shim (`rustos-test-cc5-program`) as a
 //!    position-independent `staticlib` for the freestanding x86_64 target —
 //!    this bundles crt0's `_start` and the `ros_sys_*` syscall stubs into one
-//!    `.a` (`AGENTS.md` §16.4 — the curated *System runtime / C ABI* class);
+//!    `.a` (the curated *System runtime / C ABI* class);
 //! 3. compiles `csrc/main.c` to a PIE object with the audited, version-pinned,
-//!    checksummed `clang` wrapper (`rustos_cc`, `AGENTS.md` §12) — RustOS stays
-//!    Rust-only (§1); this only *hosts* a C program;
+//!    checksummed `clang` wrapper (`rustos_cc`) — RustOS stays
+//!    Rust-only; this only *hosts* a C program;
 //! 4. links the object + the shim archive into a PIE ELF with the audited
 //!    `ld.lld` wrapper, rooting crt0's `_start` via the shared CC3 link script;
 //! 5. converts the linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag so [`rustos_abi::rxe::LoadImage::parse`]
-//!    accepts it (§9 / §19.2);
+//!    accepts it;
 //! 6. emits the bytes and `USER_BIAS` as Rust source the test `include!`s.
 //!
 //! On any non-x86_64 target (host `cargo build --workspace`, clippy) it emits
@@ -62,7 +62,7 @@ fn main() {
     let program_dir = format!("{manifest_dir}/../cc5_program");
     let c_source = format!("{program_dir}/csrc/main.c");
     // The PIE link script is the architecture-neutral one the CC3 fixture
-    // already owns; reusing it keeps a single definition (`AGENTS.md` §2.2).
+    // already owns; reusing it keeps a single definition.
     let link_script = format!("{manifest_dir}/../cc3_program/program.ld");
     let include_dir = format!("{manifest_dir}/../../../include");
     println!("cargo:rerun-if-changed={c_source}");
@@ -75,7 +75,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == X86_64_TARGET {
         // Hand the production x86_64 kernel linker script to the test kernel
-        // itself (the single per-arch script the architecture port owns, §2.2);
+        // itself (the single per-arch script the architecture port owns);
         // mirrors `kernel/rustos-kernel/build.rs` and the sibling x86_64
         // integration binaries.
         let kernel_linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
@@ -107,8 +107,7 @@ fn build_c_program(
 ) -> Vec<u8> {
     let archive = build_runtime_shim(manifest_dir, out_dir);
 
-    // Discover and validate the C toolchain (version-pinned + checksummed,
-    // `AGENTS.md` §12); record the audited binaries for the build transcript.
+    // Discover and validate the C toolchain (version-pinned + checksummed); record the audited binaries for the build transcript.
     let toolchain =
         Toolchain::discover().unwrap_or_else(|e| panic!("C toolchain unavailable: {e}"));
     for line in toolchain.audit_lines() {
@@ -152,7 +151,7 @@ fn build_runtime_shim(manifest_dir: &str, out_dir: &str) -> PathBuf {
     // The shim links no architecture crate; built PIC alongside `core` /
     // `compiler_builtins` (`-Z build-std`) with the same relocation model the
     // C object uses, so the final image carries only `R_*_RELATIVE`
-    // relocations and `elf_to_rxe` accepts it (`AGENTS.md` §19.2).
+    // relocations and `elf_to_rxe` accepts it.
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(manifest_dir)

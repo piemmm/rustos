@@ -1,13 +1,13 @@
 //! Deterministic fuzz harness for the `lib/fdt` device-tree reader
-//! (`AGENTS.md` §19.5 / §19.6 — a parser of boot-supplied, untrusted input).
+//! (a parser of boot-supplied, untrusted input).
 //!
 //! A flattened device tree is the hardware description firmware or a
 //! bootloader hands the kernel ([`rustos_fdt::Fdt::new`]); the aarch64 and
-//! riscv64 ports build their §18.2 platform discovery on it. Those bytes are
+//! riscv64 ports build their platform discovery on it. Those bytes are
 //! outside RustOS's trust boundary: a malformed header, a structure-block
 //! offset that escapes the blob, an unterminated node name, or a property
 //! length that runs past the value must all be **rejected**, never trusted
-//! (`AGENTS.md` §5.4 — fail closed). Per §19.6 ("every parser of untrusted
+//! (fail closed). Per ("every parser of untrusted
 //! input ... has a fuzz target") that decode path is driven here against
 //! arbitrary device trees, with a single invariant:
 //!
@@ -16,11 +16,11 @@
 //!   `timebase_frequency`, `each_cpu`, `property`, `property_u64`, the node
 //!   and property iterators) never panics and never reads out of bounds — the
 //!   reader either returns a well-formed view or an [`rustos_fdt::FdtError`]
-//!   (fail closed, `AGENTS.md` §2.9). The run aborting *is* the failure.
+//!   (fail closed). The run aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded
+//! RustOS pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random byte strings, flips bytes inside real device trees
-//! built by the shared `fixture` builder (`AGENTS.md` §2.2 — one DTB builder,
+//! built by the shared `fixture` builder (one DTB builder,
 //! not a second one rolled here), and splices a valid 40-byte header onto a
 //! hostile structure block. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
@@ -48,7 +48,7 @@ const PROBE_PATHS: &[(&[&[u8]], &[u8])] = &[
 
 /// Build the corpus of real, well-formed device trees the harness mutates.
 /// They all come from the shared `fixture` builder so this harness adds no
-/// second DTB layout (`AGENTS.md` §2.2).
+/// second DTB layout.
 fn templates() -> Vec<Vec<u8>> {
     vec![
         virt_like(0x8000_0000, 0x4000_0000, 10_000_000),

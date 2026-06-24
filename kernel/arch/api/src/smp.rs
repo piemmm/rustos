@@ -1,13 +1,13 @@
-//! Secondary-CPU bring-up surface of the Arch HAL (`AGENTS.md` §17.2
+//! Secondary-CPU bring-up surface of the Arch HAL (
 //! "SMP secondary-core bring-up", `plans/WIRING.md` §2 / Stage W14).
 //!
-//! `AGENTS.md` §4 mandates SMP from day one. Bringing a machine's other
+//! the charter mandates SMP from day one. Bringing a machine's other
 //! logical CPUs online is the one architecture primitive that was still
 //! ad-hoc inside each port after Stage W13: every port owned a `smp`
 //! module — x86_64 INIT-SIPI-SIPI, aarch64 PSCI `CPU_ON`, riscv64 SBI
 //! HSM `hart_start`, wasm32 a Web Worker spawn — but the rest of the
 //! kernel could not reach those through one neutral surface. This module
-//! closes the §17.2 burn-down: secondary bring-up becomes the
+//! closes the burn-down: secondary bring-up becomes the
 //! object-safe [`SecondaryBringup`] HAL trait, implemented once per port
 //! on the port's [`crate::SchedulerArch`] handle (the owner of the dense
 //! [`crate::CpuId`] ↔ native-id topology map).
@@ -17,7 +17,7 @@
 //! The *directed inter-processor interrupt* half of SMP already lives on
 //! [`crate::SchedulerArch::send_ipi`]; this slice is purely about
 //! **starting** a parked CPU, so it does not duplicate the IPI surface
-//! (`AGENTS.md` §2.4 — no interface creep).
+//! (no interface creep).
 //!
 //! The set-once *secondary entry* a freshly-started CPU runs is
 //! deliberately **not** part of this trait. On the bare-metal ports it is
@@ -26,15 +26,15 @@
 //! entry is the fixed `rustos_arch_wasm32_main` export, not a runtime
 //! pointer one instance can hand another. Forcing a settable-entry method
 //! onto the HAL would make wasm32 fake one it could never honour
-//! (`AGENTS.md` §2.1 — no fakes), so entry installation stays the
+//! (no fakes), so entry installation stays the
 //! genuinely port-shaped concern it is, performed once before
 //! [`SecondaryBringup::start_secondary`] is first called.
 //!
-//! # Per-arch shape (the §17.1/§17.2 modularity carve-out)
+//! # Per-arch shape (the modularity carve-out)
 //!
 //! Each port implements the *same* trait its own way; these parallel
 //! implementations are the deliberate shape of the HAL, never collapsed
-//! behind `cfg` (`AGENTS.md` §2.2 carve-out):
+//! behind `cfg` (carve-out):
 //!
 //! * **x86_64** owns a low-memory trampoline frame, a per-AP stack pool,
 //!   and the boot PML4; `start_secondary` installs the trampoline, writes
@@ -57,7 +57,7 @@
 //! INIT-SIPI-SIPI / PSCI / SBI / Web Worker machinery only exists on the
 //! freestanding/wasm target. The host [`conformance`] vertical therefore
 //! proves the contract that *is* observable on the host — the call is
-//! object-safe and **fails closed** (`AGENTS.md` §5.4.5) rather than
+//! object-safe and **fails closed** rather than
 //! panicking for a CPU that cannot be started (out of range / the boot
 //! CPU / unmapped) — while the real cross-core round-trip is exercised
 //! end-to-end by the multi-core `ipi_smp_qemu_*` /
@@ -71,14 +71,14 @@ use crate::CpuId;
 /// The neutral failure surface every port maps its native error onto, so
 /// the architecture-neutral kernel handles one set of outcomes. A port's
 /// richer detail (the raw PSCI / SBI / host status) is preserved in
-/// [`SmpError::StartRejected`] for the audit log (`AGENTS.md` §5.4.4).
+/// [`SmpError::StartRejected`] for the audit log.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SmpError {
     /// `cpu` did not name a startable secondary CPU: it was out of
     /// range, named the boot CPU (which is already running), or was
     /// absent from the port's topology map. The request is refused
-    /// before any platform action is taken (`AGENTS.md` §2.9 — fail
+    /// before any platform action is taken (fail
     /// closed, no out-of-bounds stack selection).
     InvalidCpu,
     /// The port's secondary entry has not been installed yet, so a
@@ -93,7 +93,7 @@ pub enum SmpError {
 }
 
 impl SmpError {
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -104,7 +104,7 @@ impl SmpError {
     }
 }
 
-/// Start a parked secondary logical CPU (`AGENTS.md` §17.2 / §4).
+/// Start a parked secondary logical CPU.
 ///
 /// The kernel calls [`Self::start_secondary`] once per detected secondary
 /// CPU during bring-up. The trait is implemented on the port's
@@ -118,7 +118,7 @@ impl SmpError {
 ///
 /// * A `cpu` the port cannot start — out of range, the boot CPU, or
 ///   unmapped — must return [`SmpError::InvalidCpu`] **before** touching
-///   any platform state (`AGENTS.md` §5.4.5 — fail closed).
+///   any platform state (fail closed).
 /// * If no secondary entry has been installed, the call must return
 ///   [`SmpError::NotReady`] rather than starting a CPU that would park.
 /// * On success the call must have issued the platform start request and
@@ -127,7 +127,7 @@ impl SmpError {
 ///   the AP's long-mode `ready` flag, because the trampoline frame is
 ///   reused; the other ports have nothing to wait on and return as soon
 ///   as the firmware/host has accepted the request).
-/// * Implementations must never panic for any `cpu` (`AGENTS.md` §2.9).
+/// * Implementations must never panic for any `cpu`.
 pub trait SecondaryBringup {
     /// Start the secondary logical CPU `cpu`.
     ///
@@ -148,7 +148,7 @@ pub trait SecondaryBringup {
     unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError>;
 }
 
-/// The §17.2 secondary-bring-up conformance vertical.
+/// The secondary-bring-up conformance vertical.
 ///
 /// Like [`crate::xtlb::conformance`] it names only the trait and runs on
 /// the host: there is no privileged INIT-SIPI-SIPI / PSCI / SBI / Web

@@ -6,23 +6,21 @@
 //! 1. Hand the x86_64 kernel linker script (which carries the multiboot
 //!    header) to `rustc` on the freestanding `x86_64-unknown-none`
 //!    target — the single per-arch linker script the architecture port
-//!    owns, shared by every x86_64 freestanding QEMU test
-//!    (`AGENTS.md` §2.2).
+//!    owns, shared by every x86_64 freestanding QEMU test.
 //! 2. Sign a synthetic vesa-driver `.rxe` manifest requesting exactly
 //!    [`CapabilityId::DRV_LOAD`] with a deterministic test seed, and emit
 //!    a Rust source file the bin pulls in via `include!`.
 //!
 //! The manifest requests only `CAP_DRV_LOAD`:
 //! `rustos_drv_display_vesa::register` gates on it, and the host installs
-//! the manifest's requested set intersected with the caller's grants
-//! (`AGENTS.md` §5.2). The `CAP_MMIO_MAP` the surface mapping
+//! the manifest's requested set intersected with the caller's grants. The `CAP_MMIO_MAP` the surface mapping
 //! additionally requires is granted on the separate `DriverHost` the bin
 //! builds for `VesaFramebuffer::open`, never through the manifest,
 //! mirroring how the framebuffer and bus-driver verticals separate the
 //! load gate from the map gate.
 //!
 //! Re-running `build.rs` produces byte-identical output for the same
-//! seed; the test is therefore deterministic (`AGENTS.md` §7).
+//! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};

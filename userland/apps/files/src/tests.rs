@@ -2,7 +2,7 @@
 //!
 //! Every test drives the [`Browser`] against an in-memory [`MockFs`] tree, so
 //! the navigation and rendering logic is exercised without a kernel or a real
-//! VFS (`AGENTS.md` §7).
+//! VFS.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
@@ -42,9 +42,9 @@ struct MockFs {
 }
 
 impl MockFs {
-    /// The §16-shaped fixture: the four top-level directories, a populated
+    /// The-shaped fixture: the four top-level directories, a populated
     /// `/System`, an empty `/System/Fonts`, and a `/System/Security` that
-    /// exists but is unreadable (capability-gated, §5.3).
+    /// exists but is unreadable (capability-gated).
     fn fixture() -> Self {
         let mut dirs = BTreeMap::new();
         dirs.insert(
@@ -253,7 +253,7 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
     let theme = Theme::dark();
     // Too short for even the path bar: paints what it can and returns a
-    // surface rather than panicking (§2.9).
+    // surface rather than panicking.
     let surface = crate::render(&browser, &theme, Rect::new(0, 0, 4, 3)).expect("surface");
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 3);

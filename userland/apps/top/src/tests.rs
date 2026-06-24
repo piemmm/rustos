@@ -1,6 +1,6 @@
 //! Behaviour tests for the `top` viewer: the model's selection/scroll/scope
 //! logic and the renderer/loop driven over in-memory `sysinfo` and tty
-//! channels (`AGENTS.md` §7).
+//! channels.
 
 use alloc::vec;
 use alloc::vec::Vec;

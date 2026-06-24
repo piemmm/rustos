@@ -4,24 +4,24 @@
 //! [`map_anonymous`] grows the caller's own address space with fresh,
 //! zeroed `RW` pages; [`unmap_anonymous`] releases them, zeroing the frames
 //! it reclaims. Both are the architecture-neutral mechanism only: the
-//! capability posture (`mem_map` is unprivileged, `AGENTS.md` §16.6), the
+//! capability posture (`mem_map` is unprivileged), the
 //! placement of a non-`FIXED` region, and the per-task bookkeeping belong
-//! to the higher-level producer that calls them, preserving the §17.4
+//! to the higher-level producer that calls them, preserving the
 //! layering (this module knows only [`AddressSpace`], a [`PhysMap`], and the
 //! injected frame source/sink).
 //!
 //! # Binding invariants (the SP5 design note, `docs/src/architecture/memory.md` §7c)
 //!
-//! * **W^X, `RW` only (`AGENTS.md` §19.2).** A region is mapped
+//! * **W^X, `RW` only.** A region is mapped
 //!   [`READ`](MapFlags::READ) | [`WRITE`](MapFlags::WRITE) |
 //!   [`USER`](MapFlags::USER) and **never** executable; [`ANON_FLAGS`] is
 //!   the single flag set, so an `RWX` mapping is unrepresentable here.
-//! * **Zero on map and on free (`AGENTS.md` §4).** Each frame is zeroed
+//! * **Zero on map and on free.** Each frame is zeroed
 //!   through the kernel direct map *before* the mapping is visible, and the
 //!   frames [`unmap_anonymous`] reclaims are zeroed before they are returned
 //!   to the allocator — no stale kernel or other-process bytes are ever
 //!   exposed, and freed user secrets do not survive.
-//! * **Deterministic OOM, fail-closed reclaim (`AGENTS.md` §4 / §2.9).** A
+//! * **Deterministic OOM, fail-closed reclaim.** A
 //!   frame exhaustion part-way through a map unwinds every page already
 //!   mapped (unmapping and freeing its frame) before returning
 //!   [`AnonError::OutOfMemory`], so a failed map leaves the address space
@@ -36,8 +36,8 @@ use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAd
 
 /// The single permission set anonymous user memory is mapped with:
 /// user-accessible, readable, and writable — **never** executable
-/// (`AGENTS.md` §19.2, W^X). Writing it once here makes an `RWX` anonymous
-/// mapping unrepresentable (`AGENTS.md` §2.2).
+/// (W^X). Writing it once here makes an `RWX` anonymous
+/// mapping unrepresentable.
 pub const ANON_FLAGS: MapFlags = MapFlags::READ.union(MapFlags::WRITE).union(MapFlags::USER);
 
 /// Why an anonymous map/unmap failed.
@@ -51,10 +51,9 @@ pub enum AnonError {
     /// A page address computation overflowed the address space.
     Overflow,
     /// No backing frame (or page-table frame) was available
-    /// (`AGENTS.md` §4 — deterministic OOM).
+    /// (deterministic OOM).
     OutOfMemory,
-    /// A page in the range to unmap had no live mapping (fail closed,
-    /// `AGENTS.md` §5.4 — the range is not one the caller mapped).
+    /// A page in the range to unmap had no live mapping (fail closed — the range is not one the caller mapped).
     NotMapped,
     /// A frame is not reachable through the kernel's direct physical map,
     /// so it cannot be zeroed.
@@ -94,7 +93,7 @@ fn page_at(base_va: u64, page_index: u64) -> Result<Page, AnonError> {
 /// the page the frame is (or was) mapped at is irrelevant; the frame is
 /// scrubbed at its physical address. Used both before a freshly allocated
 /// frame becomes user-visible and as the zero-on-free scrub
-/// (`AGENTS.md` §4 — secret hygiene), mirroring [`crate::spawn`]'s
+/// (secret hygiene), mirroring [`crate::spawn`]'s
 /// `fill_frame`.
 fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), AnonError> {
     let ptr = physmap
@@ -118,7 +117,7 @@ fn zero_frame(physmap: &dyn PhysMap, frame: Frame) -> Result<(), AnonError> {
 ///
 /// Used to unwind a partially built region when a later page fails to map,
 /// so a failed [`map_anonymous`] leaves the address space exactly as it found
-/// it (`AGENTS.md` §2.9 — fail-closed reclaim). Each page in `0..mapped` was
+/// it (fail-closed reclaim). Each page in `0..mapped` was
 /// just mapped by this call, so an unmap of it cannot fail; a defensive
 /// `Err` is swallowed here because there is no better recovery than freeing
 /// every frame we still hold.
@@ -147,14 +146,13 @@ fn reclaim<P, F>(
 /// caller's own live `space` (`plans/SPAWN.md` `SP5b`).
 ///
 /// Each page gets a frame from `alloc_frame`, which is zeroed through
-/// `physmap` *before* it is mapped, so no stale bytes are ever user-visible
-/// (`AGENTS.md` §4). Pages are mapped [`ANON_FLAGS`] — `RW|USER`, never
-/// executable (`AGENTS.md` §19.2, W^X).
+/// `physmap` *before* it is mapped, so no stale bytes are ever user-visible. Pages are mapped [`ANON_FLAGS`] — `RW|USER`, never
+/// executable (W^X).
 ///
 /// The map is all-or-nothing: if any page cannot be backed or mapped, every
 /// page already mapped by this call is unmapped, its frame zeroed and
 /// returned to `free_frame`, and the original error is returned, leaving
-/// `space` unchanged (`AGENTS.md` §2.9).
+/// `space` unchanged.
 ///
 /// # Errors
 ///
@@ -217,12 +215,12 @@ where
 
 /// Release the `page_count`-page region based at `base_va` from the caller's
 /// own live `space`, zeroing every frame before returning it to `free_frame`
-/// (`AGENTS.md` §4 — zero on free).
+/// (zero on free).
 ///
 /// The whole range is validated to be currently mapped *before* any page is
 /// torn down, so a `(base, len)` that does not name a region the caller
 /// mapped fails closed with [`AnonError::NotMapped`] without a partial
-/// teardown (`AGENTS.md` §5.4).
+/// teardown.
 ///
 /// # Errors
 ///
@@ -285,8 +283,7 @@ where
 }
 
 /// Map a [`PageTableError`] onto an [`AnonError`], folding an allocator
-/// exhaustion onto [`AnonError::OutOfMemory`] so callers see one OOM type
-/// (`AGENTS.md` §2.2).
+/// exhaustion onto [`AnonError::OutOfMemory`] so callers see one OOM type.
 fn map_errno(err: PageTableError) -> AnonError {
     match err {
         PageTableError::AllocFailed(_) => AnonError::OutOfMemory,

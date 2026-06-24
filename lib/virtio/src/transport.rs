@@ -32,7 +32,7 @@ use rustos_abi::{DriverError, RegisterWindow};
 /// and at offset `+0x70` of the modern common-cfg window. The
 /// constants are repeated rather than depending on a vendored
 /// virtio crate to keep the crate's transitive dependency surface
-/// equal to its parent bus drivers (`AGENTS.md` §2.3).
+/// equal to its parent bus drivers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct Status(u8);
 
@@ -98,9 +98,9 @@ pub enum VirtioError {
     /// No used-ring entry available yet.
     NoCompletion,
     /// A device-written used-ring completion named a descriptor head
-    /// outside the granted descriptor table (`AGENTS.md` §3.6 of the
+    /// outside the granted descriptor table (of the
     /// security charter, CWE-1257 / Thunderclap-class). The driver
-    /// rejects it fail-closed (§5.4) rather than dereference a
+    /// rejects it fail-closed rather than dereference a
     /// descriptor index that escapes the region.
     MalformedCompletion,
     /// The device reported a transport-level fault on the wire.
@@ -138,7 +138,7 @@ pub enum Direction {
 /// Methods are sequenced as virtio 1.1 §3.1. Errors are returned
 /// rather than swallowed so a driver can surface
 /// [`DriverError::DeviceFault`] / [`DriverError::OutOfRange`]
-/// rather than panic (`AGENTS.md` §2.9).
+/// rather than panic.
 pub trait Transport {
     /// Reset the device and re-establish a clean status byte.
     fn reset(&mut self);
@@ -213,7 +213,7 @@ pub trait Transport {
 /// and the concrete `drivers/bus/virtio::PciTransport` is built from it.
 /// It lives here, beside the [`Transport`] trait, so the kernel-side
 /// walk can name the builder input without depending on the bus driver
-/// crate (`AGENTS.md` §17.4 — `kernel/* → lib/*`, never a driver).
+/// crate (`kernel/* → lib/*`, never a driver).
 #[derive(Debug)]
 pub struct PciTransportWindows {
     /// Common-configuration structure window.
@@ -349,8 +349,8 @@ impl MockTransport {
     /// genuinely collected from the avail ring, this plants an *arbitrary*
     /// `head` — including one outside the granted descriptor table. That
     /// is exactly the corruption a buggy or hostile device can write
-    /// (`AGENTS.md` §3.6, CWE-1257 / Thunderclap), and it is what the
-    /// §3.6 fuzz harness drives at [`crate::queue::SplitQueue::poll_used`].
+    /// (CWE-1257 / Thunderclap), and it is what the
+    /// fuzz harness drives at [`crate::queue::SplitQueue::poll_used`].
     ///
     /// # Errors
     ///
@@ -377,7 +377,7 @@ impl MockTransport {
     /// Test/fuzz-only **hostile-device** seam: overwrite one byte of
     /// `queue`'s descriptor table at `byte_offset`, modelling a device DMA
     /// write that scribbles a descriptor field — e.g. a chain `next` link
-    /// (`AGENTS.md` §3.6, CWE-1257 / Thunderclap). The §3.6 fuzz harness
+    /// (CWE-1257 / Thunderclap). The fuzz harness
     /// uses it to make `poll_used`'s reclaim walk attempt to leave the
     /// granted region, asserting the driver bails instead.
     ///

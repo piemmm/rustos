@@ -23,8 +23,8 @@
 //! that links this crate (including the single-hart boot pipeline and
 //! the Stage-2 freestanding test bins) to define that symbol or fail to
 //! link. A set-once callback (parking until installed) keeps secondary
-//! bring-up opt-in without a Cargo feature gate (`AGENTS.md` §2.1 — no
-//! hacks, §15.3 — no feature-flag silencing).
+//! bring-up opt-in without a Cargo feature gate (no
+//! hacks — no feature-flag silencing).
 //!
 //! # Host testability
 //!
@@ -43,8 +43,8 @@ use rustos_arch_api::CpuId;
 ///
 /// A per-stack size is a fixed *bound* (like the kthread kernel stack),
 /// not a hart-count capacity, so it is a constant and not subject to the
-/// §24.1 "no fixed ceiling" rule — that rule governs the *number* of
-/// harts, not the size of one hart's stack (`AGENTS.md` §24.4). The
+/// "no fixed ceiling" rule — that rule governs the *number* of
+/// harts, not the size of one hart's stack. The
 /// number of harts the pool covers is the caller-sized `N` of
 /// [`SecondaryStackPool`].
 pub const SECONDARY_STACK_SHIFT: u32 = 14;
@@ -71,7 +71,7 @@ static SECONDARY_STACK_SHIFT_BITS: AtomicU64 = AtomicU64::new(0);
 
 /// Number of harts the registered pool covers (`0` until a pool is
 /// registered, so an unstarted system fails closed — every id is
-/// invalid, `AGENTS.md` §2.9 / §5.4.5).
+/// invalid).
 static SECONDARY_STACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Set-once guard so a second [`SecondaryStackPool::register`] is refused
@@ -83,7 +83,7 @@ static SECONDARY_STACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SecondaryStackError {
     /// A pool was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live trampoline).
+    /// (no silent re-pointing of the live trampoline).
     AlreadyRegistered,
 }
 
@@ -98,8 +98,7 @@ impl SecondaryStackSlot {
     // A 16 KiB zero array is a deliberately large *static* backing (a
     // secondary hart's whole kernel stack), only ever const-evaluated
     // into a `static SecondaryStackPool` — never materialised on a
-    // runtime stack — so the large-array lint does not apply (`AGENTS.md`
-    // §24.4: a per-stack size is a fixed bound, not a runtime stack
+    // runtime stack — so the large-array lint does not apply (: a per-stack size is a fixed bound, not a runtime stack
     // allocation).
     #[allow(clippy::large_stack_arrays)]
     const fn new() -> Self {
@@ -110,15 +109,15 @@ impl SecondaryStackSlot {
 }
 
 /// Caller-owned, `&'static` secondary-hart stack pool, sized by the
-/// constructing caller for its machine (`AGENTS.md` §24.1 — the
-/// secondary-bring-up stack count is derived from the §18-discovered hart
+/// constructing caller for its machine (the
+/// secondary-bring-up stack count is derived from the-discovered hart
 /// count, never a fixed `const` ceiling baked into the arch crate).
 ///
 /// The const parameter `N` is the number of harts the caller intends to
 /// bring up: a single-hart boot path needs no pool, a two-hart vertical
 /// uses `SecondaryStackPool<2>`, and a multi-hart boot path sizes `N`
 /// from the device-tree hart count. The arch crate stays allocator-free
-/// (`AGENTS.md` §24.1 watch-out — no `alloc` in a bare-metal arch crate,
+/// (watch-out — no `alloc` in a bare-metal arch crate,
 /// which would force a heap into every freestanding bin that links it),
 /// so the caller provides the storage as a `static` (allocator-free bins)
 /// or a leaked allocation (allocator-having callers) and registers it
@@ -155,8 +154,7 @@ impl<const N: usize> SecondaryStackPool<N> {
     /// # Errors
     ///
     /// [`SecondaryStackError::AlreadyRegistered`] on the second publish
-    /// (set-once per boot — never silently re-points the live trampoline,
-    /// `AGENTS.md` §2.1).
+    /// (set-once per boot — never silently re-points the live trampoline).
     pub fn register(&'static self) -> Result<usize, SecondaryStackError> {
         if SECONDARY_STACKS_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -171,8 +169,7 @@ impl<const N: usize> SecondaryStackPool<N> {
         // Order the pool publish ahead of any secondary hart's paging-off
         // read of the globals. The SBI `hart_start` firmware call that
         // starts a hart is itself a barrier, but the explicit `fence`
-        // makes the ordering local and unconditional (`AGENTS.md` §4 —
-        // explicit synchronisation for cross-CPU shared state).
+        // makes the ordering local and unconditional (explicit synchronisation for cross-CPU shared state).
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         // SAFETY: `fence rw, rw` orders prior stores ahead of later
         // memory accesses; it has no operands and no effect beyond
@@ -193,7 +190,7 @@ impl<const N: usize> Default for SecondaryStackPool<N> {
 /// `true` iff `hartid` indexes a slot inside the registered secondary-
 /// stack pool, so the `smp.s` trampoline selects a stack slice that lies
 /// inside it. Returns `false` for every id until a [`SecondaryStackPool`]
-/// is registered (fail closed, `AGENTS.md` §2.9).
+/// is registered (fail closed).
 #[must_use]
 pub fn is_valid_hartid(hartid: CpuId) -> bool {
     (hartid as usize) < SECONDARY_STACK_COUNT.load(Ordering::Acquire)
@@ -215,8 +212,7 @@ static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_secondary_entry`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetEntryError {
-    /// An entry was already installed; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// An entry was already installed; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -236,7 +232,7 @@ pub enum StartHartError {
 }
 
 impl StartHartError {
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -314,8 +310,7 @@ pub fn current_hartid() -> CpuId {
 ///
 /// # Errors
 ///
-/// See [`StartHartError`]. The launcher fails closed (`AGENTS.md`
-/// §5.4.5) rather than assuming the hart came up.
+/// See [`StartHartError`]. The launcher fails closed rather than assuming the hart came up.
 ///
 /// # Safety
 ///
@@ -356,7 +351,7 @@ fn secondary_trampoline_addr() -> usize {
 /// callback; with none installed it parks the hart (the
 /// [`start_secondary`] guard makes this branch unreachable in practice,
 /// but a freshly-started hart must never fall through to undefined
-/// instructions — `AGENTS.md` §2.9, fail closed).
+/// instructions, fail closed).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn rustos_arch_riscv64_secondary_main(hartid: CpuId) -> ! {

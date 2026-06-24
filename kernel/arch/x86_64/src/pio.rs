@@ -1,8 +1,7 @@
 //! x86_64 legacy port-I/O implementation of the Arch HAL port-I/O seam.
 //!
 //! This is the single in-tree implementor of the
-//! [`rustos_abi::PortIo`](rustos_abi::driver::port_io::PortIo) seam
-//! (`AGENTS.md` §17.2 / §17.4). It encapsulates the `in`/`out`
+//! [`rustos_abi::PortIo`](rustos_abi::driver::port_io::PortIo) seam. It encapsulates the `in`/`out`
 //! instructions — the only way to reach the legacy PCI configuration
 //! ports `0xCF8`/`0xCFC` (PCI Local Bus 3.0 §3.2.2.3.2) — behind the safe
 //! trait so the `lib/pci` PCI mechanism consumes it without naming
@@ -86,7 +85,7 @@ impl PortIo8 for X86PortIo8 {
             // backend is never reached on such hosts (the i8042 driver's
             // host unit tests use a mock `PortIo8`), so the shim returns
             // a constant rather than emitting an invalid instruction;
-            // returning a value honours `AGENTS.md` §2.9.
+            // returning a value honours.
             let _ = port;
             0
         }
@@ -151,7 +150,7 @@ impl PortIo for X86PortIo {
             // only on x86. The PCI bus driver's host unit tests use a
             // mock `PortIo`, so this backend is never reached; the shim
             // returns a constant rather than emitting an invalid
-            // instruction (`AGENTS.md` §2.9).
+            // instruction.
             let _ = port;
             0
         }

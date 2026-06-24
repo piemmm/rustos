@@ -5,7 +5,7 @@
 //! *over* the ones below through `lib/raster`'s single premultiplied-alpha
 //! polygon path, so a multi-part glyph (a battery body plus its terminal, a
 //! bell plus its clapper) is built by stacking layers rather than by a
-//! second multi-contour scan converter (`AGENTS.md` §2.2).
+//! second multi-contour scan converter.
 
 use alloc::vec::Vec;
 
@@ -15,7 +15,7 @@ use rustos_raster::{Color, Surface};
 /// design-grid coordinates.
 ///
 /// Fewer than three vertices covers no area and [`Surface::fill_polygon`]
-/// skips it rather than rejecting the whole icon (`AGENTS.md` §2.9).
+/// skips it rather than rejecting the whole icon.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IconLayer {
     /// The straight-alpha fill colour of this layer.
@@ -27,7 +27,7 @@ pub struct IconLayer {
 impl IconLayer {
     /// Build a layer from a fill colour and a static slice of design-grid
     /// coordinate pairs, so the built-in glyphs read as self-documenting
-    /// coordinate tables (`AGENTS.md` §2.11).
+    /// coordinate tables.
     #[must_use]
     pub fn from_points(fill: Color, points: &[(i32, i32)]) -> Self {
         Self {
@@ -42,8 +42,7 @@ impl IconLayer {
 ///
 /// The design grid is `design` units on each side. An icon with no layers is
 /// legal (it rasterises to a fully transparent image); a degenerate `design`
-/// of zero is handled by the rasteriser rather than panicking (`AGENTS.md`
-/// §2.9).
+/// of zero is handled by the rasteriser rather than panicking.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorIcon {
     design: u32,
@@ -75,7 +74,7 @@ impl VectorIcon {
     ///
     /// Returns `None` for a zero `side` or if the pixel buffer cannot be
     /// allocated, so the caller falls back to a smaller size or omits the
-    /// icon rather than crashing (`AGENTS.md` §2.9). Each layer is filled
+    /// icon rather than crashing. Each layer is filled
     /// through the shared [`Surface::fill_polygon`] path in stack order.
     #[must_use]
     pub fn rasterise(&self, side: u32) -> Option<Surface> {

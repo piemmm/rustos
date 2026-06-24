@@ -1,4 +1,4 @@
-//! RustOS `ls` — list directory contents (Stage 6, `AGENTS.md` §3
+//! RustOS `ls` — list directory contents (Stage 6
 //! `userland/apps/`).
 //!
 //! `ls` inspects each of its path operands in order. A non-directory operand
@@ -32,7 +32,7 @@
 //! that cannot be stat'd surfaces the underlying [`Errno`](rustos_abi::Errno)
 //! as [`LsError::Stat`] and stops; a directory that cannot be read is
 //! [`LsError::Read`]; a failed terminal write is [`LsError::Output`]. There
-//! is no partial-guess path and no panic (`AGENTS.md` §2.9).
+//! is no partial-guess path and no panic.
 //!
 //! # Module map
 //!
@@ -44,10 +44,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

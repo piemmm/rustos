@@ -6,7 +6,7 @@
 //! the aarch64 port directly (`rustos_arch_aarch64`, the GIC, the firmware
 //! device tree), while the device-independent core — the boot stash and the
 //! console-0 ownership gate — stays in the arch-neutral
-//! [`crate::unlock_service`] (`AGENTS.md` §2.2 / §17.2).
+//! [`crate::unlock_service`].
 //!
 //! It admits the in-kernel unlock kthread at the init seam, brings the
 //! bootstrap virtio-blk root device up over the production device-IRQ path
@@ -16,7 +16,7 @@
 //! resolves so `login` can take over
 //! ([`crate::unlock_service::CONSOLE0_GATE`]).
 //!
-//! Two bootstrap-floor block drivers (`AGENTS.md` §18.6) are brought up
+//! Two bootstrap-floor block drivers are brought up
 //! here, selected by which one [`crate::root_storage`] bound: the virtio-blk
 //! device over the production device-IRQ path (the QEMU `virt` / x86_64
 //! root, proven on `-M virt`), or the Raspberry Pi 4 EMMC2 SD host over
@@ -24,9 +24,8 @@
 //! — `raspi4b` cannot model EMMC2, so it is host-tested at the driver level
 //! and metal-gated here, `plans/PI.md` P8/B4). The bring-up differs per
 //! device; the read-only `/System` autoload, the passphrase prompt, and the
-//! interactive unlock are identical and shared in [`finish_unlock`]
-//! (`AGENTS.md` §2.2). A bound driver that is neither fails closed
-//! (logged, gate opened, no database installed; `AGENTS.md` §2.9 / §18.4).
+//! interactive unlock are identical and shared in [`finish_unlock`]. A bound driver that is neither fails closed
+//! (logged, gate opened, no database installed;).
 
 use core::convert::Infallible;
 
@@ -80,8 +79,7 @@ const POOL_PAGES: usize = 64;
 /// so this address space is **pure bookkeeping**; the base is chosen far
 /// above the boot identity window (which never exceeds a few GiB) so a
 /// window mapping never collides with an identity gigapage block in the
-/// throwaway bookkeeping space. Genuinely this bring-up's own constant
-/// (`AGENTS.md` §2.2).
+/// throwaway bookkeeping space. Genuinely this bring-up's own constant.
 const POOL_VBASE: u64 = 0x60_0000_0000;
 
 /// Bookkeeping virtual base of the MMIO register-window map (see
@@ -102,9 +100,9 @@ const MMIO_CAP_PAGES: usize = 64;
 
 /// Find the GICv2 INTID of the `virtio,mmio` node whose `reg` base equals
 /// `slot_base`, decoded through the production [`gic_device_intid`]
-/// (INCREMENT (1)) — no board constant (`AGENTS.md` §2.20). [`None`] when
+/// (INCREMENT (1)) — no board constant. [`None`] when
 /// no node matches or its `interrupts` specifier is unrepresentable
-/// (fail closed, §18.4).
+/// (fail closed).
 pub(crate) fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     for node in fdt.nodes() {
         let node = node.ok()?;
@@ -123,11 +121,10 @@ pub(crate) fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
 /// Find the GICv2 INTID of the console UART node — the same node
 /// [`rustos_arch_aarch64::console::find_console`] selects (`arm,pl011`
 /// preferred, the BCM2835 AUX mini-UART as fallback) — decoded through
-/// [`gic_device_intid`], a discovered value and never a board constant
-/// (`AGENTS.md` §18.1 / §2.20).
+/// [`gic_device_intid`], a discovered value and never a board constant.
 ///
 /// [`None`] when no console node carries a representable `interrupts`
-/// specifier (fail closed, `AGENTS.md` §2.9 / §18.4): the console then stays
+/// specifier (fail closed): the console then stays
 /// on the polled path, and `login`'s reader keeps parking until the polled
 /// re-check delivers — never an error.
 pub(crate) fn console_spi(fdt: &Fdt<'_>) -> Option<u32> {
@@ -147,10 +144,10 @@ pub(crate) fn console_spi(fdt: &Fdt<'_>) -> Option<u32> {
 /// Find the GICv2 INTID of the EMMC2 SD host node (`brcm,bcm2711-emmc2`,
 /// the same node the hardware tree's Storage device is discovered from),
 /// decoded through [`gic_device_intid`] — a discovered value, never a board
-/// constant (`AGENTS.md` §18.1 / §2.20).
+/// constant.
 ///
 /// [`None`] when no EMMC2 node carries a representable `interrupts`
-/// specifier (fail closed, `AGENTS.md` §2.9 / §18.4): the SD bring-up then
+/// specifier (fail closed): the SD bring-up then
 /// refuses rather than parking forever on a line that can never fire, since
 /// the interrupt-driven driver depends on a bound completion line.
 pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
@@ -177,10 +174,10 @@ pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
 /// not ready, then unmask ([`rustos_arch_aarch64::exceptions::enable_irq`])
 /// so the woken completion is taken by the EL1 vector and dispatched into
 /// `IrqTable::fire`. This is exactly the discipline the proven `-M virt`
-/// `WfiWaiter` uses (`AGENTS.md` §2.2 — one wait shape).
+/// `WfiWaiter` uses (one wait shape).
 ///
 /// Parking on `wfi` (rather than busy-yielding through the scheduler) is
-/// both correct and §2.1-clean. The production cooperative dispatch runs
+/// both correct and-clean. The production cooperative dispatch runs
 /// with `DAIF.I` masked once a user task's `svc` trap has masked it, and the
 /// register-only context switch (`context.s`) never restores it, so a
 /// kthread that merely yielded would spin a tight poll on a line whose
@@ -210,7 +207,7 @@ impl IrqWaiter for RearmingIrqWaiter {
         // `IrqTable::fire` masked it. A re-arm refusal (an out-of-range
         // line — impossible for a bound SPI) is harmless: the park below
         // then waits on a line that cannot fire and the run budget bounds
-        // it (`AGENTS.md` §2.9).
+        // it.
         let _ = GIC_IRQ_CONTROLLER.unmask_line(self.line);
         // Canonical race-free park: mask IRQ taking, re-check the ready
         // flag, `wfi` only if still not ready, then unmask so the woken
@@ -232,14 +229,14 @@ impl IrqWaiter for RearmingIrqWaiter {
 }
 
 /// The EMMC2 driver's completion seam ([`CompletionWait`]) over the same
-/// [`RearmingIrqWaiter`] park the virtio host uses (`AGENTS.md` §2.2 — one
+/// [`RearmingIrqWaiter`] park the virtio host uses (one
 /// wait shape, no second park implementation).
 ///
 /// The SDHCI engine calls [`await_irq`](CompletionWait::await_irq) whenever
 /// a command/transfer completion is outstanding; it re-arms the controller's
 /// bound GIC line and parks the kthread on a race-free `wfi` until the ISR
 /// signals, so the driver never busy-spins a status register and monopolises
-/// the CPU (`AGENTS.md` §17.1 / §2.16). The inner waiter owns the `'static`
+/// the CPU. The inner waiter owns the `'static`
 /// IRQ table, handle, and line, so the completion is `'static` and the opened
 /// [`Emmc2`] it lives in can be shared for life behind the block layer.
 struct Emmc2Completion {
@@ -260,13 +257,13 @@ impl CompletionWait for Emmc2Completion {
 ///
 /// The two always happen together — both mean "the unlock window is over,
 /// `login` may take the console now" — so they are flipped through one
-/// helper to keep them from diverging (`AGENTS.md` §2.2). Opening the gate
+/// helper to keep them from diverging. Opening the gate
 /// lets `login`'s gated console reads through ([`GatedConsoleRead`]);
 /// [`LateUsersDb::resolve`](rustos_kernel_core::LateUsersDb::resolve) flips
 /// a `login` parked on the pending (`WouldBlock`) `users_db_read` into its
 /// prompt — against the installed database if the unlock succeeded
 /// ([`install`](rustos_kernel_core::LateUsersDb) ran first and wins), else
-/// fail-closed deny-all (`AGENTS.md` §5.4.5).
+/// fail-closed deny-all.
 fn release_console0_to_login() {
     CONSOLE0_GATE.open();
     // Opening the gate is an input-availability edge for any `login` already
@@ -274,7 +271,7 @@ fn release_console0_to_login() {
     // wait-queue so it re-polls the now-open gate at once, draining any
     // type-ahead buffered in the console-0 queue during the closed window
     // rather than waiting for the next keystroke to push and wake it
-    // (`AGENTS.md` §2.1 — the wake that closes the gated-park race). A
+    // (the wake that closes the gated-park race). A
     // no-op before the wait-queue arch hook is installed, and a spurious
     // wake for a reader on another console is harmless (it re-polls and
     // re-parks).
@@ -282,7 +279,7 @@ fn release_console0_to_login() {
     LATE_USERS_DB.resolve();
     // The passphrase poll is over, so switch the UART console from polled to
     // interrupt-driven: a `login` reader now parks off the run queue and the
-    // receive interrupt wakes it (`AGENTS.md` §2.1 / §20). A no-op when the
+    // receive interrupt wakes it. A no-op when the
     // boot path discovered no console interrupt (the console then stays on the
     // polled path) or when the console is the video keyboard rather than the
     // UART (`crate::aarch64::gic_irq::enable_uart_console_irq`).
@@ -295,14 +292,14 @@ fn release_console0_to_login() {
 /// With no binding (headless / no disk / ambiguous), an EMMC2 binding (the
 /// staged Pi metal path), or no `'static` frame allocator, it starts
 /// nothing, opens the console-0 gate so `login` proceeds normally, and
-/// returns `false` — failing closed (`AGENTS.md` §18.4 / §2.9). The
+/// returns `false` — failing closed. The
 /// console-0 gate is also opened by the kthread body once the unlock
 /// resolves, so it is never left latched closed.
 #[must_use]
 pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     let boot = take_boot();
     // Route the unlock service's security-relevant decisions (mount /
-    // install / give-up) onto the boot audit channel (`AGENTS.md` §19.4)
+    // install / give-up) onto the boot audit channel
     // when the init seam wired a `'static` audit sink; fall back to the
     // serial log otherwise. The kthread body and the unlock policy share it.
     let audit: &'static (dyn Sink + Sync) = ctx.static_audit().unwrap_or(&SERIAL_SINK);
@@ -320,7 +317,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
         // this seam knows how to bring up (virtio-blk for the QEMU `virt` /
         // x86_64 root, EMMC2 for the Raspberry Pi 4 SD card). Fail closed —
         // open the gate and leave the root unmounted rather than guess at a
-        // bring-up (`AGENTS.md` §2.9 / §18.4). `root_storage` only ever binds
+        // bring-up. `root_storage` only ever binds
         // a `provides_root_block` floor driver, so reaching here is a
         // packaging defect, not an expected path.
         note(
@@ -350,9 +347,9 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
         // already logged the unlock outcome and released console 0. Only an
         // early bring-up failure returns here — and because the success arm is
         // the uninhabited [`Infallible`], the `Err` binding is irrefutable.
-        // Fail closed (`AGENTS.md` §2.9): log the stage and open the console-0
+        // Fail closed: log the stage and open the console-0
         // gate so `login` proceeds (it refuses every attempt, as a failed
-        // unlock installs no database, §5.4.5).
+        // unlock installs no database).
         let Err(stage) = run_unlock(yielder, &binding, dtb, frames, caps, env);
         note(audit, Level::Error, stage);
         release_console0_to_login();
@@ -362,7 +359,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     if let Some(task_id) = admitted {
         // Publish the disk-owning kthread's scheduler id so its driver-store
         // serve loop registers on `SERVE_WAITQ` and is unparked the instant
-        // a request is posted (Design D D2b-2c; `AGENTS.md` §2.1 — a real
+        // a request is posted (Design D D2b-2c; — a real
         // wake, never a busy-yield).
         crate::unlock_service::set_store_service_task(task_id);
     }
@@ -378,7 +375,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
     );
     if !started {
         // Admission failed: nothing will open the gate, so do it here or
-        // console-0 `login` would park forever (`AGENTS.md` §2.9).
+        // console-0 `login` would park forever.
         release_console0_to_login();
     }
     started
@@ -387,20 +384,19 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
 /// Bring up the bound bootstrap-floor block device and run the interactive
 /// unlock policy.
 ///
-/// Dispatches on which floor block driver [`crate::root_storage`] bound
-/// (`AGENTS.md` §18.6): [`VIRTIO_BLK_PATH`] over the production device-IRQ
+/// Dispatches on which floor block driver [`crate::root_storage`] bound: [`VIRTIO_BLK_PATH`] over the production device-IRQ
 /// path, or [`EMMC2_PATH`] (the Raspberry Pi 4 SD host) over programmed
 /// I/O. The bring-up differs per device; the read-only `/System` autoload,
 /// the passphrase prompt, and the interactive unlock are shared in
-/// [`finish_unlock`] (`AGENTS.md` §2.2). A bound driver that is neither
-/// fails closed (`AGENTS.md` §2.9 / §18.4).
+/// [`finish_unlock`]. A bound driver that is neither
+/// fails closed.
 ///
 /// **On success this never returns:** [`finish_unlock`] logs the outcome,
 /// releases the console-0 gate, and parks the kthread for life as the
 /// persistent driver-store service (Design D D2a-2), so the [`Infallible`]
 /// `Ok` is never produced. Only an early bring-up failure returns `Err` with
 /// a stable stage string; on that path the caller logs it and opens the
-/// console-0 gate (`AGENTS.md` §2.9).
+/// console-0 gate.
 fn run_unlock(
     yielder: &mut dyn YieldHandle,
     binding: &RootBlockBinding,
@@ -411,15 +407,14 @@ fn run_unlock(
 ) -> Result<Infallible, &'static str> {
     // Move the kthread's single yield handle into the shared cell both the
     // re-arming IRQ waiter and the cooperative console reader suspend
-    // through (`AGENTS.md` §2.2 — one cooperative-yield definition).
+    // through (one cooperative-yield definition).
     let coop = CooperativeYield::new(yielder);
 
     // The bus-driver task capability context: the unlock kthread's caps,
     // owner `UNLOCK_TASK`, audited onto the service's audit sink. Both the
-    // virtio and the EMMC2 register-window maps gate on its `CAP_MMIO_MAP`
-    // (`AGENTS.md` §5.4). Leaked to `'static` because the brought-up device
+    // virtio and the EMMC2 register-window maps gate on its `CAP_MMIO_MAP`. Leaked to `'static` because the brought-up device
     // host borrows it for the life of the (now `'static`, shared) disk
-    // (`AGENTS.md` §4 — kernel state is never freed); a single boot-time leak,
+    // (kernel state is never freed); a single boot-time leak,
     // like `boot_tree_snapshot`.
     let caller: &'static TaskCapabilities = alloc::boxed::Box::leak(alloc::boxed::Box::new(
         TaskCapabilities::derive(UNLOCK_TASK, UserId(0), caps, caps, env.audit),
@@ -435,14 +430,12 @@ fn run_unlock(
 /// The `'static` boot environment a root-unlock bring-up threads through:
 /// the init-spawn context (the per-arch driver-spawn seam) and the audit
 /// sink. The matched-node grants a driver load mints are resolved from the
-/// live [`crate::hwtree_store::HW_TREE`] inventory directly (`AGENTS.md`
-/// §18.4), so no boot-tree snapshot rides along here.
+/// live [`crate::hwtree_store::HW_TREE`] inventory directly, so no boot-tree snapshot rides along here.
 ///
 /// Grouped because both travel together from the kthread body through the
 /// per-device bring-up into the shared [`finish_unlock`] tail; passing one
 /// cohesive `Copy` value rather than re-listing two `'static` references in
-/// every signature keeps the seams readable and below the argument-count bar
-/// (`AGENTS.md` §2.2).
+/// every signature keeps the seams readable and below the argument-count bar.
 #[derive(Clone, Copy)]
 struct UnlockEnv {
     ctx: &'static (dyn InitSpawnCtx + Sync),
@@ -489,7 +482,7 @@ fn virtio_blk_unlock<'a>(
     // `finish_unlock`), so its backing must outlive both frames. Leaking is
     // the sanctioned "kernel state is never freed" pattern
     // (`kernel/core/src/spawn.rs`) and uses only safe `Box::leak`, never an
-    // `unsafe` lifetime cast (`AGENTS.md` §4).
+    // `unsafe` lifetime cast.
     let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
         DirectPhysMap::identity(identity_limit()),
     ));
@@ -569,7 +562,7 @@ fn virtio_blk_unlock<'a>(
 
     // Admit the virtio-blk driver through the signed §8 load gate (Ed25519
     // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives
-    // hardware — a refusal fails closed (`AGENTS.md` §5.4 / §23.1).
+    // hardware — a refusal fails closed.
     let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
     loader
         .admit(VIRTIO_BLK_PATH, &loader_caps())
@@ -590,14 +583,14 @@ fn virtio_blk_unlock<'a>(
 /// Unlike the virtio path there is no DMA pool — EMMC2 transfers move data
 /// through the SDHCI buffer-data port (programmed I/O) — but the controller's
 /// completions are taken on its **bound GIC interrupt line**, never by
-/// busy-spinning a status register (`AGENTS.md` §17.1 / §2.16). Two
+/// busy-spinning a status register. Two
 /// resources are therefore wired: the SDHCI register window (the matched
-/// node's sole register-window grant, `AGENTS.md` §18.3) is mapped under
+/// node's sole register-window grant) is mapped under
 /// `CAP_MMIO_MAP` through the kernel mapper, and the controller's GIC SPI —
 /// discovered from the firmware device tree ([`emmc2_spi`]), never a board
-/// constant (`AGENTS.md` §18.1 / §2.20) — is bound, routed, and armed on the
+/// constant — is bound, routed, and armed on the
 /// published IRQ table so the driver parks on completion through the shared
-/// [`RearmingIrqWaiter`] ([`Emmc2Completion`], `AGENTS.md` §2.2). `raspi4b`
+/// [`RearmingIrqWaiter`] ([`Emmc2Completion`]). `raspi4b`
 /// cannot model EMMC2 (`plans/PI.md` §0.4), so this path is host-tested at
 /// the driver level and metal-gated here.
 fn emmc2_unlock<'a>(
@@ -608,16 +601,15 @@ fn emmc2_unlock<'a>(
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
-    // Admit the EMMC2 driver through the signed §8 load gate before it
-    // drives hardware — a refusal fails closed (`AGENTS.md` §5.4 / §23.1 /
-    // §18.6).
+    // Admit the EMMC2 driver through the signed load gate before it
+    // drives hardware — a refusal fails closed.
     let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
     loader
         .admit(EMMC2_PATH, &loader_caps())
         .map_err(|_| "root-unlock: emmc2 refused at the signed load gate")?;
 
     // The SDHCI register window the matched node requested. `sole_register_window`
-    // fails closed on a missing or ambiguous window (`AGENTS.md` §2.9) rather
+    // fails closed on a missing or ambiguous window rather
     // than guessing an address.
     let (regs_phys, _len) = sole_register_window(binding.node.resources())
         .map_err(|_| "root-unlock: emmc2 register window")?;
@@ -626,8 +618,8 @@ fn emmc2_unlock<'a>(
     // table the kernel core published (the same production device-IRQ path the
     // virtio bring-up uses). The driver parks on this line for every command
     // and block-transfer completion instead of busy-spinning a status
-    // register (`AGENTS.md` §17.1 / §2.16); with no interrupt the driver would
-    // park forever, so fail closed (`AGENTS.md` §2.9 / §18.4).
+    // register; with no interrupt the driver would
+    // park forever, so fail closed.
     if dtb == 0 {
         return Err("root-unlock: no device tree; emmc2 root unbound");
     }
@@ -655,7 +647,7 @@ fn emmc2_unlock<'a>(
     // subsequent one.
     let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
     // The completion seam the SDHCI engine parks on, over the shared re-arming
-    // `wfi` waiter (`AGENTS.md` §2.2). Owns only `'static`/`Copy` state, so the
+    // `wfi` waiter. Owns only `'static`/`Copy` state, so the
     // opened `Emmc2` it lives in is `'static` and shareable for life.
     let waiter = Emmc2Completion {
         waiter: RearmingIrqWaiter {
@@ -671,7 +663,7 @@ fn emmc2_unlock<'a>(
     // gigapage block). Boot-leaked to `'static` (safe `Box::leak`) like the
     // virtio path: the brought-up disk is shared for life by the two
     // independent tasks `finish_unlock` runs, so the `Emmc2`'s window backing
-    // must outlive both frames (`AGENTS.md` §4 — kernel state is never freed).
+    // must outlive both frames (kernel state is never freed).
     let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
         DirectPhysMap::identity(identity_limit()),
     ));
@@ -703,7 +695,7 @@ fn emmc2_unlock<'a>(
                 // *and* how it failed, so a controller/command fault is told
                 // apart from a decode rejection at the same step (e.g. CMD9
                 // `SEND_CSD` timing out vs. returning an unsupported CSD)
-                // (`AGENTS.md` §19.4 / §2.16 — measure, do not guess).
+                // (measure, do not guess).
                 note_stage(
                     audit,
                     Level::Error,
@@ -718,24 +710,21 @@ fn emmc2_unlock<'a>(
     finish_unlock(blk, coop, env)
 }
 
-/// The shared two-task tail both floor block bring-ups feed (`AGENTS.md`
-/// §2.2), turning the one brought-up disk into a disk shared for life by two
+/// The shared two-task tail both floor block bring-ups feed, turning the one brought-up disk into a disk shared for life by two
 /// independent preemptive tasks (Design D D2b-2c).
 ///
 /// `blk` is the brought-up whole-disk [`Block`] device (virtio-blk or EMMC2),
 /// already boot-leaked to `'static` by its bring-up. It is wrapped in a
 /// leaked `&'static` [`DriverStoreService`] (over the [`SharedBlock`] layer),
-/// so two tasks reach it through independent serialised windows
-/// (`AGENTS.md` §4):
+/// so two tasks reach it through independent serialised windows:
 ///
 /// * A **separate, spawned** preemptive task runs the interactive
 ///   encrypted-root unlock against the *user-data* volume and, when it
 ///   resolves (installed or fail-closed), releases the console-0 gate to
-///   `login` (`AGENTS.md` §5.4.5).
+///   `login`.
 /// * **This** task becomes the persistent driver-store serve loop: it binds
 ///   and serves the capability-gated store IPC endpoint the user-space
-///   `devmgr` loads signed `/System` drivers through (`AGENTS.md` §18.3 /
-///   §18.4), real-parking on `SERVE_WAITQ` between requests, and never
+///   `devmgr` loads signed `/System` drivers through, real-parking on `SERVE_WAITQ` between requests, and never
 ///   returns on success.
 ///
 /// Crucially the store endpoint binds **independently of** the user-data
@@ -745,7 +734,7 @@ fn emmc2_unlock<'a>(
 /// interleaving of the two on one kthread.
 ///
 /// On success this never returns. Every fallible *setup* step fails closed
-/// with a stable stage string the caller logs (`AGENTS.md` §2.9).
+/// with a stable stage string the caller logs.
 fn finish_unlock<B: Block + 'static>(
     blk: B,
     coop: &CooperativeYield<'_>,
@@ -755,10 +744,9 @@ fn finish_unlock<B: Block + 'static>(
 
     // The one brought-up disk, boot-leaked to `'static` behind the
     // block-sharing layer so two independent preemptive tasks drive it through
-    // their own serialised windows (`AGENTS.md` §4): *this* task is the
+    // their own serialised windows: *this* task is the
     // driver-store serve loop (below), and a *separate* spawned task runs the
-    // encrypted-root unlock. A geometry fault refuses the device fail-closed
-    // (`AGENTS.md` §2.9).
+    // encrypted-root unlock. A geometry fault refuses the device fail-closed.
     let store: &'static DriverStoreService<B> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
             SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
@@ -769,7 +757,7 @@ fn finish_unlock<B: Block + 'static>(
     // `/System` driver store (`plans/PI.md` design B), so the store endpoint
     // (bound + served by *this* task below) answers `devmgr` immediately —
     // the keyboard driver loads in user space *before* the prompt, with no
-    // cooperative interleaving on one kthread (`AGENTS.md` §4 / §17.1 — two
+    // cooperative interleaving on one kthread (two
     // independent tasks sharing the disk). The unlock task drives its own
     // console reader over its own scheduler yield handle.
     let unlock_body = move |yielder: &mut dyn YieldHandle| {
@@ -779,8 +767,7 @@ fn finish_unlock<B: Block + 'static>(
         // Both input halves are interrupt-fed console queues (the keyboard
         // injection queue, or the UART's `UART_INPUT`-backed read half) whose
         // `push` wakes `CONSOLE_WAITQ` (`console_wake`), so the kthread reader
-        // parks for input rather than busy-polling a raw FIFO (`AGENTS.md`
-        // §2.1 / §17.1 — nothing cooperative). It reads the raw device behind
+        // parks for input rather than busy-polling a raw FIFO (nothing cooperative). It reads the raw device behind
         // the console-0 gate `login` reads through (the gate stays closed
         // until this unlock resolves), so the two never contend.
         let (console_write, raw_read): (
@@ -800,7 +787,7 @@ fn finish_unlock<B: Block + 'static>(
         };
         // The kthread's own scheduler id (published at admission), so the
         // reader registers on `CONSOLE_WAITQ` and the RX interrupt unparks it
-        // by id (`AGENTS.md` §2.1).
+        // by id.
         let reader = KthreadConsoleRead::new(
             raw_read,
             &coop,
@@ -817,7 +804,7 @@ fn finish_unlock<B: Block + 'static>(
         // exactly once on every internal return path, so a successful unlock
         // can no longer leave the gate latched shut and the UART RX masked —
         // the defect that wedged both the keyboard and serial `login` after a
-        // good unlock (`AGENTS.md` §5.4.5 — a failed unlock still installs no
+        // good unlock (a failed unlock still installs no
         // database, so `login` keeps refusing).
         match unlock_root_disk_interactively(
             store.window(),
@@ -840,7 +827,7 @@ fn finish_unlock<B: Block + 'static>(
     match ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {
         // Publish the interactive unlock kthread's scheduler id so its
         // passphrase reader can register on `CONSOLE_WAITQ` and the console
-        // RX interrupt can unpark it by id (`AGENTS.md` §2.1). This seam is
+        // RX interrupt can unpark it by id. This seam is
         // single-CPU and continues straight to the driver-store serve loop
         // (parking only later), so the id is published before the spawned
         // body ever runs and constructs its reader.
@@ -848,7 +835,7 @@ fn finish_unlock<B: Block + 'static>(
         // The unlock task could not be admitted: nothing will prompt for the
         // passphrase or open the console-0 gate, so open it here (login still
         // refuses, as no database is installed) and serve the store anyway so
-        // `devmgr` can load drivers (`AGENTS.md` §2.9).
+        // `devmgr` can load drivers.
         None => {
             note(
                 audit,
@@ -861,31 +848,27 @@ fn finish_unlock<B: Block + 'static>(
 
     // The driver-signing trust anchor the autoload load gate verifies each
     // winning bundle against — the kernel's own embedded key, the single
-    // source `KernelDriverLoader` also trusts (`AGENTS.md` §8 / §9 / §2.2). A
-    // corrupt key is a broken build, not an admissible state: fail closed
-    // (`AGENTS.md` §2.9) rather than autoload against no anchor.
+    // source `KernelDriverLoader` also trusts. A
+    // corrupt key is a broken build, not an admissible state: fail closed rather than autoload against no anchor.
     let trust_anchor = Ed25519PublicKey::from_bytes(&KERNEL_DRIVER_SIGNER_PUBKEY)
         .map_err(|_| "root-unlock: driver trust anchor")?;
     let trusted = [trust_anchor];
     // The scheduler-agnostic driver-spawn seam over the captured boot
-    // context + the aarch64 process producer (`AGENTS.md` §17.1 / §2.2) —
+    // context + the aarch64 process producer —
     // the one per-arch input the otherwise arch-neutral driver-store load op
     // needs to spawn a verified driver into its own process.
     let driver_spawn = InitCtxDriverProcessSpawn::new(ctx, &AARCH64_PROCESS_SPAWN);
     // The kernel-side load mechanism the persistent driver-store service
     // keeps in its trusted base (Design D D2b-2c): the driver-signing trust
     // anchor, the delegatable `autoload_caps` gate superset (`CAP_DRV_LOAD`
-    // to pass the §8 gate plus the resource caps an autoloaded driver's class
+    // to pass the gate plus the resource caps an autoloaded driver's class
     // may request — `CAP_INPUT_INJECT`/`CAP_IRQ_BIND` for an input driver and
     // `CAP_IPC_BIND_PRIVILEGED` for a bus service driver such as the VideoCore
-    // `vcmailbox`, intersected per driver with its signed manifest request,
-    // `AGENTS.md` §5.2 / §18.3), the aarch64 process-spawn seam, and the
+    // `vcmailbox`, intersected per driver with its signed manifest request), the aarch64 process-spawn seam, and the
     // **live** hardware inventory (`crate::hwtree_store::HW_TREE`) a matched
-    // `node_id` is resolved against to mint exactly that node's grants (§4 —
-    // no ambient authority). Resolving against the live store (not a frozen
+    // `node_id` is resolved against to mint exactly that node's grants (no ambient authority). Resolving against the live store (not a frozen
     // boot snapshot) is what lets a node a user-space bus driver publishes at
-    // runtime through `hw_emit_node` be loaded the moment it appears
-    // (`AGENTS.md` §18.4) — the recursive bus chain (pcie → vl805 → usb_kbd)
+    // runtime through `hw_emit_node` be loaded the moment it appears — the recursive bus chain (pcie → vl805 → usb_kbd)
     // depends on it. The user-space `devmgr` owns the matching *policy*; this
     // kthread serves the *mechanism* over the capability-gated store endpoint
     // below.
@@ -898,16 +881,15 @@ fn finish_unlock<B: Block + 'static>(
 
     // This task is now the persistent driver-store service: it binds and
     // serves the capability-gated store IPC endpoint the user-space `devmgr`
-    // reads the signed `/System` driver store through (`AGENTS.md` §18.3 /
-    // §18.4), real-parking on `SERVE_WAITQ` between requests. It serves over
+    // reads the signed `/System` driver store through, real-parking on `SERVE_WAITQ` between requests. It serves over
     // its own `/System` window onto the `'static`-leaked shared disk,
     // independently of the encrypted-root unlock task spawned above
     // (`plans/PI.md` design B). `login`, PID 1, `devmgr`, the unlock task, and
     // every other task run on their own tasks.
     //
     // The binder context holds only `IPC_BIND_PRIVILEGED` (the privileged
-    // authority to bind the restricted-sender store endpoint, §5.2), distinct
-    // from the kthread's own minimal `service_caps` (§5.4 — no ambient
+    // authority to bind the restricted-sender store endpoint), distinct
+    // from the kthread's own minimal `service_caps` (no ambient
     // authority).
     let binder = TaskCapabilities::derive(
         UNLOCK_TASK,
@@ -930,8 +912,7 @@ fn finish_unlock<B: Block + 'static>(
         // The serve loop never returns on success (`Infallible`).
         Some(Ok(never)) => match never {},
         // The endpoint could not be bound (e.g. its well-known id is already
-        // registered, or the mount became unreadable). Fail closed
-        // (`AGENTS.md` §2.9): log the stage and park the kthread for life
+        // registered, or the mount became unreadable). Fail closed: log the stage and park the kthread for life
         // still owning the disk, so an `ipc_call` to the unbound store
         // endpoint fails closed with `NotFound` rather than blocking.
         Some(Err(stage)) => {
@@ -941,7 +922,7 @@ fn finish_unlock<B: Block + 'static>(
         // No read-only `/System` volume on this disk (already audited
         // `SYSTEM_VOLUME_UNAVAILABLE`): nothing to serve. Park for life
         // owning the disk; `devmgr`'s store reads fail closed with
-        // `NotFound` (`AGENTS.md` §18.4 / §2.9).
+        // `NotFound`.
         None => {
             note(
                 audit,
@@ -960,9 +941,9 @@ fn finish_unlock<B: Block + 'static>(
 /// EMMC2 is programmed-I/O, so it needs no virtio/DMA host: the only host
 /// service it uses is [`MmioMapper::map_window`] for its SDHCI register
 /// block. Every map is re-checked kernel-side against `caps` by the wrapped
-/// [`KernelMmioMapper`] (`AGENTS.md` §5.4), so the host cannot widen its own
+/// [`KernelMmioMapper`], so the host cannot widen its own
 /// authority. Kept local to this bring-up rather than generalised, since it
-/// is the only in-kernel MMIO-only host today (`AGENTS.md` §2.3 / §15.5).
+/// is the only in-kernel MMIO-only host today.
 struct Emmc2Host<'a> {
     caps: CapabilitySet,
     mmio: &'a dyn MmioMapper,
@@ -983,7 +964,7 @@ impl DriverHost for Emmc2Host<'_> {
 
     fn kind(&self) -> DriverKind {
         // The driver runs inside the kernel image as a bootstrap-floor block
-        // driver (`AGENTS.md` §18.6 — below the signed store it reads).
+        // driver (below the signed store it reads).
         DriverKind::InKernel
     }
 
@@ -995,8 +976,7 @@ impl DriverHost for Emmc2Host<'_> {
 /// The production aarch64 identity-map extent the DMA/MMIO physical map
 /// reaches frames and device windows through: the configured number of
 /// identity-mapped gigapages (`plans/PI.md` P6), so the map matches the
-/// boot path's own identity extent rather than a fixed guess
-/// (`AGENTS.md` §24.1).
+/// boot path's own identity extent rather than a fixed guess.
 fn identity_limit() -> u64 {
     (configured_identity_gigapages() as u64) << 30
 }
@@ -1010,7 +990,7 @@ fn identity_limit() -> u64 {
 /// timing out vs. returning a CSD the driver does not support) — which
 /// `raspi4b` cannot reveal (`plans/PI.md` §0.4 / P8 / B4). Fails closed on an
 /// unforeseen variant (`DriverError` is `#[non_exhaustive]`) with a generic
-/// name rather than asserting (`AGENTS.md` §2.9).
+/// name rather than asserting.
 fn driver_error_name(error: rustos_abi::DriverError) -> &'static str {
     use rustos_abi::DriverError;
     match error {

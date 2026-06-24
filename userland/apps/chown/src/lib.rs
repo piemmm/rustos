@@ -1,4 +1,4 @@
-//! RustOS `chown` — change file owner and group (Stage 6, `AGENTS.md` §3
+//! RustOS `chown` — change file owner and group (Stage 6
 //! `userland/apps/`).
 //!
 //! `chown` applies an ownership change to each of its file operands. The owner
@@ -7,8 +7,7 @@
 //! `:GROUP` only the owning group, and `OWNER:GROUP` both. With `-R` a
 //! directory operand is changed and then its contents are changed recursively.
 //! This is the POSIX model, restricted to numeric ids (RustOS has no
-//! name-to-id seam in this tool, so a name would be interface creep,
-//! `AGENTS.md` §2.4) and a building block of the §5.3 filesystem permission
+//! name-to-id seam in this tool, so a name would be interface creep) and a building block of the filesystem permission
 //! model.
 //!
 //! # What this crate is
@@ -39,8 +38,7 @@
 //! [`Errno`](rustos_abi::Errno) as [`ChownError::Stat`]; an owner that cannot
 //! be applied is [`ChownError::Apply`]; a directory whose entries cannot be
 //! read during a recursive descent is [`ChownError::Read`]. The first failure
-//! stops the run before any later operand, and there is no panic (`AGENTS.md`
-//! §2.9).
+//! stops the run before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -52,10 +50,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

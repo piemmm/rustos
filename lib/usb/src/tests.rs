@@ -87,7 +87,7 @@ impl DmaRegion for MockDma {
 /// File-scope recorder for the [`DmaSlab`] coherency hook (a bare `fn`
 /// pointer, so the observed call count and length are published through
 /// atomics). Used by a single test so no cross-test race is possible
-/// (`AGENTS.md` §7 — no flaky tests).
+/// (no flaky tests).
 mod slab_coherency_test_state {
     use core::sync::atomic::{AtomicUsize, Ordering};
     pub(super) static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -110,7 +110,7 @@ fn dma_slab_region_brackets_writes_and_reads_with_cache_maintenance() {
     // A leaked 64-byte buffer behind a `DmaSlab` carrying the recording
     // coherency hook — the metal shape where the BCM2711 PCIe master does
     // not snoop the CPU caches, so the `DmaRegion` impl must bracket every
-    // ring publish / event consume with cache maintenance (`AGENTS.md` §4).
+    // ring publish / event consume with cache maintenance.
     let storage = alloc::vec![0u8; 64].into_boxed_slice();
     let phys = storage.as_ptr() as u64;
     let leaked: &'static mut [u8] = alloc::boxed::Box::leak(storage);
@@ -269,7 +269,7 @@ struct MockXhci {
     stall_class_requests: bool,
     /// When set, class requests (`SET_PROTOCOL`) answer a non-STALL
     /// transaction error — a genuine fault `control_optional` must
-    /// still surface (`AGENTS.md` §2.9).
+    /// still surface.
     fault_class_requests: bool,
     /// When set, report completions forge a residual above the TRB
     /// length (a hostile controller claim).
@@ -302,7 +302,7 @@ struct MockXhci {
     hub_powered: u32,
     /// When set, the class `GET_DESCRIPTOR(hub)` reply carries a wrong
     /// `bDescriptorType` — a forged/corrupt descriptor the driver must
-    /// reject fail-closed (`AGENTS.md` §5.4 / §2.9).
+    /// reject fail-closed.
     forge_hub_descriptor: bool,
     /// Whether the default control endpoint is halted. A control
     /// transfer that STALLs halts EP0 in xHCI (§4.8.3 / §4.10.2.4): the
@@ -314,20 +314,20 @@ struct MockXhci {
     /// §11.24.2.7) STALLs — modelling the metal failure where the
     /// hub-descriptor read succeeds but each per-port status read
     /// faults, so the bring-up diagnostic must surface the completion
-    /// code (`AGENTS.md` §15.7).
+    /// code.
     fault_hub_port_status: bool,
     /// When non-zero, every downstream-port class `GET_STATUS` posts a
     /// transfer event carrying this *raw* completion-code byte — used to
     /// model a controller-specific/reserved code the driver does not
     /// decode (the metal `completion_hex=0` was a code the diagnostic
-    /// failed to record, not a true timeout, `AGENTS.md` §15.7).
+    /// failed to record, not a true timeout).
     fault_hub_port_status_raw: u8,
     /// When non-zero, every downstream-port class `GET_STATUS` posts an
     /// event carrying this *raw TRB-type* (rather than a Transfer
     /// Event) — modelling an unexpected asynchronous controller event
     /// reaching the wait, which `await_event_for` rejects fast without
     /// recording a completion code (the metal `completion_hex=0` +
-    /// fast-failure signature, `AGENTS.md` §15.7).
+    /// fast-failure signature).
     fault_hub_port_status_evtype: u8,
     /// Bitmask of downstream hub ports software has reset (bit `n-1` for
     /// port `n`) via a class `SET_FEATURE(PORT_RESET)`; a reset port
@@ -606,8 +606,7 @@ impl MockXhci {
     /// Post an event carrying an arbitrary *raw* TRB-type (control bits
     /// 15:10) at `trb_addr` — so a test can model an unexpected
     /// asynchronous controller event reaching a transfer/command wait,
-    /// which `await_event_for` rejects as an unhandled type
-    /// (`AGENTS.md` §15.7).
+    /// which `await_event_for` rejects as an unhandled type.
     fn post_event_raw_type(&mut self, trb_addr: u64, type_raw: u8) {
         self.post_event(Trb {
             parameter: trb_addr,
@@ -1543,7 +1542,7 @@ fn event_cursor_owned_peeks_without_advancing() {
     // `owned` reports producer ownership by the cycle bit alone and must not
     // advance the cursor — `poll_event` relies on this to read the cycle, then
     // `dma_rmb`, then re-read and `pop` the entry body (the torn-read fix for
-    // non-coherent DMA, `AGENTS.md` §2.16).
+    // non-coherent DMA).
     let mut segment = [Trb::ZERO; 3];
     let mut cursor = EventRingCursor::new(3).expect("segment fits");
     assert_eq!(cursor.owned(&segment), Ok(false), "nothing produced yet");
@@ -1799,7 +1798,7 @@ fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
     // The same VL805-shaped controller, but the engine is denied a region
     // large enough to reserve the 31 scratchpad pages: `start` fails
     // closed (`LengthOutOfRange`) rather than running a controller whose
-    // `DCBAA[0]` it could not program (`AGENTS.md` §5.4 / §2.9).
+    // `DCBAA[0]` it could not program.
     let small: SharedMem = Rc::new(RefCell::new(alloc::vec![0u8; 0x4000]));
     let xhci = Xhci::open(MockXhci::with_device_scratchpad(&small, 31)).expect("bring-up succeeds");
     let dma = MockDma {
@@ -1880,7 +1879,7 @@ fn enumerate_first_connected_finds_the_populated_port() {
 #[test]
 fn enumerate_first_connected_fails_closed_on_an_empty_root_hub() {
     // No port reports a connected device: the scan refuses with
-    // `NotFound` rather than guessing a port (`AGENTS.md` §2.9 / §5.4).
+    // `NotFound` rather than guessing a port.
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
     mock.portsc[0] &= !regs::PORTSC_CCS;
@@ -1957,7 +1956,7 @@ fn enumerate_first_connected_connects_a_port_only_after_power() {
 #[test]
 fn root_port_status_raw_reports_each_port_and_rejects_a_bad_port() {
     // The diagnostic accessor walks every reported port and fails closed
-    // on an out-of-range port (`AGENTS.md` §15.7 / §5.4).
+    // on an out-of-range port.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     assert_eq!(device.root_port_count(), 4);
@@ -2020,9 +2019,9 @@ fn enumerate_hid_records_the_configured_stage_on_success() {
 fn enumerate_hid_fails_closed_on_a_non_stall_class_fault() {
     // A STALL on the optional SET_PROTOCOL is tolerated, but a *genuine*
     // class-request fault (here a USB transaction error) is not optional
-    // — it still fails closed (`AGENTS.md` §2.9), leaving the breadcrumb
+    // — it still fails closed, leaving the breadcrumb
     // at exactly that step with the raw completion code so a metal
-    // capture pins the faulting xHCI operation (`AGENTS.md` §15.7).
+    // capture pins the faulting xHCI operation.
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
     mock.fault_class_requests = true;
@@ -2274,8 +2273,7 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
 
 /// A deterministic [`Delay`] for the host tests: counts `delay_us`
 /// invocations and advances a synthetic monotonic clock, so a test asserts
-/// the hub settle windows were honoured without sleeping (`AGENTS.md` §7 —
-/// no flaky tests).
+/// the hub settle windows were honoured without sleeping (no flaky tests).
 #[derive(Default)]
 struct TestDelay {
     calls: core::cell::Cell<u32>,
@@ -2335,7 +2333,7 @@ fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
     // orchestration recognises the hub, powers its ports, waits the
     // power-on-good window, resets the connected port, waits reset
     // recovery, and addresses the keyboard on a second slot — without the
-    // caller naming a port (`AGENTS.md` §18 — discovered, not guessed).
+    // caller naming a port (discovered, not guessed).
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     // Full-speed downstream device (the metal `wstatus` case: connect, no
@@ -2380,8 +2378,7 @@ fn enumerate_boot_keyboard_descends_through_a_hub_to_the_keyboard() {
 fn enumerate_boot_keyboard_fails_closed_when_a_hub_has_no_connected_downstream() {
     // The root device is a hub, but no downstream port ever reports a
     // connected device. The orchestration must fail closed
-    // (`DriverError::NotFound`) rather than guess a port (`AGENTS.md`
-    // §2.9 / §5.4).
+    // (`DriverError::NotFound`) rather than guess a port.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     // No connect bit, so every downstream port reads disconnected even
@@ -2587,7 +2584,7 @@ fn enumerate_downstream_hid_before_a_hub_is_addressed_fails_closed() {
     // Addressing a downstream device requires a hub already addressed on
     // the active slot (its slot is the route's root and its TT hub).
     // Without one the call fails closed rather than addressing a device
-    // at a guessed topology (`AGENTS.md` §5.4 / §2.9).
+    // at a guessed topology.
     let mem = shared_mem();
     let mock = MockXhci::with_hub(&mem, 4, 4);
     let mut device = started_device(mock, &mem);
@@ -2600,7 +2597,7 @@ fn enumerate_downstream_hid_before_a_hub_is_addressed_fails_closed() {
 #[test]
 fn hub_num_ports_fails_closed_on_a_forged_descriptor() {
     // A hub descriptor with the wrong bDescriptorType is forged/corrupt
-    // and rejected fail-closed (`AGENTS.md` §5.4 / §2.9).
+    // and rejected fail-closed.
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
     mock.forge_hub_descriptor = true;
@@ -2615,8 +2612,7 @@ fn faulting_hub_port_status_records_the_completion_code() {
     // each `wstatus` read as the all-ones sentinel — the per-port class
     // `GET_STATUS` faulted while the hub-descriptor read and Port-Power
     // writes succeeded. The bring-up diagnostic surfaces the raw xHCI
-    // completion code so a metal capture can tell *why* (`AGENTS.md`
-    // §15.7); this pins that a faulting `GET_STATUS` fails closed and
+    // completion code so a metal capture can tell *why*; this pins that a faulting `GET_STATUS` fails closed and
     // leaves `last_completion_code()` at the failing code rather than a
     // stale success.
     let mem = shared_mem();
@@ -2649,7 +2645,7 @@ fn faulting_hub_port_status_records_an_undecodable_completion_code() {
     // `last_completion_code()` at the `0` "no event" sentinel. The fix
     // records the raw code as the event is observed, so a reserved /
     // controller-specific code (here xHCI `7`, Resource Error) survives
-    // for the metal capture (`AGENTS.md` §15.7). This fails before the
+    // for the metal capture. This fails before the
     // fix (code lost to `0`) and passes after.
     const RESOURCE_ERROR: u8 = 7;
     let mem = shared_mem();
@@ -2682,7 +2678,7 @@ fn faulting_hub_port_status_records_an_unexpected_event_type() {
     // now records `last_reject_reason()=1` (unexpected type) and the raw
     // type in `last_event_type()`, while `last_completion_code()` stays
     // `0` truthfully (no completion code was carried), distinguishing
-    // the two (`AGENTS.md` §15.7). Fails before the fix (no such
+    // the two. Fails before the fix (no such
     // accessors / reason lost); passes after.
     let unexpected = TrbType::NoOp.as_u8();
     let mem = shared_mem();
@@ -2877,7 +2873,7 @@ fn describe_device_emits_the_hid_child_node() {
 
     // The generic HID boot-keyboard bind key (`usb_hid::BIND_KEYS`)
     // resolves against the emitted node by class (vendor/product
-    // wildcard), exactly as `devmgr` will (`AGENTS.md` §18.3).
+    // wildcard), exactly as `devmgr` will.
     let keyboard_key = rustos_drv_input_usb_hid::BIND_KEYS[0].key;
     assert!(keyboard_key.matches(&emitted));
     // A boot-mouse bind key must not bind a keyboard interface.
@@ -2890,7 +2886,7 @@ fn describe_device_before_enumeration_fails_closed() {
     let mem = shared_mem();
     let device = started_device(MockXhci::with_device(&mem), &mem);
     // No device enumerated yet: the identity is absent, so the bus
-    // refuses to fabricate a node (`AGENTS.md` §2.9 / §18.5).
+    // refuses to fabricate a node.
     assert_eq!(
         device.describe_device(7, 9).err(),
         Some(DriverError::NotFound)

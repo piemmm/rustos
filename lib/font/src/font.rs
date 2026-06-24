@@ -5,7 +5,7 @@
 //! not cover. [`BitmapFont::draw_text`] composites each glyph onto a
 //! `lib/raster` [`Surface`] through that crate's single premultiplied-alpha
 //! [`Pixel::over`] path, so text blends over whatever is already painted with
-//! no colour arithmetic duplicated here (`AGENTS.md` §2.2).
+//! no colour arithmetic duplicated here.
 
 use rustos_raster::{Color, Pixel, Surface};
 
@@ -13,7 +13,7 @@ use crate::glyphs::{Glyph, FIRST_CHAR, GLYPHS, GLYPH_HEIGHT, GLYPH_WIDTH, LAST_C
 
 /// The fallback glyph for a character outside the atlas: a hollow box (the
 /// conventional "missing glyph" tofu) so an unsupported character is visibly
-/// wrong rather than silently dropped (`AGENTS.md` §2.9).
+/// wrong rather than silently dropped.
 const FALLBACK: Glyph = [
     0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
 ];
@@ -77,7 +77,7 @@ impl BitmapFont {
     /// width with no trailing inter-glyph gap. An empty string is zero wide.
     ///
     /// Arithmetic saturates, so a pathologically long string reports
-    /// [`u32::MAX`] rather than wrapping (`AGENTS.md` §2.9).
+    /// [`u32::MAX`] rather than wrapping.
     #[must_use]
     pub fn text_width(&self, text: &str) -> u32 {
         let count = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
@@ -97,10 +97,9 @@ impl BitmapFont {
     /// keep a label from spilling past its box (the taskbar's clock and task
     /// titles, the file browser's path bar and entry names), so the
     /// fit-to-width arithmetic lives in one place rather than being repeated
-    /// per consumer (`AGENTS.md` §2.2). A `width` too small for even one glyph
+    /// per consumer. A `width` too small for even one glyph
     /// yields the empty string; a `text` that already fits is returned whole.
-    /// Arithmetic saturates, so a pathological width never wraps (`AGENTS.md`
-    /// §2.9).
+    /// Arithmetic saturates, so a pathological width never wraps.
     #[must_use]
     pub fn truncate_to_width<'a>(&self, text: &'a str, width: u32) -> &'a str {
         if width < self.glyph_width {
@@ -120,9 +119,8 @@ impl BitmapFont {
     ///
     /// The pen advances by [`advance`](Self::advance) per character. Pixels
     /// that fall outside the surface (including at negative coordinates) are
-    /// skipped, so off-screen text clips rather than panicking (`AGENTS.md`
-    /// §2.9). Each lit glyph pixel is composited over the destination, so
-    /// translucent text blends correctly (`AGENTS.md` §10).
+    /// skipped, so off-screen text clips rather than panicking. Each lit glyph pixel is composited over the destination, so
+    /// translucent text blends correctly.
     pub fn draw_text(
         &self,
         surface: &mut Surface,

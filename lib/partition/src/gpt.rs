@@ -4,11 +4,10 @@
 //! 1 (signature `"EFI PART"`), and an array of 128-byte partition entries
 //! starting at the LBA the header names. Every field is CRC32-protected.
 //! RustOS reads GPT so a UEFI x86_64 disk is a first-class root device
-//! (`AGENTS.md` §17 — any scheme on any architecture); the write path
+//! (any scheme on any architecture); the write path
 //! lands with the UEFI image builder.
 //!
-//! Parsing is fail-closed against an untrusted disk (`AGENTS.md` §5.4 /
-//! §2.9 / §19.5): the header signature, the header CRC, and the entry-array
+//! Parsing is fail-closed against an untrusted disk: the header signature, the header CRC, and the entry-array
 //! CRC are all checked before any extent is trusted, and a malformed
 //! table is rejected whole.
 
@@ -27,7 +26,7 @@ pub const HEADER_SIGNATURE: [u8; 8] = *b"EFI PART";
 pub const ENTRY_LEN: usize = 128;
 
 /// Fail-closed cap on the declared partition-entry count an untrusted GPT
-/// header may name (`AGENTS.md` §19.5 / §24.4 — a defensive parse bound).
+/// header may name (a defensive parse bound).
 pub const MAX_DECLARED_ENTRIES: u32 = 1024;
 
 /// GPT type GUID of the EFI System Partition (the FAT boot partition),
@@ -78,7 +77,7 @@ pub enum GptError {
 
 /// IEEE CRC-32 (reflected, polynomial `0xEDB8_8320`), as GPT specifies.
 ///
-/// First-party (`AGENTS.md` §2.12); GPT uses the IEEE polynomial, distinct
+/// First-party; GPT uses the IEEE polynomial, distinct
 /// from the CRC-32C used elsewhere, so it is defined here beside its only
 /// consumer rather than shared.
 #[must_use]
@@ -186,7 +185,7 @@ pub fn parse<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<PartitionTabl
     };
 
     // Each logical block must hold at least one entry, or the scan below
-    // could not make forward progress (`AGENTS.md` §2.1 — no spin).
+    // could not make forward progress (no spin).
     if bs < ENTRY_LEN {
         return Err(PartitionError::Gpt(GptError::BadGeometry));
     }

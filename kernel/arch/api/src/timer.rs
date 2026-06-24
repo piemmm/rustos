@@ -1,7 +1,7 @@
-//! Timer-programming surface of the Arch HAL (`AGENTS.md` §17.2
+//! Timer-programming surface of the Arch HAL (
 //! "timer programming").
 //!
-//! RustOS is a **tickless (`NO_HZ`)** kernel (`AGENTS.md` §17.1): the timer
+//! RustOS is a **tickless (`NO_HZ`)** kernel: the timer
 //! is armed *one-shot*, to the next event the scheduler needs, never at a
 //! fixed frequency. Each port owns a per-CPU timer — the x86_64 LAPIC
 //! timer, the aarch64 EL1 generic timer, the riscv64 supervisor (SBI)
@@ -18,18 +18,17 @@
 //! is architecture-neutral (the scheduler makes it — see
 //! [`crate::SchedulerArch::set_preemption`]), and only the per-port
 //! register/MMIO write differs, so the two arming verbs live on this one
-//! HAL surface (`AGENTS.md` §2.2) while their bodies stay genuinely
-//! per-port (§2.21). RustOS arms the timer **one-shot, to the next event
+//! HAL surface while their bodies stay genuinely
+//! per-port. RustOS arms the timer **one-shot, to the next event
 //! the scheduler needs, and leaves it disarmed when a CPU has nothing to
 //! preempt to** — there is no fixed-frequency periodic re-arm anywhere
-//! (PLAN P-4 retired the P-1 100 Hz arming, `AGENTS.md` §17.1). §17.2
+//! (PLAN P-4 retired the P-1 100 Hz arming).
 //! makes the architecture surface a closed set of traits on the HAL;
 //! this module is the "timer programming" member of that set, so the
 //! callback install/dispatch *and* the one-shot arm/disarm live behind
-//! one vocabulary instead of being re-described per port (`AGENTS.md`
-//! §2.2). The parallel per-arch implementations of this one trait are the
-//! deliberate shape of §17.1/§17.2 modularity, never collapsed behind
-//! `cfg` (§2.2 carve-out).
+//! one vocabulary instead of being re-described per port. The parallel per-arch implementations of this one trait are the
+//! deliberate shape of modularity, never collapsed behind
+//! `cfg` (carve-out).
 //!
 //! # What lives here
 //!
@@ -47,8 +46,8 @@
 //!   ([`crate::SchedulerArch::set_preemption`]); the per-port body is the
 //!   LAPIC one-shot count / `CNTP_TVAL_EL0` / SBI `set_timer` / next
 //!   animation-frame request. There is no periodic re-arm: a fired timer
-//!   recurs only if the scheduler arms it again (`AGENTS.md` §17.1).
-//! * [`conformance`] — the §17.2 conformance vertical: a host-run
+//!   recurs only if the scheduler arms it again.
+//! * [`conformance`] — the conformance vertical: a host-run
 //!   [`conformance::run_all`] check every port runs over its [`Timer`]
 //!   handle, proving the installed callback fires on dispatch and that a
 //!   handle with no callback installed dispatches harmlessly.
@@ -69,13 +68,12 @@ use crate::CpuId;
 ///
 /// A `100 Hz` (~10 ms) slice bounds a runaway user task's hold on a
 /// *contended* CPU while costing negligible trap overhead. This is **not**
-/// a periodic tick: RustOS is tickless (`AGENTS.md` §17.1), so the timer
+/// a periodic tick: RustOS is tickless, so the timer
 /// is armed one-shot to one quantum only when a CPU has a competitor, and
 /// disarmed otherwise. The value lives here, once, so the aarch64 and
 /// riscv64 ports (which both derive their per-quantum counter-tick
 /// interval via `interval_for_hz(discovered_hz, DEFAULT_PREEMPT_QUANTUM_HZ)`)
-/// share a single definition rather than each carrying their own copy
-/// (`AGENTS.md` §2.2). The x86_64 port arms its LAPIC one-shot from a
+/// share a single definition rather than each carrying their own copy. The x86_64 port arms its LAPIC one-shot from a
 /// calibration expressed in microseconds and keeps its own period; a port
 /// whose silicon genuinely wants a different slice overrides locally.
 pub const DEFAULT_PREEMPT_QUANTUM_HZ: u64 = 100;
@@ -84,14 +82,12 @@ pub const DEFAULT_PREEMPT_QUANTUM_HZ: u64 = 100;
 ///
 /// `extern "C" fn(CpuId)` rather than a closure: the port stores it in a
 /// lock-free slot and invokes it from interrupt/trap/frame context, so it
-/// must have no captured environment to drop mid-flight (`AGENTS.md`
-/// §2.1). The argument is the firing CPU's [`CpuId`] — the value the
+/// must have no captured environment to drop mid-flight. The argument is the firing CPU's [`CpuId`] — the value the
 /// scheduler needs to advance the right run queue without re-deriving it
 /// on every tick.
 pub type TickFn = extern "C" fn(CpuId);
 
-/// The timer-programming handle an architecture port exposes
-/// (`AGENTS.md` §17.2).
+/// The timer-programming handle an architecture port exposes.
 ///
 /// The kernel installs the scheduler-tick callback once with
 /// [`Self::set_tick_callback`] before any tick can fire, and the port's
@@ -124,10 +120,10 @@ pub trait Timer: Send + Sync {
     /// This is the architecture-neutral half of the port's
     /// interrupt/frame handler. A tick that arrives before any callback
     /// is installed dispatches harmlessly (returns `false`), never a
-    /// panic (`AGENTS.md` §2.9). The port's handler does **not** re-arm
+    /// panic. The port's handler does **not** re-arm
     /// the timer after this returns: RustOS is tickless, so the next fire
     /// happens only if the scheduler arms it again via
-    /// [`Self::arm_oneshot`] (`AGENTS.md` §17.1).
+    /// [`Self::arm_oneshot`].
     fn dispatch_tick(&self, cpu: CpuId) -> bool;
 
     /// Arm the calling CPU's timer **one-shot** to fire once after
@@ -140,10 +136,10 @@ pub trait Timer: Send + Sync {
     /// request). It acts on the **calling** CPU's timer only — a one-shot
     /// deadline is inherently a write to a per-CPU register — so the
     /// scheduler calls it from the CPU whose running task it wants to
-    /// bound (`AGENTS.md` §17.1: armed to the next event the scheduler
+    /// bound (: armed to the next event the scheduler
     /// needs, never at a fixed frequency). A `ticks_from_now` of `0` is
     /// clamped by the port to at least one tick so a degenerate deadline
-    /// cannot wedge the CPU re-trapping with no progress (§2.9).
+    /// cannot wedge the CPU re-trapping with no progress.
     ///
     /// Calling it before any tick callback is installed is permitted; the
     /// fire will dispatch harmlessly (see [`Self::dispatch_tick`]).
@@ -154,15 +150,14 @@ pub trait Timer: Send + Sync {
     ///
     /// The scheduler disarms when the calling CPU has nothing to preempt
     /// to — it is idle or runs a single runnable task — so an otherwise
-    /// quiet core takes no timer interrupts at all (`AGENTS.md` §17.1
-    /// tickless / `NO_HZ`; §2.16 — work paid off the hot path). Like
+    /// quiet core takes no timer interrupts at all (
+    /// tickless / `NO_HZ`; — work paid off the hot path). Like
     /// [`Self::arm_oneshot`] it acts on the calling CPU's per-CPU timer
-    /// only. Disarming an already-stopped timer is a harmless no-op
-    /// (§2.9).
+    /// only. Disarming an already-stopped timer is a harmless no-op.
     fn disarm(&self);
 }
 
-/// The §17.2 timer-programming conformance vertical.
+/// The timer-programming conformance vertical.
 ///
 /// Every architecture port runs [`conformance::run_all`] against its
 /// [`Timer`] handle. The suite is portable — it names only the trait —
@@ -213,8 +208,7 @@ pub mod conformance {
 
     /// Arming a one-shot deadline and disarming are total operations that
     /// never panic for any input — including a zero deadline (clamped by
-    /// the port) and a disarm of an already-stopped timer (`AGENTS.md`
-    /// §2.9). The cross-core *effect* (an interrupt actually firing once)
+    /// the port) and a disarm of an already-stopped timer. The cross-core *effect* (an interrupt actually firing once)
     /// is not observable from a single-threaded host test; it is proven
     /// by the `preempt_el0_qemu_*` verticals. Here we only pin that the
     /// two arming verbs are callable and harmless on the port's real
@@ -229,7 +223,7 @@ pub mod conformance {
     }
 
     /// A freshly observed handle reports no callback and a dispatch on it
-    /// is a harmless no-op that runs nothing (`AGENTS.md` §2.9).
+    /// is a harmless no-op that runs nothing.
     fn no_callback_dispatches_harmlessly<T: Timer + ?Sized>(timer: &T) {
         // The suite installs a callback below; this branch only holds
         // before any install, which a port's handle guarantees by
@@ -346,7 +340,7 @@ pub mod conformance {
             timer.arm_oneshot(42);
             assert_eq!(timer.armed.load(Ordering::Relaxed), 42);
             // A zero deadline is clamped to one tick so the CPU cannot
-            // re-trap with no progress (`AGENTS.md` §2.9).
+            // re-trap with no progress.
             timer.arm_oneshot(0);
             assert_eq!(timer.armed.load(Ordering::Relaxed), 1);
             timer.disarm();

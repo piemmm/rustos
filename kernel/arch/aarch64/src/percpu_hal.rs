@@ -1,4 +1,4 @@
-//! aarch64 per-CPU storage (`AGENTS.md` §17.2 "per-CPU storage").
+//! aarch64 per-CPU storage ("per-CPU storage").
 //!
 //! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
 //! for aarch64 over the **`TPIDR_EL1`** system register — the
@@ -6,14 +6,14 @@
 //! (its EL0 counterpart `TPIDR_EL0` belongs to user-space TLS and is
 //! never touched here). This slice keeps the `TPIDR_EL1` read/write in
 //! exactly one place so the architecture-neutral kernel reaches the
-//! per-CPU word through the one HAL trait (`AGENTS.md` §2.2).
+//! per-CPU word through the one HAL trait.
 //!
 //! The stored word is opaque to this surface: the kernel decides whether
 //! it holds the address of a per-CPU control block or a dense CPU index
 //! (see the [`PerCpu`](rustos_arch_api::PerCpu) trait docs). On the host
 //! build there is no `TPIDR_EL1`, so the handle backs the word with an
 //! in-handle cell solely for the unit tests; it is never linked into a
-//! kernel image (`AGENTS.md` §1).
+//! kernel image.
 
 use core::sync::atomic::AtomicUsize;
 
@@ -29,8 +29,7 @@ use rustos_arch_api::PerCpu;
 pub struct PerCpuStorage {
     /// Host-only backing for the per-CPU word. On the bare-metal target
     /// `TPIDR_EL1` is the source of truth and this field is never read;
-    /// kept so the host and bare-metal builds share one struct shape
-    /// (`AGENTS.md` §1).
+    /// kept so the host and bare-metal builds share one struct shape.
     #[cfg_attr(all(target_arch = "aarch64", target_os = "none"), allow(dead_code))]
     host_base: AtomicUsize,
 }

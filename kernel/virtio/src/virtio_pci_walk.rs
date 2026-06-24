@@ -11,9 +11,8 @@
 //! This module is that walk. It stays driver-agnostic — it reaches
 //! the PCI bus driver only through the frozen [`VirtioPciBus`] ABI
 //! seam and the kernel mapping facility only through [`MmioMapper`],
-//! so ring 0 never names a concrete `drivers/bus/*` type
-//! (`AGENTS.md` §8) and never synthesises a pointer of its own
-//! (`AGENTS.md` §4). The capability check that authorises every
+//! so ring 0 never names a concrete `drivers/bus/*` type and never synthesises a pointer of its own
+//! . The capability check that authorises every
 //! window lives inside the mapper.
 
 use rustos_abi::driver::bus::BusDevice;
@@ -67,7 +66,7 @@ pub enum VirtioPciWalkError {
 /// device's MSI-X interrupt
 /// ([`route_msix`](rustos_abi::driver::msix::MsixBus::route_msix)),
 /// which is keyed by function — the walk already located it, so it is
-/// returned here rather than re-enumerated (`AGENTS.md` §2.2).
+/// returned here rather than re-enumerated.
 #[derive(Debug)]
 pub struct VirtioProvision<T> {
     /// Transport the builder constructed over the kernel-mapped
@@ -90,13 +89,12 @@ pub struct VirtioProvision<T> {
 /// The walk maps the windows but never names a concrete transport
 /// type: the caller passes `build` (in production
 /// `rustos_drv_bus_virtio::PciTransport::new`), so ring 0 depends only
-/// on `lib/*` and never on a `drivers/bus/*` crate (`AGENTS.md`
-/// §17.4 — `kernel/* → lib/*`, never a driver).
+/// on `lib/*` and never on a `drivers/bus/*` crate (`kernel/* → lib/*`, never a driver).
 ///
 /// # Errors
 ///
 /// See [`VirtioPciWalkError`]; every failure mode is reported rather
-/// than panicking (`AGENTS.md` §2.9). The walk touches no device state
+/// than panicking. The walk touches no device state
 /// itself; any device init the transport drives happens inside `build`,
 /// whose [`VirtioError`] is surfaced as
 /// [`VirtioPciWalkError::Transport`].
@@ -190,8 +188,7 @@ mod tests {
 
     /// Identity builder: keeps the assembled windows so the test can
     /// assert on them directly, standing in for a real transport
-    /// constructor without depending on a `drivers/bus/*` crate
-    /// (`AGENTS.md` §17.4).
+    /// constructor without depending on a `drivers/bus/*` crate.
     fn keep_windows() -> impl FnOnce(PciTransportWindows) -> Result<PciTransportWindows, VirtioError>
     {
         |windows| Ok(windows)

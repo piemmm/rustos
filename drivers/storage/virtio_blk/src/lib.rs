@@ -4,12 +4,11 @@
 //! bus-agnostic virtio protocol from `lib/virtio`. The driver is
 //! bus-agnostic: the same source compiles against the PCI and MMIO
 //! transports (from `drivers/bus/virtio`) because both implement the
-//! [`rustos_virtio::Transport`] trait. (`AGENTS.md` §2.2 / §17.4 —
-//! the queue protocol lives once, in `lib/virtio`.)
+//! [`rustos_virtio::Transport`] trait. (the queue protocol lives once, in `lib/virtio`.)
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`VirtioBlk`] is a public *type* re-exported so the driver host
 //! can instantiate it; the host never reaches into the type beyond
 //! the [`Block`] trait.
@@ -17,15 +16,14 @@
 //! # Capabilities
 //!
 //! Loading requires [`CapabilityId::DRV_LOAD`]. The block driver
-//! does not request `CAP_DRV_KERNEL`; it runs in user space per
-//! `AGENTS.md` §4 / §8.
+//! does not request `CAP_DRV_KERNEL`; it runs in user space per.
 //!
 //! # Zero-on-free
 //!
 //! The classified `read_blocks_with_class` / `write_blocks_with_class`
 //! methods honour the sensitive flag by scrubbing the bounce-buffer
 //! staging through [`rustos_virtio::BounceBuffer`]'s drop
-//! impl (`AGENTS.md` §4 / `BufferClass::Sensitive` contract).
+//! impl (`BufferClass::Sensitive` contract).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -50,32 +48,29 @@ const REGISTER_HANDLE_MARKER: u64 = 0x564E_4250_0000_0001; // "VBKP"
 /// driver and nothing else.
 pub const VIRTIO_BLK_DEVICE_ID: u32 = 2;
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries.
+/// The bind priority [`BIND_KEYS`] carries.
 ///
 /// A virtio device-id match is *exact* (the discovered node's probed
 /// device id either is `virtio-blk` or it is not — there is no wildcard,
 /// see [`HwMatchKey::matches`]), so it ranks at the exact-match tier
-/// alongside the other concrete-identity floor drivers (`AGENTS.md`
-/// §18.3 — higher matched priority binds; an unbroken tie is a packaging
+/// alongside the other concrete-identity floor drivers (higher matched priority binds; an unbroken tie is a packaging
 /// defect).
 const BIND_PRIORITY: u16 = 10;
 
-/// This driver's hardware bind table (`AGENTS.md` §18.3): a virtio block
+/// This driver's hardware bind table: a virtio block
 /// device, matched by its virtio device id ([`VIRTIO_BLK_DEVICE_ID`]).
 ///
 /// The single source of truth the signed-manifest bind table is authored
 /// from and the device manager (or the in-kernel bootstrap-floor
-/// catalogue) resolves a discovered node against (`AGENTS.md` §2.2 /
-/// §18.3). The match key carries no transport (PCI vs MMIO) detail: the
+/// catalogue) resolves a discovered node against. The match key carries no transport (PCI vs MMIO) detail: the
 /// same driver binds a virtio-blk device however it is attached, because
-/// the bus-agnostic [`rustos_virtio::Transport`] abstracts the transport
-/// (`AGENTS.md` §2.2 / §17.4).
+/// the bus-agnostic [`rustos_virtio::Transport`] abstracts the transport.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID),
 )];
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -134,8 +129,7 @@ mod wire {
 /// its DMA regions through. The host is *minted per driver load* by
 /// a `VirtioHostFactory` (the seam defined in `lib/virtio`)
 /// and lives only for the duration of that load, so the driver borrows
-/// it for `'h` rather than demanding a `'static` host (`AGENTS.md`
-/// §4 — per-process pools are reclaimed when the driver unloads).
+/// it for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads).
 pub struct VirtioBlk<'h, T: Transport> {
     transport: T,
     queue: SplitQueue,
@@ -180,7 +174,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         // Accept only the features we implement. `VIRTIO_BLK_F_DISCARD`
         // is the sole extended feature negotiated; everything else is
         // declined so the driver never claims behaviour it does not
-        // honour (`AGENTS.md` §2.1).
+        // honour.
         let device_features = transport.device_features();
         let discard_offered = device_features & wire::VIRTIO_BLK_F_DISCARD != 0;
         let driver_features = if discard_offered {

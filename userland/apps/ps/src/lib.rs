@@ -1,11 +1,9 @@
-//! RustOS `ps` — list processes via the System Information API (Stage 6,
-//! `AGENTS.md` §3 `userland/apps/`, §16.6).
+//! RustOS `ps` — list processes via the System Information API (Stage 6 `userland/apps/`).
 //!
 //! RustOS has no `/proc` and no `/sys`. `ps` does not scrape a virtual
 //! filesystem; it issues the typed, versioned, capability-checked
 //! `sysinfo-v1` process-list queries served by `/System/Services/sysinfod`
-//! and has no privileged path that bypasses the capability check
-//! (`AGENTS.md` §16.6). By default it lists the caller's own processes
+//! and has no privileged path that bypasses the capability check. By default it lists the caller's own processes
 //! (the ungated `SELF_PROCESS_LIST`); `-e`/`-A` request every process
 //! (`GLOBAL_PROCESS_LIST`, which the service gates on `CAP_SYSINFO_GLOBAL`).
 //!
@@ -16,7 +14,7 @@
 //! fixed-column row per process. The request framing, the page walk, the
 //! columnar rendering, and the [`Transport`]/[`Output`] seams are shared
 //! with the `sysinfo` CLI through `lib/procinfo` rather than duplicated
-//! here (`AGENTS.md` §2.2); `ps` owns only its own argument grammar, usage
+//! here; `ps` owns only its own argument grammar, usage
 //! banner, and error enum.
 //!
 //! The binary that ships as `ps` wires the real IPC-backed transport and
@@ -31,11 +29,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
+//! `no_std` (with `alloc`); the only dependencies are the
 //! audited `lib/abi` ABI crate and the shared `lib/procinfo` client
-//! helpers, so this userland tool never links a kernel or driver crate
-//! (`AGENTS.md` §17.4). No `unsafe`, and no `unwrap`/`expect`/`panic!` in
-//! production paths (`AGENTS.md` §2.9).
+//! helpers, so this userland tool never links a kernel or driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

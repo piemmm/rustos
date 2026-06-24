@@ -1,7 +1,7 @@
 //! Build script: hand the kernel linker script to `rustc` *only* on the
 //! freestanding `x86_64-unknown-none` target. Mirrors
 //! `tests/integration/scheduler_stress_qemu/build.rs` exactly — both
-//! crates share the same linker script (`AGENTS.md` §2.2 — no
+//! crates share the same linker script (no
 //! duplication).
 
 fn main() {

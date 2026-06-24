@@ -29,7 +29,7 @@
 //! # Result-returning OOM
 //!
 //! `alloc` / `alloc_order` return [`AllocError::OutOfMemory`]; the
-//! allocator never panics on resource exhaustion (`AGENTS.md` §4).
+//! allocator never panics on resource exhaustion.
 
 use alloc::collections::BTreeSet;
 use alloc::vec;

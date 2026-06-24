@@ -3,7 +3,7 @@
 //! Only the exception vectors the tests actually exercise are wired up:
 //! `#GP` (vector 13), `#PF` (vector 14) and `#DF` (vector 8). Every other
 //! vector points to a default trampoline that reports failure to QEMU —
-//! `AGENTS.md` §2.9 forbids silent resets, and §10 requires us to fail
+//! the charter forbids silent resets, and the charter requires us to fail
 //! closed on any unexpected exception.
 //!
 //! The IDT is stored in a per-binary `static mut`. That is the *only*
@@ -98,7 +98,7 @@ pub unsafe fn init(pf: PageFaultHandler) -> &'static Idt {
         let bytes = size_of::<[IdtEntry; IDT_LEN]>();
         assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
         // SAFETY-INVARIANT: the `assert!` proves the truncation cast
-        // is lossless; AGENTS.md §15.10 justified `#[allow]`.
+        // is lossless; justified `#[allow]`.
         #[allow(clippy::cast_possible_truncation)]
         let limit = (bytes - 1) as u16;
         limit
@@ -116,7 +116,7 @@ pub unsafe fn init(pf: PageFaultHandler) -> &'static Idt {
         set_handler(8, df_thunk as *const () as u64);
 
         // Every other vector traps to a default-fail thunk so the kernel
-        // fails closed on an unexpected exception (`AGENTS.md` §10).
+        // fails closed on an unexpected exception.
         for v in 0..IDT_LEN {
             if v != 8 && v != 13 && v != 14 {
                 set_handler(v, default_thunk as *const () as u64);
@@ -168,9 +168,9 @@ extern "C" fn rustos_arch_x86_64_page_fault(error_code: u64, rip: u64) -> ! {
 #[no_mangle]
 extern "C" fn rustos_arch_x86_64_general_protection(error_code: u64, rip: u64) -> ! {
     // GP doesn't fire in either Stage-2 test on a healthy kernel; treat
-    // it as a closed-fail per AGENTS.md §10. `error_code` and `rip` are
+    // it as a closed-fail. `error_code` and `rip` are
     // accepted into the ABI now so adding diagnostics in Stage 3a does
-    // not require a signature change (AGENTS.md §2.4 — no interface
+    // not require a signature change (no interface
     // creep, extend through dispatched callbacks).
     let _ = (error_code, rip);
     crate::qemu_exit::exit_failure();

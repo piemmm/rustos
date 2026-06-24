@@ -4,36 +4,34 @@
 //!
 //! A user-space driver does not map raw physical memory. It maps a
 //! **granted** device resource: when the device manager autoloads a driver
-//! for a hardware-tree node (`AGENTS.md` §18.3) the kernel mints the driver
+//! for a hardware-tree node the kernel mints the driver
 //! one unforgeable handle per [`HwResource`] that node requested — and *no
-//! more* (§4 — no ambient authority). The `mmio_map` syscall takes such a
+//! more* (no ambient authority). The `mmio_map` syscall takes such a
 //! handle (plus the `[offset, offset + len)` sub-region to map) and the
 //! kernel resolves it **against the calling task** through the per-task
 //! grant table that lives in
 //! [`AddressSpaceRegistry`](crate::aspace::AddressSpaceRegistry) (minted at
 //! driver admission, reclaimed when the task is withdrawn on exit — the same
 //! per-process lifecycle as the task's streams and limits, so handle forgery
-//! is rejected exactly as `irq_wait` re-checks its binding, §5.4). This
+//! is rejected exactly as `irq_wait` re-checks its binding). This
 //! module owns the two pieces of the handler that are *not* that table:
 //!
 //! * [`mappable_subwindow`] — the input-validation half: confirm a resolved
 //!   grant names a memory window `mmio_map` can map and the requested
 //!   sub-region lies wholly inside it, returning that sub-region's
-//!   `(phys_base, len)`, or a fail-closed [`Errno`] (`AGENTS.md` §5.4 /
-//!   §24.1).
+//!   `(phys_base, len)`, or a fail-closed [`Errno`].
 //! * [`MmioMapFacility`] — the *mechanism* half: map a validated physical
 //!   window into the caller's live address space. Naming a port's concrete
-//!   page table and direct physical map is irreducibly architecture-specific
-//!   (`AGENTS.md` §17.2 / §17.4), so — like [`crate::memmap::MemMap`] — the
+//!   page table and direct physical map is irreducibly architecture-specific, so — like [`crate::memmap::MemMap`] — the
 //!   concrete producer is installed at boot through a `with_*` builder and
 //!   the handler reaches it through this trait. Until one is installed the
 //!   handler holds [`NULL_MMIO_MAP_FACILITY`], which fails closed with
-//!   [`Errno::NotImplemented`] (`AGENTS.md` §2.9).
+//!   [`Errno::NotImplemented`].
 //!
 //! Keeping the grant *policy* in the per-task registry (where the
-//! capability/grant decision belongs, `AGENTS.md` §5.4) and the page-table
+//! capability/grant decision belongs) and the page-table
 //! *mechanism* behind this trait keeps page-table knowledge out of
-//! `kernel/core` (`AGENTS.md` §17.4).
+//! `kernel/core`.
 
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::Errno;
@@ -57,8 +55,7 @@ pub trait MmioMapFacility: Sync {
     ///
     /// The handler guarantees `len` is non-zero and that
     /// `phys_base + len` does not overflow before calling this. The
-    /// implementation never makes the mapping executable (`AGENTS.md`
-    /// §19.2 — W^X for a register window is meaningless and unsafe) and
+    /// implementation never makes the mapping executable (W^X for a register window is meaningless and unsafe) and
     /// maps into the *running caller's* space (the active address space on
     /// the CPU servicing the syscall), exactly like
     /// [`crate::memmap::MemMap::map`].
@@ -67,7 +64,7 @@ pub trait MmioMapFacility: Sync {
     ///
     /// Returns a stable [`Errno`] — [`Errno::OutOfMemory`] when no
     /// page-table frame or virtual window is available (deterministic OOM,
-    /// never a panic, `AGENTS.md` §4 / §2.9), or another stable code the
+    /// never a panic), or another stable code the
     /// platform reports. The default producer ([`NullMmioMapFacility`])
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
     fn map_window(&self, phys_base: u64, len: usize) -> Result<u64, Errno>;
@@ -79,7 +76,7 @@ pub trait MmioMapFacility: Sync {
 /// through; `device_addr` is the **device-visible** base the driver
 /// programs into the hardware. For a coherent bus (and the QEMU `virt`
 /// stand-in) `device_addr` is the CPU-physical base; a translating inbound
-/// viewport maps it onto the far-side bus address (`AGENTS.md` §18.1).
+/// viewport maps it onto the far-side bus address.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct DmaCarve {
     /// Base user virtual address of the mapped, guard-bracketed buffer.
@@ -93,7 +90,7 @@ pub struct DmaCarve {
 ///
 /// Implemented by the architecture-port-installed producer, mirroring
 /// [`MmioMapFacility`]: the handler has already resolved + owner-checked the
-/// grant and validated its kind/constraint (`AGENTS.md` §5.4 / §18.3); this
+/// grant and validated its kind/constraint; this
 /// trait performs only the carve mechanism — a physically-contiguous,
 /// zeroed, coherent block mapped `RW`, non-executable, guard-bracketed into
 /// the **caller's own** address space, bounded by `addr_limit`.
@@ -104,7 +101,7 @@ pub trait DmaAllocFacility: Sync {
     /// Carve `len` bytes of physically-contiguous, zeroed, coherent DMA
     /// memory into the caller's own address space, bounded so the backing
     /// block lies wholly below `addr_limit` when it is non-zero (the granted
-    /// device addressing constraint, `AGENTS.md` §18.3; `0` declares no
+    /// device addressing constraint; `0` declares no
     /// constraint). Return the buffer's CPU virtual base and its
     /// physically-contiguous base.
     ///
@@ -113,8 +110,7 @@ pub trait DmaAllocFacility: Sync {
     /// # Errors
     ///
     /// Returns a stable [`Errno`] — [`Errno::OutOfMemory`] when no
-    /// contiguous block or page-table frame is available (deterministic OOM,
-    /// `AGENTS.md` §4 / §2.9), [`Errno::OutOfRange`] when the request
+    /// contiguous block or page-table frame is available (deterministic OOM), [`Errno::OutOfRange`] when the request
     /// exceeds the addressing limit or the maximum contiguous block, or
     /// another stable code the platform reports. The default producer
     /// ([`NullDmaAllocFacility`]) returns [`Errno::NotImplemented`].
@@ -124,7 +120,7 @@ pub trait DmaAllocFacility: Sync {
 /// The DMA-alloc facility installed before any real one exists.
 ///
 /// Every carve fails closed with [`Errno::NotImplemented`] — the fail-closed
-/// default `AGENTS.md` §2.9 / §5.4 require. Mirrors [`NullMmioMapFacility`].
+/// default require. Mirrors [`NullMmioMapFacility`].
 #[derive(Debug, Default, Copy, Clone)]
 pub struct NullDmaAllocFacility;
 
@@ -140,7 +136,7 @@ pub static NULL_DMA_ALLOC_FACILITY: NullDmaAllocFacility = NullDmaAllocFacility;
 /// The MMIO-map facility installed before any real one exists.
 ///
 /// Every map fails closed with [`Errno::NotImplemented`] — the fail-closed
-/// default `AGENTS.md` §2.9 / §5.4 require, so a `mmio_map` issued before
+/// default require, so a `mmio_map` issued before
 /// the boot path installs the `kernel/mem` producer announces an inert
 /// interface rather than pretending a window was mapped. Mirrors
 /// [`crate::memmap::NullMemMap`].
@@ -168,7 +164,7 @@ pub static NULL_MMIO_MAP_FACILITY: NullMmioMapFacility = NullMmioMapFacility;
 ///
 /// This is the input-validation half of the `mmio_map` handler, kept here
 /// as a pure function so it is exercised directly by unit tests
-/// (`AGENTS.md` §5.4.3 — validate every input):
+/// (validate every input):
 ///
 /// * the resource must be an MMIO register window
 ///   ([`HwResourceKind::Mmio`]) or an outbound bus window
@@ -180,10 +176,10 @@ pub static NULL_MMIO_MAP_FACILITY: NullMmioMapFacility = NullMmioMapFacility;
 /// * `len` must be non-zero and fit in `usize` on the target;
 /// * `[offset, offset + len)` must lie **wholly inside** the granted
 ///   window (`offset + len <= resource.length()`) — a driver maps a
-///   sub-region *inside* its grant, never past it (`AGENTS.md` §4 — no
-///   ambient authority; §18.3). Mapping a bounded sub-region is what lets a
+///   sub-region *inside* its grant, never past it (no
+///   ambient authority;). Mapping a bounded sub-region is what lets a
 ///   driver granted a large outbound bus aperture map just the single BAR
-///   it enumerated, instead of the whole 1 GiB window (`AGENTS.md` §24.1);
+///   it enumerated, instead of the whole 1 GiB window;
 /// * `base + offset + len` must not overflow the address space.
 ///
 /// # Errors
@@ -211,13 +207,13 @@ pub fn mappable_subwindow(
     // The requested sub-region must lie wholly inside the granted window:
     // `offset + len <= grant length`. A sub-region that escapes the grant
     // would reach memory the driver was never granted, so it is refused
-    // (`AGENTS.md` §5.4 — fail closed; §4 — no ambient authority).
+    // (fail closed; — no ambient authority).
     let end = offset.checked_add(len_u64).ok_or(Errno::OutOfRange)?;
     if end > resource.length() {
         return Err(Errno::OutOfRange);
     }
     // The absolute physical base of the sub-region; an overflow names no
-    // real region (`AGENTS.md` §5.4 — validate every input, never wrap).
+    // real region (validate every input, never wrap).
     let phys_base = resource
         .base()
         .checked_add(offset)
@@ -248,7 +244,7 @@ pub struct DmaConstraint {
 ///
 /// This is the input-validation half of the `dma_alloc` handler, kept here
 /// as a pure function so it is exercised directly by unit tests
-/// (`AGENTS.md` §5.4.3 — validate every input):
+/// (validate every input):
 ///
 /// * the resource must be a [`HwResourceKind::Dma`] constraint — any other
 ///   kind (a register window, an IRQ line, a port range), or an unknown wire
@@ -277,11 +273,11 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
 
 /// Resolve the **device-visible** base address a driver programs into its
 /// hardware from the CPU-physical base the carve produced, honouring the
-/// grant's inbound-viewport translation (`AGENTS.md` §18.1).
+/// grant's inbound-viewport translation.
 ///
 /// This is the output half of the `dma_alloc` handler, kept here as a pure
 /// function so the translation arithmetic is exercised directly by unit
-/// tests (`AGENTS.md` §5.4):
+/// tests:
 ///
 /// * An **untranslated** (coherent) constraint (`translated_base == 0`) — a
 ///   coherent bus, the QEMU `virt` stand-in, the `VideoCore` mailbox carve —
@@ -298,7 +294,7 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
 ///
 /// Every step is checked: a `cpu_phys` below the viewport's CPU base, a
 /// base at or past the aperture top, or a far-side overflow fails closed
-/// with [`Errno::OutOfRange`] (`AGENTS.md` §2.9) rather than handing back a
+/// with [`Errno::OutOfRange`] rather than handing back a
 /// wrapped or out-of-aperture device address.
 ///
 /// # Errors
@@ -361,7 +357,7 @@ mod tests {
         // A small BAR inside a large (1 GiB) outbound bus window: the
         // sub-region's absolute physical base is `grant.base() + offset` and
         // its length is the request, never the whole 1 GiB grant
-        // (`AGENTS.md` §24.1 — the defect this fixes).
+        // (the defect this fixes).
         let bus = HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000);
         assert_eq!(
             mappable_subwindow(&bus, 0x3D50_0000, 0x1000),
@@ -372,7 +368,7 @@ mod tests {
     #[test]
     fn mappable_subwindow_rejects_a_sub_region_escaping_the_grant() {
         // `offset + len` past the granted window would reach memory the
-        // driver was never granted: refused fail-closed (`AGENTS.md` §4).
+        // driver was never granted: refused fail-closed.
         let mmio = HwResource::mmio(0xFE98_0000, 0x4000);
         assert_eq!(
             mappable_subwindow(&mmio, 0x3000, 0x2000),

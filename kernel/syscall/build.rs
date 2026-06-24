@@ -1,7 +1,7 @@
 //! Build-time derivation of [`SYSCALL_TABLE_HASH`].
 //!
-//! `AGENTS.md` §9 makes `rustos_abi::ENCODED_TABLE` the single source of
-//! truth for the `abi-v1` syscall table, and §2.2 forbids a second,
+//! the charter makes `rustos_abi::ENCODED_TABLE` the single source of
+//! truth for the `abi-v1` syscall table, and the charter forbids a second,
 //! hand-maintained definition of anything derived from it. The table's
 //! SHA-256 fingerprint is exactly such a derived value, so it is computed
 //! here at build time rather than committed as a literal: there is no

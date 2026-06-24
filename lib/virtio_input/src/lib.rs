@@ -4,19 +4,19 @@
 //! virtio-input device, implementing [`rustos_abi::driver::input::Input`]
 //! on top of the cross-arch virtio transport from `lib/virtio`. As with
 //! `virtio_blk` / `virtio_net`, the logic is bus-agnostic: the same
-//! source drives the PCI and MMIO transports (`AGENTS.md` §2.2 — the
+//! source drives the PCI and MMIO transports (the
 //! queue protocol lives once, in the transport crate).
 //!
 //! It lives in `lib/*` so both the in-kernel `-M virt` input verticals
 //! and the user-space input-driver process compose it without a
-//! `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2 — the
+//! `drivers/*`→`drivers/*` dependency (the
 //! virtio analogue of `lib/hid` ↔ `drivers/input/usb_hid`). The thin
 //! `drivers/input/virtio_input` crate keeps only the §8 `register` entry
-//! and the §18.3 bind table built from [`VIRTIO_INPUT_DEVICE_ID`].
+//! and the bind table built from [`VIRTIO_INPUT_DEVICE_ID`].
 //!
 //! # Wire protocol
 //!
-//! Virtio 1.1 §5.8. A virtio-input device exposes two virtqueues —
+//! Virtio 1.1. A virtio-input device exposes two virtqueues —
 //! the **eventq** (index 0), on which the device delivers
 //! `struct virtio_input_event` records to the driver, and the
 //! **statusq** (index 1), on which the driver returns status (LEDs,
@@ -57,7 +57,7 @@ use rustos_virtio::{
 /// bind table's match key is built from it, so a discovered virtio node
 /// whose probed device id is 18 binds that driver and nothing else; it
 /// lives here as the single source of truth the device logic and the
-/// driver crate's `BIND_KEYS` both depend on (`AGENTS.md` §2.2 / §18.3).
+/// driver crate's `BIND_KEYS` both depend on.
 pub const VIRTIO_INPUT_DEVICE_ID: u32 = 18;
 
 /// Virtio-input wire-protocol constants (virtio 1.1 §5.8 + the Linux
@@ -112,7 +112,7 @@ mod wire {
 /// Returns `None` for frame markers (`EV_SYN`) and any `type`/`code`
 /// this `abi-v1` input surface does not model, so the caller treats a
 /// consumed-but-unmapped event as "no event" rather than fabricating a
-/// bogus one (`AGENTS.md` §2.9 — fail closed, never guess).
+/// bogus one (fail closed, never guess).
 fn decode_event(etype: u16, code: u16, value: i32) -> Option<InputEvent> {
     // `EV_SYN` is kept as its own arm: a frame separator is a distinct,
     // expected protocol case (virtio 1.1 §5.8.6) that we deliberately
@@ -159,8 +159,7 @@ fn decode_event(etype: u16, code: u16, value: i32) -> Option<InputEvent> {
 /// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
 /// its DMA regions through; the host is minted per driver load and
 /// lives only for the duration of that load, so the driver borrows it
-/// for `'h` rather than demanding a `'static` host (`AGENTS.md` §4 —
-/// per-process pools are reclaimed when the driver unloads). This
+/// for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads). This
 /// mirrors [`VirtioNet`](../rustos_drv_network_virtio_net/struct.VirtioNet.html).
 pub struct VirtioInput<'h, T: Transport> {
     transport: T,
@@ -267,7 +266,7 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             .add_chain(&segments)
             .map_err(VirtioError::as_driver_error)?;
         // `head` is queue-assigned (the driver's own free list), so it is
-        // always in range; guard anyway and fail closed (§5.4).
+        // always in range; guard anyway and fail closed.
         *event_bufs
             .get_mut(head as usize)
             .ok_or(DriverError::DeviceFault)? = Some(buf);
@@ -281,7 +280,7 @@ impl<T: Transport> Input for VirtioInput<'_, T> {
             return Err(DriverError::BufferTooSmall);
         }
         // Drain whatever the device has already completed; only park the
-        // CPU (interrupt-driven, never a busy-spin — `AGENTS.md` §2.1)
+        // CPU (interrupt-driven, never a busy-spin)
         // when nothing is pending, then drain once more.
         let mut count = self.drain_ready(events)?;
         if count == 0 {
@@ -299,7 +298,7 @@ impl<T: Transport> VirtioInput<'_, T> {
     ///
     /// Frame separators (`EV_SYN`), unmodelled events, and short
     /// completions consume and replenish a buffer without yielding an
-    /// `InputEvent` (fail closed — never decode stale bytes, §5.4), so a
+    /// `InputEvent` (fail closed — never decode stale bytes), so a
     /// single keypress's `EV_KEY`+`EV_SYN` pair surfaces exactly one
     /// event.
     fn drain_ready(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {

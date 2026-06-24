@@ -1,7 +1,7 @@
 //! Error types for the scheduler contract.
 //!
 //! All scheduler entry points return a typed `Result` — `panic!` / `unwrap`
-//! are forbidden in production paths (`AGENTS.md` §2.9). Each variant
+//! are forbidden in production paths. Each variant
 //! describes a single, recoverable failure mode; callers are expected to
 //! match exhaustively.
 
@@ -12,7 +12,7 @@ use core::fmt;
 /// The variants are deliberately coarse: scheduler entry points are called
 /// from interrupt-safe paths and should not branch on detailed sub-codes.
 /// Refine only when a new caller has a concrete reason to distinguish two
-/// failure modes (`AGENTS.md` §2.4 — no interface creep).
+/// failure modes (no interface creep).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SchedError {
@@ -64,7 +64,7 @@ mod tests {
     fn display_covers_every_variant() {
         // Iterating manually rather than using `strum` so the test
         // breaks loudly if a new variant lands without a `Display`
-        // arm (`AGENTS.md` §13 — docs in sync with behaviour).
+        // arm (docs in sync with behaviour).
         for v in [
             SchedError::QueueFull,
             SchedError::NoSuchTask,

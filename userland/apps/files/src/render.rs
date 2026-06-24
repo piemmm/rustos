@@ -5,15 +5,14 @@
 //! [`Palette`] for every colour and the shared [`BitmapFont`] for every label.
 //! The surface is the window manager's to place and round: the browser paints
 //! a *rectangular* buffer and the compositor applies any corner radius through
-//! its single anti-aliased rounded-corner path (`AGENTS.md` §2.2). There is no
+//! its single anti-aliased rounded-corner path. There is no
 //! rounding — and no colour algebra — here.
 //!
 //! The top row is a path bar showing the current directory; the rows below it
 //! list the entries, one per line, the selected entry highlighted with the
 //! accent role. When there are more entries than fit, the list scrolls so the
 //! selected entry stays visible. Every length saturates and every blit clips,
-//! so a degenerate viewport paints nothing rather than panicking (`AGENTS.md`
-//! §2.9).
+//! so a degenerate viewport paints nothing rather than panicking.
 
 use alloc::string::String;
 
@@ -38,7 +37,7 @@ const ROW_PADDING: u32 = 2;
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
 /// dimensions cannot be allocated (a surface that could never exist), so the
-/// caller fails closed rather than panicking (`AGENTS.md` §2.9).
+/// caller fails closed rather than panicking.
 #[must_use]
 pub fn render<S: DirectorySource>(
     browser: &Browser<S>,
@@ -153,7 +152,7 @@ fn first_visible(selected: Option<usize>, visible_rows: usize) -> usize {
 
 /// Draw `text` leading-aligned and vertically centred within the row spanning
 /// the full surface width at top `y` with height `row_height`. Text wider than
-/// the row is truncated to what fits (`AGENTS.md` §2.9).
+/// the row is truncated to what fits.
 fn draw_label(
     surface: &mut Surface,
     font: &BitmapFont,

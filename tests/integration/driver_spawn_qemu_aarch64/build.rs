@@ -4,13 +4,13 @@
 //! Three jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
-//!    per-board script the architecture port owns — `AGENTS.md` §2.2) and dump
+//!    per-board script the architecture port owns) and dump
 //!    the canonical QEMU `virt` flattened device tree, embedding it so the test
 //!    discovers the GICv2 base and the generic-timer rate from the firmware
 //!    tree (`plans/PI.md` P3/P4). QEMU's `-kernel <ELF>` aarch64 path passes no
 //!    DTB pointer (`x0 = 0`), so the board tree is embedded at build time; the
 //!    dump helper lives in the shared harness so no aarch64 build script
-//!    re-rolls it (`AGENTS.md` §2.2).
+//!    re-rolls it.
 //! 2. Compile the pure-Rust driver-stub fixture program
 //!    (`tests/integration/driver_register_program`) **position-independent**
 //!    for the freestanding aarch64 target (its own `program.ld` roots
@@ -21,7 +21,7 @@
 //!    [`USER_BIAS`] the production spawn producer maps every child image at and
 //!    stamping the kernel's compiled-in syscall CFI tag
 //!    (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -29,7 +29,7 @@
 //! compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -41,9 +41,8 @@ use std::process::Command;
 /// spawn producer's image bias (`spawn_with` passes it to
 /// `build_process_image`, so the `rxe`'s baked relocations must target the
 /// same value). It is the shared [`rustos_itest_harness::USER_IMAGE_BIAS`]
-/// definition (`AGENTS.md` §2.2); the test kernel asserts it agrees with the
-/// producer's `SHELL_USER_BIAS` at runtime and fails closed on a mismatch
-/// (`AGENTS.md` §2.9).
+/// definition; the test kernel asserts it agrees with the
+/// producer's `SHELL_USER_BIAS` at runtime and fails closed on a mismatch.
 use rustos_itest_harness::USER_IMAGE_BIAS as USER_BIAS;
 
 /// Rust target triple of the freestanding aarch64 build.
@@ -69,7 +68,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel itself links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -103,7 +102,7 @@ const DRIVER_SIGNING_SEED: [u8; 32] = *b"rustos-driver-spawn-vertical/v1!";
 /// reply (`MEM_DMA`, the reply port's send gate, plus `IRQ_BIND`). The
 /// signature covers `header[..signed_end] || cap_body || bind_table ||
 /// payload`, exactly what `drvhost::Host::verify_signature` reconstructs
-/// (`AGENTS.md` §8 / §2.17 — the payload program is authenticated). The bind
+/// (the payload program is authenticated). The bind
 /// table is empty: the device manager matches against the candidate bind
 /// keys the kernel constructs, and a malformed/forged image still fails the
 /// gate (the bind-table decode path is covered by `drvhost`'s
@@ -118,11 +117,11 @@ fn write_driver_image_fixture(path: &std::path::Path, rxe: &[u8]) {
         (Vec::new(), [0u8; 32])
     } else {
         // The shared composer assembles + signs the bundle from the one
-        // manifest wire definition (`AGENTS.md` §2.2): a `kind = UserSpace`
+        // manifest wire definition: a `kind = UserSpace`
         // image requesting the driver-class caps the spawned stub needs to
         // reply, with an empty bind table (the device manager matches against
         // the candidate bind keys the kernel constructs), signed so the
-        // signature covers the payload (`AGENTS.md` §2.17).
+        // signature covers the payload.
         let signed = build_signed_driver_image(
             &DRIVER_SIGNING_SEED,
             DriverKind::UserSpace,
@@ -176,7 +175,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -233,8 +232,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 /// The converted stub `rxe` bytes are not emitted on their own: they are
 /// embedded as the *payload* of the signed `DRIVER_IMAGE`
 /// ([`write_driver_image_fixture`]), which is what the `SpawnDriverLoader`
-/// gate admits and spawns. Emitting a second loose copy would be unused
-/// (`AGENTS.md` §2.14).
+/// gate admits and spawns. Emitting a second loose copy would be unused.
 fn write_bias_fixture(path: &std::path::Path) {
     let mut out = String::new();
     out.push_str("// Auto-generated by build.rs. DO NOT EDIT.\n");

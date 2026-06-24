@@ -1,5 +1,5 @@
 //! Cross-CPU TLB shootdown on x86_64 (the `plans/WIRING.md` W6 slice of
-//! the Arch HAL "TLB shootdown" surface, `AGENTS.md` §17.2).
+//! the Arch HAL "TLB shootdown" surface).
 //!
 //! x86_64 has no broadcast TLB-invalidation instruction: `invlpg` only
 //! affects the CPU that executes it. To make a page-table edit globally
@@ -29,8 +29,7 @@
 //!
 //! The spin in step 5 is a genuine, bounded synchronisation — every
 //! targeted CPU has interrupts enabled in the kernel idle/work loop and
-//! will service the IPI — not a "retry until it works" bring-up hack
-//! (`AGENTS.md` §2.1): under-invalidating (returning before a CPU has
+//! will service the IPI — not a "retry until it works" bring-up hack: under-invalidating (returning before a CPU has
 //! flushed) is the only failure mode, so the initiator *must* wait for
 //! the acknowledge. Deadlock is impossible because only the lock holder
 //! sends IPIs, and a CPU spinning to *acquire* the lock still services
@@ -42,7 +41,7 @@
 //! `target_os = "none"`: they reach LAPIC MMIO and the per-CPU IDT.
 //! The host build carries none of them; the [`X86_64Arch`] shootdown
 //! impl is a vacuous no-op there (there is no second CPU and no TLB),
-//! and the §17.2 conformance vertical asserts only that the call is
+//! and the conformance vertical asserts only that the call is
 //! total and panic-free. The real cross-CPU round-trip is proven by the
 //! `cross_cpu_tlb_shootdown_qemu_x86_64` QEMU vertical.
 //!
@@ -93,9 +92,9 @@ static SHOOTDOWN: ShootdownMailbox = ShootdownMailbox {
 /// caller). An empty iterator degrades to a purely local `invlpg`. The
 /// iterator is taken `Clone` rather than as a `&[u8]` so the caller can
 /// stream the ids straight out of its caller-sized per-CPU map without a
-/// fixed `MAX_CPUS` scratch buffer (`AGENTS.md` §24.1); `shootdown` walks
+/// fixed `MAX_CPUS` scratch buffer; `shootdown` walks
 /// it twice — once to publish the acknowledge count, once to raise the
-/// IPIs — so it must be cheap to re-walk (`AGENTS.md` §2.16).
+/// IPIs — so it must be cheap to re-walk.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn shootdown<I>(vaddr: u64, targets: I)
 where
@@ -160,7 +159,7 @@ fn invlpg(vaddr: u64) {
     // discards a cached translation. No Rust spelling exists. This is the
     // same instruction `crate::paging`'s local `TlbShootdown::flush_page`
     // issues (the local-invalidation primitive); the cross-CPU initiator
-    // and the per-target ISR below both reuse it (`AGENTS.md` §2.2).
+    // and the per-target ISR below both reuse it.
     unsafe {
         core::arch::asm!(
             "invlpg [{addr}]",
@@ -202,7 +201,7 @@ unsafe extern "C" fn rustos_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut Saved
     // Acknowledge last, with `Release`, so the remote `invlpg` above is
     // ordered before the initiator's `Acquire` load observes the
     // decrement. `saturating_sub`-style guard: a spurious delivery with
-    // `pending == 0` must not wrap the counter (`AGENTS.md` §2.9).
+    // `pending == 0` must not wrap the counter.
     let prev = SHOOTDOWN.pending.load(Ordering::Relaxed);
     if prev != 0 {
         SHOOTDOWN.pending.fetch_sub(1, Ordering::Release);

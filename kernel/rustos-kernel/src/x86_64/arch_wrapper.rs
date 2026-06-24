@@ -34,7 +34,7 @@ use rustos_sync::once::OnceCell;
 /// Used by the freestanding external-IRQ Rust dispatcher
 /// ([`production_external_irq_dispatch`]) to translate a vector hit
 /// into an [`IrqTable::fire`] call. The `OnceCell` enforces the
-/// one-shot-publish invariant (`AGENTS.md` §2.1).
+/// one-shot-publish invariant.
 static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
 
 /// Set-once slot for the `'static` [`IrqController`] the external-IRQ
@@ -54,7 +54,7 @@ static IRQ_CONTROLLER_SLOT: OnceCell<&'static (dyn IrqController + Send + Sync)>
 /// the `pub(crate)` `KernelState`. The slot stores its own clone of
 /// the map, so the live kernel allocator and any observer-built
 /// allocator draw from the same firmware description but never share a
-/// mutable handle (`AGENTS.md` §2.1 — one-shot publish).
+/// mutable handle (one-shot publish).
 static MEMORY_MAP_SLOT: OnceCell<BootMemoryMap> = OnceCell::new();
 
 /// Production external-IRQ dispatcher.
@@ -94,7 +94,7 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
     // Wake any `irq_wait` caller parked on a bound line: `fire` set the
     // per-line ready flag (after masking — mask-before-wake holds). A
     // spurious wake for a waiter on a different line is harmless — it
-    // re-checks its own line and parks again (`AGENTS.md` §2.1 / §2.16).
+    // re-checks its own line and parks again.
     // Wait-free and allocation-free, safe from this interrupt context.
     rustos_kernel_core::irq_wake();
 }
@@ -109,11 +109,11 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
 /// of a `yield` syscall: the task is re-enqueued at its priority and the
 /// scheduler picks the next runnable task, giving EEVDF-ordered
 /// time-slicing. This is the x86_64 sibling of the aarch64/riscv64
-/// `production_preempt_dispatch` (`AGENTS.md` §2.21 — one shape over the
+/// `production_preempt_dispatch` (one shape over the
 /// Arch HAL). [`reschedule_current`] returns `false` when no resumable
 /// user kthread is published on `cpu` (unreachable from ring 3 with none
 /// switched in, but the fail-closed return means a stray invocation is a
-/// harmless no-op rather than an unsound switch — `AGENTS.md` §2.9). The
+/// harmless no-op rather than an unsound switch). The
 /// call only ever runs after the ISR has written the LAPIC EOI, so the
 /// in-service bit is already released across the context switch, and the
 /// ISR brackets it with the `swapgs` pair that balances the kthread
@@ -131,7 +131,7 @@ extern "C" fn production_preempt_dispatch(cpu: CpuId) {
 /// re-armed to the next pending deadline
 /// ([`rustos_kernel_core::timed_wake_sweep`]), so a finite `hw_tree_wait`
 /// timeout fires even when the CPU is otherwise idle (every task parked)
-/// and takes no preemption tick (`AGENTS.md` §17.1). It is pure accounting
+/// and takes no preemption tick. It is pure accounting
 /// (it never context-switches), so it is safe on a tick taken in ring 0;
 /// the *preemption* of a ring-3 task is the separate
 /// [`production_preempt_dispatch`] ring-3-only callback.
@@ -151,8 +151,8 @@ extern "C" fn production_tick_dispatch(_cpu: CpuId) {
 /// [`IrqTable::bind`] / [`IrqTable::try_wait_step`] against the live
 /// table without re-borrowing the `pub(crate)` `KernelState`.
 ///
-/// AGENTS.md §2.1 (one-shot publish): the returned reference is to a
-/// `'static` table; once visible it cannot be replaced. AGENTS.md §2.4
+/// (one-shot publish): the returned reference is to a
+/// `'static` table; once visible it cannot be replaced.
 /// (no interface creep): this accessor performs only a read of
 /// already-published state — no new writable surface is exposed.
 #[must_use]
@@ -184,7 +184,7 @@ pub fn published_irq_controller() -> Option<&'static (dyn IrqController + Send +
 /// the original is moved into the `kernel_core` hand-off. A second
 /// call is a no-op (`OnceCell::set` rejects it); the boot pipeline
 /// only ever calls this once, so the discarded `Err` cannot mask a
-/// real defect (`AGENTS.md` §2.1 — one-shot publish).
+/// real defect (one-shot publish).
 pub fn publish_memory_map(map: &BootMemoryMap) {
     let _ = MEMORY_MAP_SLOT.set(map.clone());
 }
@@ -194,7 +194,7 @@ pub fn publish_memory_map(map: &BootMemoryMap) {
 ///
 /// Returns `None` until `boot::try_boot` has published the map. The
 /// returned reference is to the `'static` slot-owned clone; the
-/// accessor exposes no writable surface (`AGENTS.md` §2.4). A
+/// accessor exposes no writable surface. A
 /// driver-bring-up observer uses it to construct a per-device DMA
 /// [`rustos_kernel_mem::FrameAllocator`] from the same firmware
 /// description the live kernel allocator was built against.
@@ -214,7 +214,7 @@ pub fn published_memory_map() -> Option<&'static BootMemoryMap> {
 /// arch crate's [`Rdtsc`] reader and converts the tick count into
 /// nanoseconds via [`Calibration::tsc_ticks_to_ns`] — the same TSC
 /// frequency the boot path measured against the PIT
-/// (`AGENTS.md` §2.4 — no parallel measurement, no interface creep).
+/// (no parallel measurement, no interface creep).
 pub struct BinArch {
     arch: X86_64Arch,
     calibration: Calibration,
@@ -297,19 +297,19 @@ impl SchedulerArch for BinArch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): forward the scheduler's
+        // Tickless preemption: forward the scheduler's
         // arm/disarm decision to the arch port, which programs the
         // LAPIC-timer one-shot. The default no-op would silently drop
-        // preemption, so the delegation is required (§2.9).
+        // preemption, so the delegation is required.
         self.arch.set_preemption(armed);
     }
 
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
         // Forward the nearest blocking-wait deadline to the arch port,
         // which combines it with the quantum and arms the single
-        // LAPIC-timer one-shot to the earlier (`AGENTS.md` §17.1). The
+        // LAPIC-timer one-shot to the earlier. The
         // default no-op would silently drop timed wakes, so the delegation
-        // is required (§2.9).
+        // is required.
         self.arch.set_wakeup(deadline_ns);
     }
 }
@@ -338,8 +338,8 @@ impl KernelArch for BinArch {
     fn install_irq_dispatch(&self, table: &'static IrqTable) {
         // Publish the IrqTable into the dispatcher slot. A second
         // publish (e.g. a stray re-call from a future code path)
-        // is fail-closed via `arch_halt` — `AGENTS.md` §2.1 (one-shot
-        // publish) and §5.4.5 (fail closed). The boot pipeline calls
+        // is fail-closed via `arch_halt` (one-shot
+        // publish) and (fail closed). The boot pipeline calls
         // `install_irq_dispatch` exactly once per boot, so the halt
         // branch is unreachable in production.
         if IRQ_TABLE_SLOT.set(table).is_err() {
@@ -360,20 +360,18 @@ impl KernelArch for BinArch {
         // the LAPIC-timer ISR forwards each user-mode tick to. The timer
         // was programmed **one-shot and left disarmed** during boot
         // (`preempt::init_local_preempt`, the production boot's step 8);
-        // RustOS is tickless (`AGENTS.md` §17.1), so the scheduler arms
+        // RustOS is tickless, so the scheduler arms
         // the one-shot to one quantum (via `X86_64Arch::set_preemption`)
         // only when it dispatches onto a contended CPU and disarms
         // otherwise. The kernel runs with `RFLAGS.IF == 0` (it issues no
         // `sti`), so no tick is *taken* until `init` drops to ring 3 with
         // `IF` set (`userentry`), by which point a user kthread is
         // published — so installing the callback here, in the kernel-core
-        // `Irq` phase before `BootCompleted`, is race-free and additive
-        // (`AGENTS.md` §2.17): it cannot preempt the cooperative kernel,
+        // `Irq` phase before `BootCompleted`, is race-free and additive: it cannot preempt the cooperative kernel,
         // only a runaway user task. No scheduler-tick callback is installed
-        // — EEVDF is tickless, so the timer is armed solely to preempt
-        // (`AGENTS.md` §2.3); the timed-wake sweep a deadline-bearing
+        // — EEVDF is tickless, so the timer is armed solely to preempt; the timed-wake sweep a deadline-bearing
         // blocking wait needs (P-2) installs its tick consumer then, not
-        // ahead of it (§2.4). `set_preempt_callback` is an idempotent
+        // ahead of it. `set_preempt_callback` is an idempotent
         // pointer store (not a one-shot slot), so no fail-closed re-call
         // guard is needed here.
         rustos_arch_x86_64::preempt::set_preempt_callback(production_preempt_dispatch);
@@ -381,18 +379,16 @@ impl KernelArch for BinArch {
         // Install the per-tick timed-wake sweep callback (Design D P-2), so
         // every tick — including one taken on an idle ring-0 CPU armed
         // solely for a blocking-wait deadline — releases any elapsed waiter
-        // and re-arms the one-shot to the next deadline (`AGENTS.md`
-        // §17.1). `set_timer_callback` is an idempotent pointer store, so
+        // and re-arms the one-shot to the next deadline. `set_timer_callback` is an idempotent pointer store, so
         // no fail-closed re-call guard is needed.
         rustos_arch_x86_64::preempt::set_timer_callback(production_tick_dispatch);
     }
 
     fn wait_for_interrupt(&self) {
-        // The tickless idle wait (`AGENTS.md` §17.1): the ring-0 dispatch
-        // loop runs with `RFLAGS.IF == 0` (the kernel is non-preemptible,
-        // §4 — it issues no `sti`), so a wake delivered between the loop's
+        // The tickless idle wait: the ring-0 dispatch
+        // loop runs with `RFLAGS.IF == 0` (the kernel is non-preemptible — it issues no `sti`), so a wake delivered between the loop's
         // `step` and here stays *pending* rather than being taken, and no
-        // edge is lost (the race-free park, §2.1). The `sti; hlt` pair is
+        // edge is lost (the race-free park). The `sti; hlt` pair is
         // atomic with respect to interrupt delivery — `sti` enables `IF`
         // only *after* the following instruction, so the pending interrupt
         // is taken during `hlt` (waking it), the timer/IRQ handler unparks
@@ -409,7 +405,7 @@ impl KernelArch for BinArch {
             // `hlt` only wakes with `IF == 1`, so unlike the aarch64/riscv64
             // `wfi` this primitive must itself enable interrupts across the
             // halt; the `sti`-then-`hlt` pair is atomic so a pending
-            // interrupt is taken during `hlt` and no wake is lost (§2.1).
+            // interrupt is taken during `hlt` and no wake is lost.
             unsafe {
                 core::arch::asm!("sti; hlt; cli", options(nomem, nostack, preserves_flags));
             }
@@ -419,11 +415,11 @@ impl KernelArch for BinArch {
     fn set_device_irqs(&self, enabled: bool) {
         // Toggle this CPU's maskable-interrupt flag (`RFLAGS.IF`) so the
         // ring-0 dispatch loop runs in-kernel tasks/kthreads with device
-        // interrupts enabled (`AGENTS.md` §17.1 — the fully preemptive
+        // interrupts enabled (the fully preemptive
         // kernel), masking them only around the idle park and before halt.
         // Enabling `IF` in ring 0 is safe: the LAPIC-timer ISR gates
         // preemption on the interrupted `CS` (a ring-0 tick runs lock-free
-        // accounting but never reschedules the kernel, §4), and an IO-APIC
+        // accounting but never reschedules the kernel), and an IO-APIC
         // device IRQ forwards to the lock-free dispatcher. On a host build
         // there is no ring 0, so this is a benign no-op.
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
@@ -454,7 +450,7 @@ impl KernelArch for BinArch {
         // arch port that needs per-CPU offset compensation would feed
         // it into a `cpu_to_tsc_offset` table read here; nothing in the
         // current SMP bring-up populates such a table, so reading it
-        // would be a stub (`AGENTS.md` §15.1) and is omitted.
+        // would be a stub and is omitted.
         let mut rdtsc = Rdtsc;
         let ticks = rdtsc.read();
         self.calibration.tsc_ticks_to_ns(ticks)
@@ -467,13 +463,13 @@ impl KernelArch for BinArch {
 // `unreachable!()`-followed return type). This is the pattern called
 // out by the arch crate's `_HALT_RETURNS_NEVER` const assertion;
 // repeating it here pins the impl on this side of the wrapper too —
-// `AGENTS.md` §2.10 (encode the invariant in the type system).
+// (encode the invariant in the type system).
 const _BIN_ARCH_HALT_RETURNS_NEVER: fn(&BinArch) -> ! = <BinArch as KernelArch>::halt;
 
 // SAFETY-INVARIANT: `BinArch` implements `SchedulerArch`. A regression
 // that broke the super-trait impl (e.g. a missing `current_cpu`)
 // would surface at this `const _` coercion before the kernel binary
-// linked. `AGENTS.md` §2.4 — no interface creep — applies in both
+// linked. — no interface creep — applies in both
 // directions: shrinking the surface is a defect too.
 const _BIN_ARCH_IS_SCHED_ARCH: fn(&BinArch) -> u32 = <BinArch as SchedulerArch>::current_cpu;
 
@@ -490,10 +486,8 @@ mod tests {
 
     fn arch_with_boot_cpu(boot_cpu: u32, lapic: u8) -> X86_64Arch {
         // Each construction leaks its own per-CPU backing so no two
-        // handles share IPI counters under the parallel test runner
-        // (`AGENTS.md` §7); the leak is bounded (one per host test) and
-        // the bin crate already has an allocator (`AGENTS.md` §24.1 —
-        // allocator-having callers may provide leaked storage).
+        // handles share IPI counters under the parallel test runner; the leak is bounded (one per host test) and
+        // the bin crate already has an allocator (allocator-having callers may provide leaked storage).
         let storage: &'static X86_64ArchStorage<TEST_CPUS> =
             Box::leak(Box::new(X86_64ArchStorage::new()));
         let mut map = [None; TEST_CPUS];
@@ -562,8 +556,7 @@ mod tests {
         // (via `Rdtsc`) and converts through `Calibration::tsc_ticks_to_ns`.
         // RDTSC is monotonically non-decreasing on every x86_64 CPU
         // RustOS is built on, including the CI host, so two
-        // consecutive reads must satisfy `a <= b` (`AGENTS.md` §7 —
-        // no flaky tests; we assert a non-strict ordering because
+        // consecutive reads must satisfy `a <= b` (no flaky tests; we assert a non-strict ordering because
         // the conversion can compress two close ticks onto the same
         // ns value).
         let arch = bin_arch_with_unsupported_routing(0, 0xA0);
@@ -608,7 +601,7 @@ mod tests {
     /// Because the test runner serialises tests within a single
     /// process, the assertion is deterministic: whichever
     /// `IrqRouting::controller` was published first is what every
-    /// subsequent reader observes (AGENTS.md §2.1 — one-shot publish).
+    /// subsequent reader observes (one-shot publish).
     #[test]
     fn published_irq_controller_returns_set_once_pointer() {
         // Ensure at least one BinArch has been constructed in this
@@ -636,7 +629,7 @@ mod tests {
     /// accessor must remain `None` for the duration of this test
     /// regardless of test-ordering. Should a future test publish a
     /// table, this assertion will surface the change and the test
-    /// can be relaxed in the same commit (AGENTS.md §15.3 — no
+    /// can be relaxed in the same commit (no
     /// silent weakening).
     #[test]
     fn published_irq_table_is_none_until_install_dispatch_runs() {
@@ -650,7 +643,7 @@ mod tests {
     /// `'static` clone of the firmware map. This test is the only
     /// publisher of `MEMORY_MAP_SLOT` in the process, so the set-once
     /// slot deterministically reflects the map published here
-    /// (`AGENTS.md` §2.1 — one-shot publish).
+    /// (one-shot publish).
     #[test]
     fn published_memory_map_returns_the_published_clone() {
         use rustos_kernel_mem::{MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};

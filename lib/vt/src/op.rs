@@ -4,7 +4,7 @@
 //! a C0 control, or a recognised escape sequence. It is the shared currency of
 //! the crate — [`crate::encode`] turns an [`Op`] into bytes and [`crate::Parser`]
 //! turns bytes back into [`Op`]s — so the emitter and consumer never disagree
-//! about what a sequence means (`AGENTS.md` §2.2).
+//! about what a sequence means.
 
 use alloc::string::String;
 
@@ -35,7 +35,7 @@ impl EraseMode {
     }
 
     /// The [`EraseMode`] for ANSI parameter `value`, or `None` for anything
-    /// other than `0`, `1`, or `2` (fail closed, `AGENTS.md` §2.9).
+    /// other than `0`, `1`, or `2` (fail closed).
     #[must_use]
     pub const fn from_value(value: u16) -> Option<EraseMode> {
         match value {

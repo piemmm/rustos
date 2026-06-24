@@ -11,7 +11,7 @@ use crate::error::MountError;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     /// List the current mount table (no operands). Issues the ungated
-    /// `sysinfo-v1` `MOUNT_LIST` query (`AGENTS.md` §16.6).
+    /// `sysinfo-v1` `MOUNT_LIST` query.
     List,
     /// Attach the described filesystem (two operands).
     Mount(MountRequest),
@@ -22,7 +22,7 @@ pub enum Command {
 /// A parsed `mount` attach request.
 ///
 /// The privileged *act* of mounting is the kernel's decision, gated on
-/// `CAP_FS_MOUNT` (`AGENTS.md` §5.2); this struct only describes what the
+/// `CAP_FS_MOUNT`; this struct only describes what the
 /// user asked for. The driver `fstype` is optional — a kernel that probes
 /// the superblock can identify it — and `flags` is the parsed mount policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,8 +170,7 @@ fn value<'a>(
 /// Parse a comma-separated `-o` option list into the [`MountFlags`] it sets.
 ///
 /// Accepts the policy names RustOS recognises: `ro`/`rw` (read-only vs the
-/// read-write default) and the `nosuid`/`nodev`/`noexec` restrictions
-/// (`AGENTS.md` §5.3). `rw` clears nothing on its own — it is the default —
+/// read-write default) and the `nosuid`/`nodev`/`noexec` restrictions. `rw` clears nothing on its own — it is the default —
 /// but is accepted so a user can write it explicitly.
 ///
 /// # Errors

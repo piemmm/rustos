@@ -1,4 +1,4 @@
-//! riscv64 side-channel mitigations (`AGENTS.md` §19.1).
+//! riscv64 side-channel mitigations.
 //!
 //! Implements the Arch HAL
 //! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
@@ -24,7 +24,7 @@
 //!   speculation past a faulting privileged load; the in-order cores
 //!   RustOS targets never do, so there is no Meltdown-class leak.
 //!   Kernel/user separation is still enforced by ordinary page-table
-//!   permissions (the `U` bit), which is not the §19.1 KPTI control.
+//!   permissions (the `U` bit), which is not the KPTI control.
 //! * **Context-switch microarchitectural-buffer flush** — MDS / L1TF /
 //!   MMIO-stale-data are Intel store/fill/load-buffer sampling flaws; the
 //!   RISC-V cores RustOS targets do not expose those buffers.
@@ -35,7 +35,7 @@
 //!
 //! Were RustOS to add an out-of-order RISC-V core (a future Tier-2
 //! target), this profile must be revisited per that core's errata
-//! (`AGENTS.md` §19.1 — a no-op is permitted only where the silicon is
+//! (a no-op is permitted only where the silicon is
 //! provably not vulnerable).
 
 use rustos_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
@@ -53,7 +53,7 @@ impl SideChannel {
         Self
     }
 
-    /// The honest §19.1 declaration for riscv64 (see the module docs).
+    /// The honest declaration for riscv64 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> MitigationProfile {
         MitigationProfile {

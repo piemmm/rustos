@@ -50,7 +50,7 @@ struct Heap([u8; HEAP_BYTES]);
 // never aliased because each allocation hands out a disjoint slice.
 static mut HEAP: Heap = Heap([0; HEAP_BYTES]);
 
-/// Forward-only bump allocator. `AGENTS.md` §6 puts shared utilities in
+/// Forward-only bump allocator. puts shared utilities in
 /// `lib/`; this allocator is intentionally local because (a) it never
 /// frees (a documented limitation for the test binary only) and (b)
 /// nothing in `kernel/` or `lib/` should ever take a dependency on a
@@ -116,7 +116,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // sequencing.
     //
     // Publish the caller-owned per-CPU GDT/IDT/IST arena before the first
-    // `percpu::init`, sized to this single-CPU vertical (`AGENTS.md` §24.1
+    // `percpu::init`, sized to this single-CPU vertical (
     // — no baked-in `MAX_CPUS`). `register` is set-once; this `kernel_main`
     // runs once, so a function-local `static` is sound and needs no
     // allocator.
@@ -141,10 +141,10 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // dispatch is the cooperative `step` loop below.
     let bsp_id = smp::bsp_lapic_id();
     // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
-    // to one slot (`AGENTS.md` §24.1 — no baked-in `MAX_CPUS`).
+    // to one slot (no baked-in `MAX_CPUS`).
     let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
-    // `&'static` backing (`AGENTS.md` §24.1); `kernel_main` runs once, so
+    // `&'static` backing; `kernel_main` runs once, so
     // a function-local `static` is sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
@@ -166,7 +166,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // Spawn two kthreads. Each runs on its own kernel stack and yields
     // back to the dispatcher PING_PONGS times via the real
     // `ContextSwitch::switch`, then returns (Exit). `ContextSwitchHal` is
-    // the x86_64 §17.2 context-switch primitive.
+    // the x86_64 context-switch primitive.
     for index in 0..2usize {
         let spawned = spawn_kthread(
             &sched,
@@ -191,7 +191,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // exited. Each `step` enters a task, which yields straight back, so
     // the two tasks ping-pong through the real context switch. A switch
     // that never resumed its task would stall the drain and the harness
-    // would time out (fail-loud, `AGENTS.md` §7).
+    // would time out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

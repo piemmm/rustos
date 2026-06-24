@@ -1,10 +1,9 @@
 //! RustOS compositing window manager (`userland/gui/wm`).
 //!
-//! This crate is the user-space compositor for the RustOS desktop
-//! (`AGENTS.md` §10). It composes per-window [`Surface`]s into a single
+//! This crate is the user-space compositor for the RustOS desktop. It composes per-window [`Surface`]s into a single
 //! scan-out frame and presents it through a capability-gated
 //! [`Display`](rustos_abi::driver::display::Display) driver; the kernel
-//! never composites (`AGENTS.md` §10, §17.3 — the desktop is an
+//! never composites (the desktop is an
 //! optional, one-way-dependent userland frontend).
 //!
 //! # What this increment delivers
@@ -18,7 +17,7 @@
 //!   rendered content of a window.
 //! - **Anti-aliased rounded corners** ([`corner`]) via deterministic
 //!   supersampling, with a square-corner opt-out — the single
-//!   rounded-corner path the taskbar reuses (`AGENTS.md` §2.2).
+//!   rounded-corner path the taskbar reuses.
 //! - **Damage tracking** ([`damage`]): only changed pixels are
 //!   recomposited.
 //! - **The [`Compositor`]**: a z-ordered [`Window`] stack composited
@@ -30,7 +29,7 @@
 //! - **Pointer cursor overlay** ([`cursor`]): a scalable, colourful,
 //!   replaceable [`CursorImage`](rustos_cursor::CursorImage) from
 //!   `lib/cursor`, composited as the top-most layer so its hotspot
-//!   tracks the pointer (`AGENTS.md` §2.2 / §2.4).
+//!   tracks the pointer.
 //! - **Cursor selection** ([`select`]): the [`CursorController`]
 //!   chooses the [`CursorKind`](rustos_theme::CursorKind) from live
 //!   interaction state (move-grab, the window under the pointer, the

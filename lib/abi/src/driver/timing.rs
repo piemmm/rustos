@@ -6,8 +6,7 @@
 //! train, a USB hub power-on-good / reset-recovery window). It lives in
 //! `lib/abi` so the driver-class crates that need it — the PCIe root-complex
 //! bring-up (`drivers/bus/pcie_brcm`) and the bus-agnostic USB stack
-//! (`lib/usb`) — depend on one trait rather than each declaring their own
-//! (`AGENTS.md` §2.2 / §17.4).
+//! (`lib/usb`) — depend on one trait rather than each declaring their own.
 //!
 //! It carries no authority of its own: it is a pure timing facility the host
 //! supplies (on metal a generic-timer implementation reading the

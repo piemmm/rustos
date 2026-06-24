@@ -292,7 +292,7 @@ impl SplitQueue {
         // guest issues) tolerates the omission; an *asynchronous* device
         // (virtio-input, which pops a buffer when an input event arrives out
         // of band) does not — it reads the ring from a different context and
-        // must see a consistent snapshot (`AGENTS.md` §2.1 — no races). The
+        // must see a consistent snapshot (no races). The
         // release fence orders the entry stores before the index store.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         // Update the avail.idx field (offset 2, little-endian u16).
@@ -308,7 +308,7 @@ impl SplitQueue {
         // so a device that wakes on the notify reads the published index
         // rather than a stale one. Without it an asynchronous device
         // (virtio-input) can observe an empty avail ring and report
-        // queue-full on the next event (`AGENTS.md` §2.1).
+        // queue-full on the next event.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         transport.notify(self.queue_index);
     }
@@ -322,9 +322,9 @@ impl SplitQueue {
     ///   available.
     /// * [`VirtioError::MalformedCompletion`] if the device-written
     ///   completion names a descriptor head outside the granted
-    ///   descriptor table (`AGENTS.md` §3.6, CWE-1257 / Thunderclap).
+    ///   descriptor table (CWE-1257 / Thunderclap).
     ///   The bogus entry is skipped (the queue still makes progress) and
-    ///   no chain is reclaimed — fail closed (§5.4).
+    ///   no chain is reclaimed — fail closed.
     pub fn poll_used(&mut self) -> Result<UsedToken, VirtioError> {
         let used_bytes = self.used.as_bytes();
         let used_idx = u16::from_le_bytes(used_bytes[2..4].try_into().unwrap_or_default());
@@ -335,7 +335,7 @@ impl SplitQueue {
         // used-`idx`, the device's writes to the used-ring *entry* it points
         // at must be acquired before they are read, so the entry read cannot
         // be reordered ahead of — or read stale relative to — the index that
-        // announced it (`AGENTS.md` §2.1).
+        // announced it.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         let slot = (self.last_used_idx % self.queue_size) as usize;
         let entry_off = USED_HEADER_BYTES + slot * size_of::<UsedElem>();
@@ -354,8 +354,7 @@ impl SplitQueue {
         // buggy or hostile device (CWE-1257 / Thunderclap) can name a
         // head outside the descriptor table the driver granted it.
         // Walking such a head would index `desc` storage outside the
-        // granted region, so reject it fail-closed (`AGENTS.md` §3.6 /
-        // §5.4). The bogus used entry is still consumed so the queue
+        // granted region, so reject it fail-closed. The bogus used entry is still consumed so the queue
         // makes forward progress, but no chain is reclaimed on its word.
         if head >= self.queue_size {
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
@@ -379,7 +378,7 @@ impl SplitQueue {
             // A chain `next` link is descriptor-table data and may have
             // been corrupted (CWE-1257 / Thunderclap DMA write). Never
             // read a descriptor outside the granted table: bail rather
-            // than index out of region (`AGENTS.md` §3.6 / §5.4). The
+            // than index out of region. The
             // caller validated `head`; this guards every followed `next`.
             if cur >= self.queue_size {
                 return;

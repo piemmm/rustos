@@ -2,7 +2,7 @@
 //! ([`rustos_arch_api::SchedulerArch`]).
 //!
 //! Like the bare-metal ports, the wasm32 port is a pure Arch HAL
-//! implementation (`AGENTS.md` §17.2): it implements [`SchedulerArch`]
+//! implementation: it implements [`SchedulerArch`]
 //! and exposes the monotonic clock, but it does not name `kernel/core`
 //! or implement its `KernelArch` super-trait. The downstream boot
 //! consumer wraps [`WasmArch`] in a local `KernelArch` type.
@@ -23,7 +23,7 @@
 //! The monotonic clock reads `performance.now()` (fractional
 //! milliseconds) through `crate::bindings` and converts to
 //! nanoseconds via [`ms_to_ns`], so the tick source and the conversion
-//! share one host clock (`AGENTS.md` §2.4 — no parallel measurement).
+//! share one host clock (no parallel measurement).
 //!
 //! # Host testability
 //!
@@ -32,7 +32,7 @@
 //! `performance.now()` / worker index through `crate::bindings`; the
 //! host build substitutes a monotonic counter *solely* so the host
 //! tests observe a non-decreasing clock and is never linked into a wasm
-//! image (`AGENTS.md` §1 — no fake primitives in production).
+//! image (no fake primitives in production).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -46,19 +46,19 @@ use rustos_arch_api::{CpuId, SchedulerArch, SecondaryBringup, SmpError};
 ///
 /// This is the host worker-addressing bound, **not** the size of the
 /// per-worker bookkeeping: [`WasmArch`] now sizes its bookkeeping from
-/// the discovered worker count (`AGENTS.md` §24.1, see
+/// the discovered worker count (see
 /// [`WasmArch::worker_capacity`]). Converting this remaining bound to a
-/// discovered-hardware capacity is tracked as the next §24 L3b
+/// discovered-hardware capacity is tracked as the next L3b
 /// increment (the secondary-bring-up item).
 pub const MAX_WORKERS: usize = 8;
 
-/// §24.1 per-CPU sizing policy for [`WasmArch`]: one bookkeeping slot
+/// per-CPU sizing policy for [`WasmArch`]: one bookkeeping slot
 /// per discovered worker context, with a floor that always covers the
 /// boot context's own slot.
 ///
 /// Web-Worker contexts are fixed at boot — the host reports them once —
 /// so the discovered count *is* the hardware quantity and no speculative
-/// headroom is reserved beyond it (`AGENTS.md` §24.2). The floor of
+/// headroom is reserved beyond it. The floor of
 /// `boot_cpu + 1` guarantees the boot CPU's slot is always representable
 /// even for a single-worker handle.
 fn worker_storage_len(boot_cpu: CpuId, discovered: usize) -> usize {
@@ -78,7 +78,7 @@ pub struct WasmArch {
 
     /// Forward map: dense `CpuId` index → host worker index of that CPU.
     /// `None` for unpopulated slots. Set once at construction; its length
-    /// is the discovered worker count (`AGENTS.md` §24.1, see
+    /// is the discovered worker count (see
     /// `worker_storage_len`), never a fixed ceiling.
     cpu_to_worker: Box<[Option<CpuId>]>,
 
@@ -114,7 +114,7 @@ impl WasmArch {
     /// The handle's per-worker bookkeeping is sized to the discovered
     /// worker count — `workers.len()`, floored at `boot_cpu + 1` (see
     /// `worker_storage_len`) — so a larger machine is never silently
-    /// truncated to a fixed ceiling (`AGENTS.md` §24.1). `boot_cpu` names
+    /// truncated to a fixed ceiling. `boot_cpu` names
     /// the logical CPU of the boot context.
     #[must_use]
     pub fn with_workers(boot_cpu: CpuId, workers: &[CpuId]) -> Self {
@@ -137,8 +137,7 @@ impl WasmArch {
     }
 
     /// Number of dense `CpuId` slots this handle tracks — the discovered
-    /// worker count its per-worker bookkeeping was sized to
-    /// (`AGENTS.md` §24.1).
+    /// worker count its per-worker bookkeeping was sized to.
     #[must_use]
     pub fn worker_capacity(&self) -> usize {
         self.cpu_to_worker.len()
@@ -188,7 +187,7 @@ impl WasmArch {
     ///
     /// Reads `performance.now()` (fractional milliseconds) and converts
     /// via [`ms_to_ns`], so the tick source and the conversion share one
-    /// host clock (`AGENTS.md` §2.4). The downstream `KernelArch`
+    /// host clock. The downstream `KernelArch`
     /// wrapper forwards `monotonic_ns` here.
     #[must_use]
     pub fn monotonic_ns(&self) -> u64 {
@@ -203,7 +202,7 @@ impl SchedulerArch for WasmArch {
             // Recover the running worker index from the host and
             // reverse-map it to a dense `CpuId`. An unmapped worker falls
             // back to the boot CPU rather than inventing an id
-            // (`AGENTS.md` §5.4.5 — fail closed).
+            // (fail closed).
             let worker = crate::bindings::host_current_worker();
             self.cpu_for_worker(worker).unwrap_or(self.boot_cpu)
         }
@@ -246,7 +245,7 @@ impl SecondaryBringup for WasmArch {
     unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
         // Fail closed before asking the host to spawn anything: the boot
         // context is already running, and an unmapped dense id has no
-        // worker to spawn (`AGENTS.md` §5.4.5).
+        // worker to spawn.
         if cpu == self.boot_cpu {
             return Err(SmpError::InvalidCpu);
         }
@@ -270,7 +269,7 @@ impl SecondaryBringup for WasmArch {
 ///
 /// A negative or non-finite reading (which the host clock never produces)
 /// clamps to `0`, and an out-of-range product saturates at [`u64::MAX`],
-/// so the conversion never panics or traps (`AGENTS.md` §2.9).
+/// so the conversion never panics or traps.
 #[must_use]
 pub fn ms_to_ns(ms: f64) -> u64 {
     if !ms.is_finite() || ms <= 0.0 {

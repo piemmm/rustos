@@ -54,7 +54,7 @@ const USER_STACK_PAGES: u64 = 288;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands the two spawn builds (image segments + the
@@ -112,8 +112,7 @@ static ALLOCATOR: FreeListAllocator =
 
 /// Per-space page-table pools (one per U-mode address space). Each backs an
 /// Sv39 hierarchy whose root [`activate_user_root`] reinstalls (via `satp`)
-/// before every switch into its task, so the two tasks stay hardware-isolated
-/// (`AGENTS.md` §4).
+/// before every switch into its task, so the two tasks stay hardware-isolated.
 static PAGE_TABLES_A: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLES_B: paging::PageTablePool = paging::PageTablePool::new();
 
@@ -122,7 +121,7 @@ static PAGE_TABLES_B: paging::PageTablePool = paging::PageTablePool::new();
 /// mapped (its physical address equals its kernel virtual address), so the
 /// builders reach it through [`DirectPhysMap::identity`]. A single monotonic
 /// cursor ([`FRAME_CURSOR`]) hands disjoint frames to both program builds, so
-/// the two address spaces never share a data frame (`AGENTS.md` §4).
+/// the two address spaces never share a data frame.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -167,8 +166,8 @@ fn spawn_el0_timeshare_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen either program's
-/// own authority; it only authorises the *act* of spawning (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen either program's
+/// own authority; it only authorises the *act* of spawning.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -184,7 +183,7 @@ impl CapabilityQuery for SpawnAuthority {
 /// tasks timeshare the hart. `yield` resumes here on the next dispatch (and the
 /// callback `sret`s back into U-mode); `exit` reaps the task and never returns
 /// to the callback. Any other syscall is unexpected from the fixture program
-/// and fails the test loudly (`AGENTS.md` §7).
+/// and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -274,7 +273,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     note(TEST_START, "riscv64 RV-X2 test: building two U-mode images");
 
     // Read the timer frequency from the firmware tree. Fail closed (finisher)
-    // if it is omitted rather than guessing a divisor (`AGENTS.md` §5.4).
+    // if it is omitted rather than guessing a divisor.
     // SAFETY: `dtb` is the verbatim `a1` pointer OpenSBI handed the boot hart;
     // `boot.s` forwards it unchanged.
     let Some(timebase) = (unsafe { Fdt::from_ptr(dtb as *const u8) })
@@ -316,7 +315,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // masked, so dispatch is the cooperative `step` loop below (the spawn-time
     // self-IPI via SBI stays pending and is never delivered).
     // Single-hart slice: one per-CPU slot, owned by an allocator-free
-    // `static` backing (`AGENTS.md` §24.1).
+    // `static` backing.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -325,8 +324,8 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
 
     // Admit both U-mode tasks as resumable user kthreads. Each runs on its own
     // kernel stack; its `pre_resume` hook reactivates its page-table root
-    // (isolation, §4), and its work body `enter_user`s into U-mode. The
-    // `ContextSwitchHal` is the riscv64 §17.2 context-switch primitive.
+    // (isolation), and its work body `enter_user`s into U-mode. The
+    // `ContextSwitchHal` is the riscv64 context-switch primitive.
     //
     // The kernel-stack top the `pre_resume` hook is handed (`_top`) is unused on
     // riscv64: `sscratch` is per-task hardware state — `userentry::enter_user`
@@ -364,7 +363,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // ping-pong with the dispatcher through real U-mode↔kernel context switches
     // landing on their own kernel stacks (the RV1 park-safe path). A switch that
     // never resumed its task would stall the drain and the harness would time
-    // out (fail-loud, `AGENTS.md` §7).
+    // out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

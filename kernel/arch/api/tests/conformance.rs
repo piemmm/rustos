@@ -1,9 +1,9 @@
-//! §17.2 acceptance test: the Arch HAL conformance harness runs.
+//! acceptance test: the Arch HAL conformance harness runs.
 //!
 //! This is the canonical location `plans/WIRING.md` (Stage W0) names —
 //! the arch-agnostic suite parameterised over the HAL traits, mirroring
 //! `kernel/sched/api/tests/conformance.rs`. The api crate cannot name a
-//! concrete port (that would invert the §17.4 layering: ports depend on
+//! concrete port (that would invert the layering: ports depend on
 //! `kernel/arch/api`, never the reverse — and a port is host-buildable
 //! only on its own host), so this integration test drives the harness
 //! over a faithful in-test double to prove the suite itself runs. The

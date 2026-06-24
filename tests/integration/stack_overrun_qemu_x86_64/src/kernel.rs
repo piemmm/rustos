@@ -187,7 +187,7 @@ fn fail(what: &'static str) -> ! {
 /// The page-fault observer the production `#PF` entry invokes. The
 /// overrunning kthread's access to the unmapped guard page must land here
 /// as a **supervisor, not-present** fault on exactly the guard page;
-/// anything else is a closed failure. Never returns (`AGENTS.md` §2.9).
+/// anything else is a closed failure. Never returns.
 extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
     let base = guard_page();
     let page_end = base + STACK_GUARD_BYTES;
@@ -245,7 +245,7 @@ fn run_overrun_test() -> ! {
     // not drive the *production* scheduler while the cooperative `step` loop
     // below runs our own (the kthread faults on its first dispatch anyway).
     // SAFETY: `cli` is well-defined in ring 0; the cooperative loop needs no
-    // interrupts (`AGENTS.md` §2.9).
+    // interrupts.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
     }
@@ -301,10 +301,10 @@ fn run_overrun_test() -> ! {
     // spawn-time self-IPI is latched and never delivered).
     let bsp_id = smp::bsp_lapic_id();
     // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
-    // to one slot (`AGENTS.md` §24.1 — no baked-in `MAX_CPUS`).
+    // to one slot (no baked-in `MAX_CPUS`).
     let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
-    // `&'static` backing (`AGENTS.md` §24.1); `run_overrun_test` runs once,
+    // `&'static` backing; `run_overrun_test` runs once,
     // so a function-local `static` is sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let Ok(handle) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
@@ -350,7 +350,7 @@ fn run_overrun_test() -> ! {
     // kthread, whose overrun faults into `on_fault` (which exits PASS). If
     // the guard page were wrongly left mapped the body would return (Exit)
     // and the loop would drain — a guard regression we report below rather
-    // than letting it pass silently (`AGENTS.md` §2.9).
+    // than letting it pass silently.
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

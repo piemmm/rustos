@@ -4,15 +4,15 @@
 //!
 //! The kernel does not *hunt* for a disk, it
 //! binds a block driver because that driver's signed bind table matched a
-//! discovered node's identity (`AGENTS.md` §18.3 / §18.5). The match is the
+//! discovered node's identity. The match is the
 //! one shared `lib/devmatch` policy the user-space `devmgr` autoloader also
 //! uses, applied against the bootstrap-floor catalogue
 //! ([`crate::driver_catalog`]) — the only drivers compiled into the kernel,
 //! the storage path that must exist before the signed driver store under
-//! `/System/Drivers/` is reachable (`AGENTS.md` §18.6).
+//! `/System/Drivers/` is reachable.
 //!
 //! The gate is **resolution only** — it never reads, mounts, or trusts a
-//! volume (the signed load gate and the mount path do that, §18.6). It is
+//! volume (the signed load gate and the mount path do that). It is
 //! the front half the root-mount composition ([`crate::root_mount`]) builds
 //! on: once a block device is bound here, the bring-up maps its windows
 //! through an in-kernel `DriverHost`, mounts the filesystem, and loads the
@@ -25,19 +25,19 @@
 //! the discovered tree. A device behind a bus that must be *probed* — a
 //! virtio-blk disk, whose bind key is the virtio device id read from the
 //! transport, not a `compatible` string — appears only after the bus driver
-//! enumerates it and attaches the probed child node (`AGENTS.md` §18.2).
+//! enumerates it and attaches the probed child node.
 //! This gate resolves whatever the tree it is handed contains: the raw
 //! firmware tree on a direct-attached board, or the post-enumeration tree
 //! once a bus driver has attached its children.
 //!
-//! # Fail closed (`AGENTS.md` §2.9 / §5.4)
+//! # Fail closed
 //!
 //! A tree with no block device leaves the root unbound (logged, never a
-//! panic — §18.4). A tree with **more than one** distinct block device is
+//! panic). A tree with **more than one** distinct block device is
 //! ambiguous: which volume is the root is a policy decision that needs an
 //! explicit boot descriptor, not a guess, so the gate fails closed (binds
 //! nothing) rather than picking one. Every outcome is audited under a
-//! stable `ROOT_STORAGE_AUTOLOAD` event id (`AGENTS.md` §19.4).
+//! stable `ROOT_STORAGE_AUTOLOAD` event id.
 
 use rustos_abi::driver::bus::{Bus, BusDevice};
 use rustos_abi::driver::virtio_mmio::VirtioMmioBus;
@@ -54,7 +54,7 @@ use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 use crate::driver_catalog;
 
 /// First synthetic hardware-tree id for a probed virtio-MMIO child node
-/// (`AGENTS.md` §18.2 — the bind key is the virtio device id read from the
+/// (the bind key is the virtio device id read from the
 /// transport, attached as a *probed child* of the raw bus node).
 ///
 /// [`RootBlockSelection`] uses a node id only to tell two distinct block
@@ -77,7 +77,7 @@ const VIRTIO_PROBE_NODE_BASE_ID: u32 = 0x8000_0000;
 /// enumerated input slot, so distinct devices stay distinct.
 const VIRTIO_INPUT_PROBE_NODE_BASE_ID: u32 = 0x8001_0000;
 
-/// Audit event id for the root-storage bind gate (`AGENTS.md` §19.4 — a
+/// Audit event id for the root-storage bind gate (a
 /// stable id for the security-relevant bind decision). Sits beside the
 /// root-mount audit ids (`4133`/`4134`, [`crate::root_mount`]) in the
 /// `4000..5000` range `kernel/core` owns.
@@ -87,7 +87,7 @@ const ROOT_STORAGE_AUTOLOAD: EventId = EventId(4135);
 ///
 /// Carries the matched node by value (a `HwNode` is a fixed-size record)
 /// so the bring-up that follows has the node's resource-grant requests
-/// (`AGENTS.md` §18.3 — a driver receives only the resources its matched
+/// (a driver receives only the resources its matched
 /// node requested) without re-walking the tree.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RootBlockBinding {
@@ -96,7 +96,7 @@ pub struct RootBlockBinding {
     /// The discovered hardware-tree node that bound it (with its
     /// capability-grant resource requests).
     pub node: HwNode,
-    /// The bind priority the match resolved at (`AGENTS.md` §18.3).
+    /// The bind priority the match resolved at.
     pub priority: u16,
 }
 
@@ -104,11 +104,10 @@ pub struct RootBlockBinding {
 /// when the node binds a bootstrap-floor **block** driver
 /// ([`driver_catalog::is_root_block_driver`]).
 ///
-/// A node that matches nothing, ties (a packaging defect — fail closed,
-/// §2.9), or binds a floor driver that is not a block driver is not a
+/// A node that matches nothing, ties (a packaging defect — fail closed), or binds a floor driver that is not a block driver is not a
 /// root block device and yields [`None`] — the [`is_root_block_driver`]
 /// check is kept as defence-in-depth even though the floor is storage-only
-/// today (`AGENTS.md` §18.6 / §2.2).
+/// today.
 ///
 /// [`is_root_block_driver`]: driver_catalog::is_root_block_driver
 #[must_use]
@@ -135,8 +134,7 @@ fn classify(node: &HwNode) -> Option<RootBlockBinding> {
 ///
 /// Feeding nodes one at a time ([`Self::observe`]) lets the production
 /// boot path resolve the root device straight off the discovery sink with
-/// no intermediate `Vec` of the whole tree (`AGENTS.md` §2.16 —
-/// allocation-free on the boot path; §24.1 — no fixed-size tree buffer to
+/// no intermediate `Vec` of the whole tree (allocation-free on the boot path; — no fixed-size tree buffer to
 /// outgrow). [`Self::finish`] audits and yields the decision.
 #[derive(Default)]
 pub struct RootBlockSelection {
@@ -158,7 +156,7 @@ impl RootBlockSelection {
     ///
     /// The first block device seen is provisionally the root; a second
     /// *distinct* one marks the selection ambiguous (root disambiguation
-    /// needs an explicit boot descriptor, not a guess — §2.9). A repeated
+    /// needs an explicit boot descriptor, not a guess). A repeated
     /// emission of the same node id is idempotent.
     pub fn observe(&mut self, node: &HwNode) {
         let Some(binding) = classify(node) else {
@@ -246,7 +244,7 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 }
 
 /// Enumerate the virtio-MMIO `bus` and emit each populated **block** slot
-/// into `sink` as a probed child node (`AGENTS.md` §18.2 / §18.6).
+/// into `sink` as a probed child node.
 ///
 /// The raw `virtio,mmio` firmware node the discovery walk emits carries
 /// only its `compatible` string, which no floor block driver binds — the
@@ -256,7 +254,7 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 /// gap: it reads each slot's `DeviceID` register through the MMIO bus
 /// driver and, for a virtio-block device ([`VIRTIO_BLK_DEVICE_ID`]),
 /// synthesises the probed child node keyed by [`HwMatchKey::virtio`] — the
-/// genuine probed identity (`AGENTS.md` §18.5 — never a fabricated key),
+/// genuine probed identity (never a fabricated key),
 /// exactly the node shape the gate models. The bring-up
 /// ([`crate::unlock_service`]) derives the slot's register window and GIC
 /// SPI from the same device tree by base, so the probed child carries only
@@ -264,16 +262,15 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 ///
 /// The probed child is **emitted into the same [`HwNodeSink`] the platform
 /// discovery walk writes to**, so it becomes part of the one buffered
-/// hardware tree (`AGENTS.md` §18.1) the boot path both resolves the root
+/// hardware tree the boot path both resolves the root
 /// binding from ([`resolve_root_block_driver`]) and stashes for the unlock
-/// kthread's `devmgr` autoload — a discovered node, never a side channel
-/// (`AGENTS.md` §2.2).
+/// kthread's `devmgr` autoload — a discovered node, never a side channel.
 ///
 /// Driver-agnostic: it reaches the bus only through the frozen [`Bus`] ABI
-/// seam (`AGENTS.md` §8), so the boot path never names a concrete
+/// seam, so the boot path never names a concrete
 /// `drivers/bus/*` type. The enumeration is bounded by
 /// [`MAX_SLOTS`]; an over-full bus fails closed rather than
-/// under-enumerating (`AGENTS.md` §2.9 / §24.4).
+/// under-enumerating.
 ///
 /// # Errors
 ///
@@ -281,7 +278,7 @@ pub fn resolve_root_block_driver(tree: &[HwNode], audit: &dyn Sink) -> Option<Ro
 /// when more than [`MAX_SLOTS`] slots respond, or a malformed-tree
 /// [`DriverError::DeviceFault`]. A [`DiscoveryError::SinkFull`] from a full
 /// sink is also surfaced as [`DriverError::BufferTooSmall`]. The caller
-/// leaves the root unbound on any error (fail closed, §18.4).
+/// leaves the root unbound on any error (fail closed).
 pub fn observe_virtio_mmio_block_devices(
     bus: &dyn Bus,
     sink: &mut dyn HwNodeSink,
@@ -304,20 +301,19 @@ pub fn observe_virtio_mmio_block_devices(
         // not the `HW_NODE_ROOT` *parent sentinel*: a node whose parent is
         // the sentinel is the root itself and is skipped by the autoload
         // walk (`HwNode::is_root`), so a top-level discovered device must
-        // name the root's id as its parent (`AGENTS.md` §2.2 / §18.1).
+        // name the root's id as its parent.
         let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
         next_id = next_id.wrapping_add(1);
         // One bind key always fits a fresh node; the capacity bound is the
         // ABI's, so a node that somehow could not hold it is dropped rather
-        // than bound on a partial identity (`AGENTS.md` §2.9).
+        // than bound on a partial identity.
         if node
             .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
             .is_ok()
         {
             // A full sink (`DiscoveryError::SinkFull`) is the only emit
             // failure a buffering sink raises; surface it as the same
-            // bounded-capacity refusal an over-full bus does (fail closed,
-            // `AGENTS.md` §2.9 / §24.4).
+            // bounded-capacity refusal an over-full bus does (fail closed).
             sink.emit(node)
                 .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
         }
@@ -328,12 +324,11 @@ pub fn observe_virtio_mmio_block_devices(
 /// Enumerate the virtio-MMIO `bus` and emit each populated **virtio-input**
 /// slot into `sink` as a discovered, user-space-autoloadable device node
 /// carrying its register window **and** DMA constraint as capability-grant
-/// requests (`AGENTS.md` §18.2 / §18.3 / §18.6).
+/// requests.
 ///
 /// This is the input-device analogue of [`observe_virtio_mmio_block_devices`],
 /// and the discovery step the user-space input-driver autoload depends on:
-/// a virtio keyboard/pointer is driven entirely from user space (`AGENTS.md`
-/// §4 — drivers in user space), so unlike the in-kernel bootstrap-floor
+/// a virtio keyboard/pointer is driven entirely from user space (drivers in user space), so unlike the in-kernel bootstrap-floor
 /// block path (whose bring-up re-derives the slot window from the device
 /// tree by base) the input node **must** carry both its MMIO window and a
 /// DMA constraint as [`HwResource`]s — a user-space virtio driver maps its
@@ -343,39 +338,35 @@ pub fn observe_virtio_mmio_block_devices(
 /// device-resource grant per resource the matched node requested
 /// ([`crate::driver_spawn_loader`]), so the autoloaded driver is handed a
 /// window grant of precisely the slot it owns plus a DMA grant for its
-/// virtqueues — and nothing more (`AGENTS.md` §18.3 / §4 — no ambient
+/// virtqueues — and nothing more (no ambient
 /// authority).
 ///
 /// Each populated slot whose `DeviceID` register equals
 /// [`VIRTIO_INPUT_DEVICE_ID`] (the genuine probed identity read from the
-/// transport, never a fabricated key — `AGENTS.md` §18.5) is emitted as an
+/// transport, never a fabricated key) is emitted as an
 /// [`HwDeviceClass::Input`] node keyed by [`HwMatchKey::virtio`], carrying
 /// [`HwResource::mmio`] over the slot's discovered base and the extent
-/// [`VirtioMmioBus::slot_window`] reports from the device tree (`AGENTS.md`
-/// §18.1 — a discovered value, never a literal) plus a coherent
+/// [`VirtioMmioBus::slot_window`] reports from the device tree (a discovered value, never a literal) plus a coherent
 /// [`HwResource::dma`] (the QEMU `virt` virtio interconnect is cache-coherent
 /// with no IOMMU, so the device addresses all of RAM — no address limit,
-/// never a board constant, §18.5). The node is parented to the tree root id
+/// never a board constant). The node is parented to the tree root id
 /// ([`HW_NODE_ROOT_ID`]), not the `HW_NODE_ROOT` parent sentinel, so the
 /// autoload walk treats it as a device rather than skipping it as the root
 /// ([`HwNode::is_root`]). It is emitted into the same buffered
 /// hardware tree the discovery walk and the block probe write to, so the
-/// unlock kthread's `devmgr` autoload sees one faithful tree (`AGENTS.md`
-/// §18.1 / §2.2).
+/// unlock kthread's `devmgr` autoload sees one faithful tree.
 ///
 /// Driver-agnostic: it reaches the bus only through the frozen
-/// [`VirtioMmioBus`] / [`Bus`] ABI seams (`AGENTS.md` §8), so the boot path
+/// [`VirtioMmioBus`] / [`Bus`] ABI seams, so the boot path
 /// never names a concrete `drivers/bus/*` type. The Raspberry Pi 4 firmware
 /// tree describes no `virtio,mmio` node, so this is a no-op there — it is
-/// the QEMU `virt`-board path, additive and metal-neutral (`AGENTS.md`
-/// §2.17).
+/// the QEMU `virt`-board path, additive and metal-neutral.
 ///
 /// A slot whose window extent cannot be resolved (a malformed `reg`), or a
 /// fresh node that cannot hold its match key and both resources, is
 /// **skipped** rather than emitted on a partial identity — a node the
 /// kernel cannot mint a correct, bounded grant for is left undiscovered and
-/// thus unbound, never half-described (fail closed, `AGENTS.md` §2.9 /
-/// §18.4).
+/// thus unbound, never half-described (fail closed).
 ///
 /// # Errors
 ///
@@ -383,7 +374,7 @@ pub fn observe_virtio_mmio_block_devices(
 /// when more than [`MAX_SLOTS`] slots respond, or a malformed-tree
 /// [`DriverError::DeviceFault`]. A [`DiscoveryError::SinkFull`] from a full
 /// sink is surfaced as [`DriverError::BufferTooSmall`]. The caller leaves
-/// the affected node undiscovered on any error (fail closed, §18.4).
+/// the affected node undiscovered on any error (fail closed).
 pub fn observe_virtio_mmio_input_devices(
     bus: &dyn VirtioMmioBus,
     slot_irq: &dyn Fn(u64) -> Option<u32>,
@@ -406,32 +397,30 @@ pub fn observe_virtio_mmio_input_devices(
         // The window extent the device tree declares for this slot. A
         // malformed `reg` (or a base the bus cannot resolve) means the
         // kernel cannot size a correct grant, so skip the node rather than
-        // grant a guessed window (fail closed, `AGENTS.md` §5.4 / §2.9).
+        // grant a guessed window (fail closed).
         let Ok(len) = bus.slot_window(device.address) else {
             continue;
         };
         // The interrupt line the platform routes this slot to, resolved by
         // the arch-supplied `slot_irq` (the aarch64 port decodes the FDT
         // `interrupts` specifier through `gic_device_intid`; the line is a
-        // *discovered* value, never a board constant — `AGENTS.md` §18.1 /
-        // §2.20). A user-space virtio-input driver is interrupt-driven: it
-        // parks on `irq_wait` rather than busy-polling its event queue
-        // (`AGENTS.md` §2.1 / §2.16), so a slot whose IRQ cannot be resolved
+        // *discovered* value, never a board constant). A user-space virtio-input driver is interrupt-driven: it
+        // parks on `irq_wait` rather than busy-polling its event queue, so a slot whose IRQ cannot be resolved
         // is left undiscovered rather than emitted without the line its
-        // driver needs (fail closed, `AGENTS.md` §5.4 / §2.9 / §18.4).
+        // driver needs (fail closed).
         let Some(intid) = slot_irq(device.address) else {
             continue;
         };
         // A top-level discovered device parents to the tree root
         // ([`HW_NODE_ROOT_ID`]), never the `HW_NODE_ROOT` parent sentinel
         // (which marks the root itself and is skipped by the autoload
-        // walk, `HwNode::is_root`) — `AGENTS.md` §2.2 / §18.1.
+        // walk, `HwNode::is_root`).
         let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Input);
         next_id = next_id.wrapping_add(1);
         // The probed bind identity, the register window, a coherent DMA
         // constraint, **and** the interrupt line — the four things the
         // autoloaded user-space driver needs and the spawn path mints one
-        // grant each for (`AGENTS.md` §18.3). A virtio device drives its
+        // grant each for. A virtio device drives its
         // split virtqueues out of driver-allocated DMA memory, so without a
         // DMA resource the autoloaded driver is granted no DMA region and its
         // queue bring-up fails closed — the input node must request DMA
@@ -440,12 +429,11 @@ pub fn observe_virtio_mmio_input_devices(
         // address all of RAM: `addr_limit = 0` declares no upper bound and
         // `max_len = 0` no per-buffer cap (the driver's DMA footprint is
         // bounded by its fixed queue sizes and the kernel's deterministic
-        // OOM, §4) — a discovered property of the coherent transport, never a
-        // board constant (§18.5). The IRQ resource carries the discovered
-        // line so the driver can `irq_bind` it (it requests `CAP_IRQ_BIND`,
-        // `AGENTS.md` §5.2). All four fit a fresh node by the ABI's capacity;
+        // OOM) — a discovered property of the coherent transport, never a
+        // board constant. The IRQ resource carries the discovered
+        // line so the driver can `irq_bind` it (it requests `CAP_IRQ_BIND`). All four fit a fresh node by the ABI's capacity;
         // a node that somehow could not hold them is dropped rather than
-        // emitted on a partial identity (`AGENTS.md` §2.9).
+        // emitted on a partial identity.
         if node
             .push_match_key(HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID))
             .is_ok()
@@ -459,8 +447,7 @@ pub fn observe_virtio_mmio_input_devices(
         {
             // A full sink (`DiscoveryError::SinkFull`) is the only emit
             // failure a buffering sink raises; surface it as the same
-            // bounded-capacity refusal an over-full bus does (fail closed,
-            // `AGENTS.md` §2.9 / §24.4).
+            // bounded-capacity refusal an over-full bus does (fail closed).
             sink.emit(node)
                 .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
         }
@@ -480,11 +467,11 @@ mod tests {
     /// `slot_irq` closure for every slot, so the emitted node carries a
     /// predictable [`HwResource::irq`] the assertions check. An arbitrary
     /// in-range GICv2 SPI; the value is the test's own and never a board
-    /// constant the production path uses (`AGENTS.md` §2.2).
+    /// constant the production path uses.
     const TEST_INPUT_INTID: u32 = 34;
 
     /// Captures every audited event so a test can assert the bind decision
-    /// was logged with the right id and level (`AGENTS.md` §19.4). Host
+    /// was logged with the right id and level. Host
     /// tests are single-threaded, so a `RefCell` is sufficient — the gate
     /// takes a plain `&dyn Sink`, not the `Sync` boot-sink bound.
     #[derive(Default)]
@@ -520,7 +507,7 @@ mod tests {
 
     /// A virtio-blk disk as it appears **after** the bus driver probes the
     /// transport and attaches the child: the bind key is the virtio device
-    /// id (`2`), not a `compatible` string (`AGENTS.md` §18.2).
+    /// id (`2`), not a `compatible` string.
     fn virtio_blk_node(id: u32) -> HwNode {
         let mut node = HwNode::new(id, 0, HwDeviceClass::Storage);
         node.push_match_key(HwMatchKey::virtio(2)).expect("one key");
@@ -578,7 +565,7 @@ mod tests {
         // Before the bus is enumerated the transport node carries only its
         // `compatible` string; the virtio-blk bind key (device id `2`) does
         // not match it, so the root stays unbound until the probed child is
-        // attached (`AGENTS.md` §18.2).
+        // attached.
         let audit = RecordingSink::default();
         let tree = [raw_virtio_mmio_node(2)];
         assert!(resolve_root_block_driver(&tree, &audit).is_none());
@@ -624,7 +611,7 @@ mod tests {
     fn two_distinct_block_devices_fail_closed_as_ambiguous() {
         // Which volume is the root is a policy decision needing a boot
         // descriptor, not a guess: the gate binds nothing and audits the
-        // ambiguity as an error (`AGENTS.md` §2.9).
+        // ambiguity as an error.
         let audit = RecordingSink::default();
         let tree = [virtio_blk_node(4), emmc2_node(7)];
         assert!(resolve_root_block_driver(&tree, &audit).is_none());
@@ -647,9 +634,9 @@ mod tests {
     }
 
     /// A fake virtio-MMIO bus enumerating a fixed slot table, standing in
-    /// for the live `drivers/bus/mmio` reader so the §18.2 enumeration
+    /// for the live `drivers/bus/mmio` reader so the enumeration
     /// (`observe_virtio_mmio_block_devices`) is host-testable without MMIO
-    /// (`AGENTS.md` §2.2 — same shape as the `kernel/virtio` walk's fake).
+    /// (same shape as the `kernel/virtio` walk's fake).
     struct FakeBus {
         slots: alloc::vec::Vec<BusDevice>,
     }
@@ -728,7 +715,7 @@ mod tests {
     /// emits into a [`RootBlockSelection`], so the enumeration tests assert
     /// the binding decision through the same streaming accumulator the
     /// production resolve path uses while exercising the [`HwNodeSink`]
-    /// emit contract (`AGENTS.md` §2.2). A selection is unbounded, so emit
+    /// emit contract. A selection is unbounded, so emit
     /// never fails.
     struct SelectionSink<'a>(&'a mut RootBlockSelection);
 
@@ -744,7 +731,7 @@ mod tests {
         // A populated virtio-block slot (DeviceID 2) is attached as a probed
         // child keyed by its virtio device id, which binds virtio-blk — the
         // bootstrap-floor enumeration that lets the `virt` boot find its
-        // root (`AGENTS.md` §18.2 / §18.6).
+        // root.
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
@@ -759,7 +746,7 @@ mod tests {
     #[test]
     fn a_non_block_virtio_slot_is_not_a_root_block_device() {
         // A virtio-net slot (DeviceID 1) is enumerated but binds no floor
-        // *block* driver, so it never becomes the root (`AGENTS.md` §18.2);
+        // *block* driver, so it never becomes the root;
         // an empty slot (DeviceID 0 is filtered by the bus) likewise.
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
@@ -786,8 +773,7 @@ mod tests {
     #[test]
     fn two_probed_block_slots_fail_closed_as_ambiguous() {
         // Two distinct virtio-block disks get distinct probed-child ids, so
-        // the gate fails closed rather than guess which is the root
-        // (`AGENTS.md` §2.9).
+        // the gate fails closed rather than guess which is the root.
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_DEVICE_ID]);
@@ -801,7 +787,7 @@ mod tests {
     fn an_overfull_bus_fails_closed() {
         // More than `MAX_SLOTS` responding slots cannot be enumerated whole,
         // so the probe surfaces the error and the caller leaves the root
-        // unbound rather than under-enumerating (`AGENTS.md` §2.9 / §24.4).
+        // unbound rather than under-enumerating.
         let mut selection = RootBlockSelection::new();
         let devices = alloc::vec![VIRTIO_BLK_DEVICE_ID; MAX_SLOTS + 1];
         let bus = FakeBus::with(&devices);
@@ -832,8 +818,7 @@ mod tests {
         // A populated virtio-input slot (DeviceID 18) is emitted as a
         // user-space-autoloadable `Input` node keyed by its probed virtio
         // device id and carrying its register window as a grant request —
-        // the discovery the input-driver autoload binds against
-        // (`AGENTS.md` §18.2 / §18.3).
+        // the discovery the input-driver autoload binds against.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
         observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
@@ -849,7 +834,7 @@ mod tests {
         // The grant requests are exactly the slot's discovered register
         // window, a coherent DMA constraint, and the discovered interrupt
         // line — the window of precisely the region it owns, the DMA region
-        // its virtqueues need, and the IRQ it parks on (`AGENTS.md` §18.3).
+        // its virtqueues need, and the IRQ it parks on.
         assert_eq!(
             node.resources(),
             &[
@@ -863,7 +848,7 @@ mod tests {
     #[test]
     fn a_non_input_virtio_slot_emits_no_input_node() {
         // A virtio-blk slot (2) and a virtio-net slot (1) are not input
-        // devices, so the input probe emits nothing (`AGENTS.md` §18.2).
+        // devices, so the input probe emits nothing.
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, 1]);
         let mut sink = CollectingSink::default();
         observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
@@ -875,8 +860,7 @@ mod tests {
     fn an_input_slot_beside_a_block_slot_emits_only_the_input_node() {
         // On a mixed bus the input probe emits exactly the input device and
         // ignores the block disk; its node id comes from the disjoint input
-        // base, so it can never collide with a block probe child
-        // (`AGENTS.md` §2.2 / §18.1).
+        // base, so it can never collide with a block probe child.
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
         observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink)
@@ -928,7 +912,7 @@ mod tests {
 
     #[test]
     fn probed_device_nodes_parent_to_the_root_id_not_the_sentinel() {
-        // Regression (`AGENTS.md` §18.3): a probed device node must name the
+        // Regression: a probed device node must name the
         // tree root's id (`HW_NODE_ROOT_ID`) as its parent, never the
         // `HW_NODE_ROOT` *parent sentinel*. A node parented to the sentinel
         // satisfies `HwNode::is_root`, and the devmgr autoload walk skips
@@ -961,7 +945,7 @@ mod tests {
     fn an_overfull_bus_fails_closed_for_input() {
         // More than `MAX_SLOTS` responding slots cannot be enumerated whole,
         // so the input probe surfaces the error and the caller leaves the
-        // affected nodes undiscovered (`AGENTS.md` §2.9 / §24.4).
+        // affected nodes undiscovered.
         let devices = alloc::vec![VIRTIO_INPUT_DEVICE_ID; MAX_SLOTS + 1];
         let bus = FakeBus::with(&devices);
         let mut sink = CollectingSink::default();
@@ -976,7 +960,7 @@ mod tests {
         // A user-space virtio-input driver is interrupt-driven, so a slot
         // whose interrupt line the arch `slot_irq` cannot resolve is left
         // undiscovered rather than emitted without the IRQ its driver parks
-        // on (`AGENTS.md` §5.4 / §2.9 / §18.4).
+        // on.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
         observe_virtio_mmio_input_devices(&bus, &|_| None, &mut sink).expect("enumerate");

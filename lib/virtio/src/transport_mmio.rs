@@ -14,8 +14,8 @@
 //! consumers (`kernel/virtio`, the production binary, the `-M virt`
 //! integration verticals) **and** an arch-neutral user-space virtio
 //! input/storage driver process can construct it without depending on a
-//! `drivers/*` crate (`AGENTS.md` §17.4 — `drivers/* → lib/*` only; the
-//! `lib/usb` ↔ `drivers/bus/usb` precedent, §2.2). It depends only on
+//! `drivers/*` crate (`drivers/* → lib/*` only; the
+//! `lib/usb` ↔ `drivers/bus/usb` precedent). It depends only on
 //! the bounds-checked [`RegisterWindow`] in `lib/abi` and the protocol
 //! types in this crate, so it builds for every Tier-1 target and is
 //! identical across architectures.
@@ -24,8 +24,7 @@
 //! MMIO transport reads and writes every register at a fixed offset
 //! inside one window. It therefore performs **no** pointer arithmetic
 //! and holds **no** ambient authority: it can only touch the register
-//! block the kernel chose to map for the owning driver task
-//! (`AGENTS.md` §4). Every access goes through the bounds-checked
+//! block the kernel chose to map for the owning driver task. Every access goes through the bounds-checked
 //! accessors on [`RegisterWindow`].
 //!
 //! # No panics on the production path
@@ -36,7 +35,7 @@
 //! reads or writes lives at a compile-time-constant offset below that
 //! bound, the infallible [`Transport`] methods treat their accesses as
 //! in-bounds and fall back to a safe default on the (then impossible)
-//! error rather than panicking (`AGENTS.md` §2.9).
+//! error rather than panicking.
 
 use rustos_abi::RegisterWindow;
 

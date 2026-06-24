@@ -2,10 +2,10 @@
 //!
 //! These are the recovery operations the online [`crate::RustFs::scrub`]
 //! (Stage 8) deliberately does *not* attempt. Both lean on the seams the
-//! earlier stages built (the §8 block identity + companion mirror, the
+//! earlier stages built (the block identity + companion mirror, the
 //! [`crate::integrity::DataFault`] classes, the chunk/reverse-reference trees,
 //! and the free-space / dedupe-index rebuilds), so the verification core is
-//! shared rather than written twice (`AGENTS.md` §2.2).
+//! shared rather than written twice.
 //!
 //! * **`check`** is the *offline structural validator/rebuilder*. It runs on a
 //!   mounted handle and is the **superset** of the online scrub's checks plus
@@ -13,13 +13,13 @@
 //!   integrity, and refcounts (reusing scrub's [`crate::RustFs::verify_everything`]),
 //!   **rebuilds** the rebuildable derived state — the free-space bitmap and the
 //!   dedupe index — from the authoritative metadata so a corrupt derivation can
-//!   never keep a sound volume unmountable (§4), validates directories, and
+//!   never keep a sound volume unmountable, validates directories, and
 //!   detects and reclaims **orphaned inodes**. It reports what it could not
-//!   safely fix and never panics (`AGENTS.md` §5.4 / §2.9).
+//!   safely fix and never panics.
 //! * **`rescue`** is the *damaged-volume extractor*. Without requiring a
 //!   mountable filesystem it recovers the volume keys from a surviving
 //!   superblock discovery header, **scans** the device for self-identifying
-//!   §8 transaction roots, picks the highest-generation valid root, maps the
+//!   transaction roots, picks the highest-generation valid root, maps the
 //!   inode/extent metadata to files, and **extracts** the readable file data —
 //!   running every recovered block through the Stage 5/6 integrity pipeline so
 //!   only blocks that pass are emitted. It is read-only on the damaged volume.
@@ -62,7 +62,7 @@ pub const RESCUE_DENIED: EventId = EventId(12_022);
 
 /// Every check/rescue event identifier falls inside the reserved `rustfs`
 /// range so the stable IDs external audit-log consumers rely on never collide
-/// with another subsystem's range (`AGENTS.md` §19.4).
+/// with another subsystem's range.
 const _: () = {
     assert!(CHECK_CLEAN.0 >= RUSTFS_RANGE_START && CHECK_CLEAN.0 < RUSTFS_RANGE_END);
     assert!(CHECK_REPAIRED.0 >= RUSTFS_RANGE_START && CHECK_REPAIRED.0 < RUSTFS_RANGE_END);
@@ -98,8 +98,8 @@ pub struct CheckReport {
     pub orphaned_inodes: u64,
     /// Orphaned inodes `check` reclaimed (freeing their blocks and inode slot).
     pub orphans_reclaimed: u64,
-    /// `true` once the rebuildable derived state — the free-space bitmap (§4)
-    /// and the in-memory dedupe index (§9) — was rebuilt from the
+    /// `true` once the rebuildable derived state — the free-space bitmap
+    /// and the in-memory dedupe index — was rebuilt from the
     /// authoritative trees, so a corrupt derivation can never keep a sound
     /// volume unmountable. A completed check always rebuilds both.
     pub rebuilt_derived_state: bool,
@@ -119,7 +119,7 @@ impl CheckReport {
             || self.orphans_reclaimed != 0
     }
 
-    /// Emit the closing check event to `sink` (`AGENTS.md` §5.4 — log
+    /// Emit the closing check event to `sink` (log
     /// security-relevant findings with a stable event ID).
     fn log_outcome(&self, sink: &dyn Sink) {
         let (id, level, message) = if self.unrecoverable_findings != 0 {
@@ -164,7 +164,7 @@ pub struct RescueReport {
     /// emitted to the sink.
     pub blocks_extracted: u64,
     /// File-data blocks skipped because they failed the integrity pipeline
-    /// (never emitted — a corrupt block is never handed back, §6).
+    /// (never emitted — a corrupt block is never handed back).
     pub blocks_skipped: u64,
     /// Inodes whose metadata (extent tree) could not be read at all.
     pub unreadable_inodes: u64,
@@ -232,17 +232,17 @@ impl<B: Block> RustFs<B> {
     /// integrity, and refcounts (reusing the shared verification core),
     /// **rebuilds** the rebuildable derived state (the free-space bitmap and the
     /// dedupe index) from the authoritative metadata so a corrupt derivation can
-    /// never keep a sound volume unmountable (§4), validates the directory tree,
+    /// never keep a sound volume unmountable, validates the directory tree,
     /// and detects and reclaims orphaned inodes. It reports what it could not
     /// safely fix. A clean check changes nothing on disk and is idempotent.
     ///
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if `caps` does not grant
-    ///   [`CapabilityId::FS_MOUNT`] (fail-closed, `AGENTS.md` §5.4).
+    ///   [`CapabilityId::FS_MOUNT`] (fail-closed).
     /// * [`DriverError::DeviceFault`] / [`DriverError::NoSpace`] on an
     ///   unrecoverable device error while validating or persisting a repair
-    ///   (never a panic, §2.9).
+    ///   (never a panic).
     ///
     /// # Capabilities
     ///
@@ -290,7 +290,7 @@ impl<B: Block> RustFs<B> {
 
         // Rebuild the rebuildable derived state first, from the authoritative
         // trees, before any allocation: a corrupt free-space or dedupe-index
-        // derivation must never keep a sound volume unmountable (§4). These are
+        // derivation must never keep a sound volume unmountable. These are
         // in-memory only — they mutate no on-disk block.
         self.rebuild_free_space()?;
         self.rebuild_dedupe_index()?;
@@ -298,8 +298,7 @@ impl<B: Block> RustFs<B> {
 
         // Reuse the online scrub's verification core: metadata both-copies
         // verify/repair, data integrity classification, and refcount /
-        // reverse-reference reconcile against the live extents (`AGENTS.md`
-        // §2.2).
+        // reverse-reference reconcile against the live extents.
         let refcounts_corrected = self.verify_everything(&mut report.verification)?;
 
         // Structural validation scrub does not do: walk the directory tree from
@@ -360,7 +359,7 @@ impl<B: Block> RustFs<B> {
     /// chunk references) and its inode slot. Returns whether anything was
     /// reclaimed (so the caller commits). An entry pointing at a missing inode
     /// is a *dangling* finding: it is reported, not auto-deleted, since removing
-    /// a live name is not a safe automatic repair (`AGENTS.md` §2.1).
+    /// a live name is not a safe automatic repair.
     fn check_directories_and_orphans(
         &mut self,
         report: &mut CheckReport,
@@ -425,11 +424,11 @@ impl<B: Block> RustFs<B> {
     /// `rescue` does not require a mountable filesystem. It recovers the volume
     /// keys from a surviving superblock discovery header (the wrapped master
     /// key, plaintext at rest), **scans** the whole device for self-identifying
-    /// §8 transaction roots whose inline commit record validates, picks the
+    /// transaction roots whose inline commit record validates, picks the
     /// highest-generation valid root, walks the inode/extent metadata it names,
     /// and **extracts** the readable file data — running every recovered block
     /// through the Stage 5/6 integrity pipeline so only blocks that pass are
-    /// emitted to `out` (a corrupt block is skipped, never handed back, §6).
+    /// emitted to `out` (a corrupt block is skipped, never handed back).
     ///
     /// It is **read-only** on the damaged volume: the repair-on-read paths are
     /// suppressed for the duration, so it never writes to the device.
@@ -437,14 +436,14 @@ impl<B: Block> RustFs<B> {
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if `caps` does not grant
-    ///   [`CapabilityId::FS_MOUNT`] (fail-closed, `AGENTS.md` §5.4), or if a
+    ///   [`CapabilityId::FS_MOUNT`] (fail-closed), or if a
     ///   structurally-valid superblock is present but `volume_key` does not
     ///   unwrap it (wrong key).
     /// * [`DriverError::Unsupported`] if the device block size is unsupported.
     /// * [`DriverError::BadMagic`] if the device is not a rustfs volume (no
     ///   superblock discovery header is present at all).
     /// * [`DriverError::DeviceFault`] on an unrecoverable low-level read while
-    ///   scanning (never a panic, §2.9).
+    ///   scanning (never a panic).
     ///
     /// # Capabilities
     ///
@@ -492,11 +491,11 @@ impl<B: Block> RustFs<B> {
         Ok(report)
     }
 
-    /// Scan every physical block for a self-identifying §8 transaction root
+    /// Scan every physical block for a self-identifying transaction root
     /// whose inline commit record validates, returning the highest-generation
     /// one (or `None` when the scan finds none). Counts every distinct valid
     /// root found. Read-only: a misdirected or torn block simply does not
-    /// decode and is skipped (`AGENTS.md` §2.9).
+    /// decode and is skipped.
     fn rescue_find_best_root(&mut self, report: &mut RescueReport) -> Option<TxnRoot> {
         let bs = self.block_size;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
@@ -520,7 +519,7 @@ impl<B: Block> RustFs<B> {
     /// pipeline is skipped (counted, never emitted); an inode whose extent tree
     /// cannot be read at all is counted as unreadable and skipped. An inode
     /// tree too damaged to enumerate leaves the report's root-found state but
-    /// extracts nothing rather than failing (`AGENTS.md` §2.9).
+    /// extracts nothing rather than failing.
     fn rescue_extract(
         &mut self,
         out: &mut dyn RescueSink,

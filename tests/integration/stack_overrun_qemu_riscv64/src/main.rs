@@ -68,7 +68,7 @@
 //! `rustos-arch-riscv64` port, and the default `rustos-kernel-sched-eevdf`
 //! policy directly and supplies its own `kernel_main`. The QEMU-exit
 //! shortcut lives in this dedicated bin, never behind a Cargo feature on a
-//! library crate (`AGENTS.md` §5.4.5 — fail closed).
+//! library crate (fail closed).
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]
@@ -144,14 +144,13 @@ mod kernel {
     /// Page-table pool backing the address space (lives in `.bss`).
     static POOL: PageTablePool = PageTablePool::new();
 
-    /// Per-CPU bookkeeping backing for this single-hart vertical
-    /// (`AGENTS.md` §24.1): one slot, owned by an allocator-free `static`.
+    /// Per-CPU bookkeeping backing for this single-hart vertical: one slot, owned by an allocator-free `static`.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
 
     /// The arena's byte length, expressed in `usize` (= 2 MiB = 512 × the
     /// 4 KiB `PAGE_SIZE`) so the array type below needs no `u64`→`usize`
     /// cast. The const-assert ties it to the Arch HAL's `BLOCK_2MIB` so the
-    /// two can never drift (`AGENTS.md` §2.2).
+    /// two can never drift.
     const ARENA_BYTES: usize = 512 * PAGE_SIZE;
     const _: () = assert!(ARENA_BYTES as u64 == BLOCK_2MIB);
 
@@ -229,7 +228,7 @@ mod kernel {
     /// The synchronous-exception handler the trap vector invokes. The
     /// kthread's overrun write must land here as a store page fault on
     /// exactly the guard page; anything else is a closed failure. Never
-    /// returns (`AGENTS.md` §2.9).
+    /// returns.
     extern "C" fn on_fault(scause: u64, stval: u64, _sepc: u64) -> ! {
         let base = guard_page();
         if !GUARD_UNMAPPED.load(Ordering::SeqCst) {
@@ -390,7 +389,7 @@ mod kernel {
         // kthread, whose overrun faults into `on_fault` (which exits PASS).
         // If the guard page were wrongly left mapped the body would return
         // (Exit) and the loop would drain — a guard regression we report
-        // below rather than letting it pass silently (`AGENTS.md` §2.9).
+        // below rather than letting it pass silently.
         let mut steps = 0u64;
         while sched.live_task_count() != 0 && steps < MAX_STEPS {
             let _ = sched.step(BOOT_CPU);

@@ -10,7 +10,7 @@
 //! format (six 32-bit words per plane plus an end marker). It is kept
 //! self-contained and fully validated so a miscomputed field fails
 //! closed rather than driving the scan-out engine off the end of its
-//! list (`AGENTS.md` §2.9, §5.4).
+//! list.
 
 use rustos_abi::driver::display::{AccelLayer, DisplayFormat, DisplayMode};
 use rustos_abi::driver::mmio::WindowError;
@@ -321,7 +321,7 @@ fn pack_dims(width: u32, height: u32) -> u32 {
 }
 
 /// Clamp an `i32` to the `i16` range so a wildly off-screen origin packs
-/// to the nearest representable edge rather than wrapping (§2.9).
+/// to the nearest representable edge rather than wrapping.
 fn saturating_i16(value: i32) -> i16 {
     let clamped = value.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
     i16::try_from(clamped).unwrap_or(0)

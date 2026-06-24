@@ -25,9 +25,9 @@ pub enum Command {
 /// A parsed `useradd` account specification.
 ///
 /// All ids are **decimal** (RustOS has no name-to-id seam in this tool, so a
-/// name would be interface creep, `AGENTS.md` §2.4). The primary group is
+/// name would be interface creep). The primary group is
 /// always present — `useradd` requires `-g` rather than guessing a default
-/// group (`AGENTS.md` §2.1).
+/// group.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewUser {
     /// The login name, validated against [`validate_name`].

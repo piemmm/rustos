@@ -1,6 +1,6 @@
 //! The error type surfaced by [`Login::run`](crate::Login::run).
 //!
-//! Every variant is a **fail-closed** outcome (`AGENTS.md` §5.4.5): login
+//! Every variant is a **fail-closed** outcome: login
 //! launches a session only when a user authenticates *and* their session
 //! starts. Anything else — a console that cannot be read, an exhausted
 //! attempt budget, or a launcher that refuses the session — returns one of

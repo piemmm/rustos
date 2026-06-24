@@ -1,9 +1,8 @@
-//! Stateful property model for the syscall dispatch path (`AGENTS.md`
-//! §19.7 Bronze).
+//! Stateful property model for the syscall dispatch path (Bronze).
 //!
 //! [`Dispatcher::dispatch`] is the single place the kernel runs the five
-//! §5.4 steps for every privileged entry point. §19.7 requires it to carry a
-//! `proptest`-style stateful model alongside its unit tests and the §19.6
+//! steps for every privileged entry point. The charter requires it to carry a
+//! `proptest`-style stateful model alongside its unit tests and the
 //! argument fuzz harness (`tests/fuzz_args.rs`).
 //!
 //! Where the fuzz harness focuses on **argument typing** under raw random
@@ -13,21 +12,21 @@
 //! in-range-unassigned number, or an out-of-range number) — is replayed
 //! against a live dispatcher whose mock handlers count invocations. After
 //! every call the result is checked against an independent oracle of the
-//! §5.4 precedence, and the running handler-invocation count is checked
+//! precedence, and the running handler-invocation count is checked
 //! against the model's count of calls that should have reached a handler.
 //! Arguments are always well-typed, so for a known syscall the *only*
 //! rejection a known caller can provoke is the capability gate — the
 //! property this model exists to pin down.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.7)
+//! ## Wall-clock budget
 //!
 //! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
-//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
 //! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (pinnable via
-//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
+//! `--seed`), so a fresh-seed counterexample is still reproducible.
 
 use core::cell::RefCell;
 

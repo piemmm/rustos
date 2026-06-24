@@ -4,13 +4,13 @@
 //! Three jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
-//!    per-board script the architecture port owns — `AGENTS.md` §2.2) and dump
+//!    per-board script the architecture port owns) and dump
 //!    the canonical QEMU `virt` flattened device tree, embedding it so the test
 //!    discovers the GICv2 base and the generic-timer rate from the firmware
 //!    tree (`plans/PI.md` P3/P4). QEMU's `-kernel <ELF>` aarch64 path passes no
 //!    DTB pointer (`x0 = 0`), so the board tree is embedded at build time; the
 //!    dump helper lives in the shared harness so no aarch64 build script
-//!    re-rolls it (`AGENTS.md` §2.2).
+//!    re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    heap_program`) **position-independent** for the freestanding aarch64
 //!    target (its own `program.ld` roots `rustos-rt`'s `_start`), into a private
@@ -21,7 +21,7 @@
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -29,7 +29,7 @@
 //! compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -40,7 +40,7 @@ use std::process::Command;
 /// Virtual base the program image is mapped at. Chosen at 64 GiB — far above
 /// the kernel's 2 GiB identity map and within the 39-bit (512 GiB) TTBR0
 /// region — so the image lands on freshly walked stage-1 tables instead of
-/// colliding with an identity gigapage block (`AGENTS.md` §2.2 — the proven
+/// colliding with an identity gigapage block (the proven
 /// spawn layout). The heap's own arena sits higher still, at 96 GiB.
 const USER_BIAS: u64 = 0x10_0000_0000;
 
@@ -66,7 +66,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel itself links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -103,7 +103,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`).

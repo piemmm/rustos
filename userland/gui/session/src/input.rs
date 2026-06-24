@@ -4,14 +4,13 @@
 //! [`InputRouter`] (focus, click-to-activate, interactive move-grabs) and the
 //! taskbar's [`TaskbarInput`] (start-menu toggle, task activate/minimise,
 //! notification/clock presses) — and both consume the **same** shared
-//! `rustos_input` (`lib/input`) event vocabulary (`AGENTS.md` §17.4, §2.2). A
+//! `rustos_input` (`lib/input`) event vocabulary. A
 //! real input source produces one stream of events, so something must decide
 //! which router each event belongs to. Neither GUI crate may depend on the
-//! other (§17.4), so that decision is session glue, and [`SessionInputRouter`]
+//! other, so that decision is session glue, and [`SessionInputRouter`]
 //! is that glue.
 //!
-//! The policy is deliberately simple — one event does exactly one thing
-//! (`AGENTS.md` §2.1):
+//! The policy is deliberately simple — one event does exactly one thing:
 //!
 //! * **The taskbar claims a primary press** when its start menu is open (the
 //!   menu is modal, so a press anywhere selects an entry or dismisses it) or
@@ -31,9 +30,9 @@
 //! inner routers and drives them against the embedder's [`Compositor`] and
 //! [`Taskbar`], passed in on each [`handle`](SessionInputRouter::handle).
 //! Composing the taskbar and window-manager crates is the permitted
-//! `userland/gui/*` edge (§17.4); nothing outside `userland/gui/*` depends on
-//! this glue (§17.3). It never panics: every routed sub-call is itself total
-//! and fails closed (`AGENTS.md` §2.9).
+//! `userland/gui/*` edge; nothing outside `userland/gui/*` depends on
+//! this glue. It never panics: every routed sub-call is itself total
+//! and fails closed.
 
 use rustos_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
 use rustos_wm::{
@@ -104,8 +103,7 @@ impl SessionInputRouter {
     ///
     /// The session glue calls this when the taskbar activates a running task by
     /// id, so the window manager's focus follows the bar. Returns `false`,
-    /// changing nothing, when `compositor` does not know `window` (`AGENTS.md`
-    /// §2.9). Delegates to the window manager's router, which owns focus.
+    /// changing nothing, when `compositor` does not know `window`. Delegates to the window manager's router, which owns focus.
     pub fn focus(&mut self, window: WindowId, compositor: &Compositor) -> bool {
         self.wm.focus(window, compositor)
     }
@@ -119,8 +117,7 @@ impl SessionInputRouter {
 
     /// Start an interactive move-grab on the focused window, anchored at the
     /// current pointer position. Returns `false` (starting no grab) when there
-    /// is no focused window or it is no longer known to `compositor`
-    /// (`AGENTS.md` §2.9). Decorations call this on a title-bar press; the
+    /// is no focused window or it is no longer known to `compositor`. Decorations call this on a title-bar press; the
     /// subsequent motion then drags the window.
     pub fn begin_move(&mut self, compositor: &Compositor) -> bool {
         self.wm.begin_move(compositor)
@@ -142,8 +139,8 @@ impl SessionInputRouter {
         taskbar: &mut Taskbar,
     ) -> SessionInputResponse {
         // The taskbar hit-tests at the output's density, which the compositor
-        // owns (`AGENTS.md` §10); the session reads it here rather than
-        // keeping its own copy (§2.2).
+        // owns; the session reads it here rather than
+        // keeping its own copy.
         let scale = compositor.scale();
         match event {
             InputEvent::PointerMoved { .. } => {

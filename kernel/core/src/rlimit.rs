@@ -1,5 +1,5 @@
 //! Per-task resource-limit storage and the `rlimit_set` authorisation rule
-//! (`AGENTS.md` §24 — the L2 kernel enforcement of the `lib/abi` rlimit
+//! (the L2 kernel enforcement of the `lib/abi` rlimit
 //! contract).
 //!
 //! `lib/abi` ([`rustos_abi::rlimit`]) fixes the *wire* contract: the closed
@@ -11,21 +11,21 @@
 //! the single decision the `rlimit_set` handler makes about a requested
 //! limit.
 //!
-//! # Default policy (§24.1 / §24.2)
+//! # Default policy
 //!
 //! Until a principal imposes a tighter ceiling, every resource is governed
 //! by the discovered, growable default policy — *not* by a hard-wired
 //! `const` ceiling. L2 expresses that "no ceiling imposed here" as
 //! [`ResourceLimit::UNLIMITED`] for every kind ([`LimitSet::DEFAULT`]); the
 //! actual capacity a task can reach is bounded by the growable kernel
-//! structures, which L3 sizes from the §18-discovered hardware. A future
+//! structures, which L3 sizes from the-discovered hardware. A future
 //! discovered-hardware default policy slots in by tightening
 //! [`LimitSet::DEFAULT`] (or deriving it per boot); every consumer reads it
-//! through this one definition (`AGENTS.md` §2.2), and inheritance already
+//! through this one definition, and inheritance already
 //! intersects against it so a child can never widen past it.
 //!
 //! This is a *capacity* facility. It must never loosen the fixed
-//! security/format bounds on untrusted input (§24.4); those stay fixed and
+//! security/format bounds on untrusted input; those stay fixed and
 //! fail closed in their own modules.
 
 use rustos_abi::{Errno, LimitKind, ResourceLimit};
@@ -37,7 +37,7 @@ use rustos_abi::{Errno, LimitKind, ResourceLimit};
 /// [`LimitKind::COUNT`], so adding a resource grows the storage in step and
 /// any kind missing an entry fails to compile. `Copy` because a limit set is
 /// a handful of `u64`s — small enough to pass by value across the registry
-/// boundary without a heap allocation (`AGENTS.md` §2.16).
+/// boundary without a heap allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LimitSet {
     limits: [ResourceLimit; LimitKind::COUNT],
@@ -45,13 +45,13 @@ pub struct LimitSet {
 
 impl LimitSet {
     /// The default policy a task runs under until a tighter ceiling is
-    /// imposed (`AGENTS.md` §24.1 / §24.2).
+    /// imposed.
     ///
     /// Every resource is [`ResourceLimit::UNLIMITED`]: L2 imposes no
     /// `rlimit` ceiling of its own, leaving each capacity governed by the
     /// growable kernel structures L3 sizes from discovered hardware. The
     /// single source of truth — tighten it here (or derive it per boot) and
-    /// every task, including inheritance, follows (`AGENTS.md` §2.2).
+    /// every task, including inheritance, follows.
     pub const DEFAULT: Self = Self {
         limits: [ResourceLimit::UNLIMITED; LimitKind::COUNT],
     };
@@ -64,19 +64,18 @@ impl LimitSet {
 
     /// Replace the effective limit for `kind`.
     ///
-    /// The caller is responsible for the §24.3 authorisation
+    /// The caller is responsible for the authorisation
     /// ([`authorize_set`]); this is the unconditional store the handler
     /// reaches only once a request is authorised.
     pub fn set(&mut self, kind: LimitKind, limit: ResourceLimit) {
         self.limits[kind.as_u32() as usize] = limit;
     }
 
-    /// The limit set a child inherits from `parent` at spawn (`AGENTS.md`
-    /// §24.3).
+    /// The limit set a child inherits from `parent` at spawn.
     ///
     /// Each resource is `parent.intersect(DEFAULT)`: the child can never
     /// hold a bound wider than either the parent's ceiling or the system
-    /// default, mirroring the never-widen capability delegation rule (§5.2).
+    /// default, mirroring the never-widen capability delegation rule.
     /// While [`LimitSet::DEFAULT`] is unlimited this equals the parent's set
     /// verbatim; once a tighter default lands (L3) the same intersection
     /// keeps a child inside it without a second code path.
@@ -100,7 +99,7 @@ impl Default for LimitSet {
 }
 
 /// Decide a `rlimit_set` request against the caller's current effective
-/// limit (`AGENTS.md` §24.3).
+/// limit.
 ///
 /// `requested` has already been decoded and is well-formed (`soft <= hard`,
 /// guaranteed by [`ResourceLimit::decode`]). The rule:
@@ -109,7 +108,7 @@ impl Default for LimitSet {
 ///   current ceiling, is free — a process may always tighten its own limits.
 /// * Raising the hard bound above `current.hard` requires
 ///   [`rustos_abi::CapabilityId::RLIMIT_RAISE`]; without it the request is
-///   refused with [`Errno::PermissionDenied`] (fail closed, §5.4). Because
+///   refused with [`Errno::PermissionDenied`] (fail closed). Because
 ///   `requested` is well-formed, a permitted request (hard not raised) also
 ///   never lets the soft bound exceed the current ceiling.
 ///

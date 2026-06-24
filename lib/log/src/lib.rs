@@ -1,6 +1,6 @@
 //! Structured, level-filtered logging for RustOS.
 //!
-//! Design goals (`AGENTS.md` §2.1 / §2.5):
+//! Design goals:
 //!
 //! * **Structured.** Every emitted record carries a stable [`EventId`]; the
 //!   message body is a borrowed `&str` plus a slice of borrowed key/value

@@ -2,8 +2,7 @@
 //!
 //! Adding a terminal is a data entry (a new variant plus its [`Capabilities`]
 //! record and a capability test), not new control flow (`plans/CURSES.md` §1).
-//! The set is frozen with the same discipline as any other ABI surface
-//! (`AGENTS.md` §2.4).
+//! The set is frozen with the same discipline as any other ABI surface.
 
 use crate::capabilities::Capabilities;
 
@@ -79,9 +78,9 @@ impl TermType {
 /// Resolve an untrusted `TERM` string to a [`TermType`].
 ///
 /// The match is exact over the recognised set ([`TermType::ALL`]). An unknown
-/// or empty value fails closed to [`TermType::Dumb`] (`AGENTS.md` §2.9, §5.4)
+/// or empty value fails closed to [`TermType::Dumb`]
 /// rather than guessing a richer terminal. Parsing `TERM` never triggers a file
-/// read (`AGENTS.md` §16.1): the database is compiled in.
+/// read: the database is compiled in.
 #[must_use]
 pub fn from_term(term: &str) -> TermType {
     match term {
@@ -94,7 +93,7 @@ pub fn from_term(term: &str) -> TermType {
         "vt100" => TermType::Vt100,
         "vt220" => TermType::Vt220,
         // "dumb", an empty string, and every unrecognised value fail closed
-        // to the safe baseline (`AGENTS.md` §2.9, §5.4).
+        // to the safe baseline.
         _ => TermType::Dumb,
     }
 }

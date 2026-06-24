@@ -1,17 +1,17 @@
 //! Deterministic fuzz harness for the split-virtqueue completion path
-//! against a hostile virtio device (`AGENTS.md` §3.6 of the security
+//! against a hostile virtio device (of the security
 //! charter, CWE-1257 / Thunderclap-class).
 //!
 //! `SplitQueue::poll_used` consumes the **device-written** used ring and
 //! the descriptor table the device can DMA over. In the threat model of
-//! §4 / §3.6 those bytes are attacker-controlled: a buggy or malicious
+//! those bytes are attacker-controlled: a buggy or malicious
 //! device may name a descriptor head outside the granted table or
 //! scribble a chain `next` link so the driver's reclaim walk would leave
-//! the region. Per §19.6 ("every parser of untrusted input ... has a
+//! the region. Per ("every parser of untrusted input... has a
 //! fuzz target") the consumer is driven here against arbitrary
 //! device-supplied completions.
 //!
-//! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
+//! RustOS does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded PRNG drives random heads, lengths, and
 //! descriptor-table corruption through the in-process [`MockTransport`]
 //! hostile-device seams and asserts the invariants the driver must
@@ -19,13 +19,13 @@
 //!
 //! 1. `poll_used` never panics and never dereferences a descriptor
 //!    outside the granted table (the run aborting would be the failure).
-//! 2. **Fail-closed** (`AGENTS.md` §5.4): a completion naming a head
+//! 2. **Fail-closed**: a completion naming a head
 //!    `>= queue_size` is rejected with [`VirtioError::MalformedCompletion`],
 //!    never reclaimed.
 //! 3. An in-range head is accepted (`Ok`); the queue keeps making
 //!    progress (`free_count` never exceeds the queue size).
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//! ## Wall-clock budget
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed. When

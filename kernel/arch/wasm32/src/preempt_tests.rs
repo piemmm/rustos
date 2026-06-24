@@ -8,8 +8,7 @@
 //! The stateful tests share this module's global statics, so they hold
 //! the single shared lock ([`super::test_state_lock`]) for their
 //! duration — the same lock the `timer_hal` conformance vertical takes.
-//! Serialising them keeps the suite deterministic rather than flaky
-//! (`AGENTS.md` §7).
+//! Serialising them keeps the suite deterministic rather than flaky.
 
 use super::*;
 

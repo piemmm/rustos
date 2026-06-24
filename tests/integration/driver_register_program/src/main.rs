@@ -15,24 +15,23 @@
 //!    `resource_grants` syscall and refuses to proceed unless exactly one
 //!    well-formed register-window grant was delivered (handle 1, MMIO
 //!    kind, non-zero length) — the way a user-space driver learns the
-//!    windows its matched node requested (`AGENTS.md` §18.3);
+//!    windows its matched node requested;
 //! 4. sends a `DriverRegisterReply::registered` record over the
 //!    production `ipc_send` syscall (kernel-side capability check +
-//!    copy-in, `AGENTS.md` §5.2 / §5.4);
+//!    copy-in);
 //! 5. returns 0, which `rustos-rt` routes through the `exit` syscall.
 //!
 //! Each failure path returns a distinct non-zero diagnostic so the
-//! vertical fails loudly (`AGENTS.md` §2.9, §7): the reply never arrives
+//! vertical fails loudly: the reply never arrives
 //! and the host-side budget loop reports the failure rather than a silent
 //! pass.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust
+//! It is a **pure-Rust** program: it links the Rust
 //! userland runtime `rustos-rt` (which provides `_start`, the stack
 //! canary, the panic handler, and the `ipc_send`/`exit` syscall wrappers),
 //! never the C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust
-//! programs (`AGENTS.md` §16.4). It is built position-independent and
-//! converted to an `rxe` blob by the consuming test's build script
-//! (`AGENTS.md` §9, §19.2). On the host it is an inert stub so
+//! programs. It is built position-independent and
+//! converted to an `rxe` blob by the consuming test's build script. On the host it is an inert stub so
 //! `cargo build --workspace`, clippy, and fmt still cover the crate.
 
 #![cfg_attr(freestanding, no_std)]
@@ -47,13 +46,12 @@ mod program {
 
     /// Raw value of the informational [`DriverHandle`] this stub reports.
     /// Any non-zero value works (the host mints its own unforgeable handle
-    /// on success, `AGENTS.md` §5.2); the consuming vertical pins the same
+    /// on success); the consuming vertical pins the same
     /// constant and asserts the decoded reply round-tripped it.
     const STUB_HANDLE_RAW: u64 = 0x00D8_0001;
 
     /// Parse `bytes` as a non-negative decimal `u64`, or `None` on an
-    /// empty string, a non-digit byte, or overflow (fail closed,
-    /// `AGENTS.md` §2.9 — a malformed endpoint argument never sends).
+    /// empty string, a non-digit byte, or overflow (fail closed — a malformed endpoint argument never sends).
     fn parse_u64(bytes: &[u8]) -> Option<u64> {
         if bytes.is_empty() {
             return None;
@@ -85,11 +83,10 @@ mod program {
 
         // Verify the spawn minted and delivered this driver's device-
         // resource grant before replying: a user-space driver reaches its
-        // windows only through the grants `resource_grants` enumerates
-        // (`AGENTS.md` §4 / §18.3). Exactly one well-formed register-window
+        // windows only through the grants `resource_grants` enumerates. Exactly one well-formed register-window
         // grant must arrive (handle 1, MMIO kind, non-zero length); any
         // shortfall is a wiring defect the vertical must surface, never a
-        // silently sent reply (§2.9).
+        // silently sent reply.
         let mut grant_buf = [0u8; GrantedResource::WIRE_LEN];
         let read = rustos_rt::resource_grants(&mut grant_buf);
         if read != GrantedResource::WIRE_LEN as i64 {
@@ -110,7 +107,7 @@ mod program {
 
         // Build the informational success reply. `from_raw` refuses only
         // the zero sentinel, which `STUB_HANDLE_RAW` is not; surface a
-        // distinct diagnostic anyway rather than unwrapping (§2.9).
+        // distinct diagnostic anyway rather than unwrapping.
         let Ok(handle) = DriverHandle::from_raw(STUB_HANDLE_RAW) else {
             return 12;
         };
@@ -118,7 +115,7 @@ mod program {
 
         // The production `ipc_send` path: kernel-side endpoint resolution,
         // payload bound, copy-in from this process's own address space,
-        // and the per-send capability check (`AGENTS.md` §5.2 / §5.4). A
+        // and the per-send capability check. A
         // negative return is `-errno`.
         if rustos_rt::ipc_send(endpoint, &reply.to_le_bytes()) < 0 {
             return 13;

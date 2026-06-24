@@ -16,21 +16,20 @@
 //! and enumerates devices). None of those is a part of another: a different
 //! board may need the PCIe driver without USB at all, or an xHCI controller
 //! that needs no firmware reload. Keeping them separate is the correct
-//! modular shape (`AGENTS.md` §2.2 / §8 / §17.4).
+//! modular shape.
 //!
 //! # Why this lives in the driver crate, not `lib/*`
 //!
 //! This is the VL805's device-specific firmware-reload policy and the
 //! controller-node wiring: pure driver logic. It is **not** in a `lib/*`
-//! crate, because the §2.20 device-support carve-out only permits that when a
-//! *charter-legal non-driver* consumer (a §18.6 bootstrap-floor path, or a
+//! crate, because the device-support carve-out only permits that when a
+//! *charter-legal non-driver* consumer (a bootstrap-floor path, or a
 //! driver of a different class) shares it — and this driver has none. A VL805
 //! USB driver sits **above** the §18.6 bootstrap floor (it is discovered and
-//! autoloaded into user space, §18.5), so the firmware policy's only consumer
+//! autoloaded into user space), so the firmware policy's only consumer
 //! is this crate's own `Run` binary. The logic therefore lives here, in the
 //! driver, as a host-testable `lib` target the freestanding bin links — there
-//! is no second crate and no `lib/*` device-support crate to keep in sync
-//! (`AGENTS.md` §2.22 / §2.2 / §2.14).
+//! is no second crate and no `lib/*` device-support crate to keep in sync.
 //!
 //! # Layering
 //!
@@ -38,23 +37,23 @@
 //! **only** through the board-neutral
 //! [`MailboxChannel`] seam the
 //! host exposes — never a doorbell address, a property-buffer carve, or a
-//! `kernel/*` dependency (`AGENTS.md` §17.4). The board specifics (doorbell
+//! `kernel/*` dependency. The board specifics (doorbell
 //! window, DMA-aliased buffer, cache coherency) stay behind the host's
 //! `MailboxChannel` implementation and the `VideoCore` client
 //! (`lib/vcmailbox`). The property-message *layout* lives once in
 //! `lib/vcmailbox` ([`encode_xhci_reset`] and friends); this crate only
-//! sequences the policy (`AGENTS.md` §2.2).
+//! sequences the policy.
 //!
 //! # Public surface & capabilities
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`]; the
+//! Per the only public *function* is [`register`]; the
 //! firmware policy is exposed as [`reload_firmware`] and
 //! [`probe_firmware_revision`], composed by the host over a
 //! [`MailboxChannel`]. The
 //! [`wiring`] module composes the firmware reload with publishing the
 //! controller as an xHCI hardware-tree node. Loading requires
 //! [`CapabilityId::DRV_LOAD`]; the mailbox doorbell/buffer access is gated
-//! host-side by the `MailboxChannel` implementation (`AGENTS.md` §5.4). Runs
+//! host-side by the `MailboxChannel` implementation. Runs
 //! in user space (no `CAP_DRV_KERNEL`).
 
 #![no_std]
@@ -94,19 +93,19 @@ pub const VL805_PCI_DEVICE: u16 = 0x3483;
 /// could not bind this driver.
 pub const VL805_PCI_CLASS: u32 = 0x0C_03_30;
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries.
+/// The bind priority [`BIND_KEYS`] carries.
 ///
 /// An exact vendor:device match ranks **above** the generic xHCI
 /// class-wildcard driver (priority 5) so the VL805 is matched specifically
-/// when both could bind a discovered node (`AGENTS.md` §18.3 — bind
+/// when both could bind a discovered node (bind
 /// specificity decides).
 const BIND_PRIORITY: u16 = 20;
 
-/// This driver's hardware bind table (`AGENTS.md` §18.3): the VL805 USB
+/// This driver's hardware bind table: the VL805 USB
 /// host controller, matched by its exact PCI vendor:device id
 /// ([`VL805_PCI_VENDOR`]`:`[`VL805_PCI_DEVICE`]). The single source of
 /// truth the signed-manifest bind table is authored from and `devmgr`
-/// resolves a discovered node against (`AGENTS.md` §2.2).
+/// resolves a discovered node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     HwMatchKey::pci(VL805_PCI_VENDOR, VL805_PCI_DEVICE, VL805_PCI_CLASS),
@@ -139,7 +138,7 @@ pub enum FirmwareResetFailure {
 
 impl FirmwareResetFailure {
     /// Stable, allocation-free name for the failure, for the host's
-    /// diagnostic log (`AGENTS.md` §2.9 — the log path never allocates).
+    /// diagnostic log (the log path never allocates).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -174,7 +173,7 @@ impl FirmwareResetFailure {
     /// [`MailboxChannel::exchange`] *transport* to a stable reason.
     ///
     /// The host's channel reports transport failures as the board-neutral
-    /// [`DriverError`] (`AGENTS.md` §17.4), so this re-derives the reason
+    /// [`DriverError`], so this re-derives the reason
     /// from it; it is the inverse of `MailboxError::as_driver_error` over
     /// the transport-level error set (a `Timeout` is the only thing that
     /// maps to [`DriverError::DeviceFault`] at this stage — a
@@ -211,7 +210,7 @@ pub enum FirmwareResetOutcome {
     },
 }
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// Verifies the host already granted [`CapabilityId::DRV_LOAD`] and returns
 /// the registration marker handle. No hardware is touched here; the
@@ -242,7 +241,7 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// the heavier [`reload_firmware`] localises a failure — a probe failure
 /// means the mailbox path itself is broken, while a probe success followed
 /// by a reload timeout means the firmware is specifically dropping the
-/// reset tag (`AGENTS.md` §15.7 — measure, don't guess). The composing
+/// reset tag (measure, don't guess). The composing
 /// host logs the outcome.
 ///
 /// # Errors
@@ -266,18 +265,17 @@ pub fn probe_firmware_revision(channel: &dyn MailboxChannel) -> Result<u32, Firm
 /// have dropped the VL805's firmware), this reload restores it before the
 /// generic xHCI driver brings the controller up. It is fail-closed: an
 /// unverified firmware ack is treated as a failure, never a success
-/// (`AGENTS.md` §5.4 — the firmware is external input). The response value
+/// (the firmware is external input). The response value
 /// is diagnostic only; an honoured tag is the success signal.
 ///
 /// The buffer is encoded once via
 /// [`encode_xhci_reset`], exchanged
 /// over the board-neutral channel, and verified via
 /// [`decode_xhci_reset_response`]
-/// — the property layout is never re-derived here (`AGENTS.md` §2.2).
+/// — the property layout is never re-derived here.
 ///
 /// This is best-effort in the boot composition: the authoritative xHCI
-/// liveness gate is the controller's capability block at `Xhci::open`
-/// (`AGENTS.md` §2.9), so the host logs a failure but need not abort on it.
+/// liveness gate is the controller's capability block at `Xhci::open`, so the host logs a failure but need not abort on it.
 #[must_use]
 pub fn reload_firmware(channel: &dyn MailboxChannel) -> FirmwareResetOutcome {
     let mut message = encode_xhci_reset(VL805_FIRMWARE_DEV_ADDR);

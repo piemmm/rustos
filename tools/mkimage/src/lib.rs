@@ -1,9 +1,9 @@
-//! Platform image builders for RustOS (`AGENTS.md` §12).
+//! Platform image builders for RustOS.
 //!
 //! `rustos-mkimage` authors flashable images in pure Rust: the partition
 //! contents are laid down by the **real** in-tree filesystem drivers — the
 //! same code the booted system mounts the volumes with — so the image
-//! author and its consumer can never drift (`AGENTS.md` §2.2). There is no
+//! author and its consumer can never drift. There is no
 //! shelling out to `parted`/`mkfs`/`xorriso`.
 //!
 //! ## `images/rustos-aarch64-rpi.img` (`plans/PI.md` P9)
@@ -12,12 +12,12 @@
 //!
 //! - **MBR** ([`mbr`]): two primary partitions, both 1 MiB-aligned.
 //! - **Boot partition** ([`fatboot`], FAT32, [`BOOT_PART_SECTORS`]): the
-//!   pinned third-party firmware blobs ([`firmware`], `AGENTS.md` §19.3),
+//!   pinned third-party firmware blobs ([`firmware`]),
 //!   the generated `config.txt`, and `kernel8.img` — the freestanding
 //!   aarch64 `rustos-kernel` ELF flattened by [`elfflat`].
 //! - **Root partition** ([`rootfs`], `RustFS`, [`ROOT_PART_SECTORS`]): an
-//!   encrypted volume carrying the `AGENTS.md` §16 directory skeleton. Its
-//!   volume key is **derived from a passphrase** (`AGENTS.md` §11): the
+//!   encrypted volume carrying the directory skeleton. Its
+//!   volume key is **derived from a passphrase**: the
 //!   build provisions an
 //!   [`UnlockDescriptor`] (a
 //!   per-volume random salt + PBKDF2 iteration count), derives the volume
@@ -28,7 +28,7 @@
 //!   before mounting. The passphrase itself is never stored in the image.
 //!
 //! Two [`ImageProfile`]s exist. **Installer** is the shippable form: the
-//! root carries no user accounts, the §11 installer authors
+//! root carries no user accounts, the installer authors
 //! `/System/Security/Users` on first boot, and its encrypted root is
 //! unlocked by a **blank** passphrase ([`INSTALLER_PASSPHRASE`]) the
 //! bootstrap auto-enters with no prompt, so a fresh install boots straight
@@ -80,7 +80,7 @@ pub const BOOT_PART_SECTORS: u32 = 131_072;
 pub const SYSTEM_PART_LBA: u32 = BOOT_PART_LBA + BOOT_PART_SECTORS;
 
 /// Sectors in the read-only `RustFS` `/System` partition: 64 MiB — the
-/// §16.2 skeleton plus headroom for the signed driver bundles that land
+/// skeleton plus headroom for the signed driver bundles that land
 /// here in the later design-B increments.
 pub const SYSTEM_PART_SECTORS: u32 = 131_072;
 
@@ -88,7 +88,7 @@ pub const SYSTEM_PART_SECTORS: u32 = 131_072;
 /// with the `/System` partition, which already ends 1 MiB-aligned).
 pub const ROOT_PART_LBA: u32 = SYSTEM_PART_LBA + SYSTEM_PART_SECTORS;
 
-/// Sectors in the `RustFS` root partition: 64 MiB — the §16 skeleton plus
+/// Sectors in the `RustFS` root partition: 64 MiB — the skeleton plus
 /// installer headroom. The installer grows the layout on first boot;
 /// `RustFs::grow` expands a volume to its device, so a card-sized root is
 /// a first-boot job, not an image-build job.
@@ -98,7 +98,7 @@ pub const ROOT_PART_SECTORS: u32 = 131_072;
 pub const IMAGE_SECTORS: u32 = ROOT_PART_LBA + ROOT_PART_SECTORS;
 
 /// Everything that can go wrong while authoring an image. Every variant is
-/// a refusal: mkimage never emits a best-effort image (`AGENTS.md` §5.4).
+/// a refusal: mkimage never emits a best-effort image.
 #[derive(Debug)]
 pub enum MkimageError {
     /// The firmware pin manifest is malformed or incomplete.
@@ -148,14 +148,14 @@ impl From<MbrError> for MkimageError {
 
 impl std::error::Error for MkimageError {}
 
-/// Which kind of image to author (`AGENTS.md` §12).
+/// Which kind of image to author.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ImageProfile {
     /// Development image: the root volume is seeded with the
     /// [`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`] account so the login prompt is
     /// usable without the installer. Never shipped.
     Debug,
-    /// Shippable image: no user accounts; the §11 installer authors
+    /// Shippable image: no user accounts; the installer authors
     /// `/System/Security/Users` on first boot.
     Installer,
 }
@@ -202,9 +202,9 @@ pub const DEBUG_PASSWORD: &str = "root";
 pub const DEBUG_PASSPHRASE: &[u8] = b"root";
 
 /// Passphrase the **installer** image's encrypted root is provisioned
-/// under — **blank** (`AGENTS.md` §11).
+/// under — **blank**.
 ///
-/// The installer image's root is **re-provisioned by the §11 installer**,
+/// The installer image's root is **re-provisioned by the installer**,
 /// which sets the user's real, operator-chosen passphrase when it authors
 /// the production root on first boot. Until then a blank passphrase
 /// unlocks it (auto-enterable, so a fresh install does not stall). The
@@ -219,11 +219,11 @@ pub const INSTALLER_PASSPHRASE: &[u8] = b"";
 /// provisioned under.
 ///
 /// The passphrase is fully determined by the profile (there is no
-/// operator choice at *image-build* time — the §11 installer is where a
+/// operator choice at *image-build* time — the installer is where a
 /// real passphrase is chosen), so it is derived here rather than passed in
 /// alongside the profile, which removes any chance of provisioning an
 /// image under a passphrase that disagrees with the one its prompt expects
-/// (`AGENTS.md` §2.2 — one source of truth).
+/// (one source of truth).
 #[must_use]
 pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
     match profile {
@@ -235,7 +235,7 @@ pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
 /// Build the debug-profile `/System/Security/Users` text: the single
 /// `root` account, its password salted from `entropy` and hashed at the
 /// default PBKDF2 cost, granted the administrative capability ceiling a
-/// bring-up session needs (`AGENTS.md` §5.2 — powers come from
+/// bring-up session needs (powers come from
 /// capabilities, not from `uid 0`).
 fn debug_users_db(entropy: &mut dyn EntropySource) -> Result<String, MkimageError> {
     let mut salt: Salt = [0u8; rustos_users::SALT_LEN];
@@ -302,29 +302,27 @@ pub struct RpiImage {
 /// debug build, the seeded account's password salt; `profile` selects the
 /// [`ImageProfile`] **and** the encrypted-root unlock passphrase
 /// ([`passphrase_for`]) — `root` for the debug image, blank for the
-/// installer (`AGENTS.md` §11). The passphrase is not a separate argument:
+/// installer. The passphrase is not a separate argument:
 /// deriving it from the profile makes it impossible to provision an image
-/// under a passphrase that disagrees with the one its prompt expects
-/// (`AGENTS.md` §2.2).
+/// under a passphrase that disagrees with the one its prompt expects.
 ///
 /// The root is encrypted under a [`VolumeKey`] **derived** from the
 /// profile's passphrase through a freshly provisioned
 /// [`UnlockDescriptor`]; the
 /// plaintext descriptor is laid on the boot partition
 /// ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap re-derives the key
-/// from the passphrase before mounting (`AGENTS.md` §11).
+/// from the passphrase before mounting.
 ///
 /// `drivers` is the set of signed `.rxe` driver bundles to install into the
 /// read-only `/System/Drivers/` store, each as `(components, bytes)` where
 /// `components` is the bundle's leaf path **relative to the `/System` volume
 /// root** (for example `&[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"]`)
-/// and `bytes` is the bundle exactly as the §18.6 store scan reads it back.
+/// and `bytes` is the bundle exactly as the store scan reads it back.
 /// The caller cross-compiles and signs each bundle (this crate stays pure —
 /// it never drives `cargo`); `build_rpi_image` only plants the bytes. The
 /// kernel verifies every bundle against its embedded trust anchor at load, so
-/// a tampered read-only store fails closed (`AGENTS.md` §18.6). An empty slice
-/// produces an image with no autoloaded drivers (every node left unbound,
-/// `AGENTS.md` §18.4).
+/// a tampered read-only store fails closed. An empty slice
+/// produces an image with no autoloaded drivers (every node left unbound).
 ///
 /// # Errors
 ///
@@ -409,7 +407,7 @@ pub fn build_rpi_image(
 /// (`/dev/urandom`), used for the image's root volume key and the volume's
 /// internal key hierarchy. Fails closed when the host source is
 /// unavailable — an image is never provisioned with predictable key
-/// material (`AGENTS.md` §5.4).
+/// material.
 pub struct HostEntropy;
 
 impl EntropySource for HostEntropy {
@@ -533,7 +531,7 @@ mod tests {
         assert_eq!(info.kind, NodeKind::RegularFile);
 
         // The on-disk descriptor re-derives exactly the volume key the
-        // image was provisioned under (the bootstrap's path, §11).
+        // image was provisioned under (the bootstrap's path).
         let descriptor = read_unlock_descriptor(&built.image);
         assert_eq!(descriptor, built.unlock);
         assert_eq!(
@@ -553,7 +551,7 @@ mod tests {
         let rustfs_root = rfs.root();
         rfs.lookup(rustfs_root, b"System").expect("/System exists");
 
-        // An installer image ships no user accounts (§11 first-boot job).
+        // An installer image ships no user accounts (first-boot job).
         let system = rfs.lookup(rustfs_root, b"System").expect("/System");
         let security = rfs.lookup(system, b"Security").expect("Security");
         assert!(rfs
@@ -586,7 +584,7 @@ mod tests {
         assert_eq!(system.block_count, u64::from(SYSTEM_PART_SECTORS));
 
         // It mounts read-only under the non-secret well-known key and its
-        // root *is* `/System`, carrying the §16.2 skeleton directly.
+        // root *is* `/System`, carrying the skeleton directly.
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
         let mut sys = RustFs::open_read_only(window, &SYSTEM_VOLUME_KEY)
             .expect("/System mounts read-only under the public key");
@@ -601,7 +599,7 @@ mod tests {
             .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
             .is_err());
 
-        // A read-only mount refuses mutation fail-closed (`AGENTS.md` §5.4).
+        // A read-only mount refuses mutation fail-closed.
         assert_eq!(
             sys.create(sys_root, b"x", NodeKind::Directory),
             Err(DriverError::PermissionDenied)
@@ -615,8 +613,7 @@ mod tests {
 
         // A synthetic bundle blob: this test proves the *planting* (path +
         // bytes + intermediate-directory creation), not signature validity —
-        // the signed-bundle composition is exercised where it is built
-        // (`AGENTS.md` §2.2). The store path mirrors the real mailbox
+        // the signed-bundle composition is exercised where it is built. The store path mirrors the real mailbox
         // service-driver install (`Drivers/<class>/<leaf>/Run`).
         const BUNDLE: &[u8] = b"a signed .rxe driver bundle's bytes (synthetic)";
         let store_path: &[&[u8]] = &[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"];
@@ -631,7 +628,7 @@ mod tests {
         .expect("image builds");
 
         // Mount the read-only `/System` volume and read the planted bundle
-        // back at its store path, byte-for-byte — the shape the §18.6 store
+        // back at its store path, byte-for-byte — the shape the store
         // scan reads.
         let mut disk = MemBlock::from_bytes(built.image).expect("whole sectors");
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
@@ -664,7 +661,7 @@ mod tests {
         let descriptor = read_unlock_descriptor(&built.image);
 
         // A wrong passphrase derives a different key, which the volume's
-        // AEAD-wrapped master key rejects — no separate oracle (§5.4).
+        // AEAD-wrapped master key rejects — no separate oracle.
         let wrong = descriptor.derive_volume_key(b"not the passphrase");
         assert_ne!(wrong, built.root_key);
         let root_at = ROOT_PART_LBA as usize * SECTOR_BYTES;
@@ -735,7 +732,7 @@ mod tests {
     fn each_profile_maps_to_its_unlock_passphrase() {
         // The debug image unlocks with `root` (typed at the prompt); the
         // installer with a blank passphrase (auto-entered, no prompt) —
-        // `AGENTS.md` §11. The two differ, so the wrong-passphrase test
+        // . The two differ, so the wrong-passphrase test
         // above is a genuine negative.
         assert_eq!(passphrase_for(ImageProfile::Debug), DEBUG_PASSPHRASE);
         assert_eq!(

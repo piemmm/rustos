@@ -1,10 +1,9 @@
-//! Per-run PRNG seed selection for the §19.6 fuzz and §19.7 proptest soaks.
+//! Per-run PRNG seed selection for the fuzz and proptest soaks.
 //!
 //! The in-tree fuzz harnesses (`commands::fuzz`) and stateful proptest models
 //! (`commands::proptest`) draw their inputs from a seeded PRNG. With a *fixed*
 //! seed every run replays the identical input stream, so a soak that re-ran
-//! the same harness night after night would explore nothing new (`AGENTS.md`
-//! §2.1 forbids that kind of busy-work). This module chooses the seed each
+//! the same harness night after night would explore nothing new (the charter forbids that kind of busy-work). This module chooses the seed each
 //! orchestrated run exports to its harnesses:
 //!
 //! * with no `--seed`, every job gets a *fresh* entropy seed, so consecutive
@@ -17,8 +16,7 @@
 //! back via `--seed`.
 //!
 //! The seed primitives and the env-var names are shared with the harness side
-//! through [`rustos_fuzzseed`] so they live in exactly one place (`AGENTS.md`
-//! §2.2): this module adds only the orchestrator-specific per-job derivation.
+//! through [`rustos_fuzzseed`] so they live in exactly one place: this module adds only the orchestrator-specific per-job derivation.
 
 pub use rustos_fuzzseed::{splitmix64, FUZZ_SEED_ENV, PROPTEST_SEED_ENV};
 

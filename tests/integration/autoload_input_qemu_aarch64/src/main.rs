@@ -4,7 +4,7 @@
 //! virtio-input keyboard driver bundle** in `/System/Drivers/`, and prove the
 //! full **driver-loading-by-discovery autoload path** spawns that user-space
 //! driver, which delivers an injected keystroke to the kernel input-focus
-//! arbiter (`AGENTS.md` §4 / §18 / §20).
+//! arbiter.
 //!
 //! ## What this test asserts — and how it differs from its siblings
 //!
@@ -26,8 +26,8 @@
 //! 1. **Discovers** the virtio-block root *and* the virtio-input keyboard node
 //!    (bootstrap-floor virtio-MMIO enumeration). The input node carries its
 //!    register window, a coherent DMA constraint, **and** its discovered GICv2
-//!    interrupt line as capability-grant requests (`AGENTS.md` §18.3); the full
-//!    hardware tree is stashed for the init seam (`AGENTS.md` §18.2).
+//!    interrupt line as capability-grant requests; the full
+//!    hardware tree is stashed for the init seam.
 //! 2. **Admits the unlock kthread**, which brings the root block device up over
 //!    the device-IRQ path, mounts the read-only `/System` volume, and serves
 //!    its signed driver store over the capability-gated IPC endpoint.
@@ -35,14 +35,13 @@
 //!    `devmgr` service reads the hardware tree, lists the `/System` store over
 //!    the IPC service, matches the signed `virtio_kbd` bundle to the discovered
 //!    virtio-input node (`lib/devmatch`), and asks the kernel to load it; the
-//!    kernel re-runs the full signed §8 gate (verified against the embedded
+//!    kernel re-runs the full signed gate (verified against the embedded
 //!    `KERNEL_DRIVER_SIGNER_PUBKEY`) and **spawns it into its own user-space
 //!    process** with exactly that node's resource grants (register window, DMA,
-//!    and the IRQ line) plus the delegated `CAP_INPUT_INJECT` (`AGENTS.md`
-//!    §18.3 / §5.2).
+//!    and the IRQ line) plus the delegated `CAP_INPUT_INJECT`.
 //! 4. The spawned driver maps its register window, brings the virtio-input
 //!    device up, **binds its granted interrupt line and parks on `irq_wait`**
-//!    (interrupt-driven, never a busy poll — `AGENTS.md` §2.1 / §2.16), and on
+//!    (interrupt-driven, never a busy poll), and on
 //!    each device interrupt pumps decoded key edges into the arbiter via
 //!    `key_inject`.
 //!
@@ -51,7 +50,7 @@
 //! The audit sink reports PASS once it sees `AuditEvent::InputDelivered`
 //! (`EventId` 4050) — the one-shot witness the
 //! `key_inject` handler emits the first time an input driver delivers a key
-//! edge to the arbiter (`AGENTS.md` §20 — it carries no key content, count, or
+//! edge to the arbiter (it carries no key content, count, or
 //! timing). Reaching it requires every preceding step to have succeeded: the
 //! `/System` volume mounted and served, the store listed, the signed bundle
 //! verified, the node matched, the user-space driver spawned and granted its
@@ -61,8 +60,7 @@
 //! audited `irq_bind` syscall, `AUTOLOAD_INPUT_KEY_MARKER`), so the device is
 //! active with posted buffers and the keypress is delivered rather than dropped
 //! against an un-ready device. A run where any step fails never reaches that
-//! witness, so the harness times out — the documented fail-loud behaviour
-//! (`AGENTS.md` §7).
+//! witness, so the harness times out — the documented fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -79,7 +77,7 @@
 //! audit sink. Splitting the audit-observer behaviour into a separate bin
 //! (instead of a Cargo feature on a production crate) prevents feature
 //! unification from leaking the QEMU-exit shortcut into any production build
-//! (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what the kernel
+//! (fail closed; the harness never decides what the kernel
 //! does next).
 
 #![cfg_attr(itest_aarch64, no_std)]
@@ -140,8 +138,7 @@ mod kernel {
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-    /// §7).
+    /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn rustos_autoload_input_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

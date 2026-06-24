@@ -5,12 +5,12 @@
 //! start button, the task list (and a slot per task), the notification area
 //! (and a slot per icon), and the clock. All arithmetic saturates, so a
 //! pathological screen size or extent fails closed inside the bar rather than
-//! wrapping (`AGENTS.md` §2.9).
+//! wrapping.
 //!
 //! The layout also carries the taskbar's [`corner_radius`](BarLayout::corner_radius),
 //! sourced from the active theme. The taskbar does not round its own corners:
 //! the window manager applies this radius through its single anti-aliased
-//! rounded-corner path, exactly as it rounds windows (`AGENTS.md` §2.2).
+//! rounded-corner path, exactly as it rounds windows.
 
 use alloc::vec::Vec;
 
@@ -45,8 +45,7 @@ pub enum Hit {
 pub struct BarLayout {
     /// The whole bar.
     pub bar: Rect,
-    /// The corner radius the window manager applies to the bar (`AGENTS.md`
-    /// §2.2). `0` is square.
+    /// The corner radius the window manager applies to the bar. `0` is square.
     pub corner_radius: u32,
     /// The start-menu button, at the leading end.
     pub start_button: Rect,
@@ -74,8 +73,7 @@ impl BarLayout {
     /// framebuffer), while the bar's extents, thickness, and the
     /// `corner_radius` are *logical* pixels authored at the reference
     /// density; `scale` converts those logical lengths into physical pixels
-    /// so the bar stays a comfortable physical size across panel densities
-    /// (`AGENTS.md` §10).
+    /// so the bar stays a comfortable physical size across panel densities.
     #[must_use]
     pub fn compute(
         config: &TaskbarConfig,
@@ -176,19 +174,18 @@ impl BarLayout {
 /// itself it is a *rectangular* buffer the window manager places and rounds:
 /// [`MenuLayout::compute`] reports the popup [`panel`](Self::panel), the
 /// [`corner_radius`](Self::corner_radius) the compositor applies through its
-/// single anti-aliased rounded-corner path (`AGENTS.md` §2.2), and one
+/// single anti-aliased rounded-corner path, and one
 /// [`Rect`] per menu entry stacked along the panel. The popup opens *outward*
 /// from the bar: above a bottom bar, below a top bar, and to the inner side of
 /// a left/right bar, with its leading edge aligned to the start button.
 ///
 /// All arithmetic saturates, so a pathological screen or scale fails closed
-/// rather than wrapping (`AGENTS.md` §2.9).
+/// rather than wrapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MenuLayout {
     /// The whole popup panel.
     pub panel: Rect,
-    /// The corner radius the window manager applies to the popup (`AGENTS.md`
-    /// §2.2). `0` is square.
+    /// The corner radius the window manager applies to the popup. `0` is square.
     pub corner_radius: u32,
     /// One row per menu entry, in entry order, stacked from the panel's top.
     pub entries: Vec<Rect>,
@@ -203,7 +200,7 @@ impl MenuLayout {
     /// from a [`BarLayout`]; the popup's own width, row height, and corner
     /// radius are *logical* lengths converted through `scale`, so the
     /// logical→physical conversion is the one in [`Scale::scale_length`],
-    /// never re-derived (`AGENTS.md` §2.2 / §10).
+    /// never re-derived.
     #[must_use]
     pub fn compute(
         edge: Edge,
@@ -297,7 +294,7 @@ fn index_of(rects: &[Rect], point: Point) -> Option<usize> {
 }
 
 /// Saturating `u32` → `i32`; an out-of-range coordinate clamps to
-/// [`i32::MAX`] rather than wrapping (`AGENTS.md` §2.9).
+/// [`i32::MAX`] rather than wrapping.
 fn to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }

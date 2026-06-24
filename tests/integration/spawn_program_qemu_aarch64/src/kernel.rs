@@ -116,7 +116,7 @@ fn spawn_program_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A `CapabilityQuery` granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). The test does not exercise the
+/// spawn caller requires. The test does not exercise the
 /// denial path here (that is covered by `kernel/core`'s host tests); it proves
 /// the *authorised* path runs end to end.
 struct SpawnAuthority;
@@ -216,8 +216,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     //    through the production capability-checked, audited spawn caller.
     // The arch `paging::AddressSpace` implements the Arch HAL page-table
     // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
-    // `kernel/mem` façade drives it with no per-test adapter (`AGENTS.md`
-    // §2.2; the Stage W5b-2 wiring removed the old `PageTableOps` shim).
+    // `kernel/mem` façade drives it with no per-test adapter (the Stage W5b-2 wiring removed the old `PageTableOps` shim).
     let mut space = AddressSpace::new(arch);
     let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
     let request = SpawnRequest {

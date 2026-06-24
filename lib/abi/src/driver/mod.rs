@@ -1,8 +1,8 @@
 //! Driver class trait surface (Stage 4 of `PLAN.md`).
 //!
 //! This module is the single source of truth for the user/kernel ABI that
-//! sits between a loaded driver module (`.rxe` binary, see `AGENTS.md` §9)
-//! and its host. The host lives in user space by default (`AGENTS.md` §4)
+//! sits between a loaded driver module (`.rxe` binary)
+//! and its host. The host lives in user space by default
 //! and dispatches calls into one of the six driver-class traits defined in
 //! the submodules below:
 //!
@@ -27,8 +27,7 @@
 //!    driver instance.
 //! 3. **Run** — the host dispatches class-trait methods on behalf of
 //!    callers. Every method is capability-gated *at the dispatch
-//!    site*; the trait implementation never re-checks
-//!    (`AGENTS.md` §5.2).
+//!    site*; the trait implementation never re-checks.
 //! 4. **Unload** — the host drops the [`DriverHandle`]; the driver's
 //!    `Drop` impl quiesces hardware and releases capabilities.
 //!
@@ -83,11 +82,11 @@ pub use virtio_pci::{
 ///
 /// Stage 4.D introduced this hint so block- and network-driver
 /// implementations can scrub their internal DMA staging buffers as
-/// soon as a payload leaves them (`AGENTS.md` §4 "zero-on-free for
+/// soon as a payload leaves them ("zero-on-free for
 /// any allocation that ever held credentials, keys, or capability
 /// tokens"). The flag is a *promise about the buffer's contents*,
 /// not an access-control gate: capability enforcement remains at the
-/// dispatch site (`AGENTS.md` §5.4).
+/// dispatch site.
 ///
 /// The variant set is `#[non_exhaustive]` so future classes (for
 /// example a `Secret` class that pins the driver's staging into a
@@ -98,7 +97,7 @@ pub use virtio_pci::{
 /// On the wire `BufferClass` is a single byte. Hosts that bridge the
 /// hint through a syscall must reject unknown values rather than
 /// silently downgrading to [`BufferClass::NonSensitive`] (failing
-/// closed, `AGENTS.md` §5.4.5).
+/// closed).
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
@@ -125,8 +124,7 @@ impl BufferClass {
     /// # Errors
     ///
     /// Returns [`DriverError::OutOfRange`] if `raw` does not name a
-    /// known class. The host must fail closed in that case
-    /// (`AGENTS.md` §5.4.5).
+    /// known class. The host must fail closed in that case.
     ///
     /// # Capabilities
     ///
@@ -162,7 +160,7 @@ pub const DRIVER_MANIFEST_MAX_CAPABILITIES: u16 = 64;
 /// may declare.
 ///
 /// Bounded so that a hostile manifest cannot force unbounded parsing
-/// work (`AGENTS.md` §24.4 — a validation bound, not a capacity). A
+/// work (a validation bound, not a capacity). A
 /// driver binds one device class on a handful of buses; sixteen keys is
 /// generous headroom for every in-tree driver.
 pub const DRIVER_MANIFEST_MAX_BIND_KEYS: u8 = 16;
@@ -232,7 +230,7 @@ impl DriverHandle {
 
 /// Whether a driver runs in user space (the default) or in the kernel.
 ///
-/// Per `AGENTS.md` §4 / §8 a driver runs in user space unless the
+/// Per a driver runs in user space unless the
 /// hardware forbids it. Declaring [`DriverKind::InKernel`] in a
 /// manifest is what causes the host to require
 /// [`CapabilityId::DRV_KERNEL`](crate::CapabilityId::DRV_KERNEL) on
@@ -333,8 +331,7 @@ impl DriverError {
     /// # Errors
     ///
     /// Returns [`DriverError::OutOfRange`] if `raw` does not name a
-    /// known variant (failing closed on a forged or future code,
-    /// `AGENTS.md` §5.4).
+    /// known variant (failing closed on a forged or future code).
     ///
     /// # Capabilities
     ///
@@ -387,8 +384,7 @@ impl DriverError {
 /// Field order is part of the frozen `abi-v1` contract. The body that
 /// follows the header is a list of [`CapabilityId`] values the driver
 /// requests (`capability_count` entries) followed by the driver's bind
-/// table (`bind_key_count` [`DriverBindKey`] records, `AGENTS.md`
-/// §18.3); header and body are covered by
+/// table (`bind_key_count` [`DriverBindKey`] records); header and body are covered by
 /// [`DriverManifest::signature`]. The signature byte range itself is
 /// excluded from coverage; use [`DriverManifest::signed_range`] when
 /// verifying.
@@ -522,7 +518,7 @@ impl DriverManifest {
 /// One entry of a driver manifest's bind table.
 ///
 /// The bind table is how a driver declares the hardware-tree nodes it
-/// can drive (`AGENTS.md` §18.3): each entry pairs one [`HwMatchKey`]
+/// can drive: each entry pairs one [`HwMatchKey`]
 /// with a manifest-declared bind priority. The device manager compares
 /// a node's match keys against every loaded manifest's table; when more
 /// than one driver matches the same node, the higher matched `priority`
@@ -578,7 +574,7 @@ impl DriverBindKey {
     /// # Capabilities
     ///
     /// None. Parsing is pure; the device manager's load gate enforces
-    /// the capability checks (`AGENTS.md` §18.3).
+    /// the capability checks.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DriverError> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(DriverError::BufferTooSmall);
@@ -610,7 +606,7 @@ impl DriverBindKey {
 /// success) is returned so a fixed-size scratch buffer can be reused
 /// across manifests. This is the single decoder for the table format,
 /// shared by every consumer that turns a signed manifest into a bind
-/// table (`AGENTS.md` §2.2).
+/// table.
 ///
 /// # Errors
 ///
@@ -646,14 +642,12 @@ pub fn decode_bind_keys(
 /// kernel-issued device-resource grants.
 ///
 /// A `devmgr`-autoloaded driver is granted exactly the resources its
-/// matched hardware-tree node requested — and no more (`AGENTS.md` §4 /
-/// §18.3). A bus/device driver maps one register block by *address*
+/// matched hardware-tree node requested — and no more. A bus/device driver maps one register block by *address*
 /// through its [`DriverHost`]'s [`MmioMapper`] (which resolves the
-/// covering grant and performs any bus→CPU translation, `AGENTS.md`
-/// §18.1); this finds that one window and returns the
+/// covering grant and performs any bus→CPU translation); this finds that one window and returns the
 /// `(base, len)` pair to map. The base is whichever address names the
 /// window for its kind — [`HwResource::register_window_base`] is the one
-/// definition of that choice (`AGENTS.md` §2.2), so the same derivation
+/// definition of that choice, so the same derivation
 /// serves every device class (the USB keyboard's BAR, a virtio MMIO
 /// transport's register block) without re-deciding `base` vs
 /// `translated_base`.
@@ -664,7 +658,7 @@ pub fn decode_bind_keys(
 ///
 /// # Errors
 ///
-/// Fails closed (`AGENTS.md` §2.9 / §5.4), never guessing a missing or
+/// Fails closed, never guessing a missing or
 /// ambiguous address:
 ///
 /// * [`DriverError::NotFound`] if no register-window grant is present.
@@ -677,8 +671,7 @@ pub fn decode_bind_keys(
 /// # Capabilities
 ///
 /// None. This inspects a grant set the kernel already minted; the map
-/// itself is capability-checked kernel-side at the `mmio_map` trap
-/// (`AGENTS.md` §5.4).
+/// itself is capability-checked kernel-side at the `mmio_map` trap.
 pub fn sole_register_window<'a, I>(resources: I) -> Result<(u64, usize), DriverError>
 where
     I: IntoIterator<Item = &'a HwResource>,
@@ -703,7 +696,7 @@ where
 /// Host-supplied environment passed to every driver's `register`
 /// entry point.
 ///
-/// Per `AGENTS.md` §8 the host (kernel or user-space driver host) owns
+/// Per the host (kernel or user-space driver host) owns
 /// the capability set, the audit channel, and the dispatch table. The
 /// driver consumes the host only through this trait so it cannot
 /// widen its own authority. Concrete implementations of this trait
@@ -764,7 +757,7 @@ pub trait DriverHost {
     /// The signature takes `&self` (not `&mut self`) so it composes
     /// with the frozen driver-load entry point
     /// `pub fn register(host: &dyn DriverHost) -> Result<DriverHandle,
-    /// DriverError>` (`AGENTS.md` §8). The returned [`VirtioHost`]
+    /// DriverError>`. The returned [`VirtioHost`]
     /// uses interior mutability for its own per-allocation
     /// bookkeeping (see [`VirtioHost`]'s `&self`-based method
     /// signatures), so passing it through an immutable reference is
@@ -795,7 +788,7 @@ pub trait DriverHost {
     /// a [`RegisterWindow`] over it. The returned [`MmioMapper`]
     /// enforces [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP)
     /// at each [`map_window`](MmioMapper::map_window) call; the bus
-    /// driver never synthesises a pointer itself (`AGENTS.md` §4).
+    /// driver never synthesises a pointer itself.
     ///
     /// The default implementation returns `None`, which is the
     /// correct shape for every host that does not (yet) ship the
@@ -828,7 +821,7 @@ pub trait DriverHost {
     /// virtio driver still uses [`virtio_host`](Self::virtio_host), which
     /// extends [`DmaHost`]; this accessor exists so a *non*-virtio driver
     /// never has to reach through a virtio-shaped trait to allocate DMA
-    /// (`AGENTS.md` §2.2 — the allocation contract is defined once, in
+    /// (the allocation contract is defined once, in
     /// [`DmaHost`]).
     ///
     /// The default implementation returns `None`, the correct shape for a
@@ -859,13 +852,12 @@ pub trait DriverHost {
     /// property messages through it. The doorbell window, the DMA-backed
     /// property buffer, and the bus-address translation are owned by the
     /// host; the board specifics stay behind the device's own crate
-    /// (`lib/vcmailbox`, `AGENTS.md` §2.20), so the generic framework above it
-    /// never names a board (`AGENTS.md` §2.20 / §17.4).
+    /// (`lib/vcmailbox`), so the generic framework above it
+    /// never names a board.
     ///
     /// The default implementation returns `None`, the correct shape for every
     /// platform with no firmware mailbox (QEMU `virt`, x86_64, riscv64) and
-    /// for any test seam that drives a driver needing none (`AGENTS.md`
-    /// §18.4 — a missing facility is silent, never an error).
+    /// for any test seam that drives a driver needing none (a missing facility is silent, never an error).
     ///
     /// # Errors
     ///
@@ -879,18 +871,17 @@ pub trait DriverHost {
         None
     }
 
-    /// Publish a discovered child [`HwNode`] into the hardware tree
-    /// (`AGENTS.md` §18.1).
+    /// Publish a discovered child [`HwNode`] into the hardware tree.
     ///
     /// A bus driver that enumerates a device behind it (a PCIe function, a USB
     /// device on a root-hub port) calls this to attach the device as a child
     /// node carrying the [`HwResource`] grant *requests* the matched
     /// downstream driver will receive — for example a USB-HID node carrying
     /// its xHCI register-window and DMA-region resources. The host validates
-    /// the node, mints it into the live tree, and the §18.3 match/autoload
+    /// the node, mints it into the live tree, and the match/autoload
     /// path then sees a bindable node like any other discovered device. The
     /// driver requests only the resources its enumeration actually found; the
-    /// host grants nothing the node did not request (`AGENTS.md` §4 — no
+    /// host grants nothing the node did not request (no
     /// ambient authority).
     ///
     /// The default implementation returns [`DriverError::Unsupported`], the
@@ -906,8 +897,7 @@ pub trait DriverHost {
     /// * [`DriverError::PermissionDenied`] if the host's capability check for
     ///   emitting a node fails.
     /// * [`DriverError::OutOfRange`] / [`DriverError::NoSpace`] if the node is
-    ///   malformed or the tree is full (the host fails closed — `AGENTS.md`
-    ///   §5.4).
+    ///   malformed or the tree is full (the host fails closed).
     ///
     /// # Capabilities
     ///
@@ -1138,8 +1128,7 @@ mod tests {
     #[test]
     fn driver_host_facility_accessors_default_to_absent() {
         // A host that wires no facilities reports each optional accessor as
-        // absent, never as an error or a synthesised handle (`AGENTS.md`
-        // §18.4 — a missing facility is silent; the bus driver fails closed).
+        // absent, never as an error or a synthesised handle (a missing facility is silent; the bus driver fails closed).
         let host = StubHost;
         assert!(host.virtio_host().is_none());
         assert!(host.mmio_mapper().is_none());
@@ -1239,7 +1228,7 @@ mod tests {
         let mailbox = host.mailbox().expect("mailbox wired");
         let mut message = [0u32; crate::driver::mailbox::MAILBOX_PROPERTY_WORDS];
         mailbox.exchange(&mut message).expect("exchange");
-        // The response was written back in place (`AGENTS.md` §5.4 — the
+        // The response was written back in place (the
         // caller reads the firmware response from the same buffer).
         assert_eq!(message[1], 0x8000_0000);
     }
@@ -1361,7 +1350,7 @@ mod tests {
     #[test]
     fn sole_register_window_resolves_a_bus_window_by_its_translated_base() {
         // A `BusWindow` is named by its far-side (bus-space) base, not its
-        // CPU base (`AGENTS.md` §18.1).
+        // CPU base.
         let grants = [HwResource::bus_window(0x6_0000_0000, 0x2000, 0x4000_0000)];
         assert_eq!(
             sole_register_window(grants.iter()),

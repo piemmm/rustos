@@ -5,7 +5,7 @@
 //! number of platform sources — a motherboard hardware RNG (RDRAND/RDSEED,
 //! virtio-rng; see [`crate::hardware`]), boot-time timing jitter, an
 //! interrupt-arrival pool — can implement it without naming a concrete
-//! architecture, keeping `lib/rng` architecture-neutral (`AGENTS.md` §17.2:
+//! architecture, keeping `lib/rng` architecture-neutral (:
 //! target-conditional probing stays in `kernel/arch/<target>`).
 //!
 //! [`CombinedSource`] mixes several sources into one so the system never
@@ -23,8 +23,7 @@ use zeroize::Zeroize;
 pub enum EntropyError {
     /// No randomness could be produced (the device is absent, not yet
     /// initialised, or — for a hardware RNG — failed every retry). Callers
-    /// fail closed: no key, nonce, or seed is derived from a failed draw
-    /// (`AGENTS.md` §5.4).
+    /// fail closed: no key, nonce, or seed is derived from a failed draw.
     Unavailable,
     /// A reseed was required to complete the draw but fresh entropy was only
     /// *momentarily* unavailable. This is the **transient** signal a
@@ -62,8 +61,7 @@ pub trait EntropySource {
     /// which is correct for an always-ready source (e.g. a deterministic test
     /// source). A platform source whose entropy can be momentarily exhausted
     /// overrides this to **park the calling task** until its pool refills —
-    /// it must wait, never busy-spin or retry-until-it-works (`AGENTS.md`
-    /// §2.1).
+    /// it must wait, never busy-spin or retry-until-it-works.
     ///
     /// # Errors
     ///
@@ -114,7 +112,7 @@ impl CombinedSource<'_, '_> {
     /// Shared XOR-combine loop, parameterised by how each source is drawn so
     /// the non-blocking [`EntropySource::fill`] and blocking
     /// [`EntropySource::fill_blocking`] paths reuse one implementation
-    /// (`AGENTS.md` §2.2 — no duplicated mixing algebra). `draw_one` returns
+    /// (no duplicated mixing algebra). `draw_one` returns
     /// `true` if a source fully satisfied its chunked draw; a source that
     /// fails is skipped (it contributes the XOR identity rather than
     /// corrupting the pool).

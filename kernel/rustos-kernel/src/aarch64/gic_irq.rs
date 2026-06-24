@@ -16,13 +16,12 @@
 //!
 //! 1. [`GicIrqController`] — a kernel-side [`IrqController`] over the
 //!    arch port's validated [`GicController`]. The arch crate cannot
-//!    depend on `kernel/irq` (`AGENTS.md` §17.4), so the bridge from the
+//!    depend on `kernel/irq`, so the bridge from the
 //!    arch HAL [`rustos_arch_api::IrqController`] to the
 //!    [`rustos_kernel_irq::IrqController`] [`IrqTable::fire`] consumes
 //!    lives here, in the kernel binary, exactly like the x86_64
 //!    `IoApicController` does. It adds **no** masking policy of its own —
-//!    it delegates to the range-checked, fence-ordered [`GicController`]
-//!    (`AGENTS.md` §2.2).
+//!    it delegates to the range-checked, fence-ordered [`GicController`].
 //! 2. [`gic_irq_routing`] — the [`IrqRouting`] the boot path hands
 //!    [`crate::aarch64::arch_wrapper::Aarch64BinArch`], naming the
 //!    `'static` [`GIC_IRQ_CONTROLLER`] and the GICv2 maximum INTID as the
@@ -37,7 +36,7 @@
 //!    masks the line before a waiter observes the wake —
 //!    `docs/src/security/irq.md`).
 //!
-//! The wiring is **additive and non-regressing** (`AGENTS.md` §2.17): no
+//! The wiring is **additive and non-regressing**: no
 //! device SPI is bound or routed until INCREMENT (2)'s unlock kthread does
 //! so, and [`production_device_irq_dispatch`] is only ever reached for a
 //! non-timer INTID the GIC delivers — which cannot occur until a line is
@@ -48,7 +47,7 @@
 // freestanding `gic_irq_routing`; on a host build neither is used (the
 // host `KernelArch::irq_routing` returns the unsupported default from
 // `arch_wrapper`), so both imports are gated to where they compile rather
-// than left unused under clippy's `-D warnings` (`AGENTS.md` §7).
+// than left unused under clippy's `-D warnings`.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,7 +63,7 @@ use rustos_sync::once::OnceCell;
 /// queue (which would storm the CPU and starve the very reader that drains
 /// it). [`rearm_uart_rx_if_masked`] re-enables the line once the reader frees
 /// queue space, so input resumes exactly like a hardware FIFO releasing its
-/// own flow control (`AGENTS.md` §2.1 / §2.16). A plain flag, not a queue of
+/// own flow control. A plain flag, not a queue of
 /// state: the line is either masked-for-full or not.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 static UART_RX_MASKED: AtomicBool = AtomicBool::new(false);
@@ -74,12 +73,11 @@ static UART_RX_MASKED: AtomicBool = AtomicBool::new(false);
 /// The scheduler arms the generic-timer one-shot to one quantum at this
 /// rate while a CPU is contended; a tick taken while EL0 was running
 /// preempts the current user task (round-robin time-slicing over the
-/// EEVDF virtual-deadline order, `kernel/sched`). RustOS is tickless
-/// (`AGENTS.md` §17.1): a CPU running a sole task disarms and takes no
+/// EEVDF virtual-deadline order, `kernel/sched`). RustOS is tickless: a CPU running a sole task disarms and takes no
 /// ticks. The rate is the shared
 /// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ)
 /// the riscv64 port also uses — defined once so the two ports cannot
-/// diverge (`AGENTS.md` §2.2).
+/// diverge.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 
@@ -91,7 +89,7 @@ const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 /// orphan rule (both the trait and `GicController` are foreign to the arch
 /// crate's dependency island) and adds no policy: every `mask` is the
 /// arch controller's range-checked, `SeqCst`-fenced
-/// [`rustos_arch_api::IrqController::mask`] (`AGENTS.md` §2.2 — the
+/// [`rustos_arch_api::IrqController::mask`] (the
 /// mask-before-wake fence lives once, in the arch port).
 pub struct GicIrqController<M: GicMmio + Send + Sync> {
     inner: GicController<M>,
@@ -118,14 +116,12 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
     /// [`crate::aarch64::root_unlock`] waiter calls this directly (it routes
     /// the SPI itself, once, at setup); the user-space `irq_wait` park path
     /// goes through the trait [`rearm`](IrqController::rearm), which *also*
-    /// routes. Both delegate to the range-checked [`GicController`]
-    /// (`AGENTS.md` §2.2).
+    /// routes. Both delegate to the range-checked [`GicController`].
     ///
     /// # Errors
     ///
     /// Surfaces [`rustos_arch_api::IrqControlError`] verbatim — an
-    /// out-of-range line fails closed without touching the distributor
-    /// (`AGENTS.md` §5.4.5).
+    /// out-of-range line fails closed without touching the distributor.
     pub fn unmask_line(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
         use rustos_arch_api::IrqController as ArchIrqController;
         ArchIrqController::unmask(&self.inner, line)
@@ -136,9 +132,9 @@ impl<M: GicMmio + Send + Sync> GicIrqController<M> {
 ///
 /// Production is single-CPU today (`BootInfo::new(BOOT_CPU, 1, …)`), so a
 /// device SPI is routed to CPU 0; secondary-core routing is selected from
-/// the discovered core count when SMP bring-up lands (`AGENTS.md` §24.1).
+/// the discovered core count when SMP bring-up lands.
 /// Defined once here so the in-kernel block path and the user-space-driver
-/// re-arm path route through the same value (`AGENTS.md` §2.2).
+/// re-arm path route through the same value.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub const CPU0_TARGET: u8 = 0b0000_0001;
 
@@ -151,7 +147,7 @@ pub const CPU0_TARGET: u8 = 0b0000_0001;
 /// one [`production_device_irq_dispatch`] fires into — never a fresh table
 /// the EL1 vector would never reach. Reading the set-once slot is the only
 /// way to reach the live table from the kthread, since the core owns its
-/// allocation inside the leaked `KernelState` (`AGENTS.md` §2.2 — one
+/// allocation inside the leaked `KernelState` (one
 /// table definition, not two that could diverge).
 ///
 /// Freestanding-only: the in-kernel unlock kthread that consumes it is
@@ -171,7 +167,7 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
     /// An out-of-range line maps to [`MaskError::OutOfRange`]; any other
     /// arch-side refusal maps to [`MaskError::Unsupported`] so the table
     /// surfaces it as the standard architecture-unsupported outcome
-    /// (`AGENTS.md` §5.4.5 — fail closed).
+    /// (fail closed).
     fn mask(&self, line: u32) -> Result<(), MaskError> {
         use rustos_arch_api::{IrqControlError, IrqController as ArchIrqController};
         match ArchIrqController::mask(&self.inner, line) {
@@ -187,8 +183,7 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
     /// routes the SPI to [`CPU0_TARGET`] (idempotent — re-routing an
     /// already-targeted line is a plain register write) and then clears its
     /// enable mask through the same range-checked, fence-ordered
-    /// [`GicController`] unmask the in-kernel block path uses (`AGENTS.md`
-    /// §2.2). An out-of-range line fails closed as [`MaskError::OutOfRange`]
+    /// [`GicController`] unmask the in-kernel block path uses. An out-of-range line fails closed as [`MaskError::OutOfRange`]
     /// without touching the distributor.
     fn rearm(&self, line: u32) -> Result<(), MaskError> {
         use rustos_arch_api::{IrqControlError, IrqController as ArchIrqController};
@@ -214,14 +209,12 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
 ///
 /// [`production_device_irq_dispatch`] reads it from interrupt context to
 /// translate an acknowledged GIC INTID into an [`IrqTable::fire`]. The
-/// [`OnceCell`] enforces the one-shot-publish invariant (`AGENTS.md`
-/// §2.1 — no global mutable state; this is a publish-once pointer).
+/// [`OnceCell`] enforces the one-shot-publish invariant (no global mutable state; this is a publish-once pointer).
 static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
 
 /// Set-once slot for the console UART's discovered GIC SPI INTID (the
 /// `arm,pl011` / mini-UART node's `interrupts`, decoded from the firmware
-/// device tree — a discovered value, never a board constant, `AGENTS.md`
-/// §18.1 / §2.20).
+/// device tree — a discovered value, never a board constant).
 ///
 /// The boot path records it ([`set_uart_console_intid`]) when it parses the
 /// device tree, and the unlock kthread's console handoff
@@ -230,13 +223,13 @@ static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
 /// context to recognise the console's receive interrupt and feed the bytes
 /// to the login reader rather than the `irq_wait` table. Empty until the
 /// boot path discovers a console interrupt (a UART-less or interrupt-less
-/// tree simply leaves `login` on the polled path — fail closed, §2.9).
+/// tree simply leaves `login` on the polled path — fail closed).
 static UART_RX_INTID: OnceCell<u32> = OnceCell::new();
 
 /// Record the console UART's discovered receive-interrupt INTID so the
 /// console handoff can route it and the device-IRQ dispatcher can recognise
 /// it. Idempotent: a second call (there is only ever one console) is a
-/// no-op (`AGENTS.md` §2.1 — publish-once).
+/// no-op (publish-once).
 pub fn set_uart_console_intid(intid: u32) {
     let _ = UART_RX_INTID.set(intid);
 }
@@ -246,8 +239,7 @@ pub fn set_uart_console_intid(intid: u32) {
 ///
 /// Built over the arch port's zero-sized [`VolatileGicMmio`] handle, which
 /// reads the **discovered** GICv2 distributor/CPU-interface bases on every
-/// access, so the controller carries no board constant (`AGENTS.md`
-/// §2.20). The bind ceiling is the GICv2 maximum INTID
+/// access, so the controller carries no board constant. The bind ceiling is the GICv2 maximum INTID
 /// ([`rustos_arch_aarch64::gic::MAX_INTID`]); a device SPI is bound below
 /// it and the table refuses any line above it.
 ///
@@ -290,7 +282,7 @@ pub fn gic_irq_routing() -> IrqRouting {
 /// already masked.
 ///
 /// Safe to invoke from interrupt context: every operation is wait-free and
-/// allocation-free (`AGENTS.md` §2.16). A delivery before the table is
+/// allocation-free. A delivery before the table is
 /// published (impossible in production — the core installs the table in
 /// `Phase::Irq`, strictly before any SPI is routed) returns silently.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
@@ -299,8 +291,7 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     // line carrying both directions, not an `irq_wait` binding. Service it by
     // reading the masked interrupt status once: push buffered transmit bytes
     // into the FIFO (`service_uart_tx_irq`, the interrupt-driven drain that
-    // keeps logging flowing without stalling any task — `AGENTS.md` §2.16 /
-    // §20), and drain the receive FIFO into the console queue **only** when a
+    // keeps logging flowing without stalling any task), and drain the receive FIFO into the console queue **only** when a
     // receive interrupt actually fired. Receive is interrupt-driven for the
     // whole interactive session (enabled by the root-unlock kthread for its
     // passphrase prompt and again at the `login` handoff), so draining wakes
@@ -325,7 +316,7 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     // per-line ready flag (after masking — mask-before-wake holds), so a
     // woken waiter that consumes it observes the mask. A spurious wake for
     // a waiter on a different line is harmless — it re-checks its own line
-    // and parks again (`AGENTS.md` §2.1 / §2.16). Wait-free and
+    // and parks again. Wait-free and
     // allocation-free, safe from this interrupt context.
     rustos_kernel_core::irq_wake();
 }
@@ -341,7 +332,7 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
 /// free space (at most one queue capacity per interrupt) and **lossless**:
 /// it dequeues from the FIFO only what the queue can accept and leaves any
 /// surplus in the FIFO, so the level-sensitive receive interrupt re-fires as
-/// the reader drains the queue (`AGENTS.md` §2.1 / §2.16). Wait-free and
+/// the reader drains the queue. Wait-free and
 /// allocation-free.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 fn drain_uart_into_console_queue() {
@@ -356,9 +347,9 @@ fn drain_uart_into_console_queue() {
         // the surplus in the FIFO keeps the receive interrupt asserted; it
         // re-fires once `login` drains the queue and frees space, so input
         // streams through a sliding window with no byte lost (the software
-        // analogue of the FIFO's own flow control, `AGENTS.md` §2.1). `login`
+        // analogue of the FIFO's own flow control). `login`
         // is already runnable (the first push woke it), so it drains promptly
-        // and the re-fire is progress, not a storm (`AGENTS.md` §2.16).
+        // and the re-fire is progress, not a storm.
         let free = queue.free_capacity();
         if free == 0 {
             // The console queue is full and the reader has not yet drained
@@ -369,7 +360,7 @@ fn drain_uart_into_console_queue() {
             // drain path, re-enables the line once space frees, and the
             // level-sensitive line re-asserts on the bytes still in the FIFO
             // — the software analogue of a hardware FIFO releasing flow
-            // control, with no byte lost and no storm (`AGENTS.md` §2.1).
+            // control, with no byte lost and no storm.
             if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
                 let _ = GIC_IRQ_CONTROLLER.mask(intid);
                 UART_RX_MASKED.store(true, Ordering::Release);
@@ -384,14 +375,14 @@ fn drain_uart_into_console_queue() {
             // interrupt so the line deasserts. The PL011 receive-timeout latch
             // is *not* cleared by emptying the FIFO, so without this the line
             // stays asserted and this ISR re-fires forever, starving every
-            // other task (`AGENTS.md` §2.1 / §2.16).
+            // other task.
             rustos_arch_aarch64::serial::clear_rx_interrupt();
             // Clear-then-recheck (no lost byte): a byte the device latched in
             // the window *between* the empty read above and the clear just
             // issued would have had its interrupt cleared with it — stranding
             // it in the FIFO with no re-fire, which wedges the parked
             // line-oriented `login` reader forever (the lost-wakeup race
-            // `AGENTS.md` §2.1 forbids). So read once more: a byte that raced
+            // the charter forbids). So read once more: a byte that raced
             // in before the clear is drained now, and any byte that arrives
             // *after* the clear latches a fresh, uncleared interrupt that
             // re-fires this ISR. Only a genuinely still-empty FIFO ends the
@@ -426,13 +417,12 @@ fn drain_uart_into_console_queue() {
 /// FIFO tail still awaiting the PL011 receive-timeout — because the reader no
 /// longer *depends* on the interrupt to see a byte that is already in the
 /// FIFO; the interrupt remains only the wake that unparks it once it has
-/// parked (`AGENTS.md` §2.1 — the park is genuine, never a busy-poll: a byte
+/// parked (the park is genuine, never a busy-poll: a byte
 /// arriving after this drain raises the interrupt that wakes the parked task).
 ///
 /// Runs in an EL1 syscall with IRQ taking masked, so it cannot race the ISR
 /// ([`drain_uart_into_console_queue`]) on this single console; the shared
-/// drain body is the one definition both entry points reuse (`AGENTS.md`
-/// §2.2).
+/// drain body is the one definition both entry points reuse.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub fn poll_uart_into_console_queue() {
     drain_uart_into_console_queue();
@@ -447,7 +437,7 @@ pub fn poll_uart_into_console_queue() {
 /// re-assert on the bytes it left in the FIFO, resuming delivery — the
 /// software analogue of a hardware FIFO releasing flow control. A cheap
 /// `Acquire` load on the common (not-masked) path, so it adds no cost to a
-/// normal read (`AGENTS.md` §2.16).
+/// normal read.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub fn rearm_uart_rx_if_masked() {
     if !UART_RX_MASKED.swap(false, Ordering::AcqRel) {
@@ -460,8 +450,7 @@ pub fn rearm_uart_rx_if_masked() {
 
 /// Enable the console UART's receive interrupt and route + unmask its GIC
 /// line, so console input is interrupt-driven and parked readers are woken
-/// by a keystroke rather than busy-polling the FIFO (`AGENTS.md` §2.1 /
-/// §17.1).
+/// by a keystroke rather than busy-polling the FIFO.
 ///
 /// Idempotent, and called at the start of the interactive session: the
 /// in-kernel root-unlock kthread calls it before its passphrase prompt (so
@@ -471,7 +460,7 @@ pub fn rearm_uart_rx_if_masked() {
 /// that open the gate without ever running the unlock kthread still enable it
 /// here for `login`. A console whose interrupt the boot path could not
 /// discover leaves the slot empty and this a no-op — the reader stays on the
-/// poll-backed path rather than failing (fail closed, `AGENTS.md` §2.9).
+/// poll-backed path rather than failing (fail closed).
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 pub fn enable_uart_console_irq() {
     let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() else {
@@ -495,8 +484,7 @@ pub fn enable_uart_console_irq() {
 ///
 /// Called once per boot by
 /// [`Aarch64BinArch::install_irq_dispatch`](crate::aarch64::arch_wrapper::Aarch64BinArch).
-/// A second publish (a stray re-call) fails closed by halting the CPU
-/// (`AGENTS.md` §2.1 / §5.4.5); the boot pipeline calls it exactly once,
+/// A second publish (a stray re-call) fails closed by halting the CPU; the boot pipeline calls it exactly once,
 /// so the halt branch is unreachable in production.
 pub fn install_device_irq_dispatch(table: &'static IrqTable) {
     if IRQ_TABLE_SLOT.set(table).is_err() {
@@ -516,8 +504,7 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         // driver routes + enables its own line (the root-unlock kthread does
         // so for the virtio-blk completion SPI,
         // [`crate::unlock_service`]); enabling the controller is therefore
-        // additive — it changes no behaviour until the first line is armed
-        // (`AGENTS.md` §2.17). It is the production counterpart of the
+        // additive — it changes no behaviour until the first line is armed. It is the production counterpart of the
         // `gic::init()` the `-M virt` IRQ verticals call.
         //
         // SAFETY: the GICv2 bases were configured from the device tree
@@ -532,8 +519,7 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         // the boot CPU and unmask it at the GIC — so buffered serial output is
         // **transmit-interrupt-driven** from the first boot phase
         // (`crate::aarch64::arch_wrapper`'s ring + `serial::service_uart_tx_irq`),
-        // draining at the UART's real throughput regardless of scheduler state
-        // (`AGENTS.md` §2.16 / §20). This stays additive (§2.17): the
+        // draining at the UART's real throughput regardless of scheduler state. This stays additive: the
         // device-level sources are masked at reset, so no interrupt fires
         // until a producer arms the transmit source (`serial::enable_tx_interrupt`)
         // or the login handoff enables receive (`enable_uart_console_irq`).
@@ -541,7 +527,7 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
         // already buffered, so it starts draining without waiting for the next
         // producer. A UART-less / interrupt-less tree left the slot empty — then
         // this is skipped and output drains on the dispatch loop's non-blocking
-        // top-up (`serial::pump_tx`), fail closed (`AGENTS.md` §2.9).
+        // top-up (`serial::pump_tx`), fail closed.
         if let Some(intid) = UART_RX_INTID.get().ok().flatten().copied() {
             // SAFETY: the GICv2 distributor bases were configured from the
             // device tree and `gic::init` ran just above, so routing this
@@ -560,8 +546,7 @@ pub fn install_device_irq_dispatch(table: &'static IrqTable) {
 ///
 /// The production aarch64 image is single-CPU (`BootInfo::new(BOOT_CPU, 1,
 /// …)`), so a `PreemptStorage<1>` covers it; secondary-core preemption is
-/// sized from the discovered CPU count when SMP bring-up lands (`AGENTS.md`
-/// §24.1 — the per-CPU timer bookkeeping is the discovered core count,
+/// sized from the discovered CPU count when SMP bring-up lands (the per-CPU timer bookkeeping is the discovered core count,
 /// never a baked-in ceiling). Published once by [`arm_preemption`].
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 static PREEMPT_STORAGE: rustos_arch_aarch64::preempt::PreemptStorage<1> =
@@ -579,7 +564,7 @@ static PREEMPT_STORAGE: rustos_arch_aarch64::preempt::PreemptStorage<1> =
 /// returns `false` when no resumable user kthread is published on `cpu`
 /// (it cannot be reached from EL0 with none switched in, but the
 /// fail-closed return means a stray invocation is a harmless no-op rather
-/// than an unsound switch — `AGENTS.md` §2.9). The call only ever runs
+/// than an unsound switch). The call only ever runs
 /// after the GIC end-of-interrupt handshake (see
 /// [`rustos_arch_aarch64::exceptions::handle_irq`]), so the timer line is
 /// already deactivated across the context switch.
@@ -598,7 +583,7 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// re-armed to the next pending deadline
 /// ([`rustos_kernel_core::timed_wake_sweep`]). This is what makes a finite
 /// `hw_tree_wait` timeout fire even when the CPU is otherwise idle (every
-/// task parked) and takes no preemption tick (`AGENTS.md` §17.1). It is
+/// task parked) and takes no preemption tick. It is
 /// pure accounting — it never context-switches — so it is safe on a tick
 /// taken in EL1; the *preemption* of an EL0 task is the separate
 /// [`production_preempt_dispatch`] EL0-only callback.
@@ -611,7 +596,7 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// per-CPU preempt storage, install the EL0-preemption callback, record
 /// the per-quantum interval derived from [`PREEMPT_TICK_HZ`], and enable
 /// the timer PPI — but leave the generic timer **disarmed**. RustOS is
-/// tickless (`AGENTS.md` §17.1 `NO_HZ`): the scheduler arms the one-shot to
+/// tickless (`NO_HZ`): the scheduler arms the one-shot to
 /// one quantum only when it dispatches a task onto a contended CPU (via
 /// `Aarch64Arch::set_preemption`), and disarms when a CPU runs a sole
 /// task, so an otherwise-quiet core takes no timer interrupts.
@@ -624,8 +609,7 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// tick is *taken* until EL0 runs with IRQs unmasked
 /// (`crate::aarch64::userentry`'s preemptible `SPSR`) or the root-unlock
 /// kthread unmasks at EL1 — the armed timer simply leaves PPI 30 pending
-/// until then, so this is **additive and non-regressing** (`AGENTS.md`
-/// §2.17): a one-shot tick taken in EL1 only disarms (it never preempts —
+/// until then, so this is **additive and non-regressing**: a one-shot tick taken in EL1 only disarms (it never preempts —
 /// the kernel is non-preemptible), and a tick taken in EL0 drives
 /// [`production_preempt_dispatch`]; the scheduler re-arms the next
 /// one-shot on its following dispatch.
@@ -637,18 +621,18 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
 /// waiter and re-arms the one-shot to the next deadline, so the timer is
 /// armed only for a real pending event — a preemption quantum and/or the
-/// nearest wakeup — never a fixed periodic tick (`AGENTS.md` §17.1).
+/// nearest wakeup — never a fixed periodic tick.
 ///
 /// A zero `CNTFRQ_EL0` reading (a board that does not report the counter
 /// frequency) leaves the kernel cooperative rather than arming a nonsense
-/// interval — fail-safe (`AGENTS.md` §2.9).
+/// interval — fail-safe.
 pub fn arm_preemption() {
     #[cfg(all(freestanding, kernel_isa = "aarch64"))]
     {
         use rustos_arch_aarch64::preempt;
 
         // Set-once per boot; a stray re-call fails closed by halting rather
-        // than re-pointing the live per-CPU slices (`AGENTS.md` §2.1).
+        // than re-pointing the live per-CPU slices.
         if PREEMPT_STORAGE.register().is_err() {
             rustos_arch_aarch64::halt_current_cpu();
         }
@@ -660,11 +644,11 @@ pub fn arm_preemption() {
         // Install the per-tick timed-wake sweep callback (Design D P-2), so
         // every tick — including one taken on an idle EL1 CPU armed solely
         // for a blocking-wait deadline — releases any elapsed waiter and
-        // re-arms the one-shot to the next deadline (`AGENTS.md` §17.1).
+        // re-arms the one-shot to the next deadline.
         preempt::set_timer_callback(production_tick_dispatch);
 
         // Derive the tick interval from the discovered counter frequency
-        // (never a board constant, `AGENTS.md` §2.20). A zero reading is a
+        // (never a board constant). A zero reading is a
         // fail-safe skip.
         let counter_hz = rustos_arch_aarch64::kernel_arch::read_cntfrq();
         if counter_hz == 0 {
@@ -678,7 +662,7 @@ pub fn arm_preemption() {
         // is up (`install_device_irq_dispatch` ran immediately before). It
         // records the quantum, enables the timer PPI, and leaves the timer
         // disarmed; the scheduler arms the first one-shot on its next
-        // dispatch onto a contended CPU (tickless, §17.1).
+        // dispatch onto a contended CPU (tickless).
         unsafe {
             preempt::init_local_preempt(0, interval);
         }
@@ -749,8 +733,7 @@ mod tests {
     #[test]
     fn rearm_unmasks_an_in_range_line() {
         // Re-arming a device SPI delegates to the arch controller's
-        // unmask and succeeds for an in-range line (`AGENTS.md` §17.4 —
-        // the re-arm lives in the bin layer that owns the GIC).
+        // unmask and succeeds for an in-range line (the re-arm lives in the bin layer that owns the GIC).
         let c = controller(MAX_INTID);
         assert_eq!(c.rearm(32), Ok(()));
     }
@@ -758,7 +741,7 @@ mod tests {
     #[test]
     fn rearm_maps_an_out_of_range_line_to_out_of_range() {
         // A line above the controller's ceiling fails closed without
-        // touching the distributor (`AGENTS.md` §5.4.5).
+        // touching the distributor.
         let c = controller(47);
         assert_eq!(c.rearm(48), Err(MaskError::OutOfRange));
     }

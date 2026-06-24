@@ -1,24 +1,21 @@
-//! The `Run` entry-point binary of the `Shell` application bundle
-//! (`AGENTS.md` §16.5) — the program PID 1 `init` launches as the user's
+//! The `Run` entry-point binary of the `Shell` application bundle — the program PID 1 `init` launches as the user's
 //! session through the `spawn` syscall (`plans/SPAWN.md` `SP3b`,
 //! `plans/PI.md` P6e).
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only (`AGENTS.md` §1), so
+//! This is a **pure-Rust** program: RustOS is Rust-only, so
 //! it links the Rust userland runtime `rustos-rt` — never the C ABI, which
-//! exists solely for programs **not** written in Rust (`AGENTS.md` §16.4).
-//! `rustos-rt` provides `_start`, the per-process stack canary (`AGENTS.md`
-//! §19.2), the panic handler, the `mem_map`-backed global allocator, and the
+//! exists solely for programs **not** written in Rust.
+//! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
 //! syscall wrappers; `rustos_rt::entry!` names this program's `main`.
 //!
 //! `main` runs the [`rustos_shell`] interpreter as a read-eval-print loop over
-//! its **inherited standard streams** (`AGENTS.md` §20): it reads command
+//! its **inherited standard streams**: it reads command
 //! lines from standard input (fd 0), writes the prompt and command output to
 //! standard output and standard error (fd 1 / fd 2), and emits advisory
 //! metadata on the standard information stream (fd 3). It binds to those
 //! descriptors only — never a console, UART, or framebuffer — because binding
-//! to a device would be ambient authority (`AGENTS.md` §4) and hidden coupling
-//! (§17.3 / §17.4); the same binary therefore works whatever the spawner
-//! backed the streams with (§20).
+//! to a device would be ambient authority and hidden coupling; the same binary therefore works whatever the spawner
+//! backed the streams with.
 //!
 //! The interpreter is pure: it decides *what* to run but reaches the outside
 //! world only through two injected seams. `RtConsole` carries its output to
@@ -26,7 +23,7 @@
 //! `spawn` syscall and reaps them through `wait`. The current `spawn` ABI
 //! carries only a program path (no argument vector, environment, pipe, or
 //! redirection), so `RtProcessHost` launches a single bare-path command and
-//! fails closed (`AGENTS.md` §2.9) on anything it cannot yet express; richer
+//! fails closed on anything it cannot yet express; richer
 //! launches await an ABI extension.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
@@ -50,14 +47,13 @@ mod program {
     };
 
     /// The shell's output sink, backed by the inherited standard output (fd 1)
-    /// and standard error (fd 2) through `rustos_rt` (`AGENTS.md` §20).
+    /// and standard error (fd 2) through `rustos_rt`.
     struct RtConsole;
 
     /// Write all of `bytes` to standard output, looping over short writes.
     ///
     /// A write that accepts zero bytes means the stream will accept no more
-    /// (a closed or full backing); the loop stops rather than spinning
-    /// (`AGENTS.md` §2.1). Output is best-effort: a dropped tail does not
+    /// (a closed or full backing); the loop stops rather than spinning. Output is best-effort: a dropped tail does not
     /// abort the session.
     fn write_all_stdout(mut bytes: &[u8]) {
         while !bytes.is_empty() {
@@ -92,7 +88,7 @@ mod program {
     }
 
     /// The shell's standard-input (fd 0) and standard-information (fd 3) seam,
-    /// backed by `rustos_rt` (`AGENTS.md` §20).
+    /// backed by `rustos_rt`.
     struct RtInput;
 
     impl ReplInput for RtInput {
@@ -124,7 +120,7 @@ mod program {
         fn launch(&self, spec: &LaunchSpec<'_>) -> Result<Pid, Errno> {
             // The current `spawn` ABI carries only a program path: no argument
             // vector, environment, pipe, or redirection. Anything richer is
-            // refused rather than silently dropped (`AGENTS.md` §2.9); it
+            // refused rather than silently dropped; it
             // awaits an ABI extension, not a shortcut here.
             let [command] = spec.commands else {
                 return Err(Errno::NotImplemented);
@@ -175,7 +171,7 @@ mod program {
     }
 
     /// Reads and imposes resource limits through the `rlimit_get` /
-    /// `rlimit_set` syscalls (`AGENTS.md` §24.3), backing the `ulimit`
+    /// `rlimit_set` syscalls, backing the `ulimit`
     /// builtin.
     struct RtLimitStore;
 
@@ -199,7 +195,7 @@ mod program {
     /// Runs the interpreter as a read-eval-print loop over the inherited
     /// standard streams and returns the session's exit code (the `exit`
     /// builtin's code, or `0` when the input stream ends). The loop binds only
-    /// to fd 0/1/2/3, never a device (`AGENTS.md` §20).
+    /// to fd 0/1/2/3, never a device.
     fn main() -> i32 {
         let console = RtConsole;
         let host = RtProcessHost;

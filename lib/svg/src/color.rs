@@ -5,7 +5,7 @@
 //! `none` / `transparent` keywords that mean "draw no fill". The optional
 //! `fill-opacity` attribute scales the alpha. Anything outside this subset is
 //! rejected so a malformed asset fails closed to its caller's fallback rather
-//! than guessing a colour (`AGENTS.md` §2.9).
+//! than guessing a colour.
 
 use rustos_raster::Color;
 
@@ -127,11 +127,10 @@ fn hex_digit(byte: u8) -> Result<u8, SvgError> {
 
 /// Parse a `fill-opacity` decimal in `0..=1` into permille (`0..=1000`).
 ///
-/// The desktop's geometry and opacities are exact integers (`AGENTS.md`
-/// §2.11), so the value is parsed with first-party fixed-point arithmetic
+/// The desktop's geometry and opacities are exact integers, so the value is parsed with first-party fixed-point arithmetic
 /// rather than a float, keeping the decoder allocation- and float-free. Up to
 /// three fractional digits are honoured; further digits must be zero so no
-/// precision is silently dropped (§2.9).
+/// precision is silently dropped.
 fn parse_permille(value: &str) -> Result<u32, SvgError> {
     let (integer, fraction) = match value.split_once('.') {
         Some((int, frac)) => (int, frac),

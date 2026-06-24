@@ -1,9 +1,8 @@
 //! The [`AppLoader`] pipeline: validate a bundle's layout, verify its signed
 //! manifest and contents, compute its capability ceiling, and resolve its
-//! shared-library references under the §16.4 policy.
+//! shared-library references under the policy.
 //!
-//! This is the one place a bundle is judged. The pipeline **fails closed**
-//! (`AGENTS.md` §5.4): the first deviation — a stray top-level entry, a
+//! This is the one place a bundle is judged. The pipeline **fails closed**: the first deviation — a stray top-level entry, a
 //! manifest that will not decode, a wrong interface hash, a bad signature, a
 //! content-hash mismatch — refuses the whole bundle and nothing is launched.
 
@@ -30,17 +29,17 @@ pub struct AppLoaderConfig<'a> {
     /// targeting a different version is refused.
     pub accepted_abi_version: u32,
     /// The kernel's compiled-in syscall-table hash. A manifest whose
-    /// declared hash does not match is refused (`AGENTS.md` §9 / §19.2).
+    /// declared hash does not match is refused.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
     /// Seam that reads a bundle off storage.
     pub store: &'a dyn BundleStore,
     /// Seam that verifies a manifest signature.
     pub verifier: &'a dyn Verifier,
-    /// Structured audit log sink (`AGENTS.md` §19.4).
+    /// Structured audit log sink.
     pub sink: &'a dyn Sink,
 }
 
-/// The application-bundle loader (Stage 6 — `AGENTS.md` §16.4, §16.5).
+/// The application-bundle loader (Stage 6).
 pub struct AppLoader<'a> {
     cfg: AppLoaderConfig<'a>,
 }
@@ -56,8 +55,7 @@ impl<'a> AppLoader<'a> {
     /// capability ceiling and entry point a caller may spawn it with.
     ///
     /// `user_grants` is the launching user's capability set; the granted
-    /// ceiling is the manifest request intersected with it (`AGENTS.md`
-    /// §5.2). The loader never widens a request.
+    /// ceiling is the manifest request intersected with it. The loader never widens a request.
     ///
     /// # Errors
     ///
@@ -174,7 +172,7 @@ impl<'a> AppLoader<'a> {
     }
 
     /// Resolve a shared-library `reference` for the bundle rooted at
-    /// `bundle` under the §16.4 dynamic-loader policy.
+    /// `bundle` under the dynamic-loader policy.
     ///
     /// A reference is accepted only if it lies inside the bundle's own
     /// `Libraries/` directory or `/System/Libraries/`.
@@ -200,7 +198,7 @@ impl<'a> AppLoader<'a> {
     /// Read and validate the entry-point `Run` binary and resolve the shared
     /// libraries it declares it needs.
     ///
-    /// `LoadImage::parse` enforces the §19.2 hardening invariants (PIE, W^X,
+    /// `LoadImage::parse` enforces the hardening invariants (PIE, W^X,
     /// and the syscall-hash CFI tag) on the binary; a malformed image or a
     /// CFI-tag mismatch is refused (`AppError::RunImage`).
     ///
@@ -208,7 +206,7 @@ impl<'a> AppLoader<'a> {
     ///
     /// [`AppError::Store`] if the binary cannot be read, [`AppError::RunImage`]
     /// if it is not a valid `rxe` image, or [`AppError::Library`] if a needed
-    /// library violates the §16.4 policy.
+    /// library violates the policy.
     fn validate_run_image(
         &self,
         bundle: &str,
@@ -231,7 +229,7 @@ impl<'a> AppLoader<'a> {
     }
 
     /// Resolve every shared library the entry-point `image` declares it needs
-    /// against the §16.4 dynamic-loader policy, in declaration order.
+    /// against the dynamic-loader policy, in declaration order.
     ///
     /// This is where the C-ABI runtime (the curated `ros_sys_*` /
     /// `/System/Libraries/` *System runtime / C ABI* library) and any bundle
@@ -394,7 +392,7 @@ mod tests {
     const KERNEL_HASH: [u8; SYSCALL_TABLE_HASH_LEN] = [0x11; SYSCALL_TABLE_HASH_LEN];
     const CONTENT_HASH: [u8; 32] = [0x22; 32];
     /// The curated System runtime / C ABI shared library a hosted C program
-    /// dynamically links (`AGENTS.md` §16.4); it lives under
+    /// dynamically links; it lives under
     /// `/System/Libraries/`.
     const RUNTIME_LIB: &str = "/System/Libraries/libros-sys.so";
 

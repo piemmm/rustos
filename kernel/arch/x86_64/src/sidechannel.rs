@@ -1,4 +1,4 @@
-//! x86_64 side-channel mitigations (`AGENTS.md` §19.1).
+//! x86_64 side-channel mitigations.
 //!
 //! Implements the Arch HAL
 //! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
@@ -7,7 +7,7 @@
 //! data). The barrier primitives the kernel calls on each privilege
 //! transition are emitted here; the declarative
 //! [`MitigationProfile`](rustos_arch_api::MitigationProfile) states
-//! honestly which §19.1 mitigations are applied today and which are
+//! honestly which mitigations are applied today and which are
 //! tracked as [`Mitigation::Pending`](rustos_arch_api::Mitigation::Pending)
 //! behind a not-yet-landed subsystem.
 //!
@@ -58,7 +58,7 @@ impl SideChannel {
         Self
     }
 
-    /// The honest §19.1 declaration for x86_64 (see the module docs).
+    /// The honest declaration for x86_64 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> MitigationProfile {
         MitigationProfile {
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(profile.context_switch_buffer_flush, Mitigation::Applied);
 
         // KPTI and IBPB are tracked Pending gaps, so the port is not yet
-        // release-ready (AGENTS.md §19.1 — a target that does not pass
+        // release-ready (a target that does not pass
         // cannot ship; that gate fires when these land).
         assert!(profile.address_space_isolation.is_pending());
         assert!(profile.context_switch_indirect_branch_barrier.is_pending());

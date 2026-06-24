@@ -7,7 +7,7 @@
 //! map / translate / unmap walk and [`rustos_arch_api::tlb::TlbShootdown`]
 //! for the per-page TLB invalidation. `kernel/mem` names **only** those
 //! HAL traits; it no longer defines its own page-table trait
-//! (`AGENTS.md` §2.2 — one vocabulary; `plans/WIRING.md` Stage W5b-2).
+//! (one vocabulary; `plans/WIRING.md` Stage W5b-2).
 //!
 //! [`AddressSpace`] is a *thin* generic façade over a port's HAL
 //! [`rustos_arch_api::mmu::AddressSpace`] (`+ TlbShootdown`)
@@ -179,7 +179,7 @@ bitflags_like! {
         /// (the BCM2711 PCIe root complex) the port maps it Normal
         /// Non-Cacheable; on a coherent platform it is ordinary cacheable
         /// RAM. Distinct from [`Self::NO_CACHE`] (Device/MMIO): a DMA buffer
-        /// is accessed with ordinary loads/stores (`AGENTS.md` §4).
+        /// is accessed with ordinary loads/stores.
         const DMA_COHERENT = 0b0010_0000;
     }
 }
@@ -209,8 +209,7 @@ pub enum PageTableError {
     /// from a port whose [`rustos_arch_api::mmu::AddressSpace::split_block`]
     /// is not implemented). The map/unmap façade never drives such an
     /// operation, so this surfaces only if a future caller routes one
-    /// through this layer — fail closed, never a silent success
-    /// (`AGENTS.md` §2.9).
+    /// through this layer — fail closed, never a silent success.
     Unsupported,
 }
 
@@ -226,7 +225,7 @@ impl From<AllocError> for PageTableError {
 /// is exactly the Arch HAL [`rustos_arch_api::mmu::AddressSpace`] (the
 /// map / translate / unmap walk) plus [`TlbShootdown`] (the per-page
 /// invalidation the map/unmap path issues), held together by this alias
-/// so the bound is written once (`AGENTS.md` §2.2 / §2.3). Every
+/// so the bound is written once. Every
 /// architecture port implements both traits; the in-crate
 /// `HostPageTable` double implements them too so the façade stays
 /// host-testable.
@@ -235,8 +234,7 @@ pub trait PageTable: HalAddressSpace + TlbShootdown {}
 impl<T: HalAddressSpace + TlbShootdown> PageTable for T {}
 
 /// Translate `kernel/mem`'s [`MapFlags`] into the HAL's neutral
-/// [`PageFlags`] permission set (one decode at the boundary,
-/// `AGENTS.md` §2.2). `kernel/mem`'s `NO_CACHE` is the HAL's `DEVICE`
+/// [`PageFlags`] permission set (one decode at the boundary). `kernel/mem`'s `NO_CACHE` is the HAL's `DEVICE`
 /// (uncached / strongly-ordered) attribute.
 fn to_page_flags(flags: MapFlags) -> PageFlags {
     let mut out = PageFlags::empty();
@@ -262,7 +260,7 @@ fn to_page_flags(flags: MapFlags) -> PageFlags {
 }
 
 /// Inverse of [`to_page_flags`]: decode a HAL [`PageFlags`] leaf back
-/// into `kernel/mem`'s [`MapFlags`] currency (`AGENTS.md` §2.2).
+/// into `kernel/mem`'s [`MapFlags`] currency.
 fn from_page_flags(flags: PageFlags) -> MapFlags {
     let mut out = MapFlags::empty();
     if flags.contains(PageFlags::READ) {
@@ -288,8 +286,7 @@ fn from_page_flags(flags: PageFlags) -> MapFlags {
 
 /// Map a HAL [`MapError`] onto `kernel/mem`'s [`PageTableError`] at the
 /// boundary. A pool-exhaustion failure becomes the allocator's
-/// [`AllocError::OutOfMemory`], so callers see one OOM type
-/// (`AGENTS.md` §2.2).
+/// [`AllocError::OutOfMemory`], so callers see one OOM type.
 fn from_map_error(err: MapError) -> PageTableError {
     match err {
         MapError::Misaligned => PageTableError::Misaligned,
@@ -303,7 +300,7 @@ fn from_map_error(err: MapError) -> PageTableError {
         // does not implement the coarse-block split, driven elsewhere).
         // The arm carries the failure faithfully so a future caller that
         // *does* route a split through this layer fails closed rather than
-        // seeing a mislabelled error (`AGENTS.md` §2.9).
+        // seeing a mislabelled error.
         MapError::Unsupported => PageTableError::Unsupported,
     }
 }
@@ -412,7 +409,7 @@ impl<P: PageTable> AddressSpace<P> {
     /// [`Self::translate`] once — recording the exact `(frame, flags)` the
     /// backend resolves rather than the bookkept flags alone — and yields a
     /// plain, POD snapshot that answers the copy path's permission checks
-    /// identically to the source space (`AGENTS.md` §5.4).
+    /// identically to the source space.
     #[must_use]
     pub fn freeze(&self) -> FrozenAddressSpace {
         let mut mappings = BTreeMap::new();
@@ -438,7 +435,7 @@ impl<P: PageTable> AddressSpace<P> {
 /// as there is no user-driven remap syscall yet — is fully described by
 /// its freeze-time snapshot; when a remap path lands it must re-register
 /// an updated snapshot rather than the registry being widened to a live
-/// mutable view (`AGENTS.md` §2.4).
+/// mutable view.
 pub struct FrozenAddressSpace {
     mappings: BTreeMap<Page, (Frame, MapFlags)>,
 }
@@ -459,7 +456,7 @@ impl UserAddressSpace for FrozenAddressSpace {
 /// backing `(`[`Frame`]`, `[`MapFlags`]`)`. A per-task registry (the
 /// kernel orchestrator in `kernel/core`) keys `dyn UserAddressSpace`
 /// values by task id and hands the user-memory copy path a
-/// `&dyn UserAddressSpace` to walk (`AGENTS.md` §5.4 /
+/// `&dyn UserAddressSpace` to walk (
 /// `tests/SECURITY.md` §5).
 ///
 /// The trait deliberately exposes **only** `translate`: the copy path
@@ -467,15 +464,14 @@ impl UserAddressSpace for FrozenAddressSpace {
 /// translation is all the fail-closed permission checks in
 /// [`crate::uaccess`] require. Mapping and unmapping stay behind
 /// [`AddressSpace`]'s own accounted [`AddressSpace::map`] /
-/// [`AddressSpace::unmap`] (`AGENTS.md` §2.4 — no widening of the
+/// [`AddressSpace::unmap`] (no widening of the
 /// interface to "make access easier").
 pub trait UserAddressSpace {
     /// Translate `page` to its backing `(frame, flags)`, or `None` when
     /// the page is not currently mapped.
     ///
     /// Mirrors [`AddressSpace::translate`] exactly; the blanket impl
-    /// forwards to it so there is one translation definition, not two
-    /// (`AGENTS.md` §2.2).
+    /// forwards to it so there is one translation definition, not two.
     fn translate(&self, page: Page) -> Option<(Frame, MapFlags)>;
 }
 
@@ -496,7 +492,7 @@ impl<P: PageTable> UserAddressSpace for AddressSpace<P> {
 /// [`rustos_arch_api::mmu::AddressSpace`] + [`TlbShootdown`] surface in
 /// pure software. No CPU page-table writes happen. The point is to
 /// exercise every code path in [`AddressSpace`] on host hardware
-/// (`AGENTS.md` §7 — all algorithms that do not need hardware must be
+/// (all algorithms that do not need hardware must be
 /// host-tested).
 ///
 /// Visible to downstream crates only behind the `host-tests` cargo
@@ -528,7 +524,7 @@ impl HalAddressSpace for HostPageTable {
         if vaddr & (PAGE_SIZE as u64 - 1) != 0 || paddr & (PAGE_SIZE as u64 - 1) != 0 {
             return Err(MapError::Misaligned);
         }
-        // RustOS's default leaf policy is W^X (`AGENTS.md` §19.2): a
+        // RustOS's default leaf policy is W^X: a
         // simultaneous write+exec leaf is refused, mirroring what a real
         // port does at the HAL boundary.
         if flags.is_write_exec() {
@@ -562,7 +558,7 @@ impl HalAddressSpace for HostPageTable {
     fn block_split_support(&self) -> rustos_arch_api::mmu::BlockSplit {
         // The double tracks single 4 KiB entries in a map; it has no
         // coarse block descriptors to re-express, so the split is
-        // honestly unsupported (`AGENTS.md` §2.17).
+        // honestly unsupported.
         rustos_arch_api::mmu::BlockSplit::Unsupported(
             "host page-table double tracks single 4 KiB entries; no coarse blocks",
         )

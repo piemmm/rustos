@@ -5,7 +5,7 @@
 //! file. This is the *userland* listing vocabulary — what an application sees
 //! once the VFS has resolved a path and authorised the read — not the
 //! driver↔VFS structural surface (`rustos_abi::driver::filesystem`), which
-//! belongs to a different layer (`AGENTS.md` §5.4 / §17.4).
+//! belongs to a different layer.
 
 use alloc::string::String;
 
@@ -13,7 +13,7 @@ use alloc::string::String;
 ///
 /// Only the two kinds the browser distinguishes are modelled; special-file
 /// kinds, when the VFS surfaces them, arrive as a new variant rather than by
-/// overloading these (`AGENTS.md` §2.4).
+/// overloading these.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum EntryKind {
     /// A directory the browser can descend into.

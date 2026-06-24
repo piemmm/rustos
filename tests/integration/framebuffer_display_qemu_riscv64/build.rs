@@ -6,8 +6,7 @@
 //!
 //! 1. Hand the riscv64 `virt` linker script to `rustc` on the
 //!    freestanding `riscv64gc-unknown-none-elf` target (the single
-//!    per-arch linker script the architecture port owns — `AGENTS.md`
-//!    §2.2).
+//!    per-arch linker script the architecture port owns).
 //! 2. Sign a synthetic framebuffer-driver `.rxe` manifest requesting
 //!    exactly [`CapabilityId::DRV_LOAD`] with a deterministic test seed,
 //!    and emit a Rust source file the bin pulls in via `include!`.
@@ -15,14 +14,14 @@
 //! The manifest requests only `CAP_DRV_LOAD`:
 //! `rustos_drv_display_framebuffer::register` gates on it, and the
 //! host installs the manifest's requested set intersected with the
-//! caller's grants (`AGENTS.md` §5.2). The `CAP_MMIO_MAP` the surface
+//! caller's grants. The `CAP_MMIO_MAP` the surface
 //! mapping additionally requires is granted on the separate
 //! `DriverHost` the bin builds for `Framebuffer::open`, never through
 //! the manifest, mirroring how the bus-driver verticals separate the
 //! load gate from the map gate.
 //!
 //! Re-running `build.rs` produces byte-identical output for the same
-//! seed; the test is therefore deterministic (`AGENTS.md` §7).
+//! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};

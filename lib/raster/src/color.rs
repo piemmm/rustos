@@ -4,14 +4,14 @@
 //! each colour channel of a [`Pixel`] is already scaled by its own alpha.
 //! Premultiplication is what makes the Porter–Duff *over* operator a
 //! single multiply-add per channel and keeps filtering and per-region
-//! opacity correct (`AGENTS.md` §10).
+//! opacity correct.
 
 /// Exact rounded integer division by 255 for a value in `0..=65025`.
 ///
 /// `value` is always a product of two `u8`s (so at most `255 * 255 =
 /// 65025`); the result is the nearest integer to `value / 255` and is
 /// therefore itself a valid `u8`. The `min(255)` is a defensive clamp
-/// that lets the conversion stay total without an `unwrap` (§2.9).
+/// that lets the conversion stay total without an `unwrap`.
 #[must_use]
 pub fn div255(value: u32) -> u8 {
     let rounded = (value + 128 + ((value + 128) >> 8)) >> 8;
@@ -149,7 +149,7 @@ impl From<rustos_theme::Rgba> for Color {
     /// The theme owns the authored colour *data*; the rasteriser owns the
     /// premultiplied-alpha arithmetic. This is the one edge where the two
     /// meet, so the colour algebra is never duplicated into the theme
-    /// crate (`AGENTS.md` §2.2). The channel layout is identical, so the
+    /// crate. The channel layout is identical, so the
     /// conversion is a field move.
     fn from(rgba: rustos_theme::Rgba) -> Self {
         Self {

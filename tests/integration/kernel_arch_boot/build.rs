@@ -3,7 +3,7 @@
 //! `kernel/rustos-kernel/build.rs` and the existing
 //! `tests/integration/{memory_isolation,scheduler_stress_qemu}/build.rs`
 //! exactly — all four crates share the same linker script
-//! (`AGENTS.md` §2.2 — no duplication).
+//! (no duplication).
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();

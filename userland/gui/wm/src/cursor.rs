@@ -3,7 +3,7 @@
 //! The cursor is the top-most layer of the scene: it is composited over
 //! every window so it is always visible. The cursor *artwork* is not the
 //! window manager's concern — it is a scalable, colourful, replaceable
-//! [`CursorImage`] produced by `lib/cursor` (`AGENTS.md` §2.2 / §2.4). This
+//! [`CursorImage`] produced by `lib/cursor`. This
 //! module only places that image on screen and samples it during
 //! recomposition.
 //!

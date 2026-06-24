@@ -4,14 +4,13 @@
 //! `drivers/bus/mmio`) reaches a device's register block through the
 //! [`MmioMapper`] ABI seam. The always-available path is this
 //! [`KernelMmioMapper`], which routes every request through the
-//! capability-gated [`rustos_kernel_sec::map_mmio`] (`AGENTS.md`
-//! §5.4): it verifies [`CapabilityId::MMIO_MAP`], maps the device's
+//! capability-gated [`rustos_kernel_sec::map_mmio`]: it verifies [`CapabilityId::MMIO_MAP`], maps the device's
 //! physical register block into the driver's address space with
 //! caching disabled, and mints a [`RegisterWindow`] over the result.
 //!
 //! The driver never synthesises a pointer: the only constructor of a
 //! [`RegisterWindow`] is `unsafe` and is called solely here, after
-//! the kernel has validated the mapping (`AGENTS.md` §4 — no ambient
+//! the kernel has validated the mapping (no ambient
 //! authority).
 //!
 //! # Lifetime / leak contract
@@ -87,7 +86,7 @@ impl<P: PageTable, S: Sink + ?Sized> MmioMapper for KernelMmioMapper<'_, '_, P, 
         // `region_base` cannot fail for a region minted one statement
         // above, but the result is plumbed through so an allocator-
         // internal inconsistency surfaces as `Unsupported` instead of
-        // a panic (`AGENTS.md` §2.9).
+        // a panic.
         let base = self
             .map
             .borrow()
@@ -115,8 +114,7 @@ fn map_gate_error(e: MmioGateError) -> MmioMapError {
         // error, guard violation, bad config) is reported as
         // `Unsupported`: the bus driver has no recovery action beyond
         // surfacing it. The wildcard also keeps this total against the
-        // `#[non_exhaustive]` `MmioGateError` without a panic
-        // (`AGENTS.md` §2.9).
+        // `#[non_exhaustive]` `MmioGateError` without a panic.
         _ => MmioMapError::Unsupported,
     }
 }

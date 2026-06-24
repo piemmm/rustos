@@ -1,15 +1,14 @@
-//! User-mode entry surface of the Arch HAL (`AGENTS.md` §17.2).
+//! User-mode entry surface of the Arch HAL.
 //!
 //! Dropping a freshly built process image into user mode (U-mode on
 //! riscv64, EL0 on aarch64, ring 3 on x86_64) is a privilege transition
 //! only the architecture port can perform: it requires the
 //! port-specific instruction (`sret` / `eret` / `iretq`) and the
 //! port-specific control-register state (`sstatus` / `SPSR_EL1` /
-//! the `iretq` frame). §17.2 makes the architecture surface a closed set
+//! the `iretq` frame). The charter makes the architecture surface a closed set
 //! of traits on the HAL; this module is the "enter user mode" member of
 //! that set, so the `sret`/`eret`/`iretq` sequence lives in exactly one
-//! place per port instead of being copied into every call site
-//! (`AGENTS.md` §2.2).
+//! place per port instead of being copied into every call site.
 //!
 //! # What lives here
 //!
@@ -34,8 +33,7 @@
 //! the transition itself is proven end-to-end by each port's QEMU
 //! round-trip (a program is entered at a `UserEntry` and its syscalls
 //! are observed kernel-side — `plans/CCOMPAT.md` CC3). Inventing a
-//! host stub that "enters user mode" would be a fake primitive
-//! (`AGENTS.md` §1).
+//! host stub that "enters user mode" would be a fake primitive.
 
 /// The architecture-neutral register state a process image is entered
 /// with.
@@ -76,8 +74,7 @@ impl UserEntry {
     }
 }
 
-/// The "enter user mode" handle an architecture port exposes
-/// (`AGENTS.md` §17.2).
+/// The "enter user mode" handle an architecture port exposes.
 ///
 /// The kernel calls [`Self::enter_user`] once a process image has been
 /// built (segments mapped and filled, user stack mapped, startup-vector

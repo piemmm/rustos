@@ -2,8 +2,7 @@
 //!
 //! The Pi 4's EMMC2 controller is an Arasan / SDHCI-5.1 SD host. This
 //! driver brings an SD card up over the standard SDHCI register block and
-//! exposes it through [`rustos_abi::driver::block::Block`] (`AGENTS.md`
-//! §8). The transfer path is programmed-I/O (PIO): blocks move one
+//! exposes it through [`rustos_abi::driver::block::Block`]. The transfer path is programmed-I/O (PIO): blocks move one
 //! 512-byte block at a time through the buffer data port in both
 //! directions (`CMD17`/`CMD18` reads, `CMD24`/`CMD25` writes), which
 //! needs no DMA capability and is the correct first bring-up path
@@ -16,12 +15,12 @@
 //! concrete memory mapping. Metal drives it over a capability-gated
 //! [`RegisterWindow`] ([`SdhciHost`] is implemented for it); host tests
 //! drive it over a register-level mock controller. This mirrors the
-//! `rpi_hvs` mailbox seam (`AGENTS.md` §2.2): the protocol layer is
+//! `rpi_hvs` mailbox seam: the protocol layer is
 //! proven host-side, the doorbell below it on metal.
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`Emmc2`] is a public *type* the driver host instantiates through
 //! [`wiring::open_discovered`]; the host never reaches into it beyond the
 //! [`Block`] trait.
@@ -31,7 +30,7 @@
 //! Loading requires [`CapabilityId::DRV_LOAD`]; mapping the discovered
 //! register window additionally requires [`CapabilityId::MMIO_MAP`]
 //! (checked in [`wiring`]). The driver runs in user space and does not
-//! request `CAP_DRV_KERNEL` (`AGENTS.md` §4 / §8).
+//! request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -58,26 +57,25 @@ use command::{ResponseKind, SdCommand, BLOCK_SIZE, BLOCK_WORDS};
 /// other drivers' marker convention.
 const REGISTER_HANDLE_MARKER: u64 = 0x5344_5000_0000_0001;
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries.
+/// The bind priority [`BIND_KEYS`] carries.
 ///
 /// An exact `compatible`-string match: it ranks at the exact-match tier
-/// (`AGENTS.md` §18.3 — higher matched priority binds; an unbroken tie is
+/// (higher matched priority binds; an unbroken tie is
 /// a packaging defect).
 const BIND_PRIORITY: u16 = 10;
 
-/// This driver's hardware bind table (`AGENTS.md` §18.3): the BCM2711
+/// This driver's hardware bind table: the BCM2711
 /// EMMC2 SD host, matched by the device-tree `compatible` string
 /// `brcm,bcm2711-emmc2` the aarch64 `FdtDiscovery` emits on the Storage
 /// node (`wiring`). The single source of truth the signed-manifest bind
-/// table is authored from and a discovered node is resolved against
-/// (`AGENTS.md` §2.2 / §18.3).
+/// table is authored from and a discovered node is resolved against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     match HwMatchKey::compatible(b"brcm,bcm2711-emmc2") {
         Ok(key) => key,
         // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
         // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic (`AGENTS.md` §2.9).
+        // never a runtime panic.
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     },
 )];
@@ -85,14 +83,13 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
 /// Upper bound on register polls while waiting for a controller event.
 ///
 /// A bound on a *defence* against an unresponsive or absent controller,
-/// not a scalable capacity (`AGENTS.md` §24.4): an SD command or block
+/// not a scalable capacity: an SD command or block
 /// transfer completes in microseconds, so a million polls is orders of
 /// magnitude past any honest completion. Exceeding it fails closed with
-/// [`DriverError::DeviceFault`] rather than spinning forever
-/// (`AGENTS.md` §2.1).
+/// [`DriverError::DeviceFault`] rather than spinning forever.
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -113,7 +110,7 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 ///
 /// Every controller access the [`Emmc2`] engine makes goes through this
 /// trait, so the command/response and block-transfer state machine is
-/// proven host-side against a register-level mock (`AGENTS.md` §2.2).
+/// proven host-side against a register-level mock.
 /// Both methods take `&mut self` so a model can represent registers with
 /// read side-effects (the buffer data port advances; write-1-to-clear
 /// status bits).
@@ -138,7 +135,7 @@ pub trait SdhciHost {
     /// line, then return so the engine re-reads `INTERRUPT`.
     ///
     /// This is the seam that keeps the engine off the CPU while a slow SD
-    /// completion is outstanding (`AGENTS.md` §17.1 / §2.16 — a driver poll
+    /// completion is outstanding (a driver poll
     /// must never busy-spin a status register and monopolise the CPU). The
     /// metal host ([`IrqSdhci`]) parks on the controller's bound GIC line
     /// through a [`CompletionWait`]; the host-test register mock returns
@@ -150,14 +147,12 @@ pub trait SdhciHost {
 /// Park-until-completion seam the metal [`IrqSdhci`] host drives
 /// ([`SdhciHost::await_irq`]).
 ///
-/// The eMMC2 driver is generic over `lib/abi` only (`AGENTS.md` §3 / §17.4),
+/// The eMMC2 driver is generic over `lib/abi` only,
 /// so it cannot name the kernel's IRQ-wait machinery. This one-method trait
 /// is the inversion point: the kernel binary supplies an implementation that
 /// blocks the calling task on the controller's bound interrupt line and is
-/// resumed by its ISR (mirroring the virtio host's `notify_wait`,
-/// `AGENTS.md` §2.2), while a host test supplies a no-op. It returns `()` so
-/// a spurious wake-up cannot be mistaken for a retriable failure
-/// (`AGENTS.md` §2.1) — the engine re-reads the status register on return.
+/// resumed by its ISR (mirroring the virtio host's `notify_wait`), while a host test supplies a no-op. It returns `()` so
+/// a spurious wake-up cannot be mistaken for a retriable failure — the engine re-reads the status register on return.
 pub trait CompletionWait {
     /// Block until the controller signals a completion on its interrupt
     /// line; the caller re-reads `INTERRUPT` on return.
@@ -168,10 +163,9 @@ pub trait CompletionWait {
 /// a [`CompletionWait`] that parks on the controller's GIC interrupt line.
 ///
 /// Splitting register access from the completion wait mirrors the virtio
-/// driver's transport/host split (`AGENTS.md` §2.2): `read32`/`write32` go to
+/// driver's transport/host split: `read32`/`write32` go to
 /// the mapped window, and [`await_irq`](SdhciHost::await_irq) parks the task
-/// on the controller's interrupt rather than busy-spinning (`AGENTS.md`
-/// §17.1). Built by [`open_discovered`](crate::wiring::open_discovered)
+/// on the controller's interrupt rather than busy-spinning. Built by [`open_discovered`](crate::wiring::open_discovered)
 /// from the discovered register window and a kernel-supplied waiter.
 pub struct IrqSdhci<W: CompletionWait> {
     window: RegisterWindow,
@@ -222,10 +216,9 @@ const IDENT_CLOCK_DIVISOR: u32 = 0x80;
 /// [`IDENT_CLOCK_DIVISOR`]), so the data clock stays at or below
 /// `32 · 400 kHz = 12.8 MHz` for *any* base clock at which identification
 /// was in range — comfortably within SD Default Speed's 25 MHz limit, so no
-/// high-speed mode switch or tuning is required (`AGENTS.md` §2.16). It is
+/// high-speed mode switch or tuning is required. It is
 /// derived from the identification divisor rather than a base-clock constant
-/// precisely so it carries no board assumption of its own (`AGENTS.md`
-/// §2.20): whatever base makes identification legal makes this legal too.
+/// precisely so it carries no board assumption of its own: whatever base makes identification legal makes this legal too.
 const DATA_CLOCK_DIVISOR: u32 = IDENT_CLOCK_DIVISOR / 32;
 
 /// Data-timeout-counter value (`CONTROL1[19:16]`): the controller's
@@ -233,8 +226,7 @@ const DATA_CLOCK_DIVISOR: u32 = IDENT_CLOCK_DIVISOR / 32;
 const DATA_TIMEOUT_VALUE: u32 = 0x0E;
 
 /// Largest number of blocks one PIO transfer may carry. The SDHCI
-/// 16-bit block-count field bounds a single transfer (`AGENTS.md`
-/// §24.4 — a format-fixed bound, not a scalable capacity); a caller
+/// 16-bit block-count field bounds a single transfer (a format-fixed bound, not a scalable capacity); a caller
 /// asking for more is rejected fail-closed.
 const MAX_BLOCKS_PER_TRANSFER: usize = 0xFFFF;
 
@@ -306,7 +298,7 @@ impl BringUpStage {
 ///
 /// [`Emmc2::open`] returns this so the failing step is recoverable for
 /// diagnostics (`plans/PI.md` P8/B4). A consumer that only needs the
-/// `DriverError` (the §8 driver-ABI shape) converts with
+/// `DriverError` (the driver-ABI shape) converts with
 /// `DriverError::from` / `?`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BringUpFault {
@@ -335,7 +327,7 @@ impl From<BringUpFault> for DriverError {
 /// `H` is the register backing: a capability-gated [`RegisterWindow`] on
 /// metal, a register-level mock in host tests. Dropping the [`Emmc2`]
 /// drops `H`; for the metal window that releases the mapping the kernel
-/// reclaims on unload (`AGENTS.md` §4).
+/// reclaims on unload.
 pub struct Emmc2<H: SdhciHost> {
     host: H,
     geometry: BlockGeometry,
@@ -396,7 +388,7 @@ impl<H: SdhciHost> Emmc2<H> {
     }
 
     /// Poll `register` until every bit in `mask` clears, within the
-    /// budget; fail closed on a stuck controller (`AGENTS.md` §2.1).
+    /// budget; fail closed on a stuck controller.
     fn wait_clear(&mut self, register: usize, mask: u32) -> Result<(), DriverError> {
         for _ in 0..self.poll_budget {
             if self.host.read32(register)? & mask == 0 {
@@ -430,17 +422,16 @@ impl<H: SdhciHost> Emmc2<H> {
     ///
     /// Each iteration reads the status once and, if neither `wanted` nor an
     /// error bit is set yet, parks via [`SdhciHost::await_irq`] until the
-    /// controller signals — never a busy-spin (`AGENTS.md` §17.1 / §2.16: a
+    /// controller signals — never a busy-spin (: a
     /// driver poll must not monopolise the CPU and starve interrupt-driven
     /// work). `poll_budget` bounds the number of parks as a fail-closed
     /// backstop against a storm of spurious wake-ups; the metal completion
-    /// itself arrives in one or two iterations (`AGENTS.md` §2.1).
+    /// itself arrives in one or two iterations.
     fn wait_interrupt(&mut self, wanted: u32) -> Result<(), DriverError> {
         for _ in 0..self.poll_budget {
             let status = self.host.read32(regs::REG_INTERRUPT)?;
             if status & regs::INT_ERROR_MASK != 0 {
-                // Clear the latched error and fail closed (`AGENTS.md`
-                // §5.4) — never retry-until-it-works (`AGENTS.md` §2.1).
+                // Clear the latched error and fail closed — never retry-until-it-works.
                 self.host.write32(regs::REG_INTERRUPT, status)?;
                 return Err(DriverError::DeviceFault);
             }
@@ -485,7 +476,7 @@ impl<H: SdhciHost> Emmc2<H> {
         // engine parks on (plus every error bit) in the signal-enable
         // register so the controller raises its CPU interrupt line on each
         // completion — the engine waits on the interrupt rather than
-        // busy-spinning (`AGENTS.md` §17.1 / §2.16). The shared GIC line is
+        // busy-spinning. The shared GIC line is
         // routed + unmasked, and the parked task woken, by the kernel-side
         // [`CompletionWait`] the metal host carries.
         self.host.write32(regs::REG_IRPT_MASK, regs::INT_ALL)?;
@@ -598,7 +589,7 @@ impl<H: SdhciHost> Emmc2<H> {
             .map_err(|e| BringUpFault::new(BringUpStage::SendIfCond, e))?;
         if if_cond[0] & 0xFF != command::IF_COND_CHECK_PATTERN {
             // The card did not echo the check pattern: not a v2 card or a
-            // voltage mismatch. Fail closed (`AGENTS.md` §5.4).
+            // voltage mismatch. Fail closed.
             return Err(BringUpFault::new(
                 BringUpStage::SendIfCond,
                 DriverError::Unsupported,
@@ -607,7 +598,7 @@ impl<H: SdhciHost> Emmc2<H> {
 
         // Poll ACMD41 until the card finishes power-up. The poll budget
         // bounds the wait so an absent or wedged card fails closed rather
-        // than spinning forever (`AGENTS.md` §2.1).
+        // than spinning forever.
         let mut powered_up = false;
         for _ in 0..self.poll_budget {
             let ocr = self
@@ -660,7 +651,7 @@ impl<H: SdhciHost> Emmc2<H> {
         // raise the clock to the data rate before any block transfer — both
         // are pure speed steps the read/write path then inherits, turning
         // the ~50 KB/s identification-clock 1-bit path into the ~6 MB/s
-        // Default-Speed 4-bit path (`AGENTS.md` §2.16). Bus width is widened
+        // Default-Speed 4-bit path. Bus width is widened
         // first so the clock change (and every later transfer) runs on the
         // final width.
         self.set_bus_width_4bit()

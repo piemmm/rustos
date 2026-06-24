@@ -1,10 +1,10 @@
-//! RustOS userland driver host (Stage 4 — `AGENTS.md` §8).
+//! RustOS userland driver host (Stage 4).
 //!
 //! This crate is the userland service that owns the lifecycle of every
 //! `.rxe` driver module on a running RustOS system. It is the single point
 //! at which a driver image is parsed, verified, capability-checked, and
 //! handed an environment ([`rustos_abi::DriverHost`]) to register itself
-//! against. Per `AGENTS.md` §4 / §8 the host runs in user space by default;
+//! against. Per the host runs in user space by default;
 //! the same code path also handles `kind = "in-kernel"` drivers by
 //! demanding [`CapabilityId::DRV_KERNEL`](rustos_abi::CapabilityId::DRV_KERNEL)
 //! on top of the universal
@@ -13,7 +13,7 @@
 //! # Pipeline
 //!
 //! For every `load`/`reload` the host executes the following checks in
-//! order, **failing closed** at the first failure (`AGENTS.md` §5.4.5):
+//! order, **failing closed** at the first failure:
 //!
 //! 1. Decode the [`rustos_abi::DriverManifest`] header.
 //! 2. Reject if `abi_version` is not the host's accepted version.
@@ -24,7 +24,7 @@
 //! 6. Decode the capability body and reject if `kind = InKernel` without
 //!    `CAP_DRV_KERNEL` in the caller's set.
 //! 7. Reject if the manifest's requested capability set is **not a subset**
-//!    of the caller's set (`AGENTS.md` §5.2 — capabilities can be
+//!    of the caller's set (capabilities can be
 //!    delegated but never widened).
 //! 8. Hand the verified manifest + payload to the host's
 //!    [`DriverSpawner`], which completes the driver's registration in its
@@ -34,7 +34,7 @@
 //!
 //! Buffers that held the manifest signature or capability bitmap are
 //! cleared with [`zeroize::secure_clear`] when the load record is dropped
-//! (`AGENTS.md` §4 — "Zero-on-free for any allocation that ever held
+//! ("Zero-on-free for any allocation that ever held
 //! credentials, keys, or capability tokens").
 //!
 //! # Module map
@@ -48,8 +48,7 @@
 //! * [`source`] — [`ImageSource`] trait abstracting file IO so the host
 //!   stays `no_std`.
 //! * [`store`] — the signed driver-store scan that turns the installed
-//!   `/System/Drivers/` bundles into `devmgr` autoload candidates
-//!   (`AGENTS.md` §18.3 / §18.6).
+//!   `/System/Drivers/` bundles into `devmgr` autoload candidates.
 //! * [`spawner`] — [`DriverSpawner`] trait that completes a verified
 //!   image's registration in its own protection domain.
 //! * [`host`] — the [`Host`] state machine implementing `load` / `unload`
@@ -57,19 +56,19 @@
 //!
 //! # Layering
 //!
-//! The crate is `no_std` (`AGENTS.md` §6) and pulls only the audited
+//! The crate is `no_std` and pulls only the audited
 //! `rustos-abi`, `rustos-caps`, `rustos-crypto`, `rustos-devmatch`,
 //! `rustos-log`, and `rustos-virtio` crates — all under `lib/*`, so the
 //! host never links a
-//! kernel or driver crate (`AGENTS.md` §17.4). The `VirtioHostFactory`
+//! kernel or driver crate. The `VirtioHostFactory`
 //! seam consumed by [`HostConfig`] lives in `rustos_virtio`.
 //! It exposes no `unsafe` across its crate boundary — the one in-tree
 //! `unsafe` block lives in [`zeroize::secure_clear`] and is covered by a
-//! unit test (`AGENTS.md` §2.10).
+//! unit test.
 //!
 //! # Stability
 //!
-//! Tier: `experimental` (per `AGENTS.md` §6). The public surface will
+//! Tier: `experimental` (). The public surface will
 //! freeze when Stage 4 lands its first real driver. The wire formats
 //! consumed (manifest header, capability body) are already frozen by
 //! `rustos-abi`.
@@ -97,7 +96,7 @@ pub use spawner::{DriverEntry, DriverSpawner, SpawnContext, SpawnRegisterError};
 pub use store::{scan_store, DriverStore, ScannedDriver};
 
 // Re-export the canonical match-candidate type the store scan produces
-// (the single `lib/devmatch` definition, `AGENTS.md` §2.2) so the
+// (the single `lib/devmatch` definition) so the
 // bin-crate boot wiring can name a candidate without a separate
 // `rustos-devmatch` dependency.
 pub use rustos_devmatch::DriverCandidate;

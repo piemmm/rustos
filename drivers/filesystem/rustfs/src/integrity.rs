@@ -15,7 +15,7 @@
 //!   *plaintext* content. It is the seam Stage 7 deduplication keys on
 //!   (`docs/src/filesystem/rustfs-spec.md` §9) and detects a corruption that
 //!   survives decryption. It is computed through `lib/crypto`'s audited
-//!   SHA-256 (`AGENTS.md` §2.12 — never hand-rolled). The spec's fixed-v1
+//!   SHA-256 (never hand-rolled). The spec's fixed-v1
 //!   constant names BLAKE3-256; `lib/crypto` exposes only the audited
 //!   `RustCrypto` SHA-256, and pulling a `blake3` crate in would widen the
 //!   trusted computing base with a SIMD backend that does not build cleanly on
@@ -23,7 +23,7 @@
 //!   documented for `chacha20`/`curve25519-dalek` in `.cargo/config.toml`).
 //!   SHA-256 is a 256-bit collision-resistant hash that serves the
 //!   integrity-and-dedupe role identically, so `RustFS` v1 uses it and the spec
-//!   records the choice (`AGENTS.md` §2.12 outranks the spec's named
+//!   records the choice (outranks the spec's named
 //!   primitive: use the audited `lib/crypto` hash, do not hand-roll or import
 //!   an unvetted one).
 //! - The **physical checksum** ([`physical_checksum`]) is a fast,
@@ -31,9 +31,9 @@
 //!   crypto trailer + logical hash). It detects media / transport corruption
 //!   cheaply and is verified *first* on read, so bit rot in the stored block
 //!   is caught by the fast check before the AEAD runs. A checksum is not a
-//!   cryptographic primitive, so §2.12 does not bar a first-party
+//!   cryptographic primitive, so does not bar a first-party
 //!   implementation; the keyed authenticity of the block still rests on the
-//!   AEAD and the §8 metadata MAC.
+//!   AEAD and the metadata MAC.
 
 use rustos_crypto::sha256;
 
@@ -52,7 +52,7 @@ pub const DATA_INTEGRITY_TRAILER: usize = LOGICAL_HASH_LEN + PHYS_CHECKSUM_LEN;
 /// (`docs/src/filesystem/rustfs-spec.md` §8 — the data-record *compression
 /// state* field). It sits between the crypto trailer and the logical hash, so
 /// the fast physical checksum covers it (a corrupted descriptor is caught by
-/// the §6 first-layer check before the AEAD runs). The layout is one state
+/// the first-layer check before the AEAD runs). The layout is one state
 /// byte followed by the little-endian `u32` length of the at-rest stored
 /// representation (the compressed-or-raw bytes the AEAD covers).
 pub const COMPRESSION_DESCRIPTOR_LEN: usize = 1 + 4;
@@ -92,7 +92,7 @@ pub fn write_compression(dst: &mut [u8], desc: Compression) {
 
 /// Parse a [`Compression`] descriptor from the first
 /// [`COMPRESSION_DESCRIPTOR_LEN`] bytes of `src`. An unknown state byte is
-/// rejected as corruption (`AGENTS.md` §5.4 — fail closed). The caller
+/// rejected as corruption (fail closed). The caller
 /// guarantees `src.len() >= COMPRESSION_DESCRIPTOR_LEN`.
 pub fn read_compression(src: &[u8]) -> Result<Compression, DataFault> {
     let compressed = match src[0] {
@@ -109,7 +109,7 @@ pub fn read_compression(src: &[u8]) -> Result<Compression, DataFault> {
 
 /// Which integrity layer rejected a data block. Surfaced to the caller as a
 /// single [`rustos_abi::DriverError::DeviceFault`] (the `abi-v1` error surface
-/// is frozen, `AGENTS.md` §9), but kept distinct internally so a media /
+/// is frozen), but kept distinct internally so a media /
 /// transport corruption (the fast [`Physical`](Self::Physical) checksum) is
 /// not confused with a ciphertext tamper (the [`Aead`](Self::Aead) tag) or a
 /// plaintext corruption that survived decryption ([`Logical`](Self::Logical)).

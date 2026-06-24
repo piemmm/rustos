@@ -1,5 +1,5 @@
 //! Decoding the wire-encoded hardware-tree snapshot the `hw_tree_read`
-//! syscall returns (`AGENTS.md` §18.1 / §18.4).
+//! syscall returns.
 //!
 //! The `Run` service reads the discovered tree into a buffer and must walk
 //! it node by node to observe (and, in a later tranche, match) each
@@ -7,9 +7,9 @@
 //! [`HwNode::node_count`](HwTreeHeader::node_count) records that follow —
 //! is pure, fail-closed, and worth testing on the host independently of
 //! the freestanding program, so it lives here in the library rather than
-//! inside `src/run.rs` (`AGENTS.md` §2.2). Every length is validated
+//! inside `src/run.rs`. Every length is validated
 //! before use and a malformed snapshot is rejected whole, never partially
-//! interpreted (`AGENTS.md` §5.4 / §2.9).
+//! interpreted.
 
 use rustos_abi::{Errno, HwNode, HwTreeHeader};
 
@@ -23,8 +23,7 @@ use rustos_abi::{Errno, HwNode, HwTreeHeader};
 ///
 /// # Errors
 ///
-/// Fails closed without invoking `visit` again once an error is hit
-/// (`AGENTS.md` §2.9):
+/// Fails closed without invoking `visit` again once an error is hit:
 ///
 /// * [`Errno::BufferTooSmall`] if `blob` is shorter than the header, or
 ///   shorter than the header plus every record the header promises — a
@@ -35,7 +34,7 @@ pub fn for_each_node(blob: &[u8], mut visit: impl FnMut(&HwNode)) -> Result<HwTr
     let header = HwTreeHeader::from_bytes(blob)?;
 
     // Validate the whole promised extent up front so a truncated tail is
-    // rejected before any node is surfaced (`AGENTS.md` §2.9). `node_count`
+    // rejected before any node is surfaced. `node_count`
     // is a `u64`; convert through `usize` and reject a count whose byte
     // span cannot be represented rather than wrapping.
     let count = usize::try_from(header.node_count()).map_err(|_| Errno::BufferTooSmall)?;

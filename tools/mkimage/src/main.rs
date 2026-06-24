@@ -11,8 +11,7 @@
 //! ```
 //!
 //! The root volume is encrypted under a key **derived** from the
-//! profile's passphrase (`rustos_mkimage::passphrase_for`, `AGENTS.md`
-//! §11) — `root` for the debug image, blank for the installer; the
+//! profile's passphrase (`rustos_mkimage::passphrase_for`) — `root` for the debug image, blank for the installer; the
 //! unlock descriptor travels on the boot partition. `--root-key-out`
 //! names where the derived key is written for host-side mounting (default
 //! `<out>.rootkey`).
@@ -75,7 +74,7 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     // needs to drive `cargo` for the freestanding driver builds), so the
     // canonical `cargo xtask image` path supplies them. A directly-scripted
     // CLI image therefore ships an empty store (the kernel leaves every node
-    // unbound, fail-closed — `AGENTS.md` §18.4), exactly as before.
+    // unbound, fail-closed), exactly as before.
     let built = build_rpi_image(&kernel_elf, &firmware, &mut HostEntropy, rpi.profile, &[])
         .map_err(|e| e.to_string())?;
 
@@ -103,7 +102,7 @@ fn run(argv: &[OsString]) -> Result<(), String> {
 }
 
 /// Write the derived root-key file with owner-only permissions: it is the
-/// mount key for the image's root volume (`AGENTS.md` §5.4 secret
+/// mount key for the image's root volume (secret
 /// hygiene). It can also be re-derived from the on-image unlock
 /// descriptor and the profile's passphrase; the file is an operator
 /// convenience for mounting the volume on a host.

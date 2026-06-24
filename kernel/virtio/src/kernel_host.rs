@@ -4,10 +4,10 @@
 //! satisfies [`rustos_virtio::VirtioHost`] by leaking `Box<[u8]>` storage; the
 //! [`KernelVirtioHost`] here satisfies the same trait but routes every
 //! allocation through the capability-gated [`rustos_kernel_sec::alloc_dma`]
-//! / [`rustos_kernel_sec::free_dma`] pair (`AGENTS.md` §5.4).
+//! / [`rustos_kernel_sec::free_dma`] pair.
 //!
 //! The host owns a single [`rustos_kernel_mem::DmaPool`] (per-driver
-//! pool — `AGENTS.md` §4 "per-process heaps, never a global user
+//! pool "per-process heaps, never a global user
 //! heap"). Allocations:
 //!
 //! 1. `kernel_sec::alloc_dma` performs the `CapabilityId::MEM_DMA`
@@ -88,10 +88,10 @@ pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
     /// Per-driver DMA pool, behind a [`SpinLock`] (not a `RefCell`) so the
     /// host is [`Sync`] and a `&'static` host can be shared across the
     /// tasks that share one device behind a [`crate`]-external block-sharing
-    /// lock (`AGENTS.md` §4 — disk access is a common, capability-checked
+    /// lock (disk access is a common, capability-checked
     /// service many tasks reach). The lock is effectively uncontended (the
     /// outer block-sharing layer already serialises every device op), so it
-    /// costs nothing on the hot path (`AGENTS.md` §2.16).
+    /// costs nothing on the hot path.
     pool: SpinLock<DmaPool<'a, P>>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
@@ -114,7 +114,7 @@ pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
     /// Clock + blocking-wait seam the completion wait loop drives.
     /// Supplied by the kernel binary (it wraps the scheduler +
     /// architecture clock); `kernel/*` stays out of this crate's
-    /// default build (`AGENTS.md` §3 — gated behind `kernel-host`). The
+    /// default build (gated behind `kernel-host`). The
     /// `+ Sync` bound keeps the host [`Sync`] (a shared `&'static` host is
     /// reached from more than one task).
     waiter: &'a (dyn IrqWaiter + Sync),
@@ -143,7 +143,7 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     /// [`Self::notify_wait`] drives. The handle is waited on against
     /// the owning task (`caller.task()`), so a host can only wake on
     /// a line its own task bound — the forgery defence lives in
-    /// [`IrqTable::try_wait_step`] (`AGENTS.md` §5.4).
+    /// [`IrqTable::try_wait_step`].
     #[must_use]
     pub fn new(
         pool: DmaPool<'a, P>,
@@ -232,7 +232,7 @@ unsafe fn slab_free_shim<P: PageTable, S: Sink + Sync + ?Sized>(
         // `free_dma` records as a `DmaAllocDenied` audit event. The
         // pool keeps the slot reserved (the supervisor process is
         // expected to reclaim it). We deliberately do not retry —
-        // `AGENTS.md` §2.1 forbids retry-until-it-works.
+        // the charter forbids retry-until-it-works.
         let _ = free_dma(&mut *host.pool.lock(), host.caller, buf, host.audit);
     }
 }
@@ -250,14 +250,14 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         // It cannot fail for a buffer minted from this pool one
         // statement above, but the result is plumbed through to
         // surface any allocator-internal inconsistency as a
-        // `DriverError` instead of a panic (`AGENTS.md` §2.9).
+        // `DriverError` instead of a panic.
         let base: NonNull<u8> = if let Ok(p) = self.pool.lock().slot_base(&buf) {
             p
         } else {
             // Roll back the allocation rather than leak the buffer;
-            // this is fail-closed per `AGENTS.md` §5.4. Cannot happen
+            // this is fail-closed. Cannot happen
             // in practice for a buffer minted one statement above,
-            // but the recovery path keeps `AGENTS.md` §2.9 satisfied
+            // but the recovery path keeps satisfied
             // without an `expect`.
             let _ = free_dma(&mut *self.pool.lock(), self.caller, buf, self.audit);
             return Err(DriverError::LengthOutOfRange);
@@ -335,8 +335,7 @@ fn map_gate_error(e: DmaGateError) -> DriverError {
     // `DmaGateError` is `#[non_exhaustive]`; today every non-
     // capability variant collapses to `LengthOutOfRange`, but the
     // explicit wildcard arm keeps the function total against
-    // future kernel-side additions without a panic
-    // (`AGENTS.md` §2.9).
+    // future kernel-side additions without a panic.
     match e {
         DmaGateError::CapabilityMissing => DriverError::PermissionDenied,
         _ => DriverError::LengthOutOfRange,

@@ -3,7 +3,7 @@
 //! A syscall handler is handed a raw user pointer (`ptr`, `len`) and must
 //! move bytes to or from that buffer without ever trusting it. This
 //! module is the architecture-neutral half of the kernel's
-//! `copy_from_user` / `copy_to_user` boundary (`AGENTS.md` §5.4 /
+//! `copy_from_user` / `copy_to_user` boundary (
 //! `tests/SECURITY.md` §5): it walks the caller's [`UserAddressSpace`]
 //! one page at a time, proves each page is a legitimate *user* page with the
 //! permission the direction requires, turns the backing frame into a
@@ -31,7 +31,7 @@
 //! ([`copy_in`]) and [`MapFlags::WRITE`] to copy *to* it
 //! ([`copy_out`]). A page missing `USER` is rejected before a missing
 //! data permission, so a kernel-pointer-confusion attempt is never
-//! reported as a mere "not readable". This upholds the §19.2 W^X model:
+//! reported as a mere "not readable". This upholds the W^X model:
 //! `copy_out` refuses an executable-but-not-writable page rather than
 //! letting the kernel scribble over code.
 //!
@@ -42,7 +42,7 @@
 //! facility runs on a developer workstation: the test maps user pages to
 //! frames inside a simulated physical window, seeds or observes the bytes
 //! through the very same [`PhysMap`] the copy uses, and asserts the
-//! cross-page, offset, and every fail-closed path (`AGENTS.md` §7).
+//! cross-page, offset, and every fail-closed path.
 
 use crate::frame::{PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
@@ -50,7 +50,7 @@ use crate::vmm::{MapFlags, Page, UserAddressSpace, VirtAddr};
 
 /// Why a user-memory copy refused to proceed.
 ///
-/// Each variant names one fail-closed reason (`AGENTS.md` §5.4). The
+/// Each variant names one fail-closed reason. The
 /// copy stops at the first failure having moved no observable bytes into
 /// the caller's destination on the [`copy_in`] path; on the
 /// [`copy_out`] path it may have written the pages it had already
@@ -67,12 +67,12 @@ pub enum UaccessError {
     /// A page in the range has no mapping in the address space.
     NotMapped,
     /// A page in the range is mapped but is not user-accessible — the
-    /// classic kernel-pointer-confusion vector (`AGENTS.md` §5).
+    /// classic kernel-pointer-confusion vector.
     NotUser,
     /// `copy_in` was asked to read a user page that is not readable.
     NotReadable,
     /// `copy_out` was asked to write a user page that is not writable
-    /// (e.g. read-only or executable — the §19.2 W^X guard).
+    /// (e.g. read-only or executable — the W^X guard).
     NotWritable,
     /// The backing frame is outside the kernel's direct physical map, so
     /// the kernel cannot reach its bytes.
@@ -127,7 +127,7 @@ pub fn copy_in(
 ///
 /// Every page the user range touches must be mapped
 /// [`USER`](MapFlags::USER) and [`WRITE`](MapFlags::WRITE)able; a
-/// read-only or executable page is refused (`AGENTS.md` §19.2 W^X).
+/// read-only or executable page is refused (W^X).
 ///
 /// # Errors
 ///
@@ -169,8 +169,7 @@ pub fn copy_out(
 /// [`MapFlags::USER`]; `missing_perm` is the error returned when a page
 /// is user-accessible but lacks it. The closure performs the actual
 /// byte move; `walk` owns every bounds and permission check so the two
-/// public entry points share exactly one validated traversal
-/// (`AGENTS.md` §2.2).
+/// public entry points share exactly one validated traversal.
 fn walk<F>(
     space: &dyn UserAddressSpace,
     physmap: &dyn PhysMap,
@@ -203,7 +202,7 @@ where
         let page_start = addr & !page_mask;
         // `page_start` is page-aligned by construction, so `Page::from_addr`
         // cannot report `Misaligned`; treat any error as "no mapping" to
-        // stay total and fail-closed (`AGENTS.md` §2.9).
+        // stay total and fail-closed.
         let page =
             Page::from_addr(VirtAddr::new(page_start)).map_err(|_| UaccessError::NotMapped)?;
         let (frame, flags) = space.translate(page).ok_or(UaccessError::NotMapped)?;

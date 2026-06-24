@@ -4,17 +4,17 @@
 //! declares its own one-liner that forwards to
 //! [`handle_panic_via_serial`]. The bridge emits a single best-effort
 //! record through the SBI console and parks the hart forever
-//! (`AGENTS.md` §2 — fail closed, never silently reset; §2.9 — no
+//! (fail closed, never silently reset; — no
 //! panic recovery in production paths).
 //!
 //! Unlike the x86_64 bridge, this does not route through
 //! `kernel_core::handle_panic`: the boot-to-`BootCompleted` slice has
 //! no post-init arch handle to publish for a richer panic context, and
 //! adding the `AtomicPtr<RiscvArch>` dance now would be unused
-//! machinery (`AGENTS.md` §2.3 — no bloat). A panic before
+//! machinery (no bloat). A panic before
 //! `BootCompleted` therefore parks the hart, the QEMU integration test
 //! times out, and the harness reports `Outcome::Timeout` — the
-//! documented fail-loud behaviour (`AGENTS.md` §7).
+//! documented fail-loud behaviour.
 
 use core::fmt::Write as _;
 use core::panic::PanicInfo;

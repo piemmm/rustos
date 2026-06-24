@@ -1,6 +1,6 @@
-//! `cargo xtask cfg-check` implementation (`AGENTS.md` §17.2 / §17.5).
+//! `cargo xtask cfg-check` implementation.
 //!
-//! §17.2 forbids target-conditional compilation —
+//! the charter forbids target-conditional compilation —
 //! `#[cfg(target_arch = "…")]`, `#[cfg(target_pointer_width = …)]`, and
 //! equivalents — everywhere except the architecture ports
 //! (`kernel/arch/<target>/`) and the build glue (`.cargo/`,
@@ -19,11 +19,11 @@
 use std::path::Path;
 
 /// Directory prefixes (workspace-relative, `/`-separated) where
-/// target-conditional compilation is permitted by §17.2.
+/// target-conditional compilation is permitted by.
 const ALLOWED: &[&str] = &["kernel/arch/", ".cargo/", "tools/mkimage/", "tools/xtask/"];
 
-/// Directory prefixes that violate §17.2 *today* and are tolerated until
-/// the §17 burn-down lands (`PLAN.md`). This list is append-never: it may
+/// Directory prefixes that violate *today* and are tolerated until
+/// the burn-down lands (`PLAN.md`). This list is append-never: it may
 /// only shrink. Each entry is a tracked defect, not a sanctioned pattern.
 ///
 /// Empty: every directory that named the target instruction set inline has
@@ -32,7 +32,7 @@ const ALLOWED: &[&str] = &["kernel/arch/", ".cargo/", "tools/mkimage/", "tools/x
 /// (`kernel/rustos-kernel/build.rs`) instead of `cfg(target_arch = …)`.
 const GRANDFATHERED: &[&str] = &[];
 
-/// The cfg predicates §17.2 forbids outside the allow-list.
+/// The cfg predicates the charter forbids outside the allow-list.
 const FORBIDDEN_KEYS: &[&str] = &["target_arch", "target_pointer_width"];
 
 /// A single offending occurrence: a workspace-relative path and the
@@ -44,7 +44,7 @@ pub struct Violation {
     pub text: String,
 }
 
-/// Scan the workspace rooted at `root` and return every §17.2 violation
+/// Scan the workspace rooted at `root` and return every violation
 /// outside the allow-list and grandfather list.
 pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();

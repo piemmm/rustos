@@ -248,8 +248,7 @@ where
 
     // 4. Walk PCI, map the four virtio register windows, route MSI-X.
     //    The x86_64 architecture port supplies the `PortIo` backend the
-    //    bus driver drives through the `rustos_abi::PortIo` seam
-    //    (`AGENTS.md` §17.2 / §17.4).
+    //    bus driver drives through the `rustos_abi::PortIo` seam.
     let bus = mechanism_one(x86_port_io());
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),

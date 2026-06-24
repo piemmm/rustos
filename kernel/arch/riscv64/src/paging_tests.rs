@@ -392,8 +392,7 @@ fn prepare_guard_arena_is_idempotent_and_fails_closed() {
     );
 
     // Zero length, a misaligned base, an arena over unmapped memory, and a
-    // length that wraps the address space are each rejected (`AGENTS.md`
-    // §2.9).
+    // length that wraps the address space are each rejected.
     assert_eq!(
         space.prepare_guard_arena(base, 0),
         Err(MapError::Misaligned)

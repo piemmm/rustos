@@ -24,7 +24,7 @@
 //! * Otherwise (pre-init panic — e.g. from inside `boot()` itself, or
 //!   from the global allocator on heap exhaustion) it logs a single
 //!   `"panic before init"` record to COM1 and parks the CPU via
-//!   [`rustos_arch_x86_64::kernel_arch::halt`] — *AGENTS.md* §5.4.5
+//!   [`rustos_arch_x86_64::kernel_arch::halt`]
 //!   (fail closed, never silently reset).
 //!
 //! The handler is **identical** in production and in the integration

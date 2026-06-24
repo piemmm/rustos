@@ -5,7 +5,7 @@
 //! a *victim* address space in which the address resolves to a known
 //! frame, and an *attacker* address space in which it does not. The CPU
 //! must fault the attacker on access. That is the architectural
-//! guarantee `AGENTS.md` §4 ("Memory isolation is enforced by hardware")
+//! guarantee ("Memory isolation is enforced by hardware")
 //! requires — and the test verifies — *at the page-table layer*, before
 //! any of the orchestration in `kernel/mem`'s `AddressSpace` is added.
 //!
@@ -28,8 +28,7 @@
 //! on the bare-metal target; like [`AddressSpace::activate`] it is proven
 //! by the `memory_isolation` QEMU vertical, not a host conformance test
 //! (the host build of those methods is `unreachable!`). The bit math is
-//! a strict subset so promotion does not require interface creep
-//! (`AGENTS.md` §2.4).
+//! a strict subset so promotion does not require interface creep.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -76,7 +75,7 @@ pub mod flags {
     /// Honoured only while `IA32_EFER.NXE` is set; with NXE clear the bit
     /// is reserved and would fault the walk, so callers that set it must
     /// have enabled NXE first. Used to mark writable user data and
-    /// read-only user data non-executable (W^X, `AGENTS.md` §19.2).
+    /// read-only user data non-executable (W^X).
     pub const NO_EXECUTE: u64 = 1 << 63;
 }
 
@@ -126,7 +125,7 @@ impl PageTablePool {
         // each cell is zero-initialised by `Table::new`. The `const`
         // initializer is consumed at array-literal expansion time and
         // never re-named, so the `declare_interior_mutable_const` lint
-        // is suppressed with rationale per AGENTS.md §15.10. The
+        // is suppressed with rationale. The
         // array itself is `POOL_SIZE * sizeof::<Table>() = 64 KiB`
         // and is materialised straight into the returned `Self`,
         // which lives in `.bss` via `static` storage at every call
@@ -150,7 +149,7 @@ impl PageTablePool {
     /// Allocate a fresh, zero-initialised table page.
     ///
     /// Returns `None` when the pool is exhausted — callers must handle it
-    /// as a closed-fail (`AGENTS.md` §4: deterministic OOM, never panic).
+    /// as a closed-fail (: deterministic OOM, never panic).
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         let idx = self.used.fetch_add(1, Ordering::SeqCst);
         if idx >= POOL_SIZE {
@@ -173,8 +172,7 @@ impl PageTableFrames for PageTablePool {
     fn alloc_table(&self) -> Option<TableFrame> {
         let entries = self.alloc()?;
         // The static pool is a higher-half kernel image; `phys_of`
-        // recovers the physical address the MMU needs (`AGENTS.md`
-        // §17.2 / `plans/WIRING.md` W5b-3 — the bootstrap frame source).
+        // recovers the physical address the MMU needs (`plans/WIRING.md` W5b-3 — the bootstrap frame source).
         let phys = phys_of(entries);
         Some(TableFrame { phys, entries })
     }
@@ -240,7 +238,7 @@ impl AddressSpace {
     }
 
     /// Shared constructor backing [`Self::new_identity_first_32mib`] and
-    /// [`Self::new_identity_first_gib`] (`AGENTS.md` §2.2 — one definition).
+    /// [`Self::new_identity_first_gib`] (one definition).
     ///
     /// Identity-maps the first `pages_2mib` 2 MiB pages (allocating one PD per
     /// 512 pages) and mirrors the boot trampoline's higher-half kernel window.
@@ -373,8 +371,7 @@ impl AddressSpace {
     /// the leaf and every intermediate table entry on the walk get the
     /// [`flags::USER`] bit, so a ring-3 (CPL 3) program may reach the
     /// page. `writable` selects [`flags::WRITABLE`] on the leaf; an
-    /// executable ring-3 page is mapped with `writable = false` (W^X,
-    /// `AGENTS.md` §19.2).
+    /// executable ring-3 page is mapped with `writable = false` (W^X).
     ///
     /// `vaddr` and `paddr` must be 4 KiB-aligned. Returns `None` on
     /// page-table-pool exhaustion or if the walk hits an existing huge
@@ -394,7 +391,7 @@ impl AddressSpace {
     /// and `executable` selects whether the page is instruction-fetchable.
     /// A non-executable leaf gets the [`flags::NO_EXECUTE`] bit, so a
     /// writable data page is mapped non-executable (`RW`) and a read-only
-    /// data page non-executable (`R`) — the `AGENTS.md` §19.2 W^X contract a
+    /// data page non-executable (`R`) — the W^X contract a
     /// process image's `RW`/`R` segments and its stack need (a code segment
     /// is mapped `executable = true`, `writable = false`, i.e. `RX`).
     ///
@@ -414,7 +411,7 @@ impl AddressSpace {
     }
 
     /// Shared 4 KiB mapping walk for [`Self::map_4k`] and
-    /// [`Self::map_4k_user`] (`AGENTS.md` §2.2 — one definition).
+    /// [`Self::map_4k_user`] (one definition).
     ///
     /// When `user` is set, [`flags::USER`] is OR-ed into the leaf and
     /// into each intermediate entry on the walk; a kernel mapping leaves
@@ -520,7 +517,7 @@ impl AddressSpace {
     /// cannot supply a replacement table. On [`MapError::PoolExhausted`]
     /// any level already split stays split (still a faithful identity
     /// re-expression of the same translation), so the address space is
-    /// never left describing a *different* mapping (`AGENTS.md` §2.9).
+    /// never left describing a *different* mapping.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
         const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -612,7 +609,7 @@ impl AddressSpace {
     /// if the page-table pool cannot supply a replacement table. On a
     /// mid-arena failure the blocks already split stay split (a faithful
     /// re-expression of the same translation), so the space never describes
-    /// a *different* mapping (`AGENTS.md` §2.9 — fail closed, never
+    /// a *different* mapping (fail closed, never
     /// corrupt).
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
@@ -675,7 +672,7 @@ impl AddressSpace {
 /// the x86_64 sibling of the aarch64 `activate_user_root`: immediately
 /// before the kernel returns into a user task's ring 3, that task's own
 /// PML4 must be installed so its translations — and only its — are in
-/// force, keeping sibling processes hardware-isolated (`AGENTS.md` §4). It
+/// force, keeping sibling processes hardware-isolated. It
 /// takes only the `u64` root, so the per-task hook that calls it captures a
 /// plain word and stays `Send`.
 ///
@@ -884,7 +881,7 @@ impl MmuAddressSpace for AddressSpace {
         // The HAL view of the inherent, QEMU-proven
         // `AddressSpace::split_block` (G1): one body, reached either
         // directly by the arch boot path / verticals or through the HAL
-        // trait here (`AGENTS.md` §2.2). Inherent methods take precedence
+        // trait here. Inherent methods take precedence
         // over a same-named trait method, so this forwards to the inherent
         // body rather than recursing into itself.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -901,7 +898,7 @@ impl MmuAddressSpace for AddressSpace {
     fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
         // The HAL view of the inherent, QEMU-proven
         // `AddressSpace::prepare_guard_arena` (G2): one body, reached either
-        // directly or through the HAL trait here (`AGENTS.md` §2.2). As with
+        // directly or through the HAL trait here. As with
         // `split_block`, inherent-method resolution forwards to the inherent
         // body rather than recursing.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -997,7 +994,7 @@ fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
 /// page-size flag (Intel SDM Vol 3A §4.5), so it is cleared. The address
 /// base is masked to the parent block's natural alignment so a stray PAT
 /// bit on the source leaf never bleeds into a sub-entry's frame address
-/// (`AGENTS.md` §2.2 — one attribute decode, never re-derived).
+/// (one attribute decode, never re-derived).
 ///
 /// Only compiled on the bare-metal target, where the page-table walk runs.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

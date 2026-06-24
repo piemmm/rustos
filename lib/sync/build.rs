@@ -5,7 +5,7 @@
 //! pulls in the `loom` crate (which depends on `std`) and rewires every
 //! atomic in `kernel/sync` to go through the model checker — a change
 //! that is not a stable, additive feature in the Cargo sense. It is
-//! enabled by passing `RUSTFLAGS="--cfg loom"`. See AGENTS.md §7 and
+//! enabled by passing `RUSTFLAGS="--cfg loom"`. See and
 //! `tests/loom.rs`.
 
 fn main() {

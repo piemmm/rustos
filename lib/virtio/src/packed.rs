@@ -11,7 +11,7 @@
 //! This is a deliberate parallel implementation of the virtqueue
 //! contract, not a duplication of [`crate::SplitQueue`]: the two ring
 //! formats are distinct wire protocols a device advertises through the
-//! `VIRTIO_F_RING_PACKED` feature bit (`AGENTS.md` §2.2 carve-out for
+//! `VIRTIO_F_RING_PACKED` feature bit (carve-out for
 //! parallel implementations of the same contract).
 
 use crate::dma::DmaSlab;

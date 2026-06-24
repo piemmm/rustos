@@ -15,8 +15,7 @@
 //! caller-provided region behind the [`DmaRegion`] trait — on metal a
 //! capability-granted [`DmaSlab`], in host tests a plain shared
 //! buffer — so the enumeration state machine is proven host-side
-//! against the register-level mock plus an in-memory ring model
-//! (`AGENTS.md` §2.2). The engine performs every ring read/write
+//! against the register-level mock plus an in-memory ring model. The engine performs every ring read/write
 //! through the seam; the ring state machines themselves hold no
 //! memory ([`ProducerRing`], [`EventRingCursor`]).
 
@@ -64,7 +63,7 @@ pub trait DmaRegion {
 
 /// TRB slots in the command, EP0, and interrupt transfer rings and in
 /// the event segment. Protocol working sets for one device, not
-/// scalable capacities (`AGENTS.md` §24.4): each ring only ever holds
+/// scalable capacities: each ring only ever holds
 /// the single in-flight command or control TD plus the primed
 /// interrupt TRBs below.
 pub const RING_TRBS: usize = 8;
@@ -107,7 +106,7 @@ const DCI_CONTROL: u8 = 1;
 /// port's connect status. A USB 2.0 hub reports `bPwrOn2PwrGood` in 2 ms
 /// units and is commonly ≤ 100 ms (USB 2.0 §11.11); this fixed budget
 /// covers the typical worst case rather than decoding the field. A fixed
-/// protocol settle, not a scalable capacity (`AGENTS.md` §24.4).
+/// protocol settle, not a scalable capacity.
 const HUB_POWER_ON_GOOD_US: u32 = 100_000;
 
 /// Reset-recovery settle, in microseconds, after a downstream-port
@@ -119,7 +118,7 @@ const HUB_RESET_RECOVERY_US: u32 = 50_000;
 /// Where each structure lives inside the caller's [`DmaRegion`].
 ///
 /// All offsets are 64-byte aligned — the strictest alignment any of
-/// the structures requires (§6.1).
+/// the structures requires.
 #[derive(Copy, Clone, Debug)]
 struct Layout {
     dcbaa: usize,
@@ -145,7 +144,7 @@ struct Layout {
     /// `DCBAA[0]` points at. `0` when the controller needs no scratchpad.
     scratchpad_array: usize,
     /// Offset of the first scratchpad buffer page. Each buffer is one
-    /// controller page and page-aligned (§4.20). `0` when none.
+    /// controller page and page-aligned. `0` when none.
     scratchpad_pages: usize,
     /// Number of scratchpad buffers reserved (`HCSPARAMS2` Max Scratchpad
     /// Buffers; the VL805 needs 31).
@@ -172,7 +171,7 @@ impl DmaRegion for DmaSlab {
         // Invalidate the CPU's view of this range first, so a non-coherent
         // DMA master's writes (e.g. an event TRB the controller posted)
         // are read from memory rather than a stale cache line. A no-op on
-        // a coherent interconnect / the mock host (`AGENTS.md` §4).
+        // a coherent interconnect / the mock host.
         DmaSlab::sync_range(self, offset, buf.len());
         let bytes = self.as_bytes();
         if end > bytes.len() {
@@ -194,7 +193,7 @@ impl DmaRegion for DmaSlab {
         // Clean this range to memory, so a non-coherent DMA master reads
         // the freshly published bytes (e.g. a command TRB) once the
         // doorbell is rung rather than stale memory. A no-op on a coherent
-        // interconnect / the mock host (`AGENTS.md` §4).
+        // interconnect / the mock host.
         DmaSlab::sync_range(self, offset, bytes.len());
         Ok(())
     }
@@ -208,7 +207,7 @@ impl Layout {
     /// # Errors
     ///
     /// * [`DriverError::OutOfRange`] if `phys` is zero or not 64-byte
-    ///   aligned (§6.1).
+    ///   aligned.
     /// * [`DriverError::LengthOutOfRange`] if the region cannot hold
     ///   every structure.
     fn new(
@@ -226,7 +225,7 @@ impl Layout {
         // A controller that needs scratchpad must report a page size, and
         // the region base must be page-aligned so each buffer lands on a
         // page boundary in the device address space (xHCI §4.20 / §6.6).
-        // Fail closed otherwise (`AGENTS.md` §5.4).
+        // Fail closed otherwise.
         if scratchpad_count > 0 && (page_size == 0 || phys % page_size as u64 != 0) {
             return Err(DriverError::OutOfRange);
         }
@@ -296,7 +295,7 @@ impl Layout {
 }
 
 /// Default-control-endpoint max packet size for a protocol speed ID
-/// (§4.3 / USB2 §5.5.3, USB3 §9.6.6).
+/// (USB2 §5.5.3, USB3 §9.6.6).
 const fn ep0_max_packet(speed: u8) -> Result<u32, DriverError> {
     match speed {
         // Low speed.
@@ -435,8 +434,7 @@ impl DeviceDescriptor {
     ///
     /// * [`DriverError::BadMagic`] if `bLength` or `bDescriptorType`
     ///   does not describe a device descriptor, or the device reports
-    ///   zero configurations — a forged or corrupt reply (`AGENTS.md`
-    ///   §5.4).
+    ///   zero configurations — a forged or corrupt reply.
     pub fn decode(bytes: &[u8; Self::LEN]) -> Result<Self, DriverError> {
         if usize::from(bytes[0]) < Self::LEN || bytes[1] != 0x01 || bytes[17] == 0 {
             return Err(DriverError::BadMagic);
@@ -638,7 +636,7 @@ impl InterfaceInfo {
         let is_hid = class24 >> 16 == INTERFACE_CLASS_HID;
         // A HID interface without an interrupt-IN endpoint is a forged or
         // corrupt reply: there is nothing to poll for reports (USB HID
-        // 1.11 §4.4, `AGENTS.md` §2.9). A non-HID interface (e.g. a hub)
+        // 1.11 §4.4). A non-HID interface (e.g. a hub)
         // carries no endpoint this engine services.
         let (int_dci, int_max_packet, int_b_interval) = match int_endpoint {
             Some(endpoint) => endpoint,
@@ -724,7 +722,7 @@ struct SlotCtxBase {
     /// The 1-based root-hub port the device is reached through (the hub's
     /// own root port for a downstream device).
     root_port: u8,
-    /// Route String (§8.9): the chain of downstream hub ports from the
+    /// Route String: the chain of downstream hub ports from the
     /// root to the device, four bits per tier. `0` for a root-port
     /// device.
     route_string: u32,
@@ -856,8 +854,7 @@ pub enum EnumStage {
 }
 
 impl EnumStage {
-    /// Raw discriminant, for an allocation-free diagnostic log
-    /// (`AGENTS.md` §15.7).
+    /// Raw discriminant, for an allocation-free diagnostic log.
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -953,7 +950,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// `budget` bounds every wait this engine performs (register
     /// polls and event-ring polls), failing closed on a stuck
-    /// controller (`AGENTS.md` §2.1).
+    /// controller.
     ///
     /// # Errors
     ///
@@ -984,7 +981,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         }
 
         // The single event ring segment table entry: segment base and
-        // size in TRBs (§6.5).
+        // size in TRBs.
         let event_phys = dma.phys() + layout.event_segment as u64;
         let segment_trbs = u32::try_from(RING_TRBS).map_err(|_| DriverError::LengthOutOfRange)?;
         let mut erst = [0u8; 16];
@@ -1079,8 +1076,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         // barrier, so the first snapshot's body bytes may predate the cycle
         // bit (a torn read pairing a fresh cycle with a stale TRB pointer —
         // the metal `REJECT_ADDRESS_MISMATCH` this fixes). Order the body read
-        // after the cycle observation, then re-read and consume (`AGENTS.md`
-        // §2.16; see `rustos_dma_barrier`).
+        // after the cycle observation, then re-read and consume (see `rustos_dma_barrier`).
         rustos_dma_barrier::dma_rmb();
         let trbs = self.read_event_segment()?;
         let event = self.event_cursor.pop(&trbs)?;
@@ -1120,12 +1116,11 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// A completion for a TRB never issued, an undecodable completion
     /// code, or an unexpected event type is a controller fault,
-    /// surfaced rather than absorbed (`AGENTS.md` §2.9). Every reject
+    /// surfaced rather than absorbed. Every reject
     /// path records *why* it failed in [`Self::last_reject`] and the
     /// observed event's raw TRB-type in [`Self::last_event_type`], so a
     /// metal capture can tell an unexpected asynchronous event from a
-    /// genuine timeout — the `completion_hex` alone cannot (`AGENTS.md`
-    /// §15.7).
+    /// genuine timeout — the `completion_hex` alone cannot.
     fn await_event_for(&mut self, addresses: &[u64]) -> Result<Trb, DriverError> {
         for _ in 0..self.budget {
             let Some(event) = self.poll_event()? else {
@@ -1145,7 +1140,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
                     // `last_completion_code()` reading `0` ("no event")
                     // and conflating a genuine timeout with a real-but-
                     // rejected completion. Capturing it here keeps the
-                    // diagnostic truthful (`AGENTS.md` §15.7).
+                    // diagnostic truthful.
                     self.last_completion = event.completion_code_raw();
                     if !addresses.contains(&event.parameter) {
                         self.last_reject = REJECT_ADDRESS_MISMATCH;
@@ -1411,7 +1406,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         Ok(())
     }
 
-    /// Bring the device on root-hub `port` to the configured state (§4.3):
+    /// Bring the device on root-hub `port` to the configured state:
     /// port reset (when not yet enabled), Enable Slot, Address Device,
     /// `GET_DESCRIPTOR(device)`/`(configuration)`, and `SET_CONFIGURATION`.
     /// A **HID** interface additionally gets its interrupt-IN endpoint
@@ -1470,7 +1465,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// Shared by the root-hub ([`Self::enumerate_hid`]) and downstream
     /// ([`Self::enumerate_downstream_hid`]) paths so the post-Address
-    /// sequence is written once (`AGENTS.md` §2.2); they differ only in the
+    /// sequence is written once; they differ only in the
     /// topology carried in `base`. The interrupt-IN endpoint is armed only
     /// for a HID interface (see [`Self::enumerate_hid`]).
     ///
@@ -1495,7 +1490,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         let descriptor = DeviceDescriptor::decode(&bytes)?;
 
         // Read the configuration descriptor to discover the interface's
-        // class and number rather than assuming (§18.5). The whole buffer is
+        // class and number rather than assuming. The whole buffer is
         // requested; the device short-packets at the real length.
         let config_buf_len =
             u32::try_from(CTRL_DATA_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
@@ -1616,20 +1611,20 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// ([`Self::enumerate_downstream_hid`]). On success [`Self::slot`] is
     /// the keyboard's slot and [`ReportSource::next_report`] drains its
     /// reports; the engine holds no logging dependency, so a driver wraps
-    /// this with its own diagnostics (`AGENTS.md` §17.4 / §2.2).
+    /// this with its own diagnostics.
     ///
     /// `delay` supplies the hardware-dictated settle windows (hub
     /// power-on-good and reset-recovery); the caller owns the clock.
     /// Only one tier of hub is descended — the boot-keyboard topology
     /// the Pi 4 presents — rather than a recursive bus walk; a keyboard
     /// nested two hubs deep is left unreached fail-closed rather than
-    /// guessed at (`AGENTS.md` §2.9).
+    /// guessed at.
     ///
     /// # Errors
     ///
     /// * [`DriverError::NotFound`] if no device connects on the root hub,
     ///   or the root device is a hub with no connected downstream port
-    ///   (fail closed — never a guessed port, `AGENTS.md` §5.4 / §2.9).
+    ///   (fail closed — never a guessed port).
     /// * [`DriverError::DeviceFault`] if a reset downstream port does not
     ///   report enabled (it never established a speed/TT, so addressing it
     ///   would be a guess).
@@ -1794,7 +1789,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// * [`DriverError::DeviceFault`] if the control transfer faults or
     ///   the device returns fewer than the two `wPortStatus` bytes
-    ///   (fail closed, `AGENTS.md` §5.4 / §2.9).
+    ///   (fail closed).
     pub fn hub_port_status(&mut self, port: u8) -> Result<u16, DriverError> {
         let transferred = self.control(setup_get_port_status(port), 4)?;
         if transferred < 2 {
@@ -1851,7 +1846,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// This is the second xHCI slot: the hub stays addressed on its slot
     /// (its output context and EP0 ring untouched), and the downstream
     /// device gets a fresh slot whose context carries the **Route
-    /// String** (the hub's downstream port, §8.9) and — for a full/low-
+    /// String** (the hub's downstream port) and — for a full/low-
     /// speed device behind the high-speed hub — the **TT** Hub Slot ID
     /// and Port Number (§6.2.2), so the controller splits its
     /// transactions through the hub's transaction translator. The device
@@ -1871,7 +1866,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     ///
     /// * [`DriverError::DeviceFault`] if no hub is addressed on the
     ///   active slot, the controller assigns no fresh slot, or any
-    ///   command/transfer faults (fail closed, `AGENTS.md` §5.4).
+    ///   command/transfer faults (fail closed).
     /// * [`DriverError::BadMagic`] if a descriptor is forged.
     pub fn enumerate_downstream_hid(
         &mut self,
@@ -1905,7 +1900,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.slot = slot;
 
         // One tier below the root hub: the device sits at the hub's
-        // downstream port number in the lowest Route String nibble (§8.9).
+        // downstream port number in the lowest Route String nibble.
         let route_string = u32::from(down_port) & 0xF;
         // A full/low-speed device behind this high-speed hub routes
         // through the hub's transaction translator; a high-speed device
@@ -1932,7 +1927,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// which xHCI operation a [`DriverError::DeviceFault`] came from —
     /// [`EnumStage::Scan`] means no connected port was ever entered (an
     /// empty hub / [`DriverError::NotFound`]); any later variant names
-    /// the faulting step (`AGENTS.md` §15.7).
+    /// the faulting step.
     #[must_use]
     pub const fn enum_stage(&self) -> EnumStage {
         self.stage
@@ -1942,7 +1937,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// command/control transfer observed (`0` = none seen since that
     /// transfer began — a timeout), pairing with [`Self::enum_stage`]
     /// to distinguish a stuck controller from a device that answered
-    /// with an error code (`AGENTS.md` §15.7).
+    /// with an error code.
     #[must_use]
     pub const fn last_completion_code(&self) -> u8 {
         self.last_completion
@@ -1954,7 +1949,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// Paired with [`Self::last_reject_reason`] this names *what* an
     /// unexpected-event reject saw — e.g. an asynchronous controller
     /// event interleaved with the awaited completion — which the
-    /// completion code alone cannot (`AGENTS.md` §15.7).
+    /// completion code alone cannot.
     #[must_use]
     pub const fn last_event_type(&self) -> u8 {
         self.last_event_type
@@ -1968,8 +1963,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// `4` the poll budget elapsed with no event (a genuine timeout).
     ///
     /// This distinguishes a fast reject (a real but unexpected event)
-    /// from a true timeout, which `completion_hex=0` alone conflates
-    /// (`AGENTS.md` §15.7).
+    /// from a true timeout, which `completion_hex=0` alone conflates.
     #[must_use]
     pub const fn last_reject_reason(&self) -> u8 {
         self.last_reject
@@ -1990,7 +1984,7 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// Raw `PORTSC` of root-hub `port` (1-based) for a bring-up diagnostic,
     /// or `None` if the port is out of range or the read faults. A capture
     /// of the connect/power/enable/speed bits when enumeration stalls on a
-    /// root port (`AGENTS.md` §15.7).
+    /// root port.
     pub fn port_status_raw(&mut self, port: u8) -> Option<u32> {
         self.xhci.port_status(port).ok().map(crate::PortStatus::raw)
     }
@@ -2002,23 +1996,21 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     /// `vid:pid` and the 24-bit class of the interface this driver
     /// brought up — both read from the device during
     /// [`Self::enumerate_hid`], never assumed — so `devmgr` resolves an
-    /// HID driver's signed bind table against it (`AGENTS.md` §18.3 /
-    /// §18.5). Its [`HwDeviceClass`] is [`HwDeviceClass::Input`], the
+    /// HID driver's signed bind table against it. Its [`HwDeviceClass`] is [`HwDeviceClass::Input`], the
     /// HID-class match key mirroring the PCI child node
     /// [`PciBus::describe_function`](rustos_abi::driver::pci::PciBus::describe_function)
-    /// emits for the controller above it (`AGENTS.md` §2.2).
+    /// emits for the controller above it.
     ///
     /// # Errors
     ///
     /// * [`DriverError::NotFound`] if no device has been enumerated yet
     ///   (the identity is captured only on a successful
-    ///   [`Self::enumerate_hid`]) — fail closed, never a fabricated node
-    ///   (`AGENTS.md` §2.9 / §18.5).
+    ///   [`Self::enumerate_hid`]) — fail closed, never a fabricated node.
     /// * [`DriverError::DeviceFault`] if the match key cannot be pushed.
     ///
     /// # Capabilities
     ///
-    /// None — describing a node mints no resources (`AGENTS.md` §18.1:
+    /// None — describing a node mints no resources (:
     /// resources are minted at the load gate).
     pub fn describe_device(&self, parent_id: u32, node_id: u32) -> Result<HwNode, DriverError> {
         let identity = self.identity.ok_or(DriverError::NotFound)?;
@@ -2067,8 +2059,7 @@ impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
                 _ => return Err(DriverError::DeviceFault),
             }
             // Map the completed TRB back to its slot's report buffer,
-            // validating every step of the controller's claim
-            // (`AGENTS.md` §5.4).
+            // validating every step of the controller's claim.
             let ring_base = self.phys_of(self.layout.int_ring);
             let offset = event
                 .parameter

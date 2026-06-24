@@ -1,6 +1,5 @@
 //! Host unit tests for the guard-arena kthread-stack allocator
-//! ([`super`]). They exercise the grow *and* shrink paths (`AGENTS.md`
-//! §24.1) over an in-memory [`BlockStore`] so the block-list arithmetic,
+//! ([`super`]). They exercise the grow *and* shrink paths over an in-memory [`BlockStore`] so the block-list arithmetic,
 //! per-block live-count accounting, and the one-free-block grace run on the
 //! CI host without real RAM; the production identity-mapped header access,
 //! the `Drop` reclaim seam, and the `free_order` return-to-allocator step
@@ -461,7 +460,7 @@ fn boundary_oscillation_yields_zero_releases() {
 
     // Repeatedly allocate-from / free-back the single chained block across
     // its boundary: the one-free-block grace keeps it resident, so no
-    // release ever fires (no thrash, `AGENTS.md` §2.16).
+    // release ever fires (no thrash).
     for _ in 0..8 {
         let g = arena
             .alloc(&grow, &store)
@@ -517,7 +516,7 @@ fn scrub_block_zeroes_a_real_region() {
 #[test]
 fn frame_arena_shrink_retains_on_wrong_len() {
     // A wrong length is rejected before any dereference, so this is safe to
-    // call with a fabricated base (fail closed, `AGENTS.md` §2.9).
+    // call with a fabricated base (fail closed).
     let map = usable_map(0, 8 * 1024 * 1024);
     let frames = FrameAllocator::new(&map).expect("allocator builds");
     let shrink = FrameArenaShrink::new(&frames);

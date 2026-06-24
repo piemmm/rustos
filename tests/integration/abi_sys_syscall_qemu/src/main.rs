@@ -53,14 +53,14 @@
 //! The test body only compiles under `#[cfg(feature = "test-hooks")]`.
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
-//! (AGENTS.md §1 — no hacks; §5.4.5 — fail closed), mirroring
+//! (no hacks; — fail closed), mirroring
 //! `rustos-test-syscall-dispatch-qemu`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-// AGENTS.md §1 — test affordances must never reach a release binary.
+// — test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate; a release build that
 // re-enables it is a configuration error, so we fail the build outright,
 // exactly as `rustos-test-syscall-dispatch-qemu` does.
@@ -127,7 +127,7 @@ mod kernel {
     /// Set once the round-trip has been driven so a stray duplicate
     /// `BootCompleted` (which the audit catalogue disallows but the
     /// pipeline cannot statically prove) never re-enters the test logic.
-    /// AGENTS.md §5.4.5 — fail closed.
+    /// — fail closed.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     // --- Dispatch callback ---------------------------------------
@@ -217,13 +217,13 @@ mod kernel {
 // The test body only compiles when `feature = "test-hooks"` is on.
 // Disabling it leaves the bin as a no-op so a layout sanity check
 // (`cargo build --no-default-features -p rustos-test-abi-sys-syscall-qemu`)
-// still builds — AGENTS.md §1 (a disabled test must compile cleanly).
+// still builds (a disabled test must compile cleanly).
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
         // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on
-        // x86_64 (`AGENTS.md` §2.9). Looping defends against spurious
+        // x86_64. Looping defends against spurious
         // wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));

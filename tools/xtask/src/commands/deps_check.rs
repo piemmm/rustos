@@ -1,9 +1,9 @@
-//! `cargo xtask deps-check` implementation (`AGENTS.md` §17.4 / §17.5).
+//! `cargo xtask deps-check` implementation.
 //!
-//! §17.5 requires a check that walks the workspace dependency graph and
+//! the charter requires a check that walks the workspace dependency graph and
 //! fails the build when any of these holds:
 //!
-//! 1. the §17.4 layering graph is violated,
+//! 1. the layering graph is violated,
 //! 2. a non-GUI crate transitively depends on `userland/gui/*`, or
 //! 3. a kernel crate outside `kernel/sched/*` / `kernel/core` names a
 //!    concrete scheduler crate.
@@ -11,25 +11,25 @@
 //! The graph is reconstructed from the workspace member manifests rather
 //! than from `cargo metadata` JSON: every in-workspace edge is a `path =`
 //! dependency, so the manifests are the authoritative, dependency-free
-//! source of truth (`AGENTS.md` §2.12 — roll our own; no new external
+//! source of truth (roll our own; no new external
 //! crate just to parse JSON). Only *build-graph* dependencies are
 //! considered — `[dev-dependencies]` are test-only scaffolding and are
-//! excluded, matching the production layering §17.4 describes.
+//! excluded, matching the production layering describes.
 //!
-//! ## Interpretation of §17.4
+//! ## Interpretation of
 //!
-//! §17.4 polices the *cross-stratum* boundaries: `lib` → `kernel` →
+//! polices the *cross-stratum* boundaries: `lib` → `kernel` →
 //! `drivers`/`userland`, the `api`/`impl` split that makes the scheduler
 //! and the architecture pluggable, and the one-way edge that keeps the
 //! desktop optional. Edges *within* the kernel-subsystem stratum (e.g.
 //! `ipc` → `mem`) are the kernel's internal wiring, not a stratum
 //! crossing, and are permitted. The matrix in [`layer_allows`] encodes
-//! exactly the strata of §17.4.
+//! exactly the strata of.
 //!
 //! ## Grandfathered violations
 //!
 //! The [`GRANDFATHERED`] list pins every offending edge that exists
-//! *today*; each is a tracked defect scheduled for the §17 burn-down
+//! *today*; each is a tracked defect scheduled for the burn-down
 //! (`PLAN.md`). The list is append-never: it may only shrink, and a *new*
 //! violating edge is always rejected. It is now empty — the layering is
 //! satisfied (see [`GRANDFATHERED`] for how the last edges were retired).
@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The stratum a crate belongs to, derived from its workspace-relative
-/// directory. The strata mirror the rows of the §17.4 graph.
+/// directory. The strata mirror the rows of the graph.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Layer {
     Lib,
@@ -85,8 +85,8 @@ pub struct Crate {
     pub deps: Vec<String>,
 }
 
-/// Edges that violate §17.4 / the concrete-scheduler rule *today*, pinned
-/// as `(from, to)` crate-name pairs. Each is a tracked defect for the §17
+/// Edges that violate / the concrete-scheduler rule *today*, pinned
+/// as `(from, to)` crate-name pairs. Each is a tracked defect for the
 /// burn-down (`PLAN.md`); this list is append-never and may only shrink —
 /// a *new* violating edge is always rejected.
 ///
@@ -113,7 +113,7 @@ pub fn classify(rel_dir: &str) -> Layer {
         // driver into a bootable image, so it legitimately names crates
         // across strata — exactly like the downstream
         // `tests/integration/riscv64_boot` consumer. It is therefore
-        // outside the product layering (§17.4).
+        // outside the product layering.
         Layer::Tooling
     } else if rel_dir == "kernel/arch/api" {
         Layer::ArchApi
@@ -136,7 +136,7 @@ pub fn classify(rel_dir: &str) -> Layer {
     }
 }
 
-/// The §17.4 layering matrix: may a crate in `from` depend on a crate in
+/// The layering matrix: may a crate in `from` depend on a crate in
 /// `to`? `Tooling` (tools/tests) is exempt and never a source here.
 pub fn layer_allows(from: Layer, to: Layer) -> bool {
     use Layer::{
@@ -165,7 +165,7 @@ pub fn layer_allows(from: Layer, to: Layer) -> bool {
 }
 
 /// True when a kernel crate at `rel_dir` is permitted to name a concrete
-/// scheduler crate: only `kernel/core` and `kernel/sched/*` (§17.1).
+/// scheduler crate: only `kernel/core` and `kernel/sched/*`.
 fn may_name_concrete_scheduler(rel_dir: &str) -> bool {
     rel_dir == "kernel/core" || rel_dir == "kernel/sched" || rel_dir.starts_with("kernel/sched/")
 }
@@ -214,7 +214,7 @@ pub fn build_graph(root: &Path) -> Result<Vec<Crate>, String> {
     Ok(crates)
 }
 
-/// Run all §17 dependency checks against the workspace at `root`.
+/// Run all dependency checks against the workspace at `root`.
 pub fn run(root: &Path) -> Result<(), String> {
     use std::fmt::Write as _;
     let crates = build_graph(root)?;
@@ -242,7 +242,7 @@ pub fn analyze(crates: &[Crate]) -> Vec<String> {
             if is_grandfathered(&c.name, dep) {
                 continue;
             }
-            // Concrete-scheduler-naming rule (§17.1 / §17.5).
+            // Concrete-scheduler-naming rule.
             if target.layer == Layer::SchedImpl
                 && c.rel_dir.starts_with("kernel/")
                 && !may_name_concrete_scheduler(&c.rel_dir)
@@ -266,7 +266,7 @@ pub fn analyze(crates: &[Crate]) -> Vec<String> {
         }
     }
 
-    // Transitive non-GUI → GUI rule (§17.3 / §17.5). No exceptions.
+    // Transitive non-GUI → GUI rule. No exceptions.
     for c in crates {
         if matches!(c.layer, Layer::UserGui | Layer::Tooling) {
             continue;
@@ -480,7 +480,7 @@ mod tests {
         // Burn-down regression: `userland/system/drvhost` reaches the
         // virtio bus crate only from its `[dev-dependencies]` (the
         // integration-test fixtures), never from production code, so the
-        // §17.4 `Userland -> Driver` edge does not exist in the build
+        // `Userland -> Driver` edge does not exist in the build
         // graph and is no longer grandfathered. A future *production*
         // dependency must be rejected, not silently tolerated.
         let root = workspace_root();
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn kernel_virtio_has_no_edge_to_drvhost() {
-        // Burn-down regression (§17.4): the `VirtioHostFactory` seam was
+        // Burn-down regression: the `VirtioHostFactory` seam was
         // hoisted into `lib/virtio`, so the kernel-side factory crate
         // (`kernel/virtio`) and the userland driver host (`drvhost`) both
         // depend on `lib/*` instead of on each other. The former
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn kernel_virtio_has_no_edge_to_bus_driver() {
-        // Burn-down regression (§17.4): the ring-0 virtio provisioning
+        // Burn-down regression: the ring-0 virtio provisioning
         // walks no longer name the concrete `drivers/bus/virtio`
         // transports. `PciTransportWindows` moved into `lib/virtio` and
         // the walks are generic over a caller-supplied transport builder,
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn riscv64_port_is_pure_arch_hal() {
-        // §17 burn-down regression (§17.2 / §17.4): the riscv64 port was
+        // burn-down regression: the riscv64 port was
         // migrated onto the Arch HAL exactly like x86_64. Its boot
         // pipeline (`RiscvBinArch` `KernelArch` wrapper, `BootInfo`
         // assembly, boot-state slots) and the `IrqController` bridge over
@@ -601,12 +601,12 @@ mod tests {
 
     #[test]
     fn virtio_driver_layer_is_on_lib_only() {
-        // §17 burn-down regression (scope C): the bus-agnostic virtio
+        // burn-down regression (scope C): the bus-agnostic virtio
         // protocol now lives in `lib/virtio`, so the virtio bus driver
         // and the virtio device drivers depend on `lib/*` only — the bus
         // crate no longer links `kernel/{mem,sec,irq}` (the kernel host
         // moved to `kernel/virtio`), and the device drivers no longer
-        // depend on the bus driver crate (`AGENTS.md` §17.4). These edges
+        // depend on the bus driver crate. These edges
         // must stay removed, not silently re-grandfathered.
         let root = workspace_root();
         let crates = build_graph(&root).expect("graph");
@@ -644,7 +644,7 @@ mod tests {
             ("rustos-drv-network-virtio-net", "rustos-virtio"),
             // The user-space virtio-input keyboard driver `rxe` builds its
             // bus-agnostic MMIO transport from `lib/virtio`, never the bus
-            // driver crate (`AGENTS.md` §17.4 — the `lib/usb` precedent).
+            // driver crate (the `lib/usb` precedent).
             ("rustos-drv-input-virtio-kbd", "rustos-virtio"),
         ] {
             let deps = dep_of(driver);
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn rustos_kernel_binary_is_tooling_integration_point() {
-        // §17 burn-down regression (§17.4): the x86_64 production binary
+        // burn-down regression: the x86_64 production binary
         // `rustos-kernel` is the image-assembly seam, not a kernel
         // subsystem. It is classified as `Tooling` (outside the product
         // layering) so it may wire the arch port, `kernel/core`, the

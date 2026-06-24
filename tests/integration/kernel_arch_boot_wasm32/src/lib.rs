@@ -27,8 +27,7 @@
 //! The browser harness (`web/harness.mjs`, launched by `cargo xtask test
 //! --wasm`) scrapes those console markers and reports PASS once it has
 //! seen `BOOT_OK`, `ISOLATION_OK`, `WORKER_OK`, `IPI_RECV`, and at least
-//! twenty `TICK`s; any panic traps the instance and fails the run loudly
-//! (`AGENTS.md` §7).
+//! twenty `TICK`s; any panic traps the instance and fails the run loudly.
 //!
 //! On a host build (`itest_wasm32` off) this compiles to an inert empty
 //! `cdylib`, exactly as the bare-metal verticals are inert host stubs.
@@ -96,7 +95,7 @@ mod kernel {
     static IPI_DROVE_SCHED: AtomicBool = AtomicBool::new(false);
 
     /// Forward this module's panics to the shared console bridge, which
-    /// emits one record and traps the instance (`AGENTS.md` §2.9).
+    /// emits one record and traps the instance.
     #[panic_handler]
     fn panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_console(info)
@@ -223,7 +222,7 @@ mod kernel {
         // the wasm32 vertical exercises the same neutral bring-up surface
         // the bare-metal SMP verticals use. The MessageChannel buffers
         // the post until the worker is live, so a single send suffices
-        // (no retry-until-it-works, `AGENTS.md` §2.1).
+        // (no retry-until-it-works).
         //
         // SAFETY: a wasm32 secondary is a fresh module instance entered
         // through the fixed `rustos_arch_wasm32_main` export (no settable
@@ -261,7 +260,7 @@ mod kernel {
     /// Prove the WASM-linear-memory isolation model denies a cross-context
     /// access against *this instance's real linear memory*. Panics
     /// (trapping the instance) if isolation fails, so a regression cannot
-    /// silently report success (`AGENTS.md` §5.4.5).
+    /// silently report success.
     fn run_isolation_check() {
         // The victim region is this worker's actual linear memory.
         let own = live_memory_region();

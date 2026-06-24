@@ -59,7 +59,7 @@ const USER_STACK_PAGES: u64 = 288;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands the two spawn builds (image segments + the
@@ -124,8 +124,8 @@ static ALLOCATOR: FreeListAllocator =
 /// Per-space page-table pools: one for the parent and one for the spawned
 /// child. Each backs an Sv39 hierarchy whose root [`activate_user_root`]
 /// reinstalls (via `satp`) before every switch into its task, so the two tasks
-/// stay hardware-isolated (`AGENTS.md` §4). A `.bss` reserve, monotonic and
-/// never freed (`AGENTS.md` §2.1).
+/// stay hardware-isolated. A `.bss` reserve, monotonic and
+/// never freed.
 static PARENT_PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 static CHILD_PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 
@@ -134,8 +134,7 @@ static CHILD_PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 /// mapped (its physical address equals its kernel virtual address), so the
 /// builders reach it through [`DirectPhysMap::identity`]. A single monotonic
 /// cursor ([`FRAME_CURSOR`]) hands disjoint frames to both the parent build and
-/// the child build, so the two address spaces never share a data frame
-/// (`AGENTS.md` §4).
+/// the child build, so the two address spaces never share a data frame.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -149,8 +148,7 @@ static FRAME_CURSOR: AtomicUsize = AtomicUsize::new(0);
 /// producer runs from the `extern "C"` dispatch callback (reached during a
 /// `step` of the parent), which cannot capture `kernel_main`'s local `&sched`,
 /// so the leaked-`'static` scheduler is published here for it. Null until
-/// [`kernel_main`] installs it; the producer fails closed on null (`AGENTS.md`
-/// §2.9).
+/// [`kernel_main`] installs it; the producer fails closed on null.
 static SCHEDULER: AtomicPtr<Scheduler<RiscvArch>> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Hand out the next identity-mapped physical frame from [`FRAME_POOL`], or
@@ -188,10 +186,9 @@ fn spawn_session_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn builder requires (`AGENTS.md` §5.4). It does not widen either
-/// program's own authority; it only authorises the *act* of spawning
-/// (`AGENTS.md` §16.5). The child's effective authority is its own (empty)
-/// manifest request, never the parent's (`AGENTS.md` §4 — no ambient
+/// spawn builder requires. It does not widen either
+/// program's own authority; it only authorises the *act* of spawning. The child's effective authority is its own (empty)
+/// manifest request, never the parent's (no ambient
 /// authority).
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
@@ -208,7 +205,7 @@ impl CapabilityQuery for SpawnAuthority {
 /// path — never moving the running parent out from under itself). Builds the
 /// image through the production capability-checked, audited `spawn_image`
 /// caller. Returns `None` on any error so the caller maps it to a fail-closed
-/// outcome (`AGENTS.md` §2.9).
+/// outcome.
 fn build_user_space(
     pool: &'static paging::PageTablePool,
     image_bytes: &'static [u8],
@@ -251,7 +248,7 @@ fn build_user_space(
     // mapped frames from `FRAME_POOL`. When `activate` is false the build
     // reaches the child's tables + frames through the caller's identity window
     // (the pool and frames are in `[0, 4 GiB)`), so the child's space need not
-    // be active to be built (the cross-port producer discipline, §2.2).
+    // be active to be built (the cross-port producer discipline).
     let entry = unsafe {
         spawn_image(
             &SpawnAuthority,
@@ -271,13 +268,13 @@ fn build_user_space(
 
 /// Admit a freshly built U-mode space onto `scheduler` as a resumable user
 /// kthread. Its `pre_resume` hook reactivates *its own* `satp` root before
-/// every switch-in (isolation, §4); its work body `enter_user`s into U-mode.
+/// every switch-in (isolation); its work body `enter_user`s into U-mode.
 /// The kernel-stack top the hook is handed (`_top`) is unused on riscv64:
 /// `sscratch` is per-task hardware state armed by `userentry::enter_user` and
 /// re-armed by the RV1 trap vector from each task's own kernel-stack frame on
 /// every U-return, so a trap from the resumed task always lands on *its* kernel
 /// stack with no dispatcher-side repointing. Returns the new task id (its PID)
-/// or `None` on a scheduler-full admission failure (`AGENTS.md` §2.9).
+/// or `None` on a scheduler-full admission failure.
 fn admit(scheduler: &Scheduler<RiscvArch>, root_phys: u64, entry: UserEntry) -> Option<u64> {
     let user_mode = UserMode::new();
     let pre_resume = move |_top: u64| {
@@ -310,8 +307,7 @@ fn admit(scheduler: &Scheduler<RiscvArch>, root_phys: u64, entry: UserEntry) -> 
 /// PID — or a negative `-errno` following the signed `abi-v1` convention. This
 /// is the riscv64 cross-port equal of `Aarch64ProcessSpawn` / the x86_64
 /// producer; the per-process page-table reserve and the frame pool bound how
-/// many children this proving vertical builds, and exhaustion fails closed
-/// (`AGENTS.md` §2.9 / §4).
+/// many children this proving vertical builds, and exhaustion fails closed.
 fn spawn_session() -> i64 {
     let sched_ptr = SCHEDULER.load(Ordering::Acquire);
     if sched_ptr.is_null() {
@@ -367,7 +363,7 @@ fn spawn_result_bits() -> u64 {
 /// keeps running; a rescheduling syscall (`yield`/`exit`) is suspended back to
 /// the dispatcher through [`reschedule_current`], so the parent and child
 /// timeshare the hart. Any other syscall is unexpected from the fixture
-/// programs and fails the test loudly (`AGENTS.md` §7).
+/// programs and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -407,7 +403,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     note(TEST_START, "riscv64 RV-X3 test: building the parent image");
 
     // Read the timer frequency from the firmware tree. Fail closed (finisher)
-    // if it is omitted rather than guessing a divisor (`AGENTS.md` §5.4).
+    // if it is omitted rather than guessing a divisor.
     // SAFETY: `dtb` is the verbatim `a1` pointer OpenSBI handed the boot hart;
     // `boot.s` forwards it unchanged.
     let Some(timebase) = (unsafe { Fdt::from_ptr(dtb as *const u8) })
@@ -454,7 +450,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // callback) can admit the child onto it. Interrupts stay masked, so
     // dispatch is the cooperative `step` loop below.
     // Single-hart slice: one per-CPU slot, owned by an allocator-free
-    // `static` backing (`AGENTS.md` §24.1).
+    // `static` backing.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -478,7 +474,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // spawn); thereafter both ping-pong with the dispatcher through real
     // U-mode↔kernel context switches on their own kernel stacks (the RV1
     // park-safe path). A switch that never resumed its task would stall the
-    // drain and the harness would time out (fail-loud, `AGENTS.md` §7).
+    // drain and the harness would time out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

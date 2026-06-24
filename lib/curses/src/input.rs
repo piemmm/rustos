@@ -1,6 +1,6 @@
 //! The input decoder: terminal bytes in, typed [`Event`]s out.
 //!
-//! [`Input`] wraps the one shared [`rustos_vt::Parser`] (`AGENTS.md` §2.2) and
+//! [`Input`] wraps the one shared [`rustos_vt::Parser`] and
 //! maps the [`rustos_vt::Op`]s it produces to the [`Event`]s a curses
 //! application reads: printable characters, the arrow / function / editing
 //! keys, mouse reports, and bracketed-paste runs. There is no second
@@ -8,7 +8,7 @@
 //! `lib/vt` already parses (the keys, mouse reports, and paste markers added to
 //! it for this stage).
 //!
-//! Decoding untrusted bytes never panics (`AGENTS.md` §2.9): an unrecognised or
+//! Decoding untrusted bytes never panics: an unrecognised or
 //! partial sequence is consumed and produces no event, and a malformed UTF-8
 //! run is dropped by the parser rather than corrupting state.
 

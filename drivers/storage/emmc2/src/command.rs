@@ -3,7 +3,7 @@
 //! These types describe the SD commands the driver issues and the
 //! response register layout the SDHCI controller exposes. The block
 //! geometry the driver reports is derived here from the card's CSD, never
-//! assumed (`AGENTS.md` §18.5 / §2.16).
+//! assumed.
 
 use rustos_abi::driver::block::BlockGeometry;
 use rustos_abi::DriverError;

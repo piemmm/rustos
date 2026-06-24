@@ -11,11 +11,11 @@
 //! task on each pick. The scan is `O(n)` in the per-CPU ready count,
 //! which is the textbook EEVDF selection rule; a future tree-backed
 //! index can replace it behind this same module boundary without
-//! changing the scheduler (`AGENTS.md` §2.4 — no interface creep).
+//! changing the scheduler (no interface creep).
 //!
 //! Virtual time is fixed-point with [`SCALE`] sub-units per unit of
 //! service so the weighted divisions stay in integer arithmetic
-//! (`AGENTS.md` §2.9 — no floats in kernel paths, deterministic).
+//! (no floats in kernel paths, deterministic).
 
 use alloc::vec::Vec;
 
@@ -63,7 +63,7 @@ struct Inner {
     /// which `virtual_time` advances so the share is proportional.
     total_weight: u64,
     /// Compile-time bound on `ready.len()` — back-pressure, never a
-    /// reallocation past this point (`AGENTS.md` §2.9, bounded queues).
+    /// reallocation past this point (bounded queues).
     capacity: usize,
 }
 
@@ -121,7 +121,7 @@ impl RunQueue {
     /// **other** ready task is waiting — a competitor the running task
     /// must be preempted for. The tickless preemption decision
     /// (`crate::Scheduler::dispatch`) reads this to arm the one-shot timer
-    /// only when a CPU is contended (`AGENTS.md` §17.1).
+    /// only when a CPU is contended.
     pub(crate) fn ready_len(&self) -> usize {
         self.inner.lock().ready.len()
     }
@@ -144,7 +144,7 @@ impl RunQueue {
     /// entry is eligible yet — which the integer virtual clock can
     /// transiently produce — the earliest `eligible` entry is taken and
     /// `V` is advanced to it so the CPU always makes progress when it
-    /// owns runnable work (`AGENTS.md` §2.1 — no spin-waiting for time
+    /// owns runnable work (no spin-waiting for time
     /// to pass).
     pub(crate) fn pick(&self) -> Option<Entry> {
         let mut g = self.inner.lock();
@@ -165,7 +165,7 @@ impl RunQueue {
         } else {
             // Nothing eligible yet: take the earliest-eligible entry and
             // fast-forward V to it so the CPU never idles while holding
-            // runnable work (`AGENTS.md` §2.1 — no spin-waiting for time).
+            // runnable work (no spin-waiting for time).
             let earliest = g
                 .ready
                 .iter()

@@ -1,4 +1,4 @@
-//! In-memory flattened-device-tree builder for tests (`AGENTS.md` §2.2).
+//! In-memory flattened-device-tree builder for tests.
 //!
 //! Exposed behind the `test-fixtures` feature so this crate's own parser
 //! tests **and** the architecture ports' discovery tests drive one DTB
@@ -165,7 +165,7 @@ pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u
         b.prop_str("device_type", "cpu");
         // The fixture writes a single-cell (`#address-cells = 1`) `reg`;
         // `try_from` keeps the cast honest rather than silently truncating
-        // a value that does not fit one cell (`AGENTS.md` §2.1).
+        // a value that does not fit one cell.
         b.prop_u32(
             "reg",
             u32::try_from(*mpidr).expect("fixture MPIDR fits one cell"),

@@ -1,6 +1,5 @@
 //! The kernel-side system console seam the `stream_write` (`abi-v1`
-//! number 11) and `stream_read` (`abi-v1` number 13) syscalls use
-//! (`AGENTS.md` §10 / §16.4).
+//! number 11) and `stream_read` (`abi-v1` number 13) syscalls use.
 //!
 //! [`ConsoleWrite`] is the output half and [`ConsoleRead`] the input
 //! half; an arch port installs its discovered [`ConsoleDevice`] list
@@ -15,7 +14,7 @@
 //! Which device that is — the detected framebuffer when one is present,
 //! else the first discovered UART (`plans/PI.md` P6) — is a boot-time
 //! decision the architecture port makes from the normalised hardware
-//! tree (`AGENTS.md` §18). `kernel/core` does not know how to talk to a
+//! tree. `kernel/core` does not know how to talk to a
 //! PL011, a 16550, or a framebuffer; it only knows it needs *a* byte
 //! sink. [`ConsoleWrite`] is that seam: the boot path installs the
 //! concrete device, and the syscall handler writes the copied-in bytes
@@ -23,7 +22,7 @@
 //!
 //! Until a console is installed the handler holds [`NULL_CONSOLE`],
 //! which fails closed with [`Errno::NotImplemented`] rather than
-//! silently swallowing the bytes (`AGENTS.md` §2.9). A build with no
+//! silently swallowing the bytes. A build with no
 //! console device wired (a headless target with no UART, an early-boot
 //! state before discovery) therefore announces an intentionally inert
 //! interface instead of pretending the write succeeded.
@@ -43,8 +42,7 @@ use crate::kthread::reschedule_current;
 /// Implemented by the architecture-port-installed console device (a
 /// UART or a framebuffer text console). The trait is deliberately
 /// minimal — one method that takes already-copied-in kernel bytes —
-/// so `kernel/core` stays free of any device knowledge (`AGENTS.md`
-/// §17.4) and the syscall handler owns the user-memory copy and the
+/// so `kernel/core` stays free of any device knowledge and the syscall handler owns the user-memory copy and the
 /// capability check, never the device implementation.
 ///
 /// Implementations must be [`Sync`]: the single installed console is
@@ -55,7 +53,7 @@ pub trait ConsoleWrite: Sync {
     /// written.
     ///
     /// The caller has already copied `bytes` out of user memory through
-    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4) and
+    /// the validated `copy_from_user` boundary and
     /// checked the caller's [`CapabilityId::CONSOLE_WRITE`](rustos_abi::CapabilityId::CONSOLE_WRITE);
     /// the implementation only moves bytes to the device. A short write
     /// (fewer than `bytes.len()`) is permitted and reported through the
@@ -72,7 +70,7 @@ pub trait ConsoleWrite: Sync {
 /// The console sink installed before any real device exists.
 ///
 /// Every write fails closed with [`Errno::NotImplemented`] — the
-/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
+/// fail-closed default require, so a
 /// `stream_write` issued before the boot path installs a device (or on
 /// a target that genuinely has no console) announces an inert interface
 /// rather than silently discarding the bytes.
@@ -99,7 +97,7 @@ pub static NULL_CONSOLE: NullConsole = NullConsole;
 /// architecture-port-installed console device (a UART or a keyboard
 /// input source). The trait is deliberately minimal — one method that
 /// fills a kernel-owned buffer — so `kernel/core` stays free of any
-/// device knowledge (`AGENTS.md` §17.4) and the syscall handler owns
+/// device knowledge and the syscall handler owns
 /// the user-memory copy and the capability check, never the device
 /// implementation.
 ///
@@ -113,14 +111,14 @@ pub static NULL_CONSOLE: NullConsole = NullConsole;
 /// Sync)` because that list is shared by the per-CPU syscall handlers,
 /// exactly like [`ConsoleWrite`]. Constraining at the storage site rather
 /// than the trait keeps the shared path `Sync` without forcing every
-/// transient reader to be (`AGENTS.md` §2.6 — do not over-constrain a
+/// transient reader to be (do not over-constrain a
 /// trait).
 pub trait ConsoleRead {
     /// Read available console input into `buf`, returning the number of
     /// bytes actually read.
     ///
     /// The caller copies the filled prefix out to user memory through
-    /// the validated `copy_to_user` boundary (`AGENTS.md` §5.4) and has
+    /// the validated `copy_to_user` boundary and has
     /// already checked the caller's
     /// [`CapabilityId::CONSOLE_READ`](rustos_abi::CapabilityId::CONSOLE_READ);
     /// the implementation only moves bytes from the device. A short
@@ -140,7 +138,7 @@ pub trait ConsoleRead {
 /// The console input source installed before any real device exists.
 ///
 /// Every read fails closed with [`Errno::NotImplemented`] — the
-/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a
+/// fail-closed default require, so a
 /// `stream_read` issued before the boot path installs a device (or on
 /// a target that genuinely has no console input) announces an inert
 /// interface rather than fabricating input.
@@ -162,7 +160,7 @@ impl ConsoleRead for NullConsoleRead {
 pub static NULL_CONSOLE_READ: NullConsoleRead = NullConsoleRead;
 
 /// A sink that accepts decoded keystroke bytes injected into a console
-/// from a user-space input driver (`AGENTS.md` §20, `plans/PI.md` P11 —
+/// from a user-space input driver (`plans/PI.md` P11 —
 /// keyboard input for the video console).
 ///
 /// The producer counterpart of [`ConsoleRead`]. A keyboard-input driver
@@ -191,8 +189,7 @@ pub trait ConsoleInput: Sync {
     /// short push
     /// (fewer than `bytes.len()`, including zero when the bounded queue
     /// is full) is permitted and reported through the return value; the
-    /// producer retries the remainder and never blocks (`AGENTS.md`
-    /// §2.1).
+    /// producer retries the remainder and never blocks.
     ///
     /// # Errors
     ///
@@ -207,7 +204,7 @@ pub trait ConsoleInput: Sync {
 /// injected input.
 ///
 /// Every push fails closed with [`Errno::NotImplemented`] — the
-/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so the input-focus
+/// fail-closed default require, so the input-focus
 /// arbiter's text sink, when it is a console with no injectable queue (a
 /// UART, which reads its own hardware FIFO), announces an inert interface
 /// rather than silently dropping the keystrokes.
@@ -230,14 +227,13 @@ pub static NULL_CONSOLE_INPUT: NullConsoleInput = NullConsoleInput;
 
 /// Capacity, in bytes, of a [`ConsoleInputQueue`]'s type-ahead ring.
 ///
-/// This is a **fixed bound**, not a scaling capacity (`AGENTS.md`
-/// §24.4): a console type-ahead buffer is the software analogue of a
+/// This is a **fixed bound**, not a scaling capacity: a console type-ahead buffer is the software analogue of a
 /// UART's hardware receive FIFO. A human types a handful of characters
 /// per second, so 256 bytes absorbs realistic type-ahead between
 /// `stream_read` drains; a bound rather than an unbounded queue means a
 /// wedged or absent consumer can never make the keyboard driver's pushes
-/// grow kernel memory without limit (`AGENTS.md` §4). Overflow drops the
-/// excess as a short push (the producer retries, `AGENTS.md` §2.1) — a
+/// grow kernel memory without limit. Overflow drops the
+/// excess as a short push (the producer retries) — a
 /// dropped surplus keystroke is preferable to unbounded growth.
 pub const CONSOLE_INPUT_QUEUE_CAPACITY: usize = 256;
 
@@ -263,7 +259,7 @@ impl InputRing {
 /// A bounded, lock-protected type-ahead queue that is both the
 /// [`ConsoleRead`] half (drained by `stream_read`) and the
 /// [`ConsoleInput`] half (the input-focus arbiter's text sink) of a
-/// keyboard-backed console (`AGENTS.md` §20, `plans/PI.md` P11).
+/// keyboard-backed console (`plans/PI.md` P11).
 ///
 /// The video console installs one of these so a directly attached
 /// keyboard's decoded bytes — encoded and pushed by the input-focus
@@ -279,8 +275,8 @@ impl InputRing {
 /// A drained byte is **zeroed in place** as it leaves the ring: a typed
 /// password transits this queue between the keyboard driver and login,
 /// so the buffer must not retain the cleartext after the consumer has
-/// taken it (`AGENTS.md` §4 — zero-on-free for memory that held a
-/// credential; §23.1 — secret hygiene).
+/// taken it (zero-on-free for memory that held a
+/// credential; — secret hygiene).
 pub struct ConsoleInputQueue {
     ring: SpinLock<InputRing>,
 }
@@ -302,7 +298,7 @@ impl ConsoleInputQueue {
     }
 
     /// Drain up to `buf.len()` queued bytes into `buf`, zeroing each
-    /// drained slot in the ring (`AGENTS.md` §4 — a transited credential
+    /// drained slot in the ring (a transited credential
     /// is not retained), and return the number drained.
     fn drain(&self, buf: &mut [u8]) -> usize {
         let mut ring = self.ring.lock();
@@ -323,7 +319,7 @@ impl ConsoleInputQueue {
     /// FIFO into this queue) reads it to apply **lossless backpressure**:
     /// dequeue from the FIFO only what the ring can accept, leaving the rest
     /// in the FIFO for the next interrupt rather than reading bytes it would
-    /// have to drop (`AGENTS.md` §2.1 — the software analogue of the FIFO's
+    /// have to drop (the software analogue of the FIFO's
     /// own flow control). A snapshot: with a concurrent drain the true free
     /// space can only grow, so a producer that trusts this never overfills.
     #[must_use]
@@ -334,7 +330,7 @@ impl ConsoleInputQueue {
 
     /// Enqueue as many of `bytes` as fit, returning the number accepted
     /// (a short push when the ring fills; the producer retries the
-    /// remainder and never blocks, `AGENTS.md` §2.1).
+    /// remainder and never blocks).
     fn enqueue(&self, bytes: &[u8]) -> usize {
         let mut ring = self.ring.lock();
         let mut pushed = 0;
@@ -355,8 +351,7 @@ impl ConsoleRead for ConsoleInputQueue {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         // An empty queue is a zero-length read, exactly like a UART with
         // an empty RX FIFO; `BlockingConsoleRead` parks the caller and
-        // re-polls, so a later arbiter push wakes it (`AGENTS.md`
-        // §20 — the backing owns blocking).
+        // re-polls, so a later arbiter push wakes it (the backing owns blocking).
         Ok(self.drain(buf))
     }
 }
@@ -366,7 +361,7 @@ impl ConsoleInput for ConsoleInputQueue {
         let pushed = self.enqueue(bytes);
         // Wake any reader parked in `BlockingConsoleRead` the instant input
         // lands, so a keyboard-backed console delivers without waiting for
-        // the bounded re-poll deadline (`AGENTS.md` §2.16 — event-driven
+        // the bounded re-poll deadline (event-driven
         // where a wake source exists; the timed re-poll is only the polled
         // UART fallback). A fail-safe no-op before the wait-arch hook is
         // installed.
@@ -379,7 +374,7 @@ impl ConsoleInput for ConsoleInputQueue {
 
 /// One installed system text console: the output sink and input source
 /// of a single console the per-process descriptor table can attach a
-/// standard stream to (`AGENTS.md` §20, `plans/PI.md` P11).
+/// standard stream to (`plans/PI.md` P11).
 ///
 /// The boot path installs a `'static` **list** of these through
 /// `BootInfo::with_consoles` — index 0 is the primary console (the
@@ -393,8 +388,7 @@ impl ConsoleInput for ConsoleInputQueue {
 /// A console with no input device (a write-only serial port, a display
 /// with no keyboard yet) carries [`NULL_CONSOLE_READ`] (or an
 /// empty-polling source) as its `read` half, so reads fail closed or
-/// park rather than borrowing another console's input (`AGENTS.md`
-/// §2.9 / §5.4).
+/// park rather than borrowing another console's input.
 pub struct ConsoleDevice {
     /// The console's byte sink (`stream_write`).
     pub write: &'static (dyn ConsoleWrite + 'static),
@@ -409,15 +403,14 @@ pub struct ConsoleDevice {
     /// keyboard-input driver's pushes are drained by the login reading
     /// this console (`plans/PI.md` P11). A console that reads its own
     /// hardware (a UART) points this at [`NULL_CONSOLE_INPUT`], so a
-    /// `console_input` targeting it fails closed (`AGENTS.md` §2.9).
+    /// `console_input` targeting it fails closed.
     pub input: &'static (dyn ConsoleInput + 'static),
     /// Whether a `stream_read` of this console echoes the bytes it
     /// consumes back to [`Self::write`] — the terminal local-echo of the
-    /// console's read line discipline (`AGENTS.md` §20, `plans/PI.md`
+    /// console's read line discipline (`plans/PI.md`
     /// P11). Defaults to **on** so an interactive user sees what they
     /// type; the `stream_echo` syscall toggles it (login disables it
-    /// around a password read so a credential is never rendered,
-    /// `AGENTS.md` §5.4). Interior mutability because the single
+    /// around a password read so a credential is never rendered). Interior mutability because the single
     /// installed console is shared `&'static`.
     echo: AtomicBool,
     /// Column of the line-discipline cursor since the last line terminator
@@ -425,7 +418,7 @@ pub struct ConsoleDevice {
     /// echo has rendered on the current input line. Bounds the **erase**
     /// (rub-out): a Backspace rubs out one rendered character only while this
     /// is non-zero, so a Backspace at the start of the input line never walks
-    /// the cursor back into the prompt the program wrote (`AGENTS.md` §20).
+    /// the cursor back into the prompt the program wrote.
     /// Reset to zero on a `CR`/`LF` echo and on every [`Self::set_echo`]
     /// toggle (each starts a fresh edited line). Relaxed ordering for the same
     /// reason as [`Self::echo`]: a single console carries a single session
@@ -435,7 +428,7 @@ pub struct ConsoleDevice {
 
 impl ConsoleDevice {
     /// Pair `write` and `read` as one installed console that accepts no
-    /// injected input, with terminal echo on by default (`AGENTS.md` §20
+    /// injected input, with terminal echo on by default (
     /// — interactive consoles echo).
     ///
     /// The console's `input` half is [`NULL_CONSOLE_INPUT`], so a
@@ -485,8 +478,7 @@ impl ConsoleDevice {
     /// P11).
     ///
     /// Toggling echo also resets the line-discipline column to zero: a
-    /// suppressed password read (`login` disables echo around it,
-    /// `AGENTS.md` §5.4) and the prompt that follows it start a fresh edited
+    /// suppressed password read (`login` disables echo around it) and the prompt that follows it start a fresh edited
     /// line, so a later Backspace must not rub out into a line the column was
     /// last counting before the toggle.
     pub fn set_echo(&self, enabled: bool) {
@@ -496,7 +488,7 @@ impl ConsoleDevice {
 
     /// Echo `bytes` (the bytes a `stream_read` just consumed) back to the
     /// console output when echo is enabled, so an interactive user sees
-    /// what they type (`AGENTS.md` §20 — terminal local echo).
+    /// what they type (terminal local echo).
     ///
     /// A carriage return or line feed is echoed as the CR-LF pair so the
     /// cursor both returns to column zero *and* advances a line — a bare
@@ -516,7 +508,7 @@ impl ConsoleDevice {
     ///
     /// Echo is purely cosmetic, so it is **best-effort**: a short write or
     /// a device error is swallowed rather than failing the read the user
-    /// asked for (`AGENTS.md` §2.16 — never let a cosmetic side effect
+    /// asked for (never let a cosmetic side effect
     /// abort the real operation). With echo disabled this is a no-op, so
     /// a suppressed password read touches the output device not at all.
     pub fn echo_bytes(&self, bytes: &[u8]) {
@@ -529,7 +521,7 @@ impl ConsoleDevice {
         // the console, not recomputed per call.
         let mut col = self.echo_col.load(Ordering::Relaxed);
         // Batch consecutive printable bytes into one device write (fewer
-        // device round-trips, `AGENTS.md` §2.16); flush the pending run when
+        // device round-trips); flush the pending run when
         // a control byte needs separate handling.
         let mut run_start = 0;
         for i in 0..bytes.len() {
@@ -556,7 +548,7 @@ impl ConsoleDevice {
 
     /// Write one run of non-line-break bytes to the console output,
     /// looping over short writes and stopping on a closed/erroring device
-    /// (`AGENTS.md` §2.1 — never spin). Best-effort, for [`Self::echo_bytes`].
+    /// (never spin). Best-effort, for [`Self::echo_bytes`].
     fn echo_run(&self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             match self.write.write(bytes) {
@@ -577,12 +569,10 @@ impl ConsoleDevice {
 pub static NO_CONSOLES: [ConsoleDevice; 0] = [];
 
 /// A [`ConsoleRead`] adapter that **blocks** the calling task until input
-/// arrives — the stream backing owning the wait, exactly as `AGENTS.md`
-/// §20 assigns it ("the backing owns blocking", never the program).
+/// arrives — the stream backing owning the wait, exactly as assigns it ("the backing owns blocking", never the program).
 ///
 /// The installed console devices are deliberately non-blocking pollers (a
-/// UART RX drain must never busy-wait inside the device, `AGENTS.md`
-/// §2.1), so a bare device read with an empty FIFO is a zero-length read.
+/// UART RX drain must never busy-wait inside the device), so a bare device read with an empty FIFO is a zero-length read.
 /// Reported to user space, that zero is indistinguishable from end of
 /// input — an interactive session reading its first keystroke would exit
 /// instantly. This adapter closes that gap at the seam between the device
@@ -590,15 +580,14 @@ pub static NO_CONSOLES: [ConsoleDevice; 0] = [];
 /// calling task back on the scheduler through [`reschedule_current`]
 /// (the same poll-and-park loop the `wait` syscall's
 /// [`KernelProcessWait`](crate::procwait::KernelProcessWait) producer
-/// uses — cooperative, never a busy-spin, `AGENTS.md` §2.1) and re-polls
+/// uses — cooperative, never a busy-spin) and re-polls
 /// the device when next dispatched, returning only once the device
 /// yields bytes or fails.
 ///
 /// A caller that cannot be parked (no resumable user kthread is published
 /// on this CPU — a kernel-context read, or a dispatch path outside the
 /// user-kthread protocol) fails closed with [`Errno::NotImplemented`]
-/// rather than busy-spinning or fabricating an end-of-input (`AGENTS.md`
-/// §2.1 / §2.9), mirroring the process-wait producer's contract.
+/// rather than busy-spinning or fabricating an end-of-input, mirroring the process-wait producer's contract.
 ///
 /// Built and installed by the kernel-core init pipeline (phase `Syscall`)
 /// around whatever [`ConsoleRead`] the boot path provided; an inner
@@ -633,7 +622,7 @@ where
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         // A zero-length destination can never receive a byte; report the
         // empty read instead of parking a caller no input could ever wake
-        // (`AGENTS.md` §2.9 — the handler already screens this, defence in
+        // (the handler already screens this, defence in
         // depth here).
         if buf.is_empty() {
             return Ok(0);
@@ -643,8 +632,7 @@ where
         // `unpark` it, when a scheduler waker hook is installed. [`None`] on a
         // host build of an unrelated path (no scheduler): such a caller can
         // still drain immediately-available bytes, but an empty poll fails
-        // closed rather than busy-spinning, since it cannot park (`AGENTS.md`
-        // §2.9), exactly as the process-wait producer does.
+        // closed rather than busy-spinning, since it cannot park, exactly as the process-wait producer does.
         let parkable: Option<_> = crate::waitq::wait_arch().and_then(|hook| hook.current_task(cpu));
         loop {
             // Register **before** polling so a push arriving in the window
@@ -652,7 +640,7 @@ where
             // [`crate::waitq::console_wake`] then `unpark`s this task and the
             // scheduler's wake-pending token converts a concurrent park commit
             // into a re-ready (this mirrors `irq_wait` / `hw_tree_wait`
-            // exactly — `AGENTS.md` §2.1 / §2.2, one park discipline). A bare
+            // exactly, one park discipline). A bare
             // register-after-poll would lose the wake for the final bytes of a
             // fast input burst (a producer pushing the tail of a line between
             // the reader's last empty poll and its park), wedging the
@@ -664,7 +652,7 @@ where
                 Ok(read) => read,
                 Err(e) => {
                     // An inner-device error propagates immediately, fail
-                    // closed (`AGENTS.md` §2.9); leave the wait set first so
+                    // closed; leave the wait set first so
                     // no stale registration lingers.
                     if let Some(task) = parkable {
                         crate::waitq::CONSOLE_WAITQ.deregister(task);
@@ -679,7 +667,7 @@ where
                 return Ok(read);
             }
             // Empty poll: **park** the caller off the run queue until input
-            // arrives (`AGENTS.md` §2.1 — never a busy-yield). A re-enqueuing
+            // arrives (never a busy-yield). A re-enqueuing
             // yield here would loop in EL1 with IRQs masked, so the dispatch
             // loop could never reach its idle `wait_for_interrupt` and a
             // device IRQ (e.g. the interrupt-driven keyboard or UART driver
@@ -698,7 +686,7 @@ where
             // no one-shot.
             //
             // With no waker hook there is no scheduler to park on, so fail
-            // closed rather than busy-spin (`AGENTS.md` §2.1 / §2.9 / §5.4.5).
+            // closed rather than busy-spin.
             let Some(task) = parkable else {
                 return Err(Errno::NotImplemented);
             };
@@ -1027,8 +1015,8 @@ mod tests {
     fn input_queue_overflow_is_a_short_push() {
         let queue = ConsoleInputQueue::new();
         // Filling to capacity accepts exactly the capacity; the surplus is
-        // a short push the producer retries (`AGENTS.md` §2.1), never an
-        // unbounded allocation (`AGENTS.md` §4).
+        // a short push the producer retries, never an
+        // unbounded allocation.
         let full = [b'x'; CONSOLE_INPUT_QUEUE_CAPACITY];
         assert_eq!(queue.push(&full), Ok(CONSOLE_INPUT_QUEUE_CAPACITY));
         assert_eq!(queue.push(b"y"), Ok(0));

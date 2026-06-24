@@ -444,7 +444,7 @@ fn non_toggle_responses_are_forwarded_unchanged() {
     );
 
     // A session control is forwarded: the session holds no capability to power
-    // the machine off, so the embedder performs it (`AGENTS.md` §10).
+    // the machine off, so the embedder performs it.
     let control = TaskbarResponse::MenuEntrySelected {
         id: MenuEntryId(3),
         action: MenuAction::Session(SessionControl::ShutDown),
@@ -851,7 +851,7 @@ fn a_press_with_no_running_task_activates_a_fresh_one() {
 // ---- desktop shell: driving the desktop from a live input stream ----
 
 /// An in-memory [`InputSource`]: a queue of events, optionally faulting once
-/// the queue is drained, standing in for the kernel's input channel (§7).
+/// the queue is drained, standing in for the kernel's input channel.
 struct MemoryInput {
     events: Vec<InputEvent>,
     next: usize,

@@ -183,7 +183,7 @@ fn exhausted_virtual_window_reports_no_space() {
 fn guard_slots_are_left_unmapped() {
     // Guard pages bracketing the register window are never mapped, so
     // a register-block over-run faults instead of reaching a
-    // neighbouring device (`AGENTS.md` §4).
+    // neighbouring device.
     let phys = sim();
     let mut map = fresh(&phys, 16);
     let region = map.map(0xFEBD_0000, 0x1000).expect("maps");
@@ -334,7 +334,7 @@ fn window_map_into_borrowed_space_round_trips_and_leaves_space_to_caller() {
 fn window_map_brackets_unmapped_guard_pages_in_the_borrowed_space() {
     // The guard pages bracketing the window are never mapped in the borrowed
     // space, so a register-block over-run faults instead of reaching a
-    // neighbouring device (`AGENTS.md` §4).
+    // neighbouring device.
     let mut space = borrowed_space();
     let mut win = window(16);
     let region = win.map_into(&mut space, 0xFEBD_0000, 0x1000).expect("maps");
@@ -427,8 +427,7 @@ fn window_map_into_rejects_zero_overflow_and_exhaustion() {
 fn window_map_into_fails_closed_and_unwinds_on_page_table_conflict() {
     // Pre-map the page the mapper would use for the first data slot so the
     // borrowed space rejects the mapping mid-way; the mapper must unwind every
-    // page it added, leaving the space exactly as it found it (`AGENTS.md`
-    // §2.9 — all-or-nothing).
+    // page it added, leaving the space exactly as it found it (all-or-nothing).
     let mut space = borrowed_space();
     let mut win = window(16);
     // A 2-page window's data lands at slots 1 and 2 (slot 0 is the leading

@@ -28,8 +28,7 @@ operand.
 /// recursively. `chown` writes nothing on success; `out` carries only the
 /// [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed,
-/// `AGENTS.md` §2.9).
+/// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///

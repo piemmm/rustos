@@ -48,7 +48,7 @@ const REG_VENDOR_ID: u64 = 0x00C;
 /// The MMIO bus driver instance.
 ///
 /// Bound to a parsed [`Fdt`] (`'dtb`) and a [`MmioRead`] reader; the
-/// type is `pub(crate)` per `AGENTS.md` §8 and reached from outside
+/// type is `pub(crate)` and reached from outside
 /// only via `dyn Bus`.
 pub struct Mmio<'dtb, T: MmioRead> {
     dtb: Fdt<'dtb>,
@@ -138,7 +138,7 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
     /// driver reads the slot's `<base, length>` pair from the device
     /// tree and asks the kernel's MMIO-map facility for a window over
     /// it. The driver never synthesises a pointer — the kernel
-    /// allocates and validates the mapping (`AGENTS.md` §4). The
+    /// allocates and validates the mapping. The
     /// returned window is what the bus driver hands to the virtio
     /// transport's `MmioBackend`.
     ///
@@ -175,12 +175,12 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
     /// `virtio,mmio` transport slot whose `reg` base equals `base`.
     ///
     /// This is the discovered slot extent the device tree `reg`
-    /// `<base, length>` pair declares (`AGENTS.md` §18.1 — a discovered
+    /// `<base, length>` pair declares (a discovered
     /// value, never a literal). It is the unmapped half of
     /// [`Self::map_slot_window`]: the bootstrap-floor discovery walk
     /// records it as a discovered virtio device node's MMIO resource so a
     /// user-space driver autoloaded against that node is granted a window
-    /// of exactly the slot's size (`AGENTS.md` §18.3). It reads no device
+    /// of exactly the slot's size. It reads no device
     /// state and maps nothing, so it needs no [`MmioMapper`].
     ///
     /// # Errors

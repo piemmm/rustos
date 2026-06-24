@@ -5,7 +5,7 @@
 //! the document's **start tags** in order and ignores text, comments,
 //! processing instructions, the doctype, and closing tags. Anything
 //! structurally broken — an unterminated tag, quote, or comment — is a
-//! [`SvgError::Malformed`] rejection, never a panic (`AGENTS.md` §2.9).
+//! [`SvgError::Malformed`] rejection, never a panic.
 //!
 //! Slicing is always at ASCII delimiters (`<`, `>`, `=`, quotes, whitespace),
 //! and every UTF-8 continuation byte is `>= 0x80`, so byte offsets never split

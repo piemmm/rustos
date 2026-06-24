@@ -1,6 +1,6 @@
-//! Stateful property model for `kernel/sec` (`AGENTS.md` §19.7 Bronze).
+//! Stateful property model for `kernel/sec` (Bronze).
 //!
-//! §19.7 requires the capability-critical paths to carry a `proptest`-style
+//! the charter requires the capability-critical paths to carry a `proptest`-style
 //! stateful model. `kernel/sec/tests/proptest_invariants.rs` already checks
 //! the two lib-level delegation properties in isolation; this model lifts
 //! them to the **registry** level: a randomised sequence of commands drives a
@@ -8,25 +8,25 @@
 //! model, asserting after every command that
 //!
 //! * a derived task's effective set is exactly `user_grant ∩ manifest_request`
-//!   and therefore a subset of both (no ambient authority, §4 / §5.2),
+//!   and therefore a subset of both (no ambient authority),
 //! * [`TaskCapabilities::delegate`] never widens the effective set and a
 //!   refused delegation leaves it untouched,
 //! * [`TaskCapabilities::revoke`] only ever shrinks the effective set, and
 //! * the registry's contents (membership, cardinality, per-task effective
 //!   set) match the model.
 //!
-//! Unlike the §19.6 fuzz harnesses this generates structured command
+//! Unlike the fuzz harnesses this generates structured command
 //! sequences and lets proptest **shrink** any counterexample.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.7)
+//! ## Wall-clock budget
 //!
 //! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
-//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
 //! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (pinnable via
-//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
+//! `--seed`), so a fresh-seed counterexample is still reproducible.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -151,7 +151,7 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
                 let ug = build(user_grant);
                 let mf = build(manifest);
                 let caps = TaskCapabilities::derive(TaskId(*task), UserId(1), ug, mf, &sink);
-                // Derive must intersect (§5.2): effective ⊆ both inputs.
+                // Derive must intersect: effective ⊆ both inputs.
                 prop_assert!(caps.effective().is_subset_of(&ug));
                 prop_assert!(caps.effective().is_subset_of(&mf));
                 table.insert(caps);

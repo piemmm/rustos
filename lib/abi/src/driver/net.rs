@@ -96,7 +96,7 @@ pub trait Net {
     /// Behaviour is identical to [`Self::transmit`] except that when
     /// `class == BufferClass::Sensitive` the driver is required to
     /// zero every internal staging copy of the frame before this
-    /// method returns (`AGENTS.md` §4).
+    /// method returns.
     ///
     /// The default implementation delegates to [`Self::transmit`]
     /// and is only safe for drivers that DMA straight from `frame`

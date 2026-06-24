@@ -11,13 +11,12 @@
 //!
 //! The [`Cell`] and its [`Attributes`] are [`lib/vt`](rustos_vt)'s shared
 //! representation, not a second copy: the emulator is a *consumer* of the one
-//! ANSI/VT/xterm vocabulary (`AGENTS.md` §2.2), so a cell here is exactly the
+//! ANSI/VT/xterm vocabulary, so a cell here is exactly the
 //! cell a curses renderer emits.
 //!
 //! Every operation is total and saturating: an out-of-range coordinate clamps
 //! into the grid and a full region scrolls rather than growing, so a hostile
-//! or buggy byte stream can never index out of bounds or panic (`AGENTS.md`
-//! §2.9).
+//! or buggy byte stream can never index out of bounds or panic.
 
 use alloc::string::String;
 use alloc::vec;
@@ -29,7 +28,7 @@ use rustos_vt::{Attributes, Cell, EraseMode};
 ///
 /// A fixed ceiling keeps `cols * rows` bounded so a caller cannot ask the
 /// terminal to allocate an unreasonable buffer; a larger request fails closed
-/// in [`Grid::new`] (`AGENTS.md` §2.9).
+/// in [`Grid::new`].
 pub const MAX_DIMENSION: u16 = 1024;
 
 /// The tab stop interval, in cells.
@@ -86,7 +85,7 @@ impl Grid {
     ///
     /// Returns `None` for a zero dimension or a dimension above
     /// [`MAX_DIMENSION`], so an unusable screen size fails closed rather than
-    /// allocating something degenerate (`AGENTS.md` §2.9).
+    /// allocating something degenerate.
     #[must_use]
     pub fn new(cols: u16, rows: u16) -> Option<Self> {
         if cols == 0 || rows == 0 || cols > MAX_DIMENSION || rows > MAX_DIMENSION {
@@ -311,7 +310,7 @@ impl Grid {
 
     /// Set the scroll region to the 1-based rows `top..=bottom`, clamped into
     /// the grid; a degenerate or inverted request falls back to the whole
-    /// screen (fail closed, `AGENTS.md` §2.9). The cursor moves to the home
+    /// screen (fail closed). The cursor moves to the home
     /// position, as on a real terminal.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
         let last = self.rows.saturating_sub(1);

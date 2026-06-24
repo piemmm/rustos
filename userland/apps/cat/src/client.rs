@@ -83,7 +83,7 @@ where
             return Ok(());
         }
         // A source that claims to have written more than the buffer holds is
-        // malformed; refuse it rather than index out of bounds (§2.9).
+        // malformed; refuse it rather than index out of bounds.
         let chunk = buf
             .get(..read)
             .ok_or(CatError::Read(Errno::LengthOutOfRange))?;

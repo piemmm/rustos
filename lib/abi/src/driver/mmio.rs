@@ -6,9 +6,9 @@
 //! reason [`DmaSlab`](super::DmaSlab) does: the [`DriverHost`] trait
 //! and the bus-class drivers all have to be able to name it without
 //! pulling in `drivers/bus/*`, which would invert the dependency
-//! direction and violate `AGENTS.md` §3.
+//! direction and violate.
 //!
-//! # The minting rule (`AGENTS.md` §4 — no ambient authority)
+//! # The minting rule (no ambient authority)
 //!
 //! The only way to obtain a [`RegisterWindow`] in safe code is to ask
 //! a [`MmioMapper`] (the kernel-side MMIO-map facility) for one. The
@@ -25,8 +25,8 @@
 //! Every accessor validates its `offset` against the window length
 //! and the natural alignment of the access width *before* it touches
 //! memory, returning [`WindowError`] on a violation rather than
-//! reading or writing out of bounds (`AGENTS.md` §5.4.3 — validate
-//! every input; §2.9 — no panics on the production path).
+//! reading or writing out of bounds (validate
+//! every input; — no panics on the production path).
 //!
 //! [`DriverHost`]: super::DriverHost
 
@@ -280,7 +280,7 @@ impl MmioMapError {
 /// actual page-table mapping live inside the concrete implementation
 /// (the kernel binary's mapper), keeping the bus drivers free of any
 /// `kernel/*` dependency and ensuring the driver never synthesises a
-/// pointer itself (`AGENTS.md` §4).
+/// pointer itself.
 pub trait MmioMapper {
     /// Map `len` bytes of device physical memory beginning at
     /// `phys_base` and return a [`RegisterWindow`] over the mapping.

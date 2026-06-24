@@ -1,6 +1,6 @@
-//! Stateful property model for `lib/caps` (`AGENTS.md` §19.7 Bronze).
+//! Stateful property model for `lib/caps` (Bronze).
 //!
-//! §19.7 requires the capability-critical paths to carry a `proptest`-style
+//! the charter requires the capability-critical paths to carry a `proptest`-style
 //! stateful model in addition to their unit tests. This is that model for
 //! `lib/caps`: a randomised sequence of mutating commands is replayed against
 //! the live [`CapabilitySet`] and an independent reference model (a
@@ -10,19 +10,19 @@
 //! checks [`CapabilityToken::verify`] against a reference oracle of its
 //! documented error precedence.
 //!
-//! Unlike the §19.6 fuzz harnesses — which hammer raw bytes looking for
+//! Unlike the fuzz harnesses — which hammer raw bytes looking for
 //! crashes — this model generates *structured* command sequences and lets
 //! proptest **shrink** any counterexample to a minimal failing program.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.7)
+//! ## Wall-clock budget
 //!
 //! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
-//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
 //! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner keeps drawing
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (and pinnable via
-//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
+//! `--seed`), so a fresh-seed counterexample is still reproducible.
 
 use std::collections::BTreeSet;
 
@@ -130,7 +130,7 @@ fn capability_set_tracks_reference_model() {
                                 }
                             };
                             // Delegation returns exactly the requested subset and
-                            // never widens the parent's authority (§5.2).
+                            // never widens the parent's authority.
                             prop_assert_eq!(granted, requested);
                             prop_assert!(granted.is_subset_of(&live));
                         } else {

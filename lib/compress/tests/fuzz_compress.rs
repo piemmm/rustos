@@ -1,11 +1,11 @@
 //! Deterministic fuzz harness for the first-party LZ decoder
-//! (`AGENTS.md` §19.5 / §19.6; `docs/src/filesystem/rustfs-spec.md` §10 — the
+//! (`docs/src/filesystem/rustfs-spec.md` §10 — the
 //! required "compression decode" fuzz target).
 //!
 //! [`rustos_compress::decompress`] parses a byte stream that, on a real
 //! system, may have been written or corrupted by anything: it is the
 //! untrusted-input parser `RustFS` runs over every compressed data record. Per
-//! §19.6 that decode path is driven by a fuzz harness whose invariants are:
+//! that decode path is driven by a fuzz harness whose invariants are:
 //!
 //! * `decompress` never panics for any input — it returns `Ok` for a valid
 //!   frame and `Err` (fail closed) for everything else; and
@@ -13,7 +13,7 @@
 //!   `x` (a malformed frame can only ever come from corruption, never from the
 //!   encoder).
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded
+//! RustOS pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random inputs and corrupts real frames. A plain `cargo
 //! test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed;
 //! `cargo xtask fuzz --soak` exports

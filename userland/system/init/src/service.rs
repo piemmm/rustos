@@ -42,8 +42,7 @@ impl Pid {
 /// [`ManifestHeader`](rustos_abi::ManifestHeader) prefix followed by its
 /// capability body). [`Init`](crate::Init) decodes it to learn the
 /// capabilities the service requests; it does **not** verify the signature
-/// — that is the [`Spawner`]'s responsibility at launch time (`AGENTS.md`
-/// §8, §9).
+/// — that is the [`Spawner`]'s responsibility at launch time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceSpec {
     name: String,
@@ -106,11 +105,11 @@ impl ServiceSpec {
 ///
 /// The implementation owns the trusted load pipeline (`rxe` envelope
 /// decode, signature verification, syscall-table-hash match — the same
-/// checks `drvhost` runs for drivers, `AGENTS.md` §8) and executes the
+/// checks `drvhost` runs for drivers) and executes the
 /// binary with **at most** the `granted` capability set. [`Init`](crate::Init)
 /// has already intersected the manifest's request with the system authority,
 /// so `granted` is the ceiling, never a floor: the spawner must not add to
-/// it (`AGENTS.md` §4 — no ambient authority).
+/// it (no ambient authority).
 pub trait Spawner {
     /// Launch `spec`'s binary with the capability set `granted`.
     ///
@@ -136,7 +135,7 @@ pub struct ReapedChild {
 ///
 /// Every PID 1 must reap the zombies of the whole system — both the
 /// services it started and the orphans it inherits when their parent dies
-/// (`AGENTS.md` §16 — init owns `/System/Services`). The kernel-backed
+/// (init owns `/System/Services`). The kernel-backed
 /// implementation drains the wait queue; a test fixture returns a fixed
 /// script.
 pub trait Reaper {

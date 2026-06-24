@@ -16,7 +16,7 @@
 //! mask-before-wake evidence (`docs/src/security/irq.md`) — before
 //! reporting PASS via ARM semihosting. A regression that fails to route,
 //! deliver, or mask never reaches PASS, so the run times out (the
-//! documented fail-loud behaviour, `AGENTS.md` §7).
+//! documented fail-loud behaviour).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

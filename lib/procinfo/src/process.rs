@@ -3,7 +3,7 @@
 //! Both the `sysinfo` and `ps` tools page through the process list the same
 //! way — fixed-size pages walked until a short page ends the list — and
 //! render each [`ProcessRecord`] into the same fixed-column row. That logic
-//! lives here, in one place, rather than being copied (`AGENTS.md` §2.2).
+//! lives here, in one place, rather than being copied.
 
 use alloc::format;
 use alloc::string::String;
@@ -35,7 +35,7 @@ pub const PROCESS_HEADER: &str = "  PID  PPID   UID   GID S CPU NAME";
 /// ([`SysinfoQueryId::SELF_PROCESS_LIST`], ungated). Records are delivered in
 /// the order the service returns them.
 ///
-/// The walk **fails closed** (`AGENTS.md` §5.4 / §2.9): a reply whose length
+/// The walk **fails closed**: a reply whose length
 /// is not a whole number of [`ProcessRecord::WIRE_LEN`] records, or one that
 /// would overflow the page offset, is rejected rather than partially
 /// rendered.

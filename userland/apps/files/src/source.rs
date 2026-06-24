@@ -4,13 +4,13 @@
 //! world: the children of an absolute path. Keeping it a trait means the
 //! navigation and rendering logic is exhaustively testable against an
 //! in-memory tree without a kernel, exactly as `appmgr`'s `BundleStore` and
-//! `ps`'s transport are injected seams (`AGENTS.md` §7).
+//! `ps`'s transport are injected seams.
 //!
 //! On a running system the source is backed by the VFS: a `list` call is a
-//! capability-checked directory read, so the §5.3 permission decision and the
-//! §16 path policy live in the VFS, not here. The browser shows exactly the
+//! capability-checked directory read, so the permission decision and the
+//! path policy live in the VFS, not here. The browser shows exactly the
 //! entries the source returns — it never fabricates a `/proc`/`/sys`-style
-//! synthetic entry (`AGENTS.md` §16.1).
+//! synthetic entry.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -32,7 +32,7 @@ pub trait DirectorySource {
     ///
     /// Returns the kernel boundary's [`Errno`] when the directory cannot be
     /// listed — for example [`Errno::PermissionDenied`] when the caller lacks
-    /// the capability to read it (`AGENTS.md` §5.3) or [`Errno::NotFound`]
+    /// the capability to read it or [`Errno::NotFound`]
     /// when it does not exist.
     fn list(&mut self, components: &[String]) -> Result<Vec<Entry>, Errno>;
 }

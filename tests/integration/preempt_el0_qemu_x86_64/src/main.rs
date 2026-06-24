@@ -20,7 +20,7 @@
 //! `TSS.RSP0`.
 //!
 //! It then arms the **production** ring-3-preemption path verbatim
-//! (`AGENTS.md` §2.2 — the same `rustos_arch_x86_64::preempt` surface the bin
+//! (the same `rustos_arch_x86_64::preempt` surface the bin
 //! crate's `install_irq_dispatch` uses): it installs a ring-3-preemption
 //! callback that suspends the running task back to the scheduler via
 //! `reschedule_current(_, Yield)`. Ring 3 already runs preemptible
@@ -35,8 +35,7 @@
 //! resumed mid-loop after each preemption — still completed its spin and
 //! exited. A preemption that never fires (the `step` never returns) or a
 //! botched resume (the task never exits) stalls the drain, so the run fails
-//! loudly — by a failure code or by the harness `Outcome::Timeout`
-//! (`AGENTS.md` §7).
+//! loudly — by a failure code or by the harness `Outcome::Timeout`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -57,8 +56,7 @@ mod kernel;
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
-        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }

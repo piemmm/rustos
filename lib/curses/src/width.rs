@@ -4,11 +4,11 @@
 //! glyphs — CJK ideographs, Hangul syllables, fullwidth forms, most emoji —
 //! occupy *two* terminal columns, not one. Getting this wrong shifts every
 //! cell after the glyph by a column. This module is the one place that
-//! answers the question (`AGENTS.md` §2.2): the [`crate::Window`] writer, the
+//! answers the question: the [`crate::Window`] writer, the
 //! [renderer], and a consumer laying out columns all measure through
 //! [`char_width`] / [`str_width`], so they agree on where a glyph ends.
 //!
-//! The width table is first-party (`AGENTS.md` §2.12): a small, sorted set of
+//! The width table is first-party: a small, sorted set of
 //! the Unicode "East Asian Wide / Fullwidth" ranges plus the common emoji
 //! blocks. Every other scalar is one column. Combining marks are *not* given
 //! zero width — the cell model stores one glyph per cell, so a lone combining

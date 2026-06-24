@@ -3,7 +3,7 @@
 //!
 //! `RustFS` keeps a notion of the volume's health so it can decide *when* a
 //! scrub is worth running, rather than only running one on demand. It leans
-//! on the seams the earlier stages built (`AGENTS.md` §2.2) and never adds a
+//! on the seams the earlier stages built and never adds a
 //! second integrity or scrub path:
 //!
 //! * **The baseline.** A self-identifying [`BlockType::HealthBaseline`] block
@@ -14,32 +14,29 @@
 //!   unrepairable blocks (the Stage-3 companion-repair seam) and per-class
 //!   data faults ([`crate::integrity::DataFault`], the Stage-5 seam). The
 //!   device snapshot is *the last clean state* and the accumulated counters
-//!   are a durable history, so both are **persisted**, not rebuildable (§4):
+//!   are a durable history, so both are **persisted**, not rebuildable:
 //!   a transient fault that was repaired leaves no trace in the live trees.
 //!   The block is the single source of truth; a crash mid-update leaves the
-//!   previously committed baseline (or none) selected and never blocks a mount
-//!   (§14).
+//!   previously committed baseline (or none) selected and never blocks a mount.
 //! * **The report + thresholds.** [`RustFs::health`] returns a structured
 //!   [`HealthReport`] (mirroring [`crate::ScrubReport`] / [`crate::CheckReport`]
 //!   / [`crate::TrimReport`]) that classifies the volume against the documented
 //!   [`HealthThresholds`] — healthy / degraded / failing — with no magic
-//!   numbers buried in code (`AGENTS.md` §2.1 / §11).
+//!   numbers buried in code.
 //! * **Health-triggered scrub.** A rise in the device's unsafe-shutdown or
 //!   media-error counters since the baseline triggers a scrub through the
 //!   Stage-8 [`RustFs::scrub`] machinery — its `CAP_FS_MOUNT` gate, its budget,
-//!   its resumable/interrupt-safe core — never a parallel verifier (§11,
-//!   `AGENTS.md` §2.2). The triggered scrub's findings fold back into the
+//!   its resumable/interrupt-safe core — never a parallel verifier. The triggered scrub's findings fold back into the
 //!   accumulated counters.
 //! * **Capability-gated + logged.** The whole operation is gated on
 //!   [`CapabilityId::FS_MOUNT`] (the mount-management capability that already
-//!   gates scrub/check/trim) and fails closed and logged otherwise
-//!   (`AGENTS.md` §5.4). Health-relevant decisions are logged through
+//!   gates scrub/check/trim) and fails closed and logged otherwise. Health-relevant decisions are logged through
 //!   `lib/log` with stable event IDs in the reserved `rustfs`
-//!   `12000..13000` range (§19.4).
+//!   `12000..13000` range.
 //!
 //! If the device exposes no telemetry the baseline records
 //! [`DeviceHealth::Unavailable`]; the health subsystem stays enabled and
-//! classifies from the filesystem-observed counters alone (§11).
+//! classifies from the filesystem-observed counters alone.
 
 use rustos_abi::driver::block::{Block, DeviceHealth, HealthSnapshot};
 use rustos_abi::{CapabilityId, CapabilityQuery, DriverError};
@@ -63,7 +60,7 @@ pub const HEALTH_DENIED: EventId = EventId(12_044);
 
 /// Every health event identifier falls inside the reserved `rustfs` range so
 /// the stable IDs audit-log consumers rely on never collide with another
-/// subsystem (`AGENTS.md` §19.4).
+/// subsystem.
 const _: () = {
     assert!(HEALTH_OK.0 >= RUSTFS_RANGE_START && HEALTH_OK.0 < RUSTFS_RANGE_END);
     assert!(HEALTH_DEGRADED.0 >= RUSTFS_RANGE_START && HEALTH_DEGRADED.0 < RUSTFS_RANGE_END);
@@ -113,11 +110,11 @@ pub enum HealthState {
 }
 
 /// The explicit, documented thresholds that classify a volume's health
-/// (`docs/src/filesystem/rustfs-spec.md` §11; `AGENTS.md` §2.1 — no magic
+/// (`docs/src/filesystem/rustfs-spec.md` §11; — no magic
 /// numbers buried in code). [`RustFs::health`] classifies against
 /// [`HealthThresholds::DEFAULT`]; the type is public so the chosen values are
 /// inspectable and testable. The thresholds are a fixed, non-tunable part of
-/// the one mandatory profile (`AGENTS.md` §11).
+/// the one mandatory profile.
 ///
 /// A signal at or above a `failing_*` threshold is [`HealthState::Failing`];
 /// at or above a `degraded_*` threshold (but below failing) it is
@@ -186,7 +183,7 @@ pub struct HealthReport {
     pub state: HealthState,
     /// The current device snapshot, or `None` when the device exposed no
     /// telemetry this pass (the classification then rests on the
-    /// filesystem-observed counters alone; the subsystem stays enabled, §11).
+    /// filesystem-observed counters alone; the subsystem stays enabled).
     pub device: Option<HealthSnapshot>,
     /// Rise in the device's unsafe-shutdown counter since the last clean
     /// baseline (saturating). A non-zero delta schedules a metadata scrub.
@@ -208,22 +205,22 @@ pub struct HealthReport {
     /// Number of scrubs health monitoring has triggered over the volume's
     /// lifetime.
     pub scrubs_triggered: u64,
-    /// `true` when an unsafe-shutdown delta scheduled a metadata scrub (§11).
+    /// `true` when an unsafe-shutdown delta scheduled a metadata scrub.
     pub metadata_scrub_recommended: bool,
-    /// `true` when a media-error delta scheduled a deep scrub (§11).
+    /// `true` when a media-error delta scheduled a deep scrub.
     pub deep_scrub_recommended: bool,
     /// The triggered scrub's report, or `None` when no threshold was crossed
     /// and no scrub ran (the recommendation, when present, was acted on
     /// through the Stage-8 machinery).
     pub scrub: Option<ScrubReport>,
     /// `true` when device health is critical enough that the volume should be
-    /// mounted read-only (critical single-device health, §11).
+    /// mounted read-only (critical single-device health).
     pub read_only_recommended: bool,
 }
 
 impl HealthReport {
     /// Emit the closing health event for this report to `sink` with a stable
-    /// event ID (`AGENTS.md` §5.4 / §19.4).
+    /// event ID.
     fn log_outcome(&self, sink: &dyn Sink) {
         if self.scrub.is_some() {
             log(
@@ -262,7 +259,7 @@ impl HealthReport {
 }
 
 /// The volume's accumulated filesystem-observed fault history. Persisted in
-/// the baseline block (not rebuildable, §4): a transient fault that was
+/// the baseline block (not rebuildable): a transient fault that was
 /// repaired leaves no trace in the live trees, so the count is only durable
 /// if it is written down.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -302,7 +299,7 @@ impl FaultCounters {
 
     /// Fold one scrub's findings into the lifetime counters (saturating, so a
     /// pathological volume can never wrap a counter past the threshold and
-    /// look healthy again — `AGENTS.md` §2.9).
+    /// look healthy again).
     fn fold_scrub(&mut self, report: &ScrubReport) {
         self.metadata_repaired = self
             .metadata_repaired
@@ -359,7 +356,7 @@ fn snapshot_to_array(s: &HealthSnapshot) -> [u64; SNAPSHOT_FIELDS] {
 
 /// Reconstruct a [`HealthSnapshot`] from its eleven persisted fields,
 /// clamping the narrow fields into range (a corrupt baseline is rebuilt at
-/// the next clean health pass, §4, so it never blocks a mount).
+/// the next clean health pass, so it never blocks a mount).
 fn snapshot_from_array(a: [u64; SNAPSHOT_FIELDS]) -> HealthSnapshot {
     HealthSnapshot {
         power_on_hours: a[0],
@@ -434,20 +431,19 @@ impl<B: Block> RustFs<B> {
     /// scrub's findings into the volume's accumulated fault history. It then
     /// stores the current telemetry as the new baseline so the next pass
     /// compares against it, and returns a structured [`HealthReport`]. The
-    /// closing classification is logged to `sink` with a stable event ID
-    /// (`AGENTS.md` §5.4 / §19.4).
+    /// closing classification is logged to `sink` with a stable event ID.
     ///
     /// A device that exposes no telemetry yields a report whose
     /// classification rests on the accumulated filesystem-observed counters
-    /// alone; the subsystem stays enabled regardless (§11).
+    /// alone; the subsystem stays enabled regardless.
     ///
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if `caps` does not grant
-    ///   [`CapabilityId::FS_MOUNT`] (fail-closed, `AGENTS.md` §5.4).
+    ///   [`CapabilityId::FS_MOUNT`] (fail-closed).
     /// * [`DriverError::DeviceFault`] / [`DriverError::NoSpace`] on an
     ///   unrecoverable device error while reading telemetry, scrubbing, or
-    ///   persisting the baseline (never a panic, §2.9).
+    ///   persisting the baseline (never a panic).
     ///
     /// # Capabilities
     ///
@@ -491,7 +487,7 @@ impl<B: Block> RustFs<B> {
         if metadata_scrub_recommended || deep_scrub_recommended {
             // Reuse the Stage-8 scrub: the gate is already satisfied, so it
             // verifies the whole volume and folds its findings into the
-            // lifetime counters (`AGENTS.md` §2.2 — no parallel verifier).
+            // lifetime counters (no parallel verifier).
             let report = self.scrub(caps, sink, ScrubBudget::Unlimited)?;
             counters.fold_scrub(&report);
             scrub = Some(report);
@@ -506,7 +502,7 @@ impl<B: Block> RustFs<B> {
         // Persist the new baseline: the current telemetry becomes the next
         // "last clean state" and the folded counters become the new history.
         // A crash mid-update leaves the previous committed baseline selected
-        // and never loses live data (§14).
+        // and never loses live data.
         self.begin();
         let new_baseline = Baseline {
             device: current,
@@ -562,8 +558,7 @@ impl<B: Block> RustFs<B> {
 
     /// Load the persisted baseline from the health-baseline block. Returns
     /// `None` when no baseline exists or the record is unreadable or its magic
-    /// is wrong: the baseline is rebuildable at the next clean health pass
-    /// (§4), so a corrupt one is simply re-established rather than failing the
+    /// is wrong: the baseline is rebuildable at the next clean health pass, so a corrupt one is simply re-established rather than failing the
     /// mount.
     fn load_health_baseline(&mut self) -> Option<Baseline> {
         if self.health_baseline_root == 0 {
@@ -600,7 +595,7 @@ impl<B: Block> RustFs<B> {
 
     /// Persist `baseline` to the health-baseline block, copy-on-writing it
     /// (and updating [`Self::health_baseline_root`]) so a crash mid-update
-    /// still leaves a mountable volume (§14).
+    /// still leaves a mountable volume.
     fn store_health_baseline(&mut self, baseline: &Baseline) -> Result<(), DriverError> {
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         let bs = self.block_size;

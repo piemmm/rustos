@@ -6,14 +6,13 @@
 //! same glyph rasterises crisply at any DPI / UI scale and is tinted by the
 //! active theme rather than baking a palette into a bitmap. This is the
 //! notification-icon artwork of `PLAN.md` Stage 7, and the same SVG-first
-//! vector-then-rasterise pipeline the cursors already use (`AGENTS.md` §10).
+//! vector-then-rasterise pipeline the cursors already use.
 //!
 //! Like `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, and
 //! `lib/cursor`, this crate lives in `lib/*` so the taskbar uses it without
-//! the taskbar and the window manager depending on one another (`AGENTS.md`
-//! §6, §17.4). It owns no scan converter or colour arithmetic of its own:
+//! the taskbar and the window manager depending on one another. It owns no scan converter or colour arithmetic of its own:
 //! every glyph rasterises through `lib/raster`'s single supersampled
-//! [`Surface::fill_polygon`] path (`AGENTS.md` §2.2), exactly as a cursor
+//! [`Surface::fill_polygon`] path, exactly as a cursor
 //! does — there is no second polygon rasteriser.
 //!
 //! # Pipeline

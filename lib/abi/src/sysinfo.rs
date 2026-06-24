@@ -1,14 +1,13 @@
-//! System Information API (`sysinfo`) — the §16.6 ABI surface.
+//! System Information API (`sysinfo`) — the ABI surface.
 //!
 //! RustOS has no `/proc` and no `/sys`. Every piece of live system
 //! information that would have lived under those trees is exposed through
 //! this single, versioned, capability-checked API. Each query is a *typed*
 //! request returning a *typed* response — there is no free-form text
 //! scraping interface — and every query declares the capability a caller
-//! must hold to invoke it (`AGENTS.md` §16.6).
+//! must hold to invoke it.
 //!
-//! Adding a query carries the same discipline as adding a syscall
-//! (`AGENTS.md` §9): the registry is versioned, its canonical encoding is
+//! Adding a query carries the same discipline as adding a syscall: the registry is versioned, its canonical encoding is
 //! hashed, and it is frozen on release. Existing [`SysinfoQueryId`] numbers
 //! and [`SysinfoQuerySpec`] rows must never be re-numbered or removed; new
 //! queries take the next free identifier and ship in `sysinfo-v2`.
@@ -63,12 +62,11 @@ impl SysinfoQueryId {
     /// List the currently-mounted filesystems. Requires no capability:
     /// the mount table is system-wide rather than scoped to a principal,
     /// and exposes no per-process secret, so — like [`Self::UPTIME`] and
-    /// [`Self::SYSTEM_IDENTITY`] — any task may read it (`AGENTS.md`
-    /// §16.6). The privileged *act* of mounting is gated separately by
+    /// [`Self::SYSTEM_IDENTITY`] — any task may read it. The privileged *act* of mounting is gated separately by
     /// `CAP_FS_MOUNT`; this query only reports.
     pub const MOUNT_LIST: Self = Self(6);
     /// Read the calling principal's own effective resource limits together
-    /// with its current live usage of each (`AGENTS.md` §24.3, §16.6).
+    /// with its current live usage of each.
     ///
     /// Requires no capability: the answer is scoped to the caller's own
     /// task, exposing no other principal's state — like
@@ -135,7 +133,7 @@ pub struct SysinfoQuerySpec {
     /// `None` means any task may issue the query (its answer is scoped to
     /// the caller's own principal); `Some(cap)` means the serving service
     /// refuses with [`Errno::PermissionDenied`] unless the caller's
-    /// effective set contains `cap` (`AGENTS.md` §16.6).
+    /// effective set contains `cap`.
     pub required_capability: Option<CapabilityId>,
     /// Whether the service must emit an audit record for every invocation.
     ///
@@ -637,7 +635,7 @@ impl KernelMemoryStats {
 
 /// Response payload for [`SysinfoQueryId::UPTIME`].
 ///
-/// Time is carried with the 64-bit-native ABI types (`AGENTS.md` §21): the
+/// Time is carried with the 64-bit-native ABI types: the
 /// monotonic span since boot as a [`Duration64`] and the wall-clock boot
 /// instant as a [`Time64`]. Absolute time is never a seconds-only scalar.
 #[repr(C)]
@@ -678,7 +676,7 @@ impl Uptime {
     }
 }
 
-/// Bytes of the per-installation machine identifier (`AGENTS.md` §11).
+/// Bytes of the per-installation machine identifier.
 pub const MACHINE_ID_LEN: usize = 16;
 
 /// Maximum bytes of a hostname carried in a [`SystemIdentity`].
@@ -804,7 +802,7 @@ pub const MOUNT_FSTYPE_MAX: usize = 16;
 ///
 /// Structurally parallel to [`ProcessListRequest`] but a distinct frozen
 /// payload: each `sysinfo-v1` query owns its argument type, exactly as each
-/// syscall owns its argument shape (`AGENTS.md` §9). The response is a
+/// syscall owns its argument shape. The response is a
 /// sequence of [`MountRecord`]s; the client pages through it with
 /// `offset`/`limit` so a fixed-size transport buffer never has to hold every
 /// mount at once.
@@ -860,12 +858,12 @@ impl MountListRequest {
 ///
 /// Each record names a mounted filesystem by its backing `source`, the
 /// `target` path it is mounted at, the driver `fstype`, and the
-/// [`MountFlags`] policy in force (`ro`/`nosuid`/`nodev`/`noexec`, §5.3).
+/// [`MountFlags`] policy in force (`ro`/`nosuid`/`nodev`/`noexec`).
 /// The string fields are inline fixed-capacity buffers, so the whole record
 /// is a flat, allocation-free `repr(C)` block of [`MountRecord::WIRE_LEN`]
 /// bytes encoded little-endian. The policy bits reuse the same
 /// [`MountFlags`] type the filesystem driver ABI defines rather than
-/// re-declaring the flag algebra (`AGENTS.md` §2.2).
+/// re-declaring the flag algebra.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MountRecord {
@@ -1154,7 +1152,7 @@ mod tests {
     #[test]
     fn capability_gates_are_frozen() {
         // Self-scoped observers are ungated; cross-principal / kernel /
-        // hardware queries each carry their declared capability (§16.6).
+        // hardware queries each carry their declared capability.
         assert_eq!(
             spec_for(SysinfoQueryId::SELF_PROCESS_LIST)
                 .unwrap()
@@ -1180,7 +1178,7 @@ mod tests {
             Some(CapabilityId::SYSINFO_HW)
         );
         // The mount table is system-wide but secret-free, so it is ungated
-        // like uptime and identity (§16.6).
+        // like uptime and identity.
         assert_eq!(
             spec_for(SysinfoQueryId::MOUNT_LIST)
                 .unwrap()
@@ -1193,7 +1191,7 @@ mod tests {
         assert!(!spec_for(SysinfoQueryId::UPTIME).unwrap().audit);
         assert!(!spec_for(SysinfoQueryId::MOUNT_LIST).unwrap().audit);
         // A principal reads its own limits + usage; self-scoped, so ungated
-        // and unaudited like the other self-scoped observers (§24.3, §16.6).
+        // and unaudited like the other self-scoped observers.
         assert_eq!(
             spec_for(SysinfoQueryId::RESOURCE_LIMITS)
                 .unwrap()

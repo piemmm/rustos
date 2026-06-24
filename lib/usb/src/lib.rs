@@ -1,7 +1,7 @@
 //! RustOS bus-agnostic `xHCI` USB host-controller protocol.
 //!
 //! This `lib/*` crate carries the host-provable, **bus-agnostic** `xHCI`
-//! layers (`AGENTS.md` §2.2 / §6 / §17.4): the register vocabulary
+//! layers: the register vocabulary
 //! ([`regs`]), the TRB vocabulary ([`trb`]), the ring state machines
 //! ([`ring`]), the controller bring-up sequence ([`Xhci::open`] — `xHCI`
 //! 1.2 §4.2: halt, reset, wait ready), and the single-device enumeration
@@ -12,9 +12,9 @@
 //!
 //! It is the USB analogue of `lib/virtio`: the protocol lives here so a
 //! concrete host-controller *driver* (`drivers/bus/usb`, which adds the
-//! PCI discovery/BAR/DMA wiring and the §8 `register` entry) and an
+//! PCI discovery/BAR/DMA wiring and the `register` entry) and an
 //! arch-neutral user-space keyboard driver can both consume it without
-//! depending on each other (`AGENTS.md` §17.4 — `drivers/* → lib/*`
+//! depending on each other (`drivers/* → lib/*`
 //! only).
 //!
 //! # Layered seam
@@ -22,10 +22,8 @@
 //! Every controller access goes through the [`XhciHost`] register seam,
 //! not a concrete memory mapping. Metal drives it over a
 //! capability-gated [`RegisterWindow`] whose base the hardware tree
-//! discovered (PCI BAR assignment — never a compiled-in constant,
-//! `AGENTS.md` §18.1); host tests drive it over a register-level mock
-//! controller. This mirrors the `emmc2` `SdhciHost` seam (`AGENTS.md`
-//! §2.2): the bring-up and ring protocol is proven host-side, the
+//! discovered (PCI BAR assignment — never a compiled-in constant); host tests drive it over a register-level mock
+//! controller. This mirrors the `emmc2` `SdhciHost` seam: the bring-up and ring protocol is proven host-side, the
 //! doorbell below it on metal.
 //!
 //! # Public surface
@@ -55,11 +53,11 @@ mod tests;
 /// Upper bound on register polls while waiting for a controller event.
 ///
 /// A bound on a *defence* against an unresponsive or absent controller,
-/// not a scalable capacity (`AGENTS.md` §24.4): controller ready, halt,
+/// not a scalable capacity: controller ready, halt,
 /// and reset each complete within milliseconds on real silicon, so a
 /// million polls is orders of magnitude past any honest completion.
 /// Exceeding it fails closed with [`DriverError::DeviceFault`] rather
-/// than spinning forever (`AGENTS.md` §2.1).
+/// than spinning forever.
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 
 /// Bytes a host carves for one controller's device-shared DMA structures.
@@ -74,13 +72,13 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// exact count is read from the controller and laid out by
 /// [`device::UsbDevice::start`], which fails closed if the carve cannot hold
 /// it, so this is a fixed protocol working set for one device, not a
-/// scalable capacity (`AGENTS.md` §24.4).
+/// scalable capacity.
 ///
 /// It lives here, beside the engine that consumes it, so every host that
 /// carves a controller's DMA region — the PCI bus driver's wiring
 /// (`drivers/bus/usb`) and the arch-neutral user-space keyboard driver
 /// (`drivers/input/usb_hid`) — depends on one definition rather than each
-/// carrying its own copy (`AGENTS.md` §2.2).
+/// carrying its own copy.
 pub const XHCI_DMA_BYTES: usize = 256 * 1024;
 
 // Worst case (255 slots + 31 scratchpad pages at 4 KiB) is ~132 KiB;
@@ -95,11 +93,11 @@ const _: () = assert!(XHCI_DMA_BYTES >= 160 * 1024);
 /// controller's register BAR — the PCI bus driver's wiring
 /// (`drivers/bus/usb`) and the root-complex bus driver that resolves the
 /// controller's BAR before publishing it (`drivers/bus/pcie_brcm`) — depends
-/// on one definition (`AGENTS.md` §2.2).
+/// on one definition.
 pub const XHCI_BAR_INDEX: u8 = 0;
 
 /// The device-tree-style `compatible` identity a discovered xHCI USB
-/// host-controller node carries (`AGENTS.md` §18.1).
+/// host-controller node carries.
 ///
 /// A bus driver that brings an xHCI controller up publishes the controller
 /// into the hardware tree under this `compatible` string, and the
@@ -109,10 +107,10 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// vendor name, so it lives here beside the controller engine as the single
 /// definition both the emitting bus driver (`drivers/bus/usb/vl805`) and the
 /// binding controller driver (`drivers/input/usb_kbd`) depend on, never a
-/// copy in each (`AGENTS.md` §2.2 / §2.20).
+/// copy in each.
 pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
 
-/// Highest doorbell target value (§5.6: endpoint IDs 1..=31 for device
+/// Highest doorbell target value (: endpoint IDs 1..=31 for device
 /// doorbells; 0 is the command-ring target on doorbell 0).
 const DOORBELL_TARGET_MAX: u32 = 31;
 
@@ -120,7 +118,7 @@ const DOORBELL_TARGET_MAX: u32 = 31;
 ///
 /// Every controller access the [`Xhci`] engine makes goes through this
 /// trait, so the bring-up state machine is proven host-side against a
-/// register-level mock (`AGENTS.md` §2.2). Both methods take
+/// register-level mock. Both methods take
 /// `&mut self` so a model can represent registers with side-effects
 /// (self-clearing reset bits; write-1-to-clear status bits).
 pub trait XhciHost {
@@ -164,7 +162,7 @@ impl PortStatus {
     }
 
     /// The raw `PORTSC` dword this view wraps, for one-shot diagnostics
-    /// (a metal capture of every root-hub port's status, §15.7).
+    /// (a metal capture of every root-hub port's status).
     #[must_use]
     pub const fn raw(self) -> u32 {
         self.0
@@ -213,12 +211,12 @@ impl PortStatus {
 /// The device-shared memory addresses [`Xhci::start`] programs.
 ///
 /// Every address is device-visible and 64-byte aligned (the strictest
-/// alignment any of the four structures requires, §6.1); the memory
+/// alignment any of the four structures requires); the memory
 /// they point into is owned by the caller's DMA region
 /// ([`device::DmaRegion`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DmaProgram {
-    /// Device context base address array (§6.1), for `DCBAAP`.
+    /// Device context base address array, for `DCBAAP`.
     pub dcbaap: u64,
     /// Command ring base, for `CRCR` (consumer cycle state starts 1).
     pub command_ring: u64,
@@ -252,7 +250,7 @@ impl DmaProgram {
 
 /// An `xHCI` controller brought to the halted, freshly reset state.
 ///
-/// [`Xhci::open`] validates the capability block, then runs the §4.2
+/// [`Xhci::open`] validates the capability block, then runs the
 /// initialisation prologue: wait for Controller Not Ready to clear,
 /// halt a running controller, and issue a Host Controller Reset. The
 /// controller is left halted; [`Xhci::start`] programs the DMA
@@ -436,7 +434,7 @@ impl<H: XhciHost> Xhci<H> {
             csz: regs::hccparams1_csz(capability),
         };
         // The scratchpad buffers are each one controller page and
-        // page-aligned (§5.4.3); read the size now so [`Self::start`] can
+        // page-aligned; read the size now so [`Self::start`] can
         // lay them out. A malformed register (no supported size) fails
         // closed at the capability stage rather than assuming 4 KiB.
         let page_raw = xhci
@@ -453,7 +451,7 @@ impl<H: XhciHost> Xhci<H> {
         Ok(xhci)
     }
 
-    /// Run the §4.2 initialisation prologue on a freshly-parsed
+    /// Run the initialisation prologue on a freshly-parsed
     /// controller: halt a running controller, clear any latched
     /// Host System Error / Port Change status firmware left, issue the
     /// Host Controller Reset, and wait for it to self-clear and for
@@ -583,7 +581,7 @@ impl<H: XhciHost> Xhci<H> {
     }
 
     /// The controller page size in bytes the scratchpad buffers are sized
-    /// and aligned to (`PAGESIZE`, §5.4.3; `0` only when no scratchpad is
+    /// and aligned to (`PAGESIZE`; `0` only when no scratchpad is
     /// required and the register was unreadable).
     #[must_use]
     pub const fn page_size(&self) -> usize {
@@ -607,10 +605,9 @@ impl<H: XhciHost> Xhci<H> {
     /// register window faults the read.
     ///
     /// A driver wraps the engine's coarse [`DriverError`] with its own
-    /// structured diagnostics (the engine holds no logging dependency,
-    /// `AGENTS.md` §17.4 / §2.2); this exposes the operational command
+    /// structured diagnostics (the engine holds no logging dependency); this exposes the operational command
     /// register so a stuck-controller capture names what the silicon
-    /// reported (`AGENTS.md` §15.7).
+    /// reported.
     pub fn read_usbcmd(&mut self) -> Option<u32> {
         self.read_op(regs::USBCMD).ok()
     }
@@ -646,7 +643,7 @@ impl<H: XhciHost> Xhci<H> {
             .write32(self.rt_base + regs::IR0_BASE + offset, value)
     }
 
-    /// Program the DMA structures and start the controller (§4.2
+    /// Program the DMA structures and start the controller (
     /// steps 5–7): `CONFIG` (all reported slots enabled), `DCBAAP`,
     /// `CRCR` (consumer cycle state 1), interrupter 0's single-entry
     /// event ring segment table and dequeue pointer, then Run/Stop.
@@ -654,9 +651,8 @@ impl<H: XhciHost> Xhci<H> {
     /// # Errors
     ///
     /// * [`DriverError::OutOfRange`] if any `prog` address is zero or
-    ///   not 64-byte aligned (§6.1) — the controller would fault or,
-    ///   worse, DMA somewhere unintended (fail closed, `AGENTS.md`
-    ///   §5.4).
+    ///   not 64-byte aligned — the controller would fault or,
+    ///   worse, DMA somewhere unintended (fail closed).
     /// * [`DriverError::DeviceFault`] if the controller never leaves
     ///   the halted state within `budget` polls.
     pub fn start(&mut self, prog: &DmaProgram, budget: u32) -> Result<(), DriverError> {
@@ -668,7 +664,7 @@ impl<H: XhciHost> Xhci<H> {
         // the controller at. Order those Normal-Non-Cacheable writes ahead of
         // the register stores below so the controller — a separate,
         // possibly non-coherent bus master — never reads stale structures
-        // once `RUN` is set (`AGENTS.md` §2.16; see `rustos_dma_barrier`).
+        // once `RUN` is set (see `rustos_dma_barrier`).
         rustos_dma_barrier::dma_wmb();
         self.write_op(regs::CONFIG, u32::from(self.max_slots))?;
         self.write_op(regs::DCBAAP, low_dword(prog.dcbaap))?;
@@ -777,7 +773,7 @@ impl<H: XhciHost> Xhci<H> {
         Ok(())
     }
 
-    /// Ring a doorbell (§5.6): `index` 0 with `target` 0 notifies the
+    /// Ring a doorbell: `index` 0 with `target` 0 notifies the
     /// command ring; `index` 1..=`MaxSlots` with `target` 1..=31
     /// notifies a device endpoint.
     ///
@@ -803,7 +799,7 @@ impl<H: XhciHost> Xhci<H> {
         // doorbell store that hands them to the controller. Without this the
         // controller can observe the doorbell before the just-written TRBs on
         // non-coherent DMA memory and act on stale ring contents — the metal
-        // failure this fixes (`AGENTS.md` §2.16; see `rustos_dma_barrier`).
+        // failure this fixes (see `rustos_dma_barrier`).
         rustos_dma_barrier::dma_wmb();
         self.host
             .write32(self.db_base + usize::from(index) * 4, target)

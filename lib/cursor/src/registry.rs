@@ -9,9 +9,9 @@
 //! Stage 7): a different cursor set is a different `CursorTheme` under a new
 //! id, with no window-manager change.
 //!
-//! Both mutators fail closed (`AGENTS.md` §5.4): selecting an unknown set or
+//! Both mutators fail closed: selecting an unknown set or
 //! registering a duplicate id returns a [`CursorRegistryError`] and leaves
-//! the registry unchanged rather than panicking (`AGENTS.md` §2.9).
+//! the registry unchanged rather than panicking.
 
 use alloc::vec::Vec;
 

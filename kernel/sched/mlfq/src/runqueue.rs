@@ -25,8 +25,7 @@
 //! with three RustOS-specific simplifications:
 //!
 //! 1. The buffer is **bounded** (its capacity is fixed at construction).
-//!    An unbounded queue is a `DoS` vector against the kernel
-//!    (`AGENTS.md` §5). Overflow is signalled to the caller via
+//!    An unbounded queue is a `DoS` vector against the kernel. Overflow is signalled to the caller via
 //!    [`crate::SchedError::QueueFull`], which the scheduler handles by
 //!    routing the affected task to another CPU.
 //! 2. Slot payload is [`crate::TaskId`] (a `Copy` `u64`), not a
@@ -93,7 +92,7 @@ impl RunDeque {
     /// Returns `None` if `capacity` is not a power of two, is less than 2,
     /// or exceeds `i64::MAX as usize`. A typed `Option` is preferable to
     /// a panic so the caller — always the scheduler — can surface the
-    /// configuration error through `SchedError` (`AGENTS.md` §2.9).
+    /// configuration error through `SchedError`.
     #[must_use]
     pub fn try_new(capacity: usize) -> Option<Self> {
         if capacity < 2 || !capacity.is_power_of_two() {
@@ -136,7 +135,7 @@ impl RunDeque {
     /// (`crate::Scheduler::dispatch` → `set_preemption`), never to enforce
     /// safety: a spurious "ready" merely arms one extra one-shot quantum,
     /// and a missed "ready" is corrected at the next dispatch or the
-    /// spawn/unpark IPI (`AGENTS.md` §17.1 / §2.9).
+    /// spawn/unpark IPI.
     #[must_use]
     pub fn has_ready(&self) -> bool {
         let b = self.bottom.load(Ordering::Acquire);

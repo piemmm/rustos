@@ -3,7 +3,7 @@
 //!
 //! ## What this test asserts
 //!
-//! `AGENTS.md` §4 states that "memory isolation is enforced by hardware
+//! states that "memory isolation is enforced by hardware
 //! (page tables / MMU / WASM sandboxing). A process can only reach
 //! another process's memory through an explicit, capability-checked
 //! shared-memory IPC object." This binary is the riscv64 analogue of
@@ -41,7 +41,7 @@
 //!    the `SiFive` Test PASS finisher.
 //!
 //! Any other outcome (no fault, wrong cause, wrong `stval`, corrupted
-//! victim) is a closed failure (`AGENTS.md` §5.4.5 — fail closed). A
+//! victim) is a closed failure (fail closed). A
 //! regression that maps the attacker's `SECRET_VADDR` never faults and
 //! falls through to the failure finisher.
 
@@ -191,7 +191,7 @@ mod kernel {
             qemu_exit::exit_failure(FAIL_POOL);
         };
         // Install the secret mapping through the Arch HAL MMU surface
-        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the §17.2 path
+        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the path
         // the architecture-neutral kernel uses, rather than the port's
         // inherent `map_4k` (`plans/WIRING.md` W5b).
         if victim

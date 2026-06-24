@@ -1,14 +1,14 @@
 //! RustOS USB-HID boot-protocol input driver (keyboard + mouse).
 //!
-//! This crate is the **driver**: the §8 loadable-module identity for a USB
+//! This crate is the **driver**: the loadable-module identity for a USB
 //! HID boot keyboard or mouse — the single [`register`] entry point and the
-//! §18.3 [`BIND_KEYS`] bind table `devmgr` matches a discovered HID node
+//! [`BIND_KEYS`] bind table `devmgr` matches a discovered HID node
 //! against. All the reusable protocol logic — the boot-report decoders, the
 //! console-input producer, and the arch-neutral xHCI boot-keyboard
 //! orchestration — lives in the `rustos_hid` library, so it is shared by
 //! both the in-kernel keyboard scaffold (transitional) and the user-space
 //! keyboard driver process (`drivers/input/usb_kbd`) without a
-//! `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2), exactly as
+//! `drivers/*`→`drivers/*` dependency, exactly as
 //! the bus-agnostic xHCI protocol lives in `rustos_usb` rather than the xHCI
 //! driver.
 //!
@@ -17,7 +17,7 @@
 //! Loading requires [`CapabilityId::DRV_LOAD`]; the device's reports are
 //! decoded by the `rustos_hid` decoders the loader wires over the
 //! interrupt-IN endpoint. The driver runs in user space and does not request
-//! `CAP_DRV_KERNEL` (`AGENTS.md` §4 / §8).
+//! `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -43,19 +43,19 @@ const HID_BOOT_KEYBOARD_CLASS: u32 = 0x03_01_01;
 /// class `0x03` (HID), sub-class `0x01` (boot), protocol `0x02` (mouse).
 const HID_BOOT_MOUSE_CLASS: u32 = 0x03_01_02;
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries.
+/// The bind priority [`BIND_KEYS`] carries.
 ///
 /// This driver binds the HID boot classes regardless of vendor/product
 /// (the wildcard match of [`HwMatchKey::matches`]), so it ranks below a
-/// vendor-specific HID driver naming an exact device id, per §18.3.
+/// vendor-specific HID driver naming an exact device id,.
 const BIND_PRIORITY: u16 = 5;
 
-/// This driver's hardware bind table (`AGENTS.md` §18.3).
+/// This driver's hardware bind table.
 ///
 /// It binds any HID **boot-protocol** keyboard or mouse interface by
 /// class alone (vendor/product wildcard), so any such device enumerated
 /// behind a USB host autoloads this driver without its device id being
-/// hard-coded (`AGENTS.md` §2.2 / §18.3). This `const` is the single
+/// hard-coded. This `const` is the single
 /// source of truth the driver's signed-manifest bind table is authored
 /// from and the data `devmgr` resolves a discovered HID node against once
 /// the USB enumeration emits it into the hardware tree (PLAN Stage 4.HW
@@ -68,7 +68,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
     DriverBindKey::new(BIND_PRIORITY, HwMatchKey::usb(0, 0, HID_BOOT_MOUSE_CLASS)),
 ];
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///

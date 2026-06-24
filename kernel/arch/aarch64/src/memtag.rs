@@ -1,4 +1,4 @@
-//! aarch64 memory tagging — Arm MTE (`AGENTS.md` §19.10).
+//! aarch64 memory tagging — Arm MTE.
 //!
 //! Implements the Arch HAL
 //! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for aarch64
@@ -25,7 +25,7 @@
 //!   store-tag path, ready for the allocator to stamp a freshly-rotated
 //!   tag onto a region.
 //!
-//! # Why both §19.10 slots are `Pending`
+//! # Why both slots are `Pending`
 //!
 //! The `stg` store is only architecturally defined when MTE is *enabled*
 //! (`SCTLR_EL1.ATA`/`TCF`) and the target memory is mapped `Normal
@@ -38,7 +38,7 @@
 //! gated behind a per-handle `mte_enabled` flag that defaults **off**, so
 //! the sequence is compiled and reviewed but never executed on
 //! possibly-MTE-less silicon. The profile is honestly [`Tagging::Pending`](rustos_arch_api::Tagging::Pending)
-//! on both slots — not release-ready — exactly as the §19.1 side-channel
+//! on both slots — not release-ready — exactly as the side-channel
 //! KPTI / Spectre-v2 slots are `Pending` on this port. Use-after-free is
 //! hardened *today* by the architecture-neutral software tag check in
 //! `kernel/mem`, which shares this HAL's tag rotation.
@@ -87,7 +87,7 @@ impl MemoryTags {
         self.mte_enabled
     }
 
-    /// The honest §19.10 declaration for aarch64 (see the module docs).
+    /// The honest declaration for aarch64 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> TaggingProfile {
         TaggingProfile {

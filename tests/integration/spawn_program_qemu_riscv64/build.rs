@@ -8,12 +8,12 @@
 //! 1. compiles the fixture program **position-independent** for the freestanding
 //!    riscv64 target (its own `program.ld` roots crt0's `_start`), into a
 //!    private target directory under `OUT_DIR` so it never collides with the
-//!    outer build (`AGENTS.md` §2.2 — one program source, built two ways);
+//!    outer build (one program source, built two ways);
 //! 2. converts the linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2);
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it;
 //! 3. emits the bytes and `USER_BIAS` as a Rust source the test `include!`s.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it emits
@@ -55,7 +55,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == RISCV64_TARGET {
         // Hand the riscv64 `virt` linker script to the test kernel itself
-        // (the single per-arch script the architecture port owns, §2.2).
+        // (the single per-arch script the architecture port owns).
         let linker = format!("{manifest_dir}/../../../kernel/arch/riscv64/link/riscv64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -85,8 +85,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots crt0's trampoline; it is built position-independent
-    // (`AGENTS.md` §19.2). Scope the PIE link flags to the riscv64 target so
+    // `ENTRY(_start)` roots crt0's trampoline; it is built position-independent. Scope the PIE link flags to the riscv64 target so
     // the program's own host build script is unaffected, and build `core` /
     // `compiler_builtins` as PIC alongside it (`-Z build-std`).
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());

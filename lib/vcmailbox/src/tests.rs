@@ -663,7 +663,7 @@ fn xhci_reset_round_trips_through_a_healthy_firmware() {
     // A healthy firmware echoes the set-tag and stamps the OK header;
     // the notify call accepts it and surfaces the firmware's response
     // value word (the echoed `dev_addr`), which the metal bring-up logs
-    // to confirm the firmware processed the request (`AGENTS.md` §15.7).
+    // to confirm the firmware processed the request.
     let mut firmware = MockFirmware::healthy();
     assert_eq!(
         notify_xhci_reset(&mut firmware, TEST_VL805_DEV_ADDR).expect("reset accepted"),
@@ -702,7 +702,7 @@ fn xhci_reset_decode_rejects_an_unhonoured_tag() {
     // tag still stamps the OK *header* but leaves the tag's own response
     // code clear (no response bit). An OK header alone must NOT be read
     // as a successful reload — the decode requires the per-tag response
-    // bit and fails closed otherwise (`AGENTS.md` §5.4), so the metal
+    // bit and fails closed otherwise, so the metal
     // bring-up reports `Failed` rather than a false `Reloaded`.
     let mut unhonoured = encode_xhci_reset(TEST_VL805_DEV_ADDR);
     unhonoured[1] = CODE_RESPONSE_OK; // header OK, tag code word still 0.
@@ -731,8 +731,7 @@ fn firmware_revision_query_lays_out_the_get_tag() {
 fn firmware_revision_round_trips_through_a_healthy_firmware() {
     // The liveness probe reads the firmware's configured revision word
     // over the transport; a non-zero value proves the runtime mailbox
-    // path is sound before the heavier xHCI-reset call (`AGENTS.md`
-    // §15.7).
+    // path is sound before the heavier xHCI-reset call.
     let mut firmware = MockFirmware::healthy();
     assert_eq!(
         query_firmware_revision(&mut firmware).expect("revision read"),
@@ -878,15 +877,15 @@ fn mailbox_errors_map_to_driver_errors() {
     );
 }
 
-// --- Driver bind table (§18.3 autoload) --------------------------------
+// --- Driver bind table (autoload) --------------------------------
 
 #[test]
 fn bind_keys_match_the_discovered_mailbox_node_compatible() {
     // The `vcmailbox` service driver's single bind key resolves a discovered
     // mailbox node by its device-tree `compatible` string — the exact
-    // autoload decision `devmgr` makes (`AGENTS.md` §18.3). The aarch64
+    // autoload decision `devmgr` makes. The aarch64
     // discovery emits the node carrying this same `compatible` (the shared
-    // `MAILBOX_COMPATIBLE`), so the two can never diverge (`AGENTS.md` §2.2).
+    // `MAILBOX_COMPATIBLE`), so the two can never diverge.
     assert_eq!(BIND_KEYS.len(), 1, "the service binds exactly one device");
     let node_key = HwMatchKey::compatible(MAILBOX_COMPATIBLE).expect("fits HW_COMPATIBLE_MAX");
     assert!(
@@ -898,7 +897,7 @@ fn bind_keys_match_the_discovered_mailbox_node_compatible() {
 #[test]
 fn bind_keys_do_not_match_an_unrelated_node() {
     // A node advertising a different `compatible` matches nothing — the
-    // service binds only its declared device (`AGENTS.md` §18.3 / §18.4).
+    // service binds only its declared device.
     let other = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&other));
 }

@@ -1,10 +1,10 @@
 //! Stable [`rustos_log::EventId`] constants emitted by `sysinfod`.
 //!
-//! Per `lib/log` convention (`AGENTS.md` §2.5) every subsystem owns a
+//! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. The System Information service occupies
 //! `8000..9000` (adjacent to the driver host's `7000..8000`). Once shipped
 //! the numeric values must never be re-used or re-numbered — external
-//! audit-log consumers rely on them (`AGENTS.md` §16.6 / §19.4).
+//! audit-log consumers rely on them.
 
 use rustos_log::EventId;
 
@@ -20,14 +20,14 @@ pub const SYSINFOD_RANGE_END: u32 = 9_000;
 ///
 /// Emitted for every invocation of a query whose
 /// [`SysinfoQuerySpec::audit`](rustos_abi::SysinfoQuerySpec) flag is set —
-/// the cross-principal, kernel, and hardware queries (`AGENTS.md` §16.6).
+/// the cross-principal, kernel, and hardware queries.
 /// Self-scoped observers are deliberately not recorded, to avoid drowning
 /// the audit log.
 pub const QUERY_SERVED: EventId = EventId(8_001);
 /// A query was refused because the caller lacks its required capability.
 ///
 /// Recorded for *any* query, audited or not: a denial is a
-/// security-relevant decision in its own right (`AGENTS.md` §5.4.4).
+/// security-relevant decision in its own right.
 pub const QUERY_DENIED: EventId = EventId(8_002);
 /// A request was rejected before dispatch: the header failed to decode, or
 /// its declared payload was truncated.

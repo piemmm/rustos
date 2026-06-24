@@ -1,5 +1,4 @@
-//! Pure arithmetic shared by every port's tickless one-shot combiner
-//! (`AGENTS.md` §17.1, §2.21).
+//! Pure arithmetic shared by every port's tickless one-shot combiner.
 //!
 //! A port programs its *single* physical one-shot timer to the earlier of
 //! two pending events: the running task's preemption quantum
@@ -10,8 +9,7 @@
 //! genuinely target-divergent (register layout, MMIO, counter source) and
 //! live in each `kernel/arch/<target>` port; the *combining math* below is
 //! byte-for-byte identical across ports, so it lives here once rather than
-//! being copied into three sibling preempt modules (`AGENTS.md` §2.2 /
-//! §2.21).
+//! being copied into three sibling preempt modules.
 //!
 //! All three helpers are pure `const fn`s over plain integers, so they are
 //! exercised by host unit tests with no timer hardware.
@@ -20,8 +18,7 @@
 ///
 /// `None` means "no event of that kind pending". The result is the soonest
 /// deadline either side carries, or `None` when neither does — exactly the
-/// value the physical one-shot is armed to (`None` ⇒ disarm, `AGENTS.md`
-/// §17.1: a CPU with nothing to preempt to and no armed wakeup takes no
+/// value the physical one-shot is armed to (`None` ⇒ disarm: a CPU with nothing to preempt to and no armed wakeup takes no
 /// timer interrupt).
 #[must_use]
 pub const fn earliest(quantum: Option<u64>, wakeup: Option<u64>) -> Option<u64> {
@@ -37,7 +34,7 @@ pub const fn earliest(quantum: Option<u64>, wakeup: Option<u64>) -> Option<u64> 
 ///
 /// Clamped to at least one tick so a deadline already at or in the past
 /// arms the soonest possible interrupt rather than a zero-interval timer
-/// that re-fires with no forward progress (`AGENTS.md` §2.9 — fail
+/// that re-fires with no forward progress (fail
 /// closed). Saturating, so a `target` far in the future cannot wrap.
 #[must_use]
 pub const fn ticks_from_now(target: u64, now: u64) -> u64 {
@@ -54,10 +51,9 @@ pub const fn ticks_from_now(target: u64, now: u64) -> u64 {
 ///
 /// Computed in 128-bit space and saturated to [`u64::MAX`] so no realistic
 /// deadline overflows, and `hz == 0` is treated as `1` so a malformed
-/// frequency cannot divide-by-zero (`AGENTS.md` §2.9). This is the
+/// frequency cannot divide-by-zero. This is the
 /// `set_wakeup` half of the conversion the monotonic clock performs in the
-/// other direction (`ticks * 1e9 / hz`), kept on the same one frequency
-/// (`AGENTS.md` §2.4).
+/// other direction (`ticks * 1e9 / hz`), kept on the same one frequency.
 #[must_use]
 pub const fn ns_to_ticks(deadline_ns: u64, hz: u64) -> u64 {
     let hz = if hz == 0 { 1 } else { hz };
@@ -66,7 +62,7 @@ pub const fn ns_to_ticks(deadline_ns: u64, hz: u64) -> u64 {
         u64::MAX
     } else {
         // The `> u64::MAX` guard above proves the value fits, so the
-        // narrowing cast is lossless (`AGENTS.md` §2.11 — the cast cannot
+        // narrowing cast is lossless (the cast cannot
         // truncate on this branch).
         #[allow(clippy::cast_possible_truncation)]
         let narrowed = ticks as u64;
@@ -107,8 +103,7 @@ mod tests {
         // 1 s at 24 MHz (a typical aarch64 CNTFRQ) is 24M ticks.
         assert_eq!(ns_to_ticks(1_000_000_000, 24_000_000), 24_000_000);
         // A zero frequency cannot divide by zero: it is treated as 1 Hz,
-        // so the result is small but the call never traps (`AGENTS.md`
-        // §2.9). The value is immaterial — a zero-frequency clock is a
+        // so the result is small but the call never traps. The value is immaterial — a zero-frequency clock is a
         // malformed input the combiner never arms against in practice.
         assert_eq!(ns_to_ticks(1_000_000_000, 0), 1);
         // A pathologically large deadline saturates rather than wrapping.

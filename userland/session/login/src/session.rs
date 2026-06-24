@@ -27,10 +27,9 @@ use rustos_caps::CapabilitySet;
 pub use rustos_users::{Gid, Uid};
 
 /// Maximum accepted input-line length, in bytes, for every prompt read —
-/// a validation bound on untrusted console input (`AGENTS.md` §24.4),
+/// a validation bound on untrusted console input,
 /// matching the `users-v1` format's own per-line bound. A longer line is
-/// refused by the [`Prompt`] implementation, never silently truncated
-/// (`AGENTS.md` §2.9).
+/// refused by the [`Prompt`] implementation, never silently truncated.
 pub const INPUT_LINE_MAX: usize = 512;
 
 /// A username and the password offered for it.
@@ -41,7 +40,7 @@ pub const INPUT_LINE_MAX: usize = 512;
 /// production producer, `plans/SPAWN.md` `SP5b`) is not required to read a
 /// keystroke. Login holds the password only for as long as it takes the
 /// [`Authenticator`] to verify it, then zeroes the backing buffer itself
-/// (`AGENTS.md` §4 — nothing that held a credential survives the attempt);
+/// (nothing that held a credential survives the attempt);
 /// it is never logged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Credentials<'a> {
@@ -54,10 +53,9 @@ pub struct Credentials<'a> {
 /// The identity `kernel/sec` resolves a successful authentication to.
 ///
 /// This is the `(uid, primary gid, supplementary gids, capability grants)`
-/// tuple of `AGENTS.md` §5.1. The `capabilities` field is the user's grant
+/// tuple of. The `capabilities` field is the user's grant
 /// **ceiling**: when [`SessionLauncher::launch`] execs a binary, the loader
-/// intersects this ceiling with the binary's signed manifest request
-/// (`AGENTS.md` §5.2). Login never widens it.
+/// intersects this ceiling with the binary's signed manifest request. Login never widens it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedUser {
     /// The authenticated user's id.
@@ -68,7 +66,7 @@ pub struct AuthenticatedUser {
     pub supplementary_gids: Vec<Gid>,
     /// The maximum capability set this user may exercise this session.
     pub capabilities: CapabilitySet,
-    /// Absolute path of the user's shell of choice (`AGENTS.md` §5.1) —
+    /// Absolute path of the user's shell of choice —
     /// the program [`SessionLauncher::launch`] starts as the text
     /// session. Comes from the account's `/System/Security/Users`
     /// record; login never substitutes its own default.
@@ -77,7 +75,7 @@ pub struct AuthenticatedUser {
 
 /// Which kind of session to launch after a successful authentication.
 ///
-/// Login always offers **text** first (`AGENTS.md` §10); the graphical option
+/// Login always offers **text** first; the graphical option
 /// is presented only when a display driver and the window manager are present
 /// (see [`LoginConfig::graphical_available`](crate::LoginConfig)).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -91,7 +89,7 @@ pub enum SessionKind {
 impl SessionKind {
     /// Interpret the user's free-text session choice.
     ///
-    /// The default is always [`SessionKind::Text`] (`AGENTS.md` §10): an empty
+    /// The default is always [`SessionKind::Text`]: an empty
     /// line, an unrecognised answer, or any explicit text choice selects it.
     /// Only an explicit graphical answer (`g`, `graphical`, or `2`, in any
     /// case, surrounding whitespace ignored) selects [`SessionKind::Graphical`].
@@ -130,15 +128,14 @@ pub struct SessionOutcome {
 /// The controlling terminal: login's only channel to the user.
 ///
 /// The implementation owns the real device I/O; in particular [`read_secret`]
-/// must read the password **without echoing it** (`AGENTS.md` §5 — secrets
-/// are not displayed). Login never performs ambient terminal I/O itself
-/// (`AGENTS.md` §4).
+/// must read the password **without echoing it** (secrets
+/// are not displayed). Login never performs ambient terminal I/O itself.
 ///
 /// Both reads fill a **caller-provided** buffer instead of returning an
-/// owned string, so the prompt path takes no allocator (`AGENTS.md` §2.16
+/// owned string, so the prompt path takes no allocator (
 /// — the userland heap is not required to read a keystroke; the buffer is
 /// the caller's stack). Login validates the filled bytes as UTF-8 itself
-/// (`AGENTS.md` §5.4 — every input validated, in one place).
+/// (every input validated, in one place).
 ///
 /// [`read_secret`]: Prompt::read_secret
 pub trait Prompt {
@@ -154,7 +151,7 @@ pub trait Prompt {
     /// Returns the implementation's [`Errno`] if the terminal cannot be
     /// read (closed, timed out, …) — login treats this as fatal and fails
     /// closed — or [`Errno::LengthOutOfRange`] for a line longer than
-    /// `buf`, which is refused rather than truncated (`AGENTS.md` §2.9).
+    /// `buf`, which is refused rather than truncated.
     fn read_line(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 
     /// Read one line of input **without echoing it** (the password) into
@@ -171,9 +168,9 @@ pub trait Prompt {
 
 /// Verifies credentials against `kernel/sec` and the credential store.
 ///
-/// The implementation reads `/System/Security/Users` (`AGENTS.md` §5.1) and
+/// The implementation reads `/System/Security/Users` and
 /// checks the offered password against the stored hash using `lib/crypto`'s
-/// constant-time primitives (`AGENTS.md` §2.12, §16.4); login itself never
+/// constant-time primitives; login itself never
 /// sees the stored hash. On success it returns the user's full identity and
 /// capability ceiling.
 pub trait Authenticator {
@@ -184,7 +181,7 @@ pub trait Authenticator {
     /// Returns an [`Errno`] (typically [`Errno::PermissionDenied`]) when the
     /// credentials are rejected. The implementation must return the **same**
     /// error whether the account is unknown or the password is wrong, so a
-    /// caller cannot probe for valid usernames (`AGENTS.md` §5 — fail closed,
+    /// caller cannot probe for valid usernames (fail closed,
     /// no information leak). Login does not inspect the cause.
     fn authenticate(&self, credentials: &Credentials<'_>) -> Result<AuthenticatedUser, Errno>;
 }

@@ -7,7 +7,7 @@
 //! interleaving.
 //!
 //! Mirrors the pattern established in `kernel/sync/src/loom_compat.rs`
-//! (`AGENTS.md` §2.2 — no duplication: the scheduler maintains its own
+//! (no duplication: the scheduler maintains its own
 //! shim because `kernel/sync`'s is `pub(crate)` and intentionally not part
 //! of its public API).
 

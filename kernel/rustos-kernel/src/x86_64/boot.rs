@@ -25,7 +25,7 @@
 //! * `set_dispatch_callback` is invoked **before**
 //!   `init_local_syscalls`, satisfying the trampoline's "callback
 //!   installed before `syscall` is enabled" requirement (see
-//!   `rustos_arch_x86_64::syscall_entry` rustdoc and AGENTS.md §5.4.5).
+//!   `rustos_arch_x86_64::syscall_entry` rustdoc and).
 //! * `init_local_preempt`, `init_local_syscalls` and
 //!   `set_cpu_id_for_lapic` run with `cpu_index = 0` on the BSP after
 //!   `percpu::init(0)`, satisfying their per-call SAFETY contracts.
@@ -35,7 +35,7 @@
 //!
 //! # No `unwrap` / `expect` / `panic!` in production paths
 //!
-//! AGENTS.md §2.9 forbids panics in production paths. Every fallible
+//! the charter forbids panics in production paths. Every fallible
 //! step inside [`boot`] returns a [`BootError`]; the outer function
 //! reports the failure through the log sink and halts the CPU
 //! forever via [`rustos_arch_x86_64::kernel_arch::halt`]. The CPU
@@ -74,7 +74,7 @@ use crate::x86_64::serial_sink::COM1_CONSOLES;
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11). Enabling
 /// `NXE` lets the W^X No-Execute leaf bit the process-image builder sets on
 /// data/rodata pages and the user stack be honoured rather than treated as a
-/// reserved bit that faults the page-table walk (`AGENTS.md` §19.2).
+/// reserved bit that faults the page-table walk.
 const IA32_EFER: u32 = 0xC000_0080;
 const EFER_NXE: u64 = 1 << 11;
 
@@ -84,7 +84,7 @@ const EFER_NXE: u64 = 1 << 11;
 ///
 /// 1 ms matches the value the existing `scheduler_stress_qemu` test
 /// uses; consistency removes one source of "why is QEMU TCG behaving
-/// differently here?" noise from the boot test (AGENTS.md §7 — no
+/// differently here?" noise from the boot test (no
 /// flaky tests, no avoidable jitter). The timer is armed but no
 /// callback is installed, so each tick is a no-op except for the EOI
 /// — see `rustos_arch_x86_64::preempt::rustos_arch_x86_64_timer_dispatch`.
@@ -111,9 +111,9 @@ const KERNEL_STACK_BYTES: usize = 64 * 1024;
 /// brings up. It runs **single-CPU** (it never drives the
 /// `SecondaryBringup` HAL method — that handshake is proven by the QEMU
 /// verticals), so every per-CPU backing here is sized to one slot
-/// (`AGENTS.md` §24.1 — capacity matches the machine the caller actually
+/// (capacity matches the machine the caller actually
 /// drives, not a baked-in `MAX_CPUS` ceiling). A future AP-bring-up
-/// commit sizes this from the §18-discovered MADT processor count.
+/// commit sizes this from the-discovered MADT processor count.
 const BOOT_CPUS: usize = 1;
 
 /// 16-byte-aligned kernel-stack slot. Matches the System V AMD64
@@ -127,10 +127,10 @@ impl KernelStack {
 
 /// Per-CPU kernel stack pool, sized to the [`BOOT_CPUS`] this binary
 /// brings up (the BSP). A future AP-bring-up commit sizes it from the
-/// §18-discovered CPU count (`AGENTS.md` §24.1) rather than re-introducing
+/// -discovered CPU count rather than re-introducing
 /// a fixed ceiling.
 ///
-/// AGENTS.md §2 — the only `static mut` in the bin crate, justified
+/// — the only `static mut` in the bin crate, justified
 /// in `README.md` as the per-CPU bootstrap-stack arena. Access is
 /// exclusively through [`kernel_stack_top`], which derives a
 /// disjoint pointer per `cpu_index`.
@@ -141,7 +141,7 @@ static mut KERNEL_STACKS: [KernelStack; BOOT_CPUS] = {
 
 /// Per-CPU GDT/IDT/IST arena the arch crate's [`percpu`] entry points
 /// index, sized to [`BOOT_CPUS`] and published once by [`try_boot`]
-/// before [`percpu::init`] (`AGENTS.md` §24.1).
+/// before [`percpu::init`].
 static PER_CPU_STORAGE: percpu::PerCpuStorage<BOOT_CPUS> = percpu::PerCpuStorage::new();
 
 /// Per-CPU `syscall`-entry TLS arena, sized to [`BOOT_CPUS`] and published
@@ -169,7 +169,7 @@ fn kernel_stack_top(cpu_index: usize) -> u64 {
 ///
 /// Stored as a single `enum` rather than a heap-allocated message
 /// string so the boot log emits a stable, machine-readable `cause`
-/// field (AGENTS.md §5.4.4).
+/// field.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BootError {
     /// The Multiboot2 record at the loader-supplied address could not
@@ -244,13 +244,13 @@ pub enum BootError {
     /// guarantee it may run at a P-state-dependent rate or drift
     /// between cores, so a migrated task could observe time going
     /// backwards. Rather than silently trust the contract the boot
-    /// path fails closed (`AGENTS.md` §5.4.5, §19.1). A single-CPU
+    /// path fails closed. A single-CPU
     /// boot is unaffected: one TSC is self-monotonic.
     TscNotInvariant,
 }
 
 impl BootError {
-    /// Stable cause string for audit records (AGENTS.md §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -289,34 +289,33 @@ impl BootError {
 /// `EventId(4099)` sits in the `4000..5000` range owned by `kernel/core`
 /// (per `lib/log`'s subsystem ranges) but at the top of the range so
 /// it cannot collide with any phase-numbered event. The id is part of
-/// the audit contract with external consumers and may not be renumbered
-/// (`AGENTS.md` §5.4.4).
+/// the audit contract with external consumers and may not be renumbered.
 const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 
 /// Security-relevant boot decision: whether the BSP's CPUID advertises
-/// an Invariant TSC (`AGENTS.md` §19.1). Logged on every boot so the
+/// an Invariant TSC. Logged on every boot so the
 /// TSC contract is recorded rather than silently assumed. Sits in the
 /// `kernel/core`-owned `4000..5000` range, just below
 /// [`KERNEL_BOOT_INIT_FAILED`]; the id is part of the audit contract
-/// and may not be renumbered (`AGENTS.md` §5.4.4).
+/// and may not be renumbered.
 const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 
 /// Security-relevant boot decision: whether the kthread-stack guard arena
-/// was carved from firmware-usable RAM and installed (`AGENTS.md` §4 — a
+/// was carved from firmware-usable RAM and installed (a
 /// guarded per-task kernel stack whose guard page faults a stack overrun).
 /// When no usable region can host a whole 2 MiB-aligned arena below the
 /// identity window, the seam falls back to the software canary; logged on
 /// every boot so the choice is audited, not assumed. Sits in the
 /// `kernel/core`-owned `4000..5000` range, just below
 /// [`KERNEL_BOOT_TSC_INVARIANCE`]; the id is part of the audit contract and
-/// may not be renumbered (`AGENTS.md` §5.4.4).
+/// may not be renumbered.
 const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4097);
 
 /// Upper bound (exclusive) for the kthread-stack guard arena: the low
 /// identity window the x86_64 spawn seams (`init_spawn_x86_64`,
 /// `spawn_producer_x86_64`) build each task's root with (their
 /// `IDENTITY_GIB` = 4 GiB). A stack outside it could not be reached — nor
-/// its guard page faulted — under the task's own `CR3` (`AGENTS.md` §4), so
+/// its guard page faulted — under the task's own `CR3`, so
 /// the arena carve refuses to place the arena there.
 const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 
@@ -334,7 +333,7 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 /// Returns the bottom type. On every failure the function logs one
 /// [`KERNEL_BOOT_INIT_FAILED`] record (with the stable cause string
 /// from [`BootError::as_str`]) and parks the CPU forever via
-/// [`rustos_arch_x86_64::kernel_arch::halt`] — AGENTS.md §2 (fail
+/// [`rustos_arch_x86_64::kernel_arch::halt`] (fail
 /// closed, no silent reset).
 ///
 /// # SAFETY-INVARIANT
@@ -359,7 +358,7 @@ pub fn boot(
 
 fn log_tsc_invariance(sink: &(dyn Sink + Sync), invariant: bool) {
     // Record the decision on every boot so the TSC contract is audited,
-    // not silently trusted (`AGENTS.md` §19.1). A part that advertises
+    // not silently trusted. A part that advertises
     // the invariant flag logs at Info; one that does not logs at Warn,
     // because a later SMP bring-up on it is refused (`try_boot`).
     let (level, message) = if invariant {
@@ -408,8 +407,7 @@ fn try_boot(
     //
     //    Publish the caller-owned per-CPU GDT/IDT/IST arena before the
     //    first `percpu::init`, so the arch crate indexes a runtime-sized
-    //    slice rather than a baked-in `MAX_CPUS` arena (`AGENTS.md`
-    //    §24.1). `register` is set-once and `boot` runs once, so a second
+    //    slice rather than a baked-in `MAX_CPUS` arena. `register` is set-once and `boot` runs once, so a second
     //    publish is a boot-path defect that fails closed.
     PER_CPU_STORAGE
         .register()
@@ -427,7 +425,7 @@ fn try_boot(
     //     entry decodes the error code, captures the faulting address
     //     (`CR2`), and routes to the set-once `fault` observer — or, with
     //     none installed, preserves the exact fail-closed default
-    //     (`AGENTS.md` §2.9 / §2.17 — no security regression). This makes
+    //     (no security regression). This makes
     //     a `#PF` correctly handled and observable on x86_64, the parity
     //     the riscv64/aarch64 `fault` hooks already have.
     //
@@ -442,7 +440,7 @@ fn try_boot(
 
     // 1c. Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the
     //     process-image builder sets on a ring-3 program's data/rodata
-    //     pages and its stack is honoured (`AGENTS.md` §19.2). Without it,
+    //     pages and its stack is honoured. Without it,
     //     bit 63 is reserved and the first non-executable user mapping the
     //     `init` spawn seam builds would fault the page-table walk. Enabling
     //     it on the BSP before any user image is built is the production W^X
@@ -486,12 +484,11 @@ fn try_boot(
     // in `init`'s own `CR3` — turning a stack overrun into a synchronous
     // fault rather than a poison-canary detection (`plans/PI.md` G3b-2, the
     // cross-port sibling of the aarch64 `boot_aarch64` wiring). The arena is
-    // sized from the discovered *usable* RAM (§24.2 policy) and bounded to
+    // sized from the discovered *usable* RAM (policy) and bounded to
     // the seams' 4 GiB identity window so the stack is reachable under the
     // task's own root. When no usable region fits a whole arena the carve
     // returns `None`, the install is skipped, and the seam falls back to a
-    // software-canary `BoxStack` (fail closed, never fatal to boot,
-    // `AGENTS.md` §2.9 / §2.17).
+    // software-canary `BoxStack` (fail closed, never fatal to boot).
     //
     // The policy input is the sum of `Usable` region lengths, *not*
     // `highest_address()`: a PC firmware map spans the reserved MMIO/PCI hole
@@ -531,7 +528,7 @@ fn try_boot(
     //    Production `rustos-kernel` runs single-CPU (it never calls the
     //    `SecondaryBringup` HAL method — that handshake is proven by the
     //    QEMU verticals), so the arch handle's per-CPU bookkeeping is
-    //    sized to one slot (`AGENTS.md` §24.1 — capacity matches the
+    //    sized to one slot (capacity matches the
     //    machine the caller actually drives, no global `MAX_CPUS`
     //    ceiling baked into the arch crate). The per-CPU kernel-stack
     //    pool keeps its own `MAX_CPUS` secondary-bring-up bound.
@@ -539,13 +536,11 @@ fn try_boot(
 
     // 6b. Validate the TSC before trusting `RDTSC` as the cross-CPU
     //     monotonic clock source. The contract is recorded on every
-    //     boot rather than silently assumed (`AGENTS.md` §19.1). A
+    //     boot rather than silently assumed. A
     //     single-CPU boot proceeds regardless — one TSC is inherently
     //     self-monotonic — but the day this pipeline brings up a
     //     second CPU on a part without an Invariant TSC, it fails
-    //     closed instead of risking a non-monotonic `clock_get`
-    //     (`AGENTS.md` §5.4.5). The CPUID probe lives in the arch crate
-    //     per §17.2.
+    //     closed instead of risking a non-monotonic `clock_get`. The CPUID probe lives in the arch crate.
     let invariant_tsc = rustos_arch_x86_64::tsc::detect_invariant_tsc();
     log_tsc_invariance(log_sink, invariant_tsc);
     let active_cpu_count = cpu_to_lapic.iter().filter(|slot| slot.is_some()).count();
@@ -554,7 +549,7 @@ fn try_boot(
     }
 
     // The arch handle borrows its per-CPU bookkeeping from this
-    // process-static backing (`AGENTS.md` §24.1); `boot` runs once, so a
+    // process-static backing; `boot` runs once, so a
     // single `static` is sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let arch = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_lapic_id, &cpu_to_lapic)
@@ -578,7 +573,7 @@ fn try_boot(
     // 7b. Publish the caller-owned per-CPU syscall-TLS arena before
     //     `init_local_syscalls` (which writes this CPU's slot and points
     //     `IA32_KERNEL_GS_BASE` at it). Runtime-sized, set-once, fails
-    //     closed on a second publish (`AGENTS.md` §24.1 / §2.9).
+    //     closed on a second publish.
     SYSCALL_TLS_STORAGE
         .register()
         .map_err(|_| BootError::SyscallTlsStorageRegister)?;
@@ -624,7 +619,7 @@ fn try_boot(
     //      through the IDT, for which the CPU reads `TSS.RSP0`. Left zero
     //      (the `percpu::init` default), the interrupt-frame push faults and
     //      escalates to `#DF`, so a user trap is *undeliverable* — a security
-    //      gap, not a feature (`AGENTS.md` §2.9 / §2.17). The trap stack is
+    //      gap, not a feature. The trap stack is
     //      the same already-mapped per-CPU kernel stack the syscall path uses
     //      (Linux likewise shares one kernel stack for syscalls and traps):
     //      `RSP0` is only loaded on a ring-3 -> ring-0 transition, when that
@@ -666,7 +661,7 @@ fn try_boot(
     // set-once slot before it is moved into the `kernel_core` hand-off,
     // so a driver-bring-up observer can build a per-device DMA
     // `FrameAllocator` from the same firmware description without
-    // re-borrowing the `pub(crate)` `KernelState` (AGENTS.md §2.1).
+    // re-borrowing the `pub(crate)` `KernelState`.
     crate::x86_64::arch_wrapper::publish_memory_map(&memory_map);
 
     let scheduler_config = SchedulerConfig::defaults_for(1);
@@ -690,7 +685,7 @@ fn try_boot(
     )
     // The COM1 console list for the standard streams: `stream_write` on
     // fd 1/2/3 reaches the same serial line the log sink uses, so PID 1
-    // `init`'s banner lands (`plans/PI.md` X3a, `AGENTS.md` §20). It is a
+    // `init`'s banner lands (`plans/PI.md` X3a). It is a
     // stream *backing*, not a program-facing device; the read half fails
     // closed (no COM1 RX drain is wired on this slice).
     .with_consoles(&COM1_CONSOLES)
@@ -707,7 +702,7 @@ fn try_boot(
         &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::x86_64::spawn_producer::X86_64_PROCESS_SPAWN,
     )
-    // Serve the discovered hardware tree (`AGENTS.md` §18.1 / §18.4): the
+    // Serve the discovered hardware tree: the
     // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
     // `HW_TREE`, so the user-space device manager observes the same
     // inventory the kernel discovered (Design D).
@@ -809,8 +804,7 @@ fn build_memory_map(mb2: &Mb2BootInfo<'_>) -> Result<BootMemoryMap, BootError> {
     // `spawn` image builder's zero-fill / page-table writes corrupt the live
     // kernel (`plans/PI.md` X4 follow-on). This is the x86_64 sibling of the
     // aarch64 `mem_map` `[ram_base, __kernel_end)` reservation (`plans/PI.md`
-    // P6c-1) — without it nothing protected the kernel image (`AGENTS.md`
-    // §2.17, §4).
+    // P6c-1) — without it nothing protected the kernel image.
     let (kstart, kend) = kernel_image_phys_bounds();
     map.reserve_range(kstart, kend);
 
@@ -846,7 +840,7 @@ fn push_descriptor(map: &mut BootMemoryMap, desc: bootmemory::MemoryRegionDescri
     // Translate the arch-port mirror enum into the kernel/mem
     // canonical enum. `bootmemory`'s host-side round-trip test pins
     // the two enums together at compile time so a future drift fails
-    // the build (AGENTS.md §2.2).
+    // the build.
     let kind = match desc.kind {
         bootmemory::RegionKind::Usable => RegionKind::Usable,
         bootmemory::RegionKind::Reserved => RegionKind::Reserved,
@@ -943,7 +937,7 @@ fn discover_and_program_io_apics(
     // `tests/integration/irq_qemu_x86_64` QEMU integration test) can
     // reach [`IoApicController::program_pin`] and
     // [`IoApicController::read_pin_low`] without re-borrowing the
-    // `pub(crate)` `KernelState`. AGENTS.md §2.1 — one-shot publish;
+    // `pub(crate)` `KernelState`. — one-shot publish;
     // the slot accepts the same pointer the `IrqRouting` carries.
     crate::x86_64::ioapic_controller::publish_typed(controller_static);
 
@@ -1023,7 +1017,7 @@ fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), Boo
 // module already pins this at compile time; we re-coerce here at the
 // call-site to catch a regression at the `set_dispatch_callback`
 // install rather than only in the dispatch module's own tests.
-// AGENTS.md §2.4 — encode the contract in the type system.
+// — encode the contract in the type system.
 const _DISPATCH_CALLBACK_INSTALLABLE: syscall_entry::SyscallDispatchFn = production_dispatch;
 
 // SAFETY-INVARIANT: a 16-KiB per-CPU stack is sufficient to hold a

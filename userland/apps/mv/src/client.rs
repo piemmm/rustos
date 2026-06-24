@@ -36,8 +36,7 @@ argument is a path.
 /// one source — each source is moved into it under its base name. `mv` writes
 /// nothing on success; `out` carries only the [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed,
-/// `AGENTS.md` §2.9).
+/// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///
@@ -175,7 +174,7 @@ fn copy_file(source: &str, target: &str, fs: &dyn FileSystem) -> Result<(), MvEr
             return Ok(());
         }
         // A seam reporting more than the buffer holds would index out of
-        // bounds; refuse it rather than trust the count (`AGENTS.md` §2.9).
+        // bounds; refuse it rather than trust the count.
         if read > buf.len() {
             return Err(MvError::Read(rustos_abi::Errno::LengthOutOfRange));
         }

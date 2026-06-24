@@ -1,7 +1,7 @@
 //! Production [`SyscallHandlers`] wiring for `kernel/core`.
 //!
 //! Stage 2.7 follow-up (f3) of `PLAN.md`. The dispatcher in
-//! `kernel/syscall` performs the §5.4 checks (identify caller, check
+//! `kernel/syscall` performs the checks (identify caller, check
 //! capability, validate arguments, audit) and then forwards the call
 //! through the [`SyscallHandlers`] trait. This module ships the one
 //! concrete implementation that the production kernel uses; tests of
@@ -19,7 +19,7 @@
 //!   minimum interior mutability the dispatcher requires; the choice
 //!   mirrors `Scheduler::tasks`'s reader-preferring lock and lets
 //!   `kernel_main`'s `KernelState` compose the two registries under a
-//!   single lock-ordering policy (`AGENTS.md` §2.4).
+//!   single lock-ordering policy.
 //! * `&'a A` — the arch port, for `clock_get` via
 //!   [`KernelArch::monotonic_ns`].
 //! * `&'a RwLock<PortRegistry>` — the named-port registry, for
@@ -34,7 +34,7 @@
 //!   ([`KernelSyscallHandlers::with_caller_aspace`], increment C of
 //!   `PLAN.md` Stage 7). Reaching it here keeps the copy bridge inside
 //!   `kernel/core` so the decoupled dispatcher (`kernel/syscall`)
-//!   never gains a `kernel/mem` dependency (`AGENTS.md` §17.4).
+//!   never gains a `kernel/mem` dependency.
 //!   Wrapped in the same reader-preferring lock as the other two.
 //!
 //! `ipc_send` / `ipc_recv` resolve the destination endpoint against
@@ -53,13 +53,13 @@
 //! output reserve [`crate::random::RandomReserve`]). A faulting user
 //! pointer — or a caller with no registered address space — fails closed
 //! with [`Errno::BadAddress`] (the RustOS `EFAULT`), never an oracle
-//! that distinguishes the cause (`AGENTS.md` §19.1).
+//! that distinguishes the cause.
 //!
 //! `random_get` draws CSPRNG output from the reserve composed into
-//! `KernelState` and copies it out (`AGENTS.md` §22). Before the reserve
+//! `KernelState` and copies it out. Before the reserve
 //! is seeded it is **not ready**, so the draw fails closed with
 //! [`Errno::EntropyNotReady`] rather than returning weak bytes — the
-//! reserve is seeded once the platform-RNG entropy seam (§17.2) lands.
+//! reserve is seeded once the platform-RNG entropy seam lands.
 //! The only remaining lookup-miss deferral is an unbound IPC endpoint:
 //!
 //! | Syscall               | Condition        | Errno      | Reason |
@@ -123,7 +123,7 @@ use crate::users::{UsersDbSource, NULL_USERS_DB};
 
 /// A no-op diagnostic [`Sink`] — the fail-closed default for the
 /// `log_emit` handler's `log_sink` until the boot path installs the real
-/// arch diagnostic sink (`AGENTS.md` §2.9 / §19.4).
+/// arch diagnostic sink.
 ///
 /// Dropping a record rather than touching an uninstalled sink keeps a
 /// pre-install `log_emit` harmless; the dispatcher's capability check still
@@ -158,13 +158,12 @@ where
     /// its own boot/runtime records through (`kernel/arch/*` routes it to the
     /// serial UART on a debug build, the video console on release). The
     /// `log_emit` handler emits a capability-gated, validated user-space
-    /// record through this sink, attributed to the calling task (`AGENTS.md`
-    /// §19.4 / §20). It is **never** the hash-chained security audit sink
+    /// record through this sink, attributed to the calling task. It is **never** the hash-chained security audit sink
     /// ([`Self::audit`]), which stays kernel-only, so user space can neither
     /// forge nor truncate an audit entry. Defaults to the no-op
     /// `NULL_LOG_SINK` so that until the boot path installs the real sink
     /// through [`Self::with_log_sink`] a `log_emit` is silently dropped
-    /// rather than touching an uninstalled sink (`AGENTS.md` §2.9).
+    /// rather than touching an uninstalled sink.
     log_sink: &'a (dyn Sink + Sync),
     irq: &'a IrqTable,
     /// Controller-mask seam consumed by [`IrqTable::fire`] from the
@@ -177,38 +176,35 @@ where
     /// resolve the endpoint carried in the syscall to a live, kernel-
     /// owned [`rustos_kernel_ipc::Port`]. Borrowed under the same
     /// reader-preferring lock `KernelState` wraps it in; the handlers
-    /// take only a read guard (`AGENTS.md` §2.1 — no global mutable
+    /// take only a read guard (no global mutable
     /// static; the registry owns no lock of its own).
     ipc: &'a RwLock<PortRegistry>,
     /// Per-task address-space registry consulted to resolve the
     /// caller's [`rustos_kernel_sec::TaskId`] to the user
     /// [`AddressSpace`](rustos_kernel_mem::AddressSpace) and the
     /// [`PhysMap`] backing it — the pair the
-    /// [`rustos_kernel_mem::uaccess`] copy path walks (`AGENTS.md`
-    /// §5.4). Borrowed under the same reader-preferring lock as `caps`
+    /// [`rustos_kernel_mem::uaccess`] copy path walks. Borrowed under the same reader-preferring lock as `caps`
     /// / `ipc`; [`Self::with_caller_aspace`] takes only a read guard.
     /// Threading it here (increment C, `PLAN.md` Stage 7) lets a
     /// handler reach the caller's mappings without coupling the
-    /// decoupled dispatcher (`kernel/syscall`) to `kernel/mem`
-    /// (`AGENTS.md` §17.4); increment D wires the deferred `ipc_send` /
+    /// decoupled dispatcher (`kernel/syscall`) to `kernel/mem`; increment D wires the deferred `ipc_send` /
     /// `ipc_recv` / `cap_delegate` / `random_get` copies through it.
     aspaces: &'a RwLock<AddressSpaceRegistry>,
     /// The kernel's single cryptographic random output reserve
-    /// ([`crate::random::RandomReserve`], `AGENTS.md` §22), consulted by
+    /// ([`crate::random::RandomReserve`]), consulted by
     /// `random_get` to draw CSPRNG output before copying it into the
     /// caller's buffer. Held type-erased behind a `Box` so the handler
     /// is not generic over the reserve's entropy source — the concrete
-    /// platform-RNG seam (§17.2) is installed by re-seeding the boxed
+    /// platform-RNG seam is installed by re-seeding the boxed
     /// reserve, never by changing this borrow's type. Wrapped in the
     /// same reader-preferring [`RwLock`] as `caps` / `ipc` / `aspaces`
     /// so the kernel composes every per-task registry under one
     /// lock-ordering policy; drawing takes the write guard because the
-    /// reserve mutates its buffer as it serves (`AGENTS.md` §2.1 — the
+    /// reserve mutates its buffer as it serves (the
     /// reserve owns no lock of its own).
     rng: &'a RwLock<Box<dyn RandomReserve + Send + Sync>>,
     /// The installed system console list `stream_write` / `stream_read`
-    /// resolve a descriptor's console index against (`AGENTS.md` §10 /
-    /// §16.4 / §20). Defaults to the empty [`NO_CONSOLES`] (every
+    /// resolve a descriptor's console index against. Defaults to the empty [`NO_CONSOLES`] (every
     /// console-backed access fails closed with
     /// [`Errno::NotImplemented`]); the boot path installs the discovered
     /// list — index 0 the primary console (the detected display, else
@@ -221,19 +217,18 @@ where
     /// frames a spawned process's pages are mapped to (`plans/SPAWN.md`
     /// SP3). [`None`] until the boot path threads it through
     /// [`Self::with_frames`]; while it is `None` the `spawn` syscall fails
-    /// closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9 — the spawn
+    /// closed with [`Errno::NotImplemented`] (the spawn
     /// subsystem is not wired). Borrowed for the handler's lifetime,
     /// exactly like the other registries.
     frames: Option<&'a FrameAllocator>,
     /// The kernel's live frame allocator as a `'static` borrow, handed to
     /// the spawn producer so it can build a child's **page tables** out of
-    /// reclaimable RAM rather than a fixed-size `.bss` pool (`AGENTS.md`
-    /// §24.1 — the spawn capacity scales with discovered RAM and grows on
+    /// reclaimable RAM rather than a fixed-size `.bss` pool (the spawn capacity scales with discovered RAM and grows on
     /// demand). It is the same allocator as [`Self::frames`]; the distinct
     /// `'static`-typed field exists because a port's `AddressSpace` retains
     /// its page-table frame source for the child's lifetime. [`None`] until
     /// the boot path threads it through [`Self::with_page_table_frames`];
-    /// while it is `None` the producer fails closed (`AGENTS.md` §2.9). Held
+    /// while it is `None` the producer fails closed. Held
     /// `'static` because the kernel allocator lives for the running kernel's
     /// lifetime, exactly like the other `'static` boot-installed seams.
     page_table_frames: Option<&'static FrameAllocator>,
@@ -248,40 +243,37 @@ where
     /// The architecture-specific spawn producer the `spawn` syscall drives
     /// to build a child's isolated address space and admit it
     /// (`plans/SPAWN.md` SP3). Defaults to [`NULL_PROCESS_SPAWN`] (fail
-    /// closed with [`Errno::NotImplemented`], `AGENTS.md` §2.9); the boot
+    /// closed with [`Errno::NotImplemented`]); the boot
     /// path installs the concrete producer through [`Self::with_spawn`].
     /// Held as a `'static` borrow, exactly like the console device.
     spawn_service: &'static (dyn ProcessSpawn + 'static),
     /// The architecture-specific anonymous-memory producer the `mem_map` /
     /// `mem_unmap` syscalls drive to map and unmap fresh `RW` regions in the
     /// caller's own live address space (`plans/SPAWN.md` SP5). Defaults to
-    /// [`NULL_MEM_MAP`] (fail closed with [`Errno::NotImplemented`],
-    /// `AGENTS.md` §2.9); the boot path installs the concrete `kernel/mem`
+    /// [`NULL_MEM_MAP`] (fail closed with [`Errno::NotImplemented`]); the boot path installs the concrete `kernel/mem`
     /// producer through [`Self::with_mem_map`] once `SP5b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
     mem_map: &'static (dyn MemMap + 'static),
     /// The scheduler-side process-wait producer the `wait` syscall drives
     /// to block the caller until one of its children exits, reap it, and
     /// report its exit code (`plans/SPAWN.md` SP6). Defaults to
-    /// [`NULL_PROCESS_WAIT`] (fail closed with [`Errno::NotImplemented`],
-    /// `AGENTS.md` §2.9); the boot path installs the concrete producer
+    /// [`NULL_PROCESS_WAIT`] (fail closed with [`Errno::NotImplemented`]); the boot path installs the concrete producer
     /// through [`Self::with_process_wait`] once `SP6b` lands. Held as a
     /// `'static` borrow, exactly like the console device and spawn producer.
     process_wait: &'static (dyn ProcessWait + 'static),
     /// The kernel-held user database the `users_db_read` syscall serves
     /// (`plans/PI.md` P11). Defaults to [`NULL_USERS_DB`] (fail closed
-    /// with [`Errno::NotImplemented`], `AGENTS.md` §2.9); the boot path
+    /// with [`Errno::NotImplemented`]); the boot path
     /// that mounts the root volume and loads the database installs the
     /// real holder through [`Self::with_users_db`]. Held as a `'static`
     /// borrow, exactly like the console device.
     users_db: &'static (dyn UsersDbSource + 'static),
     /// The kernel input-focus arbiter the `key_inject` / `display_acquire`
-    /// / `display_release` / `keyboard_read` syscalls drive (`AGENTS.md`
-    /// §10 / §17.3 / §20, `plans/PI.md` P11 — input follows the surface
+    /// / `display_release` / `keyboard_read` syscalls drive (`plans/PI.md` P11 — input follows the surface
     /// owner). Defaults to [`NULL_INPUT_FOCUS`], whose text sink is the
     /// fail-closed [`crate::console::NULL_CONSOLE_INPUT`], so a build with
     /// no arbiter wired refuses to route a key edge rather than leaking it
-    /// to a device (`AGENTS.md` §2.9 / §5.4); the boot path installs the
+    /// to a device; the boot path installs the
     /// real arbiter — its text sink pointed at the console that owns the
     /// directly attached keyboard — through [`Self::with_input_focus`].
     /// Held as a `'static` borrow because the arbiter lives for the
@@ -290,23 +282,21 @@ where
     /// The architecture MMIO-map producer the `mmio_map` syscall drives to
     /// map a granted device window into the caller's own live address space
     /// (`plans/PI.md` P10 chunk 5d-0). Defaults to
-    /// [`NULL_MMIO_MAP_FACILITY`] (fail closed with [`Errno::NotImplemented`],
-    /// `AGENTS.md` §2.9); the boot path installs the concrete `kernel/mem`
+    /// [`NULL_MMIO_MAP_FACILITY`] (fail closed with [`Errno::NotImplemented`]); the boot path installs the concrete `kernel/mem`
     /// producer through [`Self::with_mmio_map_facility`]. Held as a `'static`
     /// borrow, exactly like the console device and the `mem_map` producer.
     mmio_map_facility: &'static (dyn MmioMapFacility + 'static),
     /// The architecture DMA-alloc producer the `dma_alloc` syscall drives to
     /// carve a coherent DMA buffer into the caller's own live address space
     /// (`plans/PI.md` P10 chunk 5d-0). Defaults to
-    /// [`NULL_DMA_ALLOC_FACILITY`] (fail closed with [`Errno::NotImplemented`],
-    /// `AGENTS.md` §2.9); the boot path installs the concrete `kernel/mem`
+    /// [`NULL_DMA_ALLOC_FACILITY`] (fail closed with [`Errno::NotImplemented`]); the boot path installs the concrete `kernel/mem`
     /// producer through [`Self::with_dma_alloc_facility`]. Held as a `'static`
     /// borrow, exactly like the MMIO-map producer.
     dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
     /// The kernel-held discovered hardware tree the `hw_tree_read` /
-    /// `hw_tree_wait` syscalls serve (`AGENTS.md` §16.6 / §18.1 / §18.4,
+    /// `hw_tree_wait` syscalls serve (
     /// Design D). Defaults to [`NULL_HW_TREE`] (fail closed with
-    /// [`Errno::NotImplemented`], `AGENTS.md` §2.9); the boot path installs
+    /// [`Errno::NotImplemented`]); the boot path installs
     /// the real store through [`Self::with_hw_tree`] once the inventory is
     /// seeded. Held as a `'static` borrow, exactly like the users database.
     hw_tree: &'static (dyn HwTreeSource + 'static),
@@ -326,15 +316,15 @@ where
     /// All borrows must outlive the dispatcher instance that wraps
     /// this handler. In the production kernel `KernelState` owns the
     /// targets and keeps them alive for the lifetime of the kernel
-    /// (`AGENTS.md` §2.1 — no global mutable static).
+    /// (no global mutable static).
     #[must_use]
     // Each argument is a *distinct* piece of kernel state the handler
     // borrows explicitly — there is no global mutable static and no
-    // ambient authority to reach them through (`AGENTS.md` §2.1 / §4),
+    // ambient authority to reach them through,
     // so they are threaded one-by-one exactly as `BootInfo::new`
     // mirrors its fields. Bundling them behind a wrapper purely to
     // satisfy the arg-count lint would be the one-use wrapper type
-    // `AGENTS.md` §2.3 forbids; the explicit list is the clearer shape.
+    // the charter forbids; the explicit list is the clearer shape.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         sched: &'a Scheduler<A>,
@@ -353,9 +343,9 @@ where
             arch,
             audit,
             // Diagnostic log sink unwired until the boot path installs the
-            // arch serial/console sink (`AGENTS.md` §19.4 / §20): until then a
+            // arch serial/console sink: until then a
             // `log_emit` is silently dropped through the no-op `NULL_LOG_SINK`
-            // rather than touching an uninstalled sink (`AGENTS.md` §2.9).
+            // rather than touching an uninstalled sink.
             log_sink: &NULL_LOG_SINK,
             irq,
             irq_controller,
@@ -363,7 +353,7 @@ where
             aspaces,
             rng,
             // Fail closed until the boot path installs the discovered
-            // console list (`AGENTS.md` §2.9 / §5.4): an early
+            // console list: an early
             // `stream_write` / `stream_read` returns `NotImplemented`
             // rather than touching a device that does not exist.
             consoles: &NO_CONSOLES,
@@ -390,26 +380,25 @@ where
             // real one whose text sink owns the keyboard console
             // (`plans/PI.md` P11): `key_inject` / `keyboard_read` fail
             // closed (`NotImplemented` / no input) through the shared
-            // `NULL_INPUT_FOCUS` (`AGENTS.md` §2.9 / §5.4).
+            // `NULL_INPUT_FOCUS`.
             input_focus: &NULL_INPUT_FOCUS,
             // The MMIO-map facility is unwired until the boot path installs
             // the `kernel/mem` map producer (`plans/PI.md` P10 chunk 5d-0):
             // `mmio_map` fails closed (`NotFound` for an ungranted handle,
             // resolved against the per-task grant table in `aspaces`;
             // `NotImplemented` with no map facility) — never mapping an
-            // ungranted or arbitrary region (`AGENTS.md` §2.9 / §5.4).
+            // ungranted or arbitrary region.
             mmio_map_facility: &NULL_MMIO_MAP_FACILITY,
             // The DMA-alloc facility is unwired until the boot path installs
             // the `kernel/mem` carve producer (`plans/PI.md` P10 chunk 5d-0):
             // `dma_alloc` fails closed (`NotFound` for an ungranted handle,
             // resolved against the per-task grant table in `aspaces`;
             // `NotImplemented` with no DMA facility) — never carving against
-            // an ungranted constraint (`AGENTS.md` §2.9 / §5.4).
+            // an ungranted constraint.
             dma_alloc_facility: &NULL_DMA_ALLOC_FACILITY,
             // Hardware-tree store unwired until the boot path seeds the
-            // discovered inventory and installs the holder (`AGENTS.md`
-            // §18.1): `hw_tree_read` / `hw_tree_wait` fail closed with
-            // `NotImplemented` (`AGENTS.md` §2.9).
+            // discovered inventory and installs the holder: `hw_tree_read` / `hw_tree_wait` fail closed with
+            // `NotImplemented`.
             hw_tree: &NULL_HW_TREE,
         }
     }
@@ -420,7 +409,7 @@ where
     ///
     /// Called once by the boot path after it has selected the console
     /// devices from the normalised hardware tree (`plans/PI.md` P6 /
-    /// P11, `AGENTS.md` §18): index 0 is the primary console (the
+    /// P11): index 0 is the primary console (the
     /// detected display when present, else the first discovered UART),
     /// and each further entry is an independent console with its own
     /// session context (the UART beside an active video console). Until
@@ -428,7 +417,7 @@ where
     /// every console-backed stream access fails closed with
     /// [`Errno::NotImplemented`]. The list must be `'static`: the boot
     /// path leaks it alongside `KernelState`, which lives for the
-    /// lifetime of the running kernel (`AGENTS.md` §2.1 — no global
+    /// lifetime of the running kernel (no global
     /// mutable static; the install is a one-shot move).
     #[must_use]
     pub const fn with_consoles(mut self, consoles: &'static [ConsoleDevice]) -> Self {
@@ -437,18 +426,16 @@ where
     }
 
     /// Install the kernel's diagnostic log sink the `log_emit` syscall emits
-    /// user-space records through, consuming and returning `self`
-    /// (`AGENTS.md` §19.4 / §20).
+    /// user-space records through, consuming and returning `self`.
     ///
     /// Called once by the boot path with the same arch diagnostic sink the
     /// kernel routes its own records through (the serial UART on a debug
     /// build, the video console on release). Until this is called the handler
-    /// holds the no-op `NULL_LOG_SINK` and a `log_emit` is silently dropped
-    /// (`AGENTS.md` §2.9). The sink must be `'static` because the boot path
+    /// holds the no-op `NULL_LOG_SINK` and a `log_emit` is silently dropped. The sink must be `'static` because the boot path
     /// leaks it alongside `KernelState`, which lives for the lifetime of the
     /// running kernel. This is the **diagnostic** sink only; the security
     /// audit sink stays the kernel-owned `audit` borrow user space can never
-    /// reach (`AGENTS.md` §19.4).
+    /// reach.
     #[must_use]
     pub const fn with_log_sink(mut self, log_sink: &'a (dyn Sink + Sync)) -> Self {
         self.log_sink = log_sink;
@@ -464,10 +451,9 @@ where
     /// P11). Until this is called the handler holds [`NULL_INPUT_FOCUS`]
     /// and every `key_inject` in the default text focus fails closed,
     /// `keyboard_read` returns no input, and `display_acquire` /
-    /// `display_release` toggle an arbiter no driver feeds (`AGENTS.md`
-    /// §2.9). The arbiter must be `'static`: the boot path leaks it
+    /// `display_release` toggle an arbiter no driver feeds. The arbiter must be `'static`: the boot path leaks it
     /// alongside `KernelState`, which lives for the lifetime of the running
-    /// kernel (`AGENTS.md` §2.1 — no global mutable static; the install is
+    /// kernel (no global mutable static; the install is
     /// a one-shot move).
     #[must_use]
     pub const fn with_input_focus(mut self, input_focus: &'static InputFocus) -> Self {
@@ -482,7 +468,7 @@ where
     /// Until this is called the handler holds [`None`] and `spawn` fails
     /// closed with [`Errno::NotImplemented`] — the spawn subsystem is not
     /// wired. The allocator is the leaked `KernelState`'s, which lives for
-    /// the lifetime of the running kernel (`AGENTS.md` §2.1).
+    /// the lifetime of the running kernel.
     #[must_use]
     pub const fn with_frames(mut self, frames: &'a FrameAllocator) -> Self {
         self.frames = Some(frames);
@@ -491,17 +477,16 @@ where
 
     /// Install the live frame allocator as a `'static` borrow the spawn
     /// producer builds a child's **page tables** out of, consuming and
-    /// returning `self` (`AGENTS.md` §24.1).
+    /// returning `self`.
     ///
     /// This is the same allocator as [`Self::with_frames`]; the distinct
     /// `'static`-typed seam exists because a port's `AddressSpace` retains
     /// its page-table frame source for the child's lifetime, so the source
     /// must be `'static` (the producer caches a single
     /// [`rustos_kernel_mem::FrameTableSource`] over it). Until this is
-    /// called the handler holds [`None`] and the producer fails closed
-    /// (`AGENTS.md` §2.9), so a build can never over-spawn. The allocator
+    /// called the handler holds [`None`] and the producer fails closed, so a build can never over-spawn. The allocator
     /// is the leaked `KernelState`'s, which lives for the lifetime of the
-    /// running kernel (`AGENTS.md` §2.1).
+    /// running kernel.
     #[must_use]
     pub const fn with_page_table_frames(mut self, frames: &'static FrameAllocator) -> Self {
         self.page_table_frames = Some(frames);
@@ -534,7 +519,7 @@ where
     /// Called once by a boot path that mounted the root volume and ran
     /// the audited [`crate::load_users_db`] read. Until this is called
     /// the handler holds [`NULL_USERS_DB`] and `users_db_read` fails
-    /// closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9). The
+    /// closed with [`Errno::NotImplemented`]. The
     /// holder must be `'static`: it lives for the lifetime of the
     /// running kernel, exactly like the console device.
     #[must_use]
@@ -544,12 +529,11 @@ where
     }
 
     /// Install the discovered hardware-tree store the `hw_tree_read` /
-    /// `hw_tree_wait` syscalls serve, consuming and returning `self`
-    /// (`AGENTS.md` §18.1 / §18.4).
+    /// `hw_tree_wait` syscalls serve, consuming and returning `self`.
     ///
     /// Called once by the boot path after it seeds the inventory. Until
     /// this is called the handler holds [`NULL_HW_TREE`] and both syscalls
-    /// fail closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9). The
+    /// fail closed with [`Errno::NotImplemented`]. The
     /// store must be `'static`: it lives for the lifetime of the running
     /// kernel, exactly like the users database.
     #[must_use]
@@ -563,8 +547,7 @@ where
     /// (`plans/SPAWN.md` SP5).
     ///
     /// Until this is called the handler holds [`NULL_MEM_MAP`], so both
-    /// syscalls fail closed with [`Errno::NotImplemented`] (`AGENTS.md`
-    /// §2.9). The producer must be `'static`: it lives for the lifetime of
+    /// syscalls fail closed with [`Errno::NotImplemented`]. The producer must be `'static`: it lives for the lifetime of
     /// the running kernel, exactly like the console device.
     #[must_use]
     pub const fn with_mem_map(mut self, mem_map: &'static (dyn MemMap + 'static)) -> Self {
@@ -577,8 +560,7 @@ where
     /// 5d-0).
     ///
     /// Until this is called the handler holds [`NULL_MMIO_MAP_FACILITY`],
-    /// so `mmio_map` fails closed with [`Errno::NotImplemented`]
-    /// (`AGENTS.md` §2.9). The producer must be `'static`: it lives for the
+    /// so `mmio_map` fails closed with [`Errno::NotImplemented`]. The producer must be `'static`: it lives for the
     /// lifetime of the running kernel, exactly like the `mem_map` producer.
     #[must_use]
     pub const fn with_mmio_map_facility(
@@ -594,8 +576,7 @@ where
     /// 5d-0).
     ///
     /// Until this is called the handler holds [`NULL_DMA_ALLOC_FACILITY`],
-    /// so `dma_alloc` fails closed with [`Errno::NotImplemented`]
-    /// (`AGENTS.md` §2.9). The producer must be `'static`: it lives for the
+    /// so `dma_alloc` fails closed with [`Errno::NotImplemented`]. The producer must be `'static`: it lives for the
     /// lifetime of the running kernel, exactly like the MMIO-map producer.
     #[must_use]
     pub const fn with_dma_alloc_facility(
@@ -610,8 +591,7 @@ where
     /// drives, consuming and returning `self` (`plans/SPAWN.md` SP6).
     ///
     /// Until this is called the handler holds [`NULL_PROCESS_WAIT`], so
-    /// `wait` fails closed with [`Errno::NotImplemented`] (`AGENTS.md`
-    /// §2.9). The producer must be `'static`: it lives for the lifetime of
+    /// `wait` fails closed with [`Errno::NotImplemented`]. The producer must be `'static`: it lives for the lifetime of
     /// the running kernel, exactly like the console device, the spawn
     /// producer, and the anonymous-memory producer.
     #[must_use]
@@ -651,14 +631,12 @@ where
     /// syscall handler can reach the bytes of the calling task's user
     /// memory: the registry maps `caller.task_id` to the
     /// `(&dyn UserAddressSpace, &dyn PhysMap)` pair the
-    /// [`rustos_kernel_mem::uaccess`] copy path walks (`AGENTS.md`
-    /// §5.4). The closure shape keeps the read guard alive for exactly
+    /// [`rustos_kernel_mem::uaccess`] copy path walks. The closure shape keeps the read guard alive for exactly
     /// the span the borrowed references are used and never hands a
     /// caller's mappings out past it; the registry exposes only
-    /// `translate`, so the copy path can read but never mutate them
-    /// (`AGENTS.md` §2.4).
+    /// `translate`, so the copy path can read but never mutate them.
     ///
-    /// Returns `None` (fail closed, `AGENTS.md` §5.4) when no address
+    /// Returns `None` (fail closed) when no address
     /// space is registered for the caller — e.g. a kernel task that
     /// never had user mappings, or a `CallerContext` whose task has
     /// already exited and been withdrawn. A handler maps that `None`
@@ -690,11 +668,10 @@ where
     /// caller is switched in on, so the caller's live space is the one
     /// published for [`SchedulerArch::current_cpu`]; re-freeze it and publish
     /// the fresh snapshot so the very next copy reflects the current
-    /// mappings (`AGENTS.md` §5.4). A caller with no published live space (a
+    /// mappings. A caller with no published live space (a
     /// kernel task, or a task spawned without a retained space) or no
     /// registered snapshot is a no-op — there is nothing to refresh and the
-    /// mutation could not have touched a live space either (`AGENTS.md`
-    /// §2.9).
+    /// mutation could not have touched a live space either.
     fn refreeze_caller_aspace(&self, caller: &CallerContext<'_>) {
         let cpu = SchedulerArch::current_cpu(self.arch);
         if let Some(frozen) = crate::kthread::with_current_live_space(cpu, |live| live.freeze()) {
@@ -706,13 +683,13 @@ where
 }
 
 /// Collapse every [`UaccessError`] onto the single stable
-/// [`Errno::BadAddress`] (the RustOS `EFAULT`, `AGENTS.md` §5.4).
+/// [`Errno::BadAddress`] (the RustOS `EFAULT`).
 ///
 /// A syscall that copies through the kernel's `copy_from_user` /
 /// `copy_to_user` boundary returns one code for *every* faulting-pointer
 /// reason — null, unmapped, kernel-only, wrong permission, off the direct
 /// map — so a malicious caller cannot use the distinction as an oracle to
-/// probe the kernel's memory layout (`AGENTS.md` §19.1). The handler maps
+/// probe the kernel's memory layout. The handler maps
 /// the absence of any registered address space (a kernel task, or one
 /// withdrawn on `exit`) onto the same code at the call site.
 fn copy_fault_errno(_err: UaccessError) -> Errno {
@@ -726,8 +703,7 @@ fn copy_fault_errno(_err: UaccessError) -> Errno {
 /// reserve fills a kernel slice; user memory is reached only through the
 /// validated [`copy_out`] boundary), so it draws into this fixed stack
 /// buffer and copies it out one chunk at a time. A fixed size avoids a
-/// per-call heap allocation whose failure path could OOM (`AGENTS.md`
-/// §4); the buffer is wiped after use (`AGENTS.md` §22 — zeroed on
+/// per-call heap allocation whose failure path could OOM; the buffer is wiped after use (zeroed on
 /// consumption). 256 bytes serves the common small request in a single
 /// iteration while keeping the on-stack cost trivial; a larger request
 /// simply loops.
@@ -738,7 +714,7 @@ const RANDOM_STAGE_CHUNK: usize = 256;
 /// `stream_write` stages the caller's bytes in one kernel-owned buffer
 /// before handing them to the device, so an unbounded `len` would let a
 /// caller force an arbitrarily large kernel allocation whose failure
-/// path could OOM (`AGENTS.md` §4 — deterministic OOM behaviour). The
+/// path could OOM (deterministic OOM behaviour). The
 /// call therefore writes at most this many bytes and returns the count;
 /// a caller with more to say loops, exactly as POSIX `write` allows. A
 /// banner line is far smaller than this, so the common path never
@@ -750,7 +726,7 @@ const CONSOLE_WRITE_MAX: usize = 4096;
 /// `stream_read` reads into one kernel-owned staging buffer before
 /// copying it out to the caller, so an unbounded `len` would let a caller
 /// force an arbitrarily large kernel allocation whose failure path could
-/// OOM (`AGENTS.md` §4 — deterministic OOM behaviour). The call therefore
+/// OOM (deterministic OOM behaviour). The call therefore
 /// reads at most this many bytes and returns the count; a caller wanting
 /// more loops, exactly as POSIX `read` allows. A line of console input is
 /// far smaller than this, so the common path never iterates.
@@ -762,8 +738,8 @@ const CONSOLE_READ_MAX: usize = 4096;
 /// `spawn` stages the caller's path in one kernel-owned buffer before
 /// looking it up in the registry, so an unbounded `path_len` would let a
 /// caller force an arbitrarily large kernel allocation whose failure path
-/// could OOM (`AGENTS.md` §4 — deterministic OOM behaviour). An absolute
-/// program path (`/Apps/<Name>.app/Run`, `AGENTS.md` §16.5) is far shorter
+/// could OOM (deterministic OOM behaviour). An absolute
+/// program path (`/Apps/<Name>.app/Run`) is far shorter
 /// than this; a longer request is refused with [`Errno::NotFound`] (it
 /// cannot name any registered program) rather than allocated.
 const SPAWN_PATH_MAX: usize = 1024;
@@ -796,7 +772,7 @@ where
         // for a task it tracks as a child (a process spawned through `spawn`);
         // PID 1 and kernel threads it does not track are ignored, and the
         // default `NULL_PROCESS_WAIT` is an inert no-op — so this is not the
-        // interface creep `AGENTS.md` §2.4 forbids: the one consumer (`wait`)
+        // interface creep the charter forbids: the one consumer (`wait`)
         // exists. The dispatcher's `SyscallInvoked` audit record (the `EXIT`
         // spec sets `audit = true`) still carries the code for the log.
         self.process_wait.record_exit(caller.task_id, code);
@@ -838,7 +814,7 @@ where
         // (cleanly, by fault, or killed) must not leave callers blocked in
         // `ipc_call` forever — destroying its endpoints cancels their
         // in-flight calls, and waking `CALL_WAITQ` re-runs each parked
-        // caller's poll so it abandons fail-closed (`AGENTS.md` §2.9 / §5.4).
+        // caller's poll so it abandons fail-closed.
         // The owner key is the *security* task id (`caller.caps.task()`), the
         // same id `CallEndpoint::create` recorded as the owner.
         if crate::callreg::unregister_owned_by(caller.caps.task().0, self.audit) > 0 {
@@ -855,7 +831,7 @@ where
         ptr: u64,
         len: usize,
     ) -> SyscallResult {
-        // §5.4: resolve the destination endpoint against the live
+        // resolve the destination endpoint against the live
         // named-port registry before touching the caller's buffer. An
         // endpoint that is not currently bound fails closed with
         // `NotFound` — a real lookup miss; the dispatcher's standard
@@ -877,14 +853,14 @@ where
         }
 
         // Copy the payload in from the caller's address space through the
-        // validated `copy_from_user` boundary (`AGENTS.md` §5.4). The
+        // validated `copy_from_user` boundary. The
         // bytes are staged in a kernel-owned buffer; `Port::send` then
         // takes its own kernel copy, so the sender cannot mutate the
         // message after it is accepted. `with_caller_aspace` yields
         // `None` when the caller has no registered address space (a
         // kernel task, or one already withdrawn on `exit`) — fail closed
         // with the same `BadAddress` an actual fault produces, never
-        // leaking which case occurred (§19.1).
+        // leaking which case occurred.
         let mut payload = alloc::vec![0u8; len];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(ptr), &mut payload)
@@ -895,7 +871,7 @@ where
         }
 
         // Enqueue. `Port::send` performs the per-send capability check
-        // against the caller's effective set (`AGENTS.md` §5.2) and
+        // against the caller's effective set and
         // re-checks the payload size, returning a stable `Errno` for
         // every refusal.
         port.send(caller.caps, &payload, self.audit).map(|()| 0)
@@ -908,7 +884,7 @@ where
         ptr: u64,
         len: usize,
     ) -> SyscallResult {
-        // §5.4: resolve the destination endpoint against the live
+        // resolve the destination endpoint against the live
         // named-port registry. An endpoint that is not currently bound
         // fails closed with `NotFound`; the dispatcher's standard
         // pipeline audits the rejection.
@@ -928,20 +904,20 @@ where
         // `exit`); `recv_with` yields `Some(None)` when the mailbox is
         // momentarily empty. The two are kept distinct so an empty
         // mailbox is the retryable `WouldBlock`, never confused with a
-        // faulting pointer (§19.1).
+        // faulting pointer.
         let copied = self.with_caller_aspace(caller, |space, physmap| {
             port.recv_with(|msg| -> Result<usize, Errno> {
                 let payload = msg.payload.as_slice();
                 // Refuse to truncate: a buffer smaller than the message
                 // fails closed and — because `recv_with` only commits on
                 // `Ok` — leaves the message queued for a retry with a
-                // larger buffer (§2.9).
+                // larger buffer.
                 if payload.len() > len {
                     return Err(Errno::BufferTooSmall);
                 }
                 // Every `UaccessError` collapses onto the single
                 // `BadAddress` so a faulting pointer cannot be used as a
-                // memory-layout oracle (§19.1, §5.4). A fault leaves the
+                // memory-layout oracle. A fault leaves the
                 // message queued.
                 copy_out(space, physmap, VirtAddr::new(ptr), payload)
                     .map(|()| payload.len())
@@ -977,11 +953,11 @@ where
         // `set_ptr` names a fixed-size `CapabilitySet` (its 256-bit bitmap
         // as four little-endian `u64` words, `CapabilitySet::WIRE_LEN`
         // bytes) in the caller's address space. Copy it in through the
-        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // validated `copy_from_user` boundary before
         // touching the capability table. A caller with no registered
         // address space (a kernel task, or one withdrawn on `exit`) and
         // any copy fault both collapse onto `BadAddress`, never leaking
-        // which case occurred (§19.1).
+        // which case occurred.
         let mut buf = [0u8; CapabilitySet::WIRE_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(set_ptr), &mut buf)
@@ -995,7 +971,7 @@ where
         // exactly `WIRE_LEN`, so decoding cannot fail. Run the `CapTable`
         // delegate path: `delegate` replaces the target's effective set
         // with the requested subset, rejecting a *widening* request with
-        // `DelegationWiden` and auditing the decision (§5.2). An unknown
+        // `DelegationWiden` and auditing the decision. An unknown
         // target task is the stable `NotFound`, not a kernel bug — the
         // same condition `cap_revoke` surfaces.
         let requested = CapabilitySet::from_le_bytes(&buf)?;
@@ -1023,8 +999,7 @@ where
                 // capability was not held, but the audit record it
                 // emits via the underlying `TaskCapabilities::revoke`
                 // is the security-relevant signal (the *attempt* is
-                // the event). The boolean is intentionally discarded
-                // (`AGENTS.md` §5.4.4).
+                // the event). The boolean is intentionally discarded.
                 let _ = record.revoke(cap, self.audit);
                 Ok(0)
             }
@@ -1035,20 +1010,18 @@ where
     fn clock_get(&self, caller: &CallerContext<'_>) -> SyscallResult {
         // `monotonic_ns` is documented as monotonically non-decreasing
         // per CPU; the dispatcher invokes us on the issuing CPU's
-        // process context (`AGENTS.md` §5.4 step 1), so reading from
+        // process context (step 1), so reading from
         // `self.arch.current_cpu()` is the natural source. We do not
         // accept a caller-supplied CPU id — there is no syscall
         // argument for one, and a kernel-trusted lookup is the only
         // sanctioned source.
         let cpu = crate::sched::SchedulerArch::current_cpu(self.arch);
         let ns = self.arch.monotonic_ns(cpu);
-        // A full-resolution timer is a side-channel primitive
-        // (`AGENTS.md` §19.1). Only a principal explicitly trusted with
+        // A full-resolution timer is a side-channel primitive. Only a principal explicitly trusted with
         // `CAP_TIME_HIRES` reads the raw nanosecond value; every other
-        // caller — including the §19.5 parser sandboxes and untrusted
+        // caller — including the parser sandboxes and untrusted
         // apps — sees the reading floored to
-        // `COARSE_CLOCK_GRANULARITY_NS` (security by default,
-        // `AGENTS.md` §5.7). Coarsening is value-only: the `clock_get`
+        // `COARSE_CLOCK_GRANULARITY_NS` (security by default). Coarsening is value-only: the `clock_get`
         // ABI signature is unchanged, and `coarsen_clock_ns` preserves
         // the per-CPU monotonic-non-decreasing contract the `irq_wait`
         // timeout loop relies on.
@@ -1084,18 +1057,17 @@ where
         // The poll-and-park loop itself lives in
         // `rustos_kernel_irq::block_until_ready` so the in-kernel
         // `KernelVirtioHost::notify_wait` path can drive the same
-        // implementation without a second copy (`AGENTS.md` §2.2).
+        // implementation without a second copy.
         // This handler supplies the scheduler + arch seam through
         // `SyscallIrqWaiter` and translates the terminal outcome to
         // the documented stable `Errno`.
         //
-        // The caller *parks* off the run queue between polls (`AGENTS.md`
-        // §2.1 — no busy yield): it is woken by `crate::waitq::irq_wake`
+        // The caller *parks* off the run queue between polls (no busy yield): it is woken by `crate::waitq::irq_wake`
         // the instant the device-IRQ dispatch path runs `IrqTable::fire`,
         // or, with a finite timeout, by the architecture one-shot's
         // per-tick sweep (`crate::waitq::timed_wake_sweep`), and re-checks
         // its bound line after every wake. This mirrors `hw_tree_wait`
-        // exactly (`AGENTS.md` §2.2 — one park discipline).
+        // exactly (one park discipline).
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
         let waiter = SyscallIrqWaiter {
@@ -1112,7 +1084,7 @@ where
             // park so an interrupt-driven user-space driver (which holds no
             // controller access) is routed + unmasked on the kernel's behalf.
             // The line is resolved once, owner-checked: a forged/foreign
-            // handle yields `None` and re-arms nothing (`AGENTS.md` §5.4).
+            // handle yields `None` and re-arms nothing.
             irq_controller: self.irq_controller,
             line: self.irq.line_for(handle, caller.task_id),
         };
@@ -1121,17 +1093,17 @@ where
         // window between the poll and the park is not lost: the
         // dispatch-path `irq_wake` then `unpark`s this task and the
         // scheduler's wake-pending token converts a concurrent park
-        // commit into a re-ready (`AGENTS.md` §2.1). The deadline is one
+        // commit into a re-ready. The deadline is one
         // saturating add from the clock so a `u64::MAX` timeout stays
         // `NO_DEADLINE` (explicit wake only) rather than wrapping to a
-        // tiny value (`AGENTS.md` §5.4.5 — fail closed). `block_until_ready`
+        // tiny value (fail closed). `block_until_ready`
         // recomputes the identical deadline from its own first reading.
         let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
         crate::waitq::IRQ_WAITQ.register(task, deadline_ns);
         let outcome = block_until_ready(self.irq, handle, caller.task_id, timeout_ns, &waiter);
         // Leave the wait set and re-point the one-shot at whatever deadline
         // any *remaining* waiter needs (or clear it if none) so a finished
-        // wait never leaves a stale arming behind (`AGENTS.md` §17.1).
+        // wait never leaves a stale arming behind.
         crate::waitq::IRQ_WAITQ.deregister(task);
         self.arch
             .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
@@ -1143,7 +1115,7 @@ where
             // to `Errno::NotFound`: `NoSuchTask` cannot happen here
             // (`CallerContext` is built from the live scheduler
             // current-task slot) but is mapped for symmetry with
-            // the park seam (`AGENTS.md` §5.4.5).
+            // the park seam.
             WaitOutcome::NotFound | WaitOutcome::Aborted(IrqWaitAbort::TaskVanished) => {
                 Err(Errno::NotFound)
             }
@@ -1160,7 +1132,7 @@ where
         len: usize,
         flags: RandomFlags,
     ) -> SyscallResult {
-        // Bound the work one call may request (`AGENTS.md` §22 — a caller
+        // Bound the work one call may request (a caller
         // needing more issues further requests).
         if len > RANDOM_REQUEST_MAX_BYTES {
             return Err(Errno::LengthOutOfRange);
@@ -1171,8 +1143,7 @@ where
             return Ok(0);
         }
 
-        // A non-blocking caller must never wait for the RNG to be seeded
-        // (`AGENTS.md` §22); it fails closed with `EntropyNotReady`
+        // A non-blocking caller must never wait for the RNG to be seeded; it fails closed with `EntropyNotReady`
         // instead. The flag has no effect once the reserve is seeded —
         // generation never waits for fresh entropy.
         let non_blocking = flags.is_non_blocking();
@@ -1180,10 +1151,10 @@ where
         // Resolve the caller's address space once and stream the bytes
         // out under its read guard. The reserve produces CSPRNG output
         // into a fixed kernel staging buffer — never a per-call heap
-        // allocation whose failure path could OOM (`AGENTS.md` §4) — and
+        // allocation whose failure path could OOM — and
         // each chunk is copied into the caller's buffer through the
         // validated `copy_out` boundary, then the staging is wiped
-        // (`AGENTS.md` §22 — zeroed on consumption). The whole draw runs
+        // (zeroed on consumption). The whole draw runs
         // under the reserve's write guard so one request observes a
         // contiguous stream from a single generator.
         let outcome = self.with_caller_aspace(caller, |space, physmap| {
@@ -1200,7 +1171,7 @@ where
                 // The destination is the caller pointer advanced by the
                 // bytes already delivered. A pointer that overflows the
                 // address space fails closed as `BadAddress` rather than
-                // wrapping (`AGENTS.md` §5.4).
+                // wrapping.
                 let Some(addr) = buf.checked_add(offset as u64) else {
                     staging.zeroize();
                     return Err(Errno::BadAddress);
@@ -1212,15 +1183,14 @@ where
                 offset += take;
             }
             // Wipe the staging buffer once the request is fully served
-            // (`AGENTS.md` §22 — the kernel copy of the output never
+            // (the kernel copy of the output never
             // lingers).
             staging.zeroize();
             Ok(offset as u64)
         });
         // A caller with no registered address space (a kernel task, or
         // one withdrawn on `exit`) collapses onto the same fail-closed
-        // `BadAddress` every copy-path handler returns (`AGENTS.md` §5.4
-        // / §19.1).
+        // `BadAddress` every copy-path handler returns.
         outcome.unwrap_or(Err(Errno::BadAddress))
     }
 
@@ -1232,8 +1202,8 @@ where
         len: usize,
     ) -> SyscallResult {
         // Resolve `fd` against the caller's per-process descriptor table
-        // *before* touching any state (`AGENTS.md` §5.4): the inherited
-        // descriptor, not an ambient device, is the authority (§20). An
+        // *before* touching any state: the inherited
+        // descriptor, not an ambient device, is the authority. An
         // `fd` that is not a writable inherited stream fails closed with
         // `NotFound` (its stream backing does not exist for this caller),
         // never leaking whether it was closed, the wrong direction, or
@@ -1244,11 +1214,11 @@ where
             return Err(Errno::NotFound);
         }
         // Resolve the descriptor's console index against the installed
-        // console list (`AGENTS.md` §20 — the descriptor names its
+        // console list (the descriptor names its
         // backing; the video console and the UART are separate devices,
         // `plans/PI.md` P11). An index with no installed console —
         // including the empty pre-install list — announces the inert
-        // interface (`AGENTS.md` §2.9) rather than silently dropping
+        // interface rather than silently dropping
         // the bytes.
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
@@ -1260,18 +1230,18 @@ where
             return Ok(0);
         }
         // Bound the staging allocation so a hostile `len` cannot force
-        // an arbitrarily large kernel buffer (`AGENTS.md` §4). Writing a
+        // an arbitrarily large kernel buffer. Writing a
         // prefix and reporting the count is valid short-write behaviour;
         // the caller loops for the remainder.
         let take = core::cmp::min(len, CONSOLE_WRITE_MAX);
 
         // Copy the bytes in from the caller's address space through the
-        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // validated `copy_from_user` boundary before
         // touching the device. `with_caller_aspace` yields `None` when
         // the caller has no registered address space (a kernel task, or
         // one withdrawn on `exit`) — fail closed with the same
         // `BadAddress` an actual fault produces, never leaking which
-        // case occurred (§19.1).
+        // case occurred.
         let mut payload = alloc::vec![0u8; take];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(buf), &mut payload)
@@ -1293,7 +1263,7 @@ where
         len: usize,
     ) -> SyscallResult {
         // Resolve `fd` against the caller's per-process descriptor table
-        // *before* touching any state (`AGENTS.md` §5.4 / §20): an `fd`
+        // *before* touching any state: an `fd`
         // that is not a readable inherited stream fails closed with
         // `NotFound`, never leaking which case occurred. An unregistered
         // caller resolves to the all-`Closed` default and fails here too.
@@ -1302,11 +1272,11 @@ where
             return Err(Errno::NotFound);
         }
         // Resolve the descriptor's console index against the installed
-        // console list (`AGENTS.md` §20, `plans/PI.md` P11 — a login on
+        // console list (`plans/PI.md` P11 — a login on
         // the UART console reads the UART, a login on the video console
         // reads its own keyboard source, never each other's). A missing
         // console — including the empty pre-install list — announces the
-        // inert interface (`AGENTS.md` §2.9) rather than fabricating
+        // inert interface rather than fabricating
         // input.
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
@@ -1318,7 +1288,7 @@ where
             return Ok(0);
         }
         // Bound the staging allocation so a hostile `len` cannot force an
-        // arbitrarily large kernel buffer (`AGENTS.md` §4). Reading a
+        // arbitrarily large kernel buffer. Reading a
         // prefix and reporting the count is valid short-read behaviour;
         // the caller loops for the remainder.
         let take = core::cmp::min(len, CONSOLE_READ_MAX);
@@ -1330,7 +1300,7 @@ where
         let read = device.read.read(&mut payload)?;
         // A correct device never reports more than the buffer it was
         // handed; clamp defensively so a buggy source cannot drive an
-        // out-of-bounds copy (`AGENTS.md` §5.4 — validate every input,
+        // out-of-bounds copy (validate every input,
         // including from the device side of the seam).
         let read = core::cmp::min(read, take);
         if read == 0 {
@@ -1338,13 +1308,13 @@ where
             // touching the caller's buffer. The production init pipeline
             // wraps the installed device in `BlockingConsoleRead`, which
             // parks the caller until input arrives instead of returning
-            // zero (`AGENTS.md` §20); this branch remains for a bare
+            // zero; this branch remains for a bare
             // non-blocking device (host tests), whose caller loops.
             return Ok(0);
         }
 
         // Echo the consumed bytes back to this console's own output when
-        // terminal echo is enabled (`AGENTS.md` §20 — local echo), so an
+        // terminal echo is enabled (local echo), so an
         // interactive user sees what they type. The kernel owns the read
         // line discipline, so this needs no separate `CAP_CONSOLE_WRITE`;
         // it is a no-op while a caller has suppressed echo for a password
@@ -1353,11 +1323,10 @@ where
         device.echo_bytes(&payload[..read]);
 
         // Copy the bytes actually read out to the caller's address space
-        // through the validated `copy_to_user` boundary (`AGENTS.md`
-        // §5.4). `with_caller_aspace` yields `None` when the caller has
+        // through the validated `copy_to_user` boundary. `with_caller_aspace` yields `None` when the caller has
         // no registered address space (a kernel task, or one withdrawn on
         // `exit`) — fail closed with the same `BadAddress` an actual
-        // fault produces, never leaking which case occurred (§19.1).
+        // fault produces, never leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &payload[..read])
         }) {
@@ -1376,17 +1345,16 @@ where
     ) -> SyscallResult {
         // The dispatcher already checked `CAP_PROC_SPAWN` and that `path`
         // is non-null (`UserPtr`). Bound the staged path so a hostile
-        // `path_len` cannot force an arbitrarily large kernel allocation
-        // (`AGENTS.md` §4); an over-long or empty path cannot name a
+        // `path_len` cannot force an arbitrarily large kernel allocation; an over-long or empty path cannot name a
         // registered program, so it fails closed with `NotFound`.
         if path_len == 0 || path_len > SPAWN_PATH_MAX {
             return Err(Errno::NotFound);
         }
 
         // Resolve the child's standard-stream attachment *before*
-        // touching any further state (`AGENTS.md` §5.4): `CONSOLE_INHERIT`
+        // touching any further state: `CONSOLE_INHERIT`
         // copies the caller's own descriptor table (the child stays on
-        // its parent's console, §20), while an explicit value must name
+        // its parent's console), while an explicit value must name
         // an installed console index — anything else fails closed with
         // `NotFound`, never attaching the child to a device that does
         // not exist (`plans/PI.md` P11).
@@ -1402,17 +1370,17 @@ where
 
         // The spawn subsystem must be fully wired before any state is
         // touched: a build with no frame allocator threaded fails closed
-        // with `NotImplemented` (`AGENTS.md` §2.9), the spawn-equivalent of
+        // with `NotImplemented`, the spawn-equivalent of
         // `stream_write`'s `NULL_CONSOLE`.
         let Some(frames) = self.frames else {
             return Err(Errno::NotImplemented);
         };
 
         // Copy the path in from the caller's address space through the
-        // validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // validated `copy_from_user` boundary before
         // touching the registry. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`, never
-        // leaking which case occurred (§19.1).
+        // leaking which case occurred.
         let mut path_buf = alloc::vec![0u8; path_len];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(path), &mut path_buf)
@@ -1423,7 +1391,7 @@ where
         }
 
         // Resolve the path to a registered embedded program. An unknown
-        // path fails closed with `NotFound` (`AGENTS.md` §2.1) — there is
+        // path fails closed with `NotFound` — there is
         // no prefix or alias resolution.
         let Some(program) = self.programs.lookup(&path_buf) else {
             return Err(Errno::NotFound);
@@ -1433,14 +1401,14 @@ where
         // which builds a fresh hardware-isolated address space and admits
         // it as a runnable process through `ctx`, returning the new PID.
         // The default `NULL_PROCESS_SPAWN` fails closed with
-        // `NotImplemented` (`AGENTS.md` §2.9). The producer re-asserts the
+        // `NotImplemented`. The producer re-asserts the
         // `CAP_PROC_SPAWN` gate inside `spawn_image` and audits the
         // decision; the child receives only its manifest∩user-grant
-        // authority (`AGENTS.md` §4, §16.5).
+        // authority.
         // Record the new child against the spawning caller so a later
         // `wait` from this parent can reap it (`plans/SPAWN.md` SP6). The
         // parent is the kernel-trusted caller identity, never a
-        // caller-supplied value (`AGENTS.md` §5.4.1).
+        // caller-supplied value.
         let ctx = KernelSpawnCtx::new(
             frames,
             self.page_table_frames,
@@ -1454,11 +1422,11 @@ where
             child_streams,
             // A user-driven `spawn` grants the child no device resources:
             // device windows are minted only by the privileged driver-spawn
-            // path from the matched node's requests (`AGENTS.md` §4 — no
-            // ambient authority; §18.3).
+            // path from the matched node's requests (no
+            // ambient authority;).
             &[],
             // …and it is not a node-matched driver load, so the child has no
-            // loaded node and may publish no `hw_emit_node` child (§4 / §5.4).
+            // loaded node and may publish no `hw_emit_node` child.
             None,
         );
         self.spawn_service.spawn(program, &ctx)
@@ -1467,7 +1435,7 @@ where
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         // The dispatcher already checked `CAP_CONSOLE_WRITE`. The count
         // is the installed list's length — the index space `spawn`'s
-        // `console` argument selects from (`AGENTS.md` §20,
+        // `console` argument selects from (
         // `plans/PI.md` P11); an empty pre-install list honestly
         // reports zero consoles.
         Ok(self.consoles.len() as u64)
@@ -1475,7 +1443,7 @@ where
 
     fn stream_echo(&self, caller: &CallerContext<'_>, fd: u32, enabled: u32) -> SyscallResult {
         // Resolve `fd` against the caller's per-process descriptor table
-        // *before* touching any state (`AGENTS.md` §5.4 / §20): echo is a
+        // *before* touching any state: echo is a
         // property of an *input* stream's console, so `fd` must be a
         // readable inherited stream — anything else fails closed with
         // `NotFound`, never leaking which case occurred. An unregistered
@@ -1486,7 +1454,7 @@ where
         }
         // Resolve the descriptor's console against the installed list. A
         // missing console — including the empty pre-install list —
-        // announces the inert interface (`AGENTS.md` §2.9) rather than
+        // announces the inert interface rather than
         // pretending the toggle took effect.
         let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
             return Err(Errno::NotImplemented);
@@ -1494,8 +1462,7 @@ where
         // The dispatcher already checked `CAP_CONSOLE_READ`. Any non-zero
         // value enables echo; zero disables it (the ABI contract). The
         // toggle is the program's own terminal control — login disables
-        // echo around a password read so the secret is never rendered
-        // (`AGENTS.md` §5.4).
+        // echo around a password read so the secret is never rendered.
         device.set_echo(enabled != 0);
         Ok(0)
     }
@@ -1504,21 +1471,20 @@ where
         // The dispatcher already checked `CAP_INPUT_INJECT` and that `buf`
         // is non-null (`UserPtr`). A record is fixed-width: a `len` that
         // cannot hold one fails closed rather than letting the kernel decode
-        // a truncated edge (`AGENTS.md` §2.9 / §5.4 — never act on a partial
+        // a truncated edge (never act on a partial
         // input).
         if len < KeyInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         // Copy exactly one record in from the caller's address space through
-        // the validated `copy_from_user` boundary (`AGENTS.md` §5.4) before
+        // the validated `copy_from_user` boundary before
         // touching the arbiter. The staging buffer lives on the stack and is
         // wiped on every exit: a key edge can carry a typed character (a
         // password keystroke transits here), so it must not linger
-        // (`AGENTS.md` §4 — zero memory that held a credential; §23.1).
+        // (zero memory that held a credential;).
         // `with_caller_aspace` yields `None` when the caller has no
         // registered address space — fail closed with the same `BadAddress`
-        // an actual fault produces, never leaking which case occurred
-        // (§19.1).
+        // an actual fault produces, never leaking which case occurred.
         let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(buf), &mut record_bytes)
@@ -1535,21 +1501,20 @@ where
         }
 
         // Decode the record fail-closed: a malformed edge is refused rather
-        // than interpreted (`AGENTS.md` §5.4 / §19.5). The driver no longer
+        // than interpreted. The driver no longer
         // chooses the encoding or destination — the arbiter routes the edge
         // to the text console or the desktop keyboard channel by who holds
-        // focus (`AGENTS.md` §17.4, `plans/PI.md` P11).
+        // focus (`plans/PI.md` P11).
         let decoded = KeyInput::from_bytes(&record_bytes);
         record_bytes.zeroize();
         let record = decoded?;
         let consumed = self.input_focus.inject(record)?;
-        // Witness the first successful delivery exactly once (`AGENTS.md`
-        // §18.3 / §20, `plans/PI.md` P11): proof that an (autoloaded)
+        // Witness the first successful delivery exactly once (`plans/PI.md` P11): proof that an (autoloaded)
         // keyboard driver has come up and is routing input through the
         // arbiter. The one-shot latch fires this on the first edge only —
         // never per keystroke — and the record carries no key content,
         // count, or timing, so a typed secret and its cadence never reach
-        // the log (`AGENTS.md` §20 — no input-content/timing noise; §23.1
+        // the log (no input-content/timing noise;
         // — secret hygiene).
         if self.input_focus.note_first_delivery() {
             crate::audit::emit(
@@ -1566,7 +1531,7 @@ where
         // The dispatcher already checked `CAP_DISPLAY`. Claiming the display
         // switches the arbiter's foreground to the desktop keyboard channel
         // so subsequently injected key edges follow the new surface owner
-        // (`AGENTS.md` §10 / §17.3 / §20, `plans/PI.md` P11).
+        // (`plans/PI.md` P11).
         self.input_focus.acquire_display();
         Ok(0)
     }
@@ -1574,7 +1539,7 @@ where
     fn display_release(&self, _caller: &CallerContext<'_>) -> SyscallResult {
         // The dispatcher already checked `CAP_DISPLAY`. Releasing the
         // display returns the arbiter's foreground to the text console so a
-        // login/shell once again receives the keyboard (`AGENTS.md` §20,
+        // login/shell once again receives the keyboard (
         // `plans/PI.md` P11).
         self.input_focus.release_display();
         Ok(0)
@@ -1583,15 +1548,14 @@ where
     fn keyboard_read(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
         // The dispatcher already checked `CAP_INPUT_READ` and that `buf` is
         // non-null (`UserPtr`). A record is fixed-width: a `len` that cannot
-        // hold one fails closed, the kernel never writes a partial record
-        // (`AGENTS.md` §2.9).
+        // hold one fails closed, the kernel never writes a partial record.
         if len < KeyInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
         // Drain one record into a stack buffer first. `read_key` returns
         // `0` when the channel is momentarily empty (a valid short read the
         // caller loops on) or one whole record's `WIRE_LEN`. The buffer is
-        // wiped on every exit (`AGENTS.md` §4 / §23.1 — a key edge may carry
+        // wiped on every exit (a key edge may carry
         // a typed character).
         let mut record_bytes = [0u8; KeyInput::WIRE_LEN];
         let read = match self.input_focus.read_key(&mut record_bytes) {
@@ -1607,9 +1571,9 @@ where
         }
 
         // Copy the record out to the caller's address space through the
-        // validated `copy_to_user` boundary (`AGENTS.md` §5.4). A `None`
+        // validated `copy_to_user` boundary. A `None`
         // (unregistered caller) or a fault fails closed with `BadAddress`,
-        // never leaking which case occurred (§19.1).
+        // never leaking which case occurred.
         let result = match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &record_bytes[..read])
         }) {
@@ -1631,7 +1595,7 @@ where
         // The dispatcher already validated `len` fits in `usize`, that
         // `flags` carries no reserved bit, and that `addr_hint` is a
         // well-formed `u64`. A zero-length mapping is meaningless; reject it
-        // before touching any state (`AGENTS.md` §5.4 — validate every
+        // before touching any state (validate every
         // input) rather than mapping an empty region.
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
@@ -1640,13 +1604,13 @@ where
         // maps the region into the caller's own live address space, zeroes
         // it, and returns its base (`plans/SPAWN.md` SP5b). Until one is
         // installed the default `NULL_MEM_MAP` fails closed with
-        // `NotImplemented` (`AGENTS.md` §2.9), never pretending a region was
+        // `NotImplemented`, never pretending a region was
         // mapped. A frame exhaustion surfaces as `OutOfMemory` here
-        // (`AGENTS.md` §4 — deterministic OOM).
+        // (deterministic OOM).
         let result = self.mem_map.map(len, flags, addr_hint);
         // The map grew the caller's live space; re-freeze the registry
         // snapshot so the next `copy_in`/`copy_out` can see the new region
-        // (`AGENTS.md` §5.4 — the copy path must reflect live memory). Only
+        // (the copy path must reflect live memory). Only
         // on success: a failed map touched no mappings.
         if result.is_ok() {
             self.refreeze_caller_aspace(caller);
@@ -1661,13 +1625,13 @@ where
         offset: u64,
         len: usize,
     ) -> SyscallResult {
-        // §5.4 step 2 (capability) was enforced by the dispatcher: the
+        // step 2 (capability) was enforced by the dispatcher: the
         // `mmio_map` spec carries `CAP_MMIO_MAP`. Step 3 (validate every
         // input) is here, and it is the security spine of this syscall: we
         // resolve `handle` to a granted resource **for the calling task**
         // (`caller.task_id` is kernel-trusted, never caller-supplied), so a
         // forged or another driver's handle resolves to nothing and is
-        // refused (`AGENTS.md` §5.4 — no trusted-caller shortcut; §18.3 — a
+        // refused (no trusted-caller shortcut; — a
         // driver reaches only the resources its matched node requested). The
         // per-task grant table lives in the address-space registry (minted
         // when a driver is admitted, reclaimed when the task is withdrawn on
@@ -1679,24 +1643,22 @@ where
         // requested `[offset, offset + len)` sub-region must lie wholly
         // inside it; reject any other kind/shape, a zero/overflowing length,
         // or a sub-region that escapes the grant before touching a page
-        // table (`AGENTS.md` §5.4 — fail closed rather than mapping the wrong
-        // thing; §4 — a driver maps only inside a region it was granted).
+        // table (fail closed rather than mapping the wrong
+        // thing; — a driver maps only inside a region it was granted).
         // Mapping a bounded sub-region (not the whole grant) is what lets a
         // driver granted a large outbound bus aperture map just the single
         // BAR it enumerated, instead of the whole 1 GiB window — the latter
         // would exhaust the per-task MMIO virtual window and fail closed with
-        // `OutOfMemory` (`AGENTS.md` §24.1).
+        // `OutOfMemory`.
         let (phys_base, len) = mappable_subwindow(&resource, offset, len)?;
         // Mechanism: the installed producer maps only that region —
         // caching disabled, never executable — into the caller's own live
         // address space and returns its base virtual address. The default
-        // `NULL_MMIO_MAP_FACILITY` fails closed with `NotImplemented`
-        // (`AGENTS.md` §2.9), never pretending a window was mapped; frame
-        // exhaustion surfaces as `OutOfMemory` (deterministic OOM, §4).
+        // `NULL_MMIO_MAP_FACILITY` fails closed with `NotImplemented`, never pretending a window was mapped; frame
+        // exhaustion surfaces as `OutOfMemory` (deterministic OOM).
         let result = self.mmio_map_facility.map_window(phys_base, len);
         // The window grew the caller's live space; re-freeze the registry
-        // snapshot so a later copy through the driver's space sees it
-        // (`AGENTS.md` §5.4). Only on success.
+        // snapshot so a later copy through the driver's space sees it. Only on success.
         if result.is_ok() {
             self.refreeze_caller_aspace(caller);
         }
@@ -1710,18 +1672,18 @@ where
         len: usize,
         device_out: u64,
     ) -> SyscallResult {
-        // §5.4 step 2 (capability) was enforced by the dispatcher: the
+        // step 2 (capability) was enforced by the dispatcher: the
         // `dma_alloc` spec carries `CAP_MEM_DMA`. Step 3 (validate every
         // input) is here. Resolve `handle` to a granted resource **for the
         // calling task** (`caller.task_id` is kernel-trusted), so a forged or
         // another driver's handle resolves to nothing and is refused
-        // (`AGENTS.md` §5.4; §18.3 — a driver reaches only the resources its
+        // (— a driver reaches only the resources its
         // matched node requested), exactly as `mmio_map`.
         let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
             return Err(Errno::NotFound);
         };
         // The grant must name a DMA constraint; reject any other kind before
-        // carving (`AGENTS.md` §5.4 — fail closed).
+        // carving (fail closed).
         let constraint = dma_constraint(&resource)?;
         // A zero-length buffer names nothing; reject it before any carve.
         if len == 0 {
@@ -1729,34 +1691,33 @@ where
         }
         // The buffer must fit the grant's declared maximum extent, when one
         // is declared (`max_len == 0` means no declared maximum). Reject an
-        // over-large request before carving (§5.4).
+        // over-large request before carving.
         if constraint.max_len != 0 && (len as u64) > constraint.max_len {
             return Err(Errno::OutOfRange);
         }
         // Mechanism: the installed producer carves a physically-contiguous,
         // zeroed, coherent block bounded by the grant's `addr_limit` into the
         // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
-        // fails closed with `NotImplemented` (`AGENTS.md` §2.9); frame
-        // exhaustion surfaces as `OutOfMemory` (deterministic OOM, §4).
+        // fails closed with `NotImplemented`; frame
+        // exhaustion surfaces as `OutOfMemory` (deterministic OOM).
         let carve = self.dma_alloc_facility.alloc(len, constraint.addr_limit)?;
         // Resolve the device-visible base the driver programs into its
         // hardware. For a coherent (untranslated) constraint it is the carved
         // CPU-physical base; for a translating inbound viewport
         // (`dma_translated`, e.g. the Pi 4's `IB MEM 0x0..0x1ffffffff ->
         // 0x4_0000_0000`) it is that base re-based onto the far side of the
-        // viewport — checked, never wrapped (`AGENTS.md` §18.1 / §2.9). The
+        // viewport — checked, never wrapped. The
         // carve already lies below `addr_limit`, so this only re-bases it; a
         // base outside the viewport's CPU window fails closed.
         let device_addr = translate_device_addr(&constraint, carve.device_addr)?;
         // The carve grew the caller's live space; re-freeze the registry
         // snapshot before the copy below so the new DMA window is visible to
-        // the copy path (`AGENTS.md` §5.4).
+        // the copy path.
         self.refreeze_caller_aspace(caller);
         // Hand the device-visible base back through the `device_out` user
-        // pointer via the validated `copy_to_user` boundary (`AGENTS.md`
-        // §5.4), exactly as `wait` writes the reaped status — a faulting
+        // pointer via the validated `copy_to_user` boundary, exactly as `wait` writes the reaped status — a faulting
         // `device_out` collapses onto the same fail-closed `BadAddress` an
-        // actual fault produces (§19.1). The buffer stays mapped; it is
+        // actual fault produces. The buffer stays mapped; it is
         // reclaimed when the task's live space is dropped on exit
         // (`LiveSpace::drop`), so a driver that passes a bad pointer self-DoSes
         // a buffer at worst — it never widens authority.
@@ -1771,32 +1732,32 @@ where
     }
 
     fn resource_grants(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
-        // §5.4 step 2 (capability): none required — a task reads only its
+        // step 2 (capability): none required — a task reads only its
         // *own* minted grants, which confers no authority over anything else
         // (the handles are useless without the `CAP_MMIO_MAP` / `CAP_MEM_DMA`
         // the driver also holds, and `mmio_map` / `dma_alloc` re-check
-        // ownership when they are presented). This is the §16.6 / §24.3
+        // ownership when they are presented). This is the
         // own-process-observer baseline. Step 3: serialise the grant set of
         // the **calling task** (`caller.task_id` is kernel-trusted, never
-        // caller-supplied, §5.4) from the per-task grant table in the
+        // caller-supplied) from the per-task grant table in the
         // address-space registry; the read guard is held only for the
         // serialisation.
         let bytes = self.aspaces.read().grants_to_le_bytes(caller.task_id);
         // Never deliver a partial grant list: a buffer that cannot hold the
-        // whole set fails closed (`AGENTS.md` §2.9), so the driver re-sizes
+        // whole set fails closed, so the driver re-sizes
         // and retries rather than binding against a truncated table.
         if bytes.len() > len {
             return Err(Errno::BufferTooSmall);
         }
         // A task with no grants is a valid, empty result — not an error
-        // (`AGENTS.md` §18.4 — an unbound node is normal); skip the copy.
+        // (an unbound node is normal); skip the copy.
         if bytes.is_empty() {
             return Ok(0);
         }
         // Copy the records out to the caller's address space through the
-        // validated `copy_to_user` boundary (`AGENTS.md` §5.4). A `None`
+        // validated `copy_to_user` boundary. A `None`
         // (unregistered caller) or a fault fails closed with `BadAddress`,
-        // never leaking which case occurred (§19.1).
+        // never leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &bytes)
         }) {
@@ -1809,12 +1770,12 @@ where
     fn mem_unmap(&self, caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult {
         // The dispatcher already validated `base` and that `len` fits in
         // `usize`. A zero-length range names nothing; reject it before
-        // touching any state (`AGENTS.md` §5.4).
+        // touching any state.
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
         // Hand the range to the installed producer, which zeroes the frames
-        // it reclaims (`AGENTS.md` §4) and fails closed when `(base, len)`
+        // it reclaims and fails closed when `(base, len)`
         // does not name a region the caller mapped. The default
         // `NULL_MEM_MAP` fails closed with `NotImplemented`. Success reports
         // `Ok(0)` — the `Errno`-return ABI shape (`mem_unmap` returns an
@@ -1823,7 +1784,7 @@ where
         // The unmap shrank the caller's live space; re-freeze the registry
         // snapshot so the freed pages are dropped from it too — leaving them
         // in the stale snapshot would let the copy path read or write memory
-        // the task no longer owns (`AGENTS.md` §5.4 / §2.17 — fail closed,
+        // the task no longer owns (fail closed,
         // never expose freed memory). Only on success: a failed unmap left
         // the mappings unchanged.
         if result.is_ok() {
@@ -1837,18 +1798,17 @@ where
         // `i32` and that `status` is a non-null `UserPtr`. Hand the request
         // to the installed scheduler-side producer, which validates the
         // parent/child relationship (a process may only reap its own
-        // children, `AGENTS.md` §4 / §5.4), blocks the caller until a child
+        // children), blocks the caller until a child
         // is reapable, and reports the reaped child. Until one is installed
-        // the default `NULL_PROCESS_WAIT` fails closed with `NotImplemented`
-        // (`AGENTS.md` §2.9), never fabricating a reaped child — the
+        // the default `NULL_PROCESS_WAIT` fails closed with `NotImplemented`, never fabricating a reaped child — the
         // process-wait analogue of `NULL_MEM_MAP` / `NULL_PROCESS_SPAWN`.
         let reaped = self.process_wait.wait(caller.task_id, pid)?;
 
         // Copy the child's exit code out to the caller's `status` pointer
-        // through the validated `copy_to_user` boundary (`AGENTS.md` §5.4)
+        // through the validated `copy_to_user` boundary
         // *before* reporting success, so a faulting `status` is the same
         // fail-closed `BadAddress` an actual fault produces and never leaks
-        // which case occurred (§19.1). `with_caller_aspace` yields `None`
+        // which case occurred. `with_caller_aspace` yields `None`
         // when the caller has no registered address space; fail closed.
         let status_bytes = reaped.code.to_ne_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
@@ -1861,23 +1821,23 @@ where
     }
 
     fn rlimit_get(&self, caller: &CallerContext<'_>, kind: u32, out: u64) -> SyscallResult {
-        // §5.4: validate `kind` against the closed abi-v1 set before
+        // validate `kind` against the closed abi-v1 set before
         // touching any state. An unassigned discriminant fails closed with
         // `OutOfRange` rather than indexing past the limit set.
         let kind = LimitKind::from_u32(kind)?;
 
         // Read the caller's *own* effective limit (the default policy until
         // one is imposed). Reading one's own limit grants no authority and
-        // needs no capability (`AGENTS.md` §16.6 / §24.3); the dispatcher
+        // needs no capability; the dispatcher
         // leaves this call ungated and unaudited.
         let limit = self.aspaces.read().limits(caller.task_id).get(kind);
         let encoded = limit.encode();
 
         // Copy the encoded limit out to the caller's `out` pointer through
-        // the validated `copy_to_user` boundary (`AGENTS.md` §5.4). A caller
+        // the validated `copy_to_user` boundary. A caller
         // with no registered address space (a kernel task, or one withdrawn
         // on `exit`) and any copy fault both collapse onto `BadAddress`,
-        // never leaking which case occurred (§19.1).
+        // never leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(out), &encoded)
         }) {
@@ -1888,14 +1848,14 @@ where
     }
 
     fn rlimit_set(&self, caller: &CallerContext<'_>, kind: u32, value: u64) -> SyscallResult {
-        // §5.4: validate `kind` before touching any state.
+        // validate `kind` before touching any state.
         let kind = LimitKind::from_u32(kind)?;
 
         // Copy the requested limit in from the caller's `value` pointer
-        // through the validated `copy_from_user` boundary (`AGENTS.md` §5.4)
+        // through the validated `copy_from_user` boundary
         // *before* applying any policy. A caller with no registered address
         // space and any copy fault collapse onto the same fail-closed
-        // `BadAddress` (§19.1).
+        // `BadAddress`.
         let mut buf = [0u8; ResourceLimit::WIRE_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(value), &mut buf)
@@ -1905,14 +1865,14 @@ where
             None => return Err(Errno::BadAddress),
         }
         // `decode` validates `soft <= hard` and fails closed on a malformed
-        // pair, so a hostile buffer never yields a usable limit (§5.4).
+        // pair, so a hostile buffer never yields a usable limit.
         let requested = ResourceLimit::decode(&buf)?;
 
-        // §24.3: lowering (or any change that does not raise the hard bound)
+        // lowering (or any change that does not raise the hard bound)
         // is free; raising the hard bound above the current ceiling requires
         // `CAP_RLIMIT_RAISE`. `authorize_set` returns `PermissionDenied`
-        // otherwise, fail closed (§5.4). This call is audited per spec, so
-        // the dispatcher logs a rejection automatically (§19.4) — no
+        // otherwise, fail closed. This call is audited per spec, so
+        // the dispatcher logs a rejection automatically — no
         // bespoke audit record is needed here.
         let current = self.aspaces.read().limits(caller.task_id).get(kind);
         let can_raise = caller.caps.has(CapabilityId::RLIMIT_RAISE);
@@ -1920,7 +1880,7 @@ where
 
         // Commit the authorised limit to the caller's own per-task set. The
         // task is identified by the kernel-trusted `caller.task_id`, never a
-        // caller-supplied id (§5.4.1), so a process can only set its own
+        // caller-supplied id, so a process can only set its own
         // limits.
         self.aspaces.write().set_limit(caller.task_id, kind, stored);
         Ok(0)
@@ -1931,22 +1891,21 @@ where
         // a non-null `UserPtr`. Resolve the held database first: a build
         // with no holder wired fails closed with `NotImplemented`, and a
         // wired holder with no database fails closed with `NotFound`
-        // (`AGENTS.md` §2.9 / §5.4.5 — a system without accounts refuses
+        // (a system without accounts refuses
         // every login rather than inventing one).
         let text = self.users_db.text()?;
 
         // The whole text or nothing: a credential database is never
-        // truncated to fit an undersized buffer (`AGENTS.md` §2.9). The
+        // truncated to fit an undersized buffer. The
         // format's own 64 KiB maximum bounds the copy, so a conforming
         // caller's `MAX_DB_LEN` buffer always suffices.
         if text.len() > len {
             return Err(Errno::BufferTooSmall);
         }
 
-        // Copy the text out through the validated `copy_to_user` boundary
-        // (`AGENTS.md` §5.4). A faulting pointer — or a caller with no
+        // Copy the text out through the validated `copy_to_user` boundary. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`, never
-        // leaking which case occurred (§19.1).
+        // leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), text)
         }) {
@@ -1960,21 +1919,20 @@ where
         // The dispatcher already checked `CAP_SYSINFO_HW` and that `buf` is
         // a non-null `UserPtr`. Take one wire-encoded snapshot — header +
         // nodes, read together so the reported generation matches the
-        // nodes (`AGENTS.md` §18.4). A build with no store wired fails
-        // closed with `NotImplemented` (`AGENTS.md` §2.9).
+        // nodes. A build with no store wired fails
+        // closed with `NotImplemented`.
         let blob = self.hw_tree.snapshot()?;
 
         // The whole snapshot or nothing: the inventory is never truncated
         // to fit an undersized buffer — the caller grows its buffer and
-        // retries (`AGENTS.md` §2.9 / §24.1).
+        // retries.
         if blob.len() > len {
             return Err(Errno::BufferTooSmall);
         }
 
-        // Copy the bytes out through the validated `copy_to_user` boundary
-        // (`AGENTS.md` §5.4). A faulting pointer — or a caller with no
+        // Copy the bytes out through the validated `copy_to_user` boundary. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`,
-        // never leaking which case occurred (§19.1).
+        // never leaking which case occurred.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &blob)
         }) {
@@ -1993,24 +1951,23 @@ where
         // The dispatcher already checked `CAP_SYSINFO_HW`. Block the caller
         // until the store's generation differs from the one it last
         // observed, or the deadline elapses. The caller *parks* off the run
-        // queue (`AGENTS.md` §2.1 — no busy yield); it is woken either by
+        // queue (no busy yield); it is woken either by
         // the `HwTreeSource` store on a generation bump
         // (`crate::waitq::hw_tree_wake`) or, with a finite timeout, by the
         // architecture one-shot's per-tick sweep (`crate::waitq::timed_wake_sweep`),
-        // and re-checks its condition after every wake (`AGENTS.md` §18.4).
+        // and re-checks its condition after every wake.
         //
         // The deadline is one saturating add from the first clock reading,
         // so a `u64::MAX` timeout stays `NO_DEADLINE` (no timed wake, only
-        // an explicit one) rather than wrapping to a tiny value (`AGENTS.md`
-        // §5.4.5 — fail closed); `monotonic_ns` is non-decreasing per CPU
+        // an explicit one) rather than wrapping to a tiny value (fail closed); `monotonic_ns` is non-decreasing per CPU
         // and the handler does not migrate mid-wait.
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
 
         // Fast paths, checked before registering so the common
         // already-changed / zero-timeout / no-store cases allocate nothing
-        // and never touch the wait-queue (`AGENTS.md` §2.16). A build with
-        // no store wired fails closed with `NotImplemented` (`?`, §2.9).
+        // and never touch the wait-queue. A build with
+        // no store wired fails closed with `NotImplemented` (`?`).
         let now = self.arch.monotonic_ns(cpu);
         let deadline_ns = now.saturating_add(timeout_ns);
         if self.hw_tree.generation()? != last_generation {
@@ -2023,7 +1980,7 @@ where
         // Must block: register so a waker can find and `unpark` us, then
         // loop check → arm one-shot → park. The wake-pending token in the
         // scheduler closes the check/park race, so a generation bump or
-        // timeout arriving in that window is never lost (`AGENTS.md` §2.1).
+        // timeout arriving in that window is never lost.
         crate::waitq::HW_TREE_WAITQ.register(task, deadline_ns);
         let result = loop {
             let generation = match self.hw_tree.generation() {
@@ -2040,14 +1997,14 @@ where
             }
             // Arm the timed-wake one-shot to the nearest pending deadline so
             // a finite timeout fires even on an otherwise-idle CPU
-            // (`AGENTS.md` §17.1 — the nearest armed wakeup).
+            // (the nearest armed wakeup).
             self.arch
                 .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
             // Park off the run queue until woken. `reschedule_current`
             // returns `false` only when the caller is not a resumable user
             // kthread (host tests with no live dispatch loop); fall back to
             // a cooperative yield then, mirroring the IRQ-wait fail-closed
-            // shape, so a degenerate caller never busy-spins (§2.1).
+            // shape, so a degenerate caller never busy-spins.
             if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
                 match self.sched.yield_current(task) {
                     Ok(()) | Err(SchedError::InvalidState) => {}
@@ -2058,7 +2015,7 @@ where
         };
         // Leave the wait set and re-point the one-shot at whatever deadline
         // any *remaining* waiter needs (or clear it if none) so a finished
-        // wait never leaves a stale arming behind (`AGENTS.md` §17.1).
+        // wait never leaves a stale arming behind.
         crate::waitq::HW_TREE_WAITQ.deregister(task);
         self.arch
             .set_wakeup(crate::waitq::HW_TREE_WAITQ.earliest_deadline());
@@ -2071,7 +2028,7 @@ where
         // being unlocked but has not yet been published or given up on
         // (`UsersDbSource::is_pending`, the `Errno::WouldBlock` signal) — or
         // until the deadline elapses. The caller *parks* off the run queue
-        // (`AGENTS.md` §2.1 — no busy yield, the bug this syscall fixes:
+        // (no busy yield, the bug this syscall fixes:
         // `login` previously re-read `users_db_read` in a yield loop,
         // flooding the audit log with one ERROR per poll). It is woken by
         // `crate::waitq::users_db_wake` the instant the unlock reaches a
@@ -2082,18 +2039,17 @@ where
         //
         // The deadline is one saturating add from the first clock reading,
         // so a `u64::MAX` timeout stays `NO_DEADLINE` (no timed wake, only
-        // an explicit one) rather than wrapping to a tiny value (`AGENTS.md`
-        // §5.4.5 — fail closed); `monotonic_ns` is non-decreasing per CPU
+        // an explicit one) rather than wrapping to a tiny value (fail closed); `monotonic_ns` is non-decreasing per CPU
         // and the handler does not migrate mid-wait.
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
 
         // Fast paths, checked before registering so the common
         // already-resolved / zero-timeout cases allocate nothing and never
-        // touch the wait-queue (`AGENTS.md` §2.16). A build with no
+        // touch the wait-queue. A build with no
         // users-database service wired is never pending, so the wait returns
         // immediately and the subsequent `users_db_read` fails closed with
-        // `NotImplemented` (`AGENTS.md` §2.9).
+        // `NotImplemented`.
         let now = self.arch.monotonic_ns(cpu);
         let deadline_ns = now.saturating_add(timeout_ns);
         if !self.users_db.is_pending() {
@@ -2106,8 +2062,7 @@ where
         // Must block: register so a waker can find and `unpark` us, then
         // loop check → arm one-shot → park. The wake-pending token in the
         // scheduler closes the check/park race, so a terminal unlock outcome
-        // or timeout arriving in that window is never lost (`AGENTS.md`
-        // §2.1) — mirrors `hw_tree_wait` exactly (`AGENTS.md` §2.2).
+        // or timeout arriving in that window is never lost — mirrors `hw_tree_wait` exactly.
         crate::waitq::USERS_DB_WAITQ.register(task, deadline_ns);
         let result = loop {
             if !self.users_db.is_pending() {
@@ -2120,14 +2075,14 @@ where
             }
             // Arm the timed-wake one-shot to the nearest pending deadline so
             // a finite timeout fires even on an otherwise-idle CPU
-            // (`AGENTS.md` §17.1 — the nearest armed wakeup).
+            // (the nearest armed wakeup).
             self.arch
                 .set_wakeup(crate::waitq::USERS_DB_WAITQ.earliest_deadline());
             // Park off the run queue until woken. `reschedule_current`
             // returns `false` only when the caller is not a resumable user
             // kthread (host tests with no live dispatch loop); fall back to
             // a cooperative yield then, mirroring `hw_tree_wait`, so a
-            // degenerate caller never busy-spins (§2.1).
+            // degenerate caller never busy-spins.
             if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
                 match self.sched.yield_current(task) {
                     Ok(()) | Err(SchedError::InvalidState) => {}
@@ -2138,7 +2093,7 @@ where
         };
         // Leave the wait set and re-point the one-shot at whatever deadline
         // any *remaining* waiter needs (or clear it if none) so a finished
-        // wait never leaves a stale arming behind (`AGENTS.md` §17.1).
+        // wait never leaves a stale arming behind.
         crate::waitq::USERS_DB_WAITQ.deregister(task);
         self.arch
             .set_wakeup(crate::waitq::USERS_DB_WAITQ.earliest_deadline());
@@ -2154,13 +2109,13 @@ where
         reply: u64,
         reply_cap: usize,
     ) -> SyscallResult {
-        // §5.4: resolve the call endpoint against the kernel call-endpoint
+        // resolve the call endpoint against the kernel call-endpoint
         // registry before touching the caller's buffers. An endpoint that
         // is not bound fails closed with `NotFound`; the dispatcher's
         // standard pipeline audits the rejection at this boundary (the
         // registry lookup, like `PortRegistry::lookup`, does not). A build
         // whose kthread server never registered the endpoint therefore
-        // fails closed rather than blocking (`AGENTS.md` §2.9).
+        // fails closed rather than blocking.
         let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
             return Err(Errno::NotFound);
         };
@@ -2169,19 +2124,18 @@ where
         // larger than the endpoint advertises (itself capped at
         // `IPC_MESSAGE_MAX_PAYLOAD_LEN` at create time). The same
         // `MessageTooLarge` code `CallEndpoint::post` would return, made
-        // cheap to reject here (`AGENTS.md` §2.16).
+        // cheap to reject here.
         if request_len as u64 > u64::from(ep.max_request()) {
             return Err(Errno::MessageTooLarge);
         }
 
         // Copy the request in from the caller's address space through the
-        // validated `copy_from_user` boundary (`AGENTS.md` §5.4). The bytes
+        // validated `copy_from_user` boundary. The bytes
         // are staged in a kernel-owned buffer; `CallEndpoint::post` then
         // takes its own copy, so the caller cannot mutate the request after
         // it is posted. `with_caller_aspace` yields `None` when the caller
         // has no registered address space — fail closed with the same
-        // `BadAddress` a fault produces, never leaking which case occurred
-        // (§19.1).
+        // `BadAddress` a fault produces, never leaking which case occurred.
         let mut payload = alloc::vec![0u8; request_len];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(request), &mut payload)
@@ -2192,15 +2146,13 @@ where
         }
 
         // Post the request. `CallEndpoint::post` performs the per-call
-        // capability check against the caller's effective set (`AGENTS.md`
-        // §5.2 — no ambient authority) and re-checks the size, returning a
+        // capability check against the caller's effective set (no ambient authority) and re-checks the size, returning a
         // stable `Errno` for every refusal and otherwise an opaque ticket
         // correlating this caller with its reply.
         let ticket = ep.post(caller.caps, &payload, self.audit)?;
 
         // Wake the bound server: an in-kernel IPC-server kthread parks off
-        // the run queue on `SERVE_WAITQ` between requests (no busy-yield,
-        // `AGENTS.md` §2.1), so the posted request must unpark it or the
+        // the run queue on `SERVE_WAITQ` between requests (no busy-yield), so the posted request must unpark it or the
         // call would block until some unrelated wake. The server re-checks
         // its endpoint after every wake; the scheduler's wake-pending token
         // closes the post/park race so a request posted while the server is
@@ -2208,7 +2160,7 @@ where
         crate::waitq::serve_wake();
 
         // Block until the bound server replies, parking off the run queue
-        // (`AGENTS.md` §2.1 — no busy yield). `ipc_call` carries no timeout,
+        // (no busy yield). `ipc_call` carries no timeout,
         // so register with `NO_DEADLINE`: the caller is woken only by the
         // server's reply (`crate::waitq::call_wake`) or the endpoint's
         // destruction, and re-checks its ticket after every wake. The
@@ -2227,15 +2179,14 @@ where
             match ep.take_reply(claimant, ticket) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The endpoint was torn down, or the ticket is no longer
-                // ours: abandon the call fail-closed (`AGENTS.md` §2.9).
+                // ours: abandon the call fail-closed.
                 ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
                 ReplyOutcome::Pending => {
                     // Park off the run queue until woken. `reschedule_current`
                     // returns `false` only when the caller is not a resumable
                     // user kthread (host tests with no live dispatch loop);
                     // fall back to a cooperative yield then, mirroring
-                    // `hw_tree_wait`, so a degenerate caller never busy-spins
-                    // (§2.1).
+                    // `hw_tree_wait`, so a degenerate caller never busy-spins.
                     if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
                         match self.sched.yield_current(sched_task) {
                             Ok(()) | Err(SchedError::InvalidState) => {}
@@ -2251,7 +2202,7 @@ where
         let bytes = outcome?;
 
         // Refuse to truncate: a reply larger than the caller's buffer fails
-        // closed (`AGENTS.md` §2.9). The reply was already claimed and the
+        // closed. The reply was already claimed and the
         // ticket retired, so the caller must re-issue the call with a larger
         // buffer — each endpoint's protocol bounds its replies, so a
         // correctly-sized buffer always fits.
@@ -2259,8 +2210,7 @@ where
             return Err(Errno::BufferTooSmall);
         }
 
-        // Copy the reply out through the validated `copy_to_user` boundary
-        // (`AGENTS.md` §5.4). A faulting pointer — or a caller with no
+        // Copy the reply out through the validated `copy_to_user` boundary. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`.
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(reply), &bytes)
@@ -2272,8 +2222,7 @@ where
     }
 
     // Six `abi-v1` arguments plus the kernel-trusted caller context — the
-    // syscall's own shape, not an accidental parameter pile (`AGENTS.md`
-    // §15.10 — justified allow, matching the trait declaration).
+    // syscall's own shape, not an accidental parameter pile (justified allow, matching the trait declaration).
     #[allow(clippy::too_many_arguments)]
     fn call_create(
         &self,
@@ -2288,8 +2237,7 @@ where
         // Bound the payload caps to the ABI register width before touching
         // anything else (cheap reject; `CallEndpoint::create` re-bounds them
         // against `IPC_MESSAGE_MAX_PAYLOAD_LEN`). `usize` → `u32` is the
-        // only narrowing; a request/reply cap beyond `u32` is malformed
-        // (`AGENTS.md` §2.9).
+        // only narrowing; a request/reply cap beyond `u32` is malformed.
         let Ok(max_request) = u32::try_from(max_request) else {
             return Err(Errno::LengthOutOfRange);
         };
@@ -2298,10 +2246,10 @@ where
         };
 
         // Copy both `CapabilitySet` wire images in through the validated
-        // `copy_from_user` boundary (`AGENTS.md` §5.4) before any state is
+        // `copy_from_user` boundary before any state is
         // touched. A caller with no registered address space and any copy
         // fault both collapse onto `BadAddress`, never leaking which case
-        // occurred (§19.1).
+        // occurred.
         let mut send_buf = [0u8; CapabilitySet::WIRE_LEN];
         let mut recv_buf = [0u8; CapabilitySet::WIRE_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
@@ -2318,7 +2266,7 @@ where
 
         // Build the endpoint owned by the calling task. `CallEndpoint::create`
         // runs the bind-time authority checks against the caller's effective
-        // set *before* the endpoint exists (`AGENTS.md` §5.2 / §5.4): the
+        // set *before* the endpoint exists: the
         // creator must hold every `recv` capability it requires, and must
         // hold `CAP_IPC_BIND_PRIVILEGED` to bind a restricted-sender endpoint.
         let endpoint = CallEndpoint::create(
@@ -2335,8 +2283,7 @@ where
         )?;
         // Publish it so the `ipc_call` handler can resolve callers to it. A
         // live id is never silently re-pointed: a clash fails closed with
-        // `AlreadyExists` and the freshly built endpoint is dropped
-        // (`AGENTS.md` §5.4).
+        // `AlreadyExists` and the freshly built endpoint is dropped.
         crate::callreg::register(alloc::sync::Arc::new(endpoint))?;
         Ok(0)
     }
@@ -2349,10 +2296,10 @@ where
         buf_cap: usize,
         ticket_out: u64,
     ) -> SyscallResult {
-        // §5.4: resolve the endpoint, then gate the *server* against the
+        // resolve the endpoint, then gate the *server* against the
         // endpoint's required receive capability and confirm it is the owning
         // task — both before any state is touched. A foreign or
-        // insufficiently-capable task is denied (`AGENTS.md` §5.2 — no
+        // insufficiently-capable task is denied (no
         // ambient authority); an unknown endpoint fails closed.
         let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
             return Err(Errno::NotFound);
@@ -2366,7 +2313,7 @@ where
         }
 
         // Block until a request fits and is dequeued, parking off the run
-        // queue between polls (`AGENTS.md` §2.1 — no busy yield). Register on
+        // queue between polls (no busy yield). Register on
         // `SERVE_WAITQ` *before* the first poll so a request posted in the
         // register/park window is not lost: the `ipc_call` handler's
         // `serve_wake` unparks this task, and the scheduler's wake-pending
@@ -2377,14 +2324,14 @@ where
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         let received = loop {
             // The owner was torn down, or the endpoint destroyed: abandon the
-            // receive fail-closed (`AGENTS.md` §2.9).
+            // receive fail-closed.
             if ep.is_closed() {
                 break Err(Errno::NotFound);
             }
             match ep.recv_call(buf_cap) {
                 RecvCall::Received(call) => break Ok(call),
                 // The front request does not fit: leave it queued and report
-                // closed (`AGENTS.md` §2.9). The server resizes and retries.
+                // closed. The server resizes and retries.
                 RecvCall::TooLarge { .. } => break Err(Errno::BufferTooSmall),
                 RecvCall::Empty => {
                     if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
@@ -2407,7 +2354,7 @@ where
         // the server never saw blocking its caller forever: reply-cancel the
         // call with an empty reply (releasing the parked caller fail-closed,
         // its protocol decoder rejects the truncated reply) and surface
-        // `BadAddress` to the server (`AGENTS.md` §2.9).
+        // `BadAddress` to the server.
         let ticket_bytes = call.ticket.0.to_le_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &call.request)?;
@@ -2435,7 +2382,7 @@ where
         reply: u64,
         reply_len: usize,
     ) -> SyscallResult {
-        // §5.4: resolve + gate before touching state, exactly as `call_recv`.
+        // resolve + gate before touching state, exactly as `call_recv`.
         let Some(ep) = crate::callreg::lookup(EndpointId(endpoint)) else {
             return Err(Errno::NotFound);
         };
@@ -2449,7 +2396,7 @@ where
 
         // Bound the reply copy before allocating: refuse a reply larger than
         // the endpoint advertises (the same `MessageTooLarge` `reply` would
-        // return, made cheap to reject here, `AGENTS.md` §2.16).
+        // return, made cheap to reject here).
         if reply_len as u64 > u64::from(ep.max_reply()) {
             return Err(Errno::MessageTooLarge);
         }
@@ -2464,7 +2411,7 @@ where
 
         // Complete the ticket and wake the caller blocked in `ipc_call` for
         // it. `reply` re-checks the ticket and size and fails closed on an
-        // unknown/already-answered ticket (`AGENTS.md` §2.9).
+        // unknown/already-answered ticket.
         ep.reply(CallTicket(ticket), &payload, self.audit)?;
         crate::waitq::call_wake();
         Ok(0)
@@ -2472,10 +2419,10 @@ where
 
     fn log_emit(&self, caller: &CallerContext<'_>, record: u64, len: usize) -> SyscallResult {
         // The dispatcher has already checked `CAP_LOG_EMIT` and that
-        // `record` is a non-null `UserPtr` (`AGENTS.md` §5.4). A valid
+        // `record` is a non-null `UserPtr`. A valid
         // encoded record never exceeds `LOG_RECORD_MAX`, so a larger `len`
         // is malformed and is rejected before copying — a hostile `len`
-        // cannot drive a large kernel allocation (`AGENTS.md` §4 / §24.4).
+        // cannot drive a large kernel allocation.
         if len == 0 || len > LOG_RECORD_MAX {
             return Err(Errno::LengthOutOfRange);
         }
@@ -2483,7 +2430,7 @@ where
         // Copy the encoded record in through the validated boundary before
         // touching the sink. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`, never
-        // an oracle distinguishing the cause (`AGENTS.md` §19.1).
+        // an oracle distinguishing the cause.
         let mut payload = alloc::vec![0u8; len];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(record), &mut payload)
@@ -2494,12 +2441,11 @@ where
         }
 
         // Fully validate the record (lengths, slice bounds, UTF-8) before
-        // building an event from it (`AGENTS.md` §5.4 / §2.9).
+        // building an event from it.
         let decoded = decode_log_record(&payload)?;
 
         // Attribute the record to the calling task with a kernel-supplied
-        // `task` field the caller cannot forge — the trusted origin marker
-        // (`AGENTS.md` §5.4.1 / §19.4). It is prepended to the caller's own
+        // `task` field the caller cannot forge — the trusted origin marker. It is prepended to the caller's own
         // fields, which the decoder bounds to `LOG_FIELDS_MAX`, so the
         // fixed array never overflows.
         let mut task_hex = [0u8; 16];
@@ -2516,8 +2462,7 @@ where
         }
 
         // The level byte was validated `<= LOG_LEVEL_MAX` by the decoder, so
-        // `from_u8` always succeeds; `unwrap_or` keeps the path panic-free
-        // (`AGENTS.md` §2.9).
+        // `from_u8` always succeeds; `unwrap_or` keeps the path panic-free.
         let event = Event {
             level: Level::from_u8(decoded.level()).unwrap_or(Level::Info),
             id: EventId(decoded.event_id()),
@@ -2525,19 +2470,18 @@ where
             fields: &fields_buf[..field_count],
         };
         // Emit through the kernel's diagnostic sink only — never the audit
-        // sink (`AGENTS.md` §19.4). Below the active level threshold the
-        // record is dropped in O(1) (`AGENTS.md` §2.16).
+        // sink. Below the active level threshold the
+        // record is dropped in O(1).
         rustos_log::log(self.log_sink, &event);
         Ok(0)
     }
 
     fn hw_emit_node(&self, caller: &CallerContext<'_>, node: u64, len: usize) -> SyscallResult {
         // The dispatcher has already checked `CAP_HW_EMIT` and that `node`
-        // is a non-null `UserPtr` (`AGENTS.md` §5.4). A wire-encoded
+        // is a non-null `UserPtr`. A wire-encoded
         // `HwNode` is exactly `HwNode::WIRE_LEN` bytes, so any other `len`
         // is malformed and is rejected before copying — a hostile `len`
-        // cannot drive a large copy, and a short one cannot decode
-        // (`AGENTS.md` §4 / §24.4 / §2.9).
+        // cannot drive a large copy, and a short one cannot decode.
         if len != rustos_abi::HwNode::WIRE_LEN {
             return Err(Errno::LengthOutOfRange);
         }
@@ -2545,8 +2489,8 @@ where
         // Copy the encoded node in through the validated boundary before
         // touching any state. A faulting pointer — or a caller with no
         // registered address space — fails closed with `BadAddress`, never
-        // an oracle distinguishing the cause (`AGENTS.md` §19.1). The buffer
-        // is a fixed `WIRE_LEN` stack array (no allocation, §2.16).
+        // an oracle distinguishing the cause. The buffer
+        // is a fixed `WIRE_LEN` stack array (no allocation).
         let mut bytes = [0u8; rustos_abi::HwNode::WIRE_LEN];
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_in(space, physmap, VirtAddr::new(node), &mut bytes)
@@ -2557,14 +2501,13 @@ where
         }
 
         // Fully decode and validate the node (lengths, discriminants,
-        // bounded match-key / resource counts) before touching state
-        // (`AGENTS.md` §5.4 / §2.9).
+        // bounded match-key / resource counts) before touching state.
         let decoded = rustos_abi::HwNode::from_bytes(&bytes)?;
 
         // Security spine of recursive, user-space hardware discovery
-        // (`AGENTS.md` §4 — no ambient authority; §18.3). Two checks, both
+        // (no ambient authority;). Two checks, both
         // against kernel-trusted state keyed by `caller.task_id` (never a
-        // caller-supplied value, §5.4), under one read guard held only for
+        // caller-supplied value), under one read guard held only for
         // the duration of these checks:
         //
         // 1. The caller must be an autoloaded driver bound to a matched node
@@ -2573,12 +2516,11 @@ where
         //    driver not loaded for a node) may publish nothing: it cannot
         //    name a position in the tree, so it fails closed. This is what
         //    makes the tree topology trustworthy — a driver cannot forge its
-        //    parent (`AGENTS.md` §4 / §5.4).
+        //    parent.
         // 2. Every resource the child requests must be covered by one of the
         //    caller's *own* minted grants, so an autoloaded child driver can
         //    never be granted authority its emitter lacks. One uncovered
-        //    resource fails the whole publish closed (`AGENTS.md` §2.9 —
-        //    never partially apply).
+        //    resource fails the whole publish closed (never partially apply).
         let parent_id = {
             let aspaces = self.aspaces.read();
             let Some(parent_id) = aspaces.loaded_node(caller.task_id) else {
@@ -2598,9 +2540,9 @@ where
         // store owns identity: it assigns the published node a fresh,
         // collision-free id and sets its parent to `parent_id`, so an
         // emitter-chosen id can never collide with an existing node
-        // (`AGENTS.md` §5.4 — load-bearing, the driver-store load path
+        // (load-bearing, the driver-store load path
         // resolves a matched node by id). A build with no store wired fails
-        // closed with `NotImplemented` (`AGENTS.md` §2.9). Returns `Ok(0)`
+        // closed with `NotImplemented`. Returns `Ok(0)`
         // once published (the `Errno`-return ABI shape).
         self.hw_tree.publish(parent_id, decoded).map(|()| 0)
     }
@@ -2608,18 +2550,18 @@ where
     fn hw_remove_node(&self, caller: &CallerContext<'_>, node_id: u64) -> SyscallResult {
         // The dispatcher has already checked `CAP_HW_EMIT` — the same
         // privilege publishing requires, since removing a child is the exact
-        // counterpart of emitting one (`AGENTS.md` §5.4 / §18.4). `node_id` is
+        // counterpart of emitting one. `node_id` is
         // a plain `u64`, copied in nothing: a `HwNode::id` is a `u32`, so a
         // value outside that range names no node and fails closed at the
-        // resolution below (`AGENTS.md` §2.9) — never an out-of-band copy.
+        // resolution below — never an out-of-band copy.
         let Ok(node_id) = u32::try_from(node_id) else {
             return Err(Errno::NotFound);
         };
 
-        // Security spine, identical to `hw_emit_node` (`AGENTS.md` §4 — no
+        // Security spine, identical to `hw_emit_node` (no
         // ambient authority): resolve the caller's *own* matched node from
         // kernel-trusted state keyed by `caller.task_id` (never a
-        // caller-supplied value, §5.4). A task with no loaded node (an
+        // caller-supplied value). A task with no loaded node (an
         // ordinary process, or a driver not loaded for a node) owns nothing in
         // the tree and may remove nothing — it fails closed. The store then
         // removes `node_id` only when its parent is exactly this node, so a
@@ -2635,11 +2577,9 @@ where
         // Remove the child (and its whole subtree) from the live hardware
         // tree, bumping the generation that wakes the device manager's
         // reactive watch so it unloads the driver bound to the vanished node
-        // (the same change channel `hw_tree_wait` observes, `AGENTS.md`
-        // §18.4). The store enforces the ownership check (`node_id`'s parent
+        // (the same change channel `hw_tree_wait` observes). The store enforces the ownership check (`node_id`'s parent
         // must be `parent_id`) and fails closed `NotFound` otherwise; a build
-        // with no store wired fails closed `NotImplemented` (`AGENTS.md`
-        // §2.9). Returns `Ok(0)` once removed (the `Errno`-return ABI shape).
+        // with no store wired fails closed `NotImplemented`. Returns `Ok(0)` once removed (the `Errno`-return ABI shape).
         self.hw_tree.remove(parent_id, node_id).map(|()| 0)
     }
 }
@@ -2659,7 +2599,7 @@ where
 /// path and its proving QEMU vertical (`PLAN.md` Stage 4.HW) — can drive
 /// the *same* production admit path (scheduler admit, capability-record
 /// insert, address-space + standard-stream + resource-limit registration,
-/// parent/child wait link) instead of duplicating it (`AGENTS.md` §2.2).
+/// parent/child wait link) instead of duplicating it.
 /// Construct it with [`KernelSpawnCtx::new`]; the fields stay private so
 /// the admit invariants cannot be bypassed.
 pub struct KernelSpawnCtx<'a, A>
@@ -2670,8 +2610,8 @@ where
     /// The same allocator as [`Self::frames`], but a `'static` borrow, so
     /// the producer can build the child's **page tables** out of
     /// reclaimable RAM that scales with the machine rather than a fixed
-    /// `.bss` pool (`AGENTS.md` §24.1). [`None`] when the boot path wired
-    /// no `'static` allocator, so the producer fails closed (§2.9).
+    /// `.bss` pool. [`None`] when the boot path wired
+    /// no `'static` allocator, so the producer fails closed.
     page_table_frames: Option<&'static FrameAllocator>,
     audit: &'a (dyn Sink + Sync),
     sched: &'a Scheduler<A>,
@@ -2680,16 +2620,15 @@ where
     arch: &'a A,
     /// The spawning caller's task id — the parent the freshly admitted
     /// child is recorded against so a later `wait` from this parent can
-    /// reap it (`plans/SPAWN.md` SP6). Kernel-trusted, never caller-supplied
-    /// (`AGENTS.md` §5.4.1).
+    /// reap it (`plans/SPAWN.md` SP6). Kernel-trusted, never caller-supplied.
     parent: SecTaskId,
     /// The scheduler-side process-wait producer the parent/child link is
     /// recorded with at admit. Defaults to the inert `NULL_PROCESS_WAIT`
     /// until the boot path installs the real producer, so the link is a
-    /// no-op until `wait` is wired (`AGENTS.md` §2.9).
+    /// no-op until `wait` is wired.
     process_wait: &'static (dyn ProcessWait + 'static),
     /// The standard-stream descriptor table the admitted child is
-    /// established with (`AGENTS.md` §20 — the spawner decides the
+    /// established with (the spawner decides the
     /// child's stream backing). The spawn handler resolves it from the
     /// syscall's `console` argument — the caller's own table for
     /// `CONSOLE_INHERIT`, else `DescriptorTable::standard_on` a
@@ -2700,25 +2639,25 @@ where
     /// child's matched hardware-tree node requested, so a user-space
     /// driver can reach exactly those windows through `mmio_map` /
     /// `dma_alloc` and learn its handles through `resource_grants`
-    /// (`AGENTS.md` §4 — resources are capability-grant requests, never
-    /// ambient handles; §18.3 — only the resources the matched node
+    /// (resources are capability-grant requests, never
+    /// ambient handles; — only the resources the matched node
     /// requested).
     ///
     /// The resources originate **kernel-side** — from the kernel's own
     /// discovered hardware tree, threaded by the privileged, capability-
     /// gated driver-spawn path — never copied from an untrusted caller, so
     /// minting a grant can never hand a task authority over a window its
-    /// matched node did not expose (`AGENTS.md` §4 — no ambient authority).
+    /// matched node did not expose (no ambient authority).
     /// The ordinary `spawn` syscall carries an **empty** slice: a user task
-    /// cannot grant device windows to a child (§5.2 — delegation never
+    /// cannot grant device windows to a child (delegation never
     /// widens authority).
     grants: &'a [HwResource],
     /// The discovered hardware-tree node the spawned **driver** was matched
     /// and loaded for, recorded against the child so its `hw_emit_node` calls
-    /// parent published children under it (`AGENTS.md` §18.3). [`None`] for
+    /// parent published children under it. [`None`] for
     /// an ordinary `spawn` and for any spawn that is not a node-matched
     /// driver load, so such a task has no loaded node and may publish no
-    /// child (fail closed, `AGENTS.md` §4 / §5.4). Kernel-sourced (the
+    /// child (fail closed). Kernel-sourced (the
     /// matched node the device manager resolved), never caller-supplied.
     node_id: Option<u32>,
 }
@@ -2729,23 +2668,21 @@ where
 {
     /// Bind a spawn context to the live kernel subsystems.
     ///
-    /// `parent` is the kernel-trusted identity of the spawning caller
-    /// (`AGENTS.md` §5.4.1) — for a syscall-driven spawn the dispatcher's
+    /// `parent` is the kernel-trusted identity of the spawning caller — for a syscall-driven spawn the dispatcher's
     /// resolved task id, for a kernel-side (host-driven) spawn the
     /// supervising task the child is recorded against for a later `wait`.
     /// `page_table_frames` is the `'static` allocator the producer builds
-    /// the child's page tables from; `None` fails the spawn closed
-    /// (`AGENTS.md` §2.9, §24.1). `streams` is the descriptor table the
+    /// the child's page tables from; `None` fails the spawn closed. `streams` is the descriptor table the
     /// child is established with — the spawner's resolved console
-    /// attachment (`AGENTS.md` §20). `grants` is the kernel-sourced set of
+    /// attachment. `grants` is the kernel-sourced set of
     /// device resources the child is minted a per-resource grant for — an
     /// **empty** slice for an ordinary `spawn` (a user task grants no
-    /// device windows, `AGENTS.md` §4), the matched node's requested
-    /// [`HwResource`]s for a privileged driver-spawn (§18.3).
+    /// device windows), the matched node's requested
+    /// [`HwResource`]s for a privileged driver-spawn.
     #[must_use]
     // Mirrors `KernelDispatchHook::new`: the same distinct kernel-state
-    // borrows threaded explicitly (`AGENTS.md` §2.1 / §4), not a one-use
-    // wrapper type (§2.3).
+    // borrows threaded explicitly, not a one-use
+    // wrapper type.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         frames: &'a FrameAllocator,
@@ -2811,8 +2748,7 @@ where
         // SP2): the work body performs the user-mode transition on the
         // task's own kernel stack, and the `pre_resume` hook reactivates
         // the child's address-space root before every switch into it so it
-        // `eret`s into EL0 under the correct, isolated translation regime
-        // (`AGENTS.md` §4). `enter` diverges into EL0, so the `()` it
+        // `eret`s into EL0 under the correct, isolated translation regime. `enter` diverges into EL0, so the `()` it
         // yields satisfies the body signature for the (impossible) case the
         // transition ever returned. The arch seam owns the kernel stack
         // (`stack`) — an arena-backed stack whose guard page it has unmapped
@@ -2826,7 +2762,7 @@ where
         // child with it so its `mem_map` / `mmio_map` syscalls mutate its own
         // space through the per-CPU live-space slot (`plans/PI.md`
         // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
-        // fail closed (`AGENTS.md` §2.9).
+        // fail closed.
         let admitted = match live {
             Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
                 self.sched,
@@ -2852,10 +2788,10 @@ where
 
         // Register the child's caps under the *same* numeric id the
         // dispatcher recovers (`SecTaskId(task_id)`), so its first syscall
-        // resolves a caller context (`AGENTS.md` §5.4.1). `caps` is already
+        // resolves a caller context. `caps` is already
         // the manifest∩user-grant set the producer derived; pass it as both
         // bounds so the kernel re-derives the same effective set. uid 0 is
-        // the system user (`AGENTS.md` §5.1); a per-user spawn uid is a
+        // the system user; a per-user spawn uid is a
         // later stage.
         let sec_id = SecTaskId(task_id);
         let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit);
@@ -2865,8 +2801,7 @@ where
         // same id, so its first user-memory copy resolves its own mappings
         // instead of failing closed with `BadAddress` (`plans/PI.md` P6c-3
         // follow-up). A fresh task id is never already present; a refusal
-        // signals a kernel invariant violation, so fail closed
-        // (`AGENTS.md` §2.9) rather than admit a task whose user memory the
+        // signals a kernel invariant violation, so fail closed rather than admit a task whose user memory the
         // kernel cannot reach. The already-admitted scheduler task is reaped
         // when it is next dispatched and finds no caps/aspace — but that
         // path cannot occur for a fresh id, so the conflict is reported as
@@ -2880,37 +2815,37 @@ where
             return Err(AdmitError::AspaceConflict);
         }
 
-        // Establish the child's standard streams (`AGENTS.md` §20): the
+        // Establish the child's standard streams: the
         // spawner-resolved table — the parent's own (inherit) or the
         // standard shape on an explicitly selected, validated console
         // (`plans/PI.md` P11). The program names only the fd numbers; it
-        // never reaches an ambient device (§4 / §17.4). A richer
+        // never reaches an ambient device. A richer
         // inheritance policy (e.g. piping a child's `stdout`) is a later
         // stage.
         self.aspaces.write().set_streams(sec_id, self.streams);
 
-        // Inherit the parent's effective resource limits (`AGENTS.md` §24.3):
+        // Inherit the parent's effective resource limits:
         // the child's set is the parent's intersected against the system
         // default policy, so it can never hold a bound wider than either the
         // parent's ceiling or the default (the never-widen rule, mirroring
-        // capability delegation §5.2). A parent with no established set
+        // capability delegation). A parent with no established set
         // resolves to `LimitSet::DEFAULT`, so the child does too. Read and
         // write are separate lock acquisitions because a fresh child id is
         // never concurrently mutated by another path.
         let inherited = LimitSet::inherit(&self.aspaces.read().limits(self.parent));
         self.aspaces.write().set_limits(sec_id, inherited);
 
-        // Mint the child's device-resource grants (`AGENTS.md` §4 / §18.3):
+        // Mint the child's device-resource grants:
         // one unforgeable, owner-checked handle per [`HwResource`] the
         // matched hardware-tree node requested, keyed to the child's own
         // kernel-trusted id, so the child reaches exactly those windows
         // through `mmio_map` / `dma_alloc` and enumerates its handles
         // through `resource_grants` — and another task presenting the same
-        // numeric handle resolves nothing (the registry owner-check, §5.4).
+        // numeric handle resolves nothing (the registry owner-check).
         // The resources are kernel-sourced (the privileged driver-spawn path
         // threads the matched node's requests, never an untrusted caller),
         // so minting can never widen authority beyond what that node exposed
-        // (§4 — no ambient authority); the ordinary `spawn` syscall carries
+        // (no ambient authority); the ordinary `spawn` syscall carries
         // an empty slice and mints nothing. Minted only after the child is
         // fully admitted, under one write lock, so a `resource_grants` from
         // the child observes the complete set.
@@ -2922,7 +2857,7 @@ where
             // Record the matched node the driver was loaded for, beside its
             // grants and under the same write lock, so a later `hw_emit_node`
             // from this driver parents its published child under exactly this
-            // node (`AGENTS.md` §4 / §18.3 — the emitter cannot forge its
+            // node (the emitter cannot forge its
             // tree position). `None` (an ordinary `spawn`) records nothing.
             if let Some(node_id) = self.node_id {
                 aspaces.set_loaded_node(sec_id, node_id);
@@ -2958,7 +2893,7 @@ where
     irq_controller: &'a (dyn IrqController + Sync),
     /// The line bound to this wait's handle (owner-checked at entry), or
     /// [`None`] if the handle was forged/foreign — in which case nothing is
-    /// re-armed and `try_wait_step` fails the wait closed (`AGENTS.md` §5.4).
+    /// re-armed and `try_wait_step` fails the wait closed.
     line: Option<u32>,
 }
 
@@ -2979,27 +2914,26 @@ where
         // route+enable; on later parks it re-enables after a drained
         // completion. Idempotent and best-effort — a refusal (an impossible
         // out-of-range line for a bound handle, or a placeholder controller)
-        // leaves the line as-is and the wait is bounded by its deadline
-        // (`AGENTS.md` §2.9). A forged/foreign handle resolved to `None` and
+        // leaves the line as-is and the wait is bounded by its deadline. A forged/foreign handle resolved to `None` and
         // re-arms nothing — `try_wait_step` already fails it closed.
         if let Some(line) = self.line {
             let _ = self.irq_controller.rearm(line);
         }
         // Arm the timed-wake one-shot to the nearest pending `irq_wait`
         // deadline so a finite timeout fires even on an otherwise-idle CPU
-        // (`AGENTS.md` §17.1 — the nearest armed wakeup), then *park* off
+        // (the nearest armed wakeup), then *park* off
         // the run queue until woken by `irq_wake` (a fire) or the timed
         // sweep. The caller registered this task on `IRQ_WAITQ` before the
         // first poll, so the park/unpark race is closed by the scheduler's
-        // wake-pending token (`AGENTS.md` §2.1 — no busy yield). This
-        // mirrors `hw_tree_wait`'s park exactly (`AGENTS.md` §2.2).
+        // wake-pending token (no busy yield). This
+        // mirrors `hw_tree_wait`'s park exactly.
         self.arch
             .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
         // `reschedule_current` returns `false` only when the caller is not
         // a resumable user kthread (host tests with no live dispatch loop);
         // fall back to a cooperative yield then so a degenerate caller
         // never busy-spins and the loop still terminates on the monotone
-        // clock reaching its deadline (`AGENTS.md` §2.1 / §5.4.5).
+        // clock reaching its deadline.
         if !crate::kthread::reschedule_current(self.cpu, RescheduleAction::Park) {
             match self.sched.yield_current(self.task.0) {
                 Ok(()) | Err(SchedError::InvalidState) => {}
@@ -3017,7 +2951,7 @@ where
 /// Owns the same borrows as [`KernelSyscallHandlers`] plus a
 /// [`Dispatcher`] cell built on top of them. The bin-crate
 /// `extern "C"` syscall-dispatch callback ((f5)) calls
-/// [`Self::dispatch`] once per syscall; this method runs the §5.4
+/// [`Self::dispatch`] once per syscall; this method runs the
 /// sequence (identify caller → forward to [`Dispatcher::dispatch`] →
 /// translate result) and returns a [`DispatchOutcome`] the bin crate
 /// can encode back into the architecture's syscall-return register
@@ -3033,7 +2967,7 @@ where
 ///
 /// * `current_task` returns `None` when no task is currently running
 ///   on the issuing CPU. That cannot happen once the scheduler is
-///   live, but the trampoline must not assume so (`AGENTS.md` §5.4.5).
+///   live, but the trampoline must not assume so.
 /// * `caps_for` returns `None` when the running task has no
 ///   capability record — also impossible during normal operation
 ///   (`KernelState` populates the record before scheduling any task),
@@ -3064,12 +2998,12 @@ where
     /// `KernelState` (constructed by [`crate::kernel_main`]) holds the
     /// targets for the lifetime of the running kernel; the hook is
     /// `Box::leak`'d alongside it so the published `'static dyn
-    /// DispatchHook` is sound (`AGENTS.md` §2.1 — no global mutable
+    /// DispatchHook` is sound (no global mutable
     /// static; the leak is a one-shot, immutable publish).
     #[must_use]
     // Mirrors `KernelSyscallHandlers::new`: the same distinct kernel-
-    // state borrows threaded explicitly (`AGENTS.md` §2.1 / §4), not a
-    // one-use wrapper type (§2.3).
+    // state borrows threaded explicitly, not a
+    // one-use wrapper type.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         sched: &'a Scheduler<A>,
@@ -3127,8 +3061,7 @@ where
     /// [`KernelSyscallHandlers::with_users_db`]: called once by a boot
     /// path that mounted the root volume and ran the audited
     /// [`crate::load_users_db`] read. A boot path with no root volume
-    /// simply never calls it and `users_db_read` stays fail-closed
-    /// (`AGENTS.md` §2.9).
+    /// simply never calls it and `users_db_read` stays fail-closed.
     #[must_use]
     pub fn with_users_db(mut self, users_db: &'static (dyn UsersDbSource + 'static)) -> Self {
         self.handlers = self.handlers.with_users_db(users_db);
@@ -3136,13 +3069,12 @@ where
     }
 
     /// Install the discovered hardware-tree store the `hw_tree_read` /
-    /// `hw_tree_wait` syscalls serve, consuming and returning `self`
-    /// (`AGENTS.md` §18.1 / §18.4).
+    /// `hw_tree_wait` syscalls serve, consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_hw_tree`]:
     /// called once by the boot path after it seeds the discovered
     /// inventory. A boot path that seeds no tree simply never calls it and
-    /// both syscalls stay fail-closed (`AGENTS.md` §2.9).
+    /// both syscalls stay fail-closed.
     #[must_use]
     pub fn with_hw_tree(mut self, hw_tree: &'static (dyn HwTreeSource + 'static)) -> Self {
         self.handlers = self.handlers.with_hw_tree(hw_tree);
@@ -3150,14 +3082,12 @@ where
     }
 
     /// Install the kernel's diagnostic log sink the `log_emit` syscall emits
-    /// user-space records through, consuming and returning `self`
-    /// (`AGENTS.md` §19.4 / §20).
+    /// user-space records through, consuming and returning `self`.
     ///
     /// The hook-level mirror of [`KernelSyscallHandlers::with_log_sink`]:
     /// called once by the boot path with the same arch diagnostic sink the
     /// kernel routes its own records through. A boot path that installs no
-    /// sink leaves the no-op default and a `log_emit` is silently dropped
-    /// (`AGENTS.md` §2.9).
+    /// sink leaves the no-op default and a `log_emit` is silently dropped.
     #[must_use]
     pub fn with_log_sink(mut self, log_sink: &'a (dyn Sink + Sync)) -> Self {
         self.handlers = self.handlers.with_log_sink(log_sink);
@@ -3206,7 +3136,7 @@ where
     A: KernelArch + 'static,
 {
     fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome {
-        // Step 1 (AGENTS.md §5.4.1) — identify the caller. The
+        // Step 1 — identify the caller. The
         // scheduler's per-CPU current-task slot is the only sanctioned
         // source; no caller-supplied identity is accepted.
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -3218,7 +3148,7 @@ where
         // Snapshot the caller's capability record under a *briefly* held
         // read lock, then drop the guard before dispatching. The dispatcher
         // checks the required capability against this consistent
-        // point-in-time snapshot (`AGENTS.md` §5.4.2 — check before any
+        // point-in-time snapshot (check before any
         // state touch), so there is no TOCTOU between the snapshot and the
         // check. Holding the read lock across the whole call instead would
         // self-deadlock the caps-mutating handlers — `exit`, `cap_delegate`,
@@ -3281,7 +3211,7 @@ where
 /// (`stream_write`, `ipc_*`, `cap_*`, `clock_get`, `irq_*`, `random_get`)
 /// returns to the same EL0 task without a context switch, so it is `None`.
 /// This is the single place the dispatch path names the rescheduling
-/// syscalls (`AGENTS.md` §2.2).
+/// syscalls.
 fn reschedule_action_for(raw_number: u16) -> Option<RescheduleAction> {
     if raw_number == SyscallNumber::YIELD.as_u16() {
         Some(RescheduleAction::Yield)
@@ -3327,7 +3257,7 @@ mod tests {
         // is emitted at `Error`, but `set_max_level(Trace)` keeps the
         // tests robust against a future raise of `SyscallFeatureUnavailable`'s
         // severity or against other dispatcher events flowing through
-        // the same sink (`AGENTS.md` §7 — no flaky tests).
+        // the same sink (no flaky tests).
         set_max_level(Level::Trace);
     }
 
@@ -3673,8 +3603,7 @@ mod tests {
 
     /// `log_emit` copies the encoded record in, decodes it, and emits it to
     /// the kernel's **diagnostic** `log_sink` — attributed to the calling
-    /// task with a kernel-supplied `task` field the caller cannot forge
-    /// (`AGENTS.md` §19.4 / §20). The caller's own fields follow.
+    /// task with a kernel-supplied `task` field the caller cannot forge. The caller's own fields follow.
     #[test]
     fn log_emit_emits_the_decoded_record_with_task_attribution() {
         install_trace_filter();
@@ -3733,7 +3662,7 @@ mod tests {
 
     /// `log_emit` rejects a `len` larger than any valid encoded record
     /// before copying — a hostile length cannot drive a large kernel
-    /// allocation (`AGENTS.md` §4 / §24.4) — and emits nothing.
+    /// allocation — and emits nothing.
     #[test]
     fn log_emit_rejects_an_oversize_length_fail_closed() {
         install_trace_filter();
@@ -3765,7 +3694,7 @@ mod tests {
     }
 
     /// `log_emit` copies in a record whose level byte is out of range and
-    /// fails closed at decode, emitting nothing (`AGENTS.md` §2.9 / §5.4).
+    /// fails closed at decode, emitting nothing.
     #[test]
     fn log_emit_rejects_a_malformed_record_fail_closed() {
         install_trace_filter();
@@ -4206,7 +4135,7 @@ mod tests {
 
     /// A delegation that would *widen* the target's authority fails closed
     /// with `DelegationWiden` and leaves the target's set untouched
-    /// (`AGENTS.md` §5.2 — the central capability invariant).
+    /// (the central capability invariant).
     #[test]
     fn cap_delegate_rejects_widening_and_preserves_target() {
         install_trace_filter();
@@ -4317,8 +4246,7 @@ mod tests {
 
     /// `cap_delegate` from a caller with no registered address space
     /// fails closed with `BadAddress` rather than an oracle that
-    /// distinguishes "no space" from "faulting pointer" (`AGENTS.md`
-    /// §19.1).
+    /// distinguishes "no space" from "faulting pointer".
     #[test]
     fn cap_delegate_without_caller_aspace_is_bad_address() {
         install_trace_filter();
@@ -4671,7 +4599,7 @@ mod tests {
 
     /// A caller *without* `CAP_TIME_HIRES` reads the monotonic clock
     /// floored to `COARSE_CLOCK_GRANULARITY_NS`, so sub-granularity
-    /// detail is hidden (`AGENTS.md` §19.1) while the reading stays
+    /// detail is hidden while the reading stays
     /// monotonically non-decreasing.
     #[test]
     fn clock_get_without_hires_is_coarsened() {
@@ -4820,7 +4748,7 @@ mod tests {
     }
 
     /// `random_get` against the **unseeded** boot reserve fails closed
-    /// with `EntropyNotReady` (`AGENTS.md` §22 — never weak bytes before
+    /// with `EntropyNotReady` (never weak bytes before
     /// the RNG is seeded), even with a perfectly writable buffer, and
     /// emits no `SyscallFeatureUnavailable` deferral.
     #[test]
@@ -4909,8 +4837,7 @@ mod tests {
 
     /// `random_get` from a seeded reserve but a caller with no registered
     /// address space fails closed with `BadAddress` (the RustOS
-    /// `EFAULT`) — the same code every copy-path handler returns
-    /// (`AGENTS.md` §5.4 / §19.1).
+    /// `EFAULT`) — the same code every copy-path handler returns.
     #[test]
     fn random_get_without_registered_aspace_is_bad_address() {
         install_trace_filter();
@@ -5033,8 +4960,7 @@ mod tests {
 
     /// `with_caller_aspace` fails closed with `None` (never invoking the
     /// closure) when the caller has no registered address space — a
-    /// kernel task, or a task already withdrawn on `exit` (`AGENTS.md`
-    /// §5.4).
+    /// kernel task, or a task already withdrawn on `exit`.
     #[test]
     fn with_caller_aspace_returns_none_for_unregistered_caller() {
         install_trace_filter();
@@ -5201,7 +5127,7 @@ mod tests {
 
     /// With no console installed the handler holds `NULL_CONSOLE` and
     /// fails closed with `NotImplemented` rather than silently dropping
-    /// the bytes (`AGENTS.md` §2.9). The user copy still succeeds first.
+    /// the bytes. The user copy still succeeds first.
     #[test]
     fn console_write_without_device_is_not_implemented() {
         install_trace_filter();
@@ -5240,7 +5166,7 @@ mod tests {
     /// A zero-length `stream_write` to an installed console succeeds
     /// without touching the caller's buffer or the device; with **no**
     /// console installed even a zero-length write announces the inert
-    /// interface (`AGENTS.md` §2.9 — the descriptor's backing is
+    /// interface (the descriptor's backing is
     /// resolved before anything else).
     #[test]
     fn console_write_zero_length_is_ok_and_inert() {
@@ -5289,7 +5215,7 @@ mod tests {
 
     /// `stream_write` from a caller with no registered address space
     /// fails closed with `BadAddress`, never leaking the missing-space
-    /// case (`AGENTS.md` §5.4 / §19.1).
+    /// case.
     #[test]
     fn console_write_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -5325,7 +5251,7 @@ mod tests {
 
     /// A `len` above `CONSOLE_WRITE_MAX` writes a bounded prefix and
     /// reports the count — POSIX short-write semantics, never an
-    /// unbounded kernel allocation (`AGENTS.md` §4).
+    /// unbounded kernel allocation.
     #[test]
     fn console_write_caps_length_at_console_write_max() {
         install_trace_filter();
@@ -5447,7 +5373,7 @@ mod tests {
 
     /// With no console installed the handler holds `NULL_CONSOLE_READ`
     /// and fails closed with `NotImplemented` rather than fabricating
-    /// input (`AGENTS.md` §2.9).
+    /// input.
     #[test]
     fn console_read_without_device_is_not_implemented() {
         install_trace_filter();
@@ -5486,7 +5412,7 @@ mod tests {
     /// A zero-length `stream_read` from an installed console succeeds
     /// without touching the device or the caller's buffer; with **no**
     /// console installed even a zero-length read announces the inert
-    /// interface (`AGENTS.md` §2.9 — the descriptor's backing is
+    /// interface (the descriptor's backing is
     /// resolved before anything else).
     #[test]
     fn console_read_zero_length_is_ok_and_inert() {
@@ -5534,7 +5460,7 @@ mod tests {
     }
 
     /// A device with no input pending reports a zero-length read without
-    /// touching the caller's buffer; the caller loops (`AGENTS.md` §16.4
+    /// touching the caller's buffer; the caller loops (
     /// short-read semantics).
     #[test]
     fn console_read_no_input_pending_reports_zero() {
@@ -5573,7 +5499,7 @@ mod tests {
 
     /// A `len` above `CONSOLE_READ_MAX` hands the device a bounded buffer
     /// and reports the bounded count — never an unbounded kernel
-    /// allocation (`AGENTS.md` §4).
+    /// allocation.
     #[test]
     fn console_read_caps_length_at_console_read_max() {
         install_trace_filter();
@@ -5623,7 +5549,7 @@ mod tests {
 
     /// `stream_read` from a caller with no registered address space
     /// fails closed with `BadAddress`, never leaking the missing-space
-    /// case (`AGENTS.md` §5.4 / §19.1).
+    /// case.
     #[test]
     fn console_read_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -5659,8 +5585,7 @@ mod tests {
 
     /// `stream_write` to a descriptor that is not a writable inherited
     /// stream fails closed with `NotFound` before any copy — the
-    /// descriptor table, not an ambient device, is the authority
-    /// (`AGENTS.md` §20 / §5.4). The cases: a read-only fd (`STDIN`), an
+    /// descriptor table, not an ambient device, is the authority. The cases: a read-only fd (`STDIN`), an
     /// out-of-range fd, and a caller whose table is the closed default.
     #[test]
     fn stream_write_to_non_writable_fd_is_not_found() {
@@ -5702,8 +5627,7 @@ mod tests {
     }
 
     /// `stream_read` from a descriptor that is not a readable inherited
-    /// stream fails closed with `NotFound` before touching the device
-    /// (`AGENTS.md` §20 / §5.4): a write-only fd (`STDOUT`) and a closed
+    /// stream fails closed with `NotFound` before touching the device: a write-only fd (`STDOUT`) and a closed
     /// (unestablished) caller.
     #[test]
     fn stream_read_from_non_readable_fd_is_not_found() {
@@ -5744,8 +5668,7 @@ mod tests {
     }
 
     /// A caller whose descriptor table was never established (the
-    /// fail-closed `Closed` default) cannot reach any stream backing
-    /// (`AGENTS.md` §5.4): both directions deny with `NotFound`.
+    /// fail-closed `Closed` default) cannot reach any stream backing: both directions deny with `NotFound`.
     #[test]
     fn stream_ops_without_established_table_are_not_found() {
         install_trace_filter();
@@ -5939,7 +5862,7 @@ mod tests {
         assert_eq!(producer.seen_rxe.lock().as_slice(), SPAWN_RXE);
         // A user-driven `spawn` grants the child no device resources: the
         // handler passes an empty grant slice, so the child holds no
-        // resolvable handle (`AGENTS.md` §4 — no ambient authority).
+        // resolvable handle (no ambient authority).
         assert_eq!(aspaces.read().grant(SecTaskId(pid), 1), None);
     }
 
@@ -5949,7 +5872,7 @@ mod tests {
     /// child resolves each handle (the `resource_grants` / `mmio_map`
     /// source), handles are monotonic from `1` in request order, and a
     /// different task presenting the same numeric handle resolves nothing
-    /// — the registry owner-check (`AGENTS.md` §4 / §5.4 / §18.3).
+    /// — the registry owner-check.
     #[test]
     fn driver_spawn_mints_an_owner_checked_grant_per_requested_resource() {
         install_trace_filter();
@@ -5979,7 +5902,7 @@ mod tests {
             &NULL_PROCESS_WAIT,
             DescriptorTable::standard(),
             &requested,
-            // The matched node the driver was loaded for (`AGENTS.md` §18.3).
+            // The matched node the driver was loaded for.
             Some(0x55),
         );
 
@@ -5999,9 +5922,9 @@ mod tests {
 
         // The driver's matched node is recorded against it, so a later
         // `hw_emit_node` parents its published child under exactly this node
-        // (`AGENTS.md` §4 / §18.3 — the emitter cannot forge its position).
+        // (the emitter cannot forge its position).
         assert_eq!(aspaces.read().loaded_node(child), Some(0x55));
-        // A different task has no loaded node (owner-bound, fail closed §5.4).
+        // A different task has no loaded node (owner-bound, fail closed).
         assert_eq!(aspaces.read().loaded_node(SecTaskId(pid + 1)), None);
 
         // One handle per requested resource, monotonic from 1, in order.
@@ -6011,7 +5934,7 @@ mod tests {
         assert_eq!(aspaces.read().grant(child, 3), None);
         // Owner-check: a different task presenting the same handle value
         // resolves nothing — a driver cannot reach another's window by
-        // guessing a handle (`AGENTS.md` §5.4).
+        // guessing a handle.
         assert_eq!(aspaces.read().grant(SecTaskId(pid + 1), 1), None);
 
         // The set serialises for delivery through `resource_grants`: two
@@ -6034,8 +5957,7 @@ mod tests {
     }
 
     /// A [`ProcessSpawn`] double that records whether the [`SpawnCtx`] it
-    /// is handed exposes a `'static` page-table frame allocator
-    /// (`AGENTS.md` §24.1). It never admits a task — it returns
+    /// is handed exposes a `'static` page-table frame allocator. It never admits a task — it returns
     /// `NotImplemented` after recording — so a test can assert the wiring
     /// without standing up an arch image build.
     struct PageTableAllocProbeSpawn {
@@ -6063,8 +5985,7 @@ mod tests {
     /// When the boot path threads a `'static` page-table allocator through
     /// [`KernelSyscallHandlers::with_page_table_frames`], the producer sees
     /// it via [`SpawnCtx::page_table_allocator`] — the seam an arch producer
-    /// builds a child's page tables out of reclaimable RAM through
-    /// (`AGENTS.md` §24.1).
+    /// builds a child's page tables out of reclaimable RAM through.
     #[test]
     fn spawn_threads_the_static_page_table_allocator_to_the_producer() {
         install_trace_filter();
@@ -6121,7 +6042,7 @@ mod tests {
         );
 
         // Unwired: with no `with_page_table_frames`, the producer sees `None`
-        // and an arch producer fails closed (`AGENTS.md` §2.9).
+        // and an arch producer fails closed.
         probe
             .saw_static_allocator
             .store(true, core::sync::atomic::Ordering::SeqCst);
@@ -6139,7 +6060,7 @@ mod tests {
 
     /// A spawned child inherits the parent's effective resource limits,
     /// intersected against the system default so it can never widen past
-    /// the parent's ceiling (`AGENTS.md` §24.3 — inheritance across spawn).
+    /// the parent's ceiling (inheritance across spawn).
     #[test]
     fn spawn_child_inherits_the_parents_resource_limits() {
         install_trace_filter();
@@ -6250,7 +6171,7 @@ mod tests {
     }
 
     /// With no spawn producer wired the handler holds `NULL_PROCESS_SPAWN`
-    /// and fails closed with `NotImplemented` (`AGENTS.md` §2.9) — but only
+    /// and fails closed with `NotImplemented` — but only
     /// after the path resolves, proving the null producer is reached.
     #[test]
     fn spawn_without_producer_is_not_implemented() {
@@ -6301,7 +6222,7 @@ mod tests {
 
     /// With no frame allocator threaded the spawn subsystem is unwired, so
     /// `spawn` fails closed with `NotImplemented` before touching any
-    /// state (`AGENTS.md` §2.9) — the boot default.
+    /// state — the boot default.
     #[test]
     fn spawn_without_frames_is_not_implemented() {
         install_trace_filter();
@@ -6329,8 +6250,7 @@ mod tests {
         );
     }
 
-    /// A path naming no registered program fails closed with `NotFound`
-    /// (`AGENTS.md` §2.1) — the empty boot registry resolves nothing.
+    /// A path naming no registered program fails closed with `NotFound` — the empty boot registry resolves nothing.
     #[test]
     fn spawn_unknown_path_is_not_found() {
         install_trace_filter();
@@ -6372,8 +6292,7 @@ mod tests {
     }
 
     /// `spawn` from a caller with no registered address space fails closed
-    /// with `BadAddress`, never leaking the missing-space case
-    /// (`AGENTS.md` §5.4 / §19.1).
+    /// with `BadAddress`, never leaking the missing-space case.
     #[test]
     fn spawn_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -6418,7 +6337,7 @@ mod tests {
 
     /// A zero-length or over-long path cannot name a registered program,
     /// so it fails closed with `NotFound` without staging an unbounded
-    /// allocation (`AGENTS.md` §4).
+    /// allocation.
     #[test]
     fn spawn_empty_or_oversize_path_is_not_found() {
         install_trace_filter();
@@ -6606,7 +6525,7 @@ mod tests {
 
     /// With echo on (the default), `stream_read` echoes the consumed
     /// bytes back to the *same* console's write half so an interactive
-    /// user sees what they type (`AGENTS.md` §20 — terminal local echo),
+    /// user sees what they type (terminal local echo),
     /// translating the Return key's CR into CR-LF.
     #[test]
     fn stream_read_echoes_consumed_bytes_to_the_console_write_half() {
@@ -6652,7 +6571,7 @@ mod tests {
 
     /// `stream_echo` disabling echo on the read descriptor's console
     /// stops a subsequent `stream_read` from echoing (the password-read
-    /// contract, `AGENTS.md` §5.4 — never render a credential).
+    /// contract — never render a credential).
     #[test]
     fn stream_echo_disables_console_echo_for_the_following_read() {
         install_trace_filter();
@@ -6768,9 +6687,9 @@ mod tests {
     /// `AuditEvent::InputDelivered` (`EventId(4050)`) — the witness that an
     /// (autoloaded) keyboard driver is delivering input — and a second
     /// inject emits no further witness, so the log never carries a
-    /// per-keystroke record (`AGENTS.md` §20, `plans/PI.md` P11). The
+    /// per-keystroke record (`plans/PI.md` P11). The
     /// record carries **no** fields, so a typed character never reaches the
-    /// log (`AGENTS.md` §23.1 — secret hygiene).
+    /// log (secret hygiene).
     #[test]
     fn key_inject_witnesses_first_delivery_exactly_once_with_no_content() {
         install_trace_filter();
@@ -6814,7 +6733,7 @@ mod tests {
             "first inject emits exactly one witness"
         );
         // The witness carries no key content: a typed secret never reaches
-        // the log (`AGENTS.md` §20 / §23.1).
+        // the log.
         let witness = snapshot
             .iter()
             .find(|e| e.id.0 == id)
@@ -6822,7 +6741,7 @@ mod tests {
         assert!(witness.fields.is_empty(), "the witness carries no fields");
 
         // A second successful inject emits no further witness — never one
-        // per keystroke (`AGENTS.md` §20).
+        // per keystroke.
         assert_eq!(
             h.key_inject(&ctx, 0x1000, KeyInput::WIRE_LEN),
             Ok(KeyInput::WIRE_LEN as u64)
@@ -6837,7 +6756,7 @@ mod tests {
     /// `key_inject` fails closed when no arbiter is wired: the default
     /// `NULL_INPUT_FOCUS` text sink is `NULL_CONSOLE_INPUT`, so a press
     /// that would be enqueued there surfaces `NotImplemented` rather than
-    /// dropping it (`AGENTS.md` §2.9 / §5.4). A `len` too small to hold a
+    /// dropping it. A `len` too small to hold a
     /// record fails closed before any state is touched.
     #[test]
     fn key_inject_without_arbiter_fails_closed() {
@@ -7013,7 +6932,7 @@ mod tests {
     }
 
     /// `CONSOLE_INHERIT` copies the caller's own descriptor table into
-    /// the child (`AGENTS.md` §20 — login's shell stays on login's
+    /// the child (login's shell stays on login's
     /// console).
     #[test]
     fn spawn_inherit_copies_the_callers_table() {
@@ -7076,8 +6995,7 @@ mod tests {
     }
 
     /// The dispatcher refuses `spawn` from a caller without
-    /// `CAP_PROC_SPAWN` before the handler is reached (`AGENTS.md`
-    /// §5.4 step 2): the producer is never invoked.
+    /// `CAP_PROC_SPAWN` before the handler is reached (step 2): the producer is never invoked.
     #[test]
     fn spawn_without_capability_is_denied_by_dispatcher() {
         install_trace_filter();
@@ -7164,7 +7082,7 @@ mod tests {
         }
     }
 
-    /// `mem_map` needs no capability (`AGENTS.md` §16.6) and forwards the
+    /// `mem_map` needs no capability and forwards the
     /// decoded `(len, flags, addr_hint)` to the installed producer,
     /// returning its base verbatim.
     #[test]
@@ -7203,7 +7121,7 @@ mod tests {
     }
 
     /// With no producer installed the handler holds `NULL_MEM_MAP` and
-    /// fails closed with `NotImplemented` (`AGENTS.md` §2.9).
+    /// fails closed with `NotImplemented`.
     #[test]
     fn mem_map_without_producer_is_not_implemented() {
         install_trace_filter();
@@ -7231,8 +7149,7 @@ mod tests {
         );
     }
 
-    /// A zero-length `mem_map` is rejected before the producer is reached
-    /// (`AGENTS.md` §5.4): an empty mapping is meaningless.
+    /// A zero-length `mem_map` is rejected before the producer is reached: an empty mapping is meaningless.
     #[test]
     fn mem_map_zero_length_is_length_out_of_range() {
         install_trace_filter();
@@ -7302,7 +7219,7 @@ mod tests {
     /// heap-allocated pointer (the shell path `login` passed to `spawn`)
     /// found it unmapped. After a successful `mem_map` the handler must
     /// re-freeze the caller's live space into the registry, so the next
-    /// `with_caller_aspace` copy sees the new region (`AGENTS.md` §5.4).
+    /// `with_caller_aspace` copy sees the new region.
     #[test]
     fn mem_map_refreezes_the_caller_snapshot_so_a_new_region_is_reachable() {
         install_trace_filter();
@@ -7310,7 +7227,7 @@ mod tests {
         // `with_cpus(1)` reports current CPU 0 — the slot the live space is
         // published on. No other `kernel/core` test publishes on CPU 0
         // (`live_producer` uses CPUs ≥ 1), so the global slot is unshared
-        // here (`AGENTS.md` §7 — no flaky tests).
+        // here (no flaky tests).
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
@@ -7448,7 +7365,7 @@ mod tests {
     /// caller context for `SecTaskId(2)`), returning everything the
     /// `mmio_map` tests borrow. Keeping it inline per-test mirrors the
     /// other handler tests; this helper exists only because the five
-    /// `mmio_map` tests share the exact same scaffold (`AGENTS.md` §2.2).
+    /// `mmio_map` tests share the exact same scaffold.
     #[allow(clippy::type_complexity)]
     fn mmio_scaffold() -> (
         Arc<TestArch>,
@@ -7472,7 +7389,7 @@ mod tests {
 
     /// With no grant minted for the caller the per-task grant table resolves
     /// nothing, so any handle fails closed with `NotFound` — a driver can
-    /// never map an ungranted region (`AGENTS.md` §2.9 / §4 / §18.3).
+    /// never map an ungranted region.
     #[test]
     fn mmio_map_without_grant_is_not_found() {
         let sink = make_sink();
@@ -7492,7 +7409,7 @@ mod tests {
 
     /// The grant is owner-bound: a handle minted for another task, or an
     /// unknown handle value, resolves to nothing and is refused
-    /// (`AGENTS.md` §5.4 — no trusted-caller shortcut; handle forgery is
+    /// (no trusted-caller shortcut; handle forgery is
     /// rejected exactly as `irq_wait` re-checks its binding).
     #[test]
     fn mmio_map_forged_or_foreign_handle_is_not_found() {
@@ -7541,7 +7458,7 @@ mod tests {
     /// The success path: the owner's handle resolves to its granted MMIO
     /// window, the validated `(phys_base, len)` reaches the facility, and
     /// the facility's mapped base flows back verbatim — only the granted
-    /// region, nothing else (`AGENTS.md` §18.3).
+    /// region, nothing else.
     #[test]
     fn mmio_map_maps_granted_window_through_facility() {
         let sink = make_sink();
@@ -7576,8 +7493,7 @@ mod tests {
     }
 
     /// A valid, owned grant whose mechanism is unwired holds
-    /// `NULL_MMIO_MAP_FACILITY` and fails closed with `NotImplemented`
-    /// (`AGENTS.md` §2.9) — proving the lookup + validation passed and the
+    /// `NULL_MMIO_MAP_FACILITY` and fails closed with `NotImplemented` — proving the lookup + validation passed and the
     /// missing producer denies rather than fabricating a mapping.
     #[test]
     fn mmio_map_with_grant_but_no_facility_is_not_implemented() {
@@ -7608,7 +7524,7 @@ mod tests {
     /// A grant of a non-window kind (a DMA constraint) is refused with
     /// `OutOfRange` before the mapping mechanism is reached: `mmio_map`
     /// maps memory windows, not every resource a node may request
-    /// (`AGENTS.md` §5.4 — validate every input).
+    /// (validate every input).
     #[test]
     fn mmio_map_non_window_grant_is_out_of_range() {
         let sink = make_sink();
@@ -7639,7 +7555,7 @@ mod tests {
         assert!(facility.last.lock().is_none());
     }
 
-    /// Regression (`AGENTS.md` §24.1): a driver granted a large outbound bus
+    /// Regression: a driver granted a large outbound bus
     /// window maps only the small `[offset, offset + len)` sub-region it
     /// names (e.g. one enumerated BAR), never the whole 1 GiB aperture. The
     /// mechanism receives the sub-region's absolute base (`grant base +
@@ -7684,7 +7600,7 @@ mod tests {
         assert_eq!(*facility.last.lock(), Some((0x6_3D50_0000, 0x1000)));
 
         // A sub-region running past the grant's end is refused before the
-        // mechanism (fail closed, `AGENTS.md` §5.4).
+        // mechanism (fail closed).
         *facility.last.lock() = None;
         assert_eq!(
             h.mmio_map(&ctx, handle, 0x3FFF_F000, 0x2000),
@@ -7710,7 +7626,7 @@ mod tests {
 
     /// With no grant minted for the caller, `dma_alloc` resolves nothing and
     /// fails closed with `NotFound` — a driver can never carve against an
-    /// ungranted constraint (`AGENTS.md` §2.9 / §4 / §18.3).
+    /// ungranted constraint.
     #[test]
     fn dma_alloc_without_grant_is_not_found() {
         let sink = make_sink();
@@ -7730,7 +7646,7 @@ mod tests {
 
     /// The DMA grant is owner-bound: a handle minted for another task, or an
     /// unknown handle value, resolves to nothing and is refused
-    /// (`AGENTS.md` §5.4 — handle forgery rejected as in `mmio_map`).
+    /// (handle forgery rejected as in `mmio_map`).
     #[test]
     fn dma_alloc_forged_or_foreign_handle_is_not_found() {
         let sink = make_sink();
@@ -7779,7 +7695,7 @@ mod tests {
 
     /// A grant of a non-DMA kind (an MMIO window) is refused with
     /// `OutOfRange` before the carve mechanism is reached: `dma_alloc`
-    /// carves against DMA constraints only (`AGENTS.md` §5.4).
+    /// carves against DMA constraints only.
     #[test]
     fn dma_alloc_non_dma_grant_is_out_of_range() {
         let sink = make_sink();
@@ -7819,9 +7735,9 @@ mod tests {
     /// Pi 4's `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) now reaches the
     /// carve mechanism: it is no longer rejected pre-carve. The carve runs
     /// bounded by the grant's CPU-side `addr_limit` (never a caller-supplied
-    /// bound, §18.3); with no caller address space registered the
+    /// bound); with no caller address space registered the
     /// device-address copy-out then fails closed with `BadAddress` (the same
-    /// fault `wait`'s copy-out produces, §19.1). The translation arithmetic
+    /// fault `wait`'s copy-out produces). The translation arithmetic
     /// itself is unit-tested directly on `translate_device_addr`
     /// (`kernel/core::devres`).
     #[test]
@@ -7870,7 +7786,7 @@ mod tests {
     }
 
     /// A zero-length request and an over-the-grant-maximum request are both
-    /// refused before the carve (`AGENTS.md` §5.4 — validate every input).
+    /// refused before the carve (validate every input).
     #[test]
     fn dma_alloc_rejects_zero_and_over_max_length() {
         let sink = make_sink();
@@ -7912,8 +7828,7 @@ mod tests {
     }
 
     /// A valid, owned, untranslated DMA grant whose mechanism is unwired
-    /// holds `NULL_DMA_ALLOC_FACILITY` and fails closed with `NotImplemented`
-    /// (`AGENTS.md` §2.9) — proving the lookup + validation passed and the
+    /// holds `NULL_DMA_ALLOC_FACILITY` and fails closed with `NotImplemented` — proving the lookup + validation passed and the
     /// missing producer denies rather than fabricating a buffer.
     #[test]
     fn dma_alloc_with_grant_but_no_facility_is_not_implemented() {
@@ -7976,13 +7891,13 @@ mod tests {
         .with_dma_alloc_facility(facility);
 
         // No address space is registered for task 2, so the device-address
-        // copy-out fails closed with `BadAddress` (`AGENTS.md` §5.4 / §19.1).
+        // copy-out fails closed with `BadAddress`.
         assert_eq!(
             h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
             Err(Errno::BadAddress)
         );
         // The carve nonetheless ran with the request length and the grant's
-        // addressing limit — never a caller-supplied bound (§18.3).
+        // addressing limit — never a caller-supplied bound.
         assert_eq!(*facility.last.lock(), Some((0x1000, 0x4000_0000)));
     }
 
@@ -7991,7 +7906,7 @@ mod tests {
     /// Build a handler over a caller (task 2) whose address space maps a
     /// writable user page at `0x1000` (so the grant copy-out has somewhere
     /// to land), mirroring the `wait` copy-out tests. The five
-    /// `resource_grants` tests share this exact scaffold (`AGENTS.md` §2.2).
+    /// `resource_grants` tests share this exact scaffold.
     #[allow(clippy::type_complexity)]
     fn grants_scaffold() -> (
         Arc<TestArch>,
@@ -8014,7 +7929,7 @@ mod tests {
     }
 
     /// A task with no minted grants reads an empty set: `Ok(0)`, never an
-    /// error (`AGENTS.md` §18.4 — an unbound driver is normal). No copy is
+    /// error (an unbound driver is normal). No copy is
     /// performed.
     #[test]
     fn resource_grants_with_no_grants_returns_zero() {
@@ -8065,8 +7980,7 @@ mod tests {
     }
 
     /// A buffer too small for the whole grant set fails closed with
-    /// `BufferTooSmall` rather than delivering a partial list (`AGENTS.md`
-    /// §2.9). The check happens before any copy.
+    /// `BufferTooSmall` rather than delivering a partial list. The check happens before any copy.
     #[test]
     fn resource_grants_buffer_too_small_fails_closed() {
         install_trace_filter();
@@ -8095,7 +8009,7 @@ mod tests {
 
     /// A caller with grants but no registered address space cannot receive
     /// the copy-out and fails closed with `BadAddress`, never leaking the
-    /// missing-space case (`AGENTS.md` §5.4 / §19.1).
+    /// missing-space case.
     #[test]
     fn resource_grants_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -8128,8 +8042,7 @@ mod tests {
 
     /// Grants are owner-scoped: a task reads only its *own* grants. Task 2
     /// holds a grant; task 3 (the registered caller here) sees an empty set
-    /// — it cannot enumerate another driver's handles (`AGENTS.md` §5.4 /
-    /// §18.3).
+    /// — it cannot enumerate another driver's handles.
     #[test]
     fn resource_grants_is_owner_scoped() {
         install_trace_filter();
@@ -8196,7 +8109,7 @@ mod tests {
         }
     }
 
-    /// `wait` needs no capability (`AGENTS.md` §16.6 — a process reaps its
+    /// `wait` needs no capability (a process reaps its
     /// own children): it forwards the decoded `(parent, pid)` to the
     /// installed producer, writes the reaped child's exit code to the
     /// caller's `status` pointer through the validated copy-out boundary,
@@ -8240,7 +8153,7 @@ mod tests {
     }
 
     /// With no producer installed the handler holds `NULL_PROCESS_WAIT` and
-    /// fails closed with `NotImplemented` (`AGENTS.md` §2.9).
+    /// fails closed with `NotImplemented`.
     #[test]
     fn wait_without_producer_is_not_implemented() {
         install_trace_filter();
@@ -8272,7 +8185,7 @@ mod tests {
 
     /// A producer error (e.g. `pid` is not a child of the caller) propagates
     /// verbatim, and the `status` pointer is never written on the error path
-    /// (`AGENTS.md` §2.9 — fail closed).
+    /// (fail closed).
     #[test]
     fn wait_propagates_producer_error() {
         install_trace_filter();
@@ -8309,7 +8222,7 @@ mod tests {
 
     /// `wait` from a caller with no registered address space fails closed
     /// with `BadAddress` — the reaped child's code cannot be copied out, and
-    /// the missing-space case is not leaked (`AGENTS.md` §5.4 / §19.1).
+    /// the missing-space case is not leaked.
     #[test]
     fn wait_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -8378,7 +8291,7 @@ mod tests {
 
     /// `rlimit_get` for a registered caller copies the effective limit out:
     /// with none imposed, every kind reads the default policy
-    /// ([`LimitSet::DEFAULT`], unlimited) (`AGENTS.md` §24.1 / §24.3).
+    /// ([`LimitSet::DEFAULT`], unlimited).
     #[test]
     fn rlimit_get_returns_the_default_policy_for_a_fresh_task() {
         install_trace_filter();
@@ -8422,7 +8335,7 @@ mod tests {
 
     /// `rlimit_get` validates `kind` against the closed abi-v1 set before
     /// touching state: an unassigned discriminant fails closed with
-    /// `OutOfRange` (`AGENTS.md` §5.4).
+    /// `OutOfRange`.
     #[test]
     fn rlimit_get_rejects_an_unassigned_kind() {
         install_trace_filter();
@@ -8455,7 +8368,7 @@ mod tests {
 
     /// `rlimit_get` from a caller with no registered address space fails
     /// closed with `BadAddress` — the limit cannot be copied out and the
-    /// missing-space case is not leaked (`AGENTS.md` §5.4 / §19.1).
+    /// missing-space case is not leaked.
     #[test]
     fn rlimit_get_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -8484,8 +8397,7 @@ mod tests {
     }
 
     /// `rlimit_set` lowering a bound is free (no capability) and the new
-    /// ceiling is stored against the caller's own task id (`AGENTS.md`
-    /// §24.3).
+    /// ceiling is stored against the caller's own task id.
     #[test]
     fn rlimit_set_lowers_freely_and_stores_against_the_caller() {
         install_trace_filter();
@@ -8546,7 +8458,7 @@ mod tests {
 
     /// `rlimit_set` raising a hard bound above the current ceiling without
     /// `CAP_RLIMIT_RAISE` is refused with `PermissionDenied`, and the stored
-    /// limit is left unchanged (`AGENTS.md` §24.3 — fail closed).
+    /// limit is left unchanged (fail closed).
     #[test]
     fn rlimit_set_raising_hard_without_capability_is_denied() {
         install_trace_filter();
@@ -8600,7 +8512,7 @@ mod tests {
     }
 
     /// `rlimit_set` raising a hard bound *with* `CAP_RLIMIT_RAISE` succeeds
-    /// and the higher ceiling is stored (`AGENTS.md` §24.3).
+    /// and the higher ceiling is stored.
     #[test]
     fn rlimit_set_raising_hard_with_capability_succeeds() {
         install_trace_filter();
@@ -8651,7 +8563,7 @@ mod tests {
     }
 
     /// `rlimit_set` fed a malformed pair (`soft > hard`) fails closed with
-    /// `OutOfRange` at decode and stores nothing (`AGENTS.md` §5.4).
+    /// `OutOfRange` at decode and stores nothing.
     #[test]
     fn rlimit_set_rejects_a_malformed_pair() {
         install_trace_filter();
@@ -8700,7 +8612,7 @@ mod tests {
     }
 
     /// A wired [`UsersDbSource`] whose boot read refused the record, so
-    /// no database is held (`AGENTS.md` §5.4.5).
+    /// no database is held.
     struct AbsentUsersDb;
     impl UsersDbSource for AbsentUsersDb {
         fn text(&self) -> Result<&[u8], Errno> {
@@ -8771,8 +8683,7 @@ mod tests {
     }
 
     /// With no holder wired the handler keeps `NULL_USERS_DB` and fails
-    /// closed with `NotImplemented` rather than fabricating accounts
-    /// (`AGENTS.md` §2.9).
+    /// closed with `NotImplemented` rather than fabricating accounts.
     #[test]
     fn users_db_read_without_holder_is_not_implemented() {
         install_trace_filter();
@@ -8802,8 +8713,7 @@ mod tests {
 
     /// A wired holder with no database (the boot read refused the
     /// record, or no root volume is mounted) fails closed with
-    /// `NotFound`, so a system without accounts refuses every login
-    /// (`AGENTS.md` §5.4.5).
+    /// `NotFound`, so a system without accounts refuses every login.
     #[test]
     fn users_db_read_with_no_database_is_not_found() {
         install_trace_filter();
@@ -8832,7 +8742,7 @@ mod tests {
 
     /// `users_db_wait` with no holder wired returns `Ok(0)` immediately —
     /// an inert database is never *pending*, so `login` does not block and
-    /// its subsequent `users_db_read` fails closed (`AGENTS.md` §2.9).
+    /// its subsequent `users_db_read` fails closed.
     #[test]
     fn users_db_wait_without_holder_returns_ok_immediately() {
         install_trace_filter();
@@ -8888,7 +8798,7 @@ mod tests {
     }
 
     /// `users_db_wait` with a zero timeout while the database is still
-    /// pending returns `TimedOut` without busy-spinning (`AGENTS.md` §2.1).
+    /// pending returns `TimedOut` without busy-spinning.
     #[test]
     fn users_db_wait_times_out_while_pending() {
         install_trace_filter();
@@ -8918,7 +8828,7 @@ mod tests {
     }
 
     /// An undersized buffer is refused whole with `BufferTooSmall` — a
-    /// credential database is never truncated (`AGENTS.md` §2.9) — and
+    /// credential database is never truncated — and
     /// nothing is copied to the caller.
     #[test]
     fn users_db_read_undersized_buffer_is_buffer_too_small() {
@@ -8965,7 +8875,7 @@ mod tests {
     }
 
     /// A caller with no registered address space fails closed with
-    /// `BadAddress`, exactly like every other copy-out path (§19.1).
+    /// `BadAddress`, exactly like every other copy-out path.
     #[test]
     fn users_db_read_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -9030,14 +8940,14 @@ mod tests {
         fn publish(&self, parent_id: u32, node: rustos_abi::HwNode) -> Result<(), Errno> {
             // Record the kernel-resolved parent the handler passed alongside
             // the node, so a test can assert the child is parented under the
-            // emitter's own loaded node (`AGENTS.md` §18.1).
+            // emitter's own loaded node.
             self.published.write().push((parent_id, node));
             Ok(())
         }
         fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
             // Model the store's fail-closed ownership gate: a node listed as
             // unremovable (unknown / not owned by the caller) is `NotFound`
-            // and is never recorded as removed (`AGENTS.md` §5.4).
+            // and is never recorded as removed.
             if self.unremovable.read().contains(&node_id) {
                 return Err(Errno::NotFound);
             }
@@ -9059,7 +8969,7 @@ mod tests {
     }
 
     /// `hw_tree_read` copies the wire-encoded snapshot out to the caller
-    /// and returns its exact length (`AGENTS.md` §18.4).
+    /// and returns its exact length.
     #[test]
     fn hw_tree_read_copies_the_snapshot_out_to_caller() {
         install_trace_filter();
@@ -9111,7 +9021,7 @@ mod tests {
     }
 
     /// With no store wired `hw_tree_read` keeps `NULL_HW_TREE` and fails
-    /// closed with `NotImplemented` (`AGENTS.md` §2.9).
+    /// closed with `NotImplemented`.
     #[test]
     fn hw_tree_read_without_store_is_not_implemented() {
         install_trace_filter();
@@ -9140,7 +9050,7 @@ mod tests {
     }
 
     /// An undersized buffer is refused whole with `BufferTooSmall` — the
-    /// inventory is never truncated (`AGENTS.md` §2.9) — and nothing is
+    /// inventory is never truncated — and nothing is
     /// copied to the caller.
     #[test]
     fn hw_tree_read_undersized_buffer_is_buffer_too_small() {
@@ -9193,7 +9103,7 @@ mod tests {
     }
 
     /// A caller with no registered address space fails closed with
-    /// `BadAddress`, like every other copy-out path (§19.1).
+    /// `BadAddress`, like every other copy-out path.
     #[test]
     fn hw_tree_read_unregistered_caller_is_bad_address() {
         install_trace_filter();
@@ -9223,7 +9133,7 @@ mod tests {
 
     /// `hw_tree_wait` returns immediately with `Ok(0)` when the store's
     /// generation already differs from the one the caller observed — the
-    /// tree changed, so re-read and re-match (`AGENTS.md` §18.4).
+    /// tree changed, so re-read and re-match.
     #[test]
     fn hw_tree_wait_returns_ok_when_generation_already_advanced() {
         install_trace_filter();
@@ -9253,7 +9163,7 @@ mod tests {
     }
 
     /// `hw_tree_wait` with a zero timeout and an unchanged generation
-    /// returns `TimedOut` without busy-spinning (`AGENTS.md` §2.1).
+    /// returns `TimedOut` without busy-spinning.
     #[test]
     fn hw_tree_wait_times_out_when_generation_unchanged() {
         install_trace_filter();
@@ -9284,7 +9194,7 @@ mod tests {
     }
 
     /// With no store wired `hw_tree_wait` fails closed with
-    /// `NotImplemented` rather than spinning (`AGENTS.md` §2.9).
+    /// `NotImplemented` rather than spinning.
     #[test]
     fn hw_tree_wait_without_store_is_not_implemented() {
         install_trace_filter();
@@ -9327,7 +9237,7 @@ mod tests {
 
     /// `hw_emit_node` rejects a `len` that is not exactly the node wire
     /// size before copying anything, so a hostile length cannot drive a
-    /// large copy and a short one cannot decode (`AGENTS.md` §2.9 / §24.4).
+    /// large copy and a short one cannot decode.
     #[test]
     fn hw_emit_node_rejects_a_wrong_length() {
         install_trace_filter();
@@ -9366,7 +9276,7 @@ mod tests {
     /// An emitted node requesting a resource **not** covered by any of the
     /// calling driver's grants is refused with `PermissionDenied`, and
     /// nothing is published — a bus driver can never mint a child more
-    /// authority than it holds (`AGENTS.md` §4 / §18.3).
+    /// authority than it holds.
     #[test]
     fn hw_emit_node_without_a_covering_grant_is_denied() {
         install_trace_filter();
@@ -9420,7 +9330,7 @@ mod tests {
     /// (no loaded node recorded) is refused with `PermissionDenied` and
     /// publishes nothing, even when it holds a covering grant: a task that
     /// cannot name its own position in the tree may not place a child there
-    /// (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
+    /// (identity is kernel-provided, never
     /// caller-supplied).
     #[test]
     fn hw_emit_node_without_a_loaded_node_is_denied() {
@@ -9470,7 +9380,7 @@ mod tests {
 
     /// An emitted node whose every resource is covered by one of the
     /// driver's grants is published into the live tree (`Ok(0)`), and the
-    /// exact node reaches the store (`AGENTS.md` §18.1 / §18.3).
+    /// exact node reaches the store.
     #[test]
     fn hw_emit_node_with_a_covering_grant_publishes() {
         install_trace_filter();
@@ -9494,7 +9404,7 @@ mod tests {
             rustos_abi::HwResource::mmio(0xFE98_0000, 0x1_0000),
         );
         // The emitter is a driver loaded for node 9; its published child is
-        // parented under exactly that node (`AGENTS.md` §18.1).
+        // parented under exactly that node.
         aspaces.write().set_loaded_node(SecTaskId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -9521,13 +9431,13 @@ mod tests {
         assert_eq!(published[0].1, node, "the exact node reached the store");
     }
 
-    /// The central recursive-PCI(e) case (`AGENTS.md` §18.1): a bus driver
+    /// The central recursive-PCI(e) case: a bus driver
     /// holding its host bridge's outbound window as a `BusWindow` grant
     /// publishes an enumerated child whose register BAR is an `Mmio` window
     /// resolved to a CPU address *inside* that bridge window. The
     /// `BusWindow`→`Mmio` coverage rule admits it, so the device behind the
     /// bridge autoloads — without the bridge ever minting authority it does
-    /// not already hold (`AGENTS.md` §4).
+    /// not already hold.
     #[test]
     fn hw_emit_node_covers_a_child_bar_under_a_bridge_window() {
         install_trace_filter();
@@ -9553,7 +9463,7 @@ mod tests {
             rustos_abi::HwResource::bus_window(0xFE00_0000, 0x100_0000, 0x6_0000_0000),
         );
         // The bridge driver is loaded for its own node; the child is parented
-        // under it (`AGENTS.md` §18.1).
+        // under it.
         aspaces.write().set_loaded_node(SecTaskId(2), 1);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -9580,7 +9490,7 @@ mod tests {
     }
 
     /// With no store wired `hw_emit_node` fails closed with
-    /// `NotImplemented` even for a resourceless node (`AGENTS.md` §2.9).
+    /// `NotImplemented` even for a resourceless node.
     #[test]
     fn hw_emit_node_without_store_is_not_implemented() {
         install_trace_filter();
@@ -9623,7 +9533,7 @@ mod tests {
     /// An autoloaded bus driver (a loaded node recorded) removes a child it
     /// owns: the handler resolves the caller's own loaded node as the parent
     /// and passes it with the target id to the store, which removes the
-    /// subtree (`AGENTS.md` §18.4). `Ok(0)` on success.
+    /// subtree. `Ok(0)` on success.
     #[test]
     fn hw_remove_node_with_a_loaded_node_removes_the_child() {
         install_trace_filter();
@@ -9640,7 +9550,7 @@ mod tests {
             .register(SecTaskId(2), space, physmap)
             .expect("registration succeeds");
         // The caller is the bus driver loaded for node 9; it owns the
-        // children parented under 9 and may retire them (`AGENTS.md` §18.4).
+        // children parented under 9 and may retire them.
         aspaces.write().set_loaded_node(SecTaskId(2), 9);
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -9670,7 +9580,7 @@ mod tests {
     /// A caller that is **not** an autoloaded driver bound to a node (no
     /// loaded node recorded) cannot remove anything: it owns no position in
     /// the tree, so the handler fails closed with `PermissionDenied` and the
-    /// store is never reached (`AGENTS.md` §4 / §5.4 — identity is
+    /// store is never reached (identity is
     /// kernel-provided, never caller-supplied). Mirrors the emit gate.
     #[test]
     fn hw_remove_node_without_a_loaded_node_is_denied() {
@@ -9710,7 +9620,7 @@ mod tests {
 
     /// A node the caller does not own (or an absent id) is surfaced as the
     /// store's fail-closed `NotFound`, even though the caller passed the
-    /// loaded-node gate (`AGENTS.md` §5.4).
+    /// loaded-node gate.
     #[test]
     fn hw_remove_node_for_an_unowned_node_is_not_found() {
         install_trace_filter();
@@ -9750,7 +9660,7 @@ mod tests {
     }
 
     /// A `node_id` above the `u32` range names no node and fails closed
-    /// `NotFound` before the store is reached (`AGENTS.md` §2.9).
+    /// `NotFound` before the store is reached.
     #[test]
     fn hw_remove_node_rejects_an_out_of_range_id() {
         install_trace_filter();
@@ -9788,7 +9698,7 @@ mod tests {
     }
 
     /// With no store wired `hw_remove_node` fails closed with
-    /// `NotImplemented` (`AGENTS.md` §2.9), like every hardware-tree op.
+    /// `NotImplemented`, like every hardware-tree op.
     #[test]
     fn hw_remove_node_without_store_is_not_implemented() {
         install_trace_filter();
@@ -9902,7 +9812,7 @@ mod tests {
     }
 
     /// `ipc_call` to an unregistered endpoint fails closed with `NotFound`
-    /// without touching the caller's buffers (`AGENTS.md` §5.4 / §2.9).
+    /// without touching the caller's buffers.
     #[test]
     fn ipc_call_to_unregistered_endpoint_is_not_found() {
         install_trace_filter();
@@ -9931,7 +9841,7 @@ mod tests {
     }
 
     /// `ipc_call` with a request larger than the endpoint advertises fails
-    /// closed with `MessageTooLarge` before any copy (`AGENTS.md` §2.16).
+    /// closed with `MessageTooLarge` before any copy.
     #[test]
     fn ipc_call_oversize_request_is_message_too_large() {
         install_trace_filter();
@@ -9963,8 +9873,7 @@ mod tests {
     }
 
     /// `ipc_call` from a caller with no registered address space fails
-    /// closed with `BadAddress` during the request copy-in (`AGENTS.md`
-    /// §5.4 / §19.1) — it never reaches the post/park.
+    /// closed with `BadAddress` during the request copy-in — it never reaches the post/park.
     #[test]
     fn ipc_call_without_registered_aspace_is_bad_address() {
         install_trace_filter();
@@ -9996,8 +9905,7 @@ mod tests {
 
     /// `ipc_call` against a restricted-sender endpoint the caller lacks the
     /// send capability for fails closed with `PermissionDenied` at post
-    /// time — after the request copy-in, before any reply (`AGENTS.md`
-    /// §5.2).
+    /// time — after the request copy-in, before any reply.
     #[test]
     fn ipc_call_without_send_capability_is_permission_denied() {
         install_trace_filter();
@@ -10122,7 +10030,7 @@ mod tests {
     }
 
     /// A reply larger than the caller's buffer fails closed with
-    /// `BufferTooSmall` rather than truncating (`AGENTS.md` §2.9).
+    /// `BufferTooSmall` rather than truncating.
     #[test]
     fn ipc_call_reply_larger_than_buffer_is_buffer_too_small() {
         install_trace_filter();
@@ -10228,7 +10136,7 @@ mod tests {
     }
 
     /// `call_create` binds an unrestricted endpoint the `ipc_call` handler can
-    /// then resolve, and refuses to re-point a live id (`AGENTS.md` §5.4).
+    /// then resolve, and refuses to re-point a live id.
     #[test]
     fn call_create_registers_a_resolvable_endpoint_and_refuses_a_clash() {
         install_trace_filter();
@@ -10269,7 +10177,7 @@ mod tests {
     }
 
     /// `call_recv` / `call_reply` against an unbound id fail closed with
-    /// `NotFound` before touching any buffer (`AGENTS.md` §5.4 / §2.9).
+    /// `NotFound` before touching any buffer.
     #[test]
     fn call_recv_and_reply_on_unknown_endpoint_are_not_found() {
         install_trace_filter();
@@ -10301,7 +10209,7 @@ mod tests {
     }
 
     /// A server lacking the endpoint's required receive capability is denied
-    /// at `call_recv` before any state is touched (`AGENTS.md` §5.2 / §5.4).
+    /// at `call_recv` before any state is touched.
     #[test]
     fn call_recv_without_required_recv_cap_is_permission_denied() {
         install_trace_filter();
@@ -10355,7 +10263,7 @@ mod tests {
 
     /// End-to-end server side: a posted request is delivered by `call_recv`
     /// (request bytes + ticket), and `call_reply` completes it for the
-    /// client. The serving task is the endpoint owner (`AGENTS.md` §5.4).
+    /// client. The serving task is the endpoint owner.
     #[test]
     fn call_recv_and_reply_round_trip_the_server_side() {
         install_trace_filter();

@@ -8,7 +8,7 @@
 //! through the real FAT32 driver and verifies it, then writes a fresh
 //! file and reads it back. Both sides name the same fixed file through
 //! the constants below, so the on-disk contract lives in exactly one
-//! place (`AGENTS.md` §2.2).
+//! place.
 //!
 //! The image is a minimal but genuine FAT32 volume — 1 MiB, two
 //! mirrored FATs, one-sector clusters — laid out so the real

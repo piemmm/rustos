@@ -14,7 +14,7 @@
 //!
 //! The split mirrors `crate::console`: pure, host-tested register
 //! arithmetic here, with one thin freestanding apply layer doing the
-//! volatile MMIO on the target (`AGENTS.md` §2.2 — one definition shared
+//! volatile MMIO on the target (one definition shared
 //! by the metal path and the unit tests).
 
 use rustos_fdt::Fdt;
@@ -22,14 +22,14 @@ use rustos_fdt::Fdt;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use crate::console;
 
-// --- BCM2711 GPIO block (BCM2711 ARM Peripherals §5.2) ---------------------
+// --- BCM2711 GPIO block (BCM2711 ARM Peripherals) ---------------------
 
 /// Device-tree `compatible` string of the BCM2711 GPIO controller.
 const GPIO_COMPATIBLE: &[u8] = b"brcm,bcm2711-gpio";
 
 /// Byte length of the BCM2711 GPIO register block the mux needs:
 /// `GPIO_PUP_PDN_CNTRL_REG3` at `0xF0` is the last register (datasheet
-/// §5.2 register table), so the window spans `0xF4` bytes. The device
+/// register table), so the window spans `0xF4` bytes. The device
 /// tree's `reg` length (`0xB4`) predates the BCM2711 pull registers and
 /// is deliberately not used to size the window.
 pub const GPIO_REGS_LEN: usize = 0xF4;
@@ -50,7 +50,7 @@ const TXD0_PIN: u32 = 14;
 /// `UART0` receive pin (header pin 10).
 const RXD0_PIN: u32 = 15;
 /// Function-select encoding for `ALT0` (the PL011 `UART0` function on
-/// GPIO 14/15 — datasheet §5.3 alternative-function table).
+/// GPIO 14/15 — datasheet alternative-function table).
 const FSEL_ALT0: u32 = 0b100;
 
 /// Route GPIO 14/15 to the PL011 (`ALT0`) in a read `GPFSEL1` value,
@@ -79,7 +79,7 @@ pub fn pull_none_uart0(current: u32) -> u32 {
     v
 }
 
-// --- PL011 line registers (ARM DDI 0183 §3.2) -------------------------------
+// --- PL011 line registers (ARM DDI 0183) -------------------------------
 
 /// `UARTIBRD` — integer baud-rate divisor.
 const PL011_IBRD: usize = 0x24;
@@ -205,7 +205,7 @@ pub fn find_gpio(fdt: &Fdt<'_>) -> Option<DiscoveredGpio> {
 ///
 /// Must run after [`console::configure_from_fdt`] has pointed the
 /// console at the discovered UART, and before the first log byte.
-/// No-ops fail closed (`AGENTS.md` §2.9): a non-PL011 console (the
+/// No-ops fail closed: a non-PL011 console (the
 /// mini-UART fallback keeps the firmware's line state), a tree without
 /// the GPIO controller (QEMU `virt` — no pins to mux), or an
 /// unprogrammable divisor pair each leave the corresponding state
@@ -237,8 +237,7 @@ pub fn init_from_fdt(fdt: &Fdt<'_>) {
 }
 
 /// Program the PL011 at `base`: disable, wait out a transmitting frame
-/// (bounded — a wedged transmitter must not hang the boot, `AGENTS.md`
-/// §2.1), write the [`pl011_init_writes`] sequence, leaving the UART
+/// (bounded — a wedged transmitter must not hang the boot), write the [`pl011_init_writes`] sequence, leaving the UART
 /// enabled at [`CONSOLE_BAUD`] 8N1.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn apply_pl011_init(base: usize) {
@@ -247,8 +246,7 @@ fn apply_pl011_init(base: usize) {
     };
     // SAFETY: `base` is the discovered (or default `virt`) PL011 block,
     // identity-addressed MMU-off at boot; every offset written is a
-    // PL011 register inside the device's `0x200` window (ARM DDI 0183
-    // §3.2). The TRM-ordered sequence — disable, drain, reprogram,
+    // PL011 register inside the device's `0x200` window (ARM DDI 0183). The TRM-ordered sequence — disable, drain, reprogram,
     // re-enable — runs once, single-threaded, on the boot CPU before
     // the first console byte, so no concurrent transmit is cut short.
     unsafe {

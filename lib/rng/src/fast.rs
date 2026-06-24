@@ -10,9 +10,9 @@
 //! non-security randomness the OS needs in bulk: scheduler victim selection,
 //! hashed-collection seeds, backoff jitter, test fuzzing.
 //!
-//! Constructing one is not hand-rolled cryptography (`AGENTS.md` §2.12): a
+//! Constructing one is not hand-rolled cryptography: a
 //! non-cryptographic PRNG is an ordinary algorithm, not a security primitive,
-//! and rolling it ourselves avoids an external dependency (§2.12 default).
+//! and rolling it ourselves avoids an external dependency (default).
 //! The state is expanded from the seed with `SplitMix64`, the canonical
 //! companion seeder, so a single `u64` seed still fills all 256 state bits
 //! without zero-state pathologies.

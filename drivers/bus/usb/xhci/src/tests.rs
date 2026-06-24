@@ -2,8 +2,8 @@
 //!
 //! The bus-agnostic xHCI protocol (the `Xhci` engine, the ring/TRB
 //! vocabulary, and `UsbDevice` enumeration) is proven in `lib/usb`; these
-//! tests cover the pieces that live *here* — the §8 `register` entry's
-//! capability gate and the §18.3 `BIND_KEYS` match table.
+//! tests cover the pieces that live *here* — the `register` entry's
+//! capability gate and the `BIND_KEYS` match table.
 
 use rustos_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
 

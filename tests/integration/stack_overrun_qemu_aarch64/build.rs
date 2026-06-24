@@ -4,8 +4,7 @@
 //! `tests/integration/kthread_switch_qemu_aarch64/build.rs`:
 //!
 //! 1. Hand the aarch64 `virt` linker script to `rustc` (the single
-//!    per-board linker script the architecture port owns — `AGENTS.md`
-//!    §2.2).
+//!    per-board linker script the architecture port owns).
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it so
 //!    the test can bring up the GICv2 (whose base is read from the firmware
 //!    tree) before the scheduler raises its spawn IPIs, and size the arch
@@ -13,10 +12,10 @@
 //!    (`plans/PI.md` P4). QEMU's `-kernel <ELF>` aarch64 path passes no DTB
 //!    pointer (`x0 = 0`), so the board tree is embedded at build time; the
 //!    dump helper lives in the shared harness so no aarch64 build script
-//!    re-rolls it (`AGENTS.md` §2.2).
+//!    re-rolls it.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;

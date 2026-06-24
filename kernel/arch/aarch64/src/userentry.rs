@@ -1,5 +1,5 @@
 //! aarch64 implementation of the Arch HAL "enter user mode" surface
-//! ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2).
+//! ([`rustos_arch_api::EnterUser`]).
 //!
 //! Dropping a freshly built process image into EL0 is the `eret`
 //! sequence: program `SP_EL0` with the user stack pointer, `ELR_EL1`
@@ -8,7 +8,7 @@
 //! mode drives the P-1 preemptive reschedule, `plans/PI.md` D2b-2b-A
 //! P-1), set the first-argument register `x0`, then `eret` — a
 //! context-synchronising EL1→EL0 transition. This is the one definition
-//! of that sequence (`AGENTS.md` §2.2); the CC2/CC3 QEMU verticals reach
+//! of that sequence; the CC2/CC3 QEMU verticals reach
 //! it through the HAL rather than copying the `asm!` block.
 
 use rustos_arch_api::{EnterUser, UserEntry};
@@ -49,8 +49,8 @@ const SPSR_DAIF_IRQ: u64 = 1 << 7;
 /// preemptive reschedule (`crate::exceptions::handle_irq` /
 /// `crate::preempt::on_el0_preempt_point`). FIQ and SError stay masked
 /// (the kernel routes neither to EL0), and Debug stays masked; only the
-/// IRQ unmask is required for preemption (`AGENTS.md` §2.16 — preemption
-/// is a first-class scheduling goal; §4 — the kernel itself stays
+/// IRQ unmask is required for preemption (preemption
+/// is a first-class scheduling goal; — the kernel itself stays
 /// non-preemptible, EL1 ticks never switch away).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 const SPSR_EL0T_PREEMPTIBLE: u64 = (0b1111 << 6) & !SPSR_DAIF_IRQ;
@@ -64,7 +64,7 @@ const SPSR_EL0T_PREEMPTIBLE: u64 = (0b1111 << 6) & !SPSR_DAIF_IRQ;
 /// vector table must be installed. Diverges via `eret`.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 unsafe fn enter_el0(entry: u64, sp: u64, x0: u64) -> ! {
-    // SAFETY: the §1-sanctioned assembly carve-out (no Rust spelling for
+    // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
     // `eret` or the EL1 system-register writes). Writing
     // `SP_EL0`/`ELR_EL1`/`SPSR_EL1` loads the EL0 entry state; `eret`
     // performs the documented EL1→EL0 transition (a context-synchronising

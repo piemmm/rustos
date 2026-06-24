@@ -1,9 +1,9 @@
-//! Kernel input-focus arbiter (`AGENTS.md` §10 / §17.3 / §20; `plans/PI.md`
+//! Kernel input-focus arbiter (`plans/PI.md`
 //! P11 — input follows the surface owner).
 //!
 //! A directly attached keyboard produces a single stream of decoded *key
 //! edges*. Where that stream is delivered — and how it is encoded — is
-//! **policy**, and policy lives above the device (`AGENTS.md` §17.4): the
+//! **policy**, and policy lives above the device: the
 //! keyboard driver emits only the device-resolved [`KeyInput`] record (a
 //! pressed or released key plus the held modifiers) through the `key_inject`
 //! syscall, and this arbiter decides the rest by who currently holds input
@@ -12,8 +12,7 @@
 //!
 //! * **Text foreground** (the default): a key *press* is encoded to the
 //!   console (tty) bytes a terminal sends — through the one shared
-//!   [`rustos_keymap::encode_key_input`] map, never a second copy
-//!   (`AGENTS.md` §2.2) — and enqueued on the focused text console's input
+//!   [`rustos_keymap::encode_key_input`] map, never a second copy — and enqueued on the focused text console's input
 //!   queue, where a login/shell `stream_read` drains it.
 //! * **Desktop foreground**: the whole record is routed to the kernel
 //!   keyboard channel, where the display owner (the window manager) drains it
@@ -22,11 +21,9 @@
 //! Acquiring the display ([`InputFocus::acquire_display`]) switches the
 //! foreground to the desktop, and releasing it ([`InputFocus::release_display`])
 //! returns it to the text console, so the keyboard follows the surface owner
-//! automatically — the desktop analogue of "input follows the foreground tty"
-//! (`AGENTS.md` §20). Routing is kernel-arbitrated and capability-gated (the
+//! automatically — the desktop analogue of "input follows the foreground tty". Routing is kernel-arbitrated and capability-gated (the
 //! syscalls carry `CAP_INPUT_INJECT` / `CAP_DISPLAY` / `CAP_INPUT_READ`); an
-//! unattached channel denies rather than leaking to a device (`AGENTS.md` §4 /
-//! §5.4 / §20).
+//! unattached channel denies rather than leaking to a device.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,13 +37,13 @@ use crate::console::{ConsoleInput, NULL_CONSOLE_INPUT};
 
 /// Capacity, in [`KeyInput`] records, of the desktop keyboard channel's ring.
 ///
-/// A **fixed bound**, not a scaling capacity (`AGENTS.md` §24.4): the channel
+/// A **fixed bound**, not a scaling capacity: the channel
 /// is the desktop analogue of a console's type-ahead FIFO, and a human types a
 /// handful of keys per second, so a small ring absorbs realistic type-ahead
 /// between `keyboard_read` drains. A bound rather than an unbounded queue means
 /// a wedged or absent window manager can never make the keyboard driver's
-/// pushes grow kernel memory without limit (`AGENTS.md` §4). Overflow drops the
-/// oldest record (the producer never blocks, `AGENTS.md` §2.1).
+/// pushes grow kernel memory without limit. Overflow drops the
+/// oldest record (the producer never blocks).
 pub const KEYBOARD_CHANNEL_CAPACITY: usize = 64;
 
 /// The fixed-capacity record ring behind the desktop keyboard channel.
@@ -75,8 +72,8 @@ impl ChannelRing {
 /// Each drained record is **zeroed in place** as it leaves the ring: a key
 /// event can carry a typed character (a password keystroke transits this
 /// channel between the keyboard driver and the desktop), so the buffer must
-/// not retain it after the consumer has taken it (`AGENTS.md` §4 — zero-on-free
-/// for memory that held a credential; §23.1 — secret hygiene).
+/// not retain it after the consumer has taken it (zero-on-free
+/// for memory that held a credential; — secret hygiene).
 struct KeyboardChannel {
     ring: SpinLock<ChannelRing>,
 }
@@ -89,7 +86,7 @@ impl KeyboardChannel {
     }
 
     /// Enqueue one record, dropping the oldest if the ring is full (the
-    /// producer never blocks, `AGENTS.md` §2.1).
+    /// producer never blocks).
     fn push(&self, record: &[u8; KeyInput::WIRE_LEN]) {
         let mut ring = self.ring.lock();
         if ring.len == KEYBOARD_CHANNEL_CAPACITY {
@@ -131,8 +128,7 @@ impl KeyboardChannel {
 /// keyboard channel. The boot path installs one per running kernel and points
 /// the text sink at the console that owns the directly attached keyboard (on
 /// the Pi, the video console's queue); a platform with no injectable text
-/// console points it at [`NULL_CONSOLE_INPUT`], which fails closed
-/// (`AGENTS.md` §2.9).
+/// console points it at [`NULL_CONSOLE_INPUT`], which fails closed.
 pub struct InputFocus {
     /// `true` while the desktop (window manager) holds focus; `false` (the
     /// default) routes to the text console.
@@ -146,14 +142,14 @@ pub struct InputFocus {
     /// handler emit a single audit witness the first time a (typically
     /// autoloaded) keyboard driver delivers input — proof the input path
     /// is live — without logging one record per keystroke, which would
-    /// leak typed secrets and their timing (`AGENTS.md` §20 — no
-    /// input-content/timing noise; §23.1 — secret hygiene).
+    /// leak typed secrets and their timing (no
+    /// input-content/timing noise; — secret hygiene).
     first_delivery: AtomicBool,
 }
 
 impl InputFocus {
     /// Build an arbiter whose text sink is `text_sink` and whose foreground
-    /// starts at the text console (`AGENTS.md` §20 — a freshly booted system
+    /// starts at the text console (a freshly booted system
     /// is a text login until a desktop takes the display).
     ///
     /// `const` so the boot path can place it in a `'static`.
@@ -193,10 +189,10 @@ impl InputFocus {
     /// encoded to console bytes and enqueued on the text sink — a release, a
     /// modifier, or a key with no terminal encoding produces no bytes
     /// (`Ok(0)` from the encoder) and nothing is enqueued. A short push to a
-    /// bounded sink is best-effort (`AGENTS.md` §2.1) and does not change the
+    /// bounded sink is best-effort and does not change the
     /// consumed count, but a text sink that accepts *no* injected input (a
     /// console with no keyboard) fails closed and the error is surfaced to the
-    /// driver (`AGENTS.md` §2.9).
+    /// driver.
     ///
     /// # Errors
     ///
@@ -211,7 +207,7 @@ impl InputFocus {
             let mut out = [0u8; MAX_KEY_BYTES];
             // The shared map; an over-long sequence cannot occur for a
             // `MAX_KEY_BYTES` buffer, so a `BufferTooSmall` here would be a
-            // map bug, surfaced rather than hidden (`AGENTS.md` §2.9).
+            // map bug, surfaced rather than hidden.
             let n = encode_key_input(&record, &mut out).map_err(|_| Errno::BufferTooSmall)?;
             if n > 0 {
                 // A short push (the bounded type-ahead queue is near full) is
@@ -231,8 +227,8 @@ impl InputFocus {
     /// handler calls this after a successful [`Self::inject`] and emits a
     /// single audit witness ([`crate::audit::AuditEvent::InputDelivered`])
     /// on the `true`, so the log records that an (autoloaded) input driver
-    /// is live without a per-keystroke record (`AGENTS.md` §20 — no
-    /// input-content/timing noise; §23.1 — secret hygiene). It carries no
+    /// is live without a per-keystroke record (no
+    /// input-content/timing noise; — secret hygiene). It carries no
     /// key content; only the fact of first delivery.
     #[must_use]
     pub fn note_first_delivery(&self) -> bool {
@@ -249,7 +245,7 @@ impl InputFocus {
     ///
     /// Returns [`Errno::BufferTooSmall`] if `out` cannot hold a whole record
     /// ([`KeyInput::WIRE_LEN`] bytes); the kernel never writes a partial
-    /// record (`AGENTS.md` §2.9).
+    /// record.
     pub fn read_key(&self, out: &mut [u8]) -> Result<usize, Errno> {
         if out.len() < KeyInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -261,8 +257,7 @@ impl InputFocus {
 /// The shared fail-closed arbiter a kernel build with no input-focus wiring
 /// holds: its text sink is [`NULL_CONSOLE_INPUT`], so a `key_inject` in the
 /// default text focus fails closed with [`Errno::NotImplemented`] and a
-/// `keyboard_read` of the empty channel returns no input (`AGENTS.md` §2.9 /
-/// §5.4 — never fabricate a destination).
+/// `keyboard_read` of the empty channel returns no input (never fabricate a destination).
 pub static NULL_INPUT_FOCUS: InputFocus = InputFocus::new(&NULL_CONSOLE_INPUT);
 
 #[cfg(test)]
@@ -313,8 +308,7 @@ mod tests {
     #[test]
     fn text_focus_with_no_injectable_sink_fails_closed() {
         // The NULL sink accepts no injected input: a press that would be
-        // enqueued there surfaces `NotImplemented` rather than dropping it
-        // (`AGENTS.md` §2.9).
+        // enqueued there surfaces `NotImplemented` rather than dropping it.
         let focus = InputFocus::new(&NULL_CONSOLE_INPUT);
         assert_eq!(focus.inject(press_char('a')), Err(Errno::NotImplemented));
     }
@@ -361,7 +355,7 @@ mod tests {
         // The one-shot witness latch returns `true` on the first call and
         // `false` forever after, regardless of routing or focus — so the
         // `key_inject` handler emits a single audit witness and never one
-        // per keystroke (`AGENTS.md` §20).
+        // per keystroke.
         let focus = InputFocus::new(&NULL_CONSOLE_INPUT);
         assert!(focus.note_first_delivery());
         assert!(!focus.note_first_delivery());

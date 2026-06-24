@@ -66,16 +66,15 @@ pub struct TxnRoot {
     pub reverse_ref_tree_root: u64,
     /// Physical block of the scrub-progress record, or `0` when no online
     /// scrub is mid-pass. It holds a resumable scrub's cursor and accumulated
-    /// counts (rebuildable metadata, `docs/src/filesystem/rustfs-spec.md` §4,
-    /// §12); a crash mid-scrub leaves it set but never blocks an ordinary
-    /// mount (§14).
+    /// counts (rebuildable metadata, `docs/src/filesystem/rustfs-spec.md` §4); a crash mid-scrub leaves it set but never blocks an ordinary
+    /// mount.
     pub scrub_progress_root: u64,
     /// Physical block of the device-health baseline record, or `0` when no
     /// baseline has been stored yet. It holds the last clean device-health
     /// snapshot and the volume's accumulated filesystem-observed fault
     /// counters (`docs/src/filesystem/rustfs-spec.md` §4, §11); a crash
     /// mid-update leaves the previous baseline (or none) selected and never
-    /// blocks an ordinary mount (§14).
+    /// blocks an ordinary mount.
     pub health_baseline_root: u64,
 }
 
@@ -166,8 +165,7 @@ impl TxnRoot {
     /// no longer names one; the generation it recovers is the root's own.
     ///
     /// Returns `None` for any block that is not a valid committed root at
-    /// `phys` (corruption is surfaced as a skip, never panicked — `AGENTS.md`
-    /// §2.9).
+    /// `phys` (corruption is surfaced as a skip, never panicked).
     #[must_use]
     pub fn decode_any(block: &[u8], fs_uuid: u128, phys: u64, key: &MacKey) -> Option<Self> {
         let header = BlockHeader::try_decode(block, BlockType::TxnRoot, fs_uuid, phys, key)?;

@@ -5,12 +5,11 @@
 //! may additionally carry **application launcher** entries and a **light/dark
 //! appearance toggle** appended after them. All kinds are ordinary
 //! [`MenuEntry`] values distinguished by their [`MenuAction`], so each was
-//! added without changing the public list/activate interface (`AGENTS.md`
-//! §2.4 — extend, do not creep; `PLAN.md` Stage 7).
+//! added without changing the public list/activate interface (extend, do not creep; `PLAN.md` Stage 7).
 //!
 //! The taskbar never launches anything itself: activating a launcher entry
 //! reports its [`LauncherId`] so the session glue (the window manager /
-//! `appmgr`) starts the matching application bundle (`AGENTS.md` §16.5). The
+//! `appmgr`) starts the matching application bundle. The
 //! taskbar holds no capability to spawn processes.
 
 use alloc::borrow::Cow;
@@ -54,7 +53,7 @@ impl SessionControl {
 ///
 /// The taskbar does not resolve or spawn applications: it reports the chosen
 /// `LauncherId` to its caller, which maps it to an application bundle and
-/// launches it (`AGENTS.md` §16.5). The id is opaque to the taskbar and is
+/// launches it. The id is opaque to the taskbar and is
 /// assigned by whoever populates the menu.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct LauncherId(pub u32);
@@ -62,7 +61,7 @@ pub struct LauncherId(pub u32);
 /// What activating a [`MenuEntry`] does.
 ///
 /// Every variant is [`Copy`], so a [`MenuEntry`]'s action travels by value
-/// through the input router without borrowing the menu (`AGENTS.md` §2.4).
+/// through the input router without borrowing the menu.
 /// The entry's *display label* is stored on the [`MenuEntry`] itself
 /// ([`MenuEntry::label`]), which is why a launcher's human-readable name does
 /// not live here.
@@ -76,7 +75,7 @@ pub enum MenuAction {
     ///
     /// The taskbar holds no theme registry; activating this entry reports the
     /// action and the session glue performs the switch on the shared
-    /// `rustos_theme::ThemeRegistry` (`AGENTS.md` §10).
+    /// `rustos_theme::ThemeRegistry`.
     ToggleAppearance,
 }
 
@@ -89,7 +88,7 @@ pub struct MenuEntryId(pub u32);
 ///
 /// The label is owned by the entry so a launcher can carry an
 /// application-supplied name while a session control reuses its static label
-/// without allocating (`AGENTS.md` §2.2 / §2.3).
+/// without allocating.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MenuEntry {
     /// The entry's stable id, unique within its menu.
@@ -179,9 +178,8 @@ impl StartMenu {
     /// returning the [`MenuEntryId`] assigned to it.
     ///
     /// The new entry follows every existing one and takes the next id after
-    /// the current maximum, so already-assigned ids never move (`AGENTS.md`
-    /// §2.4). The taskbar only records the launcher; the caller resolves and
-    /// starts the application when the entry is activated (`AGENTS.md` §16.5).
+    /// the current maximum, so already-assigned ids never move. The taskbar only records the launcher; the caller resolves and
+    /// starts the application when the entry is activated.
     pub fn add_launcher(&mut self, launcher: LauncherId, label: impl Into<String>) -> MenuEntryId {
         let id = MenuEntryId(self.next_id());
         self.entries.push(MenuEntry {
@@ -197,9 +195,9 @@ impl StartMenu {
     ///
     /// Like [`add_launcher`](Self::add_launcher) the entry follows every
     /// existing one and takes the next free id, so the session controls keep
-    /// their fixed ids (`AGENTS.md` §2.4). Activating it reports
+    /// their fixed ids. Activating it reports
     /// [`MenuAction::ToggleAppearance`]; the taskbar does not own the theme
-    /// and performs no switch itself (`AGENTS.md` §10).
+    /// and performs no switch itself.
     pub fn add_appearance_toggle(&mut self, label: impl Into<String>) -> MenuEntryId {
         let id = MenuEntryId(self.next_id());
         self.entries.push(MenuEntry {
@@ -212,7 +210,7 @@ impl StartMenu {
 
     /// Activate the entry with `id`, closing the menu, and return its
     /// action. An unknown id changes nothing and returns `None` (fail
-    /// closed, `AGENTS.md` §5.4 / §2.9).
+    /// closed).
     pub fn activate(&mut self, id: MenuEntryId) -> Option<MenuAction> {
         let action = self.entries.iter().find(|e| e.id == id)?.action;
         self.open = false;
@@ -220,7 +218,7 @@ impl StartMenu {
     }
 
     /// The next free entry id: one past the current maximum, saturating so a
-    /// full id space fails closed rather than wrapping (`AGENTS.md` §2.9).
+    /// full id space fails closed rather than wrapping.
     fn next_id(&self) -> u32 {
         self.entries
             .iter()

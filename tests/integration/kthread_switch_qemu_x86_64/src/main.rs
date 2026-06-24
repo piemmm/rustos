@@ -36,7 +36,7 @@
 //! task that never resumes, a stack that is not reclaimed) either reports
 //! a failure on the serial console and exits, or never drains the
 //! workload, so the run fails loudly — by `qemu_exit::exit_failure` or by
-//! the harness `Outcome::Timeout` (`AGENTS.md` §7).
+//! the harness `Outcome::Timeout`.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -45,7 +45,7 @@
 //! policy directly and supplies its own `kernel_main`, so the runtime is
 //! exercised without the full `kernel_core::kernel_main` init pipeline. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on a library crate (`AGENTS.md` §5.4.5 — fail closed).
+//! feature on a library crate (fail closed).
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]

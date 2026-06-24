@@ -76,8 +76,7 @@ mod kernel;
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
-        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }

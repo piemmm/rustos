@@ -1,4 +1,4 @@
-//! aarch64 side-channel mitigations (`AGENTS.md` §19.1).
+//! aarch64 side-channel mitigations.
 //!
 //! Implements the Arch HAL
 //! [`SideChannelMitigation`](rustos_arch_api::SideChannelMitigation)
@@ -14,7 +14,7 @@
 //!
 //! * **Syscall entry/exit speculation barrier** — `csdb` (Consume
 //!   Speculative Data Barrier), the documented `ARMv8` Spectre-v1 barrier
-//!   (`AGENTS.md` §19.1 names "`CSDB`/`SB`"). It is encoded in the hint
+//!   (names "`CSDB`/`SB`"). It is encoded in the hint
 //!   space, so it decodes on every `ARMv8` core and is a NOP on a core
 //!   that does not speculate — always safe to emit.
 //!
@@ -24,7 +24,7 @@
 //!   L1TF / MMIO-stale-data buffer-sampling classes are Intel
 //!   microarchitectural flaws; the `ARMv8` cores RustOS targets do not
 //!   expose the affected store/fill/load buffers, so there is nothing
-//!   to flush (`AGENTS.md` §19.1 — a no-op is permitted where the
+//!   to flush (a no-op is permitted where the
 //!   silicon is provably not vulnerable).
 //!
 //! # What is `Pending` (tracked, not yet shippable)
@@ -58,7 +58,7 @@ impl SideChannel {
         Self
     }
 
-    /// The honest §19.1 declaration for aarch64 (see the module docs).
+    /// The honest declaration for aarch64 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> MitigationProfile {
         MitigationProfile {

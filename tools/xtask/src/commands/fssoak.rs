@@ -5,7 +5,7 @@
 //! for integrity and the fail-closed extremes, for `rustfs`, `ext4`, and
 //! `fat32` **in parallel**. This orchestrator is the single place that
 //! runs each filesystem's soak for a wall-clock budget, mirroring the
-//! §19.6 [`fuzz`](crate::commands) and §19.7
+//! [`fuzz`](crate::commands) and
 //! [`proptest`](crate::commands) orchestrators so a PR smoke and a
 //! nightly soak share one definition of the target set.
 //!
@@ -91,7 +91,7 @@ impl Mode {
     #[must_use]
     pub fn budget(self) -> Duration {
         match self {
-            // Mirror the §19.6/§19.7 quick floor.
+            // Mirror the quick floor.
             Mode::Quick => Duration::from_secs(5),
             Mode::Soak => Duration::from_secs(24 * 60 * 60),
         }

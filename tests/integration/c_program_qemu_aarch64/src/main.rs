@@ -9,7 +9,7 @@
 //! capability-checked, audited spawn caller (`rustos_kernel_core::spawn_and_enter`,
 //! gated on `CAP_PROC_SPAWN`) to materialise the program's EL0 image — built
 //! from the `rxe` blob the build script produced — and `eret` into it. The C
-//! program checks a Time64 value across the §21 boundaries, an ipc header, and
+//! program checks a Time64 value across the boundaries, an ipc header, and
 //! a sysinfo header, then calls `cap_query` and `clock_get`; the dispatch
 //! callback services those two syscalls (returning a known answer / sentinel)
 //! and finally asserts the `exit` code is `99` before the ARM semihosting PASS

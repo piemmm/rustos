@@ -54,7 +54,7 @@ impl NotificationArea {
     }
 
     /// Add an icon. A duplicate id changes nothing and returns `false`
-    /// (fail closed, `AGENTS.md` §2.9).
+    /// (fail closed).
     pub fn add(&mut self, id: IconId, asset: impl Into<String>) -> bool {
         if self.icons.iter().any(|i| i.id == id) {
             return false;

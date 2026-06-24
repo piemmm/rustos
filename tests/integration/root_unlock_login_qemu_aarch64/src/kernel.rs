@@ -3,7 +3,7 @@
 //!
 //! The device-agnostic bring-up (boot harness, DTB MMIO walk, GICv2 + EL1
 //! IRQ wiring, static DMA pool, signed-`.rxe` load) lives in the shared
-//! `rustos-test-virtio-qemu-support` crate (`AGENTS.md` §2.2). This module
+//! `rustos-test-virtio-qemu-support` crate. This module
 //! supplies the unlock-specific tail: once the signed virtio-blk driver is
 //! loaded over the planted whole-disk encrypted-root image, it drives the
 //! **production** interactive unlock policy

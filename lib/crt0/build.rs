@@ -1,12 +1,12 @@
 //! Build script for the `rustos-crt0` crate.
 //!
-//! Sole responsibility, and it is build glue (`AGENTS.md` §17.2 confines
+//! Sole responsibility, and it is build glue (confines
 //! target-conditional decisions to the architecture ports and the build
 //! glue; a build script is build glue): select which per-architecture
 //! program-entry trampoline (`_start`) the crate compiles in.
 //!
 //! The crate cannot select the entry trampoline inline with a
-//! target-architecture `cfg` predicate — §17.2 forbids that outside the
+//! target-architecture `cfg` predicate forbids that outside the
 //! architecture ports, and `cargo xtask cfg-check` enforces it. Instead this
 //! script reads the target Cargo is building for and emits one of the
 //! `crt0_native_<arch>` conditional-compilation names when (and only when)

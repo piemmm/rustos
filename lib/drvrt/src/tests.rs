@@ -5,7 +5,7 @@
 //! builds reads and writes the right bytes at the right offset. DMA carves
 //! are backed the same way. This exercises the host's grant resolution,
 //! bus→CPU translation, map-once caching, and fail-closed paths without a
-//! kernel (`AGENTS.md` §7).
+//! kernel.
 //!
 //! The tests run on the 64-bit host, where the geometry constants
 //! (`u64` device addresses) cannot truncate when narrowed to a `usize`
@@ -186,7 +186,7 @@ impl GrantSyscalls for MockSyscalls {
             // Mirror the kernel: the `[offset, offset + len)` sub-region must
             // lie wholly inside the granted backing, and the returned VA is
             // the sub-region's base (`backing_base + offset`), never the whole
-            // window's base (`AGENTS.md` §24.1 / §5.4).
+            // window's base.
             Some(b) => {
                 let Some(end) = offset.checked_add(len as u64) else {
                     return -i64::from(Errno::LengthOutOfRange.as_i32());
@@ -220,7 +220,7 @@ impl GrantSyscalls for MockSyscalls {
         let delivered = self.delivered.borrow();
         let total = delivered.len() * GrantedResource::WIRE_LEN;
         // Never deliver a partial set: fail closed exactly as the kernel
-        // handler does (`AGENTS.md` §2.9).
+        // handler does.
         if total > buf.len() {
             return -i64::from(Errno::BufferTooSmall.as_i32());
         }
@@ -356,7 +356,7 @@ fn translates_a_bar_inside_the_outbound_bus_window() {
     // into the outbound window and the BAR length — never the whole (here
     // 64 MiB, on metal 1 GiB) bus aperture. Mapping the whole grant is the
     // defect that exhausted the per-task MMIO window and failed closed with
-    // `OutOfMemory` (`AGENTS.md` §24.1).
+    // `OutOfMemory`.
     assert_eq!(last_mmio.get(), (0x1_0000, 0x1000));
 }
 
@@ -369,7 +369,7 @@ fn maps_each_sub_region_offset_only_once() {
         RtDriverHost::new(caps(&[CapabilityId::MMIO_MAP]), mock, &[regs_grant()], None).unwrap();
 
     // Repeated requests for the *same* sub-region offset reuse the cached VA
-    // — exactly one syscall (`AGENTS.md` §2.16). A different length at the
+    // — exactly one syscall. A different length at the
     // same offset still hits the cache (the offset keys it).
     let _ = host.map_window(REGS_BASE, 0x10).expect("first");
     let _ = host.map_window(REGS_BASE, 0x20).expect("same offset again");
@@ -377,7 +377,7 @@ fn maps_each_sub_region_offset_only_once() {
 
     // A request at a *different* offset is a distinct sub-region (e.g. a
     // second BAR), so it maps afresh rather than aliasing the first
-    // (`AGENTS.md` §24.1 — sub-region mapping, not whole-window).
+    // (sub-region mapping, not whole-window).
     let _ = host
         .map_window(REGS_BASE + 0x40, 0x10)
         .expect("second offset");
@@ -635,7 +635,7 @@ fn from_grants_query_builds_the_table_the_kernel_delivered() {
 #[test]
 fn from_grants_query_with_no_grants_builds_a_host_that_maps_nothing() {
     // An unbound driver (the kernel minted no grants) is a valid, empty
-    // result (`AGENTS.md` §18.4): the host builds, but any map is refused.
+    // result: the host builds, but any map is refused.
     let mock = MockSyscalls::new();
     let host = RtDriverHost::from_grants_query(caps(&[CapabilityId::MMIO_MAP]), mock, None)
         .expect("an empty grant set still builds a host");
@@ -649,7 +649,7 @@ fn from_grants_query_with_no_grants_builds_a_host_that_maps_nothing() {
 fn from_grants_query_refuses_more_grants_than_the_cap() {
     // The kernel delivering more than `MAX_GRANTS` records cannot fit the
     // host's fixed buffer; the syscall reports `BufferTooSmall` and the host
-    // fails closed as a packaging defect (`AGENTS.md` §2.9 / §24.4).
+    // fails closed as a packaging defect.
     let mock = MockSyscalls::new();
     for _ in 0..=MAX_GRANTS {
         mock.deliver(regs_grant());
@@ -663,7 +663,7 @@ fn from_grants_query_refuses_more_grants_than_the_cap() {
 #[test]
 fn from_grants_query_surfaces_a_kernel_refusal_fail_closed() {
     // Any other negative result from the syscall is a kernel refusal: the
-    // host builds no grant table rather than guessing (`AGENTS.md` §2.9).
+    // host builds no grant table rather than guessing.
     let mock = MockSyscalls::new();
     mock.fail_grants(Errno::PermissionDenied);
     assert_eq!(
@@ -676,7 +676,7 @@ fn from_grants_query_surfaces_a_kernel_refusal_fail_closed() {
 fn resources_exposes_the_granted_resources_in_delivery_order() {
     // A driver process derives its concrete bring-up inputs (the BAR window,
     // the DMA aperture) from the same grants the host maps over, without a
-    // second `resource_grants` syscall (`AGENTS.md` §2.16).
+    // second `resource_grants` syscall.
     let mock = MockSyscalls::new();
     let host = RtDriverHost::new(
         caps(&[CapabilityId::MMIO_MAP, CapabilityId::MEM_DMA]),
@@ -713,8 +713,7 @@ fn irq_grant() -> GrantedResource {
 #[test]
 fn notify_wait_binds_the_granted_line_once_then_parks_each_call() {
     // An interrupt-driven driver (e.g. the user-space virtio-input keyboard)
-    // parks on its granted device interrupt rather than busy-polling
-    // (`AGENTS.md` §2.1 / §2.16). The first `notify_wait` binds the line the
+    // parks on its granted device interrupt rather than busy-polling. The first `notify_wait` binds the line the
     // node granted; every call (the first included) parks on `irq_wait`. The
     // bind is cached, so a second call binds no second time.
     let mock = MockSyscalls::new();
@@ -734,7 +733,7 @@ fn notify_wait_binds_the_granted_line_once_then_parks_each_call() {
 fn notify_wait_without_an_irq_grant_is_a_noop() {
     // A driver granted no IRQ line cannot park on one; `notify_wait` returns
     // without binding or waiting, and its caller falls back to a polling
-    // re-scan + yield (`AGENTS.md` §2.9 — fail safe, never a wedged wait).
+    // re-scan + yield (fail safe, never a wedged wait).
     let mock = MockSyscalls::new();
     let (_, binds, waits) = mock.irq_observers();
     let host = RtDriverHost::new(
@@ -752,7 +751,7 @@ fn notify_wait_without_an_irq_grant_is_a_noop() {
 
 #[test]
 fn notify_wait_without_the_bind_capability_is_a_noop() {
-    // Capability before the trap (`AGENTS.md` §5.4): a driver lacking
+    // Capability before the trap: a driver lacking
     // `CAP_IRQ_BIND` never issues the bind, even with an IRQ grant present.
     let mock = MockSyscalls::new();
     let (_, binds, waits) = mock.irq_observers();
@@ -767,7 +766,7 @@ fn notify_wait_without_the_bind_capability_is_a_noop() {
 fn notify_wait_does_not_park_when_the_bind_is_refused() {
     // A refused bind (the kernel rejects the line) must not be papered over
     // with a wait on an unbound handle: `notify_wait` returns and the bind is
-    // retried on the next call (`AGENTS.md` §2.9 — fail closed, no cached
+    // retried on the next call (fail closed, no cached
     // bogus handle).
     let mock = MockSyscalls::new();
     mock.fail_irq_bind(Errno::PermissionDenied);
@@ -790,8 +789,7 @@ fn mailbox_exchange_marshals_to_the_endpoint_and_decodes_the_reply() {
 
     // The host's `MailboxChannel` is purely the client side of the IPC: it
     // encodes the request, posts it to the well-known mailbox endpoint, and
-    // decodes the service's response back into the caller's buffer in place
-    // (`AGENTS.md` §17.4).
+    // decodes the service's response back into the caller's buffer in place.
     let mut request = [0u32; MAILBOX_PROPERTY_WORDS];
     for (i, word) in request.iter_mut().enumerate() {
         *word = 0x2000_0000 + u32::try_from(i).expect("index fits u32");
@@ -817,7 +815,7 @@ fn mailbox_exchange_fails_closed_on_a_transport_error() {
     use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 
     // A missing `CAP_MAILBOX` (or any other kernel refusal of the call) is
-    // surfaced as a `DriverError`, never papered over (`AGENTS.md` §2.9).
+    // surfaced as a `DriverError`, never papered over.
     let mock = MockSyscalls::new();
     mock.fail_ipc_call(Errno::PermissionDenied);
     let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();
@@ -857,8 +855,7 @@ fn emit_node_publishes_the_child_through_the_syscall() {
     use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode};
 
     // A bus driver publishes an enumerated child; the host forwards the
-    // encoded node through `hw_emit_node` and reports success (`AGENTS.md`
-    // §18.1 / §18.3). The kernel — not the host — enforces `CAP_HW_EMIT` and
+    // encoded node through `hw_emit_node` and reports success. The kernel — not the host — enforces `CAP_HW_EMIT` and
     // the grant-coverage check, so the host adds no authority of its own.
     let mock = MockSyscalls::new();
     let emitted = mock.emitted();
@@ -881,7 +878,7 @@ fn emit_node_surfaces_a_kernel_refusal_fail_closed() {
 
     // A kernel refusal — the driver lacks `CAP_HW_EMIT`, or the node requests
     // a resource outside its grants — is surfaced as `PermissionDenied`,
-    // never papered over (`AGENTS.md` §2.9 / §5.4).
+    // never papered over.
     let mock = MockSyscalls::new();
     mock.fail_emit_node(Errno::PermissionDenied);
     let host = RtDriverHost::new(caps(&[]), mock, &[], None).unwrap();

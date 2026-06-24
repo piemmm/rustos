@@ -82,7 +82,7 @@ static TABLE_PTR: AtomicUsize = AtomicUsize::new(0);
 
 /// The kernel/irq controller bridge over the aarch64 [`GicController`].
 ///
-/// §17.4 forbids the architecture crate from depending on `kernel/irq`,
+/// the charter forbids the architecture crate from depending on `kernel/irq`,
 /// so this bridge — the aarch64 analogue of x86_64's `IoApicController`
 /// `IrqController` impl — lives in the test crate (which may depend on
 /// both). `mask` delegates to the HAL [`rustos_arch_api::IrqController`]
@@ -249,7 +249,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // 5. Wait for the device interrupt to drive the table to `Ready`. No
     //    deadline (`u64::MAX`) — the harness wall-clock budget is the
     //    backstop, so a line that never fires times out and is reported
-    //    as a failure (`AGENTS.md` §7), never a false pass.
+    //    as a failure, never a false pass.
     loop {
         match table.try_wait_step(handle, OWNER, 0, u64::MAX) {
             WaitStep::Ready => break,
@@ -262,7 +262,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             }
             WaitStep::TimedOut | WaitStep::NotFound => {
                 // Unreachable with an infinite deadline and a live handle,
-                // but fail closed rather than spin (`AGENTS.md` §5.4.5).
+                // but fail closed rather than spin.
                 note(TEST_START, "unexpected wait-step outcome");
                 qemu_exit::exit_failure(FAIL_WAIT);
             }

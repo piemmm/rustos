@@ -3,7 +3,7 @@
 //! Every architecture-neutral init-time and panic-time decision taken
 //! by the kernel entry crate emits exactly one structured log record
 //! through [`rustos_log`]. The numeric identifiers are part of the
-//! audit contract with external log consumers (`AGENTS.md` §5.4.4) and
+//! audit contract with external log consumers and
 //! may not be re-used or re-numbered.
 //!
 //! Per the range convention established in `lib/log` (subsystems pick
@@ -24,17 +24,17 @@
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
-//! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU (`AGENTS.md` §5.4.5). |
+//! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
-//! | 4031 | Error | `PROCESS_SPAWN_DENIED`        | audit  | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (`AGENTS.md` §5.4 — fail closed). |
+//! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (fail closed). |
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
-//! | 4041 | Error | `USERS_DB_REJECTED`           | audit  | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (`AGENTS.md` §5.4 — fail closed). The `cause` field names the refusal. |
-//! | 4042 | Info  | `DRIVER_STORE_SCANNED`        | audit  | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates (`AGENTS.md` §18.3 / §18.6). The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
-//! | 4050 | Info  | `INPUT_DELIVERED`             | audit  | A keyboard driver delivered the **first** key edge to the input-focus arbiter via `key_inject` (`AGENTS.md` §18.3 / §20). Emitted exactly once over the kernel's lifetime, carries no key content or timing — it witnesses that an autoloaded input driver is live, never a per-keystroke record. |
+//! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
+//! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
+//! | 4050 | Info | `INPUT_DELIVERED` | audit | A keyboard driver delivered the **first** key edge to the input-focus arbiter via `key_inject`. Emitted exactly once over the kernel's lifetime, carries no key content or timing — it witnesses that an autoloaded input driver is live, never a per-keystroke record. |
 //!
 //! "audit" events route through the `audit_sink` channel
-//! (`AGENTS.md` §5.4.4 — security-relevant decisions); "log" events
+//! (security-relevant decisions); "log" events
 //! route through the diagnostic `log_sink` channel. Production
 //! kernels typically wire both sinks to the same COM1 backend, so
 //! both channels are visible on the boot console; QEMU integration
@@ -74,7 +74,7 @@ pub enum AuditEvent {
     /// The audit record carries a `feature` field naming the missing
     /// piece so external consumers can correlate user-visible
     /// `Errno::NotFound` / `Errno::NotImplemented` returns with the
-    /// kernel-side deferral. See `AGENTS.md` §15.1 — the spec is
+    /// kernel-side deferral. See — the spec is
     /// stable, the impl is announced as inert.
     SyscallFeatureUnavailable,
     /// A syscall fired on a CPU with no identifiable caller.
@@ -83,7 +83,7 @@ pub enum AuditEvent {
     /// when either `Scheduler::current_task` returns `None` for the
     /// issuing CPU or the per-task capability registry has no record
     /// for the running task. Both conditions are "should be impossible
-    /// once the scheduler is live", but `AGENTS.md` §5.4.5 mandates
+    /// once the scheduler is live", but the charter mandates
     /// fail-closed behaviour anyway: the audit record names the
     /// failing case (`cause` field) and the bin-crate dispatch
     /// callback halts the CPU exactly as the pre-(f5)
@@ -96,14 +96,13 @@ pub enum AuditEvent {
     /// ([`crate::spawn::spawn_and_enter`]) after the user address space
     /// has been materialised and immediately before the Arch HAL
     /// `enter_user` transition (which never returns). The record carries
-    /// the relocated entry-point virtual address (`AGENTS.md` §5.4.4 —
-    /// security-relevant decisions are audited).
+    /// the relocated entry-point virtual address (security-relevant decisions are audited).
     ProcessSpawned,
     /// A spawn was refused because the caller lacks `CAP_PROC_SPAWN`.
     ///
     /// Emitted by [`crate::spawn::spawn_and_enter`] before any state is
     /// touched: the capability check fails closed and no address space is
-    /// built (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// built (no ambient authority; — capability
     /// checks before state touches).
     ProcessSpawnDenied,
     /// A spawn was authorised but building the process image failed.
@@ -112,24 +111,23 @@ pub enum AuditEvent {
     /// [`rustos_kernel_mem::build_process_image`] returns an error (a
     /// malformed image, an out-of-range segment, or frame exhaustion).
     /// The partially built address space is discarded by the caller
-    /// (`AGENTS.md` §2.9 — fail closed).
+    /// (fail closed).
     ProcessSpawnFailed,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
     /// The `/System/Security/Users` database could not be read, or
     /// failed its bounded fail-closed validation; no database is held
-    /// and every login refuses (`AGENTS.md` §5.4).
+    /// and every login refuses.
     UsersDbRejected,
     /// The `/System/Drivers/` signed-driver store was enumerated for
-    /// autoload candidates (`crate::driver_store`, `AGENTS.md` §18.3 /
-    /// §18.6).
+    /// autoload candidates (`crate::driver_store`).
     ///
     /// Emitted by [`crate::driver_store::enumerate_driver_store`] once
     /// per scan with the count of bundle image paths found (`drivers`)
     /// and the count of entries refused fail-closed during the bounded
     /// walk (`skipped`). A missing store is not an error — it simply
-    /// yields zero drivers (`AGENTS.md` §18.4).
+    /// yields zero drivers.
     DriverStoreScanned,
     /// A keyboard driver delivered the **first** key edge to the
     /// input-focus arbiter (`crate::input_focus`, `plans/PI.md` P11 —
@@ -142,7 +140,7 @@ pub enum AuditEvent {
     /// that an (autoloaded) input driver has come up and is delivering
     /// input; it carries **no** key content, count, or timing — a
     /// per-keystroke record would leak typed secrets and is forbidden
-    /// (`AGENTS.md` §20 — no input-content/timing noise on the log; §23.1
+    /// (no input-content/timing noise on the log;
     /// — secret hygiene).
     InputDelivered,
 }

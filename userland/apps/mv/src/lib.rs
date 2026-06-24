@@ -1,5 +1,4 @@
-//! RustOS `mv` — move (rename) files and directories (Stage 6, `AGENTS.md`
-//! §3 `userland/apps/`).
+//! RustOS `mv` — move (rename) files and directories (Stage 6 `userland/apps/`).
 //!
 //! `mv` relocates each of its source operands to a destination. With a single
 //! source and a destination that does not name a directory, the source is
@@ -43,7 +42,7 @@
 //! is [`MvError::Read`], an uncreatable destination is [`MvError::Create`], a
 //! failed write is [`MvError::Write`], and a source that cannot be removed
 //! after a successful copy is [`MvError::Remove`]. The first failure stops the
-//! run before any later operand, and there is no panic (`AGENTS.md` §2.9).
+//! run before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -55,10 +54,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -1,8 +1,7 @@
-//! Application-bundle (`.app`) manifest and loader policy — the §16.5 /
-//! §16.4 ABI surface.
+//! Application-bundle (`.app`) manifest and loader policy — the ABI surface.
 //!
 //! An installed application is a `/Apps/<Name>.app/` directory with a
-//! **fixed** top-level layout (`AGENTS.md` §16.5): a signed `AppInfo`
+//! **fixed** top-level layout: a signed `AppInfo`
 //! manifest, a `Run` entry-point binary, and a closed set of optional
 //! sub-directories. This module owns three frozen pieces of that contract:
 //!
@@ -17,7 +16,7 @@
 //!   Ed25519 signer key + signature. The variable body that follows is a
 //!   capability-id list (decoded by [`crate::decode_capability_ids`])
 //!   followed by the MIME-type table ([`mime_type_at`]).
-//! * [`resolve_library`] — the §16.4 dynamic-loader policy: a shared-library
+//! * [`resolve_library`] — the dynamic-loader policy: a shared-library
 //!   reference resolves only against the requesting bundle's own
 //!   `Libraries/` directory or the curated [`SYSTEM_LIBRARIES_DIR`]; any
 //!   other path is a load-time error.
@@ -25,7 +24,7 @@
 //! The module is `no_std`, allocation-free, and operates on borrowed byte
 //! slices, so the same code runs in the kernel, in a user-space loader
 //! service, and in a WebAssembly userland binary unchanged. Like every
-//! `lib/abi` surface it is frozen on release (`AGENTS.md` §9): existing
+//! `lib/abi` surface it is frozen on release: existing
 //! fields, offsets, and [`BundleEntry`] names never change; new behaviour
 //! ships in `abi-v2`.
 
@@ -60,14 +59,13 @@ pub const MIME_TYPE_MAX: usize = 64;
 /// fixed [`MIME_TYPE_MAX`] buffer.
 pub const MIME_ENTRY_LEN: usize = 1 + MIME_TYPE_MAX;
 
-/// Absolute path of the curated, OS-provided shared-library directory
-/// (`AGENTS.md` §16.4). The dynamic loader resolves a reference against
+/// Absolute path of the curated, OS-provided shared-library directory. The dynamic loader resolves a reference against
 /// this directory or the calling bundle's own `Libraries/`, and nothing
 /// else.
 pub const SYSTEM_LIBRARIES_DIR: &str = "/System/Libraries";
 
 /// One of the fixed set of names permitted at the top level of an
-/// application bundle (`AGENTS.md` §16.5).
+/// application bundle.
 ///
 /// The set is closed: a bundle that contains any other top-level entry is a
 /// packaging defect and the loader refuses it. `AppInfo` and `Run` are
@@ -137,7 +135,7 @@ impl BundleEntry {
     }
 }
 
-/// Why a bundle's top-level layout was rejected (`AGENTS.md` §16.5).
+/// Why a bundle's top-level layout was rejected.
 ///
 /// The loader fails closed: any deviation from the fixed entry set, or a
 /// missing mandatory entry, refuses the whole bundle.
@@ -166,7 +164,7 @@ impl core::fmt::Display for BundleLayoutError {
     }
 }
 
-/// Validate the top-level layout of a bundle against `AGENTS.md` §16.5.
+/// Validate the top-level layout of a bundle against.
 ///
 /// `present` is the set of names found directly under the bundle root. The
 /// layout is valid only if every name is a [`BundleEntry`], no name repeats,
@@ -198,7 +196,7 @@ pub fn validate_bundle_layout(present: &[&str]) -> Result<(), BundleLayoutError>
 }
 
 /// Which of the two policy-permitted roots a shared-library reference
-/// resolved against (`AGENTS.md` §16.4).
+/// resolved against.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LibraryScope {
     /// The reference resolved inside the requesting bundle's own
@@ -208,8 +206,7 @@ pub enum LibraryScope {
     System,
 }
 
-/// Why the dynamic loader refused a shared-library reference
-/// (`AGENTS.md` §16.4).
+/// Why the dynamic loader refused a shared-library reference.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum LibraryError {
@@ -234,7 +231,7 @@ impl core::fmt::Display for LibraryError {
     }
 }
 
-/// Resolve a shared-library reference under the §16.4 dynamic-loader policy.
+/// Resolve a shared-library reference under the dynamic-loader policy.
 ///
 /// A reference is accepted only if it is an absolute path that lies inside
 /// the requesting bundle's own `Libraries/` directory
@@ -291,8 +288,7 @@ fn is_within(path: &str, dir: &str) -> bool {
     }
 }
 
-/// Fixed-size, signed prefix of an application bundle's `AppInfo` manifest
-/// (`AGENTS.md` §16.5).
+/// Fixed-size, signed prefix of an application bundle's `AppInfo` manifest.
 ///
 /// Field order and offsets are part of the frozen `abi-v1` surface;
 /// reserved fields must be zero. The variable body that follows the header
@@ -336,7 +332,7 @@ pub struct AppInfoHeader {
     /// SHA-256 of the kernel syscall table this bundle was linked against.
     pub syscall_table_hash: [u8; SYSCALL_TABLE_HASH_LEN],
     /// Digest binding the signature to the bundle's contents
-    /// (`AGENTS.md` §16.5 — "signature over the bundle contents").
+    /// ("signature over the bundle contents").
     pub content_hash: [u8; 32],
     /// Ed25519 public key of the signer.
     pub signer_pubkey: [u8; 32],

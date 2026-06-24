@@ -13,9 +13,8 @@
 //! host (the `Run` binary that calls it is a freestanding program built only
 //! for the bare-metal targets, `src/run.rs`). It is **allocation-free** — every
 //! byte lands in the caller's buffer, because the userland heap is not required
-//! to read a keystroke (`AGENTS.md` §2.16, `plans/SPAWN.md` `SP5b`) — and it
-//! recognises the erase control from the one shared `lib/vt` definition
-//! (`AGENTS.md` §2.2), so it can never disagree with the kernel echo about
+//! to read a keystroke (`plans/SPAWN.md` `SP5b`) — and it
+//! recognises the erase control from the one shared `lib/vt` definition, so it can never disagree with the kernel echo about
 //! which byte rubs out.
 
 use rustos_vt::control;
@@ -32,8 +31,7 @@ pub enum LineFeed {
     /// is the finished line; the terminator itself is not stored.
     Complete,
     /// The byte would have grown the line past the caller's buffer. The read
-    /// fails closed rather than truncating a too-long line (`AGENTS.md`
-    /// §2.9); the buffer is left holding the bytes accepted so far.
+    /// fails closed rather than truncating a too-long line; the buffer is left holding the bytes accepted so far.
     TooLong,
 }
 
@@ -48,8 +46,7 @@ pub enum LineFeed {
 ///   network or local terminal LF, so either terminates).
 /// * **Erase** ([`control::is_line_erase`] — Backspace or Delete) rubs out the
 ///   last accepted byte: `*len` drops by one if the line is non-empty, and the
-///   vacated slot is zeroed so a transited credential is not retained
-///   (`AGENTS.md` §4). An erase on an empty line is ignored. Either way it is
+///   vacated slot is zeroed so a transited credential is not retained. An erase on an empty line is ignored. Either way it is
 ///   [`LineFeed::Pending`] — an erase never ends the line.
 /// * **Any other byte** is appended: it is stored at `buf[*len]` and `*len`
 ///   grows by one ([`LineFeed::Pending`]) unless the buffer is already full,
@@ -58,7 +55,7 @@ pub enum LineFeed {
 /// The matching echo (showing the character, or the `BS SP BS` rub-out) is the
 /// kernel console's job, so this function performs no I/O; it only edits the
 /// buffer. UTF-8 validation of the finished line is the caller's, done once
-/// over the whole line (`AGENTS.md` §5.4).
+/// over the whole line.
 pub fn push_line_byte(buf: &mut [u8], len: &mut usize, byte: u8) -> LineFeed {
     if byte == control::CR || byte == control::LF {
         return LineFeed::Complete;
@@ -164,7 +161,7 @@ mod tests {
     #[test]
     fn the_erased_slot_is_zeroed() {
         // A transited credential byte must not linger in the buffer after an
-        // erase (`AGENTS.md` §4).
+        // erase.
         let mut buf = [0u8; 8];
         let mut len = 0;
         assert_eq!(push_line_byte(&mut buf, &mut len, b's'), LineFeed::Pending);

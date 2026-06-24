@@ -19,17 +19,17 @@
 //! enumeration, BAR sizing, and capability walk above it
 //! ([`crate::enumerate`]) are the generic PCI core, so the BCM2711 PCIe
 //! host-bridge bring-up driver (`drivers/bus/pcie_brcm`) does not
-//! re-implement any of it (`AGENTS.md` §2.2). The bring-up driver trains
+//! re-implement any of it. The bring-up driver trains
 //! the link and then hands its register window here through
 //! [`crate::mechanism_brcm`].
 //!
 //! The window is a kernel-mapped [`RegisterWindow`] obtained from the
 //! MMIO-map facility after a [`CapabilityId`](rustos_abi::CapabilityId)
-//! check (`AGENTS.md` §4); the driver never synthesises a pointer. An
+//! check; the driver never synthesises a pointer. An
 //! access that lands outside the mapped window — or a config access to a
 //! device behind the bridge before the index write fits the window —
 //! resolves to the PCI "no device" sentinel (all-ones), so a walk fails
-//! closed rather than reaching out of bounds (`AGENTS.md` §5.4).
+//! closed rather than reaching out of bounds.
 
 // Same `dead_code` rationale as `config.rs` / `mech_ecam.rs`: the
 // production reach path is through `dyn Bus` dispatch wired up by the
@@ -99,7 +99,7 @@ impl BrcmConfigSpace {
     /// downstream target other than `device 0` on the configured
     /// secondary bus.
     fn data_offset(&self, addr: ConfigAddress) -> Option<usize> {
-        // The shared range gate (`AGENTS.md` §5.4); also guarantees the
+        // The shared range gate; also guarantees the
         // register byte offset is < 256, comfortably inside the 4 KiB
         // data window.
         let block = addr.ecam_offset()?;
@@ -119,7 +119,7 @@ impl BrcmConfigSpace {
         // root complex turns into a CPU external abort — a flat 256-bus
         // enumeration over forwarded config would wedge the boot. Resolve
         // every other downstream target to the "no device" sentinel
-        // *without* touching the controller (`AGENTS.md` §5.4 / §2.9);
+        // *without* touching the controller;
         // this mirrors Linux `brcm_pcie_map_conf` returning `NULL` for a
         // non-zero slot on a non-root bus.
         if addr.bus != self.secondary_bus || addr.device != 0 {

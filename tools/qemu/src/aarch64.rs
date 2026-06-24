@@ -11,8 +11,7 @@
 //!
 //! Splitting this surface out mirrors [`crate::riscv64`] and
 //! [`crate::x86_64`] and keeps [`crate::Spec`] honest as a per-arch
-//! tagged union without duplicating any glue (`AGENTS.md` §2.2 / §2.4 —
-//! no duplication, no interface creep).
+//! tagged union without duplicating any glue (no duplication, no interface creep).
 //!
 //! # Boot model
 //!

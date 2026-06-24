@@ -4,7 +4,7 @@
 //! The device-agnostic EL1 bring-up (FP enable + 2 GiB identity MMU +
 //! vectors), the `AArch64QemuEnv` serial/semihosting seam, and the
 //! one-shot boot harness all live in the shared
-//! `rustos-test-virtio-qemu-support` crate (`AGENTS.md` §2.2); the
+//! `rustos-test-virtio-qemu-support` crate; the
 //! `fw_cfg`/`ramfb` DMA client lives in `rustos-itest-fwcfg`. This module
 //! supplies only what is unique to the aarch64 display vertical: programming
 //! `ramfb` from the embedded `virt` DTB and driving the framebuffer
@@ -119,7 +119,7 @@ impl DriverSpawner for ResolveFramebuffer {
 /// Driver-host view used for `Framebuffer::open`: grants `CAP_MMIO_MAP`
 /// and exposes the real [`KernelMmioMapper`]. Distinct from the
 /// [`Host`]-installed view, mirroring how the bus-driver verticals
-/// separate the §8 load gate from the map gate.
+/// separate the load gate from the map gate.
 struct FramebufferHost<'a> {
     granted: CapabilitySet,
     mapper: &'a dyn MmioMapper,
@@ -256,7 +256,7 @@ fn drive_lifecycle(env: &dyn QemuEnv, config: FramebufferConfig) {
         mapper: &mapper,
     };
 
-    // Load the signed `.rxe` through the driver host (the §8 gate).
+    // Load the signed `.rxe` through the driver host (the gate).
     let Ok(pubkey) = Ed25519PublicKey::from_bytes(&TRUSTED_SIGNER_PUBKEY) else {
         env.fail("trust anchor decode");
     };
@@ -337,7 +337,7 @@ fn present_and_verify(
 }
 
 /// Pick a `&'static str` breadcrumb for `(phase, op)` without an
-/// allocator (`AGENTS.md` §2.9 — no `format!` on the fail path).
+/// allocator (no `format!` on the fail path).
 fn phase_msg(phase: &str, op: &str) -> &'static str {
     match (phase, op) {
         ("first", "Framebuffer::open") => "Framebuffer::open (first)",

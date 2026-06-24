@@ -6,18 +6,17 @@
 //! [`rustos_kernel_core::fs::Vfs`] policy layer and asserts the
 //! POSIX-visible semantics of every filesystem operation the system
 //! exposes: directory and file creation, unlink/rmdir, truncate,
-//! readdir/stat, the §5.3 permission model (mode bits, ACLs, and the
-//! optional per-inode capability gate), the §16 on-disk layout rules, and
+//! readdir/stat, the permission model (mode bits, ACLs, and the
+//! optional per-inode capability gate), the on-disk layout rules, and
 //! the stable errno mapping. It is the analogue of `pjdfstest`: a body of
 //! black-box assertions about return values and error codes, run against
-//! the production code paths rather than a parallel re-implementation
-//! (`AGENTS.md` §2.2).
+//! the production code paths rather than a parallel re-implementation.
 //!
 //! Like `pjdfstest`, the suite is filesystem-agnostic by construction: it
 //! talks to the VFS and a `drivers/filesystem/*` driver behind the frozen
 //! ABI traits, so a second driver can be exercised by swapping the backing
 //! constructor. `rustfs` is the first subject because it is the native FS
-//! that stores a full per-inode §5.3 record, which the
+//! that stores a full per-inode record, which the
 //! capability/ACL-gate assertions require.
 //!
 //! The block-device-over-QEMU mount path is covered separately by the
@@ -77,7 +76,7 @@ pub const TOTAL_SECTORS: u64 = 2048;
 pub const INODE_COUNT: u32 = 64;
 
 /// Mount point at which the `rustfs` volume is attached in the test VFS.
-/// Lives under `/Storage`, the §16.1 top-level directory for mounted
+/// Lives under `/Storage`, the top-level directory for mounted
 /// volumes, which is writable in the default layout.
 pub const MOUNT: &str = "/Storage/vol";
 
@@ -207,7 +206,7 @@ pub fn cred_with_groups<'a>(
 /// the VFS and the live driver.
 ///
 /// The mount carries [`MountFlags::READ_ONLY`] when `read_only` is set, so
-/// the suite can exercise the §16.2 read-only-mount refusal on a backed
+/// the suite can exercise the read-only-mount refusal on a backed
 /// subtree.
 ///
 /// # Panics
@@ -245,14 +244,14 @@ pub fn rustfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
 }
 
 /// A default-layout [`Vfs`] (owner `(ROOT_UID, ROOT_GID)`) with no driver
-/// mounted, for the in-RAM §16 layout-enforcement tests.
+/// mounted, for the in-RAM layout-enforcement tests.
 #[must_use]
 pub fn default_layout_vfs() -> Vfs {
     Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID))
 }
 
 /// Look up `name` directly under the driver root and return its
-/// [`NodeId`], for tests that set or read a node's stored §5.3 record.
+/// [`NodeId`], for tests that set or read a node's stored record.
 ///
 /// # Panics
 ///

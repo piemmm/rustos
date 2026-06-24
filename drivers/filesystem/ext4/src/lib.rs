@@ -4,18 +4,18 @@
 //! [`rustos_abi::driver::block::Block`] device and exposes it through
 //! the versioned [`rustos_abi::driver::filesystem::FilesystemRead`],
 //! [`FilesystemWrite`], and [`FilesystemSecurity`] surfaces
-//! (`AGENTS.md` §2.4 / §9 — new behaviour ships as a new trait,
+//! (new behaviour ships as a new trait,
 //! never by widening the frozen mount/unmount
 //! [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
 //!
 //! The driver makes **no** permission decisions: owner, mode, ACL, and
-//! the §5.3 capability gate live in the VFS metadata layer that mounts
-//! this driver (`AGENTS.md` §5.4 — the VFS is the policy point, this is
+//! the capability gate live in the VFS metadata layer that mounts
+//! this driver (the VFS is the policy point, this is
 //! raw structural I/O).
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`Ext4`] is a public *type* the driver host instantiates with
 //! [`Ext4::open`]; the host reaches into it only through the
 //! [`FilesystemRead`], [`FilesystemWrite`], and [`FilesystemSecurity`]
@@ -48,10 +48,10 @@
 //! (e.g. `bigalloc`, `meta_bg`, `inline_data`, an explicit
 //! `checksum_seed`) and refuses to free a mapping that is neither the
 //! classic map nor an extent tree of depth ≤ 1, rather than orphan
-//! blocks (`AGENTS.md` §2.1 / §5.4 — fail closed).
+//! blocks (fail closed).
 //!
 //! [`Ext4::format`] lays a fresh, empty volume onto a blank device (no
-//! `mkfs` shell-out, `AGENTS.md` §12/§2.12) using a conservative
+//! `mkfs` shell-out) using a conservative
 //! checksum-free `filetype`+`extent` feature set the reader accepts, and
 //! hands it straight to [`Ext4::open`].
 //!
@@ -61,8 +61,7 @@
 //!
 //! Loading requires
 //! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The
-//! driver runs in user space; it does not request `CAP_DRV_KERNEL`
-//! (`AGENTS.md` §4 / §8).
+//! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -78,7 +77,7 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4558_5434_0000_0001; // "EXT4" + index
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -315,7 +314,7 @@ fn put_le32(buf: &mut [u8], off: usize, value: u32) {
 /// Reflected, with the reversed polynomial `0x82F6_3B78` and no final
 /// inversion — the convention the Linux ext4 driver uses for the
 /// `metadata_csum` feature (the seed already carries the `~0`
-/// initialisation). `AGENTS.md` §2.12 reserves “never roll your own” for
+/// initialisation). The charter reserves “never roll your own” for
 /// *cryptographic* primitives; a storage checksum is first-party here.
 fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
     const POLY: u32 = 0x82F6_3B78;
@@ -402,8 +401,7 @@ struct Layout {
     /// Whether the volume's feature set is one this driver can safely
     /// **mutate**. Writes refuse (`Unsupported`) when it is not — a
     /// feature outside [`SAFE_INCOMPAT`] / [`SAFE_RO_COMPAT`] would need
-    /// on-disk maintenance the write path does not perform (`AGENTS.md`
-    /// §5.4 — fail closed).
+    /// on-disk maintenance the write path does not perform (fail closed).
     write_safe: bool,
     /// Whether the volume carries the `metadata_csum` feature: every
     /// metadata block (superblock, group descriptors, bitmaps, inodes,
@@ -463,7 +461,7 @@ impl Inode {
         self.flags & INODE_FLAG_EXTENTS != 0
     }
 
-    /// The inode's base §5.3 security record (owner, group, mode bits),
+    /// The inode's base security record (owner, group, mode bits),
     /// before any extended-attribute ACL is folded in.
     ///
     /// ext4 stores the POSIX mode bits (`i_mode` low 12 bits, the type
@@ -654,7 +652,7 @@ impl<B: Block> Ext4<B> {
         let feature_ro_compat = le32(&sb, 0x64);
         let metadata_csum = feature_ro_compat & RO_COMPAT_METADATA_CSUM != 0;
         let gdt_csum = !metadata_csum && feature_ro_compat & RO_COMPAT_GDT_CSUM != 0;
-        // Fail closed (§5.4): only mutate volumes whose entire feature
+        // Fail closed: only mutate volumes whose entire feature
         // set the write path can maintain. The `checksum_seed` incompat
         // (0x2000) would invalidate the `crc32c(~0, uuid)` seed, so it is
         // deliberately outside `SAFE_INCOMPAT`.
@@ -1148,7 +1146,7 @@ fn file_type_kind(ft: u8) -> Option<NodeKind> {
 
 impl<B: Block> Ext4<B> {
     /// Refuse mutation of a volume whose feature set this driver cannot
-    /// maintain (`AGENTS.md` §5.4 — fail closed).
+    /// maintain (fail closed).
     fn ensure_writable(&self) -> Result<(), DriverError> {
         if self.layout.write_safe {
             Ok(())
@@ -1371,7 +1369,7 @@ impl<B: Block> Ext4<B> {
             let mut desc = self.read_group_desc(group)?;
             let free = le16(&desc, 0x0C);
             // Skip a group whose block bitmap is not materialised on disk
-            // (fail closed rather than initialise an uninit group, §5.4).
+            // (fail closed rather than initialise an uninit group).
             if free == 0 || le16(&desc, GD_FLAGS) & BG_BLOCK_UNINIT != 0 {
                 continue;
             }
@@ -1460,7 +1458,7 @@ impl<B: Block> Ext4<B> {
             let mut desc = self.read_group_desc(group)?;
             let free = le16(&desc, 0x0E);
             // Skip a group whose inode bitmap is not materialised on disk
-            // (fail closed rather than initialise an uninit group, §5.4).
+            // (fail closed rather than initialise an uninit group).
             if free == 0 || le16(&desc, GD_FLAGS) & BG_INODE_UNINIT != 0 {
                 continue;
             }
@@ -1971,7 +1969,7 @@ fn find_posix_acl(region: &[u8], entries_start: usize, value_base: usize) -> Opt
 /// already expressed by the mode bits, so they are skipped. A value with
 /// the wrong version, or one that overflows the inline ACL budget, is
 /// folded as far as it cleanly can be — the mode bits always still apply
-/// (`AGENTS.md` §5.4 — fail closed, never widen).
+/// (fail closed, never widen).
 fn decode_posix_acl(value: &[u8], sec: &mut NodeSecurity) {
     if value.len() < 4 || le32(value, 0) != POSIX_ACL_VERSION {
         return;

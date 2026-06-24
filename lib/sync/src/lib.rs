@@ -2,11 +2,10 @@
 //!
 //! This `lib/` crate ships the foundational synchronisation primitives
 //! consumed across the workspace. They carry no kernel dependency, so
-//! per `AGENTS.md` §6 / §17.4 they live in `lib/` where every layer —
+//! they live in `lib/` where every layer —
 //! kernel subsystems (`kernel/mem`, `kernel/ipc`, `kernel/irq`), the
 //! scheduler implementations under `kernel/sched/`, and the
-//! architecture ports — may consume the one deduplicated surface
-//! (`AGENTS.md` §2.2, §2.4).
+//! architecture ports — may consume the one deduplicated surface.
 //!
 //! # Primitive catalogue
 //!
@@ -36,8 +35,7 @@
 //!   relaxes this because `loom`'s atomic constructors are not `const`).
 //! - The crate is `no_std`. The [`Epoch`] reclamation primitive uses
 //!   the `alloc` crate internally for its deferred-action queue.
-//! - Every `unsafe` block carries a `// SAFETY:` rationale per
-//!   `AGENTS.md` §2.10.
+//! - Every `unsafe` block carries a `// SAFETY:` rationale per.
 
 #![no_std]
 #![cfg_attr(loom, allow(dead_code))]
@@ -483,7 +481,7 @@ mod tests {
         // While a writer holds the lock, no `try_read` may succeed until it
         // is released. The handshake is deterministic: the writer signals
         // once it holds the lock and waits for permission to release, so the
-        // assertions never depend on thread timing (`AGENTS.md` §7 — no
+        // assertions never depend on thread timing (no
         // flaky tests).
         let l = Arc::new(RwLock::new(0u32));
         let l2 = l.clone();

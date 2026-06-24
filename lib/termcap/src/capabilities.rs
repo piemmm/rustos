@@ -4,7 +4,7 @@
 //! of colour it renders, the screen-control operations it accepts, the keys it
 //! sends, and the optional features (mouse reporting, bracketed paste) it
 //! supports. Every escape sequence it references is a [`Op`] from the one
-//! shared vocabulary (`AGENTS.md` §2.2) — this module defines no second
+//! shared vocabulary — this module defines no second
 //! escape-sequence table. [`Capabilities::referenced_ops`] returns that exact
 //! set so the database can be checked against `lib/vt`.
 
@@ -84,7 +84,7 @@ impl ColorDepth {
 /// a tracking mode and the bytes a click report arrives in are added to
 /// `lib/vt`'s vocabulary when the curses input decoder needs to emit and parse
 /// them (`plans/CURSES.md` §C4). The record states only what the terminal can
-/// do, so it never duplicates a sequence definition (`AGENTS.md` §2.2).
+/// do, so it never duplicates a sequence definition.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MouseReporting {
     /// The terminal does not report the mouse.
@@ -139,7 +139,7 @@ impl MouseSupport {
 /// In normal cursor mode an arrow key sends the same `CSI` sequence the
 /// emitter writes for the matching cursor movement, so the input is expressed
 /// as the [`Op`] the bytes parse back to through [`rustos_vt::Parser`] — one
-/// vocabulary for output and input alike (`AGENTS.md` §2.2).
+/// vocabulary for output and input alike.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArrowKeys {
     /// Up arrow (`CSI A` → [`Op::CursorUp`]).
@@ -171,8 +171,7 @@ impl ArrowKeys {
 /// function, editing (Home/End/Insert/Delete/PgUp/PgDn), and keypad keys are
 /// recorded as capability facts: their `SS3` / `CSI … ~` byte sequences are not
 /// yet in `lib/vt`'s vocabulary and are added there — not invented here — when
-/// the curses input decoder needs them (`plans/CURSES.md` §C4, `AGENTS.md`
-/// §2.2).
+/// the curses input decoder needs them (`plans/CURSES.md` §C4).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyInput {
     /// The arrow keys, if the terminal sends them.
@@ -191,8 +190,7 @@ pub struct KeyInput {
 /// Build it from a [`TermType`] with [`Capabilities::for_term`] (or
 /// [`TermType::capabilities`](crate::TermType::capabilities)). Every escape
 /// sequence it claims is a `lib/vt` [`Op`]; [`Capabilities::referenced_ops`]
-/// enumerates them for checking against the shared vocabulary (`AGENTS.md`
-/// §2.2).
+/// enumerates them for checking against the shared vocabulary.
 //
 // The booleans are independent capability facts, not a state machine: a
 // terminal supports any combination of them, so a flat record models them more
@@ -253,7 +251,7 @@ impl Capabilities {
     /// colour per renderable model) plus the arrow-key input sequences. Because
     /// each is a `lib/vt` `Op`, encoding and re-parsing every one of them
     /// reproduces it unchanged — the database emits nothing `lib/vt` does not
-    /// define (`AGENTS.md` §2.2; the `no_record_emits_a_sequence_absent_from_vt`
+    /// define (the `no_record_emits_a_sequence_absent_from_vt`
     /// test asserts exactly this).
     #[must_use]
     pub fn referenced_ops(&self) -> Vec<Op> {

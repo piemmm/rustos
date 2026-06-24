@@ -3,7 +3,7 @@
 //! Byte offsets and bit positions follow the SD Host Controller Simplified
 //! Specification (v3.00) standard register block, which the Pi 4 EMMC2
 //! controller implements. Only the registers the driver drives are
-//! named; an unused register is not declared (`AGENTS.md` §2.3).
+//! named; an unused register is not declared.
 
 /// SDHCI standard register block length, in bytes. The Pi 4 device tree
 /// advertises a `0x100`-byte window for the `brcm,bcm2711-emmc2` node;
@@ -101,12 +101,12 @@ pub const INT_ERROR_MASK: u32 = 0xFFFF_0000;
 
 /// The `IRPT_EN` signal-enable mask the driver programs so the controller
 /// asserts its CPU interrupt line on each completion the engine parks for
-/// (`AGENTS.md` §17.1 — a driver must wait on the interrupt, never busy-spin
+/// (a driver must wait on the interrupt, never busy-spin
 /// a status register). It enables exactly the sources the engine waits on —
 /// command complete, data-transfer complete, the PIO buffer-ready events —
 /// plus every error bit, so a faulted transfer also wakes the parked task
 /// rather than wedging it. The status-enable register (`IRPT_MASK`) latches
-/// the same bits so the engine can read them back (`AGENTS.md` §2.2).
+/// the same bits so the engine can read them back.
 pub const INT_SIGNAL_ENABLE: u32 =
     INT_CMD_DONE | INT_DATA_DONE | INT_WRITE_RDY | INT_READ_RDY | INT_ERROR_MASK;
 

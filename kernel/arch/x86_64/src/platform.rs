@@ -1,4 +1,4 @@
-//! x86_64 early-boot platform discovery (`AGENTS.md` §17.2 / §18.2).
+//! x86_64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
 //! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
@@ -6,7 +6,7 @@
 //! ACPI MADT (Multiple APIC Description Table) the firmware exposes into
 //! [`rustos_abi::hwtree`] nodes. This is a tracked *move* of the facts the
 //! [`crate::acpi`] parser already extracts for SMP bring-up behind the
-//! common HAL trait, not a new parser (`AGENTS.md` §2.2): the boot path
+//! common HAL trait, not a new parser: the boot path
 //! used to enumerate the Local APIC ids directly; it now also surfaces
 //! them — and the I/O APICs — as a [`rustos_abi::HwNode`] tree.
 //!

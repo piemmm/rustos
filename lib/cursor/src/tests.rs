@@ -305,7 +305,7 @@ fn decoded_svg_cursor_rasterises() {
 
 #[test]
 fn malformed_svg_cursor_fails_closed() {
-    // The caller substitutes a built-in cursor rather than crashing (§2.9).
+    // The caller substitutes a built-in cursor rather than crashing.
     assert!(crate::decode_svg(b"<svg></svg>").is_err());
 }
 
@@ -385,7 +385,7 @@ fn from_assets_mixes_loaded_and_builtin_fallbacks() {
 #[test]
 fn from_assets_malformed_asset_falls_back_per_kind() {
     // The arrow asset is broken; it must fall back to the built-in arrow
-    // while every other kind still loads (§2.9).
+    // while every other kind still loads.
     let source = TestSource {
         kinds: &[
             CursorKind::Text,

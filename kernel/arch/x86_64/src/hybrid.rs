@@ -6,7 +6,7 @@
 //! efficiency cores and migrate work that needs throughput onto a
 //! performance core (`docs/src/architecture/scheduler.md`).
 //!
-//! Detection is the architecture port's job (`AGENTS.md` §17.2 / §18.2).
+//! Detection is the architecture port's job.
 //! The two x86_64 vendors expose the per-core class through different,
 //! incompatible CPUID surfaces, so the probe first reads the vendor
 //! string from CPUID leaf 0 and then dispatches:
@@ -21,7 +21,7 @@
 //! Both decoders (`classify_core_type`, `classify_amd_core`) are pure
 //! and host-testable; the CPUID reads only execute the instruction on
 //! the bare-metal target, returning the homogeneous default on the host
-//! so the crate builds and tests on `x86_64-linux` (`AGENTS.md` §1 — no
+//! so the crate builds and tests on `x86_64-linux` (no
 //! fake hardware in production paths).
 //!
 //! Both decoders fail conservative: any value that is not an encoding
@@ -79,7 +79,7 @@ const LEVEL_TYPE_CORE: u32 = 0x1;
 /// `CoreType` field to a named microarchitecture, so the efficiency
 /// tier is recognised from this published ranking field rather than from
 /// `CoreType`. Anything but the lowest tier is treated as a performance
-/// core (`AGENTS.md` §2.9 fail conservative).
+/// core (fail conservative).
 const EFFICIENCY_RANKING: u32 = 0x0;
 
 /// Largest topology sub-leaf the AMD probe will read before giving up.

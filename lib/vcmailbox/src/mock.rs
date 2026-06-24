@@ -2,7 +2,7 @@
 //!
 //! QEMU does not model the `VideoCore`, so every consumer of this crate
 //! proves its protocol handling against this mock instead of faking the
-//! semantics ad hoc (`AGENTS.md` §2.1, §2.2): it walks the request
+//! semantics ad hoc: it walks the request
 //! tags, echoes the set-tag values, fills the get-tag responses from
 //! its configured answers, and stamps the response codes — exactly what
 //! a healthy firmware does. The real doorbell is the on-metal

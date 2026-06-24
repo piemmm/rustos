@@ -119,7 +119,7 @@ fn decoded_svg_icon_rasterises() {
 
 #[test]
 fn malformed_svg_icon_fails_closed() {
-    // The caller substitutes a builtin glyph rather than crashing (§2.9).
+    // The caller substitutes a builtin glyph rather than crashing.
     assert!(crate::decode_svg(b"<not-svg/>").is_err());
 }
 
@@ -192,7 +192,7 @@ fn icon_set_mixes_loaded_assets_and_builtin_fallbacks() {
 #[test]
 fn icon_set_malformed_asset_falls_back_per_kind() {
     // Every kind is served broken bytes; each must fall back to its tinted
-    // built-in glyph rather than failing (§2.9).
+    // built-in glyph rather than failing.
     let source = TestSource {
         kinds: &[],
         other: Some(b"<not-svg/>"),

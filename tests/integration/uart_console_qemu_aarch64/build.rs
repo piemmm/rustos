@@ -4,18 +4,17 @@
 //! Two jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the aarch64 `virt` linker script to `rustc` (the single
-//!    per-board linker script the architecture port owns — `AGENTS.md`
-//!    §2.2).
+//!    per-board linker script the architecture port owns).
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it:
 //!    QEMU's `-kernel <ELF>` aarch64 path treats the image as bare
 //!    firmware and passes no DTB pointer (`x0 = 0`), so the test reads the
 //!    board's real generated tree — which carries the `arm,pl011` console
 //!    node — from this build-time blob rather than a live pointer. The
 //!    dump helper lives in the shared harness so no aarch64 build script
-//!    re-rolls it (`AGENTS.md` §2.2).
+//!    re-rolls it.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;

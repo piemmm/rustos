@@ -1,5 +1,4 @@
-//! Deterministic fuzz harness for the rustfs mount / metadata-decode path
-//! (`AGENTS.md` §19.5 / §19.6).
+//! Deterministic fuzz harness for the rustfs mount / metadata-decode path.
 //!
 //! [`RustFs::open`] decodes a device's superblock ring, transaction root,
 //! inode-tree nodes, per-file extent-tree nodes, and — since Stage 7 — the
@@ -11,13 +10,13 @@
 //! populated with several files, a multi-extent file, **duplicate-content
 //! files, and a reflink** so the sweep spends its time near real inode-tree,
 //! extent-tree, chunk-tree, and reverse-reference nodes, not just the
-//! superblock ring. Per §19.6 that decode path is driven by a fuzz harness
+//! superblock ring. Per that decode path is driven by a fuzz harness
 //! whose single invariant is:
 //!
 //! * `open` never panics for any device contents — it returns `Ok` for a
 //!   genuinely valid volume and `Err` (fail closed) for everything else.
 //!
-//! A mounted volume is then driven through the remaining decode paths the §16
+//! A mounted volume is then driven through the remaining decode paths the
 //! "fuzz targets" list enumerates: the **directory-block decode** path
 //! (`read_dir`/`lookup` decrypt and parse the encrypted dirent payload that
 //! the mount-time free-space walk never reads), the scrub-progress and
@@ -25,9 +24,9 @@
 //! re-walk, and the read-only `rescue` root scan. Each shares the same
 //! invariant: it returns a `Result`, never panics, and fails closed.
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded
+//! RustOS pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random images, and a structured sweep flips bytes of a real
-//! formatted image to hammer the §8 block-identity checks (magic, type,
+//! formatted image to hammer the block-identity checks (magic, type,
 //! address, keyed authenticator). Stage 3 added the keyed metadata
 //! authenticator and a redundant mirror copy of every metadata block, so the
 //! single-byte sweep also exercises the authenticate-then-fall-back-to-the-
@@ -71,7 +70,7 @@ impl Sink for NullSink {
 
 /// Rescue sink that discards every recovered block: the harness only cares
 /// that the rescue scan/extract decode path never panics for any device
-/// contents (`AGENTS.md` §2.9 / §19.6).
+/// contents.
 struct NullRescueSink;
 impl RescueSink for NullRescueSink {
     fn emit_block(&mut self, _inode: u32, _logical_block: u64, _size: u64, _data: &[u8]) {}
@@ -203,7 +202,7 @@ fn index(x: u64, len: usize) -> usize {
 /// reachable directory (bounded), decoding each block's encrypted dirent
 /// payload through `read_dir` and resolving each decoded name through
 /// `lookup`. Every call must return a `Result`, never panic, for any device
-/// contents (`AGENTS.md` §2.9 / §19.6). The traversal is bounded by a hard
+/// contents. The traversal is bounded by a hard
 /// visit budget and a depth cap so a fuzzed image cannot drive it forever.
 fn walk_directories(fs: &mut RustFs<MemBlock>) {
     let mut name = [0u8; 256];
@@ -236,17 +235,17 @@ fn exercise(image: &[u8]) {
     store.resize(IMAGE_LEN, 0);
     let dev = MemBlock { store };
     if let Ok(mut fs) = RustFs::open(dev, &FUZZ_KEY) {
-        // Drive the directory-block decode path (§16's "directory decode"
+        // Drive the directory-block decode path ('s "directory decode"
         // target): list the root directory and resolve every decoded name.
         // `read_dir`/`lookup` decrypt and parse the directory block's dirent
-        // payload (the §4 encrypted directory record), which `open`'s
+        // payload (the encrypted directory record), which `open`'s
         // free-space walk never reads. Like `open` it must return a `Result`,
-        // never panic, for any device contents (`AGENTS.md` §2.9 / §19.6).
+        // never panic, for any device contents.
         walk_directories(&mut fs);
         // Drive the Stage-8 scrub-progress decode path: a bounded scrub reads
         // and decodes any persisted scrub-progress record (`load_scrub_progress`)
         // before resuming. Like `open` it must return a `Result`, never panic,
-        // for any device contents (`AGENTS.md` §2.9 / §19.6).
+        // for any device contents.
         let _ = fs.scrub(&AllCaps, &NullSink, ScrubBudget::Inodes(1));
         // Drive the Stage-9 offline check on a mounted handle: it re-walks
         // every tree, rebuilds the derived state, and reconciles refcounts. It
@@ -255,7 +254,7 @@ fn exercise(image: &[u8]) {
         // Drive the Stage-11 health pass: it decodes any persisted
         // `HealthBaseline` record before classifying and (possibly) triggering
         // a scrub. Like `open` it must return a `Result`, never panic, for any
-        // device contents (`AGENTS.md` §2.9 / §19.6).
+        // device contents.
         let _ = fs.health(&AllCaps, &NullSink);
         // A volume that mounts must mount again from its own bytes.
         let bytes = fs.into_block().store;
@@ -333,7 +332,7 @@ fn open_never_panics_on_arbitrary_images() {
     let base = formatted_image();
 
     // Draw and log the seed up front so every sampled byte position and every
-    // PRNG image below replays exactly from the logged value (§19.6, §2.1):
+    // PRNG image below replays exactly from the logged value:
     // fresh per run, fresh per soak run under `cargo xtask fuzz`.
     let mut state: u64 = rustos_fuzzseed::start(
         "open_never_panics_on_arbitrary_images",
@@ -346,7 +345,7 @@ fn open_never_panics_on_arbitrary_images() {
         state
     };
 
-    // Structured single-byte sweep over a valid image, probing the §8
+    // Structured single-byte sweep over a valid image, probing the
     // identity/checksum rejection on a near-valid image. The soak flips every
     // byte exhaustively; a plain `cargo test` (no budget) samples a small,
     // seed-driven subset so the per-PR run stays quick — each `exercise` is a
@@ -371,7 +370,7 @@ fn open_never_panics_on_arbitrary_images() {
     // when one copy fails the keyed authenticator. Corrupt the keyed-tag byte
     // of BOTH a block and its companion so neither copy authenticates,
     // exercising the both-copies-bad path. `open` must still return a
-    // `Result`, never panic (`AGENTS.md` §2.9 / §19.6). One image per block, so
+    // `Result`, never panic. One image per block, so
     // it is cheap enough to run in either mode.
     let bs = BLOCK_SIZE as usize;
     let blocks = usize::try_from(BLOCK_COUNT).unwrap_or(0);

@@ -6,9 +6,8 @@
 //! * [`CsRng`] — the **cryptographically secure** generator. A NIST SP
 //!   800-90Ar1 HMAC-SHA256 DRBG ([`drbg::HmacDrbg`]) that reseeds from a
 //!   pluggable [`EntropySource`] for forward secrecy. This is what `RustFS`
-//!   keys, the encrypted-swap key (`AGENTS.md` §4), nonces, and the
-//!   KASLR/ASLR seed (§19.2) must use. Its draws are fallible and fail closed
-//!   (§5.4) — they never block, spin, or panic.
+//!   keys, the encrypted-swap key, nonces, and the
+//!   KASLR/ASLR seed must use. Its draws are fallible and fail closed — they never block, spin, or panic.
 //! * [`FastRng`] — a **fast, non-cryptographic** generator (xoshiro256++) for
 //!   bulk randomness with no security requirement (scheduler decisions,
 //!   collection seeds, backoff jitter). Never use it for keys or nonces.
@@ -18,7 +17,7 @@
 //!
 //! # The cryptographic core is composed, not hand-rolled
 //!
-//! Per `AGENTS.md` §1/§2.12 no cryptographic primitive is hand-rolled here.
+//! Per no cryptographic primitive is hand-rolled here.
 //! The DRBG is the standard HMAC-DRBG construction layered over `lib/crypto`'s
 //! audited HMAC-SHA256, exactly as `lib/crypto`'s `kdf` layers HKDF-Expand
 //! over the same PRF. The only first-party algorithm is the *non-cryptographic*
@@ -28,7 +27,7 @@
 //!
 //! A platform hardware source ([`hardware::HardwareRng`], supplied by
 //! `kernel/arch/<target>` or a `drivers/*` crate — it is never probed here,
-//! keeping the crate architecture-neutral, §17.2) is used two ways:
+//! keeping the crate architecture-neutral) is used two ways:
 //!
 //! 1. As an *additional* entropy input: wrap it in
 //!    [`hardware::HardwareEntropy`] and XOR-mix it with the other platform

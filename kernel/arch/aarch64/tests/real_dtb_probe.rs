@@ -11,7 +11,7 @@
 //! `target/pi-firmware/` for the Pi image build. When that cache has not
 //! been populated the test reports a skip and passes: the fixture-based
 //! unit tests still cover the logic, and an absent download must not
-//! fail an offline `cargo test` (`AGENTS.md` §2.9 — fail closed is for
+//! fail an offline `cargo test` (fail closed is for
 //! authority, not for missing optional inputs).
 //!
 //! Note: the on-disk file's `/memory@0` carries a zero `reg` — the

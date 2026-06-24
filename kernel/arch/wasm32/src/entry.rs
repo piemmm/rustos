@@ -19,7 +19,7 @@
 //! Unlike the bare-metal ports, `kernel_main` here returns: the wasm32
 //! cooperative model hands control back to the host event loop after
 //! init so the animation-frame and message callbacks above can fire.
-//! Returning is the normal, expected path (`AGENTS.md` §10 — the desktop
+//! Returning is the normal, expected path (the desktop
 //! is a session frontend; the same applies to the browser event loop).
 
 extern "C" {

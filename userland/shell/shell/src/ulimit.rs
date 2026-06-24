@@ -1,8 +1,8 @@
 //! The `ulimit` builtin: report and impose the calling process's resource
-//! limits (`AGENTS.md` §24.3).
+//! limits.
 //!
 //! RustOS sizes resource *capacities* from discovered hardware and grows
-//! them on demand (§24.1); on top of those defaults a principal may impose a
+//! them on demand; on top of those defaults a principal may impose a
 //! lower ceiling on itself and its children — the RustOS `ulimit`/`rlimit`
 //! facility. This builtin is the command-line face of that facility,
 //! marshalling through the [`LimitStore`](crate::host::LimitStore) seam to
@@ -29,9 +29,8 @@
 //!
 //! Lowering a bound is always permitted; *raising* a hard bound above the
 //! inherited ceiling is gated kernel-side on
-//! [`CapabilityId::RLIMIT_RAISE`](rustos_abi::CapabilityId::RLIMIT_RAISE)
-//! (§24.3) and surfaces here as an error the builtin reports — it is never
-//! silently swallowed (`AGENTS.md` §2.9).
+//! [`CapabilityId::RLIMIT_RAISE`](rustos_abi::CapabilityId::RLIMIT_RAISE) and surfaces here as an error the builtin reports — it is never
+//! silently swallowed.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -103,7 +102,7 @@ pub(crate) fn ulimit(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     };
 
     // A resource name, then an optional value. More than two operands is a
-    // usage error rather than a silently-ignored tail (`AGENTS.md` §2.9).
+    // usage error rather than a silently-ignored tail.
     match rest {
         [] => report_all(ctx, flags.report_bound()),
         [name] if flags.all => {
@@ -275,7 +274,7 @@ fn render_value(value: u64) -> String {
 
 /// Parse a `ulimit` value: the word `unlimited` or a decimal `u64`.
 ///
-/// Returns `None` on anything else (fail closed, `AGENTS.md` §2.1).
+/// Returns `None` on anything else (fail closed).
 fn parse_value(text: &str) -> Option<u64> {
     if text == "unlimited" {
         Some(RLIMIT_INFINITY)

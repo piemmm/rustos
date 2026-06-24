@@ -1,13 +1,11 @@
 //! The `Run` entry-point binary of the device-manager service, installed
-//! at `/System/Services/devmgr` (`AGENTS.md` §16.2, §18.3) — the
+//! at `/System/Services/devmgr` — the
 //! long-running user-space service PID 1 `init` launches to observe the
 //! discovered hardware tree and react to it.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only (`AGENTS.md` §1),
+//! This is a **pure-Rust** program: RustOS is Rust-only,
 //! so it links the Rust userland runtime `rustos-rt` — never the C ABI,
-//! which exists solely for programs **not** written in Rust (`AGENTS.md`
-//! §16.4). `rustos-rt` provides `_start`, the per-process stack canary
-//! (`AGENTS.md` §19.2), the panic handler, and the syscall wrappers
+//! which exists solely for programs **not** written in Rust. `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, and the syscall wrappers
 //! (`hw_tree_read` / `hw_tree_wait`); `rustos_rt::entry!` names this
 //! program's `main`.
 //!
@@ -15,27 +13,22 @@
 //!
 //! At startup it fetches the kernel-decoded driver **catalogue** over the
 //! capability-gated `ipc_call` endpoint the kernel store service serves
-//! (`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`, `AGENTS.md` §18.3 /
-//! §5.2): one entry per installed bundle, an opaque `bundle_id` plus the
+//! (`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`): one entry per installed bundle, an opaque `bundle_id` plus the
 //! bind table the kernel decoded from its signed manifest. The store is
 //! read-only and static for the life of the system, so the catalogue is
-//! fetched **once** (`AGENTS.md` §2.16); a fetch failure is fail-soft
-//! (`AGENTS.md` §18.4 / §2.9).
+//! fetched **once**; a fetch failure is fail-soft.
 //!
 //! It then reads the architecture-neutral hardware tree the kernel
 //! discovered at boot through the capability-gated `hw_tree_read` syscall
-//! (`CAP_SYSINFO_HW`, `AGENTS.md` §16.6 / §18.4), matches each node against
-//! the catalogue with the shared [`rustos_devmatch`] policy (`AGENTS.md`
-//! §18.3), and asks the kernel to load the matched bundle for each winning
-//! node (`StoreRequest::Load`) — the kernel re-runs the signed §8 gate and
-//! spawns the driver with only that node's grants (`AGENTS.md` §4). It then
+//! (`CAP_SYSINFO_HW`), matches each node against
+//! the catalogue with the shared [`rustos_devmatch`] policy, and asks the kernel to load the matched bundle for each winning
+//! node (`StoreRequest::Load`) — the kernel re-runs the signed gate and
+//! spawns the driver with only that node's grants. It then
 //! **blocks** in `hw_tree_wait` until the tree changes (a node seeded,
-//! appended, or removed — `AGENTS.md` §18.4) and re-matches, loading each
-//! newly-appeared node's driver once. It never busy-spins (`AGENTS.md`
-//! §2.1): the wait parks the task in the kernel until the store's generation
+//! appended, or removed) and re-matches, loading each
+//! newly-appeared node's driver once. It never busy-spins: the wait parks the task in the kernel until the store's generation
 //! advances. The device manager owns matching *policy* only; the kernel
-//! keeps the load *mechanism* (bytes, signature, spawn) in its TCB
-//! (`AGENTS.md` §4).
+//! keeps the load *mechanism* (bytes, signature, spawn) in its TCB.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -48,8 +41,7 @@
 // Compiled only for the freestanding service binary, which links the
 // optional `rustos-rt` runtime through the default `program` feature. The
 // kernel links this crate's *library* with `default-features = false`, so
-// it never builds this module (nor pulls in `rustos-rt`, `AGENTS.md`
-// §17.4).
+// it never builds this module (nor pulls in `rustos-rt`).
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
     use rustos_abi::driver_store::DRIVER_STORE_ENDPOINT;
@@ -62,13 +54,13 @@ mod program {
 
     /// Buffer the catalogue and each `Load` reply are received into, sized to
     /// the endpoint's `DRIVER_STORE_MAX_REPLY` so a full catalogue is never
-    /// truncated (`AGENTS.md` §2.9 / §24.1). Disjoint from the tree buffer so
+    /// truncated. Disjoint from the tree buffer so
     /// a load can run while a tree snapshot is being decoded.
     const REPLY_BUF_LEN: usize = 64 * 1024;
 
     /// The stable name of a node's device class for the log line. An
     /// unknown (un-modelled) discriminant is reported as `?`, never
-    /// guessed (`AGENTS.md` §2.9).
+    /// guessed.
     fn class_name(class: Option<HwDeviceClass>) -> &'static str {
         match class {
             Some(HwDeviceClass::Root) => "root",
@@ -101,10 +93,8 @@ mod program {
     /// ([`rustos_devmgr::run`]) reads, waits, and reports through this seam,
     /// which binds the `hw_tree_read` / `hw_tree_wait` `abi-v1` syscalls and
     /// emits each tree/node report through the kernel's diagnostic log via
-    /// [`LogSink`] (the serial UART on a debug build, `AGENTS.md` §19.4 /
-    /// §20) — never `stderr`. The loop's control flow is host-tested in
-    /// `rustos_devmgr::service`; this is the freestanding I/O it binds
-    /// (`AGENTS.md` §2.2).
+    /// [`LogSink`] (the serial UART on a debug build) — never `stderr`. The loop's control flow is host-tested in
+    /// `rustos_devmgr::service`; this is the freestanding I/O it binds.
     struct RtTreeService;
 
     impl HwTreeService for RtTreeService {
@@ -116,8 +106,7 @@ mod program {
             // Block until the tree's generation advances past the one last
             // observed; `u64::MAX` is the effectively unbounded wait a
             // device manager holds for the life of the system. A negative
-            // return is a `-errno` the loop fails closed on (`AGENTS.md`
-            // §2.9).
+            // return is a `-errno` the loop fails closed on.
             let waited = rustos_rt::hw_tree_wait(last_generation, u64::MAX);
             if waited < 0 {
                 return Err(errno_from(waited));
@@ -128,7 +117,7 @@ mod program {
         fn on_header(&mut self, header: &HwTreeHeader) {
             // Verbose boot/hotplug diagnostics: emitted at `Debug` so they are
             // filtered out by default and surface only when the level is
-            // lowered (`AGENTS.md` §20). Routed through the kernel diagnostic
+            // lowered. Routed through the kernel diagnostic
             // log, never `stderr`.
             let mut gen = [0u8; 16];
             let mut count = [0u8; 12];
@@ -194,17 +183,16 @@ mod program {
 
     /// The production [`DriverStoreCall`] backing: it binds the `ipc_call`
     /// `abi-v1` syscall to the read-only `/System` driver-store endpoint
-    /// ([`DRIVER_STORE_ENDPOINT`]) the kernel store service serves
-    /// (`AGENTS.md` §18.3 / §5.2). The protocol logic (request framing, reply
+    /// ([`DRIVER_STORE_ENDPOINT`]) the kernel store service serves. The protocol logic (request framing, reply
     /// decoding) is host-tested in `rustos_devmgr::store`; this is the
-    /// freestanding I/O it binds (`AGENTS.md` §2.2). The kernel re-checks the
+    /// freestanding I/O it binds. The kernel re-checks the
     /// caller's `CAP_DRV_LOAD` on every call; this client adds no authority.
     struct RtStoreCall;
 
     impl DriverStoreCall for RtStoreCall {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             // `ipc_call` returns the raw `-errno` on failure; recover the
-            // typed `Errno` and surface it fail-closed (`AGENTS.md` §2.9).
+            // typed `Errno` and surface it fail-closed.
             rustos_rt::ipc_call(DRIVER_STORE_ENDPOINT, request, reply).map_err(errno_from)
         }
     }
@@ -212,17 +200,17 @@ mod program {
     /// Program entry point. Runs the reactive match-and-load loop for the
     /// life of the service (`budget = None`): fetch the catalogue once, then
     /// read the discovered tree, load a driver for every matched node, and
-    /// block on every generation advance to re-match (`AGENTS.md` §18.4). The
+    /// block on every generation advance to re-match. The
     /// loop returns only on a fail-closed tree-seam error; PID 1 `init`
     /// supervises and relaunches the service.
     fn main() -> i32 {
         // The catalogue/load reply buffer. The tree snapshot is read into a
         // separate, service-owned buffer that grows to fit the discovered
-        // tree (`rustos_devmgr::run`, `AGENTS.md` §24.1) — a real board's
+        // tree (`rustos_devmgr::run`) — a real board's
         // firmware tree dwarfs QEMU `virt`'s, so a fixed stack buffer here
-        // would be a scaling cliff. The §16.5 stack sizing
+        // would be a scaling cliff. The stack sizing
         // (`spawn_layout::USER_STACK_PAGES`, ~1.1 MiB) covers this 64 KiB
-        // reply buffer comfortably (`AGENTS.md` §2.16).
+        // reply buffer comfortably.
         let mut reply_buf = [0u8; REPLY_BUF_LEN];
         match rustos_devmgr::run(
             &mut RtTreeService,

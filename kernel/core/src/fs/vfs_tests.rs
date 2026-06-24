@@ -1,5 +1,5 @@
-//! Behavioural tests for the [`Vfs`] tree: §16 layout enforcement, §16.2
-//! read-only `/System`, and the §5.3 permission and capability gates.
+//! Behavioural tests for the [`Vfs`] tree: layout enforcement
+//! read-only `/System`, and the permission and capability gates.
 
 use super::*;
 use crate::fs::path::RESERVED_TOP_LEVEL;
@@ -164,7 +164,7 @@ fn capability_gated_file_is_unreadable_without_the_capability() {
     let mut vfs = default_vfs();
     let admin_caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &admin_caps);
-    // World-readable mode, but gated on CAP_AUDIT_READ (`AGENTS.md` §5.3).
+    // World-readable mode, but gated on CAP_AUDIT_READ.
     let file = p("/Users/auditlog");
     vfs.create_file(&admin, &file, Mode::from_bits(0o644), b"secret".to_vec())
         .expect("create");

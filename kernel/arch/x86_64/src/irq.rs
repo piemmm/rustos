@@ -36,7 +36,7 @@
 //! ([`set_external_irq_dispatch`]) are set-once at boot. They are
 //! backed by atomics so they can be read concurrently from every
 //! CPU's trap path without taking a lock. Writers fail-closed on a
-//! second publish (`AGENTS.md` §2.1 — one-shot publish, no mutable
+//! second publish (one-shot publish, no mutable
 //! static).
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -143,7 +143,7 @@ pub type ExternalIrqDispatchFn = extern "C" fn(vector: u8);
 /// Install the production external-IRQ dispatcher.
 ///
 /// Returns [`SetDispatchError::AlreadyInstalled`] on the second
-/// publish (`AGENTS.md` §2.1 — one-shot publish).
+/// publish (one-shot publish).
 pub fn set_external_irq_dispatch(cb: ExternalIrqDispatchFn) -> Result<(), SetDispatchError> {
     let raw = cb as usize;
     EXTERNAL_IRQ_DISPATCH_FN
@@ -173,7 +173,7 @@ pub fn external_irq_dispatch_addr() -> usize {
 #[cfg(test)]
 pub(crate) fn clear_external_irq_dispatch_for_tests() {
     // Test-only helper so back-to-back host tests can re-install a
-    // dispatcher. AGENTS.md §2.9 — permitted in tests; production
+    // dispatcher. — permitted in tests; production
     // code never clears the slot.
     EXTERNAL_IRQ_DISPATCH_FN.store(0, Ordering::Release);
 }
@@ -188,7 +188,7 @@ const GSI_UNMAPPED: u32 = u32::MAX;
 /// Backed by an array of [`AtomicU32`]; one slot per reserved
 /// external vector. `u32::MAX` is the unmapped sentinel.
 /// Once the kernel binary's `Phase::Irq` step completes, the table
-/// is read-only — `AGENTS.md` §2.1 (one-shot publish).
+/// is read-only (one-shot publish).
 static GLOBAL_ROUTING: [AtomicU32; EXTERNAL_VECTOR_COUNT] = {
     #[allow(clippy::declare_interior_mutable_const)]
     const Z: AtomicU32 = AtomicU32::new(GSI_UNMAPPED);
@@ -248,7 +248,7 @@ pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
 /// dispatcher does not currently consult it (the kernel-neutral
 /// fire path needs only the GSI). It is kept in the signature so a
 /// future commit can inspect the trap frame without touching the
-/// ISR ABI (`AGENTS.md` §2.4 — no interface creep, extend through
+/// ISR ABI (no interface creep, extend through
 /// the existing pointer).
 ///
 /// Behaviour:

@@ -10,8 +10,7 @@
 //!   chunk and reverse-reference trees) is authenticated in **both** physical
 //!   copies. A copy that fails the keyed authenticator is **repaired from its
 //!   good companion** (the Stage 3 redundancy seam); a both-copies-bad block
-//!   is recorded as an unrepairable finding, fail-closed and never a panic
-//!   (`AGENTS.md` §5.4 / §2.9).
+//!   is recorded as an unrepairable finding, fail-closed and never a panic.
 //! * **Data** — every live file-data block is run through the Stage 5/6 read
 //!   pipeline and any failure is classified by its
 //!   [`crate::integrity::DataFault`] (`Physical` / `Aead` / `Logical`) and
@@ -19,7 +18,7 @@
 //!   scrub records honestly rather than pretending to fix what it cannot.
 //! * **Refcounts + reverse references** — the chunk refcounts and reverse-ref
 //!   sets are **recomputed from the live inode/extent trees** and compared with
-//!   the on-disk chunk and reverse-reference trees (§9). A divergence is a
+//!   the on-disk chunk and reverse-reference trees. A divergence is a
 //!   finding; correcting it without losing a referrer is the repair.
 //!
 //! Scrub is **resumable**: a scrub-progress record (a `BlockType::ScrubProgress`
@@ -27,12 +26,12 @@
 //! transaction root persists the cursor and the accumulated counts, so a
 //! bounded call can stop and a later call resumes exactly where it left off
 //! and reaches the same result as one uninterrupted pass. The record is
-//! rebuildable metadata (§4): a crash mid-scrub leaves a mountable volume and
-//! ordinary crash recovery never requires scrub (§14).
+//! rebuildable metadata: a crash mid-scrub leaves a mountable volume and
+//! ordinary crash recovery never requires scrub.
 //!
 //! Scrub is **capability-gated** (`CAP_FS_MOUNT`) and reports its findings
 //! through a structured [`ScrubReport`], logging security-relevant findings
-//! through `lib/log` with stable event IDs (`AGENTS.md` §5.4 / §19.4). It
+//! through `lib/log` with stable event IDs. It
 //! never silently mutates: a clean scrub of a clean volume changes nothing.
 
 use rustos_log::{log, Event, EventId, Level, Sink};
@@ -53,7 +52,7 @@ pub const SCRUB_DENIED: EventId = EventId(12_004);
 
 /// Every scrub event identifier falls inside the reserved `rustfs` range, so
 /// the stable IDs external audit-log consumers rely on never collide with
-/// another subsystem's range (`AGENTS.md` §19.4).
+/// another subsystem's range.
 const _: () = {
     assert!(SCRUB_CLEAN.0 >= RUSTFS_RANGE_START && SCRUB_CLEAN.0 < RUSTFS_RANGE_END);
     assert!(SCRUB_FAULTS_FOUND.0 >= RUSTFS_RANGE_START && SCRUB_FAULTS_FOUND.0 < RUSTFS_RANGE_END);
@@ -117,8 +116,7 @@ impl ScrubReport {
             || self.reverse_ref_divergences != 0
     }
 
-    /// Emit the closing scrub event for this report to `sink` (`AGENTS.md`
-    /// §5.4 — log security-relevant findings with a stable event ID).
+    /// Emit the closing scrub event for this report to `sink` (log security-relevant findings with a stable event ID).
     pub(crate) fn log_outcome(&self, sink: &dyn Sink) {
         let (id, level, message) = if !self.complete {
             (SCRUB_PAUSED, Level::Info, "rustfs scrub paused (resumable)")
@@ -188,15 +186,15 @@ impl<B: Block> RustFs<B> {
     /// number of inodes, persists a resumable cursor, and returns so the
     /// caller can resume later — the accumulated [`ScrubReport`] of a completed
     /// scrub is identical either way. The closing finding is logged to `sink`
-    /// with a stable event ID (`AGENTS.md` §5.4 / §19.4).
+    /// with a stable event ID.
     ///
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if `caps` does not grant
-    ///   [`CapabilityId::FS_MOUNT`] (fail-closed, `AGENTS.md` §5.4).
+    ///   [`CapabilityId::FS_MOUNT`] (fail-closed).
     /// * [`DriverError::DeviceFault`] / [`DriverError::NoSpace`] on an
     ///   unrecoverable device error while reading the structure to verify or
-    ///   while persisting progress (never a panic, §2.9).
+    ///   while persisting progress (never a panic).
     ///
     /// # Capabilities
     ///
@@ -275,7 +273,7 @@ impl<B: Block> RustFs<B> {
         }
 
         // Every inode has been verified: recompute and reconcile the chunk
-        // refcounts and reverse-reference sets against the on-disk trees (§9).
+        // refcounts and reverse-reference sets against the on-disk trees.
         if self.scrub_refcounts(&inodes, &mut report)? {
             mutated = true;
         }
@@ -291,7 +289,7 @@ impl<B: Block> RustFs<B> {
     }
 
     /// One unbounded verification pass over the whole volume, shared with the
-    /// offline [`crate::RustFs::check`] (Stage 9, `AGENTS.md` §2.2): the
+    /// offline [`crate::RustFs::check`] (Stage 9): the
     /// volume-wide metadata, then every inode's metadata and data blocks, then
     /// the refcount/reverse-reference reconcile against the live extents.
     /// Returns `true` when the reconcile corrected on-disk refcount state (so
@@ -315,7 +313,7 @@ impl<B: Block> RustFs<B> {
     /// Determine where this scrub call starts: resume the persisted cursor and
     /// counts of an in-progress scrub, or start fresh by verifying the global
     /// metadata once and beginning the inode walk at the root inode. A corrupt
-    /// progress record (rebuildable, §4) restarts the scrub rather than failing
+    /// progress record (rebuildable) restarts the scrub rather than failing
     /// the mount.
     fn scrub_resume_point(&mut self) -> Result<(ScrubReport, u64), DriverError> {
         if self.scrub_progress_root != 0 {
@@ -360,7 +358,7 @@ impl<B: Block> RustFs<B> {
         if !extent_ok {
             // The extent tree could not be fully read; the unrepairable node is
             // already recorded. Skip the data walk rather than fail closed on a
-            // read that cannot succeed (record, do not panic — §2.9).
+            // read that cannot succeed (record, do not panic).
             return Ok(());
         }
         let spec = extent_spec(ino);
@@ -435,8 +433,7 @@ impl<B: Block> RustFs<B> {
     /// Verify the two physical copies of the metadata block at `phys` and, on
     /// success, leave the good copy's bytes in `out`. Repairs a bad copy from
     /// its good companion; a both-copies-bad block is reported as
-    /// [`MetaStatus::Unrepairable`] (recorded, never panicked — `AGENTS.md`
-    /// §5.4 / §2.9).
+    /// [`MetaStatus::Unrepairable`] (recorded, never panicked).
     pub(crate) fn scrub_meta_into(
         &mut self,
         phys: u64,
@@ -585,7 +582,7 @@ impl<B: Block> RustFs<B> {
                     // record. Recreating it needs the chunk's logical length
                     // and hash, which scrub does not reconstruct here (that is
                     // the Stage 9 offline check). Record honestly without
-                    // pretending to repair (`AGENTS.md` §2.1).
+                    // pretending to repair.
                     report.refcount_divergences += 1;
                 }
             }
@@ -617,7 +614,7 @@ impl<B: Block> RustFs<B> {
 
     /// Load the persisted scrub cursor and accumulated counts from the
     /// progress record. Returns `None` when the record is unreadable or its
-    /// magic is wrong: the record is rebuildable (§4), so a corrupt one simply
+    /// magic is wrong: the record is rebuildable, so a corrupt one simply
     /// restarts the scrub rather than failing the mount.
     fn load_scrub_progress(&mut self) -> Option<(ScrubReport, u64)> {
         let mut buf = [0u8; MAX_BLOCK_SIZE];
@@ -649,7 +646,7 @@ impl<B: Block> RustFs<B> {
 
     /// Persist the scrub cursor and accumulated counts to the progress record,
     /// copy-on-writing it (and updating [`Self::scrub_progress_root`]) so a
-    /// crash mid-scrub still leaves a mountable volume (§14).
+    /// crash mid-scrub still leaves a mountable volume.
     fn store_scrub_progress(
         &mut self,
         cursor: u64,

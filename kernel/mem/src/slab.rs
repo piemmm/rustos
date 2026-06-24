@@ -1,6 +1,6 @@
 //! Kernel slab allocator with guard pages on both sides.
 //!
-//! `AGENTS.md` §4 mandates *"Guard pages around kernel slabs."* In a
+//! the charter mandates *"Guard pages around kernel slabs."* In a
 //! real RustOS deployment the guard pages are unmapped virtual pages
 //! immediately above and below each slab; a buffer-overflow write past
 //! the slab faults loudly instead of silently corrupting the next slab.
@@ -58,13 +58,13 @@ pub enum SlabError {
     /// surfaces it through this variant.
     GuardViolation,
     /// The handle's memory tag did not match the slot's current tag — a
-    /// use-after-free was detected (`AGENTS.md` §19.10). The slot was
+    /// use-after-free was detected. The slot was
     /// freed and reallocated since this handle was issued, so the handle
     /// is dangling. On a hardware-tagged port (Arm MTE) the access would
     /// have faulted; this is the architecture-neutral software check.
     TagMismatch,
     /// A slot about to be handed out was not clean: it still held
-    /// non-zero bytes (`AGENTS.md` §3.3 of the security charter,
+    /// non-zero bytes (of the security charter,
     /// CWE-908/CWE-200). [`Slab::free`] wipes every byte of a slot, and a
     /// fresh slab starts zeroed, so a free slot is **always** all-zero.
     /// A non-zero free slot means the zero-on-free invariant was skipped
@@ -94,8 +94,7 @@ impl fmt::Display for SlabError {
 
 /// Opaque handle returned by [`Slab::alloc`].
 ///
-/// Pairs an index into the slab's slot table with the *memory tag*
-/// (`AGENTS.md` §19.10) the slot carried when the handle was issued. We
+/// Pairs an index into the slab's slot table with the *memory tag* the slot carried when the handle was issued. We
 /// hand out indices instead of raw pointers so the host test double can
 /// revoke them on drop and detect double-frees without unsafe
 /// gymnastics; the tag is the software analogue of an Arm-MTE pointer
@@ -118,7 +117,7 @@ impl SlabHandle {
 }
 
 /// Whether the slab runs the architecture-neutral *software*
-/// use-after-free tag check (`AGENTS.md` §19.10).
+/// use-after-free tag check.
 ///
 /// The software check costs a tag rotation on every allocation and a
 /// tag comparison on every free and slot access. On a port whose
@@ -156,7 +155,7 @@ impl SoftwareTagCheck {
     /// enforces use-after-free in hardware
     /// ([`TaggingProfile::enforces_uaf_in_hardware`]), and
     /// [`SoftwareTagCheck::Enabled`] otherwise. This keeps the software
-    /// check on by default (`AGENTS.md` §19.10) yet steps aside — for
+    /// check on by default yet steps aside — for
     /// performance — precisely when redundant hardware tagging is
     /// available and enabled.
     ///
@@ -191,7 +190,7 @@ pub struct Slab {
     storage: Vec<u8>,
     /// Per-slot allocation state.
     in_use: Vec<bool>,
-    /// Per-slot current memory tag (`AGENTS.md` §19.10). Rotated on every
+    /// Per-slot current memory tag. Rotated on every
     /// allocation so a reused slot never carries the tag a previously
     /// issued (now dangling) handle still holds.
     tags: Vec<MemTag>,
@@ -202,7 +201,7 @@ pub struct Slab {
 
 impl Slab {
     /// Construct a new slab with the software use-after-free tag check
-    /// **enabled** (`AGENTS.md` §19.10) — the default on every port that
+    /// **enabled** — the default on every port that
     /// does not enforce UAF in hardware.
     ///
     /// A port whose silicon enforces UAF in hardware constructs the slab
@@ -278,11 +277,11 @@ impl Slab {
     /// - [`SlabError::GuardViolation`] if a guard region was tampered with.
     /// - [`SlabError::DirtySlot`] if the free slot it would hand out is not
     ///   zeroed (the zero-on-free invariant was skipped or corrupted;
-    ///   `AGENTS.md` §3.3, CWE-908/200).
+    ///   , CWE-908/200).
     pub fn alloc(&mut self) -> Result<SlabHandle, SlabError> {
         // Pre-flight: a slab is never expected to grow without a
         // detected over-run. If guards have been clobbered the alloc
-        // must fail closed (`AGENTS.md` §5.4).
+        // must fail closed.
         self.verify_guards_internal()?;
         for i in 0..self.slot_count {
             if !self.in_use[i] {
@@ -290,15 +289,15 @@ impl Slab {
                 // all-zero (`free` wipes it; a fresh slab starts zeroed).
                 // Verify it before reuse so a slot whose zero-on-free was
                 // skipped or corrupted cannot leak its previous occupant's
-                // bytes to this caller (`AGENTS.md` §3.3, CWE-908/200).
-                // Fail closed (§5.4): leave the slot free and reject.
+                // bytes to this caller (CWE-908/200).
+                // Fail closed: leave the slot free and reject.
                 if !self.slot_is_clean(i) {
                     return Err(SlabError::DirtySlot);
                 }
                 self.in_use[i] = true;
                 // Rotate the slot's tag so any handle still holding the
                 // previous tag (a dangling pointer into this slot) will
-                // mismatch and be rejected (`AGENTS.md` §19.10). When the
+                // mismatch and be rejected. When the
                 // port enforces UAF in hardware the software rotation is
                 // redundant overhead, so it is skipped and the slot keeps
                 // its resting tag.
@@ -322,7 +321,7 @@ impl Slab {
     /// - [`SlabError::UnknownHandle`] if the handle is out of range.
     /// - [`SlabError::DoubleFree`] if the slot is not currently in use.
     /// - [`SlabError::TagMismatch`] if the handle's tag no longer matches
-    ///   the slot's current tag (a use-after-free; `AGENTS.md` §19.10).
+    ///   the slot's current tag (a use-after-free;).
     /// - [`SlabError::GuardViolation`] if either guard region was
     ///   tampered with while the slot was live.
     pub fn free(&mut self, h: SlabHandle) -> Result<(), SlabError> {
@@ -363,8 +362,7 @@ impl Slab {
     /// - [`SlabError::UnknownHandle`] / [`SlabError::DoubleFree`] for
     ///   stale handles.
     /// - [`SlabError::TagMismatch`] if the handle outlived its allocation
-    ///   and the slot has since been reused (a use-after-free;
-    ///   `AGENTS.md` §19.10).
+    ///   and the slot has since been reused (a use-after-free;).
     pub fn slot_mut(&mut self, h: SlabHandle) -> Result<&mut [u8], SlabError> {
         if h.slot >= self.slot_count {
             return Err(SlabError::UnknownHandle);
@@ -445,7 +443,7 @@ impl Slab {
     /// Test-only override of slot `slot`'s stored memory tag.
     ///
     /// Models direct tampering with the slab's `tags[]` metadata — a
-    /// freelist/metadata-corruption primitive (`AGENTS.md` §19.10),
+    /// freelist/metadata-corruption primitive,
     /// distinct from the natural rotation [`Slab::alloc`] performs. A
     /// later [`Slab::slot_mut`]/[`Slab::free`] presented with the
     /// *original* handle must then be rejected as a
@@ -475,7 +473,7 @@ impl Slab {
     /// The zero-on-free invariant ([`Slab::free`] wipes the slot, a fresh
     /// slab starts zeroed) means every *free* slot is all-zero, so this is
     /// the check [`Slab::alloc`] runs before reuse to catch a slot whose
-    /// zero-on-free was skipped or corrupted (`AGENTS.md` §3.3).
+    /// zero-on-free was skipped or corrupted.
     fn slot_is_clean(&self, slot: usize) -> bool {
         let off = GUARD_BYTES + slot * self.object_size;
         self.storage[off..off + self.object_size]
@@ -618,7 +616,7 @@ mod tests {
     #[test]
     fn each_reallocation_rotates_the_tag() {
         // Repeated alloc/free of the same slot must keep changing the tag
-        // so no two consecutive lifetimes share one (`AGENTS.md` §19.10).
+        // so no two consecutive lifetimes share one.
         let mut s = Slab::new(8, 1).unwrap();
         let mut previous = None;
         for _ in 0..TAG_COUNT {
@@ -693,7 +691,7 @@ mod tests {
     #[test]
     fn new_defaults_to_software_tag_check_enabled() {
         // The software UAF check is on by default on every port that
-        // does not enforce UAF in hardware (`AGENTS.md` §19.10).
+        // does not enforce UAF in hardware.
         let s = Slab::new(16, 1).unwrap();
         assert_eq!(s.tag_check(), SoftwareTagCheck::Enabled);
         assert!(s.tag_check().is_enabled());
@@ -746,7 +744,7 @@ mod tests {
     #[test]
     fn disabled_check_still_detects_double_free_and_unknown_handle() {
         // Standing down the *tag* check must not weaken the other slab
-        // invariants (`AGENTS.md` §5.4 fail closed).
+        // invariants (fail closed).
         let mut s = Slab::with_tag_check(16, 1, SoftwareTagCheck::Disabled).unwrap();
         let h = s.alloc().unwrap();
         s.free(h).unwrap();
@@ -770,11 +768,11 @@ mod tests {
         assert!(format!("{}", SlabError::DirtySlot).contains("zeroed"));
     }
 
-    // -- §3.2 deliberate metadata-corruption tests ------------------------
+    // deliberate metadata-corruption tests ------------------------
     //
     // These drive the *detector*: corrupt the slab's `tags[]` / `in_use[]`
     // metadata through the sanctioned `#[cfg(test)]` trapdoors and assert
-    // the next operation fails closed (`AGENTS.md` §5.4) rather than
+    // the next operation fails closed rather than
     // handing back a live aliased object or a stale slot.
 
     #[test]
@@ -787,7 +785,7 @@ mod tests {
         assert_ne!(forged, h.tag());
         s.poke_tag_for_test(h.slot, forged).unwrap();
         // The original handle now disagrees with the slot's tag: every
-        // access path must reject it (`AGENTS.md` §19.10).
+        // access path must reject it.
         assert!(matches!(s.slot_mut(h), Err(SlabError::TagMismatch)));
         assert!(matches!(s.free(h), Err(SlabError::TagMismatch)));
     }
@@ -844,10 +842,10 @@ mod tests {
         ));
     }
 
-    // -- §3.3 stale-data / dirty-slot reuse tests -------------------------
+    // stale-data / dirty-slot reuse tests -------------------------
     //
     // These prove zero-on-free is an *enforced* invariant, not incidental
-    // (`AGENTS.md` §3.3 / §4 of the charter, CWE-908/200): if a freed
+    // (of the charter, CWE-908/200): if a freed
     // slot's wipe is skipped or corrupted, the reuse path must refuse the
     // slot rather than leak its previous occupant's bytes.
 
@@ -891,7 +889,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
-        /// §3.7 / §4 (CWE-787): a single-byte corruption at *any* storage
+        /// (CWE-787): a single-byte corruption at *any* storage
         /// offset is either detected (guard) or lands in legal slot bytes,
         /// and the next operations stay **total** — they return `Ok` or a
         /// typed `Err`, never UB, never a panic, and never a live aliased
@@ -899,7 +897,7 @@ mod tests {
         /// length).
         ///
         /// This validates the *detector*, not the impossibility of
-        /// corruption (`AGENTS.md` §2.6, §6 of the charter).
+        /// corruption (of the charter).
         #[test]
         fn single_byte_storage_corruption_is_total_and_never_aliases(
             object_size in 1usize..64,

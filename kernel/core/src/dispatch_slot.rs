@@ -19,8 +19,8 @@
 //! audit sink) so that the binary's `extern "C"` callback can find it
 //! at syscall time. That place is one [`DispatchCallbackSlot`] per
 //! `rustos-kernel` binary, owned by the bin crate in a `'static`
-//! storage (not a global *mutable* static — see the §2 rationale in
-//! `AGENTS.md`), referenced from [`crate::BootInfo`], and published
+//! storage (not a global *mutable* static), referenced from
+//! [`crate::BootInfo`], and published
 //! at the new `Phase::Syscall` step `kernel_main` runs between
 //! `Phase::Sched` and `Phase::Ipc`.
 //!
@@ -30,12 +30,12 @@
 //! before `syscall` may ever fire — the arch-level
 //! `set_dispatch_callback` is invoked before `syscall` is enabled
 //! (see `kernel/rustos-kernel::dispatch` rustdoc and
-//! `AGENTS.md` §5.4.5 "fail closed"). The slot only ever transitions
+//! "fail closed"). The slot only ever transitions
 //! `Empty → Installed`; no re-installation, no mutation after
 //! publish. [`rustos_sync::OnceCell`] is exactly that
 //! transition with the right memory ordering for cross-CPU
 //! observation, no extra primitive needed
-//! (`AGENTS.md` §2.3 — no bloat).
+//! (no bloat).
 //!
 //! # Concurrency
 //!
@@ -60,7 +60,7 @@ use rustos_sync::OnceCell;
 ///   syscall-return register and returns to user space.
 /// * [`Self::NoCallerContext`] — the hook could not identify the
 ///   caller (no task currently running on this CPU; no capability
-///   record for the running task). `AGENTS.md` §5.4.5 mandates the
+///   record for the running task). The charter mandates the
 ///   bin crate **fail closed** here, exactly the way the
 ///   `fail_closed_dispatch` callback did before (f5): emit a
 ///   security record and halt the CPU forever. The hook has already
@@ -70,8 +70,7 @@ use rustos_sync::OnceCell;
 /// The split exists because the audit-record emission belongs in
 /// `kernel/core` (which owns the audit-event catalogue) while the
 /// `halt` belongs in the arch-coupled bin crate — neither side can
-/// own both responsibilities without bloating its dependency surface
-/// (`AGENTS.md` §2.4).
+/// own both responsibilities without bloating its dependency surface.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum DispatchOutcome {
     /// The hook ran to completion and produced a normal
@@ -94,8 +93,7 @@ pub enum DispatchOutcome {
     /// path, which is why `result` is still carried — the bin crate need
     /// not special-case the action).
     ///
-    /// `cpu` is the dispatching CPU the hook identified the caller on
-    /// (`AGENTS.md` §5.4.1); it keys the per-CPU resume handle so the
+    /// `cpu` is the dispatching CPU the hook identified the caller on; it keys the per-CPU resume handle so the
     /// suspend reaches *this* CPU's running task.
     Reschedule {
         /// The syscall-return value to encode once the caller is resumed
@@ -104,7 +102,7 @@ pub enum DispatchOutcome {
         /// What the scheduler should do with the caller.
         action: RescheduleAction,
         /// The CPU the caller was identified on; keys the per-CPU resume
-        /// handle (`AGENTS.md` §5.4.1).
+        /// handle.
         cpu: u32,
     },
 }
@@ -116,7 +114,7 @@ pub enum DispatchOutcome {
 /// dispatch-callback ABI so the bin-crate callback and
 /// [`crate::dispatch_slot`] never depend on `kernel/sched`'s vocabulary;
 /// [`crate::reschedule_current`] maps it onto the scheduler's own
-/// `TaskAction` at the one boundary that needs it (`AGENTS.md` §2.2 — one
+/// `TaskAction` at the one boundary that needs it (one
 /// definition, decoded at the edge).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RescheduleAction {
@@ -150,8 +148,7 @@ pub enum RescheduleAction {
 /// `Dispatcher::dispatch`'s return value. Keeping that split here
 /// means the bin crate never reaches into `kernel/sec` / `kernel/sched`
 /// / `kernel/syscall` internals on the syscall hot path — those
-/// dependencies stay confined to `kernel/core` (`AGENTS.md` §2.4 —
-/// no interface creep).
+/// dependencies stay confined to `kernel/core` (no interface creep).
 pub trait DispatchHook: Sync {
     /// Run one syscall and return its result.
     ///
@@ -164,9 +161,9 @@ pub trait DispatchHook: Sync {
     /// The implementation:
     ///
     /// 1. Identifies the caller (per-CPU `current_task` + per-task
-    ///    capability lookup) — `AGENTS.md` §5.4.1.
+    ///    capability lookup).
     /// 2. Forwards through [`rustos_kernel_syscall::Dispatcher::dispatch`],
-    ///    which performs the remaining four §5.4 steps.
+    ///    which performs the remaining four steps.
     ///
     /// On a caller-identification failure (no task currently running
     /// on this CPU; capability record missing for the running task)
@@ -176,10 +173,9 @@ pub trait DispatchHook: Sync {
     ///    failure (the production implementation uses
     ///    [`crate::AuditEvent::SyscallNoCallerContext`]).
     /// 2. Return [`DispatchOutcome::NoCallerContext`], so the
-    ///    bin-crate callback halts the CPU forever (`AGENTS.md`
-    ///    §5.4.5 — fail closed).
+    ///    bin-crate callback halts the CPU forever (fail closed).
     ///
-    /// Never panic, never silently succeed (`AGENTS.md` §2.9).
+    /// Never panic, never silently succeed.
     fn dispatch(&self, raw_number: u16, args: RawArgs) -> DispatchOutcome;
 }
 
@@ -207,7 +203,7 @@ impl DispatchCallbackSlot {
     ///
     /// `const fn`, so the bin crate can declare its own slot as a
     /// `static` without resorting to lazy initialisation
-    /// (`AGENTS.md` §2 — no global mutable static; the slot is
+    /// (no global mutable static; the slot is
     /// immutable at the type level, with a controlled set-once
     /// publish through [`Self::install_dispatcher`]).
     #[must_use]
@@ -230,7 +226,7 @@ impl DispatchCallbackSlot {
     /// Returns [`AlreadyInstalledError`] if the slot has already
     /// accepted a hook. The caller is responsible for converting that
     /// into the appropriate boot-phase failure and halting — no
-    /// silent retry (`AGENTS.md` §5.4.5 — fail closed).
+    /// silent retry (fail closed).
     pub fn install_dispatcher(
         &self,
         hook: &'static (dyn DispatchHook + 'static),
@@ -253,7 +249,7 @@ impl DispatchCallbackSlot {
     /// `kernel_main` finished the `Syscall` init phase — which the
     /// arch-level `set_dispatch_callback` ordering contract makes
     /// impossible in a correctly-ordered boot, but the callback is
-    /// still required to handle it (`AGENTS.md` §5.4.5).
+    /// still required to handle it.
     ///
     /// The returned reference is `'static`: hooks live for the
     /// lifetime of the running kernel by construction in
@@ -266,7 +262,7 @@ impl DispatchCallbackSlot {
         // failed). The slot never uses the failing initialiser path,
         // so poisoning is structurally impossible here; we fold
         // `Err` and `Ok(None)` into the same `None` so callers see a
-        // single fail-closed branch (`AGENTS.md` §2.9 — no
+        // single fail-closed branch (no
         // `unwrap`/`expect`).
         match self.hook.get() {
             Ok(Some(hook)) => Some(*hook),
@@ -306,7 +302,7 @@ impl core::fmt::Debug for DispatchCallbackSlot {
 /// programmer error (double `kernel_main` entry, double registration
 /// from test glue). The boot path converts this into
 /// [`crate::InitError::DispatcherAlreadyInstalled`] and halts — no
-/// silent recovery (`AGENTS.md` §5.4.5).
+/// silent recovery.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct AlreadyInstalledError;
 

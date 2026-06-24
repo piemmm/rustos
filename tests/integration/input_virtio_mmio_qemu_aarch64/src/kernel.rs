@@ -2,8 +2,7 @@
 //! integration test.
 //!
 //! The device-agnostic bring-up *and* the virtio-input key-decode tail
-//! both live in the shared `rustos-test-virtio-qemu-support` crate
-//! (`AGENTS.md` §2.2). This module supplies only what is unique to this
+//! both live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the bare virtio-input MMIO device id, the spawner registering
 //! the loaded image through the virtio-input `register`, and the boot
 //! harness. The device tail ([`virtio_input_keypress`]) is shared with

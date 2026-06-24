@@ -3,7 +3,7 @@
 //! them.
 //!
 //! The model is deliberately free of any terminal I/O so it is exhaustively
-//! testable on the host (`AGENTS.md` §7): the [`crate::app`] glue feeds it
+//! testable on the host: the [`crate::app`] glue feeds it
 //! events and asks [`crate::app::render`] to draw it. All of curses' geometry
 //! quirks (clamping a selection, keeping it on screen) live here once.
 

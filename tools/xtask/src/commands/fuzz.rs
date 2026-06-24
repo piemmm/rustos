@@ -1,7 +1,7 @@
-//! `cargo xtask fuzz` — drive the in-tree fuzz harnesses (`AGENTS.md` §19.6).
+//! `cargo xtask fuzz` — drive the in-tree fuzz harnesses.
 //!
-//! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): the
-//! per-crate harnesses are seeded, allocation-free Rust tests that §19.6
+//! RustOS does not pull in an external fuzz runner: the
+//! per-crate harnesses are seeded, allocation-free Rust tests that
 //! explicitly sanctions as the "equivalent in-tree harness". This
 //! orchestrator is the single place that runs every such harness for a
 //! wall-clock budget, so a PR and a nightly soak share one definition of the
@@ -13,13 +13,13 @@
 //! elapses (a plain `cargo test` leaves the variable unset and runs the fast,
 //! fixed-iteration smoke sweep instead). It also exports a per-harness PRNG
 //! seed (`commands::seed`): by default a *fresh* seed each run, so two soaks
-//! never replay the same input stream (§2.1); with `--seed N`, a deterministic
+//! never replay the same input stream; with `--seed N`, a deterministic
 //! seed that reproduces a logged crash. The chosen seed is logged with each
 //! job. A harness that crashes, hangs, or fails its invariant fails the
-//! command — §19.6 fails closed.
+//! command fails closed.
 //!
 //! Adding a harness means adding a [`Target`] here, never teaching `ci`
-//! about it directly. The §19.6 burn-down now covers the wire decoders,
+//! about it directly. The burn-down now covers the wire decoders,
 //! the syscall dispatcher, the `userland/net` protocol parsers, and the
 //! capability-checked IPC port endpoint.
 
@@ -44,7 +44,7 @@ pub struct Target {
 /// The closed set of fuzz harnesses, in run order.
 ///
 /// Every entry is a deterministic `cargo test` harness; this registry is
-/// what wires them into the §19.6 budgeted runs. The set covers the wire
+/// what wires them into the budgeted runs. The set covers the wire
 /// decoders (`lib/abi`), the syscall dispatcher, the `userland/net`
 /// protocol parsers, and the capability-checked IPC port endpoint.
 pub const TARGETS: &[Target] = &[
@@ -146,9 +146,9 @@ impl Mode {
             // A single iteration: no wall-clock budget is exported, so the
             // harness runs its single smoke iteration.
             Mode::Once => None,
-            // §19.6: "runs each harness for ≥ 5 s" (the GitHub soak step).
+            // "runs each harness for ≥ 5 s" (the GitHub soak step).
             Mode::Quick => Some(Duration::from_secs(5)),
-            // §19.6: "runs each harness for ≥ 24 h".
+            // "runs each harness for ≥ 24 h".
             Mode::Soak => Some(Duration::from_secs(24 * 60 * 60)),
         }
     }
@@ -171,7 +171,7 @@ pub struct Options {
     /// Reproduce an earlier run by fixing its PRNG seed (`--seed <n>`).
     ///
     /// Unset (the default, including in `ci`) draws a fresh per-harness seed
-    /// each run, so consecutive soaks explore new inputs (§19.6, §2.1).
+    /// each run, so consecutive soaks explore new inputs.
     /// Setting it replays the exact stream the orchestrator logged for a
     /// reported crash.
     pub seed: Option<u64>,
@@ -329,8 +329,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
             }
             // Each harness reads this seed instead of its built-in constant,
             // so a fresh seed (the default) makes every run explore new
-            // inputs while `--seed N` reproduces a logged crash exactly
-            // (§19.6, §2.1). The seed is in the label so it reaches the log.
+            // inputs while `--seed N` reproduces a logged crash exactly. The seed is in the label so it reaches the log.
             let job_seed = seed::job_seed(opts.seed, i);
             cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
             let budget_desc = match budget {
@@ -373,13 +372,13 @@ mod tests {
 
     #[test]
     fn quick_budget_meets_the_five_second_floor() {
-        // §19.6 mandates ≥ 5 s per harness for the budgeted soak step.
+        // the charter mandates ≥ 5 s per harness for the budgeted soak step.
         assert!(Mode::Quick.budget().expect("quick is budgeted").as_secs() >= 5);
     }
 
     #[test]
     fn soak_budget_meets_the_twenty_four_hour_floor() {
-        // §19.6 mandates ≥ 24 h per harness for the nightly soak.
+        // the charter mandates ≥ 24 h per harness for the nightly soak.
         assert!(Mode::Soak.budget().expect("soak is budgeted").as_secs() >= 24 * 60 * 60);
     }
 
@@ -429,7 +428,7 @@ mod tests {
     #[test]
     fn seed_defaults_to_none_so_each_run_is_fresh() {
         // No `--seed` means the orchestrator draws a fresh seed per run, so
-        // consecutive soaks explore new inputs (§19.6, §2.1).
+        // consecutive soaks explore new inputs.
         let opts = parse(&argv(&[])).expect("empty args parse");
         assert_eq!(opts.seed, None);
     }
@@ -540,7 +539,7 @@ mod tests {
 
     #[test]
     fn registry_covers_the_burn_down_endpoints() {
-        // §19.6: wire decoders, dispatcher, userland/net parsers, IPC port.
+        // wire decoders, dispatcher, userland/net parsers, IPC port.
         for required in ["fuzz_decode", "fuzz_args", "fuzz_parse", "fuzz_port"] {
             assert!(
                 TARGETS.iter().any(|t| t.test == required),

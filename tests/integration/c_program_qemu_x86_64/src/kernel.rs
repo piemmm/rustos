@@ -109,7 +109,7 @@ fn c_program_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A `CapabilityQuery` granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4).
+/// spawn caller requires.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -237,7 +237,7 @@ fn run_round_trip() -> ! {
     // IRQ is taken while the program runs in ring 3 (under this CR3), and its
     // ISR reads the LAPIC ID register and writes EOI at `LAPIC_BASE_PHYS`.
     // Without this mapping that kernel-mode MMIO access would page-fault under
-    // the minimal user CR3 (`AGENTS.md` §2.17) — the same page the production /
+    // the minimal user CR3 — the same page the production /
     // timeshare spaces map. The preempt callback then no-ops here (no user
     // kthread is published), so preemption stays transparent to this round-trip.
     if arch
@@ -272,8 +272,7 @@ fn run_round_trip() -> ! {
     //    kernel-side fill writes land in the right place.
     // The arch `paging::AddressSpace` implements the Arch HAL page-table
     // surface (`mmu::AddressSpace` + `tlb::TlbShootdown`) directly, so the
-    // `kernel/mem` façade drives it with no per-test adapter (`AGENTS.md`
-    // §2.2; the Stage W5b-2 wiring removed the old `PageTableOps` shim).
+    // `kernel/mem` façade drives it with no per-test adapter (the Stage W5b-2 wiring removed the old `PageTableOps` shim).
     let mut space = AddressSpace::new(arch);
     let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, 1 << 30);
     let request = SpawnRequest {

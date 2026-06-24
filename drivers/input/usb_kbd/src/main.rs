@@ -1,24 +1,23 @@
 //! The `Run` entry-point binary of the USB boot-keyboard driver, installed as
 //! a signed `/System/Drivers/` bundle and **autoloaded into user space** by
 //! `devmgr` when a HID boot-keyboard interface is discovered behind a USB host
-//! (`AGENTS.md` §18, `plans/PI.md` P10 chunk 5d-2-ii).
+//! (`plans/PI.md` P10 chunk 5d-2-ii).
 //!
-//! This is the "drivers in user space" steady state (`AGENTS.md` §4): the
+//! This is the "drivers in user space" steady state: the
 //! board bus chain (`drivers/bus/pcie_brcm` + `drivers/bus/usb`) brings the
 //! controller up and emits the enumerated HID device into the hardware tree,
 //! the kernel mints this process exactly the device-resource grants its
 //! matched node requested — its already-assigned xHCI register BAR and a DMA
-//! constraint, and no more (`AGENTS.md` §4 / §18.3) — and this program reaches
+//! constraint, and no more — and this program reaches
 //! them through the rt-backed `RtDriverHost`. It names no board, PCI, or
-//! BCM2711 detail (`AGENTS.md` §2.20): it maps a register window by address,
+//! BCM2711 detail: it maps a register window by address,
 //! carves a DMA region, and speaks the bus-agnostic xHCI protocol via the
 //! arch-neutral `rustos_hid` composition.
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only (`AGENTS.md` §1), so it
+//! It is a **pure-Rust** program: RustOS is Rust-only, so it
 //! links the Rust userland runtime `rustos-rt` — never the C ABI, which exists
-//! solely for programs **not** written in Rust (`AGENTS.md` §16.4).
-//! `rustos-rt` provides `_start`, the per-process stack canary (`AGENTS.md`
-//! §19.2), the panic handler, and the syscall wrappers; `rustos_rt::entry!`
+//! solely for programs **not** written in Rust.
+//! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, and the syscall wrappers; `rustos_rt::entry!`
 //! names this program's `main`. It is a separate crate from the
 //! `rustos-drv-input-usb-hid` driver (which the kernel still links for the
 //! transitional in-kernel scaffold) so the userland runtime never enters the
@@ -29,29 +28,26 @@
 //! * `RtDriverHost::from_grants_query` over `RtGrantSyscalls`: the host
 //!   learns its kernel-issued grants through the `resource_grants` syscall and
 //!   maps/carves them through `mmio_map` / `dma_alloc`. Every capability and
-//!   bound is re-checked kernel-side, on the far side of the trap (`AGENTS.md`
-//!   §5.4); the host adds no authority. The DMA carve is coherent kernel-side,
+//!   bound is re-checked kernel-side, on the far side of the trap; the host adds no authority. The DMA carve is coherent kernel-side,
 //!   so no architecture-specific cache-maintenance shim is supplied here
-//!   (`coherency = None`, keeping the program platform-neutral, `AGENTS.md`
-//!   §2.20).
+//!   (`coherency = None`, keeping the program platform-neutral).
 //! * `derive_keyboard_resources` over the same delivered grants
 //!   (`RtDriverHost::resources`): the register BAR window and the DMA
 //!   aperture bound are read from the grants the kernel delivered, never a
-//!   build-time board constant (`AGENTS.md` §2.16 / §2.20).
+//!   build-time board constant.
 //! * `bring_up_boot_keyboard`: carves the device-shared DMA region (aperture
-//!   checked before any register is touched, `AGENTS.md` §5.4), maps the BAR,
+//!   checked before any register is touched), maps the BAR,
 //!   brings the xHCI controller up, and enumerates the boot keyboard.
 //! * The `KeyInjectSink` over the `key_inject` syscall: each decoded key
 //!   edge is injected into the kernel input-focus arbiter, which routes it by
-//!   who holds focus (`AGENTS.md` §17.4). The driver no longer chooses the
+//!   who holds focus. The driver no longer chooses the
 //!   encoding or the destination.
 //!
 //! After bring-up `main` polls the keyboard forever with `pump_once`,
-//! yielding between polls so the rest of the system runs (`AGENTS.md` §2.1 — a
+//! yielding between polls so the rest of the system runs (a
 //! cooperative poll loop, never a hard spin); a `pump_once` error is non-fatal
 //! and the next poll retries. A bring-up failure exits with a reserved
-//! fail-closed code, leaving the console without a keyboard rather than wedged
-//! (`AGENTS.md` §2.9); the spawning supervisor decides whether to relaunch.
+//! fail-closed code, leaving the console without a keyboard rather than wedged; the spawning supervisor decides whether to relaunch.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -76,8 +72,7 @@ mod program {
     use rustos_util::fmt::format_hex_u64;
 
     /// Diagnostic event id for a one-shot bring-up failure capture, naming
-    /// the phase that stalled and the controller state observed there
-    /// (`AGENTS.md` §15.7). The user-space replacement for the deleted
+    /// the phase that stalled and the controller state observed there. The user-space replacement for the deleted
     /// in-kernel scaffold's `4126` localisation record, now emitted over
     /// `log_emit`; the kernel attributes it to this driver task.
     const USB_KBD_BRINGUP_FAILED: EventId = EventId(4126);
@@ -89,9 +84,9 @@ mod program {
 
     /// Emit a one-shot structured diagnostic naming where boot-keyboard
     /// bring-up stalled, so the on-metal capture pins the failing controller
-    /// step (`AGENTS.md` §15.7 — QEMU models no Pi USB, §0.4). Best-effort:
+    /// step (QEMU models no Pi USB, §0.4). Best-effort:
     /// a refused or faulting `log_emit` drops the record rather than wedging
-    /// the driver (`AGENTS.md` §2.9 / §20).
+    /// the driver.
     ///
     /// For a [`BringupPhase::ControllerOpen`] stall the record carries the
     /// reset sub-stage and its `USBCMD`/`USBSTS`; for a
@@ -196,18 +191,16 @@ mod program {
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value (`AGENTS.md`
-    /// §2.9).
+    /// delivery did not fit). A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
     /// Exit code when the delivered grants do not name the register BAR and a
-    /// DMA constraint this driver needs — an unbound or mis-provisioned node
-    /// (`AGENTS.md` §18.4 / §5.4). A reserved, fail-closed value.
+    /// DMA constraint this driver needs — an unbound or mis-provisioned node. A reserved, fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
 
     /// Exit code when the controller/keyboard bring-up failed (no USB
     /// function, a DMA carve outside the aperture, a mapping failure, or an
-    /// empty enumeration). A reserved, fail-closed value (`AGENTS.md` §2.9);
+    /// empty enumeration). A reserved, fail-closed value;
     /// the console is left without a keyboard, never wedged.
     const EXIT_BRINGUP_FAILED: i32 = 82;
 
@@ -215,8 +208,7 @@ mod program {
     /// `mmio_map` / `dma_alloc` trap, so a missing grant fails fast without a
     /// round trip. It mirrors the resources the matched node requested — the
     /// register BAR (`CAP_MMIO_MAP`) and the DMA region (`CAP_MEM_DMA`). The
-    /// kernel is the authority and re-checks every trap regardless
-    /// (`AGENTS.md` §5.4): claiming a capability the process was not granted
+    /// kernel is the authority and re-checks every trap regardless: claiming a capability the process was not granted
     /// only fails the trap kernel-side, never widens authority.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
@@ -224,7 +216,7 @@ mod program {
         caps.insert(CapabilityId::MEM_DMA);
         // The driver emits a one-shot structured bring-up diagnostic through
         // `log_emit` when the controller does not come up, which the kernel
-        // gates on `CAP_LOG_EMIT` (`AGENTS.md` §19.4 / §5.4). The kernel
+        // gates on `CAP_LOG_EMIT`. The kernel
         // re-checks every trap regardless; claiming a capability the process
         // was not granted only fails the trap, never widens authority.
         caps.insert(CapabilityId::LOG_EMIT);
@@ -234,13 +226,12 @@ mod program {
     /// A [`ConsoleSink`] that injects each decoded keyboard record into the
     /// kernel input-focus arbiter through the `key_inject` syscall.
     ///
-    /// The user-space counterpart of the in-kernel `ArbiterConsoleSink`
-    /// (`AGENTS.md` §2.2): [`pump_once`] hands it one whole [`KeyInput`]
+    /// The user-space counterpart of the in-kernel `ArbiterConsoleSink`: [`pump_once`] hands it one whole [`KeyInput`]
     /// record's wire bytes per key edge; it decodes them fail-closed and
     /// injects the record. The kernel validates `CAP_INPUT_INJECT` and routes
-    /// the record by who holds input focus (`AGENTS.md` §17.4). A malformed
+    /// the record by who holds input focus. A malformed
     /// record or a refused injection surfaces as [`DriverError::DeviceFault`]
-    /// rather than silently dropping input (`AGENTS.md` §2.9); the pump loop
+    /// rather than silently dropping input; the pump loop
     /// treats it as a non-fatal poll error and retries.
     struct KeyInjectSink;
 
@@ -262,18 +253,18 @@ mod program {
     fn main() -> i32 {
         // Build the host from the grants the kernel minted for this driver.
         // Coherent DMA is carved kernel-side, so no architecture-specific
-        // cache-maintenance shim is supplied (`AGENTS.md` §2.20).
+        // cache-maintenance shim is supplied.
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         // Derive the BAR window and DMA aperture from the same delivered
         // grants the host maps over — no build-time board constant, no second
-        // `resource_grants` syscall (`AGENTS.md` §2.16 / §2.20).
+        // `resource_grants` syscall.
         let Ok(resources) = derive_keyboard_resources(host.resources()) else {
             return EXIT_NO_RESOURCES;
         };
         // The one userland clock-backed `Delay` for the hardware-dictated
-        // hub settle windows (`AGENTS.md` §2.2).
+        // hub settle windows.
         let delay = ClockDelay::new();
         let mut keyboard = match bring_up_boot_keyboard_diagnostic(
             &host,
@@ -286,8 +277,7 @@ mod program {
             Err(err) => {
                 // Pin the failing controller step on the captured serial log
                 // before exiting fail-closed: QEMU models no Pi USB, so this
-                // one-shot diagnostic is how a metal run localises the stall
-                // (`AGENTS.md` §15.7 / §2.9). The console is left without a
+                // one-shot diagnostic is how a metal run localises the stall. The console is left without a
                 // keyboard, never wedged.
                 log_bringup_failure(&err);
                 return EXIT_BRINGUP_FAILED;
@@ -295,7 +285,7 @@ mod program {
         };
         // One-shot beacon: bring-up reached the report loop. A metal capture
         // that shows this but no keystrokes localises the residual to the
-        // pump path rather than bring-up (`AGENTS.md` §15.7).
+        // pump path rather than bring-up.
         log(
             &LogSink,
             &Event {
@@ -308,7 +298,7 @@ mod program {
 
         // Poll the keyboard forever, injecting each decoded key edge into the
         // input-focus arbiter and yielding between polls so PID 1 and every
-        // other task keeps running (`AGENTS.md` §2.1). A `pump_once` error is
+        // other task keeps running. A `pump_once` error is
         // non-fatal: the next poll retries rather than dropping the driver.
         let mut console = KeyboardConsole::new();
         let mut sink = KeyInjectSink;

@@ -7,8 +7,7 @@
 //! arch-specific bring-up modules ([`crate::imp_pci`],
 //! [`crate::imp_mmio`]) reach hardware (PCI vs. MMIO, MSI-X vs. PLIC,
 //! `hlt` vs. `wfi`) and supply the concrete [`QemuEnv`]; this module
-//! owns the parts that must not be duplicated across arches
-//! (`AGENTS.md` §2.2):
+//! owns the parts that must not be duplicated across arches:
 //!
 //! * [`QemuEnv`] — the serial-breadcrumb + QEMU-exit seam each arch
 //!   implements over its own serial sink and finisher device.
@@ -120,13 +119,13 @@ pub struct ScenarioConfig<'a> {
 /// `load → snapshot → reload → unload` cycle against `factory`, running
 /// `body` (the device round-trip) *after* the reload and *before* the
 /// unload. Every transition that misbehaves flips QEMU failure with a
-/// breadcrumb (`AGENTS.md` §7 — no weakened tests). Never returns.
+/// breadcrumb (no weakened tests). Never returns.
 ///
 /// `body` is the per-device tail — typically [`virtio_blk_round_trip`]
 /// or [`virtio_net_ping`], monomorphised over the arch's concrete
 /// [`Transport`]. The whole cycle is shared so every vertical proves a
 /// reloaded driver still brings its real device online and round-trips
-/// I/O without duplicating the cycle per arch (`AGENTS.md` §2.2).
+/// I/O without duplicating the cycle per arch.
 pub fn drive_driver_lifecycle<Tr, F>(
     env: &dyn QemuEnv,
     cfg: &ScenarioConfig<'_>,
@@ -198,7 +197,7 @@ where
 /// fixed driver entry.
 ///
 /// Shared by both verticals of a device class so the per-class spawner
-/// is written once (`AGENTS.md` §2.2). The concrete `register` is
+/// is written once. The concrete `register` is
 /// supplied at construction.
 pub struct FixedSpawner {
     entry: DriverEntry,
@@ -230,8 +229,7 @@ impl DriverSpawner for FixedSpawner {
 /// [`FrameAllocator`](rustos_kernel_mem::FrameAllocator) never hands out
 /// a frame the live kernel is using. It is bounded below
 /// [`IDENTITY_LIMIT`] so every frame it yields is reachable through the
-/// identity map. Both arch scenarios carve identically (`AGENTS.md`
-/// §2.2).
+/// identity map. Both arch scenarios carve identically.
 #[must_use]
 pub fn carve_dma_map(src: &BootMemoryMap, pages: usize) -> Option<BootMemoryMap> {
     let need = (pages as u64).checked_mul(PAGE_SIZE as u64)?;
@@ -265,7 +263,7 @@ pub fn carve_dma_map(src: &BootMemoryMap, pages: usize) -> Option<BootMemoryMap>
 /// Read the flattened device tree's total size from its header
 /// (`totalsize`, a big-endian `u32` at byte offset 4) so a `&[u8]` of the
 /// exact blob length can be formed from the raw pointer. Shared by the
-/// MMIO bring-up of every `virt`-board arch (`AGENTS.md` §2.2).
+/// MMIO bring-up of every `virt`-board arch.
 ///
 /// # Safety
 ///
@@ -307,7 +305,7 @@ fn fill_sector1(sector: &mut [u8; SECTOR_LEN]) {
 /// virtio-blk device tail: open the device over `transport`, read
 /// sector 0 and verify the harness-planted pattern, then write a known
 /// pattern to sector 1 and read it back. Generic over the transport so
-/// the PCI and MMIO verticals run identical code (`AGENTS.md` §2.2).
+/// the PCI and MMIO verticals run identical code.
 pub fn virtio_blk_round_trip<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
@@ -341,12 +339,12 @@ pub fn virtio_blk_round_trip<Tr: Transport>(
 /// [`Fat32`](rustos_drv_fs_fat32::Fat32) driver, verify the planted
 /// file reads back its known contents, then create and write a fresh
 /// file and read it back. Generic over the transport so the PCI and
-/// MMIO verticals run identical code (`AGENTS.md` §2.2).
+/// MMIO verticals run identical code.
 ///
 /// The on-disk layout and the planted/written file names and contents
 /// come from the shared [`rustos_test_fat32_image`] fixture — the same
 /// source of truth the host harness plants the backing image from, so
-/// the two sides cannot drift (`AGENTS.md` §2.2).
+/// the two sides cannot drift.
 pub fn fat32_round_trip<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
@@ -399,13 +397,12 @@ pub fn fat32_round_trip<Tr: Transport>(
 /// [`RustFs`](rustos_drv_fs_rustfs::RustFs) driver, verify the planted
 /// file reads back its known contents, then create and write a fresh
 /// file and read it back. Generic over the transport so the PCI and
-/// MMIO verticals run identical code (`AGENTS.md` §2.2).
+/// MMIO verticals run identical code.
 ///
 /// The on-disk layout and the planted/written file names and contents
 /// come from the shared [`rustos_test_rustfs_image`] fixture — the same
 /// source of truth the host harness plants the backing image from (and
-/// which the real driver itself authored), so the two sides cannot drift
-/// (`AGENTS.md` §2.2).
+/// which the real driver itself authored), so the two sides cannot drift.
 pub fn rustfs_round_trip<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
@@ -470,7 +467,7 @@ pub fn rustfs_round_trip<Tr: Transport>(
 /// The on-disk layout and the planted account come from the shared
 /// [`rustos_test_rustfs_image`] users-root fixture — the same source of
 /// truth the host harness plants the backing image from (authored by
-/// the real driver), so the two sides cannot drift (`AGENTS.md` §2.2).
+/// the real driver), so the two sides cannot drift.
 pub fn users_db_load<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
@@ -525,7 +522,7 @@ const MAX_POLLS: usize = 64;
 /// virtio-net device tail: open the device over `transport`, then drive
 /// `rustos_net_icmp::Client` to ARP-resolve the SLIRP gateway and
 /// exchange one ICMP echo. Generic over the transport so the PCI and
-/// MMIO verticals run identical code (`AGENTS.md` §2.2).
+/// MMIO verticals run identical code.
 pub fn virtio_net_ping<Tr: Transport>(
     env: &dyn QemuEnv,
     transport: Tr,
@@ -576,7 +573,7 @@ pub const INPUT_READY_MARKER: &str = "virtio-qemu: virtio-input eventq armed";
 /// Bounded per-edge poll budget. The wait itself is interrupt-driven
 /// inside [`Input::poll`] (the caller's IRQ waiter parks the CPU on the
 /// eventq SPI), so this only bounds frame-marker / spurious-wake churn
-/// between the real key edges; it never spins (`AGENTS.md` §2.1).
+/// between the real key edges; it never spins.
 const MAX_INPUT_POLLS: usize = 64;
 
 /// Drain the event queue until a `Key` event with the requested `value`
@@ -605,7 +602,7 @@ fn wait_for_key<Tr: Transport>(
 /// virtio-input device tail: bring the device online over `transport`,
 /// announce readiness, then decode a real injected key press followed by
 /// its release. Generic over the transport so a PCI vertical could run
-/// the identical code (`AGENTS.md` §2.2).
+/// the identical code.
 ///
 /// The key is injected by the QEMU runner through the monitor once it
 /// observes [`INPUT_READY_MARKER`] on the serial console — a real

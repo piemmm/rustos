@@ -1,4 +1,4 @@
-//! Passphrase-derived volume-key unlock (`AGENTS.md` §11, `plans/PI.md`
+//! Passphrase-derived volume-key unlock (`plans/PI.md`
 //! P11).
 //!
 //! A [`RustFs`](crate::RustFs) volume is opened with a 32-byte
@@ -19,8 +19,7 @@
 //! ```
 //!
 //! The KDF is [`rustos_crypto::pbkdf2_sha256`] — the same audited
-//! primitive that protects `/System/Security/Users` records (`AGENTS.md`
-//! §2.12, never a hand-rolled KDF). Its 256-bit output is exactly a
+//! primitive that protects `/System/Security/Users` records (never a hand-rolled KDF). Its 256-bit output is exactly a
 //! [`VolumeKey`], so no truncation or expansion is involved.
 //!
 //! # The descriptor is not a secret; the passphrase is
@@ -33,7 +32,7 @@
 //! never stored anywhere; only the operator (or, in future, a hardware
 //! key store) holds it.
 //!
-//! # Hardware-backed key storage (future, `AGENTS.md` §19.9)
+//! # Hardware-backed key storage (future)
 //!
 //! Typing a passphrase at every boot is the *baseline*, available on any
 //! board. A platform that has a hardware root of trust — a TPM with
@@ -46,8 +45,7 @@
 //! is out of scope for this module and tracked as future work: it is a
 //! *source* of the [`VolumeKey`], slotting in beside this passphrase path,
 //! and changes nothing about the on-disk volume. Physical attacks
-//! (cold-boot, decap) remain explicitly out of the charter threat model
-//! (`AGENTS.md` §19.9); sealing bounds the *remote/offline* attacker, not
+//! (cold-boot, decap) remain explicitly out of the charter threat model; sealing bounds the *remote/offline* attacker, not
 //! the one with the silicon in a lab.
 
 use core::num::NonZeroU32;
@@ -66,7 +64,7 @@ pub const UNLOCK_SALT_LEN: usize = 16;
 
 /// Lowest PBKDF2 iteration count an [`UnlockDescriptor`] may carry.
 ///
-/// A descriptor below this is refused on decode (`AGENTS.md` §5.4 — fail
+/// A descriptor below this is refused on decode (fail
 /// closed): a volume whose key is cheap to brute-force is a security
 /// defect, not a tuning choice. Mirrors the floor `lib/users` applies to
 /// password records.
@@ -75,7 +73,7 @@ pub const UNLOCK_MIN_ITERATIONS: u32 = 100_000;
 /// Highest PBKDF2 iteration count an [`UnlockDescriptor`] may carry.
 ///
 /// Bounds the work a malformed or hostile descriptor can force the
-/// bootstrap to perform (`AGENTS.md` §24.4 — a validation bound, not a
+/// bootstrap to perform (a validation bound, not a
 /// resource capacity). A real volume is provisioned far below this.
 pub const UNLOCK_MAX_ITERATIONS: u32 = 10_000_000;
 
@@ -88,7 +86,7 @@ pub const UNLOCK_DEFAULT_ITERATIONS: u32 = 600_000;
 
 /// Magic identifying the unlock descriptor on disk (`"RUKx"`, *RustOS
 /// Unlock*). A blob not beginning with it is not a descriptor and is
-/// refused rather than misinterpreted (`AGENTS.md` §2.9).
+/// refused rather than misinterpreted.
 const UNLOCK_MAGIC: [u8; 4] = *b"RUK1";
 
 /// KDF identifier: PBKDF2-HMAC-SHA256. The only algorithm this version
@@ -107,11 +105,11 @@ pub const UNLOCK_DESCRIPTOR_LEN: usize = 4 + 1 + 3 + 4 + UNLOCK_SALT_LEN;
 /// plaintext boot partition (the FAT boot partition of a Pi SD image).
 ///
 /// This is the on-storage contract between the *writer* — `tools/mkimage`
-/// and the §11 installer, which plant the descriptor here — and the
+/// and the installer, which plant the descriptor here — and the
 /// *reader*, the boot path that reads it back *before* anything is
 /// decrypted to turn the operator passphrase into the volume key. It lives
 /// beside [`UnlockDescriptor`] so both ends share one definition rather
-/// than each carrying a private copy of the literal (`AGENTS.md` §2.2).
+/// than each carrying a private copy of the literal.
 pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
 
 /// The fixed, **non-secret** volume key the read-only, signed-bundle
@@ -123,10 +121,10 @@ pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
 /// be readable *before* any passphrase is typed (it holds the keyboard
 /// driver needed to type the encrypted-root passphrase). So it is keyed by
 /// this well-known constant, embedded identically in the image author
-/// (`tools/mkimage`) and the boot path that mounts it (`AGENTS.md` §2.2):
+/// (`tools/mkimage`) and the boot path that mounts it:
 /// the volume is effectively unencrypted, and its integrity rests on the
 /// per-bundle Ed25519 signatures the load gate verifies, not on key
-/// secrecy (`AGENTS.md` §18.6). It must **never** be used for a volume
+/// secrecy. It must **never** be used for a volume
 /// that carries secrets — those use a passphrase-derived
 /// [`UnlockDescriptor::derive_volume_key`] key.
 pub const SYSTEM_VOLUME_KEY: VolumeKey = *b"RustOS-/System-RO-public-key:001";
@@ -155,7 +153,7 @@ impl UnlockDescriptor {
     ///   `UNLOCK_MIN_ITERATIONS..=UNLOCK_MAX_ITERATIONS` — a volume is
     ///   never provisioned with a cheap-to-attack or absurd cost.
     /// * Whatever [`EntropySource::fill`] returns if the salt draw fails;
-    ///   no descriptor is built from a failed draw (`AGENTS.md` §5.4), so
+    ///   no descriptor is built from a failed draw, so
     ///   a fresh volume never carries a predictable salt.
     pub fn provision(
         iterations: u32,
@@ -169,7 +167,7 @@ impl UnlockDescriptor {
 
     /// Validate `iterations` against the policy bounds and lift it to a
     /// [`NonZeroU32`], the form the struct stores so the derivation path
-    /// never has to reconsider zero (`AGENTS.md` §2.9 — no panic path).
+    /// never has to reconsider zero (no panic path).
     fn checked_iterations(iterations: u32) -> Result<NonZeroU32, DriverError> {
         if !(UNLOCK_MIN_ITERATIONS..=UNLOCK_MAX_ITERATIONS).contains(&iterations) {
             return Err(DriverError::OutOfRange);
@@ -198,7 +196,7 @@ impl UnlockDescriptor {
     /// passphrase yields the wrong key, which [`RustFs::open`](crate::RustFs::open)
     /// then rejects through the AEAD authentication of the wrapped master
     /// key — there is no separate "passphrase correct?" oracle here, so a
-    /// guess costs a full mount attempt (`AGENTS.md` §5.4).
+    /// guess costs a full mount attempt.
     #[must_use]
     pub fn derive_volume_key(&self, passphrase: &[u8]) -> VolumeKey {
         let hash = pbkdf2_sha256(passphrase, &self.salt, self.iterations);
@@ -236,7 +234,7 @@ impl UnlockDescriptor {
     /// ([`DriverError::BadMagic`]); or an iteration count outside
     /// `UNLOCK_MIN_ITERATIONS..=UNLOCK_MAX_ITERATIONS`
     /// ([`DriverError::OutOfRange`]). A blob that is not exactly a
-    /// well-formed descriptor never yields one (`AGENTS.md` §2.9 / §5.4.3
+    /// well-formed descriptor never yields one (
     /// — validate every field).
     pub fn decode(bytes: &[u8]) -> Result<Self, DriverError> {
         if bytes.len() < UNLOCK_DESCRIPTOR_LEN {

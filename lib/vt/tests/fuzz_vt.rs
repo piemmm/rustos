@@ -1,16 +1,16 @@
 //! Deterministic fuzz harness for the `lib/vt` streaming parser
-//! (`AGENTS.md` §19.5 / §19.6 — the terminal's untrusted-input decoder).
+//! (the terminal's untrusted-input decoder).
 //!
 //! [`rustos_vt::Parser`] consumes bytes a terminal did not produce: local shell
 //! output and, in the remote stages of `plans/CURSES.md`, a foreign host's
-//! output. Per §19.6 that decode path is driven by a fuzz harness whose single
+//! output. Per that decode path is driven by a fuzz harness whose single
 //! invariant is:
 //!
 //! * feeding any byte stream never panics and never reads out of bounds — the
 //!   parser either emits well-formed [`rustos_vt::Op`] events or silently drops
-//!   the bytes it cannot interpret (fail closed, `AGENTS.md` §2.9).
+//!   the bytes it cannot interpret (fail closed).
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded LCG
+//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG
 //! draws pseudo-random byte strings, mutates real escape-sequence templates, and
 //! splices structured-but-hostile sequences together. A plain `cargo test` runs
 //! the [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask

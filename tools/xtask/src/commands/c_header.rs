@@ -1,14 +1,14 @@
 //! `cargo xtask c-header` implementation.
 //!
 //! RustOS is written entirely in Rust, but its kernel/user interface
-//! (`abi-v1`, `AGENTS.md` §9) is a stable binary contract that programs
+//! (`abi-v1`) is a stable binary contract that programs
 //! written in other languages — C in particular — must be able to call.
 //! Those programs need a C-language *view* of the ABI: the syscall numbers,
 //! the error codes, the capability identifiers, the `#[repr(C)]` types, and a
 //! prototype for each syscall entry point.
 //!
 //! That view is the C development header set. It is **generated** from the one
-//! source of truth in `lib/abi` (`AGENTS.md` §2.2 — no duplication, §9 — the
+//! source of truth in `lib/abi` (no duplication — the
 //! ABI is versioned and a C surface is a view of the existing definition,
 //! never a hand-maintained parallel one). The committed headers live in their
 //! own top-level `include/` folder so they can be handed to developers
@@ -33,7 +33,7 @@
 //!
 //! Each syscall is exposed to C as a function named `ros_sys_<name>`
 //! (for example `ros_sys_ipc_send`). The names use the short `ros_` /
-//! `ROS_` C-ABI prefix (`AGENTS.md` §9) and are namespaced and frozen
+//! `ROS_` C-ABI prefix and are namespaced and frozen
 //! alongside the rest of `abi-v1`. The future user-space stub crate that
 //! issues the actual trap implements each one with an explicit
 //! `#[export_name = "ros_sys_<name>"]` so the Rust compiler does not
@@ -81,7 +81,7 @@ pub const DEFAULT_INCLUDE_DIR: &str = "include/rustos";
 ///
 /// The numeric value of every entry is read straight from the
 /// [`Errno`] enum, so this table can never disagree with the frozen
-/// discriminants (`AGENTS.md` §2.2): only the C spelling lives here, because
+/// discriminants: only the C spelling lives here, because
 /// Rust offers no way to enumerate an enum's variants at run time. The
 /// in-module `errno_table_matches_the_frozen_enum` test pins the count and
 /// the dense `1..=N` numbering so a newly appended `Errno` variant cannot be
@@ -190,7 +190,7 @@ fn generate_error() -> String {
     out
 }
 
-/// `rustos_capability.h` — the capability identifiers (`AGENTS.md` §5.2).
+/// `rustos_capability.h` — the capability identifiers.
 fn generate_capability() -> String {
     use std::fmt::Write as _;
     let mut out = banner("Capability identifiers (AGENTS.md sec.5.2).");
@@ -215,7 +215,7 @@ fn generate_capability() -> String {
     out
 }
 
-/// `rustos_time.h` — the 64-bit-native time types (`AGENTS.md` §21).
+/// `rustos_time.h` — the 64-bit-native time types.
 ///
 /// `ros_time64_t` / `ros_duration64_t` mirror the `#[repr(C)]` layout of
 /// [`Time64`] / [`Duration64`] (8-byte signed seconds + a 4-byte canonical
@@ -264,7 +264,7 @@ fn generate_time() -> String {
     out
 }
 
-/// `rustos_random.h` — the canonical random-number ABI (`AGENTS.md` §22).
+/// `rustos_random.h` — the canonical random-number ABI.
 ///
 /// Declares the single defined request flag bit (`ROS_RANDOM_FLAG_*`, read
 /// from [`RandomFlags`]) and the byte-count limits of a single request. The
@@ -302,8 +302,7 @@ fn generate_random() -> String {
     out
 }
 
-/// `rustos_log.h` — the `log_emit` diagnostic-record ABI (`AGENTS.md`
-/// §19.4 / §20).
+/// `rustos_log.h` — the `log_emit` diagnostic-record ABI.
 ///
 /// Declares the bounds of a `log_emit` record (the wire image
 /// `ros_sys_log_emit` consumes) so a non-Rust program can build one: the
@@ -369,7 +368,7 @@ fn generate_log() -> String {
     out
 }
 
-/// `rustos_rlimit.h` — the resource-limit ABI (`AGENTS.md` §24).
+/// `rustos_rlimit.h` — the resource-limit ABI.
 ///
 /// Declares the closed [`LimitKind`] discriminants as `ROS_LIMIT_KIND_*`
 /// macros, the no-limit sentinel `ROS_RLIMIT_INFINITY`, the wire length, and
@@ -449,8 +448,7 @@ fn generate_memory() -> String {
     out
 }
 
-/// `rustos_hwtree.h` — the architecture-neutral hardware tree (`AGENTS.md`
-/// §18.1).
+/// `rustos_hwtree.h` — the architecture-neutral hardware tree.
 ///
 /// Declares the hardware-tree version, the root-parent sentinel, the array
 /// bounds, the packed little-endian `*_WIRE_LEN` of each record, the
@@ -605,8 +603,7 @@ fn hwtree_structs(out: &mut String) {
     );
 }
 
-/// `rustos_ipc.h` — the IPC message header and port-name wire types
-/// (`AGENTS.md` §4).
+/// `rustos_ipc.h` — the IPC message header and port-name wire types.
 ///
 /// `ros_ipc_message_header_t` mirrors the `#[repr(C)]` layout of
 /// [`IpcMessageHeader`] and `ros_port_name_t` that of [`PortName`]; each is
@@ -672,7 +669,7 @@ fn generate_ipc() -> String {
     out
 }
 
-/// `rustos_stdinfo.h` — the Standard Information Stream ABI (`AGENTS.md` §20).
+/// `rustos_stdinfo.h` — the Standard Information Stream ABI.
 ///
 /// Declares the reserved `stdinfo` file descriptor, the framing version tags,
 /// and the closed [`StdInfoKind`] / [`Severity`] discriminant sets. The kinds
@@ -751,7 +748,7 @@ fn generate_stdinfo() -> String {
     out
 }
 
-/// `rustos_manifest.h` — the signed `rxe` manifest header (`AGENTS.md` §9).
+/// `rustos_manifest.h` — the signed `rxe` manifest header.
 ///
 /// `ros_manifest_header_t` mirrors the `#[repr(C)]` layout of
 /// [`ManifestHeader`]: the fixed-size prefix of the signed manifest section of
@@ -803,7 +800,7 @@ fn generate_manifest() -> String {
     out
 }
 
-/// `rustos_input.h` — the desktop input event ABI (`AGENTS.md` §9, §10).
+/// `rustos_input.h` — the desktop input event ABI.
 ///
 /// Declares the pointer ([`PointerInput`]) and keyboard ([`KeyInput`]) record
 /// magics and packed wire sizes, the `kind`, `button`, `key_class`, and
@@ -930,8 +927,7 @@ const NAMED_KEY_CODES: [(&str, u16); 26] = [
     ("ROS_KEY_F12", NamedKeyCode::F12.code()),
 ];
 
-/// `rustos_appinfo.h` — the application-bundle manifest ABI
-/// (`AGENTS.md` §16.5, §16.4).
+/// `rustos_appinfo.h` — the application-bundle manifest ABI.
 ///
 /// `ros_appinfo_header_t` mirrors the `#[repr(C)]` layout of [`AppInfoHeader`]
 /// (the signed manifest prefix; naturally aligned with no trailing padding, so
@@ -1039,7 +1035,7 @@ fn generate_appinfo() -> String {
 }
 
 /// `rustos_rxe.h` — the `rxe` load-image table and load-time hardening
-/// policy (`AGENTS.md` §9, §19.2).
+/// policy.
 ///
 /// `ros_load_header_t` mirrors the `#[repr(C)]` layout of [`LoadHeader`] (the
 /// fixed image prefix; naturally aligned, so the struct size equals the wire
@@ -1141,7 +1137,7 @@ fn generate_rxe() -> String {
 }
 
 /// `rustos_process.h` — the process startup vector the kernel hands a freshly
-/// spawned program (`AGENTS.md` §16.5; `plans/CCOMPAT.md` CC3).
+/// spawned program (`plans/CCOMPAT.md` CC3).
 ///
 /// `ros_process_start_header_t` mirrors the `#[repr(C)]` layout of
 /// [`ProcessStartHeader`] (the fixed block prefix; naturally aligned, so the
@@ -1234,7 +1230,7 @@ fn generate_process() -> String {
     out
 }
 
-/// `rustos_sysinfo.h` — the System Information API surface (`AGENTS.md` §16.6).
+/// `rustos_sysinfo.h` — the System Information API surface.
 ///
 /// Declares the `sysinfo-v1` framing (`ROS_SYSINFO_VERSION_*` /
 /// `ROS_SYSINFO_REQUEST_MAGIC` / `ROS_SYSINFO_MAX_PAYLOAD_LEN`), the
@@ -1639,7 +1635,7 @@ fn driver_emit_discriminants(out: &mut String) {
 ///
 /// The [`MountFlags`] bits live here — not in `rustos_sysinfo.h` where the
 /// `MountRecord.flags` field is a bare `uint32_t` — because the flag
-/// semantics are owned by the filesystem driver ABI (`AGENTS.md` §2.2).
+/// semantics are owned by the filesystem driver ABI.
 ///
 /// [`MountFlags`]: rustos_abi::driver::filesystem::MountFlags
 /// [`NodeId`]: rustos_abi::driver::filesystem::NodeId
@@ -1711,7 +1707,7 @@ fn driver_emit_submodule_constants(out: &mut String) {
 /// The driver input-event kinds are spelled `ROS_INPUT_EVENT_KIND_*` to
 /// stay disjoint from the windowing `ROS_INPUT_KIND_*` codes in
 /// `rustos_input.h`; they are different ABIs that happen to share the word
-/// "input" (`AGENTS.md` §2.2/§2.3).
+/// "input".
 ///
 /// [`DisplayFormat`]: rustos_abi::driver::display::DisplayFormat
 /// [`NodeKind`]: rustos_abi::driver::filesystem::NodeKind
@@ -1767,13 +1763,13 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
     out.push('\n');
 }
 
-/// `rustos_driver.h` — the driver-class ABI (`AGENTS.md` §8, §9).
+/// `rustos_driver.h` — the driver-class ABI.
 ///
 /// `ros_driver_manifest_t` mirrors the `#[repr(C)]` layout of
 /// [`DriverManifest`] (the signed driver-manifest prefix; naturally aligned,
 /// so the struct size equals the wire size), `ros_driver_bind_key_t` mirrors
 /// [`DriverBindKey`] (one bind-table entry: a `ros_hw_match_key_t` from
-/// `rustos_hwtree.h` plus the bind priority, `AGENTS.md` §18.3), and
+/// `rustos_hwtree.h` plus the bind priority), and
 /// `ros_driver_register_reply_t`
 /// mirrors [`DriverRegisterReply`] (the register-handshake outcome a spawned
 /// driver process reports to its host over IPC) with its
@@ -1786,7 +1782,7 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
 /// [`DriverHandle`] `ROS_DRIVER_HANDLE_NONE` sentinel (a live driver handle
 /// travels as a `uint64_t`). The syscall-table-hash length is shared with the
 /// application manifest, so the struct reuses `ROS_SYSCALL_TABLE_HASH_LEN` from
-/// `rustos_manifest.h` rather than re-declaring it (`AGENTS.md` §2.2).
+/// `rustos_manifest.h` rather than re-declaring it.
 ///
 /// The header also carries the driver-class **submodule** POD surface: the
 /// `VIRTIO_PCI_*` / `MAC_ADDRESS_LEN` / [`MountFlags`] / [`NodeId`] constants
@@ -1879,7 +1875,7 @@ fn generate_driver() -> String {
 /// `SecurityAcl`, `SecuritySubject`) and the runtime objects (`RegisterWindow`,
 /// `DmaSlab`, `PoolId`) carry no `#[repr(C)]`/explicit-primitive layout and do
 /// not cross the C boundary, so — like the driver traits — they are
-/// deliberately omitted (`AGENTS.md` §2.3).
+/// deliberately omitted.
 const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
     "/* Block-device geometry (drivers/storage/*). */\n\
          typedef struct ros_block_geometry {\n\
@@ -3031,7 +3027,7 @@ mod tests {
         assert!(h.contains("#ifndef ROS_DRIVER_H"), "guard present");
         assert!(h.contains("#include <stdint.h>"), "stdint included");
         // Reuses the syscall-table-hash length from the manifest header (no
-        // re-declaration; AGENTS.md sec.2.2).
+        // re-declaration;).
         assert!(
             h.contains("#include \"rustos_manifest.h\""),
             "manifest header included for ROS_SYSCALL_TABLE_HASH_LEN: {h}"
@@ -3041,7 +3037,7 @@ mod tests {
             "manifest struct mirror: {h}"
         );
         // The bind-table entry embeds the hwtree match key, so the header
-        // pulls in rustos_hwtree.h (AGENTS.md sec.2.2: no re-declaration).
+        // pulls in rustos_hwtree.h (: no re-declaration).
         assert!(
             h.contains("#include \"rustos_hwtree.h\""),
             "hwtree header included for ros_hw_match_key_t: {h}"
@@ -3189,7 +3185,7 @@ mod tests {
             assert!(h.contains(line), "missing `{line}` in:\n{h}");
         }
         // The driver input-event kinds must stay disjoint from the windowing
-        // input kinds in rustos_input.h (different ABIs, AGENTS.md sec.2.2).
+        // input kinds in rustos_input.h (different ABIs).
         assert!(
             !body("rustos_input.h").contains("ROS_INPUT_EVENT_KIND_"),
             "driver input-event kinds must not leak into rustos_input.h"

@@ -1,8 +1,8 @@
 //! End-to-end Stage 4.HW autoload test: the device manager's match walk
-//! drives this crate's §8 load gate (`AGENTS.md` §18.3).
+//! drives this crate's load gate.
 //!
 //! `rustos-devmgr` owns matching *policy* and reaches the load
-//! *mechanism* only through its `DriverLoader` seam (§17.4). This test
+//! *mechanism* only through its `DriverLoader` seam. This test
 //! closes the loop with the real pipeline: signed `.rxe` images carrying
 //! bind tables are decoded fail-closed by [`rustos_drvhost::ParsedImage`],
 //! matched against a hardware tree, and the winners are loaded through a
@@ -46,8 +46,7 @@ impl DriverLoader for HostLoader<'_, '_> {
         // host's own domain and reaches hardware through the host's own
         // capability-gated view, so the matched node's resource grants
         // are not minted here (they are minted by the process-spawning
-        // loader that creates a fresh driver process — `AGENTS.md`
-        // §18.3). The argument is accepted to satisfy the seam.
+        // loader that creates a fresh driver process). The argument is accepted to satisfy the seam.
         self.host
             .load(path, caller_caps)
             .map_err(rustos_drvhost::HostError::as_errno)
@@ -80,7 +79,7 @@ fn decode_bind_table(source: &MemSource, path: &str) -> Vec<DriverBindKey> {
 #[test]
 fn autoload_matches_and_loads_through_the_real_gate() {
     // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
-    // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+    // boot); lower the threshold so the test observes it.
     rustos_log::set_max_level(rustos_log::Level::Trace);
     let sk = test_signing_key();
     let trusted = [pubkey_of(&sk)];
@@ -133,7 +132,7 @@ fn autoload_matches_and_loads_through_the_real_gate() {
         .push_match_key(compat(b"arm,pl011"))
         .expect("key fits");
     // A display node nothing matches: a headless image leaves it
-    // unbound and that is never an error (`AGENTS.md` §18.4).
+    // unbound and that is never an error.
     let mut display = HwNode::new(4, 1, HwDeviceClass::Display);
     display
         .push_match_key(HwMatchKey::virtio(16))
@@ -225,7 +224,7 @@ fn autoload_without_cap_drv_load_fails_closed_at_the_real_gate() {
     });
 
     // The caller holds no CAP_DRV_LOAD: the gate refuses, the node
-    // stays unbound, and nothing is loaded (`AGENTS.md` §5.4).
+    // stays unbound, and nothing is loaded.
     let report = DeviceManager::new(&sink).autoload(
         &tree,
         &candidates,

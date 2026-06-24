@@ -11,13 +11,13 @@
 //! 2. Install a tick callback through the Arch HAL
 //!    `rustos_arch_aarch64::timer_hal::TimerHal` (`rustos_arch_api::Timer`)
 //!    that counts each generic-timer interrupt; the IRQ path dispatches
-//!    back through the same HAL handle (`AGENTS.md` §17.2).
+//!    back through the same HAL handle.
 //! 3. Install the EL1 exception vector table
 //!    (`rustos_arch_aarch64::exceptions::init_vectors`) and initialise the
 //!    GICv2 (`rustos_arch_aarch64::gic::init`).
 //! 4. Record the per-quantum interval and enable the GIC PPI
 //!    (`rustos_arch_aarch64::preempt::init_local_preempt` leaves the timer
-//!    **disarmed** — RustOS is tickless, `AGENTS.md` §17.1), then arm the
+//!    **disarmed** — RustOS is tickless), then arm the
 //!    first **one-shot** (`preempt::arm_oneshot`) and unmask IRQs at the
 //!    PE (`exceptions::enable_irq`).
 //! 5. Spin on `wfi`; the tick callback re-arms the next one-shot
@@ -30,14 +30,14 @@
 //! A regression that fails to deliver the one-shot or whose callback
 //! fails to re-arm never reaches `TARGET_TICKS`, so the run times out and
 //! the harness reports `Outcome::Timeout` — the documented fail-loud
-//! behaviour (`AGENTS.md` §7).
+//! behaviour.
 //!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `rustos-arch-aarch64` port (the timer path needs no
 //! `kernel/*` subsystem) and supplies its own `kernel_main`. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on the arch crate (`AGENTS.md` §5.4.5 — fail closed).
+//! feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -78,7 +78,7 @@ mod kernel {
     static INTERVAL: AtomicU64 = AtomicU64::new(0);
 
     /// The scheduler-tick callback the timer IRQ path invokes. RustOS is
-    /// tickless (`AGENTS.md` §17.1): the one-shot does not auto-reload, so
+    /// tickless: the one-shot does not auto-reload, so
     /// the callback re-arms the next one-shot itself — standing in for the
     /// scheduler's `set_preemption` on a contended CPU. A real scheduler
     /// would `Scheduler::on_timer_tick(cpu)` here; the test only needs to
@@ -142,7 +142,7 @@ mod kernel {
         }
 
         // 4. Register the per-CPU preemption backing (sized to this
-        //    single-CPU vertical, `AGENTS.md` §24.1) so the timer slot
+        //    single-CPU vertical) so the timer slot
         //    `init_local_preempt` records exists, then arm the EL1
         //    physical timer at TICK_HZ and unmask IRQs.
         static PREEMPT_STORAGE: preempt::PreemptStorage<1> = preempt::PreemptStorage::new();

@@ -13,15 +13,14 @@
 //! read-only driver store ([`crate::driver_store`]): borrowed buffers, no
 //! allocation (the crate is `no_std`), and a status-framed reply so a
 //! fail-closed refusal is delivered in-band rather than as a truncated
-//! payload (`AGENTS.md` §5.4 / §2.9).
+//! payload.
 //!
 //! The payload both directions carry is a fixed
 //! [`MAILBOX_PROPERTY_WORDS`]-word `VideoCore` property buffer (the exact
 //! buffer the board-neutral [`MailboxChannel`] seam exchanges); the request
 //! is that buffer encoded little-endian, and a
 //! successful reply is a status word of `0` followed by the firmware's
-//! response buffer. The single buffer-shape definition lives with the seam
-//! (`AGENTS.md` §2.2).
+//! response buffer. The single buffer-shape definition lives with the seam.
 
 use crate::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use crate::le::{put_i32, put_u32, read_i32, read_u32};
@@ -36,8 +35,7 @@ use crate::Errno;
 /// `endpoint` argument to [`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL).
 /// A reserved well-known id (rather than a delegated handle) keeps the
 /// driver/service rendezvous from needing a prior name-exchange step; the
-/// endpoint's required send/receive capabilities still gate every call
-/// (`AGENTS.md` §5.2 / §5.4).
+/// endpoint's required send/receive capabilities still gate every call.
 pub const MAILBOX_ENDPOINT: u64 = 0x4D42_5800;
 
 /// Encoded length of a mailbox request: the [`MAILBOX_PROPERTY_WORDS`]-word
@@ -79,8 +77,7 @@ pub fn encode_request(
 /// # Errors
 ///
 /// [`Errno::LengthOutOfRange`] if `bytes` is shorter than [`REQUEST_LEN`] —
-/// a truncated request is rejected, never read past its bytes (`AGENTS.md`
-/// §5.4).
+/// a truncated request is rejected, never read past its bytes.
 pub fn decode_request(bytes: &[u8]) -> Result<[u32; MAILBOX_PROPERTY_WORDS], Errno> {
     if bytes.len() < REQUEST_LEN {
         return Err(Errno::LengthOutOfRange);
@@ -135,7 +132,7 @@ pub fn encode_error_reply(buf: &mut [u8], err: Errno) -> Result<usize, Errno> {
 /// [`DriverError`](crate::DriverError) mapped to an `Errno`), or
 /// [`Errno::BadMagic`] if a success frame is truncated or the status word is
 /// neither `0` nor a known negated discriminant (wire corruption — fail
-/// closed, `AGENTS.md` §2.9), or [`Errno::BufferTooSmall`] if `reply` is
+/// closed), or [`Errno::BufferTooSmall`] if `reply` is
 /// shorter than the status word.
 pub fn decode_reply(reply: &[u8], out: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), Errno> {
     if reply.len() < REPLY_STATUS_LEN {
@@ -163,11 +160,10 @@ pub fn decode_reply(reply: &[u8], out: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Re
 /// service runs between [`call_recv`](crate::SyscallNumber::CALL_RECV) and
 /// [`call_reply`](crate::SyscallNumber::CALL_REPLY): the hardware mechanism
 /// (the doorbell window + DMA property buffer) lives behind `channel`, so the
-/// service keeps no protocol logic of its own (`AGENTS.md` §2.2). Every
+/// service keeps no protocol logic of its own. Every
 /// failure — a malformed request or a [`DriverError`](crate::DriverError)
 /// from the exchange — is turned into an in-band status-framed error reply,
-/// so the blocked caller is always answered and fails closed (`AGENTS.md`
-/// §5.4 / §2.9).
+/// so the blocked caller is always answered and fails closed.
 ///
 /// # Errors
 ///
@@ -308,8 +304,7 @@ mod tests {
     #[test]
     fn serve_request_frames_an_exchange_error_in_band() {
         // A `DriverError` from the exchange becomes a status-framed error
-        // reply, so the blocked caller is answered and fails closed
-        // (`AGENTS.md` §5.4 / §2.9).
+        // reply, so the blocked caller is answered and fails closed.
         let channel = MockChannel {
             response: sample(),
             result: Err(DriverError::DeviceFault),

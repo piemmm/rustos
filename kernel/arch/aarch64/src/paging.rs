@@ -7,7 +7,7 @@
 //! supplies the architectural mechanism the memory-isolation QEMU
 //! vertical needs — two stage-1 translation hierarchies that disagree
 //! about a single virtual address, so the MMU faults a process that
-//! reaches for another's frame (`AGENTS.md` §4, "memory isolation is
+//! reaches for another's frame ("memory isolation is
 //! enforced by hardware").
 //!
 //! # Translation scheme
@@ -92,8 +92,7 @@ pub mod attrs {
     /// the device, and an event the device writes is visible to the CPU,
     /// with no explicit cache maintenance. Unlike Device-nGnRE it permits
     /// ordinary (including unaligned) loads/stores, so the xHCI ring and
-    /// context structures the driver reads/writes behave normally
-    /// (`AGENTS.md` §4).
+    /// context structures the driver reads/writes behave normally.
     pub const ATTR_IDX_NORMAL_NC: u64 = 2 << 2;
 }
 
@@ -134,7 +133,7 @@ pub const SCTLR_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 <
 /// pre-vectors hang on the Pi 4. The trampolines (`boot.s` `.Lin_el1`,
 /// `smp.s` `_start_secondary_aarch64`) therefore write this exact value
 /// — they hard-code `0x30D0_0800`, pinned by a unit test here — so EL1
-/// always starts from known ground (`AGENTS.md` §5.4: fail closed, not
+/// always starts from known ground (: fail closed, not
 /// "trust the reset state").
 pub const SCTLR_MMU_OFF: u64 = SCTLR_RES1;
 
@@ -335,8 +334,7 @@ pub const GIGAPAGE_MASK_WORDS: usize = ENTRIES_PER_TABLE / 64;
 /// MMIO in the first GiB. A board whose MMIO lives elsewhere (the Pi 4's
 /// high-peripheral window in gigapage 3) replaces this at boot from its
 /// device tree ([`configure_device_gigapages`]); the default is the
-/// `virt` value, never a fabricated per-board constant (`plans/PI.md`
-/// §3).
+/// `virt` value, never a fabricated per-board constant (`plans/PI.md`).
 pub const DEFAULT_DEVICE_GIGAPAGES: [u64; GIGAPAGE_MASK_WORDS] = {
     let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
     mask[0] = 1;
@@ -432,7 +430,7 @@ pub const DEFAULT_RAM_GIGAPAGES: [u64; GIGAPAGE_MASK_WORDS] = [u64::MAX; GIGAPAG
 /// *every* identity space built after configuration, so the whole
 /// system shares one attribute layout. A slot in neither this mask nor
 /// [`DEVICE_GIGAPAGES`] is left invalid (faults on access — fail
-/// closed, `AGENTS.md` §5.4).
+/// closed).
 static RAM_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] = [
     AtomicU64::new(u64::MAX),
     AtomicU64::new(u64::MAX),
@@ -505,7 +503,7 @@ pub fn identity_ram_mask(extents: &[(u64, u64)]) -> [u64; GIGAPAGE_MASK_WORDS] {
 /// Fold one combined (Device | RAM) mask word into a running identity
 /// window length: a non-zero word moves the window past its highest set
 /// gigapage. The single accumulation [`identity_window_gigapages`] and
-/// [`configured_identity_gigapages`] share (`AGENTS.md` §2.2).
+/// [`configured_identity_gigapages`] share.
 const fn window_fold(window: usize, word_index: usize, combined: u64) -> usize {
     if combined == 0 {
         window
@@ -639,7 +637,7 @@ pub const fn dcache_line_bytes(ctr_el0: u64) -> u64 {
 ///
 /// Each gigapage containing one of `device_bases` is mapped Device so
 /// MMIO reads/writes are not cached, reordered, or speculated
-/// (`AGENTS.md` §2.6 — Device-nGnRE is the only correct attribute for a
+/// (Device-nGnRE is the only correct attribute for a
 /// register block). The gigapages overlapping `[kernel_start,
 /// kernel_end)` are forced Normal regardless: the CPU executes the
 /// kernel image out of them, and a Device(+PXN) mapping would fault the
@@ -735,7 +733,7 @@ impl PageTablePool {
     /// Allocate a fresh, zero-initialised table page.
     ///
     /// Returns `None` when the pool is exhausted — callers handle it as
-    /// a closed-fail (`AGENTS.md` §4: deterministic OOM, never panic).
+    /// a closed-fail (: deterministic OOM, never panic).
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         self.alloc_with(translation_enabled())
     }
@@ -800,7 +798,7 @@ impl PageTablePool {
     /// hazard is why Linux's `head.S` invalidates its idmap tables to
     /// PoC before `__enable_mmu`. Fail-closed: the whole fixed-size
     /// pool is swept (one pass over 64 KiB at boot — off every hot
-    /// path, `AGENTS.md` §2.16), not just the slots handed out so far.
+    /// path), not just the slots handed out so far.
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     pub fn clean_invalidate_to_poc(&self) {
         let base = self.storage.as_ptr() as u64;
@@ -843,7 +841,7 @@ impl PageTableFrames for PageTablePool {
         let entries = self.alloc()?;
         // The kernel's own memory is identity-mapped (MMU-off boot then a
         // gigapage identity map), so a table's virtual address is its
-        // physical address (`AGENTS.md` §17.2 / `plans/WIRING.md` W5b-3 —
+        // physical address (`plans/WIRING.md` W5b-3 —
         // the bootstrap frame source).
         let phys = phys_of(entries);
         Some(TableFrame { phys, entries })
@@ -1006,7 +1004,7 @@ impl AddressSpace {
     /// page-leaf `leaf_attrs` (e.g. [`el0_code_leaf_attrs`] /
     /// [`el0_data_leaf_attrs`] for an EL0 user mapping). `map_4k` is this
     /// with the kernel-only [`normal_leaf_attrs`], so there is one walk
-    /// implementation (`AGENTS.md` §2.2).
+    /// implementation.
     ///
     /// `vaddr` and `paddr` must be page-aligned. Returns `None` on
     /// page-table-pool exhaustion or if the walk meets an existing block
@@ -1070,7 +1068,7 @@ impl AddressSpace {
     /// [`MapError::PoolExhausted`] any level already split stays split
     /// (still a faithful identity re-expression of the same translation),
     /// so the address space is never left describing a *different*
-    /// mapping (`AGENTS.md` §2.9 — fail closed, never corrupt).
+    /// mapping (fail closed, never corrupt).
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
@@ -1144,7 +1142,7 @@ impl AddressSpace {
     /// cannot supply a replacement table. On a mid-arena failure the
     /// blocks already split stay split (a faithful re-expression of the
     /// same translation), so the space never describes a *different*
-    /// mapping (`AGENTS.md` §2.9 — fail closed, never corrupt).
+    /// mapping (fail closed, never corrupt).
     pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
         if len == 0 || (base & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
@@ -1152,7 +1150,7 @@ impl AddressSpace {
         // The last byte the arena occupies; `len != 0`, so `base + len`
         // does not underflow when computing it. A `base + len` that wraps
         // `u64` is rejected as a fail-closed `Misaligned` (a degenerate
-        // arena), never silently truncated (`AGENTS.md` §2.9).
+        // arena), never silently truncated.
         let last = base.checked_add(len - 1).ok_or(MapError::Misaligned)?;
         let first_block = base & !(BLOCK_2MIB - 1);
         let last_block = last & !(BLOCK_2MIB - 1);
@@ -1175,9 +1173,8 @@ impl AddressSpace {
     }
 
     /// Translate the architecture-neutral [`PageFlags`] into a stage-1
-    /// page-leaf attribute word (`AGENTS.md` §2.2 — one neutral
-    /// vocabulary, decoded once at the HAL boundary). W^X is the default
-    /// (`AGENTS.md` §19.2): an executable user page is mapped read-only
+    /// page-leaf attribute word (one neutral
+    /// vocabulary, decoded once at the HAL boundary). W^X is the default: an executable user page is mapped read-only
     /// ([`el0_code_leaf_attrs`]); a writable user page is execute-never
     /// ([`el0_data_leaf_attrs`]); a read-only user page is execute-never
     /// ([`el0_rodata_leaf_attrs`]). A kernel page uses the EL1 RW,
@@ -1201,7 +1198,7 @@ impl AddressSpace {
             // while ordinary ring/context loads/stores still work (Device
             // memory would forbid them). Always EL0-accessible RW,
             // execute-never — the only consumer is a user-space driver's DMA
-            // carve (`AGENTS.md` §4 / §2.20).
+            // carve.
             el0_dma_coherent_leaf_attrs()
         } else if flags.contains(PageFlags::USER) {
             if flags.contains(PageFlags::EXEC) {
@@ -1370,7 +1367,7 @@ impl MmuAddressSpace for AddressSpace {
     fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
         // The HAL view of the inherent, fully-tested `AddressSpace::split_block`
         // (G1): one body, reached either directly by the arch boot path /
-        // verticals or through the HAL trait here (`AGENTS.md` §2.2).
+        // verticals or through the HAL trait here.
         // Method-call syntax resolves to the inherent method (inherent methods
         // take precedence over a same-named trait method), so this forwards to
         // the inherent body rather than recursing into itself.
@@ -1381,7 +1378,7 @@ impl MmuAddressSpace for AddressSpace {
         // The HAL view of the inherent, fully-tested
         // `AddressSpace::prepare_guard_arena` (G2): one body, reached either
         // directly by the arch boot path / verticals or through the HAL trait
-        // here (`AGENTS.md` §2.2). As with `split_block`, inherent-method
+        // here. As with `split_block`, inherent-method
         // resolution forwards to the inherent body rather than recursing.
         self.prepare_guard_arena(base, len)
     }
@@ -1417,7 +1414,7 @@ impl TlbShootdown for AddressSpace {
 /// [`crate::kernel_arch::Aarch64Arch`]): `tlbi vaae1is` is the
 /// inner-shareable *broadcast* variant, so the "local" and "cross-CPU"
 /// shootdowns are literally the same operation on aarch64 — there is one
-/// implementation, not two (`AGENTS.md` §2.2).
+/// implementation, not two.
 pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
@@ -1453,7 +1450,7 @@ pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
 /// SP2): immediately before the kernel `eret`s back into a user task's
 /// EL0, that task's own page-table root must be installed so its
 /// translations — and only its — are in force, keeping sibling processes
-/// hardware-isolated (`AGENTS.md` §4). It takes only the `u64` root, so
+/// hardware-isolated. It takes only the `u64` root, so
 /// the per-task hook that calls it captures a plain word and stays `Send`.
 ///
 /// Unlike [`AddressSpace::switch`] this does **not** touch `MAIR_EL1` /
@@ -1515,7 +1512,7 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 /// `block & !ADDR_MASK` captures `VALID` plus every lower (`[11:2]`) and
 /// upper (`[63:48]`, incl. `PXN`/`UXN`) attribute bit, so the finer
 /// descriptors map the same memory with identical permissions
-/// (`AGENTS.md` §2.2 — one attribute vocabulary, never re-derived).
+/// (one attribute vocabulary, never re-derived).
 fn shatter_block_into(
     child: &mut [u64; ENTRIES_PER_TABLE],
     block: u64,

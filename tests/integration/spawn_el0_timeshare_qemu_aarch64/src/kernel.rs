@@ -58,7 +58,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 /// Any value; the kernel-RNG-seeded canary is a later stage.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
@@ -116,7 +116,7 @@ static ALLOCATOR: FreeListAllocator =
 
 /// Per-space page-table pools (one per EL0 address space). Each backs a stage-1
 /// hierarchy whose root [`activate_user_root`] reinstalls before every switch
-/// into its task, so the two tasks stay hardware-isolated (`AGENTS.md` §4).
+/// into its task, so the two tasks stay hardware-isolated.
 static PAGE_TABLES_A: PageTablePool = PageTablePool::new();
 static PAGE_TABLES_B: PageTablePool = PageTablePool::new();
 
@@ -125,7 +125,7 @@ static PAGE_TABLES_B: PageTablePool = PageTablePool::new();
 /// mapped (its physical address equals its kernel virtual address), so the
 /// builders reach it through [`DirectPhysMap::identity`]. A single monotonic
 /// cursor ([`FRAME_CURSOR`]) hands disjoint frames to both program builds, so
-/// the two address spaces never share a data frame (`AGENTS.md` §4).
+/// the two address spaces never share a data frame.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -170,8 +170,8 @@ fn spawn_el0_timeshare_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen either program's
-/// own authority; it only authorises the *act* of spawning (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen either program's
+/// own authority; it only authorises the *act* of spawning.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -187,7 +187,7 @@ impl CapabilityQuery for SpawnAuthority {
 /// tasks timeshare the CPU. `yield` resumes here on the next dispatch (and the
 /// callback `eret`s back into EL0); `exit` reaps the task and never returns to
 /// the callback. Any other syscall is unexpected from the fixture program and
-/// fails the test loudly (`AGENTS.md` §7).
+/// fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -319,8 +319,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     syscall_entry::set_dispatch_callback(dispatch);
 
     // Build the live scheduler over the arch port.
-    // Per-CPU bookkeeping backing for this single-CPU vertical
-    // (`AGENTS.md` §24.1).
+    // Per-CPU bookkeeping backing for this single-CPU vertical.
     static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
         rustos_arch_aarch64::Aarch64ArchStorage::new();
     let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(
@@ -334,8 +333,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Admit both EL0 tasks as resumable user kthreads. Each runs on its own
     // kernel stack; its `pre_resume` hook reactivates its page-table root
-    // (isolation, §4), and its work body `enter_user`s into EL0. The
-    // `ContextSwitchHal` is the aarch64 §17.2 context-switch primitive.
+    // (isolation), and its work body `enter_user`s into EL0. The
+    // `ContextSwitchHal` is the aarch64 context-switch primitive.
     let cs = ContextSwitchHal::new();
     for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b)] {
         let user_mode = UserMode::new();
@@ -366,7 +365,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // through the dispatch callback's `reschedule_current`, so the two tasks
     // ping-pong through real EL0→EL0 context switches. A switch that never
     // resumed its task would stall the drain and the harness would time out
-    // (fail-loud, `AGENTS.md` §7).
+    // (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

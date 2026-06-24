@@ -16,7 +16,7 @@
 //!   which composes [`IrqTable::try_wait_step`] with
 //!   `KernelArch::monotonic_ns` and `Scheduler::yield_current` —
 //!   primitives that already exist. No new scheduler interface is
-//!   introduced (`AGENTS.md` §2.4 — no interface creep).
+//!   introduced (no interface creep).
 //! * **Mask-before-wake.** [`IrqTable::fire`] calls
 //!   [`IrqController::mask`] *before* it sets the per-entry `ready`
 //!   flag. The unit test `mask_is_observed_before_wake` exercises
@@ -34,7 +34,7 @@
 //!   ([`IrqTable`]) which the kernel binary instantiates exactly
 //!   once and holds inside `KernelState`. Interior synchronisation
 //!   is one `kernel/sync::RwLock` mirroring the `CapTable`
-//!   lock-ordering policy (`AGENTS.md` §2.1).
+//!   lock-ordering policy.
 //!
 //! # Out of scope for this landing
 //!

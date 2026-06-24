@@ -3,8 +3,7 @@
 //!
 //! Curses addresses the screen in character cells, not pixels, so this is a
 //! small, self-contained integer geometry — distinct from `lib/geometry`,
-//! which models *pixel* geometry and the desktop DPI scale for the GUI
-//! (`AGENTS.md` §10). The two never mix: a TUI is cells, a compositor is
+//! which models *pixel* geometry and the desktop DPI scale for the GUI. The two never mix: a TUI is cells, a compositor is
 //! pixels.
 
 /// A rectangle size in character cells.
@@ -63,7 +62,7 @@ impl Pos {
     }
 
     /// This position shifted by `origin`, saturating at [`u16::MAX`] so an
-    /// offset can never wrap (`AGENTS.md` §2.9).
+    /// offset can never wrap.
     #[must_use]
     pub const fn offset_by(self, origin: Pos) -> Pos {
         Pos {

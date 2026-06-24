@@ -7,17 +7,16 @@
 //! surface is the window manager's to place and round: the taskbar paints a
 //! *rectangular* buffer and the compositor applies [`BarLayout::corner_radius`]
 //! through its
-//! single anti-aliased rounded-corner path, exactly as it rounds windows
-//! (`AGENTS.md` §2.2). There is no rounding — and no colour algebra — here.
+//! single anti-aliased rounded-corner path, exactly as it rounds windows. There is no rounding — and no colour algebra — here.
 //!
 //! Region rectangles are in screen space; each is translated into the
 //! surface's local space by subtracting the bar's origin. The translation
 //! saturates and [`Surface::fill_rect`] clips, so a degenerate layout paints
-//! nothing rather than panicking (`AGENTS.md` §2.9). A label is truncated to
+//! nothing rather than panicking. A label is truncated to
 //! the characters that fit its region so text never spills into a neighbour.
 //! Each notification slot draws a scalable, themeable [`rustos_icon`] vector
 //! glyph resolved from the icon's asset id, rasterised to the slot size and
-//! composited through `lib/raster`'s single blit path (`AGENTS.md` §2.2).
+//! composited through `lib/raster`'s single blit path.
 
 use rustos_font::BitmapFont;
 use rustos_geometry::{Point, Rect, Scale};
@@ -41,14 +40,14 @@ const ICON_PADDING: u32 = 4;
 /// in, the pixel side it is rasterised to, and the generation of the active
 /// [`IconSet`]. A theme change moves the tint on, a scale change moves the
 /// side on, and installing a different icon set moves the generation on — any
-/// of the three invalidates every cached glyph (`AGENTS.md` §10).
+/// of the three invalidates every cached glyph.
 type IconEpoch = (Color, u32, u64);
 
 /// Everything [`draw_icon`] needs to resolve and cache a notification glyph:
 /// the across-frame glyph cache, the active icon set, and the set's
 /// generation (part of the cache epoch, so installing a new set invalidates
 /// the cached glyphs). Bundled so the painters take one parameter rather than
-/// three (`AGENTS.md` §2.3).
+/// three.
 struct IconContext<'a> {
     cache: &'a mut RasterCache<IconKind, Surface, IconEpoch>,
     set: &'a IconSet,
@@ -56,14 +55,14 @@ struct IconContext<'a> {
 }
 
 /// Paints a taskbar into a [`Surface`], caching the rasterised notification
-/// glyphs so each is converted only once per tint and size (`AGENTS.md` §10).
+/// glyphs so each is converted only once per tint and size.
 ///
 /// The renderer holds the icon cache across frames: the bar's regions, clock,
 /// and task titles are cheap to repaint every frame, but the vector
 /// notification glyphs are rasterised through `lib/raster` once per
 /// theme/scale and reused until one changes — the SVG-first "convert once,
 /// re-render only on a scale or theme change" rule, sharing the one
-/// [`RasterCache`] the window manager uses for cursors (`AGENTS.md` §2.2).
+/// [`RasterCache`] the window manager uses for cursors.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarRenderer {
     icons: RasterCache<IconKind, Surface, IconEpoch>,
@@ -89,11 +88,11 @@ impl TaskbarRenderer {
     ///
     /// The set is the decoded on-disk SVG assets (`IconSet::from_assets`),
     /// each kind keeping its authored colours, with a built-in fallback for
-    /// any kind the assets omit (`AGENTS.md` §10/§2.9). Installing a set bumps
+    /// any kind the assets omit. Installing a set bumps
     /// an internal generation that is part of the glyph-cache epoch, so the
     /// next render discards the previously rasterised glyphs and re-rasterises
-    /// from the new set (`AGENTS.md` §2.2). The generation saturates rather
-    /// than wrapping (`AGENTS.md` §2.9).
+    /// from the new set. The generation saturates rather
+    /// than wrapping.
     pub fn set_icons(&mut self, set: IconSet) {
         self.icon_set = set;
         self.icon_generation = self.icon_generation.saturating_add(1);
@@ -110,7 +109,7 @@ impl TaskbarRenderer {
     ///
     /// Returns `None` only if the bar's pixel dimensions cannot be allocated
     /// (a surface that could never exist), so the caller fails closed rather
-    /// than panicking (`AGENTS.md` §2.9). The window manager presents the
+    /// than panicking. The window manager presents the
     /// returned surface and rounds it with [`BarLayout::corner_radius`].
     #[must_use]
     pub fn render(&mut self, taskbar: &Taskbar, theme: &Theme, scale: Scale) -> Option<Surface> {
@@ -135,9 +134,9 @@ impl TaskbarRenderer {
     ///
     /// Returns `None` when the menu is closed (there is nothing to draw) or
     /// when the popup's pixel dimensions cannot be allocated, so the caller
-    /// fails closed rather than panicking (`AGENTS.md` §2.9). The window
+    /// fails closed rather than panicking. The window
     /// manager places the returned surface above the bar and rounds it with
-    /// [`MenuLayout::corner_radius`], exactly as it rounds the bar (§2.2). The
+    /// [`MenuLayout::corner_radius`], exactly as it rounds the bar. The
     /// popup draws only text, so it needs no glyph cache.
     #[must_use]
     pub fn render_menu(&self, taskbar: &Taskbar, theme: &Theme, scale: Scale) -> Option<Surface> {
@@ -277,7 +276,7 @@ fn task_text(palette: &Palette, focused: bool, minimised: bool) -> Color {
 
 /// Draw `text` inside the screen-space `rect`, clipped to it, vertically
 /// centred and aligned along the main axis per `align`. Text wider than the
-/// region is truncated to the characters that fit (`AGENTS.md` §2.9).
+/// region is truncated to the characters that fit.
 fn draw_label(
     surface: &mut Surface,
     origin: Point,
@@ -320,12 +319,11 @@ fn draw_label(
 /// Draw a notification icon's glyph centred in its screen-space `rect`,
 /// tinted with `color`. The glyph is a scalable [`rustos_icon`] vector icon
 /// resolved from the asset id and rasterised to the slot size at this scale,
-/// then composited onto the bar-local surface through the shared blit path
-/// (`AGENTS.md` §2.2). The rasterised glyph is taken from `icons`, which keeps
+/// then composited onto the bar-local surface through the shared blit path. The rasterised glyph is taken from `icons`, which keeps
 /// it across frames so it is converted only once per tint and size and
-/// re-rendered only on a theme or scale change (`AGENTS.md` §10). An empty
+/// re-rendered only on a theme or scale change. An empty
 /// slot, a slot too small to hold a glyph, or an unrenderable size paints
-/// nothing rather than panicking (`AGENTS.md` §2.9).
+/// nothing rather than panicking.
 fn draw_icon(
     surface: &mut Surface,
     origin: Point,

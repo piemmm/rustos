@@ -1,6 +1,6 @@
 //! Host tests for the BCM2711 PCIe root-complex bring-up.
 //!
-//! QEMU models no Pi PCIe link timing (`AGENTS.md` §0.4 / §2.1), so
+//! QEMU models no Pi PCIe link timing, so
 //! these tests drive the [`BrcmPcieRc`] state machine over a
 //! register-level mock that models the root-port role bit and link-up
 //! after a bounded number of status polls. The live link training is
@@ -48,7 +48,7 @@ impl Delay for NoDelay {
 /// read, so the bring-up's four phase marks read four strictly-increasing
 /// timestamps and each phase span is a positive, known value — the
 /// property the `bring_up_timing` per-phase split (the metal-stall
-/// localiser, `AGENTS.md` §15.7) relies on. `delay_us` is a no-op; the
+/// localiser) relies on. `delay_us` is a no-op; the
 /// split measures elapsed time between marks, not the (host-meaningless)
 /// real delay.
 struct SteppingDelay {
@@ -567,7 +567,7 @@ fn bring_up_timing_reports_each_phase_and_the_poll_count() {
     // `SteppingDelay` clock in order, so each phase span is the positive
     // step and the poll loop records how many polls it took — the
     // per-phase split a metal capture needs to localise a multi-second
-    // bring-up (`AGENTS.md` §15.7 / §23.4).
+    // bring-up.
     let regs0 = MockRegs::new(true, 4);
     let delay = SteppingDelay::new(1_000);
     let rc = BrcmPcieRc::open_with_polls(regs0, &delay, &PI_WINDOWS, 20).expect("link trains");
@@ -586,8 +586,7 @@ fn bring_up_timing_reports_each_phase_and_the_poll_count() {
     // so it reflects the mock's reset state (0 — no PERST# pre-asserted),
     // proving the field is sampled at entry rather than a later write. On
     // metal a set `RGR1_SW_INIT_1_PERST_MASK` bit here would surface that
-    // the previous boot stage already dropped the VL805 firmware
-    // (`AGENTS.md` §15.7).
+    // the previous boot stage already dropped the VL805 firmware.
     assert_eq!(
         t.entry_rgr1_sw_init & regs::RGR1_SW_INIT_1_PERST_MASK,
         0,
@@ -832,7 +831,7 @@ fn missing_resource_maps_to_a_fail_closed_not_found() {
 #[test]
 fn bring_up_from_node_requires_the_mmio_capability() {
     // A complete node still cannot be brought up without the capability:
-    // the autonomous entry checks `CAP_MMIO_MAP` before mapping (§5.4).
+    // the autonomous entry checks `CAP_MMIO_MAP` before mapping.
     let host = MockHost {
         mmio_map: false,
         mapper: Some(MockMapper { grant: true }),
@@ -886,8 +885,7 @@ fn bring_up_from_node_reaches_the_root_port_check_over_a_mapped_window() {
 // --- VL805 enumerate-and-publish composition ------------------------------
 //
 // `publish_usb_function` is the post-link half of the user-space bus driver
-// (`emit_vl805_node`): QEMU models no Pi PCIe link timing (`AGENTS.md`
-// §0.4), so the link training itself is metal-only, but this half — find the
+// (`emit_vl805_node`): QEMU models no Pi PCIe link timing, so the link training itself is metal-only, but this half — find the
 // USB function, assign/map its BAR, translate it to CPU-physical, and publish
 // the node — is host-testable against a mock bus.
 
@@ -1079,7 +1077,7 @@ fn publish_usb_function_without_a_usb_function_fails_closed_not_found() {
 fn publish_usb_function_fails_closed_when_the_bar_is_outside_the_outbound_window() {
     // A BAR below the outbound PCIe base has no CPU-physical translation in
     // the bridge window, so the publish is refused rather than emitting a
-    // grant the kernel could not cover (`AGENTS.md` §5.4).
+    // grant the kernel could not cover.
     let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base - 0x1000);
     let host = RecordingHost::new(true);
     assert_eq!(
@@ -1137,7 +1135,7 @@ fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
     );
     assert_eq!(*dma, parent);
     // …and the bridge driver's own grant covers it (the kernel's
-    // `hw_emit_node` admission check, `AGENTS.md` §18.3).
+    // `hw_emit_node` admission check).
     assert!(parent.covers(dma));
 }
 

@@ -18,11 +18,9 @@
 //!
 //! Both producers are generic over the arch (`A: SchedulerArch`) and hold a
 //! `&'static A`, mirroring [`crate::procwait::KernelProcessWait`], so
-//! `kernel/core` reads the current CPU without naming a concrete port
-//! (`AGENTS.md` §17.4). A call on a CPU with no published live space (a
+//! `kernel/core` reads the current CPU without naming a concrete port. A call on a CPU with no published live space (a
 //! task spawned without a retained space) fails closed with
-//! [`Errno::NotImplemented`] rather than touching another task's memory
-//! (`AGENTS.md` §2.9 / §5.4).
+//! [`Errno::NotImplemented`] rather than touching another task's memory.
 
 use rustos_abi::{Errno, MapFlags};
 use rustos_kernel_mem::{page_count_for, AnonError, DmaError, LiveSpaceError, MmioError};
@@ -32,9 +30,9 @@ use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility};
 use crate::kthread::with_current_live_space;
 use crate::memmap::MemMap;
 
-/// Fold an [`AnonError`] onto a stable [`Errno`] (`AGENTS.md` §2.9):
-/// allocator exhaustion is [`Errno::OutOfMemory`] (§4), a not-mapped range
-/// is [`Errno::NotFound`] (fail closed, §5.4), and a misalignment/overflow
+/// Fold an [`AnonError`] onto a stable [`Errno`]:
+/// allocator exhaustion is [`Errno::OutOfMemory`], a not-mapped range
+/// is [`Errno::NotFound`] (fail closed), and a misalignment/overflow
 /// is [`Errno::OutOfRange`].
 fn anon_errno(err: AnonError) -> Errno {
     match err {
@@ -44,13 +42,13 @@ fn anon_errno(err: AnonError) -> Errno {
         AnonError::NotMapped => Errno::NotFound,
         // `PhysUnmapped`, `Map(_)`, and any future (`#[non_exhaustive]`)
         // variant fold to the generic bad-address error, failing closed
-        // rather than being silently dropped (`AGENTS.md` §2.9).
+        // rather than being silently dropped.
         _ => Errno::BadAddress,
     }
 }
 
 /// Fold an [`MmioError`] onto a stable [`Errno`]: no free virtual slot is
-/// [`Errno::OutOfMemory`] (deterministic exhaustion, §4), a malformed
+/// [`Errno::OutOfMemory`] (deterministic exhaustion), a malformed
 /// region or mapper config is [`Errno::OutOfRange`], and a page-table or
 /// direct-map failure is [`Errno::BadAddress`].
 fn mmio_errno(err: MmioError) -> Errno {
@@ -59,17 +57,16 @@ fn mmio_errno(err: MmioError) -> Errno {
         MmioError::InvalidRegion | MmioError::InvalidMapConfig => Errno::OutOfRange,
         MmioError::UnknownRegion => Errno::NotFound,
         // `PageTable`, `DirectMap`, and any future (`#[non_exhaustive]`)
-        // kind fail closed to a generic bad-address error (`AGENTS.md` §2.9).
+        // kind fail closed to a generic bad-address error.
         _ => Errno::BadAddress,
     }
 }
 
 /// Fold a [`DmaError`] onto a stable [`Errno`]: a contiguous-block or
-/// page-table-frame exhaustion is [`Errno::OutOfMemory`] (deterministic OOM,
-/// §4); a request beyond the max buddy order or the granted addressing limit
+/// page-table-frame exhaustion is [`Errno::OutOfMemory`] (deterministic OOM); a request beyond the max buddy order or the granted addressing limit
 /// is [`Errno::OutOfRange`]; a zero-length request is
 /// [`Errno::LengthOutOfRange`]; and a not-reachable frame or page-table
-/// refusal is [`Errno::BadAddress`] (fail closed, `AGENTS.md` §2.9).
+/// refusal is [`Errno::BadAddress`] (fail closed).
 fn dma_errno(err: DmaError) -> Errno {
     match err {
         DmaError::Alloc(_) => Errno::OutOfMemory,
@@ -77,7 +74,7 @@ fn dma_errno(err: DmaError) -> Errno {
         DmaError::SizeUnsupported | DmaError::AddrLimitExceeded => Errno::OutOfRange,
         // `PageTable`, `DirectMap`, `UnknownBuffer`, `InvalidPoolConfig`, and
         // any future (`#[non_exhaustive]`) variant fail closed to a generic
-        // bad-address error (`AGENTS.md` §2.9).
+        // bad-address error.
         _ => Errno::BadAddress,
     }
 }
@@ -127,7 +124,7 @@ where
         // the live space's per-task heap-window allocator to choose one out of
         // this task's own free user-VA — never a base guessed here that might
         // collide with the image, stack, or a granted device window
-        // (`AGENTS.md` §2.9 / `plans/PI.md` 5d-0-ii (c)).
+        // (`plans/PI.md` 5d-0-ii (c)).
         if flags.is_fixed() {
             with_current_live_space(cpu, |space| space.map_anonymous(addr_hint, page_count))
         } else {
@@ -149,7 +146,7 @@ where
 /// The production MMIO-map facility: maps a validated, **granted** device
 /// window into the calling driver task's own live address space
 /// (`plans/PI.md` P10 chunk 5d-0). The handler has already resolved and
-/// owner-checked the grant (`AGENTS.md` §5.4 / §18.3); this performs only
+/// owner-checked the grant; this performs only
 /// the page-table mechanism, guard-bracketed and caching-disabled.
 pub struct LiveMmioMap<A>
 where
@@ -184,8 +181,7 @@ where
 /// The production DMA-alloc facility: carves a coherent, guard-bracketed DMA
 /// buffer into the calling driver task's own live address space
 /// (`plans/PI.md` P10 chunk 5d-0). The handler has already resolved and
-/// owner-checked the grant and validated its DMA constraint (`AGENTS.md`
-/// §5.4 / §18.3); this performs only the carve mechanism, bounded by the
+/// owner-checked the grant and validated its DMA constraint; this performs only the carve mechanism, bounded by the
 /// grant's `addr_limit`.
 pub struct LiveDmaAlloc<A>
 where
@@ -214,7 +210,7 @@ where
         // The coherent (and QEMU `virt`) device-visible address is the
         // CPU-physical base; a translating inbound viewport is refused
         // earlier in the handler (it rides the metal item), so here the
-        // device address is exactly the carved physical base (§18.1).
+        // device address is exactly the carved physical base.
         with_current_live_space(cpu, |space| space.alloc_dma(len, addr_limit))
             .ok_or(Errno::NotImplemented)?
             .map(|mapping| DmaCarve {
@@ -320,7 +316,7 @@ mod tests {
     ///
     /// Each test uses a **distinct** `cpu` so the global per-CPU
     /// [`with_current_live_space`] slot is never shared between tests running
-    /// in parallel (`AGENTS.md` §7 — no flaky tests).
+    /// in parallel (no flaky tests).
     fn arch_at(cpu: u32) -> &'static TestArch {
         let arch = Box::leak(Box::new(TestArch::with_cpus(cpu + 1)));
         arch.set_current_cpu(cpu);

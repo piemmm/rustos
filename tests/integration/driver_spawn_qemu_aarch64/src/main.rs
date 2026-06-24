@@ -24,7 +24,7 @@
 //! exits. PASS once the decoded reply round-trips the stub's pinned handle;
 //! any shortfall (spawn failure, missing or malformed reply, drained
 //! workload without a reply) writes a distinct failure finisher or times out
-//! (fail-loud, `AGENTS.md` §7).
+//! (fail-loud).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

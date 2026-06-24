@@ -5,7 +5,7 @@
 //! Two jobs on the freestanding `riscv64gc-unknown-none-elf` target:
 //!
 //! 1. Hand the riscv64 `virt` linker script to the test kernel (the single
-//!    per-arch script the architecture port owns — `AGENTS.md` §2.2), exactly
+//!    per-arch script the architecture port owns), exactly
 //!    as the sibling riscv64 integration binaries do.
 //! 2. Compile the pure-Rust spawn-session fixture program
 //!    (`tests/integration/spawn_session_program`) **twice** — once as the
@@ -14,15 +14,14 @@
 //!    freestanding riscv64 target (its own `program.ld` roots `rustos-rt`'s
 //!    `_start`), each into a private target directory under `OUT_DIR`, pinning
 //!    the yield count through `RUSTOS_SPAWN_YIELDS` so this script is the single
-//!    source of truth for the count (`AGENTS.md` §2.2). Each linked PIE ELF is
+//!    source of truth for the count. Each linked PIE ELF is
 //!    converted to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps each image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    two blobs, the shared bias, and the matching [`YIELDS_PER_TASK`] constant
-//!    as a Rust source the test `include!`s. One source serves both roles
-//!    (`AGENTS.md` §2.2): the per-process isolation is the separate page-table
+//!    as a Rust source the test `include!`s. One source serves both roles: the per-process isolation is the separate page-table
 //!    hierarchies the kernel builds, not separate sources.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it emits
@@ -30,7 +29,7 @@
 //! compiles only for the freestanding riscv64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -41,13 +40,13 @@ use std::process::Command;
 /// Virtual base each program image is mapped at, in *its own* address space.
 /// Chosen at 64 GiB — far above the kernel's identity map — so the image lands
 /// on freshly walked Sv39 tables instead of colliding with an identity gigapage
-/// leaf (the proven riscv64 spawn layout, `AGENTS.md` §2.2).
+/// leaf (the proven riscv64 spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// How many times each role yields before exiting. The single source of truth:
 /// passed to both program builds via `RUSTOS_SPAWN_YIELDS` *and* emitted as the
 /// `YIELDS_PER_TASK` constant the kernel asserts against, so the two halves can
-/// never disagree (`AGENTS.md` §2.2). Large enough that an accidental single
+/// never disagree. Large enough that an accidental single
 /// run cannot satisfy the PASS check, small enough to drain well within the
 /// harness budget.
 const YIELDS_PER_TASK: u32 = 8;
@@ -74,7 +73,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == RISCV64_TARGET {
         // The test kernel itself links with the riscv64 `virt` script the
-        // architecture port owns (the single per-arch script, §2.2).
+        // architecture port owns (the single per-arch script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/riscv64/link/riscv64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -112,7 +111,7 @@ fn build_and_convert_program(
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // riscv64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -130,7 +129,7 @@ fn build_and_convert_program(
         // host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Select the role and pin the yield count (the §2.2 single source of
+        // Select the role and pin the yield count (the single source of
         // truth). Both halves of the fixture read these.
         .env("RUSTOS_SPAWN_ROLE", role)
         .env("RUSTOS_SPAWN_YIELDS", YIELDS_PER_TASK.to_string())

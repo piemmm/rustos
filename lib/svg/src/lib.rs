@@ -2,10 +2,10 @@
 //!
 //! SVG is the canonical, scalable **source** format for every WM/desktop
 //! graphical asset — cursors, icons, notification glyphs, window-chrome
-//! artwork (`AGENTS.md` §10). This crate is the first-party decoder for that
-//! SVG-first pipeline: it is one of the curated §16.4 image-decoding shared
+//! artwork. This crate is the first-party decoder for that
+//! SVG-first pipeline: it is one of the curated image-decoding shared
 //! libraries, and — like the rest of the desktop's parsers — it is rolled in
-//! house rather than pulled from an external crate (`AGENTS.md` §2.12), so the
+//! house rather than pulled from an external crate, so the
 //! trusted computing base does not grow for an asset format.
 //!
 //! # What it produces
@@ -16,15 +16,15 @@
 //! `lib/cursor`'s `VectorCursor` and `lib/icon`'s `VectorIcon` already
 //! rasterise through `lib/raster`'s single supersampled polygon path, so the
 //! SVG-first pipeline converts an asset **once** into this fast-draw form and
-//! never re-parses SVG on the hot compositing path (`AGENTS.md` §10, §2.2).
+//! never re-parses SVG on the hot compositing path.
 //!
 //! # Untrusted input
 //!
-//! On-disk assets under `/System/Graphics` are untrusted (`AGENTS.md` §19.5).
+//! On-disk assets under `/System/Graphics` are untrusted.
 //! [`decode`] is therefore total: it never panics for any byte string, returns
 //! a precise [`SvgError`] for anything outside the supported subset, and a
 //! caller fails closed to its built-in fallback artwork rather than crashing
-//! the compositor (`AGENTS.md` §2.9).
+//! the compositor.
 //!
 //! # Supported subset
 //!
@@ -35,8 +35,7 @@
 //! named colours, or `none`, optionally scaled by `fill-opacity`. Coordinates
 //! and the design grid are integers. Curves, arcs, gradients, transforms, and
 //! a second sub-path are out of subset and fail closed — richer artwork is
-//! built by stacking filled layers, never a second rasterisation path
-//! (`AGENTS.md` §2.2).
+//! built by stacking filled layers, never a second rasterisation path.
 //!
 //! ```
 //! let svg = br##"<svg viewBox="0 0 10 10">

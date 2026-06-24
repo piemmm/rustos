@@ -89,7 +89,7 @@ const DMA_WINDOW_BASE: u64 = USER_BIAS + 0xC000_0000;
 /// Pages backing the DMA-buffer window (256 KiB).
 const DMA_WINDOW_PAGES: usize = 64;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands the spawn build.
@@ -150,8 +150,7 @@ static DMA_OK: AtomicBool = AtomicBool::new(false);
 const DMA_GRANT_HANDLE: u64 = 2;
 
 /// Fault handler: any EL0 fault here is unexpected (the program only maps a
-/// window and reads a register), so report it as a failure rather than hang
-/// (`AGENTS.md` §7 / §2.9). The `esr`/`far` are logged so a diagnosing run can
+/// window and reads a register), so report it as a failure rather than hang. The `esr`/`far` are logged so a diagnosing run can
 /// tell a translation fault from an external abort.
 extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
     let mut esr_buf = [0u8; 16];
@@ -242,8 +241,8 @@ fn mmio_map_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen the program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen the program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -269,13 +268,13 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// `mmio_map` is routed through the retained live space: the handle is
 /// owner-checked (it must be the [`GRANT_HANDLE`] the boot path minted — the
 /// registry-backed owner-check against the caller is host-proven in
-/// `kernel/core`, `AGENTS.md` §5.4), then the granted window is mapped into the
+/// `kernel/core`), then the granted window is mapped into the
 /// program's *own* address space through [`with_current_live_space`] +
 /// [`LiveSpace::map_device_window`] — the production retained-space mechanism
 /// (`plans/PI.md` 5d-0-ii (b′)). An `exit` with code `0` is the program's PASS
 /// signal (it mapped the window and read the device magic back); a non-zero
 /// code is a program-side verification failure. Any other syscall is
-/// unexpected and fails the test loudly (`AGENTS.md` §7).
+/// unexpected and fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the
     // exception handler built from the saved register frame; reading it for the
@@ -288,7 +287,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         note(TEST_MMIO_ENTER, "mmio_map test: dispatch handling mmio_map");
         let handle = args[0];
         // Owner-check the handle: only the minted grant resolves; any other
-        // handle resolves to nothing and is refused (fail closed, §5.4 — the
+        // handle resolves to nothing and is refused (fail closed — the
         // registry-backed owner-check against the caller task is host-proven).
         if handle != GRANT_HANDLE {
             return encode(Err(Errno::NotFound));
@@ -296,7 +295,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         // The program names a `[offset, offset + len)` sub-region of its
         // grant (`args[1]`/`args[2]`); confirm it lies wholly inside the
         // granted window before mapping, mirroring the production kernel
-        // `mappable_subwindow` check (`AGENTS.md` §24.1 / §5.4 — a driver maps
+        // `mappable_subwindow` check (a driver maps
         // only inside a region it was granted).
         let offset = args[1];
         let sub_len = args[2];
@@ -309,8 +308,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         }
         // Map only the requested sub-region into the program's own retained
         // live space: the producer reads the current CPU's published live
-        // space and maps that region, caching disabled, never executable
-        // (§18.3 / §19.2). No published space (a task admitted without one)
+        // space and maps that region, caching disabled, never executable. No published space (a task admitted without one)
         // fails closed.
         let result = match with_current_live_space(BOOT_CPU, |space| {
             #[allow(clippy::cast_possible_truncation)]
@@ -349,7 +347,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     } else if raw == SyscallNumber::MEM_UNMAP.as_u16() {
         // Release the placed region. `args[0]` is the base, `args[1]` the byte
         // length. The placement record is validated + released inside
-        // `unmap_anonymous` (fail closed on a wrong base/extent, §5.4).
+        // `unmap_anonymous` (fail closed on a wrong base/extent).
         let base = args[0];
         let len = args[1] as usize;
         let result = match page_count_for(len) {
@@ -373,7 +371,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         // via the production `LiveSpace::alloc_dma` (`plans/PI.md` 5d-0-ii (c)
         // DMA half). The registry-backed grant owner-check is host-proven in
         // kernel/core; this stand-in accepts only the minted DMA handle and
-        // fails closed otherwise (§5.4). The device-visible-base copy-out is
+        // fails closed otherwise. The device-visible-base copy-out is
         // host-proven, so this returns only the CPU VA. `args[0]` is the grant
         // handle, `args[1]` the byte length; no addressing limit is declared
         // for the `virt` coherent stand-in.
@@ -568,7 +566,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // Admit the EL0 program as a resumable user kthread that **retains** the
     // live space (`spawn_user_kthread_with_stack_live`, the production aarch64
     // spawn path): its `pre_resume` hook reactivates its page-table root before
-    // every switch-in (isolation, §4), the runtime publishes the retained space
+    // every switch-in (isolation), the runtime publishes the retained space
     // on the per-CPU live-space slot while it runs, and its work body
     // `enter_user`s into EL0.
     let cs = ContextSwitchHal::new();
@@ -603,8 +601,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Drive `step` until the program runs. The program exits (0 on success)
     // through the dispatch callback, which finishes the run; a program that
-    // drained without exiting, or a never-draining loop, fails loud
-    // (`AGENTS.md` §7).
+    // drained without exiting, or a never-draining loop, fails loud.
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

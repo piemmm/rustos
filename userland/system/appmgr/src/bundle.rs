@@ -18,11 +18,11 @@ use rustos_abi::{Errno, LibraryScope};
 ///
 /// All three methods address a bundle by its root path (e.g.
 /// `/Apps/Example.app`). The implementation enforces the filesystem's own
-/// permission checks (`AGENTS.md` §5.3); the loader treats every method as
+/// permission checks; the loader treats every method as
 /// fallible and **never** assumes a trusted result.
 pub trait BundleStore {
     /// The names of the entries directly under the bundle root, in any
-    /// order. The loader validates them against the fixed §16.5 layout.
+    /// order. The loader validates them against the fixed layout.
     ///
     /// # Errors
     ///
@@ -38,7 +38,7 @@ pub trait BundleStore {
     fn read_appinfo(&self, bundle: &str) -> Result<Vec<u8>, Errno>;
 
     /// The cryptographic digest of the bundle's contents, computed by the
-    /// store over every file the signature covers (`AGENTS.md` §16.5). The
+    /// store over every file the signature covers. The
     /// loader compares it against the hash embedded in the signed manifest.
     ///
     /// # Errors
@@ -47,9 +47,9 @@ pub trait BundleStore {
     fn content_hash(&self, bundle: &str) -> Result<[u8; 32], Errno>;
 
     /// The raw bytes of the bundle's entry-point `Run` binary (an `rxe`
-    /// load image, `AGENTS.md` §9). The loader validates it through
+    /// load image). The loader validates it through
     /// [`rustos_abi::LoadImage::parse`] and resolves the shared libraries it
-    /// declares it needs (`AGENTS.md` §16.4).
+    /// declares it needs.
     ///
     /// # Errors
     ///
@@ -58,7 +58,7 @@ pub trait BundleStore {
 }
 
 /// One shared-library reference the entry-point binary declares it needs,
-/// paired with the policy root it resolved against (`AGENTS.md` §16.4).
+/// paired with the policy root it resolved against.
 ///
 /// Holding a `ResolvedLibrary` is proof the reference passed the
 /// dynamic-loader policy: it lies inside the bundle's own `Libraries/` or
@@ -73,7 +73,7 @@ pub struct ResolvedLibrary {
 
 /// Verifies a detached Ed25519 signature over a byte range.
 ///
-/// The real implementation calls into `lib/crypto` (`AGENTS.md` §2.12 — the
+/// The real implementation calls into `lib/crypto` (the
 /// one place cryptographic primitives live). The loader passes the manifest
 /// bytes the signature covers, the signature, and the signer's public key;
 /// trust-rooting that key against the local capability authority is the
@@ -97,10 +97,10 @@ pub trait Verifier {
 /// A bundle the loader has accepted: its identity, the validated entry-point
 /// path, and the capability ceiling it may run with.
 ///
-/// Holding a `LoadedApp` is proof that the §16.5 layout, the manifest
+/// Holding a `LoadedApp` is proof that the layout, the manifest
 /// signature, the content hash, and the syscall-interface hash all checked
 /// out, and that `granted` is the manifest request intersected with the
-/// launching user's grants (`AGENTS.md` §5.2). The caller spawns
+/// launching user's grants. The caller spawns
 /// [`run_path`](Self::run_path) with **at most** [`granted`](Self::granted).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedApp {
@@ -163,7 +163,7 @@ impl LoadedApp {
     }
 
     /// The shared libraries the entry-point binary declared it needs, each
-    /// already resolved against the §16.4 dynamic-loader policy (the
+    /// already resolved against the dynamic-loader policy (the
     /// bundle's own `Libraries/` or the curated
     /// [`rustos_abi::SYSTEM_LIBRARIES_DIR`]).
     #[must_use]

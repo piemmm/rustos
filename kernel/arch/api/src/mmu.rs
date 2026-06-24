@@ -1,4 +1,4 @@
-//! MMU / page-table surface of the Arch HAL (`AGENTS.md` §17.2
+//! MMU / page-table surface of the Arch HAL (
 //! "MMU/page-table primitives").
 //!
 //! Mapping a virtual page to a physical frame, switching the active
@@ -6,31 +6,29 @@
 //! privilege-neutral but deeply architecture-specific: x86_64 walks a
 //! four-level PML4 and loads `CR3`, riscv64 walks an Sv39 hierarchy and
 //! writes `satp`, aarch64 walks a three-level stage-1 table and programs
-//! `TTBR0_EL1` + `SCTLR_EL1.M`. §17.2 makes the architecture surface a
+//! `TTBR0_EL1` + `SCTLR_EL1.M`. The charter makes the architecture surface a
 //! closed set of traits on the HAL; this module is the "MMU/page-table"
 //! member of that set, so the page-table primitive lives behind one
-//! vocabulary instead of being re-described at every call site
-//! (`AGENTS.md` §2.2). The parallel per-arch implementations of this one
-//! trait are the deliberate shape of §17.1/§17.2 modularity, never
-//! collapsed behind `cfg` (§2.2 carve-out).
+//! vocabulary instead of being re-described at every call site. The parallel per-arch implementations of this one
+//! trait are the deliberate shape of modularity, never
+//! collapsed behind `cfg` (carve-out).
 //!
 //! # What lives here
 //!
 //! * [`PageFlags`] — the architecture-neutral permission/attribute set a
 //!   page leaf carries. Each port translates it into its native
-//!   page-table-entry bits at the HAL boundary (one neutral vocabulary,
-//!   §2.2). The default policy is W^X (`AGENTS.md` §19.2): a leaf is
+//!   page-table-entry bits at the HAL boundary (one neutral vocabulary). The default policy is W^X: a leaf is
 //!   never both [`PageFlags::WRITE`] and [`PageFlags::EXEC`].
 //! * [`MapError`] — the fail-closed result of installing a mapping. A
 //!   bad address or an exhausted page-table pool is rejected, never
-//!   silently truncated or clobbered (`AGENTS.md` §2.9 / §5.4).
+//!   silently truncated or clobbered.
 //! * [`AddressSpace`] — the per-port handle the kernel reaches through.
 //!   It installs a 4 KiB mapping ([`AddressSpace::map_page`], host-testable
 //!   walk/encoding math), activates the translation regime
 //!   ([`AddressSpace::activate`], the port's privileged register write),
 //!   and reports the root-table physical address
 //!   ([`AddressSpace::root_phys`]).
-//! * [`conformance`] — the §17.2 conformance vertical: a host-run
+//! * [`conformance`] — the conformance vertical: a host-run
 //!   [`conformance::run_all`] check every paging-capable port runs over
 //!   its real [`AddressSpace`], proving the fail-closed `map_page`
 //!   contract (a non-zero root, misaligned addresses rejected, a good
@@ -49,9 +47,9 @@
 //! check; it is proven end-to-end by each port's `memory_isolation`
 //! QEMU vertical (two address spaces that disagree about one address,
 //! and the CPU faults the one without the mapping). Inventing a host
-//! stub that "activates" would be a fake primitive (`AGENTS.md` §1).
+//! stub that "activates" would be a fake primitive.
 //!
-//! # Scope (the §17.2 burn-down)
+//! # Scope (the burn-down)
 //!
 //! This is the `plans/WIRING.md` **Stage W5b-1** slice: the bootstrap
 //! page-table primitive every port already owns, lifted behind one HAL
@@ -59,15 +57,14 @@
 //! Wiring `kernel/mem`'s allocator-backed per-process address space onto
 //! this trait, and the per-page + cross-CPU TLB shootdown (which depends
 //! on the aarch64 IPI from Stage W6), are the tracked Stage W5b-2 / W6
-//! follow-ups — not silently duplicated here (`AGENTS.md` §2.2).
+//! follow-ups — not silently duplicated here.
 
 /// The architecture-neutral permission/attribute set a 4 KiB page leaf
 /// carries.
 ///
 /// A neutral subset of the bits every Tier-1 MMU supports; a port
 /// translates it into native page-table-entry bits at the HAL boundary
-/// (one definition, `AGENTS.md` §2.2). The default policy is W^X
-/// (`AGENTS.md` §19.2): callers never request a leaf that is both
+/// (one definition). The default policy is W^X: callers never request a leaf that is both
 /// [`Self::WRITE`] and [`Self::EXEC`], and a port that is handed such a
 /// combination is free to reject it.
 #[repr(transparent)]
@@ -99,7 +96,7 @@ impl PageFlags {
     /// It is distinct from [`Self::DEVICE`]: a DMA buffer holds ring and
     /// context structures the driver accesses with ordinary (possibly
     /// unaligned) loads/stores, which Device-nGnRE memory forbids
-    /// (`AGENTS.md` §4 / §2.20 — the kernel owns the platform coherency, so
+    /// (the kernel owns the platform coherency, so
     /// the user-space driver stays arch-neutral).
     pub const DMA_COHERENT: Self = Self(0b0010_0000);
 
@@ -125,7 +122,7 @@ impl PageFlags {
     ///
     /// Returns `None` if `bits` sets any bit outside the defined flags,
     /// so a corrupt or forward-versioned value fails closed rather than
-    /// being silently reinterpreted (`AGENTS.md` §2.9).
+    /// being silently reinterpreted.
     #[must_use]
     pub const fn from_bits(bits: u8) -> Option<Self> {
         const ALL: u8 = PageFlags::READ.0
@@ -142,7 +139,7 @@ impl PageFlags {
     }
 
     /// `true` if the leaf is both writable and executable — the W^X
-    /// violation a port may reject (`AGENTS.md` §19.2).
+    /// violation a port may reject.
     #[must_use]
     pub const fn is_write_exec(self) -> bool {
         self.contains(Self::WRITE) && self.contains(Self::EXEC)
@@ -166,8 +163,7 @@ impl core::ops::BitAnd for PageFlags {
 /// The fail-closed result of installing a mapping ([`AddressSpace::map_page`]).
 ///
 /// An address that cannot be mapped cleanly is rejected, never silently
-/// truncated, wrapped, or allowed to clobber an existing mapping
-/// (`AGENTS.md` §2.9 / §5.4). The variants are the architecture-neutral
+/// truncated, wrapped, or allowed to clobber an existing mapping. The variants are the architecture-neutral
 /// union every port reports; a port maps its primitive's error onto them
 /// at the HAL boundary.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -175,19 +171,19 @@ pub enum MapError {
     /// `vaddr` or `paddr` was not 4 KiB-aligned.
     Misaligned,
     /// The page-table pool backing this address space was exhausted —
-    /// deterministic OOM, never a panic (`AGENTS.md` §4).
+    /// deterministic OOM, never a panic.
     PoolExhausted,
     /// The target virtual address already has a live mapping (or the
     /// walk met a large-page leaf it would have to shatter); the port
     /// refuses to overwrite it rather than silently clobber.
     AlreadyMapped,
     /// The requested [`PageFlags`] are not representable on this port
-    /// (e.g. a W^X-violating write+exec leaf, `AGENTS.md` §19.2).
+    /// (e.g. a W^X-violating write+exec leaf).
     InvalidFlags,
     /// The target virtual address has no live 4 KiB leaf to operate on
     /// (reported by [`AddressSpace::unmap`] when asked to tear down an
     /// address that was never mapped); the port refuses rather than
-    /// fabricating a frame (`AGENTS.md` §2.9).
+    /// fabricating a frame.
     NotMapped,
     /// The operation is not implemented on this port. Returned by the
     /// default [`AddressSpace::split_block`] of a port whose
@@ -195,14 +191,13 @@ pub enum MapError {
     /// — the coarse-block split (the guard-page fault-form, `plans/PI.md`
     /// G1–G3) is implemented on aarch64 but pending on the other ports, so
     /// asking for it elsewhere fails closed rather than silently doing
-    /// nothing (`AGENTS.md` §2.9).
+    /// nothing.
     Unsupported,
 }
 
 /// A port's honest declaration of whether it can re-express a coarse
 /// (large-page / block) mapping at 4 KiB granularity — the foundation of
-/// the kthread guard-page fault-form (`plans/PI.md` G1–G3, `AGENTS.md`
-/// §4 / §2.17).
+/// the kthread guard-page fault-form (`plans/PI.md` G1–G3).
 ///
 /// Re-expressing a coarse block as a table of finer leaves is what lets a
 /// single 4 KiB page inside a boot-time identity *block* be unmapped (so
@@ -258,7 +253,7 @@ impl BlockSplit {
 }
 
 /// The per-process / bootstrap address-space handle an architecture port
-/// exposes (`AGENTS.md` §17.2).
+/// exposes.
 ///
 /// The kernel installs mappings with [`Self::map_page`], reads the
 /// root-table physical address with [`Self::root_phys`], and makes the
@@ -266,7 +261,7 @@ impl BlockSplit {
 /// object-safe so the kernel can hold a `dyn AddressSpace` per task; it
 /// is also usable as a generic bound (`P: AddressSpace`) so the hot
 /// map/translate paths monomorphise to zero dynamic-dispatch cost
-/// (`AGENTS.md` §2.3 — no needless overhead).
+/// (no needless overhead).
 ///
 /// The trait deliberately does **not** require [`Send`] / [`Sync`]: a
 /// port's page table owns interior `&'static mut` table references and
@@ -282,7 +277,7 @@ pub trait AddressSpace {
     /// either address is misaligned, the page-table pool is exhausted,
     /// the target is already mapped, or the flags are not representable.
     /// The port fails closed rather than install a partial or corrupt
-    /// mapping (`AGENTS.md` §2.9).
+    /// mapping.
     fn map_page(&mut self, vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), MapError>;
 
     /// Translate `vaddr` to the physical page it maps and the leaf's
@@ -292,8 +287,7 @@ pub trait AddressSpace {
     /// mapping. The returned physical address is the 4 KiB leaf base
     /// (`vaddr`'s page offset is *not* re-applied); the flags are the
     /// neutral permission set the leaf carries, decoded back from the
-    /// port's native page-table-entry bits at the HAL boundary
-    /// (`AGENTS.md` §2.2).
+    /// port's native page-table-entry bits at the HAL boundary.
     fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)>;
 
     /// Tear down the 4 KiB mapping for `vaddr` and return the physical
@@ -304,7 +298,7 @@ pub trait AddressSpace {
     /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
     /// or [`MapError::NotMapped`] if `vaddr` has no live 4 KiB leaf. The
     /// port leaves the address space unchanged on either error and never
-    /// fabricates a frame (`AGENTS.md` §2.9).
+    /// fabricates a frame.
     fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError>;
 
     /// Physical address of this space's root translation table — the
@@ -315,7 +309,7 @@ pub trait AddressSpace {
     /// coarse (large-page / block) mapping at 4 KiB granularity via
     /// [`Self::split_block`] (`plans/PI.md` G1–G3).
     ///
-    /// Every port declares one honest position (`AGENTS.md` §2.17 — never
+    /// Every port declares one honest position (never
     /// pretend a defence exists): [`BlockSplit::Supported`] (the port does
     /// it), [`BlockSplit::Unsupported`] (its translation regime has no
     /// coarse blocks to split), or [`BlockSplit::Pending`] (it could but
@@ -331,7 +325,7 @@ pub trait AddressSpace {
     /// without disturbing its neighbours.
     ///
     /// This is the foundation of the kthread guard-page fault-form
-    /// (`plans/PI.md` G1–G3, `AGENTS.md` §4 / §2.17): a guard page that
+    /// (`plans/PI.md` G1–G3): a guard page that
     /// the boot path mapped inside a coarse identity *block* has no
     /// per-4 KiB leaf to clear until the block is re-expressed as a table
     /// of finer leaves. The split only ever *adds* table levels that
@@ -342,7 +336,7 @@ pub trait AddressSpace {
     /// The default fails closed with [`MapError::Unsupported`] for a port
     /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]
     /// — asking it to split a block does nothing silently is *not* an
-    /// option (`AGENTS.md` §2.9). A supporting port overrides this.
+    /// option. A supporting port overrides this.
     ///
     /// # Errors
     ///
@@ -376,7 +370,7 @@ pub trait AddressSpace {
     /// The default fails closed with [`MapError::Unsupported`] for a port
     /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]
     /// — the arena defence falls back to the software canary for such a
-    /// port (`AGENTS.md` §2.17), never silently no-ops (`AGENTS.md` §2.9).
+    /// port, never silently no-ops.
     /// A supporting port overrides this.
     ///
     /// # Errors
@@ -405,7 +399,7 @@ pub trait AddressSpace {
     unsafe fn activate(&self);
 }
 
-/// The §17.2 MMU conformance vertical.
+/// The MMU conformance vertical.
 ///
 /// Every paging-capable architecture port runs [`conformance::run_all`]
 /// against its real [`AddressSpace`]. The suite is portable — it names
@@ -455,11 +449,11 @@ pub mod conformance {
 
     /// The port's [`AddressSpace::block_split_support`] is honest: a
     /// non-supported declaration carries a non-empty justification
-    /// (`AGENTS.md` §2.17 — a defence is never pretended), and a port that
+    /// (a defence is never pretended), and a port that
     /// does *not* support the split fails both [`AddressSpace::split_block`]
     /// and [`AddressSpace::prepare_guard_arena`] closed with
     /// [`MapError::Unsupported`] rather than silently doing nothing
-    /// (`AGENTS.md` §2.9 — the guard-page arena that builds on the split
+    /// (the guard-page arena that builds on the split
     /// must fall back to the software canary, never pretend success). A
     /// supporting port's positive split behaviour is proven by its own host
     /// tests (it needs a known coarse block, which this portable suite does
@@ -516,7 +510,7 @@ pub mod conformance {
     }
 
     /// An address with no live leaf translates to nothing rather than
-    /// fabricating a frame (`AGENTS.md` §2.9).
+    /// fabricating a frame.
     fn unmapped_address_does_not_translate<A: AddressSpace + ?Sized>(space: &A, va: u64) {
         assert_eq!(
             space.translate(va),
@@ -739,7 +733,7 @@ pub mod conformance {
 
         /// A port that declares the split *unsupported* but then fails to
         /// fail `split_block` closed (it silently no-ops) is a fail-open
-        /// hole and must be caught (`AGENTS.md` §2.9).
+        /// hole and must be caught.
         #[derive(Default)]
         struct FailOpenSplitAddressSpace {
             inner: CellAddressSpace,
@@ -781,7 +775,7 @@ pub mod conformance {
         }
 
         /// A non-supported declaration with an empty justification is a
-        /// dishonest profile and must be caught (`AGENTS.md` §2.17).
+        /// dishonest profile and must be caught.
         #[derive(Default)]
         struct EmptyJustificationAddressSpace {
             inner: CellAddressSpace,

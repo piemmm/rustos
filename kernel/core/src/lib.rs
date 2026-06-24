@@ -25,7 +25,7 @@
 //! 2. **mem** — build the physical [`rustos_kernel_mem::FrameAllocator`].
 //! 3. **sec** — verify the bootstrap [`rustos_kernel_sec::IdentityTable`].
 //! 4. **sched** — construct the SMP [`crate::sched::Scheduler`] (the
-//!    build-time-selected scheduler policy, `AGENTS.md` §17.1).
+//!    build-time-selected scheduler policy).
 //! 5. **ipc** — `kernel/ipc` has no global state at this stage; the
 //!    phase event still fires so external log consumers see a uniform
 //!    boot timeline.
@@ -40,12 +40,11 @@
 //! to [`handle_panic`] (see the example in [`mod@panic`] module docs).
 //! The handler logs one [`audit::AuditEvent::Panic`] record carrying
 //! the failing CPU id, file, line, and column, then calls
-//! [`KernelArch::halt`]. It **never** silently resets — `AGENTS.md`
-//! §2 / Stage 2 deliverables.
+//! [`KernelArch::halt`]. It **never** silently resets / Stage 2 deliverables.
 //!
 //! # No global mutable static
 //!
-//! Per `AGENTS.md` §2, *"No global mutable static beyond the per-CPU
+//! Per, *"No global mutable static beyond the per-CPU
 //! bootstrap area"*. `kernel/core` declares **zero** global mutable
 //! statics: every subsystem the kernel constructs lives on
 //! [`kernel_main`]'s stack inside `KernelState`, which never escapes
@@ -56,7 +55,7 @@
 //!
 //! Architectural detail (entry contract, init order, panic policy,
 //! `BootInfo` schema) is in `docs/src/architecture/kernel.md`. Public
-//! items here carry rustdoc per `AGENTS.md` §13.
+//! items here carry rustdoc.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -66,7 +65,7 @@ extern crate alloc;
 
 // Host tests need `std` for `Box::leak`, `catch_unwind`, and
 // `String::from_utf8`. The crate itself remains `no_std` for
-// production builds (`AGENTS.md` §1 — no hacks).
+// production builds (no hacks).
 #[cfg(test)]
 extern crate std;
 
@@ -90,7 +89,7 @@ pub mod panic;
 pub mod procwait;
 pub mod random;
 pub mod rlimit;
-// The single scheduler selection point (`AGENTS.md` §17.1). Internal:
+// The single scheduler selection point. Internal:
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
 pub(crate) mod sched;

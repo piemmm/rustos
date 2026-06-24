@@ -1,5 +1,5 @@
 //! The read-eval-print loop that drives a [`Shell`] over its inherited
-//! standard streams (`AGENTS.md` §20, `plans/PI.md` P6e-3b).
+//! standard streams (`plans/PI.md` P6e-3b).
 //!
 //! [`Shell`] is a pure interpreter: it decides *what* to run but never reads
 //! input or writes output itself. This module is the loop around it. It reads
@@ -7,7 +7,7 @@
 //! shell's [`Console`] (fd 1), feeds each complete line to
 //! [`Shell::run_line`], and stops when the `exit` builtin requests it or the
 //! input stream ends. Advisory metadata about the session goes to the
-//! standard information stream (fd 3, `AGENTS.md` §20.1).
+//! standard information stream (fd 3).
 //!
 //! # Streams, never devices
 //!
@@ -15,16 +15,15 @@
 //! seam and the shell's [`Console`]. On a running kernel those are backed by
 //! the `abi-v1` standard-stream syscalls (`stream_read` / `stream_write`); in
 //! tests they are in-memory fixtures. The loop never names a console, UART, or
-//! framebuffer: binding to a device would be ambient authority (`AGENTS.md`
-//! §4) and hidden coupling (§17.3 / §17.4), and the same loop must work
-//! whatever the spawner backed the streams with (§20 — device independence is
+//! framebuffer: binding to a device would be ambient authority and hidden coupling, and the same loop must work
+//! whatever the spawner backed the streams with (device independence is
 //! a property of the stream layer, not the program).
 //!
 //! # End of input
 //!
 //! A zero-length read means the input stream yielded nothing, which the loop
 //! treats as end of input and a clean session end. *Blocking* until a byte
-//! arrives is the stream backing's responsibility, not the program's (§20);
+//! arrives is the stream backing's responsibility, not the program's;
 //! over a UART that does not yet block on receive, the session simply ends
 //! when no input is pending — live interactive receive over silicon is an
 //! on-metal item (`plans/PI.md` P6e-2 / P6e-3a).
@@ -42,7 +41,7 @@ const PROMPT: &str = "rustos$ ";
 
 /// Maximum length of a single command line, in bytes. A line longer than this
 /// is discarded rather than buffered without bound, so untrusted input cannot
-/// drive unbounded kernel-heap growth (`AGENTS.md` §4 / §2.9). The discarded
+/// drive unbounded kernel-heap growth. The discarded
 /// line is reported on `stdinfo` (fd 3).
 const MAX_LINE: usize = 4096;
 
@@ -50,7 +49,7 @@ const MAX_LINE: usize = 4096;
 /// across reads, so this only bounds one syscall's transfer.
 const READ_CHUNK: usize = 256;
 
-/// `stdinfo` producer name for the records this loop emits (`AGENTS.md` §20.1).
+/// `stdinfo` producer name for the records this loop emits.
 const PRODUCER: &str = "rustos-shell";
 
 /// The loop's standard-input (fd 0) and standard-information (fd 3) seam.
@@ -60,14 +59,14 @@ const PRODUCER: &str = "rustos-shell";
 /// reads, and the optional advisory metadata it emits.
 pub trait ReplInput {
     /// Read up to `buf.len()` bytes from standard input (fd 0), returning the
-    /// number read. The stream *backing* owns blocking (`AGENTS.md` §20): a
+    /// number read. The stream *backing* owns blocking: a
     /// read with no pending input waits in the backing until input arrives,
     /// so a return of `0` means the input stream has genuinely ended (or has
     /// no backing at all), which the loop treats as end of input.
     fn read(&mut self, buf: &mut [u8]) -> usize;
 
     /// Write one framed advisory record to the standard information stream
-    /// (fd 3, `AGENTS.md` §20.1). Best-effort and ignorable: it must never
+    /// (fd 3). Best-effort and ignorable: it must never
     /// affect correctness, so the implementation discards any short write.
     fn write_info(&mut self, bytes: &[u8]);
 }
@@ -185,7 +184,7 @@ impl LineReader {
     }
 }
 
-/// Emit the over-length-line advisory on `stdinfo` (fd 3, `AGENTS.md` §20.1).
+/// Emit the over-length-line advisory on `stdinfo` (fd 3).
 ///
 /// This is the canonical `omission` kind: input was dropped. The record is
 /// best-effort and ignorable; a serialisation failure is silently skipped, as
@@ -213,7 +212,7 @@ fn report_truncated_line(input: &mut dyn ReplInput) {
 /// The loop writes the prompt to standard output, reads one command line from
 /// `input`, and runs it through `shell`. A line that does not parse is already
 /// reported through the shell's `Console`, so its [`crate::ParseError`] is
-/// dropped here — a bad line is not a fatal session error (`AGENTS.md` §2.9).
+/// dropped here — a bad line is not a fatal session error.
 /// The loop ends when the `exit` builtin sets [`Shell::exit_request`] or the
 /// input stream ends; on end-of-input with no explicit `exit`, the session
 /// exits `0`.

@@ -10,14 +10,14 @@
 //! Arm/riscv `virt` boards and the I/O ports `0x514`/`0x518` on x86. That
 //! single difference is the [`DmaAddressRegister`] seam each vertical
 //! supplies; everything else — request staging, file-directory scanning,
-//! and `RAMFBCfg` programming — lives here once (`AGENTS.md` §2.2 — the
+//! and `RAMFBCfg` programming — lives here once (the
 //! transport is the only deliberate parallel-implementation difference,
 //! not duplicated logic).
 //!
 //! The two `virt` boards (riscv64 and aarch64) expose `fw_cfg`
 //! identically, so the MMIO transport itself ([`MmioDma`]) lives here too
 //! and serves both display verticals; only the x86 I/O-port transport is
-//! genuinely distinct and stays in its own vertical (`AGENTS.md` §2.2).
+//! genuinely distinct and stays in its own vertical.
 //!
 //! The client assumes the staging structure and the data buffers live in
 //! identity-mapped RAM, so a buffer's virtual address is the physical
@@ -339,7 +339,7 @@ const DMA_REG_OFFSET: u64 = 16;
 /// `qemu,fw-cfg-mmio` node whose `reg` base carries the 64-bit
 /// big-endian DMA address register at `base + 16` — so this one
 /// transport serves both the riscv64 and aarch64 display verticals
-/// (`AGENTS.md` §2.2; x86 uses the distinct I/O-port transport). The
+/// (x86 uses the distinct I/O-port transport). The
 /// base is discovered from the device tree, and the guest runs with the
 /// `fw_cfg` aperture identity-mapped, so the default identity
 /// [`DmaAddressRegister::to_physical`] is correct.

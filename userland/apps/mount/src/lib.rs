@@ -1,20 +1,17 @@
-//! RustOS `mount` — list mounted filesystems and attach new ones (Stage 6,
-//! `AGENTS.md` §3 `userland/apps/`, §16.6).
+//! RustOS `mount` — list mounted filesystems and attach new ones (Stage 6 `userland/apps/`).
 //!
 //! With no operands `mount` lists the current mount table; with a
 //! `SOURCE TARGET` pair it attaches a filesystem. The two halves use
 //! different paths, both kernel-plumbing-free behind injected seams:
 //!
 //! * **Listing** is a *read* of live system state, so — like `ps` — it goes
-//!   through the System Information API (`AGENTS.md` §16.6): RustOS has no
+//!   through the System Information API: RustOS has no
 //!   `/proc` and no mount-table file. `mount` issues the typed, versioned
 //!   `sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod`
 //!   and renders one `source on target type fstype (options)` line per
 //!   mount. The query is ungated; the shared paging and rendering live in
-//!   `lib/procinfo` so `mount`, `ps`, and `sysinfo` never duplicate them
-//!   (`AGENTS.md` §2.2).
-//! * **Attaching** is privileged — it needs `CAP_FS_MOUNT` (`AGENTS.md`
-//!   §5.2) — and the **kernel** makes that decision (`AGENTS.md` §5.4), not
+//!   `lib/procinfo` so `mount`, `ps`, and `sysinfo` never duplicate them.
+//! * **Attaching** is privileged — it needs `CAP_FS_MOUNT` — and the **kernel** makes that decision, not
 //!   this tool. `mount` parses and presents a request to the injected
 //!   [`Mounter`] seam; an unauthorised or invalid attempt is refused there
 //!   and surfaced as [`MountError::Mount`].
@@ -41,7 +38,7 @@
 //! a [`MountError::BadOption`]. A listing transport failure surfaces the
 //! underlying [`Errno`](rustos_abi::Errno) as [`MountError::Service`], a
 //! refused or failed attach as [`MountError::Mount`], and a terminal write
-//! failure as [`MountError::Output`]. There is no panic (`AGENTS.md` §2.9).
+//! failure as [`MountError::Output`]. There is no panic.
 //!
 //! # Module map
 //!
@@ -52,10 +49,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
+//! `no_std` (with `alloc`); the only dependencies are the
 //! audited `lib/abi` and `lib/procinfo` crates, so this userland tool never
-//! links a kernel or driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! links a kernel or driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

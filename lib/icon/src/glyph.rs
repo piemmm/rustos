@@ -3,10 +3,9 @@
 //! [`IconKind`] is the vocabulary of glyphs the taskbar's notification area
 //! draws. A theme asset id resolves to a kind through [`IconKind::for_asset`];
 //! an unrecognised id falls back to [`IconKind::Generic`] rather than failing,
-//! so an unknown notification still shows a placeholder dot instead of nothing
-//! (`AGENTS.md` §2.9). [`builtin_icon`] turns a kind plus a single theme colour
+//! so an unknown notification still shows a placeholder dot instead of nothing. [`builtin_icon`] turns a kind plus a single theme colour
 //! into a [`VectorIcon`]; the glyphs are monochrome silhouettes tinted by the
-//! caller, so re-theming is data, not new code (`AGENTS.md` §10).
+//! caller, so re-theming is data, not new code.
 
 use alloc::vec;
 
@@ -38,7 +37,7 @@ pub enum IconKind {
 impl IconKind {
     /// Resolve a theme asset identifier to a glyph, falling back to
     /// [`Generic`](Self::Generic) for an unknown id so an unexpected
-    /// notification still draws a placeholder (`AGENTS.md` §2.9).
+    /// notification still draws a placeholder.
     #[must_use]
     pub fn for_asset(asset: &str) -> Self {
         match asset {
@@ -55,7 +54,7 @@ impl IconKind {
     ///
     /// A desktop loader names a kind's on-disk SVG asset by this id, so the
     /// id↔kind mapping lives in one place rather than being restated at the
-    /// load site (`AGENTS.md` §2.2). The round trip holds for every kind:
+    /// load site. The round trip holds for every kind:
     /// `IconKind::for_asset(kind.asset_id()) == kind`.
     #[must_use]
     pub fn asset_id(self) -> &'static str {

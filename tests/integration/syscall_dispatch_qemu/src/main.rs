@@ -19,7 +19,7 @@
 //!    table (`lib/abi/src/syscalls.rs`) — capability probes are a
 //!    "pure observer" that must not drown the audit log. The synthesised
 //!    entry point therefore inspects the `SyscallResult` return value
-//!    directly: that **is** the §5.4.4 evidence path for an audit-false
+//!    directly: that **is** the evidence path for an audit-false
 //!    syscall.
 //!
 //! 2. `(exit, 0)` — declared `audit: true`, so a successful dispatch
@@ -51,7 +51,7 @@
 //! this crate so `cargo build -p rustos-test-syscall-dispatch-qemu`
 //! and `cargo xtask test --qemu` do the obvious thing; release builds
 //! that enable it are rejected by the `compile_error!` guard below
-//! (AGENTS.md §1 — no hacks; §5.4.5 — fail closed). `cargo deny check`
+//! (no hacks; — fail closed). `cargo deny check`
 //! additionally forbids the production `rustos-kernel` crate from
 //! ever growing a `test-hooks` feature (see `deny.toml`).
 
@@ -64,7 +64,7 @@
 // production bin's allocator-backed `Arc<BinArch>` in
 // `kernel/rustos-kernel/src/boot.rs`). Pulling `extern crate alloc`
 // in at the crate root is the documented way to expose it under
-// `#![no_std]` (`AGENTS.md` §15.10 — the `unused_extern_crates`
+// `#![no_std]` (the `unused_extern_crates`
 // warning on the host build is justified: the synthesised quartet is
 // `cfg`-gated to `target_os = "none"`, so on host this declaration
 // is unused but mandatory under the bare-metal cfg).
@@ -72,7 +72,7 @@
 #[allow(unused_extern_crates)]
 extern crate alloc;
 
-// AGENTS.md §1 — test affordances must never reach a release binary.
+// — test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate (see `Cargo.toml`);
 // release builds re-running with the feature on are a configuration
 // error rather than a soundness failure, but we belt-and-brace by
@@ -161,7 +161,7 @@ mod kernel {
     /// Set once the synthesised-quartet entry point has been driven,
     /// so a stray duplicate `BootCompleted` (which the catalogue
     /// disallows but the audit pipeline cannot statically prove)
-    /// never re-enters the test logic. AGENTS.md §5.4.5 — fail closed.
+    /// never re-enters the test logic. — fail closed.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     // --- Audit observer Sinks ------------------------------------
@@ -227,7 +227,7 @@ mod kernel {
         //    `clock_get` handler is not exercised by this test, but
         //    using `BinArch` keeps the type bounds on `Scheduler<A>`
         //    and `KernelSyscallHandlers<A>` aligned with the production
-        //    wiring path — AGENTS.md §2.4, no parallel arch types).
+        //    wiring path, no parallel arch types).
         //
         //    The arch instance constructed here is independent of the
         //    production `KernelState`'s arch: `boot()` has already
@@ -246,11 +246,11 @@ mod kernel {
         // and avoids reading the LAPIC ID register a second time.
         //
         // The arch handle borrows its per-CPU bookkeeping from a
-        // caller-sized `&'static` backing (`AGENTS.md` §24.1);
+        // caller-sized `&'static` backing;
         // `run_synthesised_test` runs once, so a function-local `static`
         // is sound and needs no allocator.
         // Single-CPU synthesised test (matches `boot::try_boot`): the
-        // per-CPU bookkeeping is sized to one slot (`AGENTS.md` §24.1 — no
+        // per-CPU bookkeeping is sized to one slot (no
         // baked-in `MAX_CPUS`).
         static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
         let cpu_to_lapic: [Option<u8>; 1] = [Some(0)];
@@ -262,7 +262,7 @@ mod kernel {
         // `exit`), so the exact frequency is irrelevant to the
         // assertion — but using a well-formed `Calibration` keeps the
         // arch wrapper in the same shape the production code uses
-        // (AGENTS.md §2.2 — no parallel construction paths).
+        // (no parallel construction paths).
         let calibration = Calibration {
             ticks_per_second: 100_000,
             initial_count: 100,
@@ -291,7 +291,7 @@ mod kernel {
         // 3. Spawn a no-op task on CPU 0 so `Scheduler::exit(task_id)`
         //    has a real entry to remove. The body is never executed —
         //    the scheduler hot loop is not run — but the closure
-        //    still has to type-check (`AGENTS.md` §15.1 — no stubs:
+        //    still has to type-check (no stubs:
         //    the body must be a real `TaskAction`-returning closure).
         let Ok(task_id) = sched.spawn(0, Priority::Normal, |_| TaskAction::Exit) else {
             qemu_exit::exit_failure();
@@ -363,8 +363,8 @@ mod kernel {
         // 6. (cap_query, CAP_TIME_SET) — observed via the return
         //    value. `cap_query` is `audit: false`, so no
         //    `SyscallInvoked` record is emitted; the dispatcher's
-        //    `Ok(1)` *is* the §5.4.4 evidence path for an unaudited
-        //    syscall (AGENTS.md §5.4.4 — "every security-relevant
+        //    `Ok(1)` *is* the evidence path for an unaudited
+        //    syscall ("every security-relevant
         //    decision"; capability probes are explicitly carved out
         //    in `lib/abi/src/syscalls.rs`).
         let mut args = RawArgs::ZERO;
@@ -373,13 +373,13 @@ mod kernel {
             Ok(1) => {}
             // Any other outcome (wrong return value, or an `Errno`)
             // means the production dispatch path has regressed; fail
-            // the test loud, AGENTS.md §7 (no flaky tests).
+            // the test loud (no flaky tests).
             _ => qemu_exit::exit_failure(),
         }
         // The unaudited path must leave `SYSCALL_INVOKED_COUNT`
         // unchanged. Inspecting it here catches a future regression
         // that accidentally flips `cap_query`'s `audit` flag —
-        // AGENTS.md §9 (`abi-v1` immutable once shipped).
+        // (`abi-v1` immutable once shipped).
         if SYSCALL_INVOKED_COUNT.load(Ordering::Acquire) != 0 {
             qemu_exit::exit_failure();
         }
@@ -419,7 +419,7 @@ mod kernel {
     /// synthesised quartet) routes through `SERIAL_SINK` for the
     /// transcript and then halts via `kernel_arch::halt`; the
     /// integration harness reports `Outcome::Timeout`. This is the
-    /// documented fail-loud behaviour for AGENTS.md §7 (no flaky
+    /// documented fail-loud behaviour for (no flaky
     /// tests).
     #[panic_handler]
     fn rustos_test_syscall_dispatch_qemu_panic(info: &PanicInfo<'_>) -> ! {
@@ -443,7 +443,7 @@ mod kernel {
 // The synthesised quartet only compiles when `feature = "test-hooks"`
 // is on. Disabling it leaves the bin as a no-op host stub so a layout
 // sanity check (`cargo build --no-default-features -p
-// rustos-test-syscall-dispatch-qemu`) still builds — AGENTS.md §1
+// rustos-test-syscall-dispatch-qemu`) still builds
 // (no hacks: a disabled test must compile cleanly).
 #[cfg(all(itest_x86_64, not(feature = "test-hooks")))]
 #[no_mangle]
@@ -451,11 +451,11 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // No audit observer, no dispatch, no QEMU exit affordance: the
     // run will time out under `tools/qemu::Runner`, which is the
     // correct fail-loud signal for "test-hooks feature was disabled
-    // for a QEMU enrolment that needs it". AGENTS.md §7 — no flaky
+    // for a QEMU enrolment that needs it". — no flaky
     // tests; the timeout is deterministic.
     loop {
         // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on
-        // x86_64 (`AGENTS.md` §2.9). Looping defends against spurious
+        // x86_64. Looping defends against spurious
         // wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
@@ -480,7 +480,7 @@ fn main() {}
 
 #[cfg(not(itest_x86_64))]
 #[allow(dead_code)]
-// AGENTS.md §15.10: this `#[allow]` is justified — the freestanding
+// this `#[allow]` is justified — the freestanding
 // configuration declares `#![no_main]`, but the host configuration
 // needs an unused stub so `cargo build` for the host target does not
 // complain about the absent `fn main`. The host stub `fn main` above

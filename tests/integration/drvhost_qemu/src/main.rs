@@ -56,7 +56,7 @@ mod kernel {
 
     /// Global allocator backed by [`HEAP`]. The pointer to `HEAP`
     /// outlives the binary, and the allocator is the only consumer
-    /// (`AGENTS.md` §4 — deterministic OOM via `FreeListAllocator`).
+    /// (deterministic OOM via `FreeListAllocator`).
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
@@ -132,7 +132,7 @@ mod kernel {
 
         // load → snapshot → unload → reload — every transition flips
         // `qemu_exit::exit_failure` on any error so a misbehaving host
-        // is loud, not silent (`AGENTS.md` §7 — no flaky tests).
+        // is loud, not silent (no flaky tests).
         let Ok(h1) = host.load("/d/mock", &caller) else {
             qemu_exit::exit_failure();
         };

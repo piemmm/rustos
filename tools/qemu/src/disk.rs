@@ -12,7 +12,7 @@
 //! `lba * SECTOR_BYTES`, and the host test harness can re-read the file
 //! after the run without linking a qcow2 parser. Keeping the format
 //! trivial is what lets the planting and verification logic live in one
-//! small, auditable place (`AGENTS.md` §2.2 / §2.3).
+//! small, auditable place.
 
 use std::fs::OpenOptions;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -34,7 +34,7 @@ pub const SECTOR_BYTES: usize = 512;
 /// The file is truncated to exactly `size_sectors * SECTOR_BYTES` bytes,
 /// so every block not named in `sectors` reads back as zeroes — a
 /// deterministic, reproducible starting state for a storage test
-/// (`AGENTS.md` §7 — no flaky tests).
+/// (no flaky tests).
 ///
 /// Each planted slice may be shorter than [`SECTOR_BYTES`] (the tail of
 /// the sector stays zero) but never longer; an over-long slice is a

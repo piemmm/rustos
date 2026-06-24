@@ -15,7 +15,7 @@
 //! is reached through a kernel-mapped [`RegisterWindow`] obtained
 //! from the MMIO-map facility after a
 //! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
-//! check (`AGENTS.md` §4), exactly like a device's BAR window. The
+//! check, exactly like a device's BAR window. The
 //! caller passes that window to [`crate::mechanism_ecam`]; the
 //! window's bounds checking turns any access beyond the mapped region
 //! into the PCI "no device" sentinel, so a walk past the mapped buses
@@ -61,7 +61,7 @@ impl ConfigSpace for EcamConfigSpace {
         // offset beyond the mapped region both resolve to the PCI
         // Local Bus 3.0 §6.1 "no function present" sentinel, so the
         // enumeration walk treats them as an empty slot and fails
-        // closed (`AGENTS.md` §5.4).
+        // closed.
         let Some(offset) = addr.ecam_offset() else {
             return 0xFFFF_FFFF;
         };

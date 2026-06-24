@@ -1,28 +1,28 @@
-//! The RustOS user-account database (`AGENTS.md` §5.1, §16.2).
+//! The RustOS user-account database.
 //!
 //! `rustos-users` owns the single definition of a user account and of the
 //! versioned text format persisted at `/System/Security/Users`: the
-//! installer (`AGENTS.md` §11) and the image builder (`tools/mkimage`)
+//! installer and the image builder (`tools/mkimage`)
 //! *author* it, and the login path (`userland/session/login`) *reads* it —
-//! one format, defined once (`AGENTS.md` §2.2).
+//! one format, defined once.
 //!
 //! * [`UserRecord`] — one account: username, [`Uid`], primary [`Gid`],
 //!   supplementary groups, display name, home directory, the user's shell
-//!   of choice, the capability grant ceiling (`AGENTS.md` §5.2), the
+//!   of choice, the capability grant ceiling, the
 //!   [`AccountState`], and the stored [`PasswordRecord`].
 //! * [`UsersDb`] — the whole database: fail-closed [`UsersDb::parse`],
 //!   exact-round-trip [`UsersDb::serialise`], and the timing-equalised
 //!   [`UsersDb::authenticate`].
 //! * [`PasswordRecord`] — the salted PBKDF2-HMAC-SHA256 password hash
-//!   (`lib/crypto`, `AGENTS.md` §2.12), verified in constant time with
-//!   respect to the stored hash (`AGENTS.md` §19.1).
+//!   (`lib/crypto`), verified in constant time with
+//!   respect to the stored hash.
 //!
-//! The database text is untrusted input (`AGENTS.md` §19.5/§19.6): every
+//! The database text is untrusted input: every
 //! bound and field shape is validated and the first defect rejects the
 //! whole file ([`ParseError`]). Authentication exposes exactly one refusal
 //! ([`AuthError::InvalidCredentials`]) whether the account is unknown,
 //! locked, or the password is wrong, so the interface cannot be used to
-//! probe for valid usernames (`AGENTS.md` §5.4).
+//! probe for valid usernames.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -47,7 +47,7 @@ use core::fmt;
 
 /// Why a database text, record line, or field was refused.
 ///
-/// Every variant is a fail-closed rejection (`AGENTS.md` §2.9, §5.4): the
+/// Every variant is a fail-closed rejection: the
 /// parser returns it and the caller holds no database, rather than a
 /// partially-applied or guessed-at one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -114,7 +114,7 @@ impl fmt::Display for ParseError {
 ///
 /// Deliberately a single variant: the caller (and therefore the person at
 /// the prompt) learns only that the pair was rejected, never which part
-/// (`AGENTS.md` §5.4 — no information leak).
+/// (no information leak).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AuthError {
     /// The username/password pair was rejected.

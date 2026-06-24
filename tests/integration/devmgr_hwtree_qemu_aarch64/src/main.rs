@@ -1,10 +1,10 @@
 //! Design D P-3 QEMU integration test (`.junie/next-pi-prompt.md`): boot the
 //! production aarch64 (Raspberry Pi 4) `rustos-kernel` pipeline on the `virt`
 //! board, have PID 1 (`init`) launch the **perpetual device-manager service**
-//! (`/System/Services/devmgr`, `AGENTS.md` §18.3), and prove the service's
+//! (`/System/Services/devmgr`), and prove the service's
 //! reactive observe loop end to end: it reads the discovered hardware tree
 //! (`hw_tree_read`), **truly parks** off the run queue in `hw_tree_wait`
-//! (`AGENTS.md` §2.1 / §17.1 — no busy poll), and, on a **real generation
+//! (no busy poll), and, on a **real generation
 //! bump**, wakes, re-reads, and re-parks — with no starvation of a
 //! single-CPU system.
 //!
@@ -21,7 +21,7 @@
 //! registry (which carries `devmgr` in `spawn_layout::SPAWN_PROGRAMS`), and
 //! `HwTreeStore` source — and only swaps the audit sink. After
 //! `kernel_core::kernel_main` emits `BootCompleted`, PID 1 `init` launches
-//! `devmgr` first (`AGENTS.md` §18.3) and then a login session per console;
+//! `devmgr` first and then a login session per console;
 //! `devmgr` reads the seeded hardware tree (logging it to fd 2) and blocks in
 //! `hw_tree_wait(generation, u64::MAX)`, which **registers it on the kernel's
 //! `HW_TREE_WAITQ` and parks it** (Design D P-2).
@@ -40,7 +40,7 @@
 //! 1. **Armed → Bumped:** the first event at which `HW_TREE_WAITQ` is
 //!    non-empty proves `devmgr` parked. The sink then appends a node to the
 //!    authoritative `HW_TREE` store — a **real** mutation that bumps the
-//!    store generation and calls `hw_tree_wake` (`AGENTS.md` §18.4), exactly a
+//!    store generation and calls `hw_tree_wake`, exactly a
 //!    hardware hotplug. This unparks `devmgr`.
 //! 2. **Bumped → PASS:** at the next event with `HW_TREE_WAITQ` non-empty,
 //!    `devmgr` has been scheduled by the cooperative drain (login blocks on
@@ -53,7 +53,7 @@
 //! A regression where `devmgr` never spawns, never reads, never parks, or
 //! never wakes on the bump never reaches the second phase, so the run times
 //! out and the harness reports `Outcome::Timeout` — the documented fail-loud
-//! behaviour (`AGENTS.md` §7).
+//! behaviour.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -89,7 +89,7 @@ mod kernel {
     /// outside any scheduler lock, so calling the wake path
     /// (`HW_TREE.append` → `hw_tree_wake` → `unpark`) from here is the same
     /// safe context an IPC `send` wakes a receiver from — never re-entrant on
-    /// a held run-queue lock (`AGENTS.md` §2.1).
+    /// a held run-queue lock.
     const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -120,8 +120,7 @@ mod kernel {
 
     /// The node the sink appends as the simulated hardware hotplug. Its
     /// content is irrelevant to the proof — appending *anything* bumps the
-    /// `HwTreeStore` generation and wakes the parked `devmgr` (`AGENTS.md`
-    /// §18.4); a distinctive id keeps the serial transcript legible.
+    /// `HwTreeStore` generation and wakes the parked `devmgr`; a distinctive id keeps the serial transcript legible.
     fn hotplug_node() -> HwNode {
         HwNode::new(0x7E57, HW_NODE_ROOT, HwDeviceClass::Other)
     }
@@ -155,8 +154,7 @@ mod kernel {
                     if parked {
                         // Deliver a real generation bump (simulated hotplug):
                         // append to the authoritative store, which bumps the
-                        // generation and wakes the parked `devmgr`
-                        // (`AGENTS.md` §18.4). Same path the floor bus
+                        // generation and wakes the parked `devmgr`. Same path the floor bus
                         // bring-up uses, so this is the production wake, not a
                         // test back-channel.
                         HW_TREE.append(&hotplug_node());
@@ -182,8 +180,7 @@ mod kernel {
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-    /// §7).
+    /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn rustos_devmgr_hwtree_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

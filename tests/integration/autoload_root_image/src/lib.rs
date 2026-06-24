@@ -8,13 +8,13 @@
 //! ([`VIRTIO_KBD_BUNDLE`]) is planted into the **read-only `/System`
 //! volume**'s `Drivers/` store at [`STORE_PATH`] (design B — the store lives
 //! on a volume reachable *before* the encrypted-root passphrase). The booted
-//! kernel mounts that `/System` volume read-only, the §18.6 store scan
+//! kernel mounts that `/System` volume read-only, the store scan
 //! discovers the bundle **before** unlock, the signed load gate verifies it
 //! against the kernel's embedded `KERNEL_DRIVER_SIGNER_PUBKEY` (the bundle is
 //! signed with the kernel's own driver-signing seed, so it verifies by
-//! construction — `AGENTS.md` §2.2), `devmatch` binds it to the discovered
+//! construction), `devmatch` binds it to the discovered
 //! virtio-input node, and it is spawned into its own user-space process —
-//! the full "drivers in user space by discovery" path (`AGENTS.md` §4 / §18).
+//! the full "drivers in user space by discovery" path.
 //!
 //! `no_std` + `alloc` so the builder links into the host build tool
 //! (`tools/xtask`, which plants the image); the bundle itself is built and
@@ -36,15 +36,15 @@ include!(concat!(env!("OUT_DIR"), "/bundle.rs"));
 
 // The whole-disk geometry and the operator-facing constants are the encrypted-
 // root fixture's (this fixture only adds the driver bundle), re-exported so the
-// host harness and the guest tail name them in one place (`AGENTS.md` §2.2).
+// host harness and the guest tail name them in one place.
 pub use rustos_test_encrypted_root_image::{
     PASSPHRASE, PASSWORD, SECTOR_BYTES, TOTAL_SECTORS, USERNAME,
 };
 
 /// Path of the planted driver bundle's leaf file *under the `/System`
 /// volume's root*: `Drivers/input/virtio_kbd/Run`. The `/System` volume's
-/// own root *is* `/System` (design B), so the §16.2 `/System/Drivers/` store
-/// is at the volume-relative `Drivers/…` (`AGENTS.md` §16.2 — the store is
+/// own root *is* `/System` (design B), so the `/System/Drivers/` store
+/// is at the volume-relative `Drivers/…` (the store is
 /// `<class>/<leaf>/<driver-file>`; the leaf names the device, never the bus
 /// namespace).
 pub const STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
@@ -56,7 +56,7 @@ pub const STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];
 ///
 /// Propagates any [`DriverError`] from the underlying whole-disk assembly
 /// (descriptor provisioning, FAT/`RustFS` authoring, the MBR encode, or the
-/// bundle plant), surfaced rather than panicked (`AGENTS.md` §2.9).
+/// bundle plant), surfaced rather than panicked.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
     rustos_test_encrypted_root_image::build_image_with_drivers(&[(STORE_PATH, VIRTIO_KBD_BUNDLE)])
 }
@@ -107,7 +107,7 @@ mod tests {
     fn the_embedded_bundle_is_a_signed_userspace_driver_manifest() {
         // The bundle `build.rs` produced parses as a well-formed
         // `kind = UserSpace` manifest with a non-zero signature, so it is a
-        // genuine signed bundle, not an inert stub (`AGENTS.md` §8 / §9).
+        // genuine signed bundle, not an inert stub.
         assert!(
             VIRTIO_KBD_BUNDLE.len() > DriverManifest::WIRE_LEN,
             "the bundle carries a manifest plus a payload"
@@ -125,8 +125,8 @@ mod tests {
 
     #[test]
     fn the_store_scan_discovers_the_bundle_and_it_binds_a_virtio_input_node() {
-        // The production §18.6 store scan decodes the bundle's bind table
-        // fail-closed, and the shared §18.3 match policy resolves a discovered
+        // The production store scan decodes the bundle's bind table
+        // fail-closed, and the shared match policy resolves a discovered
         // virtio-input node to it as the sole winner — the exact autoload
         // decision the booted kernel makes off the mounted root.
         let store = scan_store(&BundleSource, &[STORE_PATH_STR], &DiscardSink);
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn a_non_virtio_input_node_does_not_bind_the_bundle() {
         // A node advertising a different virtio device id matches nothing —
-        // the bundle binds only its declared device (`AGENTS.md` §18.3 / §18.4).
+        // the bundle binds only its declared device.
         let store = scan_store(&BundleSource, &[STORE_PATH_STR], &DiscardSink);
         let candidates = store.candidates();
         let node_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID + 1)];

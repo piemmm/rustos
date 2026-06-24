@@ -1,4 +1,4 @@
-//! Shared `SchedulerPolicy` conformance suite (`AGENTS.md` §17.1).
+//! Shared `SchedulerPolicy` conformance suite.
 //!
 //! Every concrete scheduler must pass this suite. It is written purely
 //! against the [`SchedulerPolicy`] trait and the host [`TestArch`], so it
@@ -10,7 +10,7 @@
 //! The suite is deterministic and single-threaded: it drives `cpus`
 //! simulated cores round-robin from one host thread, advancing
 //! [`TestArch`]'s tick counter explicitly. That keeps the assertions
-//! reproducible (`AGENTS.md` §7 — no flaky tests) while still exercising
+//! reproducible (no flaky tests) while still exercising
 //! the ≥ 4-core SMP paths (per-CPU queues, work stealing, IPI bookkeeping).
 //!
 //! Only the public trait surface is used — no implementation internals —
@@ -96,7 +96,7 @@ fn block_wake_roundtrip<S: SchedulerPolicy<TestArch>>() {
 }
 
 /// A wake delivered *before* a task commits to park is not lost
-/// (`AGENTS.md` §2.1 — no lost wake-ups). This is the park/unpark race a
+/// (no lost wake-ups). This is the park/unpark race a
 /// blocking syscall hits: the caller checks its condition, the event then
 /// fires (an `unpark` against the still-running caller), and only *then*
 /// does the caller try to park. The wake must cancel that park rather than

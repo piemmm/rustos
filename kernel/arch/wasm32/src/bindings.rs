@@ -8,14 +8,13 @@
 //! `web/rustos.js` supplies them.
 //!
 //! RustOS deliberately does **not** depend on `wasm-bindgen` / `web-sys`
-//! for this surface (`AGENTS.md` §2.12): the import set is tiny, fixed,
+//! for this surface: the import set is tiny, fixed,
 //! and audited here in one place, so wrapping it in a third-party
 //! binding generator would only widen the trusted computing base.
 //!
 //! Each import has a single safe wrapper below. The raw `extern` block
 //! is private; the rest of the crate only ever calls the wrappers, so
-//! the `unsafe` of a host call never leaks across a module boundary
-//! (`AGENTS.md` §2.10).
+//! the `unsafe` of a host call never leaks across a module boundary.
 
 // Resolve every host import against the WebAssembly `env` module — the
 // module name the companion glue (`web/rustos.js`) supplies them under.

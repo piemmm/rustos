@@ -4,8 +4,7 @@
 //! Home or Page Down — as an escape sequence rather than a printable
 //! character. xterm and the VT220 use two encodings: the `SS3` form (`ESC O P`
 //! for `F1`) and the `CSI … ~` form (`ESC [ 3 ~` for Delete). This module names
-//! each key once so the emitter and the parser share that one definition
-//! (`AGENTS.md` §2.2): [`Key::ss3_final`] and [`Key::tilde_param`] give the
+//! each key once so the emitter and the parser share that one definition: [`Key::ss3_final`] and [`Key::tilde_param`] give the
 //! encoding the emitter writes, and the parser recognises both the canonical
 //! form and the common alternates, mapping them back to the same [`Key`].
 //!
@@ -126,7 +125,7 @@ impl Key {
     }
 
     /// The [`Key`] for a `CSI <param> ~` sequence, or `None` if `param` is not
-    /// a recognised key (fail closed, `AGENTS.md` §2.9).
+    /// a recognised key (fail closed).
     #[must_use]
     pub const fn from_tilde_param(param: u16) -> Option<Key> {
         match param {

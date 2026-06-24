@@ -31,7 +31,7 @@ mod kernel {
     ///
     /// `static mut` because the bump allocator hands out disjoint
     /// slices via an `AtomicUsize` cursor; the storage itself is
-    /// otherwise immutable from any other call site. `AGENTS.md` §2
+    /// otherwise immutable from any other call site.
     /// — the *one* `static mut` the binary needs, justified in
     /// `README.md` as the boot-heap arena.
     static mut HEAP: Heap = Heap::ZERO;
@@ -99,8 +99,7 @@ mod kernel {
     /// `static mut` because the bump allocator hands out disjoint slices
     /// via an `AtomicUsize` cursor; the storage is otherwise never
     /// aliased. It lives in `.bss` (zeroed by the boot trampoline). This
-    /// is the boot-heap arena — the one `static mut` the binary needs
-    /// (`AGENTS.md` §2).
+    /// is the boot-heap arena — the one `static mut` the binary needs.
     static mut HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
@@ -159,8 +158,7 @@ mod kernel {
     /// (`riscv64-virt.ld`), placed after `__bss_end` so the boot
     /// trampoline neither zeroes nor counts it in the usable
     /// physical-memory map (which starts at `__kernel_end`). This is the
-    /// boot-heap arena — the one `static mut` the binary needs
-    /// (`AGENTS.md` §2).
+    /// boot-heap arena — the one `static mut` the binary needs.
     #[link_section = ".heap"]
     static mut HEAP: Heap = Heap::ZERO;
 

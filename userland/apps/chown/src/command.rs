@@ -26,8 +26,7 @@ pub enum Command {
 /// id.
 ///
 /// `chown` accepts three forms, all using **decimal** ids (RustOS has no
-/// name-to-id seam in this tool, so a name would be interface creep,
-/// `AGENTS.md` §2.4):
+/// name-to-id seam in this tool, so a name would be interface creep):
 ///
 /// * `OWNER` — change the owning user, leave the group ([`uid`](Owner::uid)
 ///   set, [`gid`](Owner::gid) [`None`]).
@@ -143,7 +142,7 @@ pub fn parse_owner(spec: &str) -> Option<Owner> {
             }
             // `OWNER:` (a named user with an empty group) has no meaning
             // without a name database to resolve the user's primary group, so
-            // it is rejected rather than guessed (`AGENTS.md` §2.1).
+            // it is rejected rather than guessed.
             if uid.is_some() && gid.is_none() {
                 return None;
             }

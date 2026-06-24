@@ -12,8 +12,7 @@
 //! [`SyscallNumber::IPC_RECV`](rustos_abi::SyscallNumber::IPC_RECV) syscall;
 //! that syscall is wrapped behind the injected [`MessagePort`] seam so this
 //! `userland/gui` crate holds no endpoint capability of its own and the
-//! framing runs above the kernel boundary, not inside it (`AGENTS.md` §17.4 /
-//! §19.5). Tests back the seam with an in-memory queue (`AGENTS.md` §7).
+//! framing runs above the kernel boundary, not inside it. Tests back the seam with an in-memory queue.
 //!
 //! Each received message is validated before its payload becomes a record:
 //! the [`IpcMessageHeader`] must decode (magic, ABI version, reserved field,
@@ -22,12 +21,12 @@
 //! [`WIRE_LEN`](rustos_abi::input::PointerInput::WIRE_LEN). A message that
 //! fails any check surfaces its [`Errno`] rather than being misinterpreted, so
 //! a truncated, misrouted, or corrupt frame can never be decoded as a spurious
-//! pointer move or key press (`AGENTS.md` §5.4 / §2.9).
+//! pointer move or key press.
 //!
 //! The same framing serves both input kinds — a pointer record and a key
 //! record are each a fixed-length payload behind one IPC header — so
 //! [`IpcInputChannel`] implements both seam traits through one shared
-//! validation path rather than two (`AGENTS.md` §2.2); a given channel is
+//! validation path rather than two; a given channel is
 //! bound to one endpoint and wrapped in the matching input source.
 
 use alloc::vec::Vec;
@@ -44,7 +43,7 @@ use crate::keyboard::KeyInputChannel;
 /// On a running system this wraps the
 /// [`SyscallNumber::IPC_RECV`](rustos_abi::SyscallNumber::IPC_RECV) syscall for
 /// the endpoint the desktop bound its input channel to; tests back it with an
-/// in-memory queue (`AGENTS.md` §7). It deals only in raw bytes — validating
+/// in-memory queue. It deals only in raw bytes — validating
 /// and framing them is [`IpcInputChannel`]'s job — so the port itself need not
 /// understand the input wire formats.
 pub trait MessagePort {
@@ -73,7 +72,7 @@ pub trait MessagePort {
 /// [`DeviceInputSource`](crate::DeviceInputSource), a keyboard endpoint in
 /// [`KeyboardInputSource`](crate::KeyboardInputSource). It implements both
 /// [`PointerInputChannel`] and [`KeyInputChannel`] through one shared
-/// validation path (`AGENTS.md` §2.2); which records flow is decided by the
+/// validation path; which records flow is decided by the
 /// endpoint it is bound to, not by the channel type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IpcInputChannel<P> {
@@ -120,8 +119,7 @@ impl<P> IpcInputChannel<P> {
 impl<P: MessagePort> IpcInputChannel<P> {
     /// Receive one message and return its `N`-byte payload as a record.
     ///
-    /// Returns `Ok(None)` when the endpoint is drained, and fails closed
-    /// (`AGENTS.md` §5.4 / §2.9) on any inconsistency:
+    /// Returns `Ok(None)` when the endpoint is drained, and fails closed on any inconsistency:
     ///
     /// * a frame too short to hold the header and an `N`-byte payload →
     ///   [`Errno::BufferTooSmall`];
@@ -443,7 +441,7 @@ mod tests {
     fn key_channel_rejects_pointer_endpoint_message() {
         // Binding a channel to the key endpoint but feeding it a pointer
         // endpoint's frame is refused — the framing is shared but the binding
-        // is not (`AGENTS.md` §5.4).
+        // is not.
         let mut channel = IpcInputChannel::new(QueuePort::new(), KEY_ENDPOINT);
         let record = KeyInput::Released {
             key: KeyValue::Char('q'),

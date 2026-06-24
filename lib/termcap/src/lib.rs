@@ -4,14 +4,14 @@
 //! how deep its colour is, whether it can address the cursor, switch to an
 //! alternate screen, report the mouse, and so on. On a POSIX system this lives
 //! in a terminfo / termcap database read from `/usr/share` or `/etc`. RustOS
-//! has no such paths (`AGENTS.md` §16.1), so the database is **compiled in**:
-//! a closed, versioned [`TermType`] set (`AGENTS.md` §2.4) and a constant
+//! has no such paths, so the database is **compiled in**:
+//! a closed, versioned [`TermType`] set and a constant
 //! [`Capabilities`] record per terminal.
 //!
 //! # One vocabulary
 //!
 //! Every escape sequence a capability record describes is a [`rustos_vt::Op`]
-//! — the one shared vocabulary (`AGENTS.md` §2.2). This crate never defines a
+//! — the one shared vocabulary. This crate never defines a
 //! second escape-sequence table: the output capabilities are expressed as the
 //! `Op`s the terminal accepts, the recognised colours are the
 //! [`rustos_vt::Color`] models the terminal renders, and arrow-key input is the
@@ -23,10 +23,10 @@
 //! # Fail closed
 //!
 //! [`from_term`] parses an untrusted `TERM` string. An unknown or empty value
-//! degrades to the safe [`TermType::Dumb`] baseline (`AGENTS.md` §2.9, §5.4)
+//! degrades to the safe [`TermType::Dumb`] baseline
 //! rather than guessing — and it never reads a file derived from `TERM`. There
 //! is no `unwrap` / `expect` / `panic!` in this crate, and nothing here ever
-//! writes to fd 3 (`stdinfo` is reserved, §20).
+//! writes to fd 3 (`stdinfo` is reserved).
 //!
 //! ```
 //! use rustos_termcap::{from_term, ColorDepth, TermType};

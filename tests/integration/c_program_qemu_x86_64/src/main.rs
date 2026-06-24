@@ -16,7 +16,7 @@
 //! materialise the program's ring-3 image — built from the `rxe` blob the build
 //! script produced, with W^X leaf permissions (code RX, data RW-NX, rodata
 //! R-NX) — and `iretq` into it. The C program checks a Time64 value across the
-//! §21 boundaries, an ipc header, and a sysinfo header, then calls `cap_query`
+//! boundaries, an ipc header, and a sysinfo header, then calls `cap_query`
 //! and `clock_get`; the dispatch callback services those two syscalls
 //! (returning a known answer / sentinel) and finally asserts the `exit` code is
 //! `99` before `qemu_exit::exit_success`.
@@ -40,8 +40,7 @@ mod kernel;
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
-        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }

@@ -6,28 +6,28 @@
 //!
 //! 1. Hand the production x86_64 kernel linker script to the test kernel (the
 //!    test boots the real `rustos-kernel` pipeline, so it links exactly like
-//!    the other freestanding x86_64 integration binaries — `AGENTS.md` §2.2).
+//!    the other freestanding x86_64 integration binaries).
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    el0_yielder_program`) **position-independent** for the freestanding
 //!    x86_64 target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning its yield count through
 //!    the `RUSTOS_EL0_YIELDS` environment variable so this script is the single
-//!    source of truth for the count (`AGENTS.md` §2.2), then convert the linked
+//!    source of truth for the count, then convert the linked
 //!    PIE ELF to an `rxe` blob with [`rustos_itest_harness::elf2rxe::elf_to_rxe`],
 //!    baking relocations for the [`USER_BIAS`] the kernel maps the image at and
 //!    stamping the kernel's compiled-in syscall CFI tag
 //!    (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes, the bias, and the matching [`YIELDS_PER_TASK`] constant as a Rust
 //!    source the test `include!`s. Both isolated address spaces are built from
-//!    the same validated image (`AGENTS.md` §2.2).
+//!    the same validated image.
 //!
 //! On any non-x86_64 target (host `cargo build --workspace`, clippy) it emits
 //! inert stubs so the crate still builds; the kernel body that consumes them
 //! compiles only for the freestanding x86_64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -39,13 +39,13 @@ use std::process::Command;
 /// the kernel's low 32 MiB identity window and the higher-half kernel window,
 /// and below the 512 GiB PML4[0] boundary — so the program's pages land on
 /// freshly walked tables under the shared PML4[0] entry rather than on an
-/// identity huge-page leaf (the proven x86_64 spawn layout, `AGENTS.md` §2.2).
+/// identity huge-page leaf (the proven x86_64 spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// How many times each EL0 task yields before exiting. The single source of
 /// truth: passed to the program build via `RUSTOS_EL0_YIELDS` *and* emitted as
 /// the `YIELDS_PER_TASK` constant the kernel asserts against, so the two halves
-/// can never disagree (`AGENTS.md` §2.2). Large enough that an accidental
+/// can never disagree. Large enough that an accidental
 /// single run cannot satisfy the PASS check, small enough to drain well within
 /// the harness budget.
 const YIELDS_PER_TASK: u32 = 16;
@@ -71,7 +71,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == X86_64_TARGET {
         // Hand the production x86_64 kernel linker script to the test kernel
-        // itself (the single per-arch script the architecture port owns, §2.2);
+        // itself (the single per-arch script the architecture port owns);
         // mirrors `kernel/rustos-kernel/build.rs` and the sibling x86_64
         // integration binaries.
         let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
@@ -104,7 +104,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // x86_64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -122,7 +122,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         // host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Pin the program's yield count (the §2.2 single source of truth).
+        // Pin the program's yield count (the single source of truth).
         .env("RUSTOS_EL0_YIELDS", YIELDS_PER_TASK.to_string())
         .env(
             "CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS",

@@ -10,7 +10,7 @@
 //! These types were defined inside `userland/gui/wm`, but the taskbar must
 //! route the *same* pointer events to hit-test its regions, and a
 //! `userland/gui/*` crate may not depend on the window manager nor on a
-//! sibling userland crate (`AGENTS.md` §17.4). Per §6 / §2.2 the shared
+//! sibling userland crate. Per the shared
 //! vocabulary therefore lives in `lib/*` — exactly the reasoning that placed
 //! `Point`/`Rect` in [`rustos_geometry`] and the colour algebra in
 //! `rustos_raster`. The window manager re-exports these types, so both the

@@ -321,10 +321,10 @@ pub enum IstError {
 /// Reasons [`PerCpuGdt::validate`] rejects an in-memory table.
 ///
 /// Each variant is a privilege-boundary invariant a corrupted (or
-/// mis-built) descriptor table would break (`AGENTS.md` §3.5 / §5 of
+/// mis-built) descriptor table would break (of
 /// the security charter — call-gate / IST CVE classes). Validation runs
 /// against the bytes in memory *before* `lgdt`/`ltr` install them, so a
-/// scribbled table fails closed (§5.4) rather than being loaded.
+/// scribbled table fails closed rather than being loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GdtError {
     /// Slot 0 was not the all-zero null descriptor the CPU requires.
@@ -485,11 +485,11 @@ impl PerCpuGdt {
     /// invariants `install` relies on, **before** `lgdt`/`ltr` load it.
     ///
     /// A corrupted descriptor table is a classic privilege-escalation
-    /// vector (`AGENTS.md` §3.5 / §5 — call-gate / IST CVE classes): a
+    /// vector (call-gate / IST CVE classes): a
     /// kernel CS demoted to DPL 3, a user CS promoted to DPL 0, a
     /// cleared present bit, a TSS descriptor pointing at attacker memory,
     /// or an `RSP0`/IST pivot onto an unmapped stack. Catching these here
-    /// makes a scribbled table fail closed (§5.4) instead of being
+    /// makes a scribbled table fail closed instead of being
     /// installed. The check must run after [`Self::finalize`] (it
     /// requires the TSS descriptor to be populated) and after `RSP0` has
     /// been registered via [`Self::set_privilege_stack`].
@@ -612,7 +612,7 @@ impl PerCpuGdt {
             assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
             // SAFETY-INVARIANT: the `assert!` above proves that
             // `bytes - 1` fits in a `u16`, so the truncation cast
-            // is lossless. AGENTS.md §15.10 — justified `#[allow]`.
+            // is lossless. — justified `#[allow]`.
             #[allow(clippy::cast_possible_truncation)]
             let limit = (bytes - 1) as u16;
             limit
@@ -976,14 +976,14 @@ mod tests {
         assert_eq!(offset_of!(GdtPointer, base), 2);
     }
 
-    // -- §3.5 descriptor-table integrity / corruption tests --------------
+    // descriptor-table integrity / corruption tests --------------
     //
     // `validate` is the detector for a scribbled GDT/TSS. Each test
     // finalizes a table *in place* (the TSS descriptor embeds the live
     // address of its own TSS, so the struct must not move between
     // `finalize` and `validate`), corrupts one descriptor field through
     // the public `entries` / `tss` storage, and asserts validation fails
-    // closed (`AGENTS.md` §3.5 / §5.4) — before any `lgdt`/`ltr`.
+    // closed — before any `lgdt`/`ltr`.
 
     /// Finalize `g` in place and register a valid `RSP0`, leaving a table
     /// that `validate` accepts.

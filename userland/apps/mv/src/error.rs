@@ -8,7 +8,7 @@ use rustos_abi::Errno;
 /// The variants are deliberately coarse: the CLI surfaces enough to print a
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
-/// set (`AGENTS.md` §2.2).
+/// set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MvError {
     /// The command line carried an unrecognised option, named fewer than two

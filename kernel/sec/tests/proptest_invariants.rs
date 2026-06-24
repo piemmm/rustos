@@ -1,6 +1,6 @@
 //! Property tests for the `kernel/sec` security invariants.
 //!
-//! Mirrors `AGENTS.md` §7 "property tests" guidance: the lib-level
+//! Mirrors "property tests" guidance: the lib-level
 //! delegation invariant is asserted in `lib/caps`; this file lifts the
 //! analogous invariant to the **task** level, exactly as the Stage 2.4
 //! brief requires.

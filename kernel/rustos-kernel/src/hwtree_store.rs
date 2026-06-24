@@ -1,19 +1,17 @@
 //! Runtime hardware-inventory store (Design D, D1 — `.junie/next-pi-prompt.md`).
 //!
-//! The single, authoritative record of the discovered hardware tree
-//! (`AGENTS.md` §18.1): one growable node list the boot path seeds, the
+//! The single, authoritative record of the discovered hardware tree: one growable node list the boot path seeds, the
 //! floor bus bring-up appends discovered children to, and the autoload
 //! reader snapshots. It replaces the earlier "leak a fresh
 //! `&'static [HwNode]` slice on every change" stash in
 //! [`crate::unlock_service`], so there is exactly one inventory all three
-//! share (`AGENTS.md` §2.2 — no parallel device lists).
+//! share (no parallel device lists).
 //!
 //! The reactive surface — [`HwTreeStore::seed`], [`HwTreeStore::append`],
 //! [`HwTreeStore::snapshot`], and the monotonic
 //! [`HwTreeStore::generation`] / [`HwTreeStore::snapshot_with_generation`]
 //! the `hw_tree_read` / `hw_tree_wait` syscalls serve (Design D D2b) —
-//! lands with its first consumer, never ahead of one (`AGENTS.md` §2.3 /
-//! §2.4). Node removal for hotplug-out lands in Design D D4 with the
+//! lands with its first consumer, never ahead of one. Node removal for hotplug-out lands in Design D D4 with the
 //! user-space `bus_usb` port-watcher that drives it.
 //!
 //! # Concurrency / boot-ordering
@@ -42,14 +40,14 @@ struct Inner {
     /// Monotonic count of mutations (`seed` / `append`). Starts at `0` on
     /// an empty store and only ever increases, so a `hw_tree_wait` caller
     /// comparing against a previously observed value detects every change
-    /// without a lost wake-up (`AGENTS.md` §18.4).
+    /// without a lost wake-up.
     generation: u64,
 }
 
 /// The authoritative discovered-hardware inventory.
 ///
 /// A node is **never** silently dropped on append — the backing store is a
-/// growable [`Vec`] with no fixed-capacity ceiling (`AGENTS.md` §24.1).
+/// growable [`Vec`] with no fixed-capacity ceiling.
 pub struct HwTreeStore {
     inner: SpinLock<Inner>,
 }
@@ -79,16 +77,16 @@ impl HwTreeStore {
             inner.generation += 1;
         }
         // The generation advanced: wake every parked `hw_tree_wait` caller
-        // so it re-reads and re-matches (`AGENTS.md` §18.4). Done after the
+        // so it re-reads and re-matches. Done after the
         // inner lock is dropped so the scheduler's `unpark` locks are never
-        // taken under ours (`AGENTS.md` §2.1); a fail-safe no-op before the
+        // taken under ours; a fail-safe no-op before the
         // wait-queue arch hook is installed (early boot).
         rustos_kernel_core::hw_tree_wake();
     }
 
     /// Append one discovered child `node` to the inventory and bump the
     /// generation. The node is always added, never dropped, and the store
-    /// grows on demand (`AGENTS.md` §24.1).
+    /// grows on demand.
     pub fn append(&self, node: &HwNode) {
         {
             let mut inner = self.inner.lock();
@@ -106,7 +104,7 @@ impl HwTreeStore {
     ///
     /// This is the store side of the `hw_emit_node` syscall (the
     /// [`HwTreeSource::publish`] implementation). The kernel **owns
-    /// identity** (`AGENTS.md` §4 / §5.4): the emitter supplies a node's
+    /// identity**: the emitter supplies a node's
     /// class, match keys, and resource requests, but never its id or parent.
     /// The id is `max(existing non-root id) + 1`, so it can never collide
     /// with a seeded or previously published node — load-bearing, because the
@@ -116,8 +114,7 @@ impl HwTreeStore {
     /// driver cannot forge its position in the tree.
     ///
     /// The id scan is `O(n)` over the current node set, but a publish is a
-    /// rare discovery event (a handful per boot), never a hot path
-    /// (`AGENTS.md` §2.16); the scan and the append happen under one lock so
+    /// rare discovery event (a handful per boot), never a hot path; the scan and the append happen under one lock so
     /// the assigned id cannot race a concurrent publish.
     pub fn publish_child(&self, parent_id: u32, mut node: HwNode) -> u32 {
         let id = {
@@ -138,7 +135,7 @@ impl HwTreeStore {
             id
         };
         // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
-        // done after the inner lock is dropped (`AGENTS.md` §2.1).
+        // done after the inner lock is dropped.
         rustos_kernel_core::hw_tree_wake();
         id
     }
@@ -153,30 +150,30 @@ impl HwTreeStore {
     /// ownership gate: the `hw_remove_node` handler resolves `parent_id` to
     /// the caller's *own* matched node kernel-side, so requiring the removed
     /// node's parent to equal it means a driver can retire **only** a child it
-    /// itself published, never an arbitrary node (`AGENTS.md` §4 — no ambient
-    /// authority; §5.4 — the same caller-trusted identity `publish_child`
+    /// itself published, never an arbitrary node (no ambient
+    /// authority; — the same caller-trusted identity `publish_child`
     /// uses). A node the caller does not own and an absent node are
     /// indistinguishable in the reply (both [`Errno::NotFound`]), so the
-    /// failure leaks nothing about the rest of the tree (`AGENTS.md` §5.4).
+    /// failure leaks nothing about the rest of the tree.
     ///
     /// The whole subtree rooted at `node_id` is removed — every transitive
     /// descendant, found by walking the parent links — so a grandchild a
     /// bus-child driver published can never outlive the parent device that is
-    /// gone (`AGENTS.md` §18.4). The root sentinel can never be a removal
+    /// gone. The root sentinel can never be a removal
     /// target (an emitter's `parent_id` is its own non-root node, and the
     /// root's parent is itself), so the inventory's root is structurally
     /// safe.
     ///
     /// The descendant walk is `O(n·depth)` over the current node set, but a
     /// removal is a rare discovery event (a handful per hotplug), never a hot
-    /// path (`AGENTS.md` §2.16); the find, the subtree collection, and the
+    /// path; the find, the subtree collection, and the
     /// retain all happen under one lock so the set cannot race a concurrent
     /// mutation.
     ///
     /// # Errors
     ///
     /// [`Errno::NotFound`] if no live node has id `node_id`, or its parent is
-    /// not `parent_id` (fail closed, `AGENTS.md` §2.9 / §5.4).
+    /// not `parent_id` (fail closed).
     pub fn remove_child(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
         {
             let mut inner = self.inner.lock();
@@ -194,7 +191,7 @@ impl HwTreeStore {
 
             // Collect the subtree: the target plus every transitive
             // descendant. Iterate to a fixed point so any depth is covered
-            // without recursion (no stack growth, `AGENTS.md` §2.16); the node
+            // without recursion (no stack growth); the node
             // count bounds the passes, so it always terminates.
             let mut doomed: Vec<u32> = alloc::vec![node_id];
             loop {
@@ -214,14 +211,13 @@ impl HwTreeStore {
             inner.generation += 1;
         }
         // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
-        // done after the inner lock is dropped (`AGENTS.md` §2.1).
+        // done after the inner lock is dropped.
         rustos_kernel_core::hw_tree_wake();
         Ok(())
     }
 
     /// Bump the generation **without** changing the node set, waking every
-    /// parked `hw_tree_wait` caller so it re-reads and re-evaluates
-    /// (`AGENTS.md` §18.4).
+    /// parked `hw_tree_wait` caller so it re-reads and re-evaluates.
     ///
     /// This is the "re-evaluate now" signal for a reactive observer that
     /// depends on system state the node set does not itself carry — in
@@ -238,7 +234,7 @@ impl HwTreeStore {
             inner.generation += 1;
         }
         // Wake parked `hw_tree_wait` callers (see [`Self::seed`]); done after
-        // the inner lock is dropped (`AGENTS.md` §2.1).
+        // the inner lock is dropped.
         rustos_kernel_core::hw_tree_wake();
     }
 
@@ -251,7 +247,7 @@ impl HwTreeStore {
         self.inner.lock().nodes.clone()
     }
 
-    /// The current mutation generation (`AGENTS.md` §18.4).
+    /// The current mutation generation.
     ///
     /// A `hw_tree_wait` caller blocks while this equals the value it last
     /// observed and wakes when it differs; because it only ever increases,
@@ -268,7 +264,7 @@ impl HwTreeStore {
     /// This is what `hw_tree_read` serves: the caller learns both the tree
     /// and the exact generation to pass to a subsequent `hw_tree_wait`,
     /// with no window in which the tree changed but the reported generation
-    /// did not (`AGENTS.md` §18.4).
+    /// did not.
     #[must_use]
     pub fn snapshot_with_generation(&self) -> (u64, Vec<HwNode>) {
         let inner = self.inner.lock();
@@ -276,15 +272,14 @@ impl HwTreeStore {
     }
 
     /// The resource grants of the live non-root node `node_id`, or `None`
-    /// when no live non-root node has that id (fail closed,
-    /// `AGENTS.md` §5.4).
+    /// when no live non-root node has that id (fail closed).
     ///
     /// This is what the driver-store load gate resolves a matched node's
     /// grants against, read from the **live** inventory under the same lock
     /// every other reader uses — so a node a user-space bus driver published
     /// at runtime through `hw_emit_node` ([`Self::publish_child`]) is
     /// resolvable the instant it appears, not only the boot-seeded nodes a
-    /// one-shot snapshot froze (`AGENTS.md` §18.3 / §18.4). The root sentinel
+    /// one-shot snapshot froze. The root sentinel
     /// is never a load target (a driver is bound to a discovered device, never
     /// the tree root), so it is excluded here.
     #[must_use]
@@ -308,13 +303,12 @@ impl HwTreeStore {
     /// A wire-encoded snapshot: a [`HwTreeHeader`] (the generation it was
     /// taken at and the node count) followed by that many [`HwNode`]
     /// records, all little-endian — the exact bytes `hw_tree_read` copies
-    /// out (`AGENTS.md` §18.4).
+    /// out.
     ///
     /// The header generation and the node bytes come from one
     /// [`Self::snapshot_with_generation`] read, so a reader's header always
     /// matches the nodes it received. Defined here, beside the store it
-    /// serialises, so the wire layout has exactly one encoder
-    /// (`AGENTS.md` §2.2).
+    /// serialises, so the wire layout has exactly one encoder.
     #[must_use]
     pub fn encode_snapshot(&self) -> Vec<u8> {
         let (generation, nodes) = self.snapshot_with_generation();
@@ -330,21 +324,19 @@ impl HwTreeStore {
     }
 }
 
-/// The kernel-wide authoritative hardware inventory (`AGENTS.md` §18.1).
+/// The kernel-wide authoritative hardware inventory.
 ///
 /// Seeded by the boot path, appended to by the floor bus bring-up, and
-/// snapshotted by the autoload reader — the one store all three share
-/// (`AGENTS.md` §2.2).
+/// snapshotted by the autoload reader — the one store all three share.
 pub static HW_TREE: HwTreeStore = HwTreeStore::new();
 
 /// The [`HwTreeSource`] the boot path installs into the syscall dispatch
 /// hook (`BootInfo::with_hw_tree`), backing the `hw_tree_read` /
-/// `hw_tree_wait` syscalls with the authoritative [`HW_TREE`]
-/// (`AGENTS.md` §18.1 / §18.4).
+/// `hw_tree_wait` syscalls with the authoritative [`HW_TREE`].
 ///
 /// A zero-sized adapter: it owns nothing and simply forwards to the one
 /// global store, so the single inventory all of the kernel shares is also
-/// the one user space observes (`AGENTS.md` §2.2).
+/// the one user space observes.
 pub struct HwTreeStoreSource;
 
 impl HwTreeSource for HwTreeStoreSource {
@@ -361,11 +353,10 @@ impl HwTreeSource for HwTreeStoreSource {
         // authoritative inventory; `publish_child` assigns it a fresh,
         // collision-free id, sets its parent to the emitter's own node, bumps
         // the generation, and wakes every parked `hw_tree_wait` caller, so the
-        // device manager re-reads and autoloads the matching driver
-        // (`AGENTS.md` §18.1 / §18.3). The `hw_emit_node` handler has already
+        // device manager re-reads and autoloads the matching driver. The `hw_emit_node` handler has already
         // verified the caller's `CAP_HW_EMIT`, resolved `parent_id` to the
         // caller's own matched node, and checked that every requested resource
-        // is covered by one of its grants (`AGENTS.md` §4), so the store only
+        // is covered by one of its grants, so the store only
         // assigns identity and records it.
         HW_TREE.publish_child(parent_id, node);
         Ok(())
@@ -375,11 +366,11 @@ impl HwTreeSource for HwTreeStoreSource {
         // Remove the child `node_id` (and its subtree) from the one
         // authoritative inventory, but only when its parent is `parent_id` —
         // the caller's own matched node, resolved kernel-side by the
-        // `hw_remove_node` handler (`AGENTS.md` §4 — no ambient authority).
+        // `hw_remove_node` handler (no ambient authority).
         // `remove_child` enforces that ownership gate, removes the whole
         // subtree, bumps the generation, and wakes every parked
         // `hw_tree_wait` caller so the device manager re-reads and unloads the
-        // driver bound to the vanished node (`AGENTS.md` §18.4). It fails
+        // driver bound to the vanished node. It fails
         // closed `NotFound` for an unknown id or a node the caller does not
         // own; the store only mutates the inventory.
         HW_TREE.remove_child(parent_id, node_id)
@@ -387,7 +378,7 @@ impl HwTreeSource for HwTreeStoreSource {
 }
 
 /// The shared [`HwTreeStoreSource`] the boot path installs through
-/// `BootInfo::with_hw_tree` (`AGENTS.md` §18.1).
+/// `BootInfo::with_hw_tree`.
 pub static HW_TREE_SOURCE: HwTreeStoreSource = HwTreeStoreSource;
 
 #[cfg(test)]
@@ -405,9 +396,8 @@ mod tests {
         ]
     }
 
-    /// The bus-enumerated HID child (`AGENTS.md` §18.2), keyed by the USB
-    /// interface-class match key the bring-up reads (never fabricated,
-    /// §18.5).
+    /// The bus-enumerated HID child, keyed by the USB
+    /// interface-class match key the bring-up reads (never fabricated).
     fn hid_child() -> HwNode {
         let mut hid = HwNode::new(3, 2, HwDeviceClass::Input);
         hid.push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
@@ -453,7 +443,7 @@ mod tests {
         store.seed(&seed_tree()); // ids 1 (root) and 2 (bus)
 
         // The emitter supplies a node whose id/parent are placeholders; the
-        // store owns identity and overwrites both (`AGENTS.md` §4 / §18.1).
+        // store owns identity and overwrites both.
         let mut emitted = HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Input);
         emitted
             .push_match_key(HwMatchKey::usb(0x1234, 0x5678, 0x03_01_01))
@@ -487,7 +477,7 @@ mod tests {
         assert_eq!(store.snapshot().len(), 4);
 
         // Removing child 3 (owned by bus 2) takes grandchild 4 with it, so a
-        // stale descendant never outlives its parent (`AGENTS.md` §18.4).
+        // stale descendant never outlives its parent.
         assert_eq!(store.remove_child(2, 3), Ok(()));
         let snap = store.snapshot();
         let ids: Vec<u32> = snap.iter().map(HwNode::id).collect();
@@ -502,10 +492,10 @@ mod tests {
         assert_eq!(child, 3);
 
         // A node that exists but whose parent is not the claimed one: the
-        // caller does not own it, so removal fails closed (`AGENTS.md` §5.4).
+        // caller does not own it, so removal fails closed.
         assert_eq!(store.remove_child(99, 3), Err(Errno::NotFound));
         // An absent id fails closed identically — the two are
-        // indistinguishable to the caller (`AGENTS.md` §5.4).
+        // indistinguishable to the caller.
         assert_eq!(store.remove_child(2, 4242), Err(Errno::NotFound));
         // The failed removals left the inventory untouched.
         assert_eq!(store.snapshot().len(), 3);
@@ -519,7 +509,7 @@ mod tests {
         assert_eq!(child, 3);
         let before = store.generation();
         // A successful removal advances the generation so a parked
-        // `hw_tree_wait` caller wakes (`AGENTS.md` §18.4).
+        // `hw_tree_wait` caller wakes.
         assert_eq!(store.remove_child(2, 3), Ok(()));
         assert_eq!(store.generation(), before + 1);
         // A fail-closed removal changes nothing, including the generation.
@@ -595,7 +585,7 @@ mod tests {
     #[test]
     fn the_static_source_forwards_to_the_global_store() {
         // The adapter is a pure forwarder: its generation and snapshot are
-        // whatever the global `HW_TREE` currently holds (`AGENTS.md` §2.2).
+        // whatever the global `HW_TREE` currently holds.
         assert_eq!(HW_TREE_SOURCE.generation(), Ok(HW_TREE.generation()));
         assert_eq!(HW_TREE_SOURCE.snapshot(), Ok(HW_TREE.encode_snapshot()));
     }

@@ -1,11 +1,11 @@
-//! §5.3 permission-model conformance, exercised end-to-end: the VFS
+//! permission-model conformance, exercised end-to-end: the VFS
 //! applies mode bits, ACL grants, and the optional per-inode capability
 //! gate to the record the real `rustfs` driver stores. This is the suite's
 //! analogue of `pjdfstest`'s `chmod`/`granular` permission cases, plus the
-//! capability gate the charter (`AGENTS.md` §5.3) and `PLAN.md` Stage 5
+//! capability gate the charter and `PLAN.md` Stage 5
 //! call out explicitly.
 //!
-//! The decision never branches on `uid == 0` (§5.1): an owning user is
+//! The decision never branches on `uid == 0`: an owning user is
 //! granted by its owner triad, not by being uid 0.
 
 use rustos_test_posix_fs_suite::*;
@@ -16,7 +16,7 @@ const OTHER_UID: u32 = 2000;
 const SHARED_GID: u32 = 42;
 
 /// Create `name` at the volume root as the installer (uid 0) and write
-/// `body`, then re-stamp its stored §5.3 record with `sec`. Returns once
+/// `body`, then re-stamp its stored record with `sec`. Returns once
 /// the new record is durable.
 fn planted_file(vfs: &Vfs, fs: &mut LiveFs, name: &str, body: &[u8], sec: NodeSecurity) {
     let caps = CapabilitySet::empty();
@@ -59,7 +59,7 @@ fn owner_can_read_a_private_file_but_a_stranger_cannot() {
 
 #[test]
 fn capability_gate_blocks_read_even_at_mode_0644() {
-    // PLAN.md Stage 5 / AGENTS.md §5.3: a file marked with a required
+    // PLAN.md Stage 5 /: a file marked with a required
     // capability is unreadable without it, even though mode 0644 would
     // otherwise grant the read.
     let (vfs, mut fs) = rustfs_backed_vfs(false);

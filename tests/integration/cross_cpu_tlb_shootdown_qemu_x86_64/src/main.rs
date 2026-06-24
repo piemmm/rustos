@@ -24,14 +24,14 @@
 //!
 //! A regression that fails to bring up the AP, or whose AP never services
 //! the shootdown IPI, leaves `shootdown_page` spinning forever, so the run
-//! times out — the documented fail-loud behaviour (`AGENTS.md` §7).
+//! times out — the documented fail-loud behaviour.
 //!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `rustos-arch-x86_64` port, is alloc-free, and
 //! supplies its own `kernel_main`. The QEMU-exit shortcut lives in this
 //! dedicated bin, never behind a Cargo feature on the arch crate
-//! (`AGENTS.md` §5.4.5 — fail closed).
+//! (fail closed).
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -52,7 +52,7 @@ mod kernel {
     use rustos_arch_x86_64::{percpu, preempt, qemu_exit, serial, tlb_shootdown};
 
     /// Logical CPUs this vertical brings up: the BSP plus a single AP
-    /// (`AGENTS.md` §24.1 — the per-CPU backings are sized to the CPUs the
+    /// (the per-CPU backings are sized to the CPUs the
     /// caller actually drives, not a baked-in `MAX_CPUS`).
     const CPUS: usize = 2;
 
@@ -186,8 +186,7 @@ mod kernel {
 
         // Publish the caller-owned per-CPU GDT/IDT/IST arena (covering the
         // BSP and the one AP) before any `percpu::init`, on the BSP and
-        // before the AP is started so the AP's `percpu::init(1)` sees it
-        // (`AGENTS.md` §24.1). Set-once; this `kernel_main` runs once.
+        // before the AP is started so the AP's `percpu::init(1)` sees it. Set-once; this `kernel_main` runs once.
         static PER_CPU_STORAGE: percpu::PerCpuStorage<CPUS> = percpu::PerCpuStorage::new();
         if PER_CPU_STORAGE.register().is_err() {
             qemu_exit::exit_failure();
@@ -239,7 +238,7 @@ mod kernel {
         cpu_to_lapic[0] = Some(bsp_id);
         cpu_to_lapic[1] = Some(ap_id);
         // The arch handle borrows its per-CPU bookkeeping from a
-        // caller-sized `&'static` backing (`AGENTS.md` §24.1); `kernel_main`
+        // caller-sized `&'static` backing; `kernel_main`
         // runs once, so a function-local `static` is sound and needs no
         // allocator. `shootdown_page` walks exactly this two-CPU map.
         static ARCH_STORAGE: X86_64ArchStorage<CPUS> = X86_64ArchStorage::new();
@@ -259,8 +258,7 @@ mod kernel {
             qemu_exit::exit_failure();
         }
         // Publish the caller-owned AP bootstrap-stack pool (one stack per
-        // application processor) before `start_secondary` (`AGENTS.md`
-        // §24.1). Set-once; fails closed before registration.
+        // application processor) before `start_secondary`. Set-once; fails closed before registration.
         static AP_STACKS: smp::ApStackPool<{ CPUS - 1 }> = smp::ApStackPool::new();
         if AP_STACKS.register().is_err() {
             let _ = writeln!(

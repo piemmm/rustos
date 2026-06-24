@@ -109,7 +109,7 @@ pub trait Display {
 /// Reported by [`AcceleratedDisplay::accel_caps`] so the compositor can
 /// decide, per frame, whether the hardware path can serve the current
 /// window stack or whether it must fall back to the software
-/// [`Display::present`] path (`AGENTS.md` §10 — the software path is
+/// [`Display::present`] path (the software path is
 /// always the fallback).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -138,7 +138,7 @@ pub struct AccelCaps {
 /// `pixels` is **premultiplied-alpha** pixel data in the display's
 /// active [`DisplayMode::format`], stored row-major with `stride_bytes`
 /// between consecutive scanlines. Premultiplied alpha matches the
-/// desktop compositor's pixel model (`AGENTS.md` §10), so a layer can be
+/// desktop compositor's pixel model, so a layer can be
 /// handed to the hardware without an extra straight-alpha conversion.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AccelLayer<'a> {
@@ -188,7 +188,7 @@ impl AccelLayer<'_> {
 
 /// A display back-end that can composite a stack of layers in hardware.
 ///
-/// This is the optional GPU-accelerated path (`AGENTS.md` §10). A driver
+/// This is the optional GPU-accelerated path. A driver
 /// that exposes it composites the supplied [`AccelLayer`] stack with its
 /// own fixed-function or programmable compositor (e.g. the Raspberry Pi
 /// `VideoCore` HVS plane engine) and scans the result out itself, so the

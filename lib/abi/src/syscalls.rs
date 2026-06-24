@@ -1,13 +1,13 @@
 //! Frozen `abi-v1` syscall specification table.
 //!
 //! This module is the **source of truth** for the user/kernel syscall
-//! contract described in `AGENTS.md` §9: every entry in [`SYSCALLS`] pins
+//! contract described in: every entry in [`SYSCALLS`] pins
 //! one syscall's number, argument shape, return type, and the capability a
 //! caller must hold to invoke it. The kernel side
 //! (`kernel/syscall/src/table.rs`) is generated against this table and the
-//! two are cross-checked by `cargo xtask abi-check` (`AGENTS.md` §9 final
+//! two are cross-checked by `cargo xtask abi-check` (final
 //! paragraph). Mutating an existing entry is **not** allowed under
-//! `abi-v1`; new behaviour ships in `abi-v2` (`AGENTS.md` §9 second
+//! `abi-v1`; new behaviour ships in `abi-v2` (second
 //! paragraph).
 //!
 //! # Cross-check protocol
@@ -299,7 +299,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        // Drawing randomness needs no capability (AGENTS.md §22: a
+        // Drawing randomness needs no capability (: a
         // normal request must not block and is available to every
         // task); it is a pure observer, so — like `clock_get` — it is
         // not audited, to avoid drowning the audit log.
@@ -320,9 +320,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         // Writing one of the calling process's inherited standard
-        // streams (`AGENTS.md` §20) routes to that descriptor's kernel
+        // streams routes to that descriptor's kernel
         // stream backing. Authority is the per-process descriptor table
-        // the spawner established — never an ambient device (§4). In this
+        // the spawner established — never an ambient device. In this
         // bootstrap phase every backing is the discovered console, so the
         // coarse `CAP_CONSOLE_WRITE` still gates use of a console-backed
         // output stream; the descriptor table is the fine, fd-level gate.
@@ -342,7 +342,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // The console selector: `CONSOLE_INHERIT` (the all-ones
             // sentinel) attaches the child to the caller's own
             // descriptor table, any other value names an installed
-            // console index (`AGENTS.md` §20 — the spawner decides the
+            // console index (the spawner decides the
             // child's stream backing). `U64` so the sentinel is
             // representable; the handler validates the range.
             AbiType::U64,
@@ -352,10 +352,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         // Spawning a process materialises a new principal and hands it
-        // the CPU, so it is privileged rather than ambient (`AGENTS.md`
-        // §4 — no ambient authority). It is a security-relevant state
+        // the CPU, so it is privileged rather than ambient (no ambient authority). It is a security-relevant state
         // change — a new process appears — so unlike the high-volume
-        // data movers it IS audited per call (`AGENTS.md` §5.4.4); the
+        // data movers it IS audited per call; the
         // `ProcessSpawn*` events the spawn caller already emits cover the
         // decision, and the dispatcher's per-call record attributes the
         // request to the caller.
@@ -375,10 +374,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         ret: AbiType::U64,
-        // Reading one of the calling process's inherited standard streams
-        // (`AGENTS.md` §20) routes to that descriptor's kernel stream
+        // Reading one of the calling process's inherited standard streams routes to that descriptor's kernel stream
         // backing. Authority is the per-process descriptor table the
-        // spawner established — never an ambient device (§4). In this
+        // spawner established — never an ambient device. In this
         // bootstrap phase every backing is the discovered console, so the
         // coarse `CAP_CONSOLE_READ` still gates use of a console-backed
         // input stream; the descriptor table is the fine, fd-level gate.
@@ -402,10 +400,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         // Growing one's *own* hardware-isolated address space with
-        // anonymous RW memory is the unprivileged baseline (`AGENTS.md`
-        // §16.6 precedent — "list my own processes" needs no capability):
+        // anonymous RW memory is the unprivileged baseline (precedent — "list my own processes" needs no capability):
         // a region is mapped only into the caller's own space, so it
-        // grants no authority over anything else (`AGENTS.md` §4 — no
+        // grants no authority over anything else (no
         // global user heap, no cross-process mapping). Like the other
         // high-volume own-process operations it is not audited per call,
         // to avoid drowning the audit log.
@@ -444,14 +441,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         // Reaping one's *own* child is the unprivileged baseline
-        // (`AGENTS.md` §16.6 precedent — observing/managing one's own
+        // (precedent — observing/managing one's own
         // processes needs no capability): a process may only wait on
         // children it spawned, so waiting grants no authority over any
-        // other principal (`AGENTS.md` §4 — no ambient authority). Unlike
+        // other principal (no ambient authority). Unlike
         // the high-volume own-process data movers it IS audited per call:
         // reaping a child is a security-relevant process-lifecycle state
         // change — a principal disappears — exactly as `spawn`/`exit` are
-        // audited (`AGENTS.md` §5.4.4); `wait` blocks rather than polls, so
+        // audited; `wait` blocks rather than polls, so
         // the per-call record does not drown the log.
         required_capability: None,
         audit: true,
@@ -472,7 +469,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Reading one's *own* effective resource limit grants no authority
         // over anything else, so — like the other own-process observers
         // (`mem_map`, `wait`'s self-scoping) — it is the unprivileged
-        // baseline (`AGENTS.md` §16.6 / §24.3) and is not audited per call.
+        // baseline and is not audited per call.
         required_capability: None,
         audit: false,
     },
@@ -492,10 +489,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Lowering one's own bound needs no capability; the dispatcher
         // therefore leaves the syscall ungated and the handler performs the
         // finer `CAP_RLIMIT_RAISE` check only when a request would *raise* a
-        // hard bound (`AGENTS.md` §24.3) — the same pattern `stream_*` uses
+        // hard bound — the same pattern `stream_*` uses
         // (coarse syscall gate, fine handler-side check). It changes a
         // task's enforced limits, a security-relevant policy change, so it
-        // IS audited per call (`AGENTS.md` §5.4.4).
+        // IS audited per call.
         required_capability: None,
         audit: true,
     },
@@ -513,10 +510,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         // The user database carries every account's identity and salted
-        // password record, so reading it is privileged rather than ambient
-        // (`AGENTS.md` §4): only the authentication principal (login) is
-        // granted `CAP_USERS_READ`. It IS audited per call (`AGENTS.md`
-        // §5.4.4) — credential-database access is a security-relevant
+        // password record, so reading it is privileged rather than ambient: only the authentication principal (login) is
+        // granted `CAP_USERS_READ`. It IS audited per call — credential-database access is a security-relevant
         // decision and is low-volume (once per login process), so the
         // record cannot drown the log.
         required_capability: Some(CapabilityId::USERS_READ),
@@ -532,10 +527,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // raw register).
         ret: AbiType::U64,
         // Console topology belongs to the principals that drive
-        // consoles (PID 1 `init`, login) rather than to every task
-        // (`AGENTS.md` §5.4); the count itself is low-sensitivity
+        // consoles (PID 1 `init`, login) rather than to every task; the count itself is low-sensitivity
         // metadata, so like `cap_query` it is a pure observer and is
-        // NOT audited (`AGENTS.md` §5.4.4 — avoid drowning the log).
+        // NOT audited (avoid drowning the log).
         required_capability: Some(CapabilityId::CONSOLE_WRITE),
         audit: false,
     },
@@ -554,12 +548,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::Errno,
         // Terminal echo is a property of the console the reader holds, so
         // the control shares `stream_read`'s `CAP_CONSOLE_READ` gate —
-        // never ambient (`AGENTS.md` §4). The kernel performs the echo
+        // never ambient. The kernel performs the echo
         // itself as part of the read line discipline, so toggling it
         // needs no separate `CAP_CONSOLE_WRITE`. Like the other terminal
         // operations it is low-volume configuration, not a
         // security-relevant state change, so — like `console_count` — it
-        // is NOT audited per call (`AGENTS.md` §5.4.4).
+        // is NOT audited per call.
         required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: false,
     },
@@ -578,12 +572,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` so the C view carries the bytes-consumed-or-`-errno`
         // register convention `stream_write` / `console_count` use.
         ret: AbiType::U64,
-        // Feeding the system keyboard stream is privileged, never ambient
-        // (`AGENTS.md` §4): only the keyboard-input driver that decoded a
+        // Feeding the system keyboard stream is privileged, never ambient: only the keyboard-input driver that decoded a
         // discovered keyboard holds `CAP_INPUT_INJECT`. Like the other
         // per-event stream operations (`stream_write` / `stream_read`) it
         // fires once per key edge, so auditing every call would drown the
-        // log — it is NOT audited (`AGENTS.md` §5.4.4); the device
+        // log — it is NOT audited; the device
         // manager's one-time driver load IS the audited security decision.
         required_capability: Some(CapabilityId::INPUT_INJECT),
         audit: false,
@@ -595,12 +588,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         args: [AbiType::Unit; SYSCALL_MAX_ARGS],
         ret: AbiType::Errno,
         // Owning the display (and, with it, keyboard input focus) is
-        // privileged, never ambient (`AGENTS.md` §4): only a session's
+        // privileged, never ambient: only a session's
         // window manager holds `CAP_DISPLAY`. Taking the screen and
         // re-routing the system keyboard stream is a security-relevant
         // ownership change — the analogue of a foreground-tty switch — so
-        // unlike the high-volume stream operations it IS audited per call
-        // (`AGENTS.md` §5.4.4); it is low-volume (once per session
+        // unlike the high-volume stream operations it IS audited per call; it is low-volume (once per session
         // hand-over), so the record cannot drown the log.
         required_capability: Some(CapabilityId::DISPLAY),
         audit: true,
@@ -632,12 +624,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `U64` so the C view carries the bytes-read-or-`-errno` register
         // convention `stream_read` uses.
         ret: AbiType::U64,
-        // Reading the keyboard channel is privileged, never ambient
-        // (`AGENTS.md` §4): only the display owner (the window manager)
+        // Reading the keyboard channel is privileged, never ambient: only the display owner (the window manager)
         // holds `CAP_INPUT_READ`, so the keyboard stream is delivered only
-        // to whoever owns the surface (`AGENTS.md` §20). Like the other
+        // to whoever owns the surface. Like the other
         // high-volume stream readers (`stream_read`) it fires once per key
-        // edge, so it is NOT audited (`AGENTS.md` §5.4.4).
+        // edge, so it is NOT audited.
         required_capability: Some(CapabilityId::INPUT_READ),
         audit: false,
     },
@@ -657,14 +648,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // shared register convention, a negated errno) back to the
         // driver, exactly like `mem_map`.
         ret: AbiType::U64,
-        // Mapping a device's register block is privileged, never ambient
-        // (`AGENTS.md` §4): only a driver granted the matched node's MMIO
+        // Mapping a device's register block is privileged, never ambient: only a driver granted the matched node's MMIO
         // resource holds `CAP_MMIO_MAP`, and the kernel additionally maps
         // only the `[offset, offset + len)` sub-region — bounded inside the
         // unforgeable grant handle the driver owns — so a driver granted a
         // large outbound bus aperture maps just the one BAR it enumerated,
-        // never the whole window (§18.3 / §24.1). It IS audited per call
-        // (`AGENTS.md` §5.4.4) —
+        // never the whole window. It IS audited per call —
         // handing a principal direct access to hardware registers is a
         // security-relevant grant and is low-volume (once per window at
         // driver init), so the record cannot drown the log.
@@ -689,10 +678,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // pointer, exactly as `wait` writes the reaped status.
         ret: AbiType::U64,
         // Carving a driver a DMA-coherent buffer the hardware reads/writes
-        // is privileged, never ambient (`AGENTS.md` §4): only a driver
+        // is privileged, never ambient: only a driver
         // granted the matched node's DMA constraint holds `CAP_MEM_DMA`, and
-        // the kernel bounds the carve by that unforgeable grant (§18.3). It
-        // IS audited per call (`AGENTS.md` §5.4.4) — handing a principal a
+        // the kernel bounds the carve by that unforgeable grant. It
+        // IS audited per call — handing a principal a
         // region the hardware can touch is a security-relevant grant and is
         // low-volume (once per buffer at driver init), so the record cannot
         // drown the log.
@@ -719,9 +708,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // without the `CAP_MMIO_MAP` / `CAP_MEM_DMA` the driver also holds,
         // and the kernel re-checks ownership when they are presented), so —
         // like the other own-process observers (`mem_map`, `rlimit_get`) — it
-        // is the unprivileged baseline (`AGENTS.md` §16.6 / §24.3) and is not
+        // is the unprivileged baseline and is not
         // audited per call: the device manager's one-time driver load IS the
-        // audited security decision (`AGENTS.md` §5.4.4 / §18.3).
+        // audited security decision.
         required_capability: None,
         audit: false,
     },
@@ -743,11 +732,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // The discovered hardware inventory is a privileged *global* view,
         // not a calling-task observation: it reveals every device on the
         // machine, so it is gated by `CAP_SYSINFO_HW` exactly like the
-        // System Information API's hardware query (`AGENTS.md` §16.6 /
-        // §18.4), never the unprivileged own-process baseline. Not audited
+        // System Information API's hardware query, never the unprivileged own-process baseline. Not audited
         // per call: the device manager re-reads the tree on every change
         // (it is the high-volume reactive consumer), and the audited
-        // security decision is the subsequent driver load (§5.4.4 / §18.3),
+        // security decision is the subsequent driver load,
         // not the observation; the capability *denial* is audited by the
         // dispatcher regardless.
         required_capability: Some(CapabilityId::SYSINFO_HW),
@@ -770,8 +758,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // `-TimedOut` on deadline.
         ret: AbiType::Errno,
         // Same privilege as reading the tree — waiting for it to change is
-        // the reactive half of the same global observation (`AGENTS.md`
-        // §18.4). Not audited per call: it is a high-volume blocking wait,
+        // the reactive half of the same global observation. Not audited per call: it is a high-volume blocking wait,
         // and a refused capability is audited by the dispatcher regardless.
         required_capability: Some(CapabilityId::SYSINFO_HW),
         audit: false,
@@ -793,10 +780,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // convention `hw_tree_read` / `users_db_read` use.
         ret: AbiType::U64,
         // The endpoint enforces its own required send capability against the
-        // caller before posting (`AGENTS.md` §5.2), exactly like `ipc_send`
+        // caller before posting, exactly like `ipc_send`
         // over a port, so the dispatcher gate is `None`. Audited per call:
         // a synchronous system-service call is a security-relevant IPC, like
-        // `ipc_send` (`AGENTS.md` §5.4.4); the driver-store consumer is
+        // `ipc_send`; the driver-store consumer is
         // low-volume (a boot/hotplug match pass), so the record cannot drown
         // the log.
         required_capability: None,
@@ -821,10 +808,9 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // No flat dispatcher gate: binding a *restricted-sender* endpoint
         // requires `CAP_IPC_BIND_PRIVILEGED`, but an unrestricted (open)
         // endpoint needs none, so the gate is conditional and enforced
-        // inside the handler/`CallEndpoint::create` (`AGENTS.md` §5.2),
+        // inside the handler/`CallEndpoint::create`,
         // exactly as port binding gates conditionally. Audited: binding a
-        // service endpoint is a security-relevant, low-volume event
-        // (`AGENTS.md` §19.4).
+        // service endpoint is a security-relevant, low-volume event.
         required_capability: None,
         audit: true,
     },
@@ -846,7 +832,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // convention `ipc_recv` / `ipc_call` use.
         ret: AbiType::U64,
         // Gated by the endpoint's required *receive* capability against the
-        // caller (enforced in the handler, `AGENTS.md` §5.4), not a flat
+        // caller (enforced in the handler), not a flat
         // dispatcher gate. Not audited per call: a server's receive loop is
         // high-volume, and a refused capability is audited by the dispatcher
         // regardless (mirrors `ipc_recv`).
@@ -891,12 +877,11 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // database is no longer pending, `-TimedOut` on deadline.
         ret: AbiType::Errno,
         // Same privilege as reading the database — waiting for it to become
-        // available is the reactive half of the same access (`AGENTS.md`
-        // §5.1). NOT audited per call: it is a blocking wait, not a state
+        // available is the reactive half of the same access. NOT audited per call: it is a blocking wait, not a state
         // change, and a refused capability is audited by the dispatcher
         // regardless (the same pattern `hw_tree_wait` uses). Auditing the
         // wait per call is what flooded the boot log when `login` polled
-        // `users_db_read` instead (`AGENTS.md` §5.4.4 / §19.4).
+        // `users_db_read` instead.
         required_capability: Some(CapabilityId::USERS_READ),
         audit: false,
     },
@@ -914,15 +899,15 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             AbiType::Unit,
         ],
         // `Errno` register convention: `Ok(0)` once the record is accepted,
-        // else `-errno` for a malformed record (`AGENTS.md` §2.9).
+        // else `-errno` for a malformed record.
         ret: AbiType::Errno,
         // Emitting a diagnostic record to the system console log is a
         // privileged grant (`CAP_LOG_EMIT`), held only by trusted system
         // services so an ordinary app cannot scribble on the captured serial
-        // line (`AGENTS.md` §4 / §5.4 / §20). NOT audited per call: this is
+        // line. NOT audited per call: this is
         // the diagnostic log, not the hash-chained security audit log, and a
         // service emits records at volume — auditing each one would drown the
-        // audit log (`AGENTS.md` §5.4.4 / §19.4); a refused capability is
+        // audit log; a refused capability is
         // audited by the dispatcher regardless.
         required_capability: Some(CapabilityId::LOG_EMIT),
         audit: false,
@@ -942,12 +927,12 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         // `Errno` register convention: `Ok(0)` once the node is published,
         // else `-errno` for a malformed node, an unknown parent, or a
-        // resource outside the caller's grants (`AGENTS.md` §2.9 / §5.4).
+        // resource outside the caller's grants.
         ret: AbiType::Errno,
         // Publishing a discovered child into the global hardware tree is a
         // privileged grant (`CAP_HW_EMIT`), held only by an autoloaded
-        // user-space bus driver (`AGENTS.md` §4 / §18.3). It IS audited per
-        // call (`AGENTS.md` §5.4.4): admitting a node that drives the device
+        // user-space bus driver. It IS audited per
+        // call: admitting a node that drives the device
         // manager to autoload a further driver — and that carries
         // device-resource grants — is a security-relevant event, and it is
         // low-volume (once per enumerated device), so the record cannot
@@ -970,13 +955,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         // `Errno` register convention: `Ok(0)` once the node (and its
         // subtree) is removed, else `-errno` for an unknown id or a node the
-        // caller does not own (`AGENTS.md` §2.9 / §5.4).
+        // caller does not own.
         ret: AbiType::Errno,
         // Removing a discovered child from the global hardware tree is the
         // exact mirror of publishing it: the same privileged grant
         // (`CAP_HW_EMIT`), held only by an autoloaded user-space bus driver
-        // reporting a device it owns has gone (`AGENTS.md` §4 / §18.4). It IS
-        // audited per call (`AGENTS.md` §5.4.4): retiring a node drives the
+        // reporting a device it owns has gone. It IS
+        // audited per call: retiring a node drives the
         // device manager to unload the driver bound to it, a security-relevant
         // event, and it is low-volume (once per hot-removed device), so the
         // record cannot drown the log — symmetric with `hw_emit_node`.
@@ -1151,7 +1136,7 @@ mod tests {
         let wait = spec_for(SyscallNumber::IRQ_WAIT).unwrap();
         assert_eq!(wait.required_capability, Some(CapabilityId::IRQ_BIND));
         // stream_write is gated on CAP_CONSOLE_WRITE — the privileged
-        // hardware console is never ambient (`AGENTS.md` §4).
+        // hardware console is never ambient.
         let console = spec_for(SyscallNumber::STREAM_WRITE).unwrap();
         assert_eq!(
             console.required_capability,
@@ -1159,7 +1144,7 @@ mod tests {
         );
         assert!(!console.audit, "console_write must not audit per call");
         // stream_read is gated on CAP_CONSOLE_READ — the privileged
-        // hardware console input is never ambient (`AGENTS.md` §4).
+        // hardware console input is never ambient.
         let console_read = spec_for(SyscallNumber::STREAM_READ).unwrap();
         assert_eq!(
             console_read.required_capability,
@@ -1167,14 +1152,13 @@ mod tests {
         );
         assert!(!console_read.audit, "console_read must not audit per call");
         // spawn is gated on CAP_PROC_SPAWN and audited per call — a new
-        // process is a security-relevant state change (`AGENTS.md` §4 /
-        // §5.4.4).
+        // process is a security-relevant state change.
         let spawn = spec_for(SyscallNumber::SPAWN).unwrap();
         assert_eq!(spawn.required_capability, Some(CapabilityId::PROC_SPAWN));
         assert!(spawn.audit, "spawn must be audited");
         // mem_map / mem_unmap grow and shrink the caller's OWN
         // hardware-isolated address space, so they are the unprivileged
-        // baseline (`AGENTS.md` §16.6) and are not audited per call. Lock
+        // baseline and are not audited per call. Lock
         // that down so a refactor cannot accidentally gate or audit them.
         let mem_map = spec_for(SyscallNumber::MEM_MAP).unwrap();
         assert_eq!(mem_map.required_capability, None);
@@ -1183,8 +1167,7 @@ mod tests {
         assert_eq!(mem_unmap.required_capability, None);
         assert!(!mem_unmap.audit, "mem_unmap must not audit per call");
         // rlimit_get reads the caller's own effective limit, so it is the
-        // unprivileged baseline and is not audited per call (`AGENTS.md`
-        // §24.3). rlimit_set is ungated at the dispatcher (lowering a bound
+        // unprivileged baseline and is not audited per call. rlimit_set is ungated at the dispatcher (lowering a bound
         // needs no capability; the `CAP_RLIMIT_RAISE` check is fine-grained
         // in the handler) but IS audited — it changes enforced policy.
         let rlimit_get = spec_for(SyscallNumber::RLIMIT_GET).unwrap();
@@ -1195,8 +1178,7 @@ mod tests {
         assert!(rlimit_set.audit, "rlimit_set must be audited");
         // console_count reports console topology to the principals that
         // drive consoles, so it shares stream_write's CAP_CONSOLE_WRITE
-        // gate and, as a pure observer, is not audited (`AGENTS.md`
-        // §5.4.4).
+        // gate and, as a pure observer, is not audited.
         let console_count = spec_for(SyscallNumber::CONSOLE_COUNT).unwrap();
         assert_eq!(
             console_count.required_capability,
@@ -1205,8 +1187,7 @@ mod tests {
         assert!(!console_count.audit, "console_count must not audit");
         // stream_echo controls terminal echo on the console the reader
         // holds, so it shares stream_read's CAP_CONSOLE_READ gate and, as
-        // low-volume terminal configuration, is not audited (`AGENTS.md`
-        // §5.4.4).
+        // low-volume terminal configuration, is not audited.
         let stream_echo = spec_for(SyscallNumber::STREAM_ECHO).unwrap();
         assert_eq!(
             stream_echo.required_capability,
@@ -1215,9 +1196,8 @@ mod tests {
         assert!(!stream_echo.audit, "stream_echo must not audit");
         // key_inject feeds one decoded key edge into the input-focus
         // arbiter, so it is gated on the privileged CAP_INPUT_INJECT — the
-        // system keyboard stream is never ambient (`AGENTS.md` §4) — and,
-        // like the per-event stream operations, is not audited per call
-        // (`AGENTS.md` §5.4.4).
+        // system keyboard stream is never ambient — and,
+        // like the per-event stream operations, is not audited per call.
         let key_inject = spec_for(SyscallNumber::KEY_INJECT).unwrap();
         assert_eq!(
             key_inject.required_capability,
@@ -1226,8 +1206,7 @@ mod tests {
         assert!(!key_inject.audit, "key_inject must not audit");
         // display_acquire / display_release own the display and keyboard
         // focus, gated on CAP_DISPLAY and audited per call — re-routing the
-        // keyboard stream is a security-relevant ownership change
-        // (`AGENTS.md` §4 / §5.4.4).
+        // keyboard stream is a security-relevant ownership change.
         for n in [
             SyscallNumber::DISPLAY_ACQUIRE,
             SyscallNumber::DISPLAY_RELEASE,
@@ -1238,7 +1217,7 @@ mod tests {
         }
         // keyboard_read drains the kernel keyboard channel for the display
         // owner, gated on CAP_INPUT_READ and — like stream_read — not
-        // audited per call (`AGENTS.md` §4 / §5.4.4).
+        // audited per call.
         let keyboard_read = spec_for(SyscallNumber::KEYBOARD_READ).unwrap();
         assert_eq!(
             keyboard_read.required_capability,
@@ -1247,10 +1226,10 @@ mod tests {
         assert!(!keyboard_read.audit, "keyboard_read must not audit");
         // hw_tree_read / hw_tree_wait expose the privileged *global*
         // hardware inventory and its change notifications, gated on
-        // CAP_SYSINFO_HW (`AGENTS.md` §16.6 / §18.4 — never the ambient
+        // CAP_SYSINFO_HW (never the ambient
         // own-process baseline) and, as the high-volume reactive
         // device-manager path, not audited per call: the audited security
-        // decision is the subsequent driver load (§5.4.4 / §18.3).
+        // decision is the subsequent driver load.
         for n in [SyscallNumber::HW_TREE_READ, SyscallNumber::HW_TREE_WAIT] {
             let spec = spec_for(n).unwrap();
             assert_eq!(spec.required_capability, Some(CapabilityId::SYSINFO_HW));
@@ -1258,24 +1237,23 @@ mod tests {
         }
         // ipc_call carries no dispatcher capability gate (the call endpoint
         // enforces its own required send capability against the caller, like
-        // ipc_send over a port — `AGENTS.md` §5.2) but IS audited per call,
+        // ipc_send over a port) but IS audited per call,
         // matching ipc_send (a synchronous system-service call is
-        // security-relevant IPC, `AGENTS.md` §5.4.4).
+        // security-relevant IPC).
         let ipc_call = spec_for(SyscallNumber::IPC_CALL).unwrap();
         assert_eq!(ipc_call.required_capability, None);
         assert!(ipc_call.audit, "ipc_call must be audited");
         // log_emit is gated on the privileged CAP_LOG_EMIT — the system
-        // console log is never ambient (`AGENTS.md` §4 / §20) — and, as a
+        // console log is never ambient — and, as a
         // high-volume diagnostic channel (not the hash-chained audit log),
-        // is NOT audited per call (`AGENTS.md` §5.4.4 / §19.4).
+        // is NOT audited per call.
         let log_emit = spec_for(SyscallNumber::LOG_EMIT).unwrap();
         assert_eq!(log_emit.required_capability, Some(CapabilityId::LOG_EMIT));
         assert!(!log_emit.audit, "log_emit must not audit per call");
         // hw_emit_node publishes a discovered child into the global hardware
-        // tree, gated on the privileged CAP_HW_EMIT (`AGENTS.md` §4 / §18.3 —
-        // never ambient) and IS audited per call: admitting a node that drives
+        // tree, gated on the privileged CAP_HW_EMIT (never ambient) and IS audited per call: admitting a node that drives
         // an autoload and carries device-resource grants is a low-volume,
-        // security-relevant event (`AGENTS.md` §5.4.4 / §18.6).
+        // security-relevant event.
         let hw_emit_node = spec_for(SyscallNumber::HW_EMIT_NODE).unwrap();
         assert_eq!(
             hw_emit_node.required_capability,
@@ -1284,8 +1262,7 @@ mod tests {
         assert!(hw_emit_node.audit, "hw_emit_node must be audited");
         // hw_remove_node is the exact mirror of hw_emit_node: the same
         // privileged CAP_HW_EMIT gate and the same per-call audit (retiring a
-        // node drives an unload, a low-volume security-relevant event,
-        // `AGENTS.md` §5.4.4 / §18.4).
+        // node drives an unload, a low-volume security-relevant event).
         let hw_remove_node = spec_for(SyscallNumber::HW_REMOVE_NODE).unwrap();
         assert_eq!(
             hw_remove_node.required_capability,

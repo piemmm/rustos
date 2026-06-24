@@ -221,6 +221,6 @@ fn close_resets_the_device() {
     let (t, _events) = build_device();
     let dev = open_input(t);
     // `close` consumes the device and resets the transport status byte;
-    // a clean teardown is the unload path (`AGENTS.md` §8).
+    // a clean teardown is the unload path.
     dev.close();
 }

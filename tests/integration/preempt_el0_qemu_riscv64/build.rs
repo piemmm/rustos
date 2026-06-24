@@ -4,10 +4,10 @@
 //!
 //! Two jobs on the freestanding `riscv64gc-unknown-none-elf` target (the shared
 //! convert helper lives in `rustos_itest_harness`, so no riscv64 build script
-//! re-rolls it, `AGENTS.md` §2.2):
+//! re-rolls it):
 //!
 //! 1. Hand the riscv64 `virt` linker script to the test kernel (the single
-//!    per-arch script the architecture port owns — `AGENTS.md` §2.2), exactly
+//!    per-arch script the architecture port owns), exactly
 //!    as the sibling riscv64 integration binaries do. Unlike aarch64, the
 //!    riscv64 boot path receives the board device tree at runtime (the `a1`
 //!    pointer OpenSBI hands the boot hart), so no DTB is embedded here.
@@ -16,12 +16,12 @@
 //!    riscv64 target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning its busy-loop count
 //!    through the `RUSTOS_EL0_SPINS` environment variable so this script is the
-//!    single source of truth for the count (`AGENTS.md` §2.2), then convert the
+//!    single source of truth for the count, then convert the
 //!    linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-riscv64 target (host `cargo build --workspace`, clippy) it emits
@@ -29,7 +29,7 @@
 //! compiles only for the freestanding riscv64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -40,7 +40,7 @@ use std::process::Command;
 /// Virtual base the program image is mapped at. Chosen at 64 GiB — far above
 /// the kernel's 4 GiB identity map — so the image lands on freshly walked Sv39
 /// tables instead of colliding with an identity gigapage leaf (the proven
-/// riscv64 spawn layout, `AGENTS.md` §2.2).
+/// riscv64 spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// Busy-loop iterations the spinner program runs before it exits. The single
@@ -48,7 +48,7 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 /// enough that the loop spans many generic-timer ticks even on fast QEMU TCG,
 /// so the runaway task is guaranteed to be involuntarily preempted at least
 /// once, yet small enough to drain well within the harness budget. Matches the
-/// aarch64 preempt vertical's count (`AGENTS.md` §2.2 — the one fixture, one
+/// aarch64 preempt vertical's count (the one fixture, one
 /// count).
 const SPINS: u64 = 200_000_000;
 
@@ -73,7 +73,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == RISCV64_TARGET {
         // The test kernel itself links with the riscv64 `virt` script the
-        // architecture port owns (the single per-arch script, §2.2).
+        // architecture port owns (the single per-arch script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/riscv64/link/riscv64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -104,7 +104,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // riscv64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -122,7 +122,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         // host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Pin the program's busy-loop count (the §2.2 single source of truth).
+        // Pin the program's busy-loop count (the single source of truth).
         .env("RUSTOS_EL0_SPINS", SPINS.to_string())
         .env(
             "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS",

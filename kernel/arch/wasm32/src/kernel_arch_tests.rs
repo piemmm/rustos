@@ -57,7 +57,7 @@ fn multi_worker_map_round_trips_cpu_and_worker_indices() {
 
 #[test]
 fn bookkeeping_scales_to_the_discovered_worker_count() {
-    // §24.1: a machine with more worker contexts than the legacy fixed
+    // a machine with more worker contexts than the legacy fixed
     // ceiling (`MAX_WORKERS`) is sized to its discovered count, never
     // truncated. A dense map of `MAX_WORKERS + 2` distinct workers keeps
     // every slot addressable.
@@ -81,7 +81,7 @@ fn bookkeeping_scales_to_the_discovered_worker_count() {
 
 #[test]
 fn single_worker_handle_sizes_to_the_boot_slot() {
-    // §24.1 floor: a single-worker handle reserves exactly the boot
+    // floor: a single-worker handle reserves exactly the boot
     // CPU's own slot, no speculative headroom.
     let arch = WasmArch::new(0);
     assert_eq!(arch.worker_capacity(), 1);
@@ -120,7 +120,7 @@ fn send_ipi_to_unmapped_target_is_dropped_as_stray() {
     assert_eq!(arch.host_ipi_count(5), 0);
 }
 
-/// §17.2 / W0: the port passes the shared Arch HAL conformance vertical
+/// / W0: the port passes the shared Arch HAL conformance vertical
 /// over its real `SchedulerArch`, `SideChannel`, `MemoryTags`,
 /// discovery, and per-CPU storage handles (`plans/WIRING.md` Stage W0 /
 /// W2).
@@ -139,7 +139,7 @@ fn passes_arch_hal_conformance_suite() {
     );
 }
 
-/// §17.2 / W14: the port passes the secondary-bring-up conformance
+/// / W14: the port passes the secondary-bring-up conformance
 /// vertical over its real `WasmArch` handle. Spawning a Web Worker is a
 /// host action with no observable host-test effect, so the vertical
 /// asserts the observable half — starting an unstartable id fails closed
@@ -154,11 +154,10 @@ fn passes_secondary_bringup_conformance() {
 }
 
 /// The boot context and any unmapped dense id are refused before asking
-/// the host to spawn a worker — the fail-closed contract (`AGENTS.md`
-/// §5.4.5). (The host `start_worker` substitute increments a
+/// the host to spawn a worker — the fail-closed contract. (The host `start_worker` substitute increments a
 /// process-global counter shared with `crate::smp`'s own tests, so the
 /// accepted path is exercised there, not re-driven here — no flaky
-/// cross-test state, `AGENTS.md` §7.)
+/// cross-test state.)
 #[test]
 fn start_secondary_rejects_boot_and_unmapped_ids() {
     let arch = WasmArch::with_workers(0, &[0, 1]);

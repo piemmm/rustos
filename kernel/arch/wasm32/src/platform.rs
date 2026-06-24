@@ -1,7 +1,7 @@
-//! wasm32 early-boot platform discovery (`AGENTS.md` §17.2 / §18.2).
+//! wasm32 early-boot platform discovery.
 //!
 //! The browser sandbox has no firmware hardware table; its "hardware" is
-//! the JavaScript host (`AGENTS.md` §18.2 — "host-environment capability
+//! the JavaScript host ("host-environment capability
 //! query"). This module implements the Arch HAL
 //! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
 //! querying the host for the facts that *do* map onto the
@@ -20,8 +20,7 @@ use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 /// Upper bound on the number of CPU nodes discovery emits.
 ///
 /// Bounds the synthetic tree so a host advertising an implausibly large
-/// `hardwareConcurrency` cannot make discovery unbounded (`AGENTS.md`
-/// §2.9 — deterministic, bounded work).
+/// `hardwareConcurrency` cannot make discovery unbounded (deterministic, bounded work).
 const MAX_DISCOVERED_CPUS: u32 = 64;
 
 /// The host-environment capabilities that map onto the hardware tree.

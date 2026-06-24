@@ -171,12 +171,11 @@ impl ProcessHost for ScriptedHost {
 /// `ulimit` tests drive the real builtin logic without a kernel.
 ///
 /// An unset resource reads back [`ResourceLimit::UNLIMITED`], matching the
-/// kernel's default-unlimited starting point (`AGENTS.md` §24.2). [`put`] and
+/// kernel's default-unlimited starting point. [`put`] and
 /// [`snapshot`] are test-only direct accessors that bypass the gating
 /// [`set`](LimitStore::set) applies, so a test can arrange or inspect state;
 /// [`deny_set`] makes the next [`set`](LimitStore::set) fail with a chosen
-/// [`Errno`] to exercise the kernel-side raise gate (`CAP_RLIMIT_RAISE`,
-/// §24.3).
+/// [`Errno`] to exercise the kernel-side raise gate (`CAP_RLIMIT_RAISE`).
 ///
 /// [`put`]: MemoryLimitStore::put
 /// [`snapshot`]: MemoryLimitStore::snapshot
@@ -211,8 +210,7 @@ impl MemoryLimitStore {
     }
 
     /// Make the next [`set`](LimitStore::set) fail closed with `errno`,
-    /// modelling the kernel refusing to raise a hard bound (`AGENTS.md`
-    /// §24.3).
+    /// modelling the kernel refusing to raise a hard bound.
     pub(crate) fn deny_set(&self, errno: Errno) {
         *self.deny.borrow_mut() = Some(errno);
     }

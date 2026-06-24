@@ -10,12 +10,11 @@ use rustos_procinfo::{CallError, ListError};
 ///
 /// The variants are deliberately coarse: enough to print a useful diagnostic
 /// and set an exit status, while leaning on the frozen [`Errno`] for the
-/// wire-level cause so the tool invents no parallel error set (`AGENTS.md`
-/// §2.2).
+/// wire-level cause so the tool invents no parallel error set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TopError {
     /// The service refused the system-wide process listing because the
-    /// caller lacks `CAP_SYSINFO_GLOBAL` (`AGENTS.md` §16.6). Distinguished
+    /// caller lacks `CAP_SYSINFO_GLOBAL`. Distinguished
     /// from [`TopError::Service`] so the viewer can show the precise
     /// "global view needs a capability you do not hold" message.
     PermissionDenied,

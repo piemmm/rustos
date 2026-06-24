@@ -6,7 +6,7 @@
 //! with an `offset`/`limit` request. The paging loop is identical across
 //! them: request a page, reject a structurally invalid reply, decode each
 //! record, and stop on a short page. It lives here once rather than being
-//! copied per query (`AGENTS.md` §2.2).
+//! copied per query.
 //!
 //! [`WIRE_LEN`]: rustos_abi::sysinfo::ProcessRecord::WIRE_LEN
 
@@ -23,8 +23,8 @@ use crate::transport::Transport;
 /// invalid byte rather than failing.
 ///
 /// Shared by the process and mount row renderers so neither re-implements
-/// lossy decoding (`AGENTS.md` §2.2); a display routine never panics on
-/// hostile bytes (§2.9).
+/// lossy decoding; a display routine never panics on
+/// hostile bytes.
 pub(crate) fn field_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -35,8 +35,7 @@ pub(crate) fn field_lossy(bytes: &[u8]) -> String {
 /// (including a structurally invalid reply, reported as [`Errno::BadMagic`]);
 /// [`Sink`](ListError::Sink) carries the [`Errno`] a caller's per-record sink
 /// raised (typically a terminal write). Distinguishing them lets a consuming
-/// tool map each onto the right line of its own error enum (`AGENTS.md`
-/// §2.2). The same type serves every paged walk, so the process and mount
+/// tool map each onto the right line of its own error enum. The same type serves every paged walk, so the process and mount
 /// tools share one error shape rather than each inventing one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListError {
@@ -51,7 +50,7 @@ pub enum ListError {
 ///
 /// `record_len` is the fixed wire size of one record; `page` is the per-page
 /// record count baked into each request by `make_request`. The walk **fails
-/// closed** (`AGENTS.md` §5.4 / §2.9): a reply whose length is not a whole
+/// closed**: a reply whose length is not a whole
 /// number of `record_len` records, or one that would overflow the page
 /// offset, is rejected rather than partially delivered.
 ///

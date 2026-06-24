@@ -1,9 +1,9 @@
 //! The pointer cursors a theme selects.
 //!
 //! A theme names a cursor per [`CursorKind`] by the identifier of a cursor
-//! asset under `/System/Graphics` (`AGENTS.md` §16.2). [`CursorSet`] is a
+//! asset under `/System/Graphics`. [`CursorSet`] is a
 //! fixed record with one field per kind, so a theme always defines every
-//! cursor and a lookup can never miss (`AGENTS.md` §2.11).
+//! cursor and a lookup can never miss.
 
 use alloc::string::String;
 

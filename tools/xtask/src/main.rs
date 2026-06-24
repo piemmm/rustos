@@ -26,7 +26,7 @@
 //!   build, so the next compile is still incremental
 //! - `test`         — `cargo test --workspace --all-targets`; `--count N`
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
-//!   flaky tests (§7), defaulting to one run; `--soak` (tuned by `--secs N`)
+//!   flaky tests, defaulting to one run; `--soak` (tuned by `--secs N`)
 //!   instead repeats it for a wall-clock budget (24 h by default), which the
 //!   nightly `soak` workflow uses to run the tests repeatedly for 24 h
 //! - `clippy`       — `cargo clippy --workspace --all-targets -- -D warnings`
@@ -36,26 +36,26 @@
 //!   its source of truth in `lib/abi`
 //! - `c-header`     — generates (`--write`) or verifies the C ABI
 //!   development header in `include/` from the `lib/abi` source of truth
-//! - `deps-check`   — enforces the §17.4 modularity dependency graph
+//! - `deps-check` — enforces the modularity dependency graph
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
-//! - `cfg-check`    — rejects target-conditional compilation (§17.2)
+//! - `cfg-check` — rejects target-conditional compilation
 //!   outside the architecture ports and build glue
 //! - `coverage`     — `cargo llvm-cov` report for the host-testable subset
-//! - `sbom`         — emit a `CycloneDX` SBOM from `Cargo.lock` (§19.3):
+//! - `sbom` — emit a `CycloneDX` SBOM from `Cargo.lock`:
 //!   every workspace and external crate with its version, source URL,
 //!   and pinned source checksum
 //! - `supply-chain` — verify the committed source-hash allow-list
-//!   against `Cargo.lock` and enforce the RUSTSEC advisory SLA (§19.3);
+//!   against `Cargo.lock` and enforce the RUSTSEC advisory SLA;
 //!   `--write-pins` regenerates the pins from the lockfile
 //! - `fuzz`         — drive the in-tree fuzz harnesses for a wall-clock
-//!   budget (§19.6): `--quick` (≥ 60 s each, the `ci` budget) or
+//!   budget: `--quick` (≥ 60 s each, the `ci` budget) or
 //!   `--soak` (≥ 24 h each, nightly)
-//! - `model-check`  — exhaustively model-check the §19.7 Silver capability +
+//! - `model-check` — exhaustively model-check the Silver capability +
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
 //! - `ci`           — the full pipeline a PR must pass: `fmt --check`,
 //!   `clippy`, `deps-check`, `cfg-check`, `test` (run 20× on a GitHub
-//!   Actions runner to catch flaky tests, §7; once locally so a pre-push
+//!   Actions runner to catch flaky tests; once locally so a pre-push
 //!   `ci` is not punishingly slow), `docs-check`, `cargo deny check`,
 //!   `supply-chain`, `fuzz --quick`, `proptest --quick`, `model-check`,
 //!   `spec-review`, `abi-check`, `c-header`

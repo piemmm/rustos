@@ -56,13 +56,13 @@ pub trait IrqController {
     /// drained the completion the line must be re-enabled for the next one.
     /// A user-space interrupt-driven driver cannot touch the controller, so
     /// the `irq_wait` park path re-arms the bound line through this method on
-    /// the driver's behalf (`AGENTS.md` §4 — no ambient hardware access). It
+    /// the driver's behalf (no ambient hardware access). It
     /// is idempotent: re-routing an already-routed line and clearing an
     /// already-clear mask are both no-ops.
     ///
     /// The default is a no-op for controllers without a programmable unmask
     /// (placeholders, mask-only test doubles, or ports with no interrupt-driven
-    /// user-space driver consumer yet — §2.4, no interface ahead of a caller).
+    /// user-space driver consumer yet, no interface ahead of a caller).
     /// The aarch64 `GicIrqController` overrides it to route the line to the
     /// boot CPU and clear its enable bit, which is what the user-space
     /// virtio-input keyboard driver's `irq_wait` park path drives.
@@ -160,8 +160,7 @@ impl IrqController for UnsupportedController {
 /// unit-like type has no interior mutability, so the lint does not
 /// fire here, but the `static` form keeps the address stable and
 /// allows the type-erased reference to round-trip through the
-/// `rustos_kernel_core` handover without surprise. `AGENTS.md`
-/// §2.1 — no global mutable state; this is an *immutable* static.
+/// `rustos_kernel_core` handover without surprise. — no global mutable state; this is an *immutable* static.
 pub static UNSUPPORTED_CONTROLLER: UnsupportedController = UnsupportedController;
 
 /// Outcome of [`IrqTable::release_for`].
@@ -175,7 +174,7 @@ pub struct ReleaseOutcome {
 ///
 /// One per running kernel. Interior synchronisation through a
 /// writer-preference [`RwLock`] mirroring the `CapTable`
-/// lock-ordering policy (`AGENTS.md` §2.1 — no global mutable
+/// lock-ordering policy (no global mutable
 /// static; the table is owned by `KernelState`, which itself lives
 /// for the lifetime of the running kernel).
 #[derive(Debug)]
@@ -188,8 +187,7 @@ pub struct IrqTable {
     /// store and **never** blocks on the lock. A task parked in
     /// [`IrqTable::try_wait_step`] (which holds only a *read* guard)
     /// can therefore be woken by the same-CPU completion ISR without
-    /// the ISR spinning on a lock the parked task holds (`AGENTS.md`
-    /// §4 — no hacks; this is the interrupt-reentrancy-safe design).
+    /// the ISR spinning on a lock the parked task holds (no hacks; this is the interrupt-reentrancy-safe design).
     /// Indexed by line; length is `max_line + 1`.
     ready: Vec<AtomicBool>,
     /// Per-line "a binding exists" flags, maintained under the same
@@ -223,7 +221,7 @@ impl IrqTable {
     /// production [`IrqController::mask`] returns
     /// [`MaskError::Unsupported`], pass `0` so every `bind` call
     /// fails-fast with [`IrqError::LineOutOfRange`] before any
-    /// state is touched (`AGENTS.md` §5.4.5 — fail closed).
+    /// state is touched (fail closed).
     #[must_use]
     pub fn new(max_line: u32) -> Self {
         // One flag slot per addressable line (`0..=max_line`). `bind`
@@ -286,7 +284,7 @@ impl IrqTable {
         // `next_handle` starts at 1 and is monotonic; saturating at
         // `u64::MAX` is a fail-closed limit, not a wrap, so a
         // theoretical `2^63` rebind storm cannot collide with a
-        // live handle (`AGENTS.md` §5.4.5).
+        // live handle.
         g.next_handle = g.next_handle.saturating_add(1);
         let handle = IrqHandle::from_raw(raw);
         let entry = IrqEntry {
@@ -324,7 +322,7 @@ impl IrqTable {
     /// 1. Look up by handle. If the handle is unknown or its
     ///    binding's owner is not `caller`, return
     ///    [`WaitStep::NotFound`]. The forgery check beats every
-    ///    other check (`AGENTS.md` §5.4 — identify before any
+    ///    other check (identify before any
     ///    state-touching transition).
     /// 2. If `ready` is set, clear it and return
     ///    [`WaitStep::Ready`]. The ready flag wins over a
@@ -356,7 +354,7 @@ impl IrqTable {
             };
             let Some(entry) = g.entries.get(&line) else {
                 // by_handle and entries are kept consistent; this is a
-                // belt-and-braces fail-closed (`AGENTS.md` §5.4.5).
+                // belt-and-braces fail-closed.
                 return WaitStep::NotFound;
             };
             if entry.owner != caller {
@@ -382,7 +380,7 @@ impl IrqTable {
     /// unknown or its binding is owned by another task.
     ///
     /// Applies the same owner check [`Self::try_wait_step`] performs
-    /// (`AGENTS.md` §5.4 — identify before acting), so the `irq_wait` park
+    /// (identify before acting), so the `irq_wait` park
     /// path can resolve the line to re-arm without trusting a caller-supplied
     /// value: a forged or foreign handle yields [`None`] and re-arms nothing.
     #[must_use]
@@ -415,8 +413,7 @@ impl IrqTable {
     /// * [`IrqError::LineOutOfRange`] if `controller.mask` returned
     ///   [`MaskError::OutOfRange`] — the arch port disagreed with
     ///   the table's `max_line`. A bug rather than a runtime
-    ///   condition, but routed to a stable errno (`AGENTS.md`
-    ///   §5.4.5 — fail closed, never panic).
+    ///   condition, but routed to a stable errno (fail closed, never panic).
     pub fn fire(&self, line: u32, controller: &dyn IrqController) -> Result<FireOutcome, IrqError> {
         controller.mask(line).map_err(|e| match e {
             MaskError::Unsupported => IrqError::ArchUnsupported,
@@ -426,7 +423,7 @@ impl IrqTable {
         // per-line flags. Taking `Inner`'s lock here would deadlock a
         // single CPU whose parked task already holds it in
         // `try_wait_step`; the `bound` / `ready` atoms exist precisely
-        // so `fire` never blocks (`AGENTS.md` §4).
+        // so `fire` never blocks.
         let Some(bound) = self.bound.get(line as usize) else {
             // Line outside the addressable range — the mask still
             // happened (or failed above); treat as a contained stray.
@@ -487,7 +484,7 @@ impl IrqTable {
     /// (only [`Self::try_wait_step`] consumes the flag). Returns
     /// `false` for an unknown handle. Taking only a read guard, it is
     /// safe to call from any context, including alongside an
-    /// in-flight [`Self::fire`] (`AGENTS.md` §2.4 — a narrow read-only
+    /// in-flight [`Self::fire`] (a narrow read-only
     /// query, not a new mutation surface).
     #[must_use]
     pub fn ready_for(&self, handle: IrqHandle) -> bool {

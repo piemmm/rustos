@@ -6,7 +6,7 @@
 //! [`KernelVirtioFactory`] defined here into the host's
 //! `virtio_host_factory` slot so that every loaded virtio-class driver
 //! receives a fresh, capability-checked [`KernelVirtioHost`] backed by
-//! its own per-process [`DmaPool`] (`AGENTS.md` §4 — per-process heaps,
+//! its own per-process [`DmaPool`] (per-process heaps,
 //! never a shared global pool).
 //!
 //! # Why this lives in the kernel binary
@@ -18,10 +18,10 @@
 //! `drivers/bus/virtio`. Because both `drvhost` and this crate depend
 //! only on the `lib/virtio` seam — never on each other — the userland
 //! host stays free of any `kernel/*` dependency and the kernel stays
-//! free of any `userland/*` dependency (`AGENTS.md` §17.4). The factory
+//! free of any `userland/*` dependency. The factory
 //! is exposed from the crate's library half so the production binary
 //! and the QEMU integration tests share one implementation
-//! (`AGENTS.md` §2.2 — no duplication).
+//! (no duplication).
 //!
 //! # Per-driver freshness
 //!
@@ -60,11 +60,11 @@ pub struct KernelVirtioFactoryConfig<'k> {
     /// Capabilities of the task that owns the driver's per-process
     /// pool. Every allocation and free is audited against this set,
     /// and [`KernelVirtioHost::notify_wait`] waits on the line bound by
-    /// `caller.task()` (`AGENTS.md` §5.4 — forgery defence).
+    /// `caller.task()` (forgery defence).
     pub caller: &'k TaskCapabilities,
     /// Audit sink every DMA grant/denial and IRQ decision is logged to.
     /// `+ Sync` so the minted [`KernelVirtioHost`] is [`Sync`] (a shared
-    /// `&'static` host is reached from more than one task, `AGENTS.md` §4).
+    /// `&'static` host is reached from more than one task).
     pub audit: &'k (dyn Sink + Sync),
     /// Kernel IRQ table the device's interrupt line is bound in.
     pub irq: &'k IrqTable,
@@ -111,7 +111,7 @@ where
     /// produce the empty page table backing that driver's private
     /// [`AddressSpace`]. It must return a fresh, empty table each time;
     /// reusing a table across drivers would breach the per-process
-    /// isolation guarantee (`AGENTS.md` §4).
+    /// isolation guarantee.
     #[must_use]
     pub fn new(config: KernelVirtioFactoryConfig<'k>, make_table: F) -> Self {
         Self { config, make_table }
@@ -128,8 +128,7 @@ where
         // gets no virtio host at all. The kernel DMA gate would refuse
         // every allocation anyway (`KernelVirtioHost::alloc_dma_zeroed`
         // is authoritative), but short-circuiting here avoids minting a
-        // pool the driver can never use (`AGENTS.md` §5.4 —
-        // capability check before touching state).
+        // pool the driver can never use (capability check before touching state).
         if !granted.holds(CapabilityId::MEM_DMA) {
             return None;
         }

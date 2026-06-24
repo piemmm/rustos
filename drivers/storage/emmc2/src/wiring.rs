@@ -4,14 +4,13 @@
 //! `rustos_abi::hwtree` as a Storage-class device whose one resource is
 //! the SDHCI register window (base and length read from the device tree's
 //! `reg`, translated through ancestor-bus `ranges` — never a compiled-in
-//! constant, `AGENTS.md` §18.1 / `plans/PI.md` P8). `devmgr` matches the
-//! node against the driver's bind table (`brcm,bcm2711-emmc2`, §18.3) and
+//! constant / `plans/PI.md` P8). `devmgr` matches the
+//! node against the driver's bind table (`brcm,bcm2711-emmc2`) and
 //! the driver host calls [`open_discovered`] with the discovered window.
 //!
 //! This is the only seam that maps memory: [`open_discovered`] checks
 //! [`CapabilityId::MMIO_MAP`], maps the window through the host's
-//! [`MmioMapper`] (never a pointer the driver synthesises, `AGENTS.md`
-//! §4), and brings the card up over it. Everything below — the SDHCI
+//! [`MmioMapper`] (never a pointer the driver synthesises), and brings the card up over it. Everything below — the SDHCI
 //! command/response and block-transfer state machine — is the
 //! host-provable [`Emmc2`] engine driven over the register seam.
 
@@ -49,9 +48,9 @@ use crate::{regs, BringUpFault, BringUpStage, CompletionWait, Emmc2, IrqSdhci};
 /// [`CapabilityId::DRV_LOAD`] [`crate::register`] checked.
 ///
 /// `waiter` is the completion seam the engine parks on instead of
-/// busy-spinning a status register (`AGENTS.md` §17.1): the metal kernel
+/// busy-spinning a status register: the metal kernel
 /// supplies one that blocks the calling task on the controller's bound GIC
-/// interrupt line, while a host test supplies a no-op (`AGENTS.md` §2.2).
+/// interrupt line, while a host test supplies a no-op.
 pub fn open_discovered<W: CompletionWait>(
     host: &dyn DriverHost,
     regs_phys: u64,

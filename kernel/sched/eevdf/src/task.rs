@@ -2,7 +2,7 @@
 //!
 //! The policy-neutral lifecycle vocabulary ([`Priority`], [`TaskState`],
 //! [`TaskAction`], [`TaskContext`], [`TaskId`]) is defined once in
-//! `kernel/sched/api` (`AGENTS.md` §2.2 / §17.1) and re-exported by this
+//! `kernel/sched/api` and re-exported by this
 //! crate. This module owns only the EEVDF-specific representation of a
 //! live task: the boxed body, the lifecycle atomics, and the
 //! virtual-time bookkeeping (weight, virtual runtime, virtual deadline)
@@ -50,7 +50,7 @@ pub(crate) const fn weight_of(priority: Priority) -> u64 {
 pub(crate) struct TaskInner {
     /// Stable identity. Mirrored from the registry key so kernel-side
     /// logging / panic paths can stamp records without re-locking the
-    /// registry (`AGENTS.md` §13 — debugging must remain practical).
+    /// registry (debugging must remain practical).
     #[allow(dead_code)] // read by debug / tracing builds only.
     pub id: TaskId,
     /// CPU whose virtual-time run queue currently owns this task.
@@ -80,7 +80,7 @@ pub(crate) struct TaskInner {
     /// the registry entry.
     pub body: SpinLock<Option<Box<TaskBody>>>,
     /// Wake-pending token closing the park/unpark lost-wakeup race
-    /// (`AGENTS.md` §2.1 — no lost wake-ups). An [`crate::Scheduler::unpark`]
+    /// (no lost wake-ups). An [`crate::Scheduler::unpark`]
     /// that arrives while the task is still [`TaskState::Running`] /
     /// [`TaskState::Ready`] (it has not yet committed to park) cannot move a
     /// non-parked task, so it instead sets this flag; the dispatch loop's
@@ -114,7 +114,7 @@ impl TaskInner {
     }
 
     /// Record that a wake arrived before the task committed to park, so the
-    /// next park is cancelled (`AGENTS.md` §2.1 — no lost wake-ups).
+    /// next park is cancelled (no lost wake-ups).
     pub(crate) fn set_wake_pending(&self) {
         self.wake_pending.store(true, Ordering::Release);
     }
@@ -130,7 +130,7 @@ impl TaskInner {
     pub(crate) fn load_priority(&self) -> Priority {
         // SAFETY-INVARIANT: only `from_index`-produced values are ever
         // stored, so the fallback to High here is unreachable in
-        // practice. The fallback exists to satisfy AGENTS.md §2.9 (no
+        // practice. The fallback exists to satisfy (no
         // panic in production paths) without an unsafe transmute.
         let raw = self.priority.load(Ordering::Acquire) as usize;
         Priority::from_index(raw).unwrap_or(Priority::High)

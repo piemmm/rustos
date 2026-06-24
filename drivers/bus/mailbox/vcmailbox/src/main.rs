@@ -1,10 +1,10 @@
 //! The `Run` entry-point binary of the `VideoCore` firmware property-mailbox
 //! **service driver**, installed as a signed `/System/Drivers/` bundle and
 //! **autoloaded into user space** by `devmgr` when the BCM2711 mailbox node is
-//! discovered (`AGENTS.md` §18; `plans/PI.md` P10 D3).
+//! discovered (`plans/PI.md` P10 D3).
 //!
-//! This moves the `VideoCore` mailbox out of the kernel (the §18.6 floor stays
-//! storage-only) into a user-space service (`AGENTS.md` §4): it owns the
+//! This moves the `VideoCore` mailbox out of the kernel (the floor stays
+//! storage-only) into a user-space service: it owns the
 //! discovered doorbell MMIO window and a DMA-carved property buffer, builds the
 //! BCM2711 `VideoCore` transport (`lib/vcmailbox::MmioMailbox`), and answers
 //! *synchronous* property exchanges from other user-space drivers — the VL805
@@ -15,35 +15,32 @@
 //! translation, cache coherency) lives entirely behind the transport; the
 //! service keeps no protocol logic of its own — it decodes each request,
 //! runs the exchange, and frames the reply through
-//! `rustos_abi::mailbox_ipc::serve_request` (`AGENTS.md` §2.2). A caller's
-//! authority is enforced kernel-side by the endpoint's `CAP_MAILBOX` send gate
-//! (`AGENTS.md` §5.2 / §5.4): the service serves whoever the kernel admitted
+//! `rustos_abi::mailbox_ipc::serve_request`. A caller's
+//! authority is enforced kernel-side by the endpoint's `CAP_MAILBOX` send gate: the service serves whoever the kernel admitted
 //! and validates nothing about the caller itself.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
-//! runtime `rustos-rt` (`_start`, the stack canary §19.2, the panic handler,
+//! It is a **pure-Rust** program: it links the Rust userland
+//! runtime `rustos-rt` (`_start`, the stack canary, the panic handler,
 //! and the `call_create` / `call_recv` / `call_reply` / `yield` syscall
 //! wrappers), never the C ABI. `main` wires the real seams:
 //!
 //! * `RtDriverHost::from_grants_query` over `RtGrantSyscalls`: the host learns
 //!   its kernel-issued grants (the doorbell window + a DMA constraint) and
-//!   maps/carves them. Every capability and bound is re-checked kernel-side
-//!   (`AGENTS.md` §5.4); the host adds no authority. The kernel carves
+//!   maps/carves them. Every capability and bound is re-checked kernel-side; the host adds no authority. The kernel carves
 //!   coherent DMA, so no architecture-specific cache shim is supplied
-//!   (`coherency = None`, keeping the program free of arch code, §2.20).
+//!   (`coherency = None`, keeping the program free of arch code).
 //! * `sole_register_window` over the delivered grants: the doorbell window
-//!   `(base, len)` comes from the grants, never a build-time board constant
-//!   (`AGENTS.md` §2.16 / §2.20).
+//!   `(base, len)` comes from the grants, never a build-time board constant.
 //! * `host.alloc_dma_zeroed` carves the `PROPERTY_LEN_BYTES` property buffer;
 //!   its device-visible base is the firmware's bus address for the buffer.
 //! * `MmioMailbox::new` over the doorbell window and the property buffer, then
 //!   `call_create` to bind the restricted-sender endpoint, then the serve loop.
 //!
 //! After bring-up `main` serves forever: it blocks in `call_recv`, transforms
-//! each request, and answers with `call_reply` (`AGENTS.md` §2.1 — a genuine
+//! each request, and answers with `call_reply` (a genuine
 //! block, never a busy spin). A bring-up failure exits with a reserved
 //! fail-closed code, leaving the system without a mailbox service rather than
-//! wedged (`AGENTS.md` §2.9); the spawning supervisor decides whether to
+//! wedged; the spawning supervisor decides whether to
 //! relaunch.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
@@ -71,19 +68,17 @@ mod program {
     };
 
     /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants. A reserved, fail-closed value (`AGENTS.md`
-    /// §2.9).
+    /// kernel-delivered grants. A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
     /// Exit code when the delivered grants do not name the single doorbell
     /// register window this service needs — an unbound or mis-provisioned
-    /// node (`AGENTS.md` §18.4 / §5.4). A reserved, fail-closed value.
+    /// node. A reserved, fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
 
     /// Exit code when the mailbox transport could not be built (the doorbell
     /// window could not be mapped, the DMA property buffer could not be
-    /// carved, or its geometry is unusable). A reserved, fail-closed value
-    /// (`AGENTS.md` §2.9).
+    /// carved, or its geometry is unusable). A reserved, fail-closed value.
     const EXIT_BRINGUP_FAILED: i32 = 82;
 
     /// Exit code when the call endpoint could not be created (the id is
@@ -94,20 +89,18 @@ mod program {
     /// Property-channel poll budget for a single exchange. The main consumer
     /// is the VL805 firmware reload, which the kernel scaffold allowed a
     /// generous budget; mirror that headroom so a slow firmware reply is not
-    /// spuriously timed out (`AGENTS.md` §2.16 — sized by reasoning, not
+    /// spuriously timed out (sized by reasoning, not
     /// guesswork).
     const POLL_BUDGET: u32 = 10 * DEFAULT_POLL_BUDGET;
 
     /// Bound on the number of in-flight requests the endpoint queues. The
     /// service answers each request before receiving the next, so a small
-    /// capacity suffices; it is a queue bound, not a hardware capacity
-    /// (`AGENTS.md` §24.4).
+    /// capacity suffices; it is a queue bound, not a hardware capacity.
     const ENDPOINT_CAPACITY: usize = 4;
 
     /// The capability set the host re-checks before issuing a `mmio_map` /
     /// `dma_alloc` trap, plus the bind privilege the service needs to create a
-    /// restricted-sender endpoint. The kernel re-checks every trap regardless
-    /// (`AGENTS.md` §5.4).
+    /// restricted-sender endpoint. The kernel re-checks every trap regardless.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MMIO_MAP);
@@ -117,7 +110,7 @@ mod program {
     }
 
     /// The required-sender capability set of the served endpoint: a caller
-    /// must hold `CAP_MAILBOX` to post a request (`AGENTS.md` §5.2).
+    /// must hold `CAP_MAILBOX` to post a request.
     fn endpoint_send_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MAILBOX);
@@ -128,10 +121,10 @@ mod program {
     /// `&self` [`MailboxChannel`] the wire-level server transform consumes.
     ///
     /// Sound because the service is the transport's only, single-threaded
-    /// caller (`AGENTS.md` §4 — the service serialises access). A transport
+    /// caller (the service serialises access). A transport
     /// [`MailboxError`] is mapped to the board-neutral [`DriverError`] the
     /// seam reports, which [`mailbox_ipc::serve_request`] then frames as an
-    /// in-band error reply (fail closed, `AGENTS.md` §2.9).
+    /// in-band error reply (fail closed).
     struct ServiceChannel {
         mailbox: RefCell<MmioMailbox>,
     }
@@ -152,8 +145,7 @@ mod program {
     /// service process.
     fn main() -> i32 {
         // Build the host from the grants the kernel minted. The kernel carves
-        // coherent DMA, so no architecture-specific cache shim is supplied
-        // (`AGENTS.md` §2.20).
+        // coherent DMA, so no architecture-specific cache shim is supplied.
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
@@ -173,7 +165,7 @@ mod program {
         let Ok(buffer_bus) = u32::try_from(buffer_phys) else {
             // The VideoCore property channel addresses the buffer with a
             // 32-bit bus address; a carve above 4 GiB cannot be reached
-            // (`AGENTS.md` §5.4 — fail closed, never a truncated alias).
+            // (fail closed, never a truncated alias).
             return EXIT_BRINGUP_FAILED;
         };
         let bytes = slab.as_bytes_mut();
@@ -222,10 +214,8 @@ mod program {
     /// request through the mailbox transport, and answer with `call_reply`.
     ///
     /// A `call_recv` error (a transient refusal or a destroyed endpoint)
-    /// yields and retries rather than spinning or exiting (`AGENTS.md` §2.1 /
-    /// §2.9). A reply that fails to encode is dropped to a zero-length reply,
-    /// which the client decodes as a fail-closed truncation (`AGENTS.md`
-    /// §2.9).
+    /// yields and retries rather than spinning or exiting. A reply that fails to encode is dropped to a zero-length reply,
+    /// which the client decodes as a fail-closed truncation.
     fn serve(channel: &ServiceChannel) -> ! {
         let mut request = [0u8; mailbox_ipc::REQUEST_LEN];
         let mut reply = [0u8; mailbox_ipc::REPLY_LEN];

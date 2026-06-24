@@ -27,7 +27,7 @@
 //!
 //! A regression that fails to discover the base (or leaves the poison in
 //! place) trips an explicit failure finisher; one that never boots times
-//! out — both documented fail-loud behaviours (`AGENTS.md` §2.9 / §7).
+//! out — both documented fail-loud behaviours.
 //!
 //! ## Why `virt`, not a Raspberry Pi board
 //!
@@ -41,14 +41,14 @@
 //! `rustos-arch-aarch64` host unit tests against the `raspi_like_arm`
 //! device-tree fixture, and is an on-metal acceptance item for the later
 //! Pi peripheral stages (`plans/PI.md` Arc C — honest emulation gap, never
-//! a faked vertical, `AGENTS.md` §2.1).
+//! a faked vertical).
 //!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `rustos-arch-aarch64` port and the shared FDT reader
 //! and supplies its own `kernel_main`. The QEMU-exit shortcut lives in
 //! this dedicated bin, never behind a Cargo feature on the arch crate
-//! (`AGENTS.md` §5.4.5 — fail closed).
+//! (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

@@ -1,18 +1,18 @@
 //! Deterministic fuzz harness for the `lib/curses` input decoder
-//! (`AGENTS.md` §19.5 / §19.6 — the curses application's untrusted-input path).
+//! (the curses application's untrusted-input path).
 //!
 //! [`rustos_curses::Input`] turns terminal bytes — local keystrokes and, in the
 //! remote stages of `plans/CURSES.md`, a foreign host's reported keys, mouse
 //! events, and pastes — into typed [`rustos_curses::Event`]s, over the one
-//! shared `lib/vt` parser. Per §19.6 that decode path is driven by a fuzz
+//! shared `lib/vt` parser. Per that decode path is driven by a fuzz
 //! harness whose single invariant is:
 //!
 //! * feeding any byte stream never panics and never reads out of bounds — the
 //!   decoder emits well-formed events or silently drops what it cannot
-//!   interpret (fail closed, `AGENTS.md` §2.9), and a never-terminated
+//!   interpret (fail closed), and a never-terminated
 //!   bracketed paste cannot make it misbehave.
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded LCG
+//! RustOS pulls in no external fuzz runner: a per-run-seeded LCG
 //! draws pseudo-random byte strings and mutates real key/mouse/paste templates.
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed; `cargo xtask

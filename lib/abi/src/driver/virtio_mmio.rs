@@ -10,7 +10,7 @@
 //!
 //! The boot-time device-tree walk that turns a slot into a window
 //! lives in ring 0, but ring 0 must stay driver-agnostic: it may not
-//! name the concrete `drivers/bus/mmio` types (`AGENTS.md` §8 — a
+//! name the concrete `drivers/bus/mmio` types (a
 //! driver crate's only public surface is `register`). This module is
 //! the versioned ABI seam that breaks the tension: the MMIO bus driver
 //! implements [`VirtioMmioBus`] and the kernel calls it through a
@@ -21,7 +21,7 @@
 //! This trait is part of the `abi-v1` surface. `abi-v1` is not yet
 //! frozen (RustOS has not shipped a release), so it may still be
 //! extended in place; from the first release onward it freezes and new
-//! behaviour ships in `abi-v2` (`AGENTS.md` §9 / §2.13).
+//! behaviour ships in `abi-v2`.
 
 use super::bus::Bus;
 use super::{DriverError, MmioMapper, RegisterWindow};
@@ -32,14 +32,14 @@ use super::{DriverError, MmioMapper, RegisterWindow};
 /// [`Bus`] is a supertrait so the kernel walk can enumerate the bus
 /// (to pick the slot) and provision its window through a single
 /// `&dyn VirtioMmioBus`, without depending on the concrete
-/// `drivers/bus/mmio` crate (`AGENTS.md` §8).
+/// `drivers/bus/mmio` crate.
 ///
 /// # Capabilities
 ///
 /// The window-mapping method routes through the supplied
 /// [`MmioMapper`], which enforces
 /// [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP); the
-/// implementation performs no mapping itself (`AGENTS.md` §4 — no
+/// implementation performs no mapping itself (no
 /// ambient authority).
 pub trait VirtioMmioBus: Bus {
     /// Resolve the virtio-MMIO transport slot whose register block
@@ -76,13 +76,13 @@ pub trait VirtioMmioBus: Bus {
     /// physical `base`.
     ///
     /// This is the discovered extent the slot's device tree `reg`
-    /// `<base, length>` pair declares (`AGENTS.md` §18.1 — a window
+    /// `<base, length>` pair declares (a window
     /// extent is a *discovered* value, never a compiled-in literal). The
     /// bootstrap-floor discovery walk uses it to record a discovered
     /// virtio device node's MMIO resource as a capability-grant request
     /// of exactly the slot's size, so a user-space driver autoloaded
     /// against that node is minted a window grant of precisely the
-    /// region it owns — never more (`AGENTS.md` §4 / §18.3). It reads no
+    /// region it owns — never more. It reads no
     /// device state and maps nothing, so it needs no [`MmioMapper`]:
     /// [`Self::map_slot_window`] is the capability-gated mapping path.
     ///

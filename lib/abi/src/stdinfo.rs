@@ -1,5 +1,4 @@
-//! Standard Information Stream (`stdinfo`, file descriptor 3) ABI
-//! (`AGENTS.md` §20).
+//! Standard Information Stream (`stdinfo`, file descriptor 3) ABI.
 //!
 //! RustOS reserves file descriptor [`STDINFO_FD`] as `stdinfo`: an optional,
 //! structured advisory stream for concise human context and AI/tool metadata
@@ -33,7 +32,7 @@ pub const STDINFO_VERSION_V1: u32 = 1;
 /// The current `stdinfo` ABI version emitted by this crate.
 pub const STDINFO_VERSION_CURRENT: u32 = STDINFO_VERSION_V1;
 
-/// The closed set of `stdinfo` record kinds (`AGENTS.md` §20).
+/// The closed set of `stdinfo` record kinds.
 ///
 /// This enumeration is exhaustive by design: a new kind cannot be invented,
 /// and synonyms such as `hint`, `tip`, `notice`, `info`, `advice`, or
@@ -128,7 +127,7 @@ impl<'a> Human<'a> {
     }
 }
 
-/// A single `stdinfo` advisory record (`AGENTS.md` §20).
+/// A single `stdinfo` advisory record.
 ///
 /// The record borrows its string fields and serialises to one JSONL line
 /// through [`StdInfoRecord::write_jsonl`]. The `ai` field is a producer-

@@ -378,8 +378,7 @@ fn bind_table_matches_a_virtio_block_node() {
     use rustos_abi::HwMatchKey;
 
     // One entry at the declared exact-match priority, matching a
-    // discovered virtio node whose probed device id is `virtio-blk`
-    // (`AGENTS.md` §18.3).
+    // discovered virtio node whose probed device id is `virtio-blk`.
     assert_eq!(BIND_KEYS.len(), 1);
     assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
     let blk = HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID);
@@ -387,7 +386,7 @@ fn bind_table_matches_a_virtio_block_node() {
 
     // A different virtio device (e.g. virtio-net, device id 1) and a
     // non-virtio node both fail the match — the caller leaves them
-    // unbound rather than guessing (`AGENTS.md` §18.4 / §2.9).
+    // unbound rather than guessing.
     let net = HwMatchKey::virtio(1);
     assert!(!BIND_KEYS[0].key.matches(&net));
     let pci_storage = HwMatchKey::pci(0x8086, 0x2922, 0x01_06_01);

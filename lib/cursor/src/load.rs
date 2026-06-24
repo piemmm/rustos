@@ -1,15 +1,14 @@
 //! Assembling a complete cursor set from on-disk SVG assets.
 //!
 //! A cursor *set* is one SVG asset per [`CursorKind`] (the SVG-first asset
-//! rule, `AGENTS.md` §10). The on-disk assets live under `/System/Graphics`
-//! and are untrusted input (`AGENTS.md` §19.5): reading the bytes needs a
+//! rule). The on-disk assets live under `/System/Graphics`
+//! and are untrusted input: reading the bytes needs a
 //! filesystem capability and is the userland desktop's job, so this crate
 //! takes the bytes through an injected [`CursorAssetSource`] seam — the same
 //! pattern the default apps use for their VFS/shell channels — and stays
 //! `no_std` with no path of its own to `/System/Graphics`.
 //!
-//! [`CursorTheme::from_assets`] is **total and fail-closed per kind**
-//! (`AGENTS.md` §2.9 / §5.4): a kind whose asset is absent, malformed, or
+//! [`CursorTheme::from_assets`] is **total and fail-closed per kind**: a kind whose asset is absent, malformed, or
 //! outside the supported SVG subset keeps its built-in cursor rather than
 //! leaving the set without a shape for that kind. A completely empty source
 //! therefore yields the built-in set, and a partial set mixes loaded cursors
@@ -25,7 +24,7 @@ use crate::vector::VectorCursor;
 /// Every cursor kind a set provides an asset for.
 ///
 /// A fixed table so a loader iterates the closed [`CursorKind`] vocabulary
-/// without inventing a second list of kinds (`AGENTS.md` §2.2 / §2.4).
+/// without inventing a second list of kinds.
 pub const CURSOR_KINDS: [CursorKind; 5] = [
     CursorKind::Arrow,
     CursorKind::Text,
@@ -39,7 +38,7 @@ pub const CURSOR_KINDS: [CursorKind; 5] = [
 /// The desktop implements this over the filesystem (reading
 /// `/System/Graphics`), tests over an in-memory table. The seam keeps the
 /// asset bytes — and the capability needed to read them — out of this
-/// `no_std` library (`AGENTS.md` §17.4).
+/// `no_std` library.
 pub trait CursorAssetSource {
     /// The SVG bytes of the asset for `kind`, or `None` when the set provides
     /// no asset for that kind (so the built-in cursor is used).
@@ -51,9 +50,8 @@ impl CursorTheme {
     /// SVG asset and falling back to the built-in cursor for any kind whose
     /// asset is missing, malformed, or outside the supported subset.
     ///
-    /// Never fails: every kind always resolves to a cursor (`AGENTS.md`
-    /// §2.11), so the returned theme is complete even from an empty or
-    /// partly-broken source (`AGENTS.md` §2.9).
+    /// Never fails: every kind always resolves to a cursor, so the returned theme is complete even from an empty or
+    /// partly-broken source.
     #[must_use]
     pub fn from_assets<S: CursorAssetSource + ?Sized>(source: &S) -> Self {
         let builtin = Self::builtin();

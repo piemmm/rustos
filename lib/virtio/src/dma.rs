@@ -2,7 +2,7 @@
 //!
 //! [`DmaSlab`] is the owned representation of a contiguous, device-
 //! visible memory range whose ownership has been transferred to the
-//! driver code by the host (`AGENTS.md` §4). It replaces the
+//! driver code by the host. It replaces the
 //! previously-borrowed `DmaRegion<'a>` API: the driver code in
 //! `drivers/storage/virtio_blk` and `drivers/network/virtio_net`
 //! holds up to three live DMA regions concurrently (descriptor
@@ -22,14 +22,13 @@
 //! drop: when the caller declares the payload sensitive, the wrapper
 //! zeroes the staging bytes before the slab is dropped, so the
 //! host's per-pool slot reclaim never observes residual credentials
-//! (`AGENTS.md` §4 — zero-on-free).
+//! (zero-on-free).
 
 use rustos_abi::driver::BufferClass;
 
 // `PoolId`, `SlabFreeFn`, and `DmaSlab` moved into `lib/abi` at Stage
 // 4.D Item 0-tail so the host trait (`rustos_abi::DriverHost`) can
-// name them without inverting the dependency direction
-// (`AGENTS.md` §3). Their unit tests stay in this module against the
+// name them without inverting the dependency direction. Their unit tests stay in this module against the
 // re-export so they keep exercising the same call sites and continue
 // to enjoy `alloc` access (`lib/abi` is no-alloc).
 pub use rustos_abi::driver::{DmaSlab, PoolId, SlabFreeFn};
@@ -41,7 +40,7 @@ pub use rustos_abi::driver::{DmaSlab, PoolId, SlabFreeFn};
 /// device-visible memory. On drop the wrapper zeroes the staging
 /// bytes iff [`BufferClass::Sensitive`] was declared, satisfying the
 /// zero-on-free contract on `Block::*_with_class` /
-/// `Net::*_with_class` (`AGENTS.md` §4).
+/// `Net::*_with_class`.
 #[derive(Debug)]
 pub struct BounceBuffer {
     slab: DmaSlab,
@@ -216,7 +215,7 @@ mod tests {
     /// [`super::super::SlabCoherencyFn`] is a bare `fn` pointer (no
     /// capture), so the observed `(base, len)` is published through atomics.
     /// Used by a single test (`dma_slab_sync_range_*`) so no cross-test race
-    /// on these statics is possible (`AGENTS.md` §7 — no flaky tests).
+    /// on these statics is possible (no flaky tests).
     mod coherency_test_state {
         use core::sync::atomic::{AtomicUsize, Ordering};
         pub(super) static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -246,7 +245,7 @@ mod tests {
         assert_eq!(rec::LAST_LEN.load(Ordering::SeqCst), 8);
 
         // A zero-length request and an out-of-range request both fail closed
-        // to a no-op (`AGENTS.md` §5.4): the hook is not invoked again.
+        // to a no-op: the hook is not invoked again.
         slab.sync_range(0, 0);
         slab.sync_range(60, 8);
         slab.sync_range(usize::MAX, 1);

@@ -6,9 +6,8 @@
 //! BCM2711 PCIe driver) both need: find the function to bind, and assign /
 //! enable / map its register BAR. They are defined here once, beside the
 //! configuration-access mechanism they drive, so the two callers share one
-//! definition rather than each carrying its own copy (`AGENTS.md` §2.2 /
-//! §17.4). Each operates over the `abi-v1` [`PciBus`] seam, so a caller never
-//! names this concrete crate's internals (`AGENTS.md` §8).
+//! definition rather than each carrying its own copy. Each operates over the `abi-v1` [`PciBus`] seam, so a caller never
+//! names this concrete crate's internals.
 
 use rustos_abi::driver::bus::BusDevice;
 use rustos_abi::driver::pci::PciBus;
@@ -18,17 +17,16 @@ use rustos_abi::{DriverError, MmioMapper, RegisterWindow};
 /// Bus 3.0 Appendix D: base `0x0C` Serial Bus Controller, sub-class `0x03`
 /// USB).
 ///
-/// A standard PCI *class* code, not a vendor or product identity
-/// (`AGENTS.md` §8): a bus driver locates *a* USB host controller behind a
+/// A standard PCI *class* code, not a vendor or product identity: a bus driver locates *a* USB host controller behind a
 /// bridge by this class without naming any specific part. It lives here,
 /// beside the configuration-access mechanism that reads a function's class,
 /// as the one definition both the generic xHCI driver and a root-complex bus
-/// driver share (`AGENTS.md` §2.2).
+/// driver share.
 pub const USB_CONTROLLER_CLASS: u16 = 0x0C03;
 
 /// Upper bound on functions scanned while locating a target by class.
 ///
-/// A defence bound (`AGENTS.md` §24.4), not a capacity: a bounded scan stops
+/// A defence bound, not a capacity: a bounded scan stops
 /// a malfunctioning or hostile bus from driving an unbounded enumeration. A
 /// handful of functions covers every real single-controller bridge; the
 /// populated prefix is searched even when the bus reports more.
@@ -45,7 +43,7 @@ const MAX_BUS_SCAN: usize = 32;
 /// # Errors
 ///
 /// * [`DriverError::NotFound`] — no function on the bus carries `class`
-///   (fail closed, never a fabricated target, `AGENTS.md` §2.9 / §18.5).
+///   (fail closed, never a fabricated target).
 /// * any non-[`BufferTooSmall`](DriverError::BufferTooSmall) error of
 ///   [`Bus::enumerate`](rustos_abi::driver::bus::Bus::enumerate).
 pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, DriverError> {
@@ -76,7 +74,7 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 ///
 /// This is the prefix a DMA-driving PCI device driver runs before it can
 /// touch the controller, composed from three [`PciBus`] seam calls so the
-/// callers share one definition (`AGENTS.md` §2.2):
+/// callers share one definition:
 ///
 /// * [`PciBus::assign_bar`] places the BAR at a size-aligned address inside
 ///   the bridge's outbound window `outbound_window` (`(pcie_base, size)`,
@@ -87,7 +85,7 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 ///   Local Bus 3.0 §6.2.2); and
 /// * [`PciBus::map_bar_window`] maps the BAR through `mapper`, which enforces
 ///   [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
-///   kernel-side (`AGENTS.md` §4 — no ambient authority).
+///   kernel-side (no ambient authority).
 ///
 /// The returned window's [`phys_base`](RegisterWindow::phys_base) is the
 /// BAR's assigned base in the address space `mapper` maps (PCIe-bus space
@@ -96,7 +94,7 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 ///
 /// # Errors
 ///
-/// Every step fails closed (`AGENTS.md` §5.4): any error of
+/// Every step fails closed: any error of
 /// [`PciBus::assign_bar`] (the BAR cannot be placed inside `outbound_window`),
 /// [`PciBus::enable_bus_master`], or [`PciBus::map_bar_window`] (no such BAR,
 /// an I/O-port BAR, a size past `usize`, or a missing
@@ -125,16 +123,15 @@ pub fn assign_and_map_bar(
 /// `outbound` is the bridge's outbound window as `(cpu_base, pcie_base,
 /// size)` — the CPU aperture base, the PCIe-bus base it maps to, and the
 /// size — exactly as the discovered [`BusWindow`](rustos_abi::HwResourceKind::BusWindow)
-/// resource carries it (`AGENTS.md` §18.1). A device's BAR is assigned a
+/// resource carries it. A device's BAR is assigned a
 /// PCIe-bus address inside this window ([`assign_and_map_bar`]); a bus driver
 /// publishing that BAR as a child node's CPU-physical
 /// [`Mmio`](rustos_abi::HwResourceKind::Mmio) grant translates it here, so the
-/// arithmetic has one definition (`AGENTS.md` §2.2) and the result is a
+/// arithmetic has one definition and the result is a
 /// CPU-side address the kernel's grant-coverage check accepts against the
 /// bridge's outbound `BusWindow` grant (`HwResource::covers`).
 ///
-/// Returns the CPU-physical address, or [`None`] (fail closed, `AGENTS.md`
-/// §5.4) when `bus_addr` lies below the window's PCIe base, at or past its
+/// Returns the CPU-physical address, or [`None`] (fail closed) when `bus_addr` lies below the window's PCIe base, at or past its
 /// top, or the CPU-side sum overflows — never a wrapped or invented address.
 #[must_use]
 pub fn bus_to_cpu_phys(outbound: (u64, u64, u64), bus_addr: u64) -> Option<u64> {

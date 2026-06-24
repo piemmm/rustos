@@ -28,7 +28,7 @@
 //!    self-contained leaf (it marshals registers and executes `svc`,
 //!    calling nothing), so a single-page code alias is sufficient. The
 //!    identity pages are EL1-only, so EL0 can reach *only* the aliased
-//!    stub and its stack — the §4 isolation contract.
+//!    stub and its stack — the isolation contract.
 //! 3. Installs the syscall dispatch callback via `set_dispatch_callback`,
 //!    points `VBAR_EL1` at the vector table (`init_vectors`), and `eret`s
 //!    to EL0 with `SP_EL0` at the user stack, `ELR_EL1` at the stub, and
@@ -43,7 +43,7 @@
 //! the capability id the stub was handed (the rest zero), then reports
 //! PASS through the ARM semihosting finisher. A wrong number, a wrong
 //! argument, or the `svc` resuming in EL0 at all is a distinct closed
-//! failure (`AGENTS.md` §5.4.5).
+//! failure.
 //!
 //! ## How it differs from `rustos-test-syscall-dispatch-qemu`
 //!
@@ -57,14 +57,14 @@
 //! The test body only compiles under `#[cfg(feature = "test-hooks")]`.
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
-//! (AGENTS.md §1 — no hacks; §5.4.5 — fail closed), mirroring
+//! (no hacks; — fail closed), mirroring
 //! `rustos-test-abi-sys-syscall-qemu`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
 #![deny(missing_docs)]
 
-// AGENTS.md §1 — test affordances must never reach a release binary.
+// — test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate; a release build that
 // re-enables it is a configuration error, so we fail the build outright,
 // exactly as `rustos-test-abi-sys-syscall-qemu` does.
@@ -139,7 +139,7 @@ mod kernel {
     static mut USER_STACK: UserStack = UserStack([0; PAGE_SIZE * USER_STACK_PAGES]);
 
     /// Set once the round-trip has been driven so a re-entry can never
-    /// re-run the test logic (`AGENTS.md` §5.4.5 — fail closed).
+    /// re-run the test logic (fail closed).
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     fn note(id: EventId, level: Level, message: &'static str) {
@@ -304,14 +304,13 @@ mod kernel {
 //
 // The test body only compiles when `feature = "test-hooks"` is on.
 // Disabling it leaves the bin as a no-op so a layout sanity check
-// (`cargo build --no-default-features`) still builds — AGENTS.md §1
+// (`cargo build --no-default-features`) still builds
 // (a disabled test must compile cleanly).
 #[cfg(all(itest_aarch64, not(feature = "test-hooks")))]
 #[no_mangle]
 pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     loop {
-        // SAFETY: `wfe` is a well-defined parked-CPU hint on aarch64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `wfe` is a well-defined parked-CPU hint on aarch64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
         }

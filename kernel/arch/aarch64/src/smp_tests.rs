@@ -18,7 +18,7 @@ extern "C" fn host_entry(_cpu: CpuId) -> ! {
 
 #[test]
 fn cpu_validity_tracks_the_registered_pool() {
-    // A caller-sized pool covers exactly its `N` slots (the §24.1 capacity
+    // A caller-sized pool covers exactly its `N` slots (the capacity
     // is the discovered core count, not a baked-in `MAX_CPUS`); a second
     // pool proves registration is set-once. Declared first so they precede
     // the statements that drive them.

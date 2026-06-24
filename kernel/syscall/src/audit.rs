@@ -1,7 +1,7 @@
 //! Stable audit event identifiers used by `kernel/syscall`.
 //!
 //! The dispatcher emits exactly one structured log record per security
-//! decision it takes (`AGENTS.md` §5.4.4). The numeric identifiers
+//! decision it takes. The numeric identifiers
 //! assigned here live in the `kernel/syscall` reserved range
 //! `5_000..6_000`; they form part of the audit contract with external
 //! consumers and must not be re-used or re-numbered.
@@ -50,7 +50,7 @@ pub enum AuditEvent {
     /// It is recorded at [`Level::Debug`] so a caller that legitimately
     /// polls-while-pending cannot flood the log with errors, while the
     /// record remains available for flood/DoS forensics when the level is
-    /// lowered (`AGENTS.md` §2.1 / §19.4).
+    /// lowered.
     ///
     /// [`Errno::WouldBlock`]: rustos_abi::Errno::WouldBlock
     SyscallHandlerWouldBlock,
@@ -157,7 +157,7 @@ mod tests {
         // error level a genuine rejection does — otherwise a caller that
         // legitimately polls while pending (e.g. `login` reading
         // `users_db_read` while the encrypted root unlocks) floods the boot
-        // log with errors (`AGENTS.md` §2.1 / §19.4). It is `Debug`, below
+        // log with errors. It is `Debug`, below
         // the default `Info` filter, so it is dropped unless the level is
         // lowered for forensics.
         assert_eq!(AuditEvent::SyscallHandlerWouldBlock.level(), Level::Debug);

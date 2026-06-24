@@ -34,8 +34,7 @@ pub struct BusDevice {
 /// Enumeration is gated by ownership of the
 /// [`DriverHandle`](crate::driver::DriverHandle) (load-time
 /// [`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)). The
-/// host is expected to consult the audit trail
-/// (`AGENTS.md` §5.4.4) before forwarding the enumerated devices to a
+/// host is expected to consult the audit trail before forwarding the enumerated devices to a
 /// requester that does not itself hold `CAP_DRV_LOAD`.
 pub trait Bus {
     /// Enumerate every device currently attached to the bus into

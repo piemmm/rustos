@@ -16,12 +16,11 @@
 //! * [`init_sipi_sipi`] — the INIT-deassert + INIT + SIPI + SIPI
 //!   sequencer expressed against the existing
 //!   [`crate::apic::Lapic`] / [`crate::apic::LapicMmio`] primitives so
-//!   no new architecture-neutral surface is introduced (AGENTS.md
-//!   §2.4, §15.5).
+//!   no new architecture-neutral surface is introduced.
 //!
 //! # Why this lives in `kernel/arch/x86_64` and not `kernel/sched`
 //!
-//! AGENTS.md §15.5 forbids "convenience wrappers" that exist in only
+//! the charter forbids "convenience wrappers" that exist in only
 //! one consumer. AP bring-up is x86_64-specific (aarch64 uses PSCI,
 //! riscv64 uses HSM, wasm32 has no APs); the architecture-neutral
 //! scheduler has no business knowing how a target hardware brings up
@@ -137,7 +136,7 @@ pub struct ApBootSlot {
     /// Reserved padding so `ready` lands at the assembly-side
     /// `AP_BOOT_SLOT_READY` offset (`0x40`). Public because the struct
     /// is `#[repr(C)]` and its byte layout is part of the wire contract
-    /// with `ap_trampoline.s` (AGENTS.md §10 — invariant audited by
+    /// with `ap_trampoline.s` (invariant audited by
     /// the `ap_boot_slot_layout_is_locked` host test below).
     #[allow(clippy::pub_underscore_fields)]
     pub _reserved: [u8; 36],
@@ -417,8 +416,7 @@ static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_secondary_entry`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetEntryError {
-    /// An entry was already installed; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// An entry was already installed; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -434,12 +432,12 @@ pub enum StartCpuError {
     NoEntryInstalled,
     /// The AP never published its `ready` flag within the spin budget;
     /// the trampoline frame must not be reused for the next AP, so the
-    /// bring-up fails closed rather than racing (`AGENTS.md` §5.4.5).
+    /// bring-up fails closed rather than racing.
     StartTimedOut,
 }
 
 impl StartCpuError {
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -496,7 +494,7 @@ struct ApStack([u8; 16 * 1024]);
 
 /// Published base of the registered [`ApStackPool::stacks`] array
 /// (`null` until a pool is registered, so [`start_secondary`] fails
-/// closed before registration — `AGENTS.md` §2.9 / §24.1).
+/// closed before registration).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static AP_STACK_BASE: core::sync::atomic::AtomicPtr<ApStack> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
@@ -518,13 +516,12 @@ static AP_STACK_REGISTERED: core::sync::atomic::AtomicBool =
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ApStackPoolError {
     /// Pool was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live pool).
+    /// (no silent re-pointing of the live pool).
     AlreadyRegistered,
 }
 
 /// Caller-owned, `&'static` application-processor bootstrap-stack pool,
-/// sized by the constructing caller for its machine (`AGENTS.md` §24.1 —
-/// the AP stack count is derived from the §18-discovered application-
+/// sized by the constructing caller for its machine (the AP stack count is derived from the-discovered application-
 /// processor count, never a fixed `MAX_CPUS - 1` ceiling baked into the
 /// arch crate).
 ///
@@ -570,8 +567,7 @@ impl<const N: usize> ApStackPool<N> {
     /// # Errors
     ///
     /// [`ApStackPoolError::AlreadyRegistered`] on the second publish
-    /// (set-once per boot — never silently re-points the live pool,
-    /// `AGENTS.md` §2.1).
+    /// (set-once per boot — never silently re-points the live pool).
     pub fn register(&'static self) -> Result<usize, ApStackPoolError> {
         if AP_STACK_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -594,7 +590,7 @@ impl<const N: usize> Default for ApStackPool<N> {
 
 /// Top-of-stack (one past the last byte, 16-byte aligned) of registered
 /// AP stack pool entry `idx`, or `None` if `idx` is out of range or no
-/// pool is registered yet (fail closed, `AGENTS.md` §2.9).
+/// pool is registered yet (fail closed).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn ap_stack_top(idx: usize) -> Option<u64> {
     if idx >= AP_STACK_LEN.load(Ordering::Acquire) {
@@ -683,7 +679,7 @@ fn bringup_lapic() -> Lapic<crate::apic::VolatileLapicMmio> {
 ///
 /// # Errors
 ///
-/// See [`StartCpuError`]. The launcher fails closed (`AGENTS.md` §5.4.5)
+/// See [`StartCpuError`]. The launcher fails closed
 /// rather than assuming the AP came up.
 ///
 /// # Safety
@@ -697,7 +693,7 @@ fn bringup_lapic() -> Lapic<crate::apic::VolatileLapicMmio> {
 pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), StartCpuError> {
     // Range-check before any hardware action: the boot CPU (0) is
     // already running, and a dense id beyond the stack pool has no
-    // reserved stack (`AGENTS.md` §5.4.5).
+    // reserved stack.
     let Some(stack_idx) = (cpu as usize).checked_sub(1) else {
         return Err(StartCpuError::CpuIdOutOfRange);
     };
@@ -715,7 +711,7 @@ pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), Star
         Ok(frame) => frame,
         // The frame address/size are compile-time constants that always
         // satisfy the installer; treat any rejection as out-of-range
-        // rather than panicking (`AGENTS.md` §2.9).
+        // rather than panicking.
         Err(_) => return Err(StartCpuError::CpuIdOutOfRange),
     };
     if frame.install(trampoline_payload()).is_err() {

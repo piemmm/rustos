@@ -11,7 +11,7 @@
 //! 2. assembles the parsed geometry into a
 //!    [`rustos_drv_display_framebuffer::FramebufferConfig`];
 //! 3. loads the signed framebuffer display `.rxe` through
-//!    [`rustos_drvhost::Host`] (the §8 load gate) and drives it through
+//!    [`rustos_drvhost::Host`] (the load gate) and drives it through
 //!    `load -> use -> unload -> reload`, where "use" maps the surface
 //!    through the capability-gated [`rustos_kernel_virtio::KernelMmioMapper`]
 //!    and `present`s a frame; a second independently-mapped window reads

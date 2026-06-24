@@ -7,7 +7,7 @@
 //!   [`Init::start_all`](crate::Init::start_all). It signals a structural
 //!   defect in the registered service set — a duplicate name, a dependency
 //!   on an unregistered service, or a cycle — that prevents *any* service
-//!   from coming up (`AGENTS.md` §5.4.5). The system does not boot a
+//!   from coming up. The system does not boot a
 //!   partial, surprising configuration.
 //! * [`StartFailure`] is a **per-service** outcome recorded in the
 //!   [`StartReport`](crate::StartReport). When the graph is sound, init
@@ -54,8 +54,7 @@ pub enum StartFailure {
     /// capability set; the wrapped [`Errno`] is the decode error verbatim.
     ManifestInvalid(Errno),
     /// The manifest requests a capability the system authority does not
-    /// hold. Granting it would widen authority, so the service is refused
-    /// (`AGENTS.md` §5.2, §5.4.5).
+    /// hold. Granting it would widen authority, so the service is refused.
     CapabilityEscalation,
     /// The [`Spawner`](crate::Spawner) refused to launch the service; the
     /// wrapped [`Errno`] is the spawner's error verbatim.

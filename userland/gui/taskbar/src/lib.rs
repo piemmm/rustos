@@ -1,7 +1,7 @@
 //! RustOS traditional desktop **taskbar** (`userland/gui/taskbar`).
 //!
 //! The taskbar is the GNOME/Windows-style bar pinned to a configured screen
-//! edge (`AGENTS.md` §10, `PLAN.md` Stage 7). Along its main axis it is laid
+//! edge (`PLAN.md` Stage 7). Along its main axis it is laid
 //! out as:
 //!
 //! - **Leading end** — a [`StartMenu`] button. The menu is seeded with the
@@ -10,7 +10,7 @@
 //!   **light/dark appearance toggle** ([`StartMenu::add_appearance_toggle`])
 //!   appended after them. All kinds are ordinary [`MenuEntry`] values
 //!   distinguished by their [`MenuAction`], so each was added without
-//!   changing the list/activate interface (`AGENTS.md` §2.4).
+//!   changing the list/activate interface.
 //! - **Middle** — a [`TaskList`]: one entry per top-level window, with
 //!   click-to-activate and minimise/restore.
 //! - **Trailing end** — a clock anchored to the very end, with a
@@ -26,7 +26,7 @@
 //! radius and colours from the active theme ([`rustos_theme`]) and exposes
 //! the radius through [`BarLayout::corner_radius`]; the taskbar never rounds its own
 //! corners — the window manager applies that radius through its single
-//! anti-aliased rounded-corner path (`AGENTS.md` §2.2), exactly as it rounds
+//! anti-aliased rounded-corner path, exactly as it rounds
 //! windows.
 //!
 //! Glyph rendering (clock and task-title text) and notification-icon artwork
@@ -41,8 +41,8 @@
 //! As a `userland/gui/*` crate it depends only on `lib/*` — the shared
 //! [`rustos_geometry`] coordinate types, the shared [`rustos_raster`]
 //! surface, and the shared [`rustos_theme`] definition — never on the window
-//! manager or any sibling userland crate (`AGENTS.md` §17.4). Nothing depends
-//! on it in turn (§17.3): the desktop is an optional, one-way-dependent
+//! manager or any sibling userland crate. Nothing depends
+//! on it in turn: the desktop is an optional, one-way-dependent
 //! frontend.
 
 #![no_std]

@@ -1,19 +1,19 @@
 //! Deterministic fuzz harness for the `lib/users` database parser
-//! (`AGENTS.md` §19.5 / §19.6 — a parser of on-disk, untrusted input).
+//! (a parser of on-disk, untrusted input).
 //!
 //! `/System/Security/Users` is read by the login path before any session
 //! exists, so its bytes are outside the trust boundary of the reader: a
 //! hostile or corrupted database must be **rejected**, never trusted
-//! (`AGENTS.md` §5.4 — fail closed). Per §19.6 the decode path is driven
+//! (fail closed). Per the decode path is driven
 //! here against arbitrary text, with two invariants:
 //!
 //! * feeding any string to [`rustos_users::UsersDb::parse`] never panics
 //!   and never reads out of bounds — it returns a database or a
-//!   [`rustos_users::ParseError`] (`AGENTS.md` §2.9);
+//!   [`rustos_users::ParseError`];
 //! * any database that parses re-serialises to text that parses back to an
 //!   equal database (the format has one meaning).
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a
+//! RustOS pulls in no external fuzz runner: a
 //! per-run-seeded LCG mutates real databases built through the public
 //! constructors, splices hostile record lines under a valid header, and
 //! feeds pure noise. A plain `cargo test` runs the fixed
@@ -41,8 +41,7 @@ const MAX_NOISE: usize = 2048;
 const ALPHABET: &[u8] = b"abcdefxyz0123456789:,$#/_-. \nACTIVELOCKEDpbkdf2sha256rustos-users-v1";
 
 /// Build the corpus of real, well-formed databases through the public
-/// constructors, so this harness encodes no second copy of the format
-/// (`AGENTS.md` §2.2).
+/// constructors, so this harness encodes no second copy of the format.
 fn templates() -> Vec<String> {
     let record = |username: &str, uid: u32, state: AccountState| {
         let mut capabilities = CapabilitySet::empty();

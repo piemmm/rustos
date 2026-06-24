@@ -9,8 +9,7 @@
 //! capability-checked, audited `rustos_kernel_core::spawn_image` caller and
 //! admits it as a resumable user kthread (`spawn_user_kthread`).
 //!
-//! It then arms the **production** preemption path verbatim (`AGENTS.md` §2.2 —
-//! the same `rustos_arch_aarch64::preempt` surface the bin crate's
+//! It then arms the **production** preemption path verbatim (the same `rustos_arch_aarch64::preempt` surface the bin crate's
 //! `arm_preemption` uses): registers a per-CPU `PreemptStorage`, installs an
 //! EL0-preemption callback that suspends the running task back to the scheduler
 //! via `reschedule_current(_, Yield)`, and starts the periodic generic timer.
@@ -26,7 +25,7 @@
 //! each preemption — still completed its spin and exited. A preemption that
 //! never fires (the `step` never returns) or a botched resume (the task never
 //! exits) stalls the drain, so the run fails loudly — by a failure code or by
-//! the harness `Outcome::Timeout` (`AGENTS.md` §7).
+//! the harness `Outcome::Timeout`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

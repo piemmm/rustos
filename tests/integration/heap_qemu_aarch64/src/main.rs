@@ -19,7 +19,7 @@
 //! a `Vec` across several pages, reallocates after freeing, verifies every
 //! value, and exits 0 — a clean `exit(0)` is the PASS signal. Any shortfall (a
 //! non-zero exit code, an unexpected syscall, or a fault) trips a distinct
-//! failure finisher or times out, so the run fails loudly (`AGENTS.md` §7).
+//! failure finisher or times out, so the run fails loudly.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

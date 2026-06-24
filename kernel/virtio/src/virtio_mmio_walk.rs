@@ -12,8 +12,8 @@
 //! It stays driver-agnostic: it reaches the MMIO bus driver only
 //! through the frozen [`VirtioMmioBus`] ABI seam and the kernel mapping
 //! facility only through [`MmioMapper`], so ring 0 never names a
-//! concrete `drivers/bus/*` type (`AGENTS.md` §8) and never synthesises
-//! a pointer of its own (`AGENTS.md` §4). The capability check that
+//! concrete `drivers/bus/*` type and never synthesises
+//! a pointer of its own. The capability check that
 //! authorises the window lives inside the mapper.
 
 use rustos_abi::driver::bus::BusDevice;
@@ -75,13 +75,12 @@ pub struct VirtioMmioProvision<T> {
 /// The walk maps the window but never names a concrete transport type:
 /// the caller passes `build` (in production
 /// `rustos_drv_bus_virtio::MmioTransport::new`), so ring 0 depends only
-/// on `lib/*` and never on a `drivers/bus/*` crate (`AGENTS.md`
-/// §17.4 — `kernel/* → lib/*`, never a driver).
+/// on `lib/*` and never on a `drivers/bus/*` crate (`kernel/* → lib/*`, never a driver).
 ///
 /// # Errors
 ///
 /// See [`VirtioMmioWalkError`]; every failure mode is reported rather
-/// than panicking (`AGENTS.md` §2.9). The walk touches no device state
+/// than panicking. The walk touches no device state
 /// itself; any identity-register validation the transport performs
 /// happens inside `build`, whose [`VirtioError`] is surfaced as
 /// [`VirtioMmioWalkError::Transport`].
@@ -147,8 +146,7 @@ mod tests {
 
     /// Identity builder: keeps the mapped window so the test can assert
     /// on it directly, standing in for a real transport constructor
-    /// without depending on a `drivers/bus/*` crate (`AGENTS.md`
-    /// §17.4).
+    /// without depending on a `drivers/bus/*` crate.
     fn keep_window() -> impl FnOnce(RegisterWindow) -> Result<RegisterWindow, VirtioError> {
         |window| Ok(window)
     }

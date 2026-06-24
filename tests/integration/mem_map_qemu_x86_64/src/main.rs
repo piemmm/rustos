@@ -25,8 +25,7 @@
 //! pattern, unmaps it, then touches the released range — which must raise a
 //! page fault the fault observer reports as PASS. Any shortfall (the program
 //! returning a failure exit code, an unexpected syscall, or no fault) flips
-//! `qemu_exit::exit_failure` or times out, so the run fails loudly
-//! (`AGENTS.md` §7).
+//! `qemu_exit::exit_failure` or times out, so the run fails loudly.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -47,8 +46,7 @@ mod kernel;
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
-        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }

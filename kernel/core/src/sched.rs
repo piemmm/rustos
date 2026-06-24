@@ -1,4 +1,4 @@
-//! The single scheduler selection point (`AGENTS.md` §17.1).
+//! The single scheduler selection point.
 //!
 //! `kernel/core` is the *only* kernel crate (besides `kernel/sched/*`)
 //! permitted to name a concrete scheduler policy. It selects exactly one
@@ -12,7 +12,7 @@
 //! enforce that exactly one is active per image.
 
 // Re-export the policy-neutral vocabulary so the rest of `kernel/core`
-// names one canonical definition (`AGENTS.md` §2.2).
+// names one canonical definition.
 pub(crate) use rustos_kernel_sched_api::{CpuId, SchedError, SchedulerArch, SchedulerConfig};
 
 /// The concrete scheduler policy selected for this image.
@@ -27,7 +27,7 @@ pub(crate) use rustos_kernel_sched_eevdf::Scheduler;
 #[cfg(all(feature = "scheduler-mlfq", not(feature = "scheduler-eevdf")))]
 pub(crate) use rustos_kernel_sched_mlfq::Scheduler;
 
-// Exactly one `scheduler-*` feature must be active (§17.1). The two
+// Exactly one `scheduler-*` feature must be active. The two
 // guards below reject the "none selected" and "more than one selected"
 // configurations at compile time; adding a policy adds a `scheduler-<impl>`
 // arm above and extends the mutual-exclusion guard.

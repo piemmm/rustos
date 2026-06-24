@@ -4,26 +4,25 @@
 //! Three jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
-//!    per-board script the architecture port owns — `AGENTS.md` §2.2) and dump
+//!    per-board script the architecture port owns) and dump
 //!    the canonical QEMU `virt` flattened device tree, embedding it so the test
 //!    discovers the GICv2 base and the generic-timer rate from the firmware
 //!    tree (`plans/PI.md` P3/P4). QEMU's `-kernel <ELF>` aarch64 path passes no
 //!    DTB pointer (`x0 = 0`), so the board tree is embedded at build time; the
 //!    dump helper lives in the shared harness so no aarch64 build script
-//!    re-rolls it (`AGENTS.md` §2.2).
+//!    re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    wait_program`) **twice** — once as the `child` role and once as the
 //!    `parent` role — position-independent for the freestanding aarch64 target
 //!    (its own `program.ld` roots `rustos-rt`'s `_start`), into two private
 //!    target directories under `OUT_DIR`, pinning the child's exit code through
 //!    the `RUSTOS_WAIT_CHILD_CODE` environment variable (and the role through
-//!    `RUSTOS_WAIT_ROLE`) so this script is the single source of truth for both
-//!    (`AGENTS.md` §2.2).
+//!    `RUSTOS_WAIT_ROLE`) so this script is the single source of truth for both.
 //! 3. Convert each linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    two blobs, the bias, and the matching [`CHILD_EXIT_CODE`] constant as a
 //!    Rust source the test `include!`s.
 //!
@@ -32,7 +31,7 @@
 //! compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -45,14 +44,14 @@ use std::process::Command;
 /// region — so each program's pages land on freshly walked stage-1 tables
 /// instead of colliding with an identity gigapage block. The two programs live
 /// in *separate* address spaces, so they share the bias without colliding
-/// (`AGENTS.md` §2.2 — the proven spawn layout).
+/// (the proven spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// Exit code the child terminates with and the parent verifies after reaping
 /// it. The single source of truth: passed to *both* program builds via
 /// `RUSTOS_WAIT_CHILD_CODE` *and* emitted as the `CHILD_EXIT_CODE` constant the
 /// kernel asserts the reaped code against, so the three sites can never
-/// disagree (`AGENTS.md` §2.2). A non-trivial, non-zero value so an accidental
+/// disagree. A non-trivial, non-zero value so an accidental
 /// zero-exit cannot satisfy the check.
 const CHILD_EXIT_CODE: i32 = 23;
 
@@ -78,7 +77,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel itself links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -121,7 +120,7 @@ fn build_and_convert_program(
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -136,7 +135,7 @@ fn build_and_convert_program(
         // and apply only to the aarch64 program crates.
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Pin the role + child exit code (the §2.2 single source of truth).
+        // Pin the role + child exit code (the single source of truth).
         .env("RUSTOS_WAIT_ROLE", role)
         .env("RUSTOS_WAIT_CHILD_CODE", CHILD_EXIT_CODE.to_string())
         .env(

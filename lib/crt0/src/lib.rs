@@ -1,6 +1,6 @@
 //! `rustos-crt0` — the C-callable `abi-v1` program startup/teardown object.
 //!
-//! When the `rxe` loader (`AGENTS.md` §16.5) drops into a freshly spawned
+//! When the `rxe` loader drops into a freshly spawned
 //! program it hands the program's entry trampoline a pointer to a
 //! position-independent *startup-vector block* ([`rustos_abi::process`]).
 //! This crate is that entry trampoline (crt0): on each native Tier-1 target
@@ -11,17 +11,16 @@
 //! `exit` syscall (`rustos_abi_sys::sys_exit`, the `ros_sys_exit` stub).
 //!
 //! Together with `rustos_abi_sys` (the `ros_sys_<name>` syscall stubs) it
-//! forms the curated `/System/Libraries/` class *System runtime / C ABI*
-//! (`AGENTS.md` §16.4): the minimal libc-equivalent a program **not** written
+//! forms the curated `/System/Libraries/` class *System runtime / C ABI*: the minimal libc-equivalent a program **not** written
 //! in Rust links to run on RustOS. It is deliberately minimal — it starts and
 //! stops the program and marshals the startup vector, nothing more — and is
 //! **not** a privileged path: every capability and input check happens
-//! kernel-side (`AGENTS.md` §5.4 / `plans/CCOMPAT.md` §4). See
+//! kernel-side (`plans/CCOMPAT.md` §4). See
 //! `plans/CCOMPAT.md` (stage CC3).
 //!
 //! # Host-testable core vs. target trampoline
 //!
-//! The startup vector is **untrusted input** (`AGENTS.md` §19.5/§19.6), so the
+//! The startup vector is **untrusted input**, so the
 //! security-relevant logic — validating the block and laying out the C
 //! `argv` / `envp` — lives in the host-testable, allocation-free
 //! [`build_c_runtime`]. The per-architecture `_start` assembly carve-out (the
@@ -112,7 +111,7 @@ pub fn read_total_len(header_bytes: &[u8]) -> Result<usize, Errno> {
 ///
 /// * Any [`Errno`] from [`ProcessStart::parse`] if `block` is malformed.
 /// * [`Errno::BufferTooSmall`] if `scratch` cannot hold the whole layout —
-///   crt0 fails closed rather than truncating the runtime (`AGENTS.md` §2.9).
+///   crt0 fails closed rather than truncating the runtime.
 pub fn build_c_runtime(block: &[u8], scratch: &mut [u8]) -> Result<CRuntime, Errno> {
     let view = ProcessStart::parse(block)?;
     let argc = view.arg_count();

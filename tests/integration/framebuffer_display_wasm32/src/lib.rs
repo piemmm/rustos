@@ -12,7 +12,7 @@
 //! * **Boots.** The port's `rustos_arch_wasm32_main` export forwards to
 //!   the `kernel_main` here, which prints `BOOT_OK`.
 //! * **Signed `.rxe` load gate.** The build-time signed framebuffer
-//!   display `.rxe` is loaded through `rustos_drvhost::Host` (the §8
+//!   display `.rxe` is loaded through `rustos_drvhost::Host` (the
 //!   gate) and driven through `load -> use -> unload -> reload`.
 //! * **Capability-gated surface map.** "use" maps the surface through a
 //!   capability-checked `WasmMmioMapper` (the wasm32 analogue of the
@@ -29,7 +29,7 @@
 //! The browser harness (`web/harness.mjs`, launched by `cargo xtask test
 //! --wasm`) scrapes those console markers and reports PASS once it has
 //! seen `BOOT_OK` and `DISPLAY_OK`; any panic traps the instance and
-//! fails the run loudly (`AGENTS.md` §7).
+//! fails the run loudly.
 //!
 //! On a host build (`itest_wasm32` off) this compiles to an inert empty
 //! `cdylib`, exactly as the bare-metal verticals are inert host stubs, so
@@ -136,14 +136,14 @@ mod kernel {
     // --- Failure path ------------------------------------------------
 
     /// Emit `msg` and trap the instance so a regression fails loudly
-    /// instead of silently reporting success (`AGENTS.md` §5.4.5).
+    /// instead of silently reporting success.
     fn fail(msg: &str) -> ! {
         write_line(msg);
         panic!("framebuffer-wasm32 vertical failed");
     }
 
     /// Forward this module's panics to the shared console bridge, which
-    /// emits one record and traps the instance (`AGENTS.md` §2.9).
+    /// emits one record and traps the instance.
     #[panic_handler]
     fn panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_console(info)
@@ -228,7 +228,7 @@ mod kernel {
     /// Driver-host view used for `Framebuffer::open`: grants
     /// `CAP_MMIO_MAP` and exposes the [`WasmMmioMapper`]. Distinct from
     /// the [`Host`]-installed load view, mirroring how the bus-driver
-    /// verticals separate the §8 load gate from the map gate.
+    /// verticals separate the load gate from the map gate.
     struct FramebufferHost<'a> {
         granted: CapabilitySet,
         mapper: &'a dyn MmioMapper,
@@ -355,7 +355,7 @@ mod kernel {
             mapper: &mapper,
         };
 
-        // Load the signed `.rxe` through the driver host (the §8 gate).
+        // Load the signed `.rxe` through the driver host (the gate).
         let Ok(pubkey) = Ed25519PublicKey::from_bytes(&TRUSTED_SIGNER_PUBKEY) else {
             fail("HARNESS_ERROR trust anchor decode");
         };

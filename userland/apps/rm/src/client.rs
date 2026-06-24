@@ -29,8 +29,7 @@ parsing: every later argument is a path.
 /// not exist is skipped silently. `rm` writes nothing on success; `out`
 /// carries only the [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed,
-/// `AGENTS.md` §2.9).
+/// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///

@@ -101,7 +101,7 @@ pub fn parse(args: &[&str]) -> Result<Command, SetcapError> {
 /// * `Some(None)` for the literal `-` — clear the gate.
 /// * `None` for anything else — not a valid capability spec.
 ///
-/// The name match is exact (`AGENTS.md` §2.1 — no guessing): an unknown,
+/// The name match is exact (no guessing): an unknown,
 /// mis-cased, or bare numeric value is rejected rather than coerced.
 #[must_use]
 pub fn parse_capability(spec: &str) -> Option<Option<CapabilityId>> {

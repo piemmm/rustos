@@ -30,8 +30,7 @@
 //! A regression in any wired path (no context switch, no dispatch, no
 //! timer tick, no IPI delivery) either trips a dedicated failure finisher
 //! or never reaches the PASS write, so the run fails loudly — by an
-//! explicit failure code or by the harness `Outcome::Timeout`
-//! (`AGENTS.md` §7).
+//! explicit failure code or by the harness `Outcome::Timeout`.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -41,7 +40,7 @@
 //! exercised without the full `kernel_core::kernel_main` init pipeline
 //! (which halts after boot and keeps its scheduler private). The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on the arch crate (`AGENTS.md` §5.4.5 — fail closed).
+//! feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]
@@ -192,8 +191,7 @@ mod kernel {
     /// The supervisor-timer scheduler-tick callback. Drives the live
     /// scheduler's per-CPU preemption counter through
     /// [`Scheduler::on_timer_tick`]. ISR-safe: `on_timer_tick` is wait-free
-    /// (one bounds check + one `fetch_add`). RustOS is tickless
-    /// (`AGENTS.md` §17.1): the one-shot does not auto-reload, so the
+    /// (one bounds check + one `fetch_add`). RustOS is tickless: the one-shot does not auto-reload, so the
     /// callback re-arms the next one-shot itself (standing in for the
     /// scheduler's `set_preemption`) so the timer keeps driving the live
     /// scheduler while this hart idles in `wfi` below.
@@ -299,7 +297,7 @@ mod kernel {
         // 2. Build the live scheduler over the arch port and publish it for
         //    the trap-path callbacks.
         // Single-hart slice: one per-CPU slot, owned by an allocator-free
-        // `static` backing (`AGENTS.md` §24.1).
+        // `static` backing.
         static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
         let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
         let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), Arc::clone(&arch)) else {
@@ -369,7 +367,7 @@ mod kernel {
         // 4. Wait until the supervisor-timer trap has driven the live
         //    scheduler at least MIN_PREEMPTIONS times. A regression that
         //    fails to deliver or re-arm the timer never reaches the bound,
-        //    so the harness reports a timeout (fail-loud, `AGENTS.md` §7).
+        //    so the harness reports a timeout (fail-loud).
         while sched.preemption_count(BOOT_CPU).unwrap_or(0) < MIN_PREEMPTIONS {
             // SAFETY: `wfi` is a wait-for-interrupt hint with no
             // architectural side effects; the timer interrupt wakes it.

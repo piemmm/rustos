@@ -1,4 +1,4 @@
-//! Per-CPU storage surface of the Arch HAL (`AGENTS.md` §17.2
+//! Per-CPU storage surface of the Arch HAL (
 //! "per-CPU storage").
 //!
 //! Every CPU needs a private word it can reach with no lock and no
@@ -8,10 +8,10 @@
 //! register the CPU reads in a single instruction: the GS base on
 //! x86_64, `TPIDR_EL1` on aarch64, `tp` on riscv64. The wasm32 port has
 //! no such register, so the per-worker module instance owns the word
-//! directly. §17.2 makes the architecture surface a closed set of traits
+//! directly. The charter makes the architecture surface a closed set of traits
 //! on the HAL; this module is the "per-CPU storage" member of that set,
 //! so the register read/write lives in exactly one place per port
-//! instead of being copied into every call site (`AGENTS.md` §2.2).
+//! instead of being copied into every call site.
 //!
 //! # What lives here
 //!
@@ -20,7 +20,7 @@
 //!   seeds it once as a CPU comes online (with the address of that CPU's
 //!   control block, or a dense CPU index — the port and the kernel agree
 //!   on the meaning) and then reads it on every CPU-local access.
-//! * [`conformance`] — the §17.2 conformance vertical: a host-run
+//! * [`conformance`] — the conformance vertical: a host-run
 //!   [`conformance::run_all`] round-trip check every port runs over its
 //!   handle, plus a two-handle [`conformance::run_isolation`] check that
 //!   pins the per-CPU word of one CPU is independent of another's.
@@ -31,8 +31,7 @@
 //! meaning (a pointer to a per-CPU control block, a dense [`crate::CpuId`],
 //! …) and every port stores and returns it byte-for-byte at native
 //! pointer width. Keeping it opaque is what lets the one trait serve
-//! every port without naming a per-CPU layout it has no business owning
-//! (`AGENTS.md` §2.3 / §2.4).
+//! every port without naming a per-CPU layout it has no business owning.
 //!
 //! # Why the host backing is per-handle
 //!
@@ -44,10 +43,9 @@
 //! [`conformance::run_isolation`] exercises. This mirrors the host-only
 //! backing the other slices carry (the `host_tick_counter` in the
 //! scheduler handle); it is never linked into a kernel image
-//! (`AGENTS.md` §1 — no fake primitives in production).
+//! (no fake primitives in production).
 
-/// The per-CPU storage handle an architecture port exposes
-/// (`AGENTS.md` §17.2).
+/// The per-CPU storage handle an architecture port exposes.
 ///
 /// The kernel seeds the calling CPU's per-CPU base word with
 /// [`Self::write_self_base`] as the CPU comes online, then resolves its
@@ -65,8 +63,7 @@ pub trait PerCpu: Send + Sync {
     /// register read (`rdmsr IA32_GS_BASE` / `mrs TPIDR_EL1` /
     /// `mv _, tp`). Before [`Self::write_self_base`] has run on this CPU
     /// the word reads back as `0` (the architecture-neutral "unset"
-    /// value), never an undefined or invented address (`AGENTS.md`
-    /// §5.4.5 — fail closed).
+    /// value), never an undefined or invented address (fail closed).
     fn read_self_base(&self) -> usize;
 
     /// Install `base` as the calling CPU's per-CPU base word.
@@ -90,7 +87,7 @@ pub trait PerCpu: Send + Sync {
     unsafe fn write_self_base(&self, base: usize);
 }
 
-/// The §17.2 per-CPU storage conformance vertical.
+/// The per-CPU storage conformance vertical.
 ///
 /// Every architecture port runs [`conformance::run_all`] against its
 /// [`PerCpu`] handle. The suite is portable — it names only the trait —

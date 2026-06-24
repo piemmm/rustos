@@ -1,7 +1,7 @@
 //! Deterministic fuzz target for the dispatcher's argument decoder.
 //!
 //! Stage 2.7 requires a fuzz harness for the per-syscall argument
-//! validation path (`AGENTS.md` §7 / PLAN Stage 2.7 brief). We do not
+//! validation path (PLAN Stage 2.7 brief). We do not
 //! pull in an external fuzz runner: a deterministic LCG with a fixed
 //! seed exercises 100 000 random `(syscall, RawArgs)` pairs on every
 //! `cargo test` run and asserts the two invariants the dispatcher must
@@ -14,15 +14,15 @@
 //!    the test fails and prints the offending input.
 //!
 //! The deterministic seed makes failures reproducible — a flaky fuzz
-//! target is a bug per `AGENTS.md` §7.
+//! target is a bug.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//! ## Wall-clock budget
 //!
 //! A plain `cargo test` runs the [`ITERATIONS`] sweep once from a fresh, logged
 //! seed. When
 //! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing fresh `(syscall, RawArgs)` pairs from the *same continuing*
-//! PRNG stream until the budget elapses — the §19.6 "run each harness for its
+//! PRNG stream until the budget elapses — the "run each harness for its
 //! wall-clock budget" contract — while the logged seed keeps any crash reproducible.
 
 use core::cell::RefCell;

@@ -5,7 +5,7 @@
 //! relocatable object that references crt0's `_start`, the `ros_sys_*` syscall
 //! stubs, and the compiler-emitted stack-canary symbols. None of those are in
 //! the C object — they live in the curated *System runtime / C ABI* class
-//! (`lib/crt0` + `lib/abi-sys`, `AGENTS.md` §16.4). This crate is built as a
+//! (`lib/crt0` + `lib/abi-sys`). This crate is built as a
 //! `staticlib`, so that runtime is bundled into one `.a` the consuming QEMU
 //! test (`tests/integration/c_program_qemu_riscv64`) links with the C object
 //! to produce a single PIE image — exactly the linking a non-Rust app does
@@ -39,8 +39,7 @@ mod runtime {
 
     /// Exit code used if the program ever panics. A hosted program has no
     /// unwinder, so a panic is unrecoverable; terminate through the `exit`
-    /// syscall rather than returning into corrupt state (`AGENTS.md` §2.9 —
-    /// fail closed). The C program is panic-free; this only satisfies the
+    /// syscall rather than returning into corrupt state (fail closed). The C program is panic-free; this only satisfies the
     /// `no_std` contract for the Rust crates linked in.
     const EXIT_RUNTIME_PANIC: i32 = 70;
 

@@ -1,6 +1,6 @@
 //! Bounds-checked pointer arithmetic helpers.
 //!
-//! `AGENTS.md` §4 forbids "raw pointer arithmetic without bounds-checked
+//! the charter forbids "raw pointer arithmetic without bounds-checked
 //! wrappers." This module is the single place in `kernel/mem` allowed to
 //! call `<*mut _>::add` / `<*const _>::add`. Every other module routes
 //! pointer offsets through [`offset_within`] / [`slice_within`].

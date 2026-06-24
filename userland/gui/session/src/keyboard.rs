@@ -10,13 +10,12 @@
 //!
 //! The raw bytes arrive through an injected [`KeyInputChannel`] seam — a
 //! capability-checked kernel input channel on a running system, an in-memory
-//! queue in tests (`AGENTS.md` §7) — so this `userland/gui` crate holds no
+//! queue in tests — so this `userland/gui` crate holds no
 //! input capability of its own and the decode runs above the device, not
-//! inside it (§17.4 / §19.5). Every record is validated by
+//! inside it. Every record is validated by
 //! [`KeyInput::from_bytes`] before it becomes an [`InputEvent`]; a malformed
 //! record surfaces its [`Errno`] and the shell's
-//! [`pump`](crate::DesktopShell::pump) stops without misinterpreting the bytes
-//! (`AGENTS.md` §5.4 / §2.9).
+//! [`pump`](crate::DesktopShell::pump) stops without misinterpreting the bytes.
 //!
 //! [`InputSource`]: crate::InputSource
 //! [`InputEvent`]: rustos_wm::InputEvent
@@ -32,7 +31,7 @@ use crate::shell::InputSource;
 ///
 /// On a running system this is a capability-checked kernel keyboard channel
 /// that hands the desktop one [`KeyInput::WIRE_LEN`]-byte record at a time;
-/// tests back it with an in-memory queue (`AGENTS.md` §7). It deals only in
+/// tests back it with an in-memory queue. It deals only in
 /// raw bytes: decoding and validating them is [`KeyboardInputSource`]'s job,
 /// so the channel itself need not understand the wire format.
 pub trait KeyInputChannel {
@@ -258,7 +257,7 @@ mod tests {
         channel.push_raw([0u8; KeyInput::WIRE_LEN]);
         let mut source = KeyboardInputSource::new(channel);
         // An all-zero record has the wrong magic and must be refused, never
-        // misinterpreted (`AGENTS.md` §5.4 / §2.9).
+        // misinterpreted.
         assert_eq!(source.poll(), Err(Errno::BadMagic));
     }
 

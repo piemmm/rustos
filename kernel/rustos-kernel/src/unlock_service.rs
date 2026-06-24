@@ -10,8 +10,7 @@
 //! the dispatch loop runs would deadlock, so the unlock runs as a
 //! **scheduler kthread** admitted at the init seam, alongside PID 1.
 //!
-//! This module is the host-compiled, host-tested, device-independent core
-//! (`AGENTS.md` §2.2): the post-MMU boot stash ([`record_boot`] /
+//! This module is the host-compiled, host-tested, device-independent core: the post-MMU boot stash ([`record_boot`] /
 //! [`take_boot`]) carrying the resolved [`RootBlockBinding`], the firmware
 //! DTB pointer, and the discovered hardware tree to the init seam, plus the
 //! console-0 ownership gate ([`Console0Gate`] / [`CONSOLE0_GATE`] /
@@ -23,7 +22,7 @@
 //! the rest of the aarch64 boot pipeline in `crate::aarch64::root_unlock`
 //! (virtio-blk-MMIO for the QEMU `virt` path, and the Raspberry Pi 4 EMMC2
 //! SD host for the Pi-metal root), so this arch-neutral core names no
-//! architecture (`AGENTS.md` §17.2 / §2.20).
+//! architecture.
 
 use rustos_abi::{CapabilityId, Errno, HwNode};
 use rustos_caps::CapabilitySet;
@@ -42,7 +41,7 @@ use crate::root_storage::RootBlockBinding;
 /// Exposed as a stable `pub const` so the `-M virt` admission vertical can
 /// key its PASS on the production message — the witness that the in-kernel
 /// kthread (not a directly-driven policy) reached a mounted, installed root
-/// — without re-declaring the literal (`AGENTS.md` §2.2).
+/// — without re-declaring the literal.
 pub const USERS_DB_INSTALLED_MESSAGE: &str =
     "root-unlock: users database installed; login can authenticate";
 
@@ -57,7 +56,7 @@ pub const USERS_DB_INSTALLED_MESSAGE: &str =
 pub struct UnlockBoot {
     /// The resolved root block binding, or [`None`] when no single block
     /// device was bound (headless / no disk / ambiguous — the unlock is a
-    /// no-op and `login` finds no accounts, `AGENTS.md` §18.4).
+    /// no-op and `login` finds no accounts).
     pub binding: Option<RootBlockBinding>,
     /// The firmware/loader device-tree pointer (`0` when none was handed
     /// over), used by the live bring-up to construct the virtio-MMIO bus
@@ -86,16 +85,15 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 /// ([`crate::hwtree_store::HW_TREE`]) with the discovered `tree`.
 ///
 /// `tree` is the full discovered hardware tree the kthread matches against
-/// the signed driver store during autoload (`AGENTS.md` §18.1 / §18.3) — it
+/// the signed driver store during autoload — it
 /// already carries the bus root nodes `FdtDiscovery` emits (the
 /// `brcm,bcm2711-pcie` root complex, the `VideoCore` mailbox), against which
 /// `devmgr` autoloads the user-space bus chain. It is copied into the store
-/// (the single source of truth, `AGENTS.md` §2.2), so the boot path no longer
+/// (the single source of truth), so the boot path no longer
 /// needs to leak it to `'static`; a user-space bus driver appends its
 /// enumerated children at runtime through `hw_emit_node`
 /// ([`crate::hwtree_store::HwTreeStore::publish_child`]), and the autoload
-/// load gate resolves a matched node's grants from the live store directly
-/// (`AGENTS.md` §18.4).
+/// load gate resolves a matched node's grants from the live store directly.
 ///
 /// MUST be called **after** the MMU is enabled (see `UNLOCK_BOOT` and
 /// [`crate::hwtree_store`]).
@@ -123,7 +121,7 @@ pub fn take_boot() -> UnlockBoot {
 /// unlock — so `login` then takes over console 0 with no byte contention.
 ///
 /// It is a one-way latch (closed → open, never back), so once `login`
-/// owns the console no later code can re-gate it (`AGENTS.md` §5.4 — fail
+/// owns the console no later code can re-gate it (fail
 /// closed: a gate that never opened would only ever *withhold* input, it
 /// can never grant unauthorized access).
 pub struct Console0Gate {
@@ -168,8 +166,7 @@ pub static CONSOLE0_GATE: Console0Gate = Console0Gate::new();
 /// is opened, then delegates to the wrapped device.
 ///
 /// While the gate is closed every read reports a zero-length read, which
-/// kernel-core's `BlockingConsoleRead` turns into a scheduler park
-/// (`AGENTS.md` §20) — so the console-0 `login` waits rather than draining
+/// kernel-core's `BlockingConsoleRead` turns into a scheduler park — so the console-0 `login` waits rather than draining
 /// the passphrase bytes the unlock kthread is reading off the same device.
 /// Once the gate opens, reads delegate verbatim to `inner`.
 ///
@@ -195,7 +192,7 @@ impl ConsoleRead for GatedConsoleRead {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         if !self.gate.is_open() {
             // Withhold input: a zero-length read parks the caller in
-            // `BlockingConsoleRead` until the gate opens (`AGENTS.md` §20).
+            // `BlockingConsoleRead` until the gate opens.
             return Ok(0);
         }
         self.inner.read(buf)
@@ -204,10 +201,10 @@ impl ConsoleRead for GatedConsoleRead {
 
 /// Audit event: the in-kernel root-unlock service lifecycle (started /
 /// skipped / device bring-up result), logged at the PID 1 spawn seam and
-/// from the kthread (`AGENTS.md` §19.4). Sits beside the root-mount audit
+/// from the kthread. Sits beside the root-mount audit
 /// ids (`4135`–`4138`, [`crate::root_mount`] / [`crate::root_storage`]).
 ///
-/// Architecture-neutral (`AGENTS.md` §2.2): the one lifecycle event id
+/// Architecture-neutral: the one lifecycle event id
 /// every port's live bring-up (`crate::aarch64::root_unlock` and its
 /// future x86_64 / riscv64 siblings) logs through [`note`], never a
 /// per-arch copy.
@@ -216,16 +213,16 @@ pub const UNLOCK_SERVICE: EventId = EventId(4139);
 /// Synthetic owner task id for the unlock kthread's capability context and
 /// IRQ binding. Distinct from the keyboard service's so an audit observer
 /// can tell the two in-kernel services apart. The single definition every
-/// port shares (`AGENTS.md` §2.2).
+/// port shares.
 pub const UNLOCK_TASK: TaskId = TaskId(0x5b4);
 
 /// The capabilities the unlock kthread holds: [`CapabilityId::MMIO_MAP`]
 /// (the virtio register window), [`CapabilityId::MEM_DMA`] (the request
 /// DMA), and [`CapabilityId::DRV_LOAD`] (the signed driver-load gate). No
-/// more — every map/alloc/load is re-checked against this set (§5.4).
+/// more — every map/alloc/load is re-checked against this set.
 ///
 /// Architecture-neutral: every port's unlock kthread runs under the same
-/// minimal capability set (`AGENTS.md` §2.2 / §5.4).
+/// minimal capability set.
 #[must_use]
 pub fn service_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
@@ -237,10 +234,10 @@ pub fn service_caps() -> CapabilitySet {
 
 /// The capability set the post-mount driver autoload presents to the signed
 /// load gate — the driver-loading authority's **delegatable** superset, which
-/// each driver's manifest request is intersected with (`AGENTS.md` §5.2).
+/// each driver's manifest request is intersected with.
 ///
 /// This is deliberately broader than [`service_caps`] (the unlock kthread's
-/// *own* minimal bring-up authority, §5.4): the kthread, standing in for
+/// *own* minimal bring-up authority): the kthread, standing in for
 /// `devmgr`, must be able to hand an autoloaded driver the resource
 /// capabilities its class needs, but never holds them ambiently itself. It is
 /// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`],
@@ -252,11 +249,11 @@ pub fn service_caps() -> CapabilitySet {
 /// `VideoCore` `vcmailbox` mailbox) the privilege to bind the restricted-sender
 /// endpoint its consumers call it through. A storage or other driver — whose
 /// manifest does not request them — receives nothing extra (the per-driver
-/// intersection still binds, `AGENTS.md` §18.3 / §4 — no ambient authority).
+/// intersection still binds — no ambient authority).
 /// The driver never receives `CAP_DRV_LOAD`: it is the *caller's* key to the
 /// gate, not a capability any driver's manifest requests.
 ///
-/// Architecture-neutral (`AGENTS.md` §2.2): every port's unlock kthread
+/// Architecture-neutral: every port's unlock kthread
 /// autoloads under the same delegatable set.
 #[must_use]
 pub fn autoload_caps() -> CapabilitySet {
@@ -265,8 +262,7 @@ pub fn autoload_caps() -> CapabilitySet {
     // An interrupt-driven user-space input driver parks on its device line
     // through `irq_bind`/`irq_wait`, so the delegatable set carries
     // `CAP_IRQ_BIND` too; the per-driver manifest intersection still binds, so
-    // a driver that does not request it receives nothing extra (`AGENTS.md`
-    // §18.3 / §4 — no ambient authority).
+    // a driver that does not request it receives nothing extra (no ambient authority).
     caps.insert(CapabilityId::IRQ_BIND);
     // A user-space *service* driver (the VideoCore `vcmailbox` mailbox, whose
     // consumers reach it through a restricted-sender call endpoint) must hold
@@ -274,15 +270,15 @@ pub fn autoload_caps() -> CapabilitySet {
     // for any non-empty required-sender set). The delegatable set carries it so
     // such a signed driver can be granted it; the per-driver manifest
     // intersection still binds, so a driver that does not request it receives
-    // nothing extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
+    // nothing extra (no ambient authority).
     caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
     // A user-space *bus* driver (the `pcie_brcm` root complex, the `vl805` USB
     // host) publishes the devices it enumerates into the live hardware tree
     // with `hw_emit_node`, so the device manager autoloads each in turn — the
-    // recursive, data-driven discovery chain (`AGENTS.md` §18.1 / §18.3). That
+    // recursive, data-driven discovery chain. That
     // requires `CAP_HW_EMIT`, so the delegatable set carries it; a driver whose
     // manifest does not request it (a storage or input leaf) receives nothing
-    // extra (the per-driver intersection still binds, §5.2).
+    // extra (the per-driver intersection still binds).
     caps.insert(CapabilityId::HW_EMIT);
     // The `vl805` USB-host bus driver reloads its controller's firmware over
     // the VideoCore property mailbox before bring-up, reaching the `vcmailbox`
@@ -290,15 +286,14 @@ pub fn autoload_caps() -> CapabilitySet {
     // hold `CAP_MAILBOX` (`crate::driver_store_server` / `lib/abi`
     // `MAILBOX_ENDPOINT`). The delegatable set carries it so such a signed
     // driver can be granted it; a driver that does not request it receives
-    // nothing extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
+    // nothing extra (no ambient authority).
     caps.insert(CapabilityId::MAILBOX);
     // An autoloaded user-space driver emits its structured diagnostics
     // (e.g. the USB boot-keyboard driver's one-shot bring-up failure record)
-    // through `log_emit`, which the kernel gates on `CAP_LOG_EMIT`
-    // (`AGENTS.md` §19.4 / §15.7). The delegatable set carries it so such a
+    // through `log_emit`, which the kernel gates on `CAP_LOG_EMIT`. The delegatable set carries it so such a
     // signed driver can be granted it; the per-driver manifest intersection
     // still binds, so a driver that does not request it receives nothing
-    // extra (`AGENTS.md` §18.3 / §4 / §5.2 — no ambient authority).
+    // extra (no ambient authority).
     caps.insert(CapabilityId::LOG_EMIT);
     caps
 }
@@ -306,10 +301,10 @@ pub fn autoload_caps() -> CapabilitySet {
 /// The capability set the signed driver-load gate is presented with:
 /// `CAP_DRV_LOAD` + `CAP_DRV_KERNEL` (the bootstrap block-device manifest
 /// is `kind = InKernel`). Each driver receives only the intersection with
-/// its manifest request (`AGENTS.md` §5.2).
+/// its manifest request.
 ///
 /// Architecture-neutral: every port admits its bootstrap in-kernel block
-/// driver through the same gate caps (`AGENTS.md` §2.2 / §5.2).
+/// driver through the same gate caps.
 #[must_use]
 pub fn loader_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
@@ -323,18 +318,18 @@ pub fn loader_caps() -> CapabilitySet {
 /// [`crate::driver_store_server::create_driver_store_endpoint`]).
 ///
 /// The endpoint restricts its callers to holders of [`CapabilityId::DRV_LOAD`]
-/// (the device manager's authority to read the store, `AGENTS.md` §5.2), and
+/// (the device manager's authority to read the store), and
 /// binding such a *restricted-sender* endpoint is by definition privileged:
 /// [`rustos_kernel_ipc::CallEndpoint::create`] requires the binder to hold
 /// [`CapabilityId::IPC_BIND_PRIVILEGED`]. That bind authority is **not** part
 /// of [`service_caps`] — the kthread's minimal device bring-up set, which
-/// holds no IPC authority (§5.4 — no ambient authority) — so the one-shot
+/// holds no IPC authority (no ambient authority) — so the one-shot
 /// binder context is derived from this distinct, deliberately narrow set:
 /// `IPC_BIND_PRIVILEGED` and nothing else. The kthread never posts to or
 /// reads the store endpoint as a *caller* (it is the bound *server*), so it
 /// needs no `CAP_DRV_LOAD` here.
 ///
-/// Architecture-neutral (`AGENTS.md` §2.2): every port's driver-store
+/// Architecture-neutral: every port's driver-store
 /// kthread binds the endpoint under the same single capability.
 #[must_use]
 pub fn store_endpoint_binder_caps() -> CapabilitySet {
@@ -347,7 +342,7 @@ pub fn store_endpoint_binder_caps() -> CapabilitySet {
 /// published once at admission (Design D D2b-2c).
 ///
 /// The driver-store server parks on [`rustos_kernel_core::SERVE_WAITQ`]
-/// between requests (a real park, never a busy-yield — `AGENTS.md` §2.1);
+/// between requests (a real park, never a busy-yield);
 /// the `ipc_call` handler's [`rustos_kernel_core::serve_wake`] unparks
 /// **by id**, so the kthread's scheduler id must be reachable from the
 /// serve loop. The init seam learns the id only when
@@ -378,7 +373,7 @@ pub fn store_service_task() -> Option<rustos_kernel_sched_api::TaskId> {
 /// arrives.
 ///
 /// The unlock kthread reads the passphrase by genuinely **parking** off the
-/// run queue (`AGENTS.md` §2.1 / §17.1 — never a busy-yield), so the
+/// run queue (never a busy-yield), so the
 /// console RX interrupt's [`rustos_kernel_core::console_wake`] must be able
 /// to unpark it **by id**. The init seam learns the id only when
 /// [`rustos_kernel_core::InitSpawnCtx::spawn_kernel_service`] returns (after
@@ -386,7 +381,7 @@ pub fn store_service_task() -> Option<rustos_kernel_sched_api::TaskId> {
 /// here and read once when that body constructs its reader. Single producer
 /// (the admission seam) writes it once before the body ever runs; the body
 /// only reads — the lock never contends. Mirrors `STORE_SERVICE_TASK`
-/// (`AGENTS.md` §2.2 — one published-kthread-id discipline).
+/// (one published-kthread-id discipline).
 static UNLOCK_CONSOLE_TASK: SpinLock<Option<rustos_kernel_sched_api::TaskId>> = SpinLock::new(None);
 
 /// Publish the interactive root-unlock kthread's scheduler task id, so its
@@ -404,7 +399,7 @@ pub fn unlock_console_task() -> Option<rustos_kernel_sched_api::TaskId> {
 }
 
 /// Log an unlock-service lifecycle decision onto the service's audit sink
-/// under the shared [`UNLOCK_SERVICE`] event id (`AGENTS.md` §19.4).
+/// under the shared [`UNLOCK_SERVICE`] event id.
 pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
     log(
         audit,
@@ -426,8 +421,7 @@ pub fn note(audit: &dyn Sink, level: Level, message: &'static str) {
 /// cannot emulate, so the metal UART log is the only signal —
 /// `plans/PI.md` §0.4 / P8 / B4). Both values are stable `&'static str`s
 /// from the driver (`rustos_drv_storage_emmc2::BringUpStage::as_str` and
-/// the caller's `DriverError` name), so no name is re-spelled here
-/// (`AGENTS.md` §2.2). The `error` distinguishes a controller/command
+/// the caller's `DriverError` name), so no name is re-spelled here. The `error` distinguishes a controller/command
 /// fault from a decode rejection at the same stage (e.g. CMD9 `SEND_CSD`
 /// timing out vs. returning an unsupported CSD).
 pub fn note_stage(
@@ -464,10 +458,9 @@ pub fn note_stage(
 /// **parks** the kthread off the run queue through its shared
 /// [`CooperativeYield`] cell, and the console RX interrupt's
 /// [`rustos_kernel_core::console_wake`] unparks it the instant a byte lands.
-/// It is a genuine park, never a busy-yield (`AGENTS.md` §2.1 / §17.1): while
+/// It is a genuine park, never a busy-yield: while
 /// the kthread waits for a keystroke the dispatch loop reaches idle, so the
-/// buffered-serial transmit drain (`pump_tx`, §20) and the tickless idle
-/// (§17.1) run and the CPU sleeps — the cooperative busy-poll this replaces
+/// buffered-serial transmit drain (`pump_tx`) and the tickless idle run and the CPU sleeps — the cooperative busy-poll this replaces
 /// kept a task perpetually runnable, so the loop never idled and console
 /// output stalled until the next keystroke incidentally flushed it.
 ///
@@ -477,12 +470,11 @@ pub fn note_stage(
 /// `console_wake` arriving in the window between an empty poll and the park
 /// is not lost — the scheduler's wake-pending token converts a concurrent
 /// park into a re-ready, exactly the lost-wakeup interlock
-/// `BlockingConsoleRead` and `serve_system_store` rely on (`AGENTS.md`
-/// §2.1 / §2.2). The device backing must be the interrupt-fed console queue
+/// `BlockingConsoleRead` and `serve_system_store` rely on. The device backing must be the interrupt-fed console queue
 /// (the UART's `UART_INPUT`-backed read half, or the video keyboard queue),
 /// not a raw hardware-FIFO poll, so the wake source exists.
 ///
-/// Architecture-neutral (`AGENTS.md` §2.2): the one blocking console-read
+/// Architecture-neutral: the one blocking console-read
 /// shape every port's unlock kthread reads the passphrase through — the
 /// device backing differs, the park-and-wake discipline does not.
 pub struct KthreadConsoleRead<'a> {
@@ -498,7 +490,7 @@ impl<'a> KthreadConsoleRead<'a> {
     /// it. `task` is the kthread's scheduler id from
     /// [`unlock_console_task`]; [`None`] (the id not yet published) degrades
     /// to a cooperative yield rather than parking a task no wake could
-    /// reach (`AGENTS.md` §2.9).
+    /// reach.
     #[must_use]
     pub fn new(
         inner: &'static (dyn ConsoleRead + Sync + 'static),
@@ -521,7 +513,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
         loop {
             // Register before polling so a `console_wake` arriving between an
             // empty poll and the park is not lost (the register-before-poll
-            // interlock, `AGENTS.md` §2.1 / §2.2).
+            // interlock).
             if let Some(task) = self.task {
                 rustos_kernel_core::CONSOLE_WAITQ.register(task, rustos_kernel_core::NO_DEADLINE);
             }
@@ -529,7 +521,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 Ok(read) => read,
                 Err(e) => {
                     // Leave the wait set first so no stale registration
-                    // lingers, then propagate fail-closed (`AGENTS.md` §2.9).
+                    // lingers, then propagate fail-closed.
                     if let Some(task) = self.task {
                         rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
                     }
@@ -545,7 +537,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             match self.task {
                 // Genuine park: suspend off the run queue until the RX
                 // interrupt's `console_wake` unparks this id, then re-poll.
-                // The CPU idles meanwhile (`AGENTS.md` §2.1 / §17.1).
+                // The CPU idles meanwhile.
                 Some(task) => {
                     self.yielder.park();
                     rustos_kernel_core::CONSOLE_WAITQ.deregister(task);
@@ -554,8 +546,7 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
                 // build that did not go through admission). A parked task
                 // with no registration could never be woken, so cooperatively
                 // yield and re-poll on the next dispatch instead — bounded,
-                // since the id is published before the body runs
-                // (`AGENTS.md` §2.9).
+                // since the id is published before the body runs.
                 None => self.yielder.yield_now(),
             }
         }
@@ -649,7 +640,7 @@ mod tests {
         // The live inventory snapshot reflects exactly the seeded tree; a
         // user-space bus driver's enumerated children are added at runtime
         // through `hw_emit_node` (`publish_child`) and observed through the
-        // reactive `hw_tree_wait` generation (`AGENTS.md` §18.1 / §18.3).
+        // reactive `hw_tree_wait` generation.
         let snap = crate::hwtree_store::HW_TREE.snapshot();
         assert_eq!(snap.len(), 2, "the seeded discovered tree, nothing dropped");
         assert_eq!(snap[0], seed[0], "existing nodes keep their order");
@@ -704,7 +695,7 @@ mod tests {
 
     #[test]
     fn the_unlock_kthread_holds_exactly_its_minimal_capability_set() {
-        // §5.4 — no ambient authority: the kthread maps MMIO, allocs DMA,
+        // — no ambient authority: the kthread maps MMIO, allocs DMA,
         // and drives the signed load gate, and nothing more.
         let caps = service_caps();
         assert!(caps.contains(CapabilityId::MMIO_MAP));
@@ -721,8 +712,8 @@ mod tests {
         // and `IRQ_BIND` for an input driver, and `IPC_BIND_PRIVILEGED` for a
         // bus service driver that binds a restricted-sender endpoint (the
         // VideoCore `vcmailbox`) — none of which the kthread's own
-        // `service_caps` hold (§5.4 — no ambient authority for the bring-up
-        // context; the per-driver intersection still binds, §5.2 / §18.3).
+        // `service_caps` hold (no ambient authority for the bring-up
+        // context; the per-driver intersection still binds).
         let service = service_caps();
         let autoload = autoload_caps();
         for cap in [
@@ -734,7 +725,7 @@ mod tests {
             // `vl805` reloads its controller firmware over the `vcmailbox`
             // restricted-sender endpoint (`CAP_MAILBOX`) — both delegatable to
             // a signed manifest that requests them, neither held by the
-            // kthread itself (§5.4 — no ambient authority).
+            // kthread itself (no ambient authority).
             CapabilityId::HW_EMIT,
             CapabilityId::MAILBOX,
         ] {
@@ -764,7 +755,7 @@ mod tests {
     #[test]
     fn the_unlock_owner_task_id_is_the_fixed_shared_value() {
         // A distinct synthetic owner so an audit observer tells the two
-        // in-kernel services apart; fixed and shared by every port (§2.2).
+        // in-kernel services apart; fixed and shared by every port.
         assert_eq!(UNLOCK_TASK, TaskId(0x5b4));
     }
 
@@ -799,7 +790,7 @@ mod tests {
     /// **parks**; it must never busy-yield. With its scheduler id published,
     /// the kthread console reader parks off the run queue between empty
     /// polls (the RX interrupt's `console_wake` unparks it in production),
-    /// never spinning the CPU (`AGENTS.md` §2.1 / §17.1).
+    /// never spinning the CPU.
     struct ParkCountingYielder {
         parks: u32,
     }

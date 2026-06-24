@@ -3,7 +3,7 @@
 //! `kernel/rustos-kernel/build.rs` and the sibling
 //! `tests/integration/abi_sys_syscall_qemu/build.rs` exactly — all the
 //! freestanding x86_64 integration binaries share the same linker script
-//! (`AGENTS.md` §2.2 — no duplication).
+//! (no duplication).
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();

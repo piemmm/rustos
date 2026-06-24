@@ -36,7 +36,7 @@ pub const PORT: u16 = 0xf4;
 pub fn exit_success() -> ! {
     // SAFETY: `outb` to `PORT` is the documented QEMU contract; the `hlt`
     // loop afterwards is unreachable on QEMU but is a defence-in-depth
-    // termination path on bare metal per AGENTS.md §2.9.
+    // termination path on bare metal.
     unsafe { write_port(SUCCESS) };
     halt_forever();
 }
@@ -72,8 +72,7 @@ unsafe fn write_port(value: u8) {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn halt_forever() -> ! {
     loop {
-        // SAFETY: `cli;hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli;hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }
@@ -87,7 +86,7 @@ mod tests {
     #[test]
     fn success_byte_matches_runner() {
         // Belt-and-braces cross-check: the host runner's value lives in
-        // `tools/qemu/src/lib.rs`. AGENTS.md §2.2 forbids duplication
+        // `tools/qemu/src/lib.rs`. The charter forbids duplication
         // without a tie-down; this test is that tie-down.
         assert_eq!(SUCCESS, 0x10);
         assert_eq!(FAILURE, 0x11);

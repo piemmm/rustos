@@ -2,7 +2,7 @@
 //! *only* on the freestanding `x86_64-unknown-none` target. Mirrors
 //! `kernel/rustos-kernel/build.rs` and the sibling x86_64 integration
 //! binaries exactly — all share the one per-arch script the architecture
-//! port owns (`AGENTS.md` §2.2 — no duplication).
+//! port owns (no duplication).
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();

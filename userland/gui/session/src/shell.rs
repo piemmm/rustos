@@ -15,20 +15,19 @@
 //! taskbar action (the light/dark toggle), and bring the on-screen bar back in
 //! step. [`DesktopShell`] owns the four pieces and runs exactly that loop over
 //! an injected [`InputSource`] seam — a real pointer/keyboard channel on a
-//! running system, an in-memory queue in tests (`AGENTS.md` §7), the same
+//! running system, an in-memory queue in tests, the same
 //! injected-seam shape the default apps use for their backing channels.
 //!
 //! The shell holds no framebuffer and grants itself no authority: the
-//! [`Compositor`] is the embedder's (it owns the framebuffer capability,
-//! `AGENTS.md` §10/§17.4) and is passed in on each call. Composing the taskbar
+//! [`Compositor`] is the embedder's (it owns the framebuffer capability) and is passed in on each call. Composing the taskbar
 //! and window-manager GUI crates this way is the permitted `userland/gui/*`
-//! edge (§17.4); nothing outside `userland/gui/*` depends on this glue (§17.3).
+//! edge; nothing outside `userland/gui/*` depends on this glue.
 //! It never panics: every routed sub-call and every present is itself total and
-//! fails closed (`AGENTS.md` §2.9). A session-level effect the shell cannot
+//! fails closed. A session-level effect the shell cannot
 //! perform with its own state — relaying the switched theme to the window
 //! manager and apps, performing a session control, launching an app — is
 //! surfaced as a [`ShellOutcome`] for the embedder, which holds those
-//! capabilities, to act on (`AGENTS.md` §16.5).
+//! capabilities, to act on.
 //!
 //! [`DesktopSession`]: crate::DesktopSession
 //! [`SessionInputRouter`]: crate::SessionInputRouter
@@ -51,9 +50,9 @@ use crate::tasks::TaskBridge;
 /// A source of live pointer/keyboard events for the desktop.
 ///
 /// On a running system this is backed by the kernel's input channel; tests
-/// back it with an in-memory queue (`AGENTS.md` §7). It is the only seam
+/// back it with an in-memory queue. It is the only seam
 /// through which device events reach the desktop, so the `no_std` GUI crates
-/// hold no input capability of their own (§17.4 / §19.5).
+/// hold no input capability of their own.
 pub trait InputSource {
     /// Take the next pending input event, or `None` when the stream is
     /// momentarily drained.
@@ -63,8 +62,7 @@ pub trait InputSource {
     /// Returns the kernel boundary's [`Errno`] when the source itself faults
     /// (for example the channel was closed). A faulting source ends the
     /// current [`pump`](DesktopShell::pump) without disturbing the desktop
-    /// state already applied; the embedder replaces or re-polls the source
-    /// (`AGENTS.md` §2.9 / §19.5).
+    /// state already applied; the embedder replaces or re-polls the source.
     fn poll(&mut self) -> Result<Option<InputEvent>, Errno>;
 }
 
@@ -112,7 +110,7 @@ pub struct DesktopShell {
 impl DesktopShell {
     /// Build a desktop shell for a taskbar placed by `config`, starting from
     /// the built-in themes with the default dark theme active and the start
-    /// menu's light/dark entry labelled `appearance_label` (`AGENTS.md` §10).
+    /// menu's light/dark entry labelled `appearance_label`.
     ///
     /// The router starts with the pointer at the screen origin and no focus,
     /// the presenter has placed no window yet, and the renderer draws the
@@ -164,8 +162,8 @@ impl DesktopShell {
     /// new task appears.
     ///
     /// Returns the new [`WindowId`]. Returns `None`, opening nothing, only if
-    /// the task-id space is exhausted (`AGENTS.md` §2.9). The compositor is the
-    /// embedder's, passed in here; the shell holds no framebuffer (§17.4).
+    /// the task-id space is exhausted. The compositor is the
+    /// embedder's, passed in here; the shell holds no framebuffer.
     pub fn open_window(
         &mut self,
         compositor: &mut Compositor,
@@ -188,8 +186,7 @@ impl DesktopShell {
     /// Close `window`: remove it from the compositor and the taskbar, dropping
     /// focus if it held it, and re-present the bar so the task disappears.
     ///
-    /// Returns `false`, changing nothing, when `window` is not a tracked task
-    /// (`AGENTS.md` §2.9).
+    /// Returns `false`, changing nothing, when `window` is not a tracked task.
     pub fn close_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
         if !self.tasks.close(
             compositor,
@@ -205,7 +202,7 @@ impl DesktopShell {
 
     /// Install a loaded notification-icon set on the renderer, replacing the
     /// one in use. The next [`present`](Self::present) re-rasterises the
-    /// notification glyphs from the new set (`AGENTS.md` §10/§2.2).
+    /// notification glyphs from the new set.
     pub fn set_icons(&mut self, set: IconSet) {
         self.renderer.set_icons(set);
     }
@@ -218,7 +215,7 @@ impl DesktopShell {
     /// drives the compositor's [`set_scale`](Compositor::set_scale) — the
     /// single source of truth — and re-lays the bar in place. No desktop
     /// restart is needed and the taskbar holds no scale of its own, so the
-    /// rescale is transparent to it (`AGENTS.md` §10 / §2.2). On a `true`
+    /// rescale is transparent to it. On a `true`
     /// return the embedder brings the other scale-dependent overlays it owns
     /// up to date: the cursor (one
     /// [`CursorController::refresh`](rustos_wm::CursorController::refresh)) and
@@ -237,7 +234,7 @@ impl DesktopShell {
     /// active theme: repaint and place the bar and, while the start menu is
     /// open, its popup.
     ///
-    /// Fails closed (`AGENTS.md` §2.9): a render whose surface cannot be
+    /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     pub fn present(&mut self, compositor: &mut Compositor) {
         self.presenter.present(
@@ -288,8 +285,7 @@ impl DesktopShell {
     /// the task list and, only when the highlighted task actually moved,
     /// re-presents the bar; a drag ([`Moved`](InputResponse::Moved) /
     /// [`MoveEnded`](InputResponse::MoveEnded)), a no-op, or a press on a window
-    /// that owns no task changes no highlight and is left cheap (`AGENTS.md`
-    /// §10).
+    /// that owns no task changes no highlight and is left cheap.
     fn mirror_focus(&mut self, response: &InputResponse, compositor: &mut Compositor) {
         let focus = match *response {
             InputResponse::Activated { window, .. } => Some(window),
@@ -312,7 +308,7 @@ impl DesktopShell {
     /// Returns the [`Errno`] from a faulting [`InputSource::poll`]. The events
     /// drained before the fault have already been applied to the desktop state
     /// and the compositor (the desktop never rolls back what it has shown); the
-    /// embedder replaces or re-polls the source (`AGENTS.md` §2.9 / §19.5).
+    /// embedder replaces or re-polls the source.
     pub fn pump<S>(
         &mut self,
         source: &mut S,
@@ -332,7 +328,7 @@ impl DesktopShell {
     /// current pointer position; the next pointer motion then drags it.
     ///
     /// Returns `false` (arming nothing) when there is no focused window or it
-    /// is no longer known to `compositor` (`AGENTS.md` §2.9). Window
+    /// is no longer known to `compositor`. Window
     /// decorations call this on a title-bar press.
     pub fn begin_move(&mut self, compositor: &Compositor) -> bool {
         self.router.begin_move(compositor)

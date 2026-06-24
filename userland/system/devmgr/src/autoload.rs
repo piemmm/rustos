@@ -1,9 +1,9 @@
 //! Reactive match-and-load over the read-only `/System` driver store
 //! (Design D D2b-2c — `.junie/next-pi-prompt.md`).
 //!
-//! The device manager owns *policy* (`AGENTS.md` §4): it resolves each
+//! The device manager owns *policy*: it resolves each
 //! discovered hardware-tree node against the kernel-decoded driver
-//! catalogue with the shared [`rustos_devmatch`] policy (`AGENTS.md` §18.3),
+//! catalogue with the shared [`rustos_devmatch`] policy,
 //! and — for each winning node — asks the kernel to load the matched bundle
 //! for that node ([`crate::load_driver`]). The kernel keeps the *mechanism*
 //! (signature verification, bundle bytes, grant minting, spawn) in its
@@ -11,12 +11,12 @@
 //!
 //! A driver matched by several nodes is loaded **once** (keyed by its opaque
 //! `bundle_id`) and serves them all; an unmatched node is left unbound and
-//! logged — never an error (`AGENTS.md` §18.4); a load refusal fails only
-//! that node, closed, and the walk continues (`AGENTS.md` §5.4). Every
+//! logged — never an error; a load refusal fails only
+//! that node, closed, and the walk continues. Every
 //! outcome is audited through [`rustos_log`] with the stable
 //! [`crate::events`] identifiers, so this is the IPC-loader sibling of the
 //! kernel-side `DeviceManager::autoload` walk over the same `resolve`
-//! definition (`AGENTS.md` §2.2).
+//! definition.
 
 use alloc::collections::BTreeMap;
 
@@ -30,21 +30,21 @@ use crate::store::{load_driver, CatalogueDriver, DriverStoreCall};
 
 /// The set of bundles loaded so far, keyed by opaque `bundle_id` → the
 /// loaded driver's handle, so a bundle matched by several nodes is loaded
-/// once and the cached handle reported for the rest (`AGENTS.md` §18.3).
+/// once and the cached handle reported for the rest.
 pub type LoadedBundles = BTreeMap<u32, u64>;
 
 /// The last match decision reported for a node, so an unchanged decision is
 /// **not** re-logged when the reactive loop re-evaluates the tree.
 ///
 /// The device manager re-runs [`match_and_load`] over the whole snapshot on
-/// every hardware-tree generation advance (`AGENTS.md` §18.4). Without this
+/// every hardware-tree generation advance. Without this
 /// memory each re-evaluation would re-emit the same `NODE_UNBOUND` /
 /// `NODE_BOUND` audit line for every node, flooding the (slow, serial)
-/// diagnostic log with identical records and starving the boot — a §20
-/// progress-spam / §2.16 redundant-work defect. A node is logged only the
+/// diagnostic log with identical records and starving the boot — a
+/// progress-spam / redundant-work defect. A node is logged only the
 /// first time it reaches a decision and again only when that decision
 /// *changes* (e.g. `Unbound` → `Bound` once the late-bound catalogue
-/// arrives). `AGENTS.md` §18.4: an unbound node is logged, not re-logged.
+/// arrives).: an unbound node is logged, not re-logged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeReport {
     /// The node's winning driver is loaded ([`events::NODE_BOUND`]).
@@ -65,7 +65,7 @@ pub type ReportedNodes = BTreeMap<u32, NodeReport>;
 /// The state the reactive match-and-load loop carries across re-evaluations:
 /// the loaded-bundle cache ([`LoadedBundles`]) and the per-node decision
 /// memory ([`ReportedNodes`]). Bundling them keeps [`match_and_load`] /
-/// [`crate::service::run`] to a single state argument (`AGENTS.md` §2.3 — no
+/// [`crate::service::run`] to a single state argument (no
 /// argument sprawl) while giving each its own clear role.
 #[derive(Default)]
 pub struct AutoloadState {
@@ -84,17 +84,16 @@ pub struct AutoloadState {
 /// (built once by the caller); `reply_buf` is the caller-owned buffer each
 /// [`load_driver`] reply is received into. Idempotent across calls: a node
 /// whose winning bundle is already in `state.loaded` is reported bound
-/// without a second load (hotplug re-match, `AGENTS.md` §18.4).
+/// without a second load (hotplug re-match).
 ///
 /// `state.reported` is the per-node dedup memory ([`ReportedNodes`]): each
 /// node's decision is logged only the first time it is reached and again only
 /// when it *changes*, so re-evaluating a settled tree (the common case after
 /// each generation advance) emits no audit line at all — never re-flooding
-/// the diagnostic log with identical records (`AGENTS.md` §20 / §2.16 /
-/// §18.4). A node already recorded [`NodeReport::LoadFailed`] is **not**
+/// the diagnostic log with identical records. A node already recorded [`NodeReport::LoadFailed`] is **not**
 /// re-attempted against the static driver store (the gate would refuse it
 /// identically), so a refusal costs the kernel load gate nothing on later
-/// reactions (`AGENTS.md` §2.16).
+/// reactions.
 pub fn match_and_load<C: DriverStoreCall + ?Sized>(
     nodes: &[HwNode],
     catalogue: &[CatalogueDriver],
@@ -115,10 +114,10 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                 // real device tree most nodes (clocks, pinctrl, thermal, …)
                 // have no driver, so emitting one record per unbound node at
                 // `Info` floods the slow diagnostic UART and starves boot (a
-                // §20 progress-spam / §2.16 defect — it once delayed the Pi's
+                // progress-spam / defect — it once delayed the Pi's
                 // `Root passphrase:` prompt by tens of seconds). It is logged
                 // at `Debug` instead — still logged with its stable id when
-                // diagnostics are enabled (`AGENTS.md` §18.4), but dropped in
+                // diagnostics are enabled, but dropped in
                 // O(1) by the default `Info` filter before any `log_emit`
                 // syscall. A *binding* (`NODE_BOUND`), a packaging tie, or a
                 // load refusal stays visible — those are the actionable
@@ -150,7 +149,7 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                 } else {
                     // A node already recorded load-failed fails the static
                     // load gate identically, so do not re-run the gate (nor
-                    // re-log) on every reaction (`AGENTS.md` §2.16). A genuine
+                    // re-log) on every reaction. A genuine
                     // change re-emits the node, which resets its record below.
                     if state.reported.get(&id) == Some(&NodeReport::LoadFailed) {
                         continue;
@@ -200,14 +199,14 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
 
 /// Record `kind` as node `id`'s latest decision, returning `true` when it
 /// differs from the previously reported one (or none was) — the signal that
-/// the decision is worth logging (`AGENTS.md` §20 — log a change, not every
+/// the decision is worth logging (log a change, not every
 /// re-evaluation).
 fn changed(reported: &mut ReportedNodes, id: u32, kind: NodeReport) -> bool {
     reported.insert(id, kind) != Some(kind)
 }
 
 /// Log one node decision under `id`, stamping the node id plus up to one
-/// event-specific field (`AGENTS.md` §18.3 / §19.4).
+/// event-specific field.
 fn audit_node(sink: &dyn Sink, id: EventId, level: Level, node: u32, extra: &[Field<'_>]) {
     let mut nbuf = [0u8; 16];
     let node_str = format_hex_u64(u64::from(node), &mut nbuf);

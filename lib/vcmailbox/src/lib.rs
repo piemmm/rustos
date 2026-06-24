@@ -5,10 +5,9 @@
 //! channel**: a 16-byte-aligned buffer of little-endian `u32` words the
 //! ARM core fills with *tags*, hands to the firmware through the
 //! mailbox doorbell registers, and reads back mutated in place. This
-//! crate is the one definition of that protocol (`AGENTS.md` §2.2): it
+//! crate is the one definition of that protocol: it
 //! encodes the display-size query and the framebuffer-allocation
-//! request, validates the firmware's response fail-closed (`AGENTS.md`
-//! §5.4 — the firmware is an external input), and translates between
+//! request, validates the firmware's response fail-closed (the firmware is an external input), and translates between
 //! the `VideoCore` **bus** addresses the firmware speaks and the ARM
 //! **physical** addresses the kernel can map. Both consumers ride it:
 //! the aarch64 port's framebuffer boot console (`plans/PI.md` P7b) and
@@ -26,15 +25,13 @@
 //!   [`RegisterWindow`]s (the doorbell register block and the DMA
 //!   property buffer); emulation and host tests supply a mock
 //!   transport instead — QEMU does not model the firmware, so the
-//!   protocol semantics are proven here and on metal, never faked
-//!   (`AGENTS.md` §2.1).
+//!   protocol semantics are proven here and on metal, never faked.
 //!
 //! The mailbox MMIO base is discovered (device tree → `hwtree`), never
 //! a compiled-in constant (`plans/PI.md` §4); the caller maps it and
 //! hands the windows in — in user space through the capability-gated
 //! `MmioMapper`, in the kernel boot path through the port's own mapped
-//! identity window. No path here grants authority of its own
-//! (`AGENTS.md` §4).
+//! identity window. No path here grants authority of its own.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -51,29 +48,27 @@ mod tests;
 /// firmware mailbox.
 ///
 /// The Pi 4 device tree names the BCM2711 doorbell block with the original
-/// BCM2835 binding. This is the single source of the mailbox match identity
-/// (`AGENTS.md` §2.2): the aarch64 platform discovery emits the mailbox node
+/// BCM2835 binding. This is the single source of the mailbox match identity: the aarch64 platform discovery emits the mailbox node
 /// with this `compatible` key, and the `vcmailbox` service driver's
 /// [`BIND_KEYS`] match it — both name this one definition rather than each
 /// spelling the string themselves.
 pub const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
+/// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
-/// The `VideoCore` mailbox service driver's hardware bind table (`AGENTS.md`
-/// §18.3): the BCM2711 firmware mailbox, matched by its device-tree
+/// The `VideoCore` mailbox service driver's hardware bind table: the BCM2711 firmware mailbox, matched by its device-tree
 /// [`MAILBOX_COMPATIBLE`] string. The single source of truth the signed
 /// `vcmailbox` bundle's bind table is authored from and `devmgr` resolves a
-/// discovered mailbox node against (`AGENTS.md` §2.2).
+/// discovered mailbox node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     match HwMatchKey::compatible(MAILBOX_COMPATIBLE) {
         Ok(key) => key,
         // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
         // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic (`AGENTS.md` §2.9).
+        // never a runtime panic.
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     },
 )];
@@ -127,7 +122,7 @@ impl MailboxError {
 /// This is the same `VideoCore` property-channel width the host↔driver
 /// [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) seam
 /// transports, so it is defined once in `lib/abi` and re-used here rather
-/// than duplicated (`AGENTS.md` §2.2).
+/// than duplicated.
 pub const PROPERTY_WORDS: usize = MAILBOX_PROPERTY_WORDS;
 
 /// Byte length of the property message ([`PROPERTY_WORDS`] words).
@@ -395,7 +390,7 @@ struct TagValue<'a> {
 /// tags. A reply that nonetheless claims a length greater than the
 /// buffer is therefore a firmware fault for these tags, not the benign
 /// truncation case, so it is failed closed rather than clamped
-/// (`AGENTS.md` §5.4 — the firmware is external input).
+/// (the firmware is external input).
 fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, MailboxError> {
     let mut at = 2;
     loop {
@@ -462,7 +457,7 @@ fn tag_pair(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<(u32, u32), Mailb
 /// Every echoed field is checked against the request and the geometry
 /// is cross-validated, so a firmware that silently substituted a
 /// different surface is rejected rather than scanned out
-/// (`AGENTS.md` §5.4 — validate every input; fail closed).
+/// (validate every input; fail closed).
 ///
 /// # Errors
 ///
@@ -580,7 +575,7 @@ const TAG_GET_PHYSICAL_WH: u32 = 0x0004_0003;
 
 /// Upper bound on a believable display dimension in pixels.
 ///
-/// A validation bound on the firmware's answer (`AGENTS.md` §24.4), not
+/// A validation bound on the firmware's answer, not
 /// a capacity: no display the BCM2711 can drive approaches 16384 pixels
 /// on a side, so a larger answer is a protocol breach, not a mode.
 const MAX_DISPLAY_DIM: u32 = 16_384;
@@ -722,7 +717,7 @@ pub fn decode_firmware_revision_response(
 /// mapping, buffer bus address, cache coherency) is broken and the
 /// heavier call never had a chance; if the probe succeeds but the
 /// heavier call times out, the transport is sound and the firmware is
-/// specifically dropping that tag (`AGENTS.md` §15.7 — measure, don't
+/// specifically dropping that tag (measure, don't
 /// guess).
 ///
 /// # Errors
@@ -743,7 +738,7 @@ pub fn query_firmware_revision(transport: &mut dyn MailboxTransport) -> Result<u
 /// Public so the VL805 device driver (`drivers/bus/usb/vl805`) can build
 /// the firmware-reload message and run it over the board-neutral
 /// [`MailboxChannel`](rustos_abi::driver::mailbox::MailboxChannel) seam
-/// without re-deriving the property layout (`AGENTS.md` §2.2 — one
+/// without re-deriving the property layout (one
 /// definition, shared by [`notify_xhci_reset`] and the driver).
 #[must_use]
 pub fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
@@ -767,8 +762,7 @@ pub fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
 /// never happened. The firmware sets the per-tag response bit only when
 /// it actually processed the tag, so this additionally requires that bit
 /// (via `find_tag`, which enforces it). Fails closed on a firmware
-/// error, a malformed header, or an unhonoured tag (`AGENTS.md` §5.4 —
-/// the firmware is external input; an unverified ack is a defect, not a
+/// error, a malformed header, or an unhonoured tag (the firmware is external input; an unverified ack is a defect, not a
 /// success).
 ///
 /// The returned word is the first value word the firmware wrote into the
@@ -848,11 +842,11 @@ const CHANNEL_PROPERTY: u32 = 8;
 const CHANNEL_MASK: u32 = 0xF;
 
 /// Default doorbell poll budget. A bound on a *defence* against
-/// unresponsive firmware, not a scalable capacity (`AGENTS.md` §24.4):
+/// unresponsive firmware, not a scalable capacity:
 /// the firmware answers a property call in well under a millisecond,
 /// so a million polls is orders of magnitude past any honest response
 /// and the exchange fails closed with [`MailboxError::Timeout`]
-/// rather than spinning forever (`AGENTS.md` §2.1).
+/// rather than spinning forever.
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 
 /// Cache-maintenance hooks for the property buffer when the transport
@@ -863,7 +857,7 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// [`BufferCoherency::none`]. A post-MMU caller whose property buffer is
 /// Normal write-back memory supplies real hooks so the firmware sees the
 /// staged request and the ARM re-reads the firmware's response rather
-/// than a stale cached copy (`AGENTS.md` §23.2 — SMP/coherency
+/// than a stale cached copy (SMP/coherency
 /// correctness). Each hook receives the buffer's CPU base and byte
 /// length.
 #[derive(Copy, Clone)]
@@ -910,7 +904,7 @@ impl BufferCoherency {
 
 /// Which doorbell wait a timed-out [`MmioMailbox::exchange`] gave up in,
 /// recorded in [`ExchangeStats`] so a metal capture localises a
-/// [`MailboxError::Timeout`] without re-running (`AGENTS.md` §15.7).
+/// [`MailboxError::Timeout`] without re-running.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum TimeoutStage {
     /// The exchange did not time out.
@@ -933,7 +927,7 @@ pub enum TimeoutStage {
 /// [`Self::timeout_stage`]: `PostRoom` means the firmware never even
 /// accepted the request, while `Response` means it accepted it but never
 /// replied — two very different faults that the bare `Timeout` error
-/// cannot tell apart (`AGENTS.md` §15.7 — measure, don't guess). The
+/// cannot tell apart (measure, don't guess). The
 /// other fields pin the posted bus-address word, the last status
 /// register value observed, and how many foreign-channel completions
 /// were drained before ours (or would have been).
@@ -958,7 +952,7 @@ pub struct ExchangeStats {
 
 /// The metal mailbox transport: the doorbell register block plus a
 /// DMA-visible property buffer, both reached through capability-gated
-/// [`RegisterWindow`]s (`AGENTS.md` §4 — no ambient authority).
+/// [`RegisterWindow`]s (no ambient authority).
 pub struct MmioMailbox {
     regs: RegisterWindow,
     buffer: RegisterWindow,
@@ -1037,7 +1031,7 @@ impl MmioMailbox {
     /// Diagnostics from the most recent [`MmioMailbox::exchange`] (a
     /// fresh default before the first call), retained on both success
     /// and failure so the caller can log a timed-out exchange's stage
-    /// and counts without re-running it (`AGENTS.md` §15.7).
+    /// and counts without re-running it.
     #[must_use]
     pub fn last_exchange_stats(&self) -> ExchangeStats {
         self.last_exchange
@@ -1068,7 +1062,7 @@ impl MmioMailbox {
 impl MmioMailbox {
     /// The instrumented body of [`MmioMailbox::exchange`], threading
     /// diagnostics into `stats` so the public method records them on
-    /// every return path (`AGENTS.md` §15.7).
+    /// every return path.
     fn run_exchange(
         &mut self,
         message: &mut [u32; PROPERTY_WORDS],

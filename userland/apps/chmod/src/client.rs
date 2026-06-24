@@ -28,8 +28,7 @@ with `-`, write it without the dash (a-w) or end options first (chmod -- -w f).
 /// is changed and then its contents are changed recursively. `chmod` writes
 /// nothing on success; `out` carries only the [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed,
-/// `AGENTS.md` §2.9).
+/// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///

@@ -1,10 +1,10 @@
 //! First-party RustOS LZ compression codec (`lib/compress`).
 //!
 //! This crate is the single shared home of RustOS's general-purpose,
-//! lossless compression (`AGENTS.md` §16.4 lists compression as a curated
+//! lossless compression (lists compression as a curated
 //! shared-library class). `RustFS` uses it to compress every file-data record
 //! before encryption (`docs/src/filesystem/rustfs-spec.md` §6, §10), and it
-//! is written here rather than pulled from a registry because §2.12 — *roll
+//! is written here rather than pulled from a registry because — *roll
 //! your own; do not trust external code* — bars an external
 //! `zstd`/`lz4`/compression dependency. This is **not** the crypto carve-out:
 //! the codec is entirely first-party.
@@ -32,7 +32,7 @@
 //! [`u16`] back-reference offset and the match length. Matches may overlap
 //! their source (run-length expansion), copied one byte at a time.
 //!
-//! # Safety and robustness (`AGENTS.md` §2.9, §19.6)
+//! # Safety and robustness
 //!
 //! The crate is `no_std`, allocates nothing, and contains no `unsafe`. Both
 //! entry points are `Result`-based and total: a malformed, truncated, or
@@ -99,7 +99,7 @@ pub enum Error {
     /// The compressed input was malformed, truncated, or inconsistent (bad
     /// magic, an out-of-range back-reference, a length that overruns the
     /// frame, or a declared length the stream does not produce). Decompression
-    /// fails closed rather than panicking (`AGENTS.md` §2.9).
+    /// fails closed rather than panicking.
     Corrupt,
 }
 

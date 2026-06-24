@@ -1,7 +1,7 @@
-//! The per-architecture program entry trampoline (`_start`) — the §1
+//! The per-architecture program entry trampoline (`_start`) — the
 //! assembly carve-out — and the Rust startup driver it calls.
 //!
-//! # Why this module contains assembly (`AGENTS.md` §1 justification)
+//! # Why this module contains assembly (justification)
 //!
 //! RustOS is Rust-only; assembly is permitted only where the architecture
 //! *strictly* requires it. A program's entry point is exactly such a case:
@@ -15,7 +15,7 @@
 //!
 //! Each `_start` is gated on a build-script-emitted `crt0_native_<arch>` cfg
 //! (see `build.rs`) rather than a target-architecture predicate, so the
-//! instruction-set choice stays out of the source tree the §17.2 `cfg-check`
+//! instruction-set choice stays out of the source tree the `cfg-check`
 //! guards (mirroring `lib/abi-sys`).
 //!
 //! # Kernel → `_start` contract (`abi-v1`)
@@ -46,7 +46,7 @@ pub const STARTUP_SCRATCH_LEN: usize = 1 << 20;
 
 /// Exit code crt0 terminates the program with when the kernel-supplied
 /// startup vector cannot be validated or laid out. A non-zero, reserved code
-/// (a fail-closed teardown, `AGENTS.md` §2.9) distinct from any value a
+/// (a fail-closed teardown) distinct from any value a
 /// well-behaved `main` is likely to return.
 pub const EXIT_BAD_STARTUP: c_int = 70;
 
@@ -59,14 +59,14 @@ extern "C" {
 
 /// Storage for the program's stack-protector guard.
 ///
-/// This is the one global the §19.2 stack-canary scheme inherently requires:
+/// This is the one global the stack-canary scheme inherently requires:
 /// the compiler-inserted function prologue/epilogue of stack-protected code
 /// reads the guard word from a fixed, well-known symbol (`__stack_chk_guard`,
 /// the platform C-ABI convention). crt0 seeds it once, before any hosted
 /// code runs, with the per-process random value the kernel placed in the
-/// startup vector (`AGENTS.md` §22 entropy). It is wrapped in an
+/// startup vector (entropy). It is wrapped in an
 /// [`UnsafeCell`] rather than declared `static mut` so the write goes through
-/// a single audited path with no aliasing `&mut` (`AGENTS.md` §2.1).
+/// a single audited path with no aliasing `&mut`.
 struct StackGuard(UnsafeCell<usize>);
 
 // SAFETY: the guard is written exactly once, by `install_stack_canary`,
@@ -79,7 +79,7 @@ unsafe impl Sync for StackGuard {}
 static __stack_chk_guard: StackGuard = StackGuard(UnsafeCell::new(0));
 
 /// Seed the program's stack-protector guard with the kernel-supplied
-/// per-process canary (`AGENTS.md` §19.2).
+/// per-process canary.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the low bits are the conventional guard layout.
 fn install_stack_canary(canary: u64) {
     // The guard word is pointer-width; the canary is 64-bit. On the 64-bit
@@ -98,7 +98,7 @@ fn install_stack_canary(canary: u64) {
 ///
 /// A detected stack-buffer overflow is unrecoverable; crt0 terminates the
 /// program through the `exit` syscall with a reserved non-zero code rather
-/// than returning to corrupted state (`AGENTS.md` §2.9 — fail closed).
+/// than returning to corrupted state (fail closed).
 #[no_mangle]
 extern "C" fn __stack_chk_fail() -> ! {
     rustos_abi_sys::sys_exit(EXIT_BAD_STARTUP)

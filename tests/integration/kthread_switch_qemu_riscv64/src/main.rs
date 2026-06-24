@@ -19,7 +19,7 @@
 //! 1. **Discovered timebase.** It reads the generic-timer frequency from
 //!    the firmware device tree (the verbatim `a1` pointer OpenSBI hands the
 //!    boot hart) and fails closed if the tree omits it, rather than
-//!    guessing a divisor (`AGENTS.md` §5.4.5).
+//!    guessing a divisor.
 //! 2. **Live scheduler + two kthreads.** It builds a real
 //!    `rustos_kernel_sched_eevdf::Scheduler` over `RiscvArch` and spawns
 //!    two kthreads through `rustos_kernel_core::spawn_kthread`. Each kthread
@@ -38,7 +38,7 @@
 //! task that never resumes, a stack that is not reclaimed) either trips a
 //! dedicated failure finisher or never drains the workload, so the run
 //! fails loudly — by an explicit failure code or by the harness
-//! `Outcome::Timeout` (`AGENTS.md` §7).
+//! `Outcome::Timeout`.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -47,7 +47,7 @@
 //! policy directly and supplies its own `kernel_main`, so the runtime is
 //! exercised without the full `kernel_core::kernel_main` init pipeline. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on a library crate (`AGENTS.md` §5.4.5 — fail closed).
+//! feature on a library crate (fail closed).
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]
@@ -171,7 +171,7 @@ mod kernel {
 
         // Build the live scheduler over the arch port.
         // Single-hart slice: one per-CPU slot, owned by an allocator-free
-        // `static` backing (`AGENTS.md` §24.1).
+        // `static` backing.
         static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
         let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
         let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -181,7 +181,7 @@ mod kernel {
         // Spawn two kthreads. Each runs on its own kernel stack and yields
         // back to the dispatcher PING_PONGS times via the real
         // `ContextSwitch::switch`, then returns (Exit). The
-        // `ContextSwitchHal` handle is the riscv64 §17.2 context-switch
+        // `ContextSwitchHal` handle is the riscv64 context-switch
         // primitive. `spawn` raises a self-IPI via SBI; with supervisor
         // interrupts masked it stays pending and never disturbs the
         // cooperative `step` loop below.
@@ -211,7 +211,7 @@ mod kernel {
         // exited. Each `step` enters a task, which yields straight back, so
         // the two tasks ping-pong through the real context switch. A switch
         // that never resumed its task would stall the drain and the harness
-        // would time out (fail-loud, `AGENTS.md` §7).
+        // would time out (fail-loud).
         let mut steps = 0u64;
         while sched.live_task_count() != 0 && steps < MAX_STEPS {
             let _ = sched.step(BOOT_CPU);

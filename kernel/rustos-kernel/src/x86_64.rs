@@ -3,7 +3,7 @@
 //!
 //! Every module here names the x86_64 architecture port, so the whole
 //! subtree is gated on the `kernel_isa = "x86_64"` build-script name (the
-//! single `AGENTS.md` §17.2 selection point lives in `build.rs`, never an
+//! single selection point lives in `build.rs`, never an
 //! inline `target_arch` predicate). The host-testable wrappers
 //! ([`arch_wrapper`], [`dispatch`], [`ioapic_controller`], [`virtio_boot`],
 //! [`driver_host`]) compile on the x86_64 CI host so their unit tests run

@@ -5,7 +5,7 @@
 //! MAC and a caller-chosen, domain-separating `context` string is the message.
 //! The 256-bit output is itself a 256-bit key, so no expansion past one block
 //! is ever required and the construction stays a thin wrapper over the audited
-//! [`crate::mac`] primitive rather than a hand-rolled KDF (`AGENTS.md` §2.12).
+//! [`crate::mac`] primitive rather than a hand-rolled KDF.
 //!
 //! This is what `RustFS` uses to grow its per-volume key hierarchy
 //! (`docs/src/filesystem/rustfs-spec.md` §7): one master key derives the
@@ -16,10 +16,9 @@
 //! a deliberately slow, salted derivation that makes offline guessing of a
 //! stolen `/System/Security/Users` record expensive ([`pbkdf2_sha256`]). It
 //! is a standard *construction* over the same audited HMAC primitive — the
-//! same shape as `rustos-rng`'s HMAC-DRBG — never a hand-rolled primitive
-//! (`AGENTS.md` §2.12). Verification goes through [`crate::ct_eq`]
+//! same shape as `rustos-rng`'s HMAC-DRBG — never a hand-rolled primitive. Verification goes through [`crate::ct_eq`]
 //! ([`pbkdf2_sha256_verify`]) so a stored hash comparison cannot leak through
-//! timing (`AGENTS.md` §19.1).
+//! timing.
 
 use core::num::NonZeroU32;
 
@@ -96,7 +95,7 @@ pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: NonZeroU32) -> Pa
 /// contents.
 ///
 /// The comparison goes through [`crate::ct_eq`], so it does not leak through
-/// timing how many leading hash bytes matched (`AGENTS.md` §19.1).
+/// timing how many leading hash bytes matched.
 #[must_use]
 pub fn pbkdf2_sha256_verify(
     password: &[u8],

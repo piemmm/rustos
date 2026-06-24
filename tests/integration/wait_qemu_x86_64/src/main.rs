@@ -34,8 +34,7 @@
 //! reaps it, reads the code back, and exits 0. The test PASSes once the parent
 //! reaped the child, read back the agreed code, and exited 0. Any shortfall
 //! (an unexpected syscall, a wrong code, a missing reap, or a deadlock) flips
-//! `qemu_exit::exit_failure` or times out, so the run fails loudly
-//! (`AGENTS.md` §7).
+//! `qemu_exit::exit_failure` or times out, so the run fails loudly.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -59,8 +58,7 @@ mod kernel;
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
-        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }

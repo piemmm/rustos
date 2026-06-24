@@ -8,22 +8,22 @@
 //!
 //! This is the `lib` target of the BCM2711 PCIe bus driver crate, **not** a
 //! `lib/*` crate. It is board-specific single-device support, but it lives
-//! *in the driver* rather than under `lib/*`: the §2.20 device-support
+//! *in the driver* rather than under `lib/*`: the device-support
 //! carve-out only permits a `lib/*` home when a charter-legal *non-driver*
-//! consumer (a §18.6 bootstrap-floor path, or a driver of a different class)
+//! consumer (a bootstrap-floor path, or a driver of a different class)
 //! shares it, and a BCM2711 PCIe bus driver has none. PCIe root-complex
-//! bring-up sits **above** the §18.6 bootstrap floor (the kernel floor is the
+//! bring-up sits **above** the bootstrap floor (the kernel floor is the
 //! storage path only — virtio-blk + EMMC2), so this engine's only consumer is
 //! this crate's own `Run` binary (`src/main.rs`). It is therefore a
 //! host-testable `lib` target the freestanding bin links, with no `lib/*`
-//! device-support crate to keep in sync (`AGENTS.md` §2.22 / §2.2 / §2.14).
+//! device-support crate to keep in sync.
 //! It names BCM2711 detail legitimately because that is its entire purpose;
 //! nothing generic depends on it.
 //!
 //! # Layered seams
 //!
 //! The state machine ([`BrcmPcieRc`]) is written against two seams so it is
-//! proven host-side (`AGENTS.md` §2.2):
+//! proven host-side:
 //!
 //! * [`PcieRegs`] — register access (a capability-gated [`RegisterWindow`]
 //!   on metal, a register-level mock in tests).
@@ -31,15 +31,14 @@
 //!   (a generic-timer delay on metal, a no-op in tests).
 //!
 //! Once the link is up the register window is handed to
-//! `rustos_pci::mechanism_brcm`; this crate never enumerates
-//! (`AGENTS.md` §17.4).
+//! `rustos_pci::mechanism_brcm`; this crate never enumerates.
 //!
 //! # Public surface & capabilities
 //!
 //! The bring-up engine ([`BrcmPcieRc`], instantiated through
 //! [`wiring::open_discovered`] / [`wiring::bring_up_from_node`]) and the
 //! [`BIND_KEYS`] match table are the surface the `Run` binary drives.
-//! [`register`] is the thin `AGENTS.md` §8 driver entry that checks
+//! [`register`] is the thin driver entry that checks
 //! [`CapabilityId::DRV_LOAD`] and touches no hardware. Mapping the
 //! register window requires [`CapabilityId::MMIO_MAP`]. Runs in user
 //! space (no `CAP_DRV_KERNEL`).
@@ -66,18 +65,17 @@ mod tests;
 const REGISTER_HANDLE_MARKER: u64 = 0x5043_4200_0000_0001;
 
 /// Default upper bound on 5 ms link-training polls: 100 ms (20 × 5 ms)
-/// after `PERST#` deassert. A defence bound, not a capacity (`AGENTS.md`
-/// §24.4): a link that never trains fails closed.
+/// after `PERST#` deassert. A defence bound, not a capacity: a link that never trains fails closed.
 pub const DEFAULT_LINK_POLLS: u32 = 20;
 
 /// Microseconds between link-up polls (5 ms).
 const LINK_POLL_INTERVAL_US: u32 = 5_000;
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries. An exact
+/// The bind priority [`BIND_KEYS`] carries. An exact
 /// `compatible`-string match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
-/// This driver's hardware bind table (`AGENTS.md` §18.3): the BCM2711 PCIe
+/// This driver's hardware bind table: the BCM2711 PCIe
 /// root complex, matched by its device-tree `compatible` string
 /// `brcm,bcm2711-pcie`. The single source of truth the signed-manifest
 /// bind table is authored from and `devmgr` resolves a node against.
@@ -87,7 +85,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
         Ok(key) => key,
         // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
         // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic (`AGENTS.md` §2.9).
+        // never a runtime panic.
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     },
 )];
@@ -108,7 +106,7 @@ const fn high32(value: u64) -> u32 {
 ///
 /// Every controller access the [`BrcmPcieRc`] bring-up makes goes
 /// through this trait, so the reset/SerDes/window/link sequence is
-/// proven host-side against a register-level mock (`AGENTS.md` §2.2).
+/// proven host-side against a register-level mock.
 /// Both methods take `&mut self` so a mock can model a status register
 /// whose value evolves as the bring-up polls it.
 pub trait PcieRegs {
@@ -144,12 +142,11 @@ impl PcieRegs for RegisterWindow {
 ///
 /// Re-exported from `lib/abi` (`rustos_abi::Delay`) — the single definition
 /// shared with the bus-agnostic USB stack (`lib/usb`), so the two driver
-/// crates depend on one trait rather than each declaring their own
-/// (`AGENTS.md` §2.2). The kernel supplies a generic-timer implementation
+/// crates depend on one trait rather than each declaring their own. The kernel supplies a generic-timer implementation
 /// (`CNTPCT_EL0`/`CNTFRQ_EL0`); host tests a deterministic stand-in.
 pub use rustos_abi::Delay;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// Verifies the host already granted [`CapabilityId::DRV_LOAD`] and
 /// returns the registration marker handle. No hardware is touched here;
@@ -172,7 +169,7 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 
 /// The discovered address windows the root complex must be programmed
 /// with, all read from the `brcm,bcm2711-pcie` device-tree node — never
-/// compiled-in constants (`AGENTS.md` §18.1).
+/// compiled-in constants.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PcieWindows {
     /// Lowest PCIe-space address system memory is viewed at, from
@@ -188,8 +185,7 @@ pub struct PcieWindows {
     /// CPU-side base is `inbound_cpu_top - inbound_size`, and the inbound
     /// translation maps that CPU base onto `inbound_pcie_base`. Forwarded
     /// verbatim onto the published xHCI node so the kernel's DMA-grant
-    /// coverage check and `dma_alloc` translation agree on one aperture
-    /// (`AGENTS.md` §18.1).
+    /// coverage check and `dma_alloc` translation agree on one aperture.
     pub inbound_cpu_top: u64,
     /// CPU-physical base of the outbound MMIO window (the high PCIe
     /// MMIO aperture, e.g. `0x6_0000_0000` on the Pi 4), from `ranges`.
@@ -216,7 +212,7 @@ pub struct PcieWindows {
 /// `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`.
 ///
 /// Each field is the raw 32-bit register as it reads back on metal, or
-/// the all-ones sentinel if the read faulted (`AGENTS.md` §2.9). The
+/// the all-ones sentinel if the read faulted. The
 /// caller logs them; the driver does not depend on a logging facility.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct InboundWindowReadback {
@@ -284,7 +280,7 @@ pub struct BringUpTiming {
 /// Encode an inbound-viewport size into the 5-bit `RC_BARn` size field.
 ///
 /// Returns `0` (the "disabled" encoding) for a size outside the
-/// representable 4 KiB‥32 GiB range, failing closed (`AGENTS.md` §5.4).
+/// representable 4 KiB‥32 GiB range, failing closed.
 #[must_use]
 fn encode_ibar_size(size: u64) -> u32 {
     if size == 0 {
@@ -311,7 +307,7 @@ fn encode_ibar_size(size: u64) -> u32 {
 /// [`encode_ibar_size`] — because the SCB window always covers system
 /// RAM (≥ 64 KiB); the formula is a plain `ilog2 - 15` over the
 /// representable 64 KiB‥64 GiB range, failing closed to `0` (the
-/// smallest encoding) outside it (`AGENTS.md` §5.4).
+/// smallest encoding) outside it.
 #[must_use]
 fn encode_scb_size(size: u64) -> u32 {
     if size == 0 {
@@ -433,7 +429,7 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
     }
 
     /// Read a register, rendering a faulting read as the all-ones
-    /// sentinel (`AGENTS.md` §2.9 — the diagnostic read never propagates).
+    /// sentinel (the diagnostic read never propagates).
     fn read_or_sentinel(&mut self, offset: usize) -> u32 {
         self.regs.read32(offset).unwrap_or(0xFFFF_FFFF)
     }
@@ -617,8 +613,7 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
             entry_rgr1_sw_init,
         };
         // Training just completed: confirm the link is live before
-        // declaring the root complex up, failing closed otherwise
-        // (`AGENTS.md` §5.4 / §2.9).
+        // declaring the root complex up, failing closed otherwise.
         if !self.link_up()? {
             return Err(DriverError::DeviceFault);
         }
@@ -633,7 +628,7 @@ impl<R: PcieRegs> BrcmPcieRc<R> {
     /// Deassert `PERST#`, wait the 100 ms link-training settle, then poll
     /// for link-up, returning the number of polls performed.
     ///
-    /// Bounded by `link_polls` (`AGENTS.md` §2.1 — a link that never trains
+    /// Bounded by `link_polls` (a link that never trains
     /// fails closed in the caller rather than hanging); the poll count is
     /// reported into the bring-up timing diagnostic
     /// ([`bring_up_timing`](Self::bring_up_timing)).

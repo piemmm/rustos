@@ -1,27 +1,25 @@
-//! `cargo xtask sbom` implementation (§19.3 of `PLAN.md`, item 3 of the
-//! §19 Threat Model and Hardening burn-down).
+//! `cargo xtask sbom` implementation (of `PLAN.md`, item 3 of the
+//! Threat Model and Hardening burn-down).
 //!
-//! `AGENTS.md` §19.3 requires every image to embed a `CycloneDX` Software
+//! the charter requires every image to embed a `CycloneDX` Software
 //! Bill of Materials "listing every workspace and external crate by
 //! version, source URL, and source checksum". This command produces that
 //! document from the committed `Cargo.lock`, which already records the
 //! authoritative name, version, source, and registry checksum of every
-//! resolved package (the same source-hash pinning §19.3 relies on as the
+//! resolved package (the same source-hash pinning relies on as the
 //! defence against the xz-utils class of attack).
 //!
-//! The generator is deliberately self-contained (`AGENTS.md` §2.12 —
-//! "roll your own"): it parses the `[[package]]` blocks of `Cargo.lock`
+//! The generator is deliberately self-contained ("roll your own"): it parses the `[[package]]` blocks of `Cargo.lock`
 //! and serialises `CycloneDX` JSON by hand rather than pulling in a
 //! `serde`/`cyclonedx` dependency, and it does not shell out to `cargo
 //! metadata`. The output is deterministic — components are sorted and no
 //! timestamp or random serial number is emitted — so it composes with the
-//! reproducible-build verification tracked as a later §19.3 burn-down item.
+//! reproducible-build verification tracked as a later burn-down item.
 //!
-//! Signing the SBOM with the per-installation key (`AGENTS.md` §19.3 /
-//! §11) is deliberately *not* done here: no private-key signing API
+//! Signing the SBOM with the per-installation key is deliberately *not* done here: no private-key signing API
 //! exists yet (`lib/crypto` is verify-only and the local capability
 //! authority is a later stage). That step is tracked in `PLAN.md`
-//! alongside the other key-dependent §19.4/§19.3 work; this command emits
+//! alongside the other key-dependent work; this command emits
 //! the unsigned document the signer will wrap.
 
 use std::path::Path;
@@ -44,8 +42,7 @@ pub struct LockedPackage {
 impl LockedPackage {
     /// Classify the package by the kind of `source` it declares. A crate
     /// with no `source` is part of this workspace; everything else is an
-    /// external dependency that widens the trusted computing base
-    /// (`AGENTS.md` §2.12).
+    /// external dependency that widens the trusted computing base.
     fn source_class(&self) -> &'static str {
         match self.source.as_deref() {
             None => "workspace",
@@ -57,7 +54,7 @@ impl LockedPackage {
 
     /// `true` when this package is an external crate resolved from a Cargo
     /// registry (its `source` carries the `registry+` scheme). These are
-    /// exactly the crates whose tarball hash the §19.3 source-hash
+    /// exactly the crates whose tarball hash the source-hash
     /// allow-list pins; workspace-local crates and git sources are not.
     pub fn is_external_registry(&self) -> bool {
         self.source

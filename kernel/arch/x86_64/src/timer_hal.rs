@@ -1,4 +1,4 @@
-//! x86_64 timer programming (`AGENTS.md` §17.2 "timer programming").
+//! x86_64 timer programming ("timer programming").
 //!
 //! Implements the Arch HAL [`Timer`](rustos_arch_api::Timer) surface for
 //! x86_64 over the LAPIC timer wired in [`crate::preempt`]. The HAL
@@ -6,7 +6,7 @@
 //! installs the one scheduler-tick callback and dispatches a tick to it.
 //! The *hardware* arming/re-arming (programming the LAPIC LVT and the
 //! end-of-interrupt write) stays in [`crate::preempt`] — it is per-CPU
-//! LAPIC MMIO work with no architecture-neutral shape (`AGENTS.md` §2.4).
+//! LAPIC MMIO work with no architecture-neutral shape.
 //!
 //! Unlike the claim-based ports, the x86_64 timer ISR
 //! (`crate::preempt::rustos_arch_x86_64_timer_dispatch`) must read the
@@ -21,7 +21,7 @@
 //! the handle forwards to it; on the host build there is no ISR, so the
 //! handle backs the callback with an in-handle cell solely for the
 //! [`conformance`](rustos_arch_api::timer::conformance) vertical. It is
-//! never linked into a kernel image (`AGENTS.md` §1).
+//! never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
 // `Ordering` is only named by the host backing cell; the bare-metal
@@ -41,7 +41,7 @@ pub struct TimerHal {
     /// Host-only backing for the tick callback. On the bare-metal target
     /// [`crate::preempt`]'s static is the source of truth and this field
     /// is never read; kept so the host and bare-metal builds share one
-    /// struct shape (`AGENTS.md` §1).
+    /// struct shape.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
     host_callback: AtomicUsize,
 }
@@ -105,7 +105,7 @@ impl Timer for TimerHal {
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
             // No LAPIC on the host; the conformance vertical only requires
-            // the call to be total (`AGENTS.md` §2.9).
+            // the call to be total.
             let _ = ticks_from_now;
         }
     }

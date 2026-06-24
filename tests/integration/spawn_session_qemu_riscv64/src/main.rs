@@ -22,7 +22,7 @@
 //! ran to `exit`. A failed spawn, an unexpected syscall, a wrong drain count,
 //! or a stall trips a distinct `SiFive` Test failure finisher or times out, so
 //! the run fails loudly — by a failure code or by the harness
-//! `Outcome::Timeout` (`AGENTS.md` §7).
+//! `Outcome::Timeout`.
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]

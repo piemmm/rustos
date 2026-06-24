@@ -78,7 +78,7 @@ pub const fn is_sync(kind: u64) -> bool {
 // the waiter observes the wake — `docs/src/security/irq.md`), while the
 // GIC end-of-interrupt handshake stays in [`handle_irq`]. The slot is
 // set-once, backed by an atomic so the IRQ path reads it without a lock
-// (`AGENTS.md` §2.1 — no global mutable state; this is an immutable,
+// (no global mutable state; this is an immutable,
 // publish-once pointer).
 
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -96,8 +96,7 @@ static DEVICE_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_device_irq_dispatch`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetDispatchError {
-    /// A dispatcher was already published; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// A dispatcher was already published; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -124,7 +123,7 @@ pub fn device_irq_dispatch_addr() -> usize {
 #[cfg(test)]
 fn clear_device_irq_dispatch_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a dispatcher.
-    // Production code never clears the slot (`AGENTS.md` §2.1).
+    // Production code never clears the slot.
     DEVICE_IRQ_DISPATCH_FN.store(0, Ordering::Release);
 }
 
@@ -134,7 +133,7 @@ fn clear_device_irq_dispatch_for_tests() {
 /// dispatcher is left unserviced here (the GIC line stays active until
 /// [`handle_irq`]'s end-of-interrupt); the boot path installs the
 /// dispatcher before routing any device SPI, so this is not reached in
-/// practice (`AGENTS.md` §5.4.5 — fail closed rather than guess).
+/// practice (fail closed rather than guess).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn dispatch_device_irq(intid: u32) {
     let raw = DEVICE_IRQ_DISPATCH_FN.load(Ordering::Acquire);
@@ -204,7 +203,7 @@ pub unsafe fn enable_irq() {
 /// ready → [`wait_for_interrupt`] → [`enable_irq`]): masking only stops the
 /// CPU from *taking* an interrupt, so an enabled source that asserts
 /// between the readiness check and the `wfi` stays pending and still wakes
-/// the `wfi` — no edge is lost (`AGENTS.md` §2.1 — no unbounded sleep
+/// the `wfi` — no edge is lost (no unbounded sleep
 /// loop). An in-kernel service kthread blocking on a device line uses it to
 /// close the check-then-park window.
 ///
@@ -290,7 +289,7 @@ fn read_elr() -> u64 {
 /// and re-arms the timer, but it never switches the current task away —
 /// the kernel is non-preemptible, so a half-completed kernel critical
 /// section (a held `lib/sync` lock, an in-flight syscall) is never
-/// abandoned mid-flight (`AGENTS.md` §4 SMP watch-out / §2.1 no hacks).
+/// abandoned mid-flight (SMP watch-out / no hacks).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn handle_irq(from_el0: bool) {
     let intid = crate::gic::acknowledge();
@@ -299,7 +298,7 @@ fn handle_irq(from_el0: bool) {
         return;
     }
     // The running CPU's dense id, recovered from `MPIDR_EL1`, drives both
-    // the per-CPU timer slot and the IPI callback (`AGENTS.md` §2.2 — one
+    // the per-CPU timer slot and the IPI callback (one
     // identity source).
     let cpu = crate::smp::current_cpu_index();
     if intid == crate::preempt::TIMER_PPI {
@@ -330,7 +329,7 @@ fn handle_irq(from_el0: bool) {
     // of a `yield` syscall) and returns here when the task is next
     // dispatched, after which the trampoline `eret`s to the interrupted
     // EL0 context. A build that armed the timer without installing the
-    // callback keeps cooperative scheduling (`AGENTS.md` §2.9 fail-safe).
+    // callback keeps cooperative scheduling (fail-safe).
     if from_el0 && intid == crate::preempt::TIMER_PPI {
         crate::preempt::on_el0_preempt_point(cpu);
     }
@@ -374,8 +373,7 @@ unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // result is written back into the saved `x0` slot so the
         // trampoline's `eret` returns it to EL0; the PE already advanced
         // `ELR_EL1` past the `svc`. A syscall that arrives before the
-        // binary installed a dispatcher fails closed (`AGENTS.md`
-        // §5.4.5) rather than returning an unspecified value to EL0.
+        // binary installed a dispatcher fails closed rather than returning an unspecified value to EL0.
         if kind == kind::LOWER_SYNC && crate::syscall_entry::is_svc(esr) {
             // SAFETY: `frame` is the live `[u64; SAVED_GPRS]` register
             // frame the trampoline built; reading it for the duration of
@@ -406,7 +404,7 @@ unsafe extern "C" fn rustos_aarch64_trap_handler(kind: u64, frame: *mut u64) {
 
     // FIQ / SError / AArch32 entries are not expected in this slice.
     // Park rather than `eret`-looping on an unhandled condition
-    // (`AGENTS.md` §2 — never silently reset).
+    // (never silently reset).
     crate::kernel_arch::halt_current_cpu();
 }
 

@@ -7,7 +7,7 @@
 //! printable character as itself, `Ctrl-C` as the `0x03` control code, the up
 //! arrow as `ESC [ A`, and so on. That translation is the **terminal key map**,
 //! and it is identical for every keyboard regardless of how the device
-//! delivered the key — so it lives here, once (`AGENTS.md` §6 / §2.2), rather
+//! delivered the key — so it lives here, once, rather
 //! than being re-derived in each driver.
 //!
 //! [`encode_key`] is that one definition: given the [`Key`] a layout produced
@@ -22,12 +22,12 @@
 //! the canonical ANSI / VT / xterm vocabulary `lib/vt` already owns. This crate
 //! reuses [`rustos_vt::control`]'s control-byte constants and
 //! [`rustos_vt::key::Key`]'s `SS3` / `CSI … ~` tables, so there is no second
-//! escape-sequence definition in the tree (`AGENTS.md` §2.2). Only those
+//! escape-sequence definition in the tree. Only those
 //! `const` tables are touched, so the crate is allocation-free.
 //!
 //! # Allocation-free and fail-closed
 //!
-//! [`encode_key`] never allocates and never panics (`AGENTS.md` §2.9): it
+//! [`encode_key`] never allocates and never panics: it
 //! writes into the caller's buffer and returns [`KeymapError::BufferTooSmall`]
 //! if the buffer cannot hold the sequence. Pass a buffer of at least
 //! [`MAX_KEY_BYTES`] and that error cannot occur. A key with no console
@@ -141,8 +141,7 @@ impl<'a> Writer<'a> {
 /// produced character.
 ///
 /// The bytes are written into `out` and the number written is returned. A key
-/// with no terminal encoding writes nothing and returns `Ok(0)` (fail closed,
-/// `AGENTS.md` §2.9 — never guess). This is an encoder of already-typed input,
+/// with no terminal encoding writes nothing and returns `Ok(0)` (fail closed — never guess). This is an encoder of already-typed input,
 /// not a parser of untrusted bytes.
 ///
 /// # Mapping
@@ -280,7 +279,7 @@ use rustos_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyC
 /// Map a wire [`NamedKeyCode`] to the `lib/input` [`NamedKey`].
 ///
 /// The two enumerate the same closed set of non-character keys; this is the
-/// one place the tree crosses between them (`AGENTS.md` §2.2).
+/// one place the tree crosses between them.
 const fn named_key_from_abi(code: NamedKeyCode) -> NamedKey {
     match code {
         NamedKeyCode::Enter => NamedKey::Enter,
@@ -314,7 +313,7 @@ const fn named_key_from_abi(code: NamedKeyCode) -> NamedKey {
 
 /// Map a `lib/input` [`NamedKey`] to its wire [`NamedKeyCode`], or `None` for a
 /// function number outside the defined `F1..=F12` range (fail closed, never
-/// guess — `AGENTS.md` §2.9 / §5.4).
+/// guess).
 const fn named_key_to_abi(named: NamedKey) -> Option<NamedKeyCode> {
     Some(match named {
         NamedKey::Enter => NamedKeyCode::Enter,
@@ -384,7 +383,7 @@ const fn key_from_abi(value: KeyValue) -> Key {
 /// This is [`encode_key`] reached from the wire vocabulary: it maps the
 /// record's [`KeyValue`] and [`AbiModifiers`] to the `lib/input` [`Key`] /
 /// [`Modifiers`] and encodes them, so the arbiter never owns a second copy of
-/// the layout-to-tty mapping (`AGENTS.md` §2.2). Only a key **press** produces
+/// the layout-to-tty mapping. Only a key **press** produces
 /// bytes — a terminal sends nothing on key release — so a
 /// [`KeyInput::Released`] writes nothing and returns `Ok(0)`.
 ///
@@ -408,12 +407,11 @@ pub fn encode_key_input(record: &KeyInput, out: &mut [u8]) -> Result<usize, Keym
 /// Build a wire [`KeyInput`] record from a decoded [`Key`] edge, for a keyboard
 /// driver's *device* side (`plans/PI.md` P11): the driver resolves its
 /// device's scancodes into a [`Key`] + held [`Modifiers`] and emits the key
-/// edge, leaving the encoding and routing to the kernel arbiter
-/// (`AGENTS.md` §17.4).
+/// edge, leaving the encoding and routing to the kernel arbiter.
 ///
 /// `pressed` selects [`KeyInput::Pressed`] versus [`KeyInput::Released`].
 /// Returns `None` for a [`Key`] with no wire representation (a function number
-/// outside `F1..=F12`) — fail closed, never guess (`AGENTS.md` §2.9 / §5.4).
+/// outside `F1..=F12`) — fail closed, never guess.
 ///
 /// # Capabilities
 ///
@@ -645,7 +643,7 @@ mod tests {
     #[test]
     fn key_input_round_trips_named_and_char_through_the_bridge() {
         // A named key built from the `lib/input` vocabulary decodes back to
-        // the same key, proving the two halves of the bridge agree (§2.2).
+        // the same key, proving the two halves of the bridge agree.
         for key in [
             Key::Char('Q'),
             Key::Named(NamedKey::Enter),

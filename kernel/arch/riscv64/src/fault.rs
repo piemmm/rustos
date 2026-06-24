@@ -6,7 +6,7 @@
 //! load, or store/AMO page fault, an access fault, an illegal
 //! instruction — is, by default, unrecoverable in this kernel slice:
 //! resuming the faulting instruction without fix-up logic would re-trap
-//! forever, so the trap path parks the hart (`AGENTS.md` §2.9 — never
+//! forever, so the trap path parks the hart (never
 //! silently reset).
 //!
 //! A single fault handler may be installed through [`set_fault_handler`]
@@ -21,7 +21,7 @@
 //! # No global mutable state
 //!
 //! The slot is set-once, backed by an atomic the trap path reads without
-//! a lock; a second publish fails closed (`AGENTS.md` §2.1). The `scause`
+//! a lock; a second publish fails closed. The `scause`
 //! decode and the slot build on the host, so their unit tests run under
 //! `cargo test`; only the CSR reads that feed the handler are gated to
 //! the freestanding riscv64 target (in [`crate::trap`]).
@@ -74,8 +74,7 @@ static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_fault_handler`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetFaultHandlerError {
-    /// A handler was already published; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// A handler was already published; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -113,7 +112,7 @@ pub fn fault_handler() -> Option<FaultHandlerFn> {
 #[cfg(test)]
 fn clear_fault_handler_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a handler.
-    // Production code never clears the slot (`AGENTS.md` §2.1).
+    // Production code never clears the slot.
     FAULT_HANDLER.store(0, Ordering::Release);
 }
 
@@ -159,7 +158,7 @@ mod tests {
     // Both the set-once and the round-trip assertions mutate the single
     // process-wide `FAULT_HANDLER` slot, so they live in one test: cargo
     // runs `#[test]`s in parallel threads and two of them clearing and
-    // reinstalling the same static would race (`AGENTS.md` §7 — no flaky
+    // reinstalling the same static would race (no flaky
     // tests).
     #[test]
     fn slot_is_set_once_and_round_trips() {

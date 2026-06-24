@@ -1,4 +1,4 @@
-//! Page-table frame-source surface of the Arch HAL (`AGENTS.md` §17.2,
+//! Page-table frame-source surface of the Arch HAL (
 //! `plans/WIRING.md` Stage W5b-3).
 //!
 //! A port's `AddressSpace` is built from 4 KiB page-table frames: the
@@ -10,7 +10,7 @@
 //! (`kernel/mem`) so the tables live in ordinary reclaimable RAM rather
 //! than a fixed-size `.bss` pool.
 //!
-//! §17.4 forbids `kernel/arch/*` from depending on `kernel/mem`, so the
+//! the charter forbids `kernel/arch/*` from depending on `kernel/mem`, so the
 //! allocator cannot be named by a port directly. This module is the
 //! seam that keeps the one-way edge intact: a port draws each table
 //! through [`PageTableFrames`], and the *caller* (`kernel/mem`, which is
@@ -21,15 +21,15 @@
 //!
 //! The parallel per-source implementations of this one trait — the
 //! per-port static pool and the `kernel/mem` allocator adapter — are the
-//! deliberate shape of §17.1/§17.2 modularity, never collapsed behind a
-//! `cfg` (`AGENTS.md` §2.2 carve-out).
+//! deliberate shape of modularity, never collapsed behind a
+//! `cfg` (carve-out).
 
 /// Number of `u64` entries in one 4 KiB page table.
 ///
 /// Every architecture RustOS targets uses a 512-entry (`4096 / 8`)
 /// table at each level (x86_64 PML4/PDPT/PD/PT, aarch64 stage-1
 /// L1/L2/L3, riscv64 Sv39 levels). The constant lives here so the HAL
-/// frame currency speaks one width (`AGENTS.md` §2.2).
+/// frame currency speaks one width.
 pub const PAGE_TABLE_ENTRIES: usize = 512;
 
 /// One freshly-allocated, zeroed 4 KiB page-table frame handed to a port
@@ -57,16 +57,16 @@ pub struct TableFrame {
 }
 
 /// Source of page-table frames for a port's `AddressSpace`
-/// (`AGENTS.md` §17.2, `plans/WIRING.md` Stage W5b-3).
+/// (`plans/WIRING.md` Stage W5b-3).
 ///
 /// A port draws the root table and every intermediate table from this
 /// seam instead of owning the storage, so it keeps its one-way
-/// dependency edge (§17.4) while the caller decides where the frames
+/// dependency edge while the caller decides where the frames
 /// come from. Allocation takes `&self` — a source is shared (a `static`
 /// pool or a `&FrameAllocator`) and synchronises internally — and is
 /// infallible-or-`None`: a source that cannot satisfy a request returns
 /// [`None`] so the port fails closed with deterministic OOM rather than
-/// panicking (`AGENTS.md` §4).
+/// panicking.
 ///
 /// The shared-and-internally-synchronised contract is expressed as a
 /// [`Sync`] supertrait: a source is reached concurrently through a
@@ -87,7 +87,7 @@ pub trait PageTableFrames: Sync {
     fn alloc_table(&self) -> Option<TableFrame>;
 }
 
-/// The §17.2 page-table frame-source conformance vertical.
+/// The page-table frame-source conformance vertical.
 ///
 /// Like [`crate::tlb::conformance`] it names only the trait and runs on
 /// the host against any faithful source. It proves the contract a port

@@ -55,7 +55,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands the spawn build and the anonymous map.
@@ -156,8 +156,8 @@ fn mem_map_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen the program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen the program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -185,7 +185,7 @@ struct AnonProducer {
 // interrupt context, never cross-CPU, never re-entrantly — one `svc` is
 // serviced at a time), so the interior `&mut` the methods take out can never
 // alias. This mirrors the single-CPU cooperative discipline the rest of the
-// vertical relies on (`AGENTS.md` §4 — the access is genuinely exclusive).
+// vertical relies on (the access is genuinely exclusive).
 unsafe impl Sync for AnonProducer {}
 
 impl AnonProducer {
@@ -209,7 +209,7 @@ impl AnonProducer {
     }
 
     /// Borrow the retained live space mutably, or [`Errno::NotImplemented`]
-    /// if none was installed (fail closed, `AGENTS.md` §2.9).
+    /// if none was installed (fail closed).
     fn live(&self) -> Result<&mut LiveSpace, Errno> {
         // SAFETY: see the `unsafe impl Sync` justification — the dispatch path
         // is single-CPU and non-reentrant, so this exclusive borrow is unique.
@@ -222,8 +222,8 @@ impl AnonProducer {
 static PRODUCER: AnonProducer = AnonProducer::new();
 
 /// Map an [`AnonError`] onto a stable [`Errno`] for the syscall result, folding
-/// allocator exhaustion onto [`Errno::OutOfMemory`] (`AGENTS.md` §4) and a
-/// not-mapped range onto [`Errno::NotFound`] (fail closed, §5.4).
+/// allocator exhaustion onto [`Errno::OutOfMemory`] and a
+/// not-mapped range onto [`Errno::NotFound`] (fail closed).
 fn anon_to_errno(err: AnonError) -> Errno {
     match err {
         AnonError::ZeroLength => Errno::LengthOutOfRange,
@@ -294,7 +294,7 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// sequence before faulting. An `exit` means the fixture took a verification
 /// failure branch (the success path is the deliberate fault, not an exit), so
 /// it fails the test with the program's exit code. Any other syscall is
-/// unexpected and fails the test loudly (`AGENTS.md` §7).
+/// unexpected and fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the
     // exception handler built from the saved register frame; reading it for the
@@ -333,7 +333,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         // The success path is the deliberate fault-on-use-after-unmap, never an
         // exit; an exit therefore means the fixture hit a verification failure
         // branch. Report it with the program's exit code so the failing step
-        // is identifiable (`AGENTS.md` §7 — fail loud).
+        // is identifiable (fail loud).
         note(TEST_FAIL, "mem_map test: fixture exited before faulting");
         #[allow(clippy::cast_possible_truncation)]
         let code = args[0] as u16;
@@ -349,7 +349,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 
 /// The fault handler: a data abort on the released region — after a successful
 /// map and unmap — is the use-after-unmap the test proves, so it reports PASS.
-/// Anything else is a failure (`AGENTS.md` §2.9 — never returns).
+/// Anything else is a failure (never returns).
 extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
     let region_end = REGION_VA.wrapping_add(REGION_LEN);
     if fault::is_abort(esr)
@@ -462,8 +462,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     // Build the live scheduler over the arch port.
-    // Per-CPU bookkeeping backing for this single-CPU vertical
-    // (`AGENTS.md` §24.1).
+    // Per-CPU bookkeeping backing for this single-CPU vertical.
     static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
         rustos_arch_aarch64::Aarch64ArchStorage::new();
     let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(
@@ -476,7 +475,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
 
     // Admit the EL0 program as a resumable user kthread: its `pre_resume` hook
-    // reactivates its page-table root before every switch-in (isolation, §4),
+    // reactivates its page-table root before every switch-in (isolation),
     // and its work body `enter_user`s into EL0.
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -501,7 +500,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // exits on success — it faults on the use-after-unmap, which `on_fault`
     // reports as PASS (and exits QEMU). A program that returned, exited, or
     // never faulted trips a distinct finisher; a never-draining loop times out
-    // (fail-loud, `AGENTS.md` §7).
+    // (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

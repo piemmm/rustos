@@ -3,8 +3,7 @@
 //! [`render`] turns a model into curses windows; [`run`] is the thin
 //! event-driven loop that ties the [`Screen`] driver, the model, and the
 //! `sysinfo` transport together. Drawing is pure with respect to the model,
-//! so a test renders to an in-memory [`Tty`] and inspects the bytes
-//! (`AGENTS.md` §7).
+//! so a test renders to an in-memory [`Tty`] and inspects the bytes.
 
 use alloc::string::String;
 
@@ -32,7 +31,7 @@ pub fn list_capacity(size: Size) -> usize {
 /// The whole screen is composed in one base [`Window`]; when the help
 /// overlay is showing, a second window is composited on top through the same
 /// renderer — overlays stack by draw order, no separate panel machinery
-/// needed (`AGENTS.md` §2.3).
+/// needed.
 ///
 /// # Errors
 ///

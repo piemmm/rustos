@@ -1,12 +1,11 @@
-//! The §17.2 Arch HAL conformance vertical (`AGENTS.md` §17.2 / §19.1 /
-//! §19.10).
+//! The Arch HAL conformance vertical.
 //!
 //! Parity between architecture ports is *enforced*, never asserted by
 //! inspection (`plans/WIRING.md` §0.3): a port is "at x86_64 level" for
 //! a HAL slice only when it passes that slice's conformance suite. This
 //! module is the harness those per-port suites run, modelled on the
 //! `kernel/sched/api` [`conformance`](crate) suite every concrete
-//! scheduler must pass (`AGENTS.md` §17.1).
+//! scheduler must pass.
 //!
 //! # What it checks
 //!
@@ -15,11 +14,11 @@
 //!   `send_ipi` to self a no-op-equivalent, `core_class` total and
 //!   panic-free for every input including an out-of-range [`CpuId`]).
 //! * [`run_all`] — the whole HAL slice migrated so far: it runs
-//!   [`run_scheduler_arch`] **and** the §19.1 side-channel vertical
+//!   [`run_scheduler_arch`] **and** the side-channel vertical
 //!   ([`sidechannel::conformance::run_all`]),
-//!   the §19.10 memory-tagging vertical
+//!   the memory-tagging vertical
 //!   ([`memtag::conformance::run_all`]),
-//!   the §18 platform-discovery vertical
+//!   the platform-discovery vertical
 //!   ([`platform::conformance::run`]),
 //!   and the per-CPU storage round-trip vertical
 //!   ([`percpu::conformance::run_all`])
@@ -33,9 +32,9 @@
 //! [`run_all`] takes one reference per trait rather than assuming a
 //! single god-object. The suite names only the traits — never
 //! a concrete port — so the same source is a valid acceptance test for
-//! every present and future architecture (`AGENTS.md` §17.2 / §2.2). It
+//! every present and future architecture. It
 //! is host-run and deterministic, exactly like the scheduler-policy
-//! suite (`AGENTS.md` §7 — no flaky tests).
+//! suite (no flaky tests).
 //!
 //! The per-CPU *isolation* property (one CPU's word is independent of
 //! another's) needs two handles, which a single-handle [`run_all`] cannot
@@ -69,8 +68,8 @@ pub fn run_scheduler_arch<A: SchedulerArch + ?Sized>(arch: &A) {
 /// Run the entire migrated Arch HAL conformance vertical against a port.
 ///
 /// Combines the [`SchedulerArch`] contract ([`run_scheduler_arch`]) with
-/// the §19.1 side-channel vertical, the §19.10 memory-tagging vertical,
-/// the §18 early-boot platform-discovery vertical, and the per-CPU
+/// the side-channel vertical, the memory-tagging vertical,
+/// the early-boot platform-discovery vertical, and the per-CPU
 /// storage round-trip vertical already defined in this crate, each over
 /// the matching port handle.
 ///
@@ -102,8 +101,7 @@ pub fn run_all<A, S, M, P, C>(
     percpu::conformance::run_all(per_cpu);
 }
 
-/// `current_cpu` is stable for the duration of a call (`AGENTS.md`
-/// §17.2): repeated reads from one execution context agree.
+/// `current_cpu` is stable for the duration of a call: repeated reads from one execution context agree.
 fn current_cpu_is_stable<A: SchedulerArch + ?Sized>(arch: &A) {
     let first = arch.current_cpu();
     assert_eq!(
@@ -118,7 +116,7 @@ fn current_cpu_is_stable<A: SchedulerArch + ?Sized>(arch: &A) {
     );
 }
 
-/// `ticks_now` is monotonically non-decreasing (`AGENTS.md` §17.2): a
+/// `ticks_now` is monotonically non-decreasing: a
 /// later read never returns a smaller value than an earlier one.
 fn ticks_are_monotonic<A: SchedulerArch + ?Sized>(arch: &A) {
     let mut last = arch.ticks_now();
@@ -133,7 +131,7 @@ fn ticks_are_monotonic<A: SchedulerArch + ?Sized>(arch: &A) {
 }
 
 /// Sending an IPI to the calling CPU is permitted and is a no-op
-/// equivalent to a self-reschedule (`AGENTS.md` §17.2): it must not
+/// equivalent to a self-reschedule: it must not
 /// panic. Targeting an arbitrary (possibly unmapped) CPU is also
 /// best-effort and must not panic.
 fn send_ipi_to_self_is_a_noop<A: SchedulerArch + ?Sized>(arch: &A) {

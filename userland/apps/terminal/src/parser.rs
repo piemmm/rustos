@@ -4,16 +4,16 @@
 //! it consumes the shell's output bytes, lets `lib/vt` turn them into the
 //! shared [`Op`] vocabulary, and applies each [`Op`] to a [`Grid`]. There is no
 //! second escape-sequence definition in this app — the emulator is a *consumer*
-//! of the one ANSI/VT/xterm vocabulary (`AGENTS.md` §2.2), so it understands
+//! of the one ANSI/VT/xterm vocabulary, so it understands
 //! exactly what `lib/vt`'s emitter produces and nothing it invents privately.
 //!
 //! Because `lib/vt`'s parser is total — every byte stream is consumed without
 //! panic or out-of-bounds access, oversized parameters saturate, and an
-//! unrecognised or malformed sequence is dropped (`AGENTS.md` §2.9) — and every
+//! unrecognised or malformed sequence is dropped — and every
 //! [`Grid`] operation is itself total and clamping, a hostile or malformed
 //! stream degrades to dropped control rather than a corrupted display or a
 //! panic. Holding the escape-sequence state in the parser (rather than the
-//! grid) keeps the screen model free of parsing concerns (`AGENTS.md` §2.3).
+//! grid) keeps the screen model free of parsing concerns.
 
 use rustos_vt::{Op, Parser as VtParser};
 
@@ -93,7 +93,7 @@ fn apply(grid: &mut Grid, op: Op) {
         // off: they flow program-ward, and the emulator has no input
         // back-channel to honour the mode requests through, so a consumer that
         // renders shell *output* applies no screen change rather than
-        // mislabelling them as display operations (`AGENTS.md` §2.2).
+        // mislabelling them as display operations.
         Op::Bell
         | Op::Key(_)
         | Op::Mouse(_)

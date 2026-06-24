@@ -31,8 +31,7 @@ argument is an operand.
 /// file is rendered as `path CAP_NAME`; with `-R` a directory is reported and
 /// then its contents recursively. A file with no gate produces no output.
 ///
-/// The first failure stops the run before any later operand (fail closed,
-/// `AGENTS.md` §2.9).
+/// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///
@@ -83,7 +82,7 @@ fn report(
 /// A capability assigned a canonical name in `abi-v1` renders by that name;
 /// an in-range identifier `abi-v1` has not yet named (so a node stored a
 /// gate the running ABI does not name) renders as `CAP_<id>` rather than
-/// being dropped, so the gate is never silently hidden (`AGENTS.md` §2.1).
+/// being dropped, so the gate is never silently hidden.
 fn render(path: &str, cap: CapabilityId) -> String {
     match cap.name() {
         Some(name) => format!("{path} {name}\n"),

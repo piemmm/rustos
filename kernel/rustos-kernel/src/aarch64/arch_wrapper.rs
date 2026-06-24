@@ -37,7 +37,7 @@ use rustos_kernel_irq::IrqTable;
 /// Owns the concrete arch handle and delegates every trait method to
 /// it. Constructed once by the boot path (`boot_aarch64`) and handed to
 /// `kernel_core::kernel_main` inside an `Arc` — the single
-/// `AGENTS.md` §17.1/§17.2 concrete-arch selection point for the
+/// concrete-arch selection point for the
 /// aarch64 kernel image.
 #[derive(Debug)]
 pub struct Aarch64BinArch {
@@ -72,19 +72,19 @@ impl SchedulerArch for Aarch64BinArch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): forward the scheduler's
+        // Tickless preemption: forward the scheduler's
         // arm/disarm decision to the arch port, which programs the EL1
         // generic-timer one-shot. The default no-op would silently drop
-        // preemption, so the delegation is required, not optional (§2.9).
+        // preemption, so the delegation is required, not optional.
         self.arch.set_preemption(armed);
     }
 
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
         // Forward the nearest blocking-wait deadline to the arch port,
         // which combines it with the quantum and arms the single EL1
-        // generic-timer one-shot to the earlier (`AGENTS.md` §17.1). The
+        // generic-timer one-shot to the earlier. The
         // default no-op would silently drop timed wakes, so the delegation
-        // is required (§2.9).
+        // is required.
         self.arch.set_wakeup(deadline_ns);
     }
 }
@@ -105,12 +105,12 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn wait_for_interrupt(&self) {
-        // The tickless idle park (`AGENTS.md` §17.1). The dispatch loop
+        // The tickless idle park. The dispatch loop
         // calls this with device IRQs already **masked** (it masked them to
         // close the park/wake race and drained any already-flagged wake), so
         // `wfi` parks the CPU until an interrupt becomes pending — it wakes
         // on a *pending-but-masked* interrupt, so an edge that asserts after
-        // the drain but before this call is not lost (§2.1). The loop
+        // the drain but before this call is not lost. The loop
         // re-enables IRQs after we return, *taking* the pending interrupt
         // then (its lock-free handler flags the deferred wake the next
         // `drain_pending_wakes` consumes). On a host build there is no EL1,
@@ -139,7 +139,7 @@ impl KernelArch for Aarch64BinArch {
         // Non-blocking top-up of the buffered serial transmit ring: push
         // only what the PL011 FIFO accepts right now and arm the console
         // transmit interrupt (`TXIM`) for the rest (`serial::pump_tx`), never
-        // a per-byte spin (`AGENTS.md` §2.16 / §20). The dispatch loop calls
+        // a per-byte spin. The dispatch loop calls
         // this on **every** iteration — after each dispatched task and again
         // before the idle `wfi` — so the log drains at the loop's rate even
         // while a perpetually-runnable in-kernel kthread (the polled
@@ -157,7 +157,7 @@ impl KernelArch for Aarch64BinArch {
     fn set_device_irqs(&self, enabled: bool) {
         // Toggle this CPU's PE-level IRQ taking (`DAIF.I`) so the dispatch
         // loop runs in-kernel tasks/kthreads with device interrupts enabled
-        // (`AGENTS.md` §17.1 — the fully preemptive kernel), and masks them
+        // (the fully preemptive kernel), and masks them
         // only around the idle park and before halt. On a host build there
         // is no `DAIF`, so this is a benign no-op.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
@@ -169,7 +169,7 @@ impl KernelArch for Aarch64BinArch {
             // phase), so a taken interrupt dispatches through a valid EL1
             // handler. A device IRQ taken in EL1 services its source and
             // returns without rescheduling the current task (the kernel is
-            // non-preemptible, §4); only the EL0 timer tick preempts.
+            // non-preemptible); only the EL0 timer tick preempts.
             unsafe {
                 if enabled {
                     exceptions::enable_irq();
@@ -189,7 +189,7 @@ impl KernelArch for Aarch64BinArch {
         // against. On the bare-metal target this names the `'static`
         // `GIC_IRQ_CONTROLLER` over the discovered GICv2 windows; on a host
         // build there is no `VolatileGicMmio`, so the routing stays the
-        // conservative fail-closed default (`AGENTS.md` §5.4.5).
+        // conservative fail-closed default.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             crate::aarch64::gic_irq::gic_irq_routing()
@@ -212,9 +212,8 @@ impl KernelArch for Aarch64BinArch {
         // install the EL0-preemption callback, and start the periodic
         // generic timer. PE IRQs stay masked until EL0 runs preemptibly /
         // the unlock kthread unmasks, so the armed timer is inert until a
-        // handler context exists — additive and non-regressing (`AGENTS.md`
-        // §2.17). A tick taken in EL1 never preempts (non-preemptible
-        // kernel, §4); a tick taken in EL0 round-robin-preempts the running
+        // handler context exists — additive and non-regressing. A tick taken in EL1 never preempts (non-preemptible
+        // kernel); a tick taken in EL0 round-robin-preempts the running
         // user task back to the scheduler.
         crate::aarch64::gic_irq::arm_preemption();
     }
@@ -222,7 +221,7 @@ impl KernelArch for Aarch64BinArch {
 
 // SAFETY-INVARIANT: `Aarch64BinArch::halt` returns the bottom type. The
 // coercion fails to type-check if the impl ever loses `-> !`, pinning
-// the contract at compile time (`AGENTS.md` §2.10), exactly as the
+// the contract at compile time, exactly as the
 // x86_64 `BinArch` and riscv64 `RiscvBinArch` wrappers do.
 const _AARCH64_BIN_ARCH_HALT_RETURNS_NEVER: fn(&Aarch64BinArch) -> ! =
     <Aarch64BinArch as KernelArch>::halt;
@@ -236,12 +235,12 @@ const _AARCH64_BIN_ARCH_HALT_RETURNS_NEVER: fn(&Aarch64BinArch) -> ! =
 /// and every `stream_read` drains pending input through
 /// [`rustos_arch_aarch64::serial::read_console_bytes`], both targeting
 /// the board-discovered UART base (`plans/PI.md` P2 / P6). It is the
-/// "first discovered UART" half of the §10 console seam; the framebuffer
+/// "first discovered UART" half of the console seam; the framebuffer
 /// path (`plans/PI.md` P7) replaces it with a text-console device once a
 /// display driver loads.
 ///
 /// This is the bootstrap stream **backing** the spawner attaches to fd
-/// 0/1 (`AGENTS.md` §20), not a program-facing interface.
+/// 0/1, not a program-facing interface.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct UartConsole;
 
@@ -249,8 +248,7 @@ impl ConsoleWrite for UartConsole {
     fn write(&self, bytes: &[u8]) -> Result<usize, rustos_abi::Errno> {
         // The busy-wait transmit path accepts every byte, so the write
         // is total and never short. It performs no `\n` translation:
-        // the bytes reach the device exactly as the program wrote them
-        // (`AGENTS.md` §16.4).
+        // the bytes reach the device exactly as the program wrote them.
         Ok(serial::write_console_bytes(bytes))
     }
 }
@@ -258,12 +256,12 @@ impl ConsoleWrite for UartConsole {
 impl ConsoleRead for UartConsole {
     fn read(&self, buf: &mut [u8]) -> Result<usize, rustos_abi::Errno> {
         // The non-blocking receive path drains whatever input is
-        // immediately available and never busy-waits (`AGENTS.md` §2.1);
+        // immediately available and never busy-waits;
         // a read with no pending input is a valid zero-length read.
         // Kernel-core wraps this device in its `BlockingConsoleRead`
         // adapter, which turns that empty poll into a scheduler park so
         // a `stream_read` caller waits for input rather than seeing a
-        // spurious end-of-input (`AGENTS.md` §20).
+        // spurious end-of-input.
         Ok(serial::read_console_bytes(buf))
     }
 }
@@ -285,7 +283,7 @@ pub static UART_CONSOLE: UartConsole = UartConsole;
 /// hardware FIFO and `push`es the bytes here, which wakes the reader parked
 /// in kernel-core's `BlockingConsoleRead` (the `login` reader) or the
 /// root-unlock kthread's `KthreadConsoleRead` the instant input arrives
-/// (`AGENTS.md` §2.1 / §20 — the backing parks rather than polls). It is the
+/// (the backing parks rather than polls). It is the
 /// UART analogue of [`VIDEO_KEYBOARD`]: the same `'static` backs both the
 /// console's [`rustos_kernel_core::ConsoleRead`] half (drained by the
 /// reader's `stream_read`) and its [`rustos_kernel_core::ConsoleInput`] half
@@ -319,9 +317,9 @@ impl ConsoleRead for UartConsoleRead {
         // The reader therefore only ever parks when the FIFO *and* the queue
         // are genuinely empty, closing every residual device-IRQ-delivery
         // race; the interrupt remains only the wake that unparks it once
-        // parked (`AGENTS.md` §2.1 — a genuine park, never a busy-poll). Runs
+        // parked (a genuine park, never a busy-poll). Runs
         // in an EL1 syscall with IRQ taking masked, so it cannot race the ISR
-        // on this single console (`AGENTS.md` §2.2 — one shared drain body).
+        // on this single console (one shared drain body).
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         crate::aarch64::gic_irq::poll_uart_into_console_queue();
         let read = UART_INPUT.read(buf)?;
@@ -329,7 +327,7 @@ impl ConsoleRead for UartConsoleRead {
         // re-enable the receive line if it masked itself on a full queue, so
         // input resumes (flow control released). A cheap flag check on the
         // common path; freestanding-only because the GIC re-enable is
-        // meaningful solely on the target (`AGENTS.md` §2.16).
+        // meaningful solely on the target.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         crate::aarch64::gic_irq::rearm_uart_rx_if_masked();
         Ok(read)
@@ -356,7 +354,7 @@ pub static UART_CONSOLE_READ: UartConsoleRead = UartConsoleRead;
 /// P11). Until a keyboard driver injects anything the queue is empty, so
 /// kernel-core's `BlockingConsoleRead` parks a reader until a keystroke
 /// arrives — the prompt waits instead of exiting or borrowing the serial
-/// line (`AGENTS.md` §2.9 / §5.4).
+/// line.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct VideoConsole;
 
@@ -364,7 +362,7 @@ impl ConsoleWrite for VideoConsole {
     fn write(&self, bytes: &[u8]) -> Result<usize, rustos_abi::Errno> {
         // The boot path lists this device only when the framebuffer
         // console came up, but fail closed rather than silently dropping
-        // bytes if that invariant is ever violated (`AGENTS.md` §2.9).
+        // bytes if that invariant is ever violated.
         if !rustos_arch_aarch64::video::is_active() {
             return Err(rustos_abi::Errno::NotImplemented);
         }
@@ -395,7 +393,7 @@ pub static VIDEO_KEYBOARD: rustos_kernel_core::ConsoleInputQueue =
 
 /// The kernel input-focus arbiter the boot path installs through
 /// [`rustos_kernel_core::KernelSyscallHandlers::with_input_focus`]
-/// (`AGENTS.md` §10 / §17.3 / §20, `plans/PI.md` P11 — input follows the
+/// (`plans/PI.md` P11 — input follows the
 /// surface owner).
 ///
 /// Its *text sink* is [`VIDEO_KEYBOARD`]: while the desktop does not hold
@@ -429,7 +427,7 @@ static GATED_VIDEO_READ: crate::unlock_service::GatedConsoleRead =
 ///
 /// It reads the interrupt-fed [`UART_INPUT`] queue (not the raw FIFO): once
 /// the gate opens the receive interrupt is unmasked and a parked `login`
-/// reader is woken by the queue push, never left polling (`AGENTS.md` §2.1).
+/// reader is woken by the queue push, never left polling.
 static GATED_UART_READ: crate::unlock_service::GatedConsoleRead =
     crate::unlock_service::GatedConsoleRead::new(
         &UART_CONSOLE_READ,

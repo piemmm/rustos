@@ -5,26 +5,24 @@
 //! materialises a runnable user address space (segments mapped and filled,
 //! a zeroed user stack, and the `rustos_abi::process` startup-vector block)
 //! and reports the [`rustos_kernel_mem::ProcessImage`] register state. It is
-//! deliberately capability-agnostic and never logs (`AGENTS.md` §17.4 —
-//! `kernel/mem` does not depend on the security policy or `lib/log`).
+//! deliberately capability-agnostic and never logs (`kernel/mem` does not depend on the security policy or `lib/log`).
 //!
 //! This module is the *policy* half: the one path that authorises a spawn,
 //! audits the decision, builds the image, and drops the calling CPU into the
-//! new program through the Arch HAL [`EnterUser`] primitive
-//! (`AGENTS.md` §17.2). Keeping the capability gate and the audit record
-//! here — in the caller, not in `kernel/mem` — is what preserves the §17.4
-//! layering while still satisfying §5.4 (capability check before any state
-//! touch) and §5.4.4 (security-relevant decisions are audited).
+//! new program through the Arch HAL [`EnterUser`] primitive. Keeping the capability gate and the audit record
+//! here — in the caller, not in `kernel/mem` — is what preserves the
+//! layering while still satisfying (capability check before any state
+//! touch) and (security-relevant decisions are audited).
 //!
 //! # Security
 //!
 //! Spawning a program is privileged: it materialises a new principal's
 //! address space and hands it the CPU. [`spawn_and_enter`] therefore
 //! requires the caller to hold [`CapabilityId::PROC_SPAWN`] and fails closed
-//! (`AGENTS.md` §4 — no ambient authority; §2.9 — fail closed) — the check
+//! (no ambient authority; — fail closed) — the check
 //! happens *before* `build_process_image` touches any page table. The hosted
 //! program still receives only the capabilities its own signed manifest
-//! requests intersected with its user's grants (`AGENTS.md` §16.5); this gate
+//! requests intersected with its user's grants; this gate
 //! authorises the *act* of spawning, it does not widen the new program's
 //! authority.
 
@@ -50,7 +48,7 @@ use crate::audit::AuditEvent;
 /// Building a user address space and dropping the CPU into it is
 /// irreducibly architecture-specific — it names the port's concrete page
 /// table, its [`EnterUser`] primitive, and the direct physical map — none
-/// of which `kernel/core` can spell (`AGENTS.md` §17.2 / §17.4). So
+/// of which `kernel/core` can spell. So
 /// rather than teach [`crate::kernel_main`] those types, the arch port (or
 /// the kernel binary that wires it) hands the core a `&'static dyn
 /// InitSpawn` through [`crate::BootInfo::with_init`]. After every init
@@ -63,13 +61,12 @@ use crate::audit::AuditEvent;
 /// The implementation builds the image through the production,
 /// capability-checked, audited [`spawn_image`] caller — it is *not* a
 /// privileged bypass: the spawned program still receives only the
-/// authority its manifest requests intersected with its user's grants
-/// (`AGENTS.md` §4, §16.5).
+/// authority its manifest requests intersected with its user's grants.
 pub trait InitSpawn {
     /// Build PID 1's EL0 image and hand it to [`InitSpawnCtx::admit_init`]
     /// for registration + entry. Diverges into user mode on success;
     /// returns only when PID 1 could not be spawned, so the caller halts
-    /// fail-closed (`AGENTS.md` §2.9).
+    /// fail-closed.
     ///
     /// Called exactly once, on the boot CPU, after every init phase has
     /// succeeded — so the MMU is enabled and the user→kernel trap path is
@@ -82,8 +79,7 @@ pub trait InitSpawn {
     /// seam admits **before** `admit_init` diverges (e.g. the aarch64
     /// root-unlock kthread) can capture it in its `'static + Send` body and
     /// later drive [`InitSpawnCtx::spawn_driver_process`] to autoload
-    /// user-space drivers off the mounted root (`plans/PI.md` P11; `AGENTS.md`
-    /// §18.3). The `Sync` bound is what makes the shared reference `Send`
+    /// user-space drivers off the mounted root (`plans/PI.md` P11;). The `Sync` bound is what makes the shared reference `Send`
     /// into that body. The seam itself only needs a shared reference, so it
     /// reborrows `ctx` as a plain `&dyn InitSpawnCtx` for its own use.
     fn spawn_init(&self, ctx: &'static (dyn InitSpawnCtx + Sync));
@@ -98,8 +94,7 @@ pub trait InitSpawn {
 /// Implemented by `kernel/core` (the concrete `KernelInitSpawner`) and
 /// handed to the seam as a `&dyn InitSpawnCtx`, so the arch-specific
 /// builder and the core-specific registries meet at one object-safe
-/// boundary — neither names the other's generics (`AGENTS.md` §17.2 /
-/// §17.4).
+/// boundary — neither names the other's generics.
 pub trait InitSpawnCtx {
     /// The kernel's live physical-frame allocator, the source of the
     /// frames the image's pages are mapped to.
@@ -129,7 +124,7 @@ pub trait InitSpawnCtx {
     /// hook (`plans/SPAWN.md` SP2): the runtime calls it on the
     /// dispatcher's context immediately before every switch into PID 1, so
     /// the task `eret`s back into EL0 under its own page-table root and
-    /// stays hardware-isolated from any sibling process (`AGENTS.md` §4).
+    /// stays hardware-isolated from any sibling process.
     /// It captures only the arch root word, so it is `Send`. Its presence
     /// also enrols PID 1 in the per-CPU resume table so its trap path can
     /// suspend it.
@@ -146,13 +141,12 @@ pub trait InitSpawnCtx {
     /// closed with `BadAddress` (`plans/PI.md` P6c-3 follow-up).
     ///
     /// `stack` is PID 1's kernel stack, built by the arch seam so the
-    /// concrete stack source never leaks into this object-safe boundary
-    /// (`AGENTS.md` §17.4). The seam supplies either the heap-backed
+    /// concrete stack source never leaks into this object-safe boundary. The seam supplies either the heap-backed
     /// software-canary [`crate::BoxStack`] or an arena-backed stack whose
     /// guard page it has **unmapped in PID 1's own page-table root**, so an
     /// overrun of PID 1's kernel stack takes a synchronous fault under PID
     /// 1's translation regime rather than corrupting a neighbour
-    /// (`plans/PI.md` guard-page fault-form; `AGENTS.md` §4 / §2.17). The
+    /// (`plans/PI.md` guard-page fault-form;). The
     /// runtime stores it in PID 1's control block and frees it when the task
     /// exits.
     ///
@@ -165,7 +159,7 @@ pub trait InitSpawnCtx {
     /// the *same* arch [`AddressSpace`] it froze into `space`, so the
     /// snapshot and the live space describe one set of mappings. A seam that
     /// retains no live space passes [`None`] and PID 1's `mem_map` /
-    /// `mmio_map` fail closed (`AGENTS.md` §2.9).
+    /// `mmio_map` fail closed.
     ///
     /// # Safety
     ///
@@ -210,7 +204,7 @@ pub trait InitSpawnCtx {
     /// register windows, the DMA region, the keyboard chain — all `'static`
     /// because kernel state is never freed) and uses the object-safe
     /// [`crate::YieldHandle`] to suspend cooperatively, so it need not name
-    /// the port's concrete context-switch type (`AGENTS.md` §17.4 / §2.2).
+    /// the port's concrete context-switch type.
     /// A body that returns ends the service; a continuous service never
     /// returns.
     ///
@@ -219,17 +213,15 @@ pub trait InitSpawnCtx {
     /// caller can wake the service by id — e.g. register it on a
     /// [`crate::waitq::WaitQueue`] (the driver-store server parks on
     /// [`crate::waitq::SERVE_WAITQ`] and is unparked by
-    /// [`crate::waitq::serve_wake`] when an `ipc_call` request is posted,
-    /// `AGENTS.md` §2.1 — a real wake, never a busy-yield). [`None`] means
+    /// [`crate::waitq::serve_wake`] when an `ipc_call` request is posted — a real wake, never a busy-yield). [`None`] means
     /// the service was not admitted.
     ///
     /// The default implementation admits nothing and returns [`None`]
-    /// (`AGENTS.md` §2.9 — a context that wires no scheduler offers no
+    /// (a context that wires no scheduler offers no
     /// service rather than pretending to). The production
     /// `KernelInitSpawner` admits the body as a [`crate::spawn_kthread`]
     /// task on the boot CPU; this adds **no** ambient authority — the body
-    /// holds only the capabilities and resources the seam built into it
-    /// (`AGENTS.md` §4).
+    /// holds only the capabilities and resources the seam built into it.
     fn spawn_kernel_service(
         &self,
         body: crate::kthread::KernelServiceBody,
@@ -243,14 +235,13 @@ pub trait InitSpawnCtx {
     ///
     /// A service spawned through [`spawn_kernel_service`](Self::spawn_kernel_service)
     /// holds its driver's DMA region for the whole lifetime of the running
-    /// kernel (`AGENTS.md` §4 — a device's DMA mapping lives for the driver
+    /// kernel (a device's DMA mapping lives for the driver
     /// load), so it needs a `'static` allocator, not the call-scoped borrow
     /// [`frames`](Self::frames) hands out. Mirrors
     /// [`SpawnCtx::page_table_allocator`].
     ///
     /// The default returns [`None`] — a context with no `'static` allocator
-    /// (a host test double) makes a service spawner fall back / fail closed
-    /// (`AGENTS.md` §2.9) rather than allocating from a borrow it cannot
+    /// (a host test double) makes a service spawner fall back / fail closed rather than allocating from a borrow it cannot
     /// keep. The production `KernelInitSpawner` returns the leaked-`'static`
     /// kernel allocator.
     fn static_frames(&self) -> Option<&'static FrameAllocator> {
@@ -261,7 +252,7 @@ pub trait InitSpawnCtx {
     ///
     /// A service spawned through [`spawn_kernel_service`](Self::spawn_kernel_service)
     /// runs as a `'static` kthread, so to route its security-relevant
-    /// decisions onto the audit channel (`AGENTS.md` §19.4 — the root-unlock
+    /// decisions onto the audit channel (the root-unlock
     /// kthread's mount / install / give-up outcomes) it needs a `'static`
     /// sink, not the call-scoped [`audit`](Self::audit) borrow. Mirrors
     /// [`static_frames`](Self::static_frames).
@@ -281,20 +272,20 @@ pub trait InitSpawnCtx {
     /// where that builds and *enters* PID 1, this admits a driver process
     /// **Ready** and returns, so the spawning boot path keeps running
     /// (`plans/SPAWN.md` SP3). It is the seam the bin crate's driver
-    /// autoloader (`AGENTS.md` §18.3) drives to turn a discovered,
+    /// autoloader drives to turn a discovered,
     /// signature-verified driver bundle into a running user-space driver.
     ///
     /// The child is granted exactly `caps` — the manifest∩caller capability
     /// set the signed `drvhost::Host::load` gate already derived — plus one
     /// unforgeable, owner-checked device-resource grant per entry of
-    /// `grants` (the matched hardware-tree node's requests, §18.3), and is
+    /// `grants` (the matched hardware-tree node's requests), and is
     /// handed `args` as its startup-argument vector (`rustos_rt::arg`). This
     /// seam never widens authority beyond `caps` plus those grants
-    /// (`AGENTS.md` §4 — no ambient authority); the `grants` originate
+    /// (no ambient authority); the `grants` originate
     /// kernel-side, from the kernel's own discovered hardware tree, never
     /// from an untrusted caller.
     ///
-    /// The point of routing through this object-safe boundary is §17.1: the
+    /// The point of routing through this object-safe boundary is: the
     /// production implementation builds the live
     /// [`KernelSpawnCtx`](crate::KernelSpawnCtx) over the feature-selected
     /// scheduler, capability table, and address-space registry — types a
@@ -303,24 +294,21 @@ pub trait InitSpawnCtx {
     /// architecture's process-spawn producer; it builds the isolated address
     /// space and re-asserts every kernel-side check (the spawn path re-checks
     /// `CAP_PROC_SPAWN` and re-parses the `rxe` against the kernel's syscall
-    /// CFI tag), so spawning is not a privileged bypass (`AGENTS.md` §4,
-    /// §16.5, §19.2).
+    /// CFI tag), so spawning is not a privileged bypass.
     ///
     /// # Errors
     ///
     /// Fails closed with a stable [`Errno`] on any error — a malformed
     /// `rxe`, a build or page-table-frame exhaustion, an unrunnable context,
-    /// or an admission failure — never a panic or a half-built task
-    /// (`AGENTS.md` §2.9). The default returns [`Errno::NotImplemented`]: a
+    /// or an admission failure — never a panic or a half-built task. The default returns [`Errno::NotImplemented`]: a
     /// context that wires no scheduler offers no driver spawn rather than
     /// pretending to, mirroring [`spawn_kernel_service`](Self::spawn_kernel_service)
     /// returning [`None`] and [`ProcessSpawn::spawn_with`]'s own default.
     ///
     /// `node_id` is the discovered hardware-tree node the driver was matched
-    /// for (`AGENTS.md` §18.3); it is recorded against the child so the
+    /// for; it is recorded against the child so the
     /// child's later `hw_emit_node` calls parent published children under
-    /// exactly that node, and the emitter cannot forge its tree position
-    /// (`AGENTS.md` §4 / §5.4). [`None`] when the spawn is not a node-matched
+    /// exactly that node, and the emitter cannot forge its tree position. [`None`] when the spawn is not a node-matched
     /// driver load.
     fn spawn_driver_process(
         &self,
@@ -345,7 +333,7 @@ pub trait InitSpawnCtx {
 #[non_exhaustive]
 pub enum SpawnCallerError {
     /// The caller does not hold [`CapabilityId::PROC_SPAWN`]; no address
-    /// space was built (`AGENTS.md` §5.4 — fail closed).
+    /// space was built (fail closed).
     Denied,
     /// Building the process image failed (see [`SpawnError`]); the partially
     /// built address space is discarded by the caller.
@@ -359,7 +347,7 @@ pub enum SpawnCallerError {
 /// argument list rather than the ten positional parameters of the underlying
 /// builder.
 pub struct SpawnRequest<'a> {
-    /// The validated `rxe` load image (holding one is proof the §19.2
+    /// The validated `rxe` load image (holding one is proof the
     /// load-time invariants hold).
     pub image: &'a LoadImage,
     /// The whole `rxe` file the segments' `file_offset`s index into.
@@ -375,7 +363,7 @@ pub struct SpawnRequest<'a> {
     pub args: &'a [&'a [u8]],
     /// The environment vector, each entry a NUL-free byte string.
     pub env: &'a [&'a [u8]],
-    /// Per-process random seed for the §19.2 stack canary.
+    /// Per-process random seed for the stack canary.
     pub canary: u64,
 }
 
@@ -403,7 +391,7 @@ const fn spawn_error_cause(error: SpawnError) -> &'static str {
 ///
 /// 1. checks `caps` holds [`CapabilityId::PROC_SPAWN`], failing closed with
 ///    [`SpawnCallerError::Denied`] and an [`AuditEvent::ProcessSpawnDenied`]
-///    record if not — *before* any page table is touched (`AGENTS.md` §5.4);
+///    record if not — *before* any page table is touched;
 /// 2. calls [`build_process_image`] to materialise the user address space in
 ///    `space`, emitting [`AuditEvent::ProcessSpawnFailed`] and returning
 ///    [`SpawnCallerError::Build`] on failure;
@@ -469,8 +457,7 @@ where
 /// building the image and entering it — register the new task with the
 /// scheduler, capability table, and address-space registry so its first
 /// syscall resolves a caller context (`plans/PI.md` P6c-3) — can interpose
-/// that work without duplicating the authorise/build/audit logic
-/// (`AGENTS.md` §2.2). [`spawn_and_enter`] is the no-interposition case:
+/// that work without duplicating the authorise/build/audit logic. [`spawn_and_enter`] is the no-interposition case:
 /// it calls this and immediately enters.
 ///
 /// # Safety
@@ -497,7 +484,7 @@ where
     P: PageTable,
     A: FnMut() -> Option<Frame>,
 {
-    // Step 2 (AGENTS.md §5.4) — capability check before any state touch.
+    // Step 2 — capability check before any state touch.
     if !caps.holds(CapabilityId::PROC_SPAWN) {
         emit(audit, AuditEvent::ProcessSpawnDenied, Level::Error, &[]);
         return Err(SpawnCallerError::Denied);
@@ -551,8 +538,8 @@ where
 /// path and the validated `rxe` bytes (`plans/SPAWN.md` SP3).
 ///
 /// The bytes are the same `rxe` blob the host-only `elf2rxe` build glue
-/// produces for PID 1 `init` (`AGENTS.md` §2.2 — one conversion path);
-/// holding a valid [`LoadImage`] parsed from them is proof the §19.2
+/// produces for PID 1 `init` (one conversion path);
+/// holding a valid [`LoadImage`] parsed from them is proof the
 /// load-time invariants hold, so the spawn producer re-parses against the
 /// kernel's compiled-in syscall CFI tag and fails closed on a mismatch.
 #[derive(Clone, Copy)]
@@ -561,12 +548,11 @@ pub struct EmbeddedProgram {
     pub path: &'static [u8],
     /// The validated `rxe` image bytes.
     pub rxe: &'static [u8],
-    /// The capabilities the program's manifest requests (`AGENTS.md`
-    /// §5.2, §16.5). The spawn producer grants the spawned child exactly
+    /// The capabilities the program's manifest requests. The spawn producer grants the spawned child exactly
     /// this set — each program receives only the authority its own entry
     /// declares (the shell gets the console pair; login additionally
     /// gets `PROC_SPAWN` + `USERS_READ`), never the spawning caller's
-    /// set (`AGENTS.md` §4 — no ambient authority).
+    /// set (no ambient authority).
     pub caps: &'static [CapabilityId],
     /// The startup-argument vector handed to the program
     /// (`rustos_rt::arg`), each entry a NUL-free byte string.
@@ -576,7 +562,7 @@ pub struct EmbeddedProgram {
 impl EmbeddedProgram {
     /// The program's manifest-requested capabilities as a
     /// [`CapabilitySet`] — the grant the spawn producer admits the child
-    /// with (`AGENTS.md` §5.2).
+    /// with.
     #[must_use]
     pub fn capability_set(&self) -> CapabilitySet {
         let mut set = CapabilitySet::empty();
@@ -593,8 +579,7 @@ impl EmbeddedProgram {
 /// Threaded into the syscall handler like the [`crate::ConsoleWrite`]
 /// console seam: it boots [`EMPTY`](Self::EMPTY), so a `spawn` of any path
 /// fails closed with [`Errno::NotFound`] until the kernel binary registers
-/// its embedded programs (the host-only `elf2rxe` build glue, `AGENTS.md`
-/// §2.2). It is pure data with no ambient authority and no audit sink of
+/// its embedded programs (the host-only `elf2rxe` build glue). It is pure data with no ambient authority and no audit sink of
 /// its own — the `spawn` handler and the [`ProcessSpawn`] producer own the
 /// security-relevant logging, exactly as the dispatcher audits IPC
 /// endpoint lookups rather than the registry doing so internally.
@@ -618,8 +603,7 @@ impl ProgramRegistry {
     ///
     /// The match is exact (a byte-for-byte absolute path); there is no
     /// prefix or alias resolution, so a path either names exactly one
-    /// registered program or nothing at all (fail closed, `AGENTS.md`
-    /// §2.1).
+    /// registered program or nothing at all (fail closed).
     #[must_use]
     pub fn lookup(&self, path: &[u8]) -> Option<&'static EmbeddedProgram> {
         self.programs.iter().find(|p| p.path == path)
@@ -639,15 +623,14 @@ impl ProgramRegistry {
 }
 
 /// The shared empty [`ProgramRegistry`] the syscall handler defaults to
-/// until the kernel binary installs a populated one (`AGENTS.md` §2.9 —
-/// fail closed; mirrors [`crate::NULL_CONSOLE`]).
+/// until the kernel binary installs a populated one (fail closed; mirrors [`crate::NULL_CONSOLE`]).
 pub static EMPTY_PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::EMPTY;
 
 /// Why admitting a freshly built process as a runnable task failed.
 ///
 /// The [`ProcessSpawn`] producer maps each variant onto a stable
 /// [`Errno`] for the `spawn` syscall's caller; the partially built
-/// resources are reclaimed before returning (`AGENTS.md` §2.9).
+/// resources are reclaimed before returning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmitError {
@@ -665,8 +648,7 @@ pub enum AdmitError {
 ///
 /// It is the runtime-spawn analogue of [`InitSpawnCtx`]: the arch-specific
 /// producer builds the isolated address space (naming the port's concrete
-/// page table + [`EnterUser`] primitive, which `kernel/core` cannot spell,
-/// `AGENTS.md` §17.2 / §17.4) and hands it back through
+/// page table + [`EnterUser`] primitive, which `kernel/core` cannot spell) and hands it back through
 /// [`admit_process`](Self::admit_process), which registers the task with
 /// the scheduler, capability table, and address-space registry. Unlike
 /// [`InitSpawnCtx::admit_init`] it admits the task **Ready** and returns
@@ -681,7 +663,7 @@ pub trait SpawnCtx {
     /// The kernel's live physical-frame allocator as a `'static` borrow,
     /// when one is wired, so an arch producer can build the child's
     /// **page tables** out of ordinary reclaimable RAM instead of a
-    /// fixed-size `.bss` pool (`AGENTS.md` §24.1 — a capacity scales with
+    /// fixed-size `.bss` pool (a capacity scales with
     /// discovered RAM and grows on demand, never a hard-wired `const`
     /// ceiling on how many processes can be spawned).
     ///
@@ -691,8 +673,7 @@ pub trait SpawnCtx {
     /// PageTableFrames`, so the source must be `'static` (the elided
     /// lifetime of [`frames`](Self::frames) is the call only). The default
     /// returns [`None`] — a build context with no `'static` allocator (a
-    /// host test double) makes the producer fall back / fail closed
-    /// (`AGENTS.md` §2.9) rather than over-spawning. The production
+    /// host test double) makes the producer fall back / fail closed rather than over-spawning. The production
     /// [`KernelSyscallHandlers`](crate::KernelSyscallHandlers) returns the
     /// leaked-`'static` kernel allocator.
     fn page_table_allocator(&self) -> Option<&'static FrameAllocator> {
@@ -714,21 +695,19 @@ pub trait SpawnCtx {
     /// `FnMut()` (it diverges, so its `!` coerces to `()`); it becomes the
     /// task's kthread work body, run once on the task's first dispatch.
     /// `pre_resume` reactivates the task's page-table root before every
-    /// switch into it, keeping it hardware-isolated from its siblings
-    /// (`AGENTS.md` §4). It is handed the task's own kernel-stack top so a
+    /// switch into it, keeping it hardware-isolated from its siblings. It is handed the task's own kernel-stack top so a
     /// port whose syscall entry does not implicitly resume on that stack
     /// (x86_64) can repoint its per-CPU entry stack at it (`plans/PI.md`
     /// §X); aarch64 reuses `SP_EL1` and ignores the argument.
     ///
     /// `stack` is the child's kernel stack, built by the arch seam so the
-    /// concrete stack source never leaks into this object-safe boundary
-    /// (`AGENTS.md` §17.4), exactly as [`InitSpawnCtx::admit_init`] takes it.
+    /// concrete stack source never leaks into this object-safe boundary, exactly as [`InitSpawnCtx::admit_init`] takes it.
     /// The seam supplies either the heap-backed software-canary
     /// [`crate::BoxStack`] or an arena-backed stack whose guard page it has
     /// **unmapped in the child's own page-table root**, so an overrun of the
     /// child's kernel stack takes a synchronous fault under the child's
     /// translation regime rather than corrupting a neighbour (`plans/PI.md`
-    /// guard-page fault-form; `AGENTS.md` §4 / §2.17). The runtime stores it
+    /// guard-page fault-form;). The runtime stores it
     /// in the child's control block and frees it when the task exits.
     ///
     /// `live` is the child's **retained live, mutable** user address space
@@ -740,11 +719,11 @@ pub trait SpawnCtx {
     /// through [`crate::kthread::with_current_live_space`]. The producer
     /// builds it from the *same* arch address space it froze into `space`. A
     /// producer that retains no live space passes [`None`] and the child's
-    /// `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
+    /// `mem_map` / `mmio_map` fail closed.
     ///
     /// This does **not** enter user mode or step the scheduler: it returns
     /// the new PID and the caller resumes. Every failure reclaims what it
-    /// built and returns an [`AdmitError`] (`AGENTS.md` §2.9).
+    /// built and returns an [`AdmitError`].
     ///
     /// # Safety
     ///
@@ -778,11 +757,11 @@ pub trait SpawnCtx {
 /// exactly as the console list is installed through `with_consoles`. It
 /// defaults to
 /// [`NULL_PROCESS_SPAWN`], which fails closed with
-/// [`Errno::NotImplemented`] (`AGENTS.md` §2.9) until an arch port wires a
+/// [`Errno::NotImplemented`] until an arch port wires a
 /// real producer. The producer builds the image through the production,
 /// capability-checked, audited [`spawn_image`] caller — spawning is *not*
 /// a privileged bypass: the child receives only the authority its manifest
-/// requests intersected with its user's grants (`AGENTS.md` §4, §16.5).
+/// requests intersected with its user's grants.
 ///
 /// `Sync` because the installed producer is shared, immutably, by every
 /// CPU's syscall dispatch path (the handler is held inside the `Sync`
@@ -793,13 +772,13 @@ pub trait ProcessSpawn: Sync {
     ///
     /// The child is granted exactly `program`'s declared capability set
     /// and handed its declared argument vector — per-program authority,
-    /// never the spawning caller's (`AGENTS.md` §4, §5.2, §16.5).
+    /// never the spawning caller's.
     ///
     /// # Errors
     ///
     /// Fails closed with a stable [`Errno`] on any error — a malformed
     /// `rxe`, a build failure, an unrunnable context, or an admission
-    /// failure — never a panic or a half-built task (`AGENTS.md` §2.9).
+    /// failure — never a panic or a half-built task.
     fn spawn(&self, program: &EmbeddedProgram, ctx: &dyn SpawnCtx) -> Result<u64, Errno>;
 
     /// Build `rxe` into a fresh isolated address space and admit it as a
@@ -814,17 +793,15 @@ pub trait ProcessSpawn: Sync {
     /// argument vector the driver reads through `rustos_rt::arg`. The matched
     /// hardware-tree node's device-resource grants ride on `ctx` (the
     /// production context mints one owner-checked grant per requested
-    /// resource as the child is registered, `AGENTS.md` §18.3); this seam
-    /// never widens authority beyond `caps` plus those grants (`AGENTS.md`
-    /// §4, §5.2 — no ambient authority).
+    /// resource as the child is registered); this seam
+    /// never widens authority beyond `caps` plus those grants (no ambient authority).
     ///
     /// Exposing it on the trait lets a scheduler-agnostic caller (a generic
     /// `kernel_main` holding `&dyn ProcessSpawn`) spawn a driver into its own
     /// hardware-isolated process without naming the port's concrete spawn
-    /// mechanism or the selected scheduler (`AGENTS.md` §17.1 / §17.4).
+    /// mechanism or the selected scheduler.
     ///
-    /// The default fails closed with [`Errno::NotImplemented`] (`AGENTS.md`
-    /// §2.9): a port that has not wired a driver-spawn mechanism refuses
+    /// The default fails closed with [`Errno::NotImplemented`]: a port that has not wired a driver-spawn mechanism refuses
     /// rather than pretending to spawn, exactly as [`NullProcessSpawn`] does
     /// for [`spawn`](Self::spawn).
     ///
@@ -832,8 +809,7 @@ pub trait ProcessSpawn: Sync {
     ///
     /// Fails closed with a stable [`Errno`] on any error — a malformed
     /// `rxe`, a build or page-table-frame exhaustion, an unrunnable context,
-    /// or an admission failure — never a panic or a half-built task
-    /// (`AGENTS.md` §2.9).
+    /// or an admission failure — never a panic or a half-built task.
     fn spawn_with(
         &self,
         rxe: &[u8],
@@ -847,8 +823,7 @@ pub trait ProcessSpawn: Sync {
 }
 
 /// The fail-closed default [`ProcessSpawn`] producer: every build with no
-/// real spawn service wired returns [`Errno::NotImplemented`]
-/// (`AGENTS.md` §2.9), exactly as [`crate::NULL_CONSOLE`] does for the
+/// real spawn service wired returns [`Errno::NotImplemented`], exactly as [`crate::NULL_CONSOLE`] does for the
 /// `stream_write` syscall.
 pub struct NullProcessSpawn;
 
@@ -1073,8 +1048,7 @@ mod tests {
         // A port that has not wired a driver-spawn mechanism (here the
         // shared `NullProcessSpawn`) must refuse `spawn_with` with
         // `NotImplemented` rather than pretending to spawn — reached through
-        // `&dyn ProcessSpawn`, the path the generic boot wiring uses
-        // (`AGENTS.md` §2.9 / §17.1).
+        // `&dyn ProcessSpawn`, the path the generic boot wiring uses.
         let ctx = StubCtx::new();
         let producer: &dyn ProcessSpawn = &NULL_PROCESS_SPAWN;
         let result = producer.spawn_with(b"unused-rxe", &ctx, CapabilitySet::empty(), &[]);
@@ -1135,8 +1109,7 @@ mod tests {
         // A context that has not wired a scheduler (here the stub) must
         // refuse `spawn_driver_process` with `NotImplemented` rather than
         // pretending to spawn a driver — reached through `&dyn InitSpawnCtx`,
-        // the path the bin crate's driver autoloader uses (`AGENTS.md`
-        // §2.9 / §17.1).
+        // the path the bin crate's driver autoloader uses.
         let ctx = StubInitCtx::new();
         let init: &dyn InitSpawnCtx = &ctx;
         let result = init.spawn_driver_process(

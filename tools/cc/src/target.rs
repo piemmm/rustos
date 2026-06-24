@@ -1,8 +1,7 @@
 //! Native Tier-1 C compilation targets and the argv the wrapper builds for
 //! `clang` and `ld.lld`.
 //!
-//! The set of targets is closed to the three **native** Tier-1 targets
-//! (`AGENTS.md` §1); `wasm32` has no trap instruction and is out of scope for
+//! The set of targets is closed to the three **native** Tier-1 targets; `wasm32` has no trap instruction and is out of scope for
 //! the C runtime (`plans/CCOMPAT.md` §1). The argv builders are pure functions
 //! so the flag recipe is unit-tested without invoking a real toolchain.
 
@@ -51,7 +50,7 @@ impl CTarget {
     ///
     /// Only the riscv64 vertical is exercised today; the other two targets
     /// declare their ABI flags here so the wrapper stays a single multi-target
-    /// definition (`AGENTS.md` §2.2) rather than growing a second copy when
+    /// definition rather than growing a second copy when
     /// the aarch64 / x86_64 verticals land.
     #[must_use]
     pub fn clang_arch_flags(self) -> &'static [&'static str] {
@@ -100,12 +99,12 @@ pub struct LinkRequest<'a> {
 /// Flags shared by every C compilation, regardless of target.
 ///
 /// * `-fPIC` / position-independent: the image is loaded as a relocatable
-///   `rxe` PIE (`AGENTS.md` §19.2).
+///   `rxe` PIE.
 /// * `-ffreestanding` / `-nostdlib`: no host libc; the program reaches the
 ///   kernel only through the `ros_sys_*` runtime.
-/// * `-fstack-protector-strong`: emit the §19.2 stack canary; crt0 supplies
+/// * `-fstack-protector-strong`: emit the stack canary; crt0 supplies
 ///   `__stack_chk_guard` / `__stack_chk_fail`.
-/// * `-Wall -Wextra -Werror`: senior-quality bar (`AGENTS.md` §2.6).
+/// * `-Wall -Wextra -Werror`: senior-quality bar.
 const COMMON_COMPILE_FLAGS: &[&str] = &[
     "-fPIC",
     "-ffreestanding",
@@ -149,8 +148,7 @@ pub fn compile_argv(req: &CompileRequest<'_>) -> Vec<OsString> {
 /// The image is a hardened PIE: `-pie` makes it position-independent,
 /// `--gc-sections` drops unreferenced sections (so only the crt0 archive
 /// members actually used are pulled in), `-z noexecstack` marks the stack
-/// non-executable, and the linker script enforces W^X page-granular segments
-/// (`AGENTS.md` §19.2).
+/// non-executable, and the linker script enforces W^X page-granular segments.
 #[must_use]
 pub fn link_argv(req: &LinkRequest<'_>) -> Vec<OsString> {
     let mut argv: Vec<OsString> = vec![

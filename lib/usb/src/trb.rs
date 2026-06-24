@@ -3,12 +3,12 @@
 //! A TRB is the 16-byte unit every xHCI ring is built from: commands to
 //! the controller, transfer descriptors to an endpoint, and events back
 //! from the controller all travel as TRBs. Only the TRB types the
-//! bring-up and HID-interrupt paths use are defined (`AGENTS.md` §2.3);
+//! bring-up and HID-interrupt paths use are defined;
 //! the set grows with the consumers.
 
 use rustos_abi::DriverError;
 
-/// Byte length of one TRB (§4.11).
+/// Byte length of one TRB.
 pub const TRB_LEN: usize = 16;
 
 /// Control-word bit 0: the cycle bit, the producer/consumer ownership
@@ -104,8 +104,7 @@ impl Trb {
     /// # Errors
     ///
     /// [`DriverError::OutOfRange`] if the field does not name a type
-    /// this driver models (failing closed on a forged or future type,
-    /// `AGENTS.md` §5.4).
+    /// this driver models (failing closed on a forged or future type).
     pub const fn trb_type(&self) -> Result<TrbType, DriverError> {
         TrbType::from_raw((self.control >> TYPE_SHIFT) & TYPE_MASK)
     }
@@ -116,7 +115,7 @@ impl Trb {
     /// driver does not model — so a diagnostic can report the verbatim
     /// type of an unexpected event (e.g. an asynchronous controller
     /// event) the consumer rejected, rather than collapsing it to an
-    /// error (`AGENTS.md` §15.7 — measure, don't guess). `0` doubles as
+    /// error (measure, don't guess). `0` doubles as
     /// "no event observed".
     #[must_use]
     pub const fn trb_type_raw(&self) -> u8 {
@@ -139,7 +138,7 @@ impl Trb {
     /// Unlike [`Self::completion_code`], this never fails closed on a
     /// code the driver does not model — so a diagnostic can report a
     /// controller-specific or reserved fault code verbatim instead of
-    /// collapsing it to an error (`AGENTS.md` §15.7 — measure, don't
+    /// collapsing it to an error (measure, don't
     /// guess). `0` (xHCI "Invalid") doubles as "no event observed".
     #[must_use]
     pub const fn completion_code_raw(&self) -> u8 {
@@ -167,7 +166,7 @@ impl Trb {
     }
 
     /// The on-ring little-endian byte image of this TRB, for the
-    /// owner of the device-shared memory to publish (§4.11).
+    /// owner of the device-shared memory to publish.
     #[must_use]
     pub const fn to_bytes(&self) -> [u8; TRB_LEN] {
         let p = self.parameter.to_le_bytes();
@@ -299,7 +298,7 @@ impl CompletionCode {
     ///
     /// [`DriverError::OutOfRange`] if `raw` is not a modelled code —
     /// the caller treats the event as a device fault rather than
-    /// guessing at its meaning (`AGENTS.md` §2.9).
+    /// guessing at its meaning.
     pub const fn from_raw(raw: u32) -> Result<Self, DriverError> {
         match raw {
             1 => Ok(Self::Success),

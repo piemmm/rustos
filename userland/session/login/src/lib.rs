@@ -1,10 +1,10 @@
-//! RustOS text login (Stage 6, `AGENTS.md` §10).
+//! RustOS text login (Stage 6).
 //!
 //! `rustos-login` authenticates a user against `kernel/sec` and launches a
 //! session on their behalf. It **always starts in text mode** and offers a
 //! graphical session only when a display driver and the window manager are
 //! present; when they are not, the graphical option is simply hidden — never
-//! crashed, never errored (`AGENTS.md` §10). Installed to
+//! crashed, never errored. Installed to
 //! `/System/Services/login`.
 //!
 //! # What this crate is
@@ -16,9 +16,9 @@
 //! 1. Collect a username and an un-echoed password from the terminal.
 //! 2. Hand them to the [`Authenticator`], which verifies them against
 //!    `kernel/sec` and the credential store and returns the user's identity
-//!    and capability ceiling (`AGENTS.md` §5.1, §5.2). A rejected attempt
+//!    and capability ceiling. A rejected attempt
 //!    consumes one of a bounded number of tries; the budget makes login
-//!    **fail closed** rather than prompt forever (`AGENTS.md` §5.4.5).
+//!    **fail closed** rather than prompt forever.
 //! 3. On success, offer the session choice (text by default, graphical only
 //!    when available) and hand the authenticated identity to the
 //!    [`SessionLauncher`].
@@ -26,7 +26,7 @@
 //! Every security-relevant decision — a failed authentication, a lockout, a
 //! session start and end, a refused launch, a dead console — is audited
 //! through `lib/log` with a stable [`EventId`](rustos_log::EventId) in the
-//! reserved `10000..11000` range (`AGENTS.md` §19.4). The cause of an
+//! reserved `10000..11000` range. The cause of an
 //! authentication failure is audited but **never** disclosed to the caller,
 //! so the prompt cannot be used to probe for valid usernames.
 //!
@@ -59,13 +59,12 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
+//! `no_std` (with `alloc`); the only dependencies are the
 //! audited `lib/*` crates `rustos-abi`, `rustos-caps`, `rustos-log`,
 //! `rustos-users`, and `rustos-vt` (the shared terminal-control vocabulary the
 //! read line discipline keys off), so a userland service never links a kernel
-//! or driver crate (`AGENTS.md` §17.4).
-//! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-//! (`AGENTS.md` §2.9).
+//! or driver crate.
+//! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -2,7 +2,7 @@
 //!
 //! [`CsRng`] is the generator the rest of RustOS reaches for whenever the
 //! randomness must be unpredictable: `RustFS` volume and per-record keys, the
-//! encrypted-swap key (`AGENTS.md` §4), nonces, the KASLR/ASLR seed (§19.2),
+//! encrypted-swap key, nonces, the KASLR/ASLR seed,
 //! capability-token material. It pairs an [`HmacDrbg`] with an
 //! [`EntropySource`] and reseeds from that source on a fixed schedule, so a
 //! one-time state compromise cannot predict output indefinitely (forward
@@ -12,12 +12,12 @@
 //!
 //! Every draw can trigger a reseed, and a reseed needs fresh entropy that may
 //! be momentarily unavailable. [`CsRng`] offers the caller both ways to cope,
-//! and neither spins or panics (`AGENTS.md` §2.1, §2.9):
+//! and neither spins or panics:
 //!
 //! * **Fallible** ([`CsRng::try_fill_bytes`], [`CsRng::try_next_u64`], …):
 //!   when a required reseed has no entropy *right now*, the draw returns the
 //!   typed, transient [`EntropyError::Reseeding`] without disturbing the
-//!   generator. The caller fails closed (§5.4) or retries. A *hard* failure
+//!   generator. The caller fails closed or retries. A *hard* failure
 //!   (no source at all, e.g. at instantiation) is the distinct
 //!   [`EntropyError::Unavailable`].
 //! * **Blocking** ([`CsRng::fill_bytes_blocking`],
@@ -157,7 +157,7 @@ impl<E: EntropySource> CsRng<E> {
     /// Draw fresh reseed entropy through `mode` and fold it into the DRBG.
     ///
     /// Shared by the fallible and blocking reseeds so the seed handling,
-    /// zeroisation, and clock reset live in one place (`AGENTS.md` §2.2).
+    /// zeroisation, and clock reset live in one place.
     fn reseed_with(&mut self, mode: ReseedMode) -> Result<(), EntropyError> {
         let mut fresh = [0u8; RESEED_ENTROPY_LEN];
         let drawn = match mode {
@@ -199,7 +199,7 @@ impl<E: EntropySource> CsRng<E> {
     ///
     /// The wait happens in the entropy source's
     /// [`EntropySource::fill_blocking`] (the platform source parks the calling
-    /// task; it never busy-spins, `AGENTS.md` §2.1). When no reseed is needed
+    /// task; it never busy-spins). When no reseed is needed
     /// — the common case — this does exactly as much work as
     /// [`CsRng::try_fill_bytes`] and returns without ever blocking.
     ///
@@ -213,7 +213,7 @@ impl<E: EntropySource> CsRng<E> {
 
     /// Reseed (per `mode`) when due, then generate. Shared by the fallible and
     /// blocking fills so the reseed-clock and DRBG-limit handling is written
-    /// once (`AGENTS.md` §2.2).
+    /// once.
     fn fill_bytes_with(&mut self, out: &mut [u8], mode: ReseedMode) -> Result<(), EntropyError> {
         if self.calls_since_reseed >= self.reseed_interval || self.drbg.needs_reseed() {
             self.reseed_with(mode)?;

@@ -20,10 +20,10 @@
 //!
 //! The operation/reason constants must stay in step with
 //! `tools/qemu/src/aarch64.rs` (which decodes the exit status); the
-//! `constants_match_runner` unit test is the tie-down `AGENTS.md` §2.2
+//! `constants_match_runner` unit test is the tie-down
 //! requires.
 
-/// Semihosting operation number for `SYS_EXIT` (ARM DUI 0203 §6.1).
+/// Semihosting operation number for `SYS_EXIT` (ARM DUI 0203).
 pub const SYS_EXIT: u64 = 0x18;
 
 /// `ADP_Stopped_ApplicationExit` reason code: paired with [`SYS_EXIT`],
@@ -42,7 +42,7 @@ pub const SUCCESS_EXIT_STATUS: i32 = 0;
 /// Issues `SYS_EXIT` with subcode `0`, then parks the CPU. The park is
 /// unreachable under QEMU (the call terminates the process) but is the
 /// correct conservative behaviour on hardware without a semihosting
-/// host, per `AGENTS.md` §2.9.
+/// host,.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn exit_success() -> ! {
     // SAFETY: the documented QEMU semihosting contract; the park
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn constants_match_runner() {
         // Belt-and-braces cross-check: the host runner's values live in
-        // `tools/qemu/src/aarch64.rs`. AGENTS.md §2.2 forbids duplication
+        // `tools/qemu/src/aarch64.rs`. The charter forbids duplication
         // without a tie-down; this test is that tie-down.
         assert_eq!(SYS_EXIT, 0x18);
         assert_eq!(ADP_STOPPED_APPLICATION_EXIT, 0x2_0026);

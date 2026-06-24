@@ -1,4 +1,4 @@
-//! Hardware memory-tagging surface of the Arch HAL (`AGENTS.md` §19.10).
+//! Hardware memory-tagging surface of the Arch HAL.
 //!
 //! Use-after-free and a class of buffer over-runs are *temporal* and
 //! *spatial* memory-safety bugs that hardware **memory tagging** turns
@@ -11,9 +11,9 @@
 //! reallocated object.
 //!
 //! Only the architecture port can drive the tag-storage and tag-check
-//! silicon (Arm MTE, SPARC ADI, the RISC-V tagging proposals), so §19.10
+//! silicon (Arm MTE, SPARC ADI, the RISC-V tagging proposals), so
 //! makes this a closed trait set on the Arch HAL; this module is that
-//! set, modelled on the §19.1 [`super::sidechannel`] surface.
+//! set, modelled on the [`super::sidechannel`] surface.
 //!
 //! # What lives here
 //!
@@ -31,9 +31,9 @@
 //!   pure, `const`, and shared by every consumer (the software
 //!   tag-checking allocator in `kernel/mem` and the hardware ports) so
 //!   the tag chosen for a re-allocation is guaranteed to differ from the
-//!   tag a stale pointer still holds. `AGENTS.md` §2.2: one definition,
+//!   tag a stale pointer still holds.: one definition,
 //!   no duplication.
-//! * [`conformance`] — the §17.2 conformance vertical: every port runs
+//! * [`conformance`] — the conformance vertical: every port runs
 //!   [`conformance::run_all`] against its handle.
 
 /// A memory tag: the small value stamped on both a pointer and the
@@ -101,7 +101,7 @@ pub const fn next_free_tag(previous: MemTag, tag_count: u8) -> MemTag {
     MemTag((previous.0 + 1) % count)
 }
 
-/// One §19.10 memory-tagging feature's status on a given port.
+/// One memory-tagging feature's status on a given port.
 ///
 /// Mirrors [`super::sidechannel::Mitigation`]: a port takes exactly one
 /// honest position per feature. [`Tagging::Unsupported`] is permitted
@@ -159,10 +159,9 @@ impl Tagging {
     }
 }
 
-/// A port's honest declaration of the §19.10 tagging features it drives.
+/// A port's honest declaration of the tagging features it drives.
 ///
-/// Two genuinely distinct properties, so two slots (`AGENTS.md` §2.3 —
-/// no slot exists that the kernel does not need):
+/// Two genuinely distinct properties, so two slots (no slot exists that the kernel does not need):
 ///
 /// * [`Self::tag_storage`] — the CPU can store and read a per-granule
 ///   tag (Arm MTE `STG`/`LDG`, the [`MemoryTagging::set_region_tag`]
@@ -193,7 +192,7 @@ pub struct TaggingEntry {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProfileError {
     /// A non-supported decision carried an empty (or whitespace-only)
-    /// justification. §19.10 requires every omission to be justified;
+    /// justification. The charter requires every omission to be justified;
     /// `field` names the offending slot.
     EmptyJustification {
         /// The [`TaggingEntry::name`] of the unjustified slot.
@@ -202,7 +201,7 @@ pub enum ProfileError {
 }
 
 impl TaggingProfile {
-    /// The two §19.10 tagging slots, in a stable order, each paired with
+    /// The two tagging slots, in a stable order, each paired with
     /// its name.
     #[must_use]
     pub const fn entries(&self) -> [TaggingEntry; 2] {
@@ -218,7 +217,7 @@ impl TaggingProfile {
         ]
     }
 
-    /// Validate the §19.10 honesty rule: every non-supported feature
+    /// Validate the honesty rule: every non-supported feature
     /// must carry a non-empty explanation — a justification for a
     /// [`Tagging::Unsupported`] claim or a tracking note for a
     /// [`Tagging::Pending`] gap.
@@ -256,8 +255,7 @@ impl TaggingProfile {
     }
 }
 
-/// The memory-tagging handle an architecture port exposes
-/// (`AGENTS.md` §19.10).
+/// The memory-tagging handle an architecture port exposes.
 ///
 /// The kernel allocator rotates tags through [`Self::rotate_tag`] (pure,
 /// architecture-neutral) and, on a port with hardware tag storage,
@@ -269,7 +267,7 @@ impl TaggingProfile {
 /// Implementations must be [`Send`] + [`Sync`]: the kernel reaches the
 /// handle from every CPU.
 pub trait MemoryTagging: Send + Sync {
-    /// The port's honest declaration of which §19.10 features it drives.
+    /// The port's honest declaration of which features it drives.
     /// Must satisfy [`TaggingProfile::validate`].
     fn profile(&self) -> TaggingProfile;
 
@@ -285,7 +283,7 @@ pub trait MemoryTagging: Send + Sync {
     fn tag_count(&self) -> u8;
 
     /// Choose a fresh tag for a (re)allocation that differs from
-    /// `previous` (the use-after-free hardening rotation, §19.10).
+    /// `previous` (the use-after-free hardening rotation).
     ///
     /// Provided in terms of [`next_free_tag`] and [`Self::tag_count`] so
     /// every port shares the one rotation; a port has no reason to
@@ -312,7 +310,7 @@ pub trait MemoryTagging: Send + Sync {
     }
 }
 
-/// The §17.2 / §19.10 memory-tagging conformance vertical.
+/// The memory-tagging conformance vertical.
 ///
 /// Every architecture port runs [`conformance::run_all`] against its
 /// [`MemoryTagging`] handle. The suite is portable — it names only the
@@ -339,7 +337,7 @@ pub mod conformance {
     }
 
     /// The profile validates and every non-supported feature carries a
-    /// non-empty justification (§19.10 — an `Unsupported` claim is
+    /// non-empty justification (an `Unsupported` claim is
     /// permitted only where the silicon genuinely lacks tagging, *and
     /// justified*).
     fn profile_is_honest<M: MemoryTagging + ?Sized>(port: &M) {

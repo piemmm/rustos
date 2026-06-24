@@ -10,10 +10,10 @@
 //! does: the bus driver has to be able to name the seam without pulling in
 //! an architecture port (`kernel/arch/<target>`), which would invert the
 //! dependency direction and gate the driver on a target-conditional
-//! `cfg` — both forbidden by `AGENTS.md` §17.2 / §17.4. The architecture
+//! `cfg` — both forbidden by. The architecture
 //! port (for x86_64, `kernel/arch/x86_64`) supplies the only real
 //! implementation, encapsulating the `in`/`out` instructions and their
-//! `unsafe` invariants behind this safe trait (`AGENTS.md` §2.10). The
+//! `unsafe` invariants behind this safe trait. The
 //! driver never issues a port-I/O instruction itself and carries no
 //! architecture gate.
 //!
@@ -44,17 +44,17 @@ pub trait PortIo {
 /// Intel 8042 keyboard/mouse controller (`drivers/input/ps2`, status/command
 /// port `0x64` and data port `0x60`) and the 16550 UART are byte-addressed,
 /// and a 32-bit read would alias three neighbouring registers. `PortIo` is a
-/// frozen `abi-v1` interface, so per `AGENTS.md` §2.4 the byte width ships as
+/// frozen `abi-v1` interface, so the byte width ships as
 /// this separate versioned trait rather than as an added method.
 ///
 /// It lives in `lib/abi` for the same reason [`PortIo`] does: a driver must
 /// name the seam without depending on an architecture port
 /// (`kernel/arch/<target>`), which would invert the dependency direction and
 /// force a target-conditional `cfg` on the driver — both forbidden by
-/// `AGENTS.md` §17.2 / §17.4. The architecture port (for x86_64,
+/// . The architecture port (for x86_64,
 /// `kernel/arch/x86_64`) supplies the only real implementation, encapsulating
 /// the `inb`/`outb` instructions and their `unsafe` invariants behind this
-/// safe trait (`AGENTS.md` §2.10). The driver never issues a port-I/O
+/// safe trait. The driver never issues a port-I/O
 /// instruction itself and carries no architecture gate.
 ///
 /// Port I/O is an x86-family mechanism; architectures without an I/O port

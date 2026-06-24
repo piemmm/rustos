@@ -2,8 +2,7 @@
 //! FAT32-over-virtio_blk-pci integration test.
 //!
 //! The device-agnostic bring-up *and* the FAT32 round-trip tail both
-//! live in the shared `rustos-test-virtio-qemu-support` crate
-//! (`AGENTS.md` §2.2). This module supplies only what is unique to this
+//! live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the modern virtio-blk PCI device id, the spawner registering
 //! the loaded image through the virtio-blk `register`, and the boot harness.
 //! The device tail ([`fat32_round_trip`]) mounts the FAT32 volume the

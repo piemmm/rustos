@@ -12,7 +12,7 @@
 //! fixed-size tag, never the upstream `Mac` / `KeyInit` traits or the
 //! `GenericArray` types. Verification goes through [`crate::ct_eq`] so a
 //! caller cannot accidentally reintroduce a timing-leaking `==` over a secret
-//! tag (`AGENTS.md` §19.1).
+//! tag.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -49,8 +49,7 @@ pub fn hmac_sha256(key: &MacKey, data: &[u8]) -> MacTag {
 /// to the underlying streaming HMAC in turn so the caller never has to
 /// allocate or stack-copy a contiguous buffer. This is what lets the
 /// `rustos-rng` HMAC-DRBG compute `HMAC(K, V ‖ byte ‖ data)` (NIST SP
-/// 800-90A) over its working state without an allocator (`AGENTS.md` §4 —
-/// the kernel allocator must not be on the entropy path) or an arbitrary
+/// 800-90A) over its working state without an allocator (the kernel allocator must not be on the entropy path) or an arbitrary
 /// fixed-size scratch bound.
 ///
 /// Wraps [`hmac::Hmac`] so callers never see the upstream `Mac` / `KeyInit`
@@ -75,7 +74,7 @@ pub fn hmac_sha256_parts(key: &MacKey, parts: &[&[u8]]) -> MacTag {
 ///
 /// Returns `true` iff `tag` matches the freshly computed tag. The comparison
 /// goes through [`crate::ct_eq`], so it does not leak through timing how many
-/// leading tag bytes matched (`AGENTS.md` §19.1).
+/// leading tag bytes matched.
 #[must_use]
 pub fn hmac_sha256_verify(key: &MacKey, data: &[u8], tag: &MacTag) -> bool {
     let expected = hmac_sha256(key, data);

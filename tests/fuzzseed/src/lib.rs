@@ -1,16 +1,16 @@
 //! Shared per-run PRNG seeding, logging, and budget seam for the test
-//! harnesses that draw pseudo-random inputs: the §19.6 fuzz harnesses, the
-//! §19.7 stateful proptest models, and the filesystem soak.
+//! harnesses that draw pseudo-random inputs: the fuzz harnesses, the
+//! stateful proptest models, and the filesystem soak.
 //!
 //! ## Why this exists
 //!
 //! Every one of those harnesses needs the same three things, and before this
-//! crate each one re-implemented them — a §2.2 duplication smell:
+//! crate each one re-implemented them — a duplication smell:
 //!
 //! 1. **A per-run seed that is fresh by default but pinnable for replay.** A
 //!    harness that replayed one fixed seed every run explored nothing new
 //!    across repeated runs (and a soak that re-ran the same stream night after
-//!    night is the busy-work §2.1 forbids). So by default each run draws a
+//!    night is the busy-work the charter forbids). So by default each run draws a
 //!    *fresh* seed from host entropy; setting the harness's seed environment
 //!    variable pins it instead, which is how a logged failure is reproduced.
 //! 2. **The seed logged at the start of the test.** Because the default seed is
@@ -32,13 +32,13 @@
 //!
 //! It deliberately depends on nothing: the seed is a *test-input* seed, not a
 //! security seed, so it must not route through `lib/crypto` / `lib/rng`
-//! (`AGENTS.md` §22 governs the kernel CSPRNG, not host test tooling).
+//! (the charter governs the kernel CSPRNG, not host test tooling).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Seed environment variable the `cargo xtask fuzz` orchestrator exports and
-/// the §19.6 fuzz harnesses read.
+/// the fuzz harnesses read.
 pub const FUZZ_SEED_ENV: &str = "RUSTOS_FUZZ_SEED";
 
 /// Wall-clock budget (seconds) the `cargo xtask fuzz` orchestrator exports for
@@ -46,7 +46,7 @@ pub const FUZZ_SEED_ENV: &str = "RUSTOS_FUZZ_SEED";
 pub const FUZZ_BUDGET_ENV: &str = "RUSTOS_FUZZ_BUDGET_SECS";
 
 /// Seed environment variable the `cargo xtask proptest` orchestrator exports
-/// and the §19.7 models read.
+/// and the models read.
 pub const PROPTEST_SEED_ENV: &str = "RUSTOS_PROPTEST_SEED";
 
 /// Wall-clock budget (seconds) the `cargo xtask proptest` orchestrator exports
@@ -207,12 +207,12 @@ impl Lcg {
     }
 }
 
-/// The shared `proptest` stateful-model runner used by the §19.7 models.
+/// The shared `proptest` stateful-model runner used by the models.
 ///
 /// Enabled by the `proptest` feature. Centralises the seed resolution, the
 /// start-of-test seed log, the `ChaCha` RNG construction, and the smoke /
 /// budgeted-soak loop so each `kernel/{sec,ipc,syscall}` and `lib/caps` model
-/// is just a strategy plus a check (`AGENTS.md` §2.2).
+/// is just a strategy plus a check.
 #[cfg(feature = "proptest")]
 pub mod prop {
     use super::{announce, budget_deadline, expand_seed, resolve_seed, within_budget};

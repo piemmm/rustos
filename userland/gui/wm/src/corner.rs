@@ -1,7 +1,6 @@
 //! Anti-aliased rounded-corner coverage.
 //!
-//! A window (and the taskbar, through this same path — `AGENTS.md`
-//! §2.2/§10) may request rounded corners of a given radius. Composition
+//! A window (and the taskbar, through this same path) may request rounded corners of a given radius. Composition
 //! multiplies each source pixel's alpha by a *coverage* value in
 //! `0..=255` computed here: `255` deep inside the rounded rectangle, `0`
 //! outside it, and a smooth ramp across the one-pixel-wide corner arc.
@@ -29,7 +28,7 @@ pub enum Corners {
 }
 
 impl Corners {
-    /// The corner style for a theme corner radius (`AGENTS.md` §10).
+    /// The corner style for a theme corner radius.
     ///
     /// A radius of `0` is the square opt-out; any other radius rounds.
     /// This lets a window or the taskbar take its corner radius straight

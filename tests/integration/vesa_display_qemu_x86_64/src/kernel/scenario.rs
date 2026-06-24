@@ -185,7 +185,7 @@ impl DriverSpawner for ResolveVesa {
 /// Driver-host view used for `VesaFramebuffer::open`: grants
 /// `CAP_MMIO_MAP` and exposes the real [`KernelMmioMapper`]. Distinct
 /// from the [`Host`]-installed view, mirroring how the bus-driver
-/// verticals separate the §8 load gate from the map gate.
+/// verticals separate the load gate from the map gate.
 struct VesaHost<'a> {
     granted: CapabilitySet,
     mapper: &'a dyn MmioMapper,
@@ -335,7 +335,7 @@ fn drive_lifecycle(block: &[u8], phys_base: u64) {
         mapper: &mapper,
     };
 
-    // Load the signed `.rxe` through the driver host (the §8 gate).
+    // Load the signed `.rxe` through the driver host (the gate).
     let Ok(pubkey) = Ed25519PublicKey::from_bytes(&TRUSTED_SIGNER_PUBKEY) else {
         fail("trust anchor decode");
     };
@@ -424,7 +424,7 @@ fn present_and_verify(
 }
 
 /// Pick a `&'static str` breadcrumb for `(phase, op)` without an
-/// allocator (`AGENTS.md` §2.9 — no `format!` on the fail path).
+/// allocator (no `format!` on the fail path).
 fn phase_msg(phase: &str, op: &str) -> &'static str {
     match (phase, op) {
         ("first", "VesaFramebuffer::open") => "VesaFramebuffer::open (first)",

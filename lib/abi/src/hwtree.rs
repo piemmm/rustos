@@ -1,8 +1,7 @@
-//! The architecture-neutral hardware tree (`AGENTS.md` §18.1).
+//! The architecture-neutral hardware tree.
 //!
 //! RustOS detects the hardware actually present at boot and autoloads the
-//! matching drivers; it does not ship a hand-maintained static device list
-//! (`AGENTS.md` §18). The *single* inventory contract is the **hardware
+//! matching drivers; it does not ship a hand-maintained static device list. The *single* inventory contract is the **hardware
 //! tree** defined here: each architecture port normalises its platform's
 //! native source (ACPI on x86_64, a flattened device tree on aarch64 /
 //! riscv64, a host-capability query on wasm32) into a flat list of
@@ -12,8 +11,7 @@
 //!
 //! # ABI discipline
 //!
-//! The hardware tree is held to the same discipline as the syscall table
-//! (`AGENTS.md` §9) and the System Information API (§16.6): it is
+//! The hardware tree is held to the same discipline as the syscall table and the System Information API: it is
 //! versioned ([`HWTREE_VERSION_V1`]), every record has a fixed wire layout
 //! pinned by a `WIRE_LEN` constant and a frozen-layout host test, and the
 //! C view is generated from this source of truth (`cargo xtask c-header`).
@@ -23,14 +21,14 @@
 //!
 //! A node's resources (MMIO windows, IRQ lines, port ranges, DMA needs)
 //! are expressed as capability-grant **requests** ([`HwResource`]), never
-//! as raw ambient handles (`AGENTS.md` §4): a matched driver receives only
-//! the resource capabilities its node requested, and no more (§18.3). The
+//! as raw ambient handles: a matched driver receives only
+//! the resource capabilities its node requested, and no more. The
 //! capability a resource needs is named explicitly as a [`CapabilityId`].
 //!
 //! The types are `#[repr(C)]`, `no_std`, and allocation-free: a node is a
 //! fixed-size record built on the boot stack, encoded little-endian through
 //! the shared `le` helpers, and decoded with every field bounds-checked
-//! against `WIRE_LEN` (`AGENTS.md` §5.4 — validate every input, fail
+//! against `WIRE_LEN` (validate every input, fail
 //! closed).
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -40,7 +38,7 @@ use crate::{CapabilityId, Errno};
 ///
 /// Carried in every serialised tree so a consumer can refuse a tree
 /// produced for a future revision rather than misinterpreting it. Frozen
-/// for `abi-v1`; new behaviour bumps the version (`AGENTS.md` §18.1).
+/// for `abi-v1`; new behaviour bumps the version.
 pub const HWTREE_VERSION_V1: u16 = 1;
 
 /// Sentinel parent id marking a node with no parent (a tree root).
@@ -50,14 +48,14 @@ pub const HWTREE_VERSION_V1: u16 = 1;
 pub const HW_NODE_ROOT: u32 = u32::MAX;
 
 /// Id of the single synthetic root node every discovered hardware tree
-/// begins with (`AGENTS.md` §18.1).
+/// begins with.
 ///
 /// The root node names [`HW_NODE_ROOT`] as its *parent* (so
 /// [`HwNode::is_root`] holds for it alone); every real device node names
 /// this id — or a deeper bus node's id — as its parent. Defining it once
 /// here keeps every architecture port's root emission and every
 /// bootstrap-floor probe that attaches a top-level device to the root in
-/// agreement (`AGENTS.md` §2.2): a device parented to [`HW_NODE_ROOT`]
+/// agreement: a device parented to [`HW_NODE_ROOT`]
 /// instead of this id would be mistaken for the root and skipped by the
 /// autoload walk.
 pub const HW_NODE_ROOT_ID: u32 = 0;
@@ -74,8 +72,7 @@ pub const HW_NODE_MAX_RESOURCES: usize = 8;
 
 /// Device class of a hardware-tree node.
 ///
-/// A closed set matching the driver folder classes (`AGENTS.md` §3 /
-/// §18.1) plus the structural classes the discovery code needs to model a
+/// A closed set matching the driver folder classes plus the structural classes the discovery code needs to model a
 /// platform (`Root`, `Bus`, `Cpu`, `Memory`, `Timer`,
 /// `InterruptController`). Adding a class is an ABI change: append a new
 /// discriminant, never renumber an existing one.
@@ -174,7 +171,7 @@ impl HwMatchKind {
 /// One match key on a hardware-tree node.
 ///
 /// The device manager compares these against the bind table each driver
-/// declares in its signed manifest (`AGENTS.md` §18.3). A key is either a
+/// declares in its signed manifest. A key is either a
 /// `compatible` string (FDT / MMIO) or a numeric bus identifier (PCI, USB,
 /// virtio); the [`HwMatchKind`] discriminant selects which fields are
 /// meaningful. Unused numeric fields are zero.
@@ -195,9 +192,8 @@ impl HwMatchKey {
 
     /// A `compatible`-string match key (device tree or platform MMIO).
     ///
-    /// `const`, so a driver can declare its bind table as a `const`
-    /// (`AGENTS.md` §18.3): an over-long literal is then a *compile-time*
-    /// error in const context, never a runtime panic (`AGENTS.md` §2.9).
+    /// `const`, so a driver can declare its bind table as a `const`: an over-long literal is then a *compile-time*
+    /// error in const context, never a runtime panic.
     ///
     /// # Errors
     ///
@@ -270,8 +266,7 @@ impl HwMatchKey {
     }
 
     /// Does `self`, read as a driver **bind-table** key, match `device`,
-    /// a concrete key emitted on a discovered hardware-tree node
-    /// (`AGENTS.md` §18.3)?
+    /// a concrete key emitted on a discovered hardware-tree node?
     ///
     /// Equal kinds are required first. Then:
     ///
@@ -286,9 +281,9 @@ impl HwMatchKey {
     ///   be equal.
     ///
     /// Widening is only ever requested by the *bind* key (which comes
-    /// from a signed manifest, `AGENTS.md` §9); a discovered node can
+    /// from a signed manifest); a discovered node can
     /// never force a broader match. An unrecognised kind matches nothing
-    /// (fail closed, `AGENTS.md` §2.9 / §5.4).
+    /// (fail closed).
     #[must_use]
     pub fn matches(&self, device: &HwMatchKey) -> bool {
         let Some(kind) = self.kind() else {
@@ -405,7 +400,7 @@ pub enum HwResourceKind {
     /// issues accesses in `base`..`base+len`, which the bus bridge
     /// translates to `xlate`..`xlate+len` on the far (device) side. The
     /// motivating case is a PCIe root complex's outbound `ranges`
-    /// window (`AGENTS.md` §18.1): `base` is the CPU-physical aperture,
+    /// window: `base` is the CPU-physical aperture,
     /// `xlate` the PCIe-space base the bridge maps it to, distinct from
     /// a plain [`Mmio`](Self::Mmio) register window that needs no
     /// translation.
@@ -433,8 +428,8 @@ impl HwResourceKind {
     }
 
     /// The capability a driver must hold to be granted this resource
-    /// (`AGENTS.md` §4 — resources are capability-grant requests, never
-    /// ambient handles; §18.3).
+    /// (resources are capability-grant requests, never
+    /// ambient handles;).
     #[must_use]
     pub const fn required_capability(self) -> CapabilityId {
         match self {
@@ -449,11 +444,11 @@ impl HwResourceKind {
 }
 
 /// One resource a hardware-tree node exposes, expressed as a
-/// capability-grant request (`AGENTS.md` §4 / §18.1).
+/// capability-grant request.
 ///
 /// The matched driver receives only the capability named here, scoped to
 /// the `base`/`len` region — never ambient authority over the whole
-/// address space or interrupt namespace (§18.3). The capability is carried
+/// address space or interrupt namespace. The capability is carried
 /// explicitly on the wire so a consumer never has to re-derive it.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -471,7 +466,7 @@ pub struct HwResource {
 ///
 /// Both ends are computed with checked arithmetic so a length that would
 /// overflow the address space is refused (`false`) rather than wrapping into
-/// a spuriously-contained range (`AGENTS.md` §2.9 / §5.4). A zero-length
+/// a spuriously-contained range. A zero-length
 /// child is contained as long as its base lies within the parent's closed
 /// span. Used by [`HwResource::covers`] for the interval-containment kinds.
 fn interval_contains(parent_base: u64, parent_len: u64, child_base: u64, child_len: u64) -> bool {
@@ -520,7 +515,7 @@ impl HwResource {
     /// the far-side (bus/PCIe-space) address the viewport starts at — the
     /// inbound counterpart of [`bus_window`](Self::bus_window). The
     /// motivating case is a PCIe root complex's inbound `dma-ranges`
-    /// viewport (`AGENTS.md` §18.1): a bus driver programs the inbound
+    /// viewport: a bus driver programs the inbound
     /// BAR from `bus_base`/`len` while the kernel bounds device DMA by
     /// `addr_limit`. Recovered through
     /// [`translated_base`](Self::translated_base).
@@ -531,7 +526,7 @@ impl HwResource {
 
     /// An outbound bus address window: `cpu_base`..`cpu_base+len` on the
     /// CPU side, translated to `translated_base`..`translated_base+len`
-    /// on the far (device/bus) side (`AGENTS.md` §18.1).
+    /// on the far (device/bus) side.
     #[must_use]
     pub fn bus_window(cpu_base: u64, len: u64, translated_base: u64) -> Self {
         Self::new_xlate(HwResourceKind::BusWindow, cpu_base, len, 0, translated_base)
@@ -607,12 +602,11 @@ impl HwResource {
     /// [`BusWindow`](HwResourceKind::BusWindow) is addressed in outbound
     /// bus space, so it is named by its far-side
     /// [`translated_base`](Self::translated_base) — the bridge's bus→CPU
-    /// translation is applied by the mapper, not the driver (`AGENTS.md`
-    /// §18.1). Every other kind (a DMA constraint, an IRQ line, a port
+    /// translation is applied by the mapper, not the driver. Every other kind (a DMA constraint, an IRQ line, a port
     /// range) is not a mappable register window and yields [`None`].
     ///
     /// This is the single definition of "which address names this
-    /// resource's register window" (`AGENTS.md` §2.2): both
+    /// resource's register window": both
     /// [`sole_register_window`](crate::driver::sole_register_window) and a
     /// concrete driver's resource derivation build on it rather than
     /// re-deciding `base` vs `translated_base` per device class.
@@ -630,13 +624,13 @@ impl HwResource {
     /// hardware-tree node requests.
     ///
     /// This is the security spine of recursive, user-space hardware
-    /// discovery (`AGENTS.md` §18.1 / §18.3): the `hw_emit_node` syscall
+    /// discovery: the `hw_emit_node` syscall
     /// admits a published child node **only** when every resource it
     /// requests is covered by one of the emitting bus driver's own grants,
     /// so an autoloaded child driver can never be minted more authority than
-    /// the driver that discovered it (`AGENTS.md` §4 — no ambient authority;
-    /// §2.17 — never widen a defence). It is defined once here, beside the
-    /// type whose semantics it depends on (`AGENTS.md` §2.2), so the kernel
+    /// the driver that discovered it (no ambient authority;
+    /// — never widen a defence). It is defined once here, beside the
+    /// type whose semantics it depends on, so the kernel
     /// never re-decides per-kind containment.
     ///
     /// Coverage always requires identical `flags`, and — for every pairing
@@ -647,22 +641,21 @@ impl HwResource {
     ///   [`Irq`](HwResourceKind::Irq) are untranslated `[base, base+len)`
     ///   windows / line ranges: the child interval must lie wholly within
     ///   the parent's (checked arithmetic — a length overflow is refused,
-    ///   never wrapped, `AGENTS.md` §2.9).
+    ///   never wrapped).
     /// * [`BusWindow`](HwResourceKind::BusWindow) is a translated outbound
     ///   window: a child `BusWindow` sub-window's CPU-side interval must lie
     ///   within the parent's **and** carry the identical CPU↔bus translation
     ///   delta, so it keeps the parent's addressing exactly and cannot
     ///   re-point the far side elsewhere.
     /// * **`BusWindow` parent → `Mmio` child** is the one cross-kind pairing,
-    ///   and the central case of recursive PCI(e) discovery (`AGENTS.md`
-    ///   §18.1): a host bridge holds its outbound window as a `BusWindow`
+    ///   and the central case of recursive PCI(e) discovery: a host bridge holds its outbound window as a `BusWindow`
     ///   grant and authorises *every* CPU access within its CPU-side
     ///   `[base, base+len)` interval. When the bridge driver enumerates a
     ///   device behind it, that device's register BAR has already been
     ///   resolved to a CPU-physical [`Mmio`](HwResourceKind::Mmio) window
     ///   inside that interval, so the bridge legitimately grants it to the
     ///   child. Coverage is exactly CPU-side containment of the child window
-    ///   in the parent's — never wider (`AGENTS.md` §4 — no ambient
+    ///   in the parent's — never wider (no ambient
     ///   authority): the child receives a window the bridge already owns.
     /// * [`Dma`](HwResourceKind::Dma) is an addressing *constraint* (an
     ///   exclusive address ceiling `base` and an extent `len`), not a mapped
@@ -698,7 +691,7 @@ impl HwResource {
             | (HwResourceKind::Irq, HwResourceKind::Irq) => {
                 interval_contains(self.base, self.len, child.base, child.len)
             }
-            // Every other kind pairing fails closed (`AGENTS.md` §2.9 / §5.4).
+            // Every other kind pairing fails closed.
             _ => false,
         }
     }
@@ -755,12 +748,11 @@ impl HwResource {
 }
 
 /// A kernel-issued device-resource grant delivered to a driver process:
-/// the unforgeable grant handle paired with the [`HwResource`] it names
-/// (`AGENTS.md` §4 / §18.3 / §20).
+/// the unforgeable grant handle paired with the [`HwResource`] it names.
 ///
 /// When the kernel autoloads a driver it mints one grant per
 /// [`HwResource`] the driver's matched hardware-tree node requested — and
-/// no more (§4 — no ambient authority) — and hands the driver process the
+/// no more (no ambient authority) — and hands the driver process the
 /// handles. The process learns its grants through the `resource_grants`
 /// syscall ([`crate::SyscallNumber::RESOURCE_GRANTS`]), which serialises
 /// the task's grant set as a sequence of these records. The driver pairs
@@ -836,7 +828,7 @@ impl HwMatchKey {
     };
 }
 
-/// One node in the hardware tree (`AGENTS.md` §18.1).
+/// One node in the hardware tree.
 ///
 /// A node names exactly one detected bus or device: a stable [`id`], its
 /// [`parent`] ([`HW_NODE_ROOT`] for a root), a [`HwDeviceClass`], the
@@ -926,8 +918,8 @@ impl HwNode {
     /// assigns a fresh, collision-free id and sets the parent to the
     /// emitting driver's own matched node, so a driver can neither forge its
     /// position in the tree nor collide with an existing node's id
-    /// (`AGENTS.md` §4 / §5.4 — identity is kernel-provided, never
-    /// caller-supplied; §18.1). The store calls this on the decoded node
+    /// (identity is kernel-provided, never
+    /// caller-supplied;). The store calls this on the decoded node
     /// before it is recorded; an emitter builds the node (class, match keys,
     /// resources) and leaves the identity to the kernel.
     pub fn set_identity(&mut self, id: u32, parent: u32) {
@@ -1034,7 +1026,7 @@ impl HwNode {
 }
 
 /// Fixed-size header prefixing a [`crate::SyscallNumber::HW_TREE_READ`]
-/// reply (`AGENTS.md` §18.1 / §18.4).
+/// reply.
 ///
 /// The read syscall copies out `[HwTreeHeader][HwNode; node_count]`. The
 /// header tells the reader two things it cannot otherwise know from the
@@ -1383,7 +1375,7 @@ mod tests {
         assert!(!parent.covers(&HwResource::mmio(0x1000_F000, 0x2000)));
         assert!(!parent.covers(&HwResource::irq(0x1000_0000, 1)));
         // A length that would overflow the address space is refused, never
-        // wrapped into a spuriously-contained range (`AGENTS.md` §2.9).
+        // wrapped into a spuriously-contained range.
         assert!(!parent.covers(&HwResource::mmio(0x1000_0000, u64::MAX)));
     }
 
@@ -1406,7 +1398,7 @@ mod tests {
 
     #[test]
     fn covers_lets_a_bridge_window_cover_a_child_bar_inside_it() {
-        // The central recursive-PCI(e) case (`AGENTS.md` §18.1): a host
+        // The central recursive-PCI(e) case: a host
         // bridge holds its outbound window as a `BusWindow` grant and grants
         // an enumerated device's register BAR — a CPU-physical `Mmio` window
         // the bridge already owns — to the child driver. Coverage is exactly
@@ -1418,11 +1410,11 @@ mod tests {
         assert!(bridge.covers(&HwResource::mmio(0x6_0010_0000, 0x1_0000)));
         assert!(bridge.covers(&HwResource::mmio(0x6_0000_0000, 0)));
         // A BAR that starts below the bridge window or runs past its end is
-        // never minted to the child (`AGENTS.md` §4 — no ambient authority).
+        // never minted to the child (no ambient authority).
         assert!(!bridge.covers(&HwResource::mmio(0x5_FFFF_F000, 0x1000)));
         assert!(!bridge.covers(&HwResource::mmio(0x6_03FF_F000, 0x2000)));
         // A length that would overflow the address space is refused, never
-        // wrapped into a spuriously-contained range (`AGENTS.md` §2.9).
+        // wrapped into a spuriously-contained range.
         assert!(!bridge.covers(&HwResource::mmio(0x6_0000_0000, u64::MAX)));
         // The reverse direction is NOT symmetric: a plain MMIO grant never
         // confers a translating bus window on a child (fails closed).
@@ -1452,7 +1444,7 @@ mod tests {
     #[test]
     fn granted_resource_round_trips() {
         // A register-window grant: handle + the embedded HwResource decode
-        // back identically (the `resource_grants` delivery contract, §18.3).
+        // back identically (the `resource_grants` delivery contract).
         let grant = GrantedResource::new(7, HwResource::mmio(0xFD50_0000, 0x9310));
         let bytes = grant.to_le_bytes();
         assert_eq!(bytes.len(), GrantedResource::WIRE_LEN);
@@ -1482,7 +1474,7 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
         // A well-sized buffer whose embedded resource carries an unknown kind
-        // is rejected by `HwResource::from_bytes` (`AGENTS.md` §5.4).
+        // is rejected by `HwResource::from_bytes`.
         let mut bytes = GrantedResource::new(1, HwResource::mmio(0, 0)).to_le_bytes();
         put_u16(&mut bytes, 8, 9); // unknown HwResourceKind at the resource's offset
         assert_eq!(GrantedResource::from_bytes(&bytes), Err(Errno::OutOfRange));
@@ -1568,7 +1560,7 @@ mod tests {
 
     #[test]
     fn wire_lengths_are_frozen() {
-        // Pinned so an accidental layout change is caught (AGENTS.md §9).
+        // Pinned so an accidental layout change is caught.
         assert_eq!(HwMatchKey::WIRE_LEN, 76);
         assert_eq!(HwResource::WIRE_LEN, 32);
         assert_eq!(GrantedResource::WIRE_LEN, 40);

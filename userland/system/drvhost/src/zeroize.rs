@@ -1,6 +1,6 @@
 //! Volatile-clear primitive for sensitive buffers.
 //!
-//! Per `AGENTS.md` §4 ("Zero-on-free for any allocation that ever held
+//! Per ("Zero-on-free for any allocation that ever held
 //! credentials, keys, or capability tokens") the driver host must wipe
 //! every buffer that held a manifest signature or a capability bitmap
 //! before the allocation is returned. A plain `slice.fill(0)` is **not**

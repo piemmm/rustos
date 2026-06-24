@@ -39,7 +39,7 @@ const BOOT_CPU: CpuId = 0;
 /// Preemption-quantum rate (slices/second) — the shared production rate
 /// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ),
 /// a ~10 ms slice so a contended runaway spinner is preempted promptly
-/// under QEMU TCG. RustOS is tickless (`AGENTS.md` §17.1): the one-shot is
+/// under QEMU TCG. RustOS is tickless: the one-shot is
 /// armed to one quantum only while the spinner shares the hart with the
 /// competitor kthread, and disarmed once the spinner is the sole task.
 const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
@@ -58,7 +58,7 @@ const TARGET_PREEMPTIONS: u64 = 1;
 /// disarms it. A genuine periodic-timer regression would instead add
 /// *hundreds* of ticks over the long sole run, so this small bound stays
 /// immune to the benign boundary fire while still failing loudly on a
-/// re-armed periodic tick (`AGENTS.md` §7 — no flaky tests; §17.1).
+/// re-armed periodic tick (no flaky tests;).
 const SOLE_PREEMPT_SLACK: u64 = 16;
 
 /// Gigabytes of identity map the U-mode address space provides: `[0, 4 GiB)`
@@ -75,7 +75,7 @@ const USER_STACK_PAGES: u64 = 288;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the spawn build draws from: the program's segments, its
@@ -117,8 +117,7 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 /// [`PREEMPTIONS`] snapshot captured by the competitor kthread when it
 /// exits (handing the hart to the now-sole spinner); `u64::MAX` until
 /// recorded. `PREEMPTIONS == PREEMPTIONS_AT_SOLE` after the run proves the
-/// sole spinner took **no** further timer interrupt (tickless disarm,
-/// `AGENTS.md` §17.1).
+/// sole spinner took **no** further timer interrupt (tickless disarm).
 static PREEMPTIONS_AT_SOLE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
@@ -142,8 +141,7 @@ static ALLOCATOR: FreeListAllocator =
 /// Page-table pool backing the U-mode address space's Sv39 hierarchy.
 static PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 
-/// Per-hart preemption backing for the single boot hart (`AGENTS.md` §24.1 —
-/// `PreemptStorage<1>` covers a single-hart slice).
+/// Per-hart preemption backing for the single boot hart (`PreemptStorage<1>` covers a single-hart slice).
 static PREEMPT_STORAGE: PreemptStorage<1> = PreemptStorage::new();
 
 /// Physical-frame backing store the spawn builder allocates user pages from.
@@ -193,7 +191,7 @@ fn preempt_el0_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4).
+/// spawn caller requires.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -202,7 +200,7 @@ impl CapabilityQuery for SpawnAuthority {
 }
 
 /// The U-mode-preemption callback the timer trap path invokes for a tick taken
-/// from U-mode — the production dispatch shape verbatim (`AGENTS.md` §2.2): it
+/// from U-mode — the production dispatch shape verbatim: it
 /// suspends the running user task back to the scheduler via
 /// `reschedule_current(_, Yield)`, the involuntary analogue of a `yield`
 /// syscall. It records each preemption so the test can prove at least one fired
@@ -216,7 +214,7 @@ extern "C" fn preempt_dispatch(cpu: CpuId) {
 ///
 /// The spinner issues no `yield`; its only syscall is the `exit` that
 /// `rustos-rt` routes `main`'s return through. Any other syscall is unexpected
-/// and fails the test loudly (`AGENTS.md` §7).
+/// and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -296,7 +294,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     note(TEST_START, "riscv64 U-mode preemption test: starting");
 
     // Read the timer frequency from the firmware tree. Fail closed (finisher)
-    // if it is omitted rather than guessing a divisor (`AGENTS.md` §5.4).
+    // if it is omitted rather than guessing a divisor.
     // SAFETY: `dtb` is the verbatim `a1` pointer OpenSBI handed the boot hart;
     // `boot.s` forwards it unchanged.
     let Some(timebase) = (unsafe { Fdt::from_ptr(dtb as *const u8) })
@@ -331,8 +329,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     unsafe { trap::install_trap_vector() };
     syscall_entry::set_dispatch_callback(dispatch);
 
-    // Set up the production tickless preemption path verbatim (`AGENTS.md`
-    // §2.2): register the per-hart storage, install the U-mode-preemption
+    // Set up the production tickless preemption path verbatim: register the per-hart storage, install the U-mode-preemption
     // callback, record the per-quantum interval, and enable `sie.STIE` — but
     // leave the timer **disarmed**. The scheduler arms the one-shot to one
     // quantum only when it dispatches the spinner onto a hart that still has
@@ -353,8 +350,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     }
 
     // Build the live scheduler over the production arch handle. Single-hart
-    // slice: one per-CPU slot, owned by an allocator-free `static` backing
-    // (`AGENTS.md` §24.1).
+    // slice: one per-CPU slot, owned by an allocator-free `static` backing.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -366,7 +362,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // records the count, and exits — handing the hart to the now-sole
     // spinner. While it is queued the scheduler arms the one-shot, so the
     // runaway spinner is preempted (contention case); once it exits the sole
-    // spinner runs disarmed to completion (tickless case, `AGENTS.md` §17.1).
+    // spinner runs disarmed to completion (tickless case).
     let competitor = move |yielder: &mut Yielder<ContextSwitchHal>| {
         while PREEMPTIONS.load(Ordering::SeqCst) < TARGET_PREEMPTIONS {
             yielder.yield_now();
@@ -386,7 +382,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     }
 
     // Admit the spinner as a resumable user kthread: its `pre_resume` hook
-    // reactivates its page-table root (isolation, §4), and its work body
+    // reactivates its page-table root (isolation), and its work body
     // `enter_user`s into U-mode.
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -416,7 +412,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // never-yielding spinner is preempted; once the competitor exits, the
     // lone spinner runs disarmed to completion and `exit`s. A preemption
     // that never fires would leave the contended `step` spinning forever in
-    // U-mode and the harness would time out (fail-loud, `AGENTS.md` §7).
+    // U-mode and the harness would time out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

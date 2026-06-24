@@ -2,14 +2,14 @@
 //!
 //! A theme names fonts by *role*, not by widget: the UI font and the
 //! monospace font. A font is referenced by the family name of an installed
-//! face under `/System/Fonts` (`AGENTS.md` §16.2) plus a size and weight;
+//! face under `/System/Fonts` plus a size and weight;
 //! this crate stores the reference, it does not rasterise glyphs.
 //!
 //! Sizes are *logical* pixels at the reference density
 //! (`rustos_geometry::REFERENCE_DPI`); the desktop's DPI / UI scale
 //! (`rustos_geometry::Scale`) converts a size to physical pixels when a face
 //! is rasterised, so text stays a comfortable physical size across panel
-//! densities (`AGENTS.md` §10).
+//! densities.
 
 use alloc::string::String;
 

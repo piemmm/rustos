@@ -30,7 +30,7 @@
 //! A regression that fails to start the secondary core or to deliver the
 //! IPI never reaches the PASS write, so the run times out and the
 //! harness reports `Outcome::Timeout` — the documented fail-loud
-//! behaviour (`AGENTS.md` §7).
+//! behaviour.
 //!
 //! ## PSCI conduit (PI Stage P5)
 //!
@@ -64,7 +64,7 @@
 //! It links only the `rustos-arch-aarch64` port (the SMP path needs no
 //! `kernel/*` subsystem) and supplies its own `kernel_main`. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on the arch crate (`AGENTS.md` §5.4.5 — fail closed).
+//! feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -234,8 +234,7 @@ mod kernel {
         // targets the right GICv2 CPU interface. Install the *discovered*
         // PSCI conduit so the `SecondaryBringup` HAL trait issues `CPU_ON`
         // over the conduit read from the tree (`plans/PI.md` P5).
-        // Per-CPU bookkeeping backing for this two-core vertical
-        // (`AGENTS.md` §24.1).
+        // Per-CPU bookkeeping backing for this two-core vertical.
         static ARCH_STORAGE: Aarch64ArchStorage<2> = Aarch64ArchStorage::new();
         let arch = Aarch64Arch::with_cpus(
             &ARCH_STORAGE,
@@ -273,7 +272,7 @@ mod kernel {
         // Register the secondary-core stack pool sized to this two-core
         // vertical before any `CPU_ON`; the `smp.s` trampoline reads its
         // published base/stride to seed each started core's stack
-        // (`AGENTS.md` §24.1 — the pool scales with the machine's core
+        // (the pool scales with the machine's core
         // count, not a fixed `const`).
         static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();
         if SECONDARY_STACKS.register().is_err() {

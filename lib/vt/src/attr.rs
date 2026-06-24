@@ -3,8 +3,7 @@
 //!
 //! [`Sgr`] is the typed vocabulary of individual SGR operations. The numeric
 //! parameter encoding lives here, in [`Sgr::write_params`] and
-//! [`decode_params`], so the emitter and the parser share **one** SGR table
-//! (`AGENTS.md` §2.2): every [`Sgr`] the emitter writes decodes back to the
+//! [`decode_params`], so the emitter and the parser share **one** SGR table: every [`Sgr`] the emitter writes decodes back to the
 //! identical [`Sgr`].
 //!
 //! [`Attributes`] is the folded result — the rendition state a cell is drawn
@@ -137,8 +136,7 @@ fn basic_code(basic: BasicColor, background: bool) -> u16 {
 /// order.
 ///
 /// An empty list means `CSI m`, which is `CSI 0 m` — a reset. Unrecognised
-/// codes and malformed extended-colour runs are skipped (fail closed,
-/// `AGENTS.md` §2.9) rather than producing a bogus operation. This is the
+/// codes and malformed extended-colour runs are skipped (fail closed) rather than producing a bogus operation. This is the
 /// inverse of [`Sgr::write_params`] over the same table.
 pub fn decode_params(params: &[u16], mut sink: impl FnMut(Sgr)) {
     if params.is_empty() {

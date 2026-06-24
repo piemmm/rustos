@@ -1,4 +1,4 @@
-//! x86_64 memory tagging (`AGENTS.md` §19.10).
+//! x86_64 memory tagging.
 //!
 //! Implements the Arch HAL
 //! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for x86_64.
@@ -11,11 +11,11 @@
 //! store a matching tag per memory granule and does **not** fault on a
 //! mismatch — they are address-masking features, not memory tagging.
 //!
-//! So both §19.10 features are an honest [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported). On
+//! So both features are an honest [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported). On
 //! x86_64 use-after-free is hardened by the architecture-neutral
 //! *software* tag check in `kernel/mem` (which uses the same
 //! [`rustos_arch_api::next_free_tag`] rotation this HAL defines) layered
-//! on the slab guard pages and W^X (`AGENTS.md` §4, §19.2). The granule
+//! on the slab guard pages and W^X. The granule
 //! is therefore the trivial one byte and the tag space collapses to the
 //! single tag `0`.
 
@@ -34,7 +34,7 @@ impl MemoryTags {
         Self
     }
 
-    /// The honest §19.10 declaration for x86_64 (see the module docs).
+    /// The honest declaration for x86_64 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> TaggingProfile {
         TaggingProfile {

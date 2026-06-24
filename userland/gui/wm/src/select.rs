@@ -20,7 +20,7 @@
 //! - over the desktop background it is the plain [`CursorKind::Arrow`].
 //!
 //! The policy is a pure function of state, so it is trivially testable and
-//! has no hidden authority (`AGENTS.md` §2.11).
+//! has no hidden authority.
 //!
 //! # Applying the choice
 //!
@@ -28,8 +28,7 @@
 //! [`CursorRegistry`] and remembers which [`CursorKind`] is on screen and at
 //! what density it was rasterised. It does **not** own the scale: the desktop
 //! density belongs to the output, so the controller reads it from the
-//! [`Compositor`] ([`Compositor::scale`]) every time it installs a cursor
-//! (`AGENTS.md` §10 / §2.2). [`CursorController::refresh`] runs the policy and
+//! [`Compositor`] ([`Compositor::scale`]) every time it installs a cursor. [`CursorController::refresh`] runs the policy and
 //! re-rasterises only when something the cursor depends on actually changed —
 //! the chosen kind, the active cursor set, or the output scale — installing
 //! the result through [`Compositor::set_cursor`]. A runtime DPI change is
@@ -37,8 +36,7 @@
 //! *motion* is not its job — the caller moves the existing overlay with
 //! [`Compositor::move_cursor`]; the controller switches the *shape*.
 //!
-//! Rasterisation can fail (a degenerate cursor or scale yields no image,
-//! `AGENTS.md` §2.9). The controller fails closed: it leaves the current
+//! Rasterisation can fail (a degenerate cursor or scale yields no image). The controller fails closed: it leaves the current
 //! cursor in place and reports that nothing changed rather than blanking the
 //! pointer or panicking.
 
@@ -72,8 +70,7 @@ pub fn desired_cursor(router: &InputRouter, compositor: &Compositor) -> CursorKi
 
 /// The epoch a cached cursor image is valid for: the desktop scale (in
 /// percent) paired with the active cursor-set id. A scale change or a
-/// cursor-set swap moves the epoch on and invalidates every cached image
-/// (`AGENTS.md` §10).
+/// cursor-set swap moves the epoch on and invalidates every cached image.
 type CursorEpoch = (u32, CursorSetId);
 
 /// Drives the on-screen pointer shape from interaction state.
@@ -82,13 +79,13 @@ type CursorEpoch = (u32, CursorSetId);
 /// [`CursorKind`] currently shown, paired with the cache epoch (scale and
 /// cursor-set id) it was rasterised for. The density is **not** stored here —
 /// it belongs to the output, so [`refresh`](Self::refresh) reads it from the
-/// [`Compositor`] (`AGENTS.md` §10 / §2.2) and applies the [`desired_cursor`]
+/// [`Compositor`] and applies the [`desired_cursor`]
 /// policy.
 ///
 /// Each shown [`CursorKind`] is rasterised at most once per scale and cursor
 /// set: a [`RasterCache`] keyed by kind keeps the converted [`CursorImage`]
 /// so re-showing a kind reuses the image and only a scale or set change
-/// re-rasterises (`AGENTS.md` §10). Cursor *motion* never touches the cache;
+/// re-rasterises. Cursor *motion* never touches the cache;
 /// it moves the existing overlay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorController {
@@ -159,7 +156,7 @@ impl CursorController {
     /// already shown it does no work and returns `false`. The pointer's
     /// *position* is updated separately with [`Compositor::move_cursor`].
     /// Fails closed: if the chosen kind cannot be rasterised, the current
-    /// cursor is left untouched (`AGENTS.md` §2.9).
+    /// cursor is left untouched.
     pub fn refresh(&mut self, router: &InputRouter, compositor: &mut Compositor) -> bool {
         let kind = desired_cursor(router, compositor);
         let epoch = self.epoch(compositor);
@@ -177,8 +174,7 @@ impl CursorController {
 
     /// Rasterise `kind` at the compositor's current scale and install it so
     /// its hotspot lands on `pointer`. Fails closed (leaving any current
-    /// cursor untouched) if the cursor cannot be rasterised (`AGENTS.md`
-    /// §2.9).
+    /// cursor untouched) if the cursor cannot be rasterised.
     fn install(&mut self, kind: CursorKind, pointer: Point, compositor: &mut Compositor) -> bool {
         let epoch = self.epoch(compositor);
         let registry = &self.registry;

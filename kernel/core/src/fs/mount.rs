@@ -1,5 +1,4 @@
-//! The mount table and its per-mount permission policy (`AGENTS.md`
-//! §5.3, §16.2, §16.3).
+//! The mount table and its per-mount permission policy.
 //!
 //! A mount associates a subtree (identified by its mount-point [`Path`])
 //! with a set of [`MountFlags`] (`ro`, `nosuid`, `nodev`, `noexec`) and,
@@ -7,7 +6,7 @@
 //! The VFS consults the table on every write to decide whether the most
 //! specific mount covering a path forbids it (e.g. `/System` is mounted
 //! read-only; its `/System/Logs` and `/System/Settings` children are
-//! writable child mounts — `AGENTS.md` §16.2).
+//! writable child mounts).
 //!
 //! "Most specific" is the longest mount-point [`Path`] that is a prefix of
 //! the queried path. The root mount (`/`) covers everything, so resolution
@@ -104,7 +103,7 @@ impl MountTable {
     }
 
     /// Give the permanent root mount a backing filesystem driver — the
-    /// shape of a block-backed root volume (the whole `AGENTS.md` §16
+    /// shape of a block-backed root volume (the whole
     /// tree lives on one driver-mounted volume, as the installer lays it
     /// out). The root mount's flags are unchanged.
     ///
@@ -112,7 +111,7 @@ impl MountTable {
     ///
     /// Returns [`VfsError::AlreadyExists`] if the root mount already has
     /// a backing driver: a second root volume is a wiring defect, never
-    /// a silent re-mount (`AGENTS.md` §5.4 — fail closed).
+    /// a silent re-mount (fail closed).
     pub fn back_root(&mut self, backing: DriverHandle) -> Result<(), VfsError> {
         let root = &mut self.mounts[0];
         if root.backing.is_some() {

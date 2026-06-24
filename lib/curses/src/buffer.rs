@@ -4,7 +4,7 @@
 //! owns one, and the [screen driver] keeps two (the assembled *virtual* screen
 //! and the last-flushed *physical* screen) so the [renderer] can diff them. All
 //! access is bounds-checked and total — an out-of-range coordinate is a
-//! [`None`]/`false`, never a panic (`AGENTS.md` §2.9).
+//! [`None`]/`false`, never a panic.
 //!
 //! [screen driver]: crate::Screen
 //! [renderer]: mod@crate::render

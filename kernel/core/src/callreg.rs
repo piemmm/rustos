@@ -14,19 +14,18 @@
 //!
 //! Like [`crate::waitq::CALL_WAITQ`], the registry is global pure data
 //! behind a [`SpinLock`] (never a `static mut`, so it is not the global
-//! mutable static `AGENTS.md` §2.1 forbids): the kthread server and the
+//! mutable static the charter forbids): the kthread server and the
 //! syscall handler live in different crates and neither owns the other, so
 //! a global rendezvous keyed by the well-known
 //! [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`] avoids threading an
-//! [`Arc`] through `KernelState`'s cross-crate wiring (`AGENTS.md` §2.2 /
-//! §17.4). Each endpoint is held behind an [`Arc`] so the server and every
+//! [`Arc`] through `KernelState`'s cross-crate wiring. Each endpoint is held behind an [`Arc`] so the server and every
 //! in-flight caller share one instance for its life.
 //!
 //! # Fail closed
 //!
 //! [`register`] refuses to overwrite a live binding (returns
 //! [`Errno::AlreadyExists`]) so the kernel never silently re-points a live
-//! endpoint (`AGENTS.md` §5.4); [`lookup`] of an unbound id yields `None`,
+//! endpoint; [`lookup`] of an unbound id yields `None`,
 //! which the handler maps to [`Errno::NotFound`] and audits at that
 //! boundary (mirroring [`rustos_kernel_ipc::registry::PortRegistry`]).
 
@@ -51,7 +50,7 @@ static CALL_ENDPOINTS: SpinLock<BTreeMap<EndpointId, Arc<CallEndpoint>>> =
 ///
 /// [`Errno::AlreadyExists`] if the id is already bound; the existing
 /// binding is left untouched and the kernel never silently overwrites a
-/// live endpoint (`AGENTS.md` §5.4).
+/// live endpoint.
 pub fn register(endpoint: Arc<CallEndpoint>) -> Result<(), Errno> {
     let id = endpoint.id();
     let mut map = CALL_ENDPOINTS.lock();
@@ -86,7 +85,7 @@ pub fn unregister(id: EndpointId) -> Option<Arc<CallEndpoint>> {
 /// are blocked in `ipc_call` awaiting its replies. Without this, those
 /// callers would park forever on a dead endpoint; destroying the endpoint
 /// flips every outstanding call to [`rustos_kernel_ipc::ReplyOutcome::Cancelled`]
-/// so the next poll abandons fail-closed (`AGENTS.md` §2.9 / §5.4). The
+/// so the next poll abandons fail-closed. The
 /// caller wakes the parked callers (via [`crate::waitq::call_wake`]) when the
 /// return value is non-zero — kept out of this registry function so it stays
 /// pure registry mechanics.

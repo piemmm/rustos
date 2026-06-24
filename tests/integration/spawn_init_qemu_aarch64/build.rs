@@ -5,8 +5,7 @@
 //! to the P6c-2 boot-to-`BootCompleted` vertical:
 //!
 //! 1. Hand the aarch64 `virt` linker script to `rustc` — the single
-//!    per-board linker script the architecture port owns (`AGENTS.md`
-//!    §2.2). (`rustos-kernel`'s own build script links the Raspberry Pi 4
+//!    per-board linker script the architecture port owns. (`rustos-kernel`'s own build script links the Raspberry Pi 4
 //!    `aarch64-rpi4.ld` for its *binary*; a dependency's `rustc-link-arg`
 //!    does not propagate to this bin, so there is no conflict and this
 //!    vertical links the `virt` script it actually runs under.)
@@ -15,11 +14,10 @@
 //!    (`x0 = 0`); the boot pipeline is handed a pointer to this embedded
 //!    blob so it discovers the console, GIC, `/memory` window, timer rate,
 //!    and PSCI conduit exactly as on real firmware. The dump helper lives
-//!    in the shared harness so no aarch64 build script re-rolls it
-//!    (`AGENTS.md` §2.2).
+//!    in the shared harness so no aarch64 build script re-rolls it.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;

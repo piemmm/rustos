@@ -18,7 +18,7 @@
 //! and lends the assembled `Host` (plus the provisioned transport) to a
 //! `body` closure. The host, factory, and the per-driver DMA pools it
 //! mints are all reclaimed when the closure returns — no driver retains
-//! a register window or DMA mapping past its load (`AGENTS.md` §4).
+//! a register window or DMA mapping past its load.
 
 use rustos_abi::driver::msix::MsixBus;
 use rustos_abi::driver::virtio_pci::VirtioPciBus;
@@ -63,7 +63,7 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTable> {
     /// allocation is audited against this set.
     pub caller: &'k TaskCapabilities,
     /// Audit sink for every map/DMA/load decision. `+ Sync` so the minted
-    /// `KernelVirtioHost` is `Sync` (a shared `&'static` host, `AGENTS.md` §4).
+    /// `KernelVirtioHost` is `Sync` (a shared `&'static` host).
     pub audit: &'k (dyn Sink + Sync),
     /// Kernel IRQ table the device's interrupt line is bound in.
     pub irq: &'k IrqTable,
@@ -103,7 +103,7 @@ pub struct VirtioBootConfig<'k, 'p, P: PageTable> {
 ///
 /// `make_table` is invoked once per minted driver host to produce the
 /// empty page table backing that driver's private address space; it
-/// must return a fresh, empty table each time (`AGENTS.md` §4).
+/// must return a fresh, empty table each time.
 ///
 /// # Errors
 ///

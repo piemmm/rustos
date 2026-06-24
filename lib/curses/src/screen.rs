@@ -9,7 +9,7 @@
 //!
 //! The [`Tty`] seam is the same shape as the terminal app's `ShellSource`
 //! (`plans/CURSES.md` §C4): injecting an in-memory channel makes the whole
-//! driver host-testable without a kernel (`AGENTS.md` §7). Reads decode through
+//! driver host-testable without a kernel. Reads decode through
 //! [`Input`] into typed [`Event`]s.
 //!
 //! [renderer]: mod@crate::render
@@ -55,8 +55,7 @@ pub trait Tty {
     /// read (an empty vector signals end-of-input — the far end has closed).
     ///
     /// This backs the blocking [`getch`](Screen::getch). The kernel-backed
-    /// channel parks the task until the tty is readable (never busy-spins,
-    /// `AGENTS.md` §2.1); the default delegates to [`Tty::read`] for channels
+    /// channel parks the task until the tty is readable (never busy-spins); the default delegates to [`Tty::read`] for channels
     /// (such as a fixed test queue) that cannot truly block.
     ///
     /// # Errors

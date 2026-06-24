@@ -2,8 +2,7 @@
 //! the arch port's PLIC register driver.
 //!
 //! The riscv64 arch port (`kernel/arch/riscv64`) is a pure Arch HAL
-//! implementation and owns no `kernel/irq` dependency (`AGENTS.md`
-//! §17.2): its [`rustos_arch_riscv64::plic::PlicController`] exposes an
+//! implementation and owns no `kernel/irq` dependency: its [`rustos_arch_riscv64::plic::PlicController`] exposes an
 //! inherent `mask`/`arm`/`unmask`/`claim`/`complete` surface but does
 //! not implement the architecture-neutral
 //! [`rustos_kernel_irq::IrqController`] trait. Rust's orphan rules

@@ -12,7 +12,7 @@
 //! Shapes are painted in order, each composited *over* the ones below it
 //! through `lib/raster`'s single premultiplied-alpha path, so a cursor can
 //! layer a dark outline beneath a light body and stay legible over any
-//! background (`AGENTS.md` §2.2 — no colour arithmetic is duplicated here).
+//! background (no colour arithmetic is duplicated here).
 
 use alloc::vec::Vec;
 
@@ -45,7 +45,7 @@ impl Vertex {
 /// that crosses itself behaves as a designer would expect. Richer artwork is
 /// built by stacking layers (the bottom shape first), not by multi-contour
 /// rings. Fewer than three vertices covers no area and is skipped rather
-/// than rejected (`AGENTS.md` §2.9).
+/// than rejected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shape {
     /// The straight-alpha fill colour of this layer.
@@ -63,8 +63,7 @@ impl Shape {
 
     /// Build a shape from a fill colour and a static slice of `(x, y)`
     /// design-grid coordinate pairs. Used by the built-in cursor set so its
-    /// geometry reads as self-documenting coordinate tables (`AGENTS.md`
-    /// §2.11).
+    /// geometry reads as self-documenting coordinate tables.
     #[must_use]
     pub fn from_points(fill: Color, points: &[(i32, i32)]) -> Self {
         let polygon = points.iter().map(|&(x, y)| Vertex::new(x, y)).collect();
@@ -80,8 +79,7 @@ impl Shape {
 /// in the same units, so it scales with the artwork. A cursor with no
 /// shapes is legal (it rasterises to a fully transparent image); a
 /// degenerate `design_size` of zero is not renderable and the rasteriser
-/// reports that by returning `None` rather than panicking (`AGENTS.md`
-/// §2.9).
+/// reports that by returning `None` rather than panicking.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VectorCursor {
     design_size: u32,

@@ -28,10 +28,10 @@
 //! deliberately lock-free: it is a single store to a per-source
 //! register, so it needs no read-modify-write and races neither the
 //! trap handler's claim/complete nor a concurrent arm/unmask on a
-//! different source (`AGENTS.md` §4 — no hacks,
+//! different source (no hacks,
 //! interrupt-reentrancy-safe by design).
 //!
-//! # Arch HAL boundary (`AGENTS.md` §17.2)
+//! # Arch HAL boundary
 //!
 //! This crate is a pure Arch HAL implementation and does **not** name
 //! `kernel/irq`. [`PlicController`] exposes an inherent
@@ -223,9 +223,9 @@ pub enum PlicError {
 /// Single-context PLIC controller: the policy layer over [`Plic`].
 ///
 /// The controller validates every source against `max_source` and
-/// fails closed (`AGENTS.md` §5.4.5) before touching a register. It
+/// fails closed before touching a register. It
 /// exposes an inherent [`Self::mask`] the downstream `IrqController`
-/// bridge forwards to (`AGENTS.md` §17.2 — the arch port owns no
+/// bridge forwards to (the arch port owns no
 /// `kernel/irq` dependency).
 pub struct PlicController<M: PlicMmio> {
     plic: Plic<M>,
@@ -319,7 +319,7 @@ impl<M: PlicMmio> PlicController<M> {
     ///
     /// This is the primitive the downstream `IrqController` bridge
     /// forwards `mask` to; keeping it inherent is what lets the arch
-    /// port avoid a `kernel/irq` dependency (`AGENTS.md` §17.2).
+    /// port avoid a `kernel/irq` dependency.
     ///
     /// # Errors
     ///
@@ -346,10 +346,10 @@ impl<M: PlicMmio + Send + Sync> rustos_arch_api::IrqController for PlicControlle
     /// Mask `line` (a PLIC source) by dropping its priority to zero,
     /// forwarding to the inherent [`PlicController::mask`].
     ///
-    /// This is the §17.2 HAL view of the mask-before-wake primitive the
+    /// This is the HAL view of the mask-before-wake primitive the
     /// downstream `kernel/irq` bridge already forwards to; exposing it
     /// through the trait lets the architecture-neutral kernel name one
-    /// controller surface across every port (`AGENTS.md` §2.2) without
+    /// controller surface across every port without
     /// the arch port acquiring a `kernel/irq` dependency.
     fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
         PlicController::mask(self, line)
@@ -368,8 +368,7 @@ impl<M: PlicMmio + Send + Sync> rustos_arch_api::InterruptEntry for PlicControll
     /// Claim the highest-priority pending source for this context.
     ///
     /// The PLIC reports source `0` ("no interrupt pending") when nothing
-    /// is pending; the HAL surface maps that to [`None`]
-    /// (`AGENTS.md` §17.2).
+    /// is pending; the HAL surface maps that to [`None`].
     fn claim(&self) -> Option<u32> {
         match PlicController::claim(self) {
             0 => None,

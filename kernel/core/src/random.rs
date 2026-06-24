@@ -1,10 +1,9 @@
-//! The kernel random output reserve, composed into `KernelState`
-//! (`AGENTS.md` §22).
+//! The kernel random output reserve, composed into `KernelState`.
 //!
 //! RustOS has exactly one kernel cryptographic random subsystem. The
 //! `random_get` syscall (`abi-v1` syscall 8) serves bytes from a bounded
 //! reserve of CSPRNG **output** — `rustos_rng::OutputReserve` — refilled on
-//! demand and never weakened to a low-quality fallback (`AGENTS.md` §22).
+//! demand and never weakened to a low-quality fallback.
 //! This module is the thin seam that lets `KernelState` *hold* that reserve
 //! without naming a concrete entropy source, and that maps a reserve failure
 //! onto the stable random ABI errno.
@@ -14,18 +13,18 @@
 //! [`OutputReserve<E, N>`] is generic over its entropy source `E` and buffer
 //! size `N`, but the syscall handler must not be generic over them: it reads
 //! the reserve through one borrow held in `KernelState`, and the concrete
-//! entropy seam is supplied later (the platform-RNG `EntropySource`, §17.2,
+//! entropy seam is supplied later (the platform-RNG `EntropySource`,
 //! is still pending — see [`NullEntropy`]). [`RandomReserve`] is the
 //! object-safe view the handler depends on; `KernelState` stores a
 //! `Box<dyn RandomReserve + Send + Sync>` and swaps in a seeded reserve when
 //! the entropy seam lands, without touching the `random_get` ABI signature
-//! (`AGENTS.md` §2.4 — no interface creep, §5.7 — security by default).
+//! (no interface creep — security by default).
 //!
 //! # Fail closed
 //!
 //! Until the reserve is seeded it is **not ready**: a draw returns
 //! [`ReserveError::NotReady`], which the handler maps to
-//! [`Errno::EntropyNotReady`] (`AGENTS.md` §22 — before the kernel RNG is
+//! [`Errno::EntropyNotReady`] (before the kernel RNG is
 //! initialised a non-blocking request fails closed rather than returning
 //! weak randomness). A draw never substitutes predictable bytes.
 
@@ -38,10 +37,9 @@ use rustos_rng::{EntropyError, EntropySource, OutputReserve, ReserveError};
 /// fallible (`non_blocking`) or blocking reserve path. It exists so
 /// `KernelState` can hold the reserve as a `Box<dyn RandomReserve + Send +
 /// Sync>` while the concrete entropy source `E` stays an implementation
-/// detail of whatever seeds it (`AGENTS.md` §17.2 — the platform entropy
+/// detail of whatever seeds it (the platform entropy
 /// seam is the only architecture-aware part). The blanket impl below is the
-/// single bridge to [`OutputReserve`]; there is no second drawing path
-/// (`AGENTS.md` §2.2).
+/// single bridge to [`OutputReserve`]; there is no second drawing path.
 pub trait RandomReserve {
     /// Fill `out` with cryptographically secure random bytes.
     ///
@@ -49,7 +47,7 @@ pub trait RandomReserve {
     /// entropy fails closed (the fallible [`OutputReserve::fill`]); otherwise
     /// the call waits through the reseed (the blocking
     /// [`OutputReserve::fill_blocking`]). Generation from a *seeded* reserve
-    /// never blocks for entropy (`AGENTS.md` §22).
+    /// never blocks for entropy.
     ///
     /// # Errors
     ///
@@ -78,10 +76,9 @@ where
 /// source so a reserve always exists, but it is **never seeded from it**:
 /// every draw reports [`EntropyError::Unavailable`], so the reserve stays
 /// [`ReserveError::NotReady`] and `random_get` fails closed with
-/// [`Errno::EntropyNotReady`] until the platform-RNG `EntropySource` (§17.2,
-/// the same seam the encrypted-swap key is drawn from, §4) is installed and
-/// the reserve re-seeded. A genuinely dead source is exactly what `AGENTS.md`
-/// §22 says a blocking draw must fail closed on rather than park forever.
+/// [`Errno::EntropyNotReady`] until the platform-RNG `EntropySource` (
+/// the same seam the encrypted-swap key is drawn from) is installed and
+/// the reserve re-seeded. A genuinely dead source is exactly what says a blocking draw must fail closed on rather than park forever.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NullEntropy;
 
@@ -95,7 +92,7 @@ impl EntropySource for NullEntropy {
 /// the unseeded [`NullEntropy`] source.
 pub type BootReserve = OutputReserve<NullEntropy>;
 
-/// Map a reserve failure onto the stable random ABI errno (`AGENTS.md` §22).
+/// Map a reserve failure onto the stable random ABI errno.
 ///
 /// Both the pre-seed [`ReserveError::NotReady`] and a reseed-time
 /// [`ReserveError::Entropy`] shortage collapse onto
@@ -104,13 +101,13 @@ pub type BootReserve = OutputReserve<NullEntropy>;
 /// `random_get` contract promises (`lib/abi`'s `random` module). The handler
 /// never distinguishes the two as a randomness oracle. [`ReserveError`] is
 /// `#[non_exhaustive]`, so any future variant also fails closed to the same
-/// errno rather than leaking through (`AGENTS.md` §5.4).
+/// errno rather than leaking through.
 #[must_use]
 pub fn reserve_errno(_err: ReserveError) -> Errno {
     // Every reserve failure — the pre-seed `NotReady`, a transient reseed
     // `Entropy` shortage, or any future `#[non_exhaustive]` variant — means
     // "no cryptographically secure bytes right now" and collapses onto one
-    // errno, so the cause is never an oracle (`AGENTS.md` §5.4 / §22).
+    // errno, so the cause is never an oracle.
     Errno::EntropyNotReady
 }
 
@@ -143,7 +140,7 @@ mod tests {
         assert!(!reserve.is_ready());
         let mut out = [0u8; 8];
         assert_eq!(reserve.draw(&mut out, true), Err(ReserveError::NotReady));
-        // The fail-closed draw leaves the buffer untouched (§5.4).
+        // The fail-closed draw leaves the buffer untouched.
         assert_eq!(out, [0u8; 8]);
     }
 

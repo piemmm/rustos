@@ -30,7 +30,7 @@
 //! # Deliberate simplifications
 //!
 //! These keep a first shell small and predictable; each is documented where
-//! it lives rather than papered over (`AGENTS.md` §2.1, §2.3):
+//! it lives rather than papered over:
 //!
 //! * Expansion does not field-split or remove empty results: each word
 //!   becomes exactly one argument.
@@ -40,11 +40,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the audited
+//! `no_std` (with `alloc`); the only dependency is the audited
 //! `lib/abi` (for [`Errno`](rustos_abi::Errno) on the host seam), so a
-//! userland program never links a kernel or driver crate (`AGENTS.md` §17.4).
-//! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths
-//! (`AGENTS.md` §2.9).
+//! userland program never links a kernel or driver crate.
+//! No `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

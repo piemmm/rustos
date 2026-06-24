@@ -17,17 +17,16 @@
 //! there is no allocator yet. A fixed `static mut PER_CPU: [PerCpu;
 //! MAX_CPUS]` would therefore size the per-CPU arena to a hand-picked
 //! compile-time constant that a larger machine outgrows and a smaller
-//! one wastes — exactly the §24.1 "no fixed capacity ceiling" defect.
+//! one wastes — exactly the "no fixed capacity ceiling" defect.
 //!
 //! Instead the per-CPU arena is a caller-owned [`PerCpuStorage`]: the
-//! constructing boot path sizes `N` for the machine's §18-discovered
+//! constructing boot path sizes `N` for the machine's-discovered
 //! logical-CPU count, places it in a `static` (allocator-free bins) or a
 //! leaked allocation, and publishes it through
 //! [`PerCpuStorage::register`] before the first `init`. The per-CPU
 //! entry points then index the registered slices, bounds-checked against
 //! the published length; before registration — or for an out-of-range
-//! index — they fail closed with [`InitError::CpuIndexOutOfRange`]
-//! (`AGENTS.md` §2.9 / §24.1). This mirrors the aarch64
+//! index — they fail closed with [`InitError::CpuIndexOutOfRange`]. This mirrors the aarch64
 //! `smp::SecondaryStackPool` / riscv64 `smp::SecondaryStackPool`
 //! caller-sized secondary-bring-up pools and the crate's own
 //! [`crate::kernel_arch::X86_64ArchStorage`].
@@ -67,8 +66,7 @@ pub const IST_INDEX_NMI: u8 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
     /// `cpu_index` was outside the registered [`PerCpuStorage`] (or no
-    /// storage is registered yet — fail closed, `AGENTS.md` §2.9 /
-    /// §24.1).
+    /// storage is registered yet — fail closed).
     CpuIndexOutOfRange,
     /// `init` was called more than once for this CPU index.
     AlreadyInitialised,
@@ -82,7 +80,7 @@ pub enum InitError {
     /// A kernel `RSP0` (the ring-0 stack the CPU loads on a `syscall`
     /// from ring 3) was rejected: null, not 16-byte aligned,
     /// non-canonical, or in the user half of the address space
-    /// (`AGENTS.md` §3.5 / §5 — stack-pivot / CVE-2019-1125 class).
+    /// (stack-pivot / CVE-2019-1125 class).
     InvalidKernelStackPointer,
 }
 
@@ -150,7 +148,7 @@ impl PerCpu {
 
 /// Published base of the registered [`PerCpuStorage::cpus`] array
 /// (`null` until a storage is registered, so every per-CPU entry point
-/// fails closed before registration — `AGENTS.md` §2.9 / §24.1).
+/// fails closed before registration).
 static PER_CPU_BASE: AtomicPtr<PerCpu> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Published base of the registered [`PerCpuStorage::initialised`]
@@ -160,7 +158,7 @@ static PER_CPU_INIT_BASE: AtomicPtr<AtomicBool> = AtomicPtr::new(core::ptr::null
 
 /// Number of logical-CPU slots the registered storage covers (`0` until
 /// a storage is registered, so an unregistered system fails closed —
-/// every index is out of range, `AGENTS.md` §2.9 / §24.1).
+/// every index is out of range).
 static PER_CPU_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Set-once guard so a second [`PerCpuStorage::register`] is refused
@@ -171,19 +169,19 @@ static PER_CPU_REGISTERED: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PerCpuStorageError {
     /// Storage was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live arena).
+    /// (no silent re-pointing of the live arena).
     AlreadyRegistered,
 }
 
 /// Caller-owned, `&'static` per-CPU GDT/IDT/IST arena, sized by the
-/// constructing caller for its machine (`AGENTS.md` §24.1 — the per-CPU
-/// arena is derived from the §18-discovered logical-CPU count, never a
+/// constructing caller for its machine (the per-CPU
+/// arena is derived from the-discovered logical-CPU count, never a
 /// fixed `const` ceiling baked into the arch crate).
 ///
 /// The const parameter `N` is the number of logical CPUs the caller
 /// sizes for: a single-CPU boot path uses `PerCpuStorage<1>`, and a
 /// multi-core boot path sizes `N` from the ACPI MADT processor count.
-/// The arch crate stays allocator-free (`AGENTS.md` §24.1 watch-out — no
+/// The arch crate stays allocator-free (watch-out — no
 /// `alloc` in a bare-metal arch crate, which would force a heap into the
 /// freestanding QEMU bins), so the caller provides the storage as a
 /// `static` (allocator-free bins) or a leaked allocation and publishes it
@@ -227,8 +225,7 @@ impl<const N: usize> PerCpuStorage<N> {
     /// # Errors
     ///
     /// [`PerCpuStorageError::AlreadyRegistered`] on the second publish
-    /// (set-once per boot — never silently re-points the live arena,
-    /// `AGENTS.md` §2.1).
+    /// (set-once per boot — never silently re-points the live arena).
     pub fn register(&'static self) -> Result<usize, PerCpuStorageError> {
         if PER_CPU_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -258,7 +255,7 @@ pub fn registered_cpu_count() -> usize {
 
 /// Raw pointer to the registered per-CPU slot for `cpu_index`, or
 /// `None` if `cpu_index` is out of range or no storage is registered
-/// yet (fail closed, `AGENTS.md` §2.9).
+/// yet (fail closed).
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 fn per_cpu_ptr(cpu_index: usize) -> Option<*mut PerCpu> {
     if cpu_index >= PER_CPU_LEN.load(Ordering::Acquire) {
@@ -342,8 +339,7 @@ fn reset_per_cpu_storage_for_tests() {
 ///   per `boot.s` SAFETY-INVARIANT 6).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
-    // Fail closed before registration or for an out-of-range index
-    // (`AGENTS.md` §2.9 / §24.1): the registered storage's published
+    // Fail closed before registration or for an out-of-range index: the registered storage's published
     // length is the only bound, not a baked-in `MAX_CPUS`.
     let slot_ptr = per_cpu_ptr(cpu_index).ok_or(InitError::CpuIndexOutOfRange)?;
     let latch = per_cpu_initialised(cpu_index).ok_or(InitError::CpuIndexOutOfRange)?;
@@ -415,7 +411,7 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
 /// * `InitError::CpuIndexOutOfRange` if `cpu_index` is outside the
 ///   registered [`PerCpuStorage`] (or no storage is registered).
 /// * `InitError::NotInitialised` if `init` has not run for
-///   `cpu_index`. Fail-closed per `AGENTS.md` §10 — a stray vector
+///   `cpu_index`. Fail-closed — a stray vector
 ///   install on an un-bootstrapped CPU is a kernel bug, not a
 ///   silent fixup.
 ///
@@ -465,8 +461,7 @@ pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Resu
 /// IRQ, the CPU loads `TSS.RSP0`; a zero (or unmapped) value makes the
 /// interrupt-frame push fault and escalate to `#DF`. Installing a valid
 /// `RSP0` makes a ring-3 trap *deliverable* to the kernel — a user fault
-/// the kernel cannot field is a security gap, not a feature (`AGENTS.md`
-/// §2.9 / §2.17). This is the x86_64 counterpart of the single kernel trap
+/// the kernel cannot field is a security gap, not a feature. This is the x86_64 counterpart of the single kernel trap
 /// stack the riscv64/aarch64 ports already program.
 ///
 /// The CPU re-reads `TSS.RSP0` from memory on every transition, so writing
@@ -479,10 +474,10 @@ pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Resu
 /// * [`InitError::CpuIndexOutOfRange`] if `cpu_index` is outside the
 ///   registered [`PerCpuStorage`] (or no storage is registered).
 /// * [`InitError::NotInitialised`] if [`init`] has not finalised
-///   `cpu_index` (fail-closed, `AGENTS.md` §10).
+///   `cpu_index` (fail-closed).
 /// * [`InitError::InvalidKernelStackPointer`] if `rsp0` is null, not
 ///   16-byte aligned, non-canonical, or in the user half — the same
-///   stack-pivot guard the syscall stack uses (`AGENTS.md` §3.5 / §5.4).
+///   stack-pivot guard the syscall stack uses.
 ///
 /// # Safety
 ///
@@ -500,8 +495,7 @@ pub unsafe fn install_tss_rsp0(cpu_index: usize, rsp0: u64) -> Result<(), InitEr
         return Err(InitError::NotInitialised);
     }
     // Strong stack-pivot guard, shared with the syscall-entry stack so the
-    // two kernel-stack-top validators stay one definition (`AGENTS.md`
-    // §2.2). It is a superset of `set_privilege_stack`'s alignment/null
+    // two kernel-stack-top validators stay one definition. It is a superset of `set_privilege_stack`'s alignment/null
     // check, additionally rejecting non-canonical / user-half tops.
     crate::syscall_entry::validate_kernel_rsp0(rsp0)?;
     // SAFETY: the latch above is `true`, so `init` finalised this slot and
@@ -570,8 +564,8 @@ mod tests {
 
     #[test]
     fn per_cpu_storage_registration_publishes_runtime_sized_slices() {
-        // A caller-sized backing covers exactly its `N` slots (the §24.1
-        // capacity is the §18-discovered CPU count, not a baked-in
+        // A caller-sized backing covers exactly its `N` slots (the
+        // capacity is the-discovered CPU count, not a baked-in
         // `MAX_CPUS`); a second backing proves registration is set-once.
         // Declared first so they precede the statements that drive them.
         static STORAGE: PerCpuStorage<4> = PerCpuStorage::new();
@@ -580,8 +574,7 @@ mod tests {
         reset_per_cpu_storage_for_tests();
 
         // Before any storage is registered every per-CPU accessor fails
-        // closed (`None` / `0`) instead of dereferencing a null base
-        // (`AGENTS.md` §2.9 / §24.1).
+        // closed (`None` / `0`) instead of dereferencing a null base.
         assert_eq!(registered_cpu_count(), 0);
         assert!(per_cpu_ptr(0).is_none());
         assert!(per_cpu_initialised(0).is_none());

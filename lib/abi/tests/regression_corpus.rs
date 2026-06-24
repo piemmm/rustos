@@ -1,9 +1,9 @@
 //! Deterministic regression corpus for the CCOMPAT CC3/CC4 decoders.
 //!
 //! `lib/abi/tests/fuzz_decode.rs` proves the decoders never panic over a
-//! continuing pseudo-random stream (`AGENTS.md` §19.6); this file is the
+//! continuing pseudo-random stream; this file is the
 //! companion **regression corpus** the charter requires alongside it
-//! (`AGENTS.md` §19.6 — "crashing inputs are added to the crate's regression
+//! ("crashing inputs are added to the crate's regression
 //! corpus alongside a unit test, so the same bytes are replayed"). No crash
 //! has been found in these decoders to date, so the corpus is seeded instead
 //! with the hand-crafted boundary cases that ring the accept/reject edge of
@@ -18,7 +18,7 @@
 //! The file enforces two complementary contracts:
 //!
 //! 1. [`replay`] drives every CC3/CC4 decoder on each corpus entry and
-//!    re-asserts the §19.6 "must not panic, and an accepted decode
+//!    re-asserts the "must not panic, and an accepted decode
 //!    round-trips" contract on the very bytes a crash would be filed under.
 //! 2. The per-decoder regression tests pin a *fixed* accept-or-reject verdict
 //!    for the **validating** decoders (`NeededLibrary::decode`,
@@ -30,7 +30,7 @@
 //!    [`Errno::BufferTooSmall`] — so verdicts are not pinned on them.)
 //!
 //! New crashing inputs, when found, are appended to [`corpus`] with a name and
-//! a dedicated verdict test (`AGENTS.md` §19.6, §7; `tests/SECURITY.md`).
+//! a dedicated verdict test (`tests/SECURITY.md`).
 
 use rustos_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
 use rustos_abi::{
@@ -45,13 +45,13 @@ use rustos_abi::{
 const TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0x5A; SYSCALL_TABLE_HASH_LEN];
 
 /// The reference path of the curated *System runtime / C ABI* library a hosted
-/// C bundle declares it needs (`AGENTS.md` §16.4; `plans/CCOMPAT.md` CC4).
+/// C bundle declares it needs (`plans/CCOMPAT.md` CC4).
 const SYSTEM_RUNTIME_LIB: &str = "/System/Libraries/libros-sys.so";
 
 /// Per-process stack-canary seed baked into the corpus startup vector.
 const CANARY: u64 = 0xC0FF_EE00_D15E_A5ED;
 
-// --- valid-image builders (public encoders only, `AGENTS.md` §2.2) -------
+// --- valid-image builders (public encoders only) -------
 
 /// Encode an `rxe` load image with one R+X code page at vaddr 0 (holding the
 /// entry point) and one R+W data page, plus `needed` shared-library records.

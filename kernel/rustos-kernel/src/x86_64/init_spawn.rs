@@ -18,9 +18,9 @@
 //! syscall CFI tag are baked at build time (`build.rs` →
 //! `rustos_itest_harness::elf2rxe`), exactly like the aarch64 seam and the
 //! proven `spawn_el0_resume_qemu_x86_64` fixture, so there is one conversion
-//! path (`AGENTS.md` §2.2). Spawning `init` is *not* a privileged bypass: the
+//! path. Spawning `init` is *not* a privileged bypass: the
 //! program receives only the authority its manifest requests intersected with
-//! its user's grants (`AGENTS.md` §4, §16.5); this seam only authorises the
+//! its user's grants; this seam only authorises the
 //! *act* of spawning under `CAP_PROC_SPAWN`.
 //!
 //! # x86_64 specifics versus the aarch64 sibling
@@ -37,21 +37,21 @@
 //!   identity map. The narrower 32 MiB window the other x86_64 verticals use
 //!   is only enough when every table and frame lives in low memory.
 //! * The `pre_resume` hook does two things (the aarch64 hook only the first):
-//!   reload CR3 to PID 1's own PML4 ([`activate_user_root`], isolation §4) and
+//!   reload CR3 to PID 1's own PML4 ([`activate_user_root`], isolation) and
 //!   repoint the per-CPU `syscall` entry stack at PID 1's own kernel stack
 //!   ([`syscall_entry::set_kernel_rsp0`]) — the gap aarch64 fills implicitly
 //!   through `SP_EL1` (`plans/PI.md` §X). A rejected stack top leaves the slot
-//!   unchanged and the next syscall faults loudly (fail closed, §5.4 / §2.9).
+//!   unchanged and the next syscall faults loudly (fail closed).
 //! * PID 1's kernel stack is drawn from the boot-carved kthread guard arena
 //!   (`ArenaStack` via `KTHREAD_STACK_ARENA`): the seam re-expresses the
 //!   2 MiB identity block covering the stack's guard page at 4 KiB
 //!   granularity in PID 1's *own* PML4 and unmaps that page, so a kernel-
 //!   stack overrun takes a synchronous page fault under PID 1's CR3 — the
 //!   real hardware guard-page fault-form, the cross-port sibling of the
-//!   aarch64 seam (`plans/PI.md` G3b-2, `AGENTS.md` §4 / §2.17). When the
+//!   aarch64 seam (`plans/PI.md` G3b-2). When the
 //!   boot path carved no arena (a machine too small, or the split/unmap
 //!   fails) the seam falls back to the heap-backed software-canary
-//!   [`BoxStack`] rather than ever running unguarded (fail closed, §2.9).
+//!   [`BoxStack`] rather than ever running unguarded (fail closed).
 //! * Physical frames are reached through a [`DirectPhysMap`] over the
 //!   higher-half kernel window (`[0, 1 GiB)` physical), the same window
 //!   `boot.s` maps; the QEMU proving-ground box's RAM falls inside it. Wider
@@ -107,7 +107,7 @@ const IDENTITY_GIB: usize = 4;
 
 /// User stack base: the shared [`spawn_layout::USER_STACK_OFFSET`] above
 /// this image's bias (the layout offsets and sizes are shared across the
-/// ports in [`crate::spawn_layout`], `AGENTS.md` §2.2).
+/// ports in [`crate::spawn_layout`]).
 const USER_STACK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
 /// User virtual address the startup-vector block is written at.
 const USER_BLOCK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
@@ -132,7 +132,7 @@ const DMA_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 ///
 /// Lives in `.bss` for the lifetime of the kernel image, so CR3 keeps
 /// pointing at a valid hierarchy after [`X86_64InitSpawn::spawn_init`]
-/// switches to it (`AGENTS.md` §2.1 — monotonic, never freed).
+/// switches to it (monotonic, never freed).
 static INIT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 
 /// Set once PID 1 has been spawned so a re-entry cannot re-run the path.
@@ -162,7 +162,7 @@ impl InitSpawn for X86_64InitSpawn {
         // allocator's image frames, and the scheduler's LAPIC accesses all
         // resolve under PID 1's CR3 (the production `kernel_main` drain runs
         // on PID 1's root once `pre_resume` has reloaded it). Fail closed on
-        // page-table-pool exhaustion (`AGENTS.md` §2.9).
+        // page-table-pool exhaustion.
         let Some(mut arch) =
             ArchAddressSpace::new_identity_first_gib(&INIT_PAGE_TABLES, IDENTITY_GIB)
         else {
@@ -181,18 +181,16 @@ impl InitSpawn for X86_64InitSpawn {
         // granularity in PID 1's *own* PML4 and unmap that single page, so an
         // overrun of `init`'s kernel stack takes a synchronous page fault
         // under PID 1's CR3 rather than corrupting the lower-addressed
-        // neighbour (the real guard-page fault-form, `AGENTS.md` §4 / §2.17).
+        // neighbour (the real guard-page fault-form).
         // Doing it on `arch` *before* it is switched to means no live access
         // is disturbed (`split_block` only adds table levels reproducing the
         // existing translation) and no TLB maintenance is needed. The arena
         // grows on demand by chaining fresh 2 MiB blocks out of the kernel's
-        // live frame allocator when its boot-carved block is exhausted
-        // (`AGENTS.md` §24.1); a chained block is bounded to the identity
+        // live frame allocator when its boot-carved block is exhausted; a chained block is bounded to the identity
         // window so the stack stays mapped in PID 1's own root. If no arena
         // region is available, or the split/unmap could not be applied, fall
         // back to a heap-backed software-canary `BoxStack` rather than ever
-        // running on an unguarded stack (fail closed, `AGENTS.md` §2.9 /
-        // §2.17).
+        // running on an unguarded stack (fail closed).
         let grow = FrameArenaGrow::new(ctx.frames(), (IDENTITY_GIB as u64) << 30);
         let kernel_stack: Box<dyn KernelStack + Send> =
             match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityBlockStore) {
@@ -224,7 +222,7 @@ impl InitSpawn for X86_64InitSpawn {
         let physmap = DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN);
 
         // Parse the build-time `init` `rxe` blob against the kernel's own
-        // compiled-in syscall CFI tag (§9 / §19.2). A mismatch fails closed.
+        // compiled-in syscall CFI tag. A mismatch fails closed.
         let Ok(image) = LoadImage::parse(INIT_RXE, &SYSCALL_TABLE_HASH) else {
             return;
         };
@@ -251,8 +249,7 @@ impl InitSpawn for X86_64InitSpawn {
         // is only entered below, once `space` is active (just switched to)
         // and the ring-3 trap path is installed. The frame source draws
         // first-GiB RAM frames from the kernel's live allocator. A returning
-        // `Err` drops back to the caller's fail-closed halt (`AGENTS.md`
-        // §2.9).
+        // `Err` drops back to the caller's fail-closed halt.
         let frames = ctx.frames();
         let Ok(entry) = (unsafe {
             spawn_image(
@@ -282,7 +279,7 @@ impl InitSpawn for X86_64InitSpawn {
         // PID 1's user-address-space reactivation hook (`plans/SPAWN.md` SP2):
         // the core runs it on the dispatcher's context immediately before
         // every switch into PID 1. It reloads CR3 to PID 1's own root
-        // (isolation §4) and repoints the per-CPU `syscall` entry stack at
+        // (isolation) and repoints the per-CPU `syscall` entry stack at
         // PID 1's own kernel stack (the value the runtime hands it). It
         // captures only the `u64` root, so it is `Send`.
         let pre_resume: Box<dyn FnMut(u64) + Send> = Box::new(move |stack_top: u64| {
@@ -291,9 +288,9 @@ impl InitSpawn for X86_64InitSpawn {
             // own kernel stack — the latter is what makes an involuntary
             // LAPIC-timer preemption (P-1c), delivered through the IDT
             // interrupt gate which reads `TSS.RSP0`, land on PID 1's own stack
-            // (`AGENTS.md` §2.2 — one per-task kernel stack for both entry
+            // (one per-task kernel stack for both entry
             // kinds). A rejected value leaves the slots unchanged and the next
-            // entry faults loudly (fail closed, `AGENTS.md` §5.4 / §2.9).
+            // entry faults loudly (fail closed).
             let _ = syscall_entry::set_kernel_rsp0(BOOT_CPU, stack_top);
             // SAFETY: paging is enabled and `init_root_phys` is the PML4 of
             // PID 1's space, which maps the low identity + higher-half kernel
@@ -313,8 +310,7 @@ impl InitSpawn for X86_64InitSpawn {
         // Retain the live, mutable arch space behind the object-safe
         // `LiveUserSpace` boundary so PID 1's `mem_map` / `mmio_map` /
         // `dma_alloc` syscalls mutate *its own* address space (`plans/PI.md`
-        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 seam
-        // (`AGENTS.md` §2.2). The `LiveSpace` composes the audited
+        // 5d-0-ii (b′)), the cross-port sibling of the aarch64 seam. The `LiveSpace` composes the audited
         // anonymous-map mechanism (over the kernel's `'static` frame
         // allocator, drawn from `static_frames`) and the guarded device-window
         // allocator (over the `[MMIO_WINDOW_BASE, …)` region); it carries the
@@ -324,7 +320,7 @@ impl InitSpawn for X86_64InitSpawn {
         // higher-half kernel window are both mapped under PID 1's CR3). A
         // context with no `'static` allocator, or a window the allocator
         // rejects, retains no live space and PID 1's `mem_map` / `mmio_map`
-        // fail closed (`AGENTS.md` §2.9).
+        // fail closed.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
             Some(static_frames) => LiveSpace::new(
                 space,

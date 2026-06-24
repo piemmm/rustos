@@ -15,7 +15,7 @@
 //! by a host-side `#[cfg(test)]` round-trip test in this module, which
 //! depends on `kernel/mem` only as a dev-dependency. If the two enums
 //! ever drift, the round-trip test fails to compile and the build
-//! breaks — exactly the duplication-detection signal AGENTS.md §2.2
+//! breaks — exactly the duplication-detection signal
 //! requires.
 
 use crate::multiboot2::{

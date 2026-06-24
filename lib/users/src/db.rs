@@ -1,11 +1,10 @@
 //! The `/System/Security/Users` database: parse, serialise, authenticate.
 //!
-//! The on-disk text is **untrusted input** (`AGENTS.md` §19.5/§19.6): the
+//! The on-disk text is **untrusted input**: the
 //! parser bounds the whole file, every line, and the record count before
 //! reading anything, validates every field through [`UserRecord`], enforces
 //! username and uid uniqueness, and fails closed on the first defect — a
-//! database the parser cannot fully understand yields **no** [`UsersDb`]
-//! (`AGENTS.md` §2.9, §5.4).
+//! database the parser cannot fully understand yields **no** [`UsersDb`].
 //!
 //! # Format (`rustos-users-v1`)
 //!
@@ -32,7 +31,7 @@ use crate::{AuthError, ParseError};
 /// The exact first line of every `users-v1` database.
 pub const FORMAT_HEADER: &str = "rustos-users-v1";
 
-/// Largest database file, in bytes, the parser will consider (§24.4
+/// Largest database file, in bytes, the parser will consider (
 /// validation bound — a defence, not a capacity).
 pub const MAX_DB_LEN: usize = 64 * 1024;
 
@@ -136,8 +135,7 @@ impl UsersDb {
     /// Refusals are indistinguishable: an unknown username, a locked
     /// account, and a wrong password all cost one PBKDF2 derivation and all
     /// return the same [`AuthError::InvalidCredentials`], so a caller cannot
-    /// probe for valid usernames or locked accounts (`AGENTS.md` §5.4,
-    /// §19.1).
+    /// probe for valid usernames or locked accounts.
     ///
     /// # Errors
     ///
@@ -167,7 +165,7 @@ impl UsersDb {
 
     /// Pay the PBKDF2 cost a real verification would have paid, so a refusal
     /// for an unknown or locked account takes as long as a wrong password on
-    /// a real one (`AGENTS.md` §19.1). The burn uses the database's highest
+    /// a real one. The burn uses the database's highest
     /// record cost (the default cost when the database is empty) against an
     /// all-zero salt and hash; the discarded result is always `false`.
     fn burn_dummy_derivation(&self, password: &[u8]) {

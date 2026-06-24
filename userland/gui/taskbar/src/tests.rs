@@ -390,7 +390,7 @@ fn vertical_bar_lays_regions_along_y() {
 #[test]
 fn tiny_screen_keeps_regions_inside_the_bar() {
     // A degenerate screen far smaller than the extents must not panic and
-    // must keep every region within the bar (fail closed, §2.9).
+    // must keep every region within the bar (fail closed).
     let config = TaskbarConfig::bottom_bar(20, 10);
     let layout = BarLayout::compute(&config, 0, Scale::ONE, 3, 3);
     let bar = layout.bar;
@@ -434,7 +434,7 @@ fn scale_one_is_identical_to_the_unscaled_layout() {
 #[test]
 fn supplied_scale_relays_the_bar_at_the_new_density() {
     // The bar stores no scale: the desktop density is supplied at layout time
-    // by the compositor (`AGENTS.md` §10), so laying the same bar out at a
+    // by the compositor, so laying the same bar out at a
     // higher scale enlarges every region without any state change.
     let theme = Theme::dark();
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(4000, 2000), &theme);
@@ -721,8 +721,7 @@ fn renderer_reuses_cached_glyphs_across_frames_and_retints_on_theme_switch() {
 // ---- notification icon sets -----------------------------------------
 
 /// An in-memory [`IconAssetSource`] mapping a kind to authored SVG bytes,
-/// standing in for the on-disk `/System/Graphics` set in tests (`AGENTS.md`
-/// §7).
+/// standing in for the on-disk `/System/Graphics` set in tests.
 struct MemoryIcons {
     network: Option<&'static [u8]>,
 }
@@ -910,7 +909,7 @@ fn focused_task_title_is_drawn_in_the_on_accent_role() {
 #[test]
 fn task_title_too_long_for_its_slot_is_truncated_not_overflowing() {
     // A long title in a narrow slot must paint inside the slot and never
-    // spill into the slot to its right (fail closed, §2.9).
+    // spill into the slot to its right (fail closed).
     let theme = Theme::dark();
     let config = TaskbarConfig {
         task_extent: 24,
@@ -1262,7 +1261,7 @@ fn pressing_outside_the_open_menu_dismisses_it_without_acting() {
     press_at(&mut input, &mut bar, 10, 770); // open the menu
 
     // A press on a task slot while the menu is open dismisses the menu and
-    // does *not* activate the task (one click does one thing, §2.1).
+    // does *not* activate the task (one click does one thing).
     assert_eq!(
         press_at(&mut input, &mut bar, 100, 770),
         TaskbarResponse::StartMenuDismissed
@@ -1388,7 +1387,7 @@ fn render_menu_paints_the_panel_and_entry_labels() {
 #[test]
 fn menu_popup_compute_is_fail_closed_for_an_empty_menu() {
     // A zero-entry popup has a zero-height panel and no rows; it never
-    // panics and hit-tests to nothing (§2.9).
+    // panics and hit-tests to nothing.
     let layout = MenuLayout::compute(
         Edge::Bottom,
         Rect::new(0, 760, 1000, 40),

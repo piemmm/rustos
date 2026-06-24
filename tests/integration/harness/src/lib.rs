@@ -1,11 +1,11 @@
 //! Build-time target classification shared by the freestanding QEMU
-//! integration binaries (`AGENTS.md` §2.2, §17.2).
+//! integration binaries.
 //!
 //! The integration binaries under `tests/integration/` compile two ways:
 //! as freestanding `no_std`/`no_main` kernels for a bare-metal QEMU
 //! target, and as inert host stubs for `cargo build --workspace`. They
 //! must choose between those forms without naming the target instruction
-//! set in their own source, which §17.2 confines to the architecture
+//! set in their own source, which confines to the architecture
 //! ports and the build glue.
 //!
 //! This crate is that build glue. Each binary's build script calls
@@ -32,7 +32,7 @@
 pub mod elf2rxe;
 
 /// The signed `.rxe` driver-bundle composer, shared by the build scripts
-/// that lay a kernel-trusted driver into the system (`AGENTS.md` §2.2).
+/// that lay a kernel-trusted driver into the system.
 /// Enabled by the `driver-image` feature so the Ed25519 dependency is
 /// pulled in only where a bundle is actually signed.
 #[cfg(feature = "driver-image")]
@@ -46,9 +46,9 @@ pub mod driver_image;
 /// relocations baked for this exact bias ([`elf2rxe::elf_to_rxe`]'s
 /// `load_bias`), so the converted image runs correctly once mapped at
 /// `vaddr + USER_IMAGE_BIAS`. It is the one definition every build script
-/// that bakes a spawnable `rxe` shares (`AGENTS.md` §2.2); the kernel spawn
+/// that bakes a spawnable `rxe` shares; the kernel spawn
 /// path asserts the baked bias matches `SHELL_USER_BIAS` and fails closed on
-/// a mismatch (`AGENTS.md` §2.9), so a drift between this constant and the
+/// a mismatch, so a drift between this constant and the
 /// kernel is caught rather than miscompiled.
 pub const USER_IMAGE_BIAS: u64 = 0x10_0000_0000;
 
@@ -149,7 +149,7 @@ pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32) -> Vec<String> {
 /// Image protocol), so a vertical that needs the board's device tree at
 /// runtime embeds this blob instead of reading a live pointer. This lives
 /// here **once** rather than copied into every aarch64 build script
-/// (`AGENTS.md` §2.2 — no duplication).
+/// (no duplication).
 ///
 /// QEMU's `dumpdtb` pads the blob to the machine's 1 MiB device-tree
 /// region; the bytes are passed through [`trim_fdt_to_extent`] so the
@@ -160,7 +160,7 @@ pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32) -> Vec<String> {
 ///
 /// Panics if `qemu-system-aarch64` cannot be spawned, exits non-zero, or
 /// the dumped file cannot be read. A build script cannot proceed without
-/// the blob, so failing loudly is correct (`AGENTS.md` §7).
+/// the blob, so failing loudly is correct.
 #[must_use]
 pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
     let dtb_path = std::path::PathBuf::from(out_dir).join("virt.dtb");
@@ -186,7 +186,7 @@ pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
 ///
 /// A blob too short for the 40-byte header, with the wrong magic, or
 /// whose header offsets escape the buffer is returned unchanged — trimming
-/// is an optimisation, never a parser (`AGENTS.md` §2.9: callers still
+/// is an optimisation, never a parser (: callers still
 /// validate the result through `rustos_fdt::Fdt::new`).
 #[must_use]
 pub fn trim_fdt_to_extent(bytes: &[u8]) -> Vec<u8> {

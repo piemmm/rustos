@@ -1,11 +1,9 @@
 //! Toolchain-binary checksumming.
 //!
 //! Every external binary the wrapper invokes is hashed with the audited
-//! SHA-256 from `lib/crypto` (`AGENTS.md` §2.12 — never hand-roll crypto) so
-//! the exact bytes that were run are recorded for the audit trail
-//! (`AGENTS.md` §12 / §19.3). When a caller (or the environment) supplies an
-//! expected digest, the wrapper *verifies* it and fails closed on a mismatch
-//! (`AGENTS.md` §2.9); otherwise it records the computed digest for logging.
+//! SHA-256 from `lib/crypto` (never hand-roll crypto) so
+//! the exact bytes that were run are recorded for the audit trail. When a caller (or the environment) supplies an
+//! expected digest, the wrapper *verifies* it and fails closed on a mismatch; otherwise it records the computed digest for logging.
 
 use rustos_crypto::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
 

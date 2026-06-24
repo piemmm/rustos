@@ -5,7 +5,7 @@
 //! `#[repr(transparent)]` over a `#[repr(C)]` type) with an explicit primitive
 //! representation, and the wire layout shipped under [`ABI_VERSION_V1`] is
 //! frozen for the lifetime of `abi-v1`: new behaviour ships in `abi-v2`
-//! instead of mutating these types in place (see `AGENTS.md` §9).
+//! instead of mutating these types in place ().
 //!
 //! The crate is `no_std`, has no transitive dependencies, and performs no
 //! allocation. Encoding and decoding helpers operate exclusively on borrowed
@@ -127,7 +127,7 @@ pub const ABI_VERSION_CURRENT: u32 = ABI_VERSION_V1;
 /// [`ABI_VERSION_CURRENT`] as the `u16` carried by the wire formats whose
 /// version field is two bytes wide (for example [`ipc::IpcMessageHeader`] and
 /// [`input::PointerInput`]). Defined once so an encoder never open-codes a
-/// truncating `as u16` cast at the call site (`AGENTS.md` §2.2).
+/// truncating `as u16` cast at the call site.
 // `ABI_VERSION_V1` is 1 and every supported ABI version fits in a `u16`; the
 // narrowing is exact, and a future version that did not fit would be a
 // deliberate ABI decision made here, not a silent truncation.

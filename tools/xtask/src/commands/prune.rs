@@ -19,7 +19,7 @@
 //! always-rerunning) build script to regenerate its output on the next
 //! build. The matching `.fingerprint/<pkg>-<hash>` entry is removed with it.
 //!
-//! This is deliberately conservative (`AGENTS.md` §2.9 — fail safe): a
+//! This is deliberately conservative (fail safe): a
 //! directory whose name is not the cargo `<pkg>-<16-hex>` shape is left
 //! untouched, a package with a single build directory is left untouched, and
 //! tied-newest directories are all kept. It only ever removes regenerable
@@ -68,8 +68,7 @@ pub struct Reclaimed {
 ///
 /// Best-effort: an unreadable entry or a removal that races with another
 /// process is skipped rather than turned into a hard error, because pruning
-/// regenerable cache must never block the build it precedes (`AGENTS.md`
-/// §2.9). The current build's live directories are always retained.
+/// regenerable cache must never block the build it precedes. The current build's live directories are always retained.
 pub fn prune(ctx: &Context) -> Reclaimed {
     let mut reclaimed = Reclaimed::default();
     for build_dir in build_dirs(&ctx.target_dir()) {
@@ -204,7 +203,7 @@ fn superseded(candidates: &[BuildEntry]) -> Vec<String> {
 /// Cargo suffixes every build directory with a 16-character lowercase-hex
 /// metadata hash. Requiring exactly that shape means a directory that is not
 /// a cargo build artifact (or whose layout we do not recognise) is left
-/// untouched rather than guessed at (`AGENTS.md` §2.9). The package portion
+/// untouched rather than guessed at. The package portion
 /// itself may contain hyphens (`rustos-kernel-ipc`), so we split on the last
 /// hyphen only.
 fn package_of(name: &str) -> Option<&str> {

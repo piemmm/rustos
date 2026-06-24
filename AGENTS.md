@@ -104,6 +104,26 @@ These are absolute. They override any local convenience.
     comment. Comments are reserved for *why* (rationale, invariants, references,
     `// SAFETY:`), never for restating *what* the code already says. This does
     not relax §2.8: rustdoc and `docs/` pages remain mandatory.
+    - Here "references" means a pointer to something *outside* this charter that
+      a reader cannot derive from the code — an external spec or hardware manual
+      (Intel SDM, PCI, virtio, a NIST publication), an algorithm paper, an RFC,
+      or another file/plan in this tree (`plans/PI.md`, a `docs/.../*-spec.md`,
+      a sibling module). It does **not** mean citing `AGENTS.md` itself.
+    - A comment MUST NOT cite a charter section number (`AGENTS.md §5.4`, `§2.9`,
+      `sec.5.4`, "Section 5.4", or any equivalent, including a bare trailing
+      `(§5.4)`). The rule already lives in this file, so the citation restates
+      *what* the rule is, never *why* the code does what it does, and is exactly
+      the noise this section forbids. State the reason in plain prose instead:
+      keep "fail closed", "zeroed on drop before the buffer leaves scope", "no
+      ambient authority"; drop the trailing "(§5.4)". Where the charter itself
+      is the subject, name it in prose ("the charter forbids this duplication"),
+      never by section number.
+    - The sole exception is provenance a *generator* emits to record which
+      charter section governs a generated artefact (the `include/` C-header
+      banners); that lives in the generator, never in hand-written code. A
+      runtime diagnostic that points a developer at the rule they violated
+      (a CI-check error message, an assertion message) is program output, not a
+      comment, and may name the section.
 12. **Roll your own; do not trust external code.** Where it is feasible to do
     so cleanly, prefer a first-party implementation in this workspace over a
     dependency on an external crate. Every external dependency is code we
@@ -1188,6 +1208,17 @@ You are not exempt from any rule above. In addition:
     commit, or delegate the commit to another tool — that is the §2.1 hack this
     rule forbids. Your deliverable is the modified tree plus the §23.5
     completion report, never a commit or a push.
+17. **Never cite a charter section number in a code comment (§2.11).** The rule
+    already lives in `AGENTS.md`; repeating "(§5.4)" / "`AGENTS.md` §2.9" /
+    "sec.5.4" in a comment is the noise §2.11 forbids. Explain the *why* in
+    plain prose and stop ("fail closed", "zeroed on drop"); where the charter
+    itself is the subject, write "the charter forbids …", never the number.
+    Cross-references to *other* files/specs/plans/papers (an external spec, a
+    hardware manual, `plans/PI.md`, a sibling module) are fine; citing this
+    charter is not. The only place a charter section number belongs is a
+    generator that stamps provenance onto a generated artefact, or a runtime
+    diagnostic that tells a developer which rule they broke — neither is a
+    hand-written comment.
 
 ---
 

@@ -2,10 +2,10 @@
 //!
 //! `X86_64Arch` is the concrete handle the architecture-neutral
 //! kernel reaches for through the Arch HAL
-//! [`rustos_arch_api::SchedulerArch`] (`AGENTS.md` §17.2). It is the
+//! [`rustos_arch_api::SchedulerArch`]. It is the
 //! only production implementation of that trait inside the workspace
 //! (the host-side `TestArch` shipped by `kernel/sched` is
-//! feature-gated to `test-arch` per `AGENTS.md` §1).
+//! feature-gated to `test-arch`).
 //!
 //! # Surface
 //!
@@ -16,7 +16,7 @@
 //!   ID register and consults
 //!   [`crate::preempt::cpu_id_for_lapic`]; on host builds, returns the
 //!   boot CPU's dense `CpuId` so host tests of the scheduler remain
-//!   deterministic (`AGENTS.md` §7 — no flaky tests).
+//!   deterministic (no flaky tests).
 //! - `SchedulerArch::ticks_now` — on bare metal, reads `RDTSC` (the
 //!   invariant TSC modern x86_64 CPUs expose; QEMU advertises it); on
 //!   host builds, returns a monotonically-increasing per-instance
@@ -47,12 +47,12 @@ use crate::hybrid;
 /// Sentinel stored in an [`X86_64ArchStorage::cpu_to_lapic`] slot that no
 /// CPU maps to. A real LAPIC ID is a `u8` (`0..=255`), so `u16::MAX` can
 /// never collide with a populated entry — it is the encoded `None`
-/// (`AGENTS.md` §2.9 — an unmapped slot is unambiguously absent, never a
+/// (an unmapped slot is unambiguously absent, never a
 /// guessed id).
 const NO_LAPIC: u16 = u16::MAX;
 
 /// Caller-owned, `&'static` per-CPU backing for an [`X86_64Arch`] handle
-/// (`AGENTS.md` §24.1 — per-CPU bookkeeping is sized by the caller from
+/// (per-CPU bookkeeping is sized by the caller from
 /// discovered hardware, never a fixed `const` ceiling baked into the
 /// arch crate).
 ///
@@ -60,7 +60,7 @@ const NO_LAPIC: u16 = u16::MAX;
 /// constructing caller sizes for its machine: a single-CPU vertical uses
 /// `X86_64ArchStorage<1>`, and a multi-core boot path sizes `N` from the
 /// ACPI MADT processor count. The arch crate stays allocator-free
-/// (`AGENTS.md` §24.1 watch-out — no `alloc` in a bare-metal arch crate,
+/// (watch-out — no `alloc` in a bare-metal arch crate,
 /// which would force a bump heap onto the allocator-free Stage-2 QEMU
 /// bins), so the caller provides the storage as a `static` (allocator-free
 /// bins) or a leaked allocation (allocator-having callers); [`X86_64Arch`]
@@ -119,7 +119,7 @@ pub enum ArchInitError {
 }
 
 impl ArchInitError {
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -143,8 +143,7 @@ pub struct X86_64Arch {
     /// Forward mapping: dense `CpuId` index → LAPIC ID of that CPU,
     /// [`NO_LAPIC`] for an unpopulated slot. Borrowed from the caller's
     /// [`X86_64ArchStorage`]; its length is the caller's CPU count, so
-    /// the handle imposes no compile-time CPU ceiling (`AGENTS.md`
-    /// §24.1). Populated once at construction; never mutated thereafter.
+    /// the handle imposes no compile-time CPU ceiling. Populated once at construction; never mutated thereafter.
     cpu_to_lapic: &'static [AtomicU16],
 
     /// Dense `CpuId` of the boot processor.
@@ -158,12 +157,11 @@ pub struct X86_64Arch {
     ///
     /// Production builds (`target_os = "none"`) read `RDTSC` instead
     /// and never touch this field; it is kept unconditionally to keep
-    /// the struct layout identical between targets (`AGENTS.md` §1 —
-    /// no hacks).
+    /// the struct layout identical between targets (no hacks).
     //
     // Allow `dead_code` only on the bare-metal target: on the host
     // target the field is read by `ticks_now`. The justification is
-    // the struct-layout invariant called out above (AGENTS.md §15.10
+    // the struct-layout invariant called out above (
     // — `#[allow]` is paired with a justifying comment).
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
     host_tick_counter: AtomicU64,
@@ -185,7 +183,7 @@ pub struct X86_64Arch {
     /// via [`Self::record_core_class`]; the boot CPU's entry is recorded
     /// in [`Self::new`]. The scheduler reads the table through the
     /// [`SchedulerArch::core_class`] override so it can place background
-    /// work on efficiency cores (`AGENTS.md` §17.2 — static per-CPU
+    /// work on efficiency cores (static per-CPU
     /// identity discovered by the arch port). Borrowed from the caller's
     /// [`X86_64ArchStorage`].
     core_classes: &'static [AtomicU8],
@@ -197,10 +195,10 @@ impl X86_64Arch {
     /// # Errors
     ///
     /// See [`ArchInitError`]. The constructor refuses to silently
-    /// repair caller mistakes — fail closed per `AGENTS.md` §5.4.5.
+    /// repair caller mistakes — fail closed.
     ///
     /// `storage` is the caller-owned, `&'static` per-CPU backing sized
-    /// to the machine (`AGENTS.md` §24.1); the handle borrows its slices
+    /// to the machine; the handle borrows its slices
     /// and imposes no compile-time CPU ceiling. `cpu_to_lapic` is the
     /// dense `CpuId` → LAPIC-ID map read from the ACPI MADT; entries
     /// beyond `storage`'s capacity `N` are ignored — the caller sizes
@@ -225,8 +223,7 @@ impl X86_64Arch {
         }
         // Populate the caller's `&'static` map through the shared borrow
         // (atomic stores, so no `&'static mut` is needed). An entry whose
-        // dense id exceeds capacity `N` is silently dropped — fail closed
-        // (`AGENTS.md` §5.4), never index out of bounds.
+        // dense id exceeds capacity `N` is silently dropped — fail closed, never index out of bounds.
         for (cpu, slot) in cpu_to_lapic.iter().enumerate() {
             if let (Some(lapic), Some(dst)) = (slot, storage.cpu_to_lapic.get(cpu)) {
                 dst.store(u16::from(*lapic), Ordering::Relaxed);
@@ -254,7 +251,7 @@ impl X86_64Arch {
     /// from [`crate::hybrid::detect_current_core_class`]. An out-of-range
     /// `cpu` is ignored — the table is bounded to the caller-provided
     /// storage length, so a stray call cannot corrupt memory
-    /// (`AGENTS.md` §5.4 fail-closed).
+    /// (fail-closed).
     pub fn record_core_class(&self, cpu: CpuId, class: CoreClass) {
         if let Some(slot) = usize::try_from(cpu)
             .ok()
@@ -330,7 +327,7 @@ impl SchedulerArch for X86_64Arch {
                 // boot CPU. The bin crate populates the table before
                 // unmasking interrupts, so this branch is only
                 // reachable during the very first instructions after
-                // the trampoline hand-off (`AGENTS.md` §5.4.5 — fail
+                // the trampoline hand-off (fail
                 // closed, do not invent a CpuId).
                 self.boot_cpu_id
             } else {
@@ -424,8 +421,8 @@ impl SchedulerArch for X86_64Arch {
             let _ = target_apic_id;
             // `lapic_id_of` already confirmed `target` maps to a CPU, so
             // the counter slot exists; an absent slot is dropped rather
-            // than panicking (`AGENTS.md` §2.9). Bound by the borrowed
-            // slice length, never a fixed ceiling (`AGENTS.md` §24.1).
+            // than panicking. Bound by the borrowed
+            // slice length, never a fixed ceiling.
             if let Some(counter) = usize::try_from(target)
                 .ok()
                 .and_then(|idx| self.host_ipi_count.get(idx))
@@ -436,9 +433,9 @@ impl SchedulerArch for X86_64Arch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): `armed` records the
+        // Tickless preemption: `armed` records the
         // running task's quantum deadline (the current TSC plus one quantum
-        // in TSC ticks, the single stored copy — §2.2); `!armed` clears it.
+        // in TSC ticks, the single stored copy); `!armed` clears it.
         // The deadline combiner then programs the single LAPIC-timer
         // one-shot to the *earlier* of this quantum and any pending
         // blocking-wait wakeup ([`Self::set_wakeup`]), so neither suppresses
@@ -463,13 +460,13 @@ impl SchedulerArch for X86_64Arch {
     }
 
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
-        // The timed half of the tickless one-shot (`AGENTS.md` §17.1): a
+        // The timed half of the tickless one-shot: a
         // blocking wait with a finite timeout records its soonest waiter
         // deadline here so the parked waiter is woken on time even when the
         // CPU has no runnable task to preempt. Convert the absolute
         // monotonic-ns deadline to an absolute TSC tick against the
         // calibrated TSC rate (the same rate `monotonic_ns` reads ns *out*
-        // of, §2.4), then record it; the combiner rebases the chosen TSC
+        // of), then record it; the combiner rebases the chosen TSC
         // duration onto the LAPIC clock to arm the one-shot. Off the
         // freestanding target the arming is inert.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -492,10 +489,10 @@ impl CrossCpuTlbShootdown for X86_64Arch {
             // Stream the LAPIC ids of every *other* online CPU straight
             // to `shootdown`; the caller invalidates itself inside it.
             // The iterator walks the caller-sized per-CPU map
-            // (`AGENTS.md` §24.1 — no fixed `MAX_CPUS` buffer), and is
+            // (no fixed `MAX_CPUS` buffer), and is
             // `Clone` because it captures only `Copy` data (`self` and
             // `me`), so `shootdown` can take its length and re-walk it
-            // without an allocation (`AGENTS.md` §2.16).
+            // without an allocation.
             let me = self.current_cpu();
             let targets = (0..self.cpu_to_lapic.len()).filter_map(move |idx| {
                 let cpu = CpuId::try_from(idx).ok()?;
@@ -519,7 +516,7 @@ impl SecondaryBringup for X86_64Arch {
     unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
         // Fail closed before any hardware action: the boot CPU is
         // already running, and an unmapped dense id has no LAPIC to
-        // target (`AGENTS.md` §5.4.5).
+        // target.
         if cpu == self.boot_cpu_id {
             return Err(SmpError::InvalidCpu);
         }
@@ -569,7 +566,7 @@ impl SecondaryBringup for X86_64Arch {
 /// # SAFETY-INVARIANT
 ///
 /// This function never returns. The `!` return type encodes the
-/// invariant at the type level (`AGENTS.md` §2.10).
+/// invariant at the type level.
 pub fn halt() -> ! {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
@@ -597,7 +594,7 @@ pub fn halt() -> ! {
         // Host fallback: spin-wait forever. Host tests never invoke
         // this function — the compile-time `const _` assertion in the
         // test module proves the `-> !` signature without calling it
-        // (`AGENTS.md` §7 — no flaky tests, no host-side blocking).
+        // (no flaky tests, no host-side blocking).
         loop {
             core::hint::spin_loop();
         }
@@ -612,9 +609,9 @@ mod tests {
 
     // Each test owns a distinct function-local `static` backing — the
     // same allocator-free `&'static`-storage pattern the bare-metal
-    // verticals use (`AGENTS.md` §24.1) — so no two handles alias one
+    // verticals use — so no two handles alias one
     // another's per-CPU bookkeeping under the parallel test runner
-    // (`AGENTS.md` §7 — no flaky shared state). Each test constructs
+    // (no flaky shared state). Each test constructs
     // exactly one handle, so a single local `static` per test suffices.
 
     #[test]
@@ -632,7 +629,7 @@ mod tests {
     #[test]
     fn new_rejects_boot_cpu_out_of_range() {
         // Boot CPU id equal to the storage capacity is one past the last
-        // valid slot — fail closed (`AGENTS.md` §5.4), no fixed `MAX_CPUS`.
+        // valid slot — fail closed, no fixed `MAX_CPUS`.
         static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
         let err = X86_64Arch::new(&S, 2, 0, &[Some(0)]).unwrap_err();
         assert_eq!(err, ArchInitError::BootCpuOutOfRange);
@@ -719,7 +716,7 @@ mod tests {
         assert_eq!(arch.core_class(u32::MAX), CoreClass::Performance);
     }
 
-    /// §17.2 / W0: the port passes the shared Arch HAL conformance
+    /// / W0: the port passes the shared Arch HAL conformance
     /// vertical over its real `SchedulerArch`, `SideChannel`, and
     /// `MemoryTags` handles (`plans/WIRING.md` Stage W0).
     #[test]
@@ -727,7 +724,7 @@ mod tests {
         static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
         let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
         // One enabled Local APIC + one I/O APIC, the minimal MADT the
-        // discovery suite needs (`AGENTS.md` §18.2). The entry bytes are a
+        // discovery suite needs. The entry bytes are a
         // fixed array (LocalApic 8 bytes + IoApic 12 bytes) so the test
         // names no allocator type.
         let entries: [u8; 20] = [
@@ -745,7 +742,7 @@ mod tests {
         );
     }
 
-    /// §17.2 / W6: the port passes the cross-CPU TLB-shootdown
+    /// / W6: the port passes the cross-CPU TLB-shootdown
     /// conformance vertical over its real `X86_64Arch` handle. On the
     /// host there is no second CPU and no TLB, so the vertical asserts
     /// the observable half — the call is total and panic-free for any
@@ -760,7 +757,7 @@ mod tests {
         rustos_arch_api::xtlb::conformance::run_all(erased, 0x10_0000_0000);
     }
 
-    /// §17.2 / W14: the port passes the secondary-bring-up conformance
+    /// / W14: the port passes the secondary-bring-up conformance
     /// vertical over its real `X86_64Arch` handle. On the host there is
     /// no INIT-SIPI-SIPI hardware, so the vertical asserts the observable
     /// half — starting an unstartable id fails closed and never panics.
@@ -777,11 +774,9 @@ mod tests {
     }
 
     /// The boot CPU and any unmapped dense id are refused before any
-    /// INIT-SIPI-SIPI action — the fail-closed contract (`AGENTS.md`
-    /// §5.4.5). (The set-once secondary-entry slot is a process-global
+    /// INIT-SIPI-SIPI action — the fail-closed contract. (The set-once secondary-entry slot is a process-global
     /// shared with `crate::smp`'s own tests, so the accepted path is
-    /// exercised there, not re-driven here — no flaky cross-test state,
-    /// `AGENTS.md` §7.)
+    /// exercised there, not re-driven here — no flaky cross-test state.)
     #[test]
     fn start_secondary_rejects_boot_and_unmapped_ids() {
         static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
@@ -802,7 +797,7 @@ mod tests {
     /// required by `KernelArch::halt`. Calling it would block the
     /// test runner; coercing the function pointer is enough to
     /// surface a mismatched return type at build time
-    /// (`AGENTS.md` §2.10 — encode the invariant in the type system).
+    /// (encode the invariant in the type system).
     const _HALT_RETURNS_NEVER: fn() -> ! = halt;
 
     /// Compile-time proof that `X86_64Arch` implements

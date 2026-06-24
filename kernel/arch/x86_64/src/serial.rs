@@ -6,11 +6,10 @@
 //!
 //! # Why not pull in `uart_16550`?
 //!
-//! `AGENTS.md` §3 reserves `lib/` for crates with at least two consumers.
+//! the charter reserves `lib/` for crates with at least two consumers.
 //! The x86_64 port is currently the only consumer; the rest of the kernel
 //! uses `lib/log` and a `Sink` impl. When Stage 3b/3c land their own UART
-//! drivers and we have ≥2 consumers, this code moves to `lib/util` per
-//! `AGENTS.md` §6.
+//! drivers and we have ≥2 consumers, this code moves to `lib/util` per.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use core::fmt;
@@ -23,7 +22,7 @@ pub const COM1_BASE: u16 = 0x3F8;
 /// `Serial` holds no state of its own; the methods operate directly on
 /// the device. The type exists so callers go through a `core::fmt::Write`
 /// implementation and can never accidentally write a partial sequence of
-/// bytes (`AGENTS.md` §6 — "encapsulate behind a safe API").
+/// bytes ("encapsulate behind a safe API").
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub struct Serial {
     base: u16,

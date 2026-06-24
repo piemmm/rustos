@@ -1,6 +1,6 @@
 //! The single, filesystem-agnostic soak exerciser.
 //!
-//! One body drives every [`SoakFs`] (`AGENTS.md` §2.2):
+//! One body drives every [`SoakFs`]:
 //! an integrity round-trip across nested directories with a remount
 //! re-verification, then the fail-closed extremes. Everything is
 //! deterministic from the per-iteration `seed`, so a failure reproduces.
@@ -261,7 +261,7 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), String> {
         seed,
     )?;
 
-    // --- Fail-closed extremes (§5.4 / §2.9). ---
+    // --- Fail-closed extremes. ---
     want_err(
         fs.create(root, b"alpha", NodeKind::RegularFile).err(),
         DriverError::Busy,

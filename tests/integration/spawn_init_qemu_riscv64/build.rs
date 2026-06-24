@@ -3,7 +3,7 @@
 //!
 //! One job on the freestanding `riscv64gc-unknown-none-elf` target: hand
 //! the riscv64 `virt` linker script to `rustc` — the single per-board
-//! linker script the architecture port owns (`AGENTS.md` §2.2), exactly as
+//! linker script the architecture port owns, exactly as
 //! the sibling `kernel_arch_boot_riscv64` boot vertical does. Unlike the
 //! aarch64 `-kernel` path (which passes `x0 = 0` and so embeds a DTB), the
 //! riscv64 OpenSBI firmware hands the boot hart a real device-tree pointer

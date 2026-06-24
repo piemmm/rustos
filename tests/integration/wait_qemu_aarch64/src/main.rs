@@ -21,7 +21,7 @@
 //! reaped the child, read back the agreed code, and exited 0 — proving the
 //! `wait` blocking-reap path end to end (the `SP6b` "done when"). A regression
 //! (a wrong code, a missing reap, a never-draining loop) trips a distinct
-//! failure finisher or the harness `Outcome::Timeout` (`AGENTS.md` §7).
+//! failure finisher or the harness `Outcome::Timeout`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

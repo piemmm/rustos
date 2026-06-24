@@ -1,6 +1,6 @@
 //! Host tests for the VL805 driver-host wiring.
 //!
-//! QEMU models no Pi USB timing (`AGENTS.md` §0.4 / §2.1), so these
+//! QEMU models no Pi USB timing, so these
 //! tests prove the [`open_discovered`] composition and its fail-closed
 //! paths against in-process mocks (a recording [`PciBus`], an MMIO
 //! mapper backing real heap memory, and a DMA host minting leaked
@@ -184,8 +184,7 @@ impl PciBus for MockPciBus {
     fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
         // The mock carries only the 16-bit base+sub-class; promote it
         // to the 24-bit code (prog-if 0) for the emitted key. Identity
-        // (id/parent) is unassigned: the kernel assigns it on publish
-        // (`AGENTS.md` §4 / §18.1).
+        // (id/parent) is unassigned: the kernel assigns it on publish.
         let class24 = u32::from(self.class) << 8;
         let mut node = HwNode::new(0, rustos_abi::hwtree::HW_NODE_ROOT, HwDeviceClass::Bus);
         node.push_match_key(HwMatchKey::pci(0x1106, 0x3483, class24))
@@ -316,7 +315,7 @@ fn open_discovered_rejects_a_bus_without_a_usb_controller() {
 fn open_discovered_rejects_a_dma_carve_above_the_aperture() {
     // The carve sits at the aperture top: its end overruns the window
     // the bridge lets the controller reach, so the wiring fails closed
-    // before any hardware is touched (`AGENTS.md` §5.4).
+    // before any hardware is touched.
     let host = host_with(APERTURE_TOP);
     let bus = MockPciBus::usb();
     assert_eq!(
@@ -392,8 +391,7 @@ fn open_discovered_enables_mastering_and_reaches_the_controller() {
 }
 
 /// Tree-local ids the autonomous-entry tests place the emitted child
-/// under; the node↔driver bind resolves on match keys, not ids
-/// (`AGENTS.md` §18.3).
+/// under; the node↔driver bind resolves on match keys, not ids.
 const PARENT_NODE_ID: u32 = 7;
 const CHILD_NODE_ID: u32 = 8;
 
@@ -463,8 +461,7 @@ fn bring_up_boot_input_reaches_the_controller_then_fails_closed() {
     // carves DMA, then hands the (inert, zeroed) window to the engine,
     // which fails closed on the implausible capability block — exactly
     // the metal boundary. Because enumeration never succeeds over the
-    // inert window, no child node is emitted (fail closed, `AGENTS.md`
-    // §5.4); the full enumerate→emit path is the on-metal acceptance item.
+    // inert window, no child node is emitted (fail closed); the full enumerate→emit path is the on-metal acceptance item.
     let host = host_with(DMA_PHYS_IN_APERTURE);
     let bus = MockPciBus::usb();
     let result = bring_up_boot_input(

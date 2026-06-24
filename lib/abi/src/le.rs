@@ -5,7 +5,7 @@
 //! participate without breaking the ABI). The same per-field index
 //! arithmetic was previously open-coded in more than one module; it lives
 //! here once so that the encoders and decoders cannot drift apart
-//! (`AGENTS.md` §2.2 — no duplication).
+//! (no duplication).
 //!
 //! The helpers are `pub(crate)`: they are an implementation detail of the
 //! `abi` crate, not part of the frozen public surface. Callers are

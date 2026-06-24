@@ -27,7 +27,7 @@ const KEY_SLOTS: usize = 6;
 
 /// HID usage ID of the first modifier (`LeftControl`); modifier bit `n`
 /// of report byte 0 surfaces as the `Key` code `MODIFIER_USAGE_BASE + n`
-/// (`0xE0..=0xE7`, HID Usage Tables §10).
+/// (`0xE0..=0xE7`, HID Usage Tables).
 pub const MODIFIER_USAGE_BASE: u16 = 0xE0;
 
 /// Largest key-array error usage (`0x01` `ErrorRollOver`, `0x02`
@@ -88,7 +88,7 @@ impl ReportDecode<MAX_EVENTS> for KeyboardState {
     /// rollover or POST failure), the array is unknown for this report:
     /// the modifier bitmap (still valid per §B.1) is diffed, the held
     /// key set is left untouched, and no key edges are fabricated
-    /// (`AGENTS.md` §2.9 — never guess).
+    /// (never guess).
     fn decode(
         &mut self,
         report: &[u8],
@@ -168,7 +168,7 @@ impl<S: ReportSource> Input for BootKeyboard<S> {
     /// key edges appended; events that do not fit are latched for the
     /// next `poll`, so a too-small buffer loses nothing. The per-call
     /// report budget ([`crate::REPORT_POLL_BUDGET`]) bounds the work a
-    /// flooding device can force on one `poll` (`AGENTS.md` §2.1).
+    /// flooding device can force on one `poll`.
     fn poll(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
         poll_source(&mut self.source, &mut self.state, &mut self.pending, events)
     }

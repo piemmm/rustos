@@ -1,10 +1,9 @@
-//! Unit tests for the VL805 firmware policy: the §8 `register` gate, the
-//! §18.3 `BIND_KEYS` match table, and the firmware-reset policy run over a
+//! Unit tests for the VL805 firmware policy: the `register` gate, the
+//! `BIND_KEYS` match table, and the firmware-reset policy run over a
 //! [`MailboxChannel`].
 //!
 //! QEMU models no `VideoCore`, so the policy is proven against the
-//! protocol-faithful `lib/vcmailbox` mock firmware behind a test channel
-//! (`AGENTS.md` §2.1 / §2.2); the live doorbell is the on-metal acceptance
+//! protocol-faithful `lib/vcmailbox` mock firmware behind a test channel; the live doorbell is the on-metal acceptance
 //! item (`plans/PI.md` Increment C).
 
 use rustos_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};

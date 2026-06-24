@@ -1,7 +1,7 @@
 //! The colour models of the SGR vocabulary.
 //!
 //! ANSI / xterm terminals address colour three ways, and this module names all
-//! three so the emitter and parser share one definition (`AGENTS.md` §2.2):
+//! three so the emitter and parser share one definition:
 //!
 //! * the 16 [`BasicColor`]s (the eight ECMA-48 colours and their bright
 //!   variants), selected by the SGR codes `30..=37` / `90..=97` (foreground)
@@ -89,7 +89,7 @@ impl BasicColor {
     }
 
     /// The [`BasicColor`] for palette index `index`, or `None` if `index` is
-    /// outside `0..=15` (fail closed, `AGENTS.md` §2.9).
+    /// outside `0..=15` (fail closed).
     #[must_use]
     pub const fn from_index(index: u8) -> Option<BasicColor> {
         let color = match index {

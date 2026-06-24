@@ -10,7 +10,7 @@
 //! the Sv39 identity MMU. The same primitives back the memory-isolation
 //! QEMU vertical's two Sv39 hierarchies that disagree about a single
 //! virtual address, so the MMU faults a process that reaches for
-//! another's frame (`AGENTS.md` §4, "memory isolation is enforced by
+//! another's frame ("memory isolation is enforced by
 //! hardware").
 //!
 //! # Sv39
@@ -171,7 +171,7 @@ impl PageTablePool {
     /// Allocate a fresh, zero-initialised table page.
     ///
     /// Returns `None` when the pool is exhausted — callers handle it as
-    /// a closed-fail (`AGENTS.md` §4: deterministic OOM, never panic).
+    /// a closed-fail (: deterministic OOM, never panic).
     pub fn alloc(&self) -> Option<&'static mut [u64; ENTRIES_PER_TABLE]> {
         let idx = self.used.fetch_add(1, Ordering::SeqCst);
         if idx >= POOL_SIZE {
@@ -191,8 +191,7 @@ impl PageTableFrames for PageTablePool {
     fn alloc_table(&self) -> Option<TableFrame> {
         let entries = self.alloc()?;
         // Sv39 runs identity-mapped for the kernel's own memory, so the
-        // table's virtual address is its physical address (`AGENTS.md`
-        // §17.2 / `plans/WIRING.md` W5b-3 — the bootstrap frame source).
+        // table's virtual address is its physical address (`plans/WIRING.md` W5b-3 — the bootstrap frame source).
         let phys = phys_of(entries);
         Some(TableFrame { phys, entries })
     }
@@ -355,7 +354,7 @@ impl AddressSpace {
     /// cannot supply a replacement table. On [`MapError::PoolExhausted`]
     /// any level already split stays split (still a faithful identity
     /// re-expression of the same translation), so the address space is
-    /// never left describing a *different* mapping (`AGENTS.md` §2.9).
+    /// never left describing a *different* mapping.
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
@@ -429,7 +428,7 @@ impl AddressSpace {
     /// if the page-table pool cannot supply a replacement table. On a
     /// mid-arena failure the blocks already split stay split (a faithful
     /// re-expression of the same translation), so the space never describes
-    /// a *different* mapping (`AGENTS.md` §2.9 — fail closed, never
+    /// a *different* mapping (fail closed, never
     /// corrupt).
     pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
         if len == 0 || (base & (PAGE_SIZE as u64 - 1)) != 0 {
@@ -519,7 +518,7 @@ impl AddressSpace {
 }
 
 /// Translate the architecture-neutral [`PageFlags`] into the Sv39
-/// permission bits (`AGENTS.md` §2.2 — one neutral vocabulary, decoded
+/// permission bits (one neutral vocabulary, decoded
 /// once at the HAL boundary). The `VALID`/`ACCESSED`/`DIRTY` bits are
 /// added by [`AddressSpace::map_4k`]; riscv64 has no page-table Device
 /// attribute (memory type is PMA-driven), so [`PageFlags::DEVICE`] only
@@ -675,7 +674,7 @@ impl MmuAddressSpace for AddressSpace {
         // The HAL view of the inherent, fully-tested
         // `AddressSpace::split_block` (G1): one body, reached either
         // directly by the arch boot path / verticals or through the HAL
-        // trait here (`AGENTS.md` §2.2). Inherent methods take precedence
+        // trait here. Inherent methods take precedence
         // over a same-named trait method, so this forwards to the inherent
         // body rather than recursing into itself.
         self.split_block(vaddr)
@@ -684,7 +683,7 @@ impl MmuAddressSpace for AddressSpace {
     fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
         // The HAL view of the inherent, fully-tested
         // `AddressSpace::prepare_guard_arena` (G2): one body, reached
-        // either directly or through the HAL trait here (`AGENTS.md` §2.2).
+        // either directly or through the HAL trait here.
         // As with `split_block`, inherent-method resolution forwards to the
         // inherent body rather than recursing.
         self.prepare_guard_arena(base, len)
@@ -719,8 +718,7 @@ impl TlbShootdown for AddressSpace {
 /// per-page flush ([`TlbShootdown::flush_page`]) and the local half of
 /// the cross-CPU shootdown
 /// ([`rustos_arch_api::CrossCpuTlbShootdown::shootdown_page`] on
-/// [`crate::kernel_arch::RiscvArch`]) — one implementation, not two
-/// (`AGENTS.md` §2.2). Unlike aarch64 there is no broadcast variant: the
+/// [`crate::kernel_arch::RiscvArch`]) — one implementation, not two. Unlike aarch64 there is no broadcast variant: the
 /// cross-CPU path reaches *other* harts through the SBI RFENCE firmware
 /// call (`crate::sbi::remote_sfence_vma`).
 pub(crate) fn invalidate_page_local(vaddr: u64) {
@@ -752,8 +750,7 @@ pub(crate) fn invalidate_page_local(vaddr: u64) {
 /// §X), the riscv64 sibling of the `aarch64`/`x86_64` `activate_user_root`:
 /// immediately before the kernel `sret`s back into a user task's U-mode,
 /// that task's own page-table root must be installed so its translations —
-/// and only its — are in force, keeping sibling processes hardware-isolated
-/// (`AGENTS.md` §4). It takes only the `u64` root, so the per-task hook
+/// and only its — are in force, keeping sibling processes hardware-isolated. It takes only the `u64` root, so the per-task hook
 /// that calls it captures a plain word and stays `Send`.
 ///
 /// Unlike [`AddressSpace::switch`] this is a free function over a raw
@@ -811,7 +808,7 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 /// encoding at every level, so only the PPN changes per sub-entry —
 /// `block & !PTE_PPN_MASK` captures `VALID` plus every permission bit, so
 /// the finer leaves map the same memory with identical permissions
-/// (`AGENTS.md` §2.2 — one attribute vocabulary, never re-derived).
+/// (one attribute vocabulary, never re-derived).
 fn shatter_pte_into(child: &mut [u64; ENTRIES_PER_TABLE], block: u64, sub_shift: u32) {
     let base = phys_from_pte(block);
     let attr_bits = block & !PTE_PPN_MASK;

@@ -4,7 +4,7 @@
 //! an in-kernel thread of control: an identity, a state machine, and a
 //! body to execute on its turn. These types are policy-neutral — the
 //! concrete per-task storage (the boxed body, the atomics) lives in each
-//! `kernel/sched/<impl>` crate, not here (`AGENTS.md` §17.1).
+//! `kernel/sched/<impl>` crate, not here.
 //!
 //! ## State machine
 //!
@@ -37,7 +37,7 @@ pub type TaskId = u64;
 ///
 /// Three bands are sufficient for an MLFQ-style policy (see
 /// `docs/src/architecture/scheduler.md`). Adding more bands is an explicit
-/// interface change (`AGENTS.md` §2.4 — no interface creep): a run-queue
+/// interface change (no interface creep): a run-queue
 /// type sizes itself with `Priority::COUNT` worth of per-CPU deques.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]

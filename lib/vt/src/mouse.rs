@@ -4,7 +4,7 @@
 //! program turns tracking on with a DEC private mode ([`MouseMode`], emitted as
 //! `CSI ? <n> h`) and then reads reports in the SGR encoding
 //! (`CSI < Cb ; Cx ; Cy M` for a press, `… m` for a release). Both directions
-//! are named here once, in the shared vocabulary (`AGENTS.md` §2.2), so the
+//! are named here once, in the shared vocabulary, so the
 //! curses input decoder emits the enable sequences and parses the reports
 //! through the one [`crate::Parser`] (`plans/CURSES.md` §C4).
 //!
@@ -56,8 +56,7 @@ impl MouseButton {
     }
 
     /// The [`MouseButton`] for the masked button bits of a `Cb` byte, failing
-    /// closed to [`MouseButton::None`] for an unrecognised pattern
-    /// (`AGENTS.md` §2.9).
+    /// closed to [`MouseButton::None`] for an unrecognised pattern.
     #[must_use]
     const fn from_code(code: u16) -> MouseButton {
         match code {
@@ -161,7 +160,7 @@ impl MouseReport {
     ///
     /// This is the inverse of the button/flag decoding in [`MouseReport::decode`]
     /// over the same bit layout, so a report round-trips through the emitter and
-    /// parser unchanged (`AGENTS.md` §2.2).
+    /// parser unchanged.
     #[must_use]
     pub const fn encode_button(&self) -> u16 {
         let mut cb = self.button.code();

@@ -344,7 +344,7 @@ fn keyboard_bind_table_matches_the_published_xhci_controller_node() {
     assert_eq!(KEYBOARD_BIND_KEYS[0].priority, KEYBOARD_BIND_PRIORITY);
     // The controller node the VL805 bus driver publishes (`node B`) carries
     // the shared `usb,xhci` `compatible` key; the keyboard driver's bind
-    // table matches exactly it (`AGENTS.md` §2.2 / §18.3).
+    // table matches exactly it.
     let node_b = HwMatchKey::compatible(XHCI_COMPATIBLE).expect("fits");
     assert!(KEYBOARD_BIND_KEYS[0].key.matches(&node_b));
     // A different controller `compatible` string does not match — the bind

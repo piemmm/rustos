@@ -4,12 +4,11 @@
 //! one that is currently active. It always contains the two built-in
 //! themes, so there is always an active theme to return; switching themes
 //! at runtime is [`set_active`](ThemeRegistry::set_active), and adding a
-//! custom theme is [`register`](ThemeRegistry::register) — data, not code
-//! (`AGENTS.md` §10).
+//! custom theme is [`register`](ThemeRegistry::register) — data, not code.
 //!
-//! Both mutators fail closed (`AGENTS.md` §5.4): selecting an unknown theme
+//! Both mutators fail closed: selecting an unknown theme
 //! or registering a duplicate id returns a [`ThemeError`] and leaves the
-//! registry unchanged, rather than panicking (`AGENTS.md` §2.9).
+//! registry unchanged, rather than panicking.
 
 use alloc::vec::Vec;
 
@@ -40,7 +39,7 @@ pub struct ThemeRegistry {
 
 impl ThemeRegistry {
     /// A registry holding the built-in dark and light themes, with the
-    /// dark theme active (RustOS's default, `AGENTS.md` §10).
+    /// dark theme active (RustOS's default).
     #[must_use]
     pub fn with_builtins() -> Self {
         Self {
@@ -87,7 +86,7 @@ impl ThemeRegistry {
     /// Make the built-in theme of the given [`Appearance`] the active one,
     /// returning its id.
     ///
-    /// This is the runtime light/dark control's primitive (`AGENTS.md` §10).
+    /// This is the runtime light/dark control's primitive.
     /// The two built-ins are always present, so selecting one by appearance
     /// always succeeds — there is no failure mode to surface (contrast
     /// [`set_active`](Self::set_active), which can name an unregistered id).
@@ -105,7 +104,7 @@ impl ThemeRegistry {
     /// The toggle is driven by the *active* theme's [`Appearance`]: a dark
     /// theme (built-in or custom) switches to the light built-in and a light
     /// theme to the dark built-in. This is exactly what a "switch to
-    /// light/dark" desktop control does (`AGENTS.md` §10).
+    /// light/dark" desktop control does.
     pub fn toggle_appearance(&mut self) -> ThemeId {
         let next = match self.active().appearance() {
             Appearance::Dark => Appearance::Light,

@@ -10,7 +10,7 @@
 //! tables live in ordinary reclaimable RAM rather than a fixed-size
 //! `.bss` pool.
 //!
-//! §17.4 forbids `kernel/arch/*` from naming `kernel/mem`, so the port
+//! the charter forbids `kernel/arch/*` from naming `kernel/mem`, so the port
 //! cannot reach the allocator directly; it names only the HAL trait.
 //! `kernel/mem` *is* allowed to depend on `kernel/arch/api`, so the
 //! adapter lives here and is handed to a port as a `&'static dyn
@@ -24,10 +24,8 @@
 //! needs a CPU-dereferenceable view of that frame's 512 entries to build
 //! a table. That translation is exactly the kernel's direct physical map
 //! ([`crate::phys::PhysMap`]) the DMA and MMIO layers already use, so the
-//! adapter routes through it rather than re-deriving a pointer
-//! (`AGENTS.md` §2.2). A frame whose physical address is outside the
-//! direct map is returned to the allocator and the request fails closed
-//! (`AGENTS.md` §2.9), never synthesising a pointer of its own.
+//! adapter routes through it rather than re-deriving a pointer. A frame whose physical address is outside the
+//! direct map is returned to the allocator and the request fails closed, never synthesising a pointer of its own.
 
 use rustos_arch_api::frames::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 
@@ -59,7 +57,7 @@ impl FrameTableSource {
     /// `phys` is `Sync` because in production the one source is shared,
     /// immutably, by every CPU's spawn path (it lives behind a `'static`
     /// shared handle), so the kernel can cache a single `FrameTableSource`
-    /// in a `static` (`AGENTS.md` §2.1). The kernel direct map
+    /// in a `static`. The kernel direct map
     /// ([`DirectPhysMap`](crate::DirectPhysMap)) is `Copy` plain data, so it
     /// satisfies the bound.
     #[must_use]
@@ -71,13 +69,13 @@ impl FrameTableSource {
 impl PageTableFrames for FrameTableSource {
     fn alloc_table(&self) -> Option<TableFrame> {
         // Deterministic OOM: a full allocator returns `None`, never a
-        // panic (`AGENTS.md` §4).
+        // panic.
         let frame = self.frames.alloc().ok()?;
         let phys = frame.start().as_u64();
 
         let Some(ptr) = self.phys.translate(PhysAddr::new(phys), PAGE_SIZE) else {
             // The frame is outside the direct map: hand it back and fail
-            // closed rather than fabricating a pointer (`AGENTS.md` §2.9).
+            // closed rather than fabricating a pointer.
             // A best-effort free is correct here — the frame was just
             // allocated, so the matching free cannot legitimately fail.
             let _ = self.frames.free(frame);
@@ -150,8 +148,7 @@ mod tests {
     }
 
     /// The production source is shared, immutably, by every CPU's spawn
-    /// path, so it must be `Sync` to live behind a `'static` cache
-    /// (`AGENTS.md` §2.1 / §24.1). Asserting it here keeps the `phys: &dyn
+    /// path, so it must be `Sync` to live behind a `'static` cache. Asserting it here keeps the `phys: &dyn
     /// PhysMap + Sync` bound from silently regressing.
     #[test]
     fn frame_table_source_is_sync() {

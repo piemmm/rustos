@@ -55,7 +55,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
@@ -146,8 +146,8 @@ fn spawn_el0_resume_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen the program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen the program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -162,8 +162,7 @@ impl CapabilityQuery for SpawnAuthority {
 /// suspended back to the dispatcher through [`reschedule_current`]. `yield`
 /// resumes here on the next dispatch (and the callback `sysret`s back into ring
 /// 3); `exit` reaps the task and never returns to the callback. Any other
-/// syscall is unexpected from the fixture program and fails the test loudly
-/// (`AGENTS.md` §7).
+/// syscall is unexpected from the fixture program and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -251,7 +250,7 @@ fn run_resume() -> ! {
     // whose `bsp_lapic_id` reads the LAPIC ID register and whose spawn-time
     // self-IPI writes the LAPIC ICR; the minimal new space maps only the low
     // 32 MiB + higher-half kernel window, so without this those accesses would
-    // fault after the switch (fail closed if the pool is exhausted, §2.9).
+    // fault after the switch (fail closed if the pool is exhausted).
     if arch_space
         .map_4k(&PAGE_TABLE_POOL, LAPIC_MMIO_BASE, LAPIC_MMIO_BASE, true)
         .is_none()
@@ -320,12 +319,11 @@ fn run_resume() -> ! {
     // self-IPI to the LAPIC ICR is latched and never delivered).
     let bsp_id = smp::bsp_lapic_id();
     // This vertical drives a single CPU (the BSP, dense id 0), so its
-    // per-CPU bookkeeping is sized to one slot (`AGENTS.md` §24.1 —
-    // capacity matches the machine the caller drives, not a baked-in
+    // per-CPU bookkeeping is sized to one slot (capacity matches the machine the caller drives, not a baked-in
     // `MAX_CPUS`).
     let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
-    // `&'static` backing (`AGENTS.md` §24.1); `run` runs once, so a
+    // `&'static` backing; `run` runs once, so a
     // function-local `static` is sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let Ok(arch) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
@@ -340,10 +338,10 @@ fn run_resume() -> ! {
 
     // Admit the EL0 program as a resumable user kthread. Its `pre_resume` hook
     // runs on the dispatcher's context immediately before every switch-in: it
-    // reloads CR3 to the task's own root (isolation, §4) and — the X1 primitive
+    // reloads CR3 to the task's own root (isolation) and — the X1 primitive
     // — repoints the per-CPU `syscall` entry stack at *this* task's own kernel
     // stack (`set_kernel_rsp0`), the value the seam hands it. Its work body
-    // `enter_user`s into ring 3. `ContextSwitchHal` is the x86_64 §17.2
+    // `enter_user`s into ring 3. `ContextSwitchHal` is the x86_64
     // context-switch primitive.
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -352,7 +350,7 @@ fn run_resume() -> ! {
         // stack before the switch-in (`plans/PI.md` §X). A rejected value
         // (it is validated canonical/aligned/kernel-half) leaves the slot
         // unchanged and the next syscall would fault loudly — fail closed,
-        // never a silent wrong stack (`AGENTS.md` §5.4 / §2.9).
+        // never a silent wrong stack.
         if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
             note(TEST_FAIL, "X1 test: set_kernel_rsp0 rejected the stack top");
             qemu_exit::exit_failure();
@@ -382,7 +380,7 @@ fn run_resume() -> ! {
     // through the dispatch callback's `reschedule_current`, so it ping-pongs
     // with the dispatcher through real ring-3↔kernel context switches landing
     // on its own kernel stack. A switch that never resumed its task would stall
-    // the drain and the harness would time out (fail-loud, `AGENTS.md` §7).
+    // the drain and the harness would time out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

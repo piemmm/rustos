@@ -1,15 +1,15 @@
-//! `cargo xtask model-check` — the §19.7 Silver model checker.
+//! `cargo xtask model-check` — the Silver model checker.
 //!
-//! `AGENTS.md` §19.7 Silver requires "a TLA+ (or equivalent) model of the
+//! Silver requires "a TLA+ (or equivalent) model of the
 //! capability + IPC state machine that is kept in sync with the code". The
-//! charter (`AGENTS.md` §2.12) forbids trusting external code where a
-//! first-party implementation is feasible, and §19.6 already established the
+//! charter forbids trusting external code where a
+//! first-party implementation is feasible, and already established the
 //! "equivalent in-tree harness" precedent over an external runner. TLA+'s
 //! TLC checker is an external Java tool, so the *equivalent* here is an
 //! in-tree, exhaustive **explicit-state model checker**: it enumerates every
 //! reachable state of a finite abstract state machine by breadth-first search
 //! and verifies a set of safety invariants at every state and on every
-//! transition. The verifier — not the model — is the oracle (§19.7): a
+//! transition. The verifier — not the model — is the oracle: a
 //! reachable state (or transition) that violates an invariant fails the
 //! command, fail-closed.
 //!
@@ -144,7 +144,7 @@ pub fn check<M: Model>(model: &M) -> Result<Report, Counterexample> {
 }
 
 // ---------------------------------------------------------------------------
-// The capability + IPC model (the §19.7 Silver subject).
+// The capability + IPC model (the Silver subject).
 // ---------------------------------------------------------------------------
 
 /// Capability universe size: capabilities are the bits `0..NCAPS` of a `u8`
@@ -194,7 +194,7 @@ pub struct CapIpcState {
 
 /// The capability + IPC model. The production instance has both fault
 /// switches off; the tests flip one at a time to prove the checker rejects a
-/// model that breaks an invariant (the verifier is the oracle, §19.7).
+/// model that breaks an invariant (the verifier is the oracle).
 pub struct CapIpcModel {
     /// Fault injection: make `delegate` *widen* the effective set (breaks
     /// delegate-never-widens). Off in production.
@@ -219,7 +219,7 @@ impl Model for CapIpcModel {
     type State = CapIpcState;
 
     fn initial(&self) -> Vec<Self::State> {
-        // `derive` (§5.2): effective is exactly `user_grant ∩ manifest`. Every
+        // `derive`: effective is exactly `user_grant ∩ manifest`. Every
         // bounds pairing is an initial state.
         let mut out = Vec::new();
         for user_grant in 0..SUBSET_COUNT {
@@ -302,12 +302,12 @@ impl Model for CapIpcModel {
     }
 
     fn state_invariant(&self, s: &Self::State) -> Result<(), String> {
-        // No ambient authority / unforgeability (§4, §5.2): the effective set
+        // No ambient authority / unforgeability: the effective set
         // never exceeds either derive-time bound.
         if s.effective & !s.user_grant != 0 || s.effective & !s.manifest != 0 {
             return Err("no-ambient-authority: effective ⊄ user_grant ∩ manifest".to_string());
         }
-        // IPC fail-closed (§5.4): a queued message was authorised and sized.
+        // IPC fail-closed: a queued message was authorised and sized.
         if s.queue.iter().any(|m| !m.caps_ok || !m.size_ok) {
             return Err("ipc-fail-closed: an unauthorised/oversize message was queued".to_string());
         }
@@ -376,7 +376,7 @@ fn check_cap_ipc() -> Result<Report, Counterexample> {
     check(&CapIpcModel::production())
 }
 
-/// The closed set of §19.7 Silver models, in run order.
+/// The closed set of Silver models, in run order.
 pub const MODELS: &[NamedModel] = &[NamedModel {
     name: "cap-ipc",
     description: "capability + IPC state machine (derive/delegate/revoke + port send/recv/destroy)",

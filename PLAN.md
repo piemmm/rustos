@@ -3236,6 +3236,16 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-06-24 — No charter-section citations in code comments.** Scoped
+  §2.11's "references" to external/cross-file pointers (specs, manuals, papers,
+  other in-tree files/plans) and forbade citing `AGENTS.md` section numbers
+  (`§5.4`, `sec.5.4`, "Section 5.4", bare `(§2.9)`) in comments; the *why* is
+  stated in prose ("the charter forbids …" where the charter is the subject).
+  Added §15.17. Generator-stamped provenance (`include/` C-header banners) and
+  runtime diagnostics that point at a violated rule are exempt. Stripped the
+  citation tokens tree-wide (rationale prose retained); comment-only change, no
+  interface or behaviour touched.
+
 - **2026-06-07 — Code-quality & self-review hardening.** Added §2.13 (no
   pre-release backwards-compatibility code — RustOS has not shipped, so
   RustOS-native interfaces, types, and on-disk formats are evolved *in place*

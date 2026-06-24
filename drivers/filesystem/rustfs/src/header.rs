@@ -12,13 +12,13 @@
 //!
 //! Decoding verifies all of that against the address the reader *expected*,
 //! so a stale, misdirected, wrong-type, torn, or bit-rotted block is rejected
-//! at decode time and the caller fails closed (`AGENTS.md` §5.4) rather than
+//! at decode time and the caller fails closed rather than
 //! trusting corrupt bytes.
 //!
 //! # Authenticator
 //!
 //! The block is sealed with an HMAC-SHA256 keyed authenticator
-//! ([`mac_tag`]) computed through `lib/crypto` (`AGENTS.md` §2.12 — crypto is
+//! ([`mac_tag`]) computed through `lib/crypto` (crypto is
 //! the standing "don't roll your own" exception). The tag covers every byte
 //! of the block except the tag slot itself, so it authenticates the identity
 //! (type, UUID, owner, generation, logical and physical address, payload
@@ -67,14 +67,14 @@ pub enum BlockType {
     Directory = 4,
     /// A scrub-progress record: the resumable cursor and accumulated counts
     /// of an online scrub (`docs/src/filesystem/rustfs-spec.md` §4 rebuildable
-    /// metadata, §12). It is reached from the transaction root and never
-    /// required for ordinary crash recovery (§14).
+    /// metadata). It is reached from the transaction root and never
+    /// required for ordinary crash recovery.
     ScrubProgress = 5,
     /// A device-health baseline record: the last clean device-health
     /// snapshot plus the volume's accumulated filesystem-observed fault and
     /// repair counters (`docs/src/filesystem/rustfs-spec.md` §4, §11). Like
     /// the scrub-progress record it is reached from the transaction root and
-    /// is never required for ordinary crash recovery (§14).
+    /// is never required for ordinary crash recovery.
     HealthBaseline = 6,
 }
 
@@ -233,8 +233,7 @@ impl BlockHeader {
     /// bit-rotted, or wrong-key block); the `block_type`, filesystem UUID, and
     /// physical address match what the caller expected (rejecting a
     /// wrong-type, foreign-volume, stale, or misdirected block). Every failure
-    /// is [`DriverError::DeviceFault`] so the caller fails closed
-    /// (`AGENTS.md` §5.4).
+    /// is [`DriverError::DeviceFault`] so the caller fails closed.
     ///
     /// # Errors
     ///

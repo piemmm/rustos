@@ -19,13 +19,13 @@
 //!    proving the window points at genuine device MMIO, not blank memory.
 //! 3. Returns `0` (PASS) on a match, or a distinct non-zero code on any
 //!    failure, which `rustos-rt` routes through `exit`; the vertical reports
-//!    exit code `0` as PASS and any other as a failure (`AGENTS.md` §7 / §2.9).
+//!    exit code `0` as PASS and any other as a failure.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt`, never the C ABI (`crt0` + `abi-sys`), which exists
-//! solely for non-Rust programs (`AGENTS.md` §16.4). It is built
+//! solely for non-Rust programs. It is built
 //! position-independent and converted to an `rxe` blob by the consuming test's
-//! build script (`AGENTS.md` §9, §19.2). On the host it is an inert stub so
+//! build script. On the host it is an inert stub so
 //! `cargo build --workspace`, clippy, and fmt still cover the crate.
 
 #![cfg_attr(freestanding, no_std)]
@@ -54,7 +54,7 @@ mod program {
     const DEFAULT_REG_OFFSET: u64 = 0;
 
     /// The grant handle this program maps (pinned by the consuming build, the
-    /// §2.2 single source of truth, else the default).
+    /// single source of truth, else the default).
     const GRANT_HANDLE: u64 = match option_env!("RUSTOS_MMIO_GRANT_HANDLE") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_GRANT_HANDLE),
         None => DEFAULT_GRANT_HANDLE,
@@ -114,7 +114,7 @@ mod program {
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to `default` on an empty string, a non-digit byte, or
     /// overflow of the `u64` range. `const` and panic-free so the values are
-    /// fixed into the image with no runtime parsing (`AGENTS.md` §2.9 — fail
+    /// fixed into the image with no runtime parsing (fail
     /// closed to the default).
     const fn parse_u64(bytes: &[u8], default: u64) -> u64 {
         let mut acc: u64 = 0;
@@ -151,7 +151,7 @@ mod program {
         // 1. Map the sub-region of the granted device window that covers the
         //    register under test — from offset 0 through `REG_OFFSET + 4` —
         //    by handle. Mapping a bounded sub-region (not the whole grant) is
-        //    the production contract (`AGENTS.md` §24.1); `mmio_map` returns
+        //    the production contract; `mmio_map` returns
         //    the base VA of that sub-region. A negative result is the
         //    `-errno` the kernel returned (a refused or unresolved grant, or
         //    a sub-region escaping it).
@@ -168,7 +168,7 @@ mod program {
         // SAFETY: `mmio_map` returned the base of a mapped, caching-disabled,
         //    USER-readable device window of at least `REG_OFFSET + 4` bytes in
         //    this process's own address space, so `reg` is a valid, readable,
-        //    in-bounds pointer (`AGENTS.md` §5.4 — the kernel validated the
+        //    in-bounds pointer (the kernel validated the
         //    grant and installed the mapping).
         let got = unsafe { reg.read_volatile() };
 
@@ -190,7 +190,7 @@ mod program {
         // SAFETY: `mem_map` returned the base of `MEM_MAP_LEN` bytes of mapped,
         //    zeroed, USER-writable anonymous memory in this process's own
         //    address space, so `cell` is a valid, writable, in-bounds pointer
-        //    (`AGENTS.md` §5.4 — the kernel installed the mapping). The write
+        //    (the kernel installed the mapping). The write
         //    is `volatile` so it is not elided before the read-back.
         let read_back = unsafe {
             cell.write_volatile(MEM_SENTINEL);
@@ -219,7 +219,7 @@ mod program {
         // SAFETY: `dma_alloc` returned the base of `DMA_ALLOC_LEN` bytes of
         //    mapped, zeroed, USER-writable coherent DMA memory in this
         //    process's own address space, so `dma_cell` is a valid, writable,
-        //    in-bounds pointer (`AGENTS.md` §5.4 — the kernel installed the
+        //    in-bounds pointer (the kernel installed the
         //    mapping). The write is `volatile` so it is not elided before the
         //    read-back.
         let dma_read_back = unsafe {

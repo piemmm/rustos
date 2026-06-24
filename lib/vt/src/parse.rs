@@ -2,12 +2,12 @@
 //!
 //! [`Parser`] is a byte-at-a-time state machine. It is the inverse of the
 //! [`crate::emit`] emitter over the same tables, so every operation the emitter
-//! writes parses back to the identical [`Op`] (`AGENTS.md` §2.2).
+//! writes parses back to the identical [`Op`].
 //!
 //! The parser is total. A terminal consumes bytes it did not produce — local
 //! shell output and, in the remote stages of `plans/CURSES.md`, a foreign
 //! host's output — so every input must be handled without panic or
-//! out-of-bounds access (`AGENTS.md` §2.9). Numeric parameters saturate
+//! out-of-bounds access. Numeric parameters saturate
 //! ([`PARAM_MAX`]), the parameter and string buffers are bounded
 //! ([`MAX_PARAMS`], [`MAX_STRING`]), and an unrecognised, oversized, or
 //! malformed sequence is consumed and dropped rather than corrupting state.
@@ -22,7 +22,7 @@ use crate::mouse::{MouseMode, MouseReport};
 use crate::op::{EraseMode, Op};
 
 /// The largest value a numeric CSI parameter accumulates to; further digits
-/// saturate here so a long digit run cannot overflow (`AGENTS.md` §2.9).
+/// saturate here so a long digit run cannot overflow.
 pub const PARAM_MAX: u32 = 0xffff;
 
 /// The largest number of CSI parameters retained; further parameters are
@@ -206,7 +206,7 @@ impl Parser {
 
     /// Handle the byte after `ESC O` (`SS3`): a single final byte that names a
     /// function or editing key. An unrecognised byte fails closed and is
-    /// dropped (`AGENTS.md` §2.9).
+    /// dropped.
     fn ss3(&mut self, byte: u8, sink: &mut impl FnMut(Op)) {
         self.state = State::Ground;
         if let Some(key) = Key::from_ss3_final(byte) {
@@ -300,7 +300,7 @@ impl Parser {
 
     /// Dispatch a `CSI <n> ~` sequence: a bracketed-paste marker or a named
     /// function / editing key. An unrecognised parameter fails closed and is
-    /// dropped (`AGENTS.md` §2.9).
+    /// dropped.
     fn dispatch_tilde(&self, sink: &mut impl FnMut(Op)) {
         match self.params.first().copied() {
             Some(control::PASTE_START) => sink(Op::PasteStart),

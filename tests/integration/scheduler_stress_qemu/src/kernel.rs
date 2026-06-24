@@ -51,8 +51,7 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// `min(discovered, MAX_CPUS)` cores), and every per-CPU backing this
 /// binary owns — the execution counter, the arch handle, the per-CPU
 /// arena, and the AP stack pool — is sized to it. The arch crate no
-/// longer imposes a `MAX_CPUS` ceiling: capacity is the caller's `N`
-/// (`AGENTS.md` §24.1).
+/// longer imposes a `MAX_CPUS` ceiling: capacity is the caller's `N`.
 const MAX_CPUS: usize = 16;
 
 /// Per-CPU execution counter (debug aid; verifies tasks ran on multiple
@@ -62,7 +61,7 @@ static PER_CPU_EXEC: [AtomicU64; MAX_CPUS] = {
     // `[AtomicU64::new(0); MAX_CPUS]` syntax requires `Copy`. The
     // `const` initializer is consumed by the array literal and never
     // re-named; `declare_interior_mutable_const` is suppressed with
-    // rationale per AGENTS.md §15.10.
+    // rationale.
     #[allow(clippy::declare_interior_mutable_const)]
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; MAX_CPUS]
@@ -97,7 +96,7 @@ const PREEMPT_CALIBRATION_WINDOW_US: u32 = 10_000;
 /// milliseconds, well above 100 timer periods. We pick a *small but
 /// non-zero* lower bound so the assertion stays robust against TCG
 /// jitter while still failing loudly if preemption is silently
-/// disabled (`AGENTS.md` §7 — no flaky tests, no silent regressions).
+/// disabled (no flaky tests, no silent regressions).
 const MIN_PREEMPTIONS_PER_CPU: u64 = 10;
 
 /// Black-box busy-spin iterations one tickless **witness** task runs per
@@ -108,13 +107,13 @@ const MIN_PREEMPTIONS_PER_CPU: u64 = 10;
 /// on its next dispatch after the yield). The witnesses loop until every
 /// CPU has observed [`MIN_PREEMPTIONS_PER_CPU`] ticks, so the count is
 /// self-calibrating rather than tied to a fixed iteration budget
-/// (`AGENTS.md` §7 — no flaky tests).
+/// (no flaky tests).
 const WITNESS_SPIN: u64 = 20_000_000;
 
 /// Number of busy witness tasks pinned per CPU. Two so each CPU stays
 /// contended (and therefore keeps its one-shot armed) even after the
 /// short workload tasks drain — a single sole task would disarm under the
-/// tickless model (`AGENTS.md` §17.1) and never observe a further tick.
+/// tickless model and never observe a further tick.
 const WITNESSES_PER_CPU: u32 = 2;
 
 /// BSP-computed LAPIC-timer calibration, packed into a `u64` (ticks/s
@@ -151,7 +150,7 @@ fn unpack_calibration() -> Option<Calibration> {
         // the packed transport shape would require widening the
         // transport from `u64` to `u128`; documented here as a
         // deliberate carry-over rather than silently widening (
-        // `AGENTS.md` §2.4 — no interface creep).
+        // — no interface creep).
         tsc_per_second: 0,
     })
 }
@@ -229,7 +228,7 @@ struct Heap([u8; HEAP_BYTES]);
 // a disjoint slice from the bump cursor.
 static mut HEAP: Heap = Heap([0; HEAP_BYTES]);
 
-/// Forward-only bump allocator. AGENTS.md §6 puts shared utilities in
+/// Forward-only bump allocator. puts shared utilities in
 /// `lib/`; this allocator is intentionally local because (a) it never
 /// frees (a documented limitation for the test binary only) and (b)
 /// nothing in `kernel/` or `lib/` should ever take a dependency on a
@@ -316,7 +315,7 @@ impl SchedulerArch for SmpArch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): the scheduler arms the
+        // Tickless preemption: the scheduler arms the
         // calling CPU's LAPIC one-shot to one quantum when it dispatches a
         // task onto a contended CPU, and disarms otherwise. The per-CPU
         // quantum (LAPIC initial-count) was recorded by
@@ -343,7 +342,7 @@ impl SchedulerArch for SmpArch {
 // SIPI-SIPI, workload spawn, watchdog, and the per-CPU preemption
 // audit. Splitting it would only push the same `qemu_exit::exit_failure`
 // branches into multiple helpers and obscure the deliberate boot
-// ordering; AGENTS.md §15.5 forbids gratuitous helpers without two
+// ordering; the charter forbids gratuitous helpers without two
 // independent call sites. The `too_many_lines` lint is suppressed
 // with rationale.
 #[allow(clippy::too_many_lines)]
@@ -365,7 +364,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // Publish the caller-owned per-CPU GDT/IDT/IST arena (sized to this
     // vertical's `MAX_CPUS` capacity) before any `percpu::init`, on the
     // BSP and before any AP is started so each AP's `percpu::init(cpu_id)`
-    // sees it (`AGENTS.md` §24.1 — no baked-in arch-crate ceiling).
+    // sees it (no baked-in arch-crate ceiling).
     // Set-once; `kernel_main` runs once.
     static PER_CPU_STORAGE: percpu::PerCpuStorage<MAX_CPUS> = percpu::PerCpuStorage::new();
     if PER_CPU_STORAGE.register().is_err() {
@@ -478,7 +477,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
         cpu_to_lapic[i + 1] = Some(ap_ids.ids[i]);
     }
     // The bring-up handle borrows its per-CPU bookkeeping from a
-    // caller-sized `&'static` backing (`AGENTS.md` §24.1 — sized to this
+    // caller-sized `&'static` backing (sized to this
     // vertical's discovered CPU count, no fixed ceiling in the arch
     // crate). `kernel_main` runs once, so a function-local `static` is
     // sound and needs no allocator.
@@ -505,7 +504,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     }
     // Publish the caller-owned AP bootstrap-stack pool (one stack per
     // application processor, sized to `MAX_CPUS - 1`) before any
-    // `start_secondary` (`AGENTS.md` §24.1). Set-once; fails closed
+    // `start_secondary`. Set-once; fails closed
     // before registration.
     static AP_STACKS: smp::ApStackPool<{ MAX_CPUS - 1 }> = smp::ApStackPool::new();
     if AP_STACKS.register().is_err() {
@@ -587,7 +586,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
             })
             .expect("spawn");
     }
-    // Tickless preemption witnesses (`AGENTS.md` §17.1): the short workload
+    // Tickless preemption witnesses: the short workload
     // tasks above each run far under one quantum, so the one-shot is
     // re-armed before it can fire — under the tickless model they alone
     // would never drive a timer tick on any CPU. To prove the per-CPU LAPIC
@@ -679,7 +678,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // timer ISR — not merely by the cooperative `step()` loop — on
     // every CPU. A silent regression to cooperative-only scheduling
     // would preserve the workload-correctness check above but break
-    // the security model (`AGENTS.md` §5: a runaway task must not
+    // the security model (: a runaway task must not
     // indefinitely block another CPU's progress); this is the test
     // that catches it.
     let total_preempts = sched.total_preemption_count();
@@ -879,7 +878,7 @@ fn discover_aps(multiboot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> O
 
 // MADT discovery moved to `rustos_arch_x86_64::acpi::locate_madt`
 // in Stage 3a (c7-bin). The previous open-coded `find_madt_via_*` /
-// `try_madt` / `read_phys_*` helpers are gone — `AGENTS.md` §2.2
+// `try_madt` / `read_phys_*` helpers are gone
 // (no duplication). The `discover_aps` helper above now calls the
 // shared, audited implementation.
 

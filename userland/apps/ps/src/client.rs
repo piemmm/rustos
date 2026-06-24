@@ -19,8 +19,7 @@ usage: ps [-e | -A | --all]
 /// rendered listing to `out`.
 ///
 /// The page walk and row rendering are the shared helpers from
-/// `lib/procinfo`; `ps` only supplies the column header and the per-row sink
-/// (`AGENTS.md` §2.2). The capability gate lives in `sysinfod`, not here: a
+/// `lib/procinfo`; `ps` only supplies the column header and the per-row sink. The capability gate lives in `sysinfod`, not here: a
 /// denied global listing comes back as
 /// [`Errno::PermissionDenied`](rustos_abi::Errno::PermissionDenied), which
 /// the tool renders honestly as [`PsError::PermissionDenied`].

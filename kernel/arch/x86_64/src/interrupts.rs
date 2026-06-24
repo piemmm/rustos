@@ -39,10 +39,10 @@
 //!
 //! The "must terminate" property is intentional: the only consumers
 //! of the default thunk today are *unexpected* interrupts that
-//! `AGENTS.md` §10 requires to fail closed. A real ISR (LAPIC timer,
+//! the charter requires to fail closed. A real ISR (LAPIC timer,
 //! syscall entry, etc.) lives behind its own dedicated thunk emitted
 //! by the (c5) follow-up; it is *not* shoe-horned into the default
-//! path. This avoids the §15.5 anti-pattern of a "convenience wrapper"
+//! path. This avoids the anti-pattern of a "convenience wrapper"
 //! that ends up carrying production logic.
 
 use core::mem::size_of;
@@ -243,10 +243,10 @@ pub struct Idt {
 /// Reasons [`Idt::validate`] rejects an in-memory IDT.
 ///
 /// Each variant is an interrupt-gate invariant a corrupted (or
-/// mis-built) table would break (`AGENTS.md` §3.5 / §5 of the security
+/// mis-built) table would break (of the security
 /// charter — IDT / call-gate CVE classes). Validation runs against the
 /// bytes in memory *before* `lidt` installs them, so a scribbled table
-/// fails closed (§5.4) rather than routing an interrupt through an
+/// fails closed rather than routing an interrupt through an
 /// attacker-chosen address or a user-reachable gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdtError {
@@ -342,12 +342,12 @@ impl Idt {
     /// **before** `lidt` installs the table.
     ///
     /// A corrupted IDT is a classic privilege-escalation / hijack vector
-    /// (`AGENTS.md` §3.5 / §5 — IDT / call-gate CVE classes): a gate with
+    /// (IDT / call-gate CVE classes): a gate with
     /// a cleared present bit, a non-zero DPL (letting ring 3 fire the
     /// vector with `int n`), a foreign code selector, an out-of-range
     /// `IST`, or a zeroed handler offset all route or fault control flow
     /// where the kernel did not intend. Checking the in-memory table here
-    /// makes a scribbled IDT fail closed (§5.4) instead of being loaded.
+    /// makes a scribbled IDT fail closed instead of being loaded.
     ///
     /// `expected_selector` is the kernel CS every gate must reference
     /// (the selector passed to [`Self::with_default_handler`]).
@@ -409,7 +409,7 @@ impl Idt {
             let bytes = size_of::<[IdtEntry; IDT_LEN]>();
             assert!(bytes >= 1 && bytes - 1 <= u16::MAX as usize);
             // SAFETY-INVARIANT: the `assert!` proves the truncation
-            // cast is lossless; AGENTS.md §15.10 justified `#[allow]`.
+            // cast is lossless; justified `#[allow]`.
             #[allow(clippy::cast_possible_truncation)]
             let limit = (bytes - 1) as u16;
             limit
@@ -466,7 +466,7 @@ pub struct IdtPointer {
 /// 5. Restores the GPRs in reverse order and `iretq`s.
 ///
 /// The macro is the only sanctioned way to produce a per-vector stub
-/// (`AGENTS.md` §2.5 — no convenience wrappers, §15.5 — no shoe-
+/// (no convenience wrappers — no shoe-
 /// horning new logic into the fail-closed default thunk). Vectors
 /// that push a hardware error code (`8`, `10`–`14`, `17`, `21`) are
 /// *not* supported by this macro — they would need an additional
@@ -545,7 +545,7 @@ macro_rules! define_isr {
 
 /// Rust callback invoked by the assembly thunk
 /// `rustos_arch_x86_64_isr_default` (`interrupts.s`) with a pointer to
-/// the saved-regs block. Treated by `AGENTS.md` §10 as a closed-fail:
+/// the saved-regs block. Treated by as a closed-fail:
 /// any unexpected interrupt halts the binary through the platform's
 /// QEMU-exit hook.
 ///
@@ -677,12 +677,12 @@ mod tests {
         assert_eq!(offset_of!(InterruptStackFrame, ss), 32);
     }
 
-    // -- §3.5 IDT integrity / corruption tests ---------------------------
+    // IDT integrity / corruption tests ---------------------------
     //
     // `validate` is the detector for a scribbled IDT. Each test builds a
     // well-formed table, corrupts one gate field via a copy-mutate-assign
     // (so no reference is taken into the packed entry), and asserts
-    // validation fails closed (`AGENTS.md` §3.5 / §5.4) before any `lidt`.
+    // validation fails closed before any `lidt`.
 
     const TEST_CS: u16 = 0x08;
     const TEST_HANDLER: u64 = 0xFFFF_8000_0010_0000;

@@ -37,7 +37,7 @@
 //!
 //! # No ambient authority
 //!
-//! Per `AGENTS.md` §4 and §5.1, nothing in `kernel/sec` branches on
+//! Per and, nothing in `kernel/sec` branches on
 //! `uid == 0`. Authority is *purely* the capability bits a record
 //! carries. Tests (`identity::uid_zero_is_not_ambient_root` and
 //! `captable::uid_zero_gets_no_extra_powers`) lock this invariant in.

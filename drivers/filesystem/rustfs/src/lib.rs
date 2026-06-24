@@ -2,11 +2,10 @@
 //!
 //! `rustfs` is the native RustOS filesystem: a block-backed, copy-on-write
 //! filesystem that stores full POSIX metadata plus an inline access-control
-//! list and an optional capability gate **per inode** (`AGENTS.md` §5.3). It
+//! list and an optional capability gate **per inode**. It
 //! sits behind any [`rustos_abi::driver::block::Block`] device and exposes
 //! itself through the versioned [`FilesystemRead`] / [`FilesystemWrite`] /
-//! [`FilesystemSecurity`] / [`FilesystemTimestamps`] surfaces (`AGENTS.md`
-//! §2.4 / §9 — new behaviour ships as a new trait, never by widening the
+//! [`FilesystemSecurity`] / [`FilesystemTimestamps`] surfaces (new behaviour ships as a new trait, never by widening the
 //! frozen mount/unmount [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
 //!
 //! # Crash consistency (copy-on-write + superblock ring)
@@ -25,11 +24,11 @@
 //! Every metadata block is self-identifying (`header` module): it carries its
 //! type, the volume UUID, a generation, and its expected address under a
 //! checksum, so a stale, misdirected, wrong-type, or torn block is rejected at
-//! decode time (`AGENTS.md` §5.4 — fail closed).
+//! decode time (fail closed).
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`]. [`RustFs`]
+//! Per the only public *function* is [`register`]. [`RustFs`]
 //! is a public *type* the driver host instantiates with [`RustFs::format`] /
 //! [`RustFs::open`].
 //!
@@ -37,8 +36,7 @@
 //!
 //! Loading requires
 //! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The driver
-//! runs in user space; it does not request `CAP_DRV_KERNEL` (`AGENTS.md`
-//! §4 / §8).
+//! runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -105,7 +103,7 @@ use transaction::TxnRoot;
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5275_7374_4653_0002;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -126,11 +124,11 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// the file name) under `parent`, creating each intermediate directory that
 /// does not already exist.
 ///
-/// The single definition of the store-planting helper (`AGENTS.md` §2.2):
+/// The single definition of the store-planting helper:
 /// the image builder (`tools/mkimage`) lays the signed driver bundles into a
 /// `/System` volume's `Drivers/` store with it, and the image-fixture crates
 /// reuse the same routine so the test images and the real installation give
-/// the §18.3 / §18.6 autoload scan an identical on-disk shape. `components`
+/// the autoload scan an identical on-disk shape. `components`
 /// is the path *under `parent`* of the bundle's leaf file (for example,
 /// relative to the `/System` volume root,
 /// `&[b"Drivers", b"bus_mailbox", b"vcmailbox", b"Run"]`). The bytes are the
@@ -140,7 +138,7 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 ///
 /// Propagates any [`DriverError`] from the underlying create/write, or
 /// [`DriverError::Unsupported`] for an empty `components` path. A short write
-/// surfaces as [`DriverError::DeviceFault`] (`AGENTS.md` §2.9 — never a
+/// surfaces as [`DriverError::DeviceFault`] (never a
 /// truncated bundle).
 pub fn plant_nested_file<B>(
     fs: &mut RustFs<B>,
@@ -280,7 +278,7 @@ const I_NLINK: usize = 20;
 const I_REQCAP: usize = 24;
 const I_ACLCOUNT: usize = 28;
 const I_SIZE: usize = 32;
-// The four §21 timestamps, each a 12-byte Time64, occupy bytes 40..88.
+// The four timestamps, each a 12-byte Time64, occupy bytes 40..88.
 const I_CREATED: usize = 40;
 const I_MODIFIED: usize = 52;
 const I_ACCESSED: usize = 64;
@@ -472,10 +470,10 @@ pub struct RustFs<B: Block> {
     /// filesystem-observed fault counters, reached from the transaction root
     /// (`health` module, `docs/src/filesystem/rustfs-spec.md` §4, §11).
     health_baseline_root: u64,
-    /// The volume's deduplication domain (`crypto` module, §7). Dedupe never
+    /// The volume's deduplication domain (`crypto` module). Dedupe never
     /// crosses it.
     dedupe_domain: u64,
-    /// In-memory, rebuildable dedupe index (§9 — never authoritative): a
+    /// In-memory, rebuildable dedupe index (never authoritative): a
     /// `(domain, length, logical hash)` key mapping to a candidate chunk and
     /// the referrer that introduced it. Rebuilt from the chunk + reverse-ref
     /// trees at [`RustFs::open`]; every candidate is liveness-checked and
@@ -488,7 +486,7 @@ pub struct RustFs<B: Block> {
     txn_allocated: Vec<u64>,
     txn_freed: Vec<u64>,
     txn_private: Vec<bool>,
-    /// Transient, rebuildable (§4) queue of physical blocks that a
+    /// Transient, rebuildable queue of physical blocks that a
     /// committed transaction returned to the free pool and that have
     /// not yet been discarded to the device. A block enters here only
     /// once [`Self::finish_txn`] has marked it free — i.e. it is
@@ -598,7 +596,7 @@ impl<B: Block> RustFs<B> {
         }
     }
 
-    /// Replace the wall clock used to stamp the §21 timestamps. Used by tests
+    /// Replace the wall clock used to stamp the timestamps. Used by tests
     /// to inject a deterministic clock; the default returns the Unix epoch.
     #[must_use]
     pub fn with_clock(mut self, clock: fn() -> Time64) -> Self {
@@ -627,8 +625,7 @@ impl<B: Block> RustFs<B> {
     /// only block-by-block as each is overwritten.
     ///
     /// This is an inherent driver operation, not part of a frozen
-    /// `Filesystem*` ABI trait, so it does not widen a shipped interface
-    /// (`AGENTS.md` §2.4).
+    /// `Filesystem*` ABI trait, so it does not widen a shipped interface.
     ///
     /// # Errors
     ///
@@ -639,9 +636,9 @@ impl<B: Block> RustFs<B> {
     /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or too long.
     /// * [`DriverError::PermissionDenied`] if the handle is read-only — the
     ///   refusal is returned **before** any state is touched, so a read-only
-    ///   `/System` mount never dirties the device (`AGENTS.md` §5.4 / §18.6).
+    ///   `/System` mount never dirties the device.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block or metadata
-    ///   failure (fail-closed, `AGENTS.md` §5.4 / §2.9).
+    ///   failure (fail-closed).
     pub fn reflink(
         &mut self,
         dir: NodeId,
@@ -683,8 +680,7 @@ impl<B: Block> RustFs<B> {
     /// `companion(phys)` — so a stale, torn, or bit-rotted copy can be
     /// repaired from the other (`docs/src/filesystem/rustfs-spec.md` §5, §8).
     /// One rule covers superblock-ring slots, transaction roots, B-tree nodes,
-    /// and directory blocks, so there is a single redundancy mechanism
-    /// (`AGENTS.md` §2.2).
+    /// and directory blocks, so there is a single redundancy mechanism.
     const fn companion(phys: u64) -> u64 {
         phys + 1
     }
@@ -707,7 +703,7 @@ impl<B: Block> RustFs<B> {
     /// from it (`docs/src/filesystem/rustfs-spec.md` §8 — try redundant
     /// copies, repair bad from good). On success `buf` holds the good block's
     /// bytes. If neither copy authenticates the read fails closed with
-    /// [`DriverError::DeviceFault`] (`AGENTS.md` §5.4).
+    /// [`DriverError::DeviceFault`].
     fn read_meta(
         &mut self,
         phys: u64,
@@ -838,8 +834,7 @@ impl<B: Block> RustFs<B> {
     /// Allocate a mirrored metadata pair, scanning **downward** from the high
     /// end for two adjacent free blocks `(primary, primary + 1)`. Returns the
     /// primary; both blocks are claimed. Fails closed with
-    /// [`DriverError::NoSpace`] when no adjacent free pair remains
-    /// (`AGENTS.md` §5.4 / §2.9) — never a panic.
+    /// [`DriverError::NoSpace`] when no adjacent free pair remains — never a panic.
     fn alloc_meta_pair(&mut self) -> Result<u64, DriverError> {
         let start = RING_BLOCKS;
         let total = self.total_blocks;
@@ -1035,7 +1030,7 @@ impl<B: Block> RustFs<B> {
 
     /// Queue a now-free block for a later device discard ([`Self::trim`]).
     ///
-    /// The queue is transient, rebuildable state (§4): it only ever holds
+    /// The queue is transient, rebuildable state: it only ever holds
     /// blocks already marked free, [`Self::trim`] re-checks each is still free
     /// before discarding, and a crash that drops it loses no live data. The
     /// queue is capped at the volume's block count so a long-running mount that
@@ -1052,8 +1047,7 @@ impl<B: Block> RustFs<B> {
 
     /// Refuse a mutating operation on a read-only handle **before** it
     /// touches any state, so a read-only `/System` mount does no wasted
-    /// copy-on-write work and never dirties the device (`AGENTS.md` §5.4 /
-    /// §2.16). The [`Self::commit`] guard is the structural backstop for any
+    /// copy-on-write work and never dirties the device. The [`Self::commit`] guard is the structural backstop for any
     /// internal write path that does not funnel through here.
     fn deny_if_read_only(&self) -> Result<(), DriverError> {
         if self.read_only {
@@ -1070,7 +1064,7 @@ impl<B: Block> RustFs<B> {
     fn commit(&mut self) -> Result<(), DriverError> {
         // A read-only handle never publishes a transaction: every mutating
         // operation funnels through here, so refusing to commit fails the
-        // whole mutation closed (`AGENTS.md` §5.4) — the read-only `/System`
+        // whole mutation closed — the read-only `/System`
         // mount can be read but never written.
         if self.read_only {
             return Err(DriverError::PermissionDenied);
@@ -1187,12 +1181,12 @@ impl<B: Block> RustFs<B> {
     /// disk. There is **no** plaintext layout path
     /// (`docs/src/filesystem/rustfs-spec.md` §5, §7). A fresh volume holds no
     /// shared chunks, so the chunk/refcount and reverse-reference trees and the
-    /// dedupe index start empty and grow on demand (§9).
+    /// dedupe index start empty and grow on demand.
     ///
     /// The random per-volume UUID and the master key, wrapping salt, and wrap
     /// nonce are drawn from `entropy`, the [`EntropySource`] seam onto the
-    /// platform RNG (`lib/rng`'s `CsRng`, `AGENTS.md` §1/§4). A failed draw
-    /// fails closed: no volume is laid out with predictable key material (§5.4).
+    /// platform RNG (`lib/rng`'s `CsRng`). A failed draw
+    /// fails closed: no volume is laid out with predictable key material.
     ///
     /// # Errors
     ///
@@ -1225,7 +1219,7 @@ impl<B: Block> RustFs<B> {
         // encrypted structures are written (`docs/src/filesystem/rustfs-spec.md`
         // §11 mkfs flow). Discard is advisory: a device without support, or a
         // discard fault, must not stop a fresh volume from being created
-        // (recorded, not failed, §11), so the outcome is intentionally not
+        // (recorded, not failed), so the outcome is intentionally not
         // propagated as a format error.
         let _ = fs.mkfs_discard();
 
@@ -1260,8 +1254,8 @@ impl<B: Block> RustFs<B> {
     /// volume was formatted with. `open` recovers the key hierarchy by
     /// unwrapping the master key stored in a superblock slot's discovery
     /// header; a wrong key never unwraps and the mount is refused with
-    /// [`DriverError::PermissionDenied`], fail-closed (`AGENTS.md` §5.4),
-    /// never a panic (§2.9).
+    /// [`DriverError::PermissionDenied`], fail-closed,
+    /// never a panic.
     ///
     /// # Errors
     ///
@@ -1282,8 +1276,7 @@ impl<B: Block> RustFs<B> {
     /// block is ever written to the device, neither the mount-time
     /// companion-mirror repairs (the internal read paths skip them on a
     /// read-only handle) nor any later mutation — every mutating operation
-    /// fails closed with [`DriverError::PermissionDenied`] (`AGENTS.md`
-    /// §5.4), never a panic (§2.9).
+    /// fails closed with [`DriverError::PermissionDenied`], never a panic.
     ///
     /// This is how the boot path mounts the read-only, signed-bundle
     /// `/System` volume (the design-B pre-unlock driver store,
@@ -1300,8 +1293,7 @@ impl<B: Block> RustFs<B> {
 
     /// Shared body of [`Self::open`] and [`Self::open_read_only`]: select
     /// and replay the highest-generation committed transaction. When
-    /// `read_only` is set the handle never writes the device (`AGENTS.md`
-    /// §2.2 — one open path for both modes).
+    /// `read_only` is set the handle never writes the device (one open path for both modes).
     fn open_inner(block: B, volume_key: &VolumeKey, read_only: bool) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
         // Set the read-only flag before the ring scan so the mount-time
@@ -1364,11 +1356,11 @@ impl<B: Block> RustFs<B> {
         fs.scrub_progress_root = root.scrub_progress_root;
         fs.health_baseline_root = root.health_baseline_root;
 
-        // Rebuild the free-block bitmap by walking the live trees (§4 — free
+        // Rebuild the free-block bitmap by walking the live trees (free
         // space is rebuildable).
         fs.rebuild_free_space()?;
         // Rebuild the in-memory dedupe index from the authoritative chunk and
-        // reverse-reference trees (§9 — the index is rebuildable, never
+        // reverse-reference trees (the index is rebuildable, never
         // authoritative).
         fs.rebuild_dedupe_index()?;
         Ok(fs)
@@ -1377,7 +1369,7 @@ impl<B: Block> RustFs<B> {
     /// Resize the rebuildable in-memory free-block bitmap and per-block
     /// transaction-private markers to span exactly `total` blocks, and set the
     /// volume's working block count. The free bitmap and `txn_private` vector
-    /// are derived state (§4), so growing them simply adds zeroed (free, not
+    /// are derived state, so growing them simply adds zeroed (free, not
     /// private) words for the new blocks and shrinking them drops the tail.
     /// The allocation cursors are reset into the new range so the next walk
     /// stays in bounds.
@@ -1404,7 +1396,7 @@ impl<B: Block> RustFs<B> {
     /// The new blocks start life free, so no existing data moves and the
     /// operation is a single atomic transaction: a crash before the commit
     /// point leaves the previous (smaller) committed size selected on the next
-    /// mount, never a torn geometry (§14). The grown space is usable
+    /// mount, never a torn geometry. The grown space is usable
     /// immediately, without remounting.
     ///
     /// Online *shrink* is deliberately not offered: it would require
@@ -1413,8 +1405,7 @@ impl<B: Block> RustFs<B> {
     /// below the committed size is rejected.
     ///
     /// This is an inherent driver operation, not part of a frozen
-    /// `Filesystem*` ABI trait, so it does not widen a shipped interface
-    /// (`AGENTS.md` §2.4).
+    /// `Filesystem*` ABI trait, so it does not widen a shipped interface.
     ///
     /// # Errors
     ///
@@ -1422,8 +1413,7 @@ impl<B: Block> RustFs<B> {
     ///   block size has changed, or the device is now *smaller* than the
     ///   committed filesystem size (an attempted online shrink).
     /// * [`DriverError::DeviceFault`] / [`DriverError::NoSpace`] on an
-    ///   unrecoverable failure while committing the new size (fail-closed,
-    ///   `AGENTS.md` §5.4 / §2.9) — the in-memory geometry is restored so the
+    ///   unrecoverable failure while committing the new size (fail-closed) — the in-memory geometry is restored so the
     ///   handle stays consistent with the still-committed on-disk size.
     pub fn grow(&mut self) -> Result<u64, DriverError> {
         if self.read_only {
@@ -1472,7 +1462,7 @@ impl<B: Block> RustFs<B> {
     ///
     /// * [`DriverError::PermissionDenied`] if a structurally-valid rustfs
     ///   superblock is present but `volume_key` does not unwrap it (wrong key)
-    ///   — fail-closed (`AGENTS.md` §5.4).
+    ///   — fail-closed.
     /// * [`DriverError::BadMagic`] if no slot even looks like a rustfs
     ///   superblock (the device is not a rustfs volume).
     fn establish_keys(
@@ -1581,11 +1571,11 @@ impl<B: Block> RustFs<B> {
     /// its extent-tree nodes plus the physical runs they map. Every metadata
     /// block accounts for both its physical copies
     /// (`docs/src/filesystem/rustfs-spec.md` §4 — free space is rebuildable;
-    /// §5 — two copies).
+    /// — two copies).
     ///
     /// The free bitmap is rebuildable derived state, never authoritative, so
     /// this is the single rebuild walk shared by [`Self::open`] (mount) and the
-    /// offline [`Self::check`] (`AGENTS.md` §2.2). It is idempotent: a second
+    /// offline [`Self::check`]. It is idempotent: a second
     /// rebuild of an unchanged volume produces the same bitmap.
     fn rebuild_free_space(&mut self) -> Result<(), DriverError> {
         for word in &mut self.free {
@@ -1744,7 +1734,7 @@ impl<B: Block> RustFs<B> {
 
     /// Copy-on-write the raw data block referenced at `(ino, bi)`: reuse
     /// `old_ptr` in place only when it is private to this transaction **and**
-    /// not a shared chunk (a shared chunk is immutable, §9 — overwriting
+    /// not a shared chunk (a shared chunk is immutable — overwriting
     /// shared data creates a new physical record). Otherwise allocate a fresh
     /// block and drop the old reference. Returns the (unwritten) block.
     fn cow_data(&mut self, old_ptr: u64, ino: u32, bi: u64) -> Result<u64, DriverError> {
@@ -1767,7 +1757,7 @@ impl<B: Block> RustFs<B> {
     /// (`docs/src/filesystem/rustfs-spec.md` §4, §6, §9). Otherwise the block is
     /// copy-on-written, sealed, and the dedupe index records it as a future
     /// candidate. Sharing is only ever taken after the candidate's bytes are
-    /// confirmed equal, so unequal data is never merged (§9).
+    /// confirmed equal, so unequal data is never merged.
     fn store_block(
         &mut self,
         inode: &mut Inode,
@@ -1782,8 +1772,7 @@ impl<B: Block> RustFs<B> {
         // or physical allocation and stored as a metadata-only hole. The old
         // physical block (if any) is released through the normal COW/refcount
         // path; the gap then reads back as zero (`read_file`). A zero range is
-        // never passed to the compressor or entered in the dedupe index (§8,
-        // §9).
+        // never passed to the compressor or entered in the dedupe index.
         if is_all_zero(&blk[..capu]) {
             self.extent_remove(inode, ino, bi)?;
             if old_ptr != 0 {
@@ -1938,14 +1927,14 @@ impl<B: Block> RustFs<B> {
     }
 
     /// Find a live, byte-identical, shareable chunk for `content` in `domain`,
-    /// consulting the rebuildable dedupe index (§9 — never authoritative).
+    /// consulting the rebuildable dedupe index (never authoritative).
     ///
     /// A candidate is returned only when it is still live (its recorded
     /// referrer's extent map still points at it), has room for another referrer
     /// ([`REVERSE_REF_CAP`]), and its bytes are confirmed equal to `content`.
     /// A candidate that fails the liveness or byte check is a stale index entry
     /// and is dropped; a full candidate is left in place but not shared (the
-    /// write proceeds unique, an allowed missed duplicate, §9).
+    /// write proceeds unique, an allowed missed duplicate).
     fn dedupe_lookup(
         &mut self,
         domain: u64,
@@ -1988,7 +1977,7 @@ impl<B: Block> RustFs<B> {
 
     /// Whether the data block at `phys` decodes to plaintext byte-identical to
     /// `content`. A read or integrity failure reads as "not identical" so a
-    /// damaged candidate is never shared (`AGENTS.md` §5.4).
+    /// damaged candidate is never shared.
     fn byte_identical(&mut self, phys: u64, content: &[u8]) -> bool {
         let capu = as_usize(self.data_capacity());
         let mut buf = [0u8; MAX_BLOCK_SIZE];
@@ -2020,7 +2009,7 @@ impl<B: Block> RustFs<B> {
     }
 
     /// Rebuild the in-memory dedupe index from the authoritative chunk and
-    /// reverse-reference trees at mount (§9 — the index is rebuildable). Each
+    /// reverse-reference trees at mount (the index is rebuildable). Each
     /// shared chunk contributes one candidate keyed by its stored domain,
     /// length, and logical hash, attributed to its first recorded referrer.
     fn rebuild_dedupe_index(&mut self) -> Result<(), DriverError> {
@@ -2072,12 +2061,12 @@ impl<B: Block> RustFs<B> {
     /// AEAD), then authenticate-and-decrypt the content, then verify the
     /// plaintext against its stored logical hash. Each layer is kept distinct
     /// ([`DataFault`]) even though all three surface as one frozen
-    /// [`DriverError::DeviceFault`] (§9).
+    /// [`DriverError::DeviceFault`].
     ///
     /// # Errors
     ///
     /// [`DriverError::DeviceFault`] on a read failure or on any integrity
-    /// layer failing (`AGENTS.md` §5.4 / §2.9 — fail closed, never a panic).
+    /// layer failing (fail closed, never a panic).
     fn read_data_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         self.read_data_block_classified(phys, buf)
             .map_err(|_| DriverError::DeviceFault)
@@ -2142,7 +2131,7 @@ impl<B: Block> RustFs<B> {
     /// The pipeline is the spec's: `compress -> encrypt`
     /// (`docs/src/filesystem/rustfs-spec.md` §6, §10). Compression runs over
     /// the plaintext; when the compressed frame is not smaller than the
-    /// logical capacity the record is stored **raw** (a §1 allowed adaptive
+    /// logical capacity the record is stored **raw** (a allowed adaptive
     /// choice). Either way the full content slot is encrypted, so the crypto
     /// and integrity layers are identical for compressed and raw records and
     /// the logical hash always names the plaintext.
@@ -2546,12 +2535,12 @@ impl<B: Block> RustFs<B> {
     /// `docs/src/filesystem/rustfs-spec.md` §13):
     ///
     /// * it is non-empty and at most [`NAME_MAX`] (255) bytes long;
-    /// * it is neither `.` nor `..` (the VFS owns those, §16);
+    /// * it is neither `.` nor `..` (the VFS owns those);
     /// * it contains no path separator (`/`) and no NUL byte — exactly the two
     ///   bytes ext4 forbids in a name. Every other byte is allowed verbatim,
     ///   and names are compared byte-for-byte, so they are case-sensitive.
     ///
-    /// Fails closed (`AGENTS.md` §5.4 / §2.9): an invalid name is rejected
+    /// Fails closed: an invalid name is rejected
     /// before any directory state is touched.
     fn check_name(name: &[u8]) -> Result<(), DriverError> {
         if name.is_empty() || name.len() > NAME_MAX {
@@ -2572,7 +2561,7 @@ impl<B: Block> RustFs<B> {
     ///
     /// * [`DriverError::PermissionDenied`] if the handle is read-only — the
     ///   refusal is returned **before** any state is touched, so a read-only
-    ///   `/System` mount never dirties the device (`AGENTS.md` §5.4 / §18.6).
+    ///   `/System` mount never dirties the device.
     /// * [`DriverError::NotFound`] if `node` does not name a live inode.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     pub fn set_security(&mut self, node: NodeId, sec: Security) -> Result<(), DriverError> {
@@ -2798,15 +2787,15 @@ impl<B: Block> RustFs<B> {
 }
 
 /// Draw a random, non-zero per-volume filesystem UUID from the platform RNG
-/// seam. The value only needs to be unique and non-zero to anchor the §8
-/// block-identity checks within one volume; an all-zero draw (which the §8
+/// seam. The value only needs to be unique and non-zero to anchor the
+/// block-identity checks within one volume; an all-zero draw (which the
 /// checks reserve as "no UUID") is nudged to a non-zero value rather than
 /// retried, since any non-zero anchor satisfies the invariant.
 ///
 /// # Errors
 ///
 /// Propagates the [`EntropySource`] error if the random draw is unavailable,
-/// so a volume is never anchored on predictable identity material (§5.4).
+/// so a volume is never anchored on predictable identity material.
 fn random_uuid(entropy: &mut dyn EntropySource) -> Result<u128, DriverError> {
     let mut bytes = [0u8; 16];
     entropy.fill(&mut bytes)?;

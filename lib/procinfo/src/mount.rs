@@ -4,8 +4,7 @@
 //! [`MountRecord`] into a single line in the familiar
 //! `source on target type fstype (options)` shape. The paging is the generic
 //! [`walk_pages`](crate::list) used by the process list, so only the
-//! per-record decode and the row rendering live here (`AGENTS.md` §2.2,
-//! §16.6).
+//! per-record decode and the row rendering live here.
 
 use alloc::format;
 use alloc::string::String;
@@ -29,10 +28,9 @@ pub const MOUNT_PAGE: u16 = 64;
 /// `sink`.
 ///
 /// The query is [`SysinfoQueryId::MOUNT_LIST`], which the service serves
-/// ungated: the mount table is system-wide and secret-free (`AGENTS.md`
-/// §16.6). Records are delivered in the order the service returns them.
+/// ungated: the mount table is system-wide and secret-free. Records are delivered in the order the service returns them.
 ///
-/// The walk **fails closed** (`AGENTS.md` §5.4 / §2.9): a reply whose length
+/// The walk **fails closed**: a reply whose length
 /// is not a whole number of [`MountRecord::WIRE_LEN`] records, or one that
 /// would overflow the page offset, is rejected rather than partially
 /// rendered.

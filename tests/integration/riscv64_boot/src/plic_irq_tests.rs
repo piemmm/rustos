@@ -1,4 +1,4 @@
-//! Host unit test for [`PlicIrqController`] (`AGENTS.md` §7 — tests in
+//! Host unit test for [`PlicIrqController`] (tests in
 //! their own file).
 //!
 //! Pins the mask-before-wake contract end to end: driving
@@ -6,7 +6,7 @@
 //! the PLIC source (priority → 0) before `fire` returns `Marked`, i.e.
 //! before any waiter can observe `ready = true`. The arch port owns no
 //! `kernel/irq` dependency, so this contract is pinned here, where the
-//! `IrqController` bridge lives (`AGENTS.md` §17.2).
+//! `IrqController` bridge lives.
 
 use super::*;
 

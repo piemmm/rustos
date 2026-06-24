@@ -125,7 +125,7 @@ impl ConfigAddress {
 ///   in-crate enumeration tests.
 ///
 /// The trait is intentionally small: writes only exist to support
-/// the BAR-sizing probe sequence (`AGENTS.md` §10 PCI conformance).
+/// the BAR-sizing probe sequence (PCI conformance).
 pub trait ConfigSpace {
     /// Read a 32-bit configuration dword.
     fn read32(&self, addr: ConfigAddress) -> u32;
@@ -259,11 +259,11 @@ pub enum Capability {
 pub const CAP_ID_VENDOR: u8 = 0x09;
 
 // The virtio `cfg_type` discriminants are the frozen `abi-v1`
-// transport-provisioning seam (`AGENTS.md` §9): the kernel walk picks
+// transport-provisioning seam: the kernel walk picks
 // a `cfg_type` from `rustos_abi` and this driver resolves it, so both
 // sides must agree on one definition. These aliases bind to the
 // `rustos_abi` source of truth rather than re-stating the literals,
-// keeping the driver free of a second copy (`AGENTS.md` §2.2).
+// keeping the driver free of a second copy.
 
 /// virtio `cfg_type` for the common configuration structure
 /// (virtio 1.x §4.1.4.3).

@@ -17,20 +17,20 @@
 //!    shared [`rustos_itest_harness::USER_IMAGE_BIAS`] the production spawn
 //!    producer maps every child image at and stamping the kernel's compiled-in
 //!    syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2).
+//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it.
 //! 3. Wraps that `rxe` as the payload of a signed `kind = UserSpace`
 //!    `DriverManifest` ([`rustos_itest_harness::driver_image`]) — requesting the
 //!    capabilities the driver needs (`CAP_MMIO_MAP`, `CAP_MEM_DMA`,
-//!    `CAP_INPUT_INJECT`), carrying the driver's own §18.3 `BIND_KEYS`, and
+//!    `CAP_INPUT_INJECT`), carrying the driver's own `BIND_KEYS`, and
 //!    **signed with the kernel's own driver-signing seed**
 //!    (`build_support::KERNEL_DRIVER_SIGNING_SEED`, the single source the kernel
-//!    build derives its embedded trust anchor from, `AGENTS.md` §2.2) so the
+//!    build derives its embedded trust anchor from) so the
 //!    bundle verifies against `KERNEL_DRIVER_SIGNER_PUBKEY` at boot.
 //! 4. Emits the bundle bytes and the signer public key as a Rust source the
 //!    library `include!`s.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the fixture is
-//! deterministic (`AGENTS.md` §7 / §19.3).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -43,7 +43,7 @@ use rustos_itest_harness::driver_image::build_signed_driver_image;
 use rustos_itest_harness::elf2rxe::elf_to_rxe;
 use rustos_itest_harness::USER_IMAGE_BIAS;
 
-/// The single source of the kernel's driver-signing seed (`AGENTS.md` §2.2):
+/// The single source of the kernel's driver-signing seed:
 /// the kernel build signs its embedded in-kernel manifests with it and derives
 /// the `KERNEL_DRIVER_SIGNER_PUBKEY` trust anchor from it, so a bundle signed
 /// here with the same seed is admitted by the booted kernel's load gate.
@@ -73,7 +73,7 @@ fn main() {
 
     let rxe = build_and_convert_driver(manifest_dir, &out_dir, &driver_dir);
 
-    // The bundle the kernel autoloads: the driver's own §18.3 bind table, the
+    // The bundle the kernel autoloads: the driver's own bind table, the
     // capabilities it needs (mapped register window, coherent DMA, the device
     // interrupt line it parks on, and keyboard injection), signed with the
     // kernel's driver-signing seed.
@@ -110,8 +110,7 @@ fn build_and_convert_driver(manifest_dir: &str, out_dir: &str, driver_dir: &str)
     let _ = fs::remove_dir_all(&target_dir);
 
     // The driver links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
-    // roots `rustos-rt`'s trampoline; it is built position-independent
-    // (`AGENTS.md` §19.2). Scope the PIE link flags to the aarch64 target and
+    // roots `rustos-rt`'s trampoline; it is built position-independent. Scope the PIE link flags to the aarch64 target and
     // build `core`/`alloc`/`compiler_builtins` as PIC alongside it
     // (`-Z build-std`); `alloc` is required because `rustos-rt` registers a
     // `#[global_allocator]`. The outer build's RUSTFLAGS are cleared so the
@@ -170,8 +169,7 @@ fn write_bundle_fixture(out_dir: &str, image: &[u8], pubkey: &[u8; 32]) {
     out.push_str("\n];\n");
     out.push_str("/// Public key the bundle was signed with — derived from the kernel's\n");
     out.push_str("/// driver-signing seed, so it equals the kernel's embedded trust\n");
-    out.push_str("/// anchor `KERNEL_DRIVER_SIGNER_PUBKEY` by construction (`AGENTS.md`\n");
-    out.push_str("/// §2.2).\n");
+    out.push_str("/// anchor `KERNEL_DRIVER_SIGNER_PUBKEY` by construction.\n");
     out.push_str("pub const VIRTIO_KBD_SIGNER_PUBKEY: [u8; 32] = [");
     for (i, b) in pubkey.iter().enumerate() {
         if i % 8 == 0 {

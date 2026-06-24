@@ -2,7 +2,7 @@
 //!
 //! This crate owns the *generated dispatch table* the kernel hands every
 //! syscall to. It is the **only** place the kernel performs the five
-//! steps `AGENTS.md` §5.4 demands of every privileged entry point:
+//! steps the charter demands of every privileged entry point:
 //!
 //! 1. Identify the caller (the per-CPU current task; supplied via the
 //!    [`CallerContext`] handed in by the architecture entry stub).

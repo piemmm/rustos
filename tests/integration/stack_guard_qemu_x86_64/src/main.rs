@@ -11,7 +11,7 @@
 //!
 //! The kthread kernel-stack guard (`kernel/core::kthread`) catches a stack
 //! overflow with a poison canary checked at the next reschedule (the
-//! binding §2.17 defence). The *deployment* form turns the overflow into
+//! binding defence). The *deployment* form turns the overflow into
 //! an immediate hardware fault by **unmapping** the guard page. But the
 //! boot path identity-maps RAM with coarse 2 MiB (and, where available,
 //! 1 GiB) *huge pages*, and such a leaf has no per-4 KiB entry to clear —
@@ -66,8 +66,7 @@ mod kernel;
 #[no_mangle]
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
-        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64
-        // (`AGENTS.md` §2.9). Looping defends against spurious wake-ups.
+        // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
         }

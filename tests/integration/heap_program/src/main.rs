@@ -24,13 +24,12 @@
 //!    preserves the live bytes across both an in-place resize and a move.
 //!
 //! Each step that can fail returns a distinct non-zero exit code; a clean
-//! `exit(0)` is the success signal the vertical reports as PASS (`AGENTS.md`
-//! §7 / §2.9 — fail loud, never silently pass).
+//! `exit(0)` is the success signal the vertical reports as PASS (fail loud, never silently pass).
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (which supplies both `_start` and the global allocator),
-//! never the C ABI (`AGENTS.md` §16.4). It is built position-independent and
-//! converted to an `rxe` blob by the consuming test's build script (§9, §19.2).
+//! never the C ABI. It is built position-independent and
+//! converted to an `rxe` blob by the consuming test's build script.
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the crate.
 

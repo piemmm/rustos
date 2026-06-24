@@ -9,7 +9,7 @@
 //! frame into a [`RawArgs`], encoding a [`rustos_kernel_syscall::SyscallResult`]
 //! into the syscall-return register, and forwarding one syscall through
 //! a slot's resident `DispatchHook` — is identical across architectures
-//! and lives here exactly once (`AGENTS.md` §2.2 — no duplication).
+//! and lives here exactly once (no duplication).
 //!
 //! The module is host-testable and un-gated: the per-architecture
 //! callbacks are thin wrappers that supply the arch `SyscallDispatchFn`
@@ -59,7 +59,7 @@ pub unsafe fn read_raw_args(args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> RawArgs
 /// The encoding is part of the user/kernel ABI and is exercised by
 /// the `errno_encoding_round_trips_through_i64` unit test below; every
 /// arch port reuses this helper rather than re-deriving the convention
-/// (`AGENTS.md` §2.2 — no duplication).
+/// (no duplication).
 #[must_use]
 #[allow(
     clippy::cast_sign_loss,
@@ -89,8 +89,7 @@ pub const fn encode_result(result: rustos_kernel_syscall::SyscallResult) -> u64 
 /// `NoCallerContext`) and the caller must halt.
 ///
 /// Shared by every architecture's `production_dispatch` callback so
-/// the lookup → narrow → forward → encode sequence has one definition
-/// (`AGENTS.md` §2.2).
+/// the lookup → narrow → forward → encode sequence has one definition.
 pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs) -> Option<u64> {
     let hook = slot.get()?;
     // Narrow the syscall-number register to the bottom 16 bits the
@@ -115,7 +114,7 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
             // scheduler; control returns here only when it is next
             // dispatched (never, for `Exit`). A `false` means no user task
             // was running on `cpu` — the syscall is then an ordinary return
-            // rather than an unsound switch (fail closed, `AGENTS.md` §2.9).
+            // rather than an unsound switch (fail closed).
             let _ = reschedule_current(cpu, action);
             Some(encode_result(result))
         }

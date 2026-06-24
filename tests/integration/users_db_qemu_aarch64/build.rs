@@ -6,13 +6,13 @@
 //!
 //! 1. Hand the aarch64 `virt` linker script to `rustc` on the
 //!    freestanding `aarch64-unknown-none` target (the single per-arch
-//!    linker script the architecture port owns — `AGENTS.md` §2.2).
+//!    linker script the architecture port owns).
 //! 2. Sign a synthetic virtio-blk `.rxe` manifest requesting
 //!    [`CapabilityId::MEM_DMA`] with a deterministic test seed, and emit
 //!    a Rust source file the bin pulls in via `include!`.
 //!
 //! Re-running `build.rs` produces byte-identical output for the same
-//! seed; the test is therefore deterministic (`AGENTS.md` §7).
+//! seed; the test is therefore deterministic.
 
 use ed25519_dalek::{Signer, SigningKey};
 use rustos_abi::{CapabilityId, DriverKind, DriverManifest, DRIVER_MANIFEST_MAGIC};

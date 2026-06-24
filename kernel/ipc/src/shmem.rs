@@ -10,7 +10,7 @@
 //!
 //! * **Capability gate on every `map`.** A recipient must hold every
 //!   capability in `required_caps`; the kernel enforces, the receiver
-//!   does not re-check (`AGENTS.md` §5.2). Refused requests fail
+//!   does not re-check. Refused requests fail
 //!   with [`Errno::PermissionDenied`] and emit
 //!   [`AuditEvent::ShmemMapDenied`].
 //! * **Revocation invalidates every live mapping.** [`SharedMemory::revoke`]
@@ -22,7 +22,7 @@
 //! The backing storage uses [`rustos_kernel_mem::SensitiveBuffer`] —
 //! the audited, zero-on-free allocator from `kernel/mem` — so that
 //! any credential or capability-token bytes ever carried through
-//! shared memory are wiped at revocation (`AGENTS.md` §4).
+//! shared memory are wiped at revocation.
 
 extern crate alloc;
 
@@ -87,7 +87,7 @@ impl SharedMemory {
     ///
     /// The creator must already hold every capability in
     /// `required_caps`: a binder may not grant authority it does not
-    /// itself hold (no ambient authority, `AGENTS.md` §4).
+    /// itself hold (no ambient authority).
     ///
     /// # Errors
     ///
@@ -169,7 +169,7 @@ impl SharedMemory {
     /// Establish a mapping for `recipient`.
     ///
     /// The kernel enforces `required_caps` on every call; the
-    /// receiver does not re-check (`AGENTS.md` §5.2 final bullet).
+    /// receiver does not re-check (final bullet).
     /// Refused requests fail closed with
     /// [`Errno::PermissionDenied`] (missing capability) or
     /// [`Errno::NotFound`] (object already revoked).

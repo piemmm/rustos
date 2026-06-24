@@ -3,12 +3,12 @@
 //! Implements [`rustos_abi::driver::net::Net`] on top of the
 //! cross-arch virtio transport from `drivers/bus/virtio`. As with
 //! `virtio_blk`, the driver is bus-agnostic: the same source
-//! compiles against the PCI and MMIO transports (`AGENTS.md` §2.2
+//! compiles against the PCI and MMIO transports (
 //! — the queue protocol lives once, in the transport crate).
 //!
 //! # Wire protocol
 //!
-//! Virtio-net 1.1 §5.1. Stage 4 supports the legacy "no extended
+//! Virtio-net 1.1. Stage 4 supports the legacy "no extended
 //! features" subset: a `struct virtio_net_hdr` of all zeros prefixes
 //! every transmit and receive descriptor chain, the device negotiates
 //! `VIRTIO_NET_F_MAC` to publish a stable link-layer address, and
@@ -21,7 +21,7 @@
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`VirtioNet`] is a public *type* re-exported so the driver host
 //! can instantiate it; the host never reaches the type beyond the
 //! [`Net`] trait.
@@ -37,8 +37,7 @@
 //! [`Net::transmit_with_class`] and [`Net::receive_with_class`]
 //! honour [`BufferClass::Sensitive`](rustos_abi::driver::BufferClass)
 //! by scrubbing every staging copy through
-//! [`rustos_virtio::BounceBuffer`]'s drop impl
-//! (`AGENTS.md` §4).
+//! [`rustos_virtio::BounceBuffer`]'s drop impl.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -55,7 +54,7 @@ use rustos_virtio::{
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_4554_0000_0001; // "VNET"
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -100,8 +99,7 @@ mod wire {
 /// its DMA regions through. The host is *minted per driver load* by
 /// a `VirtioHostFactory` (the seam defined in `lib/virtio`)
 /// and lives only for the duration of that load, so the driver borrows
-/// it for `'h` rather than demanding a `'static` host (`AGENTS.md`
-/// §4 — per-process pools are reclaimed when the driver unloads). This
+/// it for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads). This
 /// mirrors [`VirtioBlk`](../rustos_drv_storage_virtio_blk/struct.VirtioBlk.html).
 pub struct VirtioNet<'h, T: Transport> {
     transport: T,

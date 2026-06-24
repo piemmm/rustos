@@ -5,8 +5,7 @@
 //! because every driver-class trait that a host implements — and the
 //! [`DriverHost::virtio_host`] accessor on the host trait itself —
 //! has to be able to name them without pulling in `drivers/bus/*`.
-//! That would invert the dependency direction and violate
-//! `AGENTS.md` §3.
+//! That would invert the dependency direction and violate.
 //!
 //! The [`PoolId`], [`SlabFreeFn`], and [`DmaSlab`] surface is
 //! identical to the surface previously exposed from
@@ -35,11 +34,11 @@ use crate::DriverError;
 /// device-context / transfer ring, a virtio driver staging a split
 /// virtqueue — obtains a [`DmaSlab`] through it. It lives in `lib/abi` so the
 /// host accessor [`DriverHost::dma_host`](super::DriverHost::dma_host) can
-/// name it without inverting the dependency direction (`AGENTS.md` §3), and
+/// name it without inverting the dependency direction, and
 /// it is *separate from* virtio so a non-virtio bus driver never has to reach
 /// through a virtio-shaped trait to allocate DMA. [`VirtioHost`] extends it
 /// (`VirtioHost: DmaHost`) so a virtio host is also a DMA host without
-/// duplicating the allocation contract (`AGENTS.md` §2.2).
+/// duplicating the allocation contract.
 ///
 /// [`VirtioHost`]: super::virtio::VirtioHost
 pub trait DmaHost {
@@ -49,7 +48,7 @@ pub trait DmaHost {
     /// id and slot it was minted from so the host's drop path can reclaim
     /// the slot. The bytes are zero-initialised so a driver can publish the
     /// slab to a device without first clearing leftover bytes from another
-    /// transaction (defence in depth — `AGENTS.md` §4 zero-on-free / §7).
+    /// transaction (defence in depth zero-on-free).
     ///
     /// # Errors
     ///
@@ -62,8 +61,7 @@ pub trait DmaHost {
     /// # Capabilities
     ///
     /// None directly at the trait level; the host enforces its own DMA-pool
-    /// quota and per-task capability check at allocation time (`AGENTS.md`
-    /// §4 "per-process heaps" + §5.4 "fail closed").
+    /// quota and per-task capability check at allocation time ("per-process heaps" + "fail closed").
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError>;
 }
 
@@ -110,7 +108,7 @@ impl PoolId {
 }
 
 /// Cache-maintenance shim a [`DmaSlab`] invokes to keep a **non-coherent**
-/// DMA master and the CPU caches in sync (`AGENTS.md` §4).
+/// DMA master and the CPU caches in sync.
 ///
 /// `base` is the CPU-virtual address of the affected sub-range and `len`
 /// its byte length. The shim must clean **and** invalidate that range to
@@ -131,8 +129,7 @@ pub type SlabCoherencyFn = fn(base: *const u8, len: usize);
 ///
 /// The shim is `unsafe` because [`DmaSlab::drop`] (the only caller)
 /// must guarantee `pool` still points at the originating pool, which
-/// the pool enforces by outliving every slab it minted
-/// (`AGENTS.md` §4).
+/// the pool enforces by outliving every slab it minted.
 pub type SlabFreeFn = unsafe fn(pool: *const (), slot: usize, len: usize);
 
 /// Owned, device-visible DMA region.
@@ -251,7 +248,7 @@ impl DmaSlab {
     /// clean/invalidate primitive here so [`Self::sync_range`] can bracket
     /// every CPU-side publish/consume. Without it [`Self::sync_range`] is a
     /// no-op, the correct behaviour for a coherent interconnect or the
-    /// in-process mock host (`AGENTS.md` §4).
+    /// in-process mock host.
     #[must_use]
     pub fn with_coherency(mut self, coherency: SlabCoherencyFn) -> Self {
         self.coherency = Some(coherency);
@@ -266,7 +263,7 @@ impl DmaSlab {
     /// read (so they reach memory before the doorbell) and **before**
     /// reading bytes the device wrote (so the CPU does not see a stale
     /// cached copy). It is a no-op when no shim is attached, when `len` is
-    /// zero, or — failing closed (`AGENTS.md` §5.4) — when the range falls
+    /// zero, or — failing closed — when the range falls
     /// outside the region.
     pub fn sync_range(&self, offset: usize, len: usize) {
         let Some(maintain) = self.coherency else {

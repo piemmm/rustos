@@ -4,7 +4,7 @@
 //! [`build_image`] assembles a whole disk of the exact shape `tools/mkimage`
 //! writes a real installable image from, through the **real** in-tree
 //! drivers and encoders so the fixture cannot drift from the system that
-//! mounts the disk (`AGENTS.md` §2.2):
+//! mounts the disk:
 //!
 //! 1. An **MBR** ([`rustos_partition::mbr::encode`]) describing two
 //!    1 MiB-aligned primary partitions.
@@ -13,7 +13,7 @@
 //!    key-derivation descriptor ([`ROOT_UNLOCK_NAME`]).
 //! 3. An **encrypted `RustFS` root partition** at [`ROOT_LBA`], whose
 //!    volume key is **derived from [`PASSPHRASE`]** through the descriptor
-//!    above (`AGENTS.md` §11), carrying `/System/Security/Users` with the
+//!    above, carrying `/System/Security/Users` with the
 //!    single [`USERNAME`]/[`PASSWORD`] account — the shared
 //!    [`rustos_test_rustfs_image`] users-root volume.
 //!
@@ -71,7 +71,7 @@ pub const FAT_BOOT_SECTORS: u64 = 131_072;
 pub const SYSTEM_LBA: u64 = BOOT_LBA + FAT_BOOT_SECTORS;
 
 /// Sectors in the read-only `RustFS` `/System` partition: 8 MiB. Large
-/// enough to carry the §16.2 skeleton **and** the design-B signed driver
+/// enough to carry the skeleton **and** the design-B signed driver
 /// bundle(s) the pre-unlock autoload reads from its `Drivers/` store
 /// (`plans/PI.md` design B / B2) — a real `.rxe` keyboard driver sits far
 /// below this, and well below the kernel's `MAX_DRIVER_IMAGE_LEN` read bound.
@@ -95,8 +95,7 @@ pub const PASSPHRASE: &[u8] = b"unlock-vertical correct horse battery staple";
 
 /// Username of the single account planted on the root volume — the shared
 /// [`rustos_test_rustfs_image`] users-root account, so the guest tail's
-/// authentication proof names exactly what the volume carries
-/// (`AGENTS.md` §2.2).
+/// authentication proof names exactly what the volume carries.
 pub const USERNAME: &str = root_image::USERS_FIXTURE_USERNAME;
 
 /// Password of the planted [`USERNAME`] account.
@@ -104,7 +103,7 @@ pub const PASSWORD: &str = root_image::USERS_FIXTURE_PASSWORD;
 
 /// Deterministic stand-in for the platform RNG seam used to provision the
 /// unlock descriptor's salt. A fixed sequence keeps the built image
-/// **reproducible** (`AGENTS.md` §19.3); it is fixture scaffolding, never a
+/// **reproducible**; it is fixture scaffolding, never a
 /// production entropy source.
 struct FixtureEntropy {
     next: u8,
@@ -180,9 +179,9 @@ impl Block for MemDisk {
 ///
 /// The descriptor carries [`UNLOCK_MIN_ITERATIONS`] — the format floor — so
 /// the per-build and per-boot PBKDF2 derivations stay fast under QEMU TCG
-/// while still exercising the real key-derivation path (`AGENTS.md` §5.4).
+/// while still exercising the real key-derivation path.
 /// Passing a **blank** `passphrase` builds the installer-profile image,
-/// which the bootstrap unlocks with no prompt (`AGENTS.md` §11).
+/// which the bootstrap unlocks with no prompt.
 ///
 /// # Errors
 ///
@@ -198,7 +197,7 @@ fn provision(passphrase: &[u8]) -> Result<([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKe
 
 /// Author the FAT32 boot partition through the real [`Fat32`] driver and
 /// plant `descriptor` under [`ROOT_UNLOCK_NAME`] — the exact write
-/// `tools/mkimage` performs (`AGENTS.md` §2.2). Returns the partition's
+/// `tools/mkimage` performs. Returns the partition's
 /// on-disk bytes.
 fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
     let mut fs = Fat32::format(MemDisk::new(FAT_BOOT_SECTORS))?;
@@ -214,16 +213,15 @@ fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
 
 /// Author the read-only `/System` partition: format a small `RustFS`
 /// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`], lay the
-/// §16.2 `/System` skeleton at its root (`Drivers` plus `Security`), and
+/// `/System` skeleton at its root (`Drivers` plus `Security`), and
 /// plant the design-B signed driver `drivers` into its `Drivers/` store —
-/// the layout `tools/mkimage::build_system_partition` writes (`AGENTS.md`
-/// §2.2). The kernel mounts it read-only and autoloads the store **before**
+/// the layout `tools/mkimage::build_system_partition` writes. The kernel mounts it read-only and autoloads the store **before**
 /// unlocking the encrypted root (`plans/PI.md` design B / B2), so the store
 /// — not the encrypted root — carries the boot drivers.
 ///
 /// Each driver is `(path_components, bytes)` where `path_components` is the
 /// bundle leaf's path **relative to this `/System` volume's root** (the
-/// volume's root *is* `/System`, so the §16.2 `/System/Drivers/` store is at
+/// volume's root *is* `/System`, so the `/System/Drivers/` store is at
 /// the volume-relative `Drivers/…`, e.g.
 /// `&[b"Drivers", b"input", b"virtio_kbd", b"Run"]`). Returns the partition's
 /// on-disk bytes.
@@ -253,7 +251,7 @@ fn build_system_partition(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, Driv
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
 /// authoring, or the MBR encode. The fixed geometry makes a failure a
 /// programming error in this fixture, but it is surfaced rather than
-/// panicked so the builder holds to `AGENTS.md` §2.9 in every path it links
+/// panicked so the builder holds to in every path it links
 /// into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
     build_image_with_drivers(&[])
@@ -263,16 +261,14 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// `passphrase` (rather than the default [`PASSPHRASE`]).
 ///
 /// A **blank** `passphrase` builds the installer-profile image: the
-/// bootstrap unlocks it with no prompt (`AGENTS.md` §11), so this is the
+/// bootstrap unlocks it with no prompt, so this is the
 /// fixture the kernel's silent auto-unlock regression mounts. Delegates to
-/// [`build_image_with_drivers_and_passphrase`] with no drivers (`AGENTS.md`
-/// §2.2 — one authoring path).
+/// [`build_image_with_drivers_and_passphrase`] with no drivers (one authoring path).
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
-/// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
-/// §2.9).
+/// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
     build_image_with_drivers_and_passphrase(&[], passphrase)
 }
@@ -281,7 +277,7 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 /// installed driver bundles into the encrypted root's `/System/Drivers/`
 /// store.
 ///
-/// This is [`build_image`] with the §18.6 discovered driver store populated:
+/// This is [`build_image`] with the discovered driver store populated:
 /// each `(path_components, bytes)` is laid into the **read-only `/System`
 /// volume**'s `Drivers/` store exactly as a real installation carries it, so
 /// the pre-unlock autoload
@@ -289,14 +285,12 @@ pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverE
 /// `driver_autoload::autoload_from_mounted_root`) discovers, verifies, and
 /// spawns the bundle off the `/System` volume *before* the encrypted root is
 /// unlocked (design B — the store lives on a volume reachable before the
-/// passphrase). [`build_image`] delegates here with no drivers (`AGENTS.md`
-/// §2.2 — one authoring path).
+/// passphrase). [`build_image`] delegates here with no drivers (one authoring path).
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
-/// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
-/// §2.9).
+/// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
     build_image_with_drivers_and_passphrase(drivers, PASSPHRASE)
 }
@@ -305,15 +299,13 @@ pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>
 /// read-only `/System` store and encrypting the root under `passphrase`.
 ///
 /// The single authoring path behind [`build_image`],
-/// [`build_image_with_drivers`], and [`build_image_with_passphrase`]
-/// (`AGENTS.md` §2.2): they differ only in the driver set and the
+/// [`build_image_with_drivers`], and [`build_image_with_passphrase`]: they differ only in the driver set and the
 /// passphrase the root volume key is derived from.
 ///
 /// # Errors
 ///
 /// Propagates any [`DriverError`] from descriptor provisioning, FAT/`RustFS`
-/// authoring, or the MBR encode (surfaced rather than panicked, `AGENTS.md`
-/// §2.9).
+/// authoring, or the MBR encode (surfaced rather than panicked).
 pub fn build_image_with_drivers_and_passphrase(
     drivers: &[(&[&[u8]], &[u8])],
     passphrase: &[u8],
@@ -393,7 +385,7 @@ mod tests {
     }
 
     /// The `/System` partition mounts read-only under the non-secret
-    /// well-known key and carries the §16.2 `Drivers` store directory.
+    /// well-known key and carries the `Drivers` store directory.
     #[test]
     fn the_system_window_mounts_read_only_under_the_public_key() {
         let bytes = build_image().expect("the whole-disk image assembles");
@@ -413,7 +405,7 @@ mod tests {
 
     /// The encrypted root window mounts only under the key the on-disk
     /// descriptor derives from [`PASSPHRASE`] — proving the descriptor and
-    /// the volume the fixture provisions agree (`AGENTS.md` §2.2 / §5.4).
+    /// the volume the fixture provisions agree.
     #[test]
     fn the_root_window_mounts_under_the_passphrase_derived_key() {
         use rustos_drv_fs_rustfs::RustFs;

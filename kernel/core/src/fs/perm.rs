@@ -1,10 +1,10 @@
 //! Per-inode permission model: POSIX mode bits **plus** ACLs **plus** a
-//! capability gate (`AGENTS.md` §5.3).
+//! capability gate.
 //!
 //! [`Metadata::authorize`] is the single decision point every VFS
 //! operation routes through. It fails closed and never branches on
 //! `uid == 0`: authority comes from capability grants, ACL entries, and
-//! mode bits, never from a magic user id (`AGENTS.md` §5.1).
+//! mode bits, never from a magic user id.
 //!
 //! The three layers compose in a fixed, documented order:
 //!
@@ -147,7 +147,7 @@ impl Credentials<'_> {
 }
 
 /// Everything the VFS stores about an inode for the purpose of access
-/// control. Mirrors the on-disk inode header `AGENTS.md` §5.3 describes.
+/// control. Mirrors the on-disk inode header describes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
     /// Owning user.
@@ -157,7 +157,7 @@ pub struct Metadata {
     /// POSIX mode bits.
     pub mode: Mode,
     /// An optional capability the caller must hold to access the inode at
-    /// all, on top of the mode/ACL checks (`AGENTS.md` §5.3).
+    /// all, on top of the mode/ACL checks.
     pub required_cap: Option<CapabilityId>,
     /// Explicit allow/deny entries, consulted before the mode bits.
     pub acl: Vec<AclEntry>,
@@ -177,15 +177,15 @@ impl Metadata {
         }
     }
 
-    /// Translate a filesystem driver's stored §5.3 security record
+    /// Translate a filesystem driver's stored security record
     /// ([`NodeSecurity`]) into the VFS policy [`Metadata`].
     ///
     /// This is the bridge that lets a driver such as `rustfs`, which stores
     /// full per-inode ownership, mode bits, an ACL, and an optional
-    /// capability gate, drive the §5.3 decision instead of a uniform
+    /// capability gate, drive the decision instead of a uniform
     /// mount-point template. Each grant-only driver ACL entry expands into
     /// one *allow* [`AclEntry`] per `rwx` bit it grants; the driver surface
-    /// carries no explicit deny (`AGENTS.md` §5.3).
+    /// carries no explicit deny.
     #[must_use]
     pub fn from_node_security(sec: &NodeSecurity) -> Self {
         let mode = Mode::from_bits(u16::try_from(sec.mode & 0o7777).unwrap_or(0));

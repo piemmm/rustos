@@ -1,20 +1,20 @@
 //! Deterministic fuzz harness for the capability-checked IPC port.
 //!
 //! [`Port::send`] is an IPC endpoint that accepts a payload and a sender's
-//! capability set from a possibly hostile caller, so per `AGENTS.md` §19.6
+//! capability set from a possibly hostile caller, so
 //! ("every IPC endpoint ... has a fuzz target") it is driven by a fuzz
-//! harness. This is the IPC-endpoint harness the §19.6 burn-down (PLAN.md
+//! harness. This is the IPC-endpoint harness the burn-down (PLAN.md
 //! item 5) calls for; it sits alongside the `lib/abi` decoder, the syscall
 //! dispatcher, and the `userland/net` parser harnesses in the `cargo xtask
 //! fuzz` target set.
 //!
-//! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
+//! RustOS does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded PRNG drives random `(sender capabilities,
 //! payload)` pairs against a port and asserts the invariants the dispatch
 //! path must uphold no matter what a caller crafts:
 //!
 //! 1. Sending never panics for any input.
-//! 2. **Fail-closed** (`AGENTS.md` §5.4): a send succeeds *iff* the sender
+//! 2. **Fail-closed**: a send succeeds *iff* the sender
 //!    holds every required capability, the payload fits `max_payload`, and
 //!    the mailbox has room — checked against an independent mirror that
 //!    mirrors the dispatcher's caps → size → capacity precedence.
@@ -26,13 +26,13 @@
 //! A separate test asserts the closed-port fast path fails closed with
 //! [`Errno::NotFound`] regardless of how privileged the sender is.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//! ## Wall-clock budget
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed. When
 //! `cargo xtask fuzz` exports `RUSTOS_FUZZ_BUDGET_SECS`, the harness keeps
 //! drawing from the *same continuing* PRNG stream until the budget elapses
-//! — the §19.6 "run each harness for its wall-clock budget" contract — while the logged
+//! — the "run each harness for its wall-clock budget" contract — while the logged
 //! seed keeps any crash reproducible.
 
 use std::collections::VecDeque;
@@ -244,7 +244,7 @@ fn fuzz_closed_port_fails_closed_for_any_sender() {
     ));
     for _ in 0..10_000 {
         // Even a sender holding every capability cannot send to a closed
-        // port — destruction wins over authority (`AGENTS.md` §5.4 fail
+        // port — destruction wins over authority (fail
         // closed).
         let sender = task_with(7, &caps_of(CAP_UNIVERSE), &sink);
         let len = (rng.next_u64() % 129) as usize;

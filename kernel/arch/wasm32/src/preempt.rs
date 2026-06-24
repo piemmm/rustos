@@ -17,8 +17,7 @@
 //!
 //! The kernel-side preemption logic lives in
 //! `kernel/sched::Scheduler::on_timer_tick`; this module only wires the
-//! wasm32 frame loop into that architecture-neutral surface (`AGENTS.md`
-//! §2.4 — no interface creep).
+//! wasm32 frame loop into that architecture-neutral surface (no interface creep).
 //!
 //! # Inter-context interrupts
 //!
@@ -136,8 +135,7 @@ fn clear_for_tests() {
 /// the host rather than starve rendering and input.
 ///
 /// A non-positive `budget_ms` (a misconfiguration) yields immediately so
-/// a degenerate budget can never let a frame run unbounded (`AGENTS.md`
-/// §2.9 — fail closed). A non-finite `elapsed_ms` likewise yields.
+/// a degenerate budget can never let a frame run unbounded (fail closed). A non-finite `elapsed_ms` likewise yields.
 #[must_use]
 pub fn cooperative_budget_exhausted(elapsed_ms: f64, budget_ms: f64) -> bool {
     if !budget_ms.is_finite() || budget_ms <= 0.0 {
@@ -169,7 +167,7 @@ pub fn on_animation_frame() {
     let cpu = TICK_CPU_ID.load(Ordering::Acquire);
     if cpu != NO_CPU {
         // Dispatch the tick through the Arch HAL timer surface so the
-        // callback invoke lives in exactly one place (`AGENTS.md` §2.2);
+        // callback invoke lives in exactly one place;
         // the HAL handle reaches the same `TICK_CALLBACK_FN` static this
         // module owns. `cpu` was stored from a `CpuId` (`u32`), so the
         // low 32 bits are the whole value.
@@ -216,7 +214,7 @@ fn request_frame() {}
 /// callback / counter statics — both the [`crate::preempt`] suite and
 /// the [`crate::timer_hal`] conformance vertical, which forwards to the
 /// same statics. Lives here (not in the test module) so both files can
-/// share one lock and the suites do not race (`AGENTS.md` §7 — no flaky
+/// share one lock and the suites do not race (no flaky
 /// tests).
 #[cfg(test)]
 static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

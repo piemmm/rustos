@@ -4,9 +4,8 @@
 //! `top` is the first in-tree consumer of the OS curses library
 //! (`lib/curses`): it draws a scrolling, selectable process list that
 //! refreshes on demand, in the spirit of the Linux `top`. It reads the same
-//! `sysinfo-v1` process list as `ps` — there is no `/proc` to scrape
-//! (`AGENTS.md` §16.6) — and renders it through the curses screen model
-//! rather than emitting escape sequences by hand (`AGENTS.md` §2.2).
+//! `sysinfo-v1` process list as `ps` — there is no `/proc` to scrape — and renders it through the curses screen model
+//! rather than emitting escape sequences by hand.
 //!
 //! # What this crate is
 //!
@@ -14,9 +13,9 @@
 //!
 //! * [`Transport`] — the `sysinfo` request channel (from `lib/procinfo`),
 //!   shared with `ps`/`sysinfo` so the paging walk and the columnar row
-//!   rendering are not duplicated here (`AGENTS.md` §2.2).
+//!   rendering are not duplicated here.
 //! * [`Tty`] — the curses byte channel; an in-memory channel makes the whole
-//!   viewer testable without a kernel (`AGENTS.md` §7).
+//!   viewer testable without a kernel.
 //! * [`Model`] — the I/O-free view state (snapshot, selection, scroll,
 //!   scope, help) that [`render`] draws and [`run`] drives.
 //!
@@ -29,14 +28,13 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6). It links only `lib/*` crates —
+//! `no_std` (with `alloc`). It links only `lib/*` crates —
 //! the audited `lib/abi`, the shared `lib/procinfo`, and the OS-provided
-//! `lib/curses`/`lib/termcap`/`lib/vt` — never a kernel or driver crate
-//! (`AGENTS.md` §17.4). `lib/curses` is the curated `/System/Libraries/`
-//! Terminal/TUI class, dynamically linked at runtime (`AGENTS.md` §16.4); in
+//! `lib/curses`/`lib/termcap`/`lib/vt` — never a kernel or driver crate. `lib/curses` is the curated `/System/Libraries/`
+//! Terminal/TUI class, dynamically linked at runtime; in
 //! the workspace it is an ordinary cargo path dependency. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9); nothing
-//! writes to fd 3 (`stdinfo`, §20).
+//! `unwrap`/`expect`/`panic!` in production paths; nothing
+//! writes to fd 3 (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]

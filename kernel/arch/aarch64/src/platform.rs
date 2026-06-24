@@ -1,4 +1,4 @@
-//! aarch64 early-boot platform discovery (`AGENTS.md` §17.2 / §18.2).
+//! aarch64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
 //! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
@@ -10,14 +10,13 @@
 //! * every node carrying a `compatible` property becomes a hardware-tree
 //!   node whose match keys are that property's strings, in order (the
 //!   devicetree most-specific-first order the `devmgr` bind resolution
-//!   relies on, `AGENTS.md` §18.3);
+//!   relies on);
 //! * `/memory` nodes (matched by `device_type`/name — they carry no
 //!   `compatible`) become `Memory` nodes;
 //! * `reg` entries become capability-gated MMIO resources, decoded with
 //!   the parent's `#address-cells`/`#size-cells` and translated through
 //!   each ancestor bus's `ranges` into CPU-physical addresses — an
-//!   untranslatable entry is dropped, never emitted untranslated
-//!   (`AGENTS.md` §2.9);
+//!   untranslatable entry is dropped, never emitted untranslated;
 //! * `interrupts` entries become IRQ resources (the three-cell GIC
 //!   specifier both supported boards use; the second cell is the
 //!   interrupt number);
@@ -29,7 +28,7 @@
 //! their children, so the flat stream reconstructs the tree shape
 //! (`kernel/arch/api` emission-order contract). Nodes describing no
 //! bindable device — no usable match key and not a memory node — are not
-//! emitted; the §18.3 matcher could never bind them.
+//! emitted; the matcher could never bind them.
 //!
 //! The PSCI conduit the tree also carries ([`crate::fdt::psci_method`]) is
 //! the prerequisite the aarch64 SMP bring-up (Stage W6) consumes; it is a
@@ -45,15 +44,14 @@ use rustos_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use rustos_fdt::{name_stem, read_cells, Node};
 // The single source of the mailbox `compatible` match identity lives in the
 // device's own client crate (`lib/vcmailbox`) so the discovery key here and
-// the `vcmailbox` service driver's `BIND_KEYS` can never diverge
-// (`AGENTS.md` §2.2).
+// the `vcmailbox` service driver's `BIND_KEYS` can never diverge.
 use rustos_vcmailbox::MAILBOX_COMPATIBLE;
 
 /// Exclusive upper bound of the 30-bit `VideoCore` SDRAM aperture: the
 /// highest ARM-physical address (plus one) the BCM2711 firmware can DMA
 /// the mailbox property buffer through. Declared on the mailbox node as
 /// the DMA resource's address limit so the host carves the buffer below
-/// it (`AGENTS.md` §18.1 — a capability-grant request, never an ambient
+/// it (a capability-grant request, never an ambient
 /// handle).
 const VIDEOCORE_APERTURE_LIMIT: u64 = 0x4000_0000;
 
@@ -68,9 +66,9 @@ const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
 /// `plans/PI.md` P10). Its emission is augmented with the **inbound-DMA
 /// aperture** the bridge grants devices behind it, so a matched bus
 /// driver knows the CPU-physical window its DMA carves must lie within
-/// (`AGENTS.md` §18.1 — a capability-grant request, never an ambient
+/// (a capability-grant request, never an ambient
 /// handle); the aperture is read from the node's `dma-ranges`, never a
-/// board constant (§18.5).
+/// board constant.
 ///
 /// Public because it is the **discovery-contract identity** of the bridge
 /// node: the in-kernel driver-candidate catalogue
@@ -78,7 +76,7 @@ const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
 /// reconstructs the discovered node's `compatible` match key from this same
 /// constant — the string the device tree advertised and [`pcie_bringup`]
 /// verified — so the USB bring-up is gated by a match against the discovered
-/// identity, never a fabricated key (`AGENTS.md` §18.5).
+/// identity, never a fabricated key.
 pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 
 /// Builds the hardware tree from a borrowed flattened device tree.
@@ -105,12 +103,11 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
             HwDeviceClass::Root,
         ))?;
         let mut next_id: u32 = 1;
-        // The shared per-depth bus state (`crate::fdt`, `AGENTS.md` §2.2)
+        // The shared per-depth bus state (`crate::fdt`)
         // plus this walk's own per-depth fact: the hardware-tree id of
         // the nearest *emitted* ancestor — the parent id a child emitted
         // at depth + 1 names. A tree nested beyond `MAX_WALK_DEPTH` is
-        // refused as malformed rather than silently under-enumerated
-        // (`AGENTS.md` §2.9 / §24.4).
+        // refused as malformed rather than silently under-enumerated.
         let mut levels = [BusLevel::DEFAULT; MAX_WALK_DEPTH];
         let mut ancestors = [0u32; MAX_WALK_DEPTH];
 
@@ -149,7 +146,7 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
 
 /// The BCM2711 PCIe root-complex address windows the in-kernel USB
 /// keyboard bring-up needs (`plans/PI.md` P10), read from the
-/// `brcm,bcm2711-pcie` node — never compiled-in (§18.5).
+/// `brcm,bcm2711-pcie` node — never compiled-in.
 ///
 /// The same three windows the [`FdtDiscovery`] walk emits on the bridge's
 /// hardware-tree node (the controller `reg`, the inbound `dma-ranges`
@@ -167,7 +164,7 @@ pub struct PcieDiscovery {
     pub regs_len: u64,
     /// Exclusive upper bound of the CPU-physical window devices behind the
     /// bridge may DMA through (the inbound aperture's top): a DMA carve
-    /// must lie wholly below it (`AGENTS.md` §5.4).
+    /// must lie wholly below it.
     pub dma_aperture_top: u64,
     /// Byte length of the inbound aperture.
     pub inbound_size: u64,
@@ -193,10 +190,9 @@ pub struct PcieDiscovery {
 /// widens the byte loads and faults there).
 ///
 /// Returns `None` when the tree describes no `brcm,bcm2711-pcie` node, or
-/// when any of the three windows is absent or undecodable — fail closed
-/// (`AGENTS.md` §2.9), never a board constant (§18.5). The QEMU `virt`
+/// when any of the three windows is absent or undecodable — fail closed, never a board constant. The QEMU `virt`
 /// tree carries no such node, so it simply yields `None` and the keyboard
-/// bring-up is skipped (`AGENTS.md` §18.4).
+/// bring-up is skipped.
 #[must_use]
 pub fn pcie_bringup(fdt: &Fdt<'_>) -> Option<PcieDiscovery> {
     scan_translated(fdt, |node, levels, depth| {
@@ -235,7 +231,7 @@ pub fn pcie_bringup(fdt: &Fdt<'_>) -> Option<PcieDiscovery> {
 
 /// Build the hardware-tree node for one device-tree node, or `None` when
 /// the node describes nothing the tree can carry (no representable match
-/// key and not a memory node — the §18.3 matcher could never bind it).
+/// key and not a memory node — the matcher could never bind it).
 fn build_node(
     node: &Node<'_>,
     depth: usize,
@@ -273,13 +269,12 @@ fn build_node(
 
     // The VideoCore firmware mailbox additionally *requests* a DMA
     // property-buffer carve inside the 30-bit aperture (`plans/PI.md`
-    // P7) — a capability-grant request the driver host satisfies
-    // (`AGENTS.md` §18.1), declared here because only the platform
+    // P7) — a capability-grant request the driver host satisfies, declared here because only the platform
     // knows the firmware's aperture.
     if compatible.is_some_and(|c| c.iter_strings().any(|s| s == MAILBOX_COMPATIBLE)) {
         let dma = HwResource::dma(VIDEOCORE_APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN);
         // A node with no room left simply carries no carve request; the
-        // capacity bound is the ABI's, never a panic (`AGENTS.md` §2.9).
+        // capacity bound is the ABI's, never a panic.
         let _ = hw.push_resource(dma);
     }
 
@@ -288,8 +283,7 @@ fn build_node(
     // P10): the CPU-physical window read from its `dma-ranges`, with the
     // node's own `#address`/`#size`-cells decoding the child PCI triple
     // and its parent bus's `#address-cells` the CPU base. Declared here
-    // because only the platform's tree knows the aperture (`AGENTS.md`
-    // §18.1); the VL805 wiring carves its xHCI DMA region below the top.
+    // because only the platform's tree knows the aperture; the VL805 wiring carves its xHCI DMA region below the top.
     if compatible.is_some_and(|c| c.iter_strings().any(|s| s == PCIE_COMPATIBLE)) {
         let level = bus_level(node);
         let parent_addr_cells = depth
@@ -300,12 +294,12 @@ fn build_node(
             dma_ranges_aperture(node, level.addr_cells, parent_addr_cells, level.size_cells)
         {
             // No room left simply carries no aperture request; the
-            // capacity bound is the ABI's, never a panic (§2.9). An
+            // capacity bound is the ABI's, never a panic. An
             // unreadable `dma-ranges` likewise omits it rather than
             // inventing a window. The far-side PCIe base the inbound
             // viewport starts at rides the resource's translation field
             // so the VL805 wiring can program the inbound BAR from the
-            // tree, never a board constant (§18.5).
+            // tree, never a board constant.
             let _ = hw.push_resource(HwResource::dma_translated(
                 aperture_top,
                 aperture_len,
@@ -318,9 +312,8 @@ fn build_node(
         // both program the root complex's outbound window and translate
         // the enumerated BAR back to a CPU-physical address. Carried as a
         // single `BusWindow` (CPU base, size, far-side PCIe base) rather
-        // than conflated with the controller's own `reg` MMIO windows
-        // (`AGENTS.md` §18.1). An unreadable `ranges` omits it rather
-        // than inventing a window (§2.9).
+        // than conflated with the controller's own `reg` MMIO windows. An unreadable `ranges` omits it rather
+        // than inventing a window.
         if let Some((cpu_base, pcie_base, size)) =
             outbound_mmio_window(node, level.addr_cells, parent_addr_cells, level.size_cells)
         {
@@ -333,14 +326,14 @@ fn build_node(
 
 /// Decode each `reg` entry with the parent's cell counts, translate it
 /// through the ancestor buses' `ranges` (the shared
-/// [`crate::fdt::translated_reg`] decoder, `AGENTS.md` §2.2), and push
+/// [`crate::fdt::translated_reg`] decoder), and push
 /// it as an MMIO resource.
 ///
 /// Entries that cannot be decoded (out-of-range cell counts, a length
 /// that is not a whole number of entries) or translated (an ancestor bus
 /// without usable `ranges`) are dropped — the tree never carries an
-/// invented or untranslated window (`AGENTS.md` §2.9). Entries past the
-/// node's resource capacity are dropped likewise (a §24.4 ABI bound).
+/// invented or untranslated window. Entries past the
+/// node's resource capacity are dropped likewise (a ABI bound).
 fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
     let Some(entries) = reg_entry_count(node, depth, levels) else {
         return;
@@ -360,7 +353,7 @@ fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], h
 /// with the three-cell GIC specifier `<type, number, flags>`; the second
 /// cell is the interrupt number the kernel and drivers bind. A value
 /// that is not a whole number of specifiers is dropped — never a guessed
-/// line (`AGENTS.md` §2.9).
+/// line.
 fn push_irq_resources(node: &Node<'_>, hw: &mut HwNode) {
     /// Byte length of one three-cell GIC interrupt specifier.
     const GIC_SPECIFIER_LEN: usize = 12;
@@ -388,7 +381,7 @@ fn push_irq_resources(node: &Node<'_>, hw: &mut HwNode) {
 /// `cpu`), the `interrupt-controller` marker property, then the
 /// spec-recommended generic node-name stem. Anything else is honestly
 /// [`HwDeviceClass::Other`] — the class is advisory; binding is by match
-/// key (`AGENTS.md` §18.3).
+/// key.
 fn classify(node: &Node<'_>) -> HwDeviceClass {
     if let Some(device_type) = node.property("device_type") {
         match device_type.iter_strings().next() {
@@ -482,7 +475,7 @@ mod tests {
         assert!(nodes[0].is_root());
 
         // `/psci` is firmware, not hardware the port special-cases: the
-        // generic walk still surfaces it (unbound is fine, §18.4).
+        // generic walk still surfaces it (unbound is fine).
         let psci = by_key(&nodes, b"arm,psci-1.0");
         assert_eq!(psci.class(), Some(HwDeviceClass::Other));
         assert!(psci.resources().is_empty());
@@ -717,7 +710,7 @@ mod tests {
     #[test]
     fn pcie_bringup_is_none_when_no_bridge_is_present() {
         // The QEMU `virt`-shaped tree (no `brcm,bcm2711-pcie` node) yields
-        // no bring-up, so the keyboard service is skipped (§18.4 / §2.9).
+        // no bring-up, so the keyboard service is skipped.
         let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(pcie_bringup(&fdt), None);
@@ -749,7 +742,7 @@ mod tests {
     #[test]
     fn pcie_bridge_without_ranges_carries_no_outbound_window() {
         // The without-`dma-ranges` fixture also carries no `ranges`: no
-        // outbound window is invented (`AGENTS.md` §2.9).
+        // outbound window is invented.
         let mut b = DtbBuilder::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
@@ -783,7 +776,7 @@ mod tests {
         // the low 3 GiB of SDRAM devices behind the bridge may reach.
         // base is the exclusive top, and the far-side PCIe base (0 on the
         // Pi: memory is viewed at PCIe address 0) rides the translation
-        // field (`AGENTS.md` §18.1).
+        // field.
         assert_eq!(dma_resources(pcie), [(0xc000_0000, 0xc000_0000, 0)]);
         let dma = pcie
             .resources()
@@ -799,8 +792,7 @@ mod tests {
     #[test]
     fn pcie_bridge_without_dma_ranges_carries_no_aperture() {
         // Strip the `dma-ranges`: the bridge is still emitted with its
-        // translated window, but no aperture is invented (`AGENTS.md`
-        // §2.9).
+        // translated window, but no aperture is invented.
         let mut b = DtbBuilder::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
@@ -820,7 +812,7 @@ mod tests {
     fn drops_a_window_an_ancestor_cannot_translate() {
         // Without `ranges` the bus address cannot reach the CPU's space;
         // the node is still emitted (bindable) but carries no invented
-        // window (`AGENTS.md` §2.9).
+        // window.
         let nodes = discover_all(&nested_soc_tree(false));
         let emmc2 = by_key(&nodes, b"brcm,bcm2711-emmc2");
         assert!(emmc2.resources().is_empty());
@@ -879,7 +871,7 @@ mod tests {
     #[test]
     fn refuses_a_tree_nested_beyond_the_walk_bound() {
         // 16 nested nodes exceed `MAX_WALK_DEPTH`; the walk fails closed
-        // rather than silently under-enumerating (`AGENTS.md` §2.9).
+        // rather than silently under-enumerating.
         let mut b = DtbBuilder::new();
         b.begin_node("");
         for _ in 0..16 {

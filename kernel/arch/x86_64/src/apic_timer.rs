@@ -53,9 +53,9 @@ pub const LAPIC_TIMER_DIVIDE_16: u32 = 16;
 pub mod timer_mode {
     /// One-shot mode (initial-count decrements once to zero, then stops).
     ///
-    /// RustOS programs the LAPIC timer one-shot only (`AGENTS.md` §17.1
+    /// RustOS programs the LAPIC timer one-shot only (
     /// tickless / `NO_HZ`); there is no periodic-mode constant because no
-    /// path arms a fixed-frequency auto-reload (§2.14 — no dead code).
+    /// path arms a fixed-frequency auto-reload (no dead code).
     pub const ONE_SHOT: u32 = 0b00 << 17;
 }
 
@@ -89,7 +89,7 @@ pub trait PortIo {
 /// exactly the same time base as `ticks_per_second`. Wiring the reader
 /// as a trait rather than calling `_rdtsc()` directly inside
 /// [`calibrate`] keeps the calibration deterministic under host unit
-/// tests (`AGENTS.md` §7 — no flaky tests).
+/// tests (no flaky tests).
 pub trait TscReader {
     /// Read the current TSC value.
     fn read(&mut self) -> u64;
@@ -138,7 +138,7 @@ impl TscReader for Rdtsc {
             // hosts — `calibrate`'s unit tests drive the calibration
             // window through `MockTsc` — so a constant keeps the crate
             // building without inventing a fake timebase. Returning a
-            // value (rather than panicking) honours `AGENTS.md` §2.9.
+            // value (rather than panicking) honours.
             0
         }
     }
@@ -181,7 +181,7 @@ impl Calibration {
     /// on bare metal because [`calibrate`] returns
     /// [`CalibrationError::NoLapicTickDetected`] long before we'd
     /// observe a zero TSC delta) returns `0` to keep the call site
-    /// from panicking — `AGENTS.md` §2.9 (no `unwrap` in production
+    /// from panicking (no `unwrap` in production
     /// paths).
     #[must_use]
     pub fn tsc_ticks_to_ns(self, ticks: u64) -> u64 {
@@ -191,7 +191,7 @@ impl Calibration {
         let numerator = u128::from(ticks).saturating_mul(1_000_000_000);
         let ns = numerator / u128::from(self.tsc_per_second);
         // `u64::try_from` saturates via `unwrap_or` so the function
-        // never panics on the overflow path; `AGENTS.md` §2.9
+        // never panics on the overflow path;
         // (no `expect`/`unwrap` in production paths).
         u64::try_from(ns).unwrap_or(u64::MAX)
     }
@@ -238,7 +238,7 @@ pub fn compute_pit_reload(period_micros: u32) -> Result<u16, CalibrationError> {
     if reload == 0 || reload > 0xFFFF {
         return Err(CalibrationError::PeriodOutOfRange);
     }
-    // SAFETY-INVARIANT (AGENTS.md §2.9): the bound check above proves
+    // SAFETY-INVARIANT: the bound check above proves
     // `reload <= 0xFFFF`, so the u16 conversion is infallible. We use
     // `unwrap_or` rather than `expect` to satisfy the "no expect in
     // production paths" rule without conditionally panicking on a
@@ -357,7 +357,7 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
 /// `vector` (the divisor and mode persist across one-shot fires, so the
 /// later `crate::preempt::arm_oneshot` only has to rewrite the
 /// initial-count), and writes an initial-count of `0` to halt the timer
-/// (SDM §11.5.4). RustOS is tickless (`AGENTS.md` §17.1): the scheduler
+/// (SDM §11.5.4). RustOS is tickless: the scheduler
 /// arms the one-shot to one quantum (`calibration.initial_count` ticks)
 /// only when a CPU is contended, and disarms otherwise — there is no
 /// periodic auto-reload. The calibration is consumed by the caller
@@ -373,7 +373,7 @@ pub fn program_oneshot_disarmed<L: LapicMmio>(lapic: &mut Lapic<L>, vector: u8) 
     let lvt = u32::from(vector) | timer_mode::ONE_SHOT;
     lapic.mmio_mut().write(Lapic::<L>::TIMER_LVT_OFFSET, lvt);
     // Initial-count 0 halts the timer: it stays disarmed until the
-    // scheduler arms a one-shot quantum (`AGENTS.md` §17.1).
+    // scheduler arms a one-shot quantum.
     lapic
         .mmio_mut()
         .write(Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET, 0);
@@ -416,7 +416,7 @@ impl PortIo for PolledPit {
             // never reached on such hosts (`calibrate`'s unit tests
             // drive a mock `PortIo`), so the shim returns a constant
             // rather than emitting an invalid instruction. Returning a
-            // value (rather than panicking) honours `AGENTS.md` §2.9.
+            // value (rather than panicking) honours.
             let _ = port;
             0
         }
@@ -482,7 +482,7 @@ mod tests {
     /// exactly `step` ticks. Tests pass a known `step` and assert on
     /// the resulting `tsc_per_second` (`step * 1_000_000 /
     /// calibration_window_us`), keeping the calibration deterministic
-    /// (`AGENTS.md` §7 — no flaky tests).
+    /// (no flaky tests).
     pub struct MockTsc {
         current: u64,
         step: u64,

@@ -5,8 +5,7 @@
 //!
 //! The Stage-3 per-sub-stage checklist requires that "the
 //! memory-isolation test passes" on each architecture — that the MMU,
-//! not software, isolates one address space's frames from another
-//! (`AGENTS.md` §4). This binary exercises that on the aarch64 `virt`
+//! not software, isolates one address space's frames from another. This binary exercises that on the aarch64 `virt`
 //! board, end to end:
 //!
 //! 1. Build two stage-1 `AddressSpace`s that each identity-map the low
@@ -29,8 +28,7 @@
 //!
 //! It links only the `rustos-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
-//! never behind a Cargo feature on the arch crate (`AGENTS.md` §5.4.5 —
-//! fail closed).
+//! never behind a Cargo feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -72,7 +70,7 @@ mod kernel {
 
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// exactly [`VICTIM_VA`], then report PASS. Anything else is a
-    /// FAILURE. Never returns (`AGENTS.md` §2.9).
+    /// FAILURE. Never returns.
     extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
         if fault::is_abort(esr) && far == VICTIM_VA {
             log(
@@ -126,7 +124,7 @@ mod kernel {
         let mut victim = AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIB)
             .unwrap_or_else(|| fail("victim identity map"));
         // Install the victim mapping through the Arch HAL MMU surface
-        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the §17.2 path
+        // (`rustos_arch_api::mmu::AddressSpace::map_page`), the path
         // the architecture-neutral kernel uses, rather than the port's
         // inherent `map_4k` (`plans/WIRING.md` W5b).
         victim

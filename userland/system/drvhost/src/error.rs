@@ -3,7 +3,7 @@
 //! Every load / unload / reload outcome maps to exactly one variant of
 //! [`HostError`]; the variants are deliberately disjoint from the kernel
 //! [`rustos_abi::Errno`] so that a mis-routed value cannot be confused
-//! between layers (`AGENTS.md` §5.4 — fail closed, never silently widen).
+//! between layers (fail closed, never silently widen).
 //!
 //! The set is `#[non_exhaustive]` so new failure modes can be added
 //! without breaking downstream `match` arms.
@@ -40,8 +40,7 @@ pub enum HostError {
     /// [`DriverError`] is the decoder's reason.
     BindKeyInvalid(DriverError),
     /// The driver requested at least one capability the caller does not
-    /// hold. Surfaces the subset-only delegation rule
-    /// (`AGENTS.md` §5.2).
+    /// hold. Surfaces the subset-only delegation rule.
     CapabilityEscalation,
     /// The driver declared `kind = InKernel` but the caller does not
     /// hold [`rustos_abi::CapabilityId::DRV_KERNEL`].

@@ -21,9 +21,9 @@
 //! device's `MagicValue` register back through the returned base, and exits 0;
 //! the callback reports exit 0 as PASS. Any shortfall (a refused map, the wrong
 //! register value, an unexpected syscall) trips a distinct failure finisher or
-//! times out, so the run fails loudly (`AGENTS.md` §7).
+//! times out, so the run fails loudly.
 //!
-//! The registry-backed grant owner-check (`AGENTS.md` §5.4) is host-proven in
+//! The registry-backed grant owner-check is host-proven in
 //! `kernel/core`; this vertical proves the retained-space device-window mapping
 //! mechanism on the board, the part QEMU `virt` can carry honestly.
 

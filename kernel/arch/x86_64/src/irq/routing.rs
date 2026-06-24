@@ -4,7 +4,7 @@
 //! (`0x30..=0xFE`). The kernel binary's `Phase::Irq` step calls
 //! [`Routing::install`] once per IO-APIC pin during boot; after
 //! `Phase::Irq` completes the table is read-only by contract
-//! (`AGENTS.md` §2.1 — one-shot publish, no mutable static).
+//! (one-shot publish, no mutable static).
 //!
 //! `u32::MAX` is the unmapped sentinel; reads through
 //! [`Routing::gsi_for_vector`] return `None` for unmapped slots.

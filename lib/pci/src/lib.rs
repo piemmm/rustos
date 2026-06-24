@@ -1,6 +1,6 @@
 //! RustOS PCI/PCIe configuration-access mechanism library.
 //!
-//! A `no_std` `lib/*` crate (`AGENTS.md` §6 / §17.4): it implements the
+//! A `no_std` `lib/*` crate: it implements the
 //! `abi-v1` PCI/PCIe bus and transport seams
 //! ([`rustos_abi::driver::bus::Bus`], [`VirtioPciBus`], [`MsixBus`],
 //! [`PciBus`]) over three configuration-access mechanisms, and exposes them
@@ -14,7 +14,7 @@
 //! ring-0 boot pipeline, a user-space bus driver (`drivers/bus/pcie_brcm`),
 //! and the host-side integration tests all compose it through the public
 //! seams above — a `drivers/*` crate may not depend on another `drivers/*`
-//! crate (`AGENTS.md` §17.4), so a user-space driver reaches the mechanism
+//! crate, so a user-space driver reaches the mechanism
 //! here, never through a sibling driver. This mirrors the `lib/usb` ↔
 //! `drivers/bus/usb` and `lib/virtio` ↔ `drivers/bus/virtio` split.
 //!
@@ -26,13 +26,13 @@
 //! routed through [`MsixBus::route_msix`]; the BAR walker maps a BAR only
 //! through the supplied [`MmioMapper`], which enforces
 //! [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) kernel-side
-//! (`AGENTS.md` §4 — no ambient authority).
+//! (no ambient authority).
 //!
 //! # Safety
 //!
 //! This crate contains no `unsafe`: the `in`/`out` instructions that reach
 //! I/O ports `0xCF8`/`0xCFC` live in the architecture port behind the
-//! [`rustos_abi::PortIo`] seam (`AGENTS.md` §17.2), driven only through
+//! [`rustos_abi::PortIo`] seam, driven only through
 //! `mech_one::PortIoConfigSpace`, which the unit tests exercise against a
 //! recording mock.
 
@@ -58,7 +58,7 @@ mod tests;
 
 // The shared bus-driver locate/BAR primitives (`locate.rs`): the one
 // definition the generic xHCI driver and a root-complex bus driver both
-// reach (`AGENTS.md` §2.2 / §17.4), re-exported at the crate root beside the
+// reach, re-exported at the crate root beside the
 // `mechanism_*` constructors.
 pub use locate::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, USB_CONTROLLER_CLASS,
@@ -80,7 +80,7 @@ pub use locate::{
 /// [`MsixBus`] both have [`Bus`] as a supertrait, so the return bound
 /// names only the two leaf seams; the opaque type still implements
 /// [`Bus`] and coerces to `&dyn Bus`. The concrete `Pci` type stays
-/// crate-private (`AGENTS.md` §8): callers borrow the result as
+/// crate-private: callers borrow the result as
 /// `&dyn Bus` / `&dyn VirtioPciBus` / `&dyn MsixBus` and never name it.
 ///
 /// Construction performs **no** I/O — it only stores the supplied
@@ -95,8 +95,7 @@ pub use locate::{
 /// entirely in the [`PortIo`] backend the caller supplies — the
 /// architecture port (`kernel/arch/x86_64`) provides the only
 /// real implementation. This constructor is therefore
-/// architecture-neutral and carries no target-conditional `cfg` gate
-/// (`AGENTS.md` §17.2 / §17.4); architectures without an I/O port
+/// architecture-neutral and carries no target-conditional `cfg` gate; architectures without an I/O port
 /// space simply never call it and reach `PCIe` through memory-mapped
 /// ECAM, a separate seam.
 #[must_use]
@@ -114,7 +113,7 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 /// `window` is the kernel-mapped [`RegisterWindow`] over the host
 /// bridge's configuration region, obtained from the MMIO-map facility
 /// after a [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP)
-/// check (`AGENTS.md` §4). Its base
+/// check. Its base
 /// is the physical base of `(bus 0, device 0, function 0, register 0)`
 /// and its length bounds the buses the enumeration can reach: an
 /// access past the window resolves to the PCI "no device" sentinel, so
@@ -123,7 +122,7 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 /// The returned value is the bus the ring-0 boot pipeline drives
 /// through the [`Bus`], [`VirtioPciBus`], and [`MsixBus`] seams,
 /// identically to [`mechanism_one`]; the concrete `Pci` type stays
-/// crate-private (`AGENTS.md` §8).
+/// crate-private.
 ///
 /// Construction performs **no** I/O — it only stores the supplied
 /// window. Configuration access happens lazily on the trait methods.
@@ -131,8 +130,7 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 /// # Platform
 ///
 /// ECAM is architecture-neutral: the window is just mapped memory, so
-/// this constructor carries no target-conditional `cfg` gate
-/// (`AGENTS.md` §17.2 / §17.4). It is the path the Raspberry Pi 4
+/// this constructor carries no target-conditional `cfg` gate. It is the path the Raspberry Pi 4
 /// (BCM2711) root complex uses to reach the VL805 USB host
 /// controller, and the path any `PCIe` host bridge without an I/O-port
 /// space uses.
@@ -151,8 +149,7 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 /// controller's register block — the very window the BCM2711 PCIe
 /// host-bridge bring-up driver (`drivers/bus/pcie_brcm`) trained the
 /// link through — obtained from the MMIO-map facility after a
-/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) check
-/// (`AGENTS.md` §4). The link must be
+/// [`CapabilityId::MMIO_MAP`](rustos_abi::CapabilityId::MMIO_MAP) check. The link must be
 /// up before any downstream configuration access, or the controller
 /// raises a CPU abort; the bring-up driver guarantees this before
 /// handing the window here.
@@ -164,19 +161,18 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 /// resolves every other downstream target to the PCI "no device"
 /// sentinel without touching the controller — otherwise a flat
 /// enumeration would forward unanswered config TLPs and the root complex
-/// would raise a CPU abort (`AGENTS.md` §5.4 / §2.9).
+/// would raise a CPU abort.
 ///
 /// The returned value is driven through the [`Bus`], [`VirtioPciBus`],
 /// [`MsixBus`], and [`PciBus`] seams identically to [`mechanism_ecam`];
-/// the concrete `Pci` type stays crate-private (`AGENTS.md` §8).
+/// the concrete `Pci` type stays crate-private.
 /// Construction performs **no** I/O.
 ///
 /// # Platform
 ///
 /// The index/data windowing is BCM2711-specific, but it is expressed
 /// entirely as offsets within the supplied memory window, so this
-/// constructor carries no target-conditional `cfg` gate (`AGENTS.md`
-/// §17.2 / §17.4): an architecture without a BCM2711 root complex
+/// constructor carries no target-conditional `cfg` gate: an architecture without a BCM2711 root complex
 /// simply never calls it.
 #[must_use]
 pub fn mechanism_brcm(
@@ -201,10 +197,9 @@ impl<C: ConfigSpace> Bus for Pci<C> {
     }
 }
 
-// The frozen `abi-v1` virtio-PCI transport-provisioning seam
-// (`AGENTS.md` §9). The ring-0 boot walk reaches the concrete `Pci`
+// The frozen `abi-v1` virtio-PCI transport-provisioning seam. The ring-0 boot walk reaches the concrete `Pci`
 // through `&dyn VirtioPciBus`, so the bus driver never leaks its
-// concrete type across the crate boundary (`AGENTS.md` §8). Both
+// concrete type across the crate boundary. Both
 // methods forward to the inherent enumeration core; the inherent
 // `Pci::map_virtio_window` wins method resolution, so the forward is
 // not recursive.
@@ -223,10 +218,9 @@ impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
     }
 }
 
-// The frozen `abi-v1` MSI-X interrupt-routing seam (`AGENTS.md` §9).
+// The frozen `abi-v1` MSI-X interrupt-routing seam.
 // Ring 0 reaches the concrete `Pci` through `&dyn MsixBus` to route a
-// device's interrupt, never naming the driver's concrete type
-// (`AGENTS.md` §8). The inherent `Pci::route_msix` wins method
+// device's interrupt, never naming the driver's concrete type. The inherent `Pci::route_msix` wins method
 // resolution, so the forward is not recursive.
 impl<C: ConfigSpace> MsixBus for Pci<C> {
     fn route_msix(
@@ -240,11 +234,10 @@ impl<C: ConfigSpace> MsixBus for Pci<C> {
     }
 }
 
-// The `abi-v1` generic-PCI transport seam (`AGENTS.md` §9): the surface
+// The `abi-v1` generic-PCI transport seam: the surface
 // a non-virtio, DMA-driving device driver (xHCI) consumes to map one of
 // the controller's BARs and enable bus mastering, reached through
-// `&dyn PciBus` so the device driver never names this concrete crate
-// (`AGENTS.md` §8 / §17.4). Both methods forward to the inherent
+// `&dyn PciBus` so the device driver never names this concrete crate. Both methods forward to the inherent
 // enumeration core; the inherent methods win method resolution, so the
 // forward is not recursive.
 impl<C: ConfigSpace> PciBus for Pci<C> {

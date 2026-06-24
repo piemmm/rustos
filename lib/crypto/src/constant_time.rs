@@ -5,7 +5,7 @@
 //! leaks, through early-exit timing, how many leading bytes matched. That is
 //! enough to forge the value one byte at a time. The function here compares
 //! in time that depends only on the *lengths* of the inputs (which are public)
-//! and never on their contents (`AGENTS.md` §19.1).
+//! and never on their contents.
 //!
 //! This is the one sanctioned home for secret comparison in RustOS: callers
 //! must never reintroduce `==`, `Ord`, or a short-circuiting loop over secret
@@ -61,7 +61,7 @@ mod tests {
     /// items the consumer actually pulled. Driving [`fold_difference`] with
     /// it turns "did the fold visit every byte regardless of content?" into
     /// a deterministic assertion — the non-flaky stand-in for a timing
-    /// measurement (`AGENTS.md` §7 forbids wall-clock timing tests).
+    /// measurement (the charter forbids wall-clock timing tests).
     struct Counting<'a, I> {
         inner: I,
         pulled: &'a mut usize,

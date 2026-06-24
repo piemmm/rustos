@@ -2,8 +2,7 @@
 //!
 //! Every security-relevant decision taken by this crate emits exactly one
 //! structured log record through [`rustos_log`]. The numeric identifiers
-//! are part of the audit contract with external log consumers
-//! (`AGENTS.md` §5.4.4) and may not be re-used or re-numbered. They live
+//! are part of the audit contract with external log consumers and may not be re-used or re-numbered. They live
 //! in the `kernel/sec` range reserved by [`rustos_log::EventId`]
 //! conventions: `1_000..2_000`.
 //!
@@ -22,9 +21,9 @@
 //! | 1021 | Info  | `TASK_CAPABILITIES_DELEGATED`     | A delegated subset was installed under a task. |
 //! | 1022 | Error | `TASK_CAPABILITIES_DELEGATE_WIDEN`| A delegation attempt would have widened the parent set and was refused. |
 //! | 1023 | Info  | `TASK_CAPABILITIES_REVOKED`       | One or more capabilities were revoked from a task. |
-//! | 1030 | Info  | `DMA_ALLOCATED`                   | A DMA buffer was allocated for a task that holds `CAP_MEM_DMA` (`AGENTS.md` §4). |
+//! | 1030 | Info | `DMA_ALLOCATED` | A DMA buffer was allocated for a task that holds `CAP_MEM_DMA`. |
 //! | 1031 | Error | `DMA_ALLOC_DENIED`                | A DMA allocation was refused because the calling task lacks `CAP_MEM_DMA`. |
-//! | 1040 | Info  | `MMIO_MAPPED`                     | A device register window was mapped for a task that holds `CAP_MMIO_MAP` (`AGENTS.md` §4). |
+//! | 1040 | Info | `MMIO_MAPPED` | A device register window was mapped for a task that holds `CAP_MMIO_MAP`. |
 //! | 1041 | Error | `MMIO_MAP_DENIED`                 | An MMIO-map request was refused because the calling task lacks `CAP_MMIO_MAP`. |
 //!
 //! Adding a new event requires assigning the next free identifier in this

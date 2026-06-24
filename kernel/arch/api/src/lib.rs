@@ -2,7 +2,7 @@
 //!
 //! `kernel/arch/api` is the closed set of traits that every
 //! architecture port (`kernel/arch/<target>`) implements and the rest
-//! of the kernel consumes (`AGENTS.md` §17.2). It is the §17.4
+//! of the kernel consumes. It is the
 //! boundary that keeps the architecture pluggable: a port names only
 //! this crate (and `lib/*`), never a concrete kernel subsystem, and
 //! no kernel crate names a concrete arch port — both sides meet here.
@@ -12,83 +12,79 @@
 //! This crate currently hosts the **scheduler-facing** slice of the
 //! HAL — the per-CPU identity, the monotonic tick source, and the
 //! inter-processor preemption hook the SMP scheduler drives through
-//! [`SchedulerArch`] — the **side-channel mitigation** slice
-//! (`AGENTS.md` §19.1): the [`SideChannelMitigation`] trait and its
+//! [`SchedulerArch`] — the **side-channel mitigation** slice: the [`SideChannelMitigation`] trait and its
 //! [`sidechannel::conformance`] vertical — and the **memory-tagging**
-//! slice (`AGENTS.md` §19.10): the [`MemoryTagging`] trait, its
+//! slice: the [`MemoryTagging`] trait, its
 //! [`memtag::conformance`] vertical, and the architecture-neutral
 //! [`MemTag`] / [`next_free_tag`] tag algebra that hardens
-//! use-after-free — and the **enter-user-mode** slice (`AGENTS.md`
-//! §17.2): the [`EnterUser`] trait and the architecture-neutral
+//! use-after-free — and the **enter-user-mode** slice: the [`EnterUser`] trait and the architecture-neutral
 //! [`UserEntry`] register state that drops a freshly built process image
 //! into user mode via the port's native transition (`sret` on riscv64,
 //! `eret` on aarch64, `iretq` on x86_64) — and the **early-boot
-//! platform-discovery** slice (`AGENTS.md` §17.2 / §18.1/§18.2): the
+//! platform-discovery** slice: the
 //! [`PlatformDiscovery`] trait that normalises a target's native
 //! hardware source into the [`rustos_abi::hwtree`] hardware tree, plus
 //! its [`platform::conformance`] vertical — and the **per-CPU storage**
-//! slice (`AGENTS.md` §17.2): the [`PerCpu`] trait that reads and writes
+//! slice: the [`PerCpu`] trait that reads and writes
 //! the calling CPU's per-CPU base word (GS base on x86_64, `TPIDR_EL1`
 //! on aarch64, `tp` on riscv64, a per-worker slot on wasm32), plus its
 //! [`percpu::conformance`] round-trip + isolation vertical — and the
-//! **interrupt entry/exit** slice (`AGENTS.md` §17.2): the
+//! **interrupt entry/exit** slice: the
 //! [`IrqController`] line-masking trait and the [`InterruptEntry`]
 //! claim/complete prologue/epilogue every claim-based port exposes, plus
 //! their [`irq::conformance`] verticals — and the **timer-programming**
-//! slice (`AGENTS.md` §17.2): the [`Timer`] trait that installs the one
+//! slice: the [`Timer`] trait that installs the one
 //! scheduler-tick callback and dispatches a tick to it (the LAPIC timer,
 //! the EL1 generic timer, the SBI timer, and the wasm32
 //! `requestAnimationFrame` loop all drive it), plus its
-//! [`timer::conformance`] vertical — and the **context-switch** slice
-//! (`AGENTS.md` §17.2): the [`ContextSwitch`] trait that seeds a
+//! [`timer::conformance`] vertical — and the **context-switch** slice: the [`ContextSwitch`] trait that seeds a
 //! never-run task's first frame ([`ContextSwitch::prepare`]) and performs
 //! the port's native task switch ([`ContextSwitch::switch`]) over the
 //! architecture-neutral [`TaskContext`] save area, plus its
-//! [`context::conformance`] vertical — and the **MMU/page-table** slice
-//! (`AGENTS.md` §17.2): the [`AddressSpace`] trait that installs a 4 KiB
+//! [`context::conformance`] vertical — and the **MMU/page-table** slice: the [`AddressSpace`] trait that installs a 4 KiB
 //! mapping ([`AddressSpace::map_page`]), reports the root-table physical
 //! address ([`AddressSpace::root_phys`]), and activates the translation
 //! regime ([`AddressSpace::activate`]) over the neutral [`PageFlags`]
 //! permission set, plus its [`mmu::conformance`] vertical — and the
-//! **TLB-shootdown** slice (`AGENTS.md` §17.2): the [`TlbShootdown`]
+//! **TLB-shootdown** slice: the [`TlbShootdown`]
 //! trait whose [`TlbShootdown::flush_page`] the per-process map/unmap
 //! path drives to invalidate one CPU's stale cached translation
 //! (`invlpg` / `tlbi vae1is` / `sfence.vma`), plus its
 //! [`tlb::conformance`] vertical — and the **cross-CPU TLB-shootdown**
-//! slice (`AGENTS.md` §17.2, `plans/WIRING.md` W6): the
+//! slice (`plans/WIRING.md` W6): the
 //! [`CrossCpuTlbShootdown`] trait whose [`CrossCpuTlbShootdown::shootdown_page`]
 //! invalidates a stale translation on *every* online CPU (an x86_64
 //! IPI + acknowledge, an aarch64 inner-shareable `tlbi ...is` broadcast,
 //! a riscv64 SBI `remote_sfence_vma`), plus its [`xtlb::conformance`]
 //! vertical — and the **page-table frame-source**
-//! slice (`AGENTS.md` §17.2, `plans/WIRING.md` W5b-3): the
+//! slice (`plans/WIRING.md` W5b-3): the
 //! [`PageTableFrames`] trait a port draws its root and intermediate
 //! tables from (as [`TableFrame`]s), so a real per-process address space
 //! is backed by the `kernel/mem` frame allocator while the static
 //! `PageTablePool` stays the boot/bootstrap source, plus its
 //! [`frames::conformance`] vertical — and the **SMP secondary-CPU
-//! bring-up** slice (`AGENTS.md` §17.2, `plans/WIRING.md` W14): the
+//! bring-up** slice (`plans/WIRING.md` W14): the
 //! [`SecondaryBringup`] trait whose [`SecondaryBringup::start_secondary`]
 //! starts a parked logical CPU (an x86_64 INIT-SIPI-SIPI handshake, an
 //! aarch64 PSCI `CPU_ON`, a riscv64 SBI HSM `hart_start`, a wasm32 Web
 //! Worker spawn), plus its [`smp::conformance`] vertical. It also hosts
-//! the **§17.2 conformance
+//! the ** conformance
 //! vertical** ([`conformance`]): the harness every port runs over its
 //! real HAL handles so parity is *enforced* rather than asserted by
 //! inspection (`plans/WIRING.md`). The remaining HAL surface enumerated
-//! by `AGENTS.md` §17.2 is now complete: the last ad-hoc slice — SMP
+//! by is now complete: the last ad-hoc slice — SMP
 //! secondary-CPU bring-up — became the [`SecondaryBringup`] trait in
 //! Stage W14 (`plans/WIRING.md`). Until a future primitive lives here it
 //! stays in its current owning crate, and the move is tracked, not
-//! silently duplicated (`AGENTS.md` §2.2).
+//! silently duplicated.
 //!
 //! # Why `no_std` and dependency-light
 //!
-//! §17.4 permits `kernel/arch/api` to depend on `lib/*` only. The crate
+//! the charter permits `kernel/arch/api` to depend on `lib/*` only. The crate
 //! is `no_std` and names a single `lib/*` dependency — `rustos_abi`,
 //! itself `no_std`, dependency-free, and allocator-free — so the
 //! [`PlatformDiscovery`] slice can speak in the one hardware-tree ABI
-//! rather than re-defining it (`AGENTS.md` §2.2). An architecture port
+//! rather than re-defining it. An architecture port
 //! implementing the HAL therefore still acquires no transitive edge to a
 //! concrete kernel crate, and the architecture-neutral kernel can name
 //! the HAL without inheriting an arch dependency.
@@ -166,8 +162,7 @@ pub type CpuId = u32;
 /// **efficiency** cores. The class is a *static identity* property of a
 /// [`CpuId`] — like [`SchedulerArch::current_cpu`] it never changes for
 /// the lifetime of the kernel image — discovered by the architecture
-/// port during early-boot platform enumeration (`AGENTS.md` §17.2,
-/// §18.2). It is deliberately distinct from *dynamic* power management
+/// port during early-boot platform enumeration. It is deliberately distinct from *dynamic* power management
 /// (frequency scaling, deep sleep), which is not part of this surface.
 ///
 /// The scheduler uses it to place latency-insensitive background work on
@@ -222,7 +217,7 @@ impl CoreClass {
 /// Every architecture port implements this trait; the host test
 /// double `TestArch` (shipped by `kernel/sched` behind its `test-arch`
 /// feature) is the only non-port implementation in the workspace
-/// (`AGENTS.md` §1 — production code never carries a fake IPI/timer).
+/// (production code never carries a fake IPI/timer).
 ///
 /// Implementations must be both [`Send`] and [`Sync`] because the
 /// scheduler stores them inside `Arc`s shared between every CPU.
@@ -244,7 +239,7 @@ impl CoreClass {
 /// The trait is deliberately tiny. *Dynamic* power management (per-core
 /// timer programming, deep sleep, frequency scaling) belongs in the
 /// arch crate itself, not in this surface; growing the trait with that
-/// would constitute interface creep (`AGENTS.md` §2.4). [`Self::core_class`]
+/// would constitute interface creep. [`Self::core_class`]
 /// is admitted because it is *static* per-CPU identity — the same
 /// category as [`Self::current_cpu`] — that the architecture-neutral
 /// scheduler genuinely needs to place work, and it is a provided method
@@ -286,7 +281,7 @@ pub trait SchedulerArch: Send + Sync {
     /// when the CPU has nothing to preempt to (it is idle or runs a single
     /// runnable task), so the timer is stopped and the core takes **no**
     /// timer interrupts at all. This is what makes RustOS tickless
-    /// (`AGENTS.md` §17.1 `NO_HZ`): the timer is armed one-shot only when a
+    /// (`NO_HZ`): the timer is armed one-shot only when a
     /// CPU is contended, never at a fixed frequency.
     ///
     /// It belongs on this surface for the same reason [`Self::send_ipi`]
@@ -294,20 +289,19 @@ pub trait SchedulerArch: Send + Sync {
     /// quantum length (a counter-tick value the port derives from its
     /// discovered timer frequency) lives in the port, so this signal stays
     /// a pure boolean and the arithmetic is never duplicated into the
-    /// architecture-neutral scheduler (`AGENTS.md` §2.2, §2.20). It is a
+    /// architecture-neutral scheduler. It is a
     /// **provided** method defaulting to a no-op so the host `TestArch`
     /// and any non-preemptive port inherit the cooperative behaviour
     /// unchanged; a real port overrides it to program its
     /// [`crate::Timer`] one-shot ([`crate::Timer::arm_oneshot`] /
-    /// [`crate::Timer::disarm`]). An implementation must never panic
-    /// (§2.9).
+    /// [`crate::Timer::disarm`]). An implementation must never panic.
     fn set_preemption(&self, _armed: bool) {}
 
     /// Arm (or clear) the **calling** CPU's one-shot to also fire no later
     /// than the absolute monotonic-nanoseconds deadline `deadline_ns`, for
     /// the nearest pending timed blocking wait.
     ///
-    /// This is the timed half of the tickless one-shot (`AGENTS.md` §17.1:
+    /// This is the timed half of the tickless one-shot (:
     /// the timer is armed "to the next event the scheduler actually needs —
     /// the running task's preemption deadline *or* the nearest armed
     /// wakeup"). A blocking wait with a finite timeout (the wait-queue in
@@ -322,13 +316,12 @@ pub trait SchedulerArch: Send + Sync {
     /// It composes with [`Self::set_preemption`]: a port programs its single
     /// physical one-shot to the *earlier* of the quantum arming and this
     /// wakeup, so neither suppresses the other. A deadline already in the
-    /// past arms the soonest possible tick rather than wrapping (`AGENTS.md`
-    /// §2.9 — fail closed).
+    /// past arms the soonest possible tick rather than wrapping (fail closed).
     ///
     /// **Provided**, defaulting to a no-op so the host `TestArch` and any
     /// non-preemptive port inherit cooperative behaviour unchanged; a real
     /// port overrides it to reprogram its [`crate::Timer`] one-shot. An
-    /// implementation must never panic (§2.9).
+    /// implementation must never panic.
     fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
 }
 

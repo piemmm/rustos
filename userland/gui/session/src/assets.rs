@@ -1,18 +1,17 @@
 //! Loading the desktop's on-disk SVG graphics assets from `/System/Graphics`.
 //!
 //! The desktop's cursors and notification icons are authored as SVG under
-//! `/System/Graphics` (the SVG-first asset rule, `AGENTS.md` §10 / §16.2).
+//! `/System/Graphics` (the SVG-first asset rule).
 //! `lib/cursor` and `lib/icon` own the decode-and-fall-back logic but stay
 //! `no_std` and hold no path of their own: they take the asset bytes through
 //! the [`CursorAssetSource`] / [`IconAssetSource`] seams. Reading those bytes
-//! needs a filesystem capability, so it is the desktop session's job
-//! (`AGENTS.md` §17.4 / §19.5). This module is that job.
+//! needs a filesystem capability, so it is the desktop session's job. This module is that job.
 //!
 //! A caller supplies a [`GraphicsAssetReader`] — VFS-backed on a running
 //! system, an in-memory table in tests — and [`load_cursor_theme`] /
 //! [`load_icon_set`] read one asset per kind, decode it, and assemble a
 //! complete [`CursorTheme`] / [`IconSet`]. Both are **total and fail-closed
-//! per kind** (`AGENTS.md` §2.9): a kind whose asset is absent, unreadable,
+//! per kind**: a kind whose asset is absent, unreadable,
 //! malformed, or outside the supported SVG subset keeps its built-in artwork,
 //! so a missing or corrupt `/System/Graphics` can never blank the pointer or a
 //! status icon — it simply yields the built-in set.
@@ -26,15 +25,14 @@ use rustos_cursor::{CursorAssetSource, CursorTheme, CURSOR_KINDS};
 use rustos_icon::{IconAssetSource, IconKind, IconSet, ICON_KINDS};
 use rustos_theme::{CursorKind, CursorSet};
 
-/// The directory the desktop's SVG graphics assets live under
-/// (`AGENTS.md` §16.2).
+/// The directory the desktop's SVG graphics assets live under.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
 
 /// A reader for the desktop's on-disk SVG graphics assets.
 ///
 /// Reading a file under [`GRAPHICS_DIR`] needs a filesystem capability, so it
 /// is the desktop session's job rather than the `no_std` `lib/cursor` /
-/// `lib/icon` crates' (`AGENTS.md` §17.4 / §19.5). On a running system this is
+/// `lib/icon` crates'. On a running system this is
 /// backed by the VFS; tests back it with an in-memory table.
 pub trait GraphicsAssetReader {
     /// Read the bytes of the asset at absolute `path` (under [`GRAPHICS_DIR`]).
@@ -44,8 +42,8 @@ pub trait GraphicsAssetReader {
     /// Returns the kernel boundary's [`Errno`] when the asset cannot be read —
     /// for example [`Errno::NotFound`] when it is absent or
     /// [`Errno::PermissionDenied`] when the caller lacks the capability to read
-    /// it (`AGENTS.md` §5.3). A read failure is not fatal: the loader falls
-    /// back to the built-in artwork for that kind (`AGENTS.md` §2.9).
+    /// it. A read failure is not fatal: the loader falls
+    /// back to the built-in artwork for that kind.
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno>;
 }
 
@@ -101,7 +99,7 @@ fn icon_path(asset_id: &str) -> String {
 ///
 /// Reads one asset per [`CursorKind`] through `reader` and lets `lib/cursor`
 /// decode it. A kind whose asset cannot be read, or whose bytes do not decode,
-/// keeps the built-in cursor (`AGENTS.md` §2.9), so this never fails: a missing
+/// keeps the built-in cursor, so this never fails: a missing
 /// `/System/Graphics` simply yields the built-in set. The result is a plain
 /// [`CursorTheme`] the window manager registers through its existing
 /// `CursorRegistry`.
@@ -123,8 +121,7 @@ where
 ///
 /// Reads one asset per [`IconKind`] (named by [`IconKind::asset_id`]) through
 /// `reader` and lets `lib/icon` decode it. A kind whose asset cannot be read,
-/// or whose bytes do not decode, falls back to its built-in glyph at draw time
-/// (`AGENTS.md` §2.9), so this never fails. The result is an [`IconSet`] the
+/// or whose bytes do not decode, falls back to its built-in glyph at draw time, so this never fails. The result is an [`IconSet`] the
 /// taskbar installs through `TaskbarRenderer::set_icons`.
 pub fn load_icon_set<R>(reader: &mut R) -> IconSet
 where

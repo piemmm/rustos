@@ -70,14 +70,14 @@ impl SyscallNumber {
     /// if `timeout_ns` elapses first. Requires
     /// [`crate::CapabilityId::IRQ_BIND`] — the handle is also
     /// re-checked against the calling task's binding to defend
-    /// against handle forgery (`AGENTS.md` §5.4).
+    /// against handle forgery.
     pub const IRQ_WAIT: Self = Self(9);
     /// Fill a user buffer with cryptographically secure random bytes.
     ///
     /// Arguments: `buf: *mut u8` (user pointer), `len: usize`,
     /// `flags: u32` ([`crate::RandomFlags`]). Returns the number of
     /// bytes written. The kernel draws from its CSPRNG-backed output
-    /// reserve (`AGENTS.md` §22); the call is unprivileged (drawing
+    /// reserve; the call is unprivileged (drawing
     /// randomness needs no capability), but a `len` above
     /// [`crate::RANDOM_REQUEST_MAX_BYTES`] is refused. With
     /// [`crate::RandomFlags::NON_BLOCKING`] set and the kernel RNG not
@@ -85,15 +85,15 @@ impl SyscallNumber {
     /// than blocking.
     pub const RANDOM_GET: Self = Self(10);
     /// Write a byte buffer to one of the calling process's inherited
-    /// standard streams (`AGENTS.md` §20).
+    /// standard streams.
     ///
     /// Arguments: `fd: u32` (the standard descriptor — [`crate::STDOUT`],
     /// [`crate::STDERR`], or [`crate::STDINFO`]), `buf: *const u8` (user
     /// pointer), `len: usize`. Returns the number of bytes written. The
     /// kernel resolves `fd` against the caller's per-process descriptor
     /// table ([`crate::DescriptorTable`]) — the inherited descriptor, not
-    /// an ambient device, is the authority (§20) — then copies the buffer
-    /// through the validated `copy_from_user` boundary (`AGENTS.md` §5.4)
+    /// an ambient device, is the authority — then copies the buffer
+    /// through the validated `copy_from_user` boundary
     /// and emits it to that descriptor's kernel stream backing. In the
     /// bootstrap session every backing is the discovered console (the
     /// detected framebuffer when present, else the first discovered UART,
@@ -103,12 +103,12 @@ impl SyscallNumber {
     /// backing wired fails closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_WRITE: Self = Self(11);
     /// Spawn a new process from an embedded program named by an absolute
-    /// path (`plans/SPAWN.md` SP3, `AGENTS.md` §16.5).
+    /// path (`plans/SPAWN.md` SP3).
     ///
     /// Arguments: `path: *const u8` (user pointer to the program's
     /// absolute path), `path_len: usize`, and `console: u64` — which
     /// system console the child's standard streams attach to
-    /// (`AGENTS.md` §20 — the spawner, never the program, decides the
+    /// (the spawner, never the program, decides the
     /// backing). Passing [`CONSOLE_INHERIT`](crate::CONSOLE_INHERIT)
     /// attaches the child to the **caller's own** descriptor table
     /// (the default session shape: a child stays on its parent's
@@ -116,21 +116,21 @@ impl SyscallNumber {
     /// [`SyscallNumber::CONSOLE_COUNT`] and an index with no installed
     /// console fails closed with [`crate::Errno::NotFound`]. The kernel
     /// copies the path in through the validated `copy_from_user`
-    /// boundary (`AGENTS.md` §5.4), looks it up in the kernel's
+    /// boundary, looks it up in the kernel's
     /// embedded-program registry, builds a fresh **hardware-isolated**
-    /// address space for it (§4), registers it as a runnable process,
+    /// address space for it, registers it as a runnable process,
     /// and returns the new process's PID; the caller keeps running (a
     /// true concurrent spawn, not an `exec`-style hand-off). Gated by
     /// [`crate::CapabilityId::PROC_SPAWN`] — spawning materialises a new
     /// principal and hands it the CPU, so it is privileged rather than
-    /// ambient (`AGENTS.md` §4). The spawned program receives only the
+    /// ambient. The spawned program receives only the
     /// intersection of its own signed manifest request and its user's
-    /// grants (§16.5); spawn authority does not widen the child's
+    /// grants; spawn authority does not widen the child's
     /// authority. A build with no spawn service wired, or a path naming
-    /// no registered program, fails closed (`AGENTS.md` §2.9).
+    /// no registered program, fails closed.
     pub const SPAWN: Self = Self(12);
     /// Read a byte buffer from the calling process's inherited standard
-    /// input (`AGENTS.md` §20).
+    /// input.
     ///
     /// Arguments: `fd: u32` (the standard descriptor — normally
     /// [`crate::STDIN`]), `buf: *mut u8` (user pointer), `len: usize`.
@@ -139,8 +139,7 @@ impl SyscallNumber {
     /// and reads from that descriptor's kernel stream backing — in the
     /// bootstrap session the first discovered keyboard/UART input source
     /// (`plans/PI.md` P6) — into a bounded kernel staging buffer, copying it
-    /// out through the validated `copy_to_user` boundary (`AGENTS.md`
-    /// §5.4). The input counterpart of [`SyscallNumber::STREAM_WRITE`]: a
+    /// out through the validated `copy_to_user` boundary. The input counterpart of [`SyscallNumber::STREAM_WRITE`]: a
     /// short read (fewer bytes than `len`, possibly zero when no input is
     /// pending) is valid, so the caller loops. Use of a console-backed
     /// stream additionally requires [`crate::CapabilityId::CONSOLE_READ`].
@@ -155,14 +154,14 @@ impl SyscallNumber {
     /// `flags: u32` ([`crate::MapFlags`]), `addr_hint: u64` (a page-aligned
     /// placement hint; `0` means "kernel chooses"). Returns the base address
     /// of the new region. The region is zeroed before it is visible, is
-    /// always `RW` and never executable (`AGENTS.md` §19.2 — W^X), and is
+    /// always `RW` and never executable (W^X), and is
     /// mapped only into the **caller's own** hardware-isolated address space
-    /// (`AGENTS.md` §4 — no global user heap, no cross-process mapping). The
+    /// (no global user heap, no cross-process mapping). The
     /// call is unprivileged — growing one's own address space needs no
-    /// capability (`AGENTS.md` §16.6 precedent) — but the kernel validates
-    /// every argument and fails closed (`AGENTS.md` §5.4). A frame- or
+    /// capability (precedent) — but the kernel validates
+    /// every argument and fails closed. A frame- or
     /// page-table-allocation failure returns [`crate::Errno::OutOfMemory`]
-    /// rather than panicking (`AGENTS.md` §4 / §2.9); a build with no memory
+    /// rather than panicking; a build with no memory
     /// service wired fails closed with [`crate::Errno::NotImplemented`].
     pub const MEM_MAP: Self = Self(14);
     /// Release a region previously returned by [`SyscallNumber::MEM_MAP`]
@@ -170,9 +169,8 @@ impl SyscallNumber {
     ///
     /// Arguments: `base: u64` (the region's base, as returned by `mem_map`)
     /// and `len: usize` (its length in bytes). The frames reclaimed are
-    /// zeroed on free (`AGENTS.md` §4 — secret hygiene). Unmapping a region
-    /// that was never mapped, or a partial/over-long range, fails closed
-    /// (`AGENTS.md` §5.4); a build with no memory service wired fails closed
+    /// zeroed on free (secret hygiene). Unmapping a region
+    /// that was never mapped, or a partial/over-long range, fails closed; a build with no memory service wired fails closed
     /// with [`crate::Errno::NotImplemented`].
     pub const MEM_UNMAP: Self = Self(15);
     /// Wait for a child process to exit, reaping it and reporting its
@@ -184,42 +182,40 @@ impl SyscallNumber {
     /// code into). Returns the reaped child's PID. A process may only wait
     /// on its **own** children — waiting reaps a child the caller spawned,
     /// so it grants no authority over anything else and needs no
-    /// capability (`AGENTS.md` §16.6 precedent — "list my own processes");
-    /// the kernel validates the parent/child relationship and fails closed
-    /// (`AGENTS.md` §5.4). Waiting on a `pid` that is not a child of the
+    /// capability (precedent — "list my own processes");
+    /// the kernel validates the parent/child relationship and fails closed. Waiting on a `pid` that is not a child of the
     /// caller fails closed with [`crate::Errno::NotFound`]; a build with no
     /// process-wait service wired fails closed with
     /// [`crate::Errno::NotImplemented`].
     pub const WAIT: Self = Self(16);
-    /// Read the calling process's effective limit for one resource
-    /// (`AGENTS.md` §24.3).
+    /// Read the calling process's effective limit for one resource.
     ///
     /// Arguments: `kind: u32` (a [`crate::LimitKind`] discriminant) and
     /// `out: *mut ros_resource_limit_t` (a non-null user pointer the kernel
     /// writes the encoded [`crate::ResourceLimit`] into). Returns an error
     /// code (`Ok(0)` on success). Observing one's *own* effective limit is
     /// the unprivileged baseline — it grants no authority and needs no
-    /// capability (`AGENTS.md` §16.6 precedent) — but the kernel validates
-    /// `kind` and the pointer and fails closed (`AGENTS.md` §5.4). An
+    /// capability (precedent) — but the kernel validates
+    /// `kind` and the pointer and fails closed. An
     /// unassigned `kind` fails with [`crate::Errno::OutOfRange`]; a build
     /// with no resource-limit service wired fails closed with
     /// [`crate::Errno::NotImplemented`].
     pub const RLIMIT_GET: Self = Self(17);
-    /// Set the calling process's limit for one resource (`AGENTS.md` §24.3).
+    /// Set the calling process's limit for one resource.
     ///
     /// Arguments: `kind: u32` (a [`crate::LimitKind`] discriminant) and
     /// `in: *const ros_resource_limit_t` (a non-null user pointer to the
     /// encoded [`crate::ResourceLimit`] to install). Returns an error code
     /// (`Ok(0)` on success). A process may freely *lower* a bound, but
     /// *raising* a hard bound — or setting any bound above the inherited
-    /// ceiling — requires [`crate::CapabilityId::RLIMIT_RAISE`] (§24.3) and
+    /// ceiling — requires [`crate::CapabilityId::RLIMIT_RAISE`] and
     /// otherwise fails with [`crate::Errno::PermissionDenied`]. A malformed
     /// pair (`soft > hard`) or an unassigned `kind` fails closed with
     /// [`crate::Errno::OutOfRange`]; a build with no resource-limit service
     /// wired fails closed with [`crate::Errno::NotImplemented`].
     pub const RLIMIT_SET: Self = Self(18);
     /// Read the system user database (`/System/Security/Users`) the kernel
-    /// loaded off the mounted root volume at boot (`AGENTS.md` §5.1,
+    /// loaded off the mounted root volume at boot (
     /// `plans/PI.md` P11).
     ///
     /// Arguments: `buf: *mut u8` (a non-null user pointer) and
@@ -228,18 +224,18 @@ impl SyscallNumber {
     /// parses with the same fail-closed `lib/users` parser the kernel
     /// used. Gated by [`crate::CapabilityId::USERS_READ`]: the text
     /// carries every account's salted password record, so only the
-    /// authentication principal (login) may read it (`AGENTS.md` §4 — no
+    /// authentication principal (login) may read it (no
     /// ambient authority). A buffer smaller than the database fails
     /// closed with [`crate::Errno::BufferTooSmall`] — the kernel never
-    /// truncates a credential database (`AGENTS.md` §2.9); sizing the
+    /// truncates a credential database; sizing the
     /// buffer at the format's own 64 KiB maximum always suffices. A build
     /// holding no database — no root volume mounted, or the record was
     /// refused at boot — fails closed with [`crate::Errno::NotFound`], so
     /// a system without accounts refuses every login rather than
-    /// inventing one (`AGENTS.md` §5.4.5).
+    /// inventing one.
     pub const USERS_DB_READ: Self = Self(19);
     /// Report how many system text consoles are installed
-    /// (`AGENTS.md` §20, `plans/PI.md` P11).
+    /// (`plans/PI.md` P11).
     ///
     /// No arguments. Returns the number of console stream backings the
     /// boot path installed — each one an independent text console (the
@@ -249,11 +245,10 @@ impl SyscallNumber {
     /// discovered console (`plans/PI.md` P11 — the video console and
     /// the UART are separate session contexts). Gated by
     /// [`crate::CapabilityId::CONSOLE_WRITE`]: console topology belongs
-    /// to the principals that drive consoles, not to every task
-    /// (`AGENTS.md` §5.4).
+    /// to the principals that drive consoles, not to every task.
     pub const CONSOLE_COUNT: Self = Self(20);
     /// Set whether one of the calling process's inherited input streams
-    /// echoes the bytes it reads back to its console (`AGENTS.md` §20,
+    /// echoes the bytes it reads back to its console (
     /// `plans/PI.md` P11 — terminal local echo).
     ///
     /// Arguments: `fd: u32` (the input descriptor — normally
@@ -267,7 +262,7 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::CONSOLE_WRITE`] for it; the call is the
     /// program's contract for suppressing echo — login disables it around
     /// a password read so the secret is never rendered, then restores it
-    /// (`AGENTS.md` §5.4 — fail closed; never echo a credential). Console
+    /// (fail closed; never echo a credential). Console
     /// echo defaults to **on**. Gated by
     /// [`crate::CapabilityId::CONSOLE_READ`]: terminal echo belongs to the
     /// principal that reads the console, never to every task. An `fd` that
@@ -276,7 +271,7 @@ impl SyscallNumber {
     /// closed with [`crate::Errno::NotImplemented`].
     pub const STREAM_ECHO: Self = Self(21);
     /// Inject one decoded keyboard *key edge* into the kernel input-focus
-    /// arbiter (`AGENTS.md` §20, `plans/PI.md` P11 — input follows the
+    /// arbiter (`plans/PI.md` P11 — input follows the
     /// surface owner).
     ///
     /// Arguments: `buf: *const u8` (one [`crate::input::KeyInput`] record)
@@ -294,14 +289,13 @@ impl SyscallNumber {
     /// desktop (window manager) foreground it routes the whole record to
     /// the kernel keyboard channel (drained by
     /// [`SyscallNumber::KEYBOARD_READ`]). The driver no longer chooses the
-    /// encoding or the destination — that policy left the device
-    /// (`AGENTS.md` §17.4). Gated by
+    /// encoding or the destination — that policy left the device. Gated by
     /// [`crate::CapabilityId::INPUT_INJECT`]: feeding the system's keyboard
-    /// stream is privileged, never ambient (`AGENTS.md` §4). A malformed
-    /// record is refused fail-closed (`AGENTS.md` §5.4 / §2.9).
+    /// stream is privileged, never ambient. A malformed
+    /// record is refused fail-closed.
     pub const KEY_INJECT: Self = Self(22);
     /// Acquire ownership of the display and claim keyboard input focus
-    /// (`AGENTS.md` §10, §17.3; `plans/PI.md` P11 — input follows the
+    /// (`plans/PI.md` P11 — input follows the
     /// surface owner).
     ///
     /// No arguments. Returns an error code (`Ok(0)` on success). The
@@ -312,12 +306,12 @@ impl SyscallNumber {
     /// [`crate::input::KeyInput`] records the manager drains with
     /// [`SyscallNumber::KEYBOARD_READ`] — the same keyboard stream now
     /// following the new surface owner automatically (the desktop analogue
-    /// of "input follows the foreground tty", `AGENTS.md` §20). Gated by
+    /// of "input follows the foreground tty"). Gated by
     /// [`crate::CapabilityId::DISPLAY`]: owning the display is privileged,
-    /// never ambient (`AGENTS.md` §4).
+    /// never ambient.
     pub const DISPLAY_ACQUIRE: Self = Self(23);
     /// Release the display and return keyboard input focus to the text
-    /// console (`AGENTS.md` §10, §17.3; `plans/PI.md` P11).
+    /// console (`plans/PI.md` P11).
     ///
     /// No arguments. Returns an error code (`Ok(0)` on success). The
     /// inverse of [`SyscallNumber::DISPLAY_ACQUIRE`]: the window manager
@@ -327,7 +321,7 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::DISPLAY`].
     pub const DISPLAY_RELEASE: Self = Self(24);
     /// Read one decoded keyboard event from the kernel keyboard channel
-    /// (`AGENTS.md` §10; `plans/PI.md` P11 — keyboard input for the
+    /// (`plans/PI.md` P11 — keyboard input for the
     /// desktop).
     ///
     /// Arguments: `buf: *mut u8` (a buffer of at least
@@ -335,16 +329,15 @@ impl SyscallNumber {
     /// length). Returns the number of bytes written — one
     /// [`crate::input::KeyInput`] record — or `0` when the channel is
     /// momentarily drained; a buffer too small to hold a record fails
-    /// closed with [`crate::Errno::BufferTooSmall`] (`AGENTS.md` §2.9). The
+    /// closed with [`crate::Errno::BufferTooSmall`]. The
     /// principal that owns the display (the window manager / desktop
     /// session) drains the records the arbiter routed to it while it held
     /// focus. Gated by [`crate::CapabilityId::INPUT_READ`]: a keyboard
     /// stream is delivered only to whoever currently owns the surface, and
-    /// an unattached channel denies rather than leaking to a device
-    /// (`AGENTS.md` §4, §5.4, §20).
+    /// an unattached channel denies rather than leaking to a device.
     pub const KEYBOARD_READ: Self = Self(25);
     /// Map a granted device MMIO register window into the calling
-    /// driver's own address space (`AGENTS.md` §4 / §18.3; `plans/PI.md`
+    /// driver's own address space (`plans/PI.md`
     /// P10 chunk 5d-0 — the `DriverHost` MMIO/DMA surface reachable over
     /// IPC).
     ///
@@ -355,7 +348,7 @@ impl SyscallNumber {
     /// sub-region to map *within* that granted window; and `len: usize` —
     /// its length in bytes. The kernel resolves the handle **against the
     /// calling task** (handle forgery is rejected exactly as
-    /// [`SyscallNumber::IRQ_WAIT`] re-checks its binding, `AGENTS.md` §5.4),
+    /// [`SyscallNumber::IRQ_WAIT`] re-checks its binding),
     /// confirms the grant names a memory window
     /// ([`crate::hwtree::HwResourceKind::Mmio`] / `BusWindow`), confirms
     /// `[offset, offset + len)` lies wholly inside that granted window, and
@@ -363,17 +356,16 @@ impl SyscallNumber {
     /// own hardware-isolated address space, returning its base user virtual
     /// address. A driver can therefore never synthesise a pointer to
     /// arbitrary physical memory: it maps a region inside one the kernel
-    /// chose to grant it, and nothing more (§4 — no ambient authority).
+    /// chose to grant it, and nothing more (no ambient authority).
     /// Mapping a sub-region (not the whole grant) is what lets a driver
     /// granted a large outbound bus aperture map just the single BAR it
-    /// enumerated rather than the entire window (`AGENTS.md` §24.1). Gated by
+    /// enumerated rather than the entire window. Gated by
     /// [`crate::CapabilityId::MMIO_MAP`]; an unknown or non-owned handle, a
     /// grant of the wrong kind, a sub-region that overflows or escapes the
-    /// granted window, or a build with no map facility wired fails closed
-    /// (`AGENTS.md` §2.9).
+    /// granted window, or a build with no map facility wired fails closed.
     pub const MMIO_MAP: Self = Self(26);
     /// Allocate a DMA-coherent buffer for the calling driver, bounded by a
-    /// granted device DMA constraint (`AGENTS.md` §4 / §18.3; `plans/PI.md`
+    /// granted device DMA constraint (`plans/PI.md`
     /// P10 chunk 5d-0 — the `DriverHost` MMIO/DMA surface reachable over
     /// IPC).
     ///
@@ -384,10 +376,10 @@ impl SyscallNumber {
     /// `device_out: *mut u64` — a user pointer the kernel writes the
     /// buffer's **device-visible** base address to on success. The kernel
     /// resolves the handle **against the calling task** (rejecting forgery
-    /// exactly as [`SyscallNumber::MMIO_MAP`] does, `AGENTS.md` §5.4),
+    /// exactly as [`SyscallNumber::MMIO_MAP`] does),
     /// confirms it names a DMA constraint, carves a physically contiguous,
     /// zeroed, coherent (caching-disabled) region whose physical extent lies
-    /// within the grant's addressing limit (`AGENTS.md` §4 — a device never
+    /// within the grant's addressing limit (a device never
     /// reaches memory the kernel did not grant it), maps it `RW`,
     /// non-executable, guard-bracketed into the caller's own address space,
     /// writes the device-visible base to `device_out`, and returns the base
@@ -397,12 +389,12 @@ impl SyscallNumber {
     /// (`dma_translated`) maps it onto the far-side bus address. Gated by
     /// [`crate::CapabilityId::MEM_DMA`]; an unknown or non-owned handle, a
     /// grant of the wrong kind, a region exceeding the grant's limit, or a
-    /// build with no DMA facility wired fails closed (`AGENTS.md` §2.9).
+    /// build with no DMA facility wired fails closed.
     pub const DMA_ALLOC: Self = Self(27);
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering the unforgeable handles the driver
     /// passes to [`SyscallNumber::MMIO_MAP`] / [`SyscallNumber::DMA_ALLOC`]
-    /// (`AGENTS.md` §4 / §18.3 / §20; `plans/PI.md` P10 chunk 5d-2 — handing
+    /// (`plans/PI.md` P10 chunk 5d-2 — handing
     /// a spawned driver process the handles for its matched node).
     ///
     /// Arguments: `buf: *mut u8` — a buffer the kernel fills with the
@@ -411,23 +403,22 @@ impl SyscallNumber {
     /// [`crate::hwtree::GrantedResource::WIRE_LEN`] bytes) — and `len: usize`
     /// — its capacity in bytes. The kernel reads the grant set of the
     /// **calling task** (the kernel-trusted caller id, never a caller-supplied
-    /// value, `AGENTS.md` §5.4), copies every record out through the
+    /// value), copies every record out through the
     /// validated boundary, and returns the total number of bytes written. A
     /// task with no grants returns `0`. A buffer too small to hold the whole
     /// set fails closed with [`Errno::BufferTooSmall`] rather than delivering
-    /// a partial grant list (`AGENTS.md` §2.9); the driver sizes its buffer
+    /// a partial grant list; the driver sizes its buffer
     /// for the matched node's resource count, bounded by
     /// [`crate::hwtree::HwNode`]'s fixed resource maximum.
     ///
     /// Needs **no capability**: a task reads only its *own* minted grants,
-    /// which confers no authority over anything else (the §16.6 / §24.3
+    /// which confers no authority over anything else (the
     /// own-process-observer baseline). The handles are useless without the
     /// `CAP_MMIO_MAP` / `CAP_MEM_DMA` the matched driver also holds, and the
     /// kernel re-checks ownership when they are presented.
     pub const RESOURCE_GRANTS: Self = Self(28);
-    /// Copy the discovered hardware tree (`AGENTS.md` §18.1) out to the
-    /// calling task (the read-only System Information API hardware view,
-    /// §16.6 / §18.4).
+    /// Copy the discovered hardware tree out to the
+    /// calling task (the read-only System Information API hardware view).
     ///
     /// Arguments: `buf: *mut u8` (a non-null user pointer) and
     /// `len: usize` (the buffer's capacity). Returns the number of bytes
@@ -439,19 +430,17 @@ impl SyscallNumber {
     /// [`SyscallNumber::HW_TREE_WAIT`]) and the node count.
     ///
     /// Gated by [`crate::CapabilityId::SYSINFO_HW`]: the hardware inventory
-    /// is a privileged global view (`AGENTS.md` §16.6 / §18.4), never an
+    /// is a privileged global view, never an
     /// ambient read. A buffer too small for the whole snapshot fails closed
     /// with [`crate::Errno::BufferTooSmall`] — the inventory is never
-    /// truncated (`AGENTS.md` §2.9); the caller grows its buffer and retries
-    /// (the node count is a discovered capacity, not a fixed ceiling —
-    /// `AGENTS.md` §24.1). A build with no hardware-tree source wired fails
+    /// truncated; the caller grows its buffer and retries
+    /// (the node count is a discovered capacity, not a fixed ceiling ). A build with no hardware-tree source wired fails
     /// closed with
     /// [`crate::Errno::NotImplemented`]. There is no `/proc`/`/sys` device
-    /// tree and no path that bypasses this capability check
-    /// (`AGENTS.md` §16.1 / §18.4).
+    /// tree and no path that bypasses this capability check.
     pub const HW_TREE_READ: Self = Self(29);
     /// Block the calling task until the hardware tree changes past a
-    /// previously observed generation (`AGENTS.md` §18.4 — reactive
+    /// previously observed generation (reactive
     /// re-match and hotplug).
     ///
     /// Arguments: `last_generation: u64` (the generation the caller last
@@ -464,7 +453,7 @@ impl SyscallNumber {
     /// blocks the caller cooperatively (re-checking the generation between
     /// scheduler dispatches, the same shape as
     /// [`SyscallNumber::IRQ_WAIT`] / [`SyscallNumber::WAIT`]), never
-    /// busy-spinning (`AGENTS.md` §2.1).
+    /// busy-spinning.
     ///
     /// Gated by [`crate::CapabilityId::SYSINFO_HW`] — the same privilege as
     /// reading the tree. A build with no hardware-tree source wired fails
@@ -472,7 +461,7 @@ impl SyscallNumber {
     pub const HW_TREE_WAIT: Self = Self(30);
     /// Make a **synchronous** capability-checked call to a kernel-owned IPC
     /// call endpoint: post a request, block until exactly one matching reply
-    /// arrives, and copy it out (`AGENTS.md` §5.2 / §5.4; Design D D2b —
+    /// arrives, and copy it out (Design D D2b —
     /// `.junie/next-pi-prompt.md`).
     ///
     /// Unlike [`SyscallNumber::IPC_SEND`] (fire-and-forget over a
@@ -492,13 +481,12 @@ impl SyscallNumber {
     /// `-errno`.
     ///
     /// The kernel enforces the endpoint's required send capability against
-    /// the **caller's** effective set before posting (`AGENTS.md` §5.2 /
-    /// §5.4 — no ambient authority), validates both buffers against the
+    /// the **caller's** effective set before posting (no ambient authority), validates both buffers against the
     /// caller's address space, and blocks the caller cooperatively until the
     /// reply arrives (the same park shape as [`SyscallNumber::HW_TREE_WAIT`]
-    /// / [`SyscallNumber::WAIT`]), never busy-spinning (`AGENTS.md` §2.1). A
+    /// / [`SyscallNumber::WAIT`]), never busy-spinning. A
     /// reply larger than `reply_cap` fails closed with
-    /// [`crate::Errno::BufferTooSmall`] (`AGENTS.md` §2.9); an unknown
+    /// [`crate::Errno::BufferTooSmall`]; an unknown
     /// endpoint, a missing capability, or the endpoint being destroyed
     /// mid-call each fail closed. A build with no call-endpoint registry
     /// wired fails closed with [`crate::Errno::NotImplemented`].
@@ -515,26 +503,24 @@ impl SyscallNumber {
     /// `call_reply` — lets an ordinary user-space process be the *callee*, so
     /// a driver service (the autoloaded `vcmailbox` mailbox service, future
     /// `appmgr`/shell services) can serve the one synchronous primitive
-    /// rather than a hand-rolled convention over two async ports
-    /// (`AGENTS.md` §2.2).
+    /// rather than a hand-rolled convention over two async ports.
     ///
     /// Arguments: `endpoint: u64` — the call-endpoint id to bind (a
     /// well-known reserved id the service publishes); `send_caps: *const u8`
     /// and `recv_caps: *const u8` — two `CapabilitySet` wire images
     /// (`CapabilitySet::WIRE_LEN` bytes each) naming the capability a
-    /// *caller* must hold to post (`AGENTS.md` §5.2) and the capability a
+    /// *caller* must hold to post and the capability a
     /// *server* must hold to [`SyscallNumber::CALL_RECV`]/
     /// [`SyscallNumber::CALL_REPLY`]; `max_request`, `max_reply`, `capacity:
     /// usize` — the endpoint payload and outstanding-call bounds (a
-    /// fail-closed memory bound, `AGENTS.md` §24.4). Returns `0`, or `-errno`.
+    /// fail-closed memory bound). Returns `0`, or `-errno`.
     ///
     /// Binding a **restricted-sender** endpoint (non-empty `send_caps`)
-    /// requires [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] (`AGENTS.md`
-    /// §5.2), enforced before any state is touched; an id already bound fails
+    /// requires [`crate::CapabilityId::IPC_BIND_PRIVILEGED`], enforced before any state is touched; an id already bound fails
     /// closed with [`crate::Errno::AlreadyExists`] so the kernel never
-    /// re-points a live endpoint (`AGENTS.md` §5.4). The endpoint is owned by
+    /// re-points a live endpoint. The endpoint is owned by
     /// the creating task and torn down (in-flight callers released
-    /// fail-closed) when that task exits (`AGENTS.md` §2.9). A build with no
+    /// fail-closed) when that task exits. A build with no
     /// call-endpoint registry wired fails closed with
     /// [`crate::Errno::NotImplemented`].
     pub const CALL_CREATE: Self = Self(32);
@@ -551,13 +537,12 @@ impl SyscallNumber {
     ///
     /// The kernel enforces the endpoint's required **receive** capability
     /// against the caller's effective set before touching any state
-    /// (`AGENTS.md` §5.2 / §5.4 — no ambient authority), validates both
+    /// (no ambient authority), validates both
     /// pointers against the caller's address space, and blocks the caller
     /// cooperatively until a request is posted (the same park shape as
-    /// [`SyscallNumber::IPC_CALL`]), never busy-spinning (`AGENTS.md` §2.1). A
+    /// [`SyscallNumber::IPC_CALL`]), never busy-spinning. A
     /// request larger than `buf_cap` fails closed with
-    /// [`crate::Errno::BufferTooSmall`] and is left queued (`AGENTS.md`
-    /// §2.9); an unknown endpoint, a missing capability, or the endpoint
+    /// [`crate::Errno::BufferTooSmall`] and is left queued; an unknown endpoint, a missing capability, or the endpoint
     /// being destroyed each fail closed.
     pub const CALL_RECV: Self = Self(33);
 
@@ -570,15 +555,15 @@ impl SyscallNumber {
     /// `reply_len: usize` — the reply payload. Returns `0`, or `-errno`.
     ///
     /// The kernel enforces the endpoint's required **receive** capability
-    /// against the caller before touching state (`AGENTS.md` §5.4), validates
+    /// against the caller before touching state, validates
     /// the buffer, and wakes the caller blocked in [`SyscallNumber::IPC_CALL`]
     /// for that ticket. A reply larger than the endpoint's `max_reply`, an
     /// unknown or already-answered ticket, or an unknown endpoint each fail
-    /// closed (`AGENTS.md` §2.9).
+    /// closed.
     pub const CALL_REPLY: Self = Self(34);
 
     /// Block the calling task until the system user database leaves its
-    /// *pending* (still-being-unlocked) state (`AGENTS.md` §5.1,
+    /// *pending* (still-being-unlocked) state (
     /// `plans/PI.md` P11 — the reactive companion to
     /// [`SyscallNumber::USERS_DB_READ`]).
     ///
@@ -587,7 +572,7 @@ impl SyscallNumber {
     /// unlock kthread mounts the encrypted root, so an early
     /// [`SyscallNumber::USERS_DB_READ`] reports [`crate::Errno::WouldBlock`]
     /// — the live-but-not-ready signal. Rather than re-reading in a yield
-    /// loop (a busy spin, `AGENTS.md` §2.1), `login` calls this once: the
+    /// loop (a busy spin), `login` calls this once: the
     /// kernel parks it off the run queue and wakes it the instant the unlock
     /// reaches a terminal outcome — a database is installed, or the unlock
     /// gives up with none — so the next read returns the database
@@ -599,14 +584,13 @@ impl SyscallNumber {
     ///
     /// Gated by [`crate::CapabilityId::USERS_READ`] — the same privilege as
     /// reading the database; only the authentication principal (login) waits
-    /// on it (`AGENTS.md` §4 — no ambient authority). A build with no
+    /// on it (no ambient authority). A build with no
     /// users-database service wired is never pending, so the wait returns
     /// `Ok(0)` immediately and the subsequent read fails closed with
-    /// [`crate::Errno::NotImplemented`] (`AGENTS.md` §2.9).
+    /// [`crate::Errno::NotImplemented`].
     pub const USERS_DB_WAIT: Self = Self(35);
 
-    /// Emit a structured diagnostic record to the kernel's system log
-    /// (`AGENTS.md` §19.4 / §20).
+    /// Emit a structured diagnostic record to the kernel's system log.
     ///
     /// Arguments: `record: *const u8` — a non-null pointer to an encoded
     /// [`crate::LogRecordRef`] wire image (see [`crate::log`]); `len: usize`
@@ -614,19 +598,19 @@ impl SyscallNumber {
     ///
     /// Gated by [`crate::CapabilityId::LOG_EMIT`]: the kernel verifies the
     /// capability, copies in at most [`crate::LOG_RECORD_MAX`] bytes, and
-    /// fully validates the record before touching state (`AGENTS.md` §5.4).
+    /// fully validates the record before touching state.
     /// It then emits the record through its **diagnostic** log sink (the
     /// serial UART on a debug build, the video console on release),
     /// attributing it to the calling task — the caller cannot forge that
     /// attribution. This never reaches the hash-chained security audit log,
-    /// which stays kernel-only (`AGENTS.md` §19.4). A malformed record fails
-    /// closed with the decoder's [`crate::Errno`] (`AGENTS.md` §2.9); the
+    /// which stays kernel-only. A malformed record fails
+    /// closed with the decoder's [`crate::Errno`]; the
     /// record is best-effort and below the active level threshold is dropped
-    /// in O(1) (`AGENTS.md` §2.16).
+    /// in O(1).
     pub const LOG_EMIT: Self = Self(36);
 
     /// Publish a discovered child device node into the live hardware tree
-    /// (`AGENTS.md` §18.1 / §18.3 — recursive, user-space hardware discovery).
+    /// (recursive, user-space hardware discovery).
     ///
     /// Arguments: `node: *const u8` — a non-null pointer to a wire-encoded
     /// [`crate::HwNode`] (see [`crate::hwtree`]); `len: usize` — its length.
@@ -634,24 +618,23 @@ impl SyscallNumber {
     ///
     /// Gated by [`crate::CapabilityId::HW_EMIT`]: the kernel verifies the
     /// capability, copies in at most [`crate::hwtree::HwNode::WIRE_LEN`]
-    /// bytes, and fully decodes and validates the node before touching state
-    /// (`AGENTS.md` §5.4). A user-space **bus** driver (PCIe, USB) calls this
+    /// bytes, and fully decodes and validates the node before touching state. A user-space **bus** driver (PCIe, USB) calls this
     /// to publish each device it enumerates, so the device manager autoloads
     /// the matching driver in turn — discovery is data-driven, never a
-    /// compiled-in list (`AGENTS.md` §18). The node is admitted **only** when
+    /// compiled-in list. The node is admitted **only** when
     /// every [`crate::hwtree::HwResource`] it requests is wholly contained
     /// within a device-resource grant the calling driver already holds, so an
     /// emitted child can never carry more authority than its emitter
-    /// (`AGENTS.md` §4 — no ambient authority; §18.3 — a driver receives only
+    /// (no ambient authority; — a driver receives only
     /// its matched node's resources). Any malformed node, an unknown parent,
-    /// or an out-of-grant resource fails closed (`AGENTS.md` §2.9 / §5.4); a
+    /// or an out-of-grant resource fails closed; a
     /// successful publish bumps the hardware-tree generation, waking the
     /// device manager's reactive autoload (the same change channel
     /// [`SyscallNumber::HW_TREE_WAIT`] observes).
     pub const HW_EMIT_NODE: Self = Self(37);
 
     /// Remove a previously-published child device node — and its whole
-    /// subtree — from the live hardware tree (`AGENTS.md` §18.4 — hotplug
+    /// subtree — from the live hardware tree (hotplug
     /// removal: a removed node unloads its driver).
     ///
     /// Argument: `node_id: u64` — the [`crate::HwNode::id`] of the node to
@@ -662,17 +645,16 @@ impl SyscallNumber {
     /// driver that enumerated a device and published it now reports that the
     /// device has gone (a USB port-down, a PCIe hot-remove). The kernel owns
     /// the topology, so removal is bounded exactly like publication
-    /// (`AGENTS.md` §4 — no ambient authority): the caller may remove **only**
+    /// (no ambient authority): the caller may remove **only**
     /// a node whose parent is the caller's *own* matched node — a child it
     /// itself published — never an arbitrary node it does not own. The whole
     /// subtree rooted at that node is removed (a bus child may itself have
     /// published grandchildren), so a stale descendant can never outlive its
     /// parent. An unknown id, or a node the caller does not own, fails closed
-    /// with [`crate::Errno::NotFound`] / [`crate::Errno::PermissionDenied`]
-    /// (`AGENTS.md` §2.9 / §5.4). A successful removal bumps the hardware-tree
+    /// with [`crate::Errno::NotFound`] / [`crate::Errno::PermissionDenied`]. A successful removal bumps the hardware-tree
     /// generation, waking the device manager's reactive watch (the same
     /// change channel [`SyscallNumber::HW_TREE_WAIT`] observes) so it unloads
-    /// the driver bound to the vanished node (`AGENTS.md` §18.4) — the
+    /// the driver bound to the vanished node — the
     /// symmetric counterpart of [`SyscallNumber::HW_EMIT_NODE`], which adds a
     /// node and leaves the *load* to the device manager.
     pub const HW_REMOVE_NODE: Self = Self(38);
@@ -702,7 +684,7 @@ impl SyscallNumber {
 /// Passing this rather than a specific PID waits for whichever of the
 /// caller's children exits next (the POSIX `waitpid(-1, …)` convention).
 /// A named constant keeps the sentinel from appearing as a bare `-1` at
-/// every call site (`AGENTS.md` §2.11).
+/// every call site.
 pub const WAIT_ANY: i32 = -1;
 
 /// Opaque, kernel-issued handle to a bound hardware interrupt line.
@@ -710,7 +692,7 @@ pub const WAIT_ANY: i32 = -1;
 /// Returned by the `irq_bind` syscall and consumed by `irq_wait`. The
 /// inner `u64` is unforgeable in the sense that the kernel rejects any
 /// `irq_wait` whose `handle` was not previously minted for the calling
-/// task (`AGENTS.md` §5.2 — capabilities are unforgeable tokens; §5.4 —
+/// task (capabilities are unforgeable tokens; —
 /// no trusted-caller shortcuts). The wire representation is the raw
 /// `u64`; the wrapper exists so call sites cannot confuse it with
 /// arbitrary integer arguments.

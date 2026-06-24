@@ -2,10 +2,10 @@
 //!
 //! Several `cargo xtask` stages run a set of independent, isolated jobs and
 //! want them to overlap instead of paying the *sum* of their wall-clock costs.
-//! Three callers share this one runner (`AGENTS.md` §2.2 — "run more than one
+//! Three callers share this one runner ("run more than one
 //! at a time" lives in exactly one place):
 //!
-//! * the fuzz (§19.6) and proptest (§19.7) orchestrators, each a registry of
+//! * the fuzz and proptest orchestrators, each a registry of
 //!   wall-clock-budgeted `cargo test` harnesses ([`Work::Command`]);
 //! * the QEMU integration matrix ([`Work::Closure`]), which plants per-test
 //!   backing images and drives [`rustos_qemu::Runner::run`] in-process.
@@ -24,7 +24,7 @@
 //! cores. That is what makes co-scheduling guests safe under TCG: a guest is
 //! never starved of a host core, so its wall-clock deadline
 //! ([`rustos_qemu::Runner::run`]) stays as reachable as it is for a solo run,
-//! and §7's no-flaky-tests / no-retry rules hold. (A single job heavier than
+//! and's no-flaky-tests / no-retry rules hold. (A single job heavier than
 //! the whole budget — a guest with more vCPUs than the host has cores — still
 //! runs, alone, when nothing else is in flight, rather than deadlocking.)
 //!

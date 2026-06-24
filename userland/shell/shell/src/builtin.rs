@@ -7,7 +7,7 @@
 //! `fg`, `bg`), or the request to leave the shell (`exit`).
 //!
 //! Each builtin returns an exit status; the caller stores it as `$?`. The
-//! recognised set is intentionally minimal (`AGENTS.md` §2.3 — no bloat):
+//! recognised set is intentionally minimal (no bloat):
 //! `cd`, `pwd`, `exit`, `export`, `unset`, `echo`, `jobs`, `fg`, `bg`, and
 //! `help`. A name outside this set is not a builtin and is launched as an
 //! external program instead.

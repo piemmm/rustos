@@ -84,7 +84,7 @@ mod kernel {
 
     /// Global allocator backed by [`HEAP`]. The pointer to `HEAP`
     /// outlives the binary, and the allocator is the only consumer
-    /// (`AGENTS.md` §4 — deterministic OOM via `FreeListAllocator`).
+    /// (deterministic OOM via `FreeListAllocator`).
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
@@ -116,7 +116,7 @@ mod kernel {
     /// Scancode-set-1 break code for the `A` key (make | release bit).
     const SCANCODE_A_BREAK: u8 = 0x9E;
     /// Iteration ceiling for every controller busy-wait, so a wedged
-    /// controller can never make the test spin (`AGENTS.md` §2.1); the
+    /// controller can never make the test spin; the
     /// QEMU wall-clock budget is the backstop if a bound is ever hit.
     const SPIN_BUDGET: u32 = 1_000_000;
     /// Controller command: copy the next data-port byte into the
@@ -148,8 +148,7 @@ mod kernel {
     /// the synthetic 1 GHz [`rdtsc_ns`] clock. One second is three orders
     /// of magnitude longer than the sub-millisecond IRQ latency, so a
     /// healthy run never observes `WaitStep::TimedOut`; the deadline only
-    /// exists so a wedged line fails loud instead of hanging
-    /// (`AGENTS.md` §2.1 / §7).
+    /// exists so a wedged line fails loud instead of hanging.
     const WAIT_DEADLINE_NS: u64 = 1_000_000_000;
     /// Master-PIC command/data port pair used to mask the legacy 8259s.
     const PIC_MASTER_DATA: u16 = 0x21;
@@ -343,7 +342,7 @@ mod kernel {
     /// Returns the minted [`IrqHandle`] on success, or `None` on any
     /// environment defect (no published table/controller, GSI 1 not
     /// programmed, bind rejected, or a wedged controller) — the caller
-    /// fails closed (`AGENTS.md` §5.4.5).
+    /// fails closed.
     fn setup_keyboard_irq() -> Option<IrqHandle> {
         let table = published_irq_table()?;
         // The controller must be published, and GSI 1 must carry a vector
@@ -453,7 +452,7 @@ mod kernel {
         };
         let mut host = Host::new(cfg);
 
-        // load: the signed PS/2 `.rxe` clears the §8 load gate through
+        // load: the signed PS/2 `.rxe` clears the load gate through
         // the real `rustos_drv_input_ps2::register`.
         let Ok(h1) = host.load("/d/ps2", &caller) else {
             qemu_exit::exit_failure();

@@ -13,8 +13,7 @@ use rustos_abi::Errno;
 ///
 /// Both fields are borrowed from the parsed [`Command`](crate::Command), so the
 /// record allocates nothing of its own. A `None` `gid` asks the database to
-/// allocate the next free one; `groupadd` never guesses one (`AGENTS.md`
-/// §2.1).
+/// allocate the next free one; `groupadd` never guesses one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GroupSpec<'a> {
     /// The group name. Already validated to match `[a-z_][a-z0-9_-]*` within
@@ -26,12 +25,12 @@ pub struct GroupSpec<'a> {
 }
 
 /// Reads and writes the group database that persists under
-/// `/System/Security/Groups` (`AGENTS.md` §5.1).
+/// `/System/Security/Groups`.
 ///
 /// `groupadd` first asks [`name_in_use`](GroupDb::name_in_use) so it can
 /// report a precise "already exists" before attempting a write, then calls
 /// [`create`](GroupDb::create). The database — not this tool — is the policy
-/// point (`AGENTS.md` §5.4): it enforces `CAP_USER_ADMIN` and gid uniqueness,
+/// point: it enforces `CAP_USER_ADMIN` and gid uniqueness,
 /// and returns the matching [`Errno`] on refusal.
 pub trait GroupDb {
     /// Return whether a group record with name `name` already exists.

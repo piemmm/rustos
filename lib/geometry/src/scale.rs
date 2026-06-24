@@ -11,13 +11,13 @@
 //!
 //! [`Scale`] is the single shared definition of that conversion, so the same
 //! logical→physical arithmetic is never written twice across the window
-//! manager, the taskbar, the cursors, and the apps (`AGENTS.md` §2.2). It
+//! manager, the taskbar, the cursors, and the apps. It
 //! lives in `lib/geometry` because scaling a length is geometry, and the
-//! geometry crate sits at the bottom of the §17.4 layering where every GUI
+//! geometry crate sits at the bottom of the layering where every GUI
 //! consumer can reach it.
 //!
 //! All arithmetic widens through `u64` and saturates, so a pathological scale
-//! or length fails closed rather than wrapping (`AGENTS.md` §2.9), and an
+//! or length fails closed rather than wrapping, and an
 //! out-of-range scale is rejected at construction rather than producing a
 //! degenerate desktop.
 
@@ -72,7 +72,7 @@ impl Scale {
     ///
     /// Rejecting an out-of-range value rather than clamping it keeps a
     /// caller's bad input visible instead of silently substituting a
-    /// different desktop scale (`AGENTS.md` §5.4 / §2.9).
+    /// different desktop scale.
     #[must_use]
     pub const fn from_percent(percent: u32) -> Option<Self> {
         if percent < Self::MIN_PERCENT || percent > Self::MAX_PERCENT {
@@ -110,8 +110,7 @@ impl Scale {
     /// Convert a `logical` pixel length into physical pixels at this scale.
     ///
     /// The product widens through `u64` and saturates at [`u32::MAX`], so an
-    /// extreme length scales to a clamped maximum rather than wrapping
-    /// (`AGENTS.md` §2.9).
+    /// extreme length scales to a clamped maximum rather than wrapping.
     #[must_use]
     pub fn scale_length(self, logical: u32) -> u32 {
         let physical = u64::from(logical) * u64::from(self.percent) / 100;

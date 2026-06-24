@@ -4,7 +4,7 @@
 //! bar. Formatting a `Time64` value into a label (and the locale and
 //! 12/24-hour policy that drives it) is a caller concern: the taskbar stores
 //! only the string to draw, so the bar carries no time ABI of its own
-//! (`AGENTS.md` §21 keeps absolute time in `lib/abi`). An empty label draws
+//! (keeps absolute time in `lib/abi`). An empty label draws
 //! nothing.
 
 use alloc::string::String;

@@ -49,8 +49,7 @@ pub fn build_signed_image(
     build_signed_image_with_bind_keys(signing_key, kind, syscall_table_hash, caps, &[], payload)
 }
 
-/// [`build_signed_image`] with an explicit bind table (`AGENTS.md`
-/// §18.3) between the capability body and the payload.
+/// [`build_signed_image`] with an explicit bind table between the capability body and the payload.
 pub fn build_signed_image_with_bind_keys(
     signing_key: &SigningKey,
     kind: DriverKind,
@@ -87,7 +86,7 @@ pub fn build_signed_image_with_bind_keys(
     }
     // The signed message covers the payload too (`host::verify_signature`):
     // for a user-space driver the payload is the program the gate spawns,
-    // so it must be authenticated (`AGENTS.md` §8 / §2.17).
+    // so it must be authenticated.
     let mut signed_message =
         Vec::with_capacity(header_no_sig.len() + cap_body.len() + bind_table.len() + payload.len());
     signed_message.extend_from_slice(&header_no_sig);

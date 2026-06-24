@@ -1,6 +1,6 @@
 //! Shared `no_std` collections that are not in `core` or `alloc`.
 //!
-//! Per `AGENTS.md` §2.3 this crate is gated on the "used by at least two
+//! Per this crate is gated on the "used by at least two
 //! places" rule: every type here must justify its existence by serving a
 //! concrete caller outside this crate. Adding speculative collections is
 //! forbidden.

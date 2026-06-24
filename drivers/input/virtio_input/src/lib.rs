@@ -1,13 +1,13 @@
-//! RustOS virtio-input driver (keyboard / pointer) — the §8 entry.
+//! RustOS virtio-input driver (keyboard / pointer) — the entry.
 //!
-//! This crate is the thin driver shell: per `AGENTS.md` §8 the only
-//! public *function* is [`register`], and [`BIND_KEYS`] is the §18.3
+//! This crate is the thin driver shell: the only
+//! public *function* is [`register`], and [`BIND_KEYS`] is the
 //! bind table `devmgr` (or the in-kernel bootstrap-floor catalogue)
 //! resolves a discovered virtio-input node against. The arch-neutral,
 //! transport-agnostic open/poll/decode device logic lives in
 //! `lib/virtio_input` (`rustos_virtio_input`) so both this driver and
 //! the user-space input-driver process compose it without a
-//! `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2 — the
+//! `drivers/*`→`drivers/*` dependency (the
 //! virtio analogue of `lib/hid` ↔ `drivers/input/usb_hid`).
 //!
 //! # Capabilities
@@ -24,31 +24,31 @@ use rustos_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x564E_5054_0000_0001; // "VNPT" (Virtio iNPuT)
 
-/// The §18.3 bind priority [`BIND_KEYS`] carries.
+/// The bind priority [`BIND_KEYS`] carries.
 ///
 /// A virtio device-id match is *exact* (the discovered node's probed
 /// device id either is `virtio-input` or it is not — there is no
 /// wildcard, see [`HwMatchKey::matches`]), so it ranks at the
 /// exact-match tier alongside the other concrete-identity drivers
-/// (`AGENTS.md` §18.3 — higher matched priority binds; an unbroken tie
+/// (higher matched priority binds; an unbroken tie
 /// is a packaging defect).
 const BIND_PRIORITY: u16 = 10;
 
-/// This driver's hardware bind table (`AGENTS.md` §18.3): a virtio input
+/// This driver's hardware bind table: a virtio input
 /// device, matched by its virtio device id ([`VIRTIO_INPUT_DEVICE_ID`]).
 ///
 /// The single source of truth the signed-manifest bind table is authored
 /// from and `devmgr` (or the in-kernel bootstrap-floor catalogue)
-/// resolves a discovered node against (`AGENTS.md` §2.2 / §18.3). The
+/// resolves a discovered node against. The
 /// match key carries no transport (PCI vs MMIO) detail: the same driver
 /// binds a virtio-input device however it is attached, because the
-/// bus-agnostic transport abstracts the bus (`AGENTS.md` §2.2 / §17.4).
+/// bus-agnostic transport abstracts the bus.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID),
 )];
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///

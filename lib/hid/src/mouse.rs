@@ -25,8 +25,7 @@ pub const BOOT_MOUSE_REPORT_MIN: usize = 3;
 
 /// `Key` code of mouse button `n` (`0x110` left, `0x111` right,
 /// `0x112` middle) — the codes a virtio pointer device delivers for the
-/// same buttons, so the WM sees one button vocabulary (`AGENTS.md`
-/// §2.2).
+/// same buttons, so the WM sees one button vocabulary.
 pub const BUTTON_CODE_BASE: u16 = 0x110;
 
 /// Buttons the boot protocol defines (bits 0..3 of byte 0). Bits 3..8
@@ -147,7 +146,7 @@ impl<S: ReportSource> Input for BootMouse<S> {
     /// deltas surface directly. Events that do not fit are latched for
     /// the next `poll`, and the per-call report budget
     /// ([`crate::REPORT_POLL_BUDGET`]) bounds the work a flooding
-    /// device can force on one `poll` (`AGENTS.md` §2.1).
+    /// device can force on one `poll`.
     fn poll(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
         poll_source(&mut self.source, &mut self.state, &mut self.pending, events)
     }

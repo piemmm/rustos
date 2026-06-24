@@ -1,13 +1,12 @@
-//! `AGENTS.md` §16 on-disk-layout enforcement: the four permitted
+//! on-disk-layout enforcement: the four permitted
 //! top-level directories, the refusal of reserved legacy POSIX names, the
 //! read-only `/System` subtree with its writable `/System/Logs` and
-//! `/System/Settings` exceptions, and the §16.2 read-only-mount refusal on
+//! `/System/Settings` exceptions, and the read-only-mount refusal on
 //! a driver-backed volume.
 
 use rustos_test_posix_fs_suite::*;
 
-/// The reserved legacy POSIX top-level names the installer and VFS refuse
-/// (`AGENTS.md` §16.1). A representative subset is enough to assert the
+/// The reserved legacy POSIX top-level names the installer and VFS refuse. A representative subset is enough to assert the
 /// rule; the exhaustive list is unit-tested in `kernel/core`.
 const RESERVED: &[&str] = &[
     "etc", "home", "usr", "var", "proc", "sys", "bin", "sbin", "dev", "tmp", "root", "boot",
@@ -82,7 +81,7 @@ fn system_logs_and_settings_are_writable() {
 
 #[test]
 fn write_to_a_read_only_mount_is_refused() {
-    // A volume mounted read-only (§16.2) refuses delegated mutation
+    // A volume mounted read-only refuses delegated mutation
     // before the driver is ever touched.
     let (vfs, mut fs) = rustfs_backed_vfs(true);
     let caps = CapabilitySet::empty();

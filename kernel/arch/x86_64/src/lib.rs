@@ -25,7 +25,7 @@
 //! stub calls into `rustos_arch_x86_64_main` (this crate's `extern "C"`
 //! entry), which validates the multiboot magic, brings the platform up
 //! to a sane minimum, then transfers to `kernel_main`. If `kernel_main`
-//! ever returns the arch port halts the CPU per `AGENTS.md` §2.9.
+//! ever returns the arch port halts the CPU.
 //!
 //! # Why no Rust crate dependencies on `kernel/core` here?
 //!
@@ -76,13 +76,12 @@ pub mod apic_timer;
 pub mod bootmemory;
 pub mod context;
 /// x86_64 implementation of the Arch HAL context-switch surface
-/// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the
+/// ([`rustos_arch_api::ContextSwitch`]): the
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 ///
 /// Gated on `sched-arch` — the feature that pulls in the
-/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
-/// §2.3), like the sibling `timer_hal` / `percpu_hal` HAL slices. The
+/// `rustos-arch-api` dependency this module's trait lives in, like the sibling `timer_hal` / `percpu_hal` HAL slices. The
 /// underlying `context` primitive itself carries no such gate.
 #[cfg(feature = "sched-arch")]
 pub mod context_hal;
@@ -90,7 +89,7 @@ pub mod context_hal;
 /// dedicated, error-code-aware page-fault ISR the production IDT installs
 /// on vector 14 and the set-once fault observer the kernel reaches it
 /// through. The x86_64 analogue of the riscv64/aarch64 `fault` modules
-/// (`AGENTS.md` §2.9 — fail closed, §17.2). The error-code decode + the
+/// (fail closed). The error-code decode + the
 /// observer slot build on the host (so their unit tests run under `cargo
 /// test`); the naked ISR stub + `CR2` read are freestanding-only.
 pub mod fault;
@@ -104,7 +103,7 @@ pub mod gdt;
 /// bin `tests/integration/memory_isolation`, which exercises
 /// page-table isolation rather than scheduling. The `rustos-kernel`
 /// bin enables the feature; see the `kernel/arch/x86_64/Cargo.toml`
-/// comment for the rationale (`AGENTS.md` §2.3 — pay for what you use).
+/// comment for the rationale (pay for what you use).
 #[cfg(feature = "sched-arch")]
 pub mod hybrid;
 pub mod interrupts;
@@ -112,7 +111,7 @@ pub mod irq;
 #[cfg(feature = "sched-arch")]
 pub mod kernel_arch;
 /// x86_64 implementation of the Arch HAL memory-tagging surface
-/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10). Mainstream
+/// ([`rustos_arch_api::MemoryTagging`]). Mainstream
 /// x86_64 has no per-granule memory tagging, so the port declares it an
 /// honest `Unsupported` (see the module docs).
 ///
@@ -123,14 +122,13 @@ pub mod memtag;
 pub mod multiboot2;
 pub mod percpu;
 /// x86_64 implementation of the Arch HAL per-CPU storage surface
-/// ([`rustos_arch_api::PerCpu`], `AGENTS.md` §17.2): the GS-base MSR
+/// ([`rustos_arch_api::PerCpu`]): the GS-base MSR
 /// (`IA32_GS_BASE`) read/write the per-CPU anchor is reached through.
 /// Distinct from [`percpu`], which owns the per-CPU GDT/IDT/IST-stack
 /// bring-up the GS base points at.
 ///
 /// Gated on `sched-arch` — the feature that pulls in the
-/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
-/// §2.3).
+/// `rustos-arch-api` dependency this module's trait lives in.
 #[cfg(feature = "sched-arch")]
 pub mod percpu_hal;
 /// x86_64 implementation of the Arch HAL port-I/O seams: the 32-bit
@@ -138,56 +136,52 @@ pub mod percpu_hal;
 /// consumes for PCI configuration access, and the 8-bit
 /// [`rustos_abi::PortIo8`](rustos_abi::driver::port_io::PortIo8) backend
 /// the `drivers/input/ps2` i8042 driver consumes — both reached only
-/// through `&dyn` (`AGENTS.md` §17.2 / §17.4).
+/// through `&dyn`.
 pub mod pio;
 /// x86_64 implementation of the Arch HAL early-boot platform-discovery
-/// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
-/// §18.2): the ACPI MADT → [`rustos_abi::hwtree`] normalisation built on
+/// surface ([`rustos_arch_api::PlatformDiscovery`]): the ACPI MADT → [`rustos_abi::hwtree`] normalisation built on
 /// the [`acpi`] parser.
 ///
 /// Gated on `sched-arch` — the feature that pulls in the
-/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
-/// §2.3).
+/// `rustos-arch-api` dependency this module's trait lives in.
 #[cfg(feature = "sched-arch")]
 pub mod platform;
 pub mod preempt;
 pub mod qemu_exit;
 pub mod serial;
 /// x86_64 implementation of the Arch HAL side-channel mitigation
-/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
-/// §19.1).
+/// surface ([`rustos_arch_api::SideChannelMitigation`]).
 ///
 /// Gated on `sched-arch` — the feature that pulls in the
 /// `rustos-arch-api` dependency this module's trait lives in — so a
 /// freestanding consumer that does not need the Arch HAL compiles
-/// neither this module nor the dependency (`AGENTS.md` §2.3).
+/// neither this module nor the dependency.
 #[cfg(feature = "sched-arch")]
 pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 /// x86_64 implementation of the Arch HAL timer-programming surface
-/// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-
+/// ([`rustos_arch_api::Timer`]): the architecture-
 /// neutral scheduler-tick callback install + dispatch over the LAPIC
 /// timer wired in [`preempt`].
 ///
 /// Gated on `sched-arch` — the feature that pulls in the
-/// `rustos-arch-api` dependency this module's trait lives in (`AGENTS.md`
-/// §2.3).
+/// `rustos-arch-api` dependency this module's trait lives in.
 #[cfg(feature = "sched-arch")]
 pub mod timer_hal;
 pub mod tlb_shootdown;
 /// x86_64 Time-Stamp Counter suitability validation: the Invariant TSC
 /// CPUID probe the boot path consults before trusting `RDTSC` as a
-/// cross-CPU monotonic clock source (`AGENTS.md` §17.2, §19.1).
+/// cross-CPU monotonic clock source.
 pub mod tsc;
 /// x86_64 implementation of the Arch HAL "enter user mode" surface
-/// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `iretq`
+/// ([`rustos_arch_api::EnterUser`]): the one `iretq`
 /// sequence that drops a built process image into ring 3.
 ///
 /// Gated on `sched-arch` — the feature that pulls in the
 /// `rustos-arch-api` dependency this module's trait lives in — so a
 /// freestanding consumer that does not need the Arch HAL compiles
-/// neither this module nor the dependency (`AGENTS.md` §2.3).
+/// neither this module nor the dependency.
 #[cfg(feature = "sched-arch")]
 pub mod userentry;
 

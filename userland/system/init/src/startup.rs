@@ -9,13 +9,13 @@
 //! later stages (`plans/PI.md` P6e and beyond) grow the boot sequence without
 //! editing `init`'s control flow.
 //!
-//! The config text is **untrusted input** (`AGENTS.md` §19.5/§19.6): it is the
+//! The config text is **untrusted input**: it is the
 //! first thing a freshly spawned program parses, so the parser is
 //! allocation-free, borrows from the caller's text rather than copying, and
 //! **fails closed** ([`ConfigError`]) on anything it does not understand — an
 //! unknown directive, a duplicate, a missing or malformed argument, or a
 //! config that omits a required directive. A surprising or partial startup
-//! configuration never boots a surprising system (`AGENTS.md` §2.9, §5.4.5).
+//! configuration never boots a surprising system.
 //!
 //! # Grammar
 //!
@@ -28,10 +28,10 @@
 //!   somewhere to go. Takes no argument.
 //! * `session <path>` — the absolute path of the program `init` launches as
 //!   the user's session (the shell, today). The argument must be an absolute
-//!   path (`AGENTS.md` §16.5 bundle layout). Required exactly once.
+//!   path (bundle layout). Required exactly once.
 //! * `service <path>` — the absolute path of a long-running system service
 //!   `init` launches once at startup and supervises for the life of the
-//!   system (the device manager, today — `AGENTS.md` §16.2 / §18.3). The
+//!   system (the device manager, today). The
 //!   argument must be an absolute path. Optional and **repeatable**, up to
 //!   [`MAX_SERVICES`]; the directives' order is the launch order.
 
@@ -40,7 +40,7 @@ use core::fmt;
 /// Maximum length, in bytes, of a startup config text [`StartupConfig::parse`]
 /// will consider. A larger input is refused outright ([`ConfigError::TooLong`])
 /// rather than scanned — the config `init` carries is tiny, and an
-/// unboundedly large one is a defect, not a workload (`AGENTS.md` §2.9).
+/// unboundedly large one is a defect, not a workload.
 pub const MAX_CONFIG_LEN: usize = 4096;
 
 /// Maximum number of `service` directives a startup config may declare.
@@ -51,8 +51,7 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 /// [`DEFAULT_CONFIG`] declares one (`devmgr`); the small headroom leaves
 /// room for the session/login-adjacent services later stages add without a
 /// heap. A config that declares more fails closed
-/// ([`ConfigError::TooManyServices`]) rather than overrunning the array
-/// (`AGENTS.md` §2.9 / §24.1).
+/// ([`ConfigError::TooManyServices`]) rather than overrunning the array.
 pub const MAX_SERVICES: usize = 4;
 
 /// The startup configuration compiled into the `init` `Run` binary.
@@ -74,15 +73,14 @@ session /System/Services/login
 
 /// The first line `init` writes to the console once it reaches user mode.
 ///
-/// A fixed, terse banner (`AGENTS.md` §13 — no aimless waffle) that proves the
+/// A fixed, terse banner (no aimless waffle) that proves the
 /// kernel reached EL0 and `init`'s console write path works end to end.
 pub const BANNER: &str = "RustOS init: reached user mode\n";
 
 /// Why a startup config text was refused.
 ///
 /// Every variant is a fail-closed refusal: [`StartupConfig::parse`] returns it
-/// and the caller starts nothing, rather than guess at a malformed intent
-/// (`AGENTS.md` §2.9, §5.4.5).
+/// and the caller starts nothing, rather than guess at a malformed intent.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ConfigError {
     /// The config text is longer than [`MAX_CONFIG_LEN`].
@@ -195,7 +193,7 @@ impl<'a> StartupConfig<'a> {
                         return Err(ConfigError::NotAbsolutePath);
                     }
                     // `service` is repeatable; overflow fails closed rather
-                    // than overrunning the fixed array (`AGENTS.md` §2.9).
+                    // than overrunning the fixed array.
                     if service_count >= MAX_SERVICES {
                         return Err(ConfigError::TooManyServices);
                     }

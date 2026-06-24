@@ -319,8 +319,7 @@ fn el0_dma_coherent_leaf_is_unprivileged_normal_non_cacheable() {
 fn leaf_attrs_for_dma_coherent_user_is_normal_non_cacheable() {
     // A `DMA_COHERENT | USER | WRITE` mapping (the DMA carve) selects the
     // Normal-NC EL0 leaf, never the cacheable `el0_data` leaf — otherwise a
-    // non-I/O-coherent device would never see the driver's descriptors
-    // (`AGENTS.md` §4). `DMA_COHERENT` takes precedence over the generic
+    // non-I/O-coherent device would never see the driver's descriptors. `DMA_COHERENT` takes precedence over the generic
     // user-data leaf.
     assert_eq!(
         AddressSpace::leaf_attrs_for(
@@ -706,7 +705,7 @@ fn prepare_guard_arena_fails_closed() {
     let base: u64 = (1u64 << 30) + 8 * BLOCK_2MIB;
 
     // Zero length, a misaligned base, and an arena over unmapped memory
-    // are each rejected (`AGENTS.md` §2.9).
+    // are each rejected.
     assert_eq!(
         space.prepare_guard_arena(base, 0),
         Err(MapError::Misaligned)

@@ -4,10 +4,10 @@
 //! Three jobs on the freestanding `aarch64-unknown-none` target (mirroring the
 //! `spawn_el0_timeshare_qemu_aarch64` build script — the shared dump/convert
 //! helpers live in `rustos_itest_harness`, so no aarch64 build script re-rolls
-//! them, `AGENTS.md` §2.2):
+//! them):
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
-//!    per-board script the architecture port owns — `AGENTS.md` §2.2) and dump
+//!    per-board script the architecture port owns) and dump
 //!    the canonical QEMU `virt` flattened device tree, embedding it so the test
 //!    discovers the GICv2 base and the generic-timer rate from the firmware
 //!    tree (`plans/PI.md` P3/P4). QEMU's `-kernel <ELF>` aarch64 path passes no
@@ -17,12 +17,12 @@
 //!    aarch64 target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning its busy-loop count
 //!    through the `RUSTOS_EL0_SPINS` environment variable so this script is the
-//!    single source of truth for the count (`AGENTS.md` §2.2).
+//!    single source of truth for the count.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
 //! On any non-aarch64 target (host `cargo build --workspace`, clippy) it emits
@@ -30,7 +30,7 @@
 //! compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -43,7 +43,7 @@ use std::process::Command;
 /// region — so the program's pages land on freshly walked stage-1 tables
 /// instead of colliding with an identity gigapage block. The kernel passes the
 /// same bias to `build_process_image`, and `elf_to_rxe` relocates the image for
-/// it (`AGENTS.md` §2.2 — the proven spawn layout).
+/// it (the proven spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// Busy-loop iterations the spinner program runs before it exits. The single
@@ -75,7 +75,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel itself links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -112,7 +112,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -130,7 +130,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         // host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Pin the program's busy-loop count (the §2.2 single source of truth).
+        // Pin the program's busy-loop count (the single source of truth).
         .env("RUSTOS_EL0_SPINS", SPINS.to_string())
         .env(
             "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",

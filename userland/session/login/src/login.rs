@@ -1,11 +1,10 @@
 //! The [`Login`] state machine: prompt, authenticate, and launch a session.
 //!
 //! This is the one place a credential is collected, checked, audited, and
-//! turned into a running session. The loop **fails closed** (`AGENTS.md`
-//! §5.4.5): it launches a session only when a user authenticates *and* their
+//! turned into a running session. The loop **fails closed**: it launches a session only when a user authenticates *and* their
 //! session starts, and it bounds the number of attempts so a stuck console
 //! can never spin forever. It always starts in text mode and offers the
-//! graphical session only when one is available (`AGENTS.md` §10).
+//! graphical session only when one is available.
 
 use core::fmt::{self, Write as _};
 
@@ -29,7 +28,7 @@ pub struct LoginConfig<'a> {
     pub max_attempts: u32,
     /// Whether a graphical session can be offered. Set only when a display
     /// driver loaded **and** the window manager is present; otherwise the
-    /// graphical option is hidden, never errored (`AGENTS.md` §10).
+    /// graphical option is hidden, never errored.
     pub graphical_available: bool,
     /// Seam that reads from and writes to the controlling terminal.
     pub prompt: &'a dyn Prompt,
@@ -37,11 +36,11 @@ pub struct LoginConfig<'a> {
     pub authenticator: &'a dyn Authenticator,
     /// Seam that launches the chosen session.
     pub launcher: &'a dyn SessionLauncher,
-    /// Structured audit log sink (`AGENTS.md` §19.4).
+    /// Structured audit log sink.
     pub sink: &'a dyn Sink,
 }
 
-/// The text-login state machine (Stage 6 — `AGENTS.md` §10).
+/// The text-login state machine (Stage 6).
 pub struct Login<'a> {
     cfg: LoginConfig<'a>,
 }
@@ -73,7 +72,7 @@ impl<'a> Login<'a> {
             // prompt → authenticate path must work without an allocator
             // (the `mem_map`-backed userland heap is not required to read
             // a keystroke). The password buffer is zeroed after every
-            // attempt, success or failure (`AGENTS.md` §4 — nothing that
+            // attempt, success or failure (nothing that
             // held a credential survives the attempt).
             let mut username_buf = [0u8; INPUT_LINE_MAX];
             let mut password_buf = [0u8; INPUT_LINE_MAX];
@@ -113,8 +112,7 @@ impl<'a> Login<'a> {
     }
 
     /// Run one terminal read into `buf`, auditing and surfacing a console
-    /// failure, and validating the filled bytes as UTF-8 (`AGENTS.md`
-    /// §5.4 — every input validated, in one place). A read whose claimed
+    /// failure, and validating the filled bytes as UTF-8 (every input validated, in one place). A read whose claimed
     /// length exceeds `buf` is refused the same way (fail closed).
     fn read<'b>(
         &self,
@@ -156,7 +154,7 @@ impl<'a> Login<'a> {
     /// Decide which session to launch.
     ///
     /// Text is the default and the only option when no graphical session is
-    /// available (`AGENTS.md` §10); otherwise the user is offered the choice.
+    /// available; otherwise the user is offered the choice.
     fn choose_session(&self) -> Result<SessionKind, LoginError> {
         if !self.cfg.graphical_available {
             return Ok(SessionKind::Text);
@@ -654,7 +652,7 @@ mod tests {
     fn invalid_utf8_input_fails_closed_as_a_console_error() {
         // A line of non-UTF-8 bytes (terminal line noise) must fail closed
         // as a console error — it is never handed to the authenticator
-        // (`AGENTS.md` §5.4 — every input validated).
+        // (every input validated).
         let prompt =
             MockPrompt::with_results(alloc::vec![Ok(alloc::vec![0xFF, 0xFE, 0xFD])], Vec::new());
         let auth = auth();
@@ -678,7 +676,7 @@ mod tests {
     fn over_long_input_line_fails_closed() {
         // The prompt refuses a line longer than the caller's buffer
         // (`INPUT_LINE_MAX`) with `LengthOutOfRange`; login surfaces it as
-        // a console failure rather than truncating (`AGENTS.md` §2.9).
+        // a console failure rather than truncating.
         let long = alloc::vec![b'a'; crate::session::INPUT_LINE_MAX + 1];
         let prompt = MockPrompt::with_results(alloc::vec![Ok(long)], Vec::new());
         let auth = auth();

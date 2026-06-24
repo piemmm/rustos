@@ -1,18 +1,16 @@
 //! Build-time fixture generator for the P-5 aarch64 in-kernel
-//! interrupt-delivery / non-preemption vertical (`plans/PI.md` /
-//! `AGENTS.md` §17.1).
+//! interrupt-delivery / non-preemption vertical (`plans/PI.md` /).
 //!
 //! Two jobs on the freestanding `aarch64-unknown-none` target (mirroring the
 //! `irq_kthread_qemu_aarch64` build script — the shared dump helper lives in
-//! `rustos_itest_harness`, so no aarch64 build script re-rolls it, `AGENTS.md`
-//! §2.2):
+//! `rustos_itest_harness`, so no aarch64 build script re-rolls it):
 //!
 //! 1. Hand the test kernel the aarch64 `virt` linker script the architecture
-//!    port owns (the single per-board script — `AGENTS.md` §2.2).
+//!    port owns (the single per-board script).
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it, so the
 //!    test discovers the GICv2 bases and the generic-timer rate from the
 //!    firmware tree (`plans/PI.md` P3/P4) rather than hard-coding a board
-//!    constant (`AGENTS.md` §2.20 / §18.2). QEMU's `-kernel <ELF>` aarch64 path
+//!    constant. QEMU's `-kernel <ELF>` aarch64 path
 //!    passes no DTB pointer (`x0 = 0`), so the board tree is embedded at build
 //!    time.
 //!
@@ -21,7 +19,7 @@
 //! it compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -44,7 +42,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");

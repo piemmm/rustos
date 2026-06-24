@@ -11,12 +11,11 @@
 //! their full yield count and exited, proving a real EL0→EL0 context switch
 //! under the live scheduler (the `SP2c` "done when").
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (which provides `_start`, the stack canary, the panic
 //! handler, and the `yield`/`exit` syscall wrappers), never the C ABI
-//! (`crt0` + `abi-sys`), which exists solely for non-Rust programs
-//! (`AGENTS.md` §16.4). It is built position-independent and converted to an
-//! `rxe` blob by the consuming test's build script (`AGENTS.md` §9, §19.2). On
+//! (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
+//! `rxe` blob by the consuming test's build script. On
 //! the host it is an inert stub so `cargo build --workspace`, clippy, and fmt
 //! still cover the crate.
 
@@ -37,7 +36,7 @@ mod program {
     /// the consuming vertical's build script sets when it compiles this
     /// program, falling back to [`DEFAULT_YIELDS`]. The vertical emits the same
     /// number as a Rust constant for its kernel side, so the build script is
-    /// the single source of truth for the count (`AGENTS.md` §2.2).
+    /// the single source of truth for the count.
     const fn yield_count() -> u32 {
         match option_env!("RUSTOS_EL0_YIELDS") {
             Some(s) => parse_u32(s.as_bytes()),
@@ -49,7 +48,7 @@ mod program {
     /// falling back to [`DEFAULT_YIELDS`] on an empty string, a non-digit
     /// byte, or overflow of the `u32` range. `const` and panic-free so the
     /// count is fixed into the image with no runtime parsing
-    /// (`AGENTS.md` §2.9 — fail closed to the default).
+    /// (fail closed to the default).
     const fn parse_u32(bytes: &[u8]) -> u32 {
         let mut acc: u32 = 0;
         let mut i = 0usize;

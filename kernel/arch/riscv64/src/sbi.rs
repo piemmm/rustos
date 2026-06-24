@@ -2,7 +2,7 @@
 //!
 //! The boot pipeline needs a small, fixed set of SBI services — console
 //! output, the timer, inter-processor interrupts, and secondary-hart
-//! start — so this module exposes only those (`AGENTS.md` §2.3 — no
+//! start — so this module exposes only those (no
 //! bloat). Every kernel print (the boot log and the `BootCompleted`
 //! audit record) goes out through the SBI legacy console, which OpenSBI
 //! on the QEMU `virt` board routes to the same NS16550 UART that
@@ -26,7 +26,7 @@
 //! (forcing the caller to materialise it in memory), and there is no
 //! legacy hart-start at all. The v0.2 calls pass the mask by value and
 //! return a typed [`SbiRet`], so the bring-up path observes failures
-//! (`AGENTS.md` §5.4.5 — fail closed) instead of a blind legacy call.
+//! (fail closed) instead of a blind legacy call.
 
 use rustos_arch_api::CpuId;
 
@@ -90,7 +90,7 @@ impl SbiRet {
 /// for every set bit `i` of `hart_mask`. Basing the mask at `hartid`
 /// itself means a single set bit (`1`) addresses exactly that hart,
 /// regardless of how large the hart id is — there is no `1 << hartid`
-/// shift to overflow for a high-numbered hart (`AGENTS.md` §2.9).
+/// shift to overflow for a high-numbered hart.
 #[must_use]
 pub const fn hart_mask_for(hartid: CpuId) -> (usize, usize) {
     (1, hartid as usize)
@@ -104,7 +104,7 @@ pub const fn hart_mask_for(hartid: CpuId) -> (usize, usize) {
 /// also clears any pending supervisor timer interrupt (`sip.STIP`), so
 /// the timer trap handler re-arms the timer through this call to
 /// acknowledge the tick. Errors are not observable through the legacy
-/// ABI, so it never panics (`AGENTS.md` §2.9).
+/// ABI, so it never panics.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn set_timer(time: u64) {
     // SAFETY: an `ecall` with `a7 = 0x00` is the documented SBI legacy
@@ -127,7 +127,7 @@ pub fn set_timer(time: u64) {
 /// Issues the legacy `console_putchar` `ecall`. Errors are not
 /// observable through the legacy ABI (it returns no status), and the
 /// console is diagnostic-only, so the call is treated as infallible —
-/// it never panics (`AGENTS.md` §2.9).
+/// it never panics.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn console_putchar(byte: u8) {
     // SAFETY: an `ecall` with `a7 = 0x01` is the documented SBI legacy
@@ -164,8 +164,7 @@ pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> SbiRet {
 /// On success the target hart begins executing in S-mode at
 /// `start_addr` with `a0 = hartid` and `a1 = opaque` (the SBI HSM
 /// hand-off convention). Returns the [`SbiRet`]; the caller inspects
-/// [`SbiRet::is_success`] and fails closed on error (`AGENTS.md`
-/// §5.4.5) rather than assuming the hart came up.
+/// [`SbiRet::is_success`] and fails closed on error rather than assuming the hart came up.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[must_use]
 pub fn hart_start(hartid: CpuId, start_addr: usize, opaque: usize) -> SbiRet {
@@ -181,7 +180,7 @@ pub fn hart_start(hartid: CpuId, start_addr: usize, opaque: usize) -> SbiRet {
 /// Instruct every hart selected by `(hart_mask, hart_mask_base)` to
 /// execute an `sfence.vma` covering `[start_addr, start_addr + size)`
 /// via the SBI v0.2 RFENCE extension — the riscv64 cross-CPU TLB
-/// shootdown (`AGENTS.md` §17.2).
+/// shootdown.
 ///
 /// riscv64 has no broadcast `sfence.vma`, so the cross-CPU invalidation
 /// is delegated to the firmware: `remote_sfence_vma` returns only once

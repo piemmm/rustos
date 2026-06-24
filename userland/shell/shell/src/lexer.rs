@@ -8,7 +8,7 @@
 //! per run of characters, whether the text is subject to variable expansion.
 //! Quoting and escaping are resolved *here* so that the one later phase that
 //! cares — [`env`](crate::env) expansion — only has to ask "is this run
-//! expandable?" and never re-examines quotes (`AGENTS.md` §2.2). A `$` that
+//! expandable?" and never re-examines quotes. A `$` that
 //! was backslash-escaped or single-quoted becomes [`Segment::Literal`] and so
 //! is never mistaken for an expansion.
 

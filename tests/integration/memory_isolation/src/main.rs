@@ -2,7 +2,7 @@
 //!
 //! ## What this test asserts
 //!
-//! `AGENTS.md` §4 states that "Memory isolation is enforced by hardware
+//! states that "Memory isolation is enforced by hardware
 //! (page tables / MMU / WASM sandboxing). A process can only reach
 //! another process's memory through an explicit, capability-checked
 //! shared-memory IPC object." Stage 2 of `PLAN.md` (deliverable: "QEMU-
@@ -37,7 +37,7 @@
 //!    to QEMU via `isa-debug-exit`.
 //!
 //! Any other outcome (no fault, wrong fault, corrupted victim byte) is a
-//! closed failure (`AGENTS.md` §5.4.5 — fail closed).
+//! closed failure (fail closed).
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -124,7 +124,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         qemu_exit::exit_failure();
     };
     // Install the secret mapping through the Arch HAL MMU surface
-    // (`rustos_arch_api::mmu::AddressSpace::map_page`), the §17.2 path the
+    // (`rustos_arch_api::mmu::AddressSpace::map_page`), the path the
     // architecture-neutral kernel uses, rather than the port's inherent
     // `map_4k` (`plans/WIRING.md` W5b).
     if victim
@@ -279,7 +279,7 @@ fn page_fault_handler(error_code: u64, rip: u64) -> ! {
 
 /// Panic handler for the freestanding binary. Reports failure to QEMU
 /// rather than entering an infinite loop, so a buggy test never
-/// silently hangs (`AGENTS.md` §7 — no flaky tests, strict timeouts).
+/// silently hangs (no flaky tests, strict timeouts).
 #[panic_handler]
 #[cfg(itest_x86_64)]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {

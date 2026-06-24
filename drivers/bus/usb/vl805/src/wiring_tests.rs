@@ -2,7 +2,7 @@
 //! the forwarded grants ([`build_xhci_node`]) and the
 //! reload-then-publish composition ([`reload_firmware_and_publish`]).
 //!
-//! QEMU models no `VideoCore` mailbox or Pi USB timing (`AGENTS.md` §0.4),
+//! QEMU models no `VideoCore` mailbox or Pi USB timing,
 //! so these prove the composition and its fail-closed paths against doubles;
 //! the live firmware reload is the on-metal acceptance item.
 
@@ -29,7 +29,7 @@ const BAR_LEN: u64 = 0x1000;
 const DMA_APERTURE_TOP: u64 = 0xC000_0000;
 
 /// The two grants `node A` carried, in an arbitrary order (the parse must
-/// not depend on ordering, `AGENTS.md` §5.4).
+/// not depend on ordering).
 fn node_a_grants() -> [HwResource; 2] {
     [
         HwResource::dma(DMA_APERTURE_TOP, XHCI_DMA_BYTES as u64),
@@ -93,13 +93,13 @@ fn build_xhci_node_forwards_the_bar_and_dma_under_the_xhci_compatible_key() {
     let node = build_xhci_node(node_a_grants().iter()).expect("node B builds");
 
     // Bound by the shared xHCI `compatible` identity the controller driver
-    // matches (`AGENTS.md` §2.2), classed as a bus to further USB devices.
+    // matches, classed as a bus to further USB devices.
     assert_eq!(node.class(), Some(HwDeviceClass::Bus));
     let key = HwMatchKey::compatible(XHCI_COMPATIBLE).expect("fits");
     assert_eq!(node.match_keys(), &[key]);
 
     // The BAR + DMA grants are forwarded verbatim (no ambient authority: the
-    // bound driver receives exactly what this driver held, `AGENTS.md` §4).
+    // bound driver receives exactly what this driver held).
     let bar = node
         .resources()
         .iter()
@@ -119,7 +119,7 @@ fn build_xhci_node_forwards_the_bar_and_dma_under_the_xhci_compatible_key() {
 #[test]
 fn build_xhci_node_fails_closed_without_the_bar_grant() {
     // Only the DMA grant: the controller's register window is missing, so no
-    // node is fabricated (`AGENTS.md` §5.4 / §18.5).
+    // node is fabricated.
     let dma = [HwResource::dma(DMA_APERTURE_TOP, XHCI_DMA_BYTES as u64)];
     assert_eq!(build_xhci_node(dma.iter()), Err(DriverError::NotFound));
 }
@@ -154,8 +154,7 @@ fn reload_then_publish_reloads_over_a_healthy_mailbox_and_emits_node_b() {
 fn reload_then_publish_emits_node_b_even_with_no_mailbox() {
     // A boot shape with no VideoCore mailbox: the reload is `NotAvailable`,
     // but the publish still happens — the authoritative liveness gate is the
-    // controller driver's `Xhci::open`, not this best-effort reload
-    // (`AGENTS.md` §2.9).
+    // controller driver's `Xhci::open`, not this best-effort reload.
     let host = MockHost::new(None);
     let node = build_xhci_node(node_a_grants().iter()).expect("node B builds");
     let outcome = reload_firmware_and_publish(&host, node).expect("publish succeeds");
@@ -167,7 +166,7 @@ fn reload_then_publish_emits_node_b_even_with_no_mailbox() {
 fn reload_then_publish_fails_closed_when_the_emit_is_refused() {
     // The kernel refuses the publish (e.g. a forwarded resource is not
     // covered by a grant, or `CAP_HW_EMIT` is missing): the composition
-    // surfaces the refusal rather than reporting success (`AGENTS.md` §5.4).
+    // surfaces the refusal rather than reporting success.
     let mut host = MockHost::new(Some(MockChannel(MockFirmware::healthy())));
     host.emit_result = Err(DriverError::PermissionDenied);
     let node = build_xhci_node(node_a_grants().iter()).expect("node B builds");

@@ -16,7 +16,7 @@
 //! they are duplicated as a small set of `const`s on each side rather
 //! than shared through a common crate so the kernel side of the contract
 //! has zero dependencies beyond `core`. The `constants_match_runner`
-//! unit test is the tie-down `AGENTS.md` §2.2 requires.
+//! unit test is the tie-down the charter requires.
 //!
 //! [crate-runner]: ../../../tools/qemu/src/riscv64.rs
 
@@ -51,7 +51,7 @@ pub const fn fail_word(code: u16) -> u32 {
 /// Writes [`FINISHER_PASS`] to the `SiFive` Test device, then parks the
 /// hart in a `wfi` loop. The park is unreachable under QEMU (the write
 /// terminates the process) but is the correct conservative behaviour on
-/// hardware without the device, per `AGENTS.md` §2.9.
+/// hardware without the device,.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn exit_success() -> ! {
     // SAFETY: `FINISHER_PASS` to `SIFIVE_TEST_BASE` is the documented
@@ -88,7 +88,7 @@ unsafe fn write_finisher(word: u32) {
 fn park_forever() -> ! {
     loop {
         // SAFETY: `wfi` is a well-defined wait-for-interrupt hint on
-        // riscv64 (`AGENTS.md` §2.9). Looping defends against a wake-up.
+        // riscv64. Looping defends against a wake-up.
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
         }
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn constants_match_runner() {
         // Belt-and-braces cross-check: the host runner's values live in
-        // `tools/qemu/src/riscv64.rs`. AGENTS.md §2.2 forbids duplication
+        // `tools/qemu/src/riscv64.rs`. The charter forbids duplication
         // without a tie-down; this test is that tie-down.
         assert_eq!(SIFIVE_TEST_BASE, 0x10_0000);
         assert_eq!(FINISHER_PASS, 0x5555);

@@ -12,7 +12,7 @@
 //! As with [`VirtioPciBus`](super::virtio_pci::VirtioPciBus), the boot
 //! walk that performs this lives in ring 0, which must stay
 //! driver-agnostic and may not name the concrete `lib/pci`
-//! types (`AGENTS.md` §8). This module is the versioned seam that
+//! types. This module is the versioned seam that
 //! breaks the tension: the PCI bus driver implements [`MsixBus`] and
 //! the kernel calls it through a `&dyn MsixBus`, handing it the
 //! [`MsiMessage`] the architecture layer built and the
@@ -27,7 +27,7 @@
 //!
 //! Like every other item in `lib/abi`, this surface is frozen for the
 //! lifetime of `abi-v1`: new behaviour ships in `abi-v2` rather than
-//! mutating it (`AGENTS.md` §9).
+//! mutating it.
 
 use super::bus::Bus;
 use super::{DriverError, MmioMapper};
@@ -55,13 +55,13 @@ pub struct MsiMessage {
 /// [`Bus`] is a supertrait so the kernel walk can enumerate the bus
 /// (to pick the device function) and route its interrupt through a
 /// single `&dyn MsixBus`, without depending on the concrete
-/// `lib/pci` crate (`AGENTS.md` §17.4).
+/// `lib/pci` crate.
 ///
 /// # Capabilities
 ///
 /// The table write routes through the supplied [`MmioMapper`], which
 /// enforces [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP);
-/// the implementation performs no mapping itself (`AGENTS.md` §4 — no
+/// the implementation performs no mapping itself (no
 /// ambient authority).
 pub trait MsixBus: Bus {
     /// Program MSI-X table `entry` of function `bdf` with `message`,

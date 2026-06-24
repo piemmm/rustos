@@ -9,7 +9,7 @@
 //! the [`Key`] a US keyboard layout produces, then emits the *device-resolved
 //! key edge* — a [`rustos_abi::input::KeyInput`] record built through the
 //! shared [`rustos_keymap::key_input`] map — leaving the encoding and routing
-//! to the kernel input-focus arbiter (`AGENTS.md` §17.4). A keyboard driver
+//! to the kernel input-focus arbiter. A keyboard driver
 //! injects each record into the kernel through the `key_inject` syscall, which
 //! decides by who holds focus whether to encode the press to a text console's
 //! tty bytes or deliver the whole record to the desktop.
@@ -17,10 +17,10 @@
 //! The `evdev`-keycode→[`Key`] table is `evdev`-specific (a USB HID boot
 //! keyboard decodes HID usages into the same [`Key`] vocabulary in
 //! `lib/hid`), so it lives here; the [`Key`]→[`KeyInput`] map is shared in
-//! `lib/keymap` (`AGENTS.md` §2.2 — one definition, the `lib/hid` console
+//! `lib/keymap` (one definition, the `lib/hid` console
 //! producer reaches it too).
 //!
-//! Everything here is allocation-free and fail-closed (`AGENTS.md` §2.9): an
+//! Everything here is allocation-free and fail-closed: an
 //! unknown keycode or a non-key event produces no record rather than guessing.
 
 use rustos_abi::driver::input::{InputEvent, InputEventKind};
@@ -113,7 +113,7 @@ pub struct VirtioKeyboardConsole {
     /// is currently held. Tracking each of the eight modifier keys
     /// independently — rather than four collapsed booleans — keeps releasing
     /// one of a left/right pair from clearing the modifier while its sibling
-    /// is still held (`AGENTS.md` §2.2 — mirrors the `lib/hid` console).
+    /// is still held (mirrors the `lib/hid` console).
     modifier_bits: u8,
     caps_lock: bool,
     num_lock: bool,
@@ -166,7 +166,7 @@ impl VirtioKeyboardConsole {
             VALUE_PRESS => true,
             VALUE_RELEASE => false,
             // A key-repeat (`value == 2`) or any other value carries no
-            // press/release edge here (`AGENTS.md` §2.9 — fail closed).
+            // press/release edge here (fail closed).
             _ => return None,
         };
         let keycode = event.code;
@@ -221,7 +221,7 @@ fn modifier_index(keycode: u16) -> Option<u8> {
 ///
 /// Returns `None` for a keycode with no console key (an unmapped keycode, a
 /// lock or modifier key, or numeric-keypad `5` with Num Lock off) — fail
-/// closed, never guess (`AGENTS.md` §2.9).
+/// closed, never guess.
 fn resolve_keycode(keycode: u16, shift: bool, caps: bool, num: bool) -> Option<Key> {
     if let Some(letter) = letter(keycode, shift, caps) {
         return Some(Key::Char(letter));

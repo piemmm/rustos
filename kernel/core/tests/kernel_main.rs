@@ -11,7 +11,7 @@
 //!    by exactly one call to [`KernelArch::halt`].
 //! 3. A failure in any phase logs [`AuditEvent::PhaseFailed`] with the
 //!    documented `phase` and `cause` fields and halts — never silently
-//!    resets (`AGENTS.md` §2 / Stage 2 deliverables).
+//!    resets (Stage 2 deliverables).
 //! 4. The panic helper (`handle_panic`) emits exactly one
 //!    [`AuditEvent::Panic`] record carrying the failing CPU id and
 //!    source location, then halts.
@@ -48,7 +48,7 @@ fn leak_sink() -> &'static TestSink {
 fn leak_dispatch_slot() -> &'static DispatchCallbackSlot {
     // Box::leak mirrors the bin-crate `static DISPATCH_SLOT`
     // convention while satisfying the `&'static` invariant
-    // `BootInfo::new` requires (`AGENTS.md` §2.9 — permitted in
+    // `BootInfo::new` requires (permitted in
     // tests).
     Box::leak(Box::new(DispatchCallbackSlot::new()))
 }

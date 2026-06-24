@@ -1,4 +1,4 @@
-//! TLB-shootdown surface of the Arch HAL (`AGENTS.md` §17.2
+//! TLB-shootdown surface of the Arch HAL (
 //! "TLB shootdown").
 //!
 //! After a page table is edited — a leaf installed, torn down, or its
@@ -6,15 +6,15 @@
 //! translation for that virtual page in its translation-lookaside
 //! buffer. Invalidating that entry is privilege-neutral but
 //! deeply architecture-specific: x86_64 issues `invlpg`, aarch64 a
-//! `tlbi vae1is` + barrier, riscv64 an `sfence.vma vaddr`. §17.2 makes
+//! `tlbi vae1is` + barrier, riscv64 an `sfence.vma vaddr`. The charter makes
 //! the architecture surface a closed set of traits on the HAL; this
 //! module is the "TLB shootdown" member of that set, so the per-page
 //! invalidation lives behind one vocabulary instead of being re-spelled
-//! at every call site (`AGENTS.md` §2.2). The parallel per-arch
+//! at every call site. The parallel per-arch
 //! implementations of this one trait are the deliberate shape of
-//! §17.1/§17.2 modularity, never collapsed behind `cfg` (§2.2 carve-out).
+//! modularity, never collapsed behind `cfg` (carve-out).
 //!
-//! # Scope (the §17.2 burn-down)
+//! # Scope (the burn-down)
 //!
 //! This is the `plans/WIRING.md` **Stage W5b-2** slice: the *local*,
 //! single-CPU per-page invalidation the per-process map/unmap path in
@@ -22,7 +22,7 @@
 //! *cross-CPU* shootdown — interrupting the other CPUs that may cache a
 //! translation and waiting for them to acknowledge the invalidation —
 //! depends on the aarch64 directed IPI landing in Stage W6, so it is a
-//! tracked follow-up, not silently stubbed here (`AGENTS.md` §2.2).
+//! tracked follow-up, not silently stubbed here.
 //!
 //! # Why there is no host `activate`-style asymmetry here
 //!
@@ -39,7 +39,7 @@
 //! leaf must be reachable immediately after the flush.
 
 /// Per-CPU TLB maintenance: invalidate the calling CPU's cached
-/// translation for a single virtual page (`AGENTS.md` §17.2).
+/// translation for a single virtual page.
 ///
 /// The kernel calls [`Self::flush_page`] after editing a leaf so the
 /// next access to that page re-walks the (updated) table rather than
@@ -48,7 +48,7 @@
 /// alongside [`crate::mmu::AddressSpace`].
 ///
 /// A flush can only ever *discard* cached state, so it is infallible by
-/// construction: there is nothing to fail closed on (`AGENTS.md` §2.9 is
+/// construction: there is nothing to fail closed on (is
 /// satisfied vacuously — the operation cannot grant authority or leave a
 /// partial mapping). Over-invalidating (flushing more than the one page)
 /// is always sound; under-invalidating is the only bug, and that is a
@@ -63,7 +63,7 @@ pub trait TlbShootdown {
     fn flush_page(&mut self, vaddr: u64);
 }
 
-/// The §17.2 TLB-shootdown conformance vertical.
+/// The TLB-shootdown conformance vertical.
 ///
 /// Like [`crate::mmu::conformance`] it names only the trait and runs on
 /// the host. There is no privileged register write to gate (a flush is

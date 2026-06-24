@@ -16,7 +16,7 @@
 //! through [`DriverHost::virtio_host`]. Both are built on the call's own
 //! stack frame and lent to a `body` closure; the host, the factory, the
 //! per-driver DMA pools it mints, and every register window the driver
-//! mapped are all reclaimed when the closure returns (`AGENTS.md` §4 — no
+//! mapped are all reclaimed when the closure returns (no
 //! driver retains a register window or DMA mapping past its load).
 //!
 //! # Why a scope/callback
@@ -64,11 +64,11 @@ pub struct DriverHostConfig<'k, 'p, P: PageTable> {
     pub phys: &'k dyn PhysMap,
     /// Capabilities of the bus-driver task; every MMIO map and DMA
     /// allocation is audited against this set, and the blocking IRQ
-    /// wait keys on `caller.task()` (`AGENTS.md` §5.4 — forgery
+    /// wait keys on `caller.task()` (forgery
     /// defence).
     pub caller: &'k TaskCapabilities,
     /// Audit sink for every map/DMA/load decision. `+ Sync` so the minted
-    /// `KernelVirtioHost` is `Sync` (a shared `&'static` host, `AGENTS.md` §4).
+    /// `KernelVirtioHost` is `Sync` (a shared `&'static` host).
     pub audit: &'k (dyn Sink + Sync),
     /// Kernel IRQ table the device's interrupt line is bound in.
     pub irq: &'k IrqTable,
@@ -101,13 +101,12 @@ pub struct DriverHostConfig<'k, 'p, P: PageTable> {
 ///
 /// `make_table` is invoked once per minted driver DMA host to produce
 /// the empty page table backing that driver's private DMA address
-/// space; it must return a fresh, empty table each time (`AGENTS.md`
-/// §4).
+/// space; it must return a fresh, empty table each time.
 ///
 /// The returned value is whatever `body` returns — typically the outcome
 /// of `host.load(…)` for the bus driver that drives the discovered
 /// controller. Capability and input checks stay kernel-side at the
-/// mapper and the DMA gate (`AGENTS.md` §5.4); this function adds no
+/// mapper and the DMA gate; this function adds no
 /// authority of its own.
 pub fn run_with_driver_host<P, F, R>(
     config: DriverHostConfig<'_, '_, P>,

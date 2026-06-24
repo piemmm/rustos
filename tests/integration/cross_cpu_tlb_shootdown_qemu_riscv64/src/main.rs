@@ -26,14 +26,13 @@
 //! A regression that fails to start the hart, traps in `shootdown_page`,
 //! or whose firmware rejects the remote fence never reaches the PASS
 //! write, so the run times out or trips a failure finisher — the
-//! documented fail-loud behaviour (`AGENTS.md` §7).
+//! documented fail-loud behaviour.
 //!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `rustos-arch-riscv64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
-//! never behind a Cargo feature on the arch crate (`AGENTS.md` §5.4.5 —
-//! fail closed).
+//! never behind a Cargo feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]
@@ -145,8 +144,7 @@ mod kernel {
         // Install the secondary entry, register the stack pool, then start
         // the other hart. The pool is sized to this two-hart vertical
         // (slots 0 and 1, so either hart can be the started secondary) and
-        // scales with the hart count, not a fixed `const` (`AGENTS.md`
-        // §24.1); the `smp.s` trampoline reads its published base/shift.
+        // scales with the hart count, not a fixed `const`; the `smp.s` trampoline reads its published base/shift.
         if smp::set_secondary_entry(secondary_entry).is_err() {
             qemu_exit::exit_failure(FAIL_SECONDARY_START);
         }
@@ -181,7 +179,7 @@ mod kernel {
         // line proves the new cross-CPU code path ran on a real two-hart
         // machine without trapping.
         // Two-hart vertical: two per-CPU slots, owned by an allocator-free
-        // `static` backing (`AGENTS.md` §24.1).
+        // `static` backing.
         static STORAGE: RiscvArchStorage<2> = RiscvArchStorage::new();
         let arch = RiscvArch::with_harts(&STORAGE, boot_hartid, timebase, &[0, 1]);
         arch.shootdown_page(SHOOTDOWN_VADDR);

@@ -1,7 +1,7 @@
 //! Authenticated encryption with associated data (AEAD).
 //!
 //! The single AEAD exposed by RustOS is ChaCha20-Poly1305 (RFC 8439). It
-//! backs the kernel's encrypted-swap layer (`AGENTS.md` §4): any page of
+//! backs the kernel's encrypted-swap layer: any page of
 //! anonymous, stack, or capability-bearing memory the kernel writes to a
 //! swap device is sealed here first, so a swap device read back off the
 //! platter (or tampered with in place) yields neither plaintext nor an
@@ -49,7 +49,7 @@ pub type AeadTag = [u8; AEAD_TAG_LEN];
 ///
 /// The variant set is deliberately coarse: a caller never learns *why*
 /// authentication failed, only that it did, so a forgery attempt leaks
-/// nothing (`AGENTS.md` §5.4 — fail closed).
+/// nothing (fail closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AeadError {
@@ -71,8 +71,7 @@ pub enum AeadError {
 /// Returns [`AeadError::Authentication`] only if the upstream cipher
 /// rejects the inputs (e.g. a message longer than the cipher's
 /// `64 GiB`-per-nonce limit). For the page-sized buffers RustOS seals this
-/// cannot occur in practice, but the path is fallible rather than panicking
-/// (`AGENTS.md` §2.9).
+/// cannot occur in practice, but the path is fallible rather than panicking.
 pub fn seal(
     key: &AeadKey,
     nonce: &AeadNonce,

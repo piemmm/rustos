@@ -5,7 +5,7 @@
 //! in the shared rasteriser's premultiplied-alpha pixel type
 //! (`lib/raster`). Keeping the two apart is deliberate: a theme is a
 //! table of colours, and the rasteriser is what blends them, so neither
-//! reimplements the other (`AGENTS.md` §2.2).
+//! reimplements the other.
 
 /// A straight-alpha colour with 8 bits per channel.
 ///

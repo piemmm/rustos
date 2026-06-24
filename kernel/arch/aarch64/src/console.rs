@@ -5,8 +5,7 @@
 //! PrimeCell PL011 at a fixed low address; the Raspberry Pi (BCM2835 /
 //! BCM2711) exposes both a PL011 (`UART0`) and a BCM2835 **AUX mini-UART**
 //! at the SoC's high peripheral window, and which one is wired to the
-//! physical pins is a board-integration choice. Per `AGENTS.md` §17.2 /
-//! §2.2 the difference is **discovered device-tree data**, never a
+//! physical pins is a board-integration choice. Per the difference is **discovered device-tree data**, never a
 //! `cfg(board = …)` fork: this module owns the one console abstraction —
 //! the `ConsoleModel` (a register layout) plus the runtime MMIO base —
 //! while the freestanding `crate::serial` module performs the actual
@@ -18,7 +17,7 @@
 //! different "can I write a byte" status bits, so each is a distinct
 //! `ConsoleModel` variant with its own pure register-offset / readiness
 //! helpers. That is a driver-model split (one console, two register
-//! backends), not the duplication `AGENTS.md` §2.2 forbids.
+//! backends), not the duplication the charter forbids.
 //!
 //! # Pre-discovery default
 //!
@@ -43,7 +42,7 @@ pub const DEFAULT_CONSOLE_BASE: usize = 0x0900_0000;
 /// `crate::serial` byte-at-a-time transmit path; they differ only in the
 /// register offsets and the transmit-ready status bit, captured by the
 /// pure helpers below so the freestanding MMIO code and the host unit
-/// tests agree on one definition (`AGENTS.md` §2.2).
+/// tests agree on one definition.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ConsoleModel {
     /// ARM PrimeCell PL011 (ARM DDI 0183): data register `UARTDR` at
@@ -51,7 +50,7 @@ pub enum ConsoleModel {
     /// bit (5) marks the transmit FIFO full. Used by the QEMU `virt`
     /// board and the Pi's `UART0`.
     Pl011,
-    /// BCM2835 AUX mini-UART (BCM2835 ARM Peripherals §2.2). The
+    /// BCM2835 AUX mini-UART (BCM2835 ARM Peripherals). The
     /// device-tree `reg` points at the mini-UART register block whose
     /// `AUX_MU_IO_REG` (data) sits at offset `0x00` and `AUX_MU_LSR_REG`
     /// (line status) at `0x14`; `LSR` bit 5 marks the transmitter able to
@@ -107,7 +106,7 @@ const PL011_IFLS_RXSEL: u32 = 0b111 << 3;
 /// never lifts the FIFO above the reset-default 1/2 trigger, so it never
 /// transitions down through that level and the transmit interrupt never
 /// re-asserts; the lowest trigger guarantees the FIFO-empty event always
-/// raises the interrupt that refills it (`AGENTS.md` §2.16 / §20).
+/// raises the interrupt that refills it.
 const PL011_IFLS_TXSEL: u32 = 0b111;
 /// `UARTIMSC.TXIM` — transmit interrupt (bit 5): asserts while the transmit
 /// FIFO is at or below its trigger level (i.e. has room), so unmasking it
@@ -117,7 +116,7 @@ const PL011_IMSC_TXIM: u32 = 1 << 5;
 /// PL011 masked interrupt-status register (`UARTMIS`) offset: the raw
 /// interrupt state masked by `UARTIMSC`, so a bit is set only for a source
 /// that is both pending *and* unmasked. The ISR reads it to act on exactly
-/// the sources that fired (`AGENTS.md` §5.4 — never drain receive bytes the
+/// the sources that fired (never drain receive bytes the
 /// poll path still owns: while `RXIM` is masked, `RXMIS` reads clear).
 const PL011_MIS: usize = 0x40;
 /// `UARTMIS.RXMIS` (bit 4) — a receive interrupt is pending and unmasked.
@@ -173,7 +172,7 @@ impl ConsoleModel {
     /// `brcm,bcm2835-aux-uart`.
     ///
     /// Returns `None` for any other string so an unknown console fails
-    /// closed rather than guessing a register layout (`AGENTS.md` §2.9).
+    /// closed rather than guessing a register layout.
     #[must_use]
     pub fn from_compatible(compatible: &[u8]) -> Option<Self> {
         match compatible {
@@ -274,7 +273,7 @@ impl ConsoleModel {
     /// and pads the shorter mini-UART one. Keeping the register/bit policy here
     /// (beside the offset/readiness helpers) and the MMIO in `crate::serial`
     /// is the same pure-policy / freestanding-driver split the rest of this
-    /// module uses (`AGENTS.md` §2.2), so the sequence is host-tested without
+    /// module uses, so the sequence is host-tested without
     /// touching MMIO.
     ///
     /// - **PL011:** select the lowest receive FIFO trigger (`UARTIFLS`), enable
@@ -342,8 +341,7 @@ impl ConsoleModel {
     /// the software ring until the ring drains and then re-masks it
     /// ([`Self::tx_interrupt_disable`]). This is the interrupt-driven transmit
     /// path that keeps buffered output flowing at the UART's real throughput
-    /// without coupling the drain to the scheduler reaching idle (`AGENTS.md`
-    /// §2.16 / §20).
+    /// without coupling the drain to the scheduler reaching idle.
     ///
     /// - **PL011:** first select the lowest transmit FIFO trigger
     ///   (`UARTIFLS.TXIFLSEL` → 1/8 full) so the interrupt fires the moment the
@@ -413,7 +411,7 @@ impl ConsoleModel {
     /// line carry both transmit and receive without the ISR ever draining
     /// receive bytes the poll path still owns: while the receive source is
     /// masked it never appears here, so the passphrase FIFO-poll keeps its
-    /// bytes (`AGENTS.md` §5.4 — fail closed by construction).
+    /// bytes (fail closed by construction).
     #[must_use]
     pub const fn interrupt_status_offset(self) -> usize {
         match self {
@@ -557,7 +555,7 @@ pub struct DiscoveredConsole {
 /// so it stays safe with the MMU off ([`crate::fdt::scan_translated`]).
 /// Returns `None` if the tree is malformed or carries no recognised,
 /// translatable console (the caller then keeps the
-/// [`DEFAULT_CONSOLE_BASE`] default — fail closed, `AGENTS.md` §2.9).
+/// [`DEFAULT_CONSOLE_BASE`] default — fail closed).
 #[must_use]
 pub fn find_console(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
     let mut mini_uart: Option<DiscoveredConsole> = None;
@@ -593,7 +591,7 @@ pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
     let found = find_console(fdt)?;
     // A device MMIO base always fits a `usize` on the 64-bit targets this
     // port serves; `try_from` keeps the conversion honest — fail closed
-    // rather than truncate — instead of asserting it (`AGENTS.md` §2.9).
+    // rather than truncate — instead of asserting it.
     let base = usize::try_from(found.base).ok()?;
     configure(base, found.model);
     Some(found)
@@ -608,7 +606,7 @@ pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredConsole> {
 /// covers that drain with generous headroom. A transmitter that is
 /// still not ready after the budget is not draining at all — on the Pi
 /// 4 this is the BT-attached PL011 whose CTS flow control never opens —
-/// and waiting longer would hang the boot (`AGENTS.md` §2.1: an
+/// and waiting longer would hang the boot (: an
 /// unbounded wait stalls the kernel before its first log line).
 pub const TX_POLL_BUDGET: u32 = 200_000;
 
@@ -619,7 +617,7 @@ pub enum TxOutcome {
     Send,
     /// The transmitter never became ready: drop the byte (the console
     /// is best-effort output and must never stall the kernel —
-    /// `AGENTS.md` §2.1 / §20 fail-closed no-op semantics).
+    /// fail-closed no-op semantics).
     Drop,
 }
 

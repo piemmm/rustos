@@ -1,15 +1,13 @@
-//! RustOS shared System Information API client helpers (Stage 6,
-//! `AGENTS.md` §6 / §16.6).
+//! RustOS shared System Information API client helpers (Stage 6).
 //!
 //! RustOS has no `/proc` and no `/sys`: every piece of live system
 //! information is read through the typed, versioned, capability-checked
-//! `sysinfo-v1` API served by `/System/Services/sysinfod` (`AGENTS.md`
-//! §16.6). Several terminal tools speak that API — the umbrella `sysinfo`
+//! `sysinfo-v1` API served by `/System/Services/sysinfod`. Several terminal tools speak that API — the umbrella `sysinfo`
 //! command, the POSIX-named `ps`, and the `mount` listing — and they share
 //! the same request envelope, the same capability-aware call mapping, and
 //! the same paged-list walk and row rendering. Sibling userland crates may
-//! not depend on one another (`AGENTS.md` §17.4), so that shared shape lives
-//! here, in one place, rather than being copied (`AGENTS.md` §2.2).
+//! not depend on one another, so that shared shape lives
+//! here, in one place, rather than being copied.
 //!
 //! # What this crate is
 //!
@@ -48,10 +46,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this helper never links a kernel or driver
-//! crate (`AGENTS.md` §17.4). No `unsafe`, and no `unwrap`/`expect`/`panic!`
-//! in production paths (`AGENTS.md` §2.9).
+//! crate. No `unsafe`, and no `unwrap`/`expect`/`panic!`
+//! in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

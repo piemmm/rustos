@@ -7,7 +7,7 @@
 //! Keeping it a trait means the screen model and the renderer are exhaustively
 //! testable against an in-memory queue without a kernel, exactly as the file
 //! browser's `DirectorySource`, `appmgr`'s `BundleStore`, and `ps`'s transport
-//! are injected seams (`AGENTS.md` §7).
+//! are injected seams.
 //!
 //! On a running system the source is backed by a capability-checked
 //! pseudo-terminal channel to the shell process, so the process-spawn and

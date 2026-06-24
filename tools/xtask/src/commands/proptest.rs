@@ -1,10 +1,10 @@
-//! `cargo xtask proptest` — drive the §19.7 Bronze stateful models.
+//! `cargo xtask proptest` — drive the Bronze stateful models.
 //!
-//! `AGENTS.md` §19.7 requires the capability-critical paths — `lib/caps`,
+//! the charter requires the capability-critical paths — `lib/caps`,
 //! `kernel/sec`, and the IPC + syscall dispatch paths — to carry a
 //! `proptest`-style stateful model that "runs under `cargo xtask proptest`
 //! for ≥ 5 s per change". This orchestrator is the single place that runs
-//! every such model for a wall-clock budget, mirroring the §19.6
+//! every such model for a wall-clock budget, mirroring the
 //! [`fuzz`](crate::commands) orchestrator so a PR and a nightly soak share
 //! one definition of the model set.
 //!
@@ -15,10 +15,10 @@
 //! test` leaves the variable unset and runs the fast fixed-case sweep
 //! instead). It also exports a per-model RNG seed (`commands::seed`): by
 //! default a *fresh* seed each run, so two soaks never replay the same
-//! programs (§2.1); with `--seed N`, a deterministic seed that reproduces a
+//! programs; with `--seed N`, a deterministic seed that reproduces a
 //! logged counterexample. The chosen seed is logged with each job. A model
 //! that finds a counterexample, hangs, or otherwise fails its invariant
-//! fails the command — §19.7 fails closed.
+//! fails the command fails closed.
 //!
 //! Adding a model means adding a [`Model`] here, never teaching `ci` about
 //! it directly.
@@ -43,7 +43,7 @@ pub struct Model {
     pub description: &'static str,
 }
 
-/// The closed set of §19.7 Bronze models, in run order. Covers every
+/// The closed set of Bronze models, in run order. Covers every
 /// capability-critical path the charter names.
 pub const MODELS: &[Model] = &[
     Model {
@@ -95,9 +95,9 @@ impl Mode {
         match self {
             // A single iteration: no wall-clock budget is exported.
             Mode::Once => None,
-            // §19.7: "runs under `cargo xtask proptest` for ≥ 5 s".
+            // "runs under `cargo xtask proptest` for ≥ 5 s".
             Mode::Quick => Some(Duration::from_secs(5)),
-            // Match the §19.6 soak floor so the nightly story is uniform.
+            // Match the soak floor so the nightly story is uniform.
             Mode::Soak => Some(Duration::from_secs(24 * 60 * 60)),
         }
     }
@@ -118,7 +118,7 @@ pub struct Options {
     /// Reproduce an earlier run by fixing its proptest RNG seed (`--seed <n>`).
     ///
     /// Unset (the default, including in `ci`) draws a fresh per-model seed each
-    /// run, so consecutive soaks explore new programs (§19.7, §2.1). Setting it
+    /// run, so consecutive soaks explore new programs. Setting it
     /// replays the exact sequence the orchestrator logged for a counterexample.
     pub seed: Option<u64>,
 }
@@ -269,8 +269,7 @@ pub fn run(ctx: &Context, opts: &Options) -> Result<(), String> {
             }
             // Each model reseeds its proptest RNG from this value instead of a
             // fixed seed, so a fresh seed (the default) makes every run draw
-            // new programs while `--seed N` reproduces a logged counterexample
-            // (§19.7, §2.1). The seed is in the label so it reaches the log.
+            // new programs while `--seed N` reproduces a logged counterexample. The seed is in the label so it reaches the log.
             let job_seed = seed::job_seed(opts.seed, i);
             cmd.env(seed::PROPTEST_SEED_ENV, job_seed.to_string());
             let budget_desc = match budget {
@@ -313,7 +312,7 @@ mod tests {
 
     #[test]
     fn quick_budget_meets_the_five_second_floor() {
-        // §19.7 mandates ≥ 5 s per model for the budgeted soak step.
+        // the charter mandates ≥ 5 s per model for the budgeted soak step.
         assert!(Mode::Quick.budget().expect("quick is budgeted").as_secs() >= 5);
     }
 
@@ -362,7 +361,7 @@ mod tests {
     #[test]
     fn seed_defaults_to_none_so_each_run_is_fresh() {
         // No `--seed` means a fresh seed per run, so consecutive soaks draw
-        // new programs (§19.7, §2.1).
+        // new programs.
         let opts = parse(&argv(&[])).expect("empty args parse");
         assert_eq!(opts.seed, None);
     }
@@ -401,7 +400,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_capability_critical_path() {
-        // §19.7: lib/caps, kernel/sec, IPC dispatch, syscall dispatch.
+        // lib/caps, kernel/sec, IPC dispatch, syscall dispatch.
         for required in ["caps", "sec", "ipc", "syscall"] {
             assert!(
                 MODELS.iter().any(|m| m.name == required),

@@ -4,7 +4,7 @@
 //! on. The terminal emulator's `Grid` stores a [`Cell`] per screen position
 //! (the consumer side), and the curses renderer builds the desired screen as
 //! [`Cell`]s before diffing it to bytes (the emitter side) — so there is one
-//! cell representation, not two (`AGENTS.md` §2.2).
+//! cell representation, not two.
 
 use crate::attr::Attributes;
 

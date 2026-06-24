@@ -1,33 +1,31 @@
 //! Shared, scheme-neutral partition-table model and a partition-window
-//! [`Block`] adapter (`AGENTS.md` §2.2).
+//! [`Block`] adapter.
 //!
 //! A flashed RustOS disk (an SD card, a USB stick, a UEFI hard disk, a
 //! `virt` virtio-blk image) carries a partition table that names a FAT
 //! boot partition the firmware reads and the encrypted `RustFS` root
-//! partition the kernel mounts (`tools/mkimage`, `AGENTS.md` §11 / §16).
+//! partition the kernel mounts (`tools/mkimage`).
 //! The table is **not** one scheme on one board: a Raspberry Pi image is
 //! an MBR disk, a UEFI x86_64 disk is GPT, and RustOS must read either on
-//! any architecture (`AGENTS.md` §17 — nothing here is board-specific).
+//! any architecture (nothing here is board-specific).
 //!
 //! Two places must agree, byte for byte, on the on-disk layout — the
 //! image author (`tools/mkimage`) that *writes* it and the boot path
 //! (`kernel/rustos-kernel`) that *reads* it back to find the partitions.
 //! This crate is that one definition, so the author and the reader can
-//! never drift (`AGENTS.md` §2.2):
+//! never drift:
 //!
 //! * the scheme-neutral [`Partition`] / [`PartitionType`] /
 //!   [`PartitionTable`] model, in *device logical blocks*, large enough
 //!   for 64-bit GPT LBAs;
 //! * [`parse_partition_table`], which detects the scheme on a [`Block`]
 //!   device and dispatches to the [`mbr`] or [`gpt`] parser, fail-closed
-//!   against an untrusted, possibly-hostile disk (`AGENTS.md` §5.4 /
-//!   §2.9 / §19.5);
+//!   against an untrusted, possibly-hostile disk;
 //! * the per-scheme [`mbr`] and [`gpt`] modules;
 //! * [`PartitionBlock`], which presents one partition's extent of an
 //!   underlying [`Block`] device as a standalone, bounds-checked
 //!   [`Block`], so a filesystem driver mounts a partition without ever
-//!   seeing — or being able to reach — the bytes outside it
-//!   (`AGENTS.md` §5.4 / §24.4).
+//!   seeing — or being able to reach — the bytes outside it.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -47,8 +45,7 @@ use rustos_abi::DriverError;
 /// from one disk.
 ///
 /// This is GPT's standard default entry count, and serves here as a
-/// fail-closed bound on an untrusted on-disk table (`AGENTS.md` §19.5 /
-/// §24.4 — a defensive parse bound, not a scalable capacity). Real RustOS
+/// fail-closed bound on an untrusted on-disk table (a defensive parse bound, not a scalable capacity). Real RustOS
 /// disks carry a handful of partitions; a table declaring more present
 /// partitions than this is rejected rather than truncated, so the root
 /// partition is never silently dropped.
@@ -61,7 +58,7 @@ pub const MAX_PARTITIONS: usize = 128;
 /// partition is [`PartitionType::Other`] and carried for completeness but
 /// not consumed. The type is a routing hint, never a trusted identity:
 /// the filesystem a partition is handed to still validates its own
-/// on-disk magic (`AGENTS.md` §18.6 — a match is necessary, never
+/// on-disk magic (a match is necessary, never
 /// sufficient).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PartitionType {
@@ -73,7 +70,7 @@ pub enum PartitionType {
     /// root (the design-B pre-unlock driver store, `plans/PI.md`). It
     /// carries no secrets, so it is keyed by a non-secret well-known
     /// volume key; tamper-evidence comes from the per-bundle Ed25519
-    /// signatures the load gate verifies (`AGENTS.md` §18.6), not from
+    /// signatures the load gate verifies, not from
     /// encryption.
     RustFsSystem,
     /// The encrypted `RustFS` data-root partition the kernel mounts after
@@ -102,7 +99,7 @@ pub struct Partition {
 /// The partitions parsed from a disk's table, in entry order.
 ///
 /// Holds the extents inline (no allocation) so the boot path parses the
-/// table off the stack (`AGENTS.md` §2.16).
+/// table off the stack.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartitionTable {
     entries: [Partition; MAX_PARTITIONS],
@@ -181,11 +178,11 @@ impl From<DriverError> for PartitionError {
 /// Parse the partition table off `dev`, detecting the scheme.
 ///
 /// `dev` is an untrusted device, so the table is fully validated before
-/// any extent is trusted (`AGENTS.md` §5.4 / §19.5). Detection is by
+/// any extent is trusted. Detection is by
 /// content, not by guessing: LBA 1 is inspected for the GPT
 /// `"EFI PART"` signature (the GPT case also has a protective MBR in LBA
 /// 0); otherwise LBA 0 is parsed as a classic MBR. A table that violates
-/// any invariant is rejected **whole** (`AGENTS.md` §2.9).
+/// any invariant is rejected **whole**.
 ///
 /// LBAs in the returned [`PartitionTable`] are in `dev`'s logical blocks.
 ///
@@ -233,8 +230,8 @@ fn read_lba0<B: Block>(
 /// Reads and writes are expressed in the partition's own block space
 /// (LBA `0` is the partition's first block) and translated onto the inner
 /// device, so a filesystem driver mounting a partition can never address
-/// — or even name — a block outside it (`AGENTS.md` §5.4 — every input
-/// validated; §24.4 — the window is a fixed extent, not a growable
+/// — or even name — a block outside it (every input
+/// validated; — the window is a fixed extent, not a growable
 /// capacity). The window's bounds are validated against the inner
 /// device's geometry once, at construction; every access is then bounded
 /// by the window length.
@@ -342,7 +339,7 @@ impl<B: Block> Block for PartitionBlock<B> {
         class: BufferClass,
     ) -> Result<(), DriverError> {
         // Forward the sensitivity class so the inner driver still scrubs
-        // any private staging copy (`AGENTS.md` §4).
+        // any private staging copy.
         let inner_lba = self.inner_lba(lba, buf.len())?;
         self.inner.read_blocks_with_class(inner_lba, buf, class)
     }

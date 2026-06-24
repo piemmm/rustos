@@ -36,7 +36,7 @@
 //! a task that never resumes, a stack that is not reclaimed) either trips
 //! a dedicated failure finisher or never drains the workload, so the run
 //! fails loudly — by an explicit failure code or by the harness
-//! `Outcome::Timeout` (`AGENTS.md` §7).
+//! `Outcome::Timeout`.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -45,7 +45,7 @@
 //! policy directly and supplies its own `kernel_main`, so the runtime is
 //! exercised without the full `kernel_core::kernel_main` init pipeline.
 //! The QEMU-exit shortcut lives in this dedicated bin, never behind a
-//! Cargo feature on a library crate (`AGENTS.md` §5.4.5 — fail closed).
+//! Cargo feature on a library crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -188,8 +188,7 @@ mod kernel {
         }
 
         // Build the live scheduler over the arch port.
-        // Per-CPU bookkeeping backing for this single-CPU vertical
-        // (`AGENTS.md` §24.1).
+        // Per-CPU bookkeeping backing for this single-CPU vertical.
         static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
             rustos_arch_aarch64::Aarch64ArchStorage::new();
         let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
@@ -200,7 +199,7 @@ mod kernel {
         // Spawn two kthreads. Each runs on its own kernel stack and yields
         // back to the dispatcher PING_PONGS times via the real
         // `ContextSwitch::switch`, then returns (Exit). The `ContextSwitchHal`
-        // handle is the aarch64 §17.2 context-switch primitive.
+        // handle is the aarch64 context-switch primitive.
         for index in 0..2usize {
             let spawned = spawn_kthread(
                 &sched,
@@ -227,7 +226,7 @@ mod kernel {
         // exited. Each `step` enters a task, which yields straight back, so
         // the two tasks ping-pong through the real context switch. A switch
         // that never resumed its task would stall the drain and the harness
-        // would time out (fail-loud, `AGENTS.md` §7).
+        // would time out (fail-loud).
         let mut steps = 0u64;
         while sched.live_task_count() != 0 && steps < MAX_STEPS {
             let _ = sched.step(BOOT_CPU);

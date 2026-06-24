@@ -1,7 +1,7 @@
 //! Host tests for the arch-neutral boot-keyboard driver-process
 //! orchestration ([`super::bring_up_boot_keyboard`]).
 //!
-//! QEMU models no Pi USB timing (`AGENTS.md` §0.4 / §2.1), so these tests
+//! QEMU models no Pi USB timing, so these tests
 //! prove the composition and its fail-closed paths against in-process mocks
 //! (an MMIO mapper backing real heap, a DMA host minting leaked
 //! [`DmaSlab`]s, a no-op [`Delay`]). The live controller bring-up — the
@@ -10,7 +10,7 @@
 //! [`Xhci::open`](rustos_usb::Xhci::open) fails closed with
 //! [`DriverError::DeviceFault`], which is exactly the boundary the "reaches
 //! the controller" test asserts (mirroring `drivers/bus/usb`'s `wiring`
-//! tests, `AGENTS.md` §2.2).
+//! tests).
 
 extern crate alloc;
 
@@ -172,7 +172,7 @@ fn requires_a_dma_host() {
 fn rejects_a_dma_carve_above_the_aperture() {
     // The carve sits at the aperture top: its end overruns the window the
     // bridge lets the controller reach, so the orchestration fails closed
-    // before any register is touched (`AGENTS.md` §5.4).
+    // before any register is touched.
     let host = host_with(APERTURE_TOP, true, true, true);
     assert_eq!(
         bring_up(&host, APERTURE_TOP).err(),
@@ -215,7 +215,7 @@ fn diagnostic_localises_the_controller_open_stall() {
     // maps) and the inert zeroed window fails `Xhci::open` at the capability
     // stage. The structured error must name the `ControllerOpen` phase and
     // the `Capability` reset sub-stage, so a metal capture localises the
-    // stall rather than seeing a bare `DeviceFault` (`AGENTS.md` §15.7).
+    // stall rather than seeing a bare `DeviceFault`.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, true, true);
     let err = bring_up_boot_keyboard_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
         .err()
@@ -232,7 +232,7 @@ fn diagnostic_localises_the_controller_open_stall() {
 fn diagnostic_localises_a_setup_stall() {
     // A host with no mapper fails fail-closed before any controller state
     // exists: the structured error names the `Setup` phase and carries no
-    // controller snapshot (`AGENTS.md` §15.7 / §2.9).
+    // controller snapshot.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, false, true);
     let err = bring_up_boot_keyboard_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
         .err()

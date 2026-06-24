@@ -34,19 +34,19 @@ impl EntropySource for SoakEntropy {
 
 /// The soak targets, in registry order. The single source of truth for
 /// `cargo xtask fssoak --list` and the `soak.sh` fan-out, so neither
-/// hard-codes the list (§2.2).
+/// hard-codes the list.
 ///
 /// `rustfs`/`ext4`/`fat32` run the fixed-sequence [`exercise()`];
 /// `rustfs-random` runs the randomized, model-checked [`random_exercise`]
 /// over rustfs, taking a different path on every launch. Both draw a fresh
-/// start seed each launch and log it (`AGENTS.md` §2.2), so every run differs
+/// start seed each launch and log it, so every run differs
 /// and any failure replays from the logged seed.
 pub const TARGETS: &[&str] = &["rustfs", "ext4", "fat32", "rustfs-random"];
 
 /// A filesystem the soak can format on a [`RamBlock`] and remount,
 /// reached only through the frozen [`FilesystemRead`]/[`FilesystemWrite`]
 /// ABI thereafter. Implemented for the three first-party drivers; the
-/// exerciser is written once against this trait (`AGENTS.md` §2.2).
+/// exerciser is written once against this trait.
 pub trait SoakFs: FilesystemRead + FilesystemWrite + Sized {
     /// Lay a fresh, empty volume onto `block` and return it mounted.
     ///
@@ -132,7 +132,7 @@ pub fn run_target(name: &str, device_bytes: u64, budget_secs: u64) -> Result<(),
 }
 
 /// Environment variable that pins the soak start seed for replay; unset
-/// draws a fresh seed each launch (`rustos_fuzzseed`, `AGENTS.md` §2.2).
+/// draws a fresh seed each launch (`rustos_fuzzseed`).
 const FSSOAK_SEED_ENV: &str = "RUSTOS_FSSOAK_SEED";
 
 /// Resolve and log this launch's *start* seed for `target`.

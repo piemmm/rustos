@@ -1,6 +1,6 @@
 //! Behavioural tests for driver delegation: the [`Vfs`] resolving a path
 //! under a driver-backed mount through a [`FilesystemRead`] driver, with the
-//! §5.3 permission template applied at the mount point.
+//! permission template applied at the mount point.
 
 use crate::fs::{Mode, Path, Vfs, VfsError};
 
@@ -401,7 +401,7 @@ fn non_utf8_directory_name_surfaces_as_io() {
 // `RwMockFs` is a small in-memory filesystem implementing *both*
 // `FilesystemRead` and `FilesystemWrite` with the same `(dir, name)`
 // mutation model the ABI defines, standing in for a block-backed driver
-// (kernel/core may not depend on `drivers/*`, AGENTS.md §17.4).
+// (kernel/core may not depend on `drivers/*`).
 // ---------------------------------------------------------------------
 
 use alloc::collections::BTreeMap;
@@ -788,10 +788,10 @@ fn delegated_mutation_of_mount_root_is_invalid() {
 // Per-inode (`FilesystemSecurity`) delegation tests.
 //
 // `SecMockFs` is a read-only driver that, unlike `MockFs`, stores a full
-// §5.3 record per node. The mount point itself is admin-owned `0o755`, so
+// record per node. The mount point itself is admin-owned `0o755`, so
 // the *uniform* `*_via` methods would grant admin every access; the
 // secured `*_via_secured` methods instead honour each node's own stored
-// record (`AGENTS.md` §5.3 / §5.4).
+// record.
 // ---------------------------------------------------------------------
 
 const SECRET_FILE: u64 = 2;

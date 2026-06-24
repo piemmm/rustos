@@ -53,7 +53,7 @@ impl CapabilityId {
     /// which hands back page-aligned, contiguous-by-physical-address
     /// regions out of the calling process's heap, with guard pages
     /// around the slab and zero-on-free for every byte ever made
-    /// device-visible (`AGENTS.md` §4).
+    /// device-visible.
     pub const MEM_DMA: Self = Self(10);
     /// Bind to a hardware interrupt line and wait for its wake-ups.
     ///
@@ -65,7 +65,7 @@ impl CapabilityId {
     /// kernel wait queue and block on it with a caller-supplied
     /// timeout. The capability does not grant the ability to *raise*
     /// or *mask* an interrupt line; both remain kernel-only
-    /// (`AGENTS.md` §5.4 — capability checks before state touches).
+    /// (capability checks before state touches).
     pub const IRQ_BIND: Self = Self(11);
     /// Map a device's memory-mapped register window into a driver's
     /// address space.
@@ -80,22 +80,22 @@ impl CapabilityId {
     /// capability does not let a driver synthesise an arbitrary
     /// pointer: the kernel is the sole minter of a `RegisterWindow`,
     /// so a driver can only reach memory the kernel chose to map for
-    /// it (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// it (no ambient authority; — capability
     /// checks before state touches).
     pub const MMIO_MAP: Self = Self(12);
     /// Query system information beyond the caller's own principal.
     ///
-    /// Required by the System Information API (`AGENTS.md` §16.6) for
+    /// Required by the System Information API for
     /// queries whose answer spans principals other than the caller —
     /// for example listing every process on the system rather than
     /// only the caller's own. Unprivileged, self-scoped queries ("list
     /// my own processes") require no capability; this one gates the
-    /// global view (`AGENTS.md` §5.4 — capability checks before state
+    /// global view (capability checks before state
     /// touches).
     pub const SYSINFO_GLOBAL: Self = Self(13);
     /// Query kernel-internal system information.
     ///
-    /// Required by the System Information API (`AGENTS.md` §16.6) for
+    /// Required by the System Information API for
     /// queries that expose kernel-internal state — for example kernel
     /// memory statistics — which a global-but-unprivileged observer
     /// must not see.
@@ -103,8 +103,7 @@ impl CapabilityId {
     /// Read the detected hardware tree through the System Information
     /// API.
     ///
-    /// Required by the privileged hardware-tree query (`AGENTS.md`
-    /// §18.4): the tree is exposed read-only to tools through the
+    /// Required by the privileged hardware-tree query: the tree is exposed read-only to tools through the
     /// System Information API, and there is no path that bypasses this
     /// capability check.
     pub const SYSINFO_HW: Self = Self(15);
@@ -112,85 +111,79 @@ impl CapabilityId {
     ///
     /// `clock_get` (`abi-v1` syscall 7) is callable by every task, but
     /// a high-resolution timer is a building block for cache- and
-    /// execution-timing side-channel attacks (`AGENTS.md` §19.1).
+    /// execution-timing side-channel attacks.
     /// Callers that do not hold this capability — in particular the
-    /// §19.5 parser sandboxes and untrusted `userland/apps` — receive
+    /// parser sandboxes and untrusted `userland/apps` — receive
     /// a value coarsened to
     /// [`COARSE_CLOCK_GRANULARITY_NS`](crate::COARSE_CLOCK_GRANULARITY_NS),
     /// so the precise timer is available only to principals explicitly
-    /// trusted with it (`AGENTS.md` §5.7 — security by default).
+    /// trusted with it (security by default).
     pub const TIME_HIRES: Self = Self(16);
     /// Spawn a new process: build a fresh user address space from a
     /// validated `rxe` image and drop into it in user mode.
     ///
     /// Spawning a program is a privileged operation — it materialises a
     /// new principal's address space and hands it the CPU — so it is
-    /// gated rather than ambient (`AGENTS.md` §4 — no ambient authority;
-    /// §5.4 — capability checks before state touches). The kernel-side
+    /// gated rather than ambient (no ambient authority;
+    /// — capability checks before state touches). The kernel-side
     /// spawn caller (`kernel/core`) verifies this capability and audits
     /// the decision before building the image; the memory mechanism in
-    /// `kernel/mem` stays capability-agnostic (§17.4). The hosted
+    /// `kernel/mem` stays capability-agnostic. The hosted
     /// program still receives only the intersection of its own signed
-    /// manifest request and its user's grants (§16.5).
+    /// manifest request and its user's grants.
     pub const PROC_SPAWN: Self = Self(17);
-    /// Use a console-backed standard *output* stream (`AGENTS.md` §10,
-    /// §16.4, §20).
+    /// Use a console-backed standard *output* stream.
     ///
     /// The coarse gate on the `stream_write` syscall (`abi-v1` number 11)
     /// when the addressed descriptor's backing is the privileged
     /// *hardware* console — the detected framebuffer when present, else
     /// the first discovered UART (`plans/PI.md` P6). The fine, per-fd
     /// authority is the inherited descriptor table the spawner
-    /// established ([`crate::DescriptorTable`], §20); this capability says
+    /// established ([`crate::DescriptorTable`]); this capability says
     /// the principal may use a *console-backed* output stream at all.
     /// Only the early bring-up principals (PID 1 `init`, login, getty,
     /// the shell) are granted it, so an ordinary app cannot scribble on
-    /// the system console (`AGENTS.md` §4 — no ambient authority; §5.4 —
+    /// the system console (no ambient authority; —
     /// capability checks before state touches).
     pub const CONSOLE_WRITE: Self = Self(18);
-    /// Use a console-backed standard *input* stream (`AGENTS.md` §10,
-    /// §16.4, §20).
+    /// Use a console-backed standard *input* stream.
     ///
     /// The coarse gate on the `stream_read` syscall (`abi-v1` number 13)
     /// when the addressed descriptor's backing is the privileged
     /// *hardware* console input — the first discovered keyboard/UART input
     /// source (`plans/PI.md` P6). The input counterpart of
     /// [`CONSOLE_WRITE`](Self::CONSOLE_WRITE); the fine, per-fd authority
-    /// is the inherited descriptor table ([`crate::DescriptorTable`],
-    /// §20). Only the early bring-up principals (PID 1 `init`, login,
+    /// is the inherited descriptor table ([`crate::DescriptorTable`]). Only the early bring-up principals (PID 1 `init`, login,
     /// getty, the shell) are granted it, so an ordinary app cannot read
-    /// the system console (`AGENTS.md` §4 — no ambient authority; §5.4 —
+    /// the system console (no ambient authority; —
     /// capability checks before state touches).
     pub const CONSOLE_READ: Self = Self(19);
-    /// Raise a hard resource limit above its inherited ceiling (`AGENTS.md`
-    /// §24.3).
+    /// Raise a hard resource limit above its inherited ceiling.
     ///
     /// A process may always *lower* its own soft or hard resource bounds
     /// ([`crate::ResourceLimit`]) without any capability, but *raising* a
     /// hard bound — or setting any bound above the ceiling it inherited —
-    /// is the privileged operation this capability gates (`AGENTS.md` §24.3;
-    /// the resource-limit analogue of the §5.2 "never widen on delegation"
+    /// is the privileged operation this capability gates (
+    /// the resource-limit analogue of the "never widen on delegation"
     /// rule). The `rlimit_set` syscall (`abi-v1` number 18) refuses such a
     /// request with [`Errno::PermissionDenied`] unless the caller holds this
-    /// capability (`AGENTS.md` §5.4 — capability checks before state
-    /// touches; §4 — no ambient authority).
+    /// capability (capability checks before state
+    /// touches; — no ambient authority).
     pub const RLIMIT_RAISE: Self = Self(20);
-    /// Read the system user database (`/System/Security/Users`,
-    /// `AGENTS.md` §5.1, §16.2) through the `users_db_read` syscall
+    /// Read the system user database (`/System/Security/Users`) through the `users_db_read` syscall
     /// (`abi-v1` number 19).
     ///
     /// The database carries every account's identity and salted password
     /// record, so reading it is privileged rather than ambient
-    /// (`AGENTS.md` §4 — no ambient authority; §5.3 — the on-disk record
+    /// (no ambient authority; — the on-disk record
     /// is itself permission-checked). Only the authentication principal
     /// (login) is granted it: login verifies offered credentials against
-    /// the delivered records and drops them immediately (`AGENTS.md` §4 —
-    /// secret hygiene). An ordinary app can neither enumerate accounts
-    /// nor see a password record (`AGENTS.md` §5.4 — capability checks
+    /// the delivered records and drops them immediately (secret hygiene). An ordinary app can neither enumerate accounts
+    /// nor see a password record (capability checks
     /// before state touches).
     pub const USERS_READ: Self = Self(21);
     /// Inject decoded keystroke input into a system text console
-    /// (`AGENTS.md` §20, `plans/PI.md` P11 — keyboard input for the video
+    /// (`plans/PI.md` P11 — keyboard input for the video
     /// console).
     ///
     /// The gate on the `console_input` syscall (`abi-v1` number 22): an
@@ -199,16 +192,16 @@ impl CapabilityId {
     /// target console's kernel-side input queue, which a
     /// [`SyscallNumber::STREAM_READ`](crate::SyscallNumber::STREAM_READ)
     /// of that console then drains. Feeding the system console's input is
-    /// privileged rather than ambient (`AGENTS.md` §4 — no ambient
+    /// privileged rather than ambient (no ambient
     /// authority): only the keyboard-input driver the device manager
     /// loaded for the discovered keyboard node is granted it, so an
     /// ordinary task cannot forge keystrokes into another session's login
-    /// (`AGENTS.md` §5.4 — capability checks before state touches). It is
+    /// (capability checks before state touches). It is
     /// the producer counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
     /// which gates the *consumer* (login) of the same console.
     pub const INPUT_INJECT: Self = Self(22);
     /// Acquire ownership of the display (the framebuffer seat) and, with
-    /// it, the keyboard input focus (`AGENTS.md` §10, §17.3; `plans/PI.md`
+    /// it, the keyboard input focus (`plans/PI.md`
     /// P11 — input follows the surface owner).
     ///
     /// The gate on the `display_acquire` / `display_release` syscalls
@@ -218,15 +211,14 @@ impl CapabilityId {
     /// foreground (decoded key events route to the desktop keyboard
     /// channel instead of the text console); releasing returns focus to
     /// the text console, so input follows the surface owner automatically
-    /// — the desktop analogue of "input follows the foreground tty"
-    /// (`AGENTS.md` §20). Owning the display is privileged rather than
-    /// ambient (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// — the desktop analogue of "input follows the foreground tty". Owning the display is privileged rather than
+    /// ambient (no ambient authority; — capability
     /// checks before state touches): only a session's window manager is
     /// granted it, so an ordinary task cannot seize the screen or steal
     /// keyboard focus from the active session.
     pub const DISPLAY: Self = Self(23);
     /// Read decoded keyboard events from the kernel keyboard channel
-    /// (`AGENTS.md` §10; `plans/PI.md` P11 — keyboard input for the
+    /// (`plans/PI.md` P11 — keyboard input for the
     /// desktop).
     ///
     /// The gate on the `keyboard_read` syscall (`abi-v1` number 25): the
@@ -236,8 +228,8 @@ impl CapabilityId {
     /// the desktop counterpart of [`CONSOLE_READ`](Self::CONSOLE_READ),
     /// which gates the *text* console's consumer (login): a keyboard
     /// stream is delivered only to whoever currently owns the surface, and
-    /// reading it is privileged rather than ambient (`AGENTS.md` §4; §5.4
-    /// — capability checks before state touches; §20 — bind to streams,
+    /// reading it is privileged rather than ambient (
+    /// — capability checks before state touches; — bind to streams,
     /// never to a device). An unattached channel denies rather than
     /// leaking, so a task without the capability — or one reading when the
     /// arbiter holds no desktop focus — sees nothing.
@@ -252,12 +244,12 @@ impl CapabilityId {
     /// `vcmailbox` service creates the endpoint with it as the required
     /// sender capability. The mailbox reconfigures hardware (framebuffer,
     /// clocks, PCIe firmware), so reaching it is privileged rather than
-    /// ambient (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
+    /// ambient (no ambient authority; — capability
     /// checks before state touches): an ordinary task cannot drive the
     /// firmware mailbox.
     pub const MAILBOX: Self = Self(25);
     /// Emit a structured diagnostic record to the system log through the
-    /// `log_emit` syscall (`abi-v1` number 36, `AGENTS.md` §19.4 / §20).
+    /// `log_emit` syscall (`abi-v1` number 36).
     ///
     /// The gate on the user-space logging path: a holder hands the kernel a
     /// bounded, validated [`crate::LogRecordRef`] which the kernel attributes
@@ -265,28 +257,25 @@ impl CapabilityId {
     /// serial UART on a debug build, the video console on release). This is
     /// **not** the hash-chained security audit log — that channel
     /// ([`AUDIT_WRITE`](Self::AUDIT_WRITE)) stays kernel-only, so a holder of
-    /// this capability can never write, forge, or truncate an audit entry
-    /// (`AGENTS.md` §19.4). Emitting to the system console is privileged
-    /// rather than ambient (`AGENTS.md` §4 — no ambient authority; §5.4 —
+    /// this capability can never write, forge, or truncate an audit entry. Emitting to the system console is privileged
+    /// rather than ambient (no ambient authority; —
     /// capability checks before state touches): only trusted system services
     /// (the device manager, login) are granted it, so an ordinary app cannot
     /// scribble diagnostics onto the captured serial line.
     pub const LOG_EMIT: Self = Self(26);
     /// Publish a discovered child device node into the live hardware tree
-    /// through the `hw_emit_node` syscall (`abi-v1` number 37, `AGENTS.md`
-    /// §18.1 / §18.3).
+    /// through the `hw_emit_node` syscall (`abi-v1` number 37).
     ///
     /// The gate on recursive, user-space hardware discovery: a user-space
     /// **bus** driver (a PCIe root complex, a USB host) enumerates the
     /// devices behind it and emits each as a child [`crate::HwNode`] so the
-    /// device manager autoloads the matching driver in turn (`AGENTS.md`
-    /// §18 — discovery is data-driven, never a compiled-in list). It confers
+    /// device manager autoloads the matching driver in turn (discovery is data-driven, never a compiled-in list). It confers
     /// **no** authority by itself: the kernel admits an emitted node only
     /// when every [`crate::hwtree::HwResource`] it requests is wholly
     /// contained within a device-resource grant the emitting driver already
     /// holds, so a bus driver can never mint a child more authority than it
-    /// was granted (`AGENTS.md` §4 — no ambient authority; §5.4 — capability
-    /// and bound checks before state touches; §18.3 — a driver receives only
+    /// was granted (no ambient authority; — capability
+    /// and bound checks before state touches; — a driver receives only
     /// its matched node's resources). Publishing into the global hardware
     /// inventory is privileged rather than ambient: only an autoloaded bus
     /// driver is granted it, never an ordinary task.
@@ -297,9 +286,8 @@ impl CapabilityId {
     ///
     /// This table is the **single source of truth** for both
     /// [`name`](Self::name) and [`from_name`](Self::from_name), so the two
-    /// can never disagree on the name↔id mapping (`AGENTS.md` §2.2). The
-    /// `CAP_*` names are the ones the charter uses throughout (`AGENTS.md`
-    /// §5.2) and are part of the frozen `abi-v1` contract: an existing
+    /// can never disagree on the name↔id mapping. The
+    /// `CAP_*` names are the ones the charter uses throughout and are part of the frozen `abi-v1` contract: an existing
     /// name may not be re-spelled or re-pointed, and a newly assigned
     /// identifier takes a new row.
     const NAMED: &'static [(Self, &'static str)] = &[
@@ -350,7 +338,7 @@ impl CapabilityId {
     ///
     /// The match is exact and case-sensitive; there is no abbreviation or
     /// alias, so a name either denotes exactly one frozen capability or
-    /// nothing at all (fail closed, `AGENTS.md` §2.1).
+    /// nothing at all (fail closed).
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         Self::NAMED
@@ -390,8 +378,7 @@ impl CapabilityId {
 /// bitmap) lives in `lib/caps`, which depends on this crate. ABI-level
 /// host seams — for example `VirtioHostFactory` in `lib/virtio` — must
 /// gate on a granted capability without naming `lib/caps`, because the reverse
-/// edge `lib/abi -> lib/caps` would invert the `lib/*` layering
-/// (`AGENTS.md` §17.4). They therefore accept `&dyn CapabilityQuery`;
+/// edge `lib/abi -> lib/caps` would invert the `lib/*` layering. They therefore accept `&dyn CapabilityQuery`;
 /// `lib/caps` implements this for its `CapabilitySet`.
 ///
 /// The trait is object-safe so a seam can hold a `&dyn CapabilityQuery`

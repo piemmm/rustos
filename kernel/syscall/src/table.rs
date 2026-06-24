@@ -2,11 +2,11 @@
 //!
 //! Every syscall entering the kernel — from any architecture port —
 //! lands in [`Dispatcher::dispatch`]. The dispatcher performs the
-//! five steps mandated by `AGENTS.md` §5.4 and forwards the call to
+//! five steps mandated by and forwards the call to
 //! the owning subsystem via the [`SyscallHandlers`] trait. The trait
 //! is implemented in `kernel/core`'s wiring layer so this crate stays
 //! decoupled from `kernel/ipc`, `kernel/sched`, and friends
-//! (`AGENTS.md` §2.3 — no bloat).
+//! (no bloat).
 
 use rustos_abi::{
     spec_for, AbiType, CapabilityId, Errno, IrqHandle, MapFlags, RandomFlags, SyscallNumber,
@@ -22,8 +22,7 @@ use crate::audit::{record, AuditEvent};
 /// SHA-256 fingerprint of [`rustos_abi::ENCODED_TABLE`].
 ///
 /// The value is **derived at build time** by this crate's `build.rs`
-/// from `rustos_abi::ENCODED_TABLE` — the single source of truth
-/// (`AGENTS.md` §9, §2.2) — and `include!`d here. There is no
+/// from `rustos_abi::ENCODED_TABLE` — the single source of truth — and `include!`d here. There is no
 /// hand-maintained literal to edit or to let drift out of sync with the
 /// table it fingerprints: changing the syscall table re-derives this
 /// value on the next build. The kernel still re-checks it via
@@ -69,8 +68,7 @@ pub struct RawArgs(pub [u64; SYSCALL_MAX_ARGS]);
 // tuple-struct constructor `RawArgs(arr)`. Locking the layout here
 // keeps that bridge sound under future field additions: any change
 // that breaks size, alignment, or representation will fail the build
-// at the call site rather than silently desync the ABI. `AGENTS.md`
-// §2.4 (no interface creep) — this is a compile-time invariant
+// at the call site rather than silently desync the ABI. (no interface creep) — this is a compile-time invariant
 // assertion, not a new public surface.
 const _RAW_ARGS_LAYOUT_MATCHES_ARRAY: () = {
     assert!(core::mem::size_of::<RawArgs>() == core::mem::size_of::<[u64; SYSCALL_MAX_ARGS]>());
@@ -165,8 +163,7 @@ pub trait SyscallHandlers {
     /// must present that handle. The implementation is responsible
     /// for refusing duplicate bindings, refusing lines outside the
     /// platform's allowable range, and recording the binding against
-    /// the calling task so the handle cannot be forged
-    /// (`AGENTS.md` §5.2, §5.4).
+    /// the calling task so the handle cannot be forged.
     fn irq_bind(&self, caller: &CallerContext<'_>, line: u32) -> SyscallResult;
     /// Block the calling task until `handle` fires, with timeout.
     ///
@@ -184,8 +181,7 @@ pub trait SyscallHandlers {
         timeout_ns: u64,
     ) -> SyscallResult;
     /// Fill the user buffer at `buf` with up to `len` cryptographically
-    /// secure random bytes drawn from the kernel output reserve
-    /// (`AGENTS.md` §22), returning the number of bytes written.
+    /// secure random bytes drawn from the kernel output reserve, returning the number of bytes written.
     ///
     /// The dispatcher has already validated that `buf` is non-null, that
     /// `len` fits in `usize`, and that `flags` carries no reserved bit.
@@ -203,22 +199,21 @@ pub trait SyscallHandlers {
     ) -> SyscallResult;
     /// Write the `len` bytes at user pointer `buf` to the calling
     /// process's standard stream `fd`, returning the number of bytes
-    /// written (`AGENTS.md` §20).
+    /// written.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::CONSOLE_WRITE`], that `buf` is non-null, that `fd`
     /// fits in `u32`, and that `len` fits in `usize`. The implementation
     /// resolves `fd` against the caller's per-process descriptor table
     /// (`rustos_abi::DescriptorTable`): an `fd` that is not a writable
-    /// inherited stream fails closed (`AGENTS.md` §5.4 / §20 — the
+    /// inherited stream fails closed (the
     /// descriptor, not an ambient device, is the authority). It then
-    /// copies the buffer through the validated `copy_from_user` boundary
-    /// (`AGENTS.md` §5.4) and emits it to that descriptor's kernel stream
+    /// copies the buffer through the validated `copy_from_user` boundary and emits it to that descriptor's kernel stream
     /// backing — in the bootstrap session the discovered console (the
     /// detected framebuffer when present, else the first discovered UART,
     /// `plans/PI.md` P6). A build with no backing wired must fail closed
     /// with [`Errno::NotImplemented`] rather than silently discarding the
-    /// bytes (`AGENTS.md` §2.9).
+    /// bytes.
     fn stream_write(
         &self,
         caller: &CallerContext<'_>,
@@ -232,13 +227,12 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::PROC_SPAWN`], that `path` is non-null, and that
     /// `path_len` fits in `usize`. The implementation copies the path in
-    /// through the validated `copy_from_user` boundary (`AGENTS.md`
-    /// §5.4), looks it up in the kernel's embedded-program registry,
-    /// builds a fresh hardware-isolated address space for it (§4),
+    /// through the validated `copy_from_user` boundary, looks it up in the kernel's embedded-program registry,
+    /// builds a fresh hardware-isolated address space for it,
     /// registers it as a runnable process, and returns its PID; the
     /// caller keeps running (`plans/SPAWN.md` SP3 — a true concurrent
     /// spawn, not an `exec`-style hand-off). `console` selects the
-    /// child's standard-stream attachment (`AGENTS.md` §20):
+    /// child's standard-stream attachment:
     /// [`rustos_abi::CONSOLE_INHERIT`] attaches the child to the
     /// caller's own descriptor table, any other value names an
     /// installed console index and the implementation must fail closed
@@ -246,7 +240,7 @@ pub trait SyscallHandlers {
     /// build with no spawn service wired must fail closed with
     /// [`Errno::NotImplemented`], and a path naming no registered
     /// program with [`Errno::NotFound`], rather than silently doing
-    /// nothing (`AGENTS.md` §2.9).
+    /// nothing.
     fn spawn(
         &self,
         caller: &CallerContext<'_>,
@@ -256,23 +250,21 @@ pub trait SyscallHandlers {
     ) -> SyscallResult;
     /// Read up to `len` bytes from the calling process's standard stream
     /// `fd` into the user buffer at `buf`, returning the number of bytes
-    /// read (`AGENTS.md` §20).
+    /// read.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::CONSOLE_READ`], that `buf` is non-null, that `fd`
     /// fits in `u32`, and that `len` fits in `usize`. The implementation
     /// resolves `fd` against the caller's per-process descriptor table
     /// (`rustos_abi::DescriptorTable`): an `fd` that is not a readable
-    /// inherited stream fails closed (`AGENTS.md` §5.4 / §20). It then
+    /// inherited stream fails closed. It then
     /// reads from that descriptor's kernel stream backing — in the
     /// bootstrap session the first discovered keyboard/UART input source
     /// (`plans/PI.md` P6) — into a bounded kernel staging buffer and
-    /// copies it out through the validated `copy_to_user` boundary
-    /// (`AGENTS.md` §5.4). A short read (fewer bytes than `len`, possibly
+    /// copies it out through the validated `copy_to_user` boundary. A short read (fewer bytes than `len`, possibly
     /// zero when no input is pending) is valid, so the caller loops. A
     /// build with no backing wired must fail closed with
-    /// [`Errno::NotImplemented`] rather than fabricating input
-    /// (`AGENTS.md` §2.9).
+    /// [`Errno::NotImplemented`] rather than fabricating input.
     fn stream_read(
         &self,
         caller: &CallerContext<'_>,
@@ -287,11 +279,10 @@ pub trait SyscallHandlers {
     /// The dispatcher has already validated that `len` fits in `usize`,
     /// that `flags` carries no reserved bit, and that `addr_hint` is a
     /// well-formed `u64`. The implementation maps the region only into the
-    /// caller's **own** hardware-isolated address space (`AGENTS.md` §4 —
-    /// no global user heap, no cross-process mapping), zeroes it before it
-    /// is visible, and never makes it executable (`AGENTS.md` §19.2 — W^X).
+    /// caller's **own** hardware-isolated address space (no global user heap, no cross-process mapping), zeroes it before it
+    /// is visible, and never makes it executable (W^X).
     /// A frame- or page-table-allocation failure must return
-    /// [`Errno::OutOfMemory`] rather than panicking (`AGENTS.md` §4 / §2.9);
+    /// [`Errno::OutOfMemory`] rather than panicking;
     /// a build with no memory service wired must fail closed with
     /// [`Errno::NotImplemented`]. A zero `len` is rejected with
     /// [`Errno::LengthOutOfRange`].
@@ -308,9 +299,8 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already validated that `base` is a well-formed
     /// `u64` and that `len` fits in `usize`. The implementation zeroes the
-    /// frames it reclaims (`AGENTS.md` §4 — secret hygiene) and fails closed
-    /// when `(base, len)` does not name a region the caller mapped
-    /// (`AGENTS.md` §5.4). A build with no memory service wired must fail
+    /// frames it reclaims (secret hygiene) and fails closed
+    /// when `(base, len)` does not name a region the caller mapped. A build with no memory service wired must fail
     /// closed with [`Errno::NotImplemented`]; a zero `len` is rejected with
     /// [`Errno::LengthOutOfRange`]. Returns `Ok(0)` on success.
     fn mem_unmap(&self, caller: &CallerContext<'_>, base: u64, len: usize) -> SyscallResult;
@@ -322,27 +312,25 @@ pub trait SyscallHandlers {
     /// `i32` and that `status` is a non-null `UserPtr`. `pid` is either a
     /// specific child's PID or [`rustos_abi::WAIT_ANY`] (wait for any
     /// child). The implementation validates the parent/child relationship —
-    /// a process may only reap its **own** children (`AGENTS.md` §4 / §5.4)
+    /// a process may only reap its **own** children
     /// — blocks the caller until a child is reapable, and copies the exit
     /// code out through the validated `copy_to_user` boundary. A `pid` that
     /// is not a child of the caller must fail closed with
     /// [`Errno::NotFound`]; a build with no process-wait service wired must
     /// fail closed with [`Errno::NotImplemented`] rather than fabricating a
-    /// reaped child (`AGENTS.md` §2.9).
+    /// reaped child.
     fn wait(&self, caller: &CallerContext<'_>, pid: i32, status: u64) -> SyscallResult;
 
     /// Read the calling task's effective limit for resource `kind`, writing
-    /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer
-    /// (`AGENTS.md` §24.3).
+    /// the encoded [`rustos_abi::ResourceLimit`] to the user `out` pointer.
     ///
     /// The dispatcher has already validated that `kind` fits in a `u32`
     /// (upper bits zero) and that `out` is a non-null `UserPtr`. The
     /// implementation validates `kind` against [`rustos_abi::LimitKind`] and
-    /// fails closed on an unassigned value (`AGENTS.md` §5.4 — validate every
+    /// fails closed on an unassigned value (validate every
     /// input). Returns `Ok(0)` on success.
     ///
-    /// The default implementation fails closed with [`Errno::NotImplemented`]
-    /// (`AGENTS.md` §2.9): a kernel build with no resource-limit service
+    /// The default implementation fails closed with [`Errno::NotImplemented`]: a kernel build with no resource-limit service
     /// wired never fabricates a limit. The enforcement is installed in
     /// `kernel/core`.
     fn rlimit_get(&self, _caller: &CallerContext<'_>, _kind: u32, _out: u64) -> SyscallResult {
@@ -350,8 +338,7 @@ pub trait SyscallHandlers {
     }
 
     /// Install the calling task's limit for resource `kind` from the encoded
-    /// [`rustos_abi::ResourceLimit`] at the user `value` pointer (`AGENTS.md`
-    /// §24.3).
+    /// [`rustos_abi::ResourceLimit`] at the user `value` pointer.
     ///
     /// The dispatcher has already validated that `kind` fits in a `u32` and
     /// that `value` is a non-null `UserPtr`. The implementation copies the
@@ -359,39 +346,37 @@ pub trait SyscallHandlers {
     /// `kind` and the soft/hard pair, and — when the request would *raise* a
     /// hard bound above the inherited ceiling — refuses with
     /// [`Errno::PermissionDenied`] unless the caller holds
-    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`] (§24.3). Returns `Ok(0)` on
+    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`]. Returns `Ok(0)` on
     /// success.
     ///
-    /// The default implementation fails closed with [`Errno::NotImplemented`]
-    /// (`AGENTS.md` §2.9); the enforcement is installed in `kernel/core`.
+    /// The default implementation fails closed with [`Errno::NotImplemented`]; the enforcement is installed in `kernel/core`.
     fn rlimit_set(&self, _caller: &CallerContext<'_>, _kind: u32, _value: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
     /// Copy the system user database (`/System/Security/Users`) the kernel
-    /// loaded at boot out to the user buffer at `buf` (`AGENTS.md` §5.1,
+    /// loaded at boot out to the user buffer at `buf` (
     /// `plans/PI.md` P11).
     ///
     /// The dispatcher has already checked
     /// [`rustos_abi::CapabilityId::USERS_READ`] and that `buf` is a
     /// non-null `UserPtr`. The implementation bounds `len`, copies the
     /// database's exact `users-v1` text through the validated
-    /// `copy_to_user` boundary (`AGENTS.md` §5.4), and returns the byte
+    /// `copy_to_user` boundary, and returns the byte
     /// count. A buffer smaller than the database must fail closed with
     /// [`Errno::BufferTooSmall`] — a credential database is never
-    /// truncated (`AGENTS.md` §2.9); a kernel holding no database must
+    /// truncated; a kernel holding no database must
     /// fail closed with [`Errno::NotFound`].
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// [`Errno::NotImplemented`]: a kernel build with
     /// no users-database service wired never fabricates accounts. The
     /// service is installed in `kernel/core`.
     fn users_db_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
-    /// Report how many system text consoles are installed (`AGENTS.md`
-    /// §20, `plans/PI.md` P11).
+    /// Report how many system text consoles are installed (`plans/PI.md` P11).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::CONSOLE_WRITE`]. The implementation returns the
@@ -400,7 +385,7 @@ pub trait SyscallHandlers {
     /// uses it to start one login session per discovered console.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// [`Errno::NotImplemented`]: a kernel build with
     /// no console list wired never fabricates a console topology. The
     /// real count is installed in `kernel/core`.
     fn console_count(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -408,7 +393,7 @@ pub trait SyscallHandlers {
     }
 
     /// Set whether one of the calling process's inherited input streams
-    /// echoes the bytes it reads back to its console (`AGENTS.md` §20,
+    /// echoes the bytes it reads back to its console (
     /// `plans/PI.md` P11 — terminal local echo).
     ///
     /// The dispatcher has already checked the caller holds
@@ -416,11 +401,11 @@ pub trait SyscallHandlers {
     /// stream and `enabled` is the ABI's `0`-disables/non-zero-enables
     /// flag. The implementation toggles the resolved console's echo flag;
     /// login disables echo around a password read so the secret is never
-    /// rendered, then restores it (`AGENTS.md` §5.4 — never echo a
+    /// rendered, then restores it (never echo a
     /// credential).
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with
+    /// [`Errno::NotImplemented`]: a kernel build with
     /// no console list wired has no echo to toggle. The real handler is
     /// installed in `kernel/core`.
     fn stream_echo(&self, _caller: &CallerContext<'_>, _fd: u32, _enabled: u32) -> SyscallResult {
@@ -428,24 +413,24 @@ pub trait SyscallHandlers {
     }
 
     /// Inject one decoded keyboard *key edge* into the kernel input-focus
-    /// arbiter (`AGENTS.md` §20, `plans/PI.md` P11 — input follows the
+    /// arbiter (`plans/PI.md` P11 — input follows the
     /// surface owner).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::INPUT_INJECT`] and that `buf` is a non-null
     /// `UserPtr`. The implementation copies up to `len` bytes in through
-    /// the validated `copy_from_user` boundary (`AGENTS.md` §5.4), decodes
+    /// the validated `copy_from_user` boundary, decodes
     /// one [`rustos_abi::input::KeyInput`] record fail-closed, and hands it
     /// to the arbiter, which decides the encoding and destination by who
     /// holds focus: with the text console foreground it encodes the press
     /// to console (tty) bytes and enqueues them on the focused console's
     /// input queue; with the desktop foreground it routes the record to the
     /// kernel keyboard channel. The driver no longer chooses the encoding
-    /// or destination (`AGENTS.md` §17.4). Returns the number of bytes
+    /// or destination. Returns the number of bytes
     /// consumed from the record.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a kernel build with no
+    /// [`Errno::NotImplemented`]: a kernel build with no
     /// input-focus arbiter wired has nowhere to route the edge. The real
     /// handler is installed in `kernel/core`.
     fn key_inject(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
@@ -453,7 +438,7 @@ pub trait SyscallHandlers {
     }
 
     /// Acquire ownership of the display and claim keyboard input focus
-    /// (`AGENTS.md` §10, §17.3; `plans/PI.md` P11 — input follows the
+    /// (`plans/PI.md` P11 — input follows the
     /// surface owner).
     ///
     /// The dispatcher has already checked the caller holds
@@ -463,7 +448,7 @@ pub trait SyscallHandlers {
     /// as records the display owner drains with [`Self::keyboard_read`].
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// [`Errno::NotImplemented`]: a build with no
     /// arbiter wired owns no display to acquire. The real handler is
     /// installed in `kernel/core`.
     fn display_acquire(&self, _caller: &CallerContext<'_>) -> SyscallResult {
@@ -471,7 +456,7 @@ pub trait SyscallHandlers {
     }
 
     /// Release the display and return keyboard input focus to the text
-    /// console (`AGENTS.md` §10, §17.3; `plans/PI.md` P11).
+    /// console (`plans/PI.md` P11).
     ///
     /// The inverse of [`Self::display_acquire`]; the dispatcher has already
     /// checked the caller holds [`CapabilityId::DISPLAY`]. The default
@@ -481,7 +466,7 @@ pub trait SyscallHandlers {
     }
 
     /// Read one decoded keyboard event from the kernel keyboard channel
-    /// (`AGENTS.md` §10; `plans/PI.md` P11 — keyboard input for the
+    /// (`plans/PI.md` P11 — keyboard input for the
     /// desktop).
     ///
     /// The dispatcher has already checked the caller holds
@@ -489,11 +474,11 @@ pub trait SyscallHandlers {
     /// The implementation drains one [`rustos_abi::input::KeyInput`] record
     /// the arbiter routed to the channel into `buf` (at least
     /// [`rustos_abi::input::KeyInput::WIRE_LEN`] bytes), copies it out
-    /// through the validated boundary (`AGENTS.md` §5.4), and returns the
+    /// through the validated boundary, and returns the
     /// number of bytes written — or `0` when the channel is drained.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// [`Errno::NotImplemented`]: a build with no
     /// arbiter wired has no channel to drain. The real handler is installed
     /// in `kernel/core`.
     fn keyboard_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
@@ -501,7 +486,7 @@ pub trait SyscallHandlers {
     }
 
     /// Map a granted device MMIO register window into the calling driver's
-    /// own address space (`AGENTS.md` §4 / §18.3; `plans/PI.md` P10 chunk
+    /// own address space (`plans/PI.md` P10 chunk
     /// 5d-0).
     ///
     /// The dispatcher has already checked the caller holds
@@ -510,17 +495,16 @@ pub trait SyscallHandlers {
     /// it binds, and `[offset, offset + len)` names the sub-region *within*
     /// that grant to map; the implementation resolves the handle **against
     /// the calling task** (rejecting forgery exactly as `irq_wait` re-checks
-    /// its binding, `AGENTS.md` §5.4), confirms the grant names a memory
+    /// its binding), confirms the grant names a memory
     /// window and the sub-region lies wholly inside it, maps only that
     /// sub-region — caching disabled — into the caller's own address space,
     /// and returns its base user virtual address. A driver therefore never
-    /// reaches physical memory the kernel did not grant it (§4 — no ambient
+    /// reaches physical memory the kernel did not grant it (no ambient
     /// authority), and a driver granted a large outbound bus aperture maps
-    /// just the single BAR it enumerated rather than the whole window
-    /// (`AGENTS.md` §24.1).
+    /// just the single BAR it enumerated rather than the whole window.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with neither a
+    /// [`Errno::NotImplemented`]: a build with neither a
     /// grant table nor a map facility wired has nothing to map. The real
     /// handler is installed in `kernel/core`.
     fn mmio_map(
@@ -534,25 +518,25 @@ pub trait SyscallHandlers {
     }
 
     /// Allocate a DMA-coherent buffer for the calling driver, bounded by a
-    /// granted device DMA constraint (`AGENTS.md` §4 / §18.3; `plans/PI.md`
+    /// granted device DMA constraint (`plans/PI.md`
     /// P10 chunk 5d-0).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::MEM_DMA`]. `handle` is an unforgeable, kernel-issued
     /// device-resource grant the driver received for the hardware-tree node
     /// it binds; the implementation resolves it **against the calling task**
-    /// (rejecting forgery exactly as [`Self::mmio_map`], `AGENTS.md` §5.4),
+    /// (rejecting forgery exactly as [`Self::mmio_map`]),
     /// confirms the grant names a DMA constraint, carves a physically
     /// contiguous, zeroed, coherent region of `len` bytes whose physical
-    /// extent lies within the grant's addressing limit (`AGENTS.md` §4),
+    /// extent lies within the grant's addressing limit,
     /// maps it `RW`, non-executable, into the caller's own address space,
     /// writes the buffer's device-visible base to the user pointer
     /// `device_out`, and returns its base user virtual address. A driver
-    /// therefore reaches no memory the kernel did not grant it (§4 — no
+    /// therefore reaches no memory the kernel did not grant it (no
     /// ambient authority).
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with neither a
+    /// [`Errno::NotImplemented`]: a build with neither a
     /// grant table nor a DMA facility wired has nothing to allocate. The
     /// real handler is installed in `kernel/core`.
     fn dma_alloc(
@@ -567,21 +551,20 @@ pub trait SyscallHandlers {
 
     /// Enumerate the device-resource grants the kernel minted for the
     /// calling driver task, delivering its unforgeable handles
-    /// (`AGENTS.md` §4 / §18.3 / §20; `plans/PI.md` P10 chunk 5d-2).
+    /// (`plans/PI.md` P10 chunk 5d-2).
     ///
     /// The dispatcher has already checked `buf` is a non-null `UserPtr`;
     /// the call needs no capability (a task reads only its *own* grants,
-    /// which confers no authority — the §16.6 / §24.3 own-process-observer
+    /// which confers no authority — the own-process-observer
     /// baseline). The implementation serialises the calling task's grant
     /// set as consecutive [`rustos_abi::hwtree::GrantedResource`] records,
-    /// copies them out through the validated boundary (`AGENTS.md` §5.4),
+    /// copies them out through the validated boundary,
     /// and returns the total byte count — `0` for a task with no grants. A
     /// buffer too small for the whole set fails closed with
-    /// [`Errno::BufferTooSmall`] rather than delivering a partial list
-    /// (`AGENTS.md` §2.9).
+    /// [`Errno::BufferTooSmall`] rather than delivering a partial list.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no grant
+    /// [`Errno::NotImplemented`]: a build with no grant
     /// table wired has nothing to enumerate. The real handler is installed
     /// in `kernel/core`.
     fn resource_grants(
@@ -594,21 +577,20 @@ pub trait SyscallHandlers {
     }
 
     /// Copy the discovered hardware tree out to the calling task — the
-    /// read-only System Information API hardware view (`AGENTS.md` §16.6 /
-    /// §18.1 / §18.4).
+    /// read-only System Information API hardware view.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::SYSINFO_HW`] and that `buf` is a non-null `UserPtr`.
     /// The implementation serialises the store's current snapshot as a
     /// [`rustos_abi::hwtree::HwTreeHeader`] (generation + node count)
     /// followed by that many [`rustos_abi::hwtree::HwNode`] records, copies
-    /// them out through the validated boundary (`AGENTS.md` §5.4), and
+    /// them out through the validated boundary, and
     /// returns the total byte count. A buffer too small for the whole
     /// snapshot fails closed with [`Errno::BufferTooSmall`] rather than
-    /// truncating the inventory (`AGENTS.md` §2.9).
+    /// truncating the inventory.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// [`Errno::NotImplemented`]: a build with no
     /// hardware-tree source wired has no tree to read. The real handler is
     /// installed in `kernel/core`.
     fn hw_tree_read(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
@@ -616,7 +598,7 @@ pub trait SyscallHandlers {
     }
 
     /// Block the calling task until the hardware tree changes past
-    /// `last_generation` (`AGENTS.md` §18.4 — reactive re-match and
+    /// `last_generation` (reactive re-match and
     /// hotplug).
     ///
     /// The dispatcher has already checked the caller holds
@@ -625,10 +607,10 @@ pub trait SyscallHandlers {
     /// seeded, appended, or removed — and [`Errno::TimedOut`] if
     /// `timeout_ns` elapses first, blocking cooperatively in between (the
     /// same shape as [`Self::irq_wait`] / [`Self::wait`]), never
-    /// busy-spinning (`AGENTS.md` §2.1).
+    /// busy-spinning.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// [`Errno::NotImplemented`]: a build with no
     /// hardware-tree source wired has nothing to wait on. The real handler
     /// is installed in `kernel/core`.
     fn hw_tree_wait(
@@ -641,7 +623,7 @@ pub trait SyscallHandlers {
     }
 
     /// Block the calling task until the system user database leaves its
-    /// pending (still-being-unlocked) state (`AGENTS.md` §5.1, `plans/PI.md`
+    /// pending (still-being-unlocked) state (`plans/PI.md`
     /// P11 — the reactive companion to [`Self::users_db_read`]).
     ///
     /// The dispatcher has already checked the caller holds
@@ -649,14 +631,14 @@ pub trait SyscallHandlers {
     /// the database is no longer pending — the unlock installed one, or gave
     /// up with none — and [`Errno::TimedOut`] if `timeout_ns` elapses first,
     /// blocking cooperatively in between (the same shape as
-    /// [`Self::hw_tree_wait`]), never busy-spinning (`AGENTS.md` §2.1). It is
+    /// [`Self::hw_tree_wait`]), never busy-spinning. It is
     /// what replaces `login` re-reading [`Self::users_db_read`] in a yield
     /// loop, which audited one ERROR per poll.
     ///
     /// The default implementation returns `Ok(0)` immediately: a build with
     /// no users-database service wired is never pending, so the caller's
     /// subsequent [`Self::users_db_read`] fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9). The real handler is
+    /// [`Errno::NotImplemented`]. The real handler is
     /// installed in `kernel/core`.
     fn users_db_wait(&self, _caller: &CallerContext<'_>, _timeout_ns: u64) -> SyscallResult {
         Ok(0)
@@ -664,23 +646,22 @@ pub trait SyscallHandlers {
 
     /// Make a synchronous capability-checked call to a kernel-owned IPC call
     /// endpoint: post the request, block until the reply arrives, and copy it
-    /// out (`AGENTS.md` §5.2 / §5.4; Design D D2b).
+    /// out (Design D D2b).
     ///
     /// The dispatcher has already checked `request` and `reply` are non-null
     /// `UserPtr`s. The implementation resolves `endpoint` against the kernel
     /// call-endpoint registry, enforces the endpoint's required send
     /// capability against the **caller's** effective set before posting
-    /// (`AGENTS.md` §5.2 — no ambient authority), copies the request in and
+    /// (no ambient authority), copies the request in and
     /// the reply out through the validated boundary, and blocks the caller
     /// cooperatively until the reply arrives (the same park shape as
-    /// [`Self::hw_tree_wait`] / [`Self::wait`]), never busy-spinning
-    /// (`AGENTS.md` §2.1). It returns the number of reply bytes written, or
+    /// [`Self::hw_tree_wait`] / [`Self::wait`]), never busy-spinning. It returns the number of reply bytes written, or
     /// fails closed: [`Errno::BufferTooSmall`] if the reply exceeds
     /// `reply_cap`, [`Errno::PermissionDenied`] without the send capability,
     /// [`Errno::NotFound`] for an unknown or destroyed endpoint.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9): a build with no
+    /// [`Errno::NotImplemented`]: a build with no
     /// call-endpoint registry wired has nothing to call. The real handler is
     /// installed in `kernel/core`.
     fn ipc_call(
@@ -696,7 +677,7 @@ pub trait SyscallHandlers {
     }
 
     /// Create and register a kernel-owned synchronous call endpoint the
-    /// calling task then serves (`AGENTS.md` §5.2 / §5.4; Design D D3 — the
+    /// calling task then serves (Design D D3 — the
     /// server half of [`Self::ipc_call`]).
     ///
     /// The dispatcher has already checked `send_caps` and `recv_caps` are
@@ -704,17 +685,17 @@ pub trait SyscallHandlers {
     /// wire images in through the validated
     /// boundary, builds the endpoint with the caller as creator (the
     /// bind-time `CAP_IPC_BIND_PRIVILEGED` check for a restricted sender runs
-    /// inside the endpoint constructor, `AGENTS.md` §5.2), and binds it under
+    /// inside the endpoint constructor), and binds it under
     /// `endpoint` — failing closed with [`Errno::AlreadyExists`] if the id is
     /// live. Returns `Ok(0)` on success.
     ///
     /// The default implementation fails closed with
-    /// [`Errno::NotImplemented`] (`AGENTS.md` §2.9); the real handler is
+    /// [`Errno::NotImplemented`]; the real handler is
     /// installed in `kernel/core`.
     // Six `abi-v1` arguments plus the kernel-trusted caller context: the
     // shape is the syscall's own (endpoint id, two `CapabilitySet` pointers,
     // and the three payload/capacity bounds), not an accidental parameter
-    // pile, so the count is intrinsic (`AGENTS.md` §15.10 — justified allow).
+    // pile, so the count is intrinsic (justified allow).
     #[allow(clippy::too_many_arguments)]
     fn call_create(
         &self,
@@ -730,17 +711,16 @@ pub trait SyscallHandlers {
     }
 
     /// Receive the next request posted to a call endpoint the calling task
-    /// owns, blocking until one arrives (`AGENTS.md` §5.4; Design D D3 — the
+    /// owns, blocking until one arrives (Design D D3 — the
     /// server-side receive half).
     ///
     /// The dispatcher has already checked `buf` and `ticket_out` are non-null
     /// `UserPtr`s. The implementation resolves `endpoint`, enforces the
     /// endpoint's required **receive** capability against the caller before
-    /// touching state (`AGENTS.md` §5.4), and either copies one request out
+    /// touching state, and either copies one request out
     /// (returning its byte length and writing its ticket to `ticket_out`) or
-    /// blocks cooperatively until one is posted (never busy-spinning,
-    /// `AGENTS.md` §2.1). A request larger than `buf_cap` fails closed with
-    /// [`Errno::BufferTooSmall`] and is left queued (`AGENTS.md` §2.9).
+    /// blocks cooperatively until one is posted (never busy-spinning). A request larger than `buf_cap` fails closed with
+    /// [`Errno::BufferTooSmall`] and is left queued.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -757,7 +737,7 @@ pub trait SyscallHandlers {
     }
 
     /// Answer one received call on an endpoint the calling task owns, waking
-    /// the blocked caller (`AGENTS.md` §5.4; Design D D3 — the server-side
+    /// the blocked caller (Design D D3 — the server-side
     /// reply half).
     ///
     /// The dispatcher has already checked `reply` is a non-null `UserPtr`.
@@ -766,7 +746,7 @@ pub trait SyscallHandlers {
     /// in through the validated boundary, and completes `ticket` (waking the
     /// caller blocked in [`Self::ipc_call`]). A reply larger than the
     /// endpoint's `max_reply`, an unknown or already-answered ticket, or an
-    /// unknown endpoint each fail closed (`AGENTS.md` §2.9). Returns
+    /// unknown endpoint each fail closed. Returns
     /// `Ok(0)` on success.
     ///
     /// The default implementation fails closed with
@@ -784,18 +764,17 @@ pub trait SyscallHandlers {
     }
 
     /// Emit a structured diagnostic record to the kernel's diagnostic log
-    /// sink (`AGENTS.md` §19.4 / §20).
+    /// sink.
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::LOG_EMIT`] and that `record` is a non-null `UserPtr`.
     /// The implementation copies in at most [`rustos_abi::LOG_RECORD_MAX`]
     /// bytes through the validated boundary, fully validates the record with
-    /// [`rustos_abi::decode_log_record`] (`AGENTS.md` §5.4), and emits it
+    /// [`rustos_abi::decode_log_record`], and emits it
     /// through the kernel's **diagnostic** `log_sink` — never the
-    /// hash-chained security audit log (`AGENTS.md` §19.4) — attributing it
+    /// hash-chained security audit log — attributing it
     /// to the calling task (the caller cannot forge that attribution).
-    /// Returns `Ok(0)` once accepted; a malformed record fails closed
-    /// (`AGENTS.md` §2.9).
+    /// Returns `Ok(0)` once accepted; a malformed record fails closed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -805,21 +784,20 @@ pub trait SyscallHandlers {
     }
 
     /// Publish a discovered child device node into the live hardware tree
-    /// (`AGENTS.md` §18.1 / §18.3 — recursive, user-space hardware discovery).
+    /// (recursive, user-space hardware discovery).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::HW_EMIT`] and that `node` is a non-null `UserPtr`. The
     /// implementation copies in at most [`rustos_abi::hwtree::HwNode::WIRE_LEN`]
     /// bytes through the validated boundary, fully decodes the node with the
-    /// fail-closed [`rustos_abi::HwNode::from_bytes`] parser (`AGENTS.md`
-    /// §5.4), and admits it **only** when every
+    /// fail-closed [`rustos_abi::HwNode::from_bytes`] parser, and admits it **only** when every
     /// [`rustos_abi::hwtree::HwResource`] it requests is wholly contained
     /// within a device-resource grant the calling task already holds — so an
     /// emitted child can never carry more authority than its emitter
-    /// (`AGENTS.md` §4 — no ambient authority; §18.3). On success it appends
+    /// (no ambient authority;). On success it appends
     /// the node to the live hardware tree, bumping the generation that wakes
     /// the device manager's reactive autoload. A malformed node, an unknown
-    /// parent, or an out-of-grant resource fails closed (`AGENTS.md` §2.9).
+    /// parent, or an out-of-grant resource fails closed.
     /// Returns `Ok(0)` once published.
     ///
     /// The default implementation fails closed with
@@ -830,7 +808,7 @@ pub trait SyscallHandlers {
     }
 
     /// Remove a previously-published child device node — and its subtree —
-    /// from the live hardware tree (`AGENTS.md` §18.4 — hotplug removal).
+    /// from the live hardware tree (hotplug removal).
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::HW_EMIT`] (the same privilege as
@@ -838,12 +816,12 @@ pub trait SyscallHandlers {
     /// *own* matched node and removes `node_id` **only** when its parent is
     /// that node — a child the caller itself published — together with every
     /// transitive descendant, so a driver can never retire a node it does not
-    /// own and no stale descendant outlives its parent (`AGENTS.md` §4 — no
+    /// own and no stale descendant outlives its parent (no
     /// ambient authority). On success it bumps the hardware-tree generation,
     /// waking the device manager's reactive watch so it unloads the driver
     /// bound to the vanished node — the symmetric counterpart of
     /// [`Self::hw_emit_node`]. An unknown id, or a node the caller does not
-    /// own, fails closed (`AGENTS.md` §2.9). Returns `Ok(0)` once removed.
+    /// own, fails closed. Returns `Ok(0)` once removed.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -875,7 +853,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         Self { handlers, audit }
     }
 
-    /// Run the full §5.4 sequence for one syscall and return its
+    /// Run the full sequence for one syscall and return its
     /// result.
     ///
     /// # Errors
@@ -906,7 +884,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             return Err(Errno::NotFound);
         };
 
-        // §5.4 step 2: capability check.
+        // step 2: capability check.
         if let Some(required) = spec.required_capability {
             if !caller.caps.has(required) {
                 self.audit_denied(caller, spec);
@@ -914,7 +892,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
         }
 
-        // §5.4 step 3: argument validation. Trailing slots must be
+        // step 3: argument validation. Trailing slots must be
         // zero — a buggy trampoline that leaks register state past
         // `arg_count` is a security defect, not "harmless".
         for slot in &args.0[spec.arg_count as usize..] {
@@ -930,10 +908,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
         }
 
-        // §5.4 step 4: dispatch.
+        // step 4: dispatch.
         let outcome = self.invoke(caller, spec, &args);
 
-        // §5.4 step 5: audit emission for security-relevant calls.
+        // step 5: audit emission for security-relevant calls.
         match &outcome {
             Ok(_) if spec.audit => self.audit_invoked(caller, spec),
             // `WouldBlock` is the `abi-v1` "nothing yet, retry" signal, not a
@@ -941,7 +919,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             // security decision was taken. Record it below the error level so
             // a caller that legitimately polls while pending (e.g. `login`
             // reading `users_db_read` while the encrypted root unlocks) cannot
-            // flood the log with errors (`AGENTS.md` §2.1 / §19.4).
+            // flood the log with errors.
             Err(Errno::WouldBlock) if spec.audit => self.audit_would_block(caller, spec),
             Err(_) if spec.audit => self.audit_rejected(caller, spec, outcome.as_ref().err()),
             _ => {}
@@ -954,7 +932,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
     // the frozen table gains. That is the intended shape — splitting it would
     // scatter the one-to-one number→handler mapping the ABI cross-check relies
     // on — so the `too_many_lines` heuristic does not apply here (the body is
-    // trivially uniform, not complex). `AGENTS.md` §15.10: justified allow.
+    // trivially uniform, not complex).: justified allow.
     #[allow(clippy::too_many_lines)]
     fn invoke(
         &self,
@@ -1073,10 +1051,9 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
             // handler resolves it against the calling task and the grant
-            // table (forgery + ownership are checked there, `AGENTS.md`
-            // §5.4). args[1] is the byte offset of the sub-region within the
+            // table (forgery + ownership are checked there). args[1] is the byte offset of the sub-region within the
             // granted window and args[2] its length; the handler confirms the
-            // sub-region lies wholly inside the grant (`AGENTS.md` §24.1).
+            // sub-region lies wholly inside the grant.
             SyscallNumber::MMIO_MAP => {
                 let len = decode_len(args.0[2])?;
                 self.handlers.mmio_map(caller, args.0[0], args.0[1], len)
@@ -1084,7 +1061,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::DMA_ALLOC => {
                 // `validate_arg` accepts args[0] as an opaque `Handle` u64
                 // (resolved against the calling task + grant table in the
-                // handler, `AGENTS.md` §5.4); args[1] is the byte length and
+                // handler); args[1] is the byte length and
                 // args[2] is the non-null `device_out` `UserPtr` the handler
                 // writes the device-visible base to.
                 let len = decode_len(args.0[1])?;
@@ -1092,13 +1069,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::RESOURCE_GRANTS => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
-                // is the buffer capacity (`AGENTS.md` §18.3 / §20).
+                // is the buffer capacity.
                 let len = decode_len(args.0[1])?;
                 self.handlers.resource_grants(caller, args.0[0], len)
             }
             SyscallNumber::HW_TREE_READ => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
-                // is the buffer capacity (`AGENTS.md` §16.6 / §18.4).
+                // is the buffer capacity.
                 let len = decode_len(args.0[1])?;
                 self.handlers.hw_tree_read(caller, args.0[0], len)
             }
@@ -1163,22 +1140,19 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::LOG_EMIT => {
                 // args[0] is the non-null record `UserPtr` (dispatcher-
-                // checked); args[1] is its byte length (`AGENTS.md` §19.4 /
-                // §20).
+                // checked); args[1] is its byte length.
                 let len = decode_len(args.0[1])?;
                 self.handlers.log_emit(caller, args.0[0], len)
             }
             SyscallNumber::HW_EMIT_NODE => {
                 // args[0] is the non-null encoded `HwNode` `UserPtr`
-                // (dispatcher-checked); args[1] is its byte length
-                // (`AGENTS.md` §18.1 / §18.3).
+                // (dispatcher-checked); args[1] is its byte length.
                 let len = decode_len(args.0[1])?;
                 self.handlers.hw_emit_node(caller, args.0[0], len)
             }
             SyscallNumber::HW_REMOVE_NODE => {
                 // args[0] is the `HwNode::id` to remove (a plain `u64`,
-                // resolved against the live tree by the handler, `AGENTS.md`
-                // §18.4).
+                // resolved against the live tree by the handler).
                 self.handlers.hw_remove_node(caller, args.0[0])
             }
             _ => Err(Errno::NotFound),
@@ -1373,7 +1347,7 @@ fn decode_len(raw: u64) -> Result<usize, Errno> {
 /// `validate_arg` has already rejected any value whose upper 32 bits are
 /// non-zero (the `AbiType::U32` rule), so the low-32 truncation is
 /// lossless; the mask makes that explicit and keeps the lint allow in one
-/// place rather than at every call site (`AGENTS.md` §2.2).
+/// place rather than at every call site.
 #[allow(clippy::cast_possible_truncation)]
 const fn decode_u32(raw: u64) -> u32 {
     (raw & 0xFFFF_FFFF) as u32
@@ -2008,7 +1982,7 @@ mod tests {
         // ERROR-level `SyscallHandlerRejected` (id 5004) a genuine refusal
         // gets — otherwise a caller that legitimately polls while pending
         // (e.g. `login` reading `users_db_read` while the encrypted root
-        // unlocks) floods the boot log with errors (`AGENTS.md` §2.1 / §19.4).
+        // unlocks) floods the boot log with errors.
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);
         let ctx = CallerContext {
@@ -2083,7 +2057,7 @@ mod tests {
     #[test]
     fn irq_bind_without_capability_is_refused_and_audited() {
         // Without `CAP_IRQ_BIND` the dispatcher must short-circuit on
-        // the capability check (AGENTS.md §5.4 step 2), refuse with
+        // the capability check (step 2), refuse with
         // PermissionDenied, never call the handler, and emit exactly
         // one denied audit record.
         let sink = RecordingSink::new();
@@ -2183,7 +2157,7 @@ mod tests {
 
     #[test]
     fn mem_map_decodes_len_flags_and_addr_hint_and_is_unaudited() {
-        // `mem_map` is ungated and unaudited (`AGENTS.md` §16.6). With a
+        // `mem_map` is ungated and unaudited. With a
         // well-typed `(len, flags, addr_hint)` tuple the dispatcher decodes
         // each argument, reaches the handler, and emits no audit record.
         let sink = RecordingSink::new();
@@ -2255,7 +2229,7 @@ mod tests {
     fn wait_decodes_pid_and_status_and_is_audited() {
         // `wait` is ungated (a process reaps its own children, no
         // capability) but audited — reaping a child is a process-lifecycle
-        // state change (`AGENTS.md` §5.4.4). With a well-typed
+        // state change. With a well-typed
         // `(pid, status)` tuple the dispatcher recovers the `i32` pid,
         // forwards the `status` pointer verbatim, reaches the handler, and
         // emits exactly one `SyscallInvoked` record on success.
@@ -2304,7 +2278,7 @@ mod tests {
         );
 
         // A null `status` pointer is rejected by the per-arg `UserPtr`
-        // validator before the handler is reached (`AGENTS.md` §5.4).
+        // validator before the handler is reached.
         let h2 = MockHandlers::default();
         let d2 = Dispatcher::new(&h2, &sink);
         let mut bad = RawArgs::ZERO;
@@ -2320,7 +2294,7 @@ mod tests {
     #[test]
     fn rlimit_get_decodes_kind_and_pointer_unaudited() {
         // `rlimit_get` reads the caller's own effective limit: ungated and
-        // not audited per call (`AGENTS.md` §24.3). With a well-typed
+        // not audited per call. With a well-typed
         // `(kind, out)` tuple the dispatcher narrows the `u32` kind, forwards
         // the `out` pointer, reaches the handler, and emits no audit record.
         let sink = RecordingSink::new();
@@ -2346,7 +2320,7 @@ mod tests {
     fn rlimit_set_decodes_kind_and_pointer_and_is_audited() {
         // `rlimit_set` is ungated at the dispatcher (lowering a bound needs
         // no capability; the `CAP_RLIMIT_RAISE` check is fine-grained in the
-        // handler) but IS audited — it changes enforced policy (§24.3).
+        // handler) but IS audited — it changes enforced policy.
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);
         let ctx = CallerContext {
@@ -2365,7 +2339,7 @@ mod tests {
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
 
         // A null pointer is rejected by the per-arg `UserPtr` validator
-        // before the handler is reached (`AGENTS.md` §5.4).
+        // before the handler is reached.
         let h2 = MockHandlers::default();
         let d2 = Dispatcher::new(&h2, &sink);
         let mut bad = RawArgs::ZERO;
@@ -2381,8 +2355,7 @@ mod tests {
     #[test]
     fn users_db_read_without_capability_is_refused_and_audited() {
         // The credential database is privileged: without `CAP_USERS_READ`
-        // the dispatcher refuses before the handler is reached (`AGENTS.md`
-        // §5.4 — capability check before state).
+        // the dispatcher refuses before the handler is reached (capability check before state).
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);
         let ctx = CallerContext {
@@ -2424,7 +2397,7 @@ mod tests {
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
 
         // A null `buf` pointer is rejected by the per-arg `UserPtr`
-        // validator before the handler is reached (`AGENTS.md` §5.4).
+        // validator before the handler is reached.
         let h2 = MockHandlers::default();
         let d2 = Dispatcher::new(&h2, &sink);
         let mut bad = RawArgs::ZERO;

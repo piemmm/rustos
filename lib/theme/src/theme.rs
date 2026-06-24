@@ -3,7 +3,7 @@
 //! A [`Theme`] bundles one [`Palette`], one set of [`Metrics`], one set of
 //! [`Fonts`], and one [`CursorSet`] under a stable [`ThemeId`]. The charter
 //! requires a default dark theme and a light theme switchable at runtime,
-//! and that "adding a theme is data, not new code" (`AGENTS.md` §10): a new
+//! and that "adding a theme is data, not new code": a new
 //! theme is just another [`Theme`] value registered with the
 //! [`ThemeRegistry`](crate::ThemeRegistry).
 

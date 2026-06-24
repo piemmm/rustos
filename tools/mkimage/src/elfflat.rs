@@ -8,8 +8,7 @@
 //! `.bss` is *not* emitted — the boot stub clears it — so the image stays as
 //! small as the file-backed content.
 //!
-//! Every header field that steers the layout is validated fail-closed
-//! (`AGENTS.md` §5.4): a kernel linked at the wrong address, an entry point
+//! Every header field that steers the layout is validated fail-closed: a kernel linked at the wrong address, an entry point
 //! that is not the image start, or an overlapping/oversized segment is a
 //! build defect the converter refuses rather than an image that faults on
 //! metal.
@@ -20,8 +19,7 @@ use crate::MkimageError;
 /// point it branches to (`docs/src/platform/aarch64.md`, "Boot protocol").
 pub const KERNEL_LOAD_ADDR: u64 = 0x8_0000;
 
-/// Upper bound on the emitted flat image, in bytes. A defence bound
-/// (`AGENTS.md` §24.4) against a malformed ELF demanding a huge zero-fill,
+/// Upper bound on the emitted flat image, in bytes. A defence bound against a malformed ELF demanding a huge zero-fill,
 /// not a kernel-size capacity: the kernel is a few MiB; 64 MiB is far
 /// beyond any honest layout.
 pub const MAX_FLAT_BYTES: u64 = 64 << 20;

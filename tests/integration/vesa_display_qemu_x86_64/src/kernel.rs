@@ -10,7 +10,7 @@
 //! 2. publishes a bootloader-captured VBE `ModeInfoBlock` describing that
 //!    surface as the boot hand-off;
 //! 3. loads the signed vesa display `.rxe` through
-//!    [`rustos_drvhost::Host`] (the §8 load gate) and drives it through
+//!    [`rustos_drvhost::Host`] (the load gate) and drives it through
 //!    `load -> use -> unload -> reload`, where "use" decodes the block
 //!    with `VesaFramebuffer::open`, maps the surface through the
 //!    capability-gated [`rustos_kernel_virtio::KernelMmioMapper`], and
@@ -42,8 +42,7 @@ use rustos_log::{Event, EventId, Sink};
 static mut HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`]. The pointer to `HEAP` outlives
-/// the binary, and the allocator is the only consumer (`AGENTS.md` §4 —
-/// deterministic OOM via `FreeListAllocator`).
+/// the binary, and the allocator is the only consumer (deterministic OOM via `FreeListAllocator`).
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
     unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };

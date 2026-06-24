@@ -1,14 +1,13 @@
 //! Framebuffer boot console: kernel log output on the attached display.
 //!
 //! Boot (and later) console messages default to the **video display**;
-//! the UART is the fallback when no display exists (`AGENTS.md` §10 —
-//! the user-facing output is the screen, the serial line is a debug
+//! the UART is the fallback when no display exists (the user-facing output is the screen, the serial line is a debug
 //! last resort). On the Raspberry Pi the display pipeline is owned by
 //! the `VideoCore` firmware, so this module asks it for a scan-out
 //! surface over the shared mailbox property-channel client
-//! (`rustos_vcmailbox`, `AGENTS.md` §2.2) and renders the kernel log
+//! (`rustos_vcmailbox`) and renders the kernel log
 //! into that surface with the shared 5×7 glyph atlas
-//! (`rustos_font::glyphs` — one font definition, §2.2).
+//! (`rustos_font::glyphs` — one font definition).
 //!
 //! Bring-up runs **before the MMU is enabled** (`configure_from_fdt`
 //! is an early-returning, `ranges`-aware walk like the console/GIC
@@ -19,7 +18,7 @@
 //! to the point of coherency (`clean_dcache_range`) so the HVS
 //! scan-out (which reads physical SDRAM) sees the rendered pixels.
 //!
-//! Fail closed (`AGENTS.md` §2.9): no mailbox node, a detached display
+//! Fail closed: no mailbox node, a detached display
 //! (`0×0` size), or any failed/malformed firmware answer leaves the
 //! video console unconfigured and the UART keeps the console
 //! (`crate::serial` routes through `write_bytes` only when
@@ -56,8 +55,7 @@ pub struct DiscoveredMailbox {
 /// ([`crate::fdt::scan_translated`]), so it stays safe with the MMU
 /// off. Returns `None` when the tree carries no mailbox (e.g. QEMU
 /// `virt`) or the node's `reg` cannot be decoded/translated — the
-/// caller then leaves the video console unconfigured (fail closed,
-/// `AGENTS.md` §2.9).
+/// caller then leaves the video console unconfigured (fail closed).
 #[must_use]
 pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
     crate::fdt::scan_translated(fdt, |node, levels, depth| {
@@ -121,8 +119,7 @@ impl Geometry {
     /// Returns `None` when the surface cannot host even one glyph cell,
     /// the pitch is not whole pixels, or the pitch is narrower than a
     /// scanline — the caller leaves the video console unconfigured
-    /// rather than rendering out of bounds (fail closed, `AGENTS.md`
-    /// §2.9 / §5.4: the geometry is firmware input).
+    /// rather than rendering out of bounds (fail closed: the geometry is firmware input).
     #[must_use]
     pub fn for_display(width_px: u32, height_px: u32, pitch_bytes: u32) -> Option<Self> {
         if pitch_bytes % 4 != 0 {
@@ -192,7 +189,7 @@ fn merge_bands(a: Option<DirtyBand>, b: Option<DirtyBand>) -> Option<DirtyBand> 
 /// The grid is a **ring**: reaching the bottom row wraps the cursor to
 /// the top and clears that row, rather than copying the whole surface
 /// up one line — a scroll would re-write (and re-clean) megabytes per
-/// log line on the boot path (`AGENTS.md` §2.16).
+/// log line on the boot path.
 ///
 /// Pure CPU pixel arithmetic over a borrowed slice, so the renderer is
 /// host-testable; the freestanding side wraps the firmware surface in a
@@ -337,8 +334,7 @@ pub struct ConfiguredFramebuffer {
 /// requests a 32-bit surface at exactly that size, so the console is
 /// pixel-for-pixel on whatever monitor is plugged in. Returns `None` —
 /// leaving the UART as the console — when no display is attached
-/// (`0×0`), or when any firmware answer fails validation (fail closed,
-/// `AGENTS.md` §2.9; the firmware is an external input, §5.4).
+/// (`0×0`), or when any firmware answer fails validation (fail closed; the firmware is an external input).
 pub fn bring_up(transport: &mut dyn MailboxTransport) -> Option<ConfiguredFramebuffer> {
     let size = query_display_size(transport).ok()?;
     if !size.is_attached() {
@@ -431,12 +427,11 @@ mod metal {
 
     /// Serialises post-MMU rendering (cursor + surface writes) across
     /// CPUs, masking IRQ+FIQ for the critical section so a log write
-    /// from an interrupt handler on the holding CPU cannot deadlock
-    /// (`AGENTS.md` §23.2).
+    /// from an interrupt handler on the holding CPU cannot deadlock.
     ///
     /// A minimal DAIF-masking spinlock private to this module —
     /// deliberately not `rustos_sync::IrqSafeSpinLock`, a documented
-    /// §2.2 carve-out: the minimal aarch64 QEMU test binaries link no
+    /// carve-out: the minimal aarch64 QEMU test binaries link no
     /// global allocator, and cargo feature unification across the
     /// single `--target aarch64-unknown-none` build of the test matrix
     /// compiles `lib/sync`'s alloc-backed `epoch` module into every
@@ -550,7 +545,7 @@ mod metal {
     /// switches to the screen ([`super::is_active`]); on any failure —
     /// no mailbox node (QEMU `virt`), no attached display, a rejected
     /// or malformed firmware answer — the UART keeps the console (fail
-    /// closed, `AGENTS.md` §2.9).
+    /// closed).
     pub fn configure_from_fdt(fdt: &Fdt<'_>) -> Option<DiscoveredVideo> {
         let mailbox = find_mailbox(fdt)?;
         if mailbox.len < MAILBOX_REGS_LEN_BYTES as u64 {

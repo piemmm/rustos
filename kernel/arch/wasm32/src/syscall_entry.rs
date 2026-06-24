@@ -9,7 +9,7 @@
 //!
 //! * Marshalling the argument words into the architecture-neutral
 //!   `rustos_abi` `[u64; SYSCALL_MAX_ARGS]` layout — the same layout the
-//!   bare-metal ports build (`AGENTS.md` §2.2 — one ABI, no duplication).
+//!   bare-metal ports build (one ABI, no duplication).
 //! * The dispatch callback the entry forwards each syscall to, mirroring
 //!   the bare-metal ports' design. The architecture-neutral validation /
 //!   capability / audit dispatcher lives in `kernel/syscall` and is
@@ -28,7 +28,7 @@ use rustos_abi::SYSCALL_MAX_ARGS;
 /// Pack the syscall argument words into the canonical `rustos_abi`
 /// layout. The order matches the ABI definition pinned in
 /// `lib/abi/src/syscalls.rs`, identical to the bare-metal ports'
-/// `pack_raw_args` (`AGENTS.md` §2.2 — one ABI).
+/// `pack_raw_args` (one ABI).
 #[must_use]
 pub const fn pack_raw_args(
     a0: u64,
@@ -83,7 +83,7 @@ fn clear_dispatch_for_tests() {
 /// Packs `args` into the canonical `rustos_abi` layout and forwards them
 /// with `number` to the dispatch callback, returning its result. Returns
 /// `None` when no callback is installed — the entry treats that as a
-/// fail-closed condition (`AGENTS.md` §5.4.5), exactly as the bare-metal
+/// fail-closed condition, exactly as the bare-metal
 /// ports do.
 #[must_use]
 pub fn dispatch_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> Option<u64> {

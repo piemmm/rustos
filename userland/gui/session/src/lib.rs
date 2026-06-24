@@ -4,7 +4,7 @@
 //! registry and no spawn capability: activating its start-menu entries only
 //! *reports* an abstract [`MenuAction`](rustos_taskbar::MenuAction) (e.g. the
 //! light/dark [`ToggleAppearance`](rustos_taskbar::MenuAction::ToggleAppearance)),
-//! leaving the actual work to the session glue (`AGENTS.md` §10, §16.5). This
+//! leaving the actual work to the session glue. This
 //! crate is that glue.
 //!
 //! [`DesktopSession`] owns the one shared [`ThemeRegistry`] and the
@@ -18,9 +18,8 @@
 //!
 //! Switching the theme — whether by [`toggle_appearance`] or by
 //! [`set_theme`] — re-themes the taskbar through one private apply path, so
-//! the relay logic is never duplicated (`AGENTS.md` §2.2). Setting an
-//! unknown theme fails closed without disturbing the active theme
-//! (`AGENTS.md` §5.4 / §2.9).
+//! the relay logic is never duplicated. Setting an
+//! unknown theme fails closed without disturbing the active theme.
 //!
 //! # Presenting the taskbar through the window manager
 //!
@@ -30,8 +29,8 @@
 //! [`TaskbarRenderer`](rustos_taskbar::TaskbarRenderer) and presents each as a
 //! window in the [`Compositor`](rustos_wm::Compositor), placed at its computed
 //! origin and rounded through the compositor's single anti-aliased
-//! rounded-corner path (`AGENTS.md` §2.2). Composing the taskbar and window
-//! manager is the permitted `userland/gui/*` edge (§17.4).
+//! rounded-corner path. Composing the taskbar and window
+//! manager is the permitted `userland/gui/*` edge.
 //!
 //! # Routing live input to the taskbar and window manager
 //!
@@ -43,25 +42,25 @@
 //! the taskbar claims a press over the bar or while its menu is open, the
 //! window manager handles everything else, motion is fanned to both so their
 //! pointers stay in step, and a release ends a window move-grab. Composing the
-//! two GUI crates this way is the permitted `userland/gui/*` edge (§17.4).
+//! two GUI crates this way is the permitted `userland/gui/*` edge.
 //!
 //! # On-disk graphics assets
 //!
 //! The session also loads the desktop's SVG graphics assets from
-//! `/System/Graphics` (`AGENTS.md` §10 / §16.2): the [`assets`] module's
+//! `/System/Graphics`: the [`assets`] module's
 //! [`GraphicsAssetReader`] seam reads the bytes (a filesystem capability the
-//! `no_std` `lib/cursor` / `lib/icon` crates must not hold, §17.4 / §19.5),
+//! `no_std` `lib/cursor` / `lib/icon` crates must not hold),
 //! and [`DesktopSession::load_cursors`] / [`DesktopSession::load_icons`]
 //! assemble a [`CursorTheme`](rustos_cursor::CursorTheme) /
 //! [`IconSet`](rustos_icon::IconSet), failing closed per kind to the built-in
-//! artwork (§2.9).
+//! artwork.
 //!
 //! # Where it sits
 //!
 //! As a `userland/gui/*` crate it composes the other GUI crates and `lib/*`
-//! only (`AGENTS.md` §17.4): it owns the [`Taskbar`] and reads the shared
+//! only: it owns the [`Taskbar`] and reads the shared
 //! [`rustos_theme`] definition. Nothing outside `userland/gui/*` depends on
-//! it (§17.3) — the desktop is an optional, one-way-dependent frontend.
+//! it — the desktop is an optional, one-way-dependent frontend.
 //!
 //! # Driving the desktop from a live input stream
 //!
@@ -73,14 +72,14 @@
 //! each to the window manager or taskbar, applies the light/dark toggle
 //! itself, re-presents the bar, and surfaces every other effect as a
 //! [`ShellOutcome`] for the embedder (which holds the framebuffer, power, and
-//! spawn capabilities) to act on (`AGENTS.md` §10, §16.5).
+//! spawn capabilities) to act on.
 //!
 //! The live backing for that [`InputSource`] is [`DeviceInputSource`] (the
 //! [`device`] module): it reads framed
 //! [`PointerInput`](rustos_abi::input::PointerInput) records from an injected
 //! [`PointerInputChannel`] (the kernel input channel) and decodes each into
 //! the `lib/input` [`InputEvent`](rustos_wm::InputEvent) the shell routes,
-//! failing closed on a malformed record (`AGENTS.md` §5.4 / §19.5). The
+//! failing closed on a malformed record. The
 //! keyboard's live backing is its counterpart [`KeyboardInputSource`] (the
 //! [`keyboard`] module): it decodes framed
 //! [`KeyInput`](rustos_abi::input::KeyInput) records from an injected
@@ -97,12 +96,12 @@
 //! fail-closed validation path — the header must decode, the message must be
 //! destined for the bound endpoint, and the payload must be exactly the
 //! record's wire length — so a truncated, misrouted, or corrupt frame can
-//! never be decoded as a spurious event (`AGENTS.md` §2.2 / §5.4 / §19.5).
+//! never be decoded as a spurious event.
 //!
 //! # Running-task list ↔ window stack
 //!
 //! The taskbar models a running-task list but owns no window manager, and the
-//! window manager owns no task list (`AGENTS.md` §17.4). [`TaskBridge`] (the
+//! window manager owns no task list. [`TaskBridge`] (the
 //! [`tasks`] module) is the glue between them: it owns the correspondence
 //! between compositor windows and taskbar tasks, [`open`](TaskBridge::open)s
 //! and [`close`](TaskBridge::close)s top-level windows as running tasks,

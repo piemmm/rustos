@@ -55,7 +55,7 @@ pub trait FileSystem {
     fn stat(&self, path: &str) -> Result<EntryKind, Errno>;
 
     /// Return the capability gate stored for `path`: [`Some`] capability when
-    /// the node carries one (`AGENTS.md` §5.3), or [`None`] when it has no
+    /// the node carries one, or [`None`] when it has no
     /// gate.
     ///
     /// # Errors

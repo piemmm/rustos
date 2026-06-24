@@ -1,4 +1,4 @@
-//! wasm32 memory tagging (`AGENTS.md` §19.10).
+//! wasm32 memory tagging.
 //!
 //! Implements the Arch HAL
 //! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for the
@@ -12,7 +12,7 @@
 //! (`kernel/arch/wasm32::isolation`), so a stray access traps at the
 //! WASM bounds check rather than escaping the instance.
 //!
-//! Both §19.10 features are therefore an honest
+//! Both features are therefore an honest
 //! [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported)
 //! — the host owns the relevant protection. Use-after-free *within* a
 //! linear memory is still hardened by the architecture-neutral *software*
@@ -34,7 +34,7 @@ impl MemoryTags {
         Self
     }
 
-    /// The honest §19.10 declaration for wasm32 (see the module docs).
+    /// The honest declaration for wasm32 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> TaggingProfile {
         TaggingProfile {

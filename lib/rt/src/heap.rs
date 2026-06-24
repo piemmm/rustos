@@ -16,8 +16,7 @@
 //! regions are tracked as a coalesced, address-sorted list of free **spans**
 //! held *in the allocator itself* (not as intrusive links inside the freed
 //! memory), so the bookkeeping never dereferences user memory and every
-//! returned pointer is range-checked before it is handed out (`AGENTS.md` §4 —
-//! no `unsafe` global allocator that does raw pointer arithmetic without
+//! returned pointer is range-checked before it is handed out (no `unsafe` global allocator that does raw pointer arithmetic without
 //! bounds-checked wrappers).
 //!
 //! * **Allocate.** First-fit over the free spans, honouring the requested
@@ -29,9 +28,9 @@
 //!   with its neighbours. When coalescing leaves whole trailing pages free at
 //!   the very top of the arena, they are returned to the kernel with
 //!   `mem_unmap` (the heap shrinks — both syscalls are genuinely exercised, no
-//!   dead path, `AGENTS.md` §2.14).
+//!   dead path).
 //! * **Reallocate.** `realloc` resizes in place whenever it can, avoiding the
-//!   copy entirely (`AGENTS.md` §2.16). A **shrink** always succeeds in place:
+//!   copy entirely. A **shrink** always succeeds in place:
 //!   the surrendered tail is returned to the free list (and whole top pages are
 //!   unmapped if it reaches the arena top). A **grow** succeeds in place when
 //!   the bytes immediately following the block are free, or the block abuts the
@@ -39,29 +38,28 @@
 //!   holds does it fall back to allocate-copy-free, copying just the overlapping
 //!   prefix; a failed move leaves the original block intact (`GlobalAlloc`
 //!   contract).
-//! * **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A failed `mem_map`, an
+//! * **Deterministic OOM.** A failed `mem_map`, an
 //!   exhausted arena, or an overflowed free-span table returns a null pointer
 //!   per the [`GlobalAlloc`] contract — never a panic.
 //!
 //! # Why not zero on free
 //!
-//! The kernel zeroes every page on `mem_map` and on `mem_unmap` (`AGENTS.md`
-//! §4), so memory entering or leaving the process is already clean and no
+//! The kernel zeroes every page on `mem_map` and on `mem_unmap`, so memory entering or leaving the process is already clean and no
 //! cross-process secret can leak. Reuse of a process's *own* freed bytes within
 //! its own heap is not a security boundary, so the heap does not re-zero on
-//! free; doing so would be pure overhead on the hot path (`AGENTS.md` §2.16).
+//! free; doing so would be pure overhead on the hot path.
 //!
-//! # Free-span table is a growable capacity (`AGENTS.md` §24)
+//! # Free-span table is a growable capacity
 //!
 //! The free-span table is **not** a fixed-capacity array. It is a capacity that
 //! grows on demand ([`SpanStore`]): coalescing keeps the live span count small
 //! for well-behaved programs, but a workload that fragments the heap past the
-//! current table capacity makes the store **grow before it fails** (§24.1) — it
+//! current table capacity makes the store **grow before it fails** — it
 //! maps one more whole metadata page through the same page source and continues,
-//! rather than capping the workload at a hand-picked `const` (§24.1 forbids such
+//! rather than capping the workload at a hand-picked `const` (the charter forbids such
 //! a ceiling). Only genuine resource exhaustion — the page source can no longer
 //! map a metadata page — fails closed (the allocation returns null, never a
-//! panic; `AGENTS.md` §4 / §2.9). See `lib/rt/README.md`.
+//! panic;). See `lib/rt/README.md`.
 
 use core::alloc::{GlobalAlloc, Layout};
 
@@ -94,7 +92,7 @@ const META_BASE: u64 = 80 << 30;
 const SPAN_SIZE: usize = core::mem::size_of::<Span>();
 
 /// Free-span slots that fit in one freshly-mapped metadata page — the unit the
-/// span table grows by (`AGENTS.md` §24.1 "grow before you fail").
+/// span table grows by ("grow before you fail").
 const SPANS_PER_PAGE: usize = PAGE_SIZE / SPAN_SIZE;
 
 /// One free region of the arena: a half-open byte range `[start, start + len)`.
@@ -123,7 +121,7 @@ impl Span {
 trait Pager {
     /// Map `pages` fresh, zeroed `RW` pages at exactly `base`
     /// (`MapFlags::FIXED`). Returns `true` on success; on failure the heap
-    /// reports OOM (`AGENTS.md` §4 — deterministic, never a panic).
+    /// reports OOM (deterministic, never a panic).
     fn map(&self, base: u64, pages: usize) -> bool;
 
     /// Release `pages` previously mapped at `base`. Returns `true` on success;
@@ -132,7 +130,7 @@ trait Pager {
     fn unmap(&self, base: u64, pages: usize) -> bool;
 }
 
-/// The growable backing store for the free-span table (`AGENTS.md` §24.1).
+/// The growable backing store for the free-span table.
 ///
 /// The number of distinct free spans tracked is a *capacity*, not a fixed
 /// ceiling: when it is reached and more virtual memory exists, the store
@@ -140,7 +138,7 @@ trait Pager {
 /// The store owns the `Span` slots; [`HeapState`] keeps the live `count`.
 /// [`MappedSpanStore`] maps fresh metadata pages through `mem_map` in
 /// production, while the unit tests use an ordinary `Vec`-backed store, so the
-/// §24 growth and fail-closed logic is exercised entirely on the host.
+/// growth and fail-closed logic is exercised entirely on the host.
 trait SpanStore {
     /// The currently-allocated span slots (capacity is `slots().len()`).
     fn slots(&self) -> &[Span];
@@ -150,8 +148,7 @@ trait SpanStore {
 
     /// Grow the store by at least one slot (one whole metadata page). Returns
     /// `true` if capacity increased; `false` only on genuine resource
-    /// exhaustion (the page source could not map — the heap then fails closed,
-    /// `AGENTS.md` §4 / §2.9).
+    /// exhaustion (the page source could not map — the heap then fails closed).
     fn grow(&mut self) -> bool;
 }
 
@@ -195,9 +192,9 @@ impl<S: SpanStore> HeapState<S> {
     }
 
     /// Ensure the table has room for one more span, growing the store by a
-    /// metadata page if it is full (`AGENTS.md` §24.1 "grow before you fail").
+    /// metadata page if it is full ("grow before you fail").
     /// Returns `false` only when the store cannot grow (genuine OOM) — the
-    /// caller then fails closed (`AGENTS.md` §4 / §2.9).
+    /// caller then fails closed.
     fn ensure_slot(&mut self) -> bool {
         self.count < self.capacity() || self.store.grow()
     }
@@ -234,8 +231,8 @@ impl<S: SpanStore> HeapState<S> {
     /// A non-coalescing insert into a full table first grows the store
     /// ([`ensure_slot`](Self::ensure_slot)); only if that grow fails (genuine
     /// OOM) is the freed region dropped (its pages stay mapped but untracked —
-    /// a bounded leak, never corruption; `AGENTS.md` §2.9). Growth makes this a
-    /// scaling capacity, not a fixed ceiling (`AGENTS.md` §24.1).
+    /// a bounded leak, never corruption;). Growth makes this a
+    /// scaling capacity, not a fixed ceiling.
     fn insert_free(&mut self, span: Span) {
         if span.len == 0 {
             return;
@@ -271,7 +268,7 @@ impl<S: SpanStore> HeapState<S> {
     ///
     /// Returns `false` (carving nothing) when the carve would need a new table
     /// slot the full table cannot supply, so the caller falls back to growing
-    /// or fails closed (`AGENTS.md` §2.9).
+    /// or fails closed.
     fn carve(&mut self, index: usize, aligned: usize, size: usize) -> bool {
         let span = self.store.slots()[index];
         let head = aligned - span.start;
@@ -305,7 +302,7 @@ impl<S: SpanStore> HeapState<S> {
     /// chosen base address (a virtual address in the arena) or `None`.
     ///
     /// On no fit the arena is grown once through `pager`; a failed grow is a
-    /// deterministic OOM (`None`, never a panic — `AGENTS.md` §4 / §2.9).
+    /// deterministic OOM (`None`, never a panic).
     fn alloc(&mut self, layout: Layout, pager: &dyn Pager) -> Option<usize> {
         let align = layout.align();
         let size = layout.size().max(1);
@@ -397,8 +394,7 @@ impl<S: SpanStore> HeapState<S> {
     /// are free (a free span starting at the allocation's end) or the
     /// allocation abuts the arena top and the arena can be grown to cover the
     /// extra; otherwise it returns `false` and the caller relocates. Never
-    /// panics — a failed arena grow is a deterministic `false` (`AGENTS.md`
-    /// §4 / §2.9).
+    /// panics — a failed arena grow is a deterministic `false`.
     fn resize_in_place(
         &mut self,
         addr: usize,
@@ -451,7 +447,7 @@ impl<S: SpanStore> HeapState<S> {
 
     /// If the free span at the arena top covers one or more whole pages,
     /// release them with `mem_unmap` and lower `mapped_end`. A failed unmap
-    /// leaves the pages mapped and tracked (no loss; `AGENTS.md` §2.9).
+    /// leaves the pages mapped and tracked (no loss;).
     fn try_shrink_top(&mut self, pager: &dyn Pager) {
         if self.count == 0 {
             return;
@@ -511,7 +507,7 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
 }
 
 // SAFETY: every allocation address is computed and bounds-checked by
-// `HeapState` (`AGENTS.md` §4 — no raw pointer arithmetic without a checked
+// `HeapState` (no raw pointer arithmetic without a checked
 // wrapper) and the returned pointer denotes memory the kernel just mapped `RW`
 // into this process's own space. The `SpinLock` serialises all access to the
 // shared `HeapState`.
@@ -530,7 +526,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // Try to keep the original address: a shrink always succeeds in place,
         // and a grow does when the following bytes are free or the block abuts
-        // the arena top (no copy, the cheap path — `AGENTS.md` §2.16).
+        // the arena top (no copy, the cheap path).
         if self
             .state
             .lock()
@@ -541,8 +537,7 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
         // Relocate: a fresh block of the requested size at the original
         // alignment, copy the overlapping prefix, free the old block. A failed
         // allocation returns null and leaves the original block intact, exactly
-        // as the [`GlobalAlloc::realloc`] contract requires (`AGENTS.md`
-        // §4 / §2.9 — deterministic, never a panic).
+        // as the [`GlobalAlloc::realloc`] contract requires (deterministic, never a panic).
         let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
             return core::ptr::null_mut();
         };
@@ -599,7 +594,7 @@ const fn metadata_growth(cap: usize) -> (u64, usize) {
 
 /// The production [`SpanStore`]: the free-span table lives in metadata pages
 /// mapped on demand at [`META_BASE`] through `mem_map` (`MapFlags::FIXED`), so
-/// the table is a capacity that grows page by page (`AGENTS.md` §24.1) rather
+/// the table is a capacity that grows page by page rather
 /// than a fixed `const` array.
 #[cfg(rt_native)]
 struct MappedSpanStore {
@@ -714,8 +709,7 @@ mod tests {
     /// `mem_map`-backed `MappedSpanStore`. It grows one slot at a time (so a
     /// few non-adjacent frees already exercise repeated growth) and can be
     /// capped at `max_slots` to model genuine resource exhaustion — the store
-    /// can no longer grow, and the heap must fail closed (`AGENTS.md` §4 /
-    /// §2.9), never corrupt or panic.
+    /// can no longer grow, and the heap must fail closed, never corrupt or panic.
     struct VecSpanStore {
         spans: Vec<Span>,
         /// `None` = unbounded; `Some(n)` = refuse to grow past `n` slots.
@@ -890,7 +884,7 @@ mod tests {
 
     #[test]
     fn span_table_grows_past_its_initial_capacity_instead_of_dropping_spans() {
-        // §24.1: the free-span table is a capacity that grows, not a fixed
+        // the free-span table is a capacity that grows, not a fixed
         // ceiling. Far more disjoint spans than any fixed inline array would
         // hold are all tracked because the store grows on demand.
         let mut heap = heap_state();
@@ -916,7 +910,7 @@ mod tests {
     fn span_table_fails_closed_when_the_store_cannot_grow() {
         // With a store that refuses to grow past one slot, a second
         // non-adjacent free is dropped (a bounded leak) rather than corrupting
-        // state or panicking — the only non-coalescing outcome (§2.9).
+        // state or panicking — the only non-coalescing outcome.
         let mut heap = HeapState::new(VecSpanStore::capped(1));
         heap.insert_free(Span {
             start: base(),

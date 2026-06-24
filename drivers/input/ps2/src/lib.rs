@@ -16,7 +16,7 @@
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`Ps2Keyboard`] is a public *type* re-exported so the driver host can
 //! instantiate it through [`Ps2Keyboard::new`]; the host reaches it only
 //! through the [`Input`] trait afterwards.
@@ -26,9 +26,9 @@
 //! The driver never issues an `inb`/`outb` instruction itself. It reaches the
 //! two controller ports exclusively through the host-supplied
 //! [`PortIo8`] seam (`lib/abi`), which the x86_64
-//! architecture port implements (`AGENTS.md` §17.2 / §17.4). The driver
+//! architecture port implements. The driver
 //! therefore carries no architecture-conditional `cfg` and no ambient
-//! authority over the I/O port space (`AGENTS.md` §4): it can only touch the
+//! authority over the I/O port space: it can only touch the
 //! ports the supplied backend lets it.
 //!
 //! # Capabilities
@@ -38,7 +38,7 @@
 //! [`DriverHandle`] the host issues on a successful
 //! [`register`]; the [`Input`] trait declares no additional per-method
 //! capability (`lib/abi/src/driver/input.rs`). The driver runs in user space;
-//! it does not request `CAP_DRV_KERNEL` (`AGENTS.md` §4 / §8).
+//! it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -82,7 +82,7 @@ const RELEASE_BIT: u8 = 0x80;
 /// platform-neutral keycode disjoint from the base set.
 const EXTENDED_KEYCODE_BASE: u16 = 0xE000;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -171,7 +171,7 @@ impl<P: PortIo8> Input for Ps2Keyboard<P> {
     /// (mouse) port — it is **not** consumed, so a future pointer driver
     /// still sees it — when `events` is full, or when a per-call read budget
     /// is exhausted. The budget bounds the work a stuck controller can force
-    /// on a single poll, so the driver can never spin (`AGENTS.md` §2.1); any
+    /// on a single poll, so the driver can never spin; any
     /// undrained bytes are read on the next [`poll`](Input::poll).
     ///
     /// Decoded events use platform-neutral keycodes: a base scancode-set-1

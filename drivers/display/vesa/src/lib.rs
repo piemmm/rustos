@@ -20,7 +20,7 @@
 //! linear-framebuffer attribute bit, the direct-colour memory model, the
 //! per-channel mask sizes and field positions — that a VBE `ModeInfoBlock`
 //! requires before a surface can be trusted. The two are deliberate
-//! sibling display drivers (`AGENTS.md` §2.2 carve-out), not duplicates.
+//! sibling display drivers (carve-out), not duplicates.
 //!
 //! Compositing, damage tracking, and GPU acceleration live above this
 //! driver in `userland/gui/wm`; the driver itself only owns the final
@@ -28,7 +28,7 @@
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`VbeModeInfo`] and [`VesaFramebuffer`] are public *types* re-exported
 //! so the driver host can decode a boot-supplied block and instantiate the
 //! surface through [`VesaFramebuffer::open`]; the host never reaches into
@@ -41,8 +41,8 @@
 //! framebuffer is device-visible memory and is reached only through the
 //! capability-gated [`MmioMapper`], never through a pointer the driver
 //! synthesises from the `ModeInfoBlock`'s `PhysBasePtr` itself
-//! (`AGENTS.md` §4 — no ambient authority). The driver runs in user space;
-//! it does not request `CAP_DRV_KERNEL` (`AGENTS.md` §4 / §8).
+//! (no ambient authority). The driver runs in user space;
+//! it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -109,7 +109,7 @@ mod field {
     pub const PHYS_BASE_PTR: usize = 0x28;
 }
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -131,7 +131,7 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 ///
 /// Construct one with [`VbeModeInfo::parse`]; the fields are read-only
 /// projections of the bytes the firmware reported, after every invariant
-/// the driver relies on has been checked (`AGENTS.md` §5.4.3).
+/// the driver relies on has been checked.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VbeModeInfo {
     /// Physical base address of the linear framebuffer (scanline 0,
@@ -296,8 +296,7 @@ fn validate_geometry(
 ///
 /// The driver owns the [`RegisterWindow`] for the whole load: dropping
 /// the [`VesaFramebuffer`] drops the window, which is the driver's
-/// quiesce step (the kernel reclaims the mapping on unload,
-/// `AGENTS.md` §4). Reloading is calling [`VesaFramebuffer::open`] again.
+/// quiesce step (the kernel reclaims the mapping on unload). Reloading is calling [`VesaFramebuffer::open`] again.
 pub struct VesaFramebuffer {
     window: RegisterWindow,
     mode: DisplayMode,
@@ -366,7 +365,7 @@ impl VesaFramebuffer {
     /// scan-out words; any trailing bytes (a surface whose length is not
     /// a multiple of four) are written individually. Every write is
     /// bounds-checked by the window, so a miscomputed offset fails closed
-    /// instead of escaping the mapping (`AGENTS.md` §2.9).
+    /// instead of escaping the mapping.
     fn blit(&self, frame: &[u8]) -> Result<(), DriverError> {
         let whole_words = self.surface_len / 4;
         for word in 0..whole_words {

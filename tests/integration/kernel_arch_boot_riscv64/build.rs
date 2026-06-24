@@ -2,7 +2,7 @@
 //! on the freestanding `riscv64gc-unknown-none-elf` target. Mirrors
 //! `tests/integration/kernel_arch_boot/build.rs` (the x86_64 analogue);
 //! both crates reference the single per-arch linker script their
-//! architecture port owns (`AGENTS.md` §2.2 — no duplication).
+//! architecture port owns (no duplication).
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();

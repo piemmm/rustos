@@ -7,7 +7,7 @@
 //!
 //! The kthread kernel-stack guard (`kernel/core::kthread`) catches a
 //! stack overflow with a poison canary checked at the next reschedule
-//! (the binding §2.17 defence). The *deployment* form turns the overflow
+//! (the binding defence). The *deployment* form turns the overflow
 //! into an immediate hardware fault by **unmapping** the guard page. But
 //! the boot path identity-maps RAM with coarse 1 GiB gigapage / 2 MiB
 //! megapage *leaves*, and such a leaf has no per-4 KiB entry to clear — so
@@ -42,8 +42,7 @@
 //!
 //! It links only the `rustos-arch-riscv64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
-//! never behind a Cargo feature on the arch crate (`AGENTS.md` §5.4.5 —
-//! fail closed).
+//! never behind a Cargo feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]

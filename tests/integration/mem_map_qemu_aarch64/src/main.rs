@@ -20,7 +20,7 @@
 //! data abort the fault handler reports as PASS. Any shortfall (the program
 //! returning a failure exit code, an unexpected syscall, or no fault) trips a
 //! distinct failure finisher or times out, so the run fails loudly — by a
-//! failure code or by the harness `Outcome::Timeout` (`AGENTS.md` §7).
+//! failure code or by the harness `Outcome::Timeout`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

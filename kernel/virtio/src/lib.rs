@@ -19,7 +19,7 @@
 //! Both walks are generic over the transport builder, so this crate
 //! names only `lib/*` types and never the concrete
 //! `drivers/bus/virtio` transports — keeping ring 0 off any
-//! `drivers/bus/*` crate (`AGENTS.md` §17.4: `kernel/* → lib/*`, never
+//! `drivers/bus/*` crate (: `kernel/* → lib/*`, never
 //! a driver). The production builders are
 //! `rustos_drv_bus_virtio::{PciTransport, MmioTransport}::new`.
 //!
@@ -32,7 +32,7 @@
 //! *same* factory and MMIO walk the x86_64 PCI path uses, so the
 //! arch-neutral code moved here where every Tier-1 freestanding target
 //! can link it without pulling in a foreign architecture port
-//! (`AGENTS.md` §2.2 — no duplication, §6 — shared code lives in one
+//! (no duplication — shared code lives in one
 //! place). `rustos-kernel` re-exports every item below, so its public
 //! API is unchanged.
 
@@ -44,7 +44,7 @@ extern crate alloc;
 
 // Host tests need `std` for the `kernel/mem` host-test doubles. The
 // crate itself stays `no_std` for the freestanding build
-// (`AGENTS.md` §1 — no hacks).
+// (no hacks).
 #[cfg(test)]
 extern crate std;
 

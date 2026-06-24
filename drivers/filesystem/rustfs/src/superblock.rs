@@ -28,7 +28,7 @@ pub const RING_SLOTS: u64 = 4;
 /// physical copies (`docs/src/filesystem/rustfs-spec.md` §5 — critical
 /// metadata copies: 2 minimum). The mirroring uses the same companion rule
 /// (`primary + 1`) as every other metadata block, so there is one redundancy
-/// mechanism, not two (`AGENTS.md` §2.2).
+/// mechanism, not two.
 pub const RING_BLOCKS: u64 = RING_SLOTS * 2;
 
 /// Primary block address of logical ring slot `slot` (`0..RING_SLOTS`); its

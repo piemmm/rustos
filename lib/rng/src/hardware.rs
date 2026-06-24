@@ -5,7 +5,7 @@
 //! `Zkr`), a TPM, or a virtio-rng device. [`HardwareRng`] is the seam through
 //! which such a source is offered to `lib/rng`. The *concrete* driver is
 //! architecture- or device-specific and therefore lives in
-//! `kernel/arch/<target>` or a `drivers/*` crate (`AGENTS.md` §17.2: no
+//! `kernel/arch/<target>` or a `drivers/*` crate (: no
 //! target-conditional code in `lib/*`); this crate only consumes the trait,
 //! so it stays architecture-neutral and host-testable.
 //!
@@ -19,7 +19,7 @@
 //! * **A fast source.** [`PlatformFast`] uses the hardware source directly
 //!   for fast, non-cryptographic `u64`s when present, and falls back to the
 //!   software [`FastRng`] when it is absent or momentarily fails. There is no
-//!   busy-retry-until-it-works loop (`AGENTS.md` §2.1): one failed draw
+//!   busy-retry-until-it-works loop: one failed draw
 //!   simply falls through to the software generator.
 
 use crate::entropy::{EntropyError, EntropySource};

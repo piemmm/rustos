@@ -12,10 +12,9 @@
 //!
 //! When no validated startup vector has been published (the kernel handed
 //! a malformed block, or a host-side unit test never installed one) the
-//! accessors report an empty argument vector rather than fabricating data
-//! (`AGENTS.md` §2.9). They add no authority: the arguments were placed in
+//! accessors report an empty argument vector rather than fabricating data. They add no authority: the arguments were placed in
 //! the process's own image by its spawner, and reading one's own memory
-//! grants nothing (`AGENTS.md` §4).
+//! grants nothing.
 
 use core::cell::UnsafeCell;
 
@@ -25,7 +24,7 @@ use rustos_abi::process::ProcessStart;
 ///
 /// Wrapped in an [`UnsafeCell`] rather than declared `static mut` so the
 /// single pre-`main` write goes through one audited path with no aliasing
-/// `&mut` (`AGENTS.md` §2.1) — the same scheme as the runtime's
+/// `&mut` — the same scheme as the runtime's
 /// `__stack_chk_guard`.
 struct StartupVector(UnsafeCell<Option<ProcessStart<'static>>>);
 
@@ -61,15 +60,14 @@ fn view() -> Option<&'static ProcessStart<'static>> {
 
 /// Number of arguments the spawner handed this process.
 ///
-/// Zero when no validated startup vector is available (fail closed,
-/// `AGENTS.md` §2.9).
+/// Zero when no validated startup vector is available (fail closed).
 #[must_use]
 pub fn arg_count() -> u32 {
     view().map_or(0, ProcessStart::arg_count)
 }
 
 /// The argument at `index`, or `None` when out of range or when no
-/// validated startup vector is available (fail closed, `AGENTS.md` §2.9).
+/// validated startup vector is available (fail closed).
 ///
 /// Index 0 is conventionally the program name its spawner chose.
 #[must_use]

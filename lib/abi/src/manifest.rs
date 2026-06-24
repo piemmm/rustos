@@ -141,7 +141,7 @@ impl ManifestHeader {
 /// `count` on success) is returned so a fixed-size scratch buffer can be
 /// reused across manifests. This is the single decoder for the body format
 /// documented on this module, shared by every consumer that turns a signed
-/// manifest into a requested capability set (`AGENTS.md` §2.2).
+/// manifest into a requested capability set.
 ///
 /// # Errors
 ///

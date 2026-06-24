@@ -2,23 +2,22 @@
 //!
 //! The taskbar models the desktop's bar and produces a *rectangular* pixel
 //! [`Surface`], and the window manager composites and
-//! rounds windows; neither knows about the other (`AGENTS.md` §17.4). Joining
+//! rounds windows; neither knows about the other. Joining
 //! them is session glue, and [`TaskbarPresenter`] is that join: it paints the
 //! bar (and, while it is open, the start-menu popup) with the taskbar's own
 //! [`TaskbarRenderer`] and presents each as a window in the
 //! [`Compositor`], placed at its computed screen origin
 //! and rounded with the theme's corner radius through the compositor's single
 //! anti-aliased rounded-corner path — the same path it uses for application
-//! windows, never a second one (`AGENTS.md` §2.2).
+//! windows, never a second one.
 //!
 //! The presenter owns only the two compositor [`WindowId`]
 //! tokens it minted; the taskbar model, the renderer (which holds the
 //! across-frame glyph cache), and the compositor are the embedder's, passed in
 //! on each [`present`](TaskbarPresenter::present) so the session crate composes
-//! the GUI crates without owning the window-manager handle (`AGENTS.md`
-//! §17.4 — composing `userland/gui/*` crates is the permitted edge).
+//! the GUI crates without owning the window-manager handle (composing `userland/gui/*` crates is the permitted edge).
 //!
-//! It is **total and fails closed** (`AGENTS.md` §2.9): a render that cannot
+//! It is **total and fails closed**: a render that cannot
 //! allocate its surface leaves whatever is already on screen untouched rather
 //! than blanking the bar or panicking, and a popup is removed from the
 //! compositor the moment the menu closes. If a presented window has
@@ -75,7 +74,7 @@ impl TaskbarPresenter {
     /// [`MenuLayout::corner_radius`]; when the menu is closed any popup window
     /// is removed.
     ///
-    /// Fails closed (`AGENTS.md` §2.9): a render whose surface cannot be
+    /// Fails closed: a render whose surface cannot be
     /// allocated leaves the existing on-screen window untouched.
     ///
     /// [`BarLayout::bar`]: rustos_taskbar::BarLayout::bar
@@ -92,7 +91,7 @@ impl TaskbarPresenter {
         // The desktop density belongs to the output the bar is on, so it is
         // read from the compositor here and laid out at present time — a
         // runtime DPI change re-presents the bar at the new scale with no
-        // taskbar state to update (`AGENTS.md` §10 / §2.2).
+        // taskbar state to update.
         let scale = compositor.scale();
         self.present_bar(compositor, renderer, taskbar, theme, scale);
         self.present_popup(compositor, renderer, taskbar, theme, scale);

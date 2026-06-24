@@ -98,7 +98,7 @@ pub trait Input {
 /// The seam lives here because its two sides are *sibling* drivers —
 /// `drivers/bus/usb` produces reports, `drivers/input/usb_hid`
 /// consumes them — and drivers may depend only on `lib/*`, never on
-/// each other (`AGENTS.md` §17.4). Host tests drive a decoder over a
+/// each other. Host tests drive a decoder over a
 /// mock queue; on metal the implementation drains the device's
 /// interrupt-IN endpoint through the xHCI transfer ring.
 pub trait ReportSource {
@@ -108,7 +108,7 @@ pub trait ReportSource {
     /// `Ok(Some(len))` — the report's byte length, `<= buf.len()` —
     /// when one was delivered. A source must never claim more bytes
     /// than `buf` holds; consumers reject such a claim as a
-    /// [`DriverError::DeviceFault`] (fail closed, `AGENTS.md` §5.4).
+    /// [`DriverError::DeviceFault`] (fail closed).
     ///
     /// # Errors
     ///

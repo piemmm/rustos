@@ -27,7 +27,7 @@ pub struct BlockGeometry {
 /// block reads back as zero (`docs/src/filesystem/rustfs-spec.md`
 /// §11). A device that does not support discard reports
 /// [`DiscardCapability::unsupported`]; such a device is *recorded, not
-/// failed* by the caller (§11).
+/// failed* by the caller.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DiscardCapability {
@@ -72,17 +72,17 @@ impl DiscardCapability {
 /// A device that exposes no health telemetry reports
 /// [`DeviceHealth::Unavailable`] rather than a zeroed snapshot, so an
 /// absence of data is never mistaken for a perfectly-healthy device
-/// (§11 — *recorded, not failed*).
+/// (*recorded, not failed*).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct HealthSnapshot {
     /// Cumulative powered-on time, in hours. Informational.
     pub power_on_hours: u64,
     /// Cumulative count of unsafe / unexpected shutdowns. A rise since the
-    /// last clean baseline is what schedules a metadata scrub (§11).
+    /// last clean baseline is what schedules a metadata scrub.
     pub unsafe_shutdowns: u64,
     /// Cumulative media / data-integrity errors the device itself detected.
-    /// A rise since the baseline is what schedules a deep scrub (§11).
+    /// A rise since the baseline is what schedules a deep scrub.
     pub media_errors: u64,
     /// Cumulative reallocated sectors (ATA) / relocated blocks.
     pub reallocated_sectors: u64,
@@ -192,7 +192,7 @@ pub trait Block {
     /// Behaviour is identical to [`Self::read_blocks`] except that
     /// when `class == BufferClass::Sensitive` the driver is required
     /// to zero every internal staging copy of the payload before the
-    /// method returns (`AGENTS.md` §4). The caller-owned `buf` is
+    /// method returns. The caller-owned `buf` is
     /// **not** zeroed; ownership of that scrubbing remains with the
     /// caller after the read completes.
     ///
@@ -227,7 +227,7 @@ pub trait Block {
     /// Behaviour is identical to [`Self::write_blocks`] except that
     /// when `class == BufferClass::Sensitive` the driver is required
     /// to zero every internal staging copy of the payload before the
-    /// method returns (`AGENTS.md` §4).
+    /// method returns.
     ///
     /// The default implementation delegates to [`Self::write_blocks`]
     /// and is only safe for drivers that never copy `buf` into a
@@ -316,7 +316,7 @@ pub trait Block {
     /// device. The default implementation reports
     /// [`DeviceHealth::Unavailable`]; a driver whose backend exposes
     /// `SMART` / `NVMe`-style telemetry overrides it. A device without
-    /// telemetry is *recorded, not failed* by the caller (§11), so this
+    /// telemetry is *recorded, not failed* by the caller, so this
     /// method does not error merely because health data is unavailable.
     ///
     /// # Errors

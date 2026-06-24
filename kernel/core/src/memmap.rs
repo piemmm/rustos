@@ -6,13 +6,13 @@
 //! in `kernel/mem` that mutates a *live* user address space — mapping fresh
 //! zeroed frames into it and unmapping them with the necessary TLB
 //! shootdown. Naming a port's concrete page table and direct physical map is
-//! irreducibly architecture-specific (`AGENTS.md` §17.2 / §17.4), so — like
+//! irreducibly architecture-specific, so — like
 //! the [`ProcessSpawn`](crate::spawn::ProcessSpawn) producer — the concrete
 //! implementation is installed at boot through a `with_*` builder and the
 //! handler reaches it through this trait.
 //!
 //! Until a producer is installed the handler holds [`NULL_MEM_MAP`], which
-//! fails closed with [`Errno::NotImplemented`] (`AGENTS.md` §2.9). A build
+//! fails closed with [`Errno::NotImplemented`]. A build
 //! whose `kernel/mem` live-mapping producer is not yet wired (the state
 //! before `plans/SPAWN.md` `SP5b` lands a real producer) therefore announces
 //! an intentionally inert interface rather than pretending a mapping
@@ -26,10 +26,10 @@ use rustos_abi::{Errno, MapFlags};
 ///
 /// Implemented by the architecture-port-installed producer that maps fresh
 /// zeroed frames into, and unmaps them from, the **caller's own**
-/// hardware-isolated address space (`AGENTS.md` §4 — no global user heap, no
+/// hardware-isolated address space (no global user heap, no
 /// cross-process mapping). The trait is deliberately minimal — the two
 /// already-validated user-facing operations — so `kernel/core` stays free of
-/// any page-table knowledge (`AGENTS.md` §17.4) and the syscall handler owns
+/// any page-table knowledge and the syscall handler owns
 /// the capability and argument validation, never the producer.
 ///
 /// Implementations must be [`Sync`]: the single installed producer is shared
@@ -42,9 +42,9 @@ pub trait MemMap: Sync {
     ///
     /// The dispatcher and handler have already validated that `len` is
     /// non-zero, that `flags` carries no reserved bit, and the capability
-    /// posture (`mem_map` is unprivileged, `AGENTS.md` §16.6). The
+    /// posture (`mem_map` is unprivileged). The
     /// implementation zeroes the pages before the mapping is visible and
-    /// never makes the region executable (`AGENTS.md` §19.2 — W^X). When
+    /// never makes the region executable (W^X). When
     /// `flags` contains [`MapFlags::FIXED`] it maps at exactly `addr_hint`
     /// or fails closed; otherwise `addr_hint` is advisory and `0` means
     /// "producer chooses".
@@ -52,17 +52,15 @@ pub trait MemMap: Sync {
     /// # Errors
     ///
     /// Returns [`Errno::OutOfMemory`] when no backing frame (or page-table
-    /// frame) is available — deterministic OOM, never a panic
-    /// (`AGENTS.md` §4 / §2.9). The default producer ([`NullMemMap`])
+    /// frame) is available — deterministic OOM, never a panic. The default producer ([`NullMemMap`])
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
     fn map(&self, len: usize, flags: MapFlags, addr_hint: u64) -> Result<u64, Errno>;
 
     /// Release the region of `len` bytes based at `base` previously returned
     /// by [`MemMap::map`] from the caller's own address space.
     ///
-    /// The implementation zeroes the frames it reclaims (`AGENTS.md` §4 —
-    /// secret hygiene) and fails closed when `(base, len)` does not name a
-    /// region the caller mapped (`AGENTS.md` §5.4).
+    /// The implementation zeroes the frames it reclaims (secret hygiene) and fails closed when `(base, len)` does not name a
+    /// region the caller mapped.
     ///
     /// # Errors
     ///
@@ -74,7 +72,7 @@ pub trait MemMap: Sync {
 /// The anonymous-memory producer installed before any real one exists.
 ///
 /// Every operation fails closed with [`Errno::NotImplemented`] — the
-/// fail-closed default `AGENTS.md` §2.9 / §5.4 require, so a `mem_map` or
+/// fail-closed default require, so a `mem_map` or
 /// `mem_unmap` issued before the boot path installs the `kernel/mem`
 /// producer (the state before `plans/SPAWN.md` `SP5b`) announces an inert
 /// interface rather than pretending a region was mapped or freed.

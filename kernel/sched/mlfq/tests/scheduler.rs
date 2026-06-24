@@ -1,7 +1,7 @@
 // The integration tests construct fixed-size four-element arrays and
 // index them with `cpu as usize` / `i as u32`; clippy's pedantic
 // truncation lints fire on those even though the casts are bounded
-// at compile time (`AGENTS.md` §15 rule 10 — justified allow).
+// at compile time (rule 10 — justified allow).
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 //! Cross-crate integration tests for `kernel/sched`.
@@ -16,7 +16,7 @@
 //! * cancellation-safe lifecycle (`spawn`, `park`, `unpark`, `exit`).
 //!
 //! The tests use a single host thread and the deterministic [`TestArch`]
-//! so they are reproducible (`AGENTS.md` §7 — no flaky tests).
+//! so they are reproducible (no flaky tests).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;

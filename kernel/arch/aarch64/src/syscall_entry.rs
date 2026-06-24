@@ -10,8 +10,7 @@
 //! * Marshalling the register-passed arguments (`x0`–`x5`) and the
 //!   syscall number (`x8`) out of the saved register frame into the
 //!   architecture-neutral `rustos_abi` `[u64; SYSCALL_MAX_ARGS]` layout —
-//!   the same layout the x86_64 and riscv64 ports build (`AGENTS.md`
-//!   §2.2 — one ABI, no duplication).
+//!   the same layout the x86_64 and riscv64 ports build (one ABI, no duplication).
 //! * The dispatch callback the syscall path forwards each `svc` to,
 //!   mirroring the [`crate::preempt`] timer-callback design. The
 //!   architecture-neutral validation / capability / audit dispatcher
@@ -65,7 +64,7 @@ pub struct SyscallFrame {
 /// Pack the six aarch64 syscall argument registers into the canonical
 /// `rustos_abi` layout. The order matches the ABI definition pinned in
 /// `lib/abi/src/syscalls.rs`, identical to the x86_64 and riscv64 ports
-/// (`AGENTS.md` §2.2 — one ABI).
+/// (one ABI).
 #[must_use]
 pub const fn pack_raw_args(
     x0: u64,
@@ -81,7 +80,7 @@ pub const fn pack_raw_args(
 /// Number of general-purpose registers (`x0`–`x30`) the EL1 vector
 /// trampoline (`vectors.s`) saves into its register frame, in order. The
 /// frame is read as a `[u64; SAVED_GPRS]` to recover the syscall
-/// registers (`AGENTS.md` §2.2 — the frame layout has one definition,
+/// registers (the frame layout has one definition,
 /// pinned by `frame_offsets_match_vectors_s`).
 pub const SAVED_GPRS: usize = 31;
 
@@ -147,7 +146,7 @@ fn clear_dispatch_for_tests() {
 /// callback, and writes the result back into `frame.args[0]` (`x0`).
 /// Returns `false` (and leaves `frame` untouched) when no callback is
 /// installed — the exception handler treats that as a fail-closed
-/// condition (`AGENTS.md` §5.4.5), exactly as the other ports do.
+/// condition, exactly as the other ports do.
 #[must_use]
 pub fn dispatch_svc(frame: &mut SyscallFrame) -> bool {
     let Some(cb) = dispatch_callback() else {

@@ -1,4 +1,4 @@
-//! x86_64 per-CPU storage (`AGENTS.md` §17.2 "per-CPU storage").
+//! x86_64 per-CPU storage ("per-CPU storage").
 //!
 //! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
 //! for x86_64 over the **GS base** — the `IA32_GS_BASE` MSR
@@ -8,7 +8,7 @@
 //! reading and writing `IA32_GS_BASE` reads and writes the calling CPU's
 //! per-CPU word. This slice keeps that MSR access in one place so the
 //! architecture-neutral kernel reaches the per-CPU word through the one
-//! HAL trait (`AGENTS.md` §2.2).
+//! HAL trait.
 //!
 //! This is distinct from [`crate::percpu`], which owns the per-CPU GDT /
 //! IDT / IST-stack bring-up; that module's `SyscallTls` block is *what*
@@ -18,8 +18,7 @@
 //! The stored word is opaque to this surface (see the
 //! [`PerCpu`](rustos_arch_api::PerCpu) trait docs). On the host build
 //! there is no GS base, so the handle backs the word with an in-handle
-//! cell solely for the unit tests; it is never linked into a kernel image
-//! (`AGENTS.md` §1).
+//! cell solely for the unit tests; it is never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
 
@@ -41,7 +40,7 @@ pub struct PerCpuStorage {
     /// Host-only backing for the per-CPU word. On the bare-metal target
     /// the GS base MSR is the source of truth and this field is never
     /// read; kept so the host and bare-metal builds share one struct
-    /// shape (`AGENTS.md` §1).
+    /// shape.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
     host_base: AtomicUsize,
 }

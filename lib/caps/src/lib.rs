@@ -1,6 +1,6 @@
 //! Capability primitives for RustOS.
 //!
-//! Per `AGENTS.md` §5.2 a process's authority is the set of unforgeable
+//! Per a process's authority is the set of unforgeable
 //! kernel-issued capabilities it holds. This crate provides the building
 //! blocks every other RustOS component uses to talk about that authority:
 //!

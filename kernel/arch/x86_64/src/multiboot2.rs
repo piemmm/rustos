@@ -1,6 +1,6 @@
 //! Zero-copy `no_alloc` parser for the Multiboot2 information structure.
 //!
-//! The Multiboot2 specification (rev 2.0, §3.3) defines a tag-stream
+//! The Multiboot2 specification (rev 2.0) defines a tag-stream
 //! handed from the boot-loader to the kernel: a 16-byte header
 //! (`total_size`, `reserved`) followed by a sequence of 8-byte-aligned
 //! tags. Each tag begins with a 4-byte `type`, a 4-byte `size`
@@ -30,7 +30,7 @@
 //!
 //! # References
 //!
-//! * Multiboot2 specification, rev 2.0, §3.3 ("Boot information format").
+//! * Multiboot2 specification, rev 2.0 ("Boot information format").
 //! * UEFI 2.10, §7.2 ("Memory Allocation Services") — for the EFI
 //!   descriptor layout carried by tag 17.
 
@@ -39,7 +39,7 @@
 use core::mem::size_of;
 
 /// Tag-stream parsing errors. All variants are closed-fail conditions
-/// (`AGENTS.md` §5.4.3 — validate every input).
+/// (validate every input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
     /// Input buffer is not 8-byte aligned (the spec mandates this).
@@ -230,8 +230,7 @@ impl<'a> Iterator for TagIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // `validate` ran in `BootInfo::parse`, so every read here is in
-        // bounds. We re-check defensively anyway (cheap, and AGENTS.md
-        // §2 forbids "trust me" comments).
+        // bounds. We re-check defensively anyway (cheap, and the charter forbids "trust me" comments).
         if self.rest.len() < size_of::<TagHeader>() {
             return None;
         }

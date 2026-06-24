@@ -4,12 +4,11 @@
 //! the fast non-cryptographic [`crate::FastRng`] and the
 //! hardware-with-fallback [`crate::hardware::PlatformFast`] — and provides the
 //! shared, generator-independent sampling logic (byte filling and unbiased
-//! bounded integers) once, so no consumer re-derives it (`AGENTS.md` §2.2).
+//! bounded integers) once, so no consumer re-derives it.
 //!
 //! The cryptographic [`crate::CsRng`] deliberately does **not** implement this
 //! trait: its draws can fail (a reseed may need entropy that is momentarily
-//! unavailable) and must surface that as a `Result`, never paper over it
-//! (`AGENTS.md` §2.9). It therefore exposes its own fallible API.
+//! unavailable) and must surface that as a `Result`, never paper over it. It therefore exposes its own fallible API.
 
 /// An infallible source of uniformly distributed `u64` values.
 ///
@@ -46,7 +45,7 @@ pub trait RandU64 {
     /// Return a uniformly distributed value in `0..bound`, free of modulo
     /// bias, using Lemire's nearly-divisionless rejection method. Returns `0`
     /// when `bound == 0` (an empty range has no element; the documented,
-    /// panic-free convention, `AGENTS.md` §2.9).
+    /// panic-free convention).
     fn next_below(&mut self, bound: u64) -> u64 {
         if bound == 0 {
             return 0;

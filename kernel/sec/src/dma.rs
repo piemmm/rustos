@@ -2,7 +2,7 @@
 //!
 //! `kernel/mem::dma::DmaPool` is intentionally capability-agnostic: it
 //! knows how to carve, map, and zero DMA-able pages but takes no view
-//! on *who* is allowed to do so (`AGENTS.md` §2.3 — every type must
+//! on *who* is allowed to do so (every type must
 //! justify its existence, and stacking the capability check inside the
 //! pool would conflate two responsibilities). This module supplies the
 //! companion check.
@@ -18,9 +18,9 @@
 //! 3. On success emit [`AuditEvent::DmaAllocated`] with the granted
 //!    buffer's length, physical-address, and the requesting
 //!    `TaskId` — every grant must leave a trail an operator can
-//!    reconcile against device traffic (`AGENTS.md` §5.4.4).
+//!    reconcile against device traffic.
 //!
-//! No `unsafe`, no `unwrap`, no `panic!`: see `AGENTS.md` §2.9 / §2.10.
+//! No `unsafe`, no `unwrap`, no `panic!`:.
 
 use rustos_abi::{CapabilityId, Errno};
 use rustos_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTable};

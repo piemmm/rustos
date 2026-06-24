@@ -8,7 +8,7 @@
 //! instantiates this same module as a new logical CPU.
 //!
 //! Like riscv64 and aarch64, SMP is kept **port-side** here, not behind
-//! an `Smp` Arch HAL trait — an `Smp` HAL slice remains a future §17.2
+//! an `Smp` Arch HAL trait — an `Smp` HAL slice remains a future
 //! decision shared by all three ports (`plans/WIRING.md` Stage W6). The
 //! architecture-neutral kernel works in dense `CpuId`s and reaches the
 //! worker map through [`crate::kernel_arch::WasmArch`].
@@ -28,7 +28,7 @@
 //! decode build and are unit-tested on the host. The host `Worker` spawn
 //! and the worker-index read are gated to the wasm target; the host build
 //! substitutes a counter so `start_worker` is exercised under `cargo
-//! test` without a browser (`AGENTS.md` §7 — never silently skip a test).
+//! test` without a browser (never silently skip a test).
 
 use rustos_arch_api::CpuId;
 
@@ -50,7 +50,7 @@ pub enum StartWorkerError {
     IndexOutOfRange,
     /// The host refused to start the worker (a duplicate index, or a
     /// context — such as a worker without nested-worker support — that
-    /// cannot spawn). The caller fails closed (`AGENTS.md` §5.4.5).
+    /// cannot spawn). The caller fails closed.
     HostRefused,
 }
 
@@ -58,7 +58,7 @@ pub enum StartWorkerError {
 ///
 /// Range-checks `worker` against the spawnable secondary range before
 /// asking the host to spawn it, so an out-of-range index never reaches
-/// the host (`AGENTS.md` §2.9 — fail closed). The freshly-spawned worker
+/// the host (fail closed). The freshly-spawned worker
 /// instantiates the same module and enters through the arch crate's
 /// `rustos_arch_wasm32_main` export trampoline; the host reports its
 /// logical CPU id through [`current_worker`].
@@ -104,7 +104,7 @@ fn host_start_worker(worker: CpuId) -> bool {
 /// Host substitute for the `Worker` spawn: record the request against a
 /// counter and report success for an in-range secondary so the unit tests
 /// observe [`start_worker`]'s success path without a browser. Never
-/// linked into a wasm image (`AGENTS.md` §1 — no fake primitives in
+/// linked into a wasm image (no fake primitives in
 /// production).
 #[cfg(not(target_arch = "wasm32"))]
 fn host_start_worker(worker: CpuId) -> bool {

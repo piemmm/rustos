@@ -7,7 +7,7 @@
 //! and runs each pipeline honouring the `;`/`&&`/`||` connectors and the `&`
 //! background flag.
 //!
-//! Failure handling follows `AGENTS.md` §2.9: a line that does not parse or
+//! Failure handling follows: a line that does not parse or
 //! expand runs nothing and returns a [`ParseError`]; a command the host
 //! cannot launch is reported and becomes a non-zero `$?`, never a panic and
 //! never a line abort, so the remaining connectors behave as POSIX requires.
@@ -65,12 +65,11 @@ impl<'a> Shell<'a> {
         }
     }
 
-    /// Install the resource-limit seam the `ulimit` builtin drives
-    /// (`AGENTS.md` §24.3).
+    /// Install the resource-limit seam the `ulimit` builtin drives.
     ///
     /// A shell built without one uses a fail-closed default, so `ulimit`
     /// reports [`rustos_abi::Errno::NotImplemented`] rather than pretending a
-    /// get or set landed (`AGENTS.md` §2.9). This mirrors the `with_*`
+    /// get or set landed. This mirrors the `with_*`
     /// builder seams the kernel boot path uses.
     #[must_use]
     pub fn with_limits(mut self, limits: &'a dyn LimitStore) -> Self {

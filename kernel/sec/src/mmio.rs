@@ -2,8 +2,7 @@
 //!
 //! `kernel/mem::mmio::MmioMap` knows how to map a device's physical
 //! register block into a process address space but, like
-//! [`crate::dma::alloc_dma`]'s pool, takes no view on *who* may do so
-//! (`AGENTS.md` §2.3). This module supplies the companion check.
+//! [`crate::dma::alloc_dma`]'s pool, takes no view on *who* may do so. This module supplies the companion check.
 //!
 //! [`map_mmio`] / [`unmap_mmio`] are the only blessed entry points for
 //! a bus driver that wants a [`RegisterWindow`](rustos_abi::RegisterWindow)
@@ -16,9 +15,9 @@
 //! 3. On a successful map emit [`AuditEvent::MmioMapped`] carrying the
 //!    requesting `TaskId`, the physical base, and the length — every
 //!    grant leaves a trail an operator can reconcile against device
-//!    traffic (`AGENTS.md` §5.4.4).
+//!    traffic.
 //!
-//! No `unsafe`, no `unwrap`, no `panic!` (`AGENTS.md` §2.9 / §2.10).
+//! No `unsafe`, no `unwrap`, no `panic!`.
 
 use rustos_abi::{CapabilityId, Errno};
 use rustos_kernel_mem::{MmioError, MmioMap, MmioRegion, PageTable};

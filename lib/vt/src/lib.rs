@@ -2,7 +2,7 @@
 //!
 //! Every real terminal, terminal multiplexer, and remote Linux host speaks the
 //! ANSI / xterm escape vocabulary, so RustOS speaks it too — and it speaks it
-//! from **one** definition (`AGENTS.md` §2.2). This crate is that definition:
+//! from **one** definition. This crate is that definition:
 //! the control set, the SGR attributes and colour models, and the
 //! screen-control operations, expressed once as the [`Op`] vocabulary and
 //! shared by the *consumer* (the terminal emulator) and the *emitter* (the
@@ -21,10 +21,10 @@
 //! A terminal consumes bytes it did not produce — local shell output, and (in
 //! the remote stages of `plans/CURSES.md`) the output of a foreign host. The
 //! [`Parser`] is therefore total: it consumes any byte stream without panic or
-//! out-of-bounds access (`AGENTS.md` §2.9), saturating oversized parameters and
+//! out-of-bounds access, saturating oversized parameters and
 //! dropping unrecognised or malformed sequences rather than corrupting state.
 //! There is no `unwrap` / `expect` / `panic!` in this crate, and nothing here
-//! ever writes to fd 3 (`stdinfo` is reserved, §20).
+//! ever writes to fd 3 (`stdinfo` is reserved).
 //!
 //! ```
 //! use rustos_vt::{encode, Op, Parser, Sgr, Color};

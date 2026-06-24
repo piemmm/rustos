@@ -10,11 +10,11 @@
 //!
 //! Like `lib/geometry`, `lib/theme`, `lib/raster`, and `lib/font`, this crate
 //! lives in `lib/*` so the window manager and the default apps use it without
-//! depending on one another (`AGENTS.md` §6, §17.4). It owns no colour
+//! depending on one another. It owns no colour
 //! arithmetic of its own: rasterising a cursor composites through
-//! `lib/raster`'s single premultiplied-alpha path (`AGENTS.md` §2.2), and it
+//! `lib/raster`'s single premultiplied-alpha path, and it
 //! names cursors by `lib/theme`'s [`CursorKind`] rather than inventing a
-//! second vocabulary (§2.2 / §2.4).
+//! second vocabulary.
 //!
 //! # Pipeline
 //!

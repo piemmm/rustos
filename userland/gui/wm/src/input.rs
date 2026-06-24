@@ -15,16 +15,16 @@
 //! [`InputResponse::Activated`]) never moves the window — only a grab
 //! the desktop decorations choose to start, typically when the press
 //! landed on a title bar, does. This keeps content interaction and
-//! window dragging cleanly separated (`AGENTS.md` §2.1 — no "drag
+//! window dragging cleanly separated (no "drag
 //! anywhere" hack).
 //!
 //! Keyboard input is delivered to the focused window: the router owns
 //! *which* window has the keyboard ([`InputRouter::focused`]) and routes a
 //! [`InputEvent::KeyPressed`] / [`InputEvent::KeyReleased`] to it as an
 //! [`InputResponse::Key`], leaving the bytes-on-the-wire encoding to
-//! `rustos_abi`'s `KeyInput` (`AGENTS.md` §9). A key with no focused window
+//! `rustos_abi`'s `KeyInput`. A key with no focused window
 //! (focus on the desktop, or the focused window since gone) is ignored
-//! rather than misdelivered (`AGENTS.md` §2.9).
+//! rather than misdelivered.
 
 use crate::geometry::Point;
 use crate::window::{Window, WindowId};
@@ -32,9 +32,9 @@ use crate::Compositor;
 
 // The device-level pointer vocabulary the router consumes is shared with the
 // taskbar, which routes the same events but may not depend on the window
-// manager (`AGENTS.md` §17.4). It therefore lives in `lib/input`; the
+// manager. It therefore lives in `lib/input`; the
 // compositor re-exports it so callers keep referring to
-// `rustos_wm::{InputEvent, PointerButton}` (§2.2 — one definition).
+// `rustos_wm::{InputEvent, PointerButton}` (one definition).
 pub use rustos_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
@@ -143,7 +143,7 @@ impl InputRouter {
     /// one place.
     ///
     /// Returns `false`, changing nothing, when `compositor` does not know
-    /// `window` (`AGENTS.md` §2.9 — fail closed; the router never grants itself
+    /// `window` (fail closed; the router never grants itself
     /// focus over a window it was not handed).
     pub fn focus(&mut self, window: WindowId, compositor: &Compositor) -> bool {
         if compositor.window(window).is_none() {
@@ -192,7 +192,7 @@ impl InputRouter {
     /// Returns [`InputResponse::Ignored`] when focus rests on the desktop or
     /// the focused window is no longer known to `compositor` — in the latter
     /// case focus is dropped so a stale window never keeps the keyboard
-    /// (`AGENTS.md` §2.9 — fail closed).
+    /// (fail closed).
     fn deliver_key(
         &mut self,
         key: Key,
@@ -218,7 +218,7 @@ impl InputRouter {
     /// Start an interactive move-grab on the focused window, anchored at
     /// the current pointer position. Returns `false` when there is no
     /// focused window or it is no longer known to the compositor, in
-    /// which case no grab is started (`AGENTS.md` §2.9 — fail closed).
+    /// which case no grab is started (fail closed).
     ///
     /// Decorations call this when a press lands on a window's move
     /// handle (e.g. its title bar); the subsequent pointer motion then

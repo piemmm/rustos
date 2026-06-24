@@ -15,7 +15,7 @@
 //!
 //! 1. Writes its banner to fd 1 (`stream_write` over the COM1 backing). The
 //!    write is *gated* — `init` parks fail-closed on a short write — so any
-//!    later progress proves the banner fully landed (`AGENTS.md` §20 / §2.9).
+//!    later progress proves the banner fully landed.
 //! 2. Issues the `spawn` syscall to launch its session. The x86_64 runtime
 //!    `ProcessSpawn` producer is not wired yet (`plans/PI.md` X3b), so the
 //!    fail-closed `NULL_PROCESS_SPAWN` rejects it (`NotImplemented`), `init`
@@ -35,7 +35,7 @@
 //! witness. A regression that never reaches ring 3 (a bad image, a fault on
 //! entry, an unhandled first `syscall`) never emits the audited syscall, so
 //! the run times out and the harness reports `Outcome::Timeout` — the
-//! documented fail-loud behaviour (`AGENTS.md` §7).
+//! documented fail-loud behaviour.
 //!
 //! ## How it differs from the production binary
 //!
@@ -43,8 +43,7 @@
 //! `with_init` seam and the COM1 console — and only replaces the audit sink.
 //! Splitting the audit-observer behaviour into a separate bin (instead of a
 //! Cargo feature on a production crate) prevents feature unification from
-//! leaking the QEMU-exit shortcut into any production build (`AGENTS.md`
-//! §5.4.5 — fail closed; the harness never decides what the kernel does next).
+//! leaking the QEMU-exit shortcut into any production build (fail closed; the harness never decides what the kernel does next).
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -123,7 +122,7 @@ mod kernel {
     /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`. The bridge
     /// logs through `SERIAL_SINK`, not `AUDIT_SINK`, so a panic before PASS
     /// does not trip the QEMU-exit short-circuit — it halts, the run times
-    /// out, and the harness reports `Outcome::Timeout` (fail-loud, §7).
+    /// out, and the harness reports `Outcome::Timeout` (fail-loud).
     #[panic_handler]
     fn rustos_spawn_init_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)

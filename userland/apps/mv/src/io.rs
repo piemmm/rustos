@@ -34,7 +34,7 @@ pub enum EntryKind {
 /// be atomic; rather than overload an [`Errno`], the seam reports
 /// [`RenameOutcome::CrossDevice`] so the engine can fall back to the POSIX
 /// copy-then-remove relocation. This keeps the boundary case an explicit,
-/// non-error outcome (`AGENTS.md` §2.11) rather than a magic error code.
+/// non-error outcome rather than a magic error code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenameOutcome {
     /// The source was renamed onto the destination atomically; the move is

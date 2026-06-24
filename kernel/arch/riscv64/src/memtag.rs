@@ -1,4 +1,4 @@
-//! riscv64 memory tagging (`AGENTS.md` §19.10).
+//! riscv64 memory tagging.
 //!
 //! Implements the Arch HAL
 //! [`MemoryTagging`](rustos_arch_api::MemoryTagging) surface for riscv64.
@@ -10,13 +10,13 @@
 //! on it) are not present on this silicon, so there is no store-tag
 //! instruction to emit and no tag-check fault to take.
 //!
-//! Both §19.10 features are therefore an honest [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported).
+//! Both features are therefore an honest [`Tagging::Unsupported`](rustos_arch_api::Tagging::Unsupported).
 //! Use-after-free on riscv64 is hardened by the architecture-neutral
 //! *software* tag check in `kernel/mem` (sharing the
 //! [`rustos_arch_api::next_free_tag`] rotation this HAL defines) plus the
 //! slab guard pages and W^X. Were RustOS to add a RISC-V core that
 //! implements ratified memory tagging, this profile must be revisited and
-//! the store-tag / fault path wired, exactly as the §19.1 side-channel
+//! the store-tag / fault path wired, exactly as the side-channel
 //! profile is revisited for an out-of-order core.
 
 use rustos_arch_api::{MemoryTagging, Tagging, TaggingProfile};
@@ -34,7 +34,7 @@ impl MemoryTags {
         Self
     }
 
-    /// The honest §19.10 declaration for riscv64 (see the module docs).
+    /// The honest declaration for riscv64 (see the module docs).
     #[must_use]
     pub const fn declared_profile() -> TaggingProfile {
         TaggingProfile {

@@ -1,9 +1,9 @@
 //! `rxe` load-image program table and load-time hardening policy.
 //!
-//! An `rxe` binary (`AGENTS.md` §9) carries the signed [`crate::ManifestHeader`]
+//! An `rxe` binary carries the signed [`crate::ManifestHeader`]
 //! *and* a load image: a fixed [`LoadHeader`] followed by a table of
 //! [`Segment`] records describing the memory map the kernel must materialise.
-//! This module owns the load image's wire format and the §19.2 load-time
+//! This module owns the load image's wire format and the load-time
 //! invariants the kernel enforces before a single page is mapped:
 //!
 //! * **W^X** — every segment is exactly one of read-only, read-execute, or
@@ -43,8 +43,8 @@ pub const LOAD_MAX_SEGMENTS: usize = 64;
 ///
 /// Bounded so a malformed or hostile image cannot force unbounded parsing
 /// work or an unbounded fixed-array footprint in [`LoadImage`]. The
-/// references are resolved by the user-space dynamic loader under the §16.4
-/// policy (`AGENTS.md`); the kernel only validates and carries them.
+/// references are resolved by the user-space dynamic loader under the
+/// policy; the kernel only validates and carries them.
 pub const LOAD_MAX_NEEDED: usize = 8;
 
 /// Maximum length, in bytes, of a single shared-library reference path.
@@ -56,7 +56,7 @@ pub const LIBREF_MAX: usize = 255;
 
 /// Load-header flag: the image is position-independent (PIE).
 ///
-/// Required by §19.2; an image without this bit is refused so the kernel
+/// Required by; an image without this bit is refused so the kernel
 /// can relocate it under KASLR.
 pub const LOAD_FLAG_PIE: u32 = 1 << 0;
 
@@ -75,7 +75,7 @@ const SEG_FLAG_KNOWN: u32 = SEG_FLAG_READ | SEG_FLAG_WRITE | SEG_FLAG_EXEC;
 
 /// Why an `rxe` load image was rejected.
 ///
-/// The loader fails closed (`AGENTS.md` §5.4): any deviation from the §19.2
+/// The loader fails closed: any deviation from the
 /// invariants yields one of these variants and no page is mapped.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -98,7 +98,7 @@ pub enum RxeError {
     /// A segment is neither readable: every segment must carry
     /// [`SEG_FLAG_READ`].
     SegmentNotReadable,
-    /// A segment is both writable and executable — the W^X violation §19.2
+    /// A segment is both writable and executable — the W^X violation
     /// refuses at load time.
     WriteExecSegment,
     /// A segment's virtual address is not [`RXE_PAGE_SIZE`]-aligned.
@@ -112,11 +112,11 @@ pub enum RxeError {
     /// An address computation overflowed `u64` (segment extent, or a KASLR
     /// relocation).
     AddressOverflow,
-    /// The load header lacks [`LOAD_FLAG_PIE`]; §19.2 requires PIE so the
+    /// The load header lacks [`LOAD_FLAG_PIE`]; the charter requires PIE so the
     /// kernel can apply KASLR.
     NotPositionIndependent,
     /// The header's CFI type-tag does not match the kernel's syscall
-    /// interface hash (§9 / §19.2).
+    /// interface hash.
     InterfaceHashMismatch,
     /// The entry point does not fall inside an executable segment.
     BadEntryPoint,
@@ -215,7 +215,7 @@ impl RxePermission {
 /// One validated segment of a load image.
 ///
 /// Only [`Segment::decode`] (and therefore [`LoadImage::parse`]) constructs
-/// a `Segment`, so every instance already satisfies the §19.2 invariants:
+/// a `Segment`, so every instance already satisfies the invariants:
 /// page-aligned virtual address, `file_size <= mem_size`, a non-empty
 /// extent, and a W^X-clean [`RxePermission`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -355,13 +355,13 @@ pub struct LoadHeader {
     /// Number of [`Segment`] records that follow the header.
     pub segment_count: u16,
     /// Number of [`NeededLibrary`] records that follow the segment table —
-    /// the shared libraries the image dynamically links (`AGENTS.md` §16.4).
+    /// the shared libraries the image dynamically links.
     /// Must not exceed [`LOAD_MAX_NEEDED`].
     pub needed_count: u16,
     /// Image-relative entry-point virtual address.
     pub entry: u64,
     /// CFI type-tag: the SHA-256 of the syscall interface this image was
-    /// linked against (`AGENTS.md` §9 / §19.2).
+    /// linked against.
     pub cfi_tag: [u8; SYSCALL_TABLE_HASH_LEN],
 }
 
@@ -383,7 +383,7 @@ impl LoadHeader {
         out
     }
 
-    /// Decode the header prefix without enforcing the §19.2 policy.
+    /// Decode the header prefix without enforcing the policy.
     ///
     /// [`LoadImage::parse`] is the policy-enforcing entry point; this only
     /// recovers the fields.
@@ -420,7 +420,7 @@ impl LoadHeader {
 /// time — the `rxe` analogue of an ELF `DT_NEEDED` entry.
 ///
 /// The reference is an absolute path the user-space dynamic loader resolves
-/// under the §16.4 policy (the requesting bundle's own `Libraries/` or
+/// under the policy (the requesting bundle's own `Libraries/` or
 /// [`crate::SYSTEM_LIBRARIES_DIR`]); this type only carries and validates the
 /// bytes. Like [`Segment`], it is hand-serialised, so the C header exports its
 /// wire size rather than a struct mirror.
@@ -505,7 +505,7 @@ impl NeededLibrary {
 /// non-overlapping, W^X-clean, page-aligned segment table.
 ///
 /// The only constructor is [`LoadImage::parse`]; holding a `LoadImage` is
-/// proof that the §19.2 load-time invariants hold.
+/// proof that the load-time invariants hold.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct LoadImage {
     entry: u64,
@@ -533,7 +533,7 @@ const NEEDED_PLACEHOLDER: NeededLibrary = NeededLibrary {
 };
 
 impl LoadImage {
-    /// Parse and validate a load image, enforcing every §19.2 invariant.
+    /// Parse and validate a load image, enforcing every invariant.
     ///
     /// `expected_cfi_tag` is the kernel's compiled-in syscall-interface
     /// hash; the header's [`LoadHeader::cfi_tag`] must equal it.
@@ -647,7 +647,7 @@ impl LoadImage {
     /// declaration order.
     ///
     /// Each reference is resolved by the user-space dynamic loader under the
-    /// §16.4 policy (the requesting bundle's own `Libraries/` or
+    /// policy (the requesting bundle's own `Libraries/` or
     /// [`crate::SYSTEM_LIBRARIES_DIR`]); the kernel only validates and carries
     /// them here.
     pub fn needed_libraries(&self) -> impl Iterator<Item = &str> {
@@ -687,8 +687,7 @@ impl LoadImage {
 /// is required.
 ///
 /// The mixing is `splitmix64`, deterministic in `seed` so a boot can
-/// reproduce the layout from its recorded seed (`AGENTS.md` §19.2 —
-/// "per-boot entropy seed").
+/// reproduce the layout from its recorded seed ("per-boot entropy seed").
 #[must_use]
 pub fn kaslr_bias(seed: u64, window_pages: u64) -> u64 {
     let max_slot = u64::MAX / RXE_PAGE_SIZE;
@@ -702,7 +701,7 @@ pub fn kaslr_bias(seed: u64, window_pages: u64) -> u64 {
 
 /// `splitmix64` finaliser — a well-known, fast, full-period mixing of a
 /// 64-bit seed. Not cryptographic; the cryptographic entropy is the caller's
-/// `seed` (drawn from the platform RNG, §19.2).
+/// `seed` (drawn from the platform RNG).
 const fn splitmix64(seed: u64) -> u64 {
     let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

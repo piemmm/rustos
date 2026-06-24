@@ -60,7 +60,7 @@ impl CapabilitySet {
     ///
     /// This is the single definition of the on-wire capability-set layout;
     /// [`crate::token::CapabilityToken`] embeds the same bytes, and the
-    /// `cap_delegate` syscall copies them in (`AGENTS.md` §2.2).
+    /// `cap_delegate` syscall copies them in.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let words = self.bits.as_words();
@@ -78,7 +78,7 @@ impl CapabilitySet {
     /// [`Self::WIRE_LEN`]; the first [`Self::WIRE_LEN`] bytes are consumed.
     /// Every bit pattern is a representable set, so no further validation is
     /// needed — a set carrying a bit outside the parent's authority is
-    /// rejected later by [`Self::delegate`] (fail closed, `AGENTS.md` §5.4).
+    /// rejected later by [`Self::delegate`] (fail closed).
     pub fn from_le_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -186,7 +186,7 @@ impl IntoIterator for &CapabilitySet {
 
 /// Expose a [`CapabilitySet`] to ABI-level host seams that gate on a
 /// granted capability through `&dyn rustos_abi::CapabilityQuery` without
-/// naming this crate (`AGENTS.md` §17.4 — the `lib/abi -> lib/caps`
+/// naming this crate (the `lib/abi -> lib/caps`
 /// reverse edge is forbidden).
 impl rustos_abi::CapabilityQuery for CapabilitySet {
     fn holds(&self, cap: CapabilityId) -> bool {

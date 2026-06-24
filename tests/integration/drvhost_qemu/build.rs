@@ -1,7 +1,7 @@
 //! Build-time generator for the Stage 4 QEMU integration test fixture.
 //!
 //! The freestanding `x86_64-unknown-none` binary that runs under QEMU
-//! cannot pull `ed25519-dalek` in directly (`AGENTS.md` §1 forbids
+//! cannot pull `ed25519-dalek` in directly (the charter forbids
 //! hand-rolled crypto; `lib/crypto` is the only auditable surface that
 //! exposes verification). This `build.rs` runs on the host where
 //! `ed25519-dalek` is available, signs a synthetic `.rxe` manifest
@@ -43,7 +43,7 @@ fn main() {
     // target. Mirrors `tests/integration/kernel_arch_boot/build.rs`
     // and the other Stage-3a QEMU test build scripts — all five
     // freestanding test bins share the same linker script
-    // (`AGENTS.md` §2.2 — no duplication).
+    // (no duplication).
     let target = std::env::var("TARGET").unwrap_or_default();
     if target == "x86_64-unknown-none" {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");

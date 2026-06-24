@@ -12,19 +12,17 @@
 //! task was correctly resumed mid-loop (it goes on to complete the spin and
 //! exit). A broken preemption path would either never preempt the runaway loop
 //! (the vertical's `step` never returns → harness timeout) or resume it wrongly
-//! (it never reaches `exit` → harness timeout), so the run fails loudly
-//! (`AGENTS.md` §7).
+//! (it never reaches `exit` → harness timeout), so the run fails loudly.
 //!
 //! The loop body is funnelled through [`core::hint::black_box`] so the compiler
 //! cannot fold the spin away to nothing — the program must genuinely execute
 //! across multiple timer ticks for the preemption to be observable.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (which provides `_start`, the stack canary, the panic
 //! handler, and the `exit` syscall wrapper that routes `main`'s return), never
-//! the C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust programs
-//! (`AGENTS.md` §16.4). It is built position-independent and converted to an
-//! `rxe` blob by the consuming test's build script (`AGENTS.md` §9, §19.2). On
+//! the C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
+//! `rxe` blob by the consuming test's build script. On
 //! the host it is an inert stub so `cargo build --workspace`, clippy, and fmt
 //! still cover the crate.
 
@@ -45,7 +43,7 @@ mod program {
     /// The spin count, read from the `RUSTOS_EL0_SPINS` environment variable
     /// the consuming vertical's build script sets when it compiles this
     /// program, falling back to [`DEFAULT_SPINS`]. The build script is the
-    /// single source of truth for the count (`AGENTS.md` §2.2).
+    /// single source of truth for the count.
     const fn spin_count() -> u64 {
         match option_env!("RUSTOS_EL0_SPINS") {
             Some(s) => parse_u64(s.as_bytes()),
@@ -56,7 +54,7 @@ mod program {
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to [`DEFAULT_SPINS`] on an empty string, a non-digit byte,
     /// or overflow of the `u64` range. `const` and panic-free so the count is
-    /// fixed into the image with no runtime parsing (`AGENTS.md` §2.9 — fail
+    /// fixed into the image with no runtime parsing (fail
     /// closed to the default).
     const fn parse_u64(bytes: &[u8]) -> u64 {
         let mut acc: u64 = 0;

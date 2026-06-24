@@ -3,7 +3,7 @@
 //! The taskbar models a running-task list — one
 //! [`TaskEntry`](rustos_taskbar::TaskEntry) per top-level window, with the
 //! click-to-activate / minimise rule — but it owns no window
-//! manager, and the window manager owns no task list (`AGENTS.md` §17.4). So
+//! manager, and the window manager owns no task list. So
 //! joining the two is session glue, and [`TaskBridge`] is that glue.
 //!
 //! A task is named by a [`TaskId`] and a window by a
@@ -13,8 +13,7 @@
 //! it is told about and translates between the two whenever the taskbar acts on
 //! a window or the window manager moves focus.
 //!
-//! The bridge performs four operations, each total and fail-closed
-//! (`AGENTS.md` §2.9):
+//! The bridge performs four operations, each total and fail-closed:
 //!
 //! * [`open`](TaskBridge::open) adds a window to the compositor, registers it
 //!   as a running task, and focuses it (a freshly opened window takes focus).
@@ -96,7 +95,7 @@ impl TaskBridge {
     /// Returns the new [`WindowId`]. Returns `None`,
     /// changing nothing, only if the task-id space is exhausted — a window the
     /// bridge cannot name as a task would drift from the bar, so it is not
-    /// opened (`AGENTS.md` §2.9 — fail closed).
+    /// opened (fail closed).
     pub fn open(
         &mut self,
         compositor: &mut Compositor,
@@ -119,8 +118,7 @@ impl TaskBridge {
     /// Close `window`: remove it from the compositor and its task from the bar,
     /// dropping focus if it held it.
     ///
-    /// Returns `false`, changing nothing, when `window` is not tracked
-    /// (`AGENTS.md` §2.9).
+    /// Returns `false`, changing nothing, when `window` is not tracked.
     pub fn close(
         &mut self,
         compositor: &mut Compositor,
@@ -148,7 +146,7 @@ impl TaskBridge {
     /// updated its own model (it computed the outcome); this brings the window
     /// manager into step. Returns `false`, changing nothing, for an
     /// [`Unknown`](ActivateOutcome::Unknown) outcome or a task the bridge does
-    /// not track (`AGENTS.md` §2.9).
+    /// not track.
     pub fn activate(
         &self,
         compositor: &mut Compositor,
@@ -179,8 +177,7 @@ impl TaskBridge {
     /// the bar's running-task list highlights the focused task, so this relays
     /// the new focus. Passing `None` (a press on the desktop) clears the
     /// highlight. A focused window the bridge does not track — the bar's own
-    /// surface, say — leaves the highlight untouched and returns `false`
-    /// (`AGENTS.md` §2.9), so a click the window manager handled but that owns
+    /// surface, say — leaves the highlight untouched and returns `false`, so a click the window manager handled but that owns
     /// no task neither blanks the highlight nor forces a needless repaint.
     pub fn sync_focus(&self, taskbar: &mut Taskbar, window: Option<WindowId>) -> bool {
         let target = match window {
@@ -214,7 +211,7 @@ fn focus_window(
 
 /// Show `window`, raise it to the top of the stack, and give it keyboard
 /// focus — the one path shared by [`TaskBridge::open`] and the activated case
-/// of [`TaskBridge::activate`] (`AGENTS.md` §2.2). Returns whether focus moved
+/// of [`TaskBridge::activate`]. Returns whether focus moved
 /// (it does not when the compositor no longer knows `window`).
 fn show_raise_focus(
     compositor: &mut Compositor,

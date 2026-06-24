@@ -87,8 +87,7 @@ impl TaskList {
     /// task also restores it (a focused window is never minimised).
     ///
     /// Passing `None` clears the highlight (focus rests on the desktop).
-    /// Passing an unknown id changes nothing and returns `false` (fail closed,
-    /// `AGENTS.md` §2.9); the focus and minimised state are left untouched.
+    /// Passing an unknown id changes nothing and returns `false` (fail closed); the focus and minimised state are left untouched.
     pub fn set_focused(&mut self, id: Option<TaskId>) -> bool {
         match id {
             None => {
@@ -108,8 +107,7 @@ impl TaskList {
 
     /// Add a new task for a freshly opened window.
     ///
-    /// A duplicate id changes nothing and returns `false` (fail closed,
-    /// `AGENTS.md` §2.9); the window manager assigns unique ids, so a clash
+    /// A duplicate id changes nothing and returns `false` (fail closed); the window manager assigns unique ids, so a clash
     /// signals a bug rather than a benign retry.
     pub fn add(&mut self, id: TaskId, title: impl Into<String>) -> bool {
         if self.position(id).is_some() {

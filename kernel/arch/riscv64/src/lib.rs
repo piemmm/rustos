@@ -29,7 +29,7 @@
 //! | `entry`       | `rustos_arch_riscv64_main` Rust trampoline (freestanding only). |
 //! | `panic`       | Shared `#[panic_handler]` bridge (freestanding only).           |
 //!
-//! # Arch HAL boundary (`AGENTS.md` §17.2 / §17.4)
+//! # Arch HAL boundary
 //!
 //! Like x86_64, this crate is a pure Arch HAL implementation: it names
 //! only `kernel/arch/api` and `lib/*`, never a concrete kernel
@@ -83,7 +83,7 @@
 
 // Host unit tests use `std` (e.g. `std::vec::Vec` in the `fdt` fixture
 // builder). The crate itself stays `no_std` for the freestanding
-// build (`AGENTS.md` §1 — no hacks).
+// build (no hacks).
 #[cfg(test)]
 extern crate std;
 
@@ -106,7 +106,7 @@ core::arch::global_asm!(include_str!("smp.s"));
 
 pub mod context;
 /// riscv64 implementation of the Arch HAL context-switch surface
-/// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the
+/// ([`rustos_arch_api::ContextSwitch`]): the
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
@@ -114,19 +114,18 @@ pub mod fault;
 pub mod fdt;
 pub mod kernel_arch;
 /// riscv64 implementation of the Arch HAL memory-tagging surface
-/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10). The RISC-V
+/// ([`rustos_arch_api::MemoryTagging`]). The RISC-V
 /// cores RustOS targets implement no ratified memory-tagging extension,
 /// so the port declares it an honest `Unsupported` (see the module docs).
 pub mod memtag;
 pub mod paging;
 /// riscv64 implementation of the Arch HAL per-CPU storage surface
-/// ([`rustos_arch_api::PerCpu`], `AGENTS.md` §17.2): the `tp`
+/// ([`rustos_arch_api::PerCpu`]): the `tp`
 /// (thread-pointer) register read/write the per-hart anchor is reached
 /// through.
 pub mod percpu_hal;
 /// riscv64 implementation of the Arch HAL early-boot platform-discovery
-/// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
-/// §18.2): the FDT → [`rustos_abi::hwtree`] normalisation built on the
+/// surface ([`rustos_arch_api::PlatformDiscovery`]): the FDT → [`rustos_abi::hwtree`] normalisation built on the
 /// [`fdt`] reader.
 pub mod platform;
 pub mod plic;
@@ -138,19 +137,18 @@ pub mod qemu_exit;
 // under `cargo test`.
 pub mod sbi;
 /// riscv64 implementation of the Arch HAL side-channel mitigation
-/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
-/// §19.1).
+/// surface ([`rustos_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 /// riscv64 implementation of the Arch HAL timer-programming surface
-/// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-
+/// ([`rustos_arch_api::Timer`]): the architecture-
 /// neutral scheduler-tick callback install + dispatch over the
 /// supervisor (SBI) timer wired in [`preempt`].
 pub mod timer_hal;
 pub mod trap;
 /// riscv64 implementation of the Arch HAL "enter user mode" surface
-/// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `sret`
+/// ([`rustos_arch_api::EnterUser`]): the one `sret`
 /// sequence that drops a built process image into U-mode.
 pub mod userentry;
 

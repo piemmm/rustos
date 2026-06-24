@@ -45,8 +45,7 @@
 //!
 //! It links only the `rustos-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
-//! never behind a Cargo feature on the arch crate (`AGENTS.md` §5.4.5 —
-//! fail closed).
+//! never behind a Cargo feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -103,7 +102,7 @@ mod kernel {
 
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// exactly the (now-unmapped) arena guard page, then report PASS.
-    /// Anything else is a FAILURE. Never returns (`AGENTS.md` §2.9).
+    /// Anything else is a FAILURE. Never returns.
     extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
         if fault::is_abort(esr) && far == guard_va() {
             log(

@@ -25,7 +25,7 @@ pub struct MountFlags(u32);
 impl MountFlags {
     /// Mount the filesystem read-only.
     pub const READ_ONLY: Self = Self(1 << 0);
-    /// Reject `setuid` / `setgid` bits on this mount (`AGENTS.md` §5.3).
+    /// Reject `setuid` / `setgid` bits on this mount.
     pub const NOSUID: Self = Self(1 << 1);
     /// Reject device-special files on this mount.
     pub const NODEV: Self = Self(1 << 2);
@@ -71,7 +71,7 @@ impl MountFlags {
     /// Both operands are already-validated [`MountFlags`], so the union
     /// stays within [`Self::KNOWN_MASK`] and needs no re-validation. Used
     /// to build composite mount policies such as the `nosuid,nodev,noexec`
-    /// default for `/System/Logs` (`AGENTS.md` §16.2).
+    /// default for `/System/Logs`.
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -165,7 +165,7 @@ impl NodeId {
 ///
 /// `abi-v1` distinguishes only the two kinds the read surface needs;
 /// special-file kinds are introduced by a later trait version rather
-/// than by widening this enum (`AGENTS.md` §2.4 / §9).
+/// than by widening this enum.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum NodeKind {
@@ -181,9 +181,9 @@ pub enum NodeKind {
 /// [`FilesystemRead::node_info`].
 ///
 /// This is *structural* information only — its `size` and `kind` come
-/// from the on-disk layout. Ownership, mode bits, ACLs, and the §5.3
+/// from the on-disk layout. Ownership, mode bits, ACLs, and the
 /// capability gate live in the VFS metadata, not here; a read driver
-/// never makes a permission decision (`AGENTS.md` §5.4 — the VFS is
+/// never makes a permission decision (the VFS is
 /// the policy point, the driver is raw structural I/O).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -217,12 +217,12 @@ pub struct DirEntry {
 /// `drivers/filesystem/*` driver. It is deliberately a *separate*
 /// trait from [`Filesystem`] (which remains mount/unmount only and
 /// frozen): new behaviour ships as a new trait, never by widening a
-/// shipped one (`AGENTS.md` §2.4 / §9). A future `FilesystemWrite`
+/// shipped one. A future `FilesystemWrite`
 /// trait will add the mutating surface.
 ///
 /// Implementations expose raw structural access and make **no**
 /// permission decisions: the VFS authorises every traversal against
-/// the §5.3 model before calling here (`AGENTS.md` §5.4). Names are
+/// the model before calling here. Names are
 /// raw on-disk bytes; case-folding and Unicode normalisation policy
 /// belong to the VFS, not the driver.
 ///
@@ -246,7 +246,7 @@ pub trait FilesystemRead {
     /// Resolve a single path component `name` within directory `dir`.
     ///
     /// `name` is a single component: it contains no path separator and
-    /// is neither `.` nor `..` (the VFS resolves those itself, §16).
+    /// is neither `.` nor `..` (the VFS resolves those itself).
     ///
     /// # Errors
     ///
@@ -296,7 +296,7 @@ pub trait FilesystemRead {
 /// symmetric counterpart to [`FilesystemRead`]. Like that trait it is a
 /// *separate* trait, never a widening of the frozen [`Filesystem`]
 /// mount/unmount surface or of [`FilesystemRead`]: new behaviour ships as
-/// a new trait (`AGENTS.md` §2.4 / §9).
+/// a new trait.
 ///
 /// # The `(dir, name)` model
 ///
@@ -307,13 +307,13 @@ pub trait FilesystemRead {
 /// FAT keep that metadata *in the parent directory*, so a mutation that
 /// grows, shrinks, or unlinks a node must address it through its parent.
 /// `name` is a single path component containing no separator and is
-/// neither `.` nor `..` (the VFS resolves those itself, §16).
+/// neither `.` nor `..` (the VFS resolves those itself).
 ///
 /// # No permission decisions
 ///
 /// As with [`FilesystemRead`], implementations expose raw structural
 /// mutation and make **no** permission decision: the VFS authorises every
-/// write against the §5.3 model before calling here (`AGENTS.md` §5.4).
+/// write against the model before calling here.
 ///
 /// # Capabilities
 ///
@@ -401,7 +401,7 @@ pub trait FilesystemWrite {
 ///
 /// Eight inline entries keep the record fixed-size and allocation-free,
 /// matching the per-inode inline-ACL budget a `drivers/filesystem/*`
-/// driver stores for the §5.3 model (`AGENTS.md` §5.3).
+/// driver stores for the model.
 pub const MAX_ACL_ENTRIES: usize = 8;
 
 /// The principal a [`SecurityAcl`] entry grants rights to.
@@ -414,13 +414,13 @@ pub enum SecuritySubject {
     Group(u32),
 }
 
-/// One inline access-control-list entry of a node's §5.3 security record.
+/// One inline access-control-list entry of a node's security record.
 ///
 /// `perms` is a POSIX-style `rwx` triad in its low three bits (`0b100`
 /// read, `0b010` write, `0b001` execute/search) **granted** to `subject`.
 /// The surface is grant-only — the POSIX ACL model — so a driver never
 /// surfaces an explicit deny; the VFS composes these grants with the mode
-/// bits when it applies the model (`AGENTS.md` §5.3).
+/// bits when it applies the model.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SecurityAcl {
     /// The user or group the entry grants rights to.
@@ -429,14 +429,13 @@ pub struct SecurityAcl {
     pub perms: u8,
 }
 
-/// The complete §5.3 security record a filesystem driver stores for one
+/// The complete security record a filesystem driver stores for one
 /// node, surfaced to the VFS through [`FilesystemSecurity::security`].
 ///
 /// This is an in-process policy record the VFS consumes, not a serialized
 /// wire type: each `drivers/filesystem/*` driver owns its own on-disk
 /// encoding and translates to and from this shape. The driver stores the
-/// record but makes **no** permission decision from it (`AGENTS.md` §5.4 —
-/// the VFS is the policy point).
+/// record but makes **no** permission decision from it (the VFS is the policy point).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NodeSecurity {
     /// POSIX mode bits (type bits are not stored here; see [`NodeKind`]).
@@ -492,20 +491,19 @@ impl NodeSecurity {
     }
 }
 
-/// Per-node §5.3 security access to a mounted filesystem.
+/// Per-node security access to a mounted filesystem.
 ///
 /// This is a **versioned `abi-v1` extension** — a *separate* trait from
 /// [`FilesystemRead`] / [`FilesystemWrite`], never a widening of either
-/// nor of the frozen [`Filesystem`]; new behaviour ships as a new trait
-/// (`AGENTS.md` §2.4 / §9). A driver that stores full POSIX metadata per
-/// inode — owner, mode, ACL, and an optional capability gate (§5.3) —
+/// nor of the frozen [`Filesystem`]; new behaviour ships as a new trait. A driver that stores full POSIX metadata per
+/// inode — owner, mode, ACL, and an optional capability gate —
 /// implements it so the VFS can use that **stored** record as the policy
 /// input instead of a uniform mount-point template. A driver such as FAT
 /// that keeps no per-file owner does not implement it, and the VFS keeps
 /// applying the mount-point template.
 ///
 /// The driver only *reports* the record; it makes no permission decision
-/// (`AGENTS.md` §5.4 — the VFS is the policy point).
+/// (the VFS is the policy point).
 ///
 /// # Capabilities
 ///
@@ -513,7 +511,7 @@ impl NodeSecurity {
 /// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
 /// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
 pub trait FilesystemSecurity {
-    /// Report the §5.3 security record stored for `node`.
+    /// Report the security record stored for `node`.
     ///
     /// # Errors
     ///
@@ -522,9 +520,9 @@ pub trait FilesystemSecurity {
     fn security(&mut self, node: NodeId) -> Result<NodeSecurity, DriverError>;
 }
 
-/// The four §21 timestamps stored for a filesystem node.
+/// The four timestamps stored for a filesystem node.
 ///
-/// Every field is a 64-bit-native [`Time64`] (`AGENTS.md` §21): absolute
+/// Every field is a 64-bit-native [`Time64`]: absolute
 /// time is never a seconds-only scalar, so the full pre-1970 and
 /// post-2038 range round-trips without truncation. The four instants
 /// follow the POSIX model:
@@ -546,19 +544,19 @@ pub struct NodeTimes {
     pub changed: Time64,
 }
 
-/// Per-node §21 timestamp access to a mounted filesystem.
+/// Per-node timestamp access to a mounted filesystem.
 ///
 /// This is a **versioned `abi-v1` extension** — a *separate* trait from
 /// [`FilesystemRead`] / [`FilesystemWrite`] / [`FilesystemSecurity`],
 /// never a widening of any of them nor of the frozen [`Filesystem`]; new
-/// behaviour ships as a new trait (`AGENTS.md` §2.4 / §9). A driver whose
-/// on-disk format stores the four §21 timestamps as true [`Time64`]
+/// behaviour ships as a new trait. A driver whose
+/// on-disk format stores the four timestamps as true [`Time64`]
 /// implements it so the VFS can surface them; a driver whose backing
 /// format keeps no timestamps (or only narrower legacy ones it cannot
 /// widen) simply does not implement it.
 ///
 /// The driver only *reports* the stored record; it makes no permission
-/// decision (`AGENTS.md` §5.4 — the VFS is the policy point).
+/// decision (the VFS is the policy point).
 ///
 /// # Capabilities
 ///
@@ -566,7 +564,7 @@ pub struct NodeTimes {
 /// [`DriverHandle`](crate::driver::DriverHandle) the host minted at load
 /// time ([`CapabilityId::DRV_LOAD`](crate::CapabilityId::DRV_LOAD)).
 pub trait FilesystemTimestamps {
-    /// Report the four §21 timestamps stored for `node`.
+    /// Report the four timestamps stored for `node`.
     ///
     /// # Errors
     ///
@@ -954,7 +952,7 @@ mod tests {
         );
     }
 
-    /// A node whose stored §5.3 record the VFS reads through the trait.
+    /// A node whose stored record the VFS reads through the trait.
     struct MockSecurityFs {
         sec: NodeSecurity,
     }
@@ -968,7 +966,7 @@ mod tests {
         }
     }
 
-    /// A node whose stored §21 timestamps the VFS reads through the trait.
+    /// A node whose stored timestamps the VFS reads through the trait.
     struct MockTimesFs {
         times: NodeTimes,
     }

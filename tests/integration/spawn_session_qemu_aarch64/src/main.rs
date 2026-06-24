@@ -3,7 +3,7 @@
 //! PID 1 (`init`) into EL0, and prove `init` **supervises** the embedded
 //! login session (`/System/Services/login`) — launching it, waiting on and
 //! reaping it when it exits, and relaunching it — rather than spawning it
-//! and forgetting it (`AGENTS.md` §20).
+//! and forgetting it.
 //!
 //! ## What this test asserts
 //!
@@ -19,7 +19,7 @@
 //!
 //! 1. `spawn` for the device-manager service `/System/Services/devmgr`
 //!    (audited `SyscallInvoked`, `EventId(5000)`, #1) — the long-running
-//!    service `init` launches *first* (`AGENTS.md` §18.3). The producer
+//!    service `init` launches *first*. The producer
 //!    builds it a fresh address space (emitting `ProcessSpawned`, #2);
 //!    `devmgr` reads the discovered hardware tree (unaudited `hw_tree_read`)
 //!    and parks in `hw_tree_wait` (unaudited), contributing no further
@@ -32,9 +32,9 @@
 //!    `init` back on the scheduler until a child is reapable.
 //! 4. The cooperative drain loop steps login; its `users_db_read` fails
 //!    closed (this board mounts no root volume, so no database is held), it
-//!    wires the deny-all authenticator (`AGENTS.md` §5.4.5), writes its
+//!    wires the deny-all authenticator, writes its
 //!    `Username: ` prompt, and **blocks** in `stream_read` on the
-//!    kernel-core `BlockingConsoleRead` backing (`AGENTS.md` §20 — the
+//!    kernel-core `BlockingConsoleRead` backing (the
 //!    backing owns blocking). The runner then holds a scripted dialogue
 //!    with it (the xtask enrolment's ordered `serial` script, each line
 //!    typed only after its prompt appeared past the previous exchange):
@@ -43,7 +43,7 @@
 //!    re-prompted (the per-keystroke-crash regression witness) — then,
 //!    after the deny-all authenticator refuses (`Login incorrect`) and
 //!    login re-prompts, a 513-byte line — one byte past login's 512-byte
-//!    `LINE_MAX` validation bound (`AGENTS.md` §24.4) — at the **second**
+//!    `LINE_MAX` validation bound — at the **second**
 //!    `Username: ` prompt. Login refuses the over-long line whole, records
 //!    the console error, and exits fail-closed (audited `SyscallInvoked`
 //!    #4 of the supervision chain). `init`'s `wait` then reaps it and
@@ -63,8 +63,7 @@
 //! built image proves the full reap-and-restart cycle, not merely a single
 //! concurrent spawn. Login's `exit` is on the critical path only if login
 //! actually ran and its blocked `stream_read` received the injected UART RX
-//! bytes: its prompt write is gated through its *own* isolated address space
-//! (`AGENTS.md` §4), and `init`'s `wait` cannot return until that `exit`
+//! bytes: its prompt write is gated through its *own* isolated address space, and `init`'s `wait` cannot return until that `exit`
 //! recorded the child's code. The supervision chain's audited syscalls are
 //! `init`'s `spawn` of `devmgr`, `init`'s `spawn` of login, `init`'s `wait`,
 //! login's `exit`, and `init`'s second login `spawn` (login's own audited
@@ -73,13 +72,12 @@
 //! spawns login, never delivers its input, never reaps it, or never
 //! relaunches it never reaches the fourth
 //! `ProcessSpawned`, so the run times out and the harness reports
-//! `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-//! §7). The runner adds the converse guard: it fails the run if the guest
+//! `Outcome::Timeout` — the documented fail-loud behaviour. The runner adds the converse guard: it fails the run if the guest
 //! exits before every scripted prompt appeared and every line was sent, so
 //! a login that crashes mid-dialogue (e.g. per keystroke) cannot pass on
 //! the relaunch's event counts alone. Logging in for real rides the P8/P11
 //! root-volume mount; until then every credential check on this board fails
-//! closed (§5.4.5).
+//! closed.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -96,7 +94,7 @@
 //! replaces the audit sink. Splitting the audit-observer behaviour into a
 //! separate bin (instead of a Cargo feature on a production crate) prevents
 //! feature unification from leaking the QEMU-exit shortcut into any
-//! production build (`AGENTS.md` §5.4.5 — fail closed; the harness never
+//! production build (fail closed; the harness never
 //! decides what the kernel does next).
 
 #![cfg_attr(itest_aarch64, no_std)]
@@ -187,8 +185,7 @@ mod kernel {
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-    /// §7).
+    /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn rustos_spawn_session_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

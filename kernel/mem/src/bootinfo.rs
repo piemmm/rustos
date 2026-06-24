@@ -82,7 +82,7 @@ impl MemoryRegion {
 /// machine's physical address space, as observed at boot.
 ///
 /// The map is *additive*: overlapping regions are not allowed, and the
-/// allocator's constructor verifies this (`AGENTS.md` §2.10 — fail
+/// allocator's constructor verifies this (fail
 /// closed). The list need not cover the full address space; any gap is
 /// implicitly treated as [`RegionKind::Reserved`] (i.e. unusable).
 #[derive(Debug, Clone, Default)]
@@ -117,7 +117,7 @@ impl BootMemoryMap {
     /// Each usable region that overlaps the range is split into the (up to
     /// two) usable sub-ranges that fall *outside* `[start, end)`; the
     /// overlapping middle is dropped, becoming an implicit reserved gap (a
-    /// gap in the map is treated as [`RegionKind::Reserved`], §85). Reserved
+    /// gap in the map is treated as [`RegionKind::Reserved`]). Reserved
     /// regions pass through untouched. The no-overlap invariant
     /// [`crate::FrameAllocator::new`] enforces is preserved, since this only
     /// shrinks or splits existing usable regions — it never introduces a new
@@ -376,8 +376,7 @@ mod tests {
 
     /// The carved range becomes an implicit reserved gap, so a frame
     /// allocator built from the clipped map never marks those frames usable.
-    /// Locks the `reserve_range` ↔ `FrameAllocator` contract (`AGENTS.md`
-    /// §2.2 — one reservation mechanism).
+    /// Locks the `reserve_range` ↔ `FrameAllocator` contract (one reservation mechanism).
     #[test]
     fn reserve_range_frames_are_not_allocatable() {
         use crate::frame::{FrameAllocator, PAGE_SIZE};

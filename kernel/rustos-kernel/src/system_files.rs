@@ -4,8 +4,7 @@
 //! Under Design D the one disk the bootstrap floor brought up is owned for
 //! the life of the system by the never-returning driver-store kthread
 //! (`crate::shared_block::DriverStoreService`, D2a-2), which keeps the
-//! read-only signed-bundle `/System` volume mounted (`AGENTS.md` §18.3 /
-//! §18.4). Everything that reads that volume — the in-kernel driver
+//! read-only signed-bundle `/System` volume mounted. Everything that reads that volume — the in-kernel driver
 //! autoload today, and the user-space `devmgr` over an IPC endpoint in
 //! D2b-2 — needs exactly two operations against it: **list** the
 //! `/System/Drivers/` store and **read** a bundle's bytes.
@@ -17,20 +16,20 @@
 //! bytes through. It consolidates the two helpers the boot path previously
 //! wired ad hoc — [`rustos_kernel_core::enumerate_driver_store`] for the
 //! listing and the now-removed `VfsImageSource` for the reads — behind a
-//! single seam (`AGENTS.md` §2.2), so D2b-2 wraps *this* service in the
+//! single seam, so D2b-2 wraps *this* service in the
 //! `IPC_RECV` loop rather than re-deriving the read path.
 //!
 //! # Layering
 //!
 //! The read itself belongs in `kernel/core`, which owns the root-mount
-//! builder and the §5.3-checked per-inode delegation
+//! builder and the-checked per-inode delegation
 //! ([`rustos_kernel_core::DriverImageReader`]) — but the [`ImageSource`]
-//! trait lives in `userland/system/drvhost`, and §17.4 forbids `kernel/core`
+//! trait lives in `userland/system/drvhost`, and the charter forbids `kernel/core`
 //! from depending on a userland crate. The bin crate is the one layer that
-//! may name `drvhost` (`AGENTS.md` §17.4), so this service lives here and
+//! may name `drvhost`, so this service lives here and
 //! simply *delegates* to the kernel-core reader and store walk, adding no
-//! authority of its own. Every capability and §5.3 check stays in
-//! `kernel/core`, which fails closed (`AGENTS.md` §5.4 / §2.9).
+//! authority of its own. Every capability and check stays in
+//! `kernel/core`, which fails closed.
 //!
 //! # Borrow model
 //!
@@ -39,8 +38,7 @@
 //! [`RefCell`]. The two operations are strictly sequential and
 //! single-threaded — the autoload lists the store once, then reads one
 //! bundle at a time — so the borrow never overlaps. The root-backed VFS the
-//! reader uses is built once at [`SystemFileService::open`] (`AGENTS.md`
-//! §2.16).
+//! reader uses is built once at [`SystemFileService::open`].
 
 use core::cell::RefCell;
 
@@ -63,14 +61,13 @@ use rustos_log::Sink;
 ///
 /// [`list_store`]: SystemFileService::list_store
 pub struct SystemFileService<'a, F: ?Sized> {
-    /// The root-backed VFS reader, its private root mount built once
-    /// (`AGENTS.md` §2.16). Every read goes through its §5.3-checked,
+    /// The root-backed VFS reader, its private root mount built once. Every read goes through its-checked,
     /// fail-closed delegation.
     reader: DriverImageReader,
     /// The store root the listing and the reads are rooted at, relative to
-    /// the mounted volume's own root (`AGENTS.md` §2.2 — the one definition
+    /// the mounted volume's own root (the one definition
     /// the walk and the reader agree on). [`DriverImageReader::read_image`]
-    /// validates every requested path lies strictly below it (§5.4).
+    /// validates every requested path lies strictly below it.
     store_root: &'a str,
     /// The mounted volume's filesystem driver, behind a [`RefCell`] because
     /// [`ImageSource::read`] is `&self` while the driver needs `&mut`; the
@@ -93,7 +90,7 @@ where
     ///
     /// The [`VfsError`] from [`DriverImageReader::open`] if the private root
     /// mount cannot be built — the sole fail-closed refusal that prevents
-    /// any read (`AGENTS.md` §2.9).
+    /// any read.
     pub fn open(fs: &'a mut F, store_root: &'a str) -> Result<Self, VfsError> {
         Ok(Self {
             reader: DriverImageReader::open()?,
@@ -103,12 +100,12 @@ where
     }
 
     /// List the installed `/System/Drivers/` bundle paths by walking the
-    /// store directory off the mounted volume (`AGENTS.md` §18.6).
+    /// store directory off the mounted volume.
     ///
     /// This is a structural walk only: it grants no authority and verifies
     /// no signature, and is fail-closed — a missing, unreadable, or empty
     /// store yields fewer (or zero) paths and audits its own outcome
-    /// through `audit`, never an error (`AGENTS.md` §18.4 / §2.9).
+    /// through `audit`, never an error.
     #[must_use]
     pub fn list_store(&self, audit: &dyn Sink) -> Vec<String> {
         enumerate_driver_store(&mut **self.fs.borrow_mut(), self.store_root, audit)
@@ -124,7 +121,7 @@ where
     /// [`DriverImageReader::read_image`]; the precise refusal (a path
     /// outside the store, a non-file, an over-large image, a short read) is
     /// mapped to the stable [`Errno`] the scan records as the bundle's skip
-    /// reason (`AGENTS.md` §5.4 / §2.9).
+    /// reason.
     fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), Errno> {
         let mut fs = self.fs.borrow_mut();
         self.reader
@@ -171,8 +168,7 @@ mod tests {
 
     #[test]
     fn list_store_of_an_empty_store_is_not_an_error() {
-        // A volume with no store directory yields no paths and never errors
-        // (`AGENTS.md` §18.4) — the same service still reads cleanly.
+        // A volume with no store directory yields no paths and never errors — the same service still reads cleanly.
         let mut fs = MockRootFs::new();
         let service =
             SystemFileService::open(&mut fs, "/System/Drivers").expect("root mount builds");

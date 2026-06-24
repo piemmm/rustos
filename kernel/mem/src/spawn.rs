@@ -9,7 +9,7 @@
 //!    segment's file content, zeroing the BSS tail beyond `file_size`;
 //! 2. allocates and maps a zeroed user stack (U|R|W);
 //! 3. serialises the [`rustos_abi::process`] startup-vector block (arguments,
-//!    environment, and the §19.2 stack-canary seed) and writes it into the
+//!    environment, and the stack-canary seed) and writes it into the
 //!    new address space (U|R|W).
 //!
 //! The result is a [`ProcessImage`] — the entry point, the initial user stack
@@ -19,7 +19,7 @@
 //! # W^X and content copy
 //!
 //! A read-execute code page must hold its bytes before it is ever run, yet it
-//! must never be user-writable (`AGENTS.md` §19.2). The fill therefore writes
+//! must never be user-writable. The fill therefore writes
 //! through the kernel's [`PhysMap`] directly to the freshly allocated frame —
 //! a *kernel-side* physical write that does not depend on the page's user
 //! permission — rather than through [`crate::uaccess::copy_out`] (which, by
@@ -31,18 +31,18 @@
 //! This module is the architecture-neutral *memory mechanism* only. The
 //! capability gate that authorises a spawn and the `lib/log` audit record for
 //! it belong to the higher-level spawn path (the spawn syscall / loader
-//! service) that calls this builder; keeping them there preserves the §17.4
+//! service) that calls this builder; keeping them there preserves the
 //! layering (`kernel/mem` does not depend on `lib/log` or the security
 //! policy). Every entry here is fail-closed: a malformed input yields a
 //! [`SpawnError`] and the partially built address space is discarded by the
-//! caller (`AGENTS.md` §2.9, §5.4).
+//! caller.
 //!
 //! # Host-testability
 //!
 //! With `HostPageTable` + `SimPhysMap` the whole builder runs on a developer
 //! workstation: the test backs frames with a simulated physical window, runs
 //! the builder, then reads the user pages back through [`crate::uaccess`] and
-//! re-parses the startup block (`AGENTS.md` §7).
+//! re-parses the startup block.
 
 use rustos_abi::process;
 use rustos_abi::rxe::{LoadImage, RxeError};

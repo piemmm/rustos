@@ -12,13 +12,13 @@
 //! routes that return value through the `exit` syscall
 //! (`rustos_abi_sys::sys_exit`). The test asserts the kernel-observed `exit`
 //! code equals `N`, proving argv marshalling and program teardown across the
-//! whole curated *System runtime / C ABI* class (`AGENTS.md` §16.4).
+//! whole curated *System runtime / C ABI* class.
 //!
 //! The program links **only** `rustos-crt0` and `rustos-abi-sys` — never an
 //! architecture crate — so its `_start` is crt0's program entry trampoline,
 //! not a kernel boot vector (the two would collide). It is built position-
 //! independent and converted to an `rxe` blob by the consuming test's build
-//! script (`AGENTS.md` §9, §19.2).
+//! script.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -45,8 +45,7 @@ mod program {
 
     /// Exit code returned when the program is spawned without the single
     /// decimal argument it expects (`argc < 2`). A reserved, fail-closed
-    /// value distinct from the small codes the round-trip exercises
-    /// (`AGENTS.md` §2.9).
+    /// value distinct from the small codes the round-trip exercises.
     const EXIT_MISSING_ARG: c_int = 71;
 
     /// Exit code returned when `argv[1]` is not a well-formed non-negative
@@ -121,7 +120,7 @@ mod program {
     /// Panic handler: a hosted program has no unwinder, so a panic is an
     /// unrecoverable fault. Terminate through the `exit` syscall with the
     /// reserved bad-argument code rather than returning to corrupt state
-    /// (`AGENTS.md` §2.9 — fail closed). The program is written to be
+    /// (fail closed). The program is written to be
     /// panic-free; this exists only to satisfy the `no_std` contract.
     #[panic_handler]
     fn panic(_info: &PanicInfo<'_>) -> ! {

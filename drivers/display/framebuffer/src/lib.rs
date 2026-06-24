@@ -9,7 +9,7 @@
 //! (the aarch64 Raspberry Pi mailbox framebuffer, the riscv64 `virt`
 //! board's `ramfb`, and any UEFI GOP linear frame buffer); the
 //! wasm32 canvas target presents the same surface shape through the
-//! browser host (`AGENTS.md` §1).
+//! browser host.
 //!
 //! Compositing, damage tracking, and GPU acceleration live above this
 //! driver in `userland/gui/wm`; the driver itself only owns the final
@@ -17,7 +17,7 @@
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`Framebuffer`] is a public *type* re-exported so the driver host
 //! can instantiate it through [`Framebuffer::open`]; the host never
 //! reaches into the type beyond the [`Display`] trait.
@@ -28,9 +28,8 @@
 //! additionally requires [`CapabilityId::MMIO_MAP`]: the framebuffer
 //! is device-visible memory and is reached only through the
 //! capability-gated [`MmioMapper`], never through a pointer the driver
-//! synthesises itself (`AGENTS.md` §4 — no ambient authority). The
-//! driver runs in user space; it does not request `CAP_DRV_KERNEL`
-//! (`AGENTS.md` §4 / §8).
+//! synthesises itself (no ambient authority). The
+//! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -51,7 +50,7 @@ mod tests;
 /// gate cleared. The bytes spell `"FBUF"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x4642_5546_0000_0001;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -105,8 +104,7 @@ impl FramebufferConfig {
     ///
     /// Rejects a zero-sized surface and a stride that cannot hold one
     /// scanline of `width_px` pixels in `format`. Failing closed here
-    /// keeps every later access inside the mapped window
-    /// (`AGENTS.md` §5.4.3).
+    /// keeps every later access inside the mapped window.
     fn validate(&self) -> Result<usize, DriverError> {
         if self.width_px == 0 || self.height_px == 0 {
             return Err(DriverError::LengthOutOfRange);
@@ -131,7 +129,7 @@ impl FramebufferConfig {
 ///
 /// The driver owns the [`RegisterWindow`] for the whole load: dropping
 /// the [`Framebuffer`] drops the window, which is the driver's quiesce
-/// step (the kernel reclaims the mapping on unload, `AGENTS.md` §4).
+/// step (the kernel reclaims the mapping on unload).
 /// Reloading is simply calling [`Framebuffer::open`] again.
 pub struct Framebuffer {
     window: RegisterWindow,
@@ -187,7 +185,7 @@ impl Framebuffer {
     /// scan-out words; any trailing bytes (a surface whose length is
     /// not a multiple of four) are written individually. Every write
     /// is bounds-checked by the window, so a miscomputed offset fails
-    /// closed instead of escaping the mapping (`AGENTS.md` §2.9).
+    /// closed instead of escaping the mapping.
     fn blit(&self, frame: &[u8]) -> Result<(), DriverError> {
         let whole_words = self.surface_len / 4;
         for word in 0..whole_words {

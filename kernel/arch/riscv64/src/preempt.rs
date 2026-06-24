@@ -16,8 +16,7 @@
 //!
 //! The kernel-side preemption logic lives in
 //! `kernel/sched::Scheduler::on_timer_tick`; this module only wires the
-//! riscv64 timer into that architecture-neutral surface (`AGENTS.md`
-//! §2.4 — no interface creep).
+//! riscv64 timer into that architecture-neutral surface (no interface creep).
 //!
 //! # Per-hart state (SMP)
 //!
@@ -118,19 +117,18 @@ static PREEMPT_CPU_ID_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null
 /// [`PreemptStorage`] is registered). Slot `i` holds the absolute
 /// `time`-CSR tick at which the running task's preemption quantum expires,
 /// or [`NO_DEADLINE`] when no quantum is armed. One half of the tickless
-/// one-shot combiner (`AGENTS.md` §17.1).
+/// one-shot combiner.
 static PREEMPT_QUANTUM_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Published per-hart **wakeup-deadline** slice base (`null` until a
 /// [`PreemptStorage`] is registered). Slot `i` holds the absolute
 /// `time`-CSR tick of the nearest pending blocking-wait timeout, or
-/// [`NO_DEADLINE`] when none is pending (`AGENTS.md` §17.1 — the nearest
+/// [`NO_DEADLINE`] when none is pending (the nearest
 /// armed wakeup).
 static PREEMPT_WAKEUP_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Length of the published per-hart slices (`0` until a [`PreemptStorage`]
-/// is registered, so every per-hart access fails closed — `AGENTS.md`
-/// §2.9).
+/// is registered, so every per-hart access fails closed).
 static PREEMPT_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Set-once guard so a second [`PreemptStorage::register`] is refused
@@ -140,20 +138,19 @@ static PREEMPT_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// Failure mode of [`PreemptStorage::register`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreemptStorageError {
-    /// Storage was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// Storage was already registered; the slot is set-once per boot.
     AlreadyRegistered,
 }
 
 /// Caller-owned, `&'static` per-hart preemption backing, sized by the
-/// constructing caller for its machine (`AGENTS.md` §24.1 — the per-hart
-/// timer bookkeeping is derived from the §18-discovered hart count, never
+/// constructing caller for its machine (the per-hart
+/// timer bookkeeping is derived from the-discovered hart count, never
 /// a fixed `const` ceiling baked into the arch crate).
 ///
 /// The const parameter `N` is the number of harts the caller sizes for: a
 /// single-hart boot path or vertical uses `PreemptStorage<1>`, and a
 /// multi-hart boot path sizes `N` from the device-tree hart count. The
-/// arch crate stays allocator-free (`AGENTS.md` §24.1 watch-out — no
+/// arch crate stays allocator-free (watch-out — no
 /// `alloc` in a bare-metal arch crate), so the caller provides the storage
 /// as a `static` (allocator-free bins) or a leaked allocation and
 /// publishes it through [`PreemptStorage::register`] before
@@ -187,7 +184,7 @@ impl<const N: usize> PreemptStorage<N> {
     /// # Errors
     ///
     /// [`PreemptStorageError::AlreadyRegistered`] on the second publish
-    /// (set-once per boot, `AGENTS.md` §2.1).
+    /// (set-once per boot).
     pub fn register(&'static self) -> Result<usize, PreemptStorageError> {
         if PREEMPT_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -218,8 +215,7 @@ static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// from U-mode** to, packed into a `usize`. Installed by the binary before
 /// the timer is armed; absent (`0`) the timer tick is pure accounting and
 /// nothing is preempted, so an image that arms the timer without wiring
-/// preemption simply keeps cooperative scheduling (fail-safe, `AGENTS.md`
-/// §2.9).
+/// preemption simply keeps cooperative scheduling (fail-safe).
 ///
 /// This is the involuntary analogue of the cooperative reschedule the
 /// `ecall` syscall path drives: a supervisor-timer interrupt taken while
@@ -228,13 +224,12 @@ static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// `trap.s`), so the installed callback can suspend that task back to the
 /// scheduler exactly as the cooperative `yield` path does. The callback is
 /// invoked **only** for a tick taken from U-mode — a tick taken in S-mode
-/// never preempts (the kernel is non-preemptible, `AGENTS.md` §4 watch-out:
+/// never preempts (the kernel is non-preemptible watch-out:
 /// a half-completed kernel critical section must never be switched away
 /// from). In production the kernel runs with `sstatus.SIE == 0`, so the
 /// privilege rule (U < S) is the *only* path on which a tick is taken at
 /// all, but the explicit SPP gate is defence-in-depth so a future S-mode
-/// `SIE` enable can never accidentally preempt the kernel (`AGENTS.md`
-/// §2.9).
+/// `SIE` enable can never accidentally preempt the kernel.
 static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// Install the per-hart timer callback.
@@ -315,7 +310,7 @@ pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
 /// [`on_timer_interrupt`] has re-armed the SBI timer (so the timer line is
 /// no longer pending while the callback context-switches away). A build
 /// that armed the timer without installing the callback keeps cooperative
-/// scheduling — the tick is pure accounting (`AGENTS.md` §2.9, fail-safe).
+/// scheduling — the tick is pure accounting (fail-safe).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_u_mode_preempt_point(cpu: CpuId) {
     let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
@@ -334,7 +329,7 @@ pub(crate) fn on_u_mode_preempt_point(cpu: CpuId) {
 /// no [`PreemptStorage`] is registered yet.
 ///
 /// The clamp to the published length is defence-in-depth so a malformed
-/// `tp` can never index outside the slices (`AGENTS.md` §2.9); `None`
+/// `tp` can never index outside the slices; `None`
 /// before registration makes every per-hart access fail closed rather
 /// than dereference a null slice base.
 fn per_cpu_index(hartid: CpuId) -> Option<usize> {
@@ -397,10 +392,8 @@ const fn slot_deadline(raw: u64) -> Option<u64> {
 
 /// Record the calling hart's preemption-quantum deadline (absolute
 /// `time`-CSR ticks), or clear it with `None`, then reprogram the one-shot
-/// to the earlier of the quantum and any pending wakeup (`AGENTS.md`
-/// §17.1). Called from [`crate::kernel_arch::RiscvArch`]'s `set_preemption`.
-/// A no-op before a [`PreemptStorage`] is registered (fail closed,
-/// `AGENTS.md` §2.9).
+/// to the earlier of the quantum and any pending wakeup. Called from [`crate::kernel_arch::RiscvArch`]'s `set_preemption`.
+/// A no-op before a [`PreemptStorage`] is registered (fail closed).
 pub fn record_quantum_deadline(deadline: Option<u64>) {
     if let Some(idx) = per_cpu_index(current_hartid()) {
         quantum_slot(idx).store(deadline.unwrap_or(NO_DEADLINE), Ordering::Relaxed);
@@ -410,8 +403,7 @@ pub fn record_quantum_deadline(deadline: Option<u64>) {
 
 /// Record the calling hart's nearest blocking-wait deadline (absolute
 /// `time`-CSR ticks), or clear it with `None`, then reprogram the one-shot
-/// to the earlier of this wakeup and any armed quantum (`AGENTS.md`
-/// §17.1). Called from `set_wakeup`. A no-op before a [`PreemptStorage`]
+/// to the earlier of this wakeup and any armed quantum. Called from `set_wakeup`. A no-op before a [`PreemptStorage`]
 /// is registered (fail closed).
 pub fn record_wakeup_deadline(deadline: Option<u64>) {
     if let Some(idx) = per_cpu_index(current_hartid()) {
@@ -436,7 +428,7 @@ pub fn recorded_deadlines() -> (Option<u64>, Option<u64>) {
 
 /// Reprogram the calling hart's single supervisor-timer one-shot to fire
 /// at the earlier of its recorded quantum and wakeup deadlines, or disarm
-/// it when neither is pending (`AGENTS.md` §17.1 — the tickless one-shot
+/// it when neither is pending (the tickless one-shot
 /// is armed only for a real pending event).
 ///
 /// The combining math is the shared, host-tested
@@ -518,7 +510,7 @@ fn reset_preempt_storage_for_tests() {
 /// Compute the tick interval, in `time`-CSR ticks, for `hz` ticks per
 /// second given a `timebase_hz` clock. Clamps to at least one tick so a
 /// pathological `hz > timebase_hz` cannot arm a zero-interval timer that
-/// re-fires without progress (`AGENTS.md` §2.9).
+/// re-fires without progress.
 #[must_use]
 pub const fn interval_for_hz(timebase_hz: u64, hz: u64) -> u64 {
     let interval = timebase_hz / if hz == 0 { 1 } else { hz };
@@ -533,10 +525,10 @@ pub const fn interval_for_hz(timebase_hz: u64, hz: u64) -> u64 {
 /// `time`-CSR ticks ahead, then leave it effectively unarmed.
 ///
 /// Programs the absolute SBI timer at `read_time() + ticks_from_now`
-/// (clamped to at least one tick, `AGENTS.md` §2.9). There is **no**
+/// (clamped to at least one tick). There is **no**
 /// periodic re-arm: once it fires, the next fire happens only if the
 /// scheduler arms it again via [`crate::kernel_arch::RiscvArch`]'s
-/// `set_preemption` (`AGENTS.md` §17.1 tickless / `NO_HZ`). `sie.STIE` must
+/// `set_preemption` (tickless / `NO_HZ`). `sie.STIE` must
 /// already be enabled (done by [`init_local_preempt`]).
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn arm_oneshot(ticks_from_now: u64) {
@@ -551,7 +543,7 @@ pub fn arm_oneshot(ticks_from_now: u64) {
 /// `u64::MAX` clears the pending `sip.STIP` (the SBI `set_timer`
 /// side-effect) and schedules the next interrupt so far out it never
 /// arrives in any realistic uptime — so a CPU running a sole runnable
-/// task takes no timer ticks (`AGENTS.md` §17.1 / §2.16). `sie.STIE`
+/// task takes no timer ticks. `sie.STIE`
 /// stays enabled so a subsequent [`arm_oneshot`] fires normally.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub fn disarm() {
@@ -565,7 +557,7 @@ pub fn disarm() {
 /// but **leaves the timer disarmed** (`set_timer(u64::MAX)`): RustOS is
 /// tickless, so the timer is armed only when the scheduler has a task to
 /// bound, via [`arm_oneshot`] from [`crate::kernel_arch::RiscvArch`]'s
-/// `set_preemption` (`AGENTS.md` §17.1 `NO_HZ`). The function does **not**
+/// `set_preemption` (`NO_HZ`). The function does **not**
 /// set `sstatus.SIE`; the caller enables global interrupts (via
 /// [`crate::trap::init_traps`]) once it is ready to take ticks — matching
 /// the x86_64 `init_local_preempt` / `sti` split.
@@ -582,7 +574,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No `PreemptStorage` registered (or this hart outside it): fail
         // closed rather than record a quantum whose tick can never be
-        // dispatched (`AGENTS.md` §2.9). A registered caller never hits
+        // dispatched. A registered caller never hits
         // this branch.
         return;
     };
@@ -590,7 +582,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     interval_slot(slot).store(interval, Ordering::Relaxed);
     cpu_id_slot(slot).store(u64::from(cpu), Ordering::Relaxed);
     // Leave the timer disarmed; the scheduler arms the first one-shot on
-    // its next dispatch onto a contended CPU (tickless, §17.1).
+    // its next dispatch onto a contended CPU (tickless).
     disarm();
     // SAFETY: setting `sie.STIE` enables supervisor timer interrupts;
     // it has no memory side effects beyond the named CSR. The caller's
@@ -604,7 +596,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 /// pending `sip.STIP`) and dispatch the (observation-only) scheduler-tick
 /// callback.
 ///
-/// RustOS is tickless (`AGENTS.md` §17.1): the timer was armed **one-shot**
+/// RustOS is tickless: the timer was armed **one-shot**
 /// by the scheduler, so this handler does **not** re-arm it — the next
 /// fire happens only when the scheduler arms another quantum via
 /// [`arm_oneshot`]. It disarms (`set_timer(u64::MAX)`, which clears the
@@ -619,25 +611,25 @@ pub(crate) fn on_timer_interrupt() {
     use rustos_arch_api::Timer;
     // Acknowledge + disarm: `set_timer(u64::MAX)` clears the pending
     // `sip.STIP` so the trap deasserts; the scheduler re-arms a fresh
-    // one-shot on its next dispatch (§17.1).
+    // one-shot on its next dispatch.
     disarm();
     // The quantum (if any) just expired, so clear its recorded deadline:
     // the dispatch after the preempt point re-arms a fresh quantum, and the
     // per-tick wakeup sweep (the timer callback below) must not re-arm the
-    // one-shot against this already-fired deadline (`AGENTS.md` §17.1). The
+    // one-shot against this already-fired deadline. The
     // wakeup deadline is owned by the sweep and left untouched.
     if let Some(slot) = per_cpu_index(current_hartid()) {
         quantum_slot(slot).store(NO_DEADLINE, Ordering::Relaxed);
     }
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No registered per-hart slot for this hart: nothing to dispatch
-        // (fail closed, `AGENTS.md` §2.9).
+        // (fail closed).
         return;
     };
     let cpu = cpu_id_slot(slot).load(Ordering::Relaxed);
     if cpu != NO_CPU {
         // Dispatch the tick through the Arch HAL timer surface so the
-        // callback invoke lives in exactly one place (`AGENTS.md` §2.2);
+        // callback invoke lives in exactly one place;
         // the HAL handle reaches the same `TIMER_CALLBACK_FN` static this
         // module owns. `cpu` was stored from a `CpuId` (`u32`) in
         // `init_local_preempt`, so the low 32 bits are the whole value.

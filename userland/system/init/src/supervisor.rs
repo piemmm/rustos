@@ -1,5 +1,5 @@
 //! PID 1's session supervision: one login session per discovered text
-//! console (`plans/PI.md` P11, `AGENTS.md` §20).
+//! console (`plans/PI.md` P11).
 //!
 //! The kernel installs one stream backing per text console — the video
 //! console and the UART are **separate session contexts** — and reports
@@ -7,12 +7,12 @@
 //! configured session program once per console with `spawn`'s explicit
 //! console selector and supervises the whole set with wait-any: whichever
 //! session exits is reaped and relaunched on **its own** console, within a
-//! per-console crash-loop budget (`AGENTS.md` §2.1 — never an unbounded
+//! per-console crash-loop budget (never an unbounded
 //! `spawn` loop).
 //!
 //! PID 1 also launches the configured long-running **services** (the device
-//! manager, today — `AGENTS.md` §16.2 / §18.3) once each at startup, on the
-//! primary console (index 0, for their fd 2 diagnostics — `AGENTS.md` §20),
+//! manager, today) once each at startup, on the
+//! primary console (index 0, for their fd 2 diagnostics),
 //! and supervises them in the *same* wait-any loop with the same per-entry
 //! crash-loop budget. A perpetual service that blocks rather than exits
 //! (`devmgr` parks in `hw_tree_wait`) simply never consumes a relaunch, so
@@ -34,9 +34,9 @@
 /// kernel's console list is discovered hardware (today at most a display
 /// plus a UART), and the slot table must live on `main`'s stack until the
 /// userland heap lands (`plans/SPAWN.md` `SP5b`), after which the table can
-/// size itself from `console_count` alone (`AGENTS.md` §24.1 — grow when
+/// size itself from `console_count` alone (grow when
 /// growth is possible). Consoles beyond the bound are left without a
-/// session rather than overrunning the table (fail closed, §2.9).
+/// session rather than overrunning the table (fail closed).
 pub const MAX_SUPERVISED_CONSOLES: usize = 8;
 
 /// How many times PID 1 will (re)launch one console's session before
@@ -44,8 +44,7 @@ pub const MAX_SUPERVISED_CONSOLES: usize = 8;
 ///
 /// On a console with a working input stream the session blocks on `stdin`
 /// rather than exiting, so its supervisor slot never approaches this
-/// bound — the budget exists only as a **crash-loop guard** (`AGENTS.md`
-/// §2.1): a session that exits the instant it starts would otherwise be
+/// bound — the budget exists only as a **crash-loop guard**: a session that exits the instant it starts would otherwise be
 /// relaunched forever. The budget is per console, so one crash-looping
 /// console cannot starve the others' relaunches.
 pub const SESSION_SPAWN_BUDGET: u32 = 3;
@@ -57,7 +56,7 @@ pub const SESSION_SPAWN_BUDGET: u32 = 3;
 /// config's `service`-directive bound (`startup::MAX_SERVICES`): the slot
 /// table must live on `main`'s stack until the userland heap lands
 /// (`plans/SPAWN.md` `SP5b`). Services beyond the bound are not launched
-/// rather than overrunning the table (fail closed, §2.9); the caller's
+/// rather than overrunning the table (fail closed); the caller's
 /// configured list is itself capped at the same bound, so this is never
 /// reached in practice.
 pub const MAX_SUPERVISED_SERVICES: usize = 4;
@@ -83,7 +82,7 @@ pub trait Sessions {
 pub enum Outcome {
     /// `console_count` failed or reported zero consoles: there is nothing
     /// a session could attach to, so PID 1 reports the system unusable
-    /// rather than spawning sessions with no streams (`AGENTS.md` §2.9).
+    /// rather than spawning sessions with no streams.
     NoConsoles,
     /// A `spawn` failed (`-errno`): an unknown path, an unwired spawn
     /// subsystem, or an invalid console index — fail-loud, never ignored.
@@ -94,7 +93,7 @@ pub enum Outcome {
     WaitFailed,
     /// Every console's session exhausted its relaunch budget: the system
     /// cannot keep a session up anywhere, and PID 1 declares that
-    /// honestly instead of busy-looping on `spawn` (`AGENTS.md` §2.1).
+    /// honestly instead of busy-looping on `spawn`.
     Exhausted,
 }
 
@@ -137,7 +136,7 @@ impl Slot<'_> {
 /// 1. Read the console count; zero (or an error) is [`Outcome::NoConsoles`].
 /// 2. Launch each entry once through [`Sessions::spawn_at`]: every
 ///    `service` on the primary console (index 0, for its fd 2 diagnostics
-///    — `AGENTS.md` §20), then `session` on each console (up to
+///    ), then `session` on each console (up to
 ///    [`MAX_SUPERVISED_CONSOLES`]). The services are launched first so a
 ///    perpetual service (`devmgr`) is up before the sessions. Any launch
 ///    failure is [`Outcome::SpawnFailed`].
@@ -150,8 +149,7 @@ impl Slot<'_> {
 ///
 /// A perpetual service that blocks (e.g. `devmgr` in `hw_tree_wait`) never
 /// exits, so its slot stays alive and the supervisor never reaches
-/// exhaustion — PID 1 holds it up for the life of the system (`AGENTS.md`
-/// §18.3). The reaped exit status is read but not yet acted on; a policy
+/// exhaustion — PID 1 holds it up for the life of the system. The reaped exit status is read but not yet acted on; a policy
 /// that distinguishes a clean logout from a crash (and resets the budget on
 /// an entry that ran long enough) awaits a clock/session-state ABI.
 pub fn supervise<'a, S: Sessions>(
@@ -164,7 +162,7 @@ pub fn supervise<'a, S: Sessions>(
         return Outcome::NoConsoles;
     }
     // Clamp to the allocation-free slot tables; entries past the bounds are
-    // not launched rather than overrunning them (fail closed, §2.9).
+    // not launched rather than overrunning them (fail closed).
     // `count` is positive here, so the conversion only fails on a width the
     // clamp would saturate anyway.
     let consoles =
@@ -220,7 +218,7 @@ pub fn supervise<'a, S: Sessions>(
         let slot = &mut slots[index];
         if slot.launches >= SESSION_SPAWN_BUDGET {
             // This entry cannot stay up; abandon the slot rather than
-            // busy-looping on `spawn` (`AGENTS.md` §2.1). The remaining
+            // busy-looping on `spawn`. The remaining
             // entries keep running.
             slot.pid = Slot::ABANDONED;
             continue;

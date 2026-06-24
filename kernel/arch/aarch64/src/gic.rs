@@ -5,7 +5,7 @@
 //! The aarch64 port boots on two boards whose GICv2 lives at different
 //! addresses: the QEMU `virt` board ([`DEFAULT_GICD_BASE`] /
 //! [`DEFAULT_GICC_BASE`]) and the Raspberry Pi 4's GIC-400
-//! (`0xFF84_1000` / `0xFF84_2000`). Per `AGENTS.md` §17.2 / §2.2 the
+//! (`0xFF84_1000` / `0xFF84_2000`). Per the
 //! difference is **discovered device-tree data**, never a `cfg(board)`
 //! fork: this module holds the runtime base pair (an atomic, default =
 //! the `virt` GICv2) the freestanding MMIO accessor reads, plus the
@@ -94,8 +94,7 @@ pub fn current() -> (usize, usize) {
 /// driver speaks. GIC-400 (`arm,gic-400`) is a GICv2, so it shares the
 /// register layout; the QEMU `virt` board advertises `arm,cortex-a15-gic`.
 /// An unrecognised controller is not matched, so the boot path keeps the
-/// fail-safe default rather than driving an unknown layout
-/// (`AGENTS.md` §2.9).
+/// fail-safe default rather than driving an unknown layout.
 const GIC_COMPATIBLES: &[&[u8]] = &[
     b"arm,gic-400",
     b"arm,cortex-a15-gic",
@@ -145,7 +144,7 @@ pub struct DiscoveredGic<'a> {
 /// ([`crate::fdt::scan_translated`]). Returns `None` if the tree is
 /// malformed or carries no recognised, translatable GIC (the caller
 /// then keeps the [`DEFAULT_GICD_BASE`] / [`DEFAULT_GICC_BASE`] default
-/// — fail closed, `AGENTS.md` §2.9).
+/// — fail closed).
 #[must_use]
 pub fn find_gic<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
     crate::fdt::scan_translated(fdt, |node, levels, depth| {
@@ -173,7 +172,7 @@ pub fn configure_from_fdt<'a>(fdt: &Fdt<'a>) -> Option<DiscoveredGic<'a>> {
     let found = find_gic(fdt)?;
     // A device MMIO base always fits a `usize` on the 64-bit targets this
     // port serves; `try_from` keeps the conversion honest — fail closed
-    // rather than truncate (`AGENTS.md` §2.9).
+    // rather than truncate.
     let distributor = usize::try_from(found.gicd_base).ok()?;
     let cpu_iface = usize::try_from(found.gicc_base).ok()?;
     configure(distributor, cpu_iface);
@@ -215,7 +214,7 @@ const GICC_EOIR: usize = 0x010;
 
 /// Highest addressable GICv2 INTID. INTIDs `1020..=1023` are reserved by
 /// the spec (1023 is [`SPURIOUS_INTID`]); a controller rejects anything
-/// above this as out of range (`AGENTS.md` §5.4.5 — fail closed).
+/// above this as out of range (fail closed).
 pub const MAX_INTID: u32 = 1019;
 
 /// Mask isolating the INTID from a `GICC_IAR` read (bits `[9:0]`; the
@@ -273,7 +272,7 @@ pub const fn icenabler_offset(intid: u32) -> usize {
 /// The production implementation is `VolatileGicMmio` (freestanding
 /// only); host tests substitute an in-memory mock. Modelled on riscv64's
 /// `PlicMmio` seam so the whole controller control-flow is host-testable
-/// (`AGENTS.md` §2.2 — one MMIO path, no duplicate register logic).
+/// (one MMIO path, no duplicate register logic).
 pub trait GicMmio {
     /// Read the distributor register at byte offset `off`.
     fn gicd_read(&self, off: usize) -> u32;
@@ -334,7 +333,7 @@ impl<M: GicMmio> Gicv2<M> {
     /// entry's destination field. INTIDs below [`MIN_SPI_INTID`] are
     /// SGIs/PPIs whose target bytes are read-only and banked per CPU, so
     /// the routing write is skipped for them (a no-op rather than a
-    /// silently-ignored read-only store — `AGENTS.md` §5.4.5).
+    /// silently-ignored read-only store).
     pub fn route_spi(&self, intid: u32, cpu_targets: u8) {
         if intid >= MIN_SPI_INTID {
             self.mmio
@@ -367,9 +366,8 @@ impl<M: GicMmio> Gicv2<M> {
 
 /// GICv2 controller: the policy layer over [`Gicv2`].
 ///
-/// Validates every INTID against `max_intid` and fails closed
-/// (`AGENTS.md` §5.4.5) before touching a register. Implements the
-/// §17.2 Arch HAL [`rustos_arch_api::IrqController`] (line masking) and
+/// Validates every INTID against `max_intid` and fails closed before touching a register. Implements the
+/// Arch HAL [`rustos_arch_api::IrqController`] (line masking) and
 /// [`rustos_arch_api::InterruptEntry`] (the claim/complete handshake).
 pub struct GicController<M: GicMmio> {
     gic: Gicv2<M>,
@@ -426,8 +424,7 @@ impl<M: GicMmio + Send + Sync> rustos_arch_api::IrqController for GicController<
 
 impl<M: GicMmio + Send + Sync> rustos_arch_api::InterruptEntry for GicController<M> {
     /// Acknowledge the active interrupt, mapping the GICv2
-    /// [`SPURIOUS_INTID`] ("nothing pending") to [`None`]
-    /// (`AGENTS.md` §17.2).
+    /// [`SPURIOUS_INTID`] ("nothing pending") to [`None`].
     fn claim(&self) -> Option<u32> {
         match self.gic.acknowledge() {
             SPURIOUS_INTID => None,
@@ -702,7 +699,7 @@ mod tests {
         assert_eq!(c.max_intid(), MAX_INTID);
     }
 
-    /// §17.2 / W3: the GIC controller passes the shared Arch HAL
+    /// / W3: the GIC controller passes the shared Arch HAL
     /// interrupt-controller + interrupt-entry conformance verticals over
     /// its real handle (`plans/WIRING.md` Stage W3). INTID 42 is an
     /// addressable SPI; 2000 is above [`MAX_INTID`]. The mock's `GICC_IAR`

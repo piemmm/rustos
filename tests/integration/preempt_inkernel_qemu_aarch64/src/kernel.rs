@@ -1,7 +1,6 @@
 //! The freestanding aarch64 test kernel: admit one busy in-kernel kthread and
 //! prove the generic-timer IRQ is delivered **while it runs** (the EL1 handler
-//! accounts the tick) without ever preempting the kernel (`plans/PI.md` /
-//! `AGENTS.md` §17.1).
+//! accounts the tick) without ever preempting the kernel (`plans/PI.md` /).
 
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -77,8 +76,7 @@ static ALLOCATOR: rustos_kalloc::FreeListAllocator = unsafe {
     rustos_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
 };
 
-/// Per-CPU preemption backing for the single boot CPU (`AGENTS.md` §24.1 —
-/// `PreemptStorage<1>` covers a single-core slice).
+/// Per-CPU preemption backing for the single boot CPU (`PreemptStorage<1>` covers a single-core slice).
 static PREEMPT_STORAGE: PreemptStorage<1> = PreemptStorage::new();
 
 /// Generic-timer ticks taken (the tick callback increments this). A non-zero
@@ -89,7 +87,7 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 /// EL0-preemption callbacks fired. The production preempt path is installed
 /// verbatim, but every tick here is taken from EL1 (the in-kernel kthread), so
 /// the IRQ path never reaches `on_el0_preempt_point`: this must stay `0`, the
-/// evidence that the kernel itself was never preempted (`AGENTS.md` §4).
+/// evidence that the kernel itself was never preempted.
 static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Set by the kthread once it observed [`TARGET_TICKS`] timer ticks during its
@@ -146,12 +144,11 @@ extern "C" fn timer_tick(_cpu: CpuId) {
     TICKS.fetch_add(1, Ordering::SeqCst);
 }
 
-/// The EL0-preemption callback — the production dispatch shape verbatim
-/// (`AGENTS.md` §2.2): the IRQ path invokes it **only** for a tick taken from
+/// The EL0-preemption callback — the production dispatch shape verbatim: the IRQ path invokes it **only** for a tick taken from
 /// EL0, to suspend the running user task back to the scheduler. Here every tick
 /// is taken from EL1, so this must never run; if it ever did it would record
 /// the violation (and still do the production reschedule), and the post-run
-/// check fails loudly (`AGENTS.md` §4 — the kernel is non-preemptible).
+/// check fails loudly (the kernel is non-preemptible).
 extern "C" fn preempt_dispatch(cpu: CpuId) {
     PREEMPTIONS.fetch_add(1, Ordering::SeqCst);
     let _ = reschedule_current(cpu, RescheduleAction::Yield);
@@ -174,7 +171,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     );
 
     // 1. Discover the board from the embedded `virt` device tree: GICv2 bases
-    //    and the generic-timer rate (`AGENTS.md` §2.20 / §18.2 — no hard-coded
+    //    and the generic-timer rate (no hard-coded
     //    board constants).
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_FDT);
@@ -195,8 +192,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         gic::init();
     }
 
-    // 3. Register the production tickless preemption path verbatim (`AGENTS.md`
-    //    §2.2): per-CPU storage, the EL0-preemption callback (must never fire
+    // 3. Register the production tickless preemption path verbatim: per-CPU storage, the EL0-preemption callback (must never fire
     //    here), the timer-tick callback (records each tick), the per-quantum
     //    interval, and the enabled timer PPI — but leave the timer disarmed.
     if PREEMPT_STORAGE.register().is_err() {
@@ -215,7 +211,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     // 4. Build the live eevdf scheduler over the arch port. Per-CPU bookkeeping
-    //    backing for this single-CPU vertical (`AGENTS.md` §24.1).
+    //    backing for this single-CPU vertical.
     static ARCH_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
     let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -272,7 +268,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // 6. Enable device IRQs at the PE — the aarch64 backing of the production
     //    `KernelArch::set_device_irqs(true)` the P-5 dispatch loop calls once
-    //    it begins steady-state dispatching (`AGENTS.md` §17.1). Every kthread
+    //    it begins steady-state dispatching. Every kthread
     //    the loop runs below now executes with the timer IRQ deliverable.
     // SAFETY: the vector table and GIC are up (step 2) and the timer
     // PPI/callbacks are installed (step 3), so an incoming tick dispatches
@@ -309,7 +305,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
     // 10. Non-preemptible kernel: every tick was taken from EL1, so the
     //     EL0-preemption callback never fired and the running task was never
-    //     rescheduled out from under itself (`AGENTS.md` §4).
+    //     rescheduled out from under itself.
     if PREEMPTIONS.load(Ordering::SeqCst) != 0 {
         qemu_exit::exit_failure(FAIL_KERNEL_PREEMPTED);
     }

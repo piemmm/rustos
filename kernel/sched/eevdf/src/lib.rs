@@ -1,10 +1,9 @@
 //! RustOS EEVDF scheduler policy.
 //!
 //! This `kernel/sched/eevdf` crate is one concrete implementation of the
-//! [`SchedulerPolicy`] contract defined in `kernel/sched/api`
-//! (`AGENTS.md` §17.1). It is a sibling of the `kernel/sched/mlfq` policy
+//! [`SchedulerPolicy`] contract defined in `kernel/sched/api`. It is a sibling of the `kernel/sched/mlfq` policy
 //! crate; adding or replacing a policy means adding a sibling crate,
-//! never editing another one (§17.1, §2.2 carve-out — parallel policy
+//! never editing another one (carve-out — parallel policy
 //! implementations are deliberate, not duplication).
 //!
 //! # Design summary
@@ -28,8 +27,7 @@
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns
 //!   one virtual-time `RunQueue` with its own clock; idle
 //!   CPUs steal the earliest-deadline task from a victim chosen by the
-//!   project's shared non-cryptographic `FastRng` (`lib/rng`; `AGENTS.md`
-//!   §2.2 — no second PRNG) and rebase its virtual times onto the
+//!   project's shared non-cryptographic `FastRng` (`lib/rng`; — no second PRNG) and rebase its virtual times onto the
 //!   stealing CPU's clock (the EEVDF migration rule — a task carries no
 //!   lag across CPUs).
 //! * **IPI-based preemption.** [`Scheduler::spawn`] and
@@ -49,7 +47,7 @@
 extern crate alloc;
 
 // Host tests need `std` for `Arc` and `AtomicU*` ergonomics; the crate
-// itself remains `no_std` for production builds (`AGENTS.md` §1).
+// itself remains `no_std` for production builds.
 #[cfg(test)]
 extern crate std;
 
@@ -59,8 +57,7 @@ mod task;
 
 // Re-export the contract vocabulary so call sites
 // (`rustos_kernel_sched_eevdf::{Scheduler, Priority, …}`) resolve to the
-// single canonical definitions in `kernel/sched/api` (`AGENTS.md` §2.2 —
-// no duplication).
+// single canonical definitions in `kernel/sched/api` (no duplication).
 pub use rustos_kernel_sched_api::{
     CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
     SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,

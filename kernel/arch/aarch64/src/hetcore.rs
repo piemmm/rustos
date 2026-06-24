@@ -7,7 +7,7 @@
 //! throughput-bound work onto the performance cores
 //! (`docs/src/architecture/scheduler.md`).
 //!
-//! Detection is the architecture port's job (`AGENTS.md` §17.2 / §18.2).
+//! Detection is the architecture port's job.
 //! Unlike x86_64 — where each core reports its own class through a
 //! per-core CPUID leaf — Arm advertises the per-core capacity in the
 //! flattened device tree: each `/cpus/cpu@*` node carries an optional
@@ -19,10 +19,10 @@
 //! The classifier is pure and host-testable; the device-tree read that
 //! feeds it is itself host-testable against the `rustos_fdt` fixture
 //! builder, so no part of heterogeneous-core discovery needs a
-//! freestanding target (`AGENTS.md` §1 — no fake hardware in production
+//! freestanding target (no fake hardware in production
 //! paths).
 //!
-//! It fails conservative (`AGENTS.md` §2.9): a homogeneous machine (every
+//! It fails conservative: a homogeneous machine (every
 //! advertised rating equal, or no ratings at all) classifies every core
 //! as [`rustos_arch_api::CoreClass::Performance`], the safe homogeneous
 //! default the Arch HAL mandates for
@@ -46,8 +46,7 @@ use rustos_arch_api::CoreClass;
 /// This is the pure, host-testable heart of the classifier;
 /// [`crate::kernel_arch::Aarch64Arch::classify_from_fdt`] computes `peak`
 /// in one device-tree pass and calls this per core in a second, so the
-/// classification needs no fixed-size buffer and scales to any CPU count
-/// (`AGENTS.md` §24.1).
+/// classification needs no fixed-size buffer and scales to any CPU count.
 #[must_use]
 pub fn class_for_capacity(capacity: Option<u64>, peak: Option<u64>) -> CoreClass {
     match (capacity, peak) {

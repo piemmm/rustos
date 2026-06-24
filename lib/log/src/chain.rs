@@ -1,11 +1,11 @@
-//! Hash-chained audit records (`AGENTS.md` §19.4).
+//! Hash-chained audit records.
 //!
 //! The append-only security log under `/System/Logs` must be
 //! *tamper-evident*: an attacker who can write to the log store must not be
 //! able to alter or delete an existing entry without the change being
 //! detectable. This module provides the cryptographic backbone for that
 //! guarantee — the persistence layer (the `/System/Logs` writer, Stage 5)
-//! and the periodic signed anchors (§19.4, blocked on the Stage 2 signing
+//! and the periodic signed anchors (blocked on the Stage 2 signing
 //! authority) are built on top of it.
 //!
 //! # Model
@@ -22,7 +22,7 @@
 //! Because each entry hash feeds into the next, editing or removing any
 //! entry breaks every later link; truncation is detectable because the
 //! sequence numbers are contiguous and the chain head is anchored
-//! separately (§19.4). [`verify_chain`] re-derives the whole chain and
+//! separately. [`verify_chain`] re-derives the whole chain and
 //! reports the first inconsistency.
 //!
 //! # No allocation
@@ -115,7 +115,7 @@ impl ChainedEntry {
 
 /// The growing head of one CPU's tamper-evident audit chain.
 ///
-/// Hold one per CPU (`AGENTS.md` §19.4 "monotonic per-CPU sequence
+/// Hold one per CPU ("monotonic per-CPU sequence
 /// number"). [`Self::append`] is the only mutating operation and never
 /// allocates.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -165,7 +165,7 @@ impl LogChain {
 
     /// Current chain head hash — the root over every entry appended so far.
     ///
-    /// This is the value the periodic anchor signs (§19.4). For a chain with
+    /// This is the value the periodic anchor signs. For a chain with
     /// no entries it equals [`GENESIS_ANCHOR`].
     #[must_use]
     pub fn head_hash(&self) -> Sha256Digest {
@@ -196,7 +196,7 @@ impl LogChain {
 /// Reason a chain failed [`verify_chain`].
 ///
 /// `index` is the position, within the verified slice, of the offending
-/// entry. A discontinuity is a security event in its own right (§19.4).
+/// entry. A discontinuity is a security event in its own right.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ChainError {
     /// The entry's stored hash does not match a recomputation of its
@@ -441,7 +441,7 @@ mod tests {
         // slice that still verifies *internally* — the attacker simply
         // forgot the later entries existed. Truncation is caught because
         // the chain head is anchored separately (the periodically signed
-        // root, §19.4): the root recomputed over the truncated slice no
+        // root): the root recomputed over the truncated slice no
         // longer equals the anchored head.
         let (chain, entries) = build(2, &[b"one", b"two", b"three"]);
         let signed_anchor = chain.head_hash();

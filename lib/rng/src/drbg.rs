@@ -4,8 +4,7 @@
 //! standard HMAC-DRBG construction — Instantiate, Update, Reseed, Generate —
 //! built **entirely** over the audited HMAC-SHA256 primitive in `lib/crypto`,
 //! exactly as `lib/crypto`'s `kdf` layers single-block HKDF-Expand over the
-//! same PRF. Nothing here is a hand-rolled cryptographic primitive
-//! (`AGENTS.md` §1, §2.12): HMAC *is* the conditioner, so the DRBG needs no
+//! same PRF. Nothing here is a hand-rolled cryptographic primitive: HMAC *is* the conditioner, so the DRBG needs no
 //! derivation function of its own.
 //!
 //! # Why HMAC-DRBG
@@ -14,8 +13,7 @@
 //! security reduces to HMAC being a PRF (Bellare), it has no awkward
 //! block-cipher key/counter edge cases, and it is the construction
 //! [`rustos_crypto`] can already serve with zero new audit surface. It is the
-//! right "best in class" core for `RustFS` volume keys, the encrypted-swap key
-//! (`AGENTS.md` §4), and KASLR/ASLR seeds (§19.2).
+//! right "best in class" core for `RustFS` volume keys, the encrypted-swap key, and KASLR/ASLR seeds.
 //!
 //! # Backtracking and prediction resistance
 //!
@@ -36,7 +34,7 @@ pub const DRBG_OUTLEN: usize = 32;
 /// Maximum number of [`HmacDrbg::generate`] calls between reseeds, per NIST
 /// SP 800-90Ar1 Table 2 for HMAC-DRBG (`2^48`). Reaching it makes
 /// [`HmacDrbg::generate`] fail closed with [`DrbgError::ReseedRequired`]
-/// rather than silently weakening (`AGENTS.md` §5.4). At realistic call
+/// rather than silently weakening. At realistic call
 /// rates this bound is never reached in a single boot; [`crate::CsRng`]
 /// reseeds far more often.
 pub const RESEED_INTERVAL: u64 = 1 << 48;
@@ -54,7 +52,7 @@ pub enum DrbgError {
 /// An HMAC-SHA256 DRBG instance (NIST SP 800-90Ar1 §10.1.2).
 ///
 /// Holds the `Key`/`V` working state and the reseed counter. The state is
-/// key material and is zeroed on drop (`AGENTS.md` §4).
+/// key material and is zeroed on drop.
 pub struct HmacDrbg {
     key: MacKey,
     v: MacTag,
@@ -179,8 +177,7 @@ impl Drop for HmacDrbg {
     fn drop(&mut self) {
         // SAFETY-INVARIANT: `Zeroize::zeroize` uses volatile writes the
         // compiler may not elide, so the working state — from which all
-        // future output is derived — is gone once the DRBG is dropped
-        // (`AGENTS.md` §4).
+        // future output is derived — is gone once the DRBG is dropped.
         self.key.zeroize();
         self.v.zeroize();
     }

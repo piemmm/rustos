@@ -1,6 +1,6 @@
 //! virtio-input driver-shell unit tests: the §8 `register` gate and the
-//! §18.3 bind table. The open/poll/decode device-logic tests live with
-//! the logic in `lib/virtio_input` (`AGENTS.md` §2.2 / §17.4).
+//! bind table. The open/poll/decode device-logic tests live with
+//! the logic in `lib/virtio_input`.
 
 use super::*;
 use rustos_abi::{CapabilityId, DriverError};
@@ -28,8 +28,7 @@ fn register_requires_drv_load() {
 #[test]
 fn bind_table_matches_a_virtio_input_node() {
     // One entry at the declared exact-match priority, matching a
-    // discovered virtio node whose probed device id is `virtio-input`
-    // (`AGENTS.md` §18.3).
+    // discovered virtio node whose probed device id is `virtio-input`.
     assert_eq!(BIND_KEYS.len(), 1);
     assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
     let input = HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID);
@@ -37,7 +36,7 @@ fn bind_table_matches_a_virtio_input_node() {
 
     // A different virtio device (e.g. virtio-blk, device id 2) and a
     // non-virtio node both fail the match — the caller leaves them
-    // unbound rather than guessing (`AGENTS.md` §18.4 / §2.9).
+    // unbound rather than guessing.
     let blk = HwMatchKey::virtio(2);
     assert!(!BIND_KEYS[0].key.matches(&blk));
     let pci_input = HwMatchKey::pci(0x1234, 0x5678, 0x09_00_00);

@@ -4,10 +4,9 @@
 //! monospace bitmap font ([`glyphs`]) and the glyph blitter that draws it onto
 //! a `lib/raster` `Surface` ([`font`], behind the default-on `render`
 //! feature). Font rendering is one of the curated
-//! shared-library classes (`AGENTS.md` §16.4); like `lib/geometry`,
+//! shared-library classes; like `lib/geometry`,
 //! `lib/theme`, and `lib/raster`, it lives in `lib/*` so the taskbar and the
-//! default apps can draw text without depending on the window manager
-//! (`AGENTS.md` §6, §17.4).
+//! default apps can draw text without depending on the window manager.
 //!
 //! There is no installed-font machinery yet: a `rustos-theme` font role
 //! selects a font by family name under `/System/Fonts`, but no faces are
@@ -20,7 +19,7 @@
 //! console, which draws into device-coherent memory with no allocator —
 //! depends on this crate with `default-features = false` and stays
 //! `alloc`-free; the `lib/raster`-backed blitter rides the default-on
-//! `render` feature (one font definition either way, `AGENTS.md` §2.2).
+//! `render` feature (one font definition either way).
 
 #![no_std]
 #![forbid(unsafe_code)]

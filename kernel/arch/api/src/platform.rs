@@ -1,13 +1,13 @@
 //! Early-boot platform discovery — the Arch HAL slice that normalises a
 //! target's native hardware source into the architecture-neutral hardware
-//! tree (`AGENTS.md` §17.2 "early-boot platform discovery", §18.1/§18.2).
+//! tree ("early-boot platform discovery").
 //!
 //! Each architecture port reads its platform's enumerable source — ACPI on
 //! x86_64, a flattened device tree on aarch64/riscv64, a host-capability
 //! query on wasm32 — and emits one [`HwNode`] per
 //! detected bus or device into a caller-supplied [`HwNodeSink`]. The
 //! architecture-specific parsing never leaks past this trait: the rest of
-//! the kernel and all of userland see only the normalised tree (§18.2,
+//! the kernel and all of userland see only the normalised tree (
 //! enforced by `cargo xtask cfg-check`).
 //!
 //! # Why a sink rather than a returned collection
@@ -17,9 +17,8 @@
 //! sink the caller owns: the kernel boot path can collect into a
 //! fixed-capacity on-stack buffer, while the user-space device manager can
 //! collect into a growable one — without this trait choosing an allocator
-//! for either (`AGENTS.md` §4 — deterministic, no hidden allocation). A
-//! sink that is full fails closed with [`DiscoveryError::SinkFull`]
-//! (`AGENTS.md` §2.9).
+//! for either (deterministic, no hidden allocation). A
+//! sink that is full fails closed with [`DiscoveryError::SinkFull`].
 
 use rustos_abi::HwNode;
 
@@ -28,7 +27,7 @@ use rustos_abi::HwNode;
 pub enum DiscoveryError {
     /// The sink could not accept another node (its capacity is exhausted).
     /// The discoverer stops and surfaces this rather than dropping nodes
-    /// silently (`AGENTS.md` §2.9 — fail closed).
+    /// silently (fail closed).
     SinkFull,
     /// The platform's hardware source was missing or malformed (a bad FDT
     /// blob, an unreadable ACPI table). Discovery produced no usable tree.
@@ -54,8 +53,7 @@ pub trait HwNodeSink {
     fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError>;
 }
 
-/// The Arch HAL early-boot platform-discovery surface (`AGENTS.md`
-/// §17.2 / §18.2).
+/// The Arch HAL early-boot platform-discovery surface.
 ///
 /// Every architecture port implements this trait, building the hardware
 /// tree from its platform's native source. Exactly one node is a root
@@ -67,8 +65,7 @@ pub trait PlatformDiscovery {
     ///
     /// Implementations emit the root node first, then its children, so a
     /// node's parent is always emitted before it. They must not panic on a
-    /// malformed source — they return [`DiscoveryError::MalformedSource`]
-    /// (`AGENTS.md` §2.9 / §18.4).
+    /// malformed source — they return [`DiscoveryError::MalformedSource`].
     ///
     /// # Errors
     ///
@@ -80,7 +77,7 @@ pub trait PlatformDiscovery {
     fn discover(&self, sink: &mut dyn HwNodeSink) -> Result<(), DiscoveryError>;
 }
 
-/// The §17.2 / §18 conformance vertical for [`PlatformDiscovery`].
+/// The conformance vertical for [`PlatformDiscovery`].
 ///
 /// Like the sibling [`crate::sidechannel::conformance`] and
 /// [`crate::memtag::conformance`] verticals, this is a generic, arch-
@@ -95,7 +92,7 @@ pub mod conformance {
     /// Generous for the shallow QEMU `virt` / PC trees the ports produce
     /// while keeping the suite allocation-free: it records only node ids
     /// (a `u32` each), never whole [`HwNode`]s, so its stack footprint is
-    /// tiny (`AGENTS.md` §4 — no hidden allocation).
+    /// tiny (no hidden allocation).
     const LEDGER_CAP: usize = 64;
 
     /// A validating sink: as each node arrives it checks the contract in

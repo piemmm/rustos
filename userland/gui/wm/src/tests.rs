@@ -352,7 +352,7 @@ fn present_propagates_driver_error() {
 fn active_theme_drives_compositor_background() {
     // The compositor sources its root background from the active theme,
     // and a runtime theme switch (dark -> light) changes the colour the
-    // screen clears to. One shared definition drives the WM (§10).
+    // screen clears to. One shared definition drives the WM.
     let mut themes = ThemeRegistry::with_builtins();
     let dark_bg = themes.active().palette().desktop;
     let mut c = Compositor::new(mode(2, 2), dark_bg.into()).expect("compositor");
@@ -372,7 +372,7 @@ fn active_theme_drives_compositor_background() {
 #[test]
 fn theme_corner_radius_shapes_windows() {
     // A window takes its corner radius from the active theme's metrics
-    // through the single compositor rounded-corner path (§2.2): the
+    // through the single compositor rounded-corner path: the
     // rounded corner still reveals the background behind it.
     let themes = ThemeRegistry::with_builtins();
     let radius = themes.active().metrics().window_corner_radius;

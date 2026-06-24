@@ -1,6 +1,6 @@
-//! RustOS scheduler contract (`AGENTS.md` §17.1).
+//! RustOS scheduler contract.
 //!
-//! This `kernel/sched/api` crate (`SchedApi` in the §17.4 layering) holds
+//! This `kernel/sched/api` crate (`SchedApi` in the layering) holds
 //! the architecture-neutral *contract* every RustOS scheduler obeys:
 //!
 //! * the [`SchedulerPolicy`] trait — task admission, dispatch, yield,
@@ -14,7 +14,7 @@
 //!   concrete scheduler must pass.
 //!
 //! Concrete policies live in sibling `kernel/sched/<impl>` crates (e.g.
-//! `kernel/sched/mlfq`) and implement [`SchedulerPolicy`]. Per §17.1 only
+//! `kernel/sched/mlfq`) and implement [`SchedulerPolicy`]. Per only
 //! `kernel/core` and `kernel/sched/*` may name a concrete scheduler type;
 //! every other crate depends on this contract.
 

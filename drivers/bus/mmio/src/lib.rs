@@ -7,7 +7,7 @@
 //! addresses; the parser used to walk it is the shared
 //! [`rustos_fdt`] reader every architecture port and QEMU vertical
 //! discovers the `virt` tree through, so there is exactly one
-//! device-tree parser in the workspace (`AGENTS.md` §2.2 / §18.2).
+//! device-tree parser in the workspace.
 //!
 //! Per the issue spec for Stage 4 the driver only enumerates; it
 //! never enables a slot. Reading the small per-slot register window
@@ -21,8 +21,7 @@
 //! [`register`] requires the host already grant
 //! [`rustos_abi::CapabilityId::DRV_LOAD`]; enumeration through
 //! [`rustos_abi::driver::bus::Bus::enumerate`] inherits the gate
-//! through the driver handle issued at load time
-//! (`AGENTS.md` §5.4 / §8).
+//! through the driver handle issued at load time.
 //!
 //! # Safety
 //!
@@ -59,7 +58,7 @@ use transport::{MmioRead, VolatileMmioRead};
 /// that every load-time gate cleared.
 const REGISTER_HANDLE_MARKER: u64 = 0x4D4D_4900_0000_0001;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -82,11 +81,10 @@ impl<T: MmioRead> Bus for Mmio<'_, T> {
     }
 }
 
-// The frozen `abi-v1` virtio-MMIO transport-provisioning seam
-// (`AGENTS.md` §9). The ring-0 device-tree walk (whose only sanctioned
-// driver surface is `register`, §8) reaches the concrete `Mmio` through
+// The frozen `abi-v1` virtio-MMIO transport-provisioning seam. The ring-0 device-tree walk (whose only sanctioned
+// driver surface is `register`) reaches the concrete `Mmio` through
 // `&dyn VirtioMmioBus`, so the bus driver never leaks its concrete type
-// across the crate boundary (`AGENTS.md` §8). The inherent
+// across the crate boundary. The inherent
 // `Mmio::map_slot_window` wins method resolution, so the forward is not
 // recursive.
 impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
@@ -149,7 +147,7 @@ fn virtio_mmio_aperture(dtb: &Fdt<'_>) -> Result<Option<(u64, u64)>, DriverError
 /// enumerates those slots and resolves per-slot register windows. The
 /// returned value is reached only through the frozen `abi-v1`
 /// [`VirtioMmioBus`] / [`Bus`] seams — the concrete `Mmio` type stays
-/// crate-private (`AGENTS.md` §8) — so the ring-0
+/// crate-private — so the ring-0
 /// `provision_virtio_mmio` walk can drive it as `&dyn VirtioMmioBus`.
 ///
 /// This is the MMIO analogue of `rustos_pci::mechanism_one`:

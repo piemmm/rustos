@@ -1,4 +1,4 @@
-//! riscv64 per-CPU storage (`AGENTS.md` §17.2 "per-CPU storage").
+//! riscv64 per-CPU storage ("per-CPU storage").
 //!
 //! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
 //! for riscv64 over the **`tp`** (thread-pointer) register. `tp` is the
@@ -7,14 +7,13 @@
 //! Rust, and [`crate::smp::current_hartid`] already reads it as the
 //! per-CPU identity. This slice generalises that read/write into the one
 //! HAL trait the architecture-neutral kernel reaches through, so the
-//! `tp` access lives in exactly one place (`AGENTS.md` §2.2).
+//! `tp` access lives in exactly one place.
 //!
 //! The stored word is opaque to this surface: the kernel decides whether
 //! `tp` holds the hart id or the address of a per-hart control block (see
 //! the [`PerCpu`](rustos_arch_api::PerCpu) trait docs). On the host build
 //! there is no `tp`, so the handle backs the word with an in-handle cell
-//! solely for the unit tests; it is never linked into a kernel image
-//! (`AGENTS.md` §1).
+//! solely for the unit tests; it is never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
 
@@ -30,8 +29,7 @@ use rustos_arch_api::PerCpu;
 pub struct PerCpuStorage {
     /// Host-only backing for the per-CPU word. On the bare-metal target
     /// `tp` is the source of truth and this field is never read; kept so
-    /// the host and bare-metal builds share one struct shape
-    /// (`AGENTS.md` §1).
+    /// the host and bare-metal builds share one struct shape.
     #[cfg_attr(all(target_arch = "riscv64", target_os = "none"), allow(dead_code))]
     host_base: AtomicUsize,
 }

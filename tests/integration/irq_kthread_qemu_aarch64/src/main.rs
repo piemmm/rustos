@@ -10,7 +10,7 @@
 //! 1. **DTB SPI discovery.** It decodes the PL031 RTC node's `interrupts`
 //!    triple into its GICv2 INTID through
 //!    `rustos_arch_aarch64::fdt::gic_device_intid` over the embedded `virt`
-//!    device tree — no board constant (`AGENTS.md` §2.20 / §18.2).
+//!    device tree — no board constant.
 //! 2. **The kthread-cooperative waiter.** A real in-kernel service kthread,
 //!    admitted on the `rustos_kernel_sched_eevdf::Scheduler` via
 //!    `rustos_kernel_core::spawn_kthread`, blocks on the bound line through
@@ -30,7 +30,7 @@
 //! mask-before-wake evidence (`docs/src/security/irq.md`) — before
 //! reporting PASS via ARM semihosting. A regression that fails to discover,
 //! deliver, wake, or mask never reaches PASS, so the run times out (the
-//! documented fail-loud behaviour, `AGENTS.md` §7).
+//! documented fail-loud behaviour).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

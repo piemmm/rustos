@@ -11,7 +11,7 @@
 //! presents when started with `-device virtio-net-device -device
 //! virtio-blk-device`.
 //!
-//! Per `AGENTS.md` §8 the production driver crate exposes only
+//! Per the production driver crate exposes only
 //! `register`; the test module reaches into the `pub(crate)`
 //! enumeration core directly.
 
@@ -463,8 +463,7 @@ fn virtio_mmio_bus_from_dtb_enumerates_attached_slots() {
     // Host stand-in for the MMIO aperture: a word buffer whose address
     // the DTB slot bases point at, so the volatile reader the
     // constructor mints reads the stamped identifier registers (the
-    // host-buildable exercise of the constructor's `unsafe` reader,
-    // `AGENTS.md` §2.10).
+    // host-buildable exercise of the constructor's `unsafe` reader).
     let mut backing = vec![0u32; 0x400];
     let base = backing.as_ptr() as u64;
     let stride = 0x200u64;

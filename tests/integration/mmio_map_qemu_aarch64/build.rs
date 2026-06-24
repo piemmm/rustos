@@ -4,7 +4,7 @@
 //! Three jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
-//!    per-board script the architecture port owns — `AGENTS.md` §2.2) and dump
+//!    per-board script the architecture port owns) and dump
 //!    the canonical QEMU `virt` flattened device tree, embedding it so the test
 //!    discovers the GICv2 base and the generic-timer rate from the firmware
 //!    tree (`plans/PI.md` P3/P4). QEMU's `-kernel <ELF>` aarch64 path passes no
@@ -13,13 +13,12 @@
 //!    mmio_map_program`) **position-independent** for the freestanding aarch64
 //!    target, pinning the grant handle, the expected register magic, and the
 //!    register offset through environment variables so this script is the
-//!    single source of truth shared by the program and the kernel
-//!    (`AGENTS.md` §2.2).
+//!    single source of truth shared by the program and the kernel.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes, the bias, and the matching grant/window constants as a Rust source
 //!    the test `include!`s.
 //!
@@ -36,20 +35,20 @@ use std::process::Command;
 /// Virtual base the program image is mapped at. Chosen at 64 GiB — far above
 /// the kernel's 2 GiB identity map and within the 39-bit (512 GiB) TTBR0
 /// region — so the image lands on freshly walked stage-1 tables (the proven
-/// spawn layout, `AGENTS.md` §2.2).
+/// spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// The device-resource grant handle the program maps. The first grant a task
 /// is minted is handle `1` (the registry issues per-task handles monotonic
 /// from `1`, `0` reserved-invalid); the kernel mints exactly one for this
 /// program. Passed to the program build *and* emitted for the kernel so the
-/// two halves can never disagree (`AGENTS.md` §2.2).
+/// two halves can never disagree.
 const GRANT_HANDLE: u64 = 1;
 
 /// Physical base of the granted device window: the first QEMU `virt`
 /// virtio-MMIO transport. Its register block reports the virtio `MagicValue`
 /// at offset 0 unconditionally, so the read-back proves the window points at
-/// genuine device MMIO (`AGENTS.md` §2.2 — emitted for the kernel grant).
+/// genuine device MMIO (emitted for the kernel grant).
 const GRANT_PHYS: u64 = 0x0a00_0000;
 
 /// Length in bytes of the granted window (one page covers the transport's
@@ -86,7 +85,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel itself links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -126,7 +125,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         // Pin the grant handle, the expected register magic, and the register
-        // offset (the §2.2 single source of truth shared with the kernel).
+        // offset (the single source of truth shared with the kernel).
         .env("RUSTOS_MMIO_GRANT_HANDLE", GRANT_HANDLE.to_string())
         .env("RUSTOS_MMIO_MAGIC", u64::from(MAGIC).to_string())
         .env("RUSTOS_MMIO_REG_OFFSET", REG_OFFSET.to_string())

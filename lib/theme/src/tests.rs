@@ -58,7 +58,7 @@ fn builtin_surfaces_are_opaque_and_distinct() {
 #[test]
 fn builtins_share_metrics_fonts_and_cursors() {
     // Corner radii, fonts, and cursors are appearance-independent house
-    // style, shared by both built-ins rather than restated (§2.2).
+    // style, shared by both built-ins rather than restated.
     assert_eq!(Theme::dark().metrics(), Theme::light().metrics());
     assert_eq!(Theme::dark().fonts(), Theme::light().fonts());
     assert_eq!(Theme::dark().cursors(), Theme::light().cursors());

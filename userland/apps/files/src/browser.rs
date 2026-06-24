@@ -4,10 +4,10 @@
 //! path and the entries the [`DirectorySource`] returned for it — plus a
 //! selection cursor for keyboard navigation. It descends into a child
 //! directory, climbs back to the parent, and re-reads the current directory,
-//! taking the path policy and the §5.3 permission decision from the source's
-//! VFS rather than re-implementing them here (`AGENTS.md` §5.4 / §16).
+//! taking the path policy and the permission decision from the source's
+//! VFS rather than re-implementing them here.
 //!
-//! Every move is **transactional and fail-closed** (`AGENTS.md` §5.4): the
+//! Every move is **transactional and fail-closed**: the
 //! browser computes the new path, asks the source to list it, and only adopts
 //! the new path *and* its entries if that read succeeds. A refused or failing
 //! read leaves the browser exactly where it was.
@@ -167,7 +167,7 @@ impl<S: DirectorySource> Browser<S> {
         }
 
         // Build the child path and list it *before* mutating any state, so a
-        // failed read leaves the browser exactly where it was (§5.4).
+        // failed read leaves the browser exactly where it was.
         let mut child = self.components.clone();
         child.push(String::from(entry.name()));
         let entries = self.source.list(&child).map_err(BrowseError::Source)?;

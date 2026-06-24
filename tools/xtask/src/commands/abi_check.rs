@@ -1,6 +1,6 @@
 //! `cargo xtask abi-check` implementation (Stage 2.7 of `PLAN.md`).
 //!
-//! Per `AGENTS.md` §9 the kernel-side dispatch table
+//! Per the kernel-side dispatch table
 //! (`kernel/syscall/src/table.rs`) is generated from the source-of-truth
 //! syscall list (`lib/abi/src/syscalls.rs`). `abi-check` enforces that
 //! contract in two independent ways so a divergence cannot survive a
@@ -11,7 +11,7 @@
 //!    motivated the watch logic added in Stage 0.
 //! 2. **Hash cross-check.** `SYSCALL_TABLE_HASH` is no longer a
 //!    hand-maintained literal — `kernel/syscall/build.rs` derives it
-//!    from `rustos_abi::ENCODED_TABLE` at build time (§2.2), so there is
+//!    from `rustos_abi::ENCODED_TABLE` at build time, so there is
 //!    nothing on disk to parse or to drift. This check recomputes
 //!    SHA-256 of `rustos_abi::ENCODED_TABLE` here and compares it to the
 //!    *linked* `rustos_kernel_syscall::SYSCALL_TABLE_HASH`, catching the

@@ -3,7 +3,7 @@
 //! `grub-mkrescue` is the canonical tool. Stage 2's QEMU integration
 //! tests need a deterministic, reproducible disk image; this module
 //! wraps the external invocation so the build rule lives in exactly
-//! one place (`AGENTS.md` §2.2) and so `cargo xtask test --qemu` can
+//! one place and so `cargo xtask test --qemu` can
 //! report a clean diagnostic when the host is missing `grub-mkrescue`
 //! / `xorriso` rather than emitting an opaque process error.
 //!

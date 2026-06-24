@@ -13,7 +13,7 @@
 //!   CPU a build-pinned number of times so the freshly admitted child
 //!   interleaves with it under the cooperative scheduler, then returns 0 — the
 //!   spawning caller keeps running (a true concurrent spawn, not an
-//!   `exec`-style hand-off, `AGENTS.md` §4);
+//!   `exec`-style hand-off);
 //! * the **child** (session) yields the CPU the same build-pinned number of
 //!   times — every `yield` is a real `ecall` the kernel turns into a context
 //!   switch back to the dispatcher — then returns 0.
@@ -24,12 +24,11 @@
 //! proving the riscv64 runtime `spawn` concurrent producer end to end (the
 //! RV-X3 "done when").
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` (which provides `_start`, the stack canary, the panic
 //! handler, and the `spawn`/`yield`/`exit` syscall wrappers), never the C ABI
-//! (`crt0` + `abi-sys`), which exists solely for non-Rust programs
-//! (`AGENTS.md` §16.4). It is built position-independent and converted to an
-//! `rxe` blob by the consuming test's build script (`AGENTS.md` §9, §19.2). On
+//! (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
+//! `rxe` blob by the consuming test's build script. On
 //! the host it is an inert stub so `cargo build --workspace`, clippy, and fmt
 //! still cover the crate.
 
@@ -42,8 +41,7 @@
 mod program {
     /// Absolute path the parent role spawns. It is the registry key the
     /// consuming vertical's runtime `spawn` producer resolves to the child
-    /// (session) `rxe`; both halves agree on this byte string (`AGENTS.md`
-    /// §16.5 bundle layout, §2.2 single definition).
+    /// (session) `rxe`; both halves agree on this byte string (bundle layout single definition).
     const SESSION_PATH: &[u8] = b"/Apps/Session.app/Run";
 
     /// Yield count when the consuming build did not pin one via
@@ -55,7 +53,7 @@ mod program {
     /// The yield count, read from `RUSTOS_SPAWN_YIELDS` (the value the consuming
     /// vertical's build script pins when it compiles both roles), falling back
     /// to [`DEFAULT_YIELDS`]. The vertical is the single source of truth for the
-    /// count (`AGENTS.md` §2.2).
+    /// count.
     const YIELDS: u32 = match option_env!("RUSTOS_SPAWN_YIELDS") {
         Some(s) => parse_u32(s.as_bytes()),
         None => DEFAULT_YIELDS,
@@ -87,7 +85,7 @@ mod program {
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to [`DEFAULT_YIELDS`] on an empty string, a non-digit byte,
     /// or overflow of the `u32` range. `const` and panic-free so the count is
-    /// fixed into the image with no runtime parsing (`AGENTS.md` §2.9 — fail
+    /// fixed into the image with no runtime parsing (fail
     /// closed to the default).
     const fn parse_u32(bytes: &[u8]) -> u32 {
         let mut acc: u32 = 0;
@@ -143,7 +141,7 @@ mod program {
 
         // Parent: spawn the session concurrently. A negative return is
         // `-errno`; surface a distinct diagnostic so the vertical fails loudly
-        // rather than silently passing on a failed spawn (`AGENTS.md` §2.9).
+        // rather than silently passing on a failed spawn.
         let pid = rustos_rt::spawn(SESSION_PATH);
         if pid < 0 {
             return 12;

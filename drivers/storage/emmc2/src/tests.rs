@@ -5,7 +5,7 @@
 //! response registers, and moves data through the buffer data port in
 //! both directions exactly as the standard register block does. The
 //! [`Emmc2`] command/response and block-transfer state machine is proven
-//! against it host-side (`AGENTS.md` §2.2 — QEMU has no Pi EMMC2 model,
+//! against it host-side (QEMU has no Pi EMMC2 model,
 //! `plans/PI.md` §0.4).
 //!
 //! [`MockMapper`] / [`MockHost`] cover the `wiring` capability gate; the
@@ -38,7 +38,7 @@ const TEST_RCA: u32 = 0xAAAA;
 /// toggles in isolation (capacity class, CSD version, command-error and
 /// stall injection), so they are genuinely separate booleans rather than
 /// a state enum — the `struct_excessive_bools` lint is allowed here for
-/// that reason (`AGENTS.md` §15.10).
+/// that reason.
 #[allow(clippy::struct_excessive_bools)]
 struct MockSdhci {
     control0: u32,
@@ -88,13 +88,13 @@ struct MockSdhci {
     // when `await_irq` runs — i.e. the engine cannot observe a completion
     // without parking on the interrupt. `await_calls` counts those parks so
     // a regression test can prove the engine is interrupt-driven and never
-    // busy-spins a status register (`AGENTS.md` §17.1).
+    // busy-spins a status register.
     defer: bool,
     staged: u32,
     await_calls: u32,
 
     // When set, `write32` asserts the driver programs `IRPT_EN` with the
-    // completion + error signal-enable mask (`AGENTS.md` §17.1), guarding
+    // completion + error signal-enable mask, guarding
     // the regression where a zero `IRPT_EN` left the interrupt line dead.
     assert_irpt_en: bool,
 }
@@ -138,7 +138,7 @@ impl MockSdhci {
     /// A healthy card that delivers every completion only through its
     /// interrupt: completion bits are staged and revealed to `INTERRUPT`
     /// when the engine parks on [`SdhciHost::await_irq`]. Proves the engine
-    /// is interrupt-driven and never busy-spins (`AGENTS.md` §17.1).
+    /// is interrupt-driven and never busy-spins.
     fn healthy_deferred(c_size: u32) -> Self {
         Self {
             defer: true,
@@ -338,7 +338,7 @@ impl SdhciHost for MockSdhci {
         // already visible, so this only counts the park; in the
         // interrupt-delivery model (`healthy_deferred`) the engine cannot
         // make progress without it, proving it parks on the interrupt and
-        // never busy-spins (`AGENTS.md` §17.1 / §2.2).
+        // never busy-spins.
         self.await_calls += 1;
         self.interrupt |= self.staged;
         self.staged = 0;
@@ -395,8 +395,7 @@ fn open_runs_identification_and_reports_geometry() {
 fn bring_up_switches_to_the_4bit_bus_and_data_clock() {
     // After identification the engine must leave the card on the 4-bit bus
     // at the data clock, not the 1-bit identification-clock path bring-up
-    // selects — the difference between ~50 KB/s and ~6 MB/s (`AGENTS.md`
-    // §2.16). This is the regression for the slow Pi-4 boot where the store
+    // selects — the difference between ~50 KB/s and ~6 MB/s. This is the regression for the slow Pi-4 boot where the store
     // scan and every bundle read ran at the identification clock.
     let dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
 
@@ -435,7 +434,7 @@ fn the_data_clock_stays_within_sd_default_speed() {
     // The data divisor is derived from the identification divisor so the
     // data clock is exactly 32× the (≤400 kHz) identification clock, i.e.
     // ≤12.8 MHz — within SD Default Speed's 25 MHz ceiling, so no high-speed
-    // mode switch is needed (`AGENTS.md` §2.16 / §24.4: a format-driven
+    // mode switch is needed (: a format-driven
     // bound, derived not guessed).
     assert_eq!(DATA_CLOCK_DIVISOR * 32, IDENT_CLOCK_DIVISOR);
     assert_ne!(DATA_CLOCK_DIVISOR, 0, "the divisor must clock the bus");
@@ -478,8 +477,7 @@ fn interrupt_driven_read_parks_until_the_controller_signals() {
     // (`healthy_deferred`): a completion bit is invisible in `INTERRUPT`
     // until the engine parks on `await_irq`. A successful read therefore
     // proves the engine waits on the interrupt for each of CMD_DONE,
-    // READ_RDY, and DATA_DONE — it never busy-spins a status register
-    // (`AGENTS.md` §17.1 / §2.16). Under the previous busy-spin code
+    // READ_RDY, and DATA_DONE — it never busy-spins a status register. Under the previous busy-spin code
     // `await_irq` was never called, so the read would spin to the poll
     // budget and fail closed instead of completing.
     let mut mock = MockSdhci::healthy_deferred(7);
@@ -500,7 +498,7 @@ fn interrupt_driven_read_parks_until_the_controller_signals() {
 fn reset_enables_the_completion_interrupt_signal() {
     // Bring-up programs `IRPT_EN` with the completion + error sources so the
     // controller actually raises its CPU line for the events the engine
-    // parks on (`AGENTS.md` §17.1); a zero `IRPT_EN` (the old PIO bring-up)
+    // parks on; a zero `IRPT_EN` (the old PIO bring-up)
     // would leave the line dead and every `await_irq` parked forever.
     let mut mock = MockSdhci::healthy(7);
     mock.assert_irpt_en = true;
@@ -712,7 +710,7 @@ fn write_command_error_fails_closed() {
 
 /// A no-op [`CompletionWait`] for the `wiring` capability tests: those
 /// return at the capability/mapper gate before the engine ever parks, so
-/// the waiter is never driven (`AGENTS.md` §5.4).
+/// the waiter is never driven.
 struct NoIrq;
 impl crate::CompletionWait for NoIrq {
     fn await_irq(&self) {}
@@ -720,7 +718,7 @@ impl crate::CompletionWait for NoIrq {
 
 /// Minimal RAM-backed mapper for the `wiring` capability tests. The full
 /// register chain is proven through [`MockSdhci`]; this only exercises the
-/// capability / mapper gate (`AGENTS.md` §5.4).
+/// capability / mapper gate.
 struct MockMapper {
     phys: u64,
     backing: Vec<u32>,
@@ -827,7 +825,7 @@ fn bind_table_matches_the_bcm2711_emmc2_node() {
 
     // One entry at the declared exact-match priority, matching a
     // discovered node carrying the EMMC2 `compatible` string the
-    // aarch64 `FdtDiscovery` emits (`AGENTS.md` §18.3).
+    // aarch64 `FdtDiscovery` emits.
     assert_eq!(BIND_KEYS.len(), 1);
     assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
     let emmc2 = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits");
@@ -835,7 +833,7 @@ fn bind_table_matches_the_bcm2711_emmc2_node() {
 
     // The sibling BCM2711 PCIe root-complex node and an unrelated node
     // both fail the match — the caller leaves them unbound rather than
-    // guessing (`AGENTS.md` §18.4 / §2.9).
+    // guessing.
     let pcie = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&pcie));
 }
@@ -869,7 +867,7 @@ fn bring_up_stage_names_every_step_distinctly() {
 
 #[test]
 fn bring_up_fault_converts_to_its_driver_error() {
-    // A consumer that only needs the §8 driver-ABI `DriverError` drops the
+    // A consumer that only needs the driver-ABI `DriverError` drops the
     // stage with `?` / `DriverError::from`.
     let fault = BringUpFault {
         stage: BringUpStage::OpCond,

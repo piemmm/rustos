@@ -6,7 +6,7 @@
 //! It is deliberately self-contained — it does not depend on the
 //! `tests/integration` harness — and keys only off the OS component of the
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
-//! cfg-check` (`AGENTS.md` §17.2) stays clean.
+//! cfg-check` stays clean.
 //!
 //! The consuming vertical (`preempt_el0_qemu_aarch64`) sets `RUSTOS_EL0_SPINS`
 //! when it compiles this program, so a changed spin count must force a

@@ -4,14 +4,14 @@
 //! per-instruction-set boot pipelines that are reusable across the
 //! production binary (`src/main.rs`) and the QEMU integration tests.
 //! Pulling a pipeline into a library is the only way to satisfy
-//! `AGENTS.md` §2.2 (no duplication) without leaking the test-only
+//! (no duplication) without leaking the test-only
 //! audit-observer sink into the production binary through Cargo feature
 //! unification.
 //!
 //! The build script (`build.rs`) selects the pipeline per instruction set
 //! via the `kernel_isa` conditional-compilation name, so the production
 //! kernel image is built for exactly one architecture at a time (the
-//! single `AGENTS.md` §17.1/§17.2 selection point): the x86_64
+//! single selection point): the x86_64
 //! Multiboot2/ACPI pipeline or the aarch64 (Raspberry Pi 4) boot path.
 //!
 //! # Module map
@@ -20,7 +20,7 @@
 //! | --------------- | --------------------------------------------------------------------------------- |
 //! | [`kalloc`]      | Freeing (coalescing free-list) `GlobalAlloc` impl shared by every bin.        |
 //! | `dispatch_core` | Arch-neutral syscall-dispatch helpers shared by every port (host-tested).         |
-//! | `spawn_layout`  | Shared user-space layout constants for every port's spawn seam/producer (§2.2).   |
+//! | `spawn_layout` | Shared user-space layout constants for every port's spawn seam/producer. |
 //! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `virtio_boot`, `driver_host`, `panic_ctx`, `serial_sink`. |
 //! | `aarch64`       | The aarch64 (Raspberry Pi 4) port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` P1). |
 //! | `riscv64`       | The riscv64 (QEMU `virt` / SiFive) port: `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` RV-P1). |
@@ -39,7 +39,7 @@
 //! Both consumers share the same boot pipeline — but they must *not*
 //! share the audit sink, because exiting QEMU on `BootCompleted` is
 //! a test-harness affordance that has no place in a production kernel
-//! (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what
+//! (fail closed; the harness never decides what
 //! the kernel does next).
 //!
 //! # `no_std`
@@ -60,21 +60,21 @@
 // `boot` module to resolve `alloc::sync::Arc`; on host builds the
 // declaration shows up as unused (`boot` is gated to the
 // `freestanding` build) but stripping it would break the bare-metal
-// build. `AGENTS.md` §15.10 — every `#[allow]` carries a justifying
+// build. — every `#[allow]` carries a justifying
 // comment.
 #[allow(unused_extern_crates)]
 extern crate alloc;
 
 // Host tests need `std` for `Box::leak` (`TestSink`) and friends. The
 // crate itself remains `no_std` for production builds
-// (`AGENTS.md` §1 — no hacks).
+// (no hacks).
 #[cfg(test)]
 extern crate std;
 
 // The boot pipeline is selected per instruction set by the build script
 // (`build.rs` emits the `kernel_isa` name from `CARGO_CFG_TARGET_ARCH`),
 // so the crate body never names `target_arch` inline — that decision
-// lives in the build glue (`AGENTS.md` §17.2; `cargo xtask cfg-check`).
+// lives in the build glue (`cargo xtask cfg-check`).
 //
 // The x86_64 pipeline (the Multiboot2/ACPI boot path, the `BinArch`
 // `KernelArch` wrapper over `X86_64Arch`, the IO-APIC controller, the
@@ -85,7 +85,7 @@ pub mod kalloc;
 
 // The architecture-neutral syscall-dispatch helpers (frame read, errno
 // encoding, slot forwarding) shared by every port's `production_dispatch`
-// callback (`AGENTS.md` §2.2). Un-gated: it names only unconditional
+// callback. Un-gated: it names only unconditional
 // `kernel/*` + `lib/abi` deps, so it compiles on every target and the CI
 // host, where its unit tests run.
 pub mod dispatch_core;
@@ -96,7 +96,7 @@ pub mod dispatch_core;
 // block device into the validated `users-v1` database
 // `kernel/core::load_users_db_source` serves. `rustos-kernel`
 // (`Layer::Tooling`) is the one layer permitted to name both the `rustfs`
-// driver and `kernel/core` (`AGENTS.md` §17.4). It is architecture-neutral
+// driver and `kernel/core`. It is architecture-neutral
 // (it consumes only the `lib/abi` `Block` seam and the `rustfs`/`kernel/core`
 // APIs), so it is un-gated — it compiles on every target and its host unit
 // tests run on the CI host; the aarch64 boot path supplies the discovered
@@ -134,8 +134,7 @@ pub mod driver_loader;
 // Chunk B-2): resolves which discovered hardware-tree node carries the
 // bootstrap root block device, and which floor block driver
 // (`driver_catalog`) binds it, through the same shared `lib/devmatch`
-// policy the user-space `devmgr` autoloader uses (`AGENTS.md` §18.3 /
-// §18.6). It is the storage analogue of the keyboard bring-up's bind gate
+// policy the user-space `devmgr` autoloader uses. It is the storage analogue of the keyboard bring-up's bind gate
 // and the front half the production root mount (`root_mount`) builds on.
 // Resolution only — it never reads or mounts a volume — so it is
 // architecture-neutral and host-tested on the CI host; it is gated, like
@@ -146,12 +145,11 @@ pub mod root_storage;
 
 // The runtime hardware-inventory store (Design D, D1 —
 // `.junie/next-pi-prompt.md`): the single source of truth for the
-// discovered hardware tree (`AGENTS.md` §18.1 / §2.2), seeded by the boot
+// discovered hardware tree, seeded by the boot
 // path, appended to by the floor bus bring-up, and snapshotted by the
 // autoload reader. It also backs the `hw_tree_read` / `hw_tree_wait`
 // syscalls through `HW_TREE_SOURCE` (the reactive generation counter the
-// wait parks on; node removal lands in Design D D4 with its consumer,
-// §2.3). Architecture-neutral and host-tested on the CI host; gated on the
+// wait parks on; node removal lands in Design D D4 with its consumer). Architecture-neutral and host-tested on the CI host; gated on the
 // three instruction sets whose production boot path installs it through
 // `BootInfo::with_hw_tree` so the device manager can observe the discovered
 // inventory.
@@ -162,7 +160,7 @@ pub mod hwtree_store;
 // `.junie/next-pi-prompt.md`): wraps the one brought-up bootstrap-floor
 // block device behind a `lib/sync` lock so it can back two concurrent
 // partition windows — the read-only `/System` driver-store mount and the
-// encrypted-root unlock window — over a single disk (`AGENTS.md` §4 — SMP
+// encrypted-root unlock window — over a single disk (SMP
 // serialisation). Architecture-neutral and host-tested on the CI host;
 // gated, like the `unlock_service` boot path that wraps the device in it,
 // on the two instruction sets where the boot path compiles.
@@ -187,8 +185,7 @@ pub mod unlock_service;
 // admits a discovered `kind = UserSpace` driver through the same signed
 // `drvhost::Host::load` gate, then **spawns** it into its own
 // hardware-isolated process, minting it one device-resource grant per
-// `HwResource` its matched hardware-tree node requested (`AGENTS.md` §4 —
-// drivers in user space; §18.3 — only the resources the matched node
+// `HwResource` its matched hardware-tree node requested (drivers in user space; — only the resources the matched node
 // requested). It implements `rustos_devmgr::DriverLoader`, so the device
 // manager's autoload walk drives it directly; the architecture-specific
 // process creation sits behind the `DriverProcessSpawn` seam, so the gate +
@@ -202,9 +199,8 @@ pub mod driver_spawn_loader;
 // D2b-1): one object over the mounted `/System` volume that both lists the
 // signed `/System/Drivers/` store and reads a bundle's bytes (a
 // `drvhost::ImageSource`) through the kernel-core `DriverImageReader`. It
-// consolidates the store walk and the per-bundle reads behind one seam
-// (`AGENTS.md` §2.2) — the seam the D2b-2 `IPC_RECV` endpoint will wrap. The
-// bin crate is the one layer that may name `drvhost` (`AGENTS.md` §17.4), so
+// consolidates the store walk and the per-bundle reads behind one seam — the seam the D2b-2 `IPC_RECV` endpoint will wrap. The
+// bin crate is the one layer that may name `drvhost`, so
 // this delegating service lives here; gated, like the other
 // `drvhost`-consuming modules, on the two instruction sets where
 // `rustos-drvhost` is a dependency of this crate.
@@ -216,10 +212,10 @@ pub mod system_files;
 // `rustos_kernel_ipc::CallEndpoint` and serves each
 // `rustos_abi::driver_store::StoreRequest` against the `system_files`
 // `SystemFileService` — a `Catalogue` op (the signed-store scan exposed as
-// opaque `bundle_id` + decoded bind keys) and a `Load` op (the signed §8
+// opaque `bundle_id` + decoded bind keys) and a `Load` op (the signed
 // gate + process spawn, granting the matched node's resources). The
 // user-space `devmgr` owns matching *policy*; this server keeps the load
-// *mechanism* in the kernel TCB (`AGENTS.md` §4). It names both
+// *mechanism* in the kernel TCB. It names both
 // `rustos_devmgr` (`DriverLoader`) and `rustos_drvhost`
 // (`scan_store`/`ImageSource`), so it is gated, like `system_files`, on the
 // two instruction sets where those crates are dependencies of this crate —
@@ -233,11 +229,10 @@ pub mod driver_store_server;
 // boot path, PID 1 (`init`) spawn seam, and runtime `spawn` producer (plus
 // the x86_64 IO-APIC controller, virtio bring-up, and `DriverHost`
 // composition), gated on the matching `kernel_isa` build-script name — the
-// single `AGENTS.md` §17.2 selection point lives in `build.rs`, never an
+// single selection point lives in `build.rs`, never an
 // inline `target_arch` predicate. Code shared across the ports stays at the
 // crate root (`dispatch_core`, `mem_map`, `stack_arena`, `spawn_layout`,
-// the driver registry, …) rather than being duplicated into a port
-// (`AGENTS.md` §2.2). Each port's bare-metal-only modules are further gated
+// the driver registry, …) rather than being duplicated into a port. Each port's bare-metal-only modules are further gated
 // on `freestanding` inside its root module.
 #[cfg(kernel_isa = "x86_64")]
 pub mod x86_64;
@@ -255,9 +250,9 @@ pub mod riscv64;
 // `CAP_PROC_SPAWN` `SpawnAuthority`, and PID 1 `init`'s own grant + argument
 // vector. These describe one user-space contract, not a per-architecture
 // register layout, so they are defined once here rather than copy-pasted into
-// each `init_spawn` / `spawn_producer` sibling (`AGENTS.md` §2.2). Gated to
+// each `init_spawn` / `spawn_producer` sibling. Gated to
 // exactly the configurations whose consumers compile, so it is never dead
-// code (`AGENTS.md` §2.3).
+// code.
 #[cfg(all(
     freestanding,
     any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
@@ -271,7 +266,7 @@ mod spawn_layout;
 // compiles — and its bounds-check unit tests run — on the CI host under
 // `cargo test` as well as on each production build that consumes it
 // (`aarch64::boot`, `x86_64::boot`, `riscv64::boot`). Gated to exactly those
-// configurations so it is never dead code (`AGENTS.md` §2.3); the per-port
+// configurations so it is never dead code; the per-port
 // carve helpers are further gated to the port(s) that use them.
 #[cfg(any(
     all(
@@ -290,7 +285,7 @@ mod mem_map;
 // `riscv64::init_spawn` on riscv64). Its bump arithmetic is free of the
 // bare-metal ports, so it compiles — and its unit tests run — on the CI
 // host as well as on the bare-metal production builds that consume it, and
-// on no other configuration, so it is never dead code (`AGENTS.md` §2.3).
+// on no other configuration, so it is never dead code.
 #[cfg(any(
     all(
         freestanding,
@@ -301,7 +296,7 @@ mod mem_map;
 mod stack_arena;
 
 // The build script's pure target-selection logic, compiled into the
-// host test build so its rules are unit tested (`AGENTS.md` §7).
+// host test build so its rules are unit tested.
 #[cfg(test)]
 #[path = "build_support.rs"]
 mod build_support;
@@ -309,8 +304,7 @@ mod build_support;
 // Shared host-test fixtures. The in-memory mock root-volume filesystem
 // driver `MockRootFs` is the surface several boot-path readers delegate
 // through (`system_files`, `driver_store_server`), so it is defined
-// once here rather than copy-pasted into each test module (`AGENTS.md`
-// §2.2). Compiled only under `cargo test`.
+// once here rather than copy-pasted into each test module. Compiled only under `cargo test`.
 #[cfg(test)]
 mod test_support;
 
@@ -328,7 +322,7 @@ pub use x86_64::driver_host::{run_with_driver_host, DriverHostConfig};
 pub use x86_64::virtio_boot::{provision_and_run, VirtioBootConfig};
 // The architecture-neutral virtio factory and provisioning walks now
 // live in `rustos-kernel-virtio` so every architecture port can reuse
-// them (`AGENTS.md` §2.2); re-exported here to keep this crate's public
+// them; re-exported here to keep this crate's public
 // API unchanged.
 pub use rustos_kernel_virtio::{
     provision_virtio_mmio, provision_virtio_pci, KernelVirtioFactory, KernelVirtioFactoryConfig,

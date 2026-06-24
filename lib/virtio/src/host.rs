@@ -1,14 +1,12 @@
 //! Host seam for virtio drivers.
 //!
 //! The kernel side of RustOS will, at Stage 4.D Item 0 wiring time,
-//! supply a concrete [`VirtioHost`] backed by a per-process DMA pool
-//! (`AGENTS.md` §4). This crate ships the *interface* and a
+//! supply a concrete [`VirtioHost`] backed by a per-process DMA pool. This crate ships the *interface* and a
 //! deterministic [`MockHost`] implementation used by the unit tests
 //! in every virtio driver crate. Decoupling the driver code from the
 //! kernel DMA allocator is what lets the same `virtio_blk` /
 //! `virtio_net` source files target x86_64-PCI, aarch64-MMIO,
-//! riscv64-MMIO, and the unit-test environment without duplication
-//! (`AGENTS.md` §2.2 / §6).
+//! riscv64-MMIO, and the unit-test environment without duplication.
 
 use crate::dma::{DmaSlab, PoolId};
 use alloc::boxed::Box;
@@ -37,7 +35,7 @@ pub use rustos_abi::driver::{DmaHost, VirtioHost};
 /// The factory is the seam between the userland driver host
 /// (`userland/system/drvhost`) and the concrete, kernel-linking
 /// implementation (`kernel/virtio`'s `KernelVirtioFactory`). Neither may
-/// depend on the other (`AGENTS.md` §17.4: a userland service and a
+/// depend on the other (: a userland service and a
 /// kernel subsystem are sibling strata), so the shared contract lives
 /// here in the bus-agnostic virtio host seam, alongside [`VirtioHost`]
 /// and [`MockHost`]. Both sides depend only on `lib/*`, so the edge that
@@ -50,7 +48,7 @@ pub use rustos_abi::driver::{DmaHost, VirtioHost};
 /// see that trait's documentation). A capability-aware factory uses it
 /// to short-circuit the allocation path when the driver was not granted
 /// `CAP_MEM_DMA`. The host's own per-task DMA gate remains authoritative
-/// (`AGENTS.md` §5.4 — fail closed).
+/// (fail closed).
 pub trait VirtioHostFactory {
     /// Construct a fresh virtio host for the upcoming `register()` call.
     ///
@@ -126,7 +124,7 @@ impl DmaHost for MockHost {
         }
         // 64 MiB pool cap is far above the Stage-4 unit-test budget;
         // exceeding it signals a runaway test rather than real
-        // allocator pressure. Failing closed (`AGENTS.md` §5.4.5).
+        // allocator pressure. Failing closed.
         let bytes_now = self.bytes_allocated.get();
         let Some(bytes_after) = bytes_now.checked_add(size) else {
             return Err(DriverError::LengthOutOfRange);

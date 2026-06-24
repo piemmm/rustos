@@ -8,7 +8,7 @@
 //!
 //! 1. hands the production x86_64 kernel linker script to `rustc` (the test
 //!    boots the real `rustos-kernel` pipeline, so it links exactly like the
-//!    other freestanding x86_64 integration binaries — `AGENTS.md` §2.2);
+//!    other freestanding x86_64 integration binaries);
 //! 2. compiles the fixture program **position-independent** for the
 //!    freestanding x86_64 target (its own `program.ld` roots crt0's `_start`),
 //!    into a private target directory under `OUT_DIR` so it never collides with
@@ -17,7 +17,7 @@
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2);
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it;
 //! 4. emits the bytes and `USER_BIAS` as a Rust source the test `include!`s.
 //!
 //! On any non-x86_64 target (host `cargo build --workspace`, clippy) it emits
@@ -65,7 +65,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == X86_64_TARGET {
         // Hand the production x86_64 kernel linker script to the test kernel
-        // itself (the single per-arch script the architecture port owns, §2.2);
+        // itself (the single per-arch script the architecture port owns);
         // mirrors `kernel/rustos-kernel/build.rs` and the sibling x86_64
         // integration binaries.
         let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
@@ -97,8 +97,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
     let _ = fs::remove_dir_all(&target_dir);
 
     // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots crt0's trampoline; it is built position-independent
-    // (`AGENTS.md` §19.2). Scope the PIE link flags to the x86_64 target so
+    // `ENTRY(_start)` roots crt0's trampoline; it is built position-independent. Scope the PIE link flags to the x86_64 target so
     // the program's own host build script is unaffected, and build `core` /
     // `compiler_builtins` as PIC alongside it (`-Z build-std`).
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());

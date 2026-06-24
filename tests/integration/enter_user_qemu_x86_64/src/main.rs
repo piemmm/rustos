@@ -1,6 +1,6 @@
 //! CCOMPAT stage CC3 QEMU exercise: the x86_64 ring-3 round-trip for the
 //! Arch HAL "enter user mode" primitive (`rustos_arch_api::EnterUser`,
-//! `kernel/arch/x86_64/src/userentry.rs`, `AGENTS.md` §17.2).
+//! `kernel/arch/x86_64/src/userentry.rs`).
 //!
 //! ## What this test asserts
 //!
@@ -30,10 +30,9 @@
 //!    and this stub's page stay reachable after the CR3 switch.
 //! 2. Aliases the page(s) holding the `ros_sys_cap_query` stub at a
 //!    ring-3 virtual address (`USER_CODE_VA`) **user-accessible,
-//!    executable, not writable** (`map_4k_user(writable = false)` — W^X,
-//!    `AGENTS.md` §19.2), and maps a USER read/write stack at
+//!    executable, not writable** (`map_4k_user(writable = false)` — W^X), and maps a USER read/write stack at
 //!    `USER_STACK_VA`. The kernel's own mappings carry no USER bit, so
-//!    ring 3 can reach *only* the aliased stub and its stack — the §4
+//!    ring 3 can reach *only* the aliased stub and its stack — the
 //!    isolation contract.
 //! 3. Overrides the dispatch callback with `record_and_exit`, switches
 //!    CR3 to the new space, and `iretq`s to ring 3 at the stub through
@@ -56,14 +55,14 @@
 //! The test body only compiles under `#[cfg(feature = "test-hooks")]`.
 //! The feature is on by default for this crate; release builds that
 //! enable it are rejected by the `compile_error!` guard below
-//! (AGENTS.md §1 — no hacks; §5.4.5 — fail closed), mirroring
+//! (no hacks; — fail closed), mirroring
 //! `rustos-test-abi-sys-syscall-qemu`.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-// AGENTS.md §1 — test affordances must never reach a release binary.
+// — test affordances must never reach a release binary.
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
     "rustos-test-enter-user-qemu-x86_64: the `test-hooks` Cargo feature is a \
@@ -137,7 +136,7 @@ mod kernel {
 
     /// Set once the round-trip has been driven so a stray duplicate
     /// `BootCompleted` can never re-enter the test logic
-    /// (`AGENTS.md` §5.4.5 — fail closed).
+    /// (fail closed).
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     /// The syscall dispatch callback installed for the round-trip.
@@ -200,7 +199,7 @@ mod kernel {
         let func_page = func_phys & !(page - 1);
         // Map the stub's page plus the following one as cheap insurance
         // against the stub straddling a page boundary. `writable = false`
-        // keeps the executable alias non-writable (W^X, §19.2).
+        // keeps the executable alias non-writable (W^X).
         for i in 0..2u64 {
             if space
                 .map_4k_user(
@@ -243,7 +242,7 @@ mod kernel {
         // LAPIC-timer IRQ is taken while the stub runs in ring 3 (under this
         // CR3), and its ISR reads the LAPIC ID register and writes EOI at
         // `LAPIC_BASE_PHYS`. Without this mapping that kernel-mode MMIO access
-        // would page-fault under the minimal user CR3 (`AGENTS.md` §2.17) — the
+        // would page-fault under the minimal user CR3 — the
         // same page the production / timeshare spaces map. The preempt callback
         // then no-ops here (no user kthread is published), so preemption stays
         // transparent to this round-trip.
@@ -299,7 +298,7 @@ mod kernel {
 pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     loop {
         // SAFETY: `cli; hlt` is a well-defined parked-CPU sequence on
-        // x86_64 (`AGENTS.md` §2.9). Looping defends against spurious
+        // x86_64. Looping defends against spurious
         // wake-ups.
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));

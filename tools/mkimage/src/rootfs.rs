@@ -2,10 +2,10 @@
 //!
 //! The root partition is a genuine encrypted `RustFS` volume laid down by
 //! the real driver (`rustos-drv-fs-rustfs`) and pre-populated with the
-//! authoritative `AGENTS.md` §16 top-level layout: exactly `/System`,
+//! authoritative top-level layout: exactly `/System`,
 //! `/Users`, `/Apps`, and `/Storage`, plus the fixed `/System` subtree.
 //! The user and group databases under `/System/Security`, the first user's
-//! home, and the mount policies are the §11 installer's first-boot job —
+//! home, and the mount policies are the installer's first-boot job —
 //! the image ships the skeleton the installer fills in. A **debug** image
 //! ([`crate::ImageProfile::Debug`]) additionally seeds a pre-authored
 //! `/System/Security/Users` database so the login prompt is usable without
@@ -25,11 +25,11 @@ use rustos_drv_fs_rustfs::{
 use crate::device::MemBlock;
 use crate::MkimageError;
 
-/// The `AGENTS.md` §16.1 top-level directories. Exactly these four; any
+/// The top-level directories. Exactly these four; any
 /// other top-level name on a RustOS volume is a defect.
 pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
-/// The `AGENTS.md` §16.2 `/System` subtree the image ships. `Security`
+/// The `/System` subtree the image ships. `Security`
 /// additionally carries its fixed `Keys` and `Policy` subdirectories; the
 /// `Users`/`Groups` databases inside it are installer-authored data, not
 /// image content.
@@ -53,20 +53,18 @@ pub const SYSTEM_SUBDIRS: [&str; 12] = [
 /// the volume size (`RustFS` allocates inodes from this hint's table).
 const ROOT_INODE_HINT: u32 = 4096;
 
-/// Name of the user database file under `/System/Security` (`AGENTS.md`
-/// §16.2).
+/// Name of the user database file under `/System/Security`.
 pub const USERS_DB_NAME: &str = "Users";
 
 /// Author the `RustFS` root partition: format `sectors` sectors under
-/// `volume_key`, create the §16 directory skeleton, and — when `users_db`
+/// `volume_key`, create the directory skeleton, and — when `users_db`
 /// is given — write it to `/System/Security/Users`.
 ///
 /// # Errors
 ///
 /// [`MkimageError::RootPartition`] if formatting, any directory creation,
 /// or the user-database write fails (including an entropy failure while
-/// provisioning the volume's key hierarchy — never a weakly-keyed volume,
-/// `AGENTS.md` §5.4).
+/// provisioning the volume's key hierarchy — never a weakly-keyed volume).
 pub fn build_root_partition(
     sectors: u64,
     volume_key: &VolumeKey,
@@ -93,7 +91,7 @@ pub fn build_root_partition(
 
 /// Author the read-only, signed-bundle `/System` partition: format
 /// `sectors` sectors under the non-secret well-known
-/// [`SYSTEM_VOLUME_KEY`] and lay the `AGENTS.md` §16.2 `/System` subtree
+/// [`SYSTEM_VOLUME_KEY`] and lay the `/System` subtree
 /// **at the volume root** (the volume *is* `/System` once mounted, so its
 /// root carries `Kernel`, `Drivers`, … directly).
 ///
@@ -102,16 +100,15 @@ pub fn build_root_partition(
 /// kernel mounts it read-only (`RustFs::open_read_only`) *before* the
 /// encrypted data root is unlocked. The signed driver bundles land here in
 /// the later design-B increments; B1 establishes the volume and its
-/// skeleton. The §16.2 subdirectories are laid down through the one shared
-/// `create_system_subdirs` helper used by the encrypted root too
-/// (`AGENTS.md` §2.2). No users database is written here — that secret
+/// skeleton. The subdirectories are laid down through the one shared
+/// `create_system_subdirs` helper used by the encrypted root too. No users database is written here — that secret
 /// stays on the encrypted root.
 ///
 /// # Errors
 ///
 /// [`MkimageError::SystemPartition`] if formatting or any directory
 /// creation fails (including an entropy failure provisioning the volume's
-/// key hierarchy, `AGENTS.md` §5.4).
+/// key hierarchy).
 pub fn build_system_partition(
     sectors: u64,
     entropy: &mut dyn EntropySource,
@@ -124,11 +121,11 @@ pub fn build_system_partition(
     create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
     // Lay each signed driver bundle into the read-only `/System` store at its
     // volume-relative path (`Drivers/<class>/<leaf>/Run`), creating any
-    // intermediate directory the §16.2 skeleton did not (the `Drivers`
+    // intermediate directory the skeleton did not (the `Drivers`
     // directory already exists, so the shared planter reuses it). This is the
-    // on-disk shape the §18.3 / §18.6 autoload scan reads back; the bundle is
+    // on-disk shape the autoload scan reads back; the bundle is
     // already Ed25519-signed against the kernel's trust anchor, so a tampered
-    // read-only store fails the load gate closed (`AGENTS.md` §18.6).
+    // read-only store fails the load gate closed.
     for (components, bytes) in drivers {
         plant_nested_file(&mut fs, root, components, bytes)
             .map_err(MkimageError::SystemPartition)?;
@@ -137,11 +134,11 @@ pub fn build_system_partition(
     Ok(fs.into_block().into_bytes())
 }
 
-/// Lay the `AGENTS.md` §16.2 `/System` subtree under `system` on the
+/// Lay the `/System` subtree under `system` on the
 /// encrypted data root: the [`SYSTEM_SUBDIRS`], `Security/{Keys,Policy}`,
 /// and — for a debug image — the seeded users database. Shared with
 /// [`build_root_partition`] so the encrypted root and the `/System` volume
-/// agree on the subtree shape (`AGENTS.md` §2.2).
+/// agree on the subtree shape.
 fn populate_system_subtree(
     fs: &mut RustFs<MemBlock>,
     system: NodeId,
@@ -159,7 +156,7 @@ fn populate_system_subtree(
 
 /// Create the [`SYSTEM_SUBDIRS`] under `system`, with `Keys` and `Policy`
 /// inside `Security`. The one definition both the encrypted-root and the
-/// `/System`-volume authoring paths reuse (`AGENTS.md` §2.2); `wrap` tags
+/// `/System`-volume authoring paths reuse; `wrap` tags
 /// the failure with the partition the caller is authoring.
 fn create_system_subdirs(
     fs: &mut RustFs<MemBlock>,
@@ -181,7 +178,7 @@ fn create_system_subdirs(
 }
 
 /// Create `/System/Security/Users` and write `text` into it whole; a short
-/// write is a build failure, never a truncated database (`AGENTS.md` §2.9).
+/// write is a build failure, never a truncated database.
 fn write_users_db(
     fs: &mut RustFs<MemBlock>,
     security: rustos_abi::driver::filesystem::NodeId,

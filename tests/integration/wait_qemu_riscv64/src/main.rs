@@ -21,8 +21,7 @@
 //! PASS once the parent reaped the child, read back the agreed code, and exited
 //! 0. A wrong code, a missing reap, an unexpected syscall, or a stall trips a
 //! distinct `SiFive` Test failure finisher or times out, so the run fails
-//! loudly — by a failure code or by the harness `Outcome::Timeout`
-//! (`AGENTS.md` §7).
+//! loudly — by a failure code or by the harness `Outcome::Timeout`.
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]

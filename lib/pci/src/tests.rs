@@ -635,7 +635,7 @@ fn assign_bar_leaves_an_already_based_bar_untouched() {
 fn assign_bar_refuses_a_bar_that_does_not_fit_the_window() {
     let pci = Pci::new(vl805_like_fixture());
     // The window is smaller than the 4 KiB BAR: fail closed rather than
-    // place the BAR partially outside it (`AGENTS.md` §5.4).
+    // place the BAR partially outside it.
     assert_eq!(
         pci.assign_bar(vl805_bdf(), 0, 0xC000_0000, 0x800)
             .unwrap_err(),
@@ -1051,7 +1051,7 @@ fn route_msix_propagates_capability_denial() {
 /// type. Construction stores the [`PortIo`] backend and issues no port
 /// I/O, so it is sound to run on the host with the inert mock below
 /// (no `0xCF8`/`0xCFC` access happens here); the real x86_64 backend
-/// lives in `kernel/arch/x86_64::pio` (`AGENTS.md` §17.2 / §17.4).
+/// lives in `kernel/arch/x86_64::pio`.
 #[test]
 fn mechanism_one_exposes_the_frozen_bus_seams() {
     use rustos_abi::driver::msix::MsixBus;
@@ -1239,7 +1239,7 @@ fn mechanism_ecam_exposes_the_frozen_bus_seams() {
 }
 
 /// The ECAM constructor's value is also reachable through the
-/// generic-PCI [`PciBus`] seam (`AGENTS.md` §9): a non-virtio,
+/// generic-PCI [`PciBus`] seam: a non-virtio,
 /// DMA-driving device driver maps a BAR and enables bus mastering
 /// through `&dyn PciBus` without naming the concrete `Pci` type.
 #[test]
@@ -1255,7 +1255,7 @@ fn mechanism_ecam_exposes_the_pci_bus_seam() {
 
 /// `enable_bus_master` sets the command register's Memory Space Enable
 /// and Bus Master Enable bits on the VL805 while leaving the RW1C
-/// status half untouched (`AGENTS.md` §2.2 — the same activation
+/// status half untouched (the same activation
 /// `route_msix` performs).
 #[test]
 fn pci_bus_enable_bus_master_sets_command_bits() {
@@ -1291,7 +1291,7 @@ fn pci_bus_enable_bus_master_sets_command_bits() {
 
 /// `map_bar_window` resolves the VL805's memory BAR0 and routes the
 /// mapping through the supplied [`MmioMapper`] (the kernel allocates
-/// the window, `AGENTS.md` §4).
+/// the window).
 #[test]
 fn pci_bus_map_bar_window_maps_vl805_bar0() {
     use rustos_abi::driver::pci::PciBus;
@@ -1340,7 +1340,7 @@ fn pci_bus_map_bar_window_rejects_absent_bar() {
 /// `describe_function` emits the VL805 as a discovered child node whose
 /// PCI match key carries its full 24-bit class, so the generic xHCI
 /// driver's wildcard bind key (`0x0C_03_30`) resolves against it
-/// (`AGENTS.md` §18.3 — autoload is match *data*, not composition).
+/// (autoload is match *data*, not composition).
 #[test]
 fn describe_function_emits_the_vl805_child_node() {
     use rustos_abi::driver::pci::PciBus;
@@ -1359,7 +1359,7 @@ fn describe_function_emits_the_vl805_child_node() {
         .describe_function(vl805)
         .expect("describes the VL805");
     // Identity (id/parent) is unassigned here — the `hw_emit_node` publish
-    // path assigns it (`AGENTS.md` §4 / §18.1); only the match key matters.
+    // path assigns it; only the match key matters.
     // A serial-bus (USB host) controller is a bus to further devices.
     assert_eq!(node.class(), Some(HwDeviceClass::Bus));
     assert_eq!(node.match_keys().len(), 1);
@@ -1375,8 +1375,7 @@ fn describe_function_emits_the_vl805_child_node() {
 }
 
 /// `describe_function` fails closed on a `bdf` with no responding
-/// function (the all-ones vendor sentinel), never fabricating a node
-/// (`AGENTS.md` §2.9 / §18.5).
+/// function (the all-ones vendor sentinel), never fabricating a node.
 #[test]
 fn describe_function_rejects_an_absent_function() {
     use rustos_abi::driver::pci::PciBus;

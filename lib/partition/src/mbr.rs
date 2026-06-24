@@ -9,9 +9,8 @@
 //! This module both writes a table (the image author, [`encode`]) and
 //! reads one back (the boot path, [`parse`]); both enforce the same
 //! extent invariants through one shared validator (`validate_extents`),
-//! so a table this module writes is always one it will read back
-//! (`AGENTS.md` §2.2), and a malformed/hostile table is rejected whole at
-//! both ends (`AGENTS.md` §5.4 / §2.9 / §19.5).
+//! so a table this module writes is always one it will read back, and a malformed/hostile table is rejected whole at
+//! both ends.
 
 use crate::{Partition, PartitionTable, PartitionType};
 
@@ -31,7 +30,7 @@ pub const PART_TYPE_FAT32_CHS: u8 = 0x0b;
 /// `0x7f` is the de-facto "reserved for individual or local use" type for
 /// a filesystem without an assigned identifier. `RustFS` volumes are
 /// self-identifying (superblock magic + checksums), so the type byte is a
-/// routing hint, never a trusted input (`AGENTS.md` §18.6).
+/// routing hint, never a trusted input.
 pub const PART_TYPE_RUSTFS: u8 = 0x7f;
 
 /// MBR partition-type byte for the read-only, signed-bundle `RustFS`
@@ -42,7 +41,7 @@ pub const PART_TYPE_RUSTFS: u8 = 0x7f;
 /// `/System` volume apart from the encrypted data root by role. Like every
 /// type byte it is a routing hint, never a trusted input: the volume is
 /// still mounted under its own key and its bundles still verified against
-/// the load gate's trust anchor (`AGENTS.md` §18.6).
+/// the load gate's trust anchor.
 pub const PART_TYPE_RUSTFS_SYSTEM: u8 = 0x7e;
 
 /// A partition entry with this type byte is unused; it is skipped on read
@@ -237,12 +236,11 @@ pub fn has_signature(sector: &[u8]) -> bool {
 /// Parse an MBR partition table out of `sector`, fail-closed.
 ///
 /// `sector` is read off an untrusted device, so it is fully validated
-/// before any extent is trusted (`AGENTS.md` §5.4 / §19.5): the buffer
+/// before any extent is trusted: the buffer
 /// must be at least [`MBR_SECTOR_LEN`] bytes and carry the `0x55AA`
 /// signature, every entry whose type byte is not [`PART_TYPE_UNUSED`] is
 /// collected, and the present extents must satisfy `validate_extents`.
-/// A table that violates any invariant is rejected **whole**
-/// (`AGENTS.md` §2.9).
+/// A table that violates any invariant is rejected **whole**.
 ///
 /// # Errors
 ///

@@ -2,8 +2,7 @@
 //!
 //! Every operation that can be asked to do something impossible — address a
 //! cell outside a window, allocate a colour pair past the table, read or write
-//! a closed tty — returns a [`CursesError`] rather than panicking
-//! (`AGENTS.md` §2.9). There is no `unwrap` / `expect` / `panic!` anywhere in
+//! a closed tty — returns a [`CursesError`] rather than panicking. There is no `unwrap` / `expect` / `panic!` anywhere in
 //! the crate.
 
 /// Why a curses operation could not be completed.

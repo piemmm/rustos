@@ -7,15 +7,15 @@
 //! `drivers/bus/virtio`, and the kernel-side host in `kernel/virtio`.
 //! Hosting the protocol here — in `lib/` rather than in one of the
 //! driver crates — is what keeps every consumer on the layering of
-//! `AGENTS.md` §17.4 (`drivers/* → lib/*` only, never another driver)
-//! while satisfying the no-duplication rule in §2.2 / §6.
+//! (`drivers/* → lib/*` only, never another driver)
+//! while satisfying the no-duplication rule in.
 //!
 //! # Surface
 //!
 //! * [`Transport`] — the bus seam every virtio device speaks through.
 //!   The concrete MMIO implementation ([`MmioTransport`]) lives here so
 //!   both kernel-side consumers and an arch-neutral user-space driver
-//!   process can build it without a `drivers/*` dependency (§17.4); the
+//!   process can build it without a `drivers/*` dependency; the
 //!   concrete PCI implementation (which needs the bus driver's PCI
 //!   capability-window wiring) lives in `drivers/bus/virtio`.
 //!   [`MockTransport`] is the in-process peer the driver unit tests
@@ -29,12 +29,12 @@
 //!   `rustos_kernel_virtio::KernelVirtioHost` is the capability-checked
 //!   production host.
 //! * [`DmaSlab`] / [`BounceBuffer`] — owned device-visible memory and
-//!   the zero-on-free staging wrapper (`AGENTS.md` §4).
+//!   the zero-on-free staging wrapper.
 //!
 //! # Ring formats
 //!
 //! Both virtqueue wire formats are implemented as parallel siblings
-//! (the `AGENTS.md` §2.2 carve-out): [`SplitQueue`] for the split ring
+//! (the carve-out): [`SplitQueue`] for the split ring
 //! (virtio 1.1 §2.6) and [`PackedQueue`] for the packed ring
 //! (virtio 1.1 §2.7). A device advertises the packed format through the
 //! `VIRTIO_F_RING_PACKED` feature bit; the two queues share the

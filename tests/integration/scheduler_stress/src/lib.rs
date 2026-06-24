@@ -1,6 +1,6 @@
 //! Stage-2 cross-crate scheduler stress test.
 //!
-//! `AGENTS.md` §7 routes cross-crate end-to-end tests to the top-level
+//! routes cross-crate end-to-end tests to the top-level
 //! `tests/` tree. This crate is the workspace-level integration test
 //! for the Stage-2 deliverable "Stress test for the scheduler under
 //! load on ≥ 4 emulated cores", lifting the in-crate test in
@@ -12,7 +12,7 @@
 //!
 //! * `N = 20 000` tasks across `4` simulated cores using the
 //!   `TestArch` host double exposed by the `test-arch` feature
-//!   (`AGENTS.md` §1 — no hacks; the double is gated behind a feature
+//!   (no hacks; the double is gated behind a feature
 //!   and never linked into production builds).
 //! * Asserts deadlock-freedom (every task eventually exits, bounded
 //!   round count).
@@ -21,8 +21,7 @@
 //!
 //! ## Why not "just" re-run `kernel/sched/tests/stress.rs`?
 //!
-//! That test exists at the `kernel/sched` *unit* scope (`AGENTS.md`
-//! §7 — unit tests live next to the code). The Stage-2 deliverable
+//! That test exists at the `kernel/sched` *unit* scope (unit tests live next to the code). The Stage-2 deliverable
 //! lists both a per-crate stress test *and* a workspace-level
 //! integration test under `tests/`. This crate is the latter: by
 //! running across crate boundaries it would catch a regression that a

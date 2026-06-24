@@ -1,7 +1,7 @@
 //! Generic copy-on-write B-tree over fixed-size records keyed by `u64`
 //! (`docs/src/filesystem/rustfs-spec.md` §4 / §6 — copy-on-write metadata trees).
 //!
-//! One implementation backs both Stage-2 trees (`AGENTS.md` §2.2 — no
+//! One implementation backs both Stage-2 trees (no
 //! duplicated structure):
 //!
 //! * the **inode tree**, keyed by inode number, whose value is a packed
@@ -21,8 +21,7 @@
 //! reachable from the committed root is never overwritten in place
 //! (`docs/src/filesystem/rustfs-spec.md` §2). Overflowing nodes split and underflowing nodes
 //! borrow from or merge with a sibling, so the tree grows and shrinks without
-//! a fixed record cap. Every path is `Result`-based and panic-free
-//! (`AGENTS.md` §2.9); there is no `unsafe`.
+//! a fixed record cap. Every path is `Result`-based and panic-free; there is no `unsafe`.
 
 use alloc::vec::Vec;
 
@@ -46,7 +45,7 @@ const INTERNAL_STRIDE: usize = 16;
 pub(crate) struct TreeSpec {
     /// Value width in bytes stored beside each key in a leaf.
     pub value_len: usize,
-    /// Owner object recorded in every node block's header (`AGENTS.md` §8).
+    /// Owner object recorded in every node block's header.
     pub owner: u64,
 }
 

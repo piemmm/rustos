@@ -1,5 +1,4 @@
-//! Integration tests for the userland driver host (`AGENTS.md` §7 —
-//! "Integration tests for a crate live in `<crate>/tests/`").
+//! Integration tests for the userland driver host ("Integration tests for a crate live in `<crate>/tests/`").
 //!
 //! Every required Stage 4 acceptance scenario is exercised here against
 //! the mock fixtures in `fixtures/mod.rs`:
@@ -140,7 +139,7 @@ fn tampered_payload_refused() {
     // The manifest signature covers the payload (`host::verify_signature`):
     // for a user-space driver the payload is the program the gate spawns, so
     // rewriting it after signing must be refused, closing the
-    // unsigned-code-execution hole (`AGENTS.md` §8 / §2.17). A flipped
+    // unsigned-code-execution hole. A flipped
     // payload byte fails signature verification exactly as a flipped
     // signature does.
     let sk = test_signing_key();

@@ -1,8 +1,7 @@
 //! [`RiscvArch`] — the riscv64 implementation of the Arch HAL
 //! ([`rustos_arch_api::SchedulerArch`]).
 //!
-//! Like x86_64, the riscv64 port is a pure Arch HAL implementation
-//! (`AGENTS.md` §17.2): it implements [`SchedulerArch`] and exposes the
+//! Like x86_64, the riscv64 port is a pure Arch HAL implementation: it implements [`SchedulerArch`] and exposes the
 //! monotonic clock and the hart-park primitive, but it does **not**
 //! name `kernel/core` or implement its `KernelArch` super-trait. The
 //! downstream boot consumer wraps [`RiscvArch`] in a local `KernelArch`
@@ -16,7 +15,7 @@
 //! board). [`RiscvArch::monotonic_ns`] converts those ticks to
 //! nanoseconds using the `timebase-frequency` the boot pipeline read
 //! from the device tree (`fdt`), so the conversion and the tick source
-//! share one frequency (`AGENTS.md` §2.4 — no parallel measurement).
+//! share one frequency (no parallel measurement).
 //!
 //! # Host testability
 //!
@@ -28,11 +27,11 @@
 //! host tests can exercise the ns conversion. The hart park
 //! (`halt_current_hart`) is freestanding-only; the production path is
 //! the `target_arch = "riscv64"` cfg and the host shims are never
-//! linked into a kernel image (`AGENTS.md` §1 — no fake primitives in
+//! linked into a kernel image (no fake primitives in
 //! production).
 
 // Both are referenced on every target now: the constructor populates the
-// `&'static` per-CPU map with atomic stores (`AGENTS.md` §24.1), so
+// `&'static` per-CPU map with atomic stores, so
 // `Ordering` is live on the bare-metal path too.
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,12 +40,12 @@ use rustos_arch_api::{CpuId, CrossCpuTlbShootdown, SchedulerArch, SecondaryBring
 /// Sentinel stored in a [`RiscvArchStorage::cpu_to_hartid`] slot that no
 /// CPU maps to. A real hart id is a [`CpuId`] (a `u32`), so `u64::MAX`
 /// can never collide with a populated entry — it is the encoded `None`
-/// (`AGENTS.md` §2.9 — an unmapped slot is unambiguously absent, never a
+/// (an unmapped slot is unambiguously absent, never a
 /// guessed id).
 const NO_HARTID: u64 = u64::MAX;
 
 /// Caller-owned, `&'static` per-CPU backing for a [`RiscvArch`] handle
-/// (`AGENTS.md` §24.1 — per-CPU bookkeeping is sized by the caller from
+/// (per-CPU bookkeeping is sized by the caller from
 /// discovered hardware, never a fixed `const` ceiling baked into the
 /// arch crate).
 ///
@@ -54,7 +53,7 @@ const NO_HARTID: u64 = u64::MAX;
 /// constructing caller sizes for its machine: a single-hart vertical
 /// uses `RiscvArchStorage<1>`, a two-hart vertical `RiscvArchStorage<2>`,
 /// and a multi-hart boot path sizes `N` from the device-tree hart count.
-/// The arch crate stays allocator-free (`AGENTS.md` §24.1 watch-out — no
+/// The arch crate stays allocator-free (watch-out — no
 /// `alloc` in a bare-metal arch crate), so the caller provides the
 /// storage as a `static` (allocator-free bins) or a leaked allocation
 /// (allocator-having callers); [`RiscvArch`] borrows it as `&'static`
@@ -104,7 +103,7 @@ impl<const N: usize> Default for RiscvArchStorage<N> {
 /// for deterministic unit tests, mirroring `X86_64Arch`).
 ///
 /// The per-CPU bookkeeping is borrowed from a caller-provided
-/// [`RiscvArchStorage`] (`AGENTS.md` §24.1), so the handle itself holds
+/// [`RiscvArchStorage`], so the handle itself holds
 /// no fixed-size array and imposes no compile-time CPU ceiling.
 #[derive(Debug)]
 pub struct RiscvArch {
@@ -147,7 +146,7 @@ impl RiscvArch {
         let this = Self::from_storage(boot_cpu, timebase_hz, storage);
         // A slot beyond the caller's `N` cannot be mapped; the handle
         // then simply has no entry for `boot_cpu` (the conformance
-        // suites never index it) — fail closed, never panic (§2.9).
+        // suites never index it) — fail closed, never panic.
         this.store_hartid(boot_cpu, boot_cpu);
         this
     }
@@ -156,8 +155,7 @@ impl RiscvArch {
     /// slice (`hartids[cpu] == hartid`).
     ///
     /// Entries beyond the caller's storage capacity `N` are ignored —
-    /// the caller sizes `N` to its discovered hart count (`AGENTS.md`
-    /// §24.1). `boot_cpu` names the logical CPU of the boot hart.
+    /// the caller sizes `N` to its discovered hart count. `boot_cpu` names the logical CPU of the boot hart.
     #[must_use]
     pub fn with_harts<const N: usize>(
         storage: &'static RiscvArchStorage<N>,
@@ -190,7 +188,7 @@ impl RiscvArch {
 
     /// Populate dense `cpu`'s map slot with `hartid`. An out-of-range
     /// `cpu` (beyond the caller-sized capacity) is silently ignored, so
-    /// a sparse or undersized storage cannot corrupt memory (§5.4 — fail
+    /// a sparse or undersized storage cannot corrupt memory (fail
     /// closed). Called only at construction.
     fn store_hartid(&self, cpu: CpuId, hartid: CpuId) {
         if let Some(slot) = usize::try_from(cpu)
@@ -253,7 +251,7 @@ impl RiscvArch {
     /// Reads the architectural `time` CSR and converts ticks to
     /// nanoseconds against this handle's `timebase_hz`, so the tick
     /// source and the conversion factor share one frequency
-    /// (`AGENTS.md` §2.4 — no parallel measurement). The downstream
+    /// (no parallel measurement). The downstream
     /// `KernelArch` wrapper forwards `monotonic_ns` here.
     #[must_use]
     pub fn monotonic_ns(&self) -> u64 {
@@ -261,7 +259,7 @@ impl RiscvArch {
         let hz = u128::from(self.timebase_hz.max(1));
         // `ticks * 1e9 / hz` in 128-bit space cannot overflow for any
         // realistic uptime, and the `max(1)` defends a malformed
-        // frequency from a division trap (`AGENTS.md` §2.9).
+        // frequency from a division trap.
         let ns = ticks.saturating_mul(1_000_000_000) / hz;
         u64::try_from(ns).unwrap_or(u64::MAX)
     }
@@ -274,7 +272,7 @@ impl SchedulerArch for RiscvArch {
             // Recover the running hart id from `tp` (seeded by `boot.s` /
             // `smp.s`) and reverse-map it to a dense `CpuId`. An unmapped
             // hart falls back to the boot CPU rather than inventing an id
-            // (`AGENTS.md` §5.4.5 — fail closed).
+            // (fail closed).
             let hartid = crate::smp::current_hartid();
             self.cpu_for_hartid(hartid).unwrap_or(self.boot_cpu)
         }
@@ -326,9 +324,9 @@ impl SchedulerArch for RiscvArch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): `armed` records the
+        // Tickless preemption: `armed` records the
         // running task's quantum deadline (now + the per-hart interval
-        // recorded by `init_local_preempt`, the single stored copy — §2.2);
+        // recorded by `init_local_preempt`, the single stored copy);
         // `!armed` clears it. The deadline combiner then programs the
         // single supervisor-timer one-shot to the *earlier* of this quantum
         // and any pending blocking-wait wakeup ([`Self::set_wakeup`]), so
@@ -351,13 +349,13 @@ impl SchedulerArch for RiscvArch {
     }
 
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
-        // The timed half of the tickless one-shot (`AGENTS.md` §17.1): a
+        // The timed half of the tickless one-shot: a
         // blocking wait with a finite timeout records its soonest waiter
         // deadline here so the parked waiter is woken on time even when the
         // hart has no runnable task to preempt. Convert the absolute
         // monotonic-ns deadline to an absolute `time`-CSR tick against this
         // handle's `timebase_hz` (the same frequency `monotonic_ns`
-        // converts the other way, §2.4), then record it; the combiner arms
+        // converts the other way), then record it; the combiner arms
         // the one-shot to the earlier of this wakeup and any quantum. Off
         // the freestanding target the arming is inert.
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -377,7 +375,7 @@ impl CrossCpuTlbShootdown for RiscvArch {
     fn shootdown_page(&self, vaddr: u64) {
         // Invalidate the calling hart locally first: the SBI remote
         // fence below covers only the *other* harts, never the caller.
-        // Both the local flush and this share the one sequence (§2.2).
+        // Both the local flush and this share the one sequence.
         crate::paging::invalidate_page_local(vaddr);
 
         #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -393,12 +391,11 @@ impl CrossCpuTlbShootdown for RiscvArch {
             // `usize::try_from` rather than `as`: an address never exceeds
             // `usize` on riscv64, so the `Err` arm is unreachable, but the
             // checked conversion keeps the cast lint-clean without an
-            // `#[allow]` (`AGENTS.md` §2.11).
+            // `#[allow]`.
             let Ok(page) = usize::try_from(vaddr & !(crate::paging::PAGE_SIZE as u64 - 1)) else {
                 return;
             };
-            // Iterate the caller-sized per-CPU map, not a fixed ceiling
-            // (`AGENTS.md` §24.1).
+            // Iterate the caller-sized per-CPU map, not a fixed ceiling.
             for cpu in 0..self.cpu_to_hartid.len() {
                 let Ok(cpu) = u32::try_from(cpu) else { break };
                 if cpu == me {
@@ -425,7 +422,7 @@ impl SecondaryBringup for RiscvArch {
     unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
         // Fail closed before any firmware call: the boot hart is already
         // running, and an unmapped / out-of-range dense id has no hart to
-        // target (`AGENTS.md` §5.4.5).
+        // target.
         if cpu == self.boot_cpu {
             return Err(SmpError::InvalidCpu);
         }
@@ -496,7 +493,7 @@ pub(crate) fn read_time() -> u64 {
 fn park() -> ! {
     // SAFETY: clearing `sstatus.SIE` masks S-mode interrupts; `wfi` is
     // a well-defined wait-for-interrupt hint. The loop defends against
-    // a spurious wake. This is the riscv64 form of the `AGENTS.md` §2
+    // a spurious wake. This is the riscv64 form of the
     // "never silently reset" contract.
     unsafe {
         core::arch::asm!("csrci sstatus, 2", options(nomem, nostack));

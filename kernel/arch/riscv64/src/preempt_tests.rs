@@ -72,7 +72,7 @@ fn diagnostic_slots_start_clear() {
 
 #[test]
 fn per_hart_slots_track_the_registered_storage() {
-    // A caller-sized backing covers exactly its `N` slots (the §24.1
+    // A caller-sized backing covers exactly its `N` slots (the
     // capacity is the discovered hart count, not a baked-in `MAX_HARTS`);
     // a second backing proves registration is set-once. Declared first so
     // they precede the statements that drive them.
@@ -82,8 +82,7 @@ fn per_hart_slots_track_the_registered_storage() {
     reset_preempt_storage_for_tests();
 
     // Before any storage is registered the per-hart observers fail closed
-    // (`0` / `u32::MAX`) instead of dereferencing a null base (`AGENTS.md`
-    // §2.9).
+    // (`0` / `u32::MAX`) instead of dereferencing a null base.
     assert_eq!(per_cpu_index(0), None);
     assert_eq!(timer_interval_ticks(), 0);
     assert_eq!(timer_cpu_id(), u32::MAX);

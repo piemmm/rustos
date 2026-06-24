@@ -33,7 +33,7 @@ struct MockNode {
     /// An explicit `stat` size overriding `content.len()` (models a
     /// short-read driver whose stated size exceeds its readable bytes).
     reported_size: Option<u64>,
-    /// The §5.3 record the driver reports for the node.
+    /// The record the driver reports for the node.
     security: NodeSecurity,
 }
 
@@ -69,7 +69,7 @@ struct MockStore {
 }
 
 impl MockStore {
-    /// A store with the four §16.1 top-level dirs absent except `/System`
+    /// A store with the four top-level dirs absent except `/System`
     /// — only the root exists until [`Self::add`] builds paths.
     fn new() -> Self {
         let mut nodes = BTreeMap::new();
@@ -179,7 +179,7 @@ impl FilesystemRead for MockStore {
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
-        // The enumeration never reads file bytes (`AGENTS.md` §18.6 — the
+        // The enumeration never reads file bytes (the
         // load gate does), but `DriverImageReader::read_image` does, so the
         // mock serves the node's content from `offset`.
         let n = self.nodes.get(&file.raw()).ok_or(DriverError::NotFound)?;
@@ -250,7 +250,7 @@ fn scanned_record(sink: &TestSink) -> (usize, usize) {
 #[test]
 fn a_nested_store_enumerates_every_regular_file_in_order() {
     let mut fs = MockStore::new();
-    // The chain drivers, organised `<class>[/<vendor>]/<driver>` (§16.2).
+    // The chain drivers, organised `<class>[/<vendor>]/<driver>`.
     fs.add_file("/System/Drivers/bus_usb");
     fs.add_file("/System/Drivers/pcie/brcm/bcm2711");
     fs.add_file("/System/Drivers/usb_kbd");
@@ -272,7 +272,7 @@ fn a_nested_store_enumerates_every_regular_file_in_order() {
 #[test]
 fn a_missing_store_is_not_an_error_and_yields_nothing() {
     // `/System` exists but `/System/Drivers` does not — a driverless
-    // install autoloads nothing (`AGENTS.md` §18.4), never an error.
+    // install autoloads nothing, never an error.
     let mut fs = MockStore::new();
     fs.add_dir("/System");
 
@@ -288,7 +288,7 @@ fn a_missing_store_is_not_an_error_and_yields_nothing() {
 #[test]
 fn an_entirely_absent_system_tree_yields_nothing() {
     // Not even `/System` exists; the store-root listing simply fails and
-    // the scan is empty (`AGENTS.md` §18.4).
+    // the scan is empty.
     let mut fs = MockStore::new();
 
     let sink = TestSink::new();
@@ -305,7 +305,7 @@ fn an_unreadable_subdirectory_is_skipped_and_the_walk_continues() {
     let private = fs.add_dir("/System/Drivers/private");
     fs.add_file("/System/Drivers/private/secret");
     // The subdir is owned by another user with no group/other access: the
-    // uid-0 boot identity cannot list it (no §5.1 bypass).
+    // uid-0 boot identity cannot list it (no bypass).
     fs.set_security(private, NodeSecurity::new(0o700, 7, 7));
 
     let sink = TestSink::new();
@@ -416,7 +416,7 @@ fn read_image_appends_rather_than_overwrites() {
 #[test]
 fn read_image_reads_an_empty_bundle_as_zero_bytes() {
     // An empty file is read as zero bytes (the load gate rejects it as
-    // truncated later, `AGENTS.md` §18.6 — not the reader's job).
+    // truncated later — not the reader's job).
     let mut fs = MockStore::new();
     fs.add_file_with("/System/Drivers/empty", &[]);
 
@@ -441,8 +441,7 @@ fn read_image_refuses_a_path_outside_the_store() {
 
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
-    // A path outside `/System/Drivers/` is refused before any fs access
-    // (`AGENTS.md` §5.4): the reader only ever reads driver bundles.
+    // A path outside `/System/Drivers/` is refused before any fs access: the reader only ever reads driver bundles.
     assert_eq!(
         reader.read_image(
             &mut fs,
@@ -520,7 +519,7 @@ fn read_image_refuses_a_directory() {
 fn read_image_refuses_an_oversized_bundle_before_reading() {
     let mut fs = MockStore::new();
     // A file whose *stated* size exceeds the validation bound: refused
-    // before a single byte (and before any large allocation), §24.4.
+    // before a single byte (and before any large allocation).
     let id = fs.add_file_with("/System/Drivers/huge", b"small actual body");
     fs.set_reported_size(id, MAX_DRIVER_IMAGE_LEN as u64 + 1);
 
@@ -538,7 +537,7 @@ fn read_image_refuses_a_bundle_the_boot_identity_may_not_read() {
     let mut fs = MockStore::new();
     let id = fs.add_file_with("/System/Drivers/guarded", b"body");
     // Owned by another user, no group/other read: the uid-0 boot identity
-    // is refused (no §5.1 bypass).
+    // is refused (no bypass).
     fs.set_security(id, NodeSecurity::new(0o600, 7, 7));
 
     let reader = DriverImageReader::open().expect("root mount builds");
@@ -569,7 +568,7 @@ fn read_image_unwinds_the_buffer_on_a_short_read() {
         reader.read_image(&mut fs, DRIVER_STORE_PATH, "/System/Drivers/torn", &mut buf),
         Err(DriverImageError::ShortRead)
     );
-    // The prefix survives; nothing partial is left behind (§2.9).
+    // The prefix survives; nothing partial is left behind.
     assert_eq!(buf, alloc::vec![0x11u8]);
 }
 

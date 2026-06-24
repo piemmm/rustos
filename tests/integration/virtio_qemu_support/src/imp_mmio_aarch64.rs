@@ -15,7 +15,7 @@
 //! publishes a usable memory map), this vertical owns its DMA frames in a
 //! static, identity-mapped pool: the `virt` board enters EL1 with the MMU
 //! off, so a `#[repr(align(4096))]` `.bss` static is identity-mapped and
-//! exclusively ours (`AGENTS.md` §2.1 — no global heap games, just a
+//! exclusively ours (no global heap games, just a
 //! reserved static).
 
 extern crate alloc;
@@ -97,7 +97,7 @@ const DMA_POOL_PAGES: usize = 512;
 /// Page-aligned `.bss` backing store for the DMA frame pool. The `virt`
 /// board enters EL1 with the MMU off, so this static is identity-mapped
 /// and exclusively ours — the aarch64 stand-in for riscv64's
-/// carved-from-the-boot-map DMA region (`AGENTS.md` §2.1).
+/// carved-from-the-boot-map DMA region.
 #[repr(C, align(4096))]
 struct DmaFrames([u8; PAGE_SIZE * DMA_POOL_PAGES]);
 
@@ -166,7 +166,7 @@ const VIRTIO_MMIO_INTERRUPT_ACK: u64 = 0x064;
 ///
 /// Public so freestanding aarch64 `virt`-board verticals beyond the
 /// virtio scenario (e.g. the framebuffer-display vertical) reuse the
-/// same serial-breadcrumb + semihosting-exit seam (`AGENTS.md` §2.2).
+/// same serial-breadcrumb + semihosting-exit seam.
 pub struct AArch64QemuEnv;
 
 impl QemuEnv for AArch64QemuEnv {
@@ -205,7 +205,7 @@ impl QemuEnv for AArch64QemuEnv {
 /// Both must be fixed before any non-trivial code runs, so this is the
 /// first thing each vertical does (riscv64 gets the equivalent from its
 /// boot pipeline). Shared by the virtio-MMIO scenario and the
-/// framebuffer-display vertical (`AGENTS.md` §2.2). A failed map build
+/// framebuffer-display vertical. A failed map build
 /// fails closed through `env`; on success the PE is running translated
 /// and FP-enabled when it returns.
 pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
@@ -219,8 +219,7 @@ pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
     }
 
     // SAFETY: install the EL1 vectors first so any synchronous abort is
-    // taken to the EL1 handler (which fails closed by parking, `AGENTS.md`
-    // §2.9) instead of escalating, then switch: the identity map covers
+    // taken to the EL1 handler (which fails closed by parking) instead of escalating, then switch: the identity map covers
     // this code, the boot stack, the static heap/DMA pool (all RAM), and
     // the device MMIO.
     unsafe {
@@ -271,7 +270,7 @@ fn device_spi_number(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
 
 /// kernel/irq ↔ aarch64 [`GicController`] bridge.
 ///
-/// §17.4 forbids the architecture crate from depending on `kernel/irq`,
+/// the charter forbids the architecture crate from depending on `kernel/irq`,
 /// so the bridge lives here (the test crate may depend on both), mirroring
 /// `tests/integration/irq_qemu_aarch64`. [`IrqController::mask`] delegates
 /// to the HAL [`rustos_arch_api::IrqController`] mask (which clears the
@@ -361,7 +360,7 @@ extern "C" fn device_dispatch(intid: u32) {
 /// the line's ready flag, parks on `wfi` only if still not ready, then
 /// clears `DAIF.I`. A completion that lands between the check and the
 /// `wfi` is held pending until `wfi` is entered, so no edge is lost and no
-/// bounding timer is needed (`AGENTS.md` §2 — no unbounded sleep loop).
+/// bounding timer is needed (no unbounded sleep loop).
 struct WfiWaiter {
     source: u32,
     table: &'static IrqTable,
@@ -589,7 +588,7 @@ macro_rules! define_mmio_boot_harness_aarch64 {
         pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             if SCENARIO_RAN.swap(true, ::core::sync::atomic::Ordering::SeqCst) {
                 // A second entry would re-run a one-shot scenario; fail
-                // closed (`AGENTS.md` §5.4.5).
+                // closed.
                 $crate::harness_fail_reentry();
             }
             $scenario();

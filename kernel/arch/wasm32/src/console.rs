@@ -11,8 +11,7 @@
 //!
 //! Each formatted chunk is handed straight to the host
 //! [`crate::bindings::host_console_write`] as a borrowed byte slice, so
-//! the sink needs no allocator and no intermediate buffer (`AGENTS.md`
-//! §4 — `rustos_log` is a no-alloc hot path). The sink is a zero-sized
+//! the sink needs no allocator and no intermediate buffer (`rustos_log` is a no-alloc hot path). The sink is a zero-sized
 //! type exposed through the [`CONSOLE_SINK`] `'static` so a boot module
 //! can hand the same reference to `BootInfo`'s `log_sink` / `audit_sink`
 //! slots without a mutable static.
@@ -56,7 +55,7 @@ impl Sink for ConsoleSink {
         let mut w = ConsoleWriter;
         // Ignore write errors: `ConsoleWriter` is infallible (the host
         // console call returns no status). The logging path must not
-        // panic (`AGENTS.md` §2.9).
+        // panic.
         let _ = write!(
             w,
             "[{}] id={} {}",

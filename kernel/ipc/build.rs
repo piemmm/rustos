@@ -7,7 +7,7 @@
 //! that is not a stable, additive feature in the Cargo sense. It is
 //! enabled by passing `RUSTFLAGS="--cfg loom"`. Mirrors the build
 //! scripts in `kernel/sync`, `kernel/mem`, and `kernel/sched`. See
-//! AGENTS.md §7 and `tests/loom.rs`.
+//! and `tests/loom.rs`.
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(loom)");

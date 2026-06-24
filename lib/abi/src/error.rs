@@ -67,8 +67,7 @@ pub enum Errno {
     ///
     /// Emitted by [`crate::time::Time64`] / [`crate::time::Duration64`] when a
     /// value is narrowed to a representation that cannot hold it — for
-    /// example converting a `Time64` to a narrower on-disk timestamp encoding
-    /// (`AGENTS.md` §21). The conversion is always checked; this errno is the
+    /// example converting a `Time64` to a narrower on-disk timestamp encoding. The conversion is always checked; this errno is the
     /// fail-closed result, never a silent truncation, wrap, or saturation.
     TimestampOutOfRange = 14,
     /// A storage backend cannot satisfy a request because it is full.
@@ -83,7 +82,7 @@ pub enum Errno {
     NoSpace = 15,
     /// The kernel cryptographic RNG has not yet been initialised.
     ///
-    /// Emitted only by the random API (`AGENTS.md` §22) and only when the
+    /// Emitted only by the random API and only when the
     /// caller explicitly requested non-blocking behaviour
     /// ([`crate::random::RandomFlags::NON_BLOCKING`]). Before the kernel RNG
     /// is seeded a blocking request waits; a non-blocking request fails
@@ -96,8 +95,7 @@ pub enum Errno {
     /// Emitted by `kernel/ipc`'s named-port registry when a caller tries
     /// to register a [`crate::ipc`] endpoint whose `EndpointId` is
     /// already bound. It is the fail-closed result of a duplicate
-    /// registration: the existing live port is never overwritten
-    /// (`AGENTS.md` §5.4), and the caller's freshly-created port is
+    /// registration: the existing live port is never overwritten, and the caller's freshly-created port is
     /// handed back so it can be torn down.
     AlreadyExists = 17,
     /// A user-space pointer handed to a syscall does not name memory the
@@ -105,14 +103,14 @@ pub enum Errno {
     ///
     /// The RustOS equivalent of POSIX `EFAULT`. Emitted by any syscall
     /// that copies through the kernel's `copy_from_user` / `copy_to_user`
-    /// boundary (`AGENTS.md` §5.4) when the user buffer is null, runs off
+    /// boundary when the user buffer is null, runs off
     /// the end of the address space, is unmapped, is not a user page, or
     /// lacks the read/write permission the copy direction needs (the
-    /// §19.2 W^X guard refuses writing an executable page). The kernel
+    /// W^X guard refuses writing an executable page). The kernel
     /// returns this one code for every such failure rather than reporting
     /// *which* invariant broke, so a faulting pointer cannot be used as an
-    /// oracle to probe the kernel's memory layout (`AGENTS.md` §5.4 — fail
-    /// closed; §19.1). It is also the fail-closed result when the caller
+    /// oracle to probe the kernel's memory layout (fail
+    /// closed;). It is also the fail-closed result when the caller
     /// has no registered address space at all (e.g. a kernel task).
     BadAddress = 18,
     /// A non-blocking operation has nothing to return right now and
@@ -134,7 +132,7 @@ pub enum Errno {
     /// a fresh region into the caller's address space because physical
     /// frames are exhausted. It is the deterministic, fail-closed result
     /// of out-of-memory: allocation failure is always a `Result`, never a
-    /// panic (`AGENTS.md` §4). It is distinct from
+    /// panic. It is distinct from
     /// [`NoSpace`](Self::NoSpace), which is a *storage* backend running out
     /// of on-disk space.
     OutOfMemory = 20,
@@ -151,7 +149,7 @@ impl Errno {
     /// is not a known discriminant.
     ///
     /// The inverse of [`as_i32`](Self::as_i32) and the single place the
-    /// numeric → variant mapping lives (`AGENTS.md` §2.2): a caller decoding
+    /// numeric → variant mapping lives: a caller decoding
     /// a syscall's signed result (a negative register is `-errno`, the
     /// standard `abi-v1` convention) recovers the `Errno` here rather than
     /// re-listing the discriminants.

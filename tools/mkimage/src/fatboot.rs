@@ -2,14 +2,13 @@
 //!
 //! The boot partition is laid down by the real in-tree FAT32 driver
 //! (`rustos-drv-fs-fat32`) — the same code that mounts it on the running
-//! system — so the author and the consumer share one on-disk definition
-//! (`AGENTS.md` §2.2). It carries exactly what the Pi GPU bootloader
+//! system — so the author and the consumer share one on-disk definition. It carries exactly what the Pi GPU bootloader
 //! reads: the verified firmware blobs, the generated `config.txt`, and the
 //! flat `kernel8.img`. It also carries the volume's plaintext
 //! [`UnlockDescriptor`](rustos_drv_fs_rustfs::UnlockDescriptor) — the
 //! salt + iteration count the bootstrap reads *before* anything is
 //! decrypted, to turn the operator passphrase into the encrypted root's
-//! volume key (`AGENTS.md` §11).
+//! volume key.
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use rustos_drv_fs_fat32::Fat32;
@@ -24,8 +23,7 @@ pub const KERNEL_IMG_NAME: &str = "kernel8.img";
 /// Name of the generated firmware configuration file.
 pub const CONFIG_TXT_NAME: &str = "config.txt";
 
-/// Name of the root volume's plaintext key-derivation descriptor
-/// (`AGENTS.md` §11). The bootstrap reads it off this partition *before*
+/// Name of the root volume's plaintext key-derivation descriptor. The bootstrap reads it off this partition *before*
 /// mounting the encrypted root, derives the volume key from the operator
 /// passphrase under the descriptor's salt + iteration count, and only
 /// then opens the root. It carries no secret — only the public KDF
@@ -34,7 +32,7 @@ pub const CONFIG_TXT_NAME: &str = "config.txt";
 ///
 /// The literal is defined once beside the descriptor it names; the writer
 /// here and the boot-path reader import the same constant so the contract
-/// cannot drift (`AGENTS.md` §2.2).
+/// cannot drift.
 pub use rustos_drv_fs_rustfs::ROOT_UNLOCK_NAME;
 
 /// Render the `config.txt` the Pi firmware boots RustOS with.

@@ -1,9 +1,8 @@
-//! RustOS `getcap` — report a file's required-capability gate (Stage 6,
-//! `AGENTS.md` §3 `userland/apps/`).
+//! RustOS `getcap` — report a file's required-capability gate (Stage 6 `userland/apps/`).
 //!
 //! Every inode in the RustOS permission model may carry an **optional
 //! capability requirement**: a capability the caller must hold to reach the
-//! node at all, on top of the mode/ACL checks (`AGENTS.md` §5.3). `getcap`
+//! node at all, on top of the mode/ACL checks. `getcap`
 //! reports that gate. For each file operand it prints one line —
 //! `path CAP_NAME` — when the file carries a gate, and prints nothing for a
 //! file that has none (so a clean tree is silent, the model `getcap` follows
@@ -16,7 +15,7 @@
 //! [`Command`] it asks the injected filesystem seam for each operand's kind
 //! and capability gate, renders the gated files, and walks each directory
 //! `-R` must descend. The driver only *reports* the stored gate; `getcap`
-//! makes no permission decision (`AGENTS.md` §5.4 — the VFS is the policy
+//! makes no permission decision (the VFS is the policy
 //! point). The operations that touch the outside world are the injected
 //! seams:
 //!
@@ -39,7 +38,7 @@
 //! that cannot be read is [`GetcapError::Query`]; a directory whose entries
 //! cannot be read during a recursive descent is [`GetcapError::Read`]; a
 //! failed write is [`GetcapError::Output`]. The first failure stops the run
-//! before any later operand, and there is no panic (`AGENTS.md` §2.9).
+//! before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -51,10 +50,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

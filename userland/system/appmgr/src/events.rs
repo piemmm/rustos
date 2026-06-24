@@ -1,10 +1,10 @@
 //! Stable [`rustos_log::EventId`] constants emitted by `appmgr`.
 //!
-//! Per `lib/log` convention (`AGENTS.md` §2.5) every subsystem owns a
+//! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. The application loader occupies
 //! `11000..12000` (adjacent to `login`'s `10000..11000`). Once shipped the
 //! numeric values must never be re-used or re-numbered — external audit-log
-//! consumers rely on them (`AGENTS.md` §19.4).
+//! consumers rely on them.
 
 use rustos_log::EventId;
 
@@ -17,29 +17,29 @@ pub const APPMGR_RANGE_END: u32 = 12_000;
 /// its capability ceiling computed.
 pub const APP_LOADED: EventId = EventId(11_001);
 /// A bundle was refused because its top-level layout deviates from the fixed
-/// set (`AGENTS.md` §16.5).
+/// set.
 pub const APP_LAYOUT_REJECTED: EventId = EventId(11_002);
 /// A bundle was refused because its `AppInfo` manifest could not be decoded
 /// or targets an unsupported ABI version.
 pub const APP_MANIFEST_INVALID: EventId = EventId(11_003);
 /// A bundle was refused because its declared syscall-table hash does not
-/// match the kernel's (`AGENTS.md` §9 / §19.2).
+/// match the kernel's.
 pub const APP_INTERFACE_MISMATCH: EventId = EventId(11_004);
 /// A bundle was refused because its manifest signature did not verify.
 pub const APP_SIGNATURE_INVALID: EventId = EventId(11_005);
 /// A bundle was refused because its contents do not match the content hash
-/// the signature covers (`AGENTS.md` §16.5).
+/// the signature covers.
 pub const APP_CONTENT_MISMATCH: EventId = EventId(11_006);
 /// A bundle could not be read from the store (an I/O failure).
 pub const APP_STORE_ERROR: EventId = EventId(11_007);
-/// A shared-library reference resolved within the §16.4 policy.
+/// A shared-library reference resolved within the policy.
 pub const LIBRARY_RESOLVED: EventId = EventId(11_008);
 /// A shared-library reference was refused because it points outside the
-/// bundle's `Libraries/` and `/System/Libraries/` (`AGENTS.md` §16.4).
+/// bundle's `Libraries/` and `/System/Libraries/`.
 pub const LIBRARY_REFUSED: EventId = EventId(11_009);
 /// A bundle was refused because its entry-point `Run` binary is not a valid
 /// `rxe` load image, or its CFI tag does not match the kernel's syscall
-/// interface hash (`AGENTS.md` §9 / §19.2).
+/// interface hash.
 pub const APP_RUN_IMAGE_INVALID: EventId = EventId(11_010);
 
 #[cfg(test)]

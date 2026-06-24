@@ -3,22 +3,21 @@
 //! This crate is the single shared definition of the desktop's integer
 //! coordinate types. It is consumed by the compositing window manager
 //! (`userland/gui/wm`), the taskbar (`userland/gui/taskbar`), and the
-//! default graphical apps, none of which may depend on one another
-//! (`AGENTS.md` §17.4); shared code therefore lives in `lib/*` (§6), exactly
+//! default graphical apps, none of which may depend on one another; shared code therefore lives in `lib/*`, exactly
 //! as `lib/theme` is the shared home for design tokens.
 //!
 //! Screen coordinates are signed (`i32`): a window may be positioned partly
 //! off the top or left edge. Sizes are unsigned (`u32`). All arithmetic is
 //! overflow-checked through `i64`/`u32` widening so a pathological
-//! coordinate fails closed rather than wrapping (`AGENTS.md` §2.9). There is
+//! coordinate fails closed rather than wrapping. There is
 //! no rendering or compositing arithmetic here — that is the window
-//! manager's job — so nothing is duplicated (§2.2).
+//! manager's job — so nothing is duplicated.
 //!
 //! The crate also owns [`Scale`], the desktop's single DPI / UI scale factor:
 //! desktop lengths are authored in *logical* pixels at a reference density
 //! and converted to a panel's *physical* pixels through one shared
 //! [`Scale::scale_length`], so variable-DPI support is not re-implemented per
-//! consumer (`AGENTS.md` §10 / §2.2).
+//! consumer.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

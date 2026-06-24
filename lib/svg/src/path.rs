@@ -2,7 +2,7 @@
 //!
 //! The desktop's rasteriser fills polygons (`lib/raster`'s single
 //! [`fill_polygon`] path); richer artwork is built by *stacking* filled layers,
-//! not by curves or multi-contour rings (`AGENTS.md` §2.2). So the supported
+//! not by curves or multi-contour rings. So the supported
 //! geometry is exactly what maps to one ring of integer vertices:
 //!
 //! * `<polygon>` / `<polyline>` `points`;
@@ -12,7 +12,7 @@
 //!
 //! Curves, arcs, and a second sub-path are rejected with
 //! [`SvgError::UnsupportedPath`] so a richer asset fails closed to its caller's
-//! fallback rather than rasterising wrongly (`AGENTS.md` §2.9). Coordinates are
+//! fallback rather than rasterising wrongly. Coordinates are
 //! integers in the design grid; a fractional or exponent literal is an
 //! [`SvgError::InvalidNumber`] rejection.
 //!
@@ -124,7 +124,7 @@ pub fn parse_path(d: &str) -> Result<Vec<(i32, i32)>, SvgError> {
             b'Z' | b'z' => {
                 // Close path: there is no current command for any operands that
                 // follow, so a stray number after `Z` is out of subset rather
-                // than an implicit repeat (which would not consume it — §2.9).
+                // than an implicit repeat (which would not consume it).
                 current_cmd = 0;
             }
             _ => return Err(SvgError::UnsupportedPath),

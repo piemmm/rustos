@@ -12,16 +12,14 @@
 //! production, capability-checked, audited spawn caller
 //! ([`rustos_kernel_core::spawn_and_enter`]). On the authorised, well-formed
 //! path the call diverges into EL0 and never returns; on any failure it
-//! returns so `kernel_main` parks the boot CPU fail-closed (`AGENTS.md`
-//! §2.9).
+//! returns so `kernel_main` parks the boot CPU fail-closed.
 //!
 //! The image, its relocation bias ([`INIT_USER_BIAS`]), and the kernel's
 //! syscall CFI tag are baked at build time (`build.rs` →
 //! `rustos_itest_harness::elf2rxe`), exactly like the proven
-//! `spawn_program_qemu_aarch64` fixture, so there is one conversion path
-//! (`AGENTS.md` §2.2). Spawning `init` is *not* a privileged bypass: the
+//! `spawn_program_qemu_aarch64` fixture, so there is one conversion path. Spawning `init` is *not* a privileged bypass: the
 //! program receives only the authority its `rxe` manifest requests
-//! intersected with its user's grants (`AGENTS.md` §4, §16.5); this seam
+//! intersected with its user's grants; this seam
 //! only authorises the *act* of spawning under `CAP_PROC_SPAWN`.
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +51,7 @@ include!(concat!(env!("OUT_DIR"), "/init_rxe.rs"));
 
 /// User stack base: the shared [`spawn_layout::USER_STACK_OFFSET`] above
 /// this image's bias (the layout offsets and sizes are shared across the
-/// ports in [`crate::spawn_layout`], `AGENTS.md` §2.2).
+/// ports in [`crate::spawn_layout`]).
 const USER_STACK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_STACK_OFFSET;
 /// User virtual address the startup-vector block is written at.
 const USER_BLOCK_BASE: u64 = INIT_USER_BIAS + spawn_layout::USER_BLOCK_OFFSET;
@@ -77,7 +75,7 @@ const DMA_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 ///
 /// Lives in `.bss` for the lifetime of the kernel image, so `TTBR0_EL1`
 /// keeps pointing at a valid table after [`Aarch64InitSpawn::spawn_init`]
-/// switches to it (`AGENTS.md` §2.1 — monotonic, never freed). The identity
+/// switches to it (monotonic, never freed). The identity
 /// map needs a single root L1 frame; the rest serve the freshly walked user
 /// mappings at [`INIT_USER_BIAS`].
 static INIT_PAGE_TABLES: PageTablePool = PageTablePool::new();
@@ -117,7 +115,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // the instant PID 1's root is switched to — exactly the metal
         // Pi 4 silence after "boot completed" (`plans/PI.md`). An empty
         // window (no masks configured) or one reaching the user region
-        // at `INIT_USER_BIAS` fails closed (`AGENTS.md` §2.9).
+        // at `INIT_USER_BIAS` fails closed.
         let identity_gib = configured_identity_gigapages();
         if identity_gib == 0 || ((identity_gib as u64) << 30) > INIT_USER_BIAS {
             return;
@@ -140,17 +138,16 @@ impl InitSpawn for Aarch64InitSpawn {
         // PID 1's *own* root and unmap that single page, so an overrun of
         // `init`'s kernel stack takes a synchronous data abort under PID
         // 1's `TTBR0_EL1` rather than corrupting the lower-addressed
-        // neighbour (the real guard-page fault-form, `AGENTS.md` §4 /
-        // §2.17). Doing it on `arch` *before* it is switched to means no
+        // neighbour (the real guard-page fault-form). Doing it on `arch` *before* it is switched to means no
         // live access is disturbed (`split_block` only adds table levels
         // reproducing the existing translation) and no TLB maintenance is
         // needed. If no arena region is available, or the split/unmap could
         // not be applied, fall back to a heap-backed software-canary
         // `BoxStack` rather than ever running on an unguarded stack (fail
-        // closed, `AGENTS.md` §2.9 / §2.17).
+        // closed).
         // The arena grows on demand by chaining fresh 2 MiB blocks out of
         // the kernel's live frame allocator when its boot-carved block is
-        // exhausted (`AGENTS.md` §24.1); a chained block is bounded to the
+        // exhausted; a chained block is bounded to the
         // identity window so the stack stays mapped in PID 1's own root.
         let grow = FrameArenaGrow::new(ctx.frames(), (identity_gib as u64) << 30);
         let kernel_stack: Box<dyn KernelStack + Send> =
@@ -180,7 +177,7 @@ impl InitSpawn for Aarch64InitSpawn {
         let physmap = DirectPhysMap::identity((identity_gib as u64) << 30);
 
         // Parse the build-time `init` `rxe` blob against the kernel's own
-        // compiled-in syscall CFI tag (§9 / §19.2). A mismatch fails closed.
+        // compiled-in syscall CFI tag. A mismatch fails closed.
         let Ok(image) = LoadImage::parse(INIT_RXE, &SYSCALL_TABLE_HASH) else {
             return;
         };
@@ -208,7 +205,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // and the EL1 trap path is installed. The frame source draws
         // identity-mapped RAM frames from the kernel's live allocator. A
         // returning `Err` (denial or build failure) drops back to the
-        // caller's fail-closed halt (`AGENTS.md` §2.9).
+        // caller's fail-closed halt.
         let frames = ctx.frames();
         let Ok(entry) = (unsafe {
             spawn_image(
@@ -239,7 +236,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // SP2): the core runs it on the dispatcher's context immediately
         // before every switch into PID 1, so the task `eret`s back into EL0
         // under its own `TTBR0_EL1` root and stays isolated from any sibling
-        // process (`AGENTS.md` §4). It captures only the `u64` root, so it is
+        // process. It captures only the `u64` root, so it is
         // `Send`.
         // The hook is handed the task's kernel-stack top (the x86_64 port
         // uses it to repoint its per-CPU syscall entry stack); aarch64
@@ -271,7 +268,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // `[MMIO_WINDOW_BASE, …)` region); it carries the *same* arch space
         // the snapshot above was frozen from. A context with no `'static`
         // allocator, or a window the allocator rejects, retains no live space
-        // and PID 1's `mem_map` / `mmio_map` fail closed (`AGENTS.md` §2.9).
+        // and PID 1's `mem_map` / `mmio_map` fail closed.
         let live: Option<Box<dyn LiveUserSpace + Send>> = match ctx.static_frames() {
             Some(static_frames) => LiveSpace::new(
                 space,
@@ -301,7 +298,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // driver reloads the controller firmware over the mailbox and emits
         // the `usb,xhci` node, and the keyboard driver binds that, brings the
         // controller up, and pumps key edges into the input arbiter (`plans/PI.md`
-        // P10 D5d, `AGENTS.md` §18 / §4 — drivers in user space). There is no
+        // P10 D5d — drivers in user space). There is no
         // in-kernel keyboard bring-up to start here.
 
         // Start the in-kernel root-unlock service alongside PID 1
@@ -313,8 +310,7 @@ impl InitSpawn for Aarch64InitSpawn {
         // root, and publishes the users database into `LATE_USERS_DB` so
         // `login` can authenticate. With no bound disk (the QEMU `virt`
         // shape without a planted root, a headless Pi) it starts nothing,
-        // opens the console-0 gate, and PID 1 runs unchanged
-        // (`AGENTS.md` §18.4).
+        // opens the console-0 gate, and PID 1 runs unchanged.
         let _unlock_started = crate::aarch64::root_unlock::spawn_if_present(ctx);
 
         // Register PID 1's caps + address space, publish it as the current

@@ -7,7 +7,7 @@
 //! via `sysretq`. The architecture-neutral dispatcher (validation,
 //! capability checks, audit) is owned by `kernel/syscall` and is
 //! re-used verbatim — this crate never duplicates the
-//! `SYSCALL_TABLE_HASH` validation surface (AGENTS.md §2.2, §9).
+//! `SYSCALL_TABLE_HASH` validation surface.
 //!
 //! # Layout
 //!
@@ -249,12 +249,12 @@ const fn is_canonical(addr: u64) -> bool {
 ///
 /// On a `syscall` from ring 3 the entry stub pivots onto this stack
 /// (loaded from the per-CPU TLS via `swapgs`). A hostile or buggy value
-/// is a stack-pivot / privilege-boundary vector (`AGENTS.md` §3.5 / §5,
+/// is a stack-pivot / privilege-boundary vector (
 /// CVE-2019-1125 class): a **non-canonical** top faults inside kernel
 /// entry, and a **user-range** top would run kernel entry on
 /// attacker-controlled memory. The stack top must therefore be non-null,
 /// 16-byte aligned (System V AMD64), canonical, and in the kernel
-/// (higher) half. Anything else is rejected fail-closed (§5.4).
+/// (higher) half. Anything else is rejected fail-closed.
 ///
 /// # Errors
 ///
@@ -277,7 +277,7 @@ pub(crate) const fn validate_kernel_rsp0(rsp0: u64) -> Result<(), crate::percpu:
 /// Why a user-supplied `(ptr, len)` buffer failed the copy-from-user
 /// boundary check ([`validate_user_buffer`]).
 ///
-/// Each variant names one fail-closed reason (`AGENTS.md` §5.4); the
+/// Each variant names one fail-closed reason; the
 /// caller maps it to its public `Errno` and never proceeds with the
 /// access.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
@@ -290,7 +290,7 @@ pub enum UserBufferError {
     NonCanonical,
     /// The base pointer, or any byte of the buffer, lies in the kernel
     /// (canonical higher) half. A user buffer must live entirely in the
-    /// lower half (`AGENTS.md` §5 — ret2usr / `copy_from_user` class).
+    /// lower half (ret2usr / `copy_from_user` class).
     KernelRange,
     /// `ptr + len` overflows the 64-bit address space (CWE-190): the
     /// length wraps the buffer back over the start.
@@ -298,13 +298,11 @@ pub enum UserBufferError {
 }
 
 /// Validate a user-supplied `(ptr, len)` buffer before the kernel copies
-/// to or from it (the `copy_from_user` / `copy_to_user` boundary,
-/// `AGENTS.md` §5 / `tests/SECURITY.md` §5, CWE-367 / CWE-822).
+/// to or from it (the `copy_from_user` / `copy_to_user` boundary / `tests/SECURITY.md` §5, CWE-367 / CWE-822).
 ///
 /// A user task hands the kernel raw 64-bit register values. Before the
 /// kernel may touch the buffer it must prove the whole `[ptr, ptr + len)`
-/// range is a legitimate *user* address window. This rejects, fail-closed
-/// (§5.4):
+/// range is a legitimate *user* address window. This rejects, fail-closed:
 ///
 /// * a **null** base ([`UserBufferError::Null`]);
 /// * a **non-canonical** base in the 48-bit hole, which would `#GP` on
@@ -358,7 +356,7 @@ pub const fn validate_user_buffer(ptr: u64, len: u64) -> Result<(), UserBufferEr
 
 /// Published base of the registered [`SyscallTlsStorage::tls`] array
 /// (`null` until a storage is registered, so the per-CPU TLS entry
-/// points fail closed before registration — `AGENTS.md` §2.9 / §24.1).
+/// points fail closed before registration).
 static SYSCALL_TLS_BASE: AtomicPtr<SyscallTls> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Number of logical-CPU TLS slots the registered storage covers (`0`
@@ -374,13 +372,13 @@ static SYSCALL_TLS_REGISTERED: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SyscallTlsStorageError {
     /// Storage was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live arena).
+    /// (no silent re-pointing of the live arena).
     AlreadyRegistered,
 }
 
 /// Caller-owned, `&'static` per-CPU [`SyscallTls`] arena, sized by the
-/// constructing caller for its machine (`AGENTS.md` §24.1 — the per-CPU
-/// syscall-TLS arena is derived from the §18-discovered logical-CPU
+/// constructing caller for its machine (the per-CPU
+/// syscall-TLS arena is derived from the-discovered logical-CPU
 /// count, never a fixed `const` ceiling baked into the arch crate).
 ///
 /// The const parameter `N` is the number of logical CPUs the caller
@@ -425,7 +423,7 @@ impl<const N: usize> SyscallTlsStorage<N> {
     ///
     /// [`SyscallTlsStorageError::AlreadyRegistered`] on the second
     /// publish (set-once per boot — never silently re-points the live
-    /// arena, `AGENTS.md` §2.1).
+    /// arena).
     pub fn register(&'static self) -> Result<usize, SyscallTlsStorageError> {
         if SYSCALL_TLS_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -454,7 +452,7 @@ pub fn registered_syscall_cpu_count() -> usize {
 
 /// Raw pointer to the registered per-CPU [`SyscallTls`] slot for
 /// `cpu_index`, or `None` if `cpu_index` is out of range or no storage
-/// is registered yet (fail closed, `AGENTS.md` §2.9).
+/// is registered yet (fail closed).
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 fn syscall_tls_ptr(cpu_index: usize) -> Option<*mut SyscallTls> {
     if cpu_index >= SYSCALL_TLS_LEN.load(Ordering::Acquire) {
@@ -491,7 +489,7 @@ fn reset_syscall_tls_storage_for_tests() {
 ///   registered).
 /// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
 ///   `kernel_rsp0` is null, not 16-byte aligned, non-canonical, or in
-///   the user half (`AGENTS.md` §3.5 — stack-pivot / CVE-2019-1125).
+///   the user half (stack-pivot / CVE-2019-1125).
 ///
 /// # Safety
 ///
@@ -509,12 +507,11 @@ pub unsafe fn install_kernel_rsp0(
     cpu_index: usize,
     kernel_rsp0: u64,
 ) -> Result<u64, crate::percpu::InitError> {
-    // Fail closed before registration or for an out-of-range index
-    // (`AGENTS.md` §2.9 / §24.1): the registered storage's published
+    // Fail closed before registration or for an out-of-range index: the registered storage's published
     // length is the only bound, not a baked-in `MAX_CPUS`.
     let slot = syscall_tls_ptr(cpu_index).ok_or(crate::percpu::InitError::CpuIndexOutOfRange)?;
     // Reject a non-canonical / user-range / misaligned stack top before
-    // it can ever be loaded by `syscall` entry (`AGENTS.md` §3.5 / §5.4).
+    // it can ever be loaded by `syscall` entry.
     validate_kernel_rsp0(kernel_rsp0)?;
     // SAFETY: caller's contract pins `cpu_index` to this CPU; no
     // other CPU writes to the same slot. `slot` points inside the
@@ -543,16 +540,16 @@ pub unsafe fn install_kernel_rsp0(
 /// TLS) and an **interrupt or exception** (e.g. the P-1c preemption timer,
 /// a `#PF`/`#GP`) reads `TSS.RSP0`. The two are one and the same per-task
 /// stack (as on Linux), so they are repointed **together** here — one
-/// definition (`AGENTS.md` §2.2) that cannot diverge, rather than each
+/// definition that cannot diverge, rather than each
 /// resume site repeating two writes. Repointing only one would let an
 /// involuntary preemption (or fault) of one task land on another task's —
 /// or the boot — kernel stack and corrupt it (a correctness *and* isolation
-/// defect, `AGENTS.md` §4).
+/// defect).
 ///
 /// The value is validated exactly as [`install_kernel_rsp0`] validates it
 /// ([`validate_kernel_rsp0`]: non-null, 16-byte aligned, canonical, kernel
 /// half) before either field is written, so a hostile or buggy stack top is
-/// rejected fail-closed (`AGENTS.md` §3.5 / §5.4) rather than installed as a
+/// rejected fail-closed rather than installed as a
 /// stack-pivot vector. The `TSS.RSP0` repoint is freestanding-only (the TSS
 /// is real hardware state); a host test exercises the `gs:0` path and the
 /// shared validator.
@@ -573,11 +570,10 @@ pub unsafe fn install_kernel_rsp0(
 /// write path the bare-metal resume takes is exercised on the host.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
 pub fn set_kernel_rsp0(cpu_index: usize, kernel_rsp0: u64) -> Result<(), crate::percpu::InitError> {
-    // Fail closed before registration or for an out-of-range index
-    // (`AGENTS.md` §2.9 / §24.1).
+    // Fail closed before registration or for an out-of-range index.
     let slot = syscall_tls_ptr(cpu_index).ok_or(crate::percpu::InitError::CpuIndexOutOfRange)?;
     // Reject a non-canonical / user-range / misaligned stack top before it
-    // can ever be loaded by `syscall` entry (`AGENTS.md` §3.5 / §5.4).
+    // can ever be loaded by `syscall` entry.
     validate_kernel_rsp0(kernel_rsp0)?;
     // SAFETY: the resume runs on the dispatcher's context on this CPU, which
     // is the only writer of its own slot, so the write does not race. Only
@@ -590,7 +586,7 @@ pub fn set_kernel_rsp0(cpu_index: usize, kernel_rsp0: u64) -> Result<(), crate::
     // stack, so an interrupt/exception taken from ring 3 (the P-1c preemption
     // timer, a `#PF`/`#GP`) lands on this task's own kernel stack — not the
     // boot-time `TSS.RSP0` a concurrently parked task would also use. The two
-    // user→kernel entry paths share one stack (`AGENTS.md` §2.2), so they are
+    // user→kernel entry paths share one stack, so they are
     // repointed in lock-step here.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
@@ -626,7 +622,7 @@ pub type SyscallDispatchFn =
 /// fail-closes via [`crate::qemu_exit::exit_failure`] in that case
 /// (see [`rustos_arch_x86_64_syscall_dispatch`]'s rustdoc); a
 /// silent return would be an "open by default" failure per
-/// AGENTS.md §7. Storage is gated to the freestanding target — the
+/// . Storage is gated to the freestanding target — the
 /// host build never reads or writes it (matches the
 /// [`crate::preempt::set_timer_callback`] pattern).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -688,7 +684,7 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
 /// `init_local_syscalls`. If the trampoline is nevertheless reached
 /// without a callback, the kernel fail-closes through
 /// [`crate::qemu_exit::exit_failure`] (the same posture
-/// [`crate::interrupts`] takes for its default ISR — AGENTS.md §10).
+/// [`crate::interrupts`] takes for its default ISR).
 ///
 /// # Safety
 ///
@@ -708,7 +704,7 @@ unsafe extern "C" fn rustos_arch_x86_64_syscall_dispatch(
         // Fail-closed: a syscall reached the trampoline before the
         // binary installed its dispatcher. Continuing would mean
         // returning an unspecified value to user space, which is
-        // exactly the "open by default" failure AGENTS.md §7 / §10
+        // exactly the "open by default" failure
         // forbid.
         crate::qemu_exit::exit_failure();
     }
@@ -1050,7 +1046,7 @@ mod tests {
         assert!(dispatch_callback().is_none());
     }
 
-    // -- §3.5 / §5 kernel-RSP0 stack-pivot validation (CVE-2019-1125) ----
+    // kernel-RSP0 stack-pivot validation (CVE-2019-1125) ----
     //
     // `install_kernel_rsp0` itself is freestanding-only (it writes the
     // per-CPU TLS arena), but its input check is the pure, host-testable
@@ -1126,7 +1122,7 @@ mod tests {
         reset_syscall_tls_storage_for_tests();
 
         // Before any storage is registered the repoint fails closed rather
-        // than dereferencing a null base (`AGENTS.md` §2.9 / §24.1) — even
+        // than dereferencing a null base — even
         // for an otherwise-valid stack top.
         assert_eq!(registered_syscall_cpu_count(), 0);
         assert_eq!(
@@ -1175,7 +1171,7 @@ mod tests {
         reset_syscall_tls_storage_for_tests();
     }
 
-    // -- §5 copy_from_user user-buffer validation (CWE-367 / CWE-822) ----
+    // copy_from_user user-buffer validation (CWE-367 / CWE-822) ----
     //
     // `validate_user_buffer` is the pure, host-testable boundary check the
     // Stage-6 `copy_from_user` fault path gates on (per-access page-fault

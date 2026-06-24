@@ -7,10 +7,10 @@
 //! 2. Subsystems initialise in a fixed order — `log → mem → sec →
 //!    sched → ipc` — and that order is part of the kernel ABI:
 //!    re-ordering would change which audit events external consumers
-//!    observe (`AGENTS.md` §2.4, no interface creep).
+//!    observe (no interface creep).
 //! 3. A failure in any phase is **fatal**: the failed-phase event is
 //!    logged and the boot CPU enters [`KernelArch::halt`]. The kernel
-//!    never silently resets (`AGENTS.md` §2 Stage 2 deliverables).
+//!    never silently resets (Stage 2 deliverables).
 //!
 //! Stage 2.7 will extend [`kernel_main`] with a syscall-registration
 //! phase and replace the trailing `arch.halt()` with the dispatch into
@@ -52,7 +52,7 @@ use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx};
 ///
 /// The numeric ordering is meaningful: phase `N` must complete before
 /// phase `N+1` begins, and the order is the audit-log contract with
-/// external consumers (`AGENTS.md` §5.4).
+/// external consumers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Phase {
     /// Install the global log sink and level filter.
@@ -140,7 +140,7 @@ pub enum InitError {
     ///
     /// The slot is set-once per boot; a second publish indicates a
     /// programmer error (e.g. a test harness pre-installed a hook,
-    /// or `kernel_main` was re-entered). `AGENTS.md` §5.4.5 — fail
+    /// or `kernel_main` was re-entered). — fail
     /// closed: report and halt, no silent recovery.
     DispatcherAlreadyInstalled(AlreadyInstalledError),
 }
@@ -192,8 +192,7 @@ impl InitError {
 ///   halting is the contract.
 /// * **Fails**: emits [`AuditEvent::PhaseFailed`] with the offending
 ///   `phase` and `cause`, then parks the boot CPU via
-///   [`KernelArch::halt`]. *Never* silently resets — see `AGENTS.md`
-///   §2 Stage 2 deliverables.
+///   [`KernelArch::halt`]. *Never* silently resets — Stage 2 deliverables.
 ///
 /// # SAFETY-INVARIANTs verified at entry
 ///
@@ -202,7 +201,7 @@ impl InitError {
 /// * `boot.boot_cpu == boot.arch.current_cpu()` — re-asserted as a
 ///   `debug_assert_eq!` so production builds pay no extra cost while
 ///   debug builds catch arch porting bugs that would route IPIs to the
-///   wrong CPU (`AGENTS.md` §1, §2.10).
+///   wrong CPU.
 #[allow(clippy::needless_pass_by_value)] // BootInfo is consumed by design.
 pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     // Phase 0 — install the log filter immediately. Until the filter
@@ -220,7 +219,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     let init_spawn = boot.init;
 
     // `BootStarted` / `BootCompleted` / `PhaseFailed` are audit
-    // lifecycle events (`AGENTS.md` §5.4.4 — security-relevant
+    // lifecycle events (security-relevant
     // decisions). They route through `audit_sink`. `PhaseStarted` /
     // `PhaseReady` remain on `log_sink` as diagnostic timeline
     // markers. Production wires both sinks to the same backend; the
@@ -240,7 +239,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     // has rejected obviously-malformed handovers — that way an
     // out-of-range `boot_cpu` is reported as a structured
     // `BootInfoError::BootCpuOutOfRange` audit record rather than as
-    // a debug-mode assertion (`AGENTS.md` §2.10, §5.4 — fail closed
+    // a debug-mode assertion (fail closed
     // with a stable cause string).
     if boot.validate().is_ok() {
         debug_assert_eq!(
@@ -293,7 +292,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
     // spawn seam (`plans/PI.md` P6c-3). On success the seam diverges into
     // the spawned program and never returns; on failure (or when no seam
     // is installed) we fall through to the fail-closed halt below
-    // (`AGENTS.md` §2.9 — never silently reset).
+    // (never silently reset).
     if let Some(init) = init_spawn {
         // The core-side registration context the seam drives: it builds
         // the arch image (through the public `spawn_image` caller) and
@@ -303,14 +302,13 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // `KernelState`, which lives for the running kernel's lifetime.
         //
         // The context is leaked to `'static` (a one-shot boot publish over
-        // the already-leaked `KernelState`, never a mutable global —
-        // `AGENTS.md` §2.1) and handed to the seam as a
+        // the already-leaked `KernelState`, never a mutable global ) and handed to the seam as a
         // `&'static (dyn InitSpawnCtx + Sync)`. That lets an in-kernel
         // service the seam admits *before* `admit_init` diverges into the
         // dispatch loop — the aarch64 root-unlock kthread, whose `'static +
         // Send` body outlives this frame — capture the context and later
         // drive `spawn_driver_process` to autoload user-space drivers off the
-        // mounted root (`plans/PI.md` P11; `AGENTS.md` §18.3). On the failure
+        // mounted root (`plans/PI.md` P11;). On the failure
         // path `spawn_init` returns and we halt below, so the leak is
         // immaterial; on success it diverges and the context lives for the
         // running kernel's lifetime, exactly like the state it borrows.
@@ -333,11 +331,11 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
 ///
 /// Bridges the global blocking wait-queue (`crate::waitq`) to the live,
 /// generic `Scheduler<A>` and arch port without the wait-queue naming
-/// either concrete type (`AGENTS.md` §17.4 / §2.2): an explicit or timed
+/// either concrete type: an explicit or timed
 /// wake `unpark`s through the scheduler (whose wake-pending token closes
-/// the lost-wakeup race, §2.1), the timed sweep reads `monotonic_ns`, and
+/// the lost-wakeup race), the timed sweep reads `monotonic_ns`, and
 /// the nearest-deadline one-shot is armed through the arch port's
-/// `set_wakeup` (§17.1). Holds only `'static` borrows into the leaked
+/// `set_wakeup`. Holds only `'static` borrows into the leaked
 /// `KernelState`, so it is itself leaked and installed once at boot.
 struct SchedWaitQueueArch<A: KernelArch + 'static> {
     scheduler: &'static Scheduler<A>,
@@ -348,7 +346,7 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
     fn unpark(&self, id: rustos_kernel_sched_api::TaskId) {
         // Cancellation-safe: `unpark` of a not-yet-parked task records a
         // wake-pending token rather than erroring, so a wake racing the
-        // park is never lost (`AGENTS.md` §2.1). A vanished task is a
+        // park is never lost. A vanished task is a
         // benign no-op for a wake.
         let _ = self.scheduler.unpark(id);
     }
@@ -367,8 +365,7 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
         cpu: rustos_kernel_sched_api::CpuId,
     ) -> Option<rustos_kernel_sched_api::TaskId> {
         // The live scheduler's per-CPU current-task slot — the same slot the
-        // dispatch hook reads to identify a syscall caller (`AGENTS.md`
-        // §5.4.1). A console-read backing parks the *current* task without
+        // dispatch hook reads to identify a syscall caller. A console-read backing parks the *current* task without
         // being handed its id, so it resolves it here.
         self.scheduler.current_task(cpu)
     }
@@ -378,10 +375,9 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
 /// install it as the global wait-queue hook (Design D P-2), so the
 /// explicit-wake (`crate::hw_tree_wake`) and timed-wake
 /// (`crate::timed_wake_sweep`) paths reach the live scheduler + arch
-/// without the wait-queue naming either concrete type (`AGENTS.md` §17.4 /
-/// §2.2). Set-once per boot; a stray re-install is a benign skip (this is
-/// the only caller — `AGENTS.md` §2.1). Factored out of `run_phases` to
-/// keep that function within its line budget (§2.3).
+/// without the wait-queue naming either concrete type. Set-once per boot; a stray re-install is a benign skip (this is
+/// the only caller). Factored out of `run_phases` to
+/// keep that function within its line budget.
 fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<A>) {
     let wait_arch: &'static SchedWaitQueueArch<A> = Box::leak(Box::new(SchedWaitQueueArch {
         scheduler: &state.scheduler,
@@ -399,11 +395,10 @@ fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<
 /// It borrows the live kernel registries from the leaked `KernelState`
 /// so the seam can register a freshly built task (scheduler, capability
 /// table, address-space registry) and dispatch it without ever naming the
-/// concrete scheduler or arch types itself (`AGENTS.md` §17.2 / §17.4 —
-/// the generics stay on this side of the object-safe boundary).
+/// concrete scheduler or arch types itself (the generics stay on this side of the object-safe boundary).
 ///
 /// Public and constructible through [`new`](Self::new) for the same reason
-/// [`KernelSpawnCtx`] is (`AGENTS.md` §2.2): a QEMU integration vertical
+/// [`KernelSpawnCtx`] is: a QEMU integration vertical
 /// drives the *production* spawn path through it rather than re-implementing
 /// the `KernelSpawnCtx` assembly. The fields stay private so the borrow set
 /// can only be supplied through [`new`](Self::new).
@@ -425,7 +420,7 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// the leaked `KernelState` like every other boot-installed producer.
     /// PID-1 admission (`admit_init`) does not consult it; it exists for the
     /// driver-spawn path. A boot path that wired no real producer passes the
-    /// fail-closed [`crate::NULL_PROCESS_WAIT`] (`AGENTS.md` §2.9).
+    /// fail-closed [`crate::NULL_PROCESS_WAIT`].
     process_wait: &'static (dyn ProcessWait + 'static),
 }
 
@@ -433,12 +428,12 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     /// Bind a spawn context to the live kernel subsystems.
     ///
     /// `frames` is the leaked-`'static` physical-frame allocator (it doubles
-    /// as the `'static` page-table frame source for a spawned child, §24.1);
+    /// as the `'static` page-table frame source for a spawned child);
     /// `audit` is the boot audit sink; `scheduler` / `caps` / `aspaces` /
     /// `arch` are the live registries a freshly built task is registered
     /// with; `process_wait` is the producer a spawned driver's parent/child
     /// wait link is recorded with (the fail-closed
-    /// [`crate::NULL_PROCESS_WAIT`] when none is wired, `AGENTS.md` §2.9).
+    /// [`crate::NULL_PROCESS_WAIT`] when none is wired).
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -470,7 +465,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     /// 1. Perform any wake a device-IRQ / timer handler deferred while the
     ///    task ran. The handler is lock-free and only flagged the wake; the
     ///    real `unpark` runs here, where taking the scheduler/run-queue locks
-    ///    is safe (`AGENTS.md` §17.1).
+    ///    is safe.
     /// 2. Top up the buffered console transmit
     ///    ([`KernelArch::pump_console_tx`]). The loop calls this on **every**
     ///    successful dispatch, not only when it idles, so a port whose
@@ -478,8 +473,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     ///    runnable in-kernel kthread (e.g. the polled USB-keyboard report
     ///    pump) keeps the loop from ever reaching its idle park — the output
     ///    then flows at the loop's dispatch rate, independent of the
-    ///    transmit-FIFO interrupt the silicon may not self-sustain
-    ///    (`AGENTS.md` §2.16 / §20). A no-op on ports with synchronous
+    ///    transmit-FIFO interrupt the silicon may not self-sustain. A no-op on ports with synchronous
     ///    console output.
     fn service_between_dispatches(&self) {
         let _ = crate::waitq::drain_pending_wakes();
@@ -528,7 +522,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // with it so its `mem_map` / `mmio_map` syscalls mutate its own
         // space through the per-CPU live-space slot (`plans/PI.md`
         // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
-        // fail closed (`AGENTS.md` §2.9).
+        // fail closed.
         let admitted = match live {
             Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
                 self.scheduler,
@@ -558,10 +552,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
         // Register the task's caps under the *same* numeric id the
         // dispatcher recovers (`SecTaskId(current_task)`), so PID 1's first
-        // syscall resolves a caller context (`AGENTS.md` §5.4.1). `init`'s
+        // syscall resolves a caller context. `init`'s
         // effective set is the intersection of its user grant and manifest
         // request; the boot path passes the system grant, so use it for both
-        // bounds (uid 0 — the system user, `AGENTS.md` §5.1).
+        // bounds (uid 0 — the system user).
         let sec_id = SecTaskId(task_id);
         let record = TaskCapabilities::derive(sec_id, UserId(0), caps, caps, self.audit);
         self.caps.write().insert(record);
@@ -572,8 +566,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // mappings instead of failing closed with `BadAddress`
         // (`plans/PI.md` P6c-3 follow-up). A fresh task id is never already
         // present; should registration nonetheless be refused, fail closed
-        // by returning so the seam (and `kernel_main`) halts the CPU
-        // (`AGENTS.md` §2.9) rather than entering a program whose user
+        // by returning so the seam (and `kernel_main`) halts the CPU rather than entering a program whose user
         // memory the kernel cannot reach.
         if self
             .aspaces
@@ -584,12 +577,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             return;
         }
 
-        // Establish PID 1's standard streams (`AGENTS.md` §20): the
+        // Establish PID 1's standard streams: the
         // standard descriptor table (`stdin` readable,
         // `stdout`/`stderr`/`stdinfo` writable), each backed by the
         // discovered console the boot path installed, so `init` writes
         // its banner through `stream_write(STDOUT, …)` over an inherited
-        // stream rather than an ambient device (§4 / §17.4).
+        // stream rather than an ambient device.
         self.aspaces
             .write()
             .set_streams(sec_id, DescriptorTable::standard());
@@ -601,7 +594,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // suspends through a rescheduling syscall (`yield`/`exit`) or its
         // kernel stack could not seed a frame (fail-closed `Exit`). The
         // loop stops once no task is live or the CPU idles, then returns so
-        // `kernel_main` halts fail-closed (`AGENTS.md` §2.9). A real
+        // `kernel_main` halts fail-closed. A real
         // session frontend that never exits is `plans/SPAWN.md` SP4.
         //
         // SAFETY: the seam built PID 1's image into and switched to the
@@ -611,15 +604,15 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // active across every later switch into a user kthread.
         let _ = task_id;
         // Run the dispatch loop with device IRQs **enabled** so RustOS is
-        // fully preemptive (`AGENTS.md` §17.1): every in-kernel task and
+        // fully preemptive: every in-kernel task and
         // kthread the loop dispatches executes with interrupts deliverable,
         // so a long in-kernel operation (a slow MMIO bring-up read, a busy
         // driver poll) can no longer mask interrupts for its whole span and
         // starve the preemption one-shot, the buffered-serial transmit
-        // drain (§20), or an interrupt-driven waiter — the cooperative
-        // dispatch loop §17.1 forbids. A device IRQ taken mid-task services
+        // drain, or an interrupt-driven waiter — the cooperative
+        // dispatch loop the charter forbids. A device IRQ taken mid-task services
         // its source and returns to the same task (the kernel stays
-        // non-preemptible, §4); its lock-free handler flags a deferred wake
+        // non-preemptible); its lock-free handler flags a deferred wake
         // that `drain_pending_wakes` performs here, in dispatcher context,
         // where taking the scheduler/run-queue locks is safe.
         self.arch.set_device_irqs(true);
@@ -639,11 +632,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                 }
                 // No runnable task this step. If every live task has
                 // exited, the system is finished — break so `kernel_main`
-                // halts fail-closed (`AGENTS.md` §2.9). Otherwise the live
+                // halts fail-closed. Otherwise the live
                 // tasks are all **parked** (a perpetual service blocked in
                 // a blocking-wait syscall, e.g. `devmgr` on `hw_tree_wait`):
                 // park the CPU until the next interrupt, then re-step —
-                // never busy-spin (`AGENTS.md` §2.1 / §17.1 tickless idle).
+                // never busy-spin (tickless idle).
                 Ok(StepOutcome::Idle) => {
                     if self.scheduler.live_task_count() == 0 {
                         break;
@@ -651,11 +644,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                     // Race-free park: mask device IRQs, then drain once more
                     // so a wake a handler flagged just before we commit to
                     // sleep is observed and re-dispatched rather than slept
-                    // through (`AGENTS.md` §2.1 — no lost wake-up). If
+                    // through (no lost wake-up). If
                     // nothing became runnable, top up the buffered console
                     // transmit one last time (so a port whose transmit FIFO
                     // is the `wfi` wake source has it armed against the
-                    // remaining backlog, §20) and `wait_for_interrupt` parks
+                    // remaining backlog) and `wait_for_interrupt` parks
                     // on a `wfi`-class instruction that still wakes on the
                     // pending-but-masked interrupt; re-enabling IRQs then
                     // *takes* it, its handler flags the wake, and the loop
@@ -685,10 +678,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // dispatches it alongside PID 1. The work shim wraps the
         // dispatcher-side concrete `Yielder<A::Cs>` in the object-safe
         // `YielderHandle`, so the arch seam's `body` never names the port's
-        // context-switch type (`AGENTS.md` §17.4 / §2.2). The admitted
+        // context-switch type. The admitted
         // scheduler [`TaskId`] is returned so the caller can wake the
         // service by id (the driver-store server registers it on
-        // `SERVE_WAITQ`); a failed admission yields `None` (`AGENTS.md` §2.9).
+        // `SERVE_WAITQ`); a failed admission yields `None`.
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
         let cs = self.arch.context_switch();
         let work = move |yielder: &mut crate::kthread::Yielder<A::Cs>| {
@@ -704,7 +697,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
     fn static_audit(&self) -> Option<&'static (dyn Sink + Sync)> {
         // The boot audit sink is `'static` (leaked at boot), so a service
-        // kthread can route its §19.4 security decisions onto the audit
+        // kthread can route its security decisions onto the audit
         // channel for the life of the kernel.
         Some(self.audit)
     }
@@ -723,22 +716,22 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // `ProcessSpawn::spawn_with` (`plans/SPAWN.md` SP3). The bin-crate
         // caller never names `Scheduler<A>` / `KernelSpawnCtx` — that
         // assembly happens here, behind the object-safe `InitSpawnCtx`
-        // boundary (`AGENTS.md` §17.1 / §17.4).
+        // boundary.
         //
         // `frames` is `'static`, so it doubles as the `'static` page-table
         // frame source the producer builds the child's page tables from
-        // (reclaimable RAM that scales with the machine, §24.1). The child
-        // is minted one owner-checked grant per requested resource (§18.3);
+        // (reclaimable RAM that scales with the machine). The child
+        // is minted one owner-checked grant per requested resource;
         // the `grants` originate kernel-side (the discovered hardware tree),
-        // never from an untrusted caller (§4).
+        // never from an untrusted caller.
         //
         // The driver is recorded against the kernel boot supervisor identity
-        // (`SecTaskId(0)` — task/uid 0, the system context, §5.1): a
+        // (`SecTaskId(0)` — task/uid 0, the system context): a
         // boot-autoloaded driver has no userland parent that `wait`s on it.
         // It is established with the fail-closed all-closed descriptor table
         // (`DescriptorTable::closed`): a driver is not a text session, so it
         // inherits no console and reaches no stream backing rather than being
-        // handed an ambient device (`AGENTS.md` §20 / §5.4); a driver's
+        // handed an ambient device; a driver's
         // diagnostics flow through `lib/log`, never `stdout`.
         let ctx = KernelSpawnCtx::new(
             self.frames,
@@ -845,7 +838,7 @@ fn run_phases<A: KernelArch>(
     //
     // The phase is placed strictly between `Sched` and `Syscall` so
     // the IRQ table is in place before any caller can dispatch
-    // `irq_bind` / `irq_wait` (`AGENTS.md` §5.4.5 — fail closed). The
+    // `irq_bind` / `irq_wait` (fail closed). The
     // audit log fields the phase emits are `phase = "irq"`.
     phase_started(log_sink, Phase::Irq);
     let routing: IrqRouting = arch.irq_routing();
@@ -857,8 +850,7 @@ fn run_phases<A: KernelArch>(
     // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
     // referencing its fields. The `Box::leak` is intentional: the
     // kernel never returns, so the leak is a one-shot publish into a
-    // `'static` slot, not a global *mutable* static (`AGENTS.md`
-    // §2.1 — the per-CPU bootstrap area is the only sanctioned
+    // `'static` slot, not a global *mutable* static (the per-CPU bootstrap area is the only sanctioned
     // mutable static; this allocation is immutable after creation
     // because every interior field carries its own synchronisation
     // primitive (`Scheduler`'s internal locks, `RwLock<CapTable>`)).
@@ -870,10 +862,10 @@ fn run_phases<A: KernelArch>(
         ipc: RwLock::new(PortRegistry::new()),
         aspaces: RwLock::new(AddressSpaceRegistry::new()),
         // The kernel random output reserve boots **unseeded** over the
-        // `NullEntropy` source (`AGENTS.md` §22): a reserve always
+        // `NullEntropy` source: a reserve always
         // exists, but `random_get` fails closed with `EntropyNotReady`
-        // until the platform-RNG entropy seam (§17.2) re-seeds it — the
-        // same seam the encrypted-swap key is drawn from (§4), still
+        // until the platform-RNG entropy seam re-seeds it — the
+        // same seam the encrypted-swap key is drawn from, still
         // pending. Boxed as a `dyn RandomReserve` so the boot reserve and
         // a later seeded one share one field type.
         rng: RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>),
@@ -888,8 +880,7 @@ fn run_phases<A: KernelArch>(
     // translate a vector-level hit to `IrqTable::fire`. The default
     // [`KernelArch::install_irq_dispatch`] is a no-op; real arch
     // ports (x86_64) override it to publish the reference into the
-    // arch crate's dispatcher slot (set-once per boot — `AGENTS.md`
-    // §2.1).
+    // arch crate's dispatcher slot (set-once per boot).
     state.arch.install_irq_dispatch(&state.irq);
 
     // Build the scheduler-side process-wait producer the `wait` syscall
@@ -898,26 +889,25 @@ fn run_phases<A: KernelArch>(
     // child is reapable; it needs only the `'static` arch handle (to read the
     // current CPU when parking), so it is built here over the leaked
     // `KernelState` and `Box::leak`'d for the same one-shot-publish reason as
-    // the hook below (`AGENTS.md` §2.1). Until this stage the handler held the
+    // the hook below. Until this stage the handler held the
     // fail-closed `NULL_PROCESS_WAIT`.
     let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) =
         Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
 
     // Publish the wait-queue arch hook (Design D P-2) so the explicit /
     // timed wake paths reach the live scheduler + arch (factored out to
-    // keep this function within the line budget — `AGENTS.md` §2.3).
+    // keep this function within the line budget).
     publish_wait_queue_arch(state);
 
     // Wrap every boot-installed console's input half in the blocking
-    // adapter (`AGENTS.md` §20 — the stream backing owns blocking, never
+    // adapter (the stream backing owns blocking, never
     // the program): a `stream_read` finding its device empty parks the
     // caller back on the scheduler until input arrives, instead of
     // reporting a zero-length read user space cannot distinguish from
     // end of input. Each adapter needs the same `'static` arch handle
     // (to read the current CPU when parking) as the process-wait
     // producer above, so the rebuilt list is `Box::leak`'d the same way
-    // — a one-shot publish, not a global mutable static (`AGENTS.md`
-    // §2.1). A console whose read half fails closed (a write-only
+    // — a one-shot publish, not a global mutable static. A console whose read half fails closed (a write-only
     // serial port's `NULL_CONSOLE_READ`) keeps failing closed: the
     // inner error propagates straight through without parking.
     let consoles: &'static [crate::console::ConsoleDevice] = {
@@ -950,7 +940,7 @@ fn run_phases<A: KernelArch>(
     // aarch64 ports) gets a working producer and one that does not fails closed
     // with `NotImplemented` exactly as the `NULL_*` defaults did. All are
     // `Box::leak`'d for the same one-shot-publish reason as the hook, arch-
-    // generic so this names no concrete port (`AGENTS.md` §2.1 / §17.4).
+    // generic so this names no concrete port.
     let (mem_map, mmio_map_facility, dma_alloc_facility) = live_producers(state.arch.as_ref());
 
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
@@ -974,7 +964,7 @@ fn run_phases<A: KernelArch>(
             // The same leaked-`'static` allocator, handed to the spawn
             // producer as a `'static` page-table frame source so a child's
             // page tables come from reclaimable RAM that scales with the
-            // machine rather than a fixed `.bss` pool (`AGENTS.md` §24.1).
+            // machine rather than a fixed `.bss` pool.
             &state.frame_allocator,
             programs,
             spawn_service,
@@ -987,18 +977,16 @@ fn run_phases<A: KernelArch>(
         // Serve the users database the boot path loaded off the mounted
         // root volume (`plans/PI.md` P11); the default `NULL_USERS_DB`
         // keeps `users_db_read` fail-closed when no root volume was
-        // mounted (`AGENTS.md` §5.4.5).
+        // mounted.
         .with_users_db(users_db)
         // Serve the discovered hardware tree the boot path seeded
         // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
-        // `hw_tree_wait` fail-closed when no inventory was seeded
-        // (`AGENTS.md` §2.9 / §18.4).
+        // `hw_tree_wait` fail-closed when no inventory was seeded.
         .with_hw_tree(hw_tree)
         // Serve the user-space `log_emit` syscall through the *same*
         // diagnostic sink the kernel routes its own records through (the
         // serial UART on a debug build, the video console on release), so a
-        // capability-gated service's diagnostics land where the kernel's do
-        // (`AGENTS.md` §19.4 / §20). The default no-op sink would silently
+        // capability-gated service's diagnostics land where the kernel's do. The default no-op sink would silently
         // drop them; this is the diagnostic sink only — the audit sink stays
         // kernel-only.
         .with_log_sink(log_sink),
@@ -1013,7 +1001,7 @@ fn run_phases<A: KernelArch>(
     // the `KernelDispatchHook` so the `ipc_send` / `ipc_recv` handlers
     // resolve an endpoint against a live, kernel-owned map. It boots
     // empty — every endpoint is published at runtime by the binder that
-    // holds the bind authority (`AGENTS.md` §5.2); the phase event fires
+    // holds the bind authority; the phase event fires
     // so the boot timeline is uniform.
     phase_started(log_sink, Phase::Ipc);
     phase_ready(log_sink, Phase::Ipc);
@@ -1026,9 +1014,8 @@ fn run_phases<A: KernelArch>(
 /// (`plans/PI.md` 5d-0-ii (b′)/(c)).
 ///
 /// Each is arch-generic (it reads the current CPU from the `'static` `arch`
-/// handle and routes to the calling task's own live space, `AGENTS.md`
-/// §17.4) and `Box::leak`'d for the one-shot-publish reason `KernelState`
-/// is (`AGENTS.md` §2.1). Factored out of [`run_phases`] so the three
+/// handle and routes to the calling task's own live space) and `Box::leak`'d for the one-shot-publish reason `KernelState`
+/// is. Factored out of [`run_phases`] so the three
 /// long-typed bindings live in one place.
 fn live_producers<A: KernelArch>(
     arch: &'static A,
@@ -1051,7 +1038,7 @@ fn live_producers<A: KernelArch>(
 /// `Box::leak`s the value so the `Phase::Syscall` step can publish a
 /// `'static dyn DispatchHook` referencing its fields. The kernel
 /// never returns from `kernel_main`'s halt, so the leak is a
-/// one-shot publish, not a global mutable static (`AGENTS.md` §2.1).
+/// one-shot publish, not a global mutable static.
 ///
 /// `kernel_main` keeps the `'static` reference around for the
 /// duration of the audit/halt sequence; future stages will hand it to
@@ -1072,21 +1059,20 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// every `ipc_send` / `ipc_recv` to resolve the endpoint carried
     /// in the syscall against the live, kernel-owned [`PortRegistry`];
     /// the binder that holds the bind authority publishes endpoints
-    /// into it at runtime (`AGENTS.md` §5.2). Wrapped in the same
+    /// into it at runtime. Wrapped in the same
     /// reader-preferring `RwLock` as `caps` so the syscall hot path
     /// takes only a shared lock and the kernel composes both
-    /// registries under one lock-ordering policy (`AGENTS.md` §2.1 —
-    /// the registry itself owns no lock, mirroring `CapTable`).
+    /// registries under one lock-ordering policy (the registry itself owns no lock, mirroring `CapTable`).
     pub(crate) ipc: RwLock<PortRegistry>,
     /// Per-task address-space registry backing the kernel's
-    /// `copy_from_user` / `copy_to_user` boundary (`AGENTS.md` §5.4).
+    /// `copy_from_user` / `copy_to_user` boundary.
     /// Maps a task's [`rustos_kernel_sec::TaskId`] to its user
     /// [`rustos_kernel_mem::AddressSpace`] and the [`PhysMap`] that
     /// backs it, so a syscall handler can resolve the caller's task id
     /// to the pair [`rustos_kernel_mem::uaccess`] walks. Wrapped in the
     /// same reader-preferring `RwLock` as `caps` / `ipc` so the syscall
     /// hot path takes only a shared lock and the kernel composes every
-    /// registry under one lock-ordering policy (`AGENTS.md` §2.1 — the
+    /// registry under one lock-ordering policy (the
     /// registry owns no lock of its own).
     ///
     /// [`PhysMap`]: rustos_kernel_mem::PhysMap
@@ -1099,17 +1085,16 @@ pub(crate) struct KernelState<A: KernelArch> {
     // populated by the spawner and withdrawn on `exit` once those call
     // sites reach it.
     pub(crate) aspaces: RwLock<AddressSpaceRegistry>,
-    /// The kernel's single cryptographic random output reserve
-    /// (`AGENTS.md` §22). The `KernelDispatchHook` borrows it so
+    /// The kernel's single cryptographic random output reserve. The `KernelDispatchHook` borrows it so
     /// `random_get` draws CSPRNG output from it before copying the
     /// bytes into the caller's buffer. It boots **unseeded** over the
     /// [`NullEntropy`](crate::random::NullEntropy) source, so a draw fails closed with
     /// [`rustos_abi::Errno::EntropyNotReady`] until the platform-RNG
-    /// entropy seam (`AGENTS.md` §17.2) re-seeds the boxed reserve in
+    /// entropy seam re-seeds the boxed reserve in
     /// place. Held type-erased behind a `Box<dyn RandomReserve>` and
     /// wrapped in the same reader-preferring `RwLock` as `caps` / `ipc`
     /// / `aspaces` (the draw takes the write guard because the reserve
-    /// mutates its buffer as it serves, `AGENTS.md` §2.1).
+    /// mutates its buffer as it serves).
     pub(crate) rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
     pub(crate) arch: Arc<A>,
     /// Audit sink the dispatch hook emits security-relevant records
@@ -1191,7 +1176,7 @@ mod tests {
 
     fn leak_dispatch_slot() -> &'static crate::DispatchCallbackSlot {
         // Mirrors the bin-crate `static DISPATCH_SLOT` convention but
-        // with `Box::leak` (`AGENTS.md` §2.9 — permitted in tests).
+        // with `Box::leak` (permitted in tests).
         Box::leak(Box::new(crate::DispatchCallbackSlot::new()))
     }
 
@@ -1319,8 +1304,7 @@ mod tests {
         // report pump) keeps the loop from ever idling and the log freezes
         // on real silicon (the transmit-FIFO interrupt does not self-sustain
         // the drain). Before the fix the Ran arm only drained deferred wakes
-        // and never pumped, so this count stayed `0` (`AGENTS.md` §17.1 /
-        // §2.16 / §20).
+        // and never pumped, so this count stayed `0`.
         let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
@@ -1388,8 +1372,7 @@ mod tests {
         // The production `KernelInitSpawner` must forward a driver spawn to
         // the architecture's `ProcessSpawn::spawn_with` with the gate-derived
         // capability set and argument vector intact, returning the producer's
-        // PID — the path the bin crate's driver autoloader drives
-        // (`AGENTS.md` §17.1 / §18.3).
+        // PID — the path the bin crate's driver autoloader drives.
         let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
@@ -1537,8 +1520,7 @@ mod tests {
 
     /// (f4) — installing into a slot that already holds a hook
     /// surfaces [`InitError::DispatcherAlreadyInstalled`] under
-    /// `Phase::Syscall`, **not** silently overwriting (`AGENTS.md`
-    /// §5.4.5 — fail closed).
+    /// `Phase::Syscall`, **not** silently overwriting (fail closed).
     #[test]
     fn run_phases_fails_under_syscall_when_slot_already_installed() {
         use crate::dispatch_slot::{DispatchHook, DispatchOutcome};

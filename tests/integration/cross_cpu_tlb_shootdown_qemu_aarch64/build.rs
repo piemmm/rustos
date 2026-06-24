@@ -2,7 +2,7 @@
 //! on the freestanding `aarch64-unknown-none` target. Mirrors
 //! `tests/integration/ipi_smp_qemu_aarch64/build.rs`; all aarch64
 //! verticals reference the single per-arch linker script the
-//! architecture port owns (`AGENTS.md` §2.2 — no duplication).
+//! architecture port owns (no duplication).
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();

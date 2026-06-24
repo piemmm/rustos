@@ -2,7 +2,7 @@
 //! [`EndpointId`] to the live [`Port`] bound to it.
 //!
 //! A [`Port`] on its own is anonymous — [`Port::create`] performs the
-//! bind-time capability check (`AGENTS.md` §5.2) and hands back an owned
+//! bind-time capability check and hands back an owned
 //! value, but nothing yet lets a *sender* or *receiver* reach it by its
 //! [`EndpointId`]. The syscall dispatcher's `ipc_send` / `ipc_recv`
 //! handlers need exactly that lookup: given the endpoint number carried
@@ -21,7 +21,7 @@
 //! index only ever points at a live binding (publishing requires the
 //! endpoint to be registered, and unregistering it withdraws its names),
 //! so a name can never resolve to a torn-down port. A name grants no
-//! authority of its own (`AGENTS.md` §5.2).
+//! authority of its own.
 //!
 //! # No interior mutability
 //!
@@ -29,14 +29,14 @@
 //! `&self` / `&mut self` surface and owns no lock of its own; the
 //! synchronisation policy lives with the kernel's `KernelState`, which
 //! composes the registry with the scheduler and the capability table
-//! under one lock-ordering policy (`AGENTS.md` §2.1 — no global mutable
+//! under one lock-ordering policy (no global mutable
 //! static). Lookups borrow `&self` (so concurrent senders share a read
 //! guard); registration and unregistration take `&mut self`.
 //!
 //! # Fail closed
 //!
 //! Every state-changing operation emits exactly one audit record before
-//! returning (`AGENTS.md` §5.4):
+//! returning:
 //!
 //! * [`PortRegistry::register`] refuses to overwrite a live binding. A
 //!   duplicate [`EndpointId`] returns the *supplied* port back to the
@@ -44,7 +44,7 @@
 //!   the rejected port down) and emits [`AuditEvent::PortRegisterDenied`];
 //!   the existing binding is left untouched.
 //! * [`PortRegistry::unregister`] destroys the removed port (draining any
-//!   in-flight messages, `AGENTS.md` §5.4) and emits
+//!   in-flight messages) and emits
 //!   [`AuditEvent::PortUnregistered`]; unregistering an unknown endpoint
 //!   returns [`Errno::NotFound`].
 //!
@@ -83,12 +83,12 @@ use crate::port::{EndpointId, Port};
 /// know. To let a process reach a *well-known* endpoint — the desktop's
 /// pointer-input port, the keyboard port, a system service — without
 /// hard-coding that number, an endpoint may additionally be published
-/// under a validated [`PortName`] (`AGENTS.md` §9). The name index is a
+/// under a validated [`PortName`]. The name index is a
 /// pure pointer into the endpoint map: a name only ever resolves to a
 /// live binding, and unregistering an endpoint withdraws every name that
 /// resolved to it, so a resolution can never dangle. Publishing a name
 /// grants no authority of its own; the per-send capability check on
-/// [`Port::send`] is unchanged (`AGENTS.md` §5.2).
+/// [`Port::send`] is unchanged.
 #[derive(Default)]
 pub struct PortRegistry {
     ports: BTreeMap<EndpointId, Port>,
@@ -113,8 +113,7 @@ impl PortRegistry {
     /// port's [`EndpointId`] is already bound. The existing binding is
     /// left untouched and the *supplied* `port` is handed back (boxed so
     /// the error variant stays small) so the caller can [`Port::destroy`]
-    /// it; the kernel never silently overwrites a live endpoint
-    /// (`AGENTS.md` §5.4).
+    /// it; the kernel never silently overwrites a live endpoint.
     ///
     /// On refusal exactly one [`AuditEvent::PortRegisterDenied`] is
     /// emitted; on success exactly one [`AuditEvent::PortRegistered`].
@@ -180,8 +179,7 @@ impl PortRegistry {
         };
 
         // Withdraw every name that resolved to this endpoint before the
-        // port is gone, so a resolution can never dangle (`AGENTS.md`
-        // §5.4). Collect first because removal mutates the map.
+        // port is gone, so a resolution can never dangle. Collect first because removal mutates the map.
         let orphaned: Vec<PortName> = self
             .names
             .iter()
@@ -229,7 +227,7 @@ impl PortRegistry {
     ///
     /// * [`Errno::AlreadyExists`] if `name` is already published. The
     ///   existing binding is left untouched; the kernel never silently
-    ///   re-points a live name (`AGENTS.md` §5.4).
+    ///   re-points a live name.
     /// * [`Errno::NotFound`] if `id` is not a currently-registered
     ///   endpoint, so a name can never resolve to a non-existent port.
     ///

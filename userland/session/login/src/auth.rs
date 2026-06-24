@@ -2,14 +2,12 @@
 //! `/System/Security/Users` database.
 //!
 //! [`UsersAuthenticator`] is the seam implementation the login binary wires
-//! once the database text has been read from `/System/Security/Users`
-//! (`AGENTS.md` §5.1, §16.2). All verification lives in `lib/users`:
+//! once the database text has been read from `/System/Security/Users`. All verification lives in `lib/users`:
 //! PBKDF2-HMAC-SHA256 through `lib/crypto`, constant-time hash comparison,
-//! and a timing-equalised refusal for unknown or locked accounts
-//! (`AGENTS.md` §19.1). This type only adapts the database's answer to the
+//! and a timing-equalised refusal for unknown or locked accounts. This type only adapts the database's answer to the
 //! [`Authenticator`] contract — every refusal becomes the same
 //! [`Errno::PermissionDenied`], so the prompt cannot probe for valid
-//! usernames (`AGENTS.md` §5.4).
+//! usernames.
 
 use alloc::string::ToString;
 
@@ -50,7 +48,7 @@ impl Authenticator for UsersAuthenticator<'_> {
 /// An [`Authenticator`] wired when no user database is held: every attempt
 /// is refused with the same error, so an installer image — or a boot that
 /// has not yet unlocked the encrypted root that carries the database — sits
-/// at a prompt that grants nothing (`AGENTS.md` §5.4.5 — fail closed, never
+/// at a prompt that grants nothing (fail closed, never
 /// invent an account). Paired with [`UsersAuthenticator`] by
 /// [`supervise`](crate::supervise::supervise), which wires this whenever a
 /// round's database reload returns nothing.

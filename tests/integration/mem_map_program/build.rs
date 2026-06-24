@@ -6,7 +6,7 @@
 //! It is deliberately self-contained — it does not depend on the
 //! `tests/integration` harness — and keys only off the OS component of the
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
-//! cfg-check` (`AGENTS.md` §17.2) stays clean.
+//! cfg-check` stays clean.
 //!
 //! The consuming vertical (`mem_map_qemu_aarch64`) sets `RUSTOS_MEM_MAP_ADDR`
 //! and `RUSTOS_MEM_MAP_LEN` when it compiles this program, so a changed region

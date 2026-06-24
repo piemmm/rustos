@@ -1,4 +1,4 @@
-//! §17.1 acceptance test: the EEVDF policy must pass the shared
+//! acceptance test: the EEVDF policy must pass the shared
 //! [`rustos_kernel_sched_api::conformance`] suite.
 //!
 //! Every concrete scheduler runs the same suite against itself; the

@@ -3,14 +3,13 @@
 //!
 //! Under Design D the one bootstrap-floor disk is owned for the life of the
 //! system by the never-returning kernel driver-store service, which keeps
-//! the read-only signed-bundle `/System` volume mounted (`AGENTS.md` §18.3 /
-//! §18.4). The user-space device manager reaches that service through a
+//! the read-only signed-bundle `/System` volume mounted. The user-space device manager reaches that service through a
 //! single capability-gated synchronous IPC call endpoint — the
 //! [`rustos_abi::SyscallNumber::IPC_CALL`] surface served by the kernel over
 //! the well-known [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`].
 //!
 //! This module is the client half of the [`rustos_abi::driver_store`] wire
-//! protocol. It owns *policy* only (`AGENTS.md` §4): it
+//! protocol. It owns *policy* only: it
 //! [`fetch_catalogue`]s the store (opaque `bundle_id` + the bind table the
 //! kernel decoded from each bundle's signed manifest), and — once it has
 //! matched a node — asks the kernel to [`load_driver`] one bundle for one
@@ -18,9 +17,8 @@
 //! kernel TCB; this client never sees a `/System` path or an image byte. The
 //! [`DriverStoreCall`] seam abstracts the one `ipc_call` transition so the
 //! framing/decoding is host-tested against a scripted double, independently
-//! of the freestanding `rustos_rt::ipc_call` syscall it binds in production
-//! (`AGENTS.md` §2.2). The kernel re-checks the caller's
-//! [`rustos_abi::CapabilityId::DRV_LOAD`] on every call (`AGENTS.md` §5.2);
+//! of the freestanding `rustos_rt::ipc_call` syscall it binds in production. The kernel re-checks the caller's
+//! [`rustos_abi::CapabilityId::DRV_LOAD`] on every call;
 //! this client adds no authority.
 
 extern crate alloc;
@@ -35,7 +33,7 @@ use rustos_devmatch::DriverCandidate;
 
 /// The single synchronous driver-store IPC call the client issues,
 /// abstracted so the protocol logic is host-testable against a scripted
-/// double (`AGENTS.md` §2.2).
+/// double.
 ///
 /// The production implementation (the freestanding `devmgr` `Run` binary)
 /// backs it with `rustos_rt::ipc_call` to
@@ -50,15 +48,13 @@ pub trait DriverStoreCall {
     /// The [`Errno`] the call failed with — a missing send capability
     /// ([`Errno::PermissionDenied`]), an unbound endpoint
     /// ([`Errno::NotFound`]), or a reply larger than `reply`
-    /// ([`Errno::BufferTooSmall`]). The client surfaces it fail-closed
-    /// (`AGENTS.md` §2.9), never a truncated reply.
+    /// ([`Errno::BufferTooSmall`]). The client surfaces it fail-closed, never a truncated reply.
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
 }
 
 /// One installed driver bundle, as the catalogue exposes it: the opaque
 /// kernel `bundle_id` to name in a [`load_driver`] request, and the bind
-/// table the kernel decoded from the bundle's signed manifest (`AGENTS.md`
-/// §18.3 / §18.6).
+/// table the kernel decoded from the bundle's signed manifest.
 ///
 /// The device manager matches [`Self::candidate`] against each discovered
 /// hardware-tree node with [`rustos_devmatch::resolve`]; the matched
@@ -69,7 +65,7 @@ pub struct CatalogueDriver {
     /// issued this catalogue (a stable index into the kernel's deterministic
     /// store scan).
     pub bundle_id: u32,
-    /// The bundle's decoded bind table (`AGENTS.md` §18.3).
+    /// The bundle's decoded bind table.
     pub bind_keys: Vec<DriverBindKey>,
 }
 
@@ -79,7 +75,7 @@ impl CatalogueDriver {
     /// The `path` field is unused by [`rustos_devmatch::resolve`] (matching
     /// is pure bind-key comparison); the device manager keys the load on
     /// [`Self::bundle_id`], so the kernel resolves the path itself and no
-    /// `/System` path ever crosses to user space (`AGENTS.md` §4).
+    /// `/System` path ever crosses to user space.
     #[must_use]
     pub fn candidate(&self) -> DriverCandidate<'_> {
         DriverCandidate {
@@ -91,11 +87,11 @@ impl CatalogueDriver {
 
 /// Fetch the installed driver catalogue by issuing one
 /// [`StoreRequest::Catalogue`] call through `call` and decoding the framed
-/// reply into owned [`CatalogueDriver`] records (`AGENTS.md` §18.3 / §18.6).
+/// reply into owned [`CatalogueDriver`] records.
 ///
 /// `reply_buf` is the caller-owned buffer the reply is received into; a
 /// catalogue that does not fit it fails closed ([`Errno::BufferTooSmall`]
-/// from the transport), never truncated (`AGENTS.md` §2.9 / §24.1).
+/// from the transport), never truncated.
 ///
 /// # Errors
 ///
@@ -115,7 +111,7 @@ pub fn fetch_catalogue<C: DriverStoreCall + ?Sized>(
         DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
     for entry in decode_catalogue_reply(&reply_buf[..reply_len])? {
         // A truncated entry fails the whole catalogue closed rather than
-        // yielding a partial inventory (`AGENTS.md` §2.9).
+        // yielding a partial inventory.
         let entry = entry?;
         let count = entry.decode_keys(&mut keys)?;
         drivers.push(CatalogueDriver {
@@ -129,16 +125,16 @@ pub fn fetch_catalogue<C: DriverStoreCall + ?Sized>(
 /// Ask the kernel to load the bundle `bundle_id` for the matched hardware-
 /// tree node `node_id`, returning the loaded driver's handle.
 ///
-/// The kernel re-reads the bundle, re-runs the full signed §8 gate, and
+/// The kernel re-reads the bundle, re-runs the full signed gate, and
 /// spawns it with **only** the resources `node_id` requested — the device
-/// manager supplies no bytes and no grants (`AGENTS.md` §4 / §18.3). `reply`
+/// manager supplies no bytes and no grants. `reply`
 /// is the caller-owned buffer the framed reply is received into.
 ///
 /// # Errors
 ///
 /// The [`Errno`] from the transport ([`DriverStoreCall::call`]) or the
 /// in-band error the kernel framed (an unknown id, or the load gate's
-/// refusal) — surfaced fail-closed (`AGENTS.md` §2.9).
+/// refusal) — surfaced fail-closed.
 pub fn load_driver<C: DriverStoreCall + ?Sized>(
     call: &mut C,
     bundle_id: u32,
@@ -272,8 +268,8 @@ mod tests {
 
     #[test]
     fn load_driver_surfaces_the_gate_refusal_fail_closed() {
-        // The kernel framed the §8 gate's refusal in band; the client
-        // surfaces it rather than fabricating a handle (`AGENTS.md` §2.9).
+        // The kernel framed the gate's refusal in band; the client
+        // surfaces it rather than fabricating a handle.
         let mut store = FailingStore(Errno::SignatureInvalid);
         let mut buf = [0u8; 64];
         assert_eq!(

@@ -1,5 +1,5 @@
 //! Shared bring-up scaffolding for the Stage 4.D Item 4 virtio QEMU
-//! integration tests (`AGENTS.md` §2.2 — no duplication).
+//! integration tests (no duplication).
 //!
 //! Every per-device QEMU vertical (virtio-blk, virtio-net) on every
 //! architecture (x86_64 PCI, riscv64 `virt`-board MMIO) boots the

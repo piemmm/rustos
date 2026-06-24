@@ -1,6 +1,6 @@
 //! Map a validated `rxe` load image into an [`AddressSpace`].
 //!
-//! The §19.2 load-time policy — W^X segments, mandatory PIE, the CFI
+//! The load-time policy — W^X segments, mandatory PIE, the CFI
 //! type-tag, and the KASLR bias — is enforced by `rustos_abi::rxe` when a
 //! [`LoadImage`] is parsed. This module is the kernel-side step that
 //! consumes a *already-validated* image and materialises it: every segment
@@ -9,8 +9,7 @@
 //!
 //! W^X holds twice over: the loader never constructs a writable-and-
 //! executable [`MapFlags`] (a [`RxePermission`] cannot be both), and the
-//! underlying [`PageTable`] backend independently rejects any such combination
-//! (`AGENTS.md` §4 / §19.2). Frame allocation is injected as a closure so
+//! underlying [`PageTable`] backend independently rejects any such combination. Frame allocation is injected as a closure so
 //! this module stays free of any particular allocator and is fully
 //! host-testable.
 
@@ -51,7 +50,7 @@ impl From<PageTableError> for LoadError {
 ///
 /// Always user-accessible and readable; execute and write are added per
 /// the permission. The write-and-execute combination is unrepresentable
-/// because [`RxePermission`] cannot be both (the §19.2 W^X invariant).
+/// because [`RxePermission`] cannot be both (the W^X invariant).
 #[must_use]
 pub fn map_flags_for(perm: RxePermission) -> MapFlags {
     let base = MapFlags::READ | MapFlags::USER;
@@ -107,7 +106,7 @@ where
 /// process-image builder ([`crate::spawn`]); the per-page hook lets the
 /// builder fill each freshly mapped frame with segment content, a zeroed
 /// stack, or the startup-vector block without duplicating the mapping
-/// arithmetic (`AGENTS.md` §2.2).
+/// arithmetic.
 ///
 /// The error type `E` is generic so callers can thread their own richer
 /// error (e.g. [`crate::spawn::SpawnError`]) through the `per_page` hook while

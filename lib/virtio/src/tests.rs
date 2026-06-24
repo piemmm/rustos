@@ -206,9 +206,9 @@ fn poll_used_returns_no_completion_when_empty() {
 
 #[test]
 fn poll_used_rejects_a_device_head_outside_the_descriptor_table() {
-    // §3.6 (CWE-1257 / Thunderclap): a hostile device publishes a used
+    // (CWE-1257 / Thunderclap): a hostile device publishes a used
     // completion whose head escapes the granted descriptor table. The
-    // driver must reject it fail-closed (`AGENTS.md` §5.4), never walk a
+    // driver must reject it fail-closed, never walk a
     // descriptor outside the region.
     let mut t = MockTransport::new(1, 4, 0, 0);
     let host = static_host();
@@ -223,7 +223,7 @@ fn poll_used_rejects_a_device_head_outside_the_descriptor_table() {
 
 #[test]
 fn poll_used_reclaim_bails_on_a_corrupted_next_link() {
-    // §3.6: a device DMA-scribbles a descriptor's chain `next` link so it
+    // a device DMA-scribbles a descriptor's chain `next` link so it
     // points outside the table. Reclaiming the chain the device names
     // must bail at the boundary rather than dereference out of region.
     let mut t = MockTransport::new(1, 4, 0, 0);

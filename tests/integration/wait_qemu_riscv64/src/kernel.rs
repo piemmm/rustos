@@ -55,7 +55,7 @@ const USER_STACK_PAGES: u64 = 288;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands the two builds (image segments + the user
@@ -112,8 +112,8 @@ static ALLOCATOR: FreeListAllocator =
 /// Per-space page-table pools: one for the child and one for the parent. Each
 /// backs an Sv39 hierarchy whose root [`activate_user_root`] reinstalls (via
 /// `satp`) before every switch into its task, so the two tasks stay
-/// hardware-isolated (`AGENTS.md` §4). A `.bss` reserve, monotonic and never
-/// freed (`AGENTS.md` §2.1).
+/// hardware-isolated. A `.bss` reserve, monotonic and never
+/// freed.
 static CHILD_PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 static PARENT_PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 
@@ -122,7 +122,7 @@ static PARENT_PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();
 /// mapped (its physical address equals its kernel virtual address), so the
 /// builders reach it through [`DirectPhysMap::identity`]. A single monotonic
 /// cursor ([`FRAME_CURSOR`]) hands disjoint frames to both builds, so the two
-/// address spaces never share a data frame (`AGENTS.md` §4).
+/// address spaces never share a data frame.
 #[repr(C, align(4096))]
 struct FramePool([u8; paging::PAGE_SIZE * FRAME_COUNT]);
 
@@ -166,8 +166,8 @@ fn wait_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen either program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen either program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -221,8 +221,7 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// the parent's `status` pointer and records whether the round-trip matched.
 /// `exit` records the caller's exit code with the producer and reaps the caller
 /// (`reschedule_current`); a parent that exits 0 after a verified reap is the
-/// PASS. Any other syscall is unexpected and fails the test loudly
-/// (`AGENTS.md` §7).
+/// PASS. Any other syscall is unexpected and fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the trap
     // handler built from the saved register frame.
@@ -283,7 +282,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 
 /// Copy `code` (as the parent's `i32` status) out to the parent's `status`
 /// pointer through the retained frozen parent space. Returns `false` on a
-/// faulting or unmapped pointer (fail closed, `AGENTS.md` §5.4).
+/// faulting or unmapped pointer (fail closed).
 fn copy_status_to_parent(status_va: u64, code: i32) -> bool {
     let guard = PARENT_SPACE.lock();
     let Some((space, physmap)) = guard.as_ref() else {
@@ -366,7 +365,7 @@ fn build_user_space(pool: &'static paging::PageTablePool, rxe: &'static [u8]) ->
 }
 
 /// Admit `entry` as a resumable user kthread whose `pre_resume` hook reactivates
-/// `root_phys` before every switch-in (isolation, §4). Returns its task id.
+/// `root_phys` before every switch-in (isolation). Returns its task id.
 /// The kernel-stack top the hook is handed (`_top`) is unused on riscv64:
 /// `sscratch` is per-task hardware state armed by `userentry::enter_user` and
 /// re-armed by the RV1 trap vector from each task's own kernel-stack frame on
@@ -406,7 +405,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     note(TEST_START, "riscv64 RV-X4 wait test: starting");
 
     // Read the timer frequency from the firmware tree. Fail closed (finisher)
-    // if it is omitted rather than guessing a divisor (`AGENTS.md` §5.4).
+    // if it is omitted rather than guessing a divisor.
     // SAFETY: `dtb` is the verbatim `a1` pointer OpenSBI handed the boot hart;
     // `boot.s` forwards it unchanged.
     let Some(timebase) = (unsafe { Fdt::from_ptr(dtb as *const u8) })
@@ -439,7 +438,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // Build the live scheduler and the process-wait producer, leaking both
     // `'static` so the dispatch callback can reach them.
     // Single-hart slice: one per-CPU slot each, owned by an allocator-free
-    // `static` backing (`AGENTS.md` §24.1).
+    // `static` backing.
     static SCHED_STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = Arc::new(RiscvArch::new(&SCHED_STORAGE, BOOT_CPU, timebase));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -471,7 +470,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
 
     // Cooperative dispatch loop. The parent's `wait` parks it until the child
     // exits; the parent's verified `exit(0)` is the PASS (raised from the
-    // dispatch callback). A never-draining loop times out (fail-loud, §7).
+    // dispatch callback). A never-draining loop times out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

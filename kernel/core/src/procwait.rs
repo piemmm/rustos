@@ -24,8 +24,7 @@
 //! `with_process_wait` builder and the handler reaches it through this trait.
 //!
 //! Until a producer is installed the handler holds [`NULL_PROCESS_WAIT`],
-//! which fails closed: every `wait` returns [`Errno::NotImplemented`]
-//! (`AGENTS.md` §2.9) and the bookkeeping hooks are inert — exactly as
+//! which fails closed: every `wait` returns [`Errno::NotImplemented`] and the bookkeeping hooks are inert — exactly as
 //! [`NULL_MEM_MAP`](crate::memmap::NULL_MEM_MAP) and
 //! [`NULL_PROCESS_SPAWN`](crate::spawn::NULL_PROCESS_SPAWN) do for their
 //! syscalls.
@@ -49,7 +48,7 @@ use crate::kthread::reschedule_current;
 pub struct ReapedChild {
     /// PID of the child that was reaped.
     pub pid: u32,
-    /// The exit code the child passed to `exit` (`AGENTS.md` §20 — the
+    /// The exit code the child passed to `exit` (the
     /// program's terminating status).
     pub code: i32,
 }
@@ -76,7 +75,7 @@ pub trait ProcessWait: Sync {
     /// has already validated that the caller passed a non-null `status`
     /// pointer (the dispatcher rejects a null `UserPtr`); the implementation
     /// validates the parent/child relationship — a process may only reap its
-    /// **own** children (`AGENTS.md` §4 / §5.4) — and fails closed.
+    /// **own** children — and fails closed.
     ///
     /// # Errors
     ///
@@ -90,7 +89,7 @@ pub trait ProcessWait: Sync {
     ///
     /// Called from the `spawn` admit path the instant a child is admitted,
     /// so a subsequent [`Self::wait`] can validate the parent/child
-    /// relationship and reap it (`AGENTS.md` §4 — a process may only reap
+    /// relationship and reap it (a process may only reap
     /// its own children). The default is a no-op so the fail-closed default
     /// and the host-test doubles need not restate it.
     fn register_child(&self, _parent: TaskId, _child: TaskId) {}
@@ -107,7 +106,7 @@ pub trait ProcessWait: Sync {
 /// The process-wait producer installed before any real one exists.
 ///
 /// Every wait fails closed with [`Errno::NotImplemented`] — the fail-closed
-/// default `AGENTS.md` §2.9 / §5.4 require, so a `wait` issued before the
+/// default require, so a `wait` issued before the
 /// boot path installs the scheduler-side producer announces an inert
 /// interface rather than fabricating a reaped child or an exit code. The
 /// bookkeeping hooks inherit the no-op trait defaults.
@@ -160,7 +159,7 @@ pub enum Reap {
 /// ([`Self::record_exit`]), and removed when its parent reaps it
 /// ([`Self::reap`]). The map is intentionally tiny and append/remove only —
 /// the scheduler owns task lifetimes; this only remembers the parent link
-/// and the terminal status the scheduler does not (`AGENTS.md` §2.3).
+/// and the terminal status the scheduler does not.
 #[derive(Debug, Default)]
 pub struct ProcessTable {
     children: BTreeMap<u64, ChildEntry>,
@@ -204,7 +203,7 @@ impl ProcessTable {
     ///
     /// `pid` is [`rustos_abi::WAIT_ANY`] for any child or a specific child's
     /// id. Among the matching children: the first (lowest-id, for
-    /// determinism, `AGENTS.md` §18.3) that has already exited is removed
+    /// determinism) that has already exited is removed
     /// and returned as [`Reap::Ready`]; if matching children exist but none
     /// has exited the result is [`Reap::Blocked`]; if no child matches it is
     /// [`Reap::NoChild`]. A negative `pid` other than [`rustos_abi::WAIT_ANY`]
@@ -216,7 +215,7 @@ impl ProcessTable {
         } else {
             // A specific child id must be a valid non-negative task id; any
             // other negative selector (not WAIT_ANY) names no child and fails
-            // closed rather than matching anything (`AGENTS.md` §5.4).
+            // closed rather than matching anything.
             match u64::try_from(pid) {
                 Ok(id) => Some(id),
                 Err(_) => return Reap::NoChild,
@@ -245,7 +244,7 @@ impl ProcessTable {
             self.children.remove(&child_id);
             // Scheduler task ids stay well within `u32` for every supported
             // configuration; a value that would not fit saturates rather
-            // than wrapping (`AGENTS.md` §5.4 — never silently truncate).
+            // than wrapping (never silently truncate).
             let pid = u32::try_from(child_id).unwrap_or(u32::MAX);
             Reap::Ready(ReapedChild { pid, code })
         } else if any_match {
@@ -262,7 +261,7 @@ impl ProcessTable {
 /// Owns the [`ProcessTable`] bookkeeping and blocks a waiting parent by
 /// cooperatively parking it back on the scheduler — through
 /// [`reschedule_current`] — until one of its children becomes reapable,
-/// mirroring the `irq_wait` poll-and-yield loop (`AGENTS.md` §2.1 — no
+/// mirroring the `irq_wait` poll-and-yield loop (no
 /// busy-spin). It needs only the arch handle (to read the current CPU for
 /// the park) and the table; the park itself is the free
 /// [`reschedule_current`] primitive, so the producer never touches the
@@ -300,7 +299,7 @@ where
     fn record_exit(&self, task: TaskId, code: i32) {
         self.table.lock().record_exit(task, code);
         // Wake every parent parked in `wait`: the exiting task may be the
-        // child one is blocked on (`AGENTS.md` §2.1 — a real park woken by
+        // child one is blocked on (a real park woken by
         // the exit event). The lock is released above before the wake.
         crate::waitq::procwait_wake();
     }
@@ -317,7 +316,7 @@ where
                 Reap::NoChild => return Err(Errno::NotFound),
                 Reap::Blocked => {
                     // **Park** the caller off the run queue until a child
-                    // exits (`AGENTS.md` §2.1 — never a busy-yield): a
+                    // exits (never a busy-yield): a
                     // re-enqueuing yield here would keep the run queue
                     // non-empty forever, so the dispatch loop could never
                     // reach its idle `wait_for_interrupt` and a device IRQ
@@ -330,8 +329,7 @@ where
                     // use). Reaping is an explicit event, so the registration
                     // carries `NO_DEADLINE` (no timed wake). A `false`
                     // reschedule means no resumable user kthread is published
-                    // on this CPU — fail closed rather than busy-spin
-                    // (`AGENTS.md` §2.9 / §5.4.5).
+                    // on this CPU — fail closed rather than busy-spin.
                     let cpu = self.arch.current_cpu();
                     crate::waitq::PROCWAIT_WAITQ.register(parent.0, crate::waitq::NO_DEADLINE);
                     let parked = reschedule_current(cpu, RescheduleAction::Park);
@@ -491,7 +489,7 @@ mod tests {
         let p = producer();
         p.register_child(TaskId(1), TaskId(2));
         p.record_exit(TaskId(2), 0);
-        // Task 9 never spawned child 2: it may not reap it (`AGENTS.md` §4).
+        // Task 9 never spawned child 2: it may not reap it.
         assert_eq!(p.wait(TaskId(9), WAIT_ANY), Err(Errno::NotFound));
         assert_eq!(p.wait(TaskId(9), 2), Err(Errno::NotFound));
     }
@@ -502,7 +500,7 @@ mod tests {
         // A registered-but-unexited child would block. In a host test no
         // resumable user kthread is published, so the park cannot proceed and
         // the producer fails closed with `NotImplemented` rather than
-        // busy-spinning forever (`AGENTS.md` §2.1 / §2.9).
+        // busy-spinning forever.
         p.register_child(TaskId(1), TaskId(2));
         assert_eq!(p.wait(TaskId(1), WAIT_ANY), Err(Errno::NotImplemented));
     }

@@ -28,7 +28,7 @@
 //! | `entry`       | `rustos_arch_aarch64_main` Rust trampoline (freestanding only). |
 //! | `panic`       | Shared `#[panic_handler]` bridge (freestanding only).           |
 //!
-//! # Arch HAL boundary (`AGENTS.md` §17.2 / §17.4)
+//! # Arch HAL boundary
 //!
 //! Like x86_64 and riscv64, this crate is a pure Arch HAL
 //! implementation: it names only `kernel/arch/api` and `lib/*`, never a
@@ -52,7 +52,7 @@
 #![deny(missing_docs)]
 
 // Host unit tests use `std` where convenient; the crate itself stays
-// `no_std` for the freestanding build (`AGENTS.md` §1 — no hacks).
+// `no_std` for the freestanding build (no hacks).
 #[cfg(test)]
 extern crate std;
 
@@ -88,7 +88,7 @@ core::arch::global_asm!(include_str!("smp.s"));
 pub mod console;
 pub mod context;
 /// aarch64 implementation of the Arch HAL context-switch surface
-/// ([`rustos_arch_api::ContextSwitch`], `AGENTS.md` §17.2): the
+/// ([`rustos_arch_api::ContextSwitch`]): the
 /// architecture-neutral first-frame seeding + task switch over the
 /// bare-metal primitive in [`context`].
 pub mod context_hal;
@@ -101,39 +101,37 @@ pub mod exceptions;
 pub mod fault;
 /// aarch64 device-tree access: the aarch64-specific `virt`-board queries
 /// (PSCI method, generic-timer PPI, `/memory`) layered on the shared
-/// [`rustos_fdt`] parser (`AGENTS.md` §2.2 / §18.2).
+/// [`rustos_fdt`] parser.
 pub mod fdt;
 pub mod gic;
 /// Heterogeneous (`big.LITTLE`) core classification: the pure
 /// `capacity-dmips-mhz` → [`rustos_arch_api::CoreClass`] classifier
 /// [`crate::kernel_arch::Aarch64Arch`] feeds from the device tree
-/// (`AGENTS.md` §17.2 / §18.2, `plans/WIRING.md` Stage W10).
+/// (`plans/WIRING.md` Stage W10).
 pub mod hetcore;
 pub mod kernel_arch;
 /// aarch64 implementation of the Arch HAL memory-tagging surface
-/// ([`rustos_arch_api::MemoryTagging`], `AGENTS.md` §19.10) — Arm MTE
+/// ([`rustos_arch_api::MemoryTagging`]) — Arm MTE
 /// (`stg` store sequence, 16-byte / 4-bit tag granule); both slots are
 /// honestly `Pending` on the Stage 6 MTE enable (see the module docs).
 pub mod memtag;
 pub mod paging;
 /// aarch64 implementation of the Arch HAL per-CPU storage surface
-/// ([`rustos_arch_api::PerCpu`], `AGENTS.md` §17.2): the `TPIDR_EL1`
+/// ([`rustos_arch_api::PerCpu`]): the `TPIDR_EL1`
 /// system-register read/write the per-CPU anchor is reached through.
 pub mod percpu_hal;
 /// aarch64 implementation of the Arch HAL early-boot platform-discovery
-/// surface ([`rustos_arch_api::PlatformDiscovery`], `AGENTS.md` §17.2 /
-/// §18.2): the FDT → [`rustos_abi::hwtree`] normalisation built on the
+/// surface ([`rustos_arch_api::PlatformDiscovery`]): the FDT → [`rustos_abi::hwtree`] normalisation built on the
 /// [`fdt`] reader.
 pub mod platform;
 pub mod preempt;
 /// PSCI (Power State Coordination Interface) firmware calls — the
 /// `CPU_ON` secondary-core power-on path the SMP bring-up issues
-/// (`AGENTS.md` §11 / `plans/WIRING.md` W6).
+/// (`plans/WIRING.md` W6).
 pub mod psci;
 pub mod qemu_exit;
 /// aarch64 implementation of the Arch HAL side-channel mitigation
-/// surface ([`rustos_arch_api::SideChannelMitigation`], `AGENTS.md`
-/// §19.1).
+/// surface ([`rustos_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;
 /// Multi-core (SMP) secondary-core bring-up primitives: the set-once
 /// secondary entry, the `MPIDR_EL1` per-core identity read, and the PSCI
@@ -141,7 +139,7 @@ pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;
 /// aarch64 implementation of the Arch HAL timer-programming surface
-/// ([`rustos_arch_api::Timer`], `AGENTS.md` §17.2): the architecture-
+/// ([`rustos_arch_api::Timer`]): the architecture-
 /// neutral scheduler-tick callback install + dispatch over the EL1
 /// physical generic timer wired in [`preempt`].
 pub mod timer_hal;
@@ -151,12 +149,12 @@ pub mod timer_hal;
 /// omission under emulation).
 pub mod uart_init;
 /// aarch64 implementation of the Arch HAL "enter user mode" surface
-/// ([`rustos_arch_api::EnterUser`], `AGENTS.md` §17.2): the one `eret`
+/// ([`rustos_arch_api::EnterUser`]): the one `eret`
 /// sequence that drops a built process image into EL0.
 pub mod userentry;
 /// Framebuffer boot console (`plans/PI.md` P7b): console output defaults
 /// to the attached display via the `VideoCore` firmware mailbox, with
-/// the UART as the fallback when no display exists (`AGENTS.md` §10).
+/// the UART as the fallback when no display exists.
 pub mod video;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -168,7 +166,7 @@ pub mod panic;
 /// `stream_write` console backing. The MMIO transmit/receive primitives
 /// are gated to the bare-metal target (host stubs make them inert), so the
 /// pure ring discipline and the buffered-drain decision logic are
-/// host-unit-tested under `cargo test` (`AGENTS.md` §7).
+/// host-unit-tested under `cargo test`.
 pub mod serial;
 
 pub use kernel_arch::{halt_current_cpu, Aarch64Arch, Aarch64ArchStorage};

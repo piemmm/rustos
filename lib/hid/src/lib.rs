@@ -6,10 +6,10 @@
 //! driver crate — so **both** the in-kernel keyboard scaffold (transitional,
 //! `plans/PI.md` P10) and the user-space keyboard driver process
 //! (`drivers/input/usb_kbd`, the autoloaded steady state) compose it without a
-//! `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4), exactly as the
+//! `drivers/*`→`drivers/*` dependency, exactly as the
 //! bus-agnostic xHCI protocol lives in [`rustos_usb`] rather than the xHCI
-//! driver (`AGENTS.md` §2.2). The thin `drivers/input/usb_hid` driver keeps
-//! only the §8 `register` entry and the §18.3 bind table.
+//! driver. The thin `drivers/input/usb_hid` driver keeps
+//! only the `register` entry and the bind table.
 //!
 //! # What it decodes
 //!
@@ -27,8 +27,8 @@
 //! [`ReportSource`] seam, defined in `lib/abi` (`rustos_abi::driver::input`)
 //! because its producer is the xHCI driver (`drivers/bus/usb`) servicing the
 //! device's interrupt-IN endpoint, and a `lib/*` crate depends only on other
-//! `lib/*` crates (`AGENTS.md` §17.4). Host tests drive the decoders over a
-//! mock report queue — the `emmc2`/`rpi_hvs` seam shape (`AGENTS.md` §2.2):
+//! `lib/*` crates. Host tests drive the decoders over a
+//! mock report queue — the `emmc2`/`rpi_hvs` seam shape:
 //! the protocol layer is proven host-side, the transport below it on metal.
 //!
 //! # Event encoding
@@ -44,12 +44,11 @@
 //!   [`KeyInput`](rustos_abi::input::KeyInput) record through the shared
 //!   `lib/keymap` map; a driver loop injects each record through the
 //!   `key_inject` syscall ([`pump_once`], `plans/PI.md` P11), leaving the
-//!   encoding and routing to the kernel input-focus arbiter (`AGENTS.md`
-//!   §17.4). Key repeat remains a higher-layer concern.
+//!   encoding and routing to the kernel input-focus arbiter. Key repeat remains a higher-layer concern.
 //! * Mouse buttons surface as `Key` events with codes
 //!   [`mouse::BUTTON_CODE_BASE`]` + n` (`0x110`/`0x111`/`0x112` for
 //!   left/right/middle — the same codes a virtio pointer device delivers, so
-//!   the WM sees one button vocabulary, `AGENTS.md` §2.2).
+//!   the WM sees one button vocabulary).
 //! * Motion surfaces as `Pointer` events on axes [`AXIS_X`]/[`AXIS_Y`] and
 //!   wheel motion as `Scroll` on [`AXIS_Y`], matching the `lib/abi` axis
 //!   encoding (`lib/abi/src/driver/input.rs`).
@@ -63,7 +62,7 @@
 //! [`rustos_usb`], and enumerates the boot keyboard.
 //! [`service::derive_keyboard_resources`] turns the kernel-issued
 //! device-resource grants into the BAR + DMA-aperture bounds that orchestration
-//! needs. Both are arch-neutral and name no board (`AGENTS.md` §2.20).
+//! needs. Both are arch-neutral and name no board.
 //!
 //! [`Input`]: rustos_abi::driver::input::Input
 //! [`InputEventKind::Key`]: rustos_abi::driver::input::InputEventKind::Key
@@ -94,20 +93,19 @@ pub use service::{
     BringupPhase, KeyboardBringupError, KeyboardResources, KeyboardSource,
 };
 
-/// The §18.3 bind priority [`KEYBOARD_BIND_KEYS`] carries.
+/// The bind priority [`KEYBOARD_BIND_KEYS`] carries.
 ///
 /// An exact `compatible`-string match for the controller node, mirroring the
 /// other `compatible`-keyed drivers (`drivers/bus/pcie_brcm`,
 /// `drivers/storage/emmc2`, priority 10).
 const KEYBOARD_BIND_PRIORITY: u16 = 10;
 
-/// The user-space USB boot-keyboard driver's hardware bind table
-/// (`AGENTS.md` §18.3): the xHCI USB host controller, matched by the
+/// The user-space USB boot-keyboard driver's hardware bind table: the xHCI USB host controller, matched by the
 /// [`XHCI_COMPATIBLE`] `compatible` string the
 /// bus driver publishes the controller node under (`drivers/bus/usb/vl805`'s
 /// `node B`). The single source of truth the `drivers/input/usb_kbd` signed
 /// manifest's bind table is authored from and `devmgr` resolves the
-/// controller node against (`AGENTS.md` §2.2).
+/// controller node against.
 ///
 /// The keyboard driver brings the whole xHCI controller up itself — the
 /// `Xhci` controller object cannot cross a process boundary, so it binds the
@@ -119,7 +117,7 @@ pub const KEYBOARD_BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
         Ok(key) => key,
         // Unreachable: `XHCI_COMPATIBLE` is well within `HW_COMPATIBLE_MAX`.
         // A too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic (`AGENTS.md` §2.9).
+        // never a runtime panic.
         Err(_) => panic!("XHCI_COMPATIBLE fits HW_COMPATIBLE_MAX"),
     },
 )];
@@ -140,17 +138,16 @@ pub const AXIS_Y: u16 = 1;
 /// report is 3 bytes plus up to 5 device-specific trailing bytes (USB
 /// HID 1.11 §B.1/§B.2), so 8 bytes holds every report either decoder
 /// accepts. A source delivering a longer report is rejected fail-closed
-/// by the decoders' length validation (`AGENTS.md` §5.4).
+/// by the decoders' length validation.
 pub const REPORT_BUF_LEN: usize = 8;
 
 /// Upper bound on reports consumed by a single `poll`.
 ///
 /// A bound on a *defence* against a hostile or faulty device that
 /// streams reports faster than the caller drains events — not a
-/// scalable capacity (`AGENTS.md` §24.4). Undrained reports stay queued
+/// scalable capacity. Undrained reports stay queued
 /// at the source and are consumed by the next `poll`, so the bound
-/// never loses input; it only stops a single `poll` from spinning
-/// (`AGENTS.md` §2.1).
+/// never loses input; it only stops a single `poll` from spinning.
 pub const REPORT_POLL_BUDGET: usize = 64;
 
 /// The zeroed placeholder event slots of a [`PendingEvents`] hold.
@@ -166,10 +163,10 @@ const EVENT_ZERO: InputEvent = InputEvent {
 /// One boot report can decode to more events than the caller's buffer
 /// has room for (a keyboard report releasing six keys while pressing
 /// six others). The decoder always decodes a consumed report *whole*
-/// into this latch — never half-applies it (`AGENTS.md` §5.4) — and
+/// into this latch — never half-applies it — and
 /// `poll` drains the latch across calls, so no event is ever dropped.
 /// `N` is each decoder's worst-case events-per-report, a protocol
-/// constant, not a capacity (`AGENTS.md` §24.4).
+/// constant, not a capacity.
 pub(crate) struct PendingEvents<const N: usize> {
     events: [InputEvent; N],
     len: usize,
@@ -189,7 +186,7 @@ impl<const N: usize> PendingEvents<N> {
     ///
     /// The decoders bound their per-report event count by `N`, so a
     /// full latch means a decoder-internal accounting bug; surfacing it
-    /// as an error beats silently dropping input (`AGENTS.md` §2.9).
+    /// as an error beats silently dropping input.
     pub(crate) fn push(&mut self, event: InputEvent) -> Result<(), DriverError> {
         if self.len == N {
             return Err(DriverError::DeviceFault);
@@ -221,13 +218,12 @@ impl<const N: usize> PendingEvents<N> {
 ///
 /// Implemented by [`keyboard::KeyboardState`] and [`mouse::MouseState`];
 /// the shared [`poll_source`] drives either through this trait so the
-/// drain loop exists exactly once (`AGENTS.md` §2.2).
+/// drain loop exists exactly once.
 pub(crate) trait ReportDecode<const N: usize> {
     /// Decode `report` whole into `pending`, updating the device state.
     ///
     /// Must validate every byte of `report` and reject the whole report
-    /// on any failure without touching the device state (`AGENTS.md`
-    /// §5.4).
+    /// on any failure without touching the device state.
     fn decode(&mut self, report: &[u8], pending: &mut PendingEvents<N>) -> Result<(), DriverError>;
 }
 

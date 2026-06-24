@@ -1,12 +1,12 @@
 //! Deterministic fuzz harness for the `lib/partition` table parsers
-//! (`AGENTS.md` §19.5 / §19.6 — a parser of untrusted on-disk bytes).
+//! (a parser of untrusted on-disk bytes).
 //!
 //! A partition table is read off a disk that is outside RustOS's trust
 //! boundary: a flashed SD card, a USB stick, or an attacker-supplied
 //! image. A corrupt MBR signature, an overlapping or out-of-range extent,
 //! a forged GPT header, a CRC that does not match, an entries-LBA that
 //! escapes the device — all must be **rejected**, never trusted
-//! (`AGENTS.md` §5.4 — fail closed). Per §19.6 ("every parser of untrusted
+//! (fail closed). Per ("every parser of untrusted
 //! input ... has a fuzz target") the read path is driven here against
 //! arbitrary disks, with a single invariant:
 //!
@@ -14,10 +14,10 @@
 //!   (and the lower [`rustos_partition::mbr::parse`] /
 //!   [`rustos_partition::gpt::crc32`]) never panics and never reads out of
 //!   bounds — the parser returns a validated [`rustos_partition::PartitionTable`]
-//!   or a [`rustos_partition::PartitionError`] (`AGENTS.md` §2.9). The run
+//!   or a [`rustos_partition::PartitionError`]. The run
 //!   aborting *is* the failure.
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a
+//! RustOS pulls in no external fuzz runner: a
 //! per-run-seeded LCG mutates valid seed images (a real MBR from
 //! [`rustos_partition::mbr::encode`] and a CRC-correct GPT) and feeds pure
 //! noise. A plain `cargo test` runs the fixed [`SMOKE_ITERATIONS`] sweep;

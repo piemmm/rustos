@@ -1,9 +1,8 @@
 //! The closed set of reasons an SVG asset is rejected.
 //!
-//! SVG is untrusted input (`AGENTS.md` §10/§19.5): every structural or
+//! SVG is untrusted input: every structural or
 //! content problem resolves to one of these variants so the caller can fail
-//! closed to a built-in fallback rather than crash the compositor
-//! (`AGENTS.md` §2.9). The decoder never panics for any byte string.
+//! closed to a built-in fallback rather than crash the compositor. The decoder never panics for any byte string.
 
 /// Why [`decode`](crate::decode) rejected an SVG document.
 ///
@@ -35,6 +34,6 @@ pub enum SvgError {
     /// comment).
     Malformed,
     /// The document exceeded a decode resource limit (layer or vertex count),
-    /// so it is refused rather than allowed to exhaust memory (§2.9).
+    /// so it is refused rather than allowed to exhaust memory.
     TooComplex,
 }

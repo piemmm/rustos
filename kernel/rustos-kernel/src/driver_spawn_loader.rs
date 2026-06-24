@@ -9,10 +9,10 @@
 //! — Ed25519 signature against the build's trust anchor, the `CAP_DRV_LOAD`
 //! gate, the syscall-table-hash match, and bind-table validation — and then
 //! **spawned into its own hardware-isolated process** rather than run in the
-//! kernel's domain (`AGENTS.md` §4 — drivers in user space wherever
-//! feasible; §18.6 — leaf drivers live in the discovered tier).
+//! kernel's domain (drivers in user space wherever
+//! feasible; — leaf drivers live in the discovered tier).
 //!
-//! The crucial security property this module realises is §18.3: *a loaded
+//! The crucial security property this module realises is: *a loaded
 //! driver receives only the resource capabilities its matched node
 //! requested.* The device manager forwards the matched hardware-tree node's
 //! [`HwResource`] requests through the [`rustos_devmgr::DriverLoader`] seam;
@@ -21,7 +21,7 @@
 //! per resource and nothing more (`KernelSpawnCtx`'s `grants` field — see
 //! [`DriverProcessSpawn`]). The resources originate kernel-side, from the
 //! kernel's own discovered hardware tree, never from an untrusted caller
-//! (`AGENTS.md` §4 — no ambient authority), so spawning a driver can never
+//! (no ambient authority), so spawning a driver can never
 //! hand it authority over a window its node did not expose.
 //!
 //! # The architecture seam
@@ -34,12 +34,11 @@
 //! subsystems and admits the driver through the architecture's
 //! `ProcessSpawn::spawn_with` path; because that names kernel/core's
 //! feature-selected concrete scheduler (which the production binary
-//! deliberately never names, §17.1), the aarch64 implementation lives with
+//! deliberately never names), the aarch64 implementation lives with
 //! its consumer — the `-M virt` driver-autoload vertical — exactly as that
 //! vertical already names the concrete scheduler to build the rest of the
 //! kernel state. Host tests here supply a recording double, so the gate and
-//! resource-threading logic are exercised on the CI host without a scheduler
-//! (`AGENTS.md` §2.2).
+//! resource-threading logic are exercised on the CI host without a scheduler.
 
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::{DriverError, DriverHandle, Errno, ABI_VERSION_CURRENT};
@@ -56,16 +55,14 @@ use rustos_kernel_syscall::SYSCALL_TABLE_HASH;
 ///
 /// The single architecture-specific step of [`SpawnDriverLoader`]: build a
 /// fresh, hardware-isolated address space for `rxe`, admit it as a runnable
-/// process granted exactly `granted` (the manifest∩caller capability set,
-/// `AGENTS.md` §5.2) and one device-resource grant per entry of `grants`
-/// (the matched node's requests, §18.3), hand it `args` as its
+/// process granted exactly `granted` (the manifest∩caller capability set) and one device-resource grant per entry of `grants`
+/// (the matched node's requests), hand it `args` as its
 /// startup-argument vector, and return the new process id.
 ///
 /// The implementation re-asserts every kernel-side check (the spawn
 /// producer re-checks `CAP_PROC_SPAWN` and re-parses the `rxe` against the
 /// kernel's syscall CFI tag) and mints the grants owner-checked against the
-/// child's own kernel-trusted id — the host adds no authority of its own
-/// (`AGENTS.md` §4 / §5.4).
+/// child's own kernel-trusted id — the host adds no authority of its own.
 pub trait DriverProcessSpawn {
     /// Spawn `rxe` as a user-space driver process.
     ///
@@ -73,14 +70,12 @@ pub trait DriverProcessSpawn {
     ///
     /// A stable [`Errno`] for every failure (`NoSpace` on resource
     /// exhaustion, `BadMagic` on an `rxe` that fails the CFI-tag re-parse,
-    /// `AlreadyExists` on a registration conflict) — never a panic
-    /// (`AGENTS.md` §2.9).
+    /// `AlreadyExists` on a registration conflict) — never a panic.
     ///
     /// `node_id` is the discovered hardware-tree node the driver was matched
-    /// for (`AGENTS.md` §18.3); the kernel records it against the child so a
+    /// for; the kernel records it against the child so a
     /// later `hw_emit_node` parents the published child under exactly that
-    /// node and the emitter cannot forge its tree position (`AGENTS.md`
-    /// §4 / §5.4).
+    /// node and the emitter cannot forge its tree position.
     fn spawn_driver(
         &self,
         rxe: &[u8],
@@ -102,12 +97,11 @@ pub trait DriverProcessSpawn {
 /// `spawn_driver` straight to [`InitSpawnCtx::spawn_driver_process`]. The
 /// `KernelSpawnCtx` assembly — and therefore every mention of the
 /// feature-selected concrete scheduler — stays inside kernel/core, so this
-/// bin-crate type names neither the scheduler nor `KernelSpawnCtx`
-/// (`AGENTS.md` §17.1 / §2.2).
+/// bin-crate type names neither the scheduler nor `KernelSpawnCtx`.
 ///
 /// It adds no authority of its own: the child receives exactly the
 /// gate-derived capability set and the matched node's resource grants the
-/// seam mints (`AGENTS.md` §4 / §18.3).
+/// seam mints.
 pub struct InitCtxDriverProcessSpawn<'a> {
     /// The boot-time init-spawn context owning the live kernel registries
     /// the seam builds the child's [`KernelSpawnCtx`](rustos_kernel_core::KernelSpawnCtx)
@@ -150,7 +144,7 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
 /// inner [`DriverError`] is what reaches the drvhost audit record, so it is
 /// mapped to the nearest typed cause rather than collapsed. An unexpected
 /// code maps to [`DriverError::DeviceFault`] — fail closed, never silently
-/// succeed (`AGENTS.md` §2.9).
+/// succeed.
 fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
     match errno {
         Errno::NoSpace => DriverError::LengthOutOfRange,
@@ -170,15 +164,13 @@ fn spawn_errno_as_driver_error(errno: Errno) -> DriverError {
 /// this for the duration of one `load`); nothing is retained.
 struct SpawningDriverSpawner<'a> {
     spawn: &'a dyn DriverProcessSpawn,
-    /// The matched hardware-tree node's resource requests (`AGENTS.md`
-    /// §18.3); minted as the new process's device-resource grants.
+    /// The matched hardware-tree node's resource requests; minted as the new process's device-resource grants.
     grants: &'a [HwResource],
     /// The startup-argument vector handed to the driver process
     /// (`rustos_rt::arg`) — e.g. the reply-endpoint id it announces
     /// readiness over.
     args: &'a [&'a [u8]],
-    /// The matched hardware-tree node the driver was loaded for
-    /// (`AGENTS.md` §18.3); recorded against the child so its `hw_emit_node`
+    /// The matched hardware-tree node the driver was loaded for; recorded against the child so its `hw_emit_node`
     /// children are parented under it. [`None`] when the load is not
     /// node-matched.
     node_id: Option<u32>,
@@ -192,7 +184,7 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
         // The gate has verified the image; `ctx.payload` is the driver
         // program `rxe`, `ctx.granted` the manifest∩caller capability set.
         // Spawn it with exactly that authority plus the matched node's
-        // resource grants (`AGENTS.md` §4 / §18.3) — no ambient authority,
+        // resource grants — no ambient authority,
         // no resource the node did not expose.
         let pid = self
             .spawn
@@ -207,8 +199,7 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
         // The spawned process id doubles as the driver's reported handle;
         // the host mints its own unforgeable handle on success, so this is
         // informational. A zero pid is impossible from a successful admit,
-        // but is rejected fail-closed rather than asserted (`AGENTS.md`
-        // §2.9).
+        // but is rejected fail-closed rather than asserted.
         DriverHandle::from_raw(pid)
             .map_err(|_| SpawnRegisterError::Register(DriverError::DeviceFault))
     }
@@ -216,31 +207,30 @@ impl DriverSpawner for SpawningDriverSpawner<'_> {
 
 /// Admits a discovered user-space driver through the signed
 /// `drvhost::Host::load` gate and spawns it into its own process, granting
-/// it the matched node's device resources (`AGENTS.md` §18.3).
+/// it the matched node's device resources.
 ///
 /// Implements [`rustos_devmgr::DriverLoader`] so the device manager's
 /// autoload walk drives it directly: for each bound node the manager calls
 /// [`load`](DriverLoader::load) with the node's path and its
 /// [`HwResource`] requests, and this loader
-/// runs the full §8 gate then the privileged spawn. The §17.4 layering keeps
+/// runs the full gate then the privileged spawn. The layering keeps
 /// the device manager on `lib/*` only; this loader is the kernel binary's
 /// integration point (the kernel binary is the one place permitted to bridge
 /// `devmgr` policy to the kernel spawn mechanism).
 pub struct SpawnDriverLoader<'a> {
     /// The driver-signing trust anchors the gate verifies against — the
-    /// build's embedded key(s) (`AGENTS.md` §8 / §9).
+    /// build's embedded key(s).
     trusted: &'a [Ed25519PublicKey],
     /// Supplies the signed `.rxe` image bytes for a `/System/Drivers/` path.
     source: &'a dyn ImageSource,
     /// Audit sink every gate decision is logged through.
     sink: &'a dyn Sink,
-    /// The architecture spawn mechanism (`AGENTS.md` §2.2).
+    /// The architecture spawn mechanism.
     spawn: &'a dyn DriverProcessSpawn,
     /// Startup-argument vector handed to every spawned driver — e.g. the
     /// reply-endpoint id it announces readiness over.
     args: &'a [&'a [u8]],
-    /// The matched hardware-tree node id the driver is loaded for
-    /// (`AGENTS.md` §18.3), recorded against the spawned child so its
+    /// The matched hardware-tree node id the driver is loaded for, recorded against the spawned child so its
     /// `hw_emit_node` children are parented under it. [`None`] when the load
     /// is not node-matched.
     node_id: Option<u32>,
@@ -279,7 +269,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
     ) -> Result<DriverHandle, Errno> {
         // The matched node's resource requests become the new process's
         // device-resource grants; the gate runs first, so a refused image
-        // is never spawned (`AGENTS.md` §5.4 — fail closed before any
+        // is never spawned (fail closed before any
         // state).
         let spawner = SpawningDriverSpawner {
             spawn: self.spawn,
@@ -297,8 +287,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
             // A spawned user-space driver maps its own register windows and
             // carves its own DMA region over the `mmio_map` / `dma_alloc`
             // syscalls against the grants minted here (`lib/drvrt`), never
-            // through an in-kernel host view — so the gate ships neither
-            // (`AGENTS.md` §4 / §5.4).
+            // through an in-kernel host view — so the gate ships neither.
             virtio_host_factory: None,
             mmio_mapper: None,
         });
@@ -398,7 +387,7 @@ mod tests {
 
     #[test]
     fn spawner_threads_payload_granted_caps_and_node_resources_to_the_mechanism() {
-        // §18.3: the matched node's resource requests, the verified
+        // the matched node's resource requests, the verified
         // payload, and exactly the granted capability set must reach the
         // spawn mechanism unchanged.
         let spawn = RecordingSpawn::ok(0x1234);
@@ -436,8 +425,7 @@ mod tests {
     #[test]
     fn a_spawn_failure_is_reported_as_a_register_error_not_a_panic() {
         // Fail closed: a spawn-mechanism error becomes a typed register
-        // failure the host maps to `Errno::NotImplemented`, never a panic
-        // (`AGENTS.md` §2.9).
+        // failure the host maps to `Errno::NotImplemented`, never a panic.
         let spawn = RecordingSpawn::failing(Errno::NoSpace);
         let spawner = SpawningDriverSpawner {
             spawn: &spawn,
@@ -599,7 +587,7 @@ mod tests {
         // gate-derived capability set, the node's grants, and the argument
         // vector straight to `InitSpawnCtx::spawn_driver_process` and return
         // its PID — the bin crate's scheduler-agnostic bridge to the kernel
-        // spawn mechanism (`AGENTS.md` §17.1 / §18.3).
+        // spawn mechanism.
         let init_ctx = RecordingInitCtx::new(0x7fff);
         let producer = UnusedProcessSpawn;
         let adapter = InitCtxDriverProcessSpawn::new(&init_ctx, &producer);

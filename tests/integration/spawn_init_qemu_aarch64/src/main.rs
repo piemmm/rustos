@@ -38,8 +38,7 @@
 //! finisher. A regression that never spawns `init`, whose banner write fails
 //! closed (so `init` parks without exiting), or that never reaches the
 //! syscall never reaches the finisher, so the run times out and the harness
-//! reports `Outcome::Timeout` — the documented fail-loud behaviour
-//! (`AGENTS.md` §7).
+//! reports `Outcome::Timeout` — the documented fail-loud behaviour.
 //!
 //! ## Embedded `virt` device tree
 //!
@@ -55,7 +54,7 @@
 //! `InitSpawn` seam — and only replaces the audit sink. Splitting the
 //! audit-observer behaviour into a separate bin (instead of a Cargo feature
 //! on a production crate) prevents feature unification from leaking the
-//! QEMU-exit shortcut into any production build (`AGENTS.md` §5.4.5 — fail
+//! QEMU-exit shortcut into any production build (fail
 //! closed; the harness never decides what the kernel does next).
 
 #![cfg_attr(itest_aarch64, no_std)]
@@ -136,8 +135,7 @@ mod kernel {
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-    /// §7).
+    /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn rustos_spawn_init_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

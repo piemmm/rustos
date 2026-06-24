@@ -6,8 +6,7 @@
 //! (`node A`) the PCIe root-complex driver enumerated and published
 //! ([`crate::BIND_KEYS`]), and mints it one grant per resource that node
 //! requested — the controller's already-assigned register BAR (resolved to
-//! its CPU-physical address) and the inbound-DMA constraint, and no more
-//! (`AGENTS.md` §4 / §18.3). This driver holds **only** `CAP_MAILBOX` and
+//! its CPU-physical address) and the inbound-DMA constraint, and no more. This driver holds **only** `CAP_MAILBOX` and
 //! `CAP_HW_EMIT`: it cannot map the forwarded BAR/DMA itself (it lacks
 //! `CAP_MMIO_MAP`/`CAP_MEM_DMA`), which is the point — its job is to reload
 //! the device firmware and hand the grants on, not to touch the registers.
@@ -30,12 +29,12 @@
 //! node B can never bring the controller up before its firmware is loaded
 //! (`plans/PI.md` P10 D5c). The reload itself is best-effort — the
 //! authoritative liveness gate is the controller's capability block at
-//! `Xhci::open` in the bound driver (`AGENTS.md` §2.9) — so a refused reload
+//! `Xhci::open` in the bound driver — so a refused reload
 //! does not block the publish; the node is emitted regardless and the
 //! outcome is returned for the caller to log.
 //!
 //! No QEMU vertical exists — QEMU models no `VideoCore` mailbox or Pi USB
-//! timing (`AGENTS.md` §0.4) — so the host tests prove the composition and
+//! timing — so the host tests prove the composition and
 //! its fail-closed paths; the live firmware reload is the on-metal
 //! acceptance item.
 
@@ -52,29 +51,28 @@ use crate::{reload_firmware, FirmwareResetOutcome};
 ///
 /// `resources` is the driver's own granted resource set (its
 /// `rustos_drvrt::RtDriverHost::resources`, the grants the kernel minted for
-/// the matched VL805 PCI node, `AGENTS.md` §18.3). The first
+/// the matched VL805 PCI node). The first
 /// [`Mmio`](HwResourceKind::Mmio) grant is the controller's already-assigned
 /// register BAR at its CPU-physical address, and the
 /// [`Dma`](HwResourceKind::Dma) grant the inbound-DMA constraint; both are
 /// copied verbatim onto the published node as grant *requests*. The kernel's
 /// `hw_emit_node` coverage check then admits node B exactly because every
 /// resource it requests is covered by one of this driver's own grants — no
-/// ambient authority is created (`AGENTS.md` §4): the controller driver that
+/// ambient authority is created: the controller driver that
 /// binds node B receives the same BAR + DMA it would have, only now with the
 /// firmware reloaded first.
 ///
 /// The node is built with placeholder identity ([`HW_NODE_ROOT`] parent,
 /// id `0`): the kernel assigns a fresh, collision-free id and the emitter's
-/// own node as parent on publish (`AGENTS.md` §4 / §18.1; D5b.2a). It is
+/// own node as parent on publish (D5b.2a). It is
 /// classed [`HwDeviceClass::Bus`] (an xHCI host controller is a bus to
 /// further USB devices) and matched by the
 /// [`XHCI_COMPATIBLE`] `compatible` string the
-/// controller driver binds — the single definition shared with that driver
-/// (`AGENTS.md` §2.2).
+/// controller driver binds — the single definition shared with that driver.
 ///
 /// # Errors
 ///
-/// Fail-closed (`AGENTS.md` §5.4): [`DriverError::NotFound`] if the grant
+/// Fail-closed: [`DriverError::NotFound`] if the grant
 /// set is missing the register BAR or the DMA constraint (an unbound or
 /// mis-provisioned node, never a fabricated resource); [`DriverError::DeviceFault`]
 /// if the `compatible` match key cannot be pushed; [`DriverError::NoSpace`]
@@ -86,7 +84,7 @@ where
     let mut bar: Option<&HwResource> = None;
     let mut dma: Option<&HwResource> = None;
     // One pass: a grant iterator is consumed once, and the grant order is not
-    // guaranteed, so latch the first of each kind (`AGENTS.md` §5.4).
+    // guaranteed, so latch the first of each kind.
     for resource in resources {
         match resource.kind() {
             Some(HwResourceKind::Mmio) if bar.is_none() => bar = Some(resource),
@@ -114,14 +112,12 @@ where
 /// published). It is best-effort: a missing mailbox reports
 /// [`FirmwareResetOutcome::NotAvailable`] and a refused tag
 /// [`FirmwareResetOutcome::Failed`], but neither blocks the publish — the
-/// authoritative liveness gate is `Xhci::open` in the bound driver
-/// (`AGENTS.md` §2.9). The outcome is returned so the composing bin can log
+/// authoritative liveness gate is `Xhci::open` in the bound driver. The outcome is returned so the composing bin can log
 /// it.
 ///
 /// `node` is published through [`DriverHost::emit_node`]; the kernel gates
 /// that call by `CAP_HW_EMIT` and admits the node only when every resource
-/// it requests is covered by one of this driver's own grants (`AGENTS.md`
-/// §4 / §5.4).
+/// it requests is covered by one of this driver's own grants.
 ///
 /// # Errors
 ///
@@ -129,7 +125,7 @@ where
 /// (the driver lacks `CAP_HW_EMIT`, or a forwarded resource is not covered
 /// by a grant) — fail-closed, nothing is left half-published. A refused
 /// firmware reload is **not** an error: it is returned as the
-/// [`FirmwareResetOutcome`] (`AGENTS.md` §2.9).
+/// [`FirmwareResetOutcome`].
 pub fn reload_firmware_and_publish(
     host: &dyn DriverHost,
     node: HwNode,

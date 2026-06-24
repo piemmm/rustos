@@ -156,7 +156,7 @@ pub const PORT_NAME_MAX_LEN: usize = 31;
 /// chose, so a binder need not embed a kernel-assigned number. The kernel
 /// port registry maps a `PortName` to the live port's endpoint; nothing
 /// about the name grants authority, the per-send capability check is
-/// unchanged (`AGENTS.md` §5.2).
+/// unchanged.
 ///
 /// A name is a non-empty, at most [`PORT_NAME_MAX_LEN`]-byte ASCII string
 /// drawn from a deliberately small alphabet: it begins with a lowercase
@@ -165,8 +165,7 @@ pub const PORT_NAME_MAX_LEN: usize = 31;
 /// names canonical (one spelling per endpoint), printable in a log line,
 /// and free of separators a path or routing layer might re-interpret.
 /// [`PortName::from_ascii`] is the only constructor and rejects anything
-/// outside that grammar, so an ill-formed name is unrepresentable
-/// (`AGENTS.md` §2.9 / §5.4).
+/// outside that grammar, so an ill-formed name is unrepresentable.
 ///
 /// The internal buffer is NUL-padded beyond the name's length, so two
 /// values are equal exactly when their names are, and the derived ordering

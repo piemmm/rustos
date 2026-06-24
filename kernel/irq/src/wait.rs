@@ -11,7 +11,7 @@
 //! Both run the same loop: compute a deadline once, poll
 //! [`IrqTable::try_wait_step`], and cooperatively yield between polls
 //! until the line fires, the deadline elapses, or the binding
-//! disappears. To avoid two copies of that loop (`AGENTS.md` §2.2),
+//! disappears. To avoid two copies of that loop,
 //! the loop lives here exactly once and is parameterised over the
 //! clock + yield seam through the [`IrqWaiter`] trait.
 //!
@@ -32,7 +32,7 @@ use crate::table::{IrqTable, WaitStep};
 /// The two methods are the only kernel primitives the blocking loop
 /// needs; keeping them behind a trait lets `kernel/irq` remain
 /// `no_std` and free of scheduler / architecture dependencies
-/// (`AGENTS.md` §2.4 — no interface creep, the surface is exactly two
+/// (no interface creep, the surface is exactly two
 /// methods).
 pub trait IrqWaiter {
     /// Current value of the kernel monotonic clock, in nanoseconds,
@@ -51,7 +51,7 @@ pub trait IrqWaiter {
     /// nor a timeout. How it suspends is the implementation's choice:
     /// the `irq_wait` syscall path *parks* off the run queue (woken by
     /// the device-IRQ dispatch path's wake or the timed sweep —
-    /// `AGENTS.md` §2.1, no busy yield), while the in-kernel kthread
+    /// , no busy yield), while the in-kernel kthread
     /// path suspends through its own race-free wait (a `wfi` park on
     /// metal, a cooperative yield under the QEMU verticals). Returning
     /// [`Ok`] re-enters the loop; returning [`Err`] aborts the wait with
@@ -73,7 +73,7 @@ pub trait IrqWaiter {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IrqWaitAbort {
     /// The waiting task can no longer be scheduled — it has been torn
-    /// down between two polls. Fail closed (`AGENTS.md` §5.4.5).
+    /// down between two polls. Fail closed.
     TaskVanished,
     /// The yield seam refused for any other reason. Defensive; not
     /// expected during normal operation.
@@ -101,8 +101,7 @@ pub enum WaitOutcome {
 /// Block the calling task on `handle` until the bound line fires, the
 /// `timeout_ns` deadline elapses, or the binding disappears.
 ///
-/// This is the single implementation of the kernel IRQ blocking loop
-/// (`AGENTS.md` §2.2). It composes [`IrqTable::try_wait_step`] —
+/// This is the single implementation of the kernel IRQ blocking loop. It composes [`IrqTable::try_wait_step`] —
 /// which performs the forgery check and the mask-before-wake-ordered
 /// ready consume — with the caller-supplied [`IrqWaiter`] clock and
 /// yield seam.
@@ -110,7 +109,7 @@ pub enum WaitOutcome {
 /// The deadline is computed once, from the first
 /// [`IrqWaiter::now_ns`] reading, with a saturating add so a caller
 /// passing `u64::MAX` does not wrap the deadline back to a tiny value
-/// (`AGENTS.md` §5.4.5 — fail closed). Pass `u64::MAX` for an
+/// (fail closed). Pass `u64::MAX` for an
 /// effectively unbounded wait (the loop still terminates on `Ready`
 /// or `NotFound`).
 #[must_use]

@@ -4,7 +4,7 @@
 //! the [`ShellSource`] channel to the hosted shell. It is the analogue of the
 //! file browser's `Browser`: the navigation/parsing logic lives here and the
 //! outside world is reached only through the injected seam, so the whole model
-//! is testable without a kernel (`AGENTS.md` §7).
+//! is testable without a kernel.
 //!
 //! Two operations cross the seam:
 //!
@@ -16,7 +16,7 @@
 //! The terminal never echoes input to the screen itself: echo (and all line
 //! editing and job control) is the shell's responsibility, exactly as on a
 //! real tty. A failing seam call surfaces the boundary [`Errno`] and leaves
-//! the screen unchanged (`AGENTS.md` §5.4).
+//! the screen unchanged.
 
 use rustos_abi::Errno;
 
@@ -37,8 +37,7 @@ impl<S: ShellSource> Terminal<S> {
     /// the cursor at the home position.
     ///
     /// Returns `None` for a screen size [`Grid::new`] rejects, so an unusable
-    /// geometry fails closed rather than allocating something degenerate
-    /// (`AGENTS.md` §2.9).
+    /// geometry fails closed rather than allocating something degenerate.
     #[must_use]
     pub fn new(cols: u16, rows: u16, shell: S) -> Option<Self> {
         Some(Self {
@@ -63,7 +62,7 @@ impl<S: ShellSource> Terminal<S> {
     /// # Errors
     ///
     /// Propagates the [`Errno`] from the underlying [`ShellSource::read`],
-    /// leaving the screen unchanged (`AGENTS.md` §5.4).
+    /// leaving the screen unchanged.
     pub fn pump(&mut self) -> Result<usize, Errno> {
         let bytes = self.shell.read()?;
         self.parser.feed(&mut self.grid, &bytes);

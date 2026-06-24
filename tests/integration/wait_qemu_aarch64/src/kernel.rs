@@ -59,7 +59,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands each spawn build.
@@ -156,8 +156,8 @@ fn wait_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen either program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen either program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -211,8 +211,7 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// the parent's `status` pointer and records whether the round-trip matched.
 /// `exit` records the caller's exit code with the producer and reaps the caller
 /// (`reschedule_current`); a parent that exits 0 after a verified reap is the
-/// PASS. Any other syscall is unexpected and fails the test loudly
-/// (`AGENTS.md` §7).
+/// PASS. Any other syscall is unexpected and fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the
     // exception handler built from the saved register frame.
@@ -273,7 +272,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 
 /// Copy `code` (as the parent's `i32` status) out to the parent's `status`
 /// pointer through the retained frozen parent space. Returns `false` on a
-/// faulting or unmapped pointer (fail closed, `AGENTS.md` §5.4).
+/// faulting or unmapped pointer (fail closed).
 fn copy_status_to_parent(status_va: u64, code: i32) -> bool {
     let guard = PARENT_SPACE.lock();
     let Some((space, physmap)) = guard.as_ref() else {
@@ -351,7 +350,7 @@ fn build_el0_space(pool: &'static PageTablePool, rxe: &[u8]) -> (u64, rustos_arc
 }
 
 /// Admit `entry` as a resumable user kthread whose `pre_resume` hook reactivates
-/// `root_phys` before every switch-in (isolation, §4). Returns its task id.
+/// `root_phys` before every switch-in (isolation). Returns its task id.
 fn admit(sched: &Scheduler<Aarch64Arch>, root_phys: u64, entry: rustos_arch_api::UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -411,8 +410,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Build the live scheduler and the process-wait producer, leaking both
     // `'static` so the dispatch callback can reach them.
-    // Per-CPU bookkeeping backing for this single-CPU vertical
-    // (`AGENTS.md` §24.1).
+    // Per-CPU bookkeeping backing for this single-CPU vertical.
     static SCHED_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
     let arch = Arc::new(Aarch64Arch::new(&SCHED_STORAGE, BOOT_CPU, counter_hz));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -441,7 +439,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // Cooperative dispatch loop. The parent's `wait` parks it until the child
     // exits; the parent's verified `exit(0)` is the PASS (raised from the
-    // dispatch callback). A never-draining loop times out (fail-loud, §7).
+    // dispatch callback). A never-draining loop times out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

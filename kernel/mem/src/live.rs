@@ -11,7 +11,7 @@
 //!
 //! This module is that retained, mutable space, behind one object-safe
 //! boundary so `kernel/core` can hold it without naming a concrete
-//! page-table backend `P` (`AGENTS.md` §17.4):
+//! page-table backend `P`:
 //!
 //! * [`LiveUserSpace`] — the object-safe, mutating operations the producers
 //!   reach (anonymous map/unmap; device-window map). `Send` so the boxed
@@ -19,22 +19,20 @@
 //!   deliberately **not** `Sync` and is reached only by the single CPU
 //!   currently running the task, from that task's own synchronous syscall
 //!   path, so the `&mut` its methods take can never alias — the same
-//!   exclusivity the task's kernel stack already relies on (`AGENTS.md`
-//!   §4 — the access is genuinely exclusive).
+//!   exclusivity the task's kernel stack already relies on (the access is genuinely exclusive).
 //! * [`LiveSpace`] — the generic concrete implementation over a port's
 //!   [`PageTable`] backend `P`, the kernel direct map `M`, the kernel
 //!   [`FrameAllocator`] (anonymous frames), and an [`MmioWindowMap`]
 //!   (device windows). It composes the already-audited
 //!   [`map_anonymous`] / [`unmap_anonymous`] and
 //!   [`MmioWindowMap`] mechanisms — there is no second mapping path
-//!   (`AGENTS.md` §2.2 — one definition each).
+//!   (one definition each).
 //!
 //! The capability posture (`mem_map` is unprivileged, the `mmio_map` grant
-//! is owner-checked, `AGENTS.md` §5.4 / §18.3) and the placement of a
+//! is owner-checked) and the placement of a
 //! non-`FIXED` anonymous region belong to the higher-level `kernel/core`
 //! producer that calls these — this layer knows only the page table, the
-//! direct map, the frame allocator, and the device-window allocator
-//! (`AGENTS.md` §17.4).
+//! direct map, the frame allocator, and the device-window allocator.
 
 use crate::anon::{map_anonymous, unmap_anonymous, AnonError};
 use crate::anon_window::AnonWindowMap;
@@ -48,7 +46,7 @@ use crate::vmm::{AddressSpace, FrozenAddressSpace, PageTable, VirtAddr};
 ///
 /// A faithful union of the two underlying mechanisms' errors so the
 /// `kernel/core` producer can fold each onto a stable `Errno` without this
-/// layer knowing the ABI error type (`AGENTS.md` §17.4 — `kernel/mem` names
+/// layer knowing the ABI error type (`kernel/mem` names
 /// no `lib/abi` error).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -86,7 +84,7 @@ impl From<DmaError> for LiveSpaceError {
 /// go through; `phys_base` is the physically-contiguous base of the backing
 /// frames — the value the `kernel/core` producer turns into the
 /// device-visible address (CPU-physical for a coherent bus, or translated
-/// through an inbound viewport, `AGENTS.md` §18.1).
+/// through an inbound viewport).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaMapping {
     /// Base user virtual address of the mapped, guard-bracketed buffer.
@@ -108,9 +106,9 @@ pub trait LiveUserSpace: Send {
     ///
     /// The placement (the value of `base_va`) is the producer's decision;
     /// this is the `FIXED` map mechanism. The pages are zeroed before they
-    /// are user-visible and are never executable (`AGENTS.md` §4 / §19.2);
+    /// are user-visible and are never executable;
     /// a part-way failure unwinds every page already mapped, leaving the
-    /// space unchanged (`AGENTS.md` §2.9).
+    /// space unchanged.
     ///
     /// # Errors
     ///
@@ -128,19 +126,18 @@ pub trait LiveUserSpace: Send {
     /// image, its stack, or a granted device window. The pages obey the same
     /// W^X / zero-on-map / all-or-nothing contract as [`Self::map_anonymous`];
     /// the reserved range is released back to the window on a mapping failure
-    /// so a failed call consumes no address space (`AGENTS.md` §2.9).
+    /// so a failed call consumes no address space.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Anon`] — [`AnonError::OutOfMemory`] when the heap
-    /// window or the frame allocator is exhausted (deterministic OOM, §4),
+    /// window or the frame allocator is exhausted (deterministic OOM),
     /// or the precise placement/map error otherwise.
     fn map_anonymous_placed(&mut self, page_count: u64) -> Result<u64, LiveSpaceError>;
 
     /// Release the `page_count`-page region based at `base_va`, zeroing
-    /// every frame before it is returned to the allocator (`AGENTS.md` §4 —
-    /// zero on free). The whole range is validated mapped before any page is
-    /// torn down (`AGENTS.md` §5.4 — fail closed on a bad range).
+    /// every frame before it is returned to the allocator (zero on free). The whole range is validated mapped before any page is
+    /// torn down (fail closed on a bad range).
     ///
     /// # Errors
     ///
@@ -151,10 +148,10 @@ pub trait LiveUserSpace: Send {
     /// Map `len` bytes of device physical memory beginning at `phys_base`
     /// into this space, returning the kernel-chosen base user virtual
     /// address of the new, guard-bracketed, caching-disabled,
-    /// non-executable window (`AGENTS.md` §4 / §19.2).
+    /// non-executable window.
     ///
     /// The producer has already resolved and validated the grant the window
-    /// comes from (owner-checked, kind, length — `AGENTS.md` §5.4 / §18.3);
+    /// comes from (owner-checked, kind, length);
     /// this only performs the page-table mechanism.
     ///
     /// # Errors
@@ -168,17 +165,14 @@ pub trait LiveUserSpace: Send {
     /// bytes into this space, returning its CPU virtual base and its
     /// physically-contiguous base ([`DmaMapping`]).
     ///
-    /// The block is mapped `RW|USER`, never executable (`AGENTS.md` §19.2),
-    /// guard-bracketed (`AGENTS.md` §4), and zeroed before it is user-visible
-    /// (`AGENTS.md` §4). When `addr_limit` is non-zero the contiguous block
+    /// The block is mapped `RW|USER`, never executable,
+    /// guard-bracketed, and zeroed before it is user-visible. When `addr_limit` is non-zero the contiguous block
     /// is bounded to lie wholly below it (the granted device addressing
-    /// constraint, §18.3); a block that would exceed the limit is returned to
-    /// the allocator and the request refused fail-closed (`AGENTS.md` §2.9 /
-    /// §5.4). `addr_limit == 0` declares no constraint.
+    /// constraint); a block that would exceed the limit is returned to
+    /// the allocator and the request refused fail-closed. `addr_limit == 0` declares no constraint.
     ///
     /// The producer has already resolved and validated the grant the buffer
-    /// is bounded by (owner-checked, kind, length — `AGENTS.md` §5.4 /
-    /// §18.3); this only performs the carve + page-table mechanism, and the
+    /// is bounded by (owner-checked, kind, length); this only performs the carve + page-table mechanism, and the
     /// buffer is reclaimed (frames zeroed and freed) when the live space is
     /// dropped on task teardown.
     ///
@@ -191,7 +185,7 @@ pub trait LiveUserSpace: Send {
 
     /// Snapshot this space's current live mappings into a `Send + Sync`
     /// [`FrozenAddressSpace`], the form the kernel-wide address-space
-    /// registry holds for the user-memory copy path (`AGENTS.md` §5.4).
+    /// registry holds for the user-memory copy path.
     ///
     /// A live space grows and shrinks as a task maps its own heap
     /// ([`Self::map_anonymous`] / [`Self::map_anonymous_placed`]), unmaps it
@@ -202,7 +196,7 @@ pub trait LiveUserSpace: Send {
     /// the exact defect [`FrozenAddressSpace`]'s own docs warn against. This
     /// is the object-safe seam `kernel/core` calls to produce that fresh
     /// snapshot without naming the concrete page-table backend `P`
-    /// (`AGENTS.md` §17.4 / §2.2 — one freeze definition).
+    /// (one freeze definition).
     fn freeze(&self) -> FrozenAddressSpace;
 }
 
@@ -211,7 +205,7 @@ pub trait LiveUserSpace: Send {
 /// Generic over the port's [`PageTable`] backend `P` and the kernel direct
 /// map `M`, so it is constructed by the architecture spawn producer (which
 /// names both) and stored behind [`LiveUserSpace`] by `kernel/core` (which
-/// names neither, `AGENTS.md` §17.4). It owns:
+/// names neither). It owns:
 ///
 /// * `space` — the live arch [`AddressSpace<P>`] (its page-table frames come
 ///   from the backend's own [`PageTableFrames`](rustos_arch_api::frames::PageTableFrames)
@@ -259,9 +253,9 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
     // architecture spawn producer threads explicitly — the live arch space,
     // the direct map, the frame allocator, and the three guarded windows'
     // `(base, pages)` pairs. Bundling the windows behind a one-use config
-    // wrapper purely to satisfy the arg-count lint would be the §2.3 wrapper
-    // type `AGENTS.md` forbids; the explicit list is the clearer shape,
-    // mirroring `KernelSyscallHandlers::new` (`AGENTS.md` §2.1).
+    // wrapper purely to satisfy the arg-count lint would be the wrapper
+    // type the charter forbids; the explicit list is the clearer shape,
+    // mirroring `KernelSyscallHandlers::new`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         space: AddressSpace<P>,
@@ -277,7 +271,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         let mmio = MmioWindowMap::new(mmio_window_base, mmio_window_pages)?;
         // An anonymous-heap-window config error is the same class of fault as
         // an MMIO-window one; fold it onto `InvalidMapConfig` so the spawn
-        // producer has one constructor error to handle (`AGENTS.md` §2.9).
+        // producer has one constructor error to handle.
         let anon = AnonWindowMap::new(anon_window_base, anon_window_pages)
             .map_err(|_| MmioError::InvalidMapConfig)?;
         // A DMA-window config error is likewise folded onto `InvalidMapConfig`
@@ -321,8 +315,7 @@ where
             |frame| {
                 // The frame was just unwound from this space; the matching
                 // free of a frame the allocator handed out cannot fail, and
-                // there is no better recovery than dropping it (`AGENTS.md`
-                // §2.9 — best-effort, never a panic).
+                // there is no better recovery than dropping it (best-effort, never a panic).
                 let _ = frames.free(frame);
             },
         )?;
@@ -347,8 +340,7 @@ where
             Ok(()) => Ok(base_va),
             Err(err) => {
                 // The mapping failed (frame exhaustion, …): give the reserved
-                // range back so a failed call consumes no address space
-                // (`AGENTS.md` §2.9). The range was just minted, so the
+                // range back so a failed call consumes no address space. The range was just minted, so the
                 // release matches and cannot fail; ignore its result rather
                 // than panic on a path that already failed closed.
                 let _ = self.anon.release(base_va, page_count);
@@ -361,7 +353,7 @@ where
         // A base inside the heap window is a non-`FIXED` placement: it must
         // match a live record exactly before any teardown, so a bad
         // (base, len) for an in-window address fails closed without unmapping
-        // a neighbour's pages (`AGENTS.md` §5.4). A `FIXED` base (outside the
+        // a neighbour's pages. A `FIXED` base (outside the
         // window) skips this and is torn down by extent as before.
         let placed = self.anon.owns(base_va);
         if placed {
@@ -401,7 +393,7 @@ where
 
     fn freeze(&self) -> FrozenAddressSpace {
         // One freeze definition lives on `AddressSpace`; this only erases the
-        // backend `P` for the registry (`AGENTS.md` §2.2).
+        // backend `P` for the registry.
         self.space.freeze()
     }
 }
@@ -409,7 +401,7 @@ where
 impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
     fn drop(&mut self) {
         // Reclaim every live DMA buffer when the task's live space is torn
-        // down: each backing block is zeroed (zero-on-free, `AGENTS.md` §4)
+        // down: each backing block is zeroed (zero-on-free)
         // and returned to the frame allocator, so a driver task's exit never
         // leaks the physical frames its DMA buffers held or leaves their
         // (possibly secret-bearing) contents recoverable. Anonymous and
@@ -438,13 +430,13 @@ mod tests {
 
     /// A simulated physical window the frame allocator draws from and the
     /// direct map translates — frame 16 up, 256 KiB. Anonymous frames must be
-    /// reachable through this map to be zeroed (`AGENTS.md` §4).
+    /// reachable through this map to be zeroed.
     const SIM_BASE: u64 = 16 * PAGE_SIZE as u64;
     const SIM_BYTES: usize = 64 * PAGE_SIZE;
 
     /// A `'static` frame allocator over the simulated usable window. Leaked so
     /// the live space can hold the production `&'static FrameAllocator` shape
-    /// (the kernel allocator is a boot global, `AGENTS.md` §2.1); a test leak
+    /// (the kernel allocator is a boot global); a test leak
     /// is bounded by the process lifetime.
     fn leaked_frames() -> &'static FrameAllocator {
         let mut map = BootMemoryMap::new();
@@ -500,7 +492,7 @@ mod tests {
         assert_eq!(live.space().mapped_pages(), 3);
 
         // The pages are readable user memory and read back as zero (no stale
-        // bytes are ever user-visible, `AGENTS.md` §4).
+        // bytes are ever user-visible).
         let sim = sim();
         let mut buf = vec![0xAAu8; 3 * PAGE_SIZE];
         copy_in(live.space(), &sim, VirtAddr::new(base), &mut buf).expect("readable user range");
@@ -523,7 +515,7 @@ mod tests {
         let base = 0x4000;
         live.map_anonymous(base, 2).expect("map");
         // The second page of a 3-page unmap is mapped but the third is not:
-        // the whole range is rejected and nothing is torn down (§5.4).
+        // the whole range is rejected and nothing is torn down.
         assert_eq!(
             live.unmap_anonymous(base, 3),
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
@@ -620,7 +612,7 @@ mod tests {
         let mut live = live();
         let a = live.map_anonymous_placed(3).expect("room");
         // A wrong page count for an in-window (placed) base is refused before
-        // any teardown (`AGENTS.md` §5.4) — no partial unmap, region intact.
+        // any teardown — no partial unmap, region intact.
         assert_eq!(
             live.unmap_anonymous(a, 2),
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
@@ -649,7 +641,7 @@ mod tests {
         // allocator's window.
         assert!(mapping.phys_base >= SIM_BASE, "phys base is real RAM");
         // The buffer reads back as zero through the CPU mapping (no stale
-        // bytes are ever user-visible, `AGENTS.md` §4).
+        // bytes are ever user-visible).
         let sim = sim();
         let mut buf = vec![0xAAu8; 2 * PAGE_SIZE];
         copy_in(live.space(), &sim, VirtAddr::new(mapping.cpu_va), &mut buf)
@@ -662,7 +654,7 @@ mod tests {
         let mut live = live();
         // An addressing limit below the allocator's RAM window cannot be
         // satisfied by any block, so the carve is refused fail-closed and no
-        // pages are mapped (`AGENTS.md` §5.4 / §2.9).
+        // pages are mapped.
         assert_eq!(
             live.alloc_dma(PAGE_SIZE, SIM_BASE),
             Err(LiveSpaceError::Dma(DmaError::AddrLimitExceeded))
@@ -721,7 +713,7 @@ mod tests {
     /// The retained live space must be `Send` (it is owned by the kernel
     /// thread that runs the task) but is intentionally **not** stored behind
     /// a shared lock — its `Send`-ness is what lets it move to its running
-    /// CPU (`AGENTS.md` §4, the module exclusivity argument).
+    /// CPU (the module exclusivity argument).
     #[test]
     fn live_space_is_send() {
         fn assert_send<T: Send>() {}

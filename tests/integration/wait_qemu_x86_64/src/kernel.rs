@@ -53,7 +53,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
@@ -221,8 +221,7 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// the parent's `status` pointer and records whether the round-trip matched.
 /// `exit` records the caller's exit code with the producer and reaps the caller
 /// (`reschedule_current`); a parent that exits 0 after a verified reap is the
-/// PASS. Any other syscall is unexpected and fails the test loudly
-/// (`AGENTS.md` §7).
+/// PASS. Any other syscall is unexpected and fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: `args_ptr` points at the live `[u64; SYSCALL_MAX_ARGS]` the
     // syscall entry stub built from the saved register frame.
@@ -285,8 +284,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         // "drained without a verified reap" failure. Driving `unpark` on this
         // scheduler is the harness's equivalent of the production wait path's
         // wake (`SchedWaitQueueArch::unpark`), so the parent resumes from its
-        // cooperative park (the X4 deliverable). `unpark` is cancellation-safe
-        // (`AGENTS.md` §2.1): on a parent not yet parked it records a
+        // cooperative park (the X4 deliverable). `unpark` is cancellation-safe: on a parent not yet parked it records a
         // wake-pending token its next park commit consumes, and an
         // already-reaped/exited parent id is a benign no-op.
         if let Some(sched) = *SCHED.lock() {
@@ -304,7 +302,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 
 /// Copy `code` (as the parent's `i32` status) out to the parent's `status`
 /// pointer through the retained frozen parent space. Returns `false` on a
-/// faulting or unmapped pointer (fail closed, `AGENTS.md` §5.4).
+/// faulting or unmapped pointer (fail closed).
 fn copy_status_to_parent(status_va: u64, code: i32) -> bool {
     let guard = PARENT_SPACE.lock();
     let Some((space, physmap)) = guard.as_ref() else {
@@ -325,7 +323,7 @@ fn copy_status_to_parent(status_va: u64, code: i32) -> bool {
 /// identity-maps the low 32 MiB, the higher-half kernel window, and the LAPIC
 /// MMIO page; it is activated (so the user mappings land in it) and the image
 /// is built through the production capability-checked, audited `spawn_image`
-/// caller. Fails the test loudly on any error (`AGENTS.md` §7).
+/// caller. Fails the test loudly on any error.
 fn build_el0_space(
     pool: &'static paging::PageTablePool,
     image: &LoadImage,
@@ -338,7 +336,7 @@ fn build_el0_space(
     };
     // Identity-map the LAPIC MMIO page into the new space so the live scheduler
     // over `X86_64Arch` can read its ID register / write the ICR after the CR3
-    // switch (fail closed if the pool is exhausted, §2.9).
+    // switch (fail closed if the pool is exhausted).
     if arch_space
         .map_4k(pool, LAPIC_MMIO_BASE, LAPIC_MMIO_BASE, true)
         .is_none()
@@ -404,7 +402,7 @@ fn build_el0_space(
 
 /// Admit `entry` as a resumable user kthread whose `pre_resume` hook reloads
 /// `root_phys` (CR3) and repoints the per-CPU syscall entry stack at the task's
-/// own kernel stack before every switch-in (isolation, §4). Returns its task id.
+/// own kernel stack before every switch-in (isolation). Returns its task id.
 fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -414,10 +412,9 @@ fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64
         // kernel stack, so an involuntary LAPIC-timer preemption (P-1c) taken
         // from ring 3 (delivered through the IDT interrupt gate, which reads
         // `TSS.RSP0`) lands on this task's own stack and the parent's and
-        // child's preemptions never collide (`AGENTS.md` §2.2 — one per-task
-        // kernel stack for both entry kinds, §4). A rejected value leaves the
-        // slots unchanged and the next entry faults loudly — fail closed
-        // (`AGENTS.md` §5.4 / §2.9).
+        // child's preemptions never collide (one per-task
+        // kernel stack for both entry kinds). A rejected value leaves the
+        // slots unchanged and the next entry faults loudly — fail closed.
         if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
             note(TEST_FAIL, "X4 test: set_kernel_rsp0 rejected the stack top");
             qemu_exit::exit_failure();
@@ -497,11 +494,11 @@ fn run_wait() -> ! {
     // masked, so dispatch is the cooperative `step` loop below.
     let bsp_id = smp::bsp_lapic_id();
     // Single-CPU vertical (BSP, dense id 0): both arch handles size their
-    // per-CPU bookkeeping to one slot (`AGENTS.md` §24.1 — no baked-in
+    // per-CPU bookkeeping to one slot (no baked-in
     // `MAX_CPUS`).
     let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
-    // `&'static` backing (`AGENTS.md` §24.1); this vertical is single-CPU,
+    // `&'static` backing; this vertical is single-CPU,
     // and `run_wait` runs once, so a function-local `static` per handle is
     // sound and needs no allocator.
     static SCHED_ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
@@ -545,7 +542,7 @@ fn run_wait() -> ! {
 
     // Cooperative dispatch loop. The parent's `wait` parks it until the child
     // exits; the parent's verified `exit(0)` is the PASS (raised from the
-    // dispatch callback). A never-draining loop times out (fail-loud, §7).
+    // dispatch callback). A never-draining loop times out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

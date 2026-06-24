@@ -4,10 +4,10 @@
 //!
 //! A console's `login` process runs an unbounded sequence of login *rounds*
 //! ([`Login::run`](crate::login::Login::run)); between rounds it loops back
-//! to a fresh prompt (`AGENTS.md` §10). The user database it authenticates
+//! to a fresh prompt. The user database it authenticates
 //! against is **not** owned by `login` — it lives on the encrypted root and
 //! is read through the capability-gated `users_db_read` syscall once that
-//! root is unlocked (`AGENTS.md` §5.1, §16.2).
+//! root is unlocked.
 //!
 //! Under design B (`plans/PI.md` P11), `init` spawns `login` *before* the
 //! in-kernel root-unlock kthread has mounted the encrypted root: the unlock
@@ -30,7 +30,7 @@
 //! Once the unlock resolves, the read returns either [`DbLoad::Present`]
 //! (wire the [`UsersAuthenticator`] and authenticate against it) or
 //! [`DbLoad::Absent`] (an installer image, or an unlock that gave up — wire
-//! the fail-closed [`DenyAll`], `AGENTS.md` §5.4.5).
+//! the fail-closed [`DenyAll`]).
 
 use crate::auth::{DenyAll, UsersAuthenticator};
 use crate::session::Authenticator;
@@ -51,7 +51,7 @@ pub enum DbLoad {
     /// console.
     Pending,
     /// No database will arrive — an installer image, or an unlock that gave
-    /// up. Run the fail-closed deny-all prompt (`AGENTS.md` §5.4.5).
+    /// up. Run the fail-closed deny-all prompt.
     Absent,
 }
 
@@ -63,7 +63,7 @@ pub enum DbLoad {
 /// when the database is [`DbLoad::Pending`] (the encrypted root is still
 /// being unlocked); it should **block** until the database becomes
 /// available (e.g. `rustos_rt::users_db_wait`, which parks the task off the
-/// run queue rather than busy-yielding, `AGENTS.md` §2.1) so the in-kernel
+/// run queue rather than busy-yielding) so the in-kernel
 /// unlock kthread runs — `login` neither prompts nor reads the console
 /// while pending, so it cannot steal the passphrase bytes.
 /// `run_round` runs one prompt → authenticate → launch round against the
@@ -72,8 +72,7 @@ pub enum DbLoad {
 /// (PID 1 relaunches `login`).
 ///
 /// A [`DbLoad::Present`] round wires a [`UsersAuthenticator`]; a
-/// [`DbLoad::Absent`] round wires the fail-closed [`DenyAll`] (`AGENTS.md`
-/// §5.4.5). Reloading per round — rather than once at process start — is
+/// [`DbLoad::Absent`] round wires the fail-closed [`DenyAll`]. Reloading per round — rather than once at process start — is
 /// what lets a `login` spawned before the encrypted root is unlocked pick
 /// up the database the instant it becomes available, instead of caching a
 /// stale answer for its whole lifetime (`plans/PI.md` P11).
@@ -89,7 +88,7 @@ where
             // The unlock has not finished: do not prompt (it would race the
             // `Root passphrase:` prompt for the console). Block until it
             // resolves, then re-check — never a busy spin, `wait` parks the
-            // task off the run queue (`AGENTS.md` §2.1).
+            // task off the run queue.
             DbLoad::Pending => wait(),
             DbLoad::Present(db) => {
                 if !run_round(&UsersAuthenticator::new(&db)) {
@@ -182,7 +181,7 @@ mod tests {
 
     /// An installer image (or an unlock that gave up) reports `Absent`:
     /// `login` runs its fail-closed deny-all prompt straight away and never
-    /// waits (`AGENTS.md` §5.4.5).
+    /// waits.
     #[test]
     fn an_absent_database_prompts_deny_all_without_waiting() {
         let waits = Cell::new(0u32);
@@ -243,8 +242,7 @@ mod tests {
     }
 
     /// A console that dies on its first round returns immediately without
-    /// reloading again — `init` is the relaunch path, not a spin here
-    /// (`AGENTS.md` §2.1).
+    /// reloading again — `init` is the relaunch path, not a spin here.
     #[test]
     fn a_dead_console_returns_after_one_round() {
         let loads = Cell::new(0u32);

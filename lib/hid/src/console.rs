@@ -7,16 +7,16 @@
 //! [`Key`] a US keyboard layout produces, then emits the *device-resolved key
 //! edge* — a [`rustos_abi::input::KeyInput`] record built through the shared
 //! [`rustos_keymap::key_input`] map — leaving the encoding and routing to the
-//! kernel input-focus arbiter (`AGENTS.md` §17.4, `plans/PI.md` P11). A keyboard
+//! kernel input-focus arbiter (`plans/PI.md` P11). A keyboard
 //! driver injects each record into the kernel through the `key_inject` syscall,
 //! which decides by who holds input focus whether to encode the press to a text
 //! console's tty bytes or deliver the whole record to the desktop.
 //!
 //! The HID-usage→[`Key`] table is HID-specific (a `ps2` keyboard decodes
 //! scancode set 1 into the same [`Key`] vocabulary), so it lives here; the
-//! [`Key`]→[`KeyInput`] map is shared in `lib/keymap` (`AGENTS.md` §2.2).
+//! [`Key`]→[`KeyInput`] map is shared in `lib/keymap`.
 //!
-//! Everything here is allocation-free and fail-closed (`AGENTS.md` §2.9): an
+//! Everything here is allocation-free and fail-closed: an
 //! unknown usage or a non-key event produces no record rather than guessing.
 
 use rustos_abi::driver::input::{Input, InputEvent, InputEventKind};
@@ -25,7 +25,7 @@ use rustos_abi::DriverError;
 use rustos_input::{Key, Modifiers, NamedKey};
 use rustos_keymap::key_input;
 
-/// HID usage of the Caps Lock key (HID Usage Tables §10, page `0x07`).
+/// HID usage of the Caps Lock key (HID Usage Tables, page `0x07`).
 const USAGE_CAPS_LOCK: u16 = 0x39;
 
 /// HID usage of the Num Lock / Clear key.
@@ -46,7 +46,7 @@ const VALUE_RELEASE: i32 = 0;
 ///
 /// On metal the keyboard driver implements this by calling the `key_inject`
 /// syscall with the record's wire bytes; host tests implement it by recording
-/// the records (`AGENTS.md` §2.2 — the same seam style as
+/// the records (the same seam style as
 /// [`crate::ReportSource`]).
 pub trait ConsoleSink {
     /// Inject one [`KeyInput`] record's wire bytes
@@ -183,7 +183,7 @@ pub fn pump_once<I: Input, S: ConsoleSink>(
 
 /// Events drained from the keyboard per [`pump_once`] call.
 ///
-/// A batch size, not a capacity (`AGENTS.md` §24.4): undrained reports stay
+/// A batch size, not a capacity: undrained reports stay
 /// queued in the keyboard's [`crate::ReportSource`] and are read next call.
 pub const EVENT_BATCH: usize = 16;
 
@@ -191,8 +191,7 @@ pub const EVENT_BATCH: usize = 16;
 /// produces, given the active `shift`, `caps`, and `num` lock state.
 ///
 /// Returns `None` for a usage with no console key (an unmapped usage, a lock
-/// key, or numeric-keypad `5` with Num Lock off) — fail closed, never guess
-/// (`AGENTS.md` §2.9).
+/// key, or numeric-keypad `5` with Num Lock off) — fail closed, never guess.
 fn resolve_usage(usage: u16, shift: bool, caps: bool, num: bool) -> Option<Key> {
     if let Some(letter) = letter(usage, shift, caps) {
         return Some(Key::Char(letter));

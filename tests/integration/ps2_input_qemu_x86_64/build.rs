@@ -1,7 +1,7 @@
 //! Build-time generator for the Stage 4 PS/2 QEMU integration fixture.
 //!
 //! The freestanding `x86_64-unknown-none` binary that runs under QEMU
-//! cannot pull `ed25519-dalek` in directly (`AGENTS.md` §1 forbids
+//! cannot pull `ed25519-dalek` in directly (the charter forbids
 //! hand-rolled crypto; `lib/crypto` is the only auditable surface that
 //! exposes verification). This `build.rs` runs on the host where
 //! `ed25519-dalek` is available, signs a synthetic PS/2-driver `.rxe`
@@ -18,10 +18,9 @@
 //! The manifest requests exactly `CAP_DRV_LOAD`:
 //! `rustos_drv_input_ps2::register` gates on it, and the driver-visible
 //! capability set the host installs at register time is the manifest's
-//! requested set intersected with the caller's grants (`AGENTS.md`
-//! §5.2), so the capability must appear in *both*. The generator
+//! requested set intersected with the caller's grants, so the capability must appear in *both*. The generator
 //! mirrors `tests/integration/drvhost_qemu/build.rs`
-//! (`AGENTS.md` §2.2 — no duplication of intent, only the per-test seed
+//! (no duplication of intent, only the per-test seed
 //! differs). Re-running it produces byte-identical output, so the test
 //! is deterministic.
 
@@ -53,7 +52,7 @@ fn main() {
     // header) to `rustc` on the freestanding `x86_64-unknown-none`
     // target. Mirrors the other Stage-3a/4 freestanding QEMU test
     // build scripts — all share the same linker script
-    // (`AGENTS.md` §2.2 — no duplication).
+    // (no duplication).
     let target = std::env::var("TARGET").unwrap_or_default();
     if target == "x86_64-unknown-none" {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");

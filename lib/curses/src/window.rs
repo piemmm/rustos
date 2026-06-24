@@ -4,12 +4,11 @@
 //! cells, a cursor, the current drawing [`Attributes`], an optional scrolling
 //! region, and the screen `origin` at which the [screen driver] composites it.
 //! It is the *client* draw model — deliberately distinct from the terminal
-//! emulator's *server* `Grid`, the legitimate §2.2 carve-out (`plans/CURSES.md`
+//! emulator's *server* `Grid`, the legitimate carve-out (`plans/CURSES.md`
 //! §C4): the two play different roles, so they are not duplication.
 //!
 //! Every coordinate is window-relative and bounds-checked; an out-of-range
-//! request returns [`CursesError::OutOfBounds`] rather than panicking
-//! (`AGENTS.md` §2.9). Writing past the right edge wraps to the next line, and
+//! request returns [`CursesError::OutOfBounds`] rather than panicking. Writing past the right edge wraps to the next line, and
 //! writing past the last line of the scrolling region scrolls when scrolling is
 //! enabled (the default-off curses `scrollok` behaviour).
 //!

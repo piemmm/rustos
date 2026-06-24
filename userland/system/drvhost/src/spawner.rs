@@ -22,7 +22,7 @@
 use rustos_abi::{DriverError, DriverHandle, DriverHost, DriverManifest};
 use rustos_caps::CapabilitySet;
 
-/// Canonical `register` entry-point signature (`AGENTS.md` §8 / §10):
+/// Canonical `register` entry-point signature:
 ///
 /// ```text
 /// pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError>;
@@ -51,12 +51,12 @@ pub struct SpawnContext<'a> {
     /// implementations pass this to the driver's `register` entry.
     pub host: &'a dyn DriverHost,
     /// The capability set the host granted this load — the manifest's
-    /// requested set intersected with the caller's (`AGENTS.md` §5.2).
+    /// requested set intersected with the caller's.
     ///
     /// In-process register spawners read authority through
     /// [`SpawnContext::host`]; a *process-spawning* spawner additionally
     /// needs the granted set as a value, to create the driver's process
-    /// with exactly that authority and no more (`AGENTS.md` §4 — no
+    /// with exactly that authority and no more (no
     /// ambient authority). It is the same set [`SpawnContext::host`]
     /// answers [`DriverHost::has_capability`] from, surfaced here so the
     /// spawner does not have to probe every capability id to recover it.
@@ -87,7 +87,7 @@ pub enum SpawnRegisterError {
 /// None checked here. The host has already verified the manifest and
 /// intersected its requested capabilities with the caller's set before
 /// the spawner is called; [`SpawnContext::host`] exposes exactly that
-/// granted set (`AGENTS.md` §5.2).
+/// granted set.
 pub trait DriverSpawner {
     /// Run the verified image's registration, returning the handle the
     /// driver reported. The returned handle is informational — the host

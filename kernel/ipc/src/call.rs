@@ -9,8 +9,7 @@
 //!
 //! Like [`Port`](crate::port::Port) it is a kernel-owned endpoint identified
 //! by a stable [`EndpointId`] and gated by capabilities (checked at create
-//! and on every post; the single bound server does not re-check —
-//! `AGENTS.md` §5.2). Unlike a port it correlates each request with one
+//! and on every post; the single bound server does not re-check ). Unlike a port it correlates each request with one
 //! reply through an opaque, unforgeable [`CallTicket`]:
 //!
 //! * a caller [`post`](CallEndpoint::post)s a request and receives a ticket;
@@ -27,7 +26,7 @@
 //! parking until a request arrives — is layered above through the same
 //! cooperative yield/park seam the IRQ wait and `wait` syscalls use
 //! (`kernel/core`), so the primitive stays synchronous-test-friendly and
-//! free of any scheduler dependency (`AGENTS.md` §2.2 / §17.4). A parker
+//! free of any scheduler dependency. A parker
 //! polls [`CallEndpoint::recv_call`] / [`CallEndpoint::take_reply`] (both
 //! return immediately) between parks, exactly as `block_until_ready` polls
 //! IRQ readiness.
@@ -35,11 +34,10 @@
 //! # Fail closed
 //!
 //! Every refused operation emits exactly one [`crate::audit`] event before
-//! returning a stable [`Errno`] (`AGENTS.md` §5.4). A destroyed endpoint
+//! returning a stable [`Errno`]. A destroyed endpoint
 //! cancels every in-flight ticket: an outstanding
 //! [`CallEndpoint::take_reply`] reports [`ReplyOutcome::Cancelled`] so a
-//! parked caller wakes and abandons rather than waiting forever
-//! (`AGENTS.md` §2.9).
+//! parked caller wakes and abandons rather than waiting forever.
 
 extern crate alloc;
 
@@ -81,7 +79,7 @@ pub struct CallTicket(pub u64);
 ///
 /// `recv_call` is *size-bounded*: it dequeues the front request only when it
 /// fits the server's buffer, so a too-small buffer never silently drops a
-/// queued request (`AGENTS.md` §2.9). The in-kernel server passes
+/// queued request. The in-kernel server passes
 /// [`usize::MAX`] and so only ever observes [`RecvCall::Empty`] or
 /// [`RecvCall::Received`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,8 +138,7 @@ pub struct CallEndpointLimits {
     /// Maximum reply payload (bytes) [`CallEndpoint::reply`] accepts.
     pub max_reply: u32,
     /// Maximum number of outstanding calls before [`CallEndpoint::post`]
-    /// fails closed (a fail-closed memory bound, not a scaling capacity —
-    /// `AGENTS.md` §24.4).
+    /// fails closed (a fail-closed memory bound, not a scaling capacity ).
     pub capacity: usize,
 }
 
@@ -194,7 +191,7 @@ pub struct CallEndpoint {
     capacity: usize,
     /// Task that created and serves this endpoint. The kernel tears the
     /// endpoint down when this task exits so in-flight callers are released
-    /// fail-closed rather than blocked forever (`AGENTS.md` §2.9 / §5.4).
+    /// fail-closed rather than blocked forever.
     owner: u64,
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
@@ -206,14 +203,14 @@ impl CallEndpoint {
     ///
     /// The authority model is identical to [`Port::create`](crate::port::Port::create):
     /// `creator` must already hold every capability in `required_recv_caps`
-    /// (no ambient authority, `AGENTS.md` §4), and must additionally hold
+    /// (no ambient authority), and must additionally hold
     /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
     /// `required_send_caps` is non-empty (a restricted-sender endpoint is by
     /// definition privileged).
     ///
     /// `capacity` bounds the number of *outstanding* calls (posted, in
     /// service, or replied-but-unclaimed) so a misbehaving caller or server
-    /// cannot grow the endpoint without bound (`AGENTS.md` §24.1 fail-closed
+    /// cannot grow the endpoint without bound (fail-closed
     /// bound, not a scaling capacity).
     ///
     /// # Errors
@@ -317,7 +314,7 @@ impl CallEndpoint {
     /// Task id that created and serves this endpoint.
     ///
     /// The call-endpoint registry indexes by this so a task's endpoints can
-    /// be torn down when it exits (`AGENTS.md` §2.9).
+    /// be torn down when it exits.
     #[must_use]
     pub fn owner(&self) -> u64 {
         self.owner
@@ -486,11 +483,10 @@ impl CallEndpoint {
     /// Returns [`RecvCall::Empty`] when no request is pending (the server
     /// should park and retry — this never blocks), [`RecvCall::TooLarge`]
     /// when the front request exceeds `max_copy` (left queued so no request
-    /// is lost, `AGENTS.md` §2.9), or [`RecvCall::Received`] with the call
+    /// is lost), or [`RecvCall::Received`] with the call
     /// moved into the in-service table keyed by its ticket so a later
     /// [`reply`](Self::reply) can match it. Performs no capability check: the
-    /// server's authority is fixed at [`create`](Self::create) time
-    /// (`AGENTS.md` §5.2), exactly like [`Port::recv`](crate::port::Port::recv);
+    /// server's authority is fixed at [`create`](Self::create) time, exactly like [`Port::recv`](crate::port::Port::recv);
     /// the syscall layer gates the caller against
     /// [`required_recv_caps`](Self::required_recv_caps).
     #[must_use]
@@ -502,7 +498,7 @@ impl CallEndpoint {
         // Refuse to dequeue a request the server's buffer cannot hold: leave
         // it queued and report its size so the server can resize (the kernel
         // maps this to `BufferTooSmall`). Without this the bounded copy would
-        // have to drop the request after popping it (`AGENTS.md` §2.9).
+        // have to drop the request after popping it.
         if front.request.len() > max_copy {
             return RecvCall::TooLarge {
                 request_len: front.request.len(),
@@ -527,7 +523,7 @@ impl CallEndpoint {
     /// buffered for the caller and one [`AuditEvent::CallReplied`] is emitted.
     ///
     /// No capability check: the single bound server's authority is fixed at
-    /// create time (`AGENTS.md` §5.2).
+    /// create time.
     ///
     /// # Errors
     ///
@@ -589,11 +585,11 @@ impl CallEndpoint {
     /// Claim the reply for `ticket` on behalf of `claimant` (the task that
     /// posted it).
     ///
-    /// This is the caller's poll step; it never blocks (`AGENTS.md` §2.1 — a
+    /// This is the caller's poll step; it never blocks (a
     /// parker loops it under the cooperative yield/park seam). The ticket is
     /// the unforgeable authority, and `claimant` must match the posting task:
     /// a mismatch reports [`ReplyOutcome::Unknown`], never revealing whether
-    /// another task's ticket exists (`AGENTS.md` §5.4 / §19.1).
+    /// another task's ticket exists.
     ///
     /// * [`ReplyOutcome::Ready`] — the reply is available; its bytes are
     ///   returned and the ticket retired.
@@ -607,7 +603,7 @@ impl CallEndpoint {
             // A ready reply, but only its poster may claim it.
             Some((sender, bytes)) if sender == claimant => return ReplyOutcome::Ready(bytes),
             // Someone else's ticket: put the reply back untouched and deny
-            // without revealing that it exists (`AGENTS.md` §19.1).
+            // without revealing that it exists.
             Some(entry) => {
                 g.completed.insert(ticket.0, entry);
                 return ReplyOutcome::Unknown;
@@ -970,7 +966,7 @@ mod tests {
         let ticket = ep.post(&caller, b"four", &sink).expect("posted");
 
         // A buffer too small for the front request reports its size and does
-        // not dequeue it (`AGENTS.md` §2.9 — no lost request).
+        // not dequeue it (no lost request).
         assert_eq!(ep.recv_call(3), RecvCall::TooLarge { request_len: 4 });
         assert_eq!(ep.outstanding(), 1);
 

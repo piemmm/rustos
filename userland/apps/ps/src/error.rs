@@ -9,14 +9,14 @@ use rustos_procinfo::{CallError, ListError};
 /// The variants are deliberately coarse: the CLI surfaces enough to print a
 /// useful diagnostic and set a process exit status, while leaning on the
 /// frozen [`Errno`] for the wire-level cause so it invents no parallel error
-/// set (`AGENTS.md` §2.2).
+/// set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PsError {
     /// The command line carried an unrecognised option. The caller should
     /// print [`crate::USAGE`].
     Usage,
     /// The service refused the query because the caller lacks the
-    /// capability the query declares (`AGENTS.md` §16.6). Distinguished
+    /// capability the query declares. Distinguished
     /// from [`PsError::Service`] so the CLI can print the precise "this
     /// listing requires a capability you do not hold" diagnostic.
     PermissionDenied,

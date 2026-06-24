@@ -38,8 +38,7 @@
 //! # Why this lives in the bin crate, not the arch port
 //!
 //! The arch port (`kernel/arch/riscv64`) is a pure Arch HAL
-//! implementation and names no concrete kernel subsystem (`AGENTS.md`
-//! §17.2). This pipeline names `kernel/{core,mem,sec}` and
+//! implementation and names no concrete kernel subsystem. This pipeline names `kernel/{core,mem,sec}` and
 //! `kernel/sched/api`, so it lives here — exactly as x86_64 keeps its
 //! boot pipeline and `BinArch` wrapper, and aarch64 its `boot_aarch64`,
 //! in this crate. [`RiscvBinArch`] is the local `KernelArch` wrapper
@@ -49,14 +48,13 @@
 //! virtio-MMIO / framebuffer bins it backs) consume this very pipeline
 //! through that downstream crate — they publish the firmware map for
 //! their device-bring-up observers and then delegate here, so there is
-//! exactly one riscv64 boot orchestration (`AGENTS.md` §2.2).
+//! exactly one riscv64 boot orchestration.
 //!
 //! # No `unwrap` / `expect` / `panic!`
 //!
 //! Every fallible step returns a [`BootError`]; [`boot`] logs the stable
 //! cause string and parks the hart via the arch port's
-//! [`rustos_arch_riscv64::halt_current_hart`] (`AGENTS.md` §2.9, §2 —
-//! fail closed).
+//! [`rustos_arch_riscv64::halt_current_hart`] (fail closed).
 
 use alloc::sync::Arc;
 
@@ -82,15 +80,14 @@ const BOOT_CPU: CpuId = 0;
 /// `4000..5000` `kernel/core` range and the top-of-range slot the
 /// x86_64 pipeline uses for the same "init failed before `kernel_main`"
 /// signal, so external audit consumers decode one stable id across
-/// arches (`AGENTS.md` §5.4.4).
+/// arches.
 const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 
 /// Audit event: the riscv64 production kernel reached its RV-P2 paged
 /// boot init point (Sv39 MMU enabled, trap vector + `ecall` dispatch
 /// installed). Shares the `kernel/core`-owned `4000..5000` range and the
 /// `4097` "reached" slot the aarch64 boot pipeline uses; only one arch's
-/// boot module compiles per image, so the id never collides at runtime
-/// (`AGENTS.md` §5.4.4).
+/// boot module compiles per image, so the id never collides at runtime.
 const KERNEL_BOOT_RISCV64_REACHED: EventId = EventId(4097);
 
 /// Audit event: the boot path's kthread guard-arena decision
@@ -100,8 +97,7 @@ const KERNEL_BOOT_RISCV64_REACHED: EventId = EventId(4097);
 /// `4000..5000` range; `4097`/`4099` are taken by the reached/init-failed
 /// records above, and `4098` is free in this image (the x86_64 pipeline
 /// uses it for its TSC-invariance record, but only one arch's boot module
-/// compiles per image, so the id never collides at runtime, `AGENTS.md`
-/// §5.4.4).
+/// compiles per image, so the id never collides at runtime).
 const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4098);
 
 /// Exclusive upper bound for the kthread-stack guard arena: the spawn
@@ -109,7 +105,7 @@ const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4098);
 /// `spawn_producer_riscv64` build `IDENTITY_GIB = 4` GiB Sv39 spaces). A
 /// kthread stack above this would be unreachable — and its guard page
 /// unfaultable — under the owning task's own root, so the carve refuses to
-/// place the arena there (`AGENTS.md` §4).
+/// place the arena there.
 const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 
 /// Number of 1 GiB identity gigapages the boot address space maps.
@@ -118,7 +114,7 @@ const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
 /// root table, so the kernel image, stack, the firmware DTB, the PLIC,
 /// and the `virt`-board MMIO window all keep their physical addresses
 /// once the MMU is on — whatever their addresses, with no `cfg(board)`
-/// fork (`AGENTS.md` §17.2). Identity mapping makes physical == virtual,
+/// fork. Identity mapping makes physical == virtual,
 /// so the device-bring-up verticals that read MMIO/DMA at physical
 /// addresses keep working under the paged regime.
 const IDENTITY_GIGABYTES: usize = 512;
@@ -129,14 +125,14 @@ const IDENTITY_GIGABYTES: usize = 512;
 /// ever hands out one frame here. It lives in `.bss` for the lifetime of
 /// the kernel image, so `satp` keeps pointing at a valid table after
 /// [`enable_mmu_and_vectors`] returns even though the transient
-/// [`AddressSpace`] handle is dropped (`AGENTS.md` §2.1 — the pool is
+/// [`AddressSpace`] handle is dropped (the pool is
 /// monotonic and never freed). The real per-process page tables are
 /// built over the `kernel/mem` frame allocator at a later stage.
 static BOOT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 
 /// Stable `"true"`/`"false"` audit-field value for a boolean condition.
 /// Keeping the boot log to `&'static str` fields means the path takes no
-/// allocation and cannot panic (`AGENTS.md` §2.9).
+/// allocation and cannot panic.
 const fn yes_no(value: bool) -> &'static str {
     if value {
         "true"
@@ -196,19 +192,19 @@ impl SchedulerArch for RiscvBinArch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): forward the scheduler's
+        // Tickless preemption: forward the scheduler's
         // arm/disarm decision to the arch port, which programs the
         // supervisor-timer one-shot. The default no-op would silently drop
-        // preemption, so the delegation is required (§2.9).
+        // preemption, so the delegation is required.
         self.arch.set_preemption(armed);
     }
 
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
         // Forward the nearest blocking-wait deadline to the arch port,
         // which combines it with the quantum and arms the single
-        // supervisor-timer one-shot to the earlier (`AGENTS.md` §17.1). The
+        // supervisor-timer one-shot to the earlier. The
         // default no-op would silently drop timed wakes, so the delegation
-        // is required (§2.9).
+        // is required.
         self.arch.set_wakeup(deadline_ns);
     }
 }
@@ -229,12 +225,12 @@ impl KernelArch for RiscvBinArch {
     }
 
     fn wait_for_interrupt(&self) {
-        // The tickless idle park (`AGENTS.md` §17.1). The dispatch loop
+        // The tickless idle park. The dispatch loop
         // calls this with `sstatus.SIE` already cleared (it masked S-mode
         // interrupts to close the park/wake race and drained any
         // already-flagged wake), so `wfi` parks the hart until an interrupt
         // becomes pending — it wakes on a pending-but-untaken interrupt
-        // even with `SIE == 0`, so no edge is lost (§2.1). The loop
+        // even with `SIE == 0`, so no edge is lost. The loop
         // re-enables interrupts after we return, *taking* the pending one
         // then (its lock-free handler flags the deferred wake the next
         // `drain_pending_wakes` consumes). On a host build there is no
@@ -253,11 +249,11 @@ impl KernelArch for RiscvBinArch {
     fn set_device_irqs(&self, enabled: bool) {
         // Toggle this hart's S-mode interrupt taking (`sstatus.SIE`) so the
         // dispatch loop runs in-kernel tasks/kthreads with interrupts
-        // enabled (`AGENTS.md` §17.1 — the fully preemptive kernel), masking
+        // enabled (the fully preemptive kernel), masking
         // them only around the idle park and before halt. Enabling `SIE` in
         // S-mode is safe: a timer tick taken in S-mode runs lock-free
         // accounting but never reschedules the kernel (the trap handler
-        // gates preemption on the saved `SPP`, §4), and a PLIC external
+        // gates preemption on the saved `SPP`), and a PLIC external
         // interrupt forwards to the lock-free dispatcher. On a host build
         // there is no S-mode, so this is a benign no-op.
         #[cfg(all(freestanding, kernel_isa = "riscv64"))]
@@ -280,8 +276,7 @@ impl KernelArch for RiscvBinArch {
         // per-hart preempt storage, install the U-mode-preemption
         // callback, record the per-quantum interval derived from the
         // device-tree `timebase-frequency`, and enable `sie.STIE` — but
-        // leave the timer disarmed. RustOS is tickless (`AGENTS.md`
-        // §17.1): the scheduler arms the one-shot to one quantum only when
+        // leave the timer disarmed. RustOS is tickless: the scheduler arms the one-shot to one quantum only when
         // it dispatches onto a contended hart (via
         // `RiscvArch::set_preemption`) and disarms otherwise, so a hart
         // running a sole task takes no timer ticks. The kernel keeps
@@ -295,19 +290,18 @@ impl KernelArch for RiscvBinArch {
 
 // SAFETY-INVARIANT: `RiscvBinArch::halt` returns the bottom type. The
 // coercion fails to type-check if the impl ever loses `-> !`, pinning
-// the contract at compile time (`AGENTS.md` §2.10).
+// the contract at compile time.
 const _RISCV_BIN_ARCH_HALT_RETURNS_NEVER: fn(&RiscvBinArch) -> ! =
     <RiscvBinArch as KernelArch>::halt;
 
 /// Preemption-quantum rate, in slices per second. The shared
 /// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ)
-/// the aarch64 port also uses (defined once so the two cannot diverge,
-/// `AGENTS.md` §2.2): a ~10 ms slice bounds a runaway user task's hold on
+/// the aarch64 port also uses (defined once so the two cannot diverge): a ~10 ms slice bounds a runaway user task's hold on
 /// a contended hart while costing negligible trap overhead. This is
 /// **not** a periodic tick — the timer is armed one-shot to one quantum
-/// only when a hart is contended (`AGENTS.md` §17.1 tickless). The
+/// only when a hart is contended (tickless). The
 /// interval in `time`-CSR ticks is derived from the discovered
-/// `timebase-frequency`, never a board constant (§2.20).
+/// `timebase-frequency`, never a board constant.
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
 const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 
@@ -316,7 +310,7 @@ const PREEMPT_TICK_HZ: u64 = rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 /// The production riscv64 image is single-hart (`BootInfo::new(BOOT_CPU,
 /// 1, …)`), so a `PreemptStorage<1>` covers it; secondary-hart preemption
 /// is sized from the discovered hart count when SMP bring-up lands
-/// (`AGENTS.md` §24.1 — the per-hart timer bookkeeping is the discovered
+/// (the per-hart timer bookkeeping is the discovered
 /// hart count, never a baked-in ceiling). Published once by
 /// [`arm_preemption`].
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
@@ -335,11 +329,11 @@ static PREEMPT_STORAGE: rustos_arch_riscv64::preempt::PreemptStorage<1> =
 /// returns `false` when no resumable user kthread is published on `cpu`
 /// (unreachable from U-mode with none switched in, but the fail-closed
 /// return means a stray invocation is a harmless no-op rather than an
-/// unsound switch — `AGENTS.md` §2.9). The call only ever runs after
+/// unsound switch). The call only ever runs after
 /// [`on_timer_interrupt`](rustos_arch_riscv64::preempt) disarmed the SBI
 /// timer (`set_timer(u64::MAX)`), so `sip.STIP` is already cleared across
 /// the context switch; the scheduler re-arms the next one-shot on its
-/// following dispatch (tickless, §17.1).
+/// following dispatch (tickless).
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]
 extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
     let _ =
@@ -355,7 +349,7 @@ extern "C" fn production_preempt_dispatch(cpu: rustos_arch_api::CpuId) {
 /// re-armed to the next pending deadline
 /// ([`rustos_kernel_core::timed_wake_sweep`]), so a finite `hw_tree_wait`
 /// timeout fires even when the hart is otherwise idle (every task parked)
-/// and takes no preemption tick (`AGENTS.md` §17.1). It is pure accounting
+/// and takes no preemption tick. It is pure accounting
 /// (it never context-switches), so it is safe on a tick taken in S-mode;
 /// the *preemption* of a U-mode task is the separate
 /// [`production_preempt_dispatch`] U-mode-only callback.
@@ -369,14 +363,13 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// record the per-quantum interval from [`PREEMPT_TICK_HZ`], and enable
 /// `sie.STIE` — but leave the timer disarmed. The scheduler arms the
 /// one-shot to one quantum only when it dispatches onto a contended hart
-/// (`RiscvArch::set_preemption`), and disarms otherwise (`AGENTS.md`
-/// §17.1 tickless / `NO_HZ`).
+/// (`RiscvArch::set_preemption`), and disarms otherwise (tickless / `NO_HZ`).
 ///
 /// Called once per boot from [`RiscvBinArch::install_irq_dispatch`], in
 /// the kernel-core `Irq` phase — after the scheduler is built and before
 /// `init` drops to U-mode. The kernel runs with `sstatus.SIE == 0`, so no
 /// tick is *taken* until a U-mode task runs (the privilege rule U < S),
-/// so this is **additive and non-regressing** (`AGENTS.md` §2.17): a tick
+/// so this is **additive and non-regressing**: a tick
 /// taken in U-mode drives [`production_preempt_dispatch`], and a one-shot
 /// that ever fired in S-mode would only disarm (never preempt — the
 /// kernel is non-preemptible).
@@ -388,11 +381,11 @@ extern "C" fn production_tick_dispatch(_cpu: rustos_arch_api::CpuId) {
 /// sweep (Design D P-2): it releases any elapsed `hw_tree_wait`-style
 /// waiter and re-arms the one-shot to the next deadline, so the SBI timer
 /// is armed only for a real pending event — a preemption quantum and/or
-/// the nearest wakeup — never a fixed periodic tick (`AGENTS.md` §17.1).
+/// the nearest wakeup — never a fixed periodic tick.
 ///
 /// A zero `timebase_hz` (a board that does not report the timer rate)
 /// leaves the kernel cooperative rather than arming a nonsense interval —
-/// fail-safe (`AGENTS.md` §2.9). The boot pipeline already refuses a
+/// fail-safe. The boot pipeline already refuses a
 /// zero/absent `timebase-frequency` (`BootError::NoTimebase`), so this is
 /// defence-in-depth.
 fn arm_preemption(timebase_hz: u64) {
@@ -405,7 +398,7 @@ fn arm_preemption(timebase_hz: u64) {
         }
 
         // Set-once per boot; a stray re-call fails closed by halting rather
-        // than re-pointing the live per-hart slices (`AGENTS.md` §2.1).
+        // than re-pointing the live per-hart slices.
         if PREEMPT_STORAGE.register().is_err() {
             halt_current_hart();
         }
@@ -417,7 +410,7 @@ fn arm_preemption(timebase_hz: u64) {
         // Install the per-tick timed-wake sweep callback (Design D P-2), so
         // every tick — including one taken on an idle S-mode hart armed
         // solely for a blocking-wait deadline — releases any elapsed waiter
-        // and re-arms the one-shot to the next deadline (`AGENTS.md` §17.1).
+        // and re-arms the one-shot to the next deadline.
         preempt::set_timer_callback(production_tick_dispatch);
 
         let interval = preempt::interval_for_hz(timebase_hz, PREEMPT_TICK_HZ);
@@ -446,14 +439,14 @@ fn arm_preemption(timebase_hz: u64) {
 /// `stream_write` byte is forwarded verbatim through the arch port's
 /// [`rustos_arch_riscv64::serial::write_console_bytes`] (no `\n`
 /// translation — the bytes reach the device exactly as the program
-/// wrote them, `AGENTS.md` §16.4). It is the riscv64 analogue of the
+/// wrote them). It is the riscv64 analogue of the
 /// aarch64 `UartConsole`'s output half: the "first discovered console"
-/// stream **backing** the spawner attaches to fd 1 (`AGENTS.md` §20),
+/// stream **backing** the spawner attaches to fd 1,
 /// not a program-facing interface.
 ///
 /// No [`rustos_kernel_core::ConsoleRead`] half is installed: the SBI
 /// legacy console exposes no non-blocking input drain, so fd 0 reads
-/// fail closed (`AGENTS.md` §5.4) until a real input backing lands — PID
+/// fail closed until a real input backing lands — PID
 /// 1 `init` and the embedded `Shell` `Run` program only *write* (a
 /// banner) and `spawn`, so this slice needs no console input.
 #[derive(Debug, Default, Copy, Clone)]
@@ -476,7 +469,7 @@ pub static RISCV_UART_CONSOLE: RiscvUartConsole = RiscvUartConsole;
 /// The riscv64 boot console list: the SBI console is the only console.
 /// Its read half is the fail-closed [`rustos_kernel_core::NULL_CONSOLE_READ`]
 /// (the SBI legacy console exposes no non-blocking input drain), so fd 0
-/// reads keep failing closed exactly as before (`AGENTS.md` §5.4).
+/// reads keep failing closed exactly as before.
 pub static RISCV_UART_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
     [rustos_kernel_core::ConsoleDevice::new(
         &RISCV_UART_CONSOLE,
@@ -505,7 +498,7 @@ pub enum BootError {
 }
 
 impl BootError {
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -524,8 +517,7 @@ impl BootError {
 /// reserve everything from RAM base through the end of the kernel image
 /// + boot heap (`__kernel_end`), then mark the remainder usable.
 ///
-/// This is the single riscv64 boot memory-map builder (`AGENTS.md`
-/// §2.2): [`try_boot`] uses it to assemble the `kernel_core` hand-off,
+/// This is the single riscv64 boot memory-map builder: [`try_boot`] uses it to assemble the `kernel_core` hand-off,
 /// and the downstream `tests/integration/riscv64_boot` consumer uses it
 /// to publish the same map to its device-bring-up observers before
 /// delegating here.
@@ -574,8 +566,7 @@ fn memory_map_from_fdt(fdt: &Fdt<'_>) -> Result<BootMemoryMap, BootError> {
 ///
 /// Returns `false` (leaving `satp == 0`) when the boot page-table pool
 /// cannot satisfy the identity map — a fail-closed signal the caller
-/// logs and parks on rather than running `kernel_main` unpaged
-/// (`AGENTS.md` §2.9). The trap vector is installed only on success, so
+/// logs and parks on rather than running `kernel_main` unpaged. The trap vector is installed only on success, so
 /// `stvec` is never left pointing at a handler the paged regime did not
 /// reach.
 ///
@@ -587,7 +578,7 @@ fn memory_map_from_fdt(fdt: &Fdt<'_>) -> Result<BootMemoryMap, BootError> {
 ///
 /// The transient [`AddressSpace`] handle is dropped on return; `satp`
 /// keeps pointing at [`BOOT_PAGE_TABLES`]' root table, which lives for
-/// the kernel's lifetime (`AGENTS.md` §2.1).
+/// the kernel's lifetime.
 fn enable_mmu_and_vectors() -> bool {
     let Some(space) = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)
     else {
@@ -623,13 +614,12 @@ fn enable_mmu_and_vectors() -> bool {
 /// production path runs paged with syscall dispatch wired
 /// (`plans/PI.md` RV-P2). No user space exists yet, so nothing `ecall`s
 /// before user mode is wired (RV-P3); installing the callback here keeps
-/// the ordering identical to the aarch64 / x86_64 boot paths
-/// (`AGENTS.md` §5.4.5). A failure to enable the MMU is fatal — the boot
+/// the ordering identical to the aarch64 / x86_64 boot paths. A failure to enable the MMU is fatal — the boot
 /// path fails closed rather than running `kernel_main` unpaged.
 ///
 /// Returns the bottom type. On failure it logs one
 /// `KERNEL_BOOT_INIT_FAILED` record and parks the hart forever
-/// (`AGENTS.md` §2.9 — fail closed).
+/// (fail closed).
 ///
 /// # SAFETY-INVARIANT
 ///
@@ -646,7 +636,7 @@ pub fn boot(
     // any allocator/scheduler work, then install the production `ecall`
     // dispatch callback. The arch port's `ecall` trap path fails closed
     // if it fires before a callback is installed, so pin it before any
-    // user thread can run (`AGENTS.md` §5.4.5).
+    // user thread can run.
     let mmu_on = enable_mmu_and_vectors();
     syscall_entry::set_dispatch_callback(production_dispatch);
 
@@ -722,7 +712,7 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
 /// Assemble the validated [`BootInfo`] hand-off for the boot hart.
 ///
 /// Split out from [`boot`] so the failure path is a plain `Result` with
-/// no `unwrap`/`panic` (`AGENTS.md` §2.9).
+/// no `unwrap`/`panic`.
 ///
 /// # SAFETY-INVARIANT
 ///
@@ -757,13 +747,12 @@ pub fn try_boot(
     // turning a stack overrun into a synchronous store page fault rather
     // than a poison-canary detection (`plans/PI.md` G3b-2, the cross-port
     // sibling of the aarch64/x86_64 wiring). The arena is sized from the
-    // discovered usable RAM (§24.2 policy, the sum of `Usable` region
+    // discovered usable RAM (policy, the sum of `Usable` region
     // lengths after the kernel-image reservation) and bounded to the seams'
     // 4 GiB identity window so the stack is reachable under the task's own
     // root. When no usable region fits a whole arena the carve returns
     // `None`, the install is skipped, and the seams fall back to a
-    // software-canary `BoxStack` (fail closed, never fatal to boot,
-    // `AGENTS.md` §2.9 / §2.17).
+    // software-canary `BoxStack` (fail closed, never fatal to boot).
     let ram_bytes: u64 = memory_map
         .regions()
         .iter()
@@ -790,7 +779,7 @@ pub fn try_boot(
     // 3. Assemble the hand-off and validate it before handing control
     //    to the architecture-neutral kernel core.
     // Single-hart boot slice: one per-CPU slot, owned by an
-    // allocator-free `static` backing (`AGENTS.md` §24.1).
+    // allocator-free `static` backing.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = Arc::new(RiscvBinArch::new(RiscvArch::new(
         &STORAGE,
@@ -811,8 +800,7 @@ pub fn try_boot(
         &DISPATCH_SLOT,
     )
     // Install the SBI console as the only console-list entry so PID 1
-    // `init` and its session can write their startup banners
-    // (`AGENTS.md` §20). Its read half is the fail-closed
+    // `init` and its session can write their startup banners. Its read half is the fail-closed
     // `NULL_CONSOLE_READ`: the SBI legacy console exposes no
     // non-blocking input drain, so fd 0 fails closed this slice.
     .with_consoles(&RISCV_UART_CONSOLES)
@@ -829,7 +817,7 @@ pub fn try_boot(
         &crate::spawn_layout::PROGRAM_REGISTRY,
         &crate::riscv64::spawn_producer::RISCV_PROCESS_SPAWN,
     )
-    // Serve the discovered hardware tree (`AGENTS.md` §18.1 / §18.4): the
+    // Serve the discovered hardware tree: the
     // `hw_tree_read` / `hw_tree_wait` syscalls read the one authoritative
     // `HW_TREE`, so the user-space device manager observes the same
     // inventory the kernel discovered (Design D).

@@ -3,8 +3,7 @@
 //! `kernel/core::fs` owns the architecture-neutral VFS: absolute-path
 //! resolution ([`path`]), the mount table and its per-mount permission
 //! policy ([`mount`]), the per-inode permission model ([`perm`]), and the
-//! [`Vfs`] tree that ties them together while enforcing the `AGENTS.md`
-//! §16 on-disk layout.
+//! [`Vfs`] tree that ties them together while enforcing the on-disk layout.
 //!
 //! The block-device and on-disk-format side of a filesystem lives in the
 //! `drivers/filesystem/*` crates behind the
@@ -14,7 +13,7 @@
 //! arena — the natural shape of the boot-time root before storage comes
 //! online.
 //!
-//! # Driver delegation (`AGENTS.md` §2.4 / §5.4)
+//! # Driver delegation
 //!
 //! A subtree may instead be backed by a `drivers/filesystem/*` driver: the
 //! mount carries the driver's
@@ -23,22 +22,22 @@
 //! resolution below the mount point to a
 //! [`rustos_abi::driver::filesystem::FilesystemRead`] driver supplied by the
 //! caller (the kernel maps the handle to the live driver). The driver
-//! returns *structural* I/O only; the VFS remains the single §5.3 policy
+//! returns *structural* I/O only; the VFS remains the single policy
 //! point, authorising every traversal against the mount point's
 //! [`Metadata`] before and as it descends ([`DelegatedFs`]).
 //!
-//! # Layout enforcement (`AGENTS.md` §16)
+//! # Layout enforcement
 //!
 //! * The VFS refuses to create any reserved legacy POSIX top-level name
 //!   ([`path::RESERVED_TOP_LEVEL`]) directly under the root, returning
 //!   [`VfsError::ReservedPath`].
 //! * [`Vfs::with_default_layout`] provides exactly the four top-level
-//!   directories `AGENTS.md` §16.1 permits (`/System`, `/Users`, `/Apps`,
+//!   directories the charter permits (`/System`, `/Users`, `/Apps`,
 //!   `/Storage`) and mounts `/System` read-only with its `/System/Logs`
-//!   and `/System/Settings` children as writable child mounts (§16.2).
+//!   and `/System/Settings` children as writable child mounts.
 //! * Writes to a read-only mount fail with [`VfsError::ReadOnly`].
 //!
-//! # Permission enforcement (`AGENTS.md` §5.3)
+//! # Permission enforcement
 //!
 //! Every operation routes its access check through
 //! [`perm::Metadata::authorize`]: capability gate, then ACL, then POSIX
@@ -67,22 +66,22 @@ use rustos_kernel_sec::{GroupId, UserId};
 
 /// Handle for the kernel's *private root mount* — the in-memory [`Vfs`] a
 /// boot-time reader builds to delegate to the mounted root volume's
-/// driver (`AGENTS.md` §5.1).
+/// driver.
 ///
 /// The value only needs to be non-zero (the reader maps the handle to the
 /// borrowed driver itself); it spells `root` so it is legible in a log.
 /// It is defined here, once, so every boot reader that builds a
 /// root-backed [`Vfs`] shares the same handle rather than carrying its own
-/// copy (`AGENTS.md` §2.2).
+/// copy.
 pub(crate) const PRIVATE_ROOT_HANDLE: u64 = 0x726F_6F74;
 
 /// Build a minimal [`Vfs`] whose root mount is backed by the caller's root
 /// volume driver, ready for the `*_via_secured` delegation methods.
 ///
 /// This is the shared shape of the real root volume — which carries the
-/// whole §16 tree from its own root directory — used by every boot-time
+/// whole tree from its own root directory — used by every boot-time
 /// reader that resolves a path off the mounted root before the full mount
-/// table exists (`AGENTS.md` §2.2: one definition, no per-reader copy).
+/// table exists (: one definition, no per-reader copy).
 ///
 /// # Errors
 ///
@@ -108,8 +107,7 @@ pub enum VfsError {
     /// The path is not absolute, has an empty/over-long component, or
     /// contains a `.`/`..`/NUL token.
     InvalidPath,
-    /// The path names a reserved legacy POSIX top-level directory
-    /// (`AGENTS.md` §16.1).
+    /// The path names a reserved legacy POSIX top-level directory.
     ReservedPath,
     /// The named object does not exist.
     NotFound,
@@ -124,7 +122,7 @@ pub enum VfsError {
     /// The caller's credentials do not satisfy the inode's permission
     /// check (capability gate, ACL, or mode bits).
     PermissionDenied,
-    /// The covering mount is read-only (`AGENTS.md` §16.2).
+    /// The covering mount is read-only.
     ReadOnly,
     /// A driver backing a delegated mount reported an unrecoverable
     /// device fault, or returned a structurally invalid response (e.g. a

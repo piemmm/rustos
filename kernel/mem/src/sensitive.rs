@@ -1,7 +1,7 @@
 //! Sensitive-region API: zero-on-free for credentials, keys, and
 //! capability tokens.
 //!
-//! `AGENTS.md` §4 mandates:
+//! the charter mandates:
 //!
 //! > Zero-on-free for any allocation that ever held credentials, keys,
 //! > or capability tokens.
@@ -9,7 +9,7 @@
 //! This module supplies the only blessed API for those allocations:
 //! [`alloc_sensitive`] hands back a [`SensitiveBuffer`] that wipes
 //! itself on drop. Zeroing is delegated to the audited `zeroize` crate
-//! per `AGENTS.md` §6 ("audited crypto. No hand-rolled primitives.").
+//! ("audited crypto. No hand-rolled primitives.").
 //!
 //! Sensitive buffers are deliberately *not* `Clone`: every copy of a
 //! secret would need its own zero-on-free dance, and accidentally
@@ -110,7 +110,7 @@ impl Drop for SensitiveBuffer {
 /// - [`AllocError::OutOfMemory`] if the underlying heap is exhausted.
 ///   Detected through `Box::try_new_uninit_slice`-style logic via a
 ///   `try_reserve` on a `Vec`, then `into_boxed_slice` — keeping the
-///   contract `Result`-only (`AGENTS.md` §4).
+///   contract `Result`-only.
 pub fn alloc_sensitive(len: usize) -> Result<SensitiveBuffer, AllocError> {
     if len == 0 {
         return Err(AllocError::ZeroSize);

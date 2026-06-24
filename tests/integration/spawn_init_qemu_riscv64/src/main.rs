@@ -47,7 +47,7 @@
 //! `InitSpawn` seam — and only replaces the audit sink. Splitting the
 //! audit-observer behaviour into a separate bin (instead of a Cargo feature
 //! on a production crate) prevents feature unification from leaking the
-//! QEMU-exit shortcut into any production build (`AGENTS.md` §5.4.5 — fail
+//! QEMU-exit shortcut into any production build (fail
 //! closed; the harness never decides what the kernel does next).
 
 #![cfg_attr(itest_riscv64, no_std)]
@@ -123,8 +123,7 @@ mod kernel {
 
     /// Forward to the shared riscv64 panic bridge. A panic before the PASS
     /// finisher parks the hart, the run times out, and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour (`AGENTS.md`
-    /// §7).
+    /// `Outcome::Timeout` — the documented fail-loud behaviour.
     #[panic_handler]
     fn rustos_spawn_init_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_serial(info)

@@ -2,7 +2,7 @@
 //!
 //! The bridge drives the legacy configuration ports `0xCF8`/`0xCFC`
 //! through the architecture-neutral [`PortIo`] seam
-//! ([`rustos_abi::PortIo`], `AGENTS.md` §17.2 / §17.4). The seam keeps
+//! ([`rustos_abi::PortIo`]). The seam keeps
 //! the `in`/`out` instructions — and the only `unsafe` they require —
 //! inside the architecture port (`kernel/arch/x86_64`), so this driver
 //! carries neither inline assembly nor a target-conditional `cfg` gate:

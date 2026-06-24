@@ -19,14 +19,13 @@
 //!
 //! Every step that can fail returns a distinct non-zero exit code instead of
 //! reaching the deliberate fault, so the kernel side reports a failure rather
-//! than the program silently passing (`AGENTS.md` §7 / §2.9). Reaching the
+//! than the program silently passing. Reaching the
 //! final `return` at all (no fault) is itself a failure code.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
+//! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `rustos-rt` and the shared `abi-v1` types (`rustos-abi`), never the
-//! C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust programs
-//! (`AGENTS.md` §16.4). It is built position-independent and converted to an
-//! `rxe` blob by the consuming test's build script (`AGENTS.md` §9, §19.2). On
+//! C ABI (`crt0` + `abi-sys`), which exists solely for non-Rust programs. It is built position-independent and converted to an
+//! `rxe` blob by the consuming test's build script. On
 //! the host it is an inert stub so `cargo build --workspace`, clippy, and fmt
 //! still cover the crate.
 
@@ -51,7 +50,7 @@ mod program {
 
     /// Virtual base the region is mapped at. The consuming vertical's build
     /// script sets `RUSTOS_MEM_MAP_ADDR` (decimal) so the program and the
-    /// kernel's fault check agree on the address (`AGENTS.md` §2.2).
+    /// kernel's fault check agree on the address.
     const REGION_VA: u64 = match option_env!("RUSTOS_MEM_MAP_ADDR") {
         Some(s) => parse_u64(s.as_bytes(), DEFAULT_REGION_VA),
         None => DEFAULT_REGION_VA,
@@ -77,7 +76,7 @@ mod program {
     /// Parse `bytes` as a non-negative decimal integer at compile time,
     /// falling back to `default` on an empty string, a non-digit byte, or
     /// overflow of the `u64` range. `const` and panic-free so the values are
-    /// fixed into the image with no runtime parsing (`AGENTS.md` §2.9 — fail
+    /// fixed into the image with no runtime parsing (fail
     /// closed to the default).
     const fn parse_u64(bytes: &[u8], default: u64) -> u64 {
         let mut acc: u64 = 0;
@@ -130,7 +129,7 @@ mod program {
             // SAFETY: `mem_map` just returned REGION_VA as the base of a
             // REGION_LEN-byte RW|USER region in this process's own address
             // space, so `region.add(i)` is a valid, writable, in-bounds
-            // pointer for `i < REGION_LEN` (`AGENTS.md` §5.4 — the kernel
+            // pointer for `i < REGION_LEN` (the kernel
             // validated and installed the mapping).
             unsafe {
                 region.add(i).write_volatile(pattern_byte(i));
@@ -162,7 +161,7 @@ mod program {
         // SAFETY: this access is *expected* to fault — the range was just
         // unmapped. If the teardown wrongly left it mapped the read is still
         // of a valid pointer-sized location, and the program then returns the
-        // FAIL_NO_FAULT code below (`AGENTS.md` §2.9 — fail loud, never hang).
+        // FAIL_NO_FAULT code below (fail loud, never hang).
         let observed = unsafe { region.read_volatile() };
         // Reaching here means no fault fired — use-after-unmap was permitted.
         // Reference `observed` so the read is not optimised away.

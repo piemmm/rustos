@@ -42,7 +42,7 @@
 //! `gsi_base .. gsi_base + max_redirection_entry + 1`. The
 //! controller stores one block per IO-APIC and routes the
 //! kernel-neutral "line" parameter (a GSI) by linear scan; the table
-//! is bounded by `MAX_IO_APICS` (8 by §7-line-budget; QEMU has 1).
+//! is bounded by `MAX_IO_APICS` (8 by-line-budget; QEMU has 1).
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -72,8 +72,8 @@ use rustos_sync::spinlock::SpinLock;
 /// `tests/integration/irq_qemu_x86_64` integration test reads this
 /// slot to unmask a real IO-APIC pin (`program_pin(masked=false)`)
 /// and to re-read the redirection-entry mask state after
-/// [`rustos_kernel_irq::IrqTable::fire`] runs. AGENTS.md §2.1 — the
-/// slot is set-once per boot; AGENTS.md §2.4 — the typed accessor is
+/// [`rustos_kernel_irq::IrqTable::fire`] runs. — the
+/// slot is set-once per boot; — the typed accessor is
 /// a *read* of already-published state, not a new writable surface.
 #[cfg(freestanding)]
 static PUBLISHED_TYPED: rustos_sync::once::OnceCell<
@@ -139,7 +139,7 @@ struct BlockInner<M: IoApicMmio + Send> {
     /// [`IoApicController::program_pin`] has run for that pin.
     /// `None` for pins never wired by the kernel binary's IDT-install
     /// pass; `mask` on such a pin returns
-    /// [`MaskError::OutOfRange`] (fail-closed per `AGENTS.md` §5.4.5).
+    /// [`MaskError::OutOfRange`] (fail-closed).
     pin_cache: Vec<Option<PinSettings>>,
 }
 
@@ -288,7 +288,7 @@ impl<M: IoApicMmio + Send + 'static> IoApicController<M> {
     /// to re-read the redirection entry and assert
     /// `low & (1 << 16) != 0` — i.e. that
     /// [`rustos_kernel_irq::IrqTable::fire`]'s controller-side mask
-    /// write reached the hardware. AGENTS.md §5.4.4 — every
+    /// write reached the hardware. — every
     /// security-relevant invariant has a direct evidence path.
     #[must_use]
     pub fn read_pin_low(&self, gsi: u32) -> Option<u32> {
@@ -342,15 +342,14 @@ impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
     }
 }
 
-/// The §17.2 Arch HAL view of the IO-APIC controller
+/// The Arch HAL view of the IO-APIC controller
 /// (`plans/WIRING.md` Stage W3).
 ///
 /// `IoApicController` already implements the consumer-side
 /// [`rustos_kernel_irq::IrqController`] the IRQ table calls during a
 /// wake; this impl additionally exposes it through the HAL
 /// [`rustos_arch_api::IrqController`] so the architecture-neutral kernel
-/// can name one interrupt-controller surface across every port
-/// (`AGENTS.md` §2.2). Both `mask` and `unmask` delegate to the existing
+/// can name one interrupt-controller surface across every port. Both `mask` and `unmask` delegate to the existing
 /// IO-APIC logic; the only error the IO-APIC controller produces is
 /// "no such addressable line", which maps to
 /// [`rustos_arch_api::IrqControlError::OutOfRange`].
@@ -359,7 +358,7 @@ impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
 /// source and end-of-interrupt is a single LAPIC write that names no
 /// line — so it deliberately does **not** implement
 /// [`rustos_arch_api::InterruptEntry`]; there is no claim register to
-/// model, and faking one would be a fake primitive (`AGENTS.md` §2.1).
+/// model, and faking one would be a fake primitive.
 impl<M: IoApicMmio + Send + 'static> rustos_arch_api::IrqController for IoApicController<M> {
     fn mask(&self, line: u32) -> Result<(), rustos_arch_api::IrqControlError> {
         <Self as IrqController>::mask(self, line)
@@ -495,7 +494,7 @@ mod tests {
         // Pin 7 was never programmed, so the cache slot is `None`.
         // The mask path fail-closes with `OutOfRange` (the
         // controller refuses to mask a line that was never
-        // programmed at install time — `AGENTS.md` §5.4.5).
+        // programmed at install time).
         assert_eq!(
             IrqController::mask(&controller, 7),
             Err(MaskError::OutOfRange),
@@ -525,7 +524,7 @@ mod tests {
         assert!(!mmio1.snapshot().is_empty(), "block 1 received writes");
     }
 
-    /// §17.2 / W3: the IO-APIC controller passes the shared Arch HAL
+    /// / W3: the IO-APIC controller passes the shared Arch HAL
     /// interrupt-controller conformance vertical over its real handle
     /// (`plans/WIRING.md` Stage W3). GSI 7 is programmed (so it is an
     /// addressable, maskable line); GSI 99 is above the single block's

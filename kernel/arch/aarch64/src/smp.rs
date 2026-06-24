@@ -26,7 +26,7 @@
 //! that links this crate (including the single-core boot pipeline and the
 //! freestanding test bins) to define that symbol or fail to link. A
 //! set-once callback (parking until installed) keeps secondary bring-up
-//! opt-in without a Cargo feature gate (`AGENTS.md` §2.1 — no hacks).
+//! opt-in without a Cargo feature gate (no hacks).
 //!
 //! # Bring-up method
 //!
@@ -35,8 +35,7 @@
 //! (`hvc`/`smc`) discovered from the device tree ([`crate::fdt`]).
 //! Non-PSCI spin-table boot (e.g. a bare Raspberry Pi 3) is a tracked
 //! follow-up documented in the port `README.md`; `start_secondary`
-//! fails closed for an absent PSCI method rather than faking it
-//! (`AGENTS.md` §2.1 / §5.4.5).
+//! fails closed for an absent PSCI method rather than faking it.
 //!
 //! # Host testability
 //!
@@ -52,9 +51,9 @@ use rustos_arch_api::CpuId;
 /// Per-secondary-core kernel stack size, in bytes (64 KiB).
 ///
 /// This is a fixed *per-stack bound* (like the kthread kernel stack), not
-/// a CPU-count capacity, so it is a constant and not subject to the §24.1
+/// a CPU-count capacity, so it is a constant and not subject to the
 /// "no fixed ceiling" rule — that rule governs the *number* of cores, not
-/// the size of one core's stack (`AGENTS.md` §24.4). The number of cores
+/// the size of one core's stack. The number of cores
 /// the pool covers is the caller-sized `N` of [`SecondaryStackPool`].
 pub const SECONDARY_STACK_BYTES: usize = 1 << 16;
 
@@ -74,7 +73,7 @@ static SECONDARY_STACK_STRIDE: AtomicU64 = AtomicU64::new(0);
 
 /// Number of logical CPUs the registered pool covers (`0` until a pool
 /// is registered, so an unstarted system fails closed — every id is
-/// invalid, `AGENTS.md` §2.9 / §5.4.5).
+/// invalid).
 static SECONDARY_STACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Set-once guard so a second [`SecondaryStackPool::register`] is refused
@@ -85,7 +84,7 @@ static SECONDARY_STACKS_REGISTERED: AtomicBool = AtomicBool::new(false);
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SecondaryStackError {
     /// A pool was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1 — no silent re-pointing of the live trampoline).
+    /// (no silent re-pointing of the live trampoline).
     AlreadyRegistered,
 }
 
@@ -100,7 +99,7 @@ impl SecondaryStackSlot {
     // A 64 KiB zero array is a deliberately large *static* backing (a
     // secondary core's whole kernel stack), only ever const-evaluated into a
     // `static SecondaryStackPool` — never materialised on a runtime stack —
-    // so the large-array lint does not apply (`AGENTS.md` §24.4: a per-stack
+    // so the large-array lint does not apply (: a per-stack
     // size is a fixed bound, not a runtime stack allocation).
     #[allow(clippy::large_stack_arrays)]
     const fn new() -> Self {
@@ -111,15 +110,15 @@ impl SecondaryStackSlot {
 }
 
 /// Caller-owned, `&'static` secondary-core stack pool, sized by the
-/// constructing caller for its machine (`AGENTS.md` §24.1 — the
-/// secondary-bring-up stack count is derived from the §18-discovered core
+/// constructing caller for its machine (the
+/// secondary-bring-up stack count is derived from the-discovered core
 /// count, never a fixed `const` ceiling baked into the arch crate).
 ///
 /// The const parameter `N` is the number of logical CPUs the caller
 /// intends to bring up: a single-CPU boot path needs no pool, a two-core
 /// vertical uses `SecondaryStackPool<2>`, and a multi-core boot path sizes
 /// `N` from the device-tree CPU count. The arch crate stays allocator-free
-/// (`AGENTS.md` §24.1 watch-out — no `alloc` in a bare-metal arch crate,
+/// (watch-out — no `alloc` in a bare-metal arch crate,
 /// which would force a heap into every freestanding bin that links it), so
 /// the caller provides the storage as a `static` (allocator-free bins) or
 /// a leaked allocation (allocator-having callers) and registers it through
@@ -156,8 +155,7 @@ impl<const N: usize> SecondaryStackPool<N> {
     /// # Errors
     ///
     /// [`SecondaryStackError::AlreadyRegistered`] on the second publish
-    /// (set-once per boot — never silently re-points the live trampoline,
-    /// `AGENTS.md` §2.1).
+    /// (set-once per boot — never silently re-points the live trampoline).
     pub fn register(&'static self) -> Result<usize, SecondaryStackError> {
         if SECONDARY_STACKS_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -172,7 +170,7 @@ impl<const N: usize> SecondaryStackPool<N> {
         // Order the pool publish ahead of any secondary core's MMU-off
         // read of the globals. The PSCI `CPU_ON` firmware call that starts
         // a core is itself a barrier, but the explicit `dsb sy` makes the
-        // ordering local and unconditional (`AGENTS.md` §4 — explicit
+        // ordering local and unconditional (explicit
         // synchronisation for cross-CPU shared state).
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         // SAFETY: `dsb sy` is a full data-synchronisation barrier with no
@@ -194,7 +192,7 @@ impl<const N: usize> Default for SecondaryStackPool<N> {
 /// `true` iff `cpu` indexes a slot inside the registered secondary-stack
 /// pool, so the `smp.s` trampoline selects a stack slice that lies inside
 /// it. Returns `false` for every id until a [`SecondaryStackPool`] is
-/// registered (fail closed, `AGENTS.md` §2.9).
+/// registered (fail closed).
 #[must_use]
 pub fn is_valid_cpu(cpu: CpuId) -> bool {
     (cpu as usize) < SECONDARY_STACK_COUNT.load(Ordering::Acquire)
@@ -216,8 +214,7 @@ static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_secondary_entry`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetEntryError {
-    /// An entry was already installed; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// An entry was already installed; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -238,7 +235,7 @@ pub enum StartCpuError {
 }
 
 impl StartCpuError {
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -324,7 +321,7 @@ pub fn current_cpu_index() -> CpuId {
 ///
 /// # Errors
 ///
-/// See [`StartCpuError`]. The launcher fails closed (`AGENTS.md` §5.4.5)
+/// See [`StartCpuError`]. The launcher fails closed
 /// rather than assuming the core came up.
 ///
 /// # Safety
@@ -375,7 +372,7 @@ fn secondary_trampoline_addr() -> usize {
 /// stack. It runs the installed [`set_secondary_entry`] callback; with
 /// none installed it parks the core (the `start_secondary` guard makes
 /// this branch unreachable in practice, but a freshly-started core must
-/// never fall through to undefined instructions — `AGENTS.md` §2.9, fail
+/// never fall through to undefined instructions, fail
 /// closed).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[no_mangle]

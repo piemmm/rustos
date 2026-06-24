@@ -3,7 +3,7 @@
 //!
 //! Every module here names the riscv64 architecture port, so the whole
 //! subtree is gated on the `kernel_isa = "riscv64"` build-script name (the
-//! single `AGENTS.md` §17.2 selection point lives in `build.rs`, never an
+//! single selection point lives in `build.rs`, never an
 //! inline `target_arch` predicate). The host-testable [`dispatch`] wrapper
 //! compiles on a riscv64 host so its unit tests run under `cargo test`; the
 //! bare-metal-only boot path, PID 1 spawn seam, and runtime spawn producer

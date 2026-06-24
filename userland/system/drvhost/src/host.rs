@@ -75,7 +75,7 @@ pub struct HostConfig<'h> {
     /// view then reports `None` and the driver `register()` impl
     /// must fall back to a no-virtio path or refuse to load. The
     /// kernel binary wires a real implementation here that mints a
-    /// `KernelVirtioHost` per driver (`AGENTS.md` §4, per-process
+    /// `KernelVirtioHost` per driver (per-process
     /// heaps).
     pub virtio_host_factory: Option<&'h dyn VirtioHostFactory>,
     /// Optional MMIO mapper the driver reaches through
@@ -84,11 +84,11 @@ pub struct HostConfig<'h> {
     /// `None` for hosts that do not (yet) ship the MMIO-map facility
     /// — the [`DriverHost::mmio_mapper`] accessor on the driver view
     /// then reports `None` and a bus driver's `register()` impl must
-    /// refuse to load (`AGENTS.md` §5.4). The kernel binary wires a
+    /// refuse to load. The kernel binary wires a
     /// `KernelMmioMapper` here so an in-kernel bus driver
     /// (`drivers/bus/pcie_brcm`, `drivers/bus/usb`) can map a
     /// device's register window through the capability-gated
-    /// `rustos_kernel_sec::map_mmio` path (`AGENTS.md` §4 — no
+    /// `rustos_kernel_sec::map_mmio` path (no
     /// pointer the driver synthesises). The mapper enforces
     /// [`CapabilityId::MMIO_MAP`] at every
     /// [`map_window`](MmioMapper::map_window) call; the host borrows
@@ -123,7 +123,7 @@ impl Drop for LoadedRecord {
     }
 }
 
-/// Userland driver host (Stage 4 — `AGENTS.md` §8).
+/// Userland driver host (Stage 4).
 pub struct Host<'h> {
     cfg: HostConfig<'h>,
     next_handle: u64,
@@ -226,8 +226,7 @@ impl<'h> Host<'h> {
     /// # Errors
     ///
     /// Surfaces any error from the underlying `load` pipeline. The old
-    /// record is *not* removed if the reload fails (`AGENTS.md` §5.4 —
-    /// fail closed: a transient signature mismatch must not deprive
+    /// record is *not* removed if the reload fails (fail closed: a transient signature mismatch must not deprive
     /// the system of a working driver).
     pub fn reload(
         &mut self,
@@ -388,7 +387,7 @@ impl<'h> Host<'h> {
         }
         // Compose `header[..signed_end] || cap_body || bind_table ||
         // payload` in a temporary buffer that is wiped before it leaves
-        // scope (`AGENTS.md` §4 — zero-on-free for any buffer that held
+        // scope (zero-on-free for any buffer that held
         // capability tokens).
         //
         // The payload is part of the signed message: for a `kind =
@@ -396,8 +395,7 @@ impl<'h> Host<'h> {
         // hands the spawner to run as a fresh process, so leaving it
         // unsigned would let an attacker who can rewrite the on-disk image
         // (but not forge the signature) substitute arbitrary code while
-        // passing the gate — an unsigned-code-execution hole (`AGENTS.md`
-        // §8 / §2.17). Covering it closes that hole; for an in-kernel
+        // passing the gate — an unsigned-code-execution hole. Covering it closes that hole; for an in-kernel
         // driver the payload is empty, so the coverage is a no-op.
         let mut signed_message: Vec<u8> = Vec::with_capacity(
             parsed.signed_bytes.len()
@@ -461,9 +459,9 @@ impl<'h> Host<'h> {
 
     fn check_bind_table(&self, path: &str, parsed: &ParsedImage<'_>) -> Result<(), HostError> {
         // The decoded entries are not consumed here — matching is the
-        // device manager's job (`AGENTS.md` §18.3) — but every entry is
+        // device manager's job — but every entry is
         // validated fail-closed at the load gate so a malformed table
-        // never reaches a consumer (§5.4.3).
+        // never reaches a consumer.
         let mut buf =
             [DriverBindKey::new(0, HwMatchKey::virtio(0)); DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
         parsed.decode_bind_table(&mut buf).map_err(|e| {
@@ -604,7 +602,7 @@ fn event_message(id: EventId) -> &'static str {
 /// Small stack buffer for rendering a `u64` (a [`DriverHandle`] or a
 /// count) as decimal without an allocator. A u64 fits in 20 decimal
 /// digits. Shared with [`crate::store`] so the crate has one decimal
-/// formatter (`AGENTS.md` §2.2).
+/// formatter.
 pub(crate) struct HandleBuf {
     bytes: [u8; 20],
     len: usize,

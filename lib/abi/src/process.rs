@@ -1,18 +1,16 @@
 //! The process startup vector: what the kernel hands a freshly spawned
 //! program.
 //!
-//! When the loader (`AGENTS.md` §16.5, the `rxe` loader) drops into a freshly
+//! When the loader (the `rxe` loader) drops into a freshly
 //! created process it materialises a single contiguous *startup-vector block*
 //! in the new address space and hands the program's entry trampoline (crt0,
 //! `plans/CCOMPAT.md` CC3) a pointer to it. The block carries the program's
 //! command-line arguments, its environment, and a per-process random seed for
-//! the §19.2 stack canary. This module is the one definition both sides share
-//! (`AGENTS.md` §2.2): the kernel *builds* the block and crt0 *parses* it.
+//! the stack canary. This module is the one definition both sides share: the kernel *builds* the block and crt0 *parses* it.
 //!
 //! The block is **position-independent** — every string is referenced by an
 //! offset relative to the block base, never an absolute pointer — so it works
-//! unchanged wherever the loader places it in a PIE address space
-//! (`AGENTS.md` §19.2). It is laid out as:
+//! unchanged wherever the loader places it in a PIE address space. It is laid out as:
 //!
 //! ```text
 //! +-----------------------------+  offset 0
@@ -30,11 +28,10 @@
 //! terminator, so crt0 copies and NUL-terminates them when it builds the C
 //! `argv` / `envp` vectors a hosted program expects.
 //!
-//! [`ProcessStart::parse`] treats the whole block as **untrusted input**
-//! (`AGENTS.md` §19.5/§19.6): it bounds-checks every field against the frozen
+//! [`ProcessStart::parse`] treats the whole block as **untrusted input**: it bounds-checks every field against the frozen
 //! `abi-v1` limits and the declared `total_len`, rejects an embedded NUL (so
 //! every string is representable as a C string), and fails closed with an
-//! [`Errno`] rather than ever indexing out of range (`AGENTS.md` §2.9).
+//! [`Errno`] rather than ever indexing out of range.
 
 use crate::le::{read_u32, read_u64};
 use crate::Errno;
@@ -131,9 +128,9 @@ pub struct ProcessStartHeader {
     pub env_count: u32,
     /// Total length of the whole block in bytes (header + slots + strings).
     pub total_len: u64,
-    /// Per-process random seed for the §19.2 stack canary.
+    /// Per-process random seed for the stack canary.
     ///
-    /// The kernel fills this from the platform RNG (`AGENTS.md` §22) when it
+    /// The kernel fills this from the platform RNG when it
     /// builds the block; crt0 installs it as the program's canary. It is not
     /// validated here — any value is structurally acceptable — but the kernel
     /// must supply real entropy.
@@ -228,7 +225,7 @@ impl ProcessStartHeader {
 /// [`ProcessStart::parse`] is the only constructor; it validates every field
 /// of the [`ProcessStartHeader`], the `arg_count + env_count` [`StringSlot`]
 /// records, and the bytes each slot points at, so the accessors below can
-/// never index out of range (`AGENTS.md` §2.9). The view borrows the block; it
+/// never index out of range. The view borrows the block; it
 /// performs no allocation, so it runs unchanged inside the kernel builder's
 /// self-check and inside crt0.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -440,7 +437,7 @@ pub fn encoded_len(args: &[&[u8]], env: &[&[u8]]) -> Result<usize, Errno> {
 /// stack-canary seed `canary` into `buf`, returning the number of bytes
 /// written.
 ///
-/// This is the production builder the §16.5 loader uses: the kernel sizes a
+/// This is the production builder the loader uses: the kernel sizes a
 /// buffer with [`encoded_len`], calls this to serialise the block, and copies
 /// the written bytes into the new process's address space.
 ///
@@ -500,27 +497,25 @@ pub fn write_into(
     Ok(total_len)
 }
 
-/// The four standard file descriptors every process inherits at spawn
-/// (`AGENTS.md` §20).
+/// The four standard file descriptors every process inherits at spawn.
 ///
 /// A program performs **all** of its text I/O over these inherited
 /// descriptors and never over a kernel-discovered device: fd 0 reads
 /// input, fd 1 writes data, fd 2 writes diagnostics, and fd 3 carries
 /// optional structured advisory metadata ([`crate::stdinfo`]). Which
 /// kernel *stream backing* each descriptor resolves to is decided by the
-/// spawner, never hard-coded into the program (§20 — device
+/// spawner, never hard-coded into the program (device
 /// independence is a property of the stream layer, not the program).
 pub const STDIN: u32 = 0;
-/// Primary data output (`AGENTS.md` §20). See [`STDIN`].
+/// Primary data output. See [`STDIN`].
 pub const STDOUT: u32 = 1;
-/// Errors, warnings, and diagnostics (`AGENTS.md` §20). See [`STDIN`].
+/// Errors, warnings, and diagnostics. See [`STDIN`].
 pub const STDERR: u32 = 2;
-/// Optional structured advisory metadata (`AGENTS.md` §20, [`crate::stdinfo`]).
+/// Optional structured advisory metadata ([`crate::stdinfo`]).
 /// See [`STDIN`].
 pub const STDINFO: u32 = 3;
 
-/// Number of standard file descriptors the process ABI reserves
-/// (`AGENTS.md` §20): exactly fd 0/1/2/3.
+/// Number of standard file descriptors the process ABI reserves: exactly fd 0/1/2/3.
 pub const STD_STREAM_COUNT: usize = 4;
 
 /// The `console` argument to [`crate::SyscallNumber::SPAWN`] that attaches
@@ -531,14 +526,14 @@ pub const STD_STREAM_COUNT: usize = 4;
 /// [`crate::SyscallNumber::CONSOLE_COUNT`] is small and unsigned, so the
 /// sentinel can never collide with one. Inheriting is the default session
 /// shape — a spawned child (login's shell, a shell's job) stays on the
-/// console its parent was driving (`AGENTS.md` §20 — the spawner decides
+/// console its parent was driving (the spawner decides
 /// the backing, the program only ever names fd numbers).
 pub const CONSOLE_INHERIT: u64 = u64::MAX;
 
 /// Highest console index a descriptor can record — the inclusive bound of
 /// the [`DescriptorTable`] per-descriptor console field (`u8`).
 ///
-/// An ABI field-width bound, not a capacity policy (`AGENTS.md` §24.4):
+/// An ABI field-width bound, not a capacity policy:
 /// the number of consoles actually installed is discovered at boot and is
 /// far below this; a spawn naming an index with no installed console fails
 /// closed regardless.
@@ -547,17 +542,16 @@ pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 /// The access a single inherited descriptor grants its process.
 ///
 /// A descriptor is established at spawn and points at a kernel *stream
-/// backing* object (`AGENTS.md` §20). [`StreamMode`] records the
+/// backing* object. [`StreamMode`] records the
 /// direction that backing supports for the owning process; a
 /// [`stream_read`](crate::SyscallNumber::STREAM_READ) /
 /// [`stream_write`](crate::SyscallNumber::STREAM_WRITE) against a
-/// descriptor whose mode does not permit the direction fails closed
-/// (§5.4) rather than reaching a device the program was never granted.
+/// descriptor whose mode does not permit the direction fails closed rather than reaching a device the program was never granted.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum StreamMode {
     /// No backing is attached to this descriptor: every access denies
-    /// (`AGENTS.md` §5.4 — fail closed; §20 — no fallback to a device).
+    /// (fail closed; — no fallback to a device).
     Closed = 0,
     /// The descriptor is readable (a `stream_read` source). Writes deny.
     Read = 1,
@@ -565,7 +559,7 @@ pub enum StreamMode {
     Write = 2,
 }
 
-/// One process's standard-stream descriptor table (`AGENTS.md` §20).
+/// One process's standard-stream descriptor table.
 ///
 /// A fixed table of [`STD_STREAM_COUNT`] entries, one per standard
 /// descriptor (fd 0/1/2/3), recording the access each inherited stream
@@ -573,7 +567,7 @@ pub enum StreamMode {
 /// per-descriptor console index). The spawner establishes it when it
 /// creates the process; the kernel consults it to resolve a
 /// `stream_read` / `stream_write` fd to its backing's direction *and*
-/// device (`AGENTS.md` §20 — the descriptor table, not an ambient device,
+/// device (the descriptor table, not an ambient device,
 /// is the authority). Two processes on different consoles (the video
 /// console and the UART, `plans/PI.md` P11) differ only in this table —
 /// the programs themselves are identical. The table is small and `Copy`;
@@ -587,7 +581,7 @@ pub struct DescriptorTable {
 impl DescriptorTable {
     /// A table with every standard descriptor [`Closed`](StreamMode::Closed).
     ///
-    /// The fail-closed default (`AGENTS.md` §5.4): a process with no
+    /// The fail-closed default: a process with no
     /// inherited streams can reach no backing until the spawner attaches
     /// one. This is also what an unregistered task resolves to.
     #[must_use]
@@ -601,8 +595,7 @@ impl DescriptorTable {
     /// The standard text-I/O table on the **primary** console (index 0):
     /// fd 0 readable, fd 1/2/3 writable.
     ///
-    /// The shape every bootstrap-session process inherits (`AGENTS.md`
-    /// §20): `stdin` is the input source, `stdout`/`stderr`/`stdinfo` are
+    /// The shape every bootstrap-session process inherits: `stdin` is the input source, `stdout`/`stderr`/`stdinfo` are
     /// output sinks. The spawner backs these descriptors with the
     /// boot path's first installed console (`plans/PI.md` P6e-3a),
     /// but the program only ever names the fd numbers.
@@ -613,12 +606,12 @@ impl DescriptorTable {
 
     /// The standard text-I/O table attached to console `console`: fd 0
     /// readable, fd 1/2/3 writable, every descriptor backed by the named
-    /// installed console (`AGENTS.md` §20, `plans/PI.md` P11 — one login
+    /// installed console (`plans/PI.md` P11 — one login
     /// session per discovered text console).
     ///
     /// The index is recorded verbatim; the kernel validates it against
     /// the installed console list when the table is established at spawn
-    /// and fails closed on an index with no console (`AGENTS.md` §5.4).
+    /// and fails closed on an index with no console.
     #[must_use]
     pub const fn standard_on(console: u8) -> Self {
         let mut modes = [StreamMode::Closed; STD_STREAM_COUNT];
@@ -638,8 +631,7 @@ impl DescriptorTable {
     ///
     /// An out-of-range descriptor resolves to `Closed` so the kernel
     /// fails it closed exactly as it would a closed standard descriptor,
-    /// without leaking that the index was out of range (`AGENTS.md`
-    /// §5.4).
+    /// without leaking that the index was out of range.
     #[must_use]
     pub fn mode(&self, fd: u32) -> StreamMode {
         let index = fd as usize;
@@ -657,7 +649,7 @@ impl DescriptorTable {
     /// [`StreamMode::Closed`]: the kernel resolves the direction first,
     /// so the index of a closed or out-of-range descriptor is never
     /// consulted — the out-of-range default exists so this accessor is
-    /// total without leaking the range check (`AGENTS.md` §5.4).
+    /// total without leaking the range check.
     #[must_use]
     pub fn console(&self, fd: u32) -> u8 {
         let index = fd as usize;
@@ -688,7 +680,7 @@ mod tests {
 
     #[test]
     fn standard_fd_numbers_are_frozen() {
-        // The fd numbers are part of the process ABI (`AGENTS.md` §20).
+        // The fd numbers are part of the process ABI.
         assert_eq!(STDIN, 0);
         assert_eq!(STDOUT, 1);
         assert_eq!(STDERR, 2);
@@ -769,7 +761,7 @@ mod tests {
 
     fn build_with_canary(args: &[&[u8]], env: &[&[u8]], canary: u64) -> Vec<u8> {
         // The tests drive the very same production builder the kernel loader
-        // uses (`AGENTS.md` §2.2 — one definition), proving the writer and the
+        // uses (one definition), proving the writer and the
         // parser agree end-to-end rather than re-implementing the layout.
         let total_len = super::encoded_len(args, env).expect("within abi-v1 limits");
         let mut block = alloc::vec![0u8; total_len];

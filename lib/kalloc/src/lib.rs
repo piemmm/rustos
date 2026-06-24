@@ -8,7 +8,7 @@
 //! never reclaimed, so any sustained allocation traffic — a file-size
 //! proportional bundle read, a long-running service serving requests —
 //! eventually exhausted the heap and the `#[alloc_error_handler]`
-//! *panicked*, violating `AGENTS.md` §4 ("Deterministic OOM behaviour:
+//! *panicked*, violating ("Deterministic OOM behaviour:
 //! allocation failure is a `Result`, never a panic"; the `GlobalAlloc`
 //! null return is that fallible signal).
 //!
@@ -30,7 +30,7 @@
 //! `#[global_allocator]` is `const`-constructed; the heap is initialised
 //! lazily on the first allocation.
 //!
-//! `AGENTS.md` §4 forbids "an `unsafe` global allocator that performs raw
+//! the charter forbids "an `unsafe` global allocator that performs raw
 //! pointer arithmetic without bounds-checked wrappers": every hole address
 //! is confined to `[heap_base, heap_base + heap_len)` by construction (the
 //! initial hole spans exactly the region and splits only ever shrink it),
@@ -127,8 +127,7 @@ struct Inner {
 /// Implements [`GlobalAlloc`]. Pair with a `static HEAP: Heap`
 /// (`#[repr(C, align(4096))]`) in the bin crate and register via
 /// `#[global_allocator]`. The `heap_base` pointer must stay valid for the
-/// life of the binary (the bin backs it with a `static mut Heap`,
-/// `AGENTS.md` §2's documented single global-mutable exception).
+/// life of the binary (the bin backs it with a `static mut Heap`'s documented single global-mutable exception).
 pub struct FreeListAllocator {
     heap_base: *mut u8,
     heap_len: usize,

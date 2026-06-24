@@ -22,22 +22,22 @@
 //! The binding invariants (`plans/SPAWN.md` SP5, settled in the SP5-0 design
 //! note):
 //!
-//! * **W^X, `RW` only (`AGENTS.md` §19.2).** A mapping is always readable
+//! * **W^X, `RW` only.** A mapping is always readable
 //!   and writable and **never** executable. An executable (JIT) mapping is a
 //!   separate, later `CAP_JIT_MAP_EXEC`-gated `RW`→`RX` flip; `mem_map` never
 //!   produces `RWX`.
-//! * **Per-process, never global (`AGENTS.md` §4).** A region is mapped only
+//! * **Per-process, never global.** A region is mapped only
 //!   into the caller's own address space; there is no global user heap and no
 //!   cross-process mapping (shared memory stays the capability-checked IPC
 //!   object).
-//! * **Unprivileged (`AGENTS.md` §16.6 precedent).** Growing one's *own*
+//! * **Unprivileged (precedent).** Growing one's *own*
 //!   address space with anonymous `RW` memory requires no capability, exactly
 //!   as "list my own processes" does. The kernel still validates every
-//!   argument and fails closed (`AGENTS.md` §5.4).
-//! * **Zero on map and on free (`AGENTS.md` §4 — secret hygiene).** Pages are
+//!   argument and fails closed.
+//! * **Zero on map and on free (secret hygiene).** Pages are
 //!   zeroed before the mapping is visible (no stale kernel / other-process
 //!   bytes), and the frames `mem_unmap` reclaims are zeroed on free.
-//! * **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A frame- or
+//! * **Deterministic OOM.** A frame- or
 //!   page-table-allocation failure returns [`Errno::OutOfMemory`], never a
 //!   panic. There is no per-process quota; a process is bounded only by the
 //!   physical frames available.
@@ -54,7 +54,7 @@ use crate::Errno;
 /// the bits named here are defined; every other bit is reserved and must be
 /// zero. [`MapFlags::from_bits`] rejects a value with any reserved bit set, so
 /// a future flag cannot be silently ignored by an older kernel
-/// (`AGENTS.md` §5.4 — validate every input, fail closed).
+/// (validate every input, fail closed).
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct MapFlags(u32);

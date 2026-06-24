@@ -12,18 +12,18 @@
 //! driven against a *borrowed* live [`AddressSpace`](crate::vmm::AddressSpace)
 //! by the higher-level [`LiveSpace`](crate::live::LiveSpace), which composes
 //! it with the already-audited [`map_anonymous`](crate::anon::map_anonymous)
-//! mechanism — there is no second mapping path (`AGENTS.md` §2.2).
+//! mechanism — there is no second mapping path.
 //!
 //! It is the placement analogue of [`MmioWindowMap`](crate::mmio::MmioWindowMap):
 //! both manage a per-task virtual window, but the MMIO mapper places a
 //! *device's own* frames (and brackets each with guard pages), whereas this
 //! only **chooses the base** for anonymous RAM the frame allocator backs.
 //!
-//! # Scalability (`AGENTS.md` §24.1)
+//! # Scalability
 //!
 //! The window is *address space*, not a physical resource: a large window
 //! costs no RAM until the frame allocator backs a mapping (and that backing
-//! fails closed as a deterministic OOM, §4). So the window may be sized
+//! fails closed as a deterministic OOM). So the window may be sized
 //! generously, and the allocator's own memory is bounded by the number of
 //! *live + freed* regions — a bump cursor plus a free-list of returned holes
 //! — never by the page count of the window. A hand-picked per-page bitmap
@@ -74,7 +74,7 @@ impl AnonWindowMap {
         }
         // The window must fit in the address space: both the byte span and
         // the top address are validated up front so `va_of_slot` can never
-        // overflow (`AGENTS.md` §5.4 — fail closed before any state).
+        // overflow (fail closed before any state).
         let span = (capacity_pages as u64)
             .checked_mul(PAGE_SIZE as u64)
             .ok_or(AnonError::Overflow)?;
@@ -101,7 +101,7 @@ impl AnonWindowMap {
     /// * [`AnonError::Overflow`] if `page_count` does not fit `usize`.
     /// * [`AnonError::OutOfMemory`] if no free hole and no remaining bump
     ///   space can satisfy the request (the window is exhausted — a
-    ///   deterministic, fail-closed refusal, `AGENTS.md` §4 / §2.9).
+    ///   deterministic, fail-closed refusal).
     pub fn allocate(&mut self, page_count: u64) -> Result<u64, AnonError> {
         if page_count == 0 {
             return Err(AnonError::ZeroLength);
@@ -133,7 +133,7 @@ impl AnonWindowMap {
     ///
     /// `page_count` must equal the count the range was allocated with: a
     /// mismatch (or an unknown base) is rejected fail-closed and frees
-    /// nothing (`AGENTS.md` §5.4 — the range is not one this allocator
+    /// nothing (the range is not one this allocator
     /// handed out, so it never tears down a neighbour's slots).
     ///
     /// # Errors
@@ -142,7 +142,7 @@ impl AnonWindowMap {
     /// window, or `page_count` does not match its recorded extent.
     pub fn release(&mut self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
         // The match check is the same fail-closed test [`Self::validate`]
-        // performs (one definition, `AGENTS.md` §2.2); only release mutates.
+        // performs (one definition); only release mutates.
         self.validate(base_va, page_count)?;
         let n = usize::try_from(page_count).map_err(|_| AnonError::Overflow)?;
         self.regions.remove(&base_va);
@@ -156,7 +156,7 @@ impl AnonWindowMap {
     ///
     /// The live space calls this before tearing a placed region's pages down,
     /// so a mismatched `(base, len)` fails closed *before* any page is
-    /// unmapped (`AGENTS.md` §5.4); the matching [`Self::release`] then runs
+    /// unmapped; the matching [`Self::release`] then runs
     /// after the teardown and is guaranteed to match.
     ///
     /// # Errors

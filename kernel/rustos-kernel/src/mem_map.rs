@@ -3,26 +3,25 @@
 //! (`plans/PI.md` P6c-1).
 //!
 //! The aarch64 boot path (`aarch64::boot`) discovers the board's RAM
-//! window from the device tree — never a fabricated static list
-//! (`AGENTS.md` §18.2). This module turns that `(base, size)` pair and
+//! window from the device tree — never a fabricated static list. This module turns that `(base, size)` pair and
 //! the linker-provided end of the kernel image into the two-region
 //! physical map the frame allocator needs (`plans/PI.md` P6c-2): the span
 //! from the RAM base through the kernel image + boot heap is
 //! [`RegionKind::Reserved`], and the remainder is [`RegionKind::Usable`].
 //! This is the aarch64 analogue of the riscv64 boot pipeline's
 //! `build_memory_map`, kept as its own pure routine rather than copied
-//! (`AGENTS.md` §2.2 carve-out: each port owns its discovery, but the
+//! (carve-out: each port owns its discovery, but the
 //! arithmetic here is self-contained and host-tested).
 //!
 //! The arithmetic is deliberately free of the architecture crates so it is
-//! exercised by host unit tests under `cargo test` (`AGENTS.md` §7): the
+//! exercised by host unit tests under `cargo test`: the
 //! `aarch64::boot` / `x86_64::boot` modules that call it link the bare-metal-only
 //! ports and cannot be host-compiled, so the correctness-critical bounds
 //! checks would otherwise never run on the CI host. The module compiles on
 //! the bare-metal production builds (where `aarch64::boot` / `x86_64::boot` /
 //! `riscv64::boot` consume it) and on any host `cargo test` build (where the
 //! tests below consume it), and on no other configuration, so it is never
-//! dead code (`AGENTS.md` §2.3). The single-window [`build_memory_map`]
+//! dead code. The single-window [`build_memory_map`]
 //! (aarch64) and the map-carve [`carve_guard_arena_from_map`] (x86_64 +
 //! riscv64) are each gated to the port(s) that use them; the arena-sizing
 //! policy is shared.
@@ -31,8 +30,7 @@ use rustos_kernel_mem::{BootMemoryMap, PhysAddr, RegionKind};
 // `MemoryRegion` and `PAGE_SIZE` are named only by the aarch64 single-window
 // `build_memory_map` and the host tests; the x86_64 carve reads regions
 // through `BootMemoryMap` without naming the element type, so the import is
-// gated to those configurations to stay free of an unused-import warning
-// (`AGENTS.md` §2.3).
+// gated to those configurations to stay free of an unused-import warning.
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 use rustos_kernel_mem::{MemoryRegion, PAGE_SIZE};
 
@@ -57,22 +55,22 @@ const STACK_ARENA_MIN_BYTES: u64 = GUARD_ARENA_ALIGN;
 
 /// Largest reserved kthread-stack guard arena: 64 MiB.
 ///
-/// A cap on the §24.2 "fraction of discovered RAM" policy so a very large
+/// A cap on the "fraction of discovered RAM" policy so a very large
 /// server does not reserve an unbounded slab up front for kthread stacks it
 /// will never all use at once. 64 MiB holds well over a thousand guarded
-/// stacks (`AGENTS.md` §24.2 — a workable headroom for both desktop and
+/// stacks (a workable headroom for both desktop and
 /// server without waste). Growth past this on genuine exhaustion is the
-/// staged follow-on (the growable/chained arena, `plans/PI.md`/PLAN §24 L3b).
+/// staged follow-on (the growable/chained arena, `plans/PI.md`/PLAN L3b).
 const STACK_ARENA_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Headroom policy: reserve roughly 1/64 of the discovered RAM window for
-/// kthread kernel stacks (`AGENTS.md` §24.1 — a capacity derived from
+/// kthread kernel stacks (a capacity derived from
 /// discovered hardware, never a hand-picked literal that caps a large
 /// machine or wastes a small one).
 const STACK_ARENA_RAM_SHIFT: u32 = 6;
 
 /// Size the reserved kthread-stack guard arena from the discovered RAM
-/// window `ram_size`, per the §24.2 default policy.
+/// window `ram_size`, per the default policy.
 ///
 /// The target is a fixed fraction of RAM ([`STACK_ARENA_RAM_SHIFT`]),
 /// clamped to `[STACK_ARENA_MIN_BYTES, STACK_ARENA_MAX_BYTES]` and rounded
@@ -82,7 +80,7 @@ const STACK_ARENA_RAM_SHIFT: u32 = 6;
 /// result is therefore always a non-zero multiple of 2 MiB. This is a
 /// *policy* (a function of discovered hardware), not a frozen scalar, so a
 /// 64 MiB embedded board and a 256 GiB server each get a workable arena from
-/// the same code (`AGENTS.md` §24.2). Whether that arena actually fits the
+/// the same code. Whether that arena actually fits the
 /// usable remainder is decided by [`carve_guard_arena`], which fails closed
 /// to no arena when it does not.
 fn stack_arena_bytes(ram_size: u64) -> u64 {
@@ -95,7 +93,7 @@ fn stack_arena_bytes(ram_size: u64) -> u64 {
 
 /// Why the discovered RAM window could not be turned into a usable map.
 ///
-/// Each variant is a fail-closed refusal (`AGENTS.md` §2.9): the boot
+/// Each variant is a fail-closed refusal: the boot
 /// path records the cause in its audit line and parks rather than
 /// handing the allocator a map it cannot trust.
 ///
@@ -116,7 +114,7 @@ pub(crate) enum MemoryMapError {
 
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 impl MemoryMapError {
-    /// Stable cause string for the boot audit line (`AGENTS.md` §5.4.4).
+    /// Stable cause string for the boot audit line.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::AddressOverflow => "address_overflow",
@@ -164,13 +162,13 @@ pub(crate) struct MemoryLayout {
 /// Carve a 2 MiB-aligned guard arena of `arena_bytes` out of the usable
 /// window `[usable_start, ram_end)`.
 ///
-/// `arena_bytes` is the §24.2 policy size from [`stack_arena_bytes`] (a
+/// `arena_bytes` is the policy size from [`stack_arena_bytes`] (a
 /// whole multiple of [`GUARD_ARENA_ALIGN`]). The arena is placed at the
 /// first 2 MiB boundary at or after `usable_start` (above the kernel image,
 /// so it never overlaps the running code or boot stack). Returns `None` if
 /// the whole `arena_bytes` block does not fit before `ram_end`, so a tiny
 /// RAM window degrades to no arena rather than a wrapped or overlapping
-/// region (`AGENTS.md` §2.9).
+/// region.
 ///
 /// This is the aarch64 single-window carve consumed by [`build_memory_map`];
 /// the x86_64 boot path carves out of a firmware region list instead
@@ -205,7 +203,7 @@ fn carve_guard_arena(usable_start: u64, ram_end: u64, arena_bytes: u64) -> Optio
 /// [`RegionKind::Reserved`] guard arena, and the [`RegionKind::Usable`]
 /// remainder. Zero-length usable spans are omitted so no degenerate
 /// region reaches the allocator. The arena's frames are reserved so the
-/// allocator never hands them out (`AGENTS.md` §4); the boot path
+/// allocator never hands them out; the boot path
 /// re-expresses the arena at 4 KiB granularity so a guard page in it can
 /// later be unmapped (`plans/PI.md` stage G2/G3).
 ///
@@ -286,7 +284,7 @@ pub(crate) fn build_memory_map(
 /// reserved)` order. Used by the aarch64 boot path to record the discovered
 /// split in its audit line (and by the host tests); the x86_64 boot path
 /// logs its guard-arena decision directly, so this is gated to the
-/// configurations that name it to stay free of dead code (`AGENTS.md` §2.3).
+/// configurations that name it to stay free of dead code.
 #[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
 pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
     let mut usable = 0u64;
@@ -308,27 +306,25 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 /// the whole map out itself, whereas x86_64 receives a multi-region
 /// firmware map (`x86_64::boot::build_memory_map`) — and riscv64 builds its own
 /// two-region map (`riscv64::boot::build_boot_memory_map`) — and each only
-/// needs to carve the arena out of it. The arena is sized by the same §24.2
+/// needs to carve the arena out of it. The arena is sized by the same
 /// policy ([`stack_arena_bytes`], a whole multiple of [`GUARD_ARENA_ALIGN`])
 /// from `ram_bytes` — the discovered RAM the caller passes (both boot paths
 /// sum the `Usable` regions, *not* the highest address, since a PC firmware
 /// map spans the reserved MMIO hole to 4 GiB and beyond) — so a 256 MiB box
-/// and a 256 GiB server each get a workable arena from one code path
-/// (`AGENTS.md` §2.2 / §24.2).
+/// and a 256 GiB server each get a workable arena from one code path.
 ///
 /// The arena is placed at the first 2 MiB boundary inside the first
 /// [`RegionKind::Usable`] region that can host the whole policy-sized block
 /// at or below `max_addr` (exclusive). `max_addr` is the spawn seams'
 /// identity-window limit: a stack outside it could not be reached — nor its
-/// guard page faulted — under the task's own root (`AGENTS.md` §4), so the
+/// guard page faulted — under the task's own root, so the
 /// carve refuses to place the arena there. On success the range is removed
 /// from the usable map ([`BootMemoryMap::reserve_range`]) so the frame
 /// allocator never hands those frames out, and the [`GuardArena`] is
 /// returned for [`crate::stack_arena::StackArena::install`].
 ///
 /// Returns `None` (the boot path then leaves the kthread-stack guard in its
-/// software-canary form — fail closed, never fatal, `AGENTS.md` §2.9 /
-/// §2.17) when no usable region can host a whole 2 MiB-aligned arena below
+/// software-canary form — fail closed, never fatal) when no usable region can host a whole 2 MiB-aligned arena below
 /// `max_addr`.
 #[cfg(any(
     all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")),
@@ -372,15 +368,13 @@ pub(crate) fn carve_guard_arena_from_map(
 }
 
 /// Record the boot path's kthread guard-arena decision on every boot so the
-/// guard posture is audited, not silently trusted (`AGENTS.md` §4 /
-/// §5.4.4).
+/// guard posture is audited, not silently trusted.
 ///
 /// A carved+installed arena logs at Info with its base/len; a fall-back to
 /// the software canary logs at Warn so a machine that could not host an
 /// arena is visible in the boot record. `id` is the per-port boot-audit
 /// event id (each boot module's `KERNEL_BOOT_GUARD_ARENA`); the body is
-/// shared so the x86_64 and riscv64 boot paths emit one record shape
-/// (`AGENTS.md` §2.2).
+/// shared so the x86_64 and riscv64 boot paths emit one record shape.
 #[cfg(all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")))]
 pub(crate) fn log_guard_arena(
     sink: &(dyn rustos_log::Sink + Sync),
@@ -608,7 +602,7 @@ mod tests {
     #[test]
     fn arena_policy_floors_at_one_block_on_a_tiny_window() {
         // 64 MiB / 64 = 1 MiB, below the one-block floor, so a tiny machine
-        // still gets a working arena rather than nothing (§24.2 default
+        // still gets a working arena rather than nothing (default
         // policy) — and never wastes more than a single 2 MiB block.
         assert_eq!(stack_arena_bytes(64 * 1024 * 1024), STACK_ARENA_MIN_BYTES);
         // Even a degenerate, sub-block window floors to one block (the
@@ -619,7 +613,7 @@ mod tests {
     #[test]
     fn arena_policy_scales_with_ram() {
         // 1 GiB / 64 = 16 MiB: a desktop gets many more stacks than the old
-        // single fixed 2 MiB block, derived from discovered RAM (§24.1).
+        // single fixed 2 MiB block, derived from discovered RAM.
         let one_gib = 0x4000_0000;
         assert_eq!(stack_arena_bytes(one_gib), 16 * 1024 * 1024);
         assert!(stack_arena_bytes(one_gib) > STACK_ARENA_MIN_BYTES);
@@ -628,7 +622,7 @@ mod tests {
     #[test]
     fn arena_policy_caps_a_huge_window() {
         // 256 GiB / 64 = 4 GiB, well past the cap: a big server reserves the
-        // bounded headroom, not an unbounded slab up front (§24.2). Growth
+        // bounded headroom, not an unbounded slab up front. Growth
         // past this is the staged growable-arena follow-on (L3b).
         let huge = 256u64 * 1024 * 1024 * 1024;
         assert_eq!(stack_arena_bytes(huge), STACK_ARENA_MAX_BYTES);

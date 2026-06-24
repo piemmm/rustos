@@ -21,7 +21,7 @@
 //! idempotent on the 16550 — the divisor and line-control bits are
 //! sticky — so the cost is a handful of `outb`s and the overhead is
 //! deliberate: it removes one shared mutable static from the bin's
-//! surface (`AGENTS.md` §2 — *"No global mutable static beyond the
+//! surface (*"No global mutable static beyond the
 //! per-CPU bootstrap area"*).
 
 use core::fmt::Write as _;
@@ -62,7 +62,7 @@ impl Sink for SerialSink {
         let mut s = Serial::init(COM1_BASE);
         // Ignore write errors: `Serial`'s `core::fmt::Write` impl is
         // infallible in practice (it busy-polls the line-status
-        // register). Logging path must not panic per AGENTS.md §2.9.
+        // register). Logging path must not panic.
         let _ = write!(
             s,
             "[{}] id={} {}",
@@ -105,12 +105,12 @@ pub use serial::COM1_BASE as REEXPORT_COM1_BASE;
 /// to (`plans/PI.md` X3a). It is the x86_64 counterpart of the aarch64
 /// `UartConsole`: the bootstrap stream **backing**, not a program-facing
 /// device interface — a program names only its inherited descriptors and
-/// the kernel routes the bytes here (`AGENTS.md` §20).
+/// the kernel routes the bytes here.
 ///
 /// Zero-sized and shared through a `&'static` reference: every call
 /// constructs a fresh [`Serial`] handle (the UART itself is the shared
 /// mutable state, not the wrapper), matching [`SerialSink`]'s discipline of
-/// holding no global mutable static (`AGENTS.md` §2).
+/// holding no global mutable static.
 #[derive(Debug)]
 pub struct Com1Console;
 
@@ -150,7 +150,7 @@ pub static COM1_CONSOLE: Com1Console = Com1Console::new();
 /// The x86_64 boot console list: COM1 is the only console. Its read half
 /// is the fail-closed [`rustos_kernel_core::NULL_CONSOLE_READ`] (no
 /// non-blocking COM1 RX drain is wired on this slice), so fd 0 reads keep
-/// failing closed exactly as before (`AGENTS.md` §5.4).
+/// failing closed exactly as before.
 pub static COM1_CONSOLES: [rustos_kernel_core::ConsoleDevice; 1] =
     [rustos_kernel_core::ConsoleDevice::new(
         &COM1_CONSOLE,

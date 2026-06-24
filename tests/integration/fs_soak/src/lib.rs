@@ -9,14 +9,14 @@
 //! on a full data region, `Busy` on a duplicate create or a
 //! non-empty `rmdir`, and `LengthOutOfRange` on an empty or
 //! oversize name. There is no `mkfs` shell-out and no parallel
-//! re-implementation of any filesystem semantics (`AGENTS.md` §2.2): the
+//! re-implementation of any filesystem semantics: the
 //! harness consumes the OS's own formatters and read/write paths and
-//! asserts the OS reports the extremes cleanly (§5.4 / §2.9).
+//! asserts the OS reports the extremes cleanly.
 //!
 //! The exerciser drives a small LCG from a per-launch start seed (fresh from
 //! host entropy by default, or pinned by `RUSTOS_FSSOAK_SEED`). The start seed
 //! is logged at the start of each run, so every launch exercises different
-//! content yet any failure reproduces from its logged seed (`AGENTS.md` §2.2).
+//! content yet any failure reproduces from its logged seed.
 //!
 //! Alongside that fixed-sequence body, [`random_exercise`] drives a
 //! genuinely *randomized*, model-checked op mix (create/move/delete/

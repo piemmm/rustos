@@ -1,6 +1,6 @@
 //! Stable [`rustos_log::EventId`] constants emitted by the driver host.
 //!
-//! Per `lib/log` convention (`AGENTS.md` §2.5) every subsystem owns a
+//! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. The driver host occupies `7000..8000`. Once
 //! shipped the numeric values must never be re-used or re-numbered —
 //! external audit-log consumers rely on them.
@@ -42,14 +42,13 @@ pub const DRIVER_UNLOADED: EventId = EventId(7_020);
 /// A driver was reloaded (re-read, re-verified, re-issued handle).
 pub const DRIVER_RELOADED: EventId = EventId(7_021);
 /// A signed-store bundle was accepted as an autoload candidate: its
-/// manifest parsed and its bind table decoded fail-closed
-/// (`AGENTS.md` §18.3). This is a *match* candidate only — signature and
+/// manifest parsed and its bind table decoded fail-closed. This is a *match* candidate only — signature and
 /// capability verification still happen at the load gate when (and only
-/// when) the candidate wins a node (`AGENTS.md` §18.6).
+/// when) the candidate wins a node.
 pub const DRIVER_STORE_CANDIDATE: EventId = EventId(7_030);
 /// A signed-store bundle was skipped during the scan: its manifest or
 /// bind table failed to decode, or its bytes were unreadable. Skipping
-/// one malformed bundle never aborts the scan (`AGENTS.md` §18.4 / §5.4).
+/// one malformed bundle never aborts the scan.
 pub const DRIVER_STORE_ENTRY_SKIPPED: EventId = EventId(7_031);
 
 #[cfg(test)]

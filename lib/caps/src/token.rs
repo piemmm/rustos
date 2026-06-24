@@ -21,7 +21,7 @@ use crate::set::CapabilitySet;
 ///
 /// A verifier accepts a token only when its epoch matches the current
 /// epoch the authority is advertising. Bumping the authority's epoch is the
-/// global mass-revocation primitive described in `AGENTS.md` §5.2.
+/// global mass-revocation primitive described in.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct RevocationEpoch(pub u64);
@@ -80,7 +80,7 @@ impl CapabilityToken {
         out[4..12].copy_from_slice(&subject.to_le_bytes());
         out[12..20].copy_from_slice(&epoch.0.to_le_bytes());
         // The capability-set layout has a single definition on
-        // `CapabilitySet` (`AGENTS.md` §2.2); the token embeds it verbatim.
+        // `CapabilitySet`; the token embeds it verbatim.
         out[20..20 + CapabilitySet::WIRE_LEN].copy_from_slice(&caps.to_le_bytes());
         out
     }
@@ -107,7 +107,7 @@ impl CapabilityToken {
         let abi_version = u32::from_le_bytes(bytes_at::<4>(bytes, 0));
         let subject = u64::from_le_bytes(bytes_at::<8>(bytes, 4));
         let epoch = RevocationEpoch(u64::from_le_bytes(bytes_at::<8>(bytes, 12)));
-        // Reuse the single capability-set wire decoder (`AGENTS.md` §2.2);
+        // Reuse the single capability-set wire decoder;
         // the body length above guarantees the 32-byte window is present.
         let caps = CapabilitySet::from_le_bytes(&bytes[20..20 + CapabilitySet::WIRE_LEN])?;
         let mut sig_bytes = [0u8; 64];
@@ -130,7 +130,7 @@ impl CapabilityToken {
     /// replay/token-theft attempt and is refused. Without this check the
     /// signed `subject` field would be dead state: a token minted for task
     /// A could be presented by an unrelated task B and accepted
-    /// (`AGENTS.md` §5.4 — identify the caller, fail closed).
+    /// (identify the caller, fail closed).
     ///
     /// The following checks must all pass; any failure returns the
     /// indicated [`Errno`] without leaking which one specifically (callers

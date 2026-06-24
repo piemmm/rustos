@@ -4,7 +4,7 @@
 //! allocate DMA-able memory and to wait for queue notifications. It
 //! lives in `lib/abi` rather than in `drivers/bus/virtio` so the
 //! host trait surface ([`super::DriverHost::virtio_host`]) can name
-//! it without inverting the dependency direction (`AGENTS.md` §3).
+//! it without inverting the dependency direction.
 //!
 //! The virtio bus crate provides:
 //!
@@ -27,9 +27,9 @@ use super::dma::DmaHost;
 /// ([`alloc_dma_zeroed`](DmaHost::alloc_dma_zeroed)) rather than here so a
 /// non-virtio bus driver can allocate DMA without depending on a
 /// virtio-shaped trait, and so the allocation contract is defined exactly
-/// once (`AGENTS.md` §2.2). The virtio-specific surface is therefore the
+/// once. The virtio-specific surface is therefore the
 /// single [`notify_wait`](Self::notify_wait) method; anything larger would
-/// be a Stage-5 deliverable per `AGENTS.md` §2.3.
+/// be a Stage-5 deliverable.
 pub trait VirtioHost: DmaHost {
     /// Block (or busy-wait) until the device signals a completion
     /// on `queue_index`.
@@ -45,6 +45,6 @@ pub trait VirtioHost: DmaHost {
     /// Never fails by design; the trait method returns `()` so a
     /// caller cannot accidentally treat "spurious wake-up" as a
     /// retriable failure (which would be the kind of hack
-    /// `AGENTS.md` §2.1 forbids).
+    /// the charter forbids).
     fn notify_wait(&self, queue_index: u16);
 }

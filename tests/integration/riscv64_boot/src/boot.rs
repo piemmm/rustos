@@ -2,8 +2,7 @@
 //!
 //! The riscv64 boot pipeline itself now lives in the production
 //! `rustos-kernel` crate (`rustos_kernel::riscv64::boot`), so there is
-//! exactly one riscv64 boot orchestration in the workspace (`AGENTS.md`
-//! §2.2) — the same one the production `rustos-kernel` binary runs. This
+//! exactly one riscv64 boot orchestration in the workspace — the same one the production `rustos-kernel` binary runs. This
 //! module re-exports the production [`RiscvBinArch`] / [`BootError`] /
 //! [`try_boot`] and adds the single test-only affordance the verticals
 //! need on top of it: publishing the firmware [`BootMemoryMap`] + DTB
@@ -12,7 +11,7 @@
 //! which moves the map into the `kernel_core` hand-off.
 //!
 //! Keeping the publish affordance here (not in the production pipeline)
-//! is the §5.4.5 discipline: the production kernel never carries a
+//! is the discipline: the production kernel never carries a
 //! test-observer side channel. The boot-completed QEMU bins swap only
 //! the audit sink, exactly as the x86_64 / aarch64 verticals do.
 
@@ -46,8 +45,7 @@ pub fn boot(
     // Publish before delegating, while the map can still be observed:
     // the production pipeline moves it into the hand-off. A build
     // failure here is non-fatal — the production boot recomputes the
-    // same map and fails closed on the identical cause (`AGENTS.md`
-    // §2.9); the observers then simply see no published map.
+    // same map and fails closed on the identical cause; the observers then simply see no published map.
     if let Ok(map) = rustos_kernel::riscv64::boot::build_boot_memory_map(dtb) {
         crate::publish::publish_memory_map(&map);
     }

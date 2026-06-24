@@ -1,15 +1,13 @@
 //! Signed driver-store scan — turn the installed `/System/Drivers/`
-//! bundles into `devmgr` autoload candidates (`AGENTS.md` §18.3 / §18.6).
+//! bundles into `devmgr` autoload candidates.
 //!
-//! RustOS does not ship a compiled-in list of *which* drivers exist
-//! (`AGENTS.md` §18.6): the discovered driver set is found at runtime by
+//! RustOS does not ship a compiled-in list of *which* drivers exist: the discovered driver set is found at runtime by
 //! scanning the installed signed bundles under `/System/Drivers/` and
 //! reading each bundle's manifest bind table. This module is that scan,
 //! sitting beside the load gate that already owns image parsing
 //! ([`crate::ParsedImage`]) and byte fetching ([`crate::ImageSource`]),
 //! so the same envelope splitter feeds both the scan and the load — the
-//! match data can never drift from the gate's view of the bytes
-//! (`AGENTS.md` §2.2).
+//! match data can never drift from the gate's view of the bytes.
 //!
 //! # What the scan does — and what it deliberately does not
 //!
@@ -21,11 +19,10 @@
 //!    ([`ParsedImage::parse`]); and
 //! 3. decodes the bind table fail-closed
 //!    ([`ParsedImage::decode_bind_table`]),
-//!    rejecting a malformed entry rather than guessing (`AGENTS.md` §5.4).
+//!    rejecting a malformed entry rather than guessing.
 //!
 //! A bundle that fails any step is **skipped and logged**, never fatal:
-//! one malformed bundle cannot block the rest of the boot
-//! (`AGENTS.md` §18.4 / §5.4). The successful bundles become owned
+//! one malformed bundle cannot block the rest of the boot. The successful bundles become owned
 //! [`ScannedDriver`] records whose borrowed [`DriverCandidate`] view feeds
 //! `rustos_devmgr`'s `DeviceManager::autoload`.
 //!
@@ -33,7 +30,7 @@
 //! bind table is *necessary but never sufficient* to run it: the bundle's
 //! Ed25519 signature, syscall-hash, capability set, and `kind` are verified
 //! by the load gate ([`crate::Host::load`]) when — and only when — the
-//! candidate wins a hardware-tree node (`AGENTS.md` §18.6). The scan
+//! candidate wins a hardware-tree node. The scan
 //! therefore never trusts the manifest beyond its structure; it has no
 //! authority to grant and checks none.
 //!
@@ -41,9 +38,8 @@
 //!
 //! The scan produces canonical [`rustos_devmatch::DriverCandidate`] values
 //! directly (the single definition both the kernel floor catalogue and the
-//! user-space `devmgr` consume, `AGENTS.md` §2.2), so the bin-crate boot
-//! wiring — the one layer that may name both `drvhost` and `devmgr`
-//! (`AGENTS.md` §17.4) — hands the candidates straight to
+//! user-space `devmgr` consume), so the bin-crate boot
+//! wiring — the one layer that may name both `drvhost` and `devmgr` — hands the candidates straight to
 //! `DeviceManager::autoload` without re-typing them.
 
 use alloc::string::{String, ToString};
@@ -80,8 +76,7 @@ impl ScannedDriver {
         &self.path
     }
 
-    /// The bind table decoded from this bundle's manifest
-    /// (`AGENTS.md` §18.3), at most
+    /// The bind table decoded from this bundle's manifest, at most
     /// [`DRIVER_MANIFEST_MAX_BIND_KEYS`] entries.
     #[must_use]
     pub fn bind_keys(&self) -> &[DriverBindKey] {
@@ -99,11 +94,11 @@ impl ScannedDriver {
 }
 
 /// The drivers discovered by scanning the signed store: the autoload
-/// candidate source (`AGENTS.md` §18.6).
+/// candidate source.
 ///
 /// Records are held in the order the caller enumerated them, so the
 /// resulting candidate slice — and therefore the deterministic match
-/// outcome (`AGENTS.md` §18.3) — depends only on the input order, never on
+/// outcome — depends only on the input order, never on
 /// internal iteration.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DriverStore {
@@ -126,7 +121,7 @@ impl DriverStore {
     }
 
     /// `true` when no bundle was accepted — a headless or driverless
-    /// install simply autoloads nothing (`AGENTS.md` §18.4), never an
+    /// install simply autoloads nothing, never an
     /// error.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -148,20 +143,20 @@ impl DriverStore {
 }
 
 /// Scan the signed driver store, building an autoload candidate per
-/// readable, well-formed bundle (`AGENTS.md` §18.3 / §18.6).
+/// readable, well-formed bundle.
 ///
 /// `paths` is the set of bundle image paths the caller enumerated from
 /// `/System/Drivers/` (a VFS directory walk in production); `source`
 /// fetches each bundle's bytes. Every accepted bundle is audited
 /// [`events::DRIVER_STORE_CANDIDATE`]; every skipped bundle is audited
 /// [`events::DRIVER_STORE_ENTRY_SKIPPED`] with the reason and the scan
-/// continues (`AGENTS.md` §18.4 / §5.4 — fail closed for that bundle
+/// continues (fail closed for that bundle
 /// only, never abort the boot).
 ///
 /// The scan allocates one owned [`ScannedDriver`] per accepted bundle (a
 /// path string plus at most [`DRIVER_MANIFEST_MAX_BIND_KEYS`] bind keys)
 /// and reuses a single read buffer and a single fixed decode buffer across
-/// bundles (`AGENTS.md` §2.16 — no per-bundle scratch allocation).
+/// bundles (no per-bundle scratch allocation).
 #[must_use]
 pub fn scan_store(source: &dyn ImageSource, paths: &[&str], sink: &dyn Sink) -> DriverStore {
     let mut store = DriverStore::default();
@@ -197,7 +192,7 @@ fn scan_one(
     source.read(path, image).map_err(HostError::SourceFailed)?;
     let parsed = ParsedImage::parse(image)?;
     // Decode into a fixed buffer sized to the ABI's bind-key ceiling
-    // (`AGENTS.md` §24.4 — a validation bound, not a scalable capacity):
+    // (a validation bound, not a scalable capacity):
     // a manifest claiming more than the maximum overruns it and is
     // rejected fail-closed by `decode_bind_table`.
     let mut buf =
@@ -352,7 +347,7 @@ mod tests {
 
     /// Build a `.rxe` image with the given capabilities, bind keys, and
     /// payload. The signature fields are left zeroed: the scan never
-    /// verifies the signature (the load gate does, §18.6), so a
+    /// verifies the signature (the load gate does), so a
     /// structurally valid but unsigned image is a valid candidate.
     fn build_image(caps: &[u16], bind_keys: &[DriverBindKey], payload: &[u8]) -> Vec<u8> {
         let m = DriverManifest {
@@ -495,7 +490,7 @@ mod tests {
     fn a_bundle_with_no_bind_keys_is_a_valid_zero_key_candidate() {
         // A driver that declares no bind table matches no node, but the
         // scan still accepts it structurally — `devmatch` simply never
-        // resolves it (`AGENTS.md` §18.4).
+        // resolves it.
         let mut src = MemStore::new();
         src.insert("/System/Drivers/none", build_image(&[1], &[], b"body"));
         let sink = RecordingSink::new();
@@ -545,7 +540,7 @@ mod tests {
     fn candidates_feed_the_matcher() {
         // End-to-end with the real `devmatch::resolve`: a scanned store's
         // candidates resolve a node exactly as a hand-built candidate set
-        // would (`AGENTS.md` §2.2 — one match definition).
+        // would (one match definition).
         let usb_keys = [DriverBindKey::new(5, HwMatchKey::pci(0, 0, 0x0C_0330))];
         let mut src = MemStore::new();
         src.insert("/System/Drivers/bus_usb", build_image(&[], &usb_keys, b""));

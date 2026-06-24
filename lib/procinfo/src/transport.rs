@@ -17,7 +17,7 @@ use rustos_abi::Errno;
 /// (build it with [`encode_request`](crate::encode_request)). The returned
 /// bytes are the service's reply exactly as `sysinfod` produced them: packed
 /// [`ProcessRecord`](rustos_abi::sysinfo::ProcessRecord)s, a scalar struct's
-/// wire image, or the hardware-tree bytes (`AGENTS.md` §16.6). The transport
+/// wire image, or the hardware-tree bytes. The transport
 /// owns the reply allocation so the caller never has to guess a response
 /// buffer size.
 ///

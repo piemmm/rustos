@@ -10,7 +10,7 @@
 //!
 //! The boot-time PCI walk that turns those capabilities into windows
 //! lives in ring 0, but ring 0 must stay driver-agnostic: it may not
-//! name the concrete `lib/pci` types (`AGENTS.md` §17.4 — a
+//! name the concrete `lib/pci` types (a
 //! driver crate's only public surface is `register`). This module is
 //! the versioned ABI seam that breaks the tension: the PCI bus driver
 //! implements [`VirtioPciBus`] and the kernel calls it through a
@@ -19,8 +19,7 @@
 //!
 //! Like every other item in `lib/abi`, the trait and its `cfg_type`
 //! constants are frozen for the lifetime of `abi-v1`: new behaviour
-//! ships in `abi-v2` rather than mutating this surface (`AGENTS.md`
-//! §9).
+//! ships in `abi-v2` rather than mutating this surface.
 
 use super::bus::Bus;
 use super::{DriverError, MmioMapper, RegisterWindow};
@@ -51,14 +50,14 @@ pub const VIRTIO_PCI_CFG_PCI: u8 = 5;
 /// [`Bus`] is a supertrait so the kernel walk can enumerate the bus
 /// (to pick the virtio function) and provision its windows through a
 /// single `&dyn VirtioPciBus`, without depending on the concrete
-/// `lib/pci` crate (`AGENTS.md` §17.4).
+/// `lib/pci` crate.
 ///
 /// # Capabilities
 ///
 /// The window-mapping method routes through the supplied
 /// [`MmioMapper`], which enforces
 /// [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP); the
-/// implementation performs no mapping itself (`AGENTS.md` §4 — no
+/// implementation performs no mapping itself (no
 /// ambient authority).
 pub trait VirtioPciBus: Bus {
     /// Resolve the virtio configuration structure of kind `cfg_type`

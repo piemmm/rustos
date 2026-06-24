@@ -15,7 +15,7 @@
 //!
 //! `PANIC_CTX` is the [`PanicContext`] the arch port builds at boot
 //! and stores in a once-initialised `static` (the per-CPU bootstrap
-//! exception called out by `AGENTS.md` §2 — *"No global mutable static
+//! exception called out by — *"No global mutable static
 //! beyond the per-CPU bootstrap area"*).
 //!
 //! [`handle_panic`] does the rest: it logs a structured
@@ -45,7 +45,7 @@ use crate::bootinfo::KernelArch;
 /// The struct is borrowed read-only by the panic path, so the arch
 /// port can store it inside a `kernel/sync::Once`-protected `static`
 /// without taking any locks at panic time (the panic path never
-/// blocks per `AGENTS.md` §2.9).
+/// blocks).
 pub struct PanicContext<'a, A: KernelArch + 'static> {
     /// Architecture port instance.
     pub arch: &'a A,
@@ -68,7 +68,7 @@ impl<'a, A: KernelArch> PanicContext<'a, A> {
 ///
 /// The function never returns: the `!` return type and the
 /// [`KernelArch::halt`] contract together guarantee that the kernel
-/// does not silently reset (`AGENTS.md` §2 / Stage 2 deliverables).
+/// does not silently reset (Stage 2 deliverables).
 ///
 /// # Emitted fields
 ///
@@ -79,7 +79,7 @@ impl<'a, A: KernelArch> PanicContext<'a, A> {
 /// | `line`   | Decimal `info.location().line()` or `"0"`.               |
 /// | `column` | Decimal `info.location().column()` or `"0"`.             |
 ///
-/// The format is part of the audit contract (`AGENTS.md` §5.4.4) and
+/// The format is part of the audit contract and
 /// is asserted by the integration tests.
 pub fn handle_panic<A: KernelArch>(info: &PanicInfo<'_>, ctx: &PanicContext<'_, A>) -> ! {
     panic_dump(info.location(), ctx)
@@ -98,7 +98,7 @@ pub fn panic_dump<A: KernelArch>(
     let cpu = ctx.arch.current_cpu();
 
     // Stack-resident formatting buffers. No allocation per
-    // `AGENTS.md` §4 — the panic path must not depend on the heap,
+    // — the panic path must not depend on the heap,
     // which may itself be the source of the panic.
     let mut cpu_buf = [0u8; 11];
     let mut line_buf = [0u8; 11];

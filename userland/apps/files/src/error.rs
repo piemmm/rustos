@@ -1,6 +1,6 @@
 //! The outcomes of a browser navigation.
 //!
-//! Every navigation fails closed (`AGENTS.md` §5.4): a refused read or a
+//! Every navigation fails closed: a refused read or a
 //! request for an entry that is not there leaves the browser on the directory
 //! it was already showing, and surfaces a [`BrowseError`] rather than
 //! guessing, fabricating entries, or partially applying the move.
@@ -15,7 +15,7 @@ pub enum BrowseError {
     /// The directory source could not list the target directory. The wrapped
     /// [`Errno`] is the kernel boundary's reason — most often
     /// [`Errno::PermissionDenied`] when the caller lacks the capability to
-    /// read the directory (`AGENTS.md` §5.3), or [`Errno::NotFound`] when it
+    /// read the directory, or [`Errno::NotFound`] when it
     /// has been removed underneath the browser.
     Source(Errno),
     /// The selected or indexed entry does not exist in the current listing.

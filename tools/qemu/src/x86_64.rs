@@ -12,14 +12,13 @@
 //! Splitting this surface out keeps [`crate::Spec`] honest as a
 //! per-arch tagged union and lines the codebase up for the Stage 3b/3c/
 //! 3d modules (`aarch64.rs`, `riscv64.rs`, `wasm32.rs`) without
-//! duplicating any glue (`AGENTS.md` §2.2 / §2.4 — no duplication, no
+//! duplicating any glue (no duplication, no
 //! interface creep).
 //!
 //! # No `unwrap` / `expect` / `panic!`
 //!
-//! Every fallible call site propagates an `io::Result` per AGENTS.md
-//! §2.9. The only `expect`s in this file live inside `#[cfg(test)]`
-//! blocks per §2.9's tests carve-out.
+//! Every fallible call site propagates an `io::Result`. The only `expect`s in this file live inside `#[cfg(test)]`
+//! blocks 's tests carve-out.
 
 use std::ffi::OsString;
 use std::io;

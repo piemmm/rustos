@@ -1,8 +1,7 @@
 //! Per-task capability state.
 //!
 //! Every running task has a [`TaskCapabilities`] record. The effective
-//! capability set is **the intersection** of two narrower-or-equal sets
-//! (`AGENTS.md` §5.2):
+//! capability set is **the intersection** of two narrower-or-equal sets:
 //!
 //! * the user grant attached to the task's owning [`UserId`], and
 //! * the capability set the binary's signed manifest *requested*.
@@ -65,8 +64,7 @@ impl TaskCapabilities {
     /// Derive a task's effective capabilities from its user grant and the
     /// verified manifest request.
     ///
-    /// The effective set is the intersection of the two inputs (`AGENTS.md`
-    /// §5.2). Emits exactly one
+    /// The effective set is the intersection of the two inputs. Emits exactly one
     /// [`AuditEvent::TaskCapabilitiesDerived`].
     pub fn derive<S: Sink + ?Sized>(
         task: TaskId,
@@ -204,7 +202,7 @@ impl TaskCapabilities {
     /// set (which acts as the parent), and **this task's id as the
     /// subject** — a token minted for another task is refused here, so a
     /// stolen or misdirected token cannot be replayed onto an unrelated
-    /// principal (`AGENTS.md` §5.4). On success the task's effective set
+    /// principal. On success the task's effective set
     /// is replaced with the token's payload (always a subset of the
     /// current set by [`CapabilityToken::verify`]'s own invariant).
     /// Failure modes are mapped to the same audit event as a
@@ -303,7 +301,7 @@ impl TaskCapabilities {
 /// the borrow `caps_for(&self, _) -> Option<&TaskCapabilities>`
 /// natural and lets `KernelState` compose this registry with the
 /// scheduler under a single lock-ordering policy
-/// (`AGENTS.md` §2.1 / §2.4 — no hidden global state, no interface
+/// (no hidden global state, no interface
 /// creep).
 ///
 /// # No ambient authority
@@ -364,8 +362,7 @@ impl CapTable {
     /// record can be inspected by tests, then dropped. Returning the
     /// record (instead of swallowing it) lets the caller zero out any
     /// capability material in line with the kernel allocator's
-    /// "zero-on-free for credential-holding memory" requirement
-    /// (`AGENTS.md` §4).
+    /// "zero-on-free for credential-holding memory" requirement.
     pub fn remove(&mut self, task: TaskId) -> Option<TaskCapabilities> {
         self.entries.remove(&task)
     }
@@ -466,7 +463,7 @@ mod tests {
         assert!(t.revoke(CapabilityId::FS_MOUNT, &sink));
         assert!(!t.has(CapabilityId::FS_MOUNT));
         // Revoking again is idempotent (returns false) but still
-        // produces an audit record per `AGENTS.md` §5.4.4.
+        // produces an audit record.
         assert!(!t.revoke(CapabilityId::FS_MOUNT, &sink));
         assert_eq!(
             sink.ids(),
@@ -508,8 +505,7 @@ mod tests {
     fn token_for_another_task_is_refused() {
         // A correctly-signed, current-epoch, subset token issued to a
         // *different* task must not apply here: binding to the subject
-        // forecloses replaying a stolen token onto another principal
-        // (`AGENTS.md` §5.4). The effective set must be left untouched.
+        // forecloses replaying a stolen token onto another principal. The effective set must be left untouched.
         let signing = SigningKey::from_bytes(&[0x33; 32]);
         let authority = Ed25519PublicKey::from_bytes(signing.verifying_key().as_bytes()).unwrap();
 

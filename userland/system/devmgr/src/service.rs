@@ -1,23 +1,21 @@
-//! The device manager's reactive match-and-load loop (`AGENTS.md` §18.4).
+//! The device manager's reactive match-and-load loop.
 //!
 //! The `Run` service fetches the kernel-decoded driver catalogue once (the
-//! read-only `/System` store is static for the life of the system,
-//! `AGENTS.md` §2.16), then reads the discovered hardware tree, loads a
+//! read-only `/System` store is static for the life of the system), then reads the discovered hardware tree, loads a
 //! driver for every node that matches a catalogue bundle, and **blocks**
-//! until the tree changes and re-reads it — the reactive discovery the §18.4
+//! until the tree changes and re-reads it — the reactive discovery the
 //! hotplug model requires. Both halves are pure with respect to the kernel:
 //! the loop reads/waits through the [`HwTreeService`] seam and fetches/loads
 //! through the [`DriverStoreCall`] seam, so its logic — fetch once, then
 //! match-and-load on every generation advance — is exercised on the host
 //! against scripted doubles, independently of the freestanding
 //! `hw_tree_read` / `hw_tree_wait` / `ipc_call` syscalls it binds in
-//! production (`AGENTS.md` §2.2).
+//! production.
 //!
-//! The loop never busy-spins (`AGENTS.md` §2.1): [`HwTreeService::wait_for_change`]
+//! The loop never busy-spins: [`HwTreeService::wait_for_change`]
 //! blocks until the store's generation advances. A failure in a tree-seam
-//! operation ends the loop fail-closed with the reported [`Errno`]
-//! (`AGENTS.md` §2.9); a catalogue that cannot be fetched is fail-soft —
-//! the service loads nothing but keeps observing (`AGENTS.md` §18.4).
+//! operation ends the loop fail-closed with the reported [`Errno`]; a catalogue that cannot be fetched is fail-soft —
+//! the service loads nothing but keeps observing.
 
 use alloc::vec::Vec;
 
@@ -35,18 +33,16 @@ use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 ///
 /// The production implementation (the freestanding `devmgr` `Run` binary)
 /// backs these with the `hw_tree_read` / `hw_tree_wait` `abi-v1` syscalls
-/// and writes node reports to its inherited diagnostic stream (fd 2,
-/// `AGENTS.md` §20).
+/// and writes node reports to its inherited diagnostic stream (fd 2).
 pub trait HwTreeService {
     /// Read the current hardware-tree snapshot into `buf`, returning the
     /// number of bytes written (a [`HwTreeHeader`] followed by its node
     /// records). Fails closed with the reported [`Errno`] — an undersized
-    /// buffer is [`Errno::BufferTooSmall`], never a truncated read
-    /// (`AGENTS.md` §2.9 / §24.1).
+    /// buffer is [`Errno::BufferTooSmall`], never a truncated read.
     fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
 
     /// Block until the store's generation advances past `last_generation`
-    /// (`AGENTS.md` §18.4 — reactive re-match and hotplug). Returns once
+    /// (reactive re-match and hotplug). Returns once
     /// the tree has changed, or fails closed with the reported [`Errno`].
     fn wait_for_change(&mut self, last_generation: u64) -> Result<(), Errno>;
 
@@ -60,8 +56,7 @@ pub trait HwTreeService {
 
 /// Initial size of the growable hardware-tree snapshot buffer.
 ///
-/// This is a *starting capacity*, never a ceiling (`AGENTS.md` §24.1 /
-/// §24.4): [`read_tree_growing`] doubles the buffer and retries whenever the
+/// This is a *starting capacity*, never a ceiling: [`read_tree_growing`] doubles the buffer and retries whenever the
 /// kernel reports the discovered tree does not fit, so a machine whose
 /// device tree is larger than this — a real board's full firmware tree has
 /// far more nodes than QEMU `virt`'s handful — is read in full rather than
@@ -74,15 +69,14 @@ const INITIAL_TREE_SNAPSHOT_BYTES: usize = 64 * 1024;
 /// until the whole snapshot fits.
 ///
 /// `hw_tree_read` returns the entire snapshot or [`Errno::BufferTooSmall`]
-/// — it never truncates (`AGENTS.md` §2.9) and does not report the size it
+/// — it never truncates and does not report the size it
 /// needs — so a buffer too small for the discovered tree is doubled and the
 /// read retried until it fits. The hardware tree is a *discovered capacity*,
-/// not a fixed ceiling: the device manager grows before it fails
-/// (`AGENTS.md` §24.1), so a board with a larger tree than
+/// not a fixed ceiling: the device manager grows before it fails, so a board with a larger tree than
 /// [`INITIAL_TREE_SNAPSHOT_BYTES`] is read in full rather than aborting the
 /// service. Genuine exhaustion still fails closed — the underlying
 /// allocation failure surfaces as the runtime's OOM, and an arithmetic
-/// overflow of the doubling is [`Errno::OutOfRange`] (`AGENTS.md` §24.1).
+/// overflow of the doubling is [`Errno::OutOfRange`].
 ///
 /// # Errors
 ///
@@ -99,8 +93,7 @@ fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Resul
             Err(Errno::BufferTooSmall) => {
                 // Double and retry. `buf` is non-empty here (resized above),
                 // so the new length is strictly larger; an overflow of the
-                // doubling fails closed rather than wrapping (`AGENTS.md`
-                // §24.1 / §5.4).
+                // doubling fails closed rather than wrapping.
                 let grown = buf.len().checked_mul(2).ok_or(Errno::OutOfRange)?;
                 buf.resize(grown, 0);
             }
@@ -117,8 +110,7 @@ fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Resul
 /// The catalogue is retried while `catalogue` is [`None`]: the kernel store
 /// service binds its endpoint *after* the boot tree settles, so a fetch
 /// issued before the bind fails (the endpoint is unbound) — the kernel then
-/// bumps the tree generation when it binds, waking this loop to retry
-/// (`AGENTS.md` §18.4). Until the catalogue is obtained, matching runs
+/// bumps the tree generation when it binds, waking this loop to retry. Until the catalogue is obtained, matching runs
 /// against an empty candidate set, so every node is observed and left
 /// unbound, then loaded on the re-evaluation once the store is reachable.
 ///
@@ -126,8 +118,8 @@ fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Resul
 ///
 /// Propagates the [`Errno`] from [`HwTreeService::read_tree`] or from the
 /// fail-closed [`for_each_node`] decode; on any error no header is reported
-/// and no node is loaded (`AGENTS.md` §2.9). A catalogue-fetch failure is
-/// **not** propagated — it is fail-soft (logged, retried, `AGENTS.md` §18.4).
+/// and no node is loaded. A catalogue-fetch failure is
+/// **not** propagated — it is fail-soft (logged, retried).
 fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
@@ -143,8 +135,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
             Err(_) => {
                 // Fail-soft: no store served yet (unbound endpoint) or an
                 // unreadable store loads nothing this cycle, but the service
-                // keeps observing and retries on the next generation bump
-                // (`AGENTS.md` §18.4 / §2.9).
+                // keeps observing and retries on the next generation bump.
                 log_event(
                     sink,
                     &Event {
@@ -169,7 +160,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree.on_header(&header);
     // Match against the obtained catalogue, or an empty set while it is not
     // yet available (every node observed and left unbound until the store
-    // binds, `AGENTS.md` §18.4).
+    // binds).
     let drivers: &[CatalogueDriver] = catalogue.as_deref().unwrap_or(&[]);
     let candidates: Vec<DriverCandidate<'_>> =
         drivers.iter().map(CatalogueDriver::candidate).collect();
@@ -178,16 +169,14 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
 }
 
 /// Run the reactive match-and-load loop: read the tree, load a driver for
-/// every matched node, and block on every generation advance to re-match
-/// (`AGENTS.md` §18.4).
+/// every matched node, and block on every generation advance to re-match.
 ///
 /// * `tree` — the hardware-tree read/wait seam.
 /// * `store` — the driver-store catalogue/load seam.
 /// * `sink` — the audit sink every match/load decision is logged through.
 /// * `reply_buf` — the buffer the catalogue and each load reply are received
 ///   into. The tree snapshot is read into a separate, service-owned
-///   buffer that grows to fit the discovered tree (`read_tree_growing`,
-///   `AGENTS.md` §24.1), so the caller never picks a tree-size ceiling and a
+///   buffer that grows to fit the discovered tree (`read_tree_growing`), so the caller never picks a tree-size ceiling and a
 ///   load (writing `reply_buf`) never clobbers the snapshot mid-decode.
 /// * `budget` — bounds the number of *reactions* (re-reads after a change):
 ///   [`None`] runs for the life of the service (the production device
@@ -198,16 +187,16 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
 /// The catalogue is fetched lazily and retried while it has not been
 /// obtained: the kernel store service binds its endpoint after the boot tree
 /// settles, so the first fetch may fail and is retried on the re-evaluation
-/// the kernel triggers when it binds (`AGENTS.md` §18.4 / §2.16 — once
+/// the kernel triggers when it binds (once
 /// obtained, the static read-only store is not re-fetched).
 ///
 /// # Errors
 ///
 /// Returns the first [`Errno`] a *tree-seam* operation reports
 /// ([`HwTreeService::read_tree`] / [`HwTreeService::wait_for_change`]) or a
-/// snapshot decode failure; the loop is fail-closed (`AGENTS.md` §2.9) and
+/// snapshot decode failure; the loop is fail-closed and
 /// never silently continues past such an error. A catalogue-fetch failure is
-/// fail-soft, not propagated (`AGENTS.md` §18.4).
+/// fail-soft, not propagated.
 pub fn run<T: HwTreeService, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
@@ -217,8 +206,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
 ) -> Result<(), Errno> {
     let mut catalogue: Option<Vec<CatalogueDriver>> = None;
     // The loaded-bundle cache plus the per-node decision memory: a
-    // re-evaluation of a settled tree re-emits no audit line (`AGENTS.md`
-    // §20 / §2.16). The device manager re-matches the whole snapshot on every
+    // re-evaluation of a settled tree re-emits no audit line. The device manager re-matches the whole snapshot on every
     // generation advance, and without the decision memory each pass would
     // re-log every unbound node, flooding the slow diagnostic serial line and
     // stalling the boot.
@@ -226,7 +214,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     // The snapshot buffer the service owns for its lifetime: it starts
     // empty and `read_tree_growing` sizes it to the discovered tree on the
     // first read, growing it later only if the tree ever grows past it
-    // (`AGENTS.md` §24.1 — no caller-picked ceiling).
+    // (no caller-picked ceiling).
     let mut tree_buf: Vec<u8> = Vec::new();
 
     let mut last_generation = react_once(
@@ -430,7 +418,7 @@ mod tests {
     #[test]
     fn an_unmatched_node_is_left_unbound_and_never_loaded() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
-        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        // boot); lower the threshold so the test observes it.
         rustos_log::set_max_level(rustos_log::Level::Trace);
         let snapshot = encode(
             1,
@@ -536,7 +524,7 @@ mod tests {
     #[test]
     fn a_reaction_does_not_relog_an_unchanged_unbound_node() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
-        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        // boot); lower the threshold so the test observes it.
         rustos_log::set_max_level(rustos_log::Level::Trace);
         let unmatched = HwMatchKey::virtio(0xFFFF);
         let first = encode(
@@ -567,7 +555,7 @@ mod tests {
 
         // Node 2 is unbound in both evaluations, but the unbound decision is
         // logged exactly once — a re-evaluation of a settled tree must not
-        // re-flood the diagnostic log (`AGENTS.md` §20 / §2.16 / §18.4).
+        // re-flood the diagnostic log.
         assert_eq!(
             sink.ids()
                 .iter()
@@ -581,7 +569,7 @@ mod tests {
     #[test]
     fn a_failed_catalogue_fetch_is_fail_soft_and_still_observes() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
-        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        // boot); lower the threshold so the test observes it.
         rustos_log::set_max_level(rustos_log::Level::Trace);
         let snapshot = encode(
             1,
@@ -641,8 +629,7 @@ mod tests {
     /// A hardware-tree seam serving one fixed snapshot: it fails closed with
     /// [`Errno::BufferTooSmall`] (without consuming anything) until the
     /// caller's buffer is large enough, then copies the whole snapshot out —
-    /// the double for exercising [`read_tree_growing`]'s grow-and-retry
-    /// (`AGENTS.md` §24.1). `reads` counts every `read_tree` call so a test
+    /// the double for exercising [`read_tree_growing`]'s grow-and-retry. `reads` counts every `read_tree` call so a test
     /// can assert a grow actually happened.
     struct FixedSnapshotTree {
         snapshot: Vec<u8>,
@@ -670,7 +657,7 @@ mod tests {
 
     /// A hardware-tree seam whose `read_tree` always fails with a non-
     /// `BufferTooSmall` error — to prove [`read_tree_growing`] propagates it
-    /// fail-closed rather than looping (`AGENTS.md` §2.9).
+    /// fail-closed rather than looping.
     struct ErroringTree(Errno);
 
     impl HwTreeService for ErroringTree {
@@ -690,7 +677,7 @@ mod tests {
     #[test]
     fn read_tree_growing_grows_a_too_small_buffer_until_the_snapshot_fits() {
         // A snapshot far larger than the buffer we start with, so the read
-        // must grow several times before it fits (`AGENTS.md` §24.1 — grow
+        // must grow several times before it fits (grow
         // before you fail; the tree is a discovered capacity, not a ceiling).
         let mut nodes = vec![HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)];
         for id in 2..50u32 {
@@ -725,7 +712,7 @@ mod tests {
         // snapshot buffer (which starts empty, sizes to
         // `INITIAL_TREE_SNAPSHOT_BYTES`, then grows) must grow before the
         // discovered tree fits — and still load the matched node, rather than
-        // failing closed and being relaunched (`AGENTS.md` §24.1).
+        // failing closed and being relaunched.
         let target = HwMatchKey::virtio(0x9999);
         let mut nodes = vec![HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)];
         for id in 2..220u32 {

@@ -1,8 +1,7 @@
 //! Assembling a desktop icon set from on-disk SVG assets.
 //!
-//! An icon *set* is one SVG asset per [`IconKind`] (the SVG-first asset rule,
-//! `AGENTS.md` §10). The on-disk assets live under `/System/Graphics` and are
-//! untrusted input (`AGENTS.md` §19.5): reading the bytes needs a filesystem
+//! An icon *set* is one SVG asset per [`IconKind`] (the SVG-first asset rule). The on-disk assets live under `/System/Graphics` and are
+//! untrusted input: reading the bytes needs a filesystem
 //! capability and is the userland desktop's job, so this crate takes the bytes
 //! through an injected [`IconAssetSource`] seam — the same pattern the default
 //! apps use for their VFS/shell channels — and stays `no_std` with no path of
@@ -10,8 +9,7 @@
 //!
 //! [`IconSet`] decodes the asset for each kind once and remembers it. A kind
 //! whose asset is absent, malformed, or outside the supported SVG subset has
-//! no stored icon and falls back to the [`builtin_icon`] glyph at draw time
-//! (`AGENTS.md` §2.9 / §5.4) — so the set is **total**:
+//! no stored icon and falls back to the [`builtin_icon`] glyph at draw time — so the set is **total**:
 //! every kind always produces a glyph. An SVG asset carries its own per-layer
 //! colours, so [`IconSet::icon`] tints only the built-in fallback, never an
 //! authored asset.
@@ -24,7 +22,7 @@ use crate::vector::VectorIcon;
 /// Every icon kind a set can provide an asset for.
 ///
 /// A fixed table so a loader iterates the closed [`IconKind`] vocabulary
-/// without inventing a second list of kinds (`AGENTS.md` §2.2 / §2.4).
+/// without inventing a second list of kinds.
 pub const ICON_KINDS: [IconKind; 5] = [
     IconKind::Network,
     IconKind::Volume,
@@ -38,7 +36,7 @@ pub const ICON_KINDS: [IconKind; 5] = [
 /// The desktop implements this over the filesystem (reading
 /// `/System/Graphics`), tests over an in-memory table. The seam keeps the
 /// asset bytes — and the capability needed to read them — out of this
-/// `no_std` library (`AGENTS.md` §17.4).
+/// `no_std` library.
 pub trait IconAssetSource {
     /// The SVG bytes of the asset for `kind`, or `None` when the set provides
     /// no asset for that kind (so the built-in glyph is used).
@@ -49,7 +47,7 @@ pub trait IconAssetSource {
 /// source supplied, with a built-in fallback for the rest.
 ///
 /// Stored as fixed fields rather than a map so every kind always resolves and
-/// [`icon`](Self::icon) is total (`AGENTS.md` §2.11).
+/// [`icon`](Self::icon) is total.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IconSet {
     network: Option<VectorIcon>,
@@ -62,7 +60,7 @@ pub struct IconSet {
 impl IconSet {
     /// The all-built-in set: every kind falls back to its [`builtin_icon`]
     /// glyph, so the desktop has a complete icon set before any on-disk asset
-    /// is loaded (`AGENTS.md` §2.9). Swapping a loaded set in later is
+    /// is loaded. Swapping a loaded set in later is
     /// [`from_assets`](Self::from_assets).
     #[must_use]
     pub const fn builtin() -> Self {
@@ -78,7 +76,7 @@ impl IconSet {
     /// Build an icon set from an [`IconAssetSource`], decoding each kind's SVG
     /// asset once. A kind whose asset is missing, malformed, or outside the
     /// supported subset is left unset and falls back to its built-in glyph in
-    /// [`icon`](Self::icon) (`AGENTS.md` §2.9).
+    /// [`icon`](Self::icon).
     #[must_use]
     pub fn from_assets<S: IconAssetSource + ?Sized>(source: &S) -> Self {
         Self {
@@ -94,8 +92,7 @@ impl IconSet {
     /// the built-in glyph tinted with `tint`.
     ///
     /// Total — every kind always produces a glyph. The `tint` colours only a
-    /// built-in fallback; an authored SVG asset keeps its own colours
-    /// (`AGENTS.md` §10).
+    /// built-in fallback; an authored SVG asset keeps its own colours.
     #[must_use]
     pub fn icon(&self, kind: IconKind, tint: Color) -> VectorIcon {
         self.loaded(kind)

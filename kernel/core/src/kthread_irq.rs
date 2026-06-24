@@ -15,7 +15,7 @@
 //! [`KthreadIrqWaiter`] is the second (and only other)
 //! [`rustos_kernel_irq::IrqWaiter`] the production kernel installs. It
 //! adapts that kthread handle into the same shared blocking loop, so there
-//! is **one** IRQ blocking loop in the tree (`AGENTS.md` §2.2): both the
+//! is **one** IRQ blocking loop in the tree: both the
 //! syscall path and the kthread path reach
 //! [`rustos_kernel_irq::block_until_ready`].
 //!
@@ -103,7 +103,7 @@ where
         // the next dispatch; the shared loop then re-polls the table. A
         // service kthread cannot "vanish" mid-wait the way a user task
         // can (no `exit` syscall reaps it), so the yield always succeeds —
-        // there is no scheduler error to surface (`AGENTS.md` §5.4.5: the
+        // there is no scheduler error to surface (: the
         // failure modes that exist on the syscall path do not apply here).
         self.yielder.yield_now();
         Ok(())
@@ -129,7 +129,7 @@ where
 /// CPU and the suspending sites call [`Self::yield_now`] strictly serially,
 /// never re-entrantly (each `borrow_mut` is released the instant the inner
 /// `yield_now` returns), so the borrow is never already held. It is *not* a
-/// global mutable static (`AGENTS.md` §2.1) — it lives on the kthread's own
+/// global mutable static — it lives on the kthread's own
 /// stack frame and is `!Sync` (never shared across CPUs).
 pub struct CooperativeYield<'a> {
     yielder: RefCell<&'a mut dyn YieldHandle>,
@@ -159,8 +159,7 @@ impl<'a> CooperativeYield<'a> {
     ///
     /// Unlike [`Self::yield_now`], a parked task is *not* re-enqueued, so it
     /// consumes no CPU while suspended — this is the suspension a long-lived
-    /// kernel service uses to wait for work without busy-yielding
-    /// (`AGENTS.md` §2.1). The `borrow_mut` is held only for the inner
+    /// kernel service uses to wait for work without busy-yielding. The `borrow_mut` is held only for the inner
     /// [`YieldHandle::park`] call; the kthread's suspending sites never call
     /// this re-entrantly, so the borrow is never already held.
     pub fn park(&self) {
@@ -353,8 +352,7 @@ mod tests {
     #[test]
     fn cooperative_park_delegates_to_the_inner_handle_park() {
         // A long-lived kernel service (the Design D D2a-2 driver-store
-        // service) parks through the shared cell rather than busy-yielding
-        // (`AGENTS.md` §2.1): `park` must reach the inner handle's `park`.
+        // service) parks through the shared cell rather than busy-yielding: `park` must reach the inner handle's `park`.
         let parks = Cell::new(0);
         let mut mock = ParkRecorder { parks: &parks };
         let coop = CooperativeYield::new(&mut mock);

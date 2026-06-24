@@ -5,7 +5,7 @@
 //! contract the kernel relies on: disjoint live blocks, reclamation on
 //! free, coalescing of adjacent frees back into a single large hole, and
 //! survival of sustained allocate/free churn in bounded memory (the
-//! property the previous bump allocator lacked, `AGENTS.md` §4).
+//! property the previous bump allocator lacked).
 
 use super::{FreeListAllocator, MIN_BLOCK};
 use core::alloc::{GlobalAlloc, Layout};
@@ -101,7 +101,7 @@ fn adjacent_frees_coalesce_into_one_large_hole() {
 #[test]
 fn alloc_returns_null_when_exhausted_then_recovers_after_free() {
     // Small heap: a handful of blocks, then exhaustion → null (never a
-    // panic, `AGENTS.md` §4). Freeing one block lets the next alloc succeed.
+    // panic). Freeing one block lets the next alloc succeed.
     let mut backing = Backing([0u8; 256]);
     let alloc = fixture(&mut backing);
     let layout = Layout::from_size_align(48, 8).unwrap();

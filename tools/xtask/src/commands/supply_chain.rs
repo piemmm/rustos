@@ -1,11 +1,11 @@
 //! `cargo xtask supply-chain` implementation (`PLAN.md` §19 burn-down item
-//! 4, `AGENTS.md` §19.3).
+//! 4).
 //!
-//! §19.3 mandates two complementary supply-chain controls beyond the SBOM:
+//! the charter mandates two complementary supply-chain controls beyond the SBOM:
 //!
 //! * **Source-hash pinning.** `Cargo.lock` already records each external
 //!   crate's registry tarball SHA-256, but the lockfile is also where a
-//!   hostile dependency bump would land. So §19.3 requires a *separate*,
+//!   hostile dependency bump would land. So the charter requires a *separate*,
 //!   independently reviewed allow-list of those hashes: a crate whose
 //!   `Cargo.lock` checksum does not match its pinned value fails the
 //!   build, and a new dependency that is not yet pinned fails the build
@@ -21,7 +21,7 @@
 //!
 //! Both controls read a single committed policy file, `supply-chain.toml`,
 //! at the workspace root. The parser and the JSON-free style mirror
-//! [`super::sbom`] (`AGENTS.md` §2.12 — roll your own; no `toml`/`serde`
+//! [`super::sbom`] (roll your own; no `toml`/`serde`
 //! dependency). The `[[source-pin]]` blocks are regenerated from
 //! `Cargo.lock` with `--write-pins` (reviewed by diff, exactly like the
 //! lockfile itself); the `[[advisory]]` blocks are hand-curated.
@@ -55,7 +55,7 @@ pub enum AdvisoryTier {
 
 impl AdvisoryTier {
     /// The grace window, in days from publication, before the advisory
-    /// blocks every merge (`AGENTS.md` §19.3).
+    /// blocks every merge.
     pub fn sla_days(self) -> i64 {
         match self {
             AdvisoryTier::Crypto => 7,

@@ -6,7 +6,7 @@
 //! It is deliberately self-contained — it does not depend on the
 //! `tests/integration` harness — and keys only off the OS component of the
 //! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
-//! cfg-check` (`AGENTS.md` §17.2) stays clean.
+//! cfg-check` stays clean.
 //!
 //! The consuming vertical (`wait_qemu_aarch64`) sets `RUSTOS_WAIT_ROLE` and
 //! `RUSTOS_WAIT_CHILD_CODE` when it compiles this program (once per role), so a

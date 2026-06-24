@@ -5,7 +5,7 @@
 //! the capability-downgrade rules; the input decoder is driven per terminal
 //! through the one shared `lib/vt` parser; and the [`Screen`] driver is run
 //! over an in-memory [`Tty`] so the whole pipeline is host-testable without a
-//! kernel (`AGENTS.md` §7).
+//! kernel.
 
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
@@ -278,7 +278,7 @@ fn render_degrades_color_for_the_terminals_depth() {
 #[test]
 fn render_output_round_trips_through_the_vt_consumer() {
     // What the renderer emits, a `lib/vt` consumer parses back — one
-    // vocabulary end to end (`AGENTS.md` §2.2).
+    // vocabulary end to end.
     let caps = TermType::Xterm256Color.capabilities();
     let size = Size::new(1, 5);
     let blank = Buffer::new(size);

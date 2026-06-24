@@ -1,12 +1,12 @@
 //! RustOS `sysinfo` — the terminal client of the System Information API
-//! (Stage 6, `AGENTS.md` §16.6).
+//! (Stage 6).
 //!
 //! RustOS has no `/proc` and no `/sys`. Every piece of live system
 //! information is exposed through the typed, versioned, capability-checked
 //! `sysinfo-v1` API served by `/System/Services/sysinfod`. `sysinfo` is the
 //! single command-line tool that exposes that same API to the terminal: it
 //! does **not** open files in a virtual filesystem, and it has no privileged
-//! path that bypasses the capability check (`AGENTS.md` §16.6).
+//! path that bypasses the capability check.
 //!
 //! # What this crate is
 //!
@@ -41,15 +41,14 @@
 //!
 //! The [`Transport`] and [`Output`] seams, the request framing, and the
 //! process-list paging and rendering are shared with the `ps` tool through
-//! `lib/procinfo` rather than duplicated here (`AGENTS.md` §2.2).
+//! `lib/procinfo` rather than duplicated here.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependencies are the
+//! `no_std` (with `alloc`); the only dependencies are the
 //! audited `lib/abi` ABI crate and the shared `lib/procinfo` client
-//! helpers, so this userland tool never links a kernel or driver crate
-//! (`AGENTS.md` §17.4). No `unsafe`, and no `unwrap`/`expect`/`panic!` in
-//! production paths (`AGENTS.md` §2.9).
+//! helpers, so this userland tool never links a kernel or driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

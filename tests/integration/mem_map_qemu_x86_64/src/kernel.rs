@@ -49,7 +49,7 @@ const USER_STACK_PAGES: u64 = 288;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
@@ -129,8 +129,8 @@ fn mem_map_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen the program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen the program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -157,7 +157,7 @@ struct AnonProducer {
 // synchronously from the cooperative syscall-dispatch callback (never from
 // interrupt context, never cross-CPU, never re-entrantly — one `syscall` is
 // serviced at a time), so the interior `&mut` the methods take out can never
-// alias (`AGENTS.md` §4 — the access is genuinely exclusive).
+// alias (the access is genuinely exclusive).
 unsafe impl Sync for AnonProducer {}
 
 impl AnonProducer {
@@ -181,7 +181,7 @@ impl AnonProducer {
     }
 
     /// Borrow the retained live space mutably, or [`Errno::NotImplemented`]
-    /// if none was installed (fail closed, `AGENTS.md` §2.9).
+    /// if none was installed (fail closed).
     fn live(&self) -> Result<&mut LiveSpace, Errno> {
         // SAFETY: see the `unsafe impl Sync` justification — the dispatch path
         // is single-CPU and non-reentrant, so this exclusive borrow is unique.
@@ -194,8 +194,8 @@ impl AnonProducer {
 static PRODUCER: AnonProducer = AnonProducer::new();
 
 /// Map an [`AnonError`] onto a stable [`Errno`] for the syscall result, folding
-/// allocator exhaustion onto [`Errno::OutOfMemory`] (`AGENTS.md` §4) and a
-/// not-mapped range onto [`Errno::NotFound`] (fail closed, §5.4).
+/// allocator exhaustion onto [`Errno::OutOfMemory`] and a
+/// not-mapped range onto [`Errno::NotFound`] (fail closed).
 fn anon_to_errno(err: AnonError) -> Errno {
     match err {
         AnonError::ZeroLength => Errno::LengthOutOfRange,
@@ -265,8 +265,7 @@ fn encode(result: Result<u64, Errno>) -> u64 {
 /// can confirm the program completed the map→verify→unmap sequence before
 /// faulting. An `exit` means the fixture took a verification failure branch
 /// (the success path is the deliberate fault, not an exit), so it fails the
-/// test. Any other syscall is unexpected and fails the test loudly
-/// (`AGENTS.md` §7).
+/// test. Any other syscall is unexpected and fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: the `IA32_LSTAR` entry stub built the `[u64; SYSCALL_MAX_ARGS]`
     // array on the kernel stack and passes a pointer valid for this call
@@ -302,7 +301,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     } else if number == u64::from(SyscallNumber::EXIT.as_u16()) {
         // The success path is the deliberate fault-on-use-after-unmap, never an
         // exit; an exit therefore means the fixture hit a verification failure
-        // branch. Fail loudly (`AGENTS.md` §7).
+        // branch. Fail loudly.
         note(TEST_FAIL, "mem_map test: fixture exited before faulting");
         qemu_exit::exit_failure();
     } else {
@@ -316,7 +315,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 
 /// The fault observer: a not-present page fault on the released region — after
 /// a successful map and unmap — is the use-after-unmap the test proves, so it
-/// reports PASS. Anything else is a failure (`AGENTS.md` §2.9 — never returns).
+/// reports PASS. Anything else is a failure (never returns).
 extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
     let region_end = REGION_VA.wrapping_add(REGION_LEN);
     if fault::is_not_present(error_code)
@@ -387,7 +386,7 @@ fn run_round_trip() -> ! {
     }
 
     // The dedicated `#PF` entry the production boot installed routes to this
-    // observer (fail-closed if none — `AGENTS.md` §2.17). Install it before any
+    // observer (fail-closed if none). Install it before any
     // user mapping can fault.
     if fault::set_fault_handler(on_fault).is_err() {
         note(TEST_FAIL, "mem_map test: fault observer already installed");
@@ -405,7 +404,7 @@ fn run_round_trip() -> ! {
     // LAPIC-timer IRQ is taken while this program runs in ring 3 (under this
     // CR3), and its ISR reads the LAPIC ID register and writes EOI at
     // `LAPIC_BASE_PHYS`. Without this mapping that kernel-mode MMIO access would
-    // page-fault under the minimal user CR3 (`AGENTS.md` §2.17) — the same page
+    // page-fault under the minimal user CR3 — the same page
     // the production / timeshare spaces map. The preempt callback then no-ops
     // here (no user kthread is published), so preemption stays transparent to
     // the test.
@@ -487,7 +486,7 @@ fn run_round_trip() -> ! {
     // Drop into the program. `enter_user` `iretq`s into ring 3; the program's
     // `syscall`s reach `dispatch` and its deliberate use-after-unmap raises a
     // page fault `on_fault` reports as PASS. Reaching past it is a closed
-    // failure (`AGENTS.md` §2.9).
+    // failure.
     // SAFETY: the entered space is the active regime and the trap path +
     // dispatch callback + fault observer are installed, so the program's
     // `syscall`s and its deliberate fault are handled; `build_process_image`

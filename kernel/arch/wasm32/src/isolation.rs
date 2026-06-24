@@ -3,7 +3,7 @@
 //! The bare-metal ports enforce process isolation with hardware page
 //! tables: an [`crate::kernel_arch::WasmArch`] process can only reach
 //! another's memory through an explicit, capability-checked shared
-//! mapping (`AGENTS.md` §4). wasm32 gets the same guarantee from the
+//! mapping. wasm32 gets the same guarantee from the
 //! WebAssembly sandbox: each Web Worker runs a distinct module instance
 //! with its **own linear memory**, and a load/store is bounds-checked by
 //! the engine against that instance's memory — a worker cannot even name
@@ -23,7 +23,7 @@
 //! The whole model is plain integer arithmetic with no wasm intrinsics,
 //! so it builds and is unit-tested on the host. All arithmetic is
 //! checked: an access whose `addr + len` would overflow is a fault, not
-//! a wraparound (`AGENTS.md` §2.9).
+//! a wraparound.
 
 /// A contiguous span of one worker's WASM linear memory.
 ///
@@ -48,7 +48,7 @@ impl MemoryRegion {
 
     /// One past the last address of the region, saturating at
     /// [`u64::MAX`] so a region declared at the top of the address space
-    /// cannot wrap (`AGENTS.md` §2.9).
+    /// cannot wrap.
     #[must_use]
     pub const fn end(&self) -> u64 {
         self.base.saturating_add(self.len)
@@ -86,7 +86,7 @@ pub struct WasmFault {
 ///
 /// Exactly one [`MemoryRegion`] — the context's own linear memory. Any
 /// access outside it is a [`WasmFault`]; there is no ambient way to
-/// reach another context's region (`AGENTS.md` §4 — no ambient
+/// reach another context's region (no ambient
 /// authority). Cross-context sharing would be a separate, explicit,
 /// capability-checked object, never an implicit reach.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -113,8 +113,7 @@ impl AddressSpace {
     /// the caller can index its own linear memory; returns a
     /// [`WasmFault`] for any access that strays outside the region or
     /// whose end would overflow. This is the single check every access
-    /// goes through — there is no unchecked fast path (`AGENTS.md`
-    /// §5.4.3 — validate every input, fail closed).
+    /// goes through — there is no unchecked fast path (validate every input, fail closed).
     ///
     /// # Errors
     ///
@@ -148,7 +147,7 @@ impl AddressSpace {
 /// this instance load and rejects every address beyond it — including any
 /// address that belongs to another worker's separate linear memory. Each
 /// Web Worker runs this against its own memory, so the check is genuinely
-/// *per worker* (`AGENTS.md` §4 — no ambient cross-context reach).
+/// *per worker* (no ambient cross-context reach).
 #[cfg(target_arch = "wasm32")]
 #[must_use]
 pub fn live_memory_region() -> MemoryRegion {

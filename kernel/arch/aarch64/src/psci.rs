@@ -5,7 +5,7 @@
 //! `CPU_ON` function, handing it an entry point and an opaque context
 //! value (`plans/WIRING.md` Stage W6). This module is the aarch64
 //! analogue of riscv64's `sbi` module: it exposes only the small,
-//! fixed set of PSCI services the bring-up path needs (`AGENTS.md` §2.3
+//! fixed set of PSCI services the bring-up path needs (
 //! — no bloat).
 //!
 //! # Conduit
@@ -21,8 +21,7 @@
 //!
 //! Every PSCI call returns a signed status in `x0`: `0`
 //! (`SUCCESS`) on success, a negative `error` code otherwise. The
-//! bring-up path inspects `PsciRet::is_success` and fails closed
-//! (`AGENTS.md` §5.4.5) rather than assuming the core came up.
+//! bring-up path inspects `PsciRet::is_success` and fails closed rather than assuming the core came up.
 //!
 //! # Host testability
 //!
@@ -33,7 +32,7 @@
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use crate::fdt::PsciMethod;
 
-/// PSCI `CPU_ON` function id (SMC64 calling convention, `AGENTS.md` §11
+/// PSCI `CPU_ON` function id (SMC64 calling convention
 /// / PSCI spec §5.1.3). The bit-30 SMC64 flag (`0x4000_0000`) selects
 /// the 64-bit argument convention, so `target_cpu`, `entry_point`, and
 /// `context_id` are passed as full 64-bit values in `x1`/`x2`/`x3`.
@@ -83,7 +82,7 @@ impl PsciRet {
         self.status == error::SUCCESS
     }
 
-    /// Stable cause string for audit records (`AGENTS.md` §5.4.4).
+    /// Stable cause string for audit records.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self.status {
@@ -209,7 +208,7 @@ mod tests {
             "psci_not_present"
         );
         // An undefined status decodes to the catch-all rather than
-        // panicking (`AGENTS.md` §2.9).
+        // panicking.
         assert_eq!(PsciRet { status: -42 }.as_str(), "psci_unknown_error");
     }
 }

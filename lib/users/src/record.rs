@@ -4,7 +4,7 @@
 //! field is checked at construction *and* at decode, so an in-memory record
 //! and a parsed record obey the same invariants — there is no way to hold a
 //! `UserRecord` whose fields the database format could not carry
-//! (`AGENTS.md` §23.2 — illegal states unrepresentable).
+//! (illegal states unrepresentable).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,13 +15,13 @@ use rustos_caps::CapabilitySet;
 use crate::password::{PasswordRecord, Salt};
 use crate::ParseError;
 
-/// Numeric user identifier (`AGENTS.md` §5.1). `uid == 0` carries **no**
+/// Numeric user identifier. `uid == 0` carries **no**
 /// ambient power; powers come from capabilities.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Uid(pub u32);
 
-/// Numeric group identifier (`AGENTS.md` §5.1).
+/// Numeric group identifier.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Gid(pub u32);
@@ -104,7 +104,7 @@ pub struct Identity<'a> {
     pub home: &'a str,
     /// Absolute path of the user's shell of choice.
     pub shell: &'a str,
-    /// Capability grant ceiling (`AGENTS.md` §5.2).
+    /// Capability grant ceiling.
     pub capabilities: CapabilitySet,
     /// Whether the account may start sessions.
     pub state: AccountState,
@@ -275,7 +275,7 @@ impl UserRecord {
         &self.shell
     }
 
-    /// The capability grant ceiling (`AGENTS.md` §5.2).
+    /// The capability grant ceiling.
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySet {
         self.capabilities

@@ -1,7 +1,7 @@
-//! RustOS PID 1 — the service manager (`init`), Stage 6, `AGENTS.md` §5.2.
+//! RustOS PID 1 — the service manager (`init`), Stage 6.
 //!
 //! `init` is the first user-space process the kernel starts. It owns the
-//! lifecycle of every long-running system service (`AGENTS.md` §16.2,
+//! lifecycle of every long-running system service (
 //! `/System/Services`): it brings them up in dependency order, grants each
 //! one exactly the capability set its signed manifest requests intersected
 //! with the authority init was itself granted, and reaps children — both
@@ -19,9 +19,9 @@
 //!    a malformed service graph never boots a partial, surprising system.
 //! 3. For each service, decode its signed manifest into a requested
 //!    capability set and grant the intersection of that request with the
-//!    [`InitConfig::authority`] (`AGENTS.md` §5.2). A service whose manifest
+//!    [`InitConfig::authority`]. A service whose manifest
 //!    requests authority init does not hold is refused, never silently
-//!    widened (`AGENTS.md` §5.4.5).
+//!    widened.
 //! 4. Reap exited children, distinguishing a known service's exit from an
 //!    inherited orphan, and audit both.
 //!
@@ -35,7 +35,7 @@
 //!
 //! Verifying a service binary's signature, syscall-table hash, and `rxe`
 //! envelope is the loader's job (the same pipeline `drvhost` runs for
-//! drivers, `AGENTS.md` §8); init computes the capability ceiling and hands
+//! drivers); init computes the capability ceiling and hands
 //! it to the [`Spawner`], which performs that verification before it
 //! executes anything.
 //!
@@ -52,18 +52,17 @@
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
 //! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
 //! program linking only the pure-Rust userland runtime `rustos-rt`
-//! (`AGENTS.md` §1 — RustOS code never uses the C ABI), **not** this
+//! (RustOS code never uses the C ABI), **not** this
 //! orchestrator library, so its tiny startup-config parser lives alongside it
 //! (`src/startup.rs`) rather than here — pulling this crate's `alloc` + crypto
 //! dependency chain into a banner-printing program would be the bloat
-//! `AGENTS.md` §2.3 forbids.
+//! the charter forbids.
 //!
 //! # Layering
 //!
-//! The crate is `no_std` (with `alloc`, `AGENTS.md` §6) and depends only on
+//! The crate is `no_std` (with `alloc`) and depends only on
 //! the audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`,
-//! so a userland service never links a kernel or driver crate
-//! (`AGENTS.md` §17.4).
+//! so a userland service never links a kernel or driver crate.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

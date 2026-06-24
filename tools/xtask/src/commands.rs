@@ -219,7 +219,7 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     prune_before_build(ctx);
 
     // `--headless` builds the first-class headless configuration required
-    // by AGENTS.md §17.3 / §17.5: every `userland/gui/*` crate is excluded
+    // by: every `userland/gui/*` crate is excluded
     // from the image so the system must remain buildable without the
     // desktop. The flag is consumed here; everything else is forwarded.
     let mut headless = false;
@@ -369,7 +369,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// The `userland/gui/*` crates excluded from the headless image (§17.3).
+/// The `userland/gui/*` crates excluded from the headless image.
 const GUI_CRATES: &[&str] = &["rustos-wm", "rustos-taskbar"];
 
 /// The environment variable GitHub Actions sets to `"true"` on every runner.
@@ -384,15 +384,14 @@ const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
 ///
 /// Reads the runner-set [`GITHUB_ACTIONS_ENV`] signal. The QEMU matrix uses
 /// it only to scale per-test timeouts for the slower shared runners; the
-/// test count itself is no longer CI-dependent (`ci` runs the matrix once,
-/// §7).
+/// test count itself is no longer CI-dependent (`ci` runs the matrix once).
 fn in_github_actions() -> bool {
     std::env::var_os(GITHUB_ACTIONS_ENV).is_some_and(|v| v == "true")
 }
 
 /// Default wall-clock budget for `cargo xtask test --soak`: 24 h.
 ///
-/// Matches the fuzz/proptest soak floor (§19.6/§19.7). The nightly `soak`
+/// Matches the fuzz/proptest soak floor. The nightly `soak`
 /// workflow repeats the whole test matrix for this long via
 /// `tools/ci/soak.sh` so a flake too rare to surface in the per-PR
 /// single-pass run still gets a full night of exposure. Flake-hunting
@@ -569,13 +568,13 @@ fn parse_secs(value: &OsString) -> Result<u64, String> {
 
 fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `--qemu` opts in to the bare-metal QEMU integration tests in
-    // `tests/integration/*`. Per AGENTS.md §7 they share the test
+    // `tests/integration/*`. Per they share the test
     // entry point (`cargo xtask test`) so a single command runs the
     // whole matrix; per the same section we never retry on failure
     // and every run has a strict, finite timeout.
     //
     // `--count N` (alias `--iterations N`) runs the whole matrix N times;
-    // it defaults to one, and `ci` runs the matrix exactly once (§7). The
+    // it defaults to one, and `ci` runs the matrix exactly once. The
     // flake-hunting repetition lives in the time-limited GitHub soaks:
     // `--soak` (tuned by `--secs N`) repeats the matrix for a wall-clock
     // budget, which the nightly `soak` workflow uses to run the tests for
@@ -661,7 +660,7 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // many-core CI host busy through that serial tail. Nightly-only and
     // experimental, but the toolchain is pinned nightly already (it likewise
     // backs `-Z build-std`), so this is consistent with the project's posture.
-    // The `-Z` flag carries this rationale comment per `AGENTS.md` §2.11.
+    // The `-Z` flag carries this rationale comment.
     //
     // `-Z rustdoc-mergeable-info` (a cargo `-Z` flag, RFC 3662) makes cargo
     // drive rustdoc's mergeable cross-crate-info: each crate writes its
@@ -706,7 +705,7 @@ fn run_docs_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
 
 fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
     // Stage 2.7: real syscall ABI cross-check. `abi_check::check_sync`
-    // enforces both the pair-existence rule (`AGENTS.md` §9) and the
+    // enforces both the pair-existence rule and the
     // SHA-256 hash equality between the kernel-side table and the
     // `lib/abi` source of truth. Its unit tests exercise the desync
     // failure mode against a mutated fixture (see
@@ -722,7 +721,7 @@ fn run_abi_check(ctx: &Context, _args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // The C development header (`AGENTS.md` §9) is a generated view of the
+    // The C development header is a generated view of the
     // `lib/abi` source of truth. With no arguments this verifies the
     // committed header is in sync (the `ci` drift guard); `--write`
     // regenerates it, reviewed by diff like the kernel syscall table.
@@ -753,7 +752,7 @@ fn run_c_header(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_deps_check(ctx: &Context) -> Result<(), String> {
-    // §17.4 / §17.5: walk the workspace dependency graph and reject any
+    // walk the workspace dependency graph and reject any
     // layering violation, concrete-scheduler naming outside the sanctioned
     // crates, or a non-GUI crate reaching the optional desktop.
     eprintln!("xtask: [deps-check] {}", ctx.workspace_root.display());
@@ -761,7 +760,7 @@ fn run_deps_check(ctx: &Context) -> Result<(), String> {
 }
 
 fn run_cfg_check(ctx: &Context) -> Result<(), String> {
-    // §17.2 / §17.5: reject target-conditional compilation outside the
+    // reject target-conditional compilation outside the
     // architecture ports and the build glue.
     eprintln!("xtask: [cfg-check] {}", ctx.workspace_root.display());
     cfg_check::run(&ctx.workspace_root)
@@ -784,7 +783,7 @@ fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_sbom(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // §19.3: emit a CycloneDX SBOM from the committed `Cargo.lock`. The
+    // emit a CycloneDX SBOM from the committed `Cargo.lock`. The
     // default is stdout (composes with redirection and signing); an
     // explicit `--output PATH` (or `-o PATH`) writes the document to disk,
     // creating any missing parent directories (e.g. the gitignored
@@ -807,7 +806,7 @@ fn run_sbom(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // §19.3: verify the committed source-hash allow-list against
+    // verify the committed source-hash allow-list against
     // `Cargo.lock` and enforce the advisory SLA. `--write-pins`
     // regenerates the `[[source-pin]]` blocks from the lockfile
     // (reviewed by diff, like the lockfile itself); the default verifies.
@@ -827,7 +826,7 @@ fn run_supply_chain(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // §19.6: drive the in-tree fuzz harnesses for a wall-clock budget.
+    // drive the in-tree fuzz harnesses for a wall-clock budget.
     // `--quick` (the default and the `ci` budget) runs each ≥ 60 s;
     // `--soak` runs each ≥ 24 h for the nightly job. The harness set and
     // the budget live in `commands/fuzz.rs`.
@@ -837,7 +836,7 @@ fn run_fuzz(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_proptest(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    // §19.7 Bronze: drive the stateful capability models for a wall-clock
+    // Bronze: drive the stateful capability models for a wall-clock
     // budget. `--quick` (the default and the `ci` budget) runs each ≥ 5 s;
     // `--soak` runs each ≥ 24 h for the nightly job. The model set and the
     // budget live in `commands/proptest.rs`.
@@ -858,7 +857,7 @@ fn run_fssoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_model_check(args: &[OsString]) -> Result<(), String> {
-    // §19.7 Silver: exhaustively model-check the capability + IPC state
+    // Silver: exhaustively model-check the capability + IPC state
     // machine. The model and the explicit-state checker live in
     // `commands/model_check.rs`; the formal narrative is in
     // `docs/src/security/model/capability_ipc.md`. Fails closed on any
@@ -869,7 +868,7 @@ fn run_model_check(args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_spec_review(ctx: &Context) -> Result<(), String> {
-    // §19.7: fail closed if any unreviewed AI-drafted artefact marker
+    // fail closed if any unreviewed AI-drafted artefact marker
     // reaches the tree. The scanner lives in `commands/spec_review.rs`.
     eprintln!("xtask: [spec-review] {}", ctx.workspace_root.display());
     spec_review::run(&ctx.workspace_root)
@@ -879,7 +878,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate: cheap and deterministic checks run
     // first so a failing PR fails fast. The test phase opts in to `--qemu`
     // so the Stage-2 QEMU integration tests run as part of every PR per
-    // `AGENTS.md` §7; CI hosts therefore need QEMU, `grub-mkrescue`,
+    // ; CI hosts therefore need QEMU, `grub-mkrescue`,
     // `xorriso`, and OVMF, all documented under
     // `docs/src/platform/x86_64.md`. The closing image gate additionally
     // needs the pinned Pi firmware blobs: an operator-staged directory
@@ -887,11 +886,11 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // checksummed cache (`docs/src/install/raspberry_pi.md`).
     run_fmt(ctx, &[])?;
     run_clippy(ctx, &[])?;
-    // Modularity gates (§17.5) are static, deterministic, and cheap, so
+    // Modularity gates are static, deterministic, and cheap, so
     // they run before the test matrix to fail a non-conforming PR fast.
     run_deps_check(ctx)?;
     run_cfg_check(ctx)?;
-    // §7: run the whole test matrix exactly once. `ci` runs each test a
+    // run the whole test matrix exactly once. `ci` runs each test a
     // single time, on a developer machine and on a CI runner alike; the
     // flake-hunting repetition lives in the time-limited GitHub soaks
     // (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`. The
@@ -899,42 +898,42 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     run_test(ctx, &[OsString::from("--qemu")])?;
     run_docs_check(ctx, &[])?;
     run_deny(ctx)?;
-    // §19.3 supply-chain integrity: the source-hash allow-list and the
+    // supply-chain integrity: the source-hash allow-list and the
     // advisory SLA. Runs right after `cargo deny` (which blocks an
     // advisory immediately); this gate caps how long one may be accepted
     // and fails closed when a pin drifts from `Cargo.lock`.
     run_supply_chain(ctx, &[])?;
-    // §19.6: the per-PR fuzz gate. Runs each in-tree harness for a single
+    // the per-PR fuzz gate. Runs each in-tree harness for a single
     // iteration with a fresh, logged seed (a crash, hang, or invariant
     // failure fails the gate, fail-closed). `ci` does not budget the
     // harnesses — the wall-clock soak coverage is the time-limited GitHub
     // soak (`cargo xtask fuzz --soak`, run outside `ci`).
     run_fuzz(ctx, &[OsString::from("--once")])?;
-    // §19.7 Bronze: the per-PR stateful-model gate. Runs each capability
+    // Bronze: the per-PR stateful-model gate. Runs each capability
     // model for a single iteration with a fresh, logged seed; a
     // counterexample, hang, or invariant failure fails the gate
     // (fail-closed). The wall-clock soak is `cargo xtask proptest --soak`,
     // run outside `ci`.
     run_proptest(ctx, &[OsString::from("--once")])?;
-    // §19.7 Silver: exhaustively model-check the capability + IPC state
+    // Silver: exhaustively model-check the capability + IPC state
     // machine on every PR. The check is exhaustive (not budgeted) and fast,
     // so it always runs; a reachable invariant violation fails closed.
     run_model_check(&[])?;
-    // §19.7: reject any unreviewed AI-drafted artefact marker that reached
+    // reject any unreviewed AI-drafted artefact marker that reached
     // the tree. Static and cheap; fails closed.
     run_spec_review(ctx)?;
-    // §19.1: re-run `lib/crypto`'s unit tests under release optimisation
+    // re-run `lib/crypto`'s unit tests under release optimisation
     // (`[profile.release]` is `opt-level = 3`). The constant-time
     // comparison guarantee can be broken by the optimiser, so the charter
     // requires the secret-handling tests to pass under `-C opt-level=3`,
     // not only the debug profile the main test phase uses.
     run_crypto_constant_time(ctx)?;
     run_abi_check(ctx, &[])?;
-    // §9: the C ABI development header is a generated view of `lib/abi`.
+    // the C ABI development header is a generated view of `lib/abi`.
     // Verify the committed copy is in sync so a `lib/abi` change cannot land
     // without regenerating the header non-Rust programs link against.
     run_c_header(ctx, &[])?;
-    // §12/§15.6: every shippable image profile is built on every PR, so an
+    // every shippable image profile is built on every PR, so an
     // image-breaking change (kernel link, firmware manifest, root-volume
     // layout, profile seeding) can never land green. Both profiles of every
     // delivered image platform are assembled end-to-end and written under
@@ -963,7 +962,7 @@ fn run_image_gate(ctx: &Context) -> Result<(), String> {
     Ok(())
 }
 
-/// §19.1: run `lib/crypto`'s unit tests under the release profile so the
+/// run `lib/crypto`'s unit tests under the release profile so the
 /// constant-time comparison tests are exercised at `-C opt-level=3`. A
 /// data-dependent branch introduced by the optimiser would surface here, in
 /// the `constant_time` module's full-traversal assertions, rather than at
@@ -1008,7 +1007,7 @@ struct ImageArgs {
 /// (default `debug` — the development image seeds the test `root` account;
 /// the installer image seeds none), `--out <path>`, and `--headless`. The
 /// root volume key is derived from the profile's passphrase
-/// (`rustos_mkimage::passphrase_for`, `AGENTS.md` §11 — `root` for the
+/// (`rustos_mkimage::passphrase_for` — `root` for the
 /// debug image, blank for the installer); there is no operator-supplied
 /// key.
 fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
@@ -1050,7 +1049,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
             }
             // The image carries the kernel and the root skeleton only; the
             // desktop ships as installable userland later, so the headless
-            // image is byte-identical today. Accepted so the §17.5 headless
+            // image is byte-identical today. Accepted so the headless
             // invocation works unchanged once the contents diverge.
             "--headless" => {}
             other => return Err(format!("image: unknown argument {other}")),
@@ -1075,7 +1074,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
 /// Fetch every pinned firmware blob missing from `cache` from the
 /// manifest's pinned HTTPS source, then prove the cache complete.
 ///
-/// The blobs are third-party build inputs (AGENTS.md §19.3): each download
+/// The blobs are third-party build inputs: each download
 /// lands beside the cache as `<name>.part` and is renamed in only after
 /// `missing_in` — the same pinned size + SHA-256 check `load_dir` applies —
 /// stops reporting it. A blob that still mismatches after its fetch is
@@ -1142,12 +1141,12 @@ fn fetch_missing_firmware(
 ///
 /// The single freestanding kernel binary cannot read `cfg!(debug_assertions)`
 /// from the image it is planted in, so the boot-log routing the aarch64
-/// console performs (`kernel/arch/aarch64/src/serial.rs`, `AGENTS.md` §10 —
+/// console performs (`kernel/arch/aarch64/src/serial.rs` —
 /// debug build → UART, release build → screen) is only correct if each image
 /// profile compiles the kernel in the matching Cargo profile:
 ///
 /// * The `debug` image is the non-shippable development form (it seeds the
-///   `root`/`root` test account and must never ship, `AGENTS.md` §12), so its
+///   `root`/`root` test account and must never ship), so its
 ///   kernel is built in Cargo's `dev` profile — `debug_assertions` on — and
 ///   the console diverts the boot-log/debug stream to the UART.
 /// * The `installer` image is the shippable form, built `--release`
@@ -1227,13 +1226,13 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 
     // Cross-compile and sign the autoloaded `/System/Drivers/` bundles the
     // image ships, then install them into the read-only `/System` store. They
-    // all run in user space (the §18.6 floor stays storage-only), so `devmgr`
+    // all run in user space (the floor stays storage-only), so `devmgr`
     // autoloads each against its discovered node — and the bus chain is
     // recursive: the PCIe root-complex driver binds the discovered
     // `brcm,bcm2711-pcie` node and emits the VL805 PCI function; the VL805
     // driver binds that, reloads the controller firmware over the mailbox, and
     // emits the `usb,xhci` node; the keyboard driver binds that and pumps key
-    // edges into the input arbiter (`plans/PI.md` P10 D5d, `AGENTS.md` §18).
+    // edges into the input arbiter (`plans/PI.md` P10 D5d).
     let vcmailbox = image_drivers::build_vcmailbox_bundle(ctx)?;
     let pcie_brcm = image_drivers::build_pcie_brcm_bundle(ctx)?;
     let vl805 = image_drivers::build_vl805_bundle(ctx)?;
@@ -1255,7 +1254,7 @@ fn run_image(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     .map_err(|e| format!("image: {e}"))?;
 
     // 3. Write the image and its root volume key (owner-only) under
-    //    `images/` (§3 — built images are output, never committed).
+    //    `images/` (built images are output, never committed).
     let out = out.unwrap_or_else(|| {
         ctx.workspace_root
             .join("images")
@@ -1552,7 +1551,7 @@ mod tests {
     }
 
     /// A failing pass aborts the loop immediately and propagates the error
-    /// (no retry, §7).
+    /// (no retry).
     #[test]
     fn run_budget_stops_on_first_failure() {
         let mut passes = 0u64;

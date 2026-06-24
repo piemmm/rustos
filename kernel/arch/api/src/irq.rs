@@ -1,5 +1,5 @@
 //! Interrupt-controller and interrupt-entry surface of the Arch HAL
-//! (`AGENTS.md` §17.2 "interrupt entry/exit").
+//! ("interrupt entry/exit").
 //!
 //! Every architecture routes external device interrupts through a
 //! programmable interrupt controller and a per-interrupt
@@ -9,11 +9,11 @@
 //! controller (the load-bearing mask-before-wake primitive of the
 //! user-space IRQ contract, `docs/src/security/irq.md`), and, for a
 //! claim-based controller, run the claim → handle → complete handshake
-//! that drains a pending interrupt. §17.2 makes the architecture surface
+//! that drains a pending interrupt. The charter makes the architecture surface
 //! a closed set of traits on the HAL; this module is the
 //! "interrupt entry/exit" member of that set, so the controller logic
 //! lives behind one vocabulary instead of being re-described at every
-//! call site (`AGENTS.md` §2.2).
+//! call site.
 //!
 //! # What lives here
 //!
@@ -22,7 +22,7 @@
 //!   of the consumer-side `rustos_kernel_irq::IrqController` (which the
 //!   IRQ table calls through during a wake): a port implements this HAL
 //!   trait over its real controller, and the kernel binary bridges the
-//!   two (`AGENTS.md` §17.2 — the arch port owns no `kernel/irq`
+//!   two (the arch port owns no `kernel/irq`
 //!   dependency).
 //! * [`InterruptEntry`] — the claim/complete prologue/epilogue a
 //!   *claim-based* controller (PLIC, GIC) exposes. A **vectored** port
@@ -30,9 +30,8 @@
 //!   end-of-interrupt is a single LAPIC write independent of the line)
 //!   has no claim register, so it honestly does not implement this trait
 //!   — the same "declare the absence, never fake it" discipline the
-//!   side-channel and memory-tagging slices follow (`AGENTS.md` §19.1 /
-//!   §2.1).
-//! * [`conformance`] — the §17.2 conformance verticals: a host-run
+//!   side-channel and memory-tagging slices follow.
+//! * [`conformance`] — the conformance verticals: a host-run
 //!   [`conformance::run_controller`] mask/unmask round-trip + fail-closed
 //!   check every controller-bearing port runs over its handle, and a
 //!   [`conformance::run_entry`] claim/complete drain check every
@@ -46,7 +45,7 @@
 /// Failure mode of an [`IrqController`] operation.
 ///
 /// The controller validates every line before touching a register and
-/// fails closed (`AGENTS.md` §5.4.5): an out-of-range line is rejected,
+/// fails closed: an out-of-range line is rejected,
 /// never silently masking or unmasking an unrelated source.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IrqControlError {
@@ -57,7 +56,7 @@ pub enum IrqControlError {
 }
 
 /// The interrupt-controller line-masking handle an architecture port
-/// exposes (`AGENTS.md` §17.2).
+/// exposes.
 ///
 /// The kernel holds a line masked at the controller while a driver
 /// drains the device, then unmasks it. [`Self::mask`] is the primitive
@@ -80,7 +79,7 @@ pub trait IrqController: Send + Sync {
     ///
     /// [`IrqControlError::OutOfRange`] if `line` is outside the
     /// controller's addressable range. The call never panics on a
-    /// stray line (`AGENTS.md` §2.9).
+    /// stray line.
     fn mask(&self, line: u32) -> Result<(), IrqControlError>;
 
     /// Clear the mask on `line`, restoring delivery.
@@ -95,7 +94,7 @@ pub trait IrqController: Send + Sync {
 }
 
 /// The claim/complete interrupt prologue/epilogue a *claim-based*
-/// controller exposes (`AGENTS.md` §17.2).
+/// controller exposes.
 ///
 /// On a claim-based controller (riscv64 PLIC, aarch64 GICv2) the
 /// interrupt handler reads a claim register to learn which source is
@@ -104,8 +103,7 @@ pub trait IrqController: Send + Sync {
 /// the source from the IDT vector the CPU dispatched to and signals
 /// end-of-interrupt with a single LAPIC write that names no line, so it
 /// does not implement this trait — the claim register has no analogue
-/// there, and inventing one would be a fake primitive (`AGENTS.md`
-/// §2.1).
+/// there, and inventing one would be a fake primitive.
 ///
 /// Implementations must be [`Send`] + [`Sync`].
 pub trait InterruptEntry: Send + Sync {
@@ -122,11 +120,11 @@ pub trait InterruptEntry: Send + Sync {
     ///
     /// Called with a line previously returned by [`Self::claim`]. A
     /// completion for a line that was not active is dropped
-    /// best-effort, never a panic (`AGENTS.md` §2.9).
+    /// best-effort, never a panic.
     fn complete(&self, line: u32);
 }
 
-/// The §17.2 interrupt-controller / interrupt-entry conformance
+/// The interrupt-controller / interrupt-entry conformance
 /// verticals.
 ///
 /// Each controller-bearing port runs [`conformance::run_controller`]
@@ -137,7 +135,7 @@ pub trait InterruptEntry: Send + Sync {
 /// verticals. They are deliberately *not* folded into
 /// [`crate::conformance::run_all`]: the controller check needs a
 /// port-specific valid/invalid `line` pair (which the handle cannot
-/// self-describe without interface creep, `AGENTS.md` §2.4) and the
+/// self-describe without interface creep) and the
 /// entry check is implemented by only a subset of ports.
 pub mod conformance {
     use super::{InterruptEntry, IrqControlError, IrqController};
@@ -201,7 +199,7 @@ pub mod conformance {
     }
 
     /// An out-of-range line is rejected by both operations and never
-    /// panics: the controller fails closed (`AGENTS.md` §5.4.5).
+    /// panics: the controller fails closed.
     fn invalid_line_fails_closed<C: IrqController + ?Sized>(controller: &C, line: u32) {
         assert_eq!(
             controller.mask(line),

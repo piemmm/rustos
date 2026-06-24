@@ -34,7 +34,7 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 /// `EventId` emitted when every boot init phase completed.
 const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
-/// Stable audit-event ids for the QEMU transcript (free range, §13).
+/// Stable audit-event ids for the QEMU transcript (free range).
 const TEST_START: EventId = EventId(4335);
 const TEST_SPAWNED: EventId = EventId(4336);
 const TEST_PASS: EventId = EventId(4337);
@@ -50,7 +50,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical base of the architectural LAPIC MMIO page, identity-mapped into the
@@ -82,7 +82,7 @@ const TARGET_PREEMPTIONS: u64 = 1;
 /// `set_preemption(false)` disarms it. A genuine periodic-timer regression
 /// would instead add *hundreds* of ticks over the long sole run, so this
 /// small bound stays immune to the benign boundary fire while still
-/// failing loudly on a re-armed periodic tick (`AGENTS.md` §7; §17.1).
+/// failing loudly on a re-armed periodic tick.
 const SOLE_PREEMPT_SLACK: u64 = 16;
 
 /// Count of involuntary timer-driven preemptions of the running ring-3 task.
@@ -93,7 +93,7 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 /// exits (handing the CPU to the now-sole spinner); `u64::MAX` until
 /// recorded. `PREEMPTIONS == PREEMPTIONS_AT_SOLE` after the run proves the
 /// sole spinner took **no** further LAPIC-timer interrupt (tickless
-/// disarm, `AGENTS.md` §17.1).
+/// disarm).
 static PREEMPTIONS_AT_SOLE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Set once the round-trip has been driven so a duplicate `BootCompleted`
@@ -156,7 +156,7 @@ fn preempt_el0_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4).
+/// spawn caller requires.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -165,7 +165,7 @@ impl CapabilityQuery for SpawnAuthority {
 }
 
 /// The ring-3-preemption callback the LAPIC-timer ISR invokes for a tick taken
-/// from ring 3 — the production dispatch shape verbatim (`AGENTS.md` §2.2): it
+/// from ring 3 — the production dispatch shape verbatim: it
 /// suspends the running user task back to the scheduler via
 /// `reschedule_current(_, Yield)`, the involuntary analogue of a `yield`
 /// syscall. It records each preemption so the test can prove at least one fired
@@ -179,7 +179,7 @@ extern "C" fn preempt_dispatch(cpu: u32) {
 ///
 /// The spinner issues no `yield`; its only syscall is the `exit` that
 /// `rustos-rt` routes `main`'s return through. Any other syscall is unexpected
-/// and fails the test loudly (`AGENTS.md` §7).
+/// and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -217,7 +217,7 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 
 /// Build the isolated ring-3 address space from the validated `image` over
 /// [`PAGE_TABLE_POOL`], returning its PML4 root and the entry register state.
-/// Fails the test loudly on any error (`AGENTS.md` §7).
+/// Fails the test loudly on any error.
 fn build_el0_space(image: &LoadImage) -> (u64, UserEntry) {
     let Some(mut arch_space) = paging::AddressSpace::new_identity_first_32mib(&PAGE_TABLE_POOL)
     else {
@@ -311,8 +311,7 @@ fn run_preempt() -> ! {
 
     syscall_entry::set_dispatch_callback(dispatch);
 
-    // Arm the production tickless ring-3-preemption path verbatim
-    // (`AGENTS.md` §2.2): install the ring-3-preemption callback the
+    // Arm the production tickless ring-3-preemption path verbatim: install the ring-3-preemption callback the
     // LAPIC-timer ISR forwards each user-mode tick to. The production boot
     // programmed the LAPIC timer **one-shot and disarmed**
     // (`preempt::init_local_preempt`); the scheduler arms the one-shot to
@@ -352,7 +351,7 @@ fn run_preempt() -> ! {
     // records the count, and exits — handing the CPU to the now-sole
     // spinner. While it is queued the scheduler arms the one-shot, so the
     // runaway spinner is preempted (contention case); once it exits the sole
-    // spinner runs disarmed to completion (tickless case, `AGENTS.md` §17.1).
+    // spinner runs disarmed to completion (tickless case).
     let competitor = move |yielder: &mut Yielder<ContextSwitchHal>| {
         while PREEMPTIONS.load(Ordering::SeqCst) < TARGET_PREEMPTIONS {
             yielder.yield_now();
@@ -376,7 +375,7 @@ fn run_preempt() -> ! {
     // on the dispatcher's context immediately before every switch-in: it
     // repoints the per-CPU `syscall` entry stack AND the `TSS.RSP0` trap stack
     // at *this* task's own kernel stack (the value the seam hands it), then
-    // reloads CR3 to the task's own root (isolation, §4). Repointing `TSS.RSP0`
+    // reloads CR3 to the task's own root (isolation). Repointing `TSS.RSP0`
     // is what makes the involuntary timer IRQ (delivered through the IDT
     // interrupt gate, which reads `TSS.RSP0`) land on the spinner's own kernel
     // stack rather than the boot trap stack.
@@ -388,9 +387,9 @@ fn run_preempt() -> ! {
         // kernel stack — the latter is what makes the involuntary LAPIC-timer
         // preemption (delivered through the IDT interrupt gate, which reads
         // `TSS.RSP0`) land on the spinner's own kernel stack rather than the
-        // boot trap stack (`AGENTS.md` §2.2 — one per-task kernel stack for both
-        // entry kinds, §4). A rejected value leaves the slots unchanged and the
-        // next entry faults loudly (fail closed, §5.4 / §2.9).
+        // boot trap stack (one per-task kernel stack for both
+        // entry kinds). A rejected value leaves the slots unchanged and the
+        // next entry faults loudly (fail closed).
         if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
             note(
                 TEST_FAIL,
@@ -422,7 +421,7 @@ fn run_preempt() -> ! {
     // never-yielding spinner is preempted; once the competitor exits, the
     // lone spinner runs disarmed to completion and `exit`s. A preemption
     // that never fires would leave the contended `step` spinning forever in
-    // ring 3 and the harness would time out (fail-loud, `AGENTS.md` §7).
+    // ring 3 and the harness would time out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

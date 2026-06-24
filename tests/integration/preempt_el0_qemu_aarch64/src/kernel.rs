@@ -42,7 +42,7 @@ const BOOT_CPU: CpuId = 0;
 /// Preemption quantum rate (slices/second) — the shared production rate
 /// [`DEFAULT_PREEMPT_QUANTUM_HZ`](rustos_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ),
 /// a ~10 ms slice so a contended runaway spinner is preempted promptly
-/// under QEMU TCG. RustOS is tickless (`AGENTS.md` §17.1): the one-shot is
+/// under QEMU TCG. RustOS is tickless: the one-shot is
 /// armed to one quantum only while the spinner shares the CPU with the
 /// competitor kthread, and disarmed once the spinner is the sole runnable
 /// task.
@@ -62,7 +62,7 @@ const TARGET_PREEMPTIONS: u64 = 1;
 /// A genuine periodic-timer regression would instead add *hundreds* of
 /// ticks over the long sole run, so this small bound stays immune to the
 /// benign boundary fire while still failing loudly on a re-armed periodic
-/// tick (`AGENTS.md` §7 — no flaky tests; §17.1).
+/// tick (no flaky tests;).
 const SOLE_PREEMPT_SLACK: u64 = 16;
 
 /// Gigabytes of identity map the EL0 address space provides: `[0, 2 GiB)`
@@ -78,7 +78,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// User virtual address the startup-vector block is written at (3 MiB up).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the spawn build draws from: the program's segments, its
@@ -117,7 +117,7 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 /// instant it exits (handing the CPU to the now-sole spinner); `u64::MAX`
 /// until recorded. After the run, `PREEMPTIONS == PREEMPTIONS_AT_SOLE`
 /// proves the sole spinner took **no** further timer interrupt — the
-/// tickless disarm (`AGENTS.md` §17.1).
+/// tickless disarm.
 static PREEMPTIONS_AT_SOLE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Bump-heap size: the spawn caller allocates the startup-vector block buffer
@@ -141,8 +141,7 @@ static ALLOCATOR: FreeListAllocator =
 /// Page-table pool backing the EL0 address space's stage-1 hierarchy.
 static PAGE_TABLES: PageTablePool = PageTablePool::new();
 
-/// Per-CPU preemption backing for the single boot CPU (`AGENTS.md` §24.1 —
-/// `PreemptStorage<1>` covers a single-core slice).
+/// Per-CPU preemption backing for the single boot CPU (`PreemptStorage<1>` covers a single-core slice).
 static PREEMPT_STORAGE: PreemptStorage<1> = PreemptStorage::new();
 
 /// Physical-frame backing store the spawn builder allocates user pages from.
@@ -189,7 +188,7 @@ fn preempt_el0_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4).
+/// spawn caller requires.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -198,7 +197,7 @@ impl CapabilityQuery for SpawnAuthority {
 }
 
 /// The EL0-preemption callback the timer IRQ path invokes for a tick taken
-/// from EL0 — the production dispatch shape verbatim (`AGENTS.md` §2.2): it
+/// from EL0 — the production dispatch shape verbatim: it
 /// suspends the running user task back to the scheduler via
 /// `reschedule_current(_, Yield)`, the involuntary analogue of a `yield`
 /// syscall. It records each preemption so the test can prove at least one
@@ -212,7 +211,7 @@ extern "C" fn preempt_dispatch(cpu: CpuId) {
 ///
 /// The spinner issues no `yield`; its only syscall is the `exit` that
 /// `rustos-rt` routes `main`'s return through. Any other syscall is unexpected
-/// and fails the test loudly (`AGENTS.md` §7).
+/// and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -320,8 +319,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
     syscall_entry::set_dispatch_callback(dispatch);
 
-    // Set up the production tickless preemption path verbatim (`AGENTS.md`
-    // §2.2): register the per-CPU storage, install the EL0-preemption
+    // Set up the production tickless preemption path verbatim: register the per-CPU storage, install the EL0-preemption
     // callback, record the per-quantum interval, and enable the timer PPI —
     // but leave the timer **disarmed**. EL0 runs preemptible
     // (`SPSR_EL0T_PREEMPTIBLE`); the scheduler arms the one-shot to one
@@ -344,7 +342,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     // Build the live scheduler over the arch port. Per-CPU bookkeeping backing
-    // for this single-CPU vertical (`AGENTS.md` §24.1).
+    // for this single-CPU vertical.
     static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
         rustos_arch_aarch64::Aarch64ArchStorage::new();
     let arch = Arc::new(rustos_arch_aarch64::Aarch64Arch::new(
@@ -364,8 +362,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // runaway spinner is involuntarily preempted (the contention case). Once
     // it exits, the spinner is the sole runnable task, so the scheduler
     // disarms and the spinner runs its remaining millions of iterations with
-    // **no** further timer interrupt — the tickless sole-task case
-    // (`AGENTS.md` §17.1), checked after the loop.
+    // **no** further timer interrupt — the tickless sole-task case, checked after the loop.
     let competitor = move |yielder: &mut Yielder<ContextSwitchHal>| {
         while PREEMPTIONS.load(Ordering::SeqCst) < TARGET_PREEMPTIONS {
             yielder.yield_now();
@@ -385,7 +382,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     }
 
     // Admit the spinner as a resumable user kthread: its `pre_resume` hook
-    // reactivates its page-table root (isolation, §4), and its work body
+    // reactivates its page-table root (isolation), and its work body
     // `enter_user`s into EL0.
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -412,7 +409,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // `reschedule_current`s back here). Once the competitor exits, the lone
     // spinner runs disarmed to completion and `exit`s. A preemption that
     // never fires would leave the contended `step` spinning forever inside
-    // EL0 and the harness would time out (fail-loud, `AGENTS.md` §7).
+    // EL0 and the harness would time out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

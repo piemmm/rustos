@@ -19,9 +19,9 @@
 //! periodically remounts and re-verifies that *every* file's bytes,
 //! every file's size, and every directory's listing match the model
 //! byte-for-byte. A mismatch — or an unexpected driver error — fails the
-//! soak, tagged with the reproducing seed (§5.4 / §2.9). The body is
+//! soak, tagged with the reproducing seed. The body is
 //! generic over [`SoakFs`] so it adds no parallel re-implementation of
-//! any filesystem semantics (`AGENTS.md` §2.2).
+//! any filesystem semantics.
 
 use std::collections::{BTreeMap, BTreeSet};
 

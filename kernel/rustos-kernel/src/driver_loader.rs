@@ -2,25 +2,24 @@
 //! 4.HW item 5).
 //!
 //! The [`driver_catalog`](crate::driver_catalog) registry decides *which*
-//! driver binds a discovered hardware node (`AGENTS.md` §18.3). This module
+//! driver binds a discovered hardware node. This module
 //! is the load *mechanism*: it admits a registered in-kernel driver through
 //! the signed-manifest `drvhost::Host::load` gate — Ed25519 signature
 //! verification against the build's embedded driver-signing key, the
 //! `CAP_DRV_LOAD` hard gate, and the `CAP_DRV_KERNEL` gate that every
-//! `kind = InKernel` manifest additionally demands (`AGENTS.md` §8 / §9) —
+//! `kind = InKernel` manifest additionally demands —
 //! rather than calling a driver's `register()` directly. Every capability
-//! and input check stays kernel-side and the load fails closed (`AGENTS.md`
-//! §5.4). The gate is generic over hardware: it admits any driver in the
+//! and input check stays kernel-side and the load fails closed. The gate is generic over hardware: it admits any driver in the
 //! [`IN_KERNEL_DRIVERS`](crate::driver_catalog::IN_KERNEL_DRIVERS) registry,
 //! never a hard-coded device list.
 //!
 //! # In-kernel, statically-linked drivers
 //!
-//! `AGENTS.md` §4 keeps drivers in user space wherever feasible and §8
+//! keeps drivers in user space wherever feasible and
 //! sanctions the drivers that must run in-kernel (`kind = InKernel`). Those
 //! drivers are linked into the kernel image and brought up through this
 //! gate: the spawner is an in-process register that invokes the verified
-//! driver's own §8 `register()` entry point (an admission check returning a
+//! driver's own `register()` entry point (an admission check returning a
 //! marker handle) on the granted-capability host view the gate built. The
 //! signed image carries no program payload — there is no separate binary to
 //! spawn — but it carries the driver's real signed manifest (kind,
@@ -60,7 +59,7 @@ impl ImageSource for BakedImageSource {
 }
 
 /// [`DriverSpawner`] that completes one verified manifest's registration
-/// by invoking the statically-linked driver's §8 `register()` entry on the
+/// by invoking the statically-linked driver's `register()` entry on the
 /// granted-capability host view the gate built (the in-process register,
 /// `plans/PI.md` P10 5c-ii).
 struct InProcessRegister {
@@ -81,7 +80,7 @@ impl DriverSpawner for InProcessRegister {
 /// trust anchor.
 pub struct KernelDriverLoader<'s> {
     /// The build's driver-signing public key — the kernel's sole driver
-    /// trust anchor (`AGENTS.md` §8 / §9; `build.rs`).
+    /// trust anchor (`build.rs`).
     trusted: [Ed25519PublicKey; 1],
     /// Audit sink every `Host::load` decision is logged through.
     sink: &'s dyn Sink,
@@ -91,7 +90,7 @@ impl<'s> KernelDriverLoader<'s> {
     /// Build a loader trusting only the build's embedded driver-signing
     /// key, logging every decision to `sink`.
     ///
-    /// Returns [`None`] fail-closed (`AGENTS.md` §2.9) if the embedded
+    /// Returns [`None`] fail-closed if the embedded
     /// key bytes are not a valid Ed25519 point — a corrupted build
     /// rather than an admissible state; the caller then starts no driver.
     #[must_use]
@@ -112,7 +111,7 @@ impl<'s> KernelDriverLoader<'s> {
     /// verification, the `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` capability
     /// gates, bind-table validation, and the in-process `register()`
     /// hand-off — every check kernel-side, failing closed at the first
-    /// failure (`AGENTS.md` §5.4).
+    /// failure.
     ///
     /// # Errors
     ///
@@ -208,7 +207,7 @@ mod tests {
         let sink = NullSink;
         let loader = KernelDriverLoader::new(&sink).expect("embedded signer key is valid");
         // CAP_DRV_LOAD but not CAP_DRV_KERNEL: every registered manifest is
-        // `kind = InKernel`, so the gate refuses (`AGENTS.md` §8).
+        // `kind = InKernel`, so the gate refuses.
         let err = loader
             .admit(IN_KERNEL_DRIVERS[1].path, &caps(&[CapabilityId::DRV_LOAD]))
             .expect_err("InKernel without CAP_DRV_KERNEL must fail closed");

@@ -11,7 +11,7 @@
 //! window and the protocol types, so it lives in [`rustos_virtio`] where
 //! both this crate's kernel-side consumers and an arch-neutral
 //! user-space virtio driver process can construct it without a
-//! `drivers/* → drivers/*` edge (`AGENTS.md` §17.4 / §2.2 — the
+//! `drivers/* → drivers/*` edge (the
 //! `lib/usb` ↔ `drivers/bus/usb` precedent). It is re-exported below so
 //! existing `rustos_drv_bus_virtio::MmioTransport` import sites keep
 //! resolving.
@@ -21,7 +21,7 @@
 //! here — they live in [`rustos_virtio`] so that the device-class
 //! drivers (`drivers/storage/virtio_blk`, `drivers/network/virtio_net`)
 //! consume them through `lib/*` rather than depending on this bus
-//! driver crate, which `AGENTS.md` §17.4 forbids (`drivers/* → lib/*`
+//! driver crate, which the charter forbids (`drivers/* → lib/*`
 //! only). The protocol surface is re-exported below so the kernel-side
 //! consumers that legitimately bind both a concrete transport and the
 //! protocol types (`kernel/virtio`, the production binary, the QEMU
@@ -29,7 +29,7 @@
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 a driver crate's only public function is
+//! Per a driver crate's only public function is
 //! [`register`]. The other public items are *types* re-exported through
 //! the [`Transport`] surface so consumers can construct a concrete
 //! transport; they are not driver entry points.
@@ -59,7 +59,7 @@ pub use transport_pci::PciTransport;
 // The bus-agnostic protocol now lives in `lib/virtio`. Re-export it so
 // existing `rustos_drv_bus_virtio::{...}` import sites in the kernel-side
 // consumers keep resolving without each one having to also name the
-// `rustos-virtio` crate directly (`AGENTS.md` §2.2 — one canonical
+// `rustos-virtio` crate directly (one canonical
 // definition, re-exported, never duplicated).
 pub use rustos_virtio::{
     BounceBuffer, ChainSegment, ChainView, Direction, DmaSlab, MmioTransport, MockHost,
@@ -74,11 +74,10 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 /// Mirrors the convention of `lib/pci` and
 /// `drivers/bus/mmio`: the driver host re-issues a host-local handle
 /// when binding this driver into its load table; this constant is
-/// the on-the-wire signal that the load-time gates cleared
-/// (`AGENTS.md` §8).
+/// the on-the-wire signal that the load-time gates cleared.
 const REGISTER_HANDLE_MARKER: u64 = 0x5654_4E54_0000_0001; // "VTNT" + tag.
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// Verifies the host already granted [`CapabilityId::DRV_LOAD`] and
 /// returns the registration marker handle. The cross-arch transport

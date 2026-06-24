@@ -3,7 +3,7 @@
 //!
 //! Both the `sysinfo` and `ps` tools build the same [`SysinfoRequestHeader`]
 //! envelope and map a capability denial onto the same distinguished error,
-//! so that logic lives here rather than being copied (`AGENTS.md` §2.2).
+//! so that logic lives here rather than being copied.
 
 use alloc::vec::Vec;
 
@@ -20,11 +20,11 @@ use crate::transport::Transport;
 /// [`Service`](CallError::Service) so a consuming tool can print the precise
 /// "this query requires a capability you do not hold" diagnostic; everything
 /// else leans on the frozen [`Errno`] for the wire-level cause and invents no
-/// parallel error set (`AGENTS.md` §2.2).
+/// parallel error set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CallError {
     /// The service refused the query because the caller lacks the capability
-    /// the query declares (`AGENTS.md` §16.6).
+    /// the query declares.
     PermissionDenied,
     /// The transport failed for any other reason. Carries the underlying
     /// [`Errno`].
@@ -38,8 +38,7 @@ pub enum CallError {
 /// The header's `payload_len` is the payload's byte length. Every payload a
 /// process-list client builds is at most a handful of bytes, so the
 /// `usize → u32` conversion is always exact; the saturating fallback is
-/// unreachable and never silently corrupts a real request (`AGENTS.md`
-/// §2.9).
+/// unreachable and never silently corrupts a real request.
 #[must_use]
 pub fn encode_request(query: SysinfoQueryId, payload: &[u8]) -> Vec<u8> {
     let header = SysinfoRequestHeader {

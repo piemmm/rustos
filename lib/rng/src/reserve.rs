@@ -1,14 +1,14 @@
 //! The kernel random output reserve ([`OutputReserve`]).
 //!
-//! `AGENTS.md` §22 requires the kernel to keep a *bounded random output
+//! the charter requires the kernel to keep a *bounded random output
 //! reserve*: a buffer of CSPRNG **output** (not raw entropy) that satisfies
 //! random requests without running the DRBG on every call, refilled on
 //! demand. This type is that reserve, kept architecture-neutral and
 //! allocator-free in `lib/rng` so the kernel can place one per CPU
-//! (`AGENTS.md` §22 — "preferably per-CPU to avoid lock contention") in
+//! ("preferably per-CPU to avoid lock contention") in
 //! kernel-only, non-swappable memory.
 //!
-//! # Contract (mirrors `AGENTS.md` §22)
+//! # Contract (mirrors)
 //!
 //! * **Uninitialised before seeding.** A reserve constructed with
 //!   [`OutputReserve::new`] holds no generator. [`OutputReserve::fill`]
@@ -23,7 +23,7 @@
 //!   it is refilled — a paged-out or cloned copy can never replay them.
 //! * **Discarded across boundaries.** [`OutputReserve::discard`] wipes the
 //!   buffered output for the suspend/hibernate/clone/crash-dump/reseed
-//!   boundaries §22 enumerates; the generator state is wiped too when the
+//!   boundaries enumerates; the generator state is wiped too when the
 //!   reserve is dropped (`zeroize`, via [`crate::CsRng`]).
 
 use zeroize::Zeroize;
@@ -33,8 +33,7 @@ use crate::entropy::{EntropyError, EntropySource};
 
 /// Whether a reserve operation reseeds fallibly or blocks through a shortage.
 ///
-/// Lets the fallible and blocking entry points share one fill/reseed body
-/// (`AGENTS.md` §2.2) by abstracting only the choice of `CsRng` method.
+/// Lets the fallible and blocking entry points share one fill/reseed body by abstracting only the choice of `CsRng` method.
 #[derive(Clone, Copy)]
 enum ReseedMode {
     Fallible,
@@ -63,7 +62,7 @@ impl ReseedMode {
     }
 }
 
-/// Default reserve size, in bytes (`AGENTS.md` §22 permits 2 KiB).
+/// Default reserve size, in bytes (the charter permits 2 KiB).
 ///
 /// Matches `rustos_abi::RANDOM_RESERVE_DEFAULT_BYTES`; the two are kept equal
 /// but the crates do not depend on one another, so each states it
@@ -103,7 +102,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
     ///
     /// [`OutputReserve::fill`] returns [`ReserveError::NotReady`] until
     /// [`OutputReserve::seed`] succeeds; this models the pre-initialisation
-    /// window in `AGENTS.md` §22.
+    /// window in.
     #[must_use]
     pub const fn new() -> Self {
         const {
@@ -146,7 +145,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
     /// regenerating the whole buffer (after wiping it) when it is exhausted.
     /// A request larger than the buffer is generated directly from the
     /// CSPRNG, so the reserve never returns short or blocks for entropy once
-    /// ready (`AGENTS.md` §22).
+    /// ready.
     ///
     /// This is the **fallible** fill: a required reseed that cannot draw fresh
     /// entropy fails closed with [`ReserveError::Entropy`] (carrying
@@ -169,7 +168,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
     /// Identical to [`OutputReserve::fill`] except that a required reseed
     /// waits for entropy (via [`crate::CsRng::fill_bytes_blocking`]) instead
     /// of failing closed. Generation itself never needs fresh entropy, so the
-    /// common buffered/refill path does not block (`AGENTS.md` §22).
+    /// common buffered/refill path does not block.
     ///
     /// # Errors
     ///
@@ -181,7 +180,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
     }
 
     /// Shared fill body for the fallible and blocking paths; `mode` chooses
-    /// only how a required reseed draws its entropy (`AGENTS.md` §2.2).
+    /// only how a required reseed draws its entropy.
     fn fill_with(&mut self, out: &mut [u8], mode: ReseedMode) -> Result<(), ReserveError> {
         let Some(rng) = self.rng.as_mut() else {
             return Err(ReserveError::NotReady);
@@ -189,7 +188,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
 
         // A request larger than one buffer's worth is generated directly:
         // buffering it would gain nothing and the reserve must not return
-        // short (§22 — generate synchronously when the reserve cannot serve).
+        // short (generate synchronously when the reserve cannot serve).
         if out.len() > N {
             if let Err(e) = mode.generate(rng, out) {
                 out.zeroize();
@@ -215,7 +214,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
             }
             let take = core::cmp::min(out.len() - written, self.filled - self.pos);
             out[written..written + take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
-            // Zeroise consumed bytes immediately (§22 — zeroed on consumption).
+            // Zeroise consumed bytes immediately (zeroed on consumption).
             self.buf[self.pos..self.pos + take].zeroize();
             self.pos += take;
             written += take;
@@ -225,7 +224,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
 
     /// Reseed the inner CSPRNG and discard any buffered output.
     ///
-    /// `AGENTS.md` §22 lists the reseed boundary among the points where the
+    /// lists the reseed boundary among the points where the
     /// reserve's buffered bytes must be discarded. This is the **fallible**
     /// reseed; use [`OutputReserve::reseed_blocking`] to wait for entropy.
     ///
@@ -251,8 +250,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
         self.reseed_with(ReseedMode::Blocking)
     }
 
-    /// Shared reseed body for the fallible and blocking paths (`AGENTS.md`
-    /// §2.2).
+    /// Shared reseed body for the fallible and blocking paths.
     fn reseed_with(&mut self, mode: ReseedMode) -> Result<(), ReserveError> {
         let Some(rng) = self.rng.as_mut() else {
             return Err(ReserveError::NotReady);
@@ -265,7 +263,7 @@ impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
     /// Discard (zeroise) the buffered output without touching the generator.
     ///
     /// Called at the suspend/hibernate/fork-clone/crash-dump boundaries of
-    /// `AGENTS.md` §22 so already-generated bytes cannot be replayed from a
+    /// so already-generated bytes cannot be replayed from a
     /// snapshot or inherited by a cloned task.
     pub fn discard(&mut self) {
         self.buf.zeroize();
@@ -482,7 +480,7 @@ mod tests {
     fn reseed_failure_is_surfaced_not_hidden() {
         // Budget 1: only the instantiation seed succeeds. A subsequent
         // explicit reseed has no entropy left, and that must surface rather
-        // than be hidden or replaced with weak randomness (§5.4 fail closed).
+        // than be hidden or replaced with weak randomness (fail closed).
         let mut r = OutputReserve::<CountingSource, 16>::new();
         r.seed(CountingSource::with_budget(9, 1)).unwrap();
         // Serving still works (generation does not draw fresh entropy)…

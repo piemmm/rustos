@@ -40,7 +40,7 @@ struct MockRoot {
     present: bool,
     /// Whether the `Users` node is a directory.
     is_dir: bool,
-    /// §5.3 record reported for the `Users` node.
+    /// record reported for the `Users` node.
     security: NodeSecurity,
     /// Set when `read_at` touches the `Users` node.
     read_called: bool,
@@ -53,7 +53,7 @@ impl MockRoot {
             reported_size: text.len() as u64,
             present: true,
             is_dir: false,
-            // The rustfs default for a created file (`AGENTS.md` §5.3).
+            // The rustfs default for a created file.
             security: NodeSecurity::new(0o644, 0, 0),
             read_called: false,
         }
@@ -177,7 +177,7 @@ fn a_valid_database_loads_and_is_audited() {
 fn the_source_load_holds_the_exact_text_and_authenticates() {
     // `load_users_db_source` shares the read/parse/audit path with
     // `load_users_db` but retains the canonical `users-v1` text so the
-    // `users_db_read` syscall serves the exact bytes (`AGENTS.md` §2.2).
+    // `users_db_read` syscall serves the exact bytes.
     let sink = TestSink::new();
     let text = valid_db_text();
     let mut fs = MockRoot::with_text(&text);
@@ -185,7 +185,7 @@ fn the_source_load_holds_the_exact_text_and_authenticates() {
     let source = load_users_db_source(&mut fs, &sink).expect("valid database loads");
 
     // The held bytes are byte-for-byte the database text on disk — not a
-    // re-serialisation (`AGENTS.md` §2.2).
+    // re-serialisation.
     assert_eq!(source.text().expect("held text"), text.as_bytes());
 
     // The served text re-parses and authenticates the planted account,
@@ -214,7 +214,7 @@ fn the_source_load_holds_the_exact_text_and_authenticates() {
 fn the_source_load_fails_closed_with_no_holder_on_a_missing_database() {
     // A missing database yields no holder and the same `4041` rejection
     // record `load_users_db` emits — login then refuses every attempt
-    // rather than inventing accounts (`AGENTS.md` §5.4.5).
+    // rather than inventing accounts.
     let sink = TestSink::new();
     let mut fs = MockRoot::with_text(&valid_db_text());
     fs.present = false;
@@ -234,7 +234,7 @@ fn the_source_load_fails_closed_with_no_holder_on_a_missing_database() {
 #[test]
 fn the_source_load_fails_closed_on_an_invalid_database() {
     // A structurally invalid database is refused by the shared parser and
-    // produces no holder (`AGENTS.md` §2.9).
+    // produces no holder.
     let sink = TestSink::new();
     let mut fs = MockRoot::with_text("not-the-users-header\n");
 
@@ -329,7 +329,7 @@ fn a_database_unreadable_by_its_stored_record_is_refused() {
     let sink = TestSink::new();
     let mut fs = MockRoot::with_text(&valid_db_text());
     // Owned by uid 7, no group/other read: the kernel's uid-0 bootstrap
-    // identity holds no bypass (`AGENTS.md` §5.1).
+    // identity holds no bypass.
     fs.security = NodeSecurity::new(0o600, 7, 7);
 
     let err = load_users_db(&mut fs, &sink).expect_err("unreadable record refused");
@@ -382,7 +382,7 @@ fn a_resolved_empty_late_users_db_fails_closed_not_implemented() {
     // resolved with no database installed: `text()` flips from the pending
     // `WouldBlock` to the inert `NotImplemented`, identical to
     // `NULL_USERS_DB`, so `login` stops waiting and runs its fail-closed
-    // deny-all prompt (`AGENTS.md` §2.9 / §5.4.5).
+    // deny-all prompt.
     let late = LateUsersDb::new();
     late.resolve();
     assert!(!late.is_installed());
@@ -426,8 +426,7 @@ fn the_late_users_db_serves_the_installed_text() {
 fn the_late_users_db_is_set_once_and_refuses_replacement() {
     // The credential database is immutable after the first install: a
     // second install is refused and the originally-served bytes are
-    // unchanged, so no later code path can swap the live database
-    // (`AGENTS.md` §5.4).
+    // unchanged, so no later code path can swap the live database.
     let late = LateUsersDb::new();
     let original = valid_db_text();
     late.install(held_source()).expect("first install succeeds");

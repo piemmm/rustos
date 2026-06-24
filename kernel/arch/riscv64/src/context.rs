@@ -12,7 +12,7 @@
 //! Only the kernel-stack pointer needs persisting in [`TaskCtx`]; the
 //! callee-saved registers live on the outgoing task's stack in a fixed
 //! prologue layout owned by `switch`. The RISC-V calling convention
-//! ("RISC-V ABIs Specification" §2) lists `ra` (x1) and `s0`–`s11`
+//! ("RISC-V ABIs Specification") lists `ra` (x1) and `s0`–`s11`
 //! (x8, x9, x18–x27) as the registers that must survive a call;
 //! `switch` saves those plus the first argument register `a0` (x10) so
 //! the first-run frame can deliver the task's argument.
@@ -65,7 +65,7 @@ impl TaskCtx {
     ///
     /// `stack_top` is the *exclusive* upper bound of the task's kernel
     /// stack (one byte past the last addressable byte). It must be
-    /// 16-byte aligned (RISC-V ABI §2 stack alignment) and non-zero.
+    /// 16-byte aligned (RISC-V ABI stack alignment) and non-zero.
     ///
     /// On success `self.sp` points at the bottom of the synthesised
     /// frame, whose layout matches the suspend epilogue of `switch`
@@ -128,7 +128,7 @@ impl TaskCtx {
 pub enum PrepareError {
     /// `stack_top` was zero.
     NullStack,
-    /// `stack_top` was not 16-byte aligned (RISC-V ABI §2).
+    /// `stack_top` was not 16-byte aligned (RISC-V ABI).
     Misaligned,
     /// `stack_top` had no room for the initial frame.
     TooSmall,

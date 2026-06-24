@@ -1,12 +1,12 @@
 //! Build script: enable the `freestanding` cfg when the crate is built for a
 //! bare-metal target (`target_os = "none"`), so the device-manager service
 //! `Run` binary (`src/run.rs`) compiles as a freestanding pure-Rust program
-//! there and as an inert host stub everywhere else (`AGENTS.md` §18.3).
+//! there and as an inert host stub everywhere else.
 //!
 //! This is deliberately self-contained and keys only off the OS component of
 //! the target (bare-metal vs hosted), never the instruction set, so `cargo
-//! xtask cfg-check` (`AGENTS.md` §17.2) stays clean. It mirrors
-//! `userland/session/login/build.rs` (`AGENTS.md` §2.2).
+//! xtask cfg-check` stays clean. It mirrors
+//! `userland/session/login/build.rs`.
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(freestanding)");

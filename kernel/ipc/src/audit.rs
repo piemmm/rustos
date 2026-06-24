@@ -3,7 +3,7 @@
 //! Every security-relevant decision taken by this crate emits exactly
 //! one structured record through [`rustos_log`]. The numeric
 //! identifiers are part of the audit contract with external log
-//! consumers (`AGENTS.md` §5.4.4) and may not be re-used or re-numbered.
+//! consumers and may not be re-used or re-numbered.
 //! They live in the `kernel/ipc` range reserved by [`rustos_log::EventId`]
 //! conventions: `3_000..4_000`. (`kernel/sec` owns `1_000..2_000`;
 //! `kernel/mem` owns `2_000..3_000`.)

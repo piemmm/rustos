@@ -6,7 +6,7 @@
 //! atomic in our dependency chain through the model checker — a change
 //! that is not a stable, additive feature in the Cargo sense. It is
 //! enabled by passing `RUSTFLAGS="--cfg loom"`. Mirrors the convention
-//! established by `kernel/sync/build.rs`; see `AGENTS.md` §7 and
+//! established by `kernel/sync/build.rs`; and
 //! `tests/loom.rs`.
 
 fn main() {

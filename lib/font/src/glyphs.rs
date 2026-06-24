@@ -4,7 +4,7 @@
 //! row are the pixels of that row, with bit `GLYPH_WIDTH - 1` (the high used
 //! bit, `0b10000`) the leftmost column. Writing every glyph as binary row
 //! literals keeps the data self-documenting: the `1` bits trace the letter
-//! shape in the source (`AGENTS.md` §2.11), so a wrong pixel is visible on the
+//! shape in the source, so a wrong pixel is visible on the
 //! page rather than hidden behind a hex blob.
 //!
 //! The atlas covers the printable ASCII range [`FIRST_CHAR`]`..=`[`LAST_CHAR`]

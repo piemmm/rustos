@@ -3,7 +3,7 @@
 //! `TestArch` lets the host-side integration tests drive
 //! [`crate::kernel_main`] and [`crate::handle_panic`] without a real
 //! platform. It is gated behind `cfg(any(test, feature = "test-arch"))`
-//! so production builds never link it — `AGENTS.md` §1 (no hacks: a
+//! so production builds never link it (no hacks: a
 //! production kernel must not carry a fake `halt`/`current_cpu`).
 //!
 //! # Driving the `!` return type of `halt`
@@ -16,7 +16,7 @@
 //! without blocking the test thread. This is the same pattern Rust's
 //! `std::process::abort` test harnesses use; it is permitted here
 //! because the code only exists under `cfg(any(test, feature =
-//! "test-arch"))` (`AGENTS.md` §2.9 — `panic!` allowed in tests).
+//! "test-arch"))` (`panic!` allowed in tests).
 
 extern crate std;
 
@@ -68,7 +68,7 @@ impl ContextSwitch for TestContextSwitch {
 
     unsafe fn switch(&self, _prev: *mut TaskContext, _next: *mut TaskContext) {
         // The host never switches into an EL0 task; the bare-metal ports'
-        // QEMU verticals exercise the real switch (`AGENTS.md` §1 — no
+        // QEMU verticals exercise the real switch (no
         // fake primitive).
     }
 }
@@ -110,7 +110,7 @@ impl TestArch {
     /// Build a `TestArch` reporting `cpu_count` logical CPUs.
     ///
     /// Panics if `cpu_count == 0`, which is a test-only programming
-    /// error — `AGENTS.md` §2.9 permits panics in tests.
+    /// error permits panics in tests.
     #[must_use]
     pub fn with_cpus(cpu_count: u32) -> Self {
         assert!(cpu_count > 0, "TestArch requires at least one CPU");

@@ -15,7 +15,7 @@
 //! little-endian array of [`rustos_abi::CapabilityId`] u16 values whose
 //! length is the manifest's `capability_count` field, followed by the
 //! driver's bind table: `bind_key_count` consecutive
-//! [`rustos_abi::DriverBindKey`] records (`AGENTS.md` §18.3). Everything
+//! [`rustos_abi::DriverBindKey`] records. Everything
 //! beyond that is opaque payload (in production the program half of the
 //! binary the [`crate::DriverSpawner`] spawns; in tests, an arbitrary
 //! `&[u8]`).

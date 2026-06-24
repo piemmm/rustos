@@ -1,4 +1,4 @@
-//! wasm32 per-CPU storage (`AGENTS.md` §17.2 "per-CPU storage").
+//! wasm32 per-CPU storage ("per-CPU storage").
 //!
 //! Implements the Arch HAL [`PerCpu`](rustos_arch_api::PerCpu) surface
 //! for wasm32. A WebAssembly module has **no per-CPU register** — the
@@ -15,7 +15,7 @@
 //! cell backs both the wasm build (where it is the genuine per-worker
 //! slot) and the host build (where it lets the round-trip and isolation
 //! conformance verticals run under `cargo test`), so there is one code
-//! path and no fake primitive to keep honest (`AGENTS.md` §1 / §2.2).
+//! path and no fake primitive to keep honest.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 

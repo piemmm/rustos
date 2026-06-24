@@ -56,7 +56,7 @@ pub struct LaunchSpec<'a> {
 /// Launches and controls the child processes a pipeline becomes.
 ///
 /// The implementation owns the trusted load pipeline (path resolution,
-/// `rxe` verification, capability handoff — `AGENTS.md` §8, §16.4) and the
+/// `rxe` verification, capability handoff) and the
 /// plumbing of pipes and redirections. The shell hands it a fully-resolved
 /// [`LaunchSpec`] and never performs ambient I/O itself.
 pub trait ProcessHost {
@@ -91,8 +91,8 @@ pub trait ProcessHost {
     /// absolute directory on success (used by the `cd` builtin).
     ///
     /// The host — not the shell — validates that the target exists, is a
-    /// directory, and is permitted (`AGENTS.md` §5.3): the shell holds no
-    /// ambient filesystem authority of its own (`AGENTS.md` §4).
+    /// directory, and is permitted: the shell holds no
+    /// ambient filesystem authority of its own.
     ///
     /// # Errors
     ///
@@ -108,17 +108,15 @@ pub trait Console {
     fn write_stderr(&self, text: &str);
 }
 
-/// Reads and imposes the calling process's resource limits (`AGENTS.md`
-/// §24.3), the seam the `ulimit` builtin drives.
+/// Reads and imposes the calling process's resource limits, the seam the `ulimit` builtin drives.
 ///
 /// On a running kernel this is backed by the `rlimit_get` / `rlimit_set`
 /// syscalls ([`rustos_abi::SyscallNumber::RLIMIT_GET`] /
 /// [`rustos_abi::SyscallNumber::RLIMIT_SET`]); in tests it is an in-memory
-/// fixture. The shell holds no ambient authority of its own (`AGENTS.md`
-/// §4): reading a limit needs no capability, but *raising* a hard bound is
-/// gated kernel-side on [`rustos_abi::CapabilityId::RLIMIT_RAISE`] (§24.3),
+/// fixture. The shell holds no ambient authority of its own: reading a limit needs no capability, but *raising* a hard bound is
+/// gated kernel-side on [`rustos_abi::CapabilityId::RLIMIT_RAISE`],
 /// which surfaces here as an [`Errno`] the builtin reports rather than
-/// hides (`AGENTS.md` §2.9).
+/// hides.
 pub trait LimitStore {
     /// Read the effective [`ResourceLimit`] for resource `kind`.
     ///
@@ -134,7 +132,7 @@ pub trait LimitStore {
     ///
     /// Returns the host's [`Errno`] if the limit cannot be set —
     /// [`Errno::PermissionDenied`] when raising a hard bound without
-    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`] (§24.3), or
+    /// [`rustos_abi::CapabilityId::RLIMIT_RAISE`], or
     /// [`Errno::OutOfRange`] for a malformed pair.
     fn set(&self, kind: LimitKind, value: ResourceLimit) -> Result<(), Errno>;
 }
@@ -143,8 +141,7 @@ pub trait LimitStore {
 /// [`Errno::NotImplemented`].
 ///
 /// A [`Shell`](crate::Shell) built without a real limit seam uses this, so
-/// `ulimit` denies rather than pretending a get or set landed (`AGENTS.md`
-/// §2.9, §5.4). The real seam is installed with
+/// `ulimit` denies rather than pretending a get or set landed. The real seam is installed with
 /// [`Shell::with_limits`](crate::Shell::with_limits).
 pub(crate) struct NullLimitStore;
 

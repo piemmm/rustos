@@ -1,5 +1,4 @@
-//! Deterministic hardware-node ↔ driver bind-table match resolution
-//! (`AGENTS.md` §18.3).
+//! Deterministic hardware-node ↔ driver bind-table match resolution.
 //!
 //! Matching is pure data comparison: a hardware-tree node carries the
 //! match keys its discoverer emitted ([`rustos_abi::HwNode::match_keys`]),
@@ -10,28 +9,27 @@
 //! PCI/USB, so a generic class driver binds without hard-coding a device
 //! id). When several drivers match the same node the highest matched bind
 //! priority wins; an unbroken tie across *different* drivers is a packaging
-//! defect and the node is refused a binding — never a coin-flip
-//! (`AGENTS.md` §2.1, §18.3).
+//! defect and the node is refused a binding — never a coin-flip.
 //!
 //! # Why this is its own crate
 //!
 //! The same match policy is needed in two places that cannot share a crate
-//! across the §17.4 layering boundary:
+//! across the layering boundary:
 //!
-//! * the user-space device manager (`userland/system/devmgr`), the §18.3
+//! * the user-space device manager (`userland/system/devmgr`), the
 //!   autoload owner; and
 //! * the kernel's interim in-kernel driver-candidate catalogue
 //!   (`kernel/rustos-kernel`), which brings the Pi 4 USB chain up by the
 //!   same data-driven match until the user-space driver-host-over-IPC path
 //!   lands (PLAN Stage 4.HW item 5).
 //!
-//! The kernel may not depend on a `userland/*` crate (§17.4), so the policy
+//! The kernel may not depend on a `userland/*` crate, so the policy
 //! lives here in `lib/*` as the single definition both reach — never
-//! duplicated (`AGENTS.md` §2.2).
+//! duplicated.
 //!
 //! # Stability
 //!
-//! Tier: `experimental` (per `AGENTS.md` §6). The wire formats compared
+//! Tier: `experimental` (). The wire formats compared
 //! (hardware-tree match keys, bind-table entries) are owned by `rustos-abi`.
 
 #![no_std]
@@ -45,7 +43,7 @@ use rustos_abi::{DriverBindKey, HwMatchKey};
 ///
 /// The caller supplies the decoded table (the drvhost load gate already
 /// validates every entry via `ParsedImage::decode_bind_table`); the
-/// match resolver never re-parses image bytes itself, keeping the §17.4
+/// match resolver never re-parses image bytes itself, keeping the
 /// layering intact.
 #[derive(Copy, Clone, Debug)]
 pub struct DriverCandidate<'a> {
@@ -68,7 +66,7 @@ pub enum MatchResolution {
         priority: u16,
     },
     /// Two or more *distinct* candidates matched at the same highest
-    /// priority — a packaging defect (`AGENTS.md` §18.3).
+    /// priority — a packaging defect.
     Tie {
         /// The tied highest priority.
         priority: u16,

@@ -36,8 +36,7 @@ argument is a path.
 /// into it under its base name. `cp` writes nothing on success; `out` carries
 /// only the [`Command::Help`] banner.
 ///
-/// The first failure stops the run before any later operand (fail closed,
-/// `AGENTS.md` §2.9).
+/// The first failure stops the run before any later operand (fail closed).
 ///
 /// # Errors
 ///
@@ -151,7 +150,7 @@ fn copy_file(source: &str, target: &str, force: bool, fs: &dyn FileSystem) -> Re
             return Ok(());
         }
         // A seam reporting more than the buffer holds would index out of
-        // bounds; refuse it rather than trust the count (`AGENTS.md` §2.9).
+        // bounds; refuse it rather than trust the count.
         if read > buf.len() {
             return Err(CpError::Read(rustos_abi::Errno::LengthOutOfRange));
         }

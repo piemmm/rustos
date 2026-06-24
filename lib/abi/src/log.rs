@@ -1,6 +1,6 @@
 //! `abi-v1` wire format for the `log_emit` syscall — a user-space service's
 //! structured diagnostic record handed to the kernel's **diagnostic** log
-//! sink (`AGENTS.md` §9, §19.4, §20).
+//! sink.
 //!
 //! # Why this exists
 //!
@@ -17,7 +17,7 @@
 //! validates it, attributes it to the caller, and emits it through the same
 //! diagnostic sink the kernel itself uses.
 //!
-//! # Security (`AGENTS.md` §5.4, §19.4)
+//! # Security
 //!
 //! This is a **diagnostic** channel, never the hash-chained security audit
 //! log: `log_emit` reaches the kernel's `log_sink` only, so user space can
@@ -27,11 +27,11 @@
 //! trusted system services), every field is bounded and validated, and the
 //! kernel — not the caller — attributes each record to the calling task, so
 //! a record cannot impersonate another principal. A malformed record is
-//! rejected fail-closed (`AGENTS.md` §2.9); nothing is partially applied.
+//! rejected fail-closed; nothing is partially applied.
 //!
 //! # Wire layout
 //!
-//! All scalars are little-endian (`AGENTS.md` — every Tier-1 target is
+//! All scalars are little-endian (every Tier-1 target is
 //! little-endian; the explicit encoding lets a future big-endian port
 //! participate). A record is a fixed [`LOG_RECORD_HEADER_LEN`]-byte header
 //! followed by the message bytes and then the field records:
@@ -55,14 +55,14 @@ use crate::Errno;
 /// discriminant. The five levels `Trace`/`Debug`/`Info`/`Warn`/`Error`
 /// occupy `0..=4`; this mirrors the `abi-v1` numeric values frozen in
 /// `lib/log` (the kernel maps the byte back with `rustos_log::Level::from_u8`,
-/// so the enum is defined in exactly one place, `AGENTS.md` §2.2).
+/// so the enum is defined in exactly one place).
 pub const LOG_LEVEL_MAX: u8 = 4;
 
 /// Maximum length, in bytes, of a record's message.
 ///
 /// Matches the `lib/log` convention that a message stays within one terminal
 /// line, and bounds the kernel's copy-in so a hostile length cannot force a
-/// large allocation (`AGENTS.md` §4 / §24.4 — a security bound, fixed, not a
+/// large allocation (a security bound, fixed, not a
 /// growable capacity).
 pub const LOG_MESSAGE_MAX: usize = 120;
 
@@ -85,7 +85,7 @@ const LOG_FIELD_PREFIX_LEN: usize = 2;
 ///
 /// The kernel copies at most this many bytes from the caller before
 /// decoding, so a `len` argument larger than this is rejected without
-/// touching the caller's buffer further (`AGENTS.md` §4 / §5.4).
+/// touching the caller's buffer further.
 pub const LOG_RECORD_MAX: usize = LOG_RECORD_HEADER_LEN
     + LOG_MESSAGE_MAX
     + LOG_FIELDS_MAX * (LOG_FIELD_PREFIX_LEN + LOG_FIELD_KEY_MAX + LOG_FIELD_VALUE_MAX);
@@ -107,7 +107,7 @@ const fn encoded_len(message_len: usize, fields_total: usize) -> usize {
 /// body, and `fields` the structured key/value pairs. Every bound is checked
 /// before a byte is written, so a rejected record leaves `buf` untouched up
 /// to the point of failure and is never partially transmitted (the caller
-/// drops it, `AGENTS.md` §2.9).
+/// drops it).
 ///
 /// # Errors
 ///
@@ -244,8 +244,7 @@ impl<'a> Iterator for LogFieldIter<'a> {
         }
         // `decode_record` validated every record up front, so the indexing
         // and the UTF-8 conversions below cannot fail; the `unwrap_or` keeps
-        // the iterator total without a panic on the (impossible) bad slice
-        // (`AGENTS.md` §2.9).
+        // the iterator total without a panic on the (impossible) bad slice.
         let key_len = self.bytes[self.offset] as usize;
         let value_len = self.bytes[self.offset + 1] as usize;
         let key_start = self.offset + LOG_FIELD_PREFIX_LEN;
@@ -262,7 +261,7 @@ impl<'a> Iterator for LogFieldIter<'a> {
 ///
 /// Every length is range-checked, every slice is confirmed to lie within
 /// `bytes`, and the message and each field key/value are confirmed to be
-/// valid UTF-8 before a view is returned (`AGENTS.md` §5.4 — validate every
+/// valid UTF-8 before a view is returned (validate every
 /// input). Any inconsistency is rejected fail-closed; nothing is partially
 /// accepted.
 ///

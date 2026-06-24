@@ -1,7 +1,7 @@
 //! No-allocation numeric formatters used to attach numeric identifiers
 //! to structured log records.
 //!
-//! Per `AGENTS.md` §2.2 / §6, these helpers were extracted from
+//! Per, these helpers were extracted from
 //! `kernel/sec` once a second consumer (`kernel/ipc`) needed them.
 //! Both crates render task / port / capability identifiers into
 //! `lib/log`'s structured field values without touching an

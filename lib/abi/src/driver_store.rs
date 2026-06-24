@@ -3,37 +3,35 @@
 //!
 //! Under Design D the one bootstrap-floor disk is owned for the life of the
 //! system by the never-returning kernel driver-store service, which keeps
-//! the read-only signed-bundle `/System` volume mounted (`AGENTS.md` §18.3 /
-//! §18.4). The reactive user-space device manager (`userland/system/devmgr`)
+//! the read-only signed-bundle `/System` volume mounted. The reactive user-space device manager (`userland/system/devmgr`)
 //! reaches that service through a single capability-gated synchronous IPC
 //! call endpoint — the [`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL)
 //! surface served by the kernel over the well-known [`DRIVER_STORE_ENDPOINT`].
 //!
 //! The device manager owns *policy* (which driver binds which node); the
 //! kernel keeps the *mechanism* (bundle bytes, signature verification, spawn)
-//! in its trusted base (`AGENTS.md` §4). The two operations that contract
+//! in its trusted base. The two operations that contract
 //! needs are:
 //!
 //! * [`StoreRequest::Catalogue`] — the kernel returns one entry per installed
 //!   bundle: an **opaque** `bundle_id` plus the bind table the kernel already
-//!   decoded fail-closed from that bundle's signed manifest (`AGENTS.md`
-//!   §18.6). No bytes and no `/System` path ever cross to user space — the
+//!   decoded fail-closed from that bundle's signed manifest. No bytes and no `/System` path ever cross to user space — the
 //!   device manager matches the decoded bind keys against the hardware tree
-//!   with `lib/devmatch` (`AGENTS.md` §18.3) and never re-parses an
-//!   image, keeping the §17.4 layering intact.
+//!   with `lib/devmatch` and never re-parses an
+//!   image, keeping the layering intact.
 //! * [`StoreRequest::Load`] — naming a `bundle_id` it matched and the
 //!   hardware-tree `node_id` that matched it, the device manager asks the
 //!   kernel to load that bundle. The kernel re-reads the bundle, re-runs the
-//!   full signed §8 gate, and spawns it with **only** the resources the named
+//!   full signed gate, and spawns it with **only** the resources the named
 //!   node requested — the device manager supplies no bytes and no grants
-//!   (`AGENTS.md` §4 — no ambient authority).
+//!   (no ambient authority).
 //!
 //! This module is the wire contract for that endpoint: the request encoder
 //! both sides share and the reply framing, all operating on borrowed buffers
-//! (`AGENTS.md` §2.2; no allocation, matching the crate's `no_std` contract).
+//! (no allocation, matching the crate's `no_std` contract).
 //! Every reply is length-framed and carries a leading status word so a
 //! fail-closed refusal is delivered in-band rather than as a truncated
-//! payload (`AGENTS.md` §5.4 / §2.9).
+//! payload.
 
 use crate::driver::DriverBindKey;
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
@@ -47,8 +45,7 @@ use crate::{Errno, DRIVER_MANIFEST_MAX_BIND_KEYS};
 /// `endpoint` argument to [`SyscallNumber::IPC_CALL`](crate::SyscallNumber::IPC_CALL).
 /// A reserved well-known id (rather than a delegated handle) keeps the
 /// bootstrap client/server rendezvous from needing a prior name-exchange
-/// step; the endpoint's required send capability still gates every call
-/// (`AGENTS.md` §5.2 / §5.4).
+/// step; the endpoint's required send capability still gates every call.
 pub const DRIVER_STORE_ENDPOINT: u64 = 0xD012_5701;
 
 /// Request opcode: list the installed store as opaque-id + bind-key entries.
@@ -65,7 +62,7 @@ pub const LOAD_REQUEST_LEN: usize = 1 + 4 + 4;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StoreRequest {
     /// List every installed bundle as an opaque `bundle_id` plus its decoded
-    /// bind table (`AGENTS.md` §18.3 / §18.6).
+    /// bind table.
     Catalogue,
     /// Load the bundle the device manager matched, granting the loaded
     /// driver only the resources the matched hardware-tree node requested.
@@ -181,13 +178,13 @@ const CATALOGUE_ENTRY_HEADER_LEN: usize = 4 + 2;
 ///
 /// Each `entries` item is `(bundle_id, bind_keys)`: the opaque kernel bundle
 /// id and the bind table the kernel decoded from that bundle's signed
-/// manifest (`AGENTS.md` §18.6). The frame is
+/// manifest. The frame is
 /// `status(0) || count || (bundle_id || key_count || DriverBindKey*)*`.
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] if `buf` cannot hold every entry — the
-///   catalogue is never truncated (`AGENTS.md` §2.9); the caller grows its
+///   catalogue is never truncated; the caller grows its
 ///   buffer.
 /// * [`Errno::LengthOutOfRange`] if an entry holds more than
 ///   [`DRIVER_MANIFEST_MAX_BIND_KEYS`] keys or the entry count exceeds `u32`.
@@ -258,7 +255,7 @@ impl CatalogueEntry<'_> {
     /// * [`Errno::BufferTooSmall`] if `out` is shorter than
     ///   [`Self::key_count`].
     /// * [`Errno::BadMagic`] if any record fails to decode (wire
-    ///   corruption — fail closed, `AGENTS.md` §2.9).
+    ///   corruption — fail closed).
     pub fn decode_keys(&self, out: &mut [DriverBindKey]) -> Result<usize, Errno> {
         let count = usize::from(self.key_count);
         if out.len() < count {
@@ -277,8 +274,7 @@ impl CatalogueEntry<'_> {
 /// reply carries.
 ///
 /// Construct with [`decode_catalogue_reply`]; each [`Iterator::next`] yields
-/// one `Result<CatalogueEntry, Errno>`, failing closed on a truncated entry
-/// (`AGENTS.md` §2.9).
+/// one `Result<CatalogueEntry, Errno>`, failing closed on a truncated entry.
 pub struct CatalogueReplyIter<'a> {
     body: &'a [u8],
     remaining: u32,
@@ -399,7 +395,7 @@ mod tests {
         assert_eq!(StoreRequest::decode(&[]), Err(Errno::LengthOutOfRange));
         assert_eq!(StoreRequest::decode(&[0xFF]), Err(Errno::OutOfRange));
         // A `Load` opcode with a truncated body is rejected, never read past
-        // its bytes (`AGENTS.md` §5.4).
+        // its bytes.
         assert_eq!(
             StoreRequest::decode(&[OP_LOAD, 1, 2, 3]),
             Err(Errno::LengthOutOfRange)

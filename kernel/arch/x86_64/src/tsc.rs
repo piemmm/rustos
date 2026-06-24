@@ -10,15 +10,14 @@
 //! the SMP scheduler could observe time going backwards — which would
 //! break the per-CPU monotonic contract `clock_get`/`irq_wait` rely on.
 //!
-//! The architecture port is the only place allowed to read CPUID
-//! (`AGENTS.md` §17.2), so detection lives here. The decoder
+//! The architecture port is the only place allowed to read CPUID, so detection lives here. The decoder
 //! [`invariant_tsc_supported`](crate::tsc::invariant_tsc_supported) is
 //! pure and host-tested; the bare-metal probe
 //! [`detect_invariant_tsc`](crate::tsc::detect_invariant_tsc) reads
 //! CPUID only on the freestanding
 //! target and is consumed by the kernel boot path, which records the
 //! result and fails closed before bringing up a second CPU on a part that
-//! does not advertise an invariant TSC (`AGENTS.md` §5.4).
+//! does not advertise an invariant TSC.
 //!
 //! Reference: Intel SDM Vol. 3B §18.17 ("Invariant TSC"); AMD64 APM
 //! Vol. 2 — CPUID leaf `0x8000_0007` EDX bit 8 (`TscInvariant`).
@@ -57,12 +56,12 @@ pub const fn invariant_tsc_supported(advanced_power_mgmt_edx: u32) -> bool {
 /// requirement), then decodes the flag with [`invariant_tsc_supported`].
 /// A part whose maximum extended leaf does not even reach
 /// `0x8000_0007` cannot assert invariance, so the probe returns `false`
-/// (fail closed, `AGENTS.md` §5.4.5).
+/// (fail closed).
 ///
 /// On the host target there is no bare-metal CPU contract to honour and
 /// the production boot validation never runs, so the probe reports
 /// `true` to avoid spuriously failing closed in host unit tests of
-/// consumers (`AGENTS.md` §1 — no fake hardware in production paths; the
+/// consumers (no fake hardware in production paths; the
 /// real decision is made by [`invariant_tsc_supported`], which *is*
 /// host-tested).
 #[must_use]

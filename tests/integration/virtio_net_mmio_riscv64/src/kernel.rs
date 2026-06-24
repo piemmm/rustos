@@ -2,8 +2,7 @@
 //! virtio-net-mmio integration test.
 //!
 //! The device-agnostic bring-up *and* the virtio-net ARP + ICMP-echo tail
-//! both live in the shared `rustos-test-virtio-qemu-support` crate
-//! (`AGENTS.md` §2.2). This module supplies only what is unique to this
+//! both live in the shared `rustos-test-virtio-qemu-support` crate. This module supplies only what is unique to this
 //! vertical: the bare virtio-net MMIO device id, the spawner registering the
 //! loaded image through the virtio-net `register`, and the boot harness. The
 //! device tail ([`virtio_net_ping`]) is the same code the x86_64 PCI

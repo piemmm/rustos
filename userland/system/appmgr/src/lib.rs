@@ -1,11 +1,10 @@
-//! RustOS application-bundle loader (`appmgr`), Stage 6 — `AGENTS.md` §16.4,
-//! §16.5.
+//! RustOS application-bundle loader (`appmgr`), Stage 6.
 //!
 //! An installed application is a `/Apps/<Name>.app/` bundle with a fixed
-//! top-level layout and a signed `AppInfo` manifest (`AGENTS.md` §16.5).
+//! top-level layout and a signed `AppInfo` manifest.
 //! This crate is the user-space service that decides whether such a bundle
 //! may be launched and with what authority. It owns three responsibilities
-//! and **fails closed** at the first problem (`AGENTS.md` §5.4):
+//! and **fails closed** at the first problem:
 //!
 //! 1. **Layout** — the bundle's top-level entries must be exactly drawn from
 //!    the fixed [`rustos_abi::BundleEntry`] set, with the mandatory `AppInfo`
@@ -15,15 +14,15 @@
 //!    decoded, its target ABI version and syscall-table hash are matched
 //!    against the kernel's, its Ed25519 signature is verified, and the
 //!    content hash it carries is checked against the bundle's actual
-//!    contents (`AGENTS.md` §16.5 — "signature over the bundle contents").
+//!    contents ("signature over the bundle contents").
 //! 3. **Authority** — the granted capability set is the manifest's request
 //!    *intersected* with the launching user's grants; ambient authority is
-//!    forbidden (`AGENTS.md` §4, §5.2), so the loader never widens a request.
+//!    forbidden, so the loader never widens a request.
 //!
 //! It additionally validates the entry-point `Run` binary through
-//! [`rustos_abi::LoadImage::parse`] (enforcing the §19.2 PIE / W^X / CFI-tag
+//! [`rustos_abi::LoadImage::parse`] (enforcing the PIE / W^X / CFI-tag
 //! invariants on a C binary identically to a Rust one) and resolves every
-//! shared library that binary declares it needs under the §16.4
+//! shared library that binary declares it needs under the
 //! dynamic-loader policy ([`AppLoader::resolve_library`]): a reference
 //! resolves only against the bundle's own `Libraries/` directory or
 //! `/System/Libraries/`. The whole pipeline is language-agnostic, so a
@@ -43,13 +42,13 @@
 //! The loader never *executes* anything: it computes the capability ceiling
 //! and the validated entry-point path and returns them in a [`LoadedApp`].
 //! Spawning the verified `rxe` binary with that ceiling is the caller's job
-//! (the same load gate `init`/`drvhost` use, `AGENTS.md` §8, §9).
+//! (the same load gate `init`/`drvhost` use).
 //!
 //! # Layering
 //!
-//! The crate is `no_std` (with `alloc`, `AGENTS.md` §6) and depends only on
+//! The crate is `no_std` (with `alloc`) and depends only on
 //! the audited `lib/*` crates `rustos-abi`, `rustos-caps`, and `rustos-log`,
-//! so it links no kernel or driver crate (`AGENTS.md` §17.4).
+//! so it links no kernel or driver crate.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

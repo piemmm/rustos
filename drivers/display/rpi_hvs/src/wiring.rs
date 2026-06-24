@@ -4,8 +4,7 @@
 //! discovers the `VideoCore` firmware mailbox through the hardware tree
 //! (the aarch64 `FdtDiscovery` emits a `brcm,bcm2835-mbox` node whose
 //! resources are the doorbell MMIO window and a DMA property-buffer
-//! carve request bounded by the 30-bit `VideoCore` aperture,
-//! `AGENTS.md` §18.1), carves the buffer, and hands both to
+//! carve request bounded by the 30-bit `VideoCore` aperture), carves the buffer, and hands both to
 //! [`open_discovered`]: it maps them under
 //! [`CapabilityId::MMIO_MAP`], rings the firmware for the scan-out
 //! surface over [`MmioMailbox`], assembles the full [`HvsConfig`]
@@ -17,7 +16,7 @@
 //! [`MailboxTransport`] seam, so [`open_with_transport`] is the
 //! host-provable half: the crate's tests drive it with the shared
 //! protocol-faithful mock firmware (QEMU does not model the
-//! `VideoCore`, `AGENTS.md` §2.1), and the doorbell below the seam is
+//! `VideoCore`), and the doorbell below the seam is
 //! the on-metal acceptance item.
 
 use rustos_abi::{CapabilityId, DriverError, DriverHost, MmioMapper};
@@ -31,7 +30,7 @@ use crate::{map, HvsConfig, RpiHvs, ScanoutConfig, MAX_PLANES};
 
 /// The discovered mailbox doorbell plus the host's property-buffer
 /// carve, both expressed as ARM-physical addresses the host maps under
-/// [`CapabilityId::MMIO_MAP`] (`AGENTS.md` §4 — never a compiled-in
+/// [`CapabilityId::MMIO_MAP`] (never a compiled-in
 /// base).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MailboxWiring {

@@ -18,8 +18,7 @@
 //!
 //! The kernel-side preemption logic lives in
 //! `kernel/sched::Scheduler::on_timer_tick`; this module only wires the
-//! aarch64 timer into that architecture-neutral surface (`AGENTS.md`
-//! §2.4 — no interface creep).
+//! aarch64 timer into that architecture-neutral surface (no interface creep).
 //!
 //! # Host testability
 //!
@@ -78,20 +77,18 @@ static PREEMPT_CPU_ID_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null
 /// [`PreemptStorage`] is registered). Slot `i` holds the absolute
 /// `CNTPCT_EL0` tick at which the running task's preemption quantum
 /// expires, or [`NO_DEADLINE`] when no quantum is armed (the CPU runs a
-/// sole task / is idle). One half of the tickless one-shot combiner
-/// (`AGENTS.md` §17.1).
+/// sole task / is idle). One half of the tickless one-shot combiner.
 static PREEMPT_QUANTUM_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Published per-CPU **wakeup-deadline** slice base (`null` until a
 /// [`PreemptStorage`] is registered). Slot `i` holds the absolute
 /// `CNTPCT_EL0` tick of the nearest pending blocking-wait timeout, or
 /// [`NO_DEADLINE`] when none is pending. The other half of the combiner
-/// (`AGENTS.md` §17.1 — the nearest armed wakeup).
+/// (the nearest armed wakeup).
 static PREEMPT_WAKEUP_PTR: AtomicPtr<AtomicU64> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Length of the published per-CPU slices (`0` until a [`PreemptStorage`]
-/// is registered, so every per-CPU access fails closed — `AGENTS.md`
-/// §2.9).
+/// is registered, so every per-CPU access fails closed).
 static PREEMPT_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Set-once guard so a second [`PreemptStorage::register`] is refused
@@ -101,20 +98,19 @@ static PREEMPT_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// Failure mode of [`PreemptStorage::register`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreemptStorageError {
-    /// Storage was already registered; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// Storage was already registered; the slot is set-once per boot.
     AlreadyRegistered,
 }
 
 /// Caller-owned, `&'static` per-CPU preemption backing, sized by the
-/// constructing caller for its machine (`AGENTS.md` §24.1 — the per-CPU
-/// timer bookkeeping is derived from the §18-discovered core count, never
+/// constructing caller for its machine (the per-CPU
+/// timer bookkeeping is derived from the-discovered core count, never
 /// a fixed `const` ceiling baked into the arch crate).
 ///
 /// The const parameter `N` is the number of logical CPUs the caller sizes
 /// for: a single-CPU boot path or vertical uses `PreemptStorage<1>`, and a
 /// multi-core boot path sizes `N` from the device-tree CPU count. The arch
-/// crate stays allocator-free (`AGENTS.md` §24.1 watch-out — no `alloc` in
+/// crate stays allocator-free (watch-out — no `alloc` in
 /// a bare-metal arch crate), so the caller provides the storage as a
 /// `static` (allocator-free bins) or a leaked allocation and publishes it
 /// through [`PreemptStorage::register`] before `init_local_preempt`.
@@ -147,7 +143,7 @@ impl<const N: usize> PreemptStorage<N> {
     /// # Errors
     ///
     /// [`PreemptStorageError::AlreadyRegistered`] on the second publish
-    /// (set-once per boot, `AGENTS.md` §2.1).
+    /// (set-once per boot).
     pub fn register(&'static self) -> Result<usize, PreemptStorageError> {
         if PREEMPT_REGISTERED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -178,8 +174,7 @@ static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// from EL0** to, packed into a `usize`. Installed by the binary before
 /// the timer is armed; absent (`0`) the timer tick is pure accounting and
 /// nothing is preempted, so an image that arms the timer without wiring
-/// preemption simply keeps cooperative scheduling (fail-safe, `AGENTS.md`
-/// §2.9).
+/// preemption simply keeps cooperative scheduling (fail-safe).
 ///
 /// This is the involuntary analogue of the cooperative reschedule the
 /// `svc` syscall path drives: a timer interrupt taken while EL0 was
@@ -189,7 +184,7 @@ static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// `yield` syscall. The callback runs **after** the GIC end-of-interrupt
 /// handshake (so the line is no longer active across the context switch)
 /// and **only** for a tick taken from EL0 — a tick taken in EL1 never
-/// preempts (the kernel is non-preemptible, `AGENTS.md` §4 watch-out: a
+/// preempts (the kernel is non-preemptible watch-out: a
 /// half-completed kernel critical section must never be switched away
 /// from).
 static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
@@ -271,7 +266,7 @@ pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
 /// **after** the GIC end-of-interrupt handshake (so the timer line is no
 /// longer active while the callback context-switches away). A build that
 /// armed the timer without installing the callback keeps cooperative
-/// scheduling — the tick is pure accounting (`AGENTS.md` §2.9, fail-safe).
+/// scheduling — the tick is pure accounting (fail-safe).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_el0_preempt_point(cpu: CpuId) {
     let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
@@ -290,8 +285,7 @@ pub(crate) fn on_el0_preempt_point(cpu: CpuId) {
 /// [`PreemptStorage`] is registered yet.
 ///
 /// The clamp to the published length is defence-in-depth so an
-/// out-of-range `CpuId` can never index outside the slices (`AGENTS.md`
-/// §2.9); `None` before registration makes every per-CPU access fail
+/// out-of-range `CpuId` can never index outside the slices; `None` before registration makes every per-CPU access fail
 /// closed rather than dereference a null slice base.
 fn per_cpu_index(cpu: CpuId) -> Option<usize> {
     let len = PREEMPT_LEN.load(Ordering::Acquire);
@@ -353,11 +347,10 @@ const fn slot_deadline(raw: u64) -> Option<u64> {
 
 /// Record CPU `cpu`'s preemption-quantum deadline (absolute `CNTPCT_EL0`
 /// ticks), or clear it with `None`, then reprogram the one-shot to the
-/// earlier of the quantum and any pending wakeup (`AGENTS.md` §17.1).
+/// earlier of the quantum and any pending wakeup.
 ///
 /// Called from [`crate::kernel_arch::Aarch64Arch`]'s `set_preemption`. A
-/// no-op before a [`PreemptStorage`] is registered (fail closed,
-/// `AGENTS.md` §2.9).
+/// no-op before a [`PreemptStorage`] is registered (fail closed).
 pub fn record_quantum_deadline(cpu: CpuId, deadline: Option<u64>) {
     if let Some(idx) = per_cpu_index(cpu) {
         quantum_slot(idx).store(deadline.unwrap_or(NO_DEADLINE), Ordering::Relaxed);
@@ -367,8 +360,7 @@ pub fn record_quantum_deadline(cpu: CpuId, deadline: Option<u64>) {
 
 /// Record CPU `cpu`'s nearest blocking-wait deadline (absolute
 /// `CNTPCT_EL0` ticks), or clear it with `None`, then reprogram the
-/// one-shot to the earlier of this wakeup and any armed quantum
-/// (`AGENTS.md` §17.1). Called from `set_wakeup`. A no-op before a
+/// one-shot to the earlier of this wakeup and any armed quantum. Called from `set_wakeup`. A no-op before a
 /// [`PreemptStorage`] is registered (fail closed).
 pub fn record_wakeup_deadline(cpu: CpuId, deadline: Option<u64>) {
     if let Some(idx) = per_cpu_index(cpu) {
@@ -393,7 +385,7 @@ pub fn recorded_deadlines(cpu: CpuId) -> (Option<u64>, Option<u64>) {
 
 /// Reprogram CPU `cpu`'s single physical one-shot to fire at the earlier
 /// of its recorded quantum and wakeup deadlines, or disarm it when
-/// neither is pending (`AGENTS.md` §17.1 — the tickless one-shot is armed
+/// neither is pending (the tickless one-shot is armed
 /// only for a real pending event).
 ///
 /// The combining math is the shared, host-tested
@@ -478,7 +470,7 @@ fn reset_preempt_storage_for_tests() {
 /// Compute the tick interval, in counter ticks, for `hz` ticks per
 /// second given a `counter_hz` clock. Clamps to at least one tick so a
 /// pathological `hz > counter_hz` cannot arm a zero-interval timer that
-/// re-fires without progress (`AGENTS.md` §2.9).
+/// re-fires without progress.
 #[must_use]
 pub const fn interval_for_hz(counter_hz: u64, hz: u64) -> u64 {
     let interval = counter_hz / if hz == 0 { 1 } else { hz };
@@ -505,12 +497,11 @@ fn write_tval(interval: u64) {
 /// `ticks_from_now` counter ticks, then stop until armed again.
 ///
 /// The down-counter is loaded with `ticks_from_now` (clamped to at least
-/// one tick so a degenerate `0` cannot re-trap with no progress,
-/// `AGENTS.md` §2.9) and the timer is enabled with its interrupt unmasked
+/// one tick so a degenerate `0` cannot re-trap with no progress) and the timer is enabled with its interrupt unmasked
 /// (`CNTP_CTL_EL0.ENABLE`, `IMASK = 0`). There is **no** periodic re-arm:
 /// once it fires, the next fire happens only if the scheduler arms it
 /// again via [`crate::kernel_arch::Aarch64Arch`]'s `set_preemption`
-/// (`AGENTS.md` §17.1 tickless / `NO_HZ`). The GIC PPI must already be
+/// (tickless / `NO_HZ`). The GIC PPI must already be
 /// enabled (done by [`init_local_preempt`]).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn arm_oneshot(ticks_from_now: u64) {
@@ -528,8 +519,8 @@ pub fn arm_oneshot(ticks_from_now: u64) {
 ///
 /// Clears `CNTP_CTL_EL0` (both `ENABLE` and `IMASK`): the timer stops and
 /// raises no interrupt, so a CPU running a sole runnable task takes no
-/// timer ticks at all (`AGENTS.md` §17.1 / §2.16). Disarming an
-/// already-stopped timer is a harmless no-op (§2.9).
+/// timer ticks at all. Disarming an
+/// already-stopped timer is a harmless no-op.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn disarm() {
     // SAFETY: clearing `CNTP_CTL_EL0` disables the timer and masks its
@@ -546,7 +537,7 @@ pub fn disarm() {
 /// the GIC, but **leaves the timer disarmed**: RustOS is tickless, so the
 /// timer is armed only when the scheduler has a task to bound, via
 /// [`arm_oneshot`] from [`crate::kernel_arch::Aarch64Arch`]'s
-/// `set_preemption` (`AGENTS.md` §17.1 `NO_HZ`). It does **not** unmask
+/// `set_preemption` (`NO_HZ`). It does **not** unmask
 /// interrupts at the PE (`DAIF`); the caller does that via
 /// [`crate::exceptions::enable_irq`] once it is ready to take ticks —
 /// matching the riscv64 `init_local_preempt` / `sstatus.SIE` split.
@@ -563,7 +554,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     let Some(slot) = per_cpu_index(cpu) else {
         // No `PreemptStorage` registered (or `cpu` outside it): fail
         // closed rather than record a quantum whose tick can never be
-        // dispatched (`AGENTS.md` §2.9). A registered caller never hits
+        // dispatched. A registered caller never hits
         // this branch.
         return;
     };
@@ -578,16 +569,16 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     }
 
     // Leave the timer disarmed: the scheduler arms the first one-shot when
-    // it dispatches a task onto a contended CPU (tickless, §17.1). The
+    // it dispatches a task onto a contended CPU (tickless). The
     // per-quantum interval the one-shot is later armed to is read back
-    // through [`timer_interval_ticks`] (the single stored copy, §2.2).
+    // through [`timer_interval_ticks`] (the single stored copy).
     disarm();
 }
 
 /// Handle a generic-timer interrupt: clear the timer condition and
 /// dispatch the (observation-only) scheduler-tick callback.
 ///
-/// RustOS is tickless (`AGENTS.md` §17.1): the timer was armed **one-shot**
+/// RustOS is tickless: the timer was armed **one-shot**
 /// by the scheduler, so this handler does **not** re-arm it — the next
 /// fire happens only when the scheduler arms another quantum via
 /// [`arm_oneshot`]. It disarms (clearing the now-asserted timer condition
@@ -602,25 +593,24 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt(cpu: CpuId) {
     // Clear the fired one-shot's timer condition so the line deasserts;
-    // the scheduler re-arms a fresh one-shot on its next dispatch (§17.1).
+    // the scheduler re-arms a fresh one-shot on its next dispatch.
     disarm();
     // The quantum (if any) just expired, so clear its recorded deadline:
     // the dispatch that follows the preempt point re-arms a fresh quantum,
     // and the per-tick wakeup sweep (the timer callback below) must not
-    // re-arm the one-shot against this already-fired deadline (`AGENTS.md`
-    // §17.1). The wakeup deadline is owned by the sweep and left untouched.
+    // re-arm the one-shot against this already-fired deadline. The wakeup deadline is owned by the sweep and left untouched.
     if let Some(slot) = per_cpu_index(cpu) {
         quantum_slot(slot).store(NO_DEADLINE, Ordering::Relaxed);
     }
     let Some(slot) = per_cpu_index(cpu) else {
         // No registered per-CPU slot for this core: nothing to dispatch
-        // (fail closed, `AGENTS.md` §2.9).
+        // (fail closed).
         return;
     };
     let recorded = cpu_id_slot(slot).load(Ordering::Relaxed);
     if recorded != NO_CPU {
         // Dispatch the tick through the Arch HAL timer surface so the
-        // callback invoke lives in exactly one place (`AGENTS.md` §2.2);
+        // callback invoke lives in exactly one place;
         // the HAL handle reaches the same `TIMER_CALLBACK_FN` static this
         // module owns. `recorded` was stored from a `CpuId` (`u32`) in
         // `init_local_preempt`, so the low 32 bits are the whole value.
@@ -746,7 +736,7 @@ mod tests {
 
     #[test]
     fn per_cpu_slots_track_the_registered_storage() {
-        // A caller-sized backing covers exactly its `N` slots (the §24.1
+        // A caller-sized backing covers exactly its `N` slots (the
         // capacity is the discovered core count, not a baked-in `MAX_CPUS`);
         // a second backing proves registration is set-once. Declared first so
         // they precede the statements that drive them.
@@ -756,8 +746,7 @@ mod tests {
         reset_preempt_storage_for_tests();
 
         // Before any storage is registered, every per-CPU observer fails
-        // closed (`0` / `None`) instead of dereferencing a null base
-        // (`AGENTS.md` §2.9).
+        // closed (`0` / `None`) instead of dereferencing a null base.
         assert_eq!(per_cpu_index(0), None);
         assert_eq!(timer_interval_ticks(0), 0);
         assert_eq!(timer_cpu_id(0), None);

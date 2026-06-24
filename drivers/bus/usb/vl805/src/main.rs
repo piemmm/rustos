@@ -1,16 +1,15 @@
 //! The `Run` entry-point binary of the Raspberry Pi 4 (BCM2711) **VL805**
 //! USB **bus driver**, installed as a signed `/System/Drivers/` bundle and
 //! **autoloaded into user space** by `devmgr` when the VL805 PCI node is
-//! discovered (`AGENTS.md` §18; `plans/PI.md` P10 D5c).
+//! discovered (`plans/PI.md` P10 D5c).
 //!
-//! This is the device-specific link in the Pi 4 USB chain (`AGENTS.md` §4):
+//! This is the device-specific link in the Pi 4 USB chain:
 //! the PCIe root-complex bus driver (`drivers/bus/pcie_brcm`) trains the link,
 //! enumerates the VL805 behind the bridge, assigns its register BAR, and
 //! publishes it as a VL805 PCI node (`node A`) carrying that BAR (at its
 //! CPU-physical address) and the inbound-DMA constraint as grant requests.
 //! `devmgr` autoloads this driver against node A; the kernel mints it exactly
-//! those two grants — and **no** mapping capability for them (`AGENTS.md`
-//! §4 / §18.3). This program holds only `CAP_MAILBOX` and `CAP_HW_EMIT`, so
+//! those two grants — and **no** mapping capability for them. This program holds only `CAP_MAILBOX` and `CAP_HW_EMIT`, so
 //! it cannot touch the controller's registers or DMA; its job is narrower:
 //!
 //! 1. reload the VL805's firmware over the `VideoCore` mailbox IPC — the
@@ -32,25 +31,24 @@
 //! against `DriverHost` doubles; this binary is the thin freestanding wiring
 //! that builds the real host and drives it. The device logic is co-located
 //! here, in the driver, rather than in `lib/*`: a VL805 USB driver sits above
-//! the §18.6 bootstrap floor, so it has no charter-legal non-driver consumer
-//! and the §2.20 carve-out does not apply (`AGENTS.md` §2.22). Every
+//! the bootstrap floor, so it has no charter-legal non-driver consumer
+//! and the carve-out does not apply. Every
 //! capability and bound is re-checked kernel-side, on the far side of each
-//! trap (`AGENTS.md` §5.4); the driver adds no authority, and the kernel owns
-//! the published node's identity (`AGENTS.md` §4 / §18.1).
+//! trap; the driver adds no authority, and the kernel owns
+//! the published node's identity.
 //!
-//! It is a **pure-Rust** program (`AGENTS.md` §1): it links the Rust userland
-//! runtime `rustos-rt` (`_start`, the stack canary §19.2, the panic handler,
+//! It is a **pure-Rust** program: it links the Rust userland
+//! runtime `rustos-rt` (`_start`, the stack canary, the panic handler,
 //! the syscall wrappers, and `yield_now`), never the C ABI, which exists
-//! solely for non-Rust programs (`AGENTS.md` §16.4). It maps no DMA and no
+//! solely for non-Rust programs. It maps no DMA and no
 //! registers, so it supplies no architecture-specific cache shim and names no
-//! board detail (`coherency = None`, keeping the program platform-neutral,
-//! `AGENTS.md` §2.20).
+//! board detail (`coherency = None`, keeping the program platform-neutral).
 //!
 //! After publishing the node `main` parks, yielding forever so PID 1 and
 //! every other task keeps running while this driver stays resident
-//! (`AGENTS.md` §2.1 — a genuine yield loop, never a busy spin). A bring-up
+//! (a genuine yield loop, never a busy spin). A bring-up
 //! failure exits with a reserved fail-closed code, leaving the controller
-//! unpublished rather than wedged (`AGENTS.md` §2.9); the spawning supervisor
+//! unpublished rather than wedged; the spawning supervisor
 //! decides whether to relaunch.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
@@ -58,7 +56,7 @@
 //!
 //! # No QEMU vertical
 //!
-//! QEMU models no `VideoCore` mailbox or Pi USB timing (`AGENTS.md` §0.4), so
+//! QEMU models no `VideoCore` mailbox or Pi USB timing, so
 //! the live reload → publish chain is the on-metal acceptance item; this
 //! crate's own host tests (`src/lib.rs`, `src/wiring.rs`) prove the
 //! composition and its fail-closed paths.
@@ -77,19 +75,18 @@ mod program {
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value (`AGENTS.md`
-    /// §2.9).
+    /// delivery did not fit). A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
     /// Exit code when the delivered grants do not name the controller's
     /// register BAR and inbound-DMA constraint this driver forwards — an
-    /// unbound or mis-provisioned node (`AGENTS.md` §18.4 / §5.4). A reserved,
+    /// unbound or mis-provisioned node. A reserved,
     /// fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
 
     /// Exit code when publishing the xHCI controller node was refused (the
     /// driver lacks `CAP_HW_EMIT`, or a forwarded resource is not covered by a
-    /// grant). A reserved, fail-closed value (`AGENTS.md` §2.9); the firmware
+    /// grant). A reserved, fail-closed value; the firmware
     /// reload is best-effort and never fails the driver (its authoritative
     /// gate is the controller driver's `Xhci::open`).
     const EXIT_PUBLISH_FAILED: i32 = 82;
@@ -101,8 +98,8 @@ mod program {
     /// (`CAP_MAILBOX`) and publishing the controller node (`CAP_HW_EMIT`) —
     /// and deliberately **excludes** `CAP_MMIO_MAP` / `CAP_MEM_DMA`: this
     /// driver forwards the BAR/DMA grants without ever mapping them
-    /// (`AGENTS.md` §4 — least privilege). The kernel re-checks every trap
-    /// regardless (`AGENTS.md` §5.4).
+    /// (least privilege). The kernel re-checks every trap
+    /// regardless.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MAILBOX);
@@ -118,27 +115,25 @@ mod program {
     fn main() -> i32 {
         // Build the host from the grants the kernel minted for this driver. It
         // maps no DMA and no registers, so no architecture-specific cache shim
-        // is supplied (`coherency = None`, `AGENTS.md` §2.20).
+        // is supplied (`coherency = None`).
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         // Build node B from the same delivered grants the host holds — the
         // controller's BAR + DMA, forwarded to the next driver in the chain
-        // (no build-time board constant, no second `resource_grants` syscall,
-        // `AGENTS.md` §2.16 / §2.20).
+        // (no build-time board constant, no second `resource_grants` syscall).
         let Ok(node) = build_xhci_node(host.resources()) else {
             return EXIT_NO_RESOURCES;
         };
         // Reload the firmware over the mailbox IPC, then publish node B. The
         // reload is best-effort (the firmware outcome is discarded here — the
-        // authoritative liveness gate is the bound driver's `Xhci::open`,
-        // `AGENTS.md` §2.9); only a refused publish fails the driver.
+        // authoritative liveness gate is the bound driver's `Xhci::open`); only a refused publish fails the driver.
         if reload_firmware_and_publish(&host, node).is_err() {
             return EXIT_PUBLISH_FAILED;
         }
         // The controller node must stay published and this driver resident for
         // the life of the system; park yielding so PID 1 and every other task
-        // keeps running (`AGENTS.md` §2.1 — a genuine yield loop, never a hard
+        // keeps running (a genuine yield loop, never a hard
         // spin).
         loop {
             rustos_rt::yield_now();

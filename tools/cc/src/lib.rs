@@ -1,30 +1,29 @@
 //! `rustos-cc` — an audited, version-pinned, checksummed C toolchain wrapper.
 //!
-//! RustOS is a Rust-only OS (`AGENTS.md` §1); this crate does **not** add C to
-//! the codebase. It is host-only build glue (`AGENTS.md` §12) that lets a
+//! RustOS is a Rust-only OS; this crate does **not** add C to
+//! the codebase. It is host-only build glue that lets a
 //! single QEMU integration test *host* a small C program to prove the
 //! generated `abi-v1` C header, the `ros_sys_*` syscall stub runtime
 //! (`lib/abi-sys`), and the crt0 startup object (`lib/crt0`) agree with the
 //! Rust side end to end (`plans/CCOMPAT.md` stage CC5). Hosting a C program is
-//! a different thing from authoring the OS in C (`AGENTS.md` §1).
+//! a different thing from authoring the OS in C.
 //!
 //! # Why a wrapper, not a raw `Command`
 //!
-//! `AGENTS.md` §12 forbids unaudited shell-outs to external build tools: every
+//! the charter forbids unaudited shell-outs to external build tools: every
 //! external invocation must be version-pinned and checksummed. This crate is
 //! the single, auditable gateway to `clang` and `ld.lld`:
 //!
 //! * **Version-pinned.** [`Toolchain::discover`] runs `--version`, parses the
 //!   banner, and fails closed unless the tool reports exactly
-//!   [`REQUIRED_CLANG_VERSION`] / [`REQUIRED_LLD_VERSION`] (`AGENTS.md` §19.3 —
-//!   supply-chain integrity).
+//!   [`REQUIRED_CLANG_VERSION`] / [`REQUIRED_LLD_VERSION`] (supply-chain integrity).
 //!   Bumping the pin is a deliberate change, like the toolchain pin in
 //!   `rust-toolchain.toml`.
 //! * **Checksummed.** Every resolved binary is SHA-256-hashed with the audited
-//!   `lib/crypto` (`AGENTS.md` §2.12). The digest is recorded for the audit
+//!   `lib/crypto`. The digest is recorded for the audit
 //!   trail and, when the caller pins an expected digest (via the
 //!   `RUSTOS_CC_CLANG_SHA256` / `RUSTOS_CC_LLD_SHA256` environment variables),
-//!   verified — a mismatch fails closed (`AGENTS.md` §2.9).
+//!   verified — a mismatch fails closed.
 //!
 //! # Targets
 //!
@@ -50,7 +49,7 @@ use std::process::Command;
 use rustos_crypto::Sha256Digest;
 
 /// The exact `clang` version the wrapper accepts. Bumping it is a deliberate,
-/// reviewed change (`AGENTS.md` §12 / §19.3).
+/// reviewed change.
 pub const REQUIRED_CLANG_VERSION: &str = "18.1.3";
 
 /// The exact `ld.lld` version the wrapper accepts.

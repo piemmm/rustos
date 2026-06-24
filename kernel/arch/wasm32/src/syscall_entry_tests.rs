@@ -3,7 +3,7 @@
 //! The argument packing, the callback storage, and [`dispatch_syscall`]
 //! build and run on the host. The stateful tests share the global
 //! dispatch slot, so they hold a single [`STATE_LOCK`] for their
-//! duration to stay deterministic (`AGENTS.md` §7).
+//! duration to stay deterministic.
 
 use super::*;
 use core::sync::atomic::AtomicU64;

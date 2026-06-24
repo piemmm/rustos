@@ -355,7 +355,7 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
 // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4) and are therefore
 // gated to the freestanding x86_64 target.
 //
-// AGENTS.md §2.2 — both the `tests/integration/kernel_arch_boot`
+// — both the `tests/integration/kernel_arch_boot`
 // boot test (Stage 3a (c7-bin)) and the existing `scheduler_stress_qemu`
 // integration test need to find the MADT this way. Centralising the
 // logic here removes the duplication that would otherwise grow with
@@ -365,7 +365,7 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
 ///
 /// Re-exported as a `const` (rather than `size_of::<SdtHeader>()`) so
 /// host code can index into raw byte slices without depending on the
-/// internal type layout (`AGENTS.md` §2.4 — no leaking representation
+/// internal type layout (no leaking representation
 /// details across an API).
 pub const ACPI_SDT_HEADER_LEN: usize = SDT_HEADER_LEN;
 
@@ -505,7 +505,7 @@ const _: () = {
     // RSDP signature is 8 bytes by ACPI spec.
     assert!(size_of::<[u8; 8]>() == 8);
     // The public `ACPI_SDT_HEADER_LEN` and the module-private
-    // `SDT_HEADER_LEN` must agree exactly. `AGENTS.md` §2.2 — no
+    // `SDT_HEADER_LEN` must agree exactly. — no
     // duplicate-source-of-truth constants.
     assert!(ACPI_SDT_HEADER_LEN == SDT_HEADER_LEN);
 };
@@ -599,8 +599,7 @@ pub(crate) mod tests {
     // Helper: build a MADT with the supplied entries appended.
     //
     // `pub(crate)` so the `platform` module's discovery tests drive the
-    // same MADT builder rather than re-rolling the table layout
-    // (`AGENTS.md` §2.2).
+    // same MADT builder rather than re-rolling the table layout.
     pub(crate) fn build_madt(lapic: u32, flags: u32, entries: &[u8]) -> Vec<u8> {
         let total = 44 + entries.len();
         let mut buf = vec![0u8; total];

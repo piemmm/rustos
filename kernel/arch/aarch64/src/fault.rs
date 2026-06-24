@@ -6,7 +6,7 @@
 //! an alignment fault, an illegal-state exception — is, by default,
 //! unrecoverable in this kernel slice: resuming the faulting instruction
 //! without fix-up logic would re-trap forever, so the vector parks the
-//! CPU (`AGENTS.md` §2.9 — never silently reset).
+//! CPU (never silently reset).
 //!
 //! A single fault handler may be installed through [`set_fault_handler`]
 //! before any fault can fire; the vector then invokes it with the
@@ -20,7 +20,7 @@
 //! # No global mutable state
 //!
 //! The slot is set-once, backed by an atomic the vector reads without a
-//! lock; a second publish fails closed (`AGENTS.md` §2.1). The `ESR_EL1`
+//! lock; a second publish fails closed. The `ESR_EL1`
 //! decode and the slot build on the host, so their unit tests run under
 //! `cargo test`; only the system-register reads that feed the handler
 //! are gated to the freestanding aarch64 target (in
@@ -88,8 +88,7 @@ static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_fault_handler`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetFaultHandlerError {
-    /// A handler was already published; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// A handler was already published; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -127,7 +126,7 @@ pub fn fault_handler() -> Option<FaultHandlerFn> {
 #[cfg(test)]
 fn clear_fault_handler_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a handler.
-    // Production code never clears the slot (`AGENTS.md` §2.1).
+    // Production code never clears the slot.
     FAULT_HANDLER.store(0, Ordering::Release);
 }
 

@@ -60,7 +60,7 @@ const USER_STACK_PAGES: u64 = 64;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to each program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to each program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// `IA32_EFER` MSR number and its No-Execute-Enable bit (bit 11).
@@ -75,7 +75,7 @@ const LAPIC_MMIO_BASE: u64 = 0xFEE0_0000;
 
 /// Physical frames the test hands the spawn builds. Both program builds draw
 /// from this one pool through a single monotonic cursor, so the two address
-/// spaces never share a data frame (`AGENTS.md` §4).
+/// spaces never share a data frame.
 const FRAME_COUNT: usize = 256;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
@@ -106,8 +106,7 @@ static ALLOCATOR: FreeListAllocator =
 
 /// Per-space page-table pools (one per EL0 address space). Each backs a PML4
 /// hierarchy whose root [`activate_user_root`] reloads (via CR3) before every
-/// switch into its task, so the two tasks stay hardware-isolated
-/// (`AGENTS.md` §4).
+/// switch into its task, so the two tasks stay hardware-isolated.
 static PAGE_TABLE_POOL_A: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLE_POOL_B: paging::PageTablePool = paging::PageTablePool::new();
 
@@ -158,8 +157,8 @@ fn spawn_el0_timeshare_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen either program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen either program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -175,7 +174,7 @@ impl CapabilityQuery for SpawnAuthority {
 /// tasks timeshare the CPU. `yield` resumes here on the next dispatch (and the
 /// callback `sysret`s back into ring 3); `exit` reaps the task and never
 /// returns to the callback. Any other syscall is unexpected from the fixture
-/// program and fails the test loudly (`AGENTS.md` §7).
+/// program and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -224,8 +223,7 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 /// state. The new space identity-maps the low 32 MiB, the higher-half kernel
 /// window, and the LAPIC MMIO page; it is activated (so the user mappings land
 /// in it) and the image is built through the production capability-checked,
-/// audited `spawn_image` caller. Fails the test loudly on any error
-/// (`AGENTS.md` §7).
+/// audited `spawn_image` caller. Fails the test loudly on any error.
 fn build_el0_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> (u64, UserEntry) {
     let Some(mut arch_space) = paging::AddressSpace::new_identity_first_32mib(pool) else {
         note(TEST_FAIL, "X2 test: page-table pool exhausted");
@@ -236,7 +234,7 @@ fn build_el0_space(pool: &'static paging::PageTablePool, image: &LoadImage) -> (
     // LAPIC ICR (the latched spawn-time self-IPI); the minimal new space maps
     // only the low 32 MiB + higher-half kernel window, so without this those
     // accesses would fault after the switch (fail closed if the pool is
-    // exhausted, §2.9).
+    // exhausted).
     if arch_space
         .map_4k(pool, LAPIC_MMIO_BASE, LAPIC_MMIO_BASE, true)
         .is_none()
@@ -346,10 +344,10 @@ fn run_timeshare() -> ! {
     // self-IPI to the LAPIC ICR is latched and never delivered).
     let bsp_id = smp::bsp_lapic_id();
     // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
-    // to one slot (`AGENTS.md` §24.1 — no baked-in `MAX_CPUS`).
+    // to one slot (no baked-in `MAX_CPUS`).
     let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
-    // `&'static` backing (`AGENTS.md` §24.1); `run` runs once, so a
+    // `&'static` backing; `run` runs once, so a
     // function-local `static` is sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let Ok(arch) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
@@ -365,10 +363,10 @@ fn run_timeshare() -> ! {
     // Admit both ring-3 programs as resumable user kthreads. Each runs on its
     // own kernel stack; its `pre_resume` hook runs on the dispatcher's context
     // immediately before every switch-in: it reloads CR3 to the task's own root
-    // (isolation, §4) and repoints the per-CPU `syscall` entry stack at *this*
+    // (isolation) and repoints the per-CPU `syscall` entry stack at *this*
     // task's own kernel stack (`set_kernel_rsp0`), the value the seam hands it.
     // Its work body `enter_user`s into ring 3. `ContextSwitchHal` is the x86_64
-    // §17.2 context-switch primitive — and the carrier of the X2
+    // context-switch primitive — and the carrier of the X2
     // cooperative-park `swapgs` balance the kthread runtime invokes across each
     // mid-handler park.
     let cs = ContextSwitchHal::new();
@@ -379,7 +377,7 @@ fn run_timeshare() -> ! {
             // stack before the switch-in. A rejected value (it is validated
             // canonical/aligned/kernel-half) leaves the slot unchanged and the
             // next syscall would fault loudly — fail closed, never a silent
-            // wrong stack (`AGENTS.md` §5.4 / §2.9).
+            // wrong stack.
             if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
                 note(TEST_FAIL, "X2 test: set_kernel_rsp0 rejected the stack top");
                 qemu_exit::exit_failure();
@@ -412,7 +410,7 @@ fn run_timeshare() -> ! {
     // their own kernel stacks — the path that exercises the durable per-task
     // user-`%rsp` save and the cooperative-park `swapgs` balance. A switch that
     // never resumed its task would stall the drain and the harness would time
-    // out (fail-loud, `AGENTS.md` §7).
+    // out (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

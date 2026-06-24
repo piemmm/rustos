@@ -1,7 +1,7 @@
 //! Driver register-reply record (`PLAN.md` Stage 4.HW).
 //!
 //! When the driver host spawns a verified driver image into its own
-//! process (`AGENTS.md` §4 — drivers run in user space), the spawned
+//! process (drivers run in user space), the spawned
 //! driver completes its `register()` entry in its own protection domain
 //! and reports the outcome back to the host over IPC. This module is the
 //! single wire definition of that reply: one fixed-size, versioned
@@ -11,9 +11,8 @@
 //! The record is *informational only*: the host mints its own
 //! unforgeable [`DriverHandle`] on success, so a hostile driver that
 //! forges a reply gains no authority — it can only mark *itself* as
-//! registered or failed (`AGENTS.md` §5.2). Every field is validated on
-//! decode and an inconsistent record is rejected whole (fail closed,
-//! `AGENTS.md` §5.4).
+//! registered or failed. Every field is validated on
+//! decode and an inconsistent record is rejected whole (fail closed).
 
 use crate::le::{read_i32, read_u32, read_u64};
 
@@ -33,7 +32,7 @@ pub const DRIVER_REGISTER_STATUS_OK: i32 = 0;
 /// to the driver host over IPC.
 ///
 /// Field order is part of the `abi-v1` contract (mutable until the
-/// first release, `AGENTS.md` §9). Construct with
+/// first release). Construct with
 /// [`DriverRegisterReply::registered`] / [`DriverRegisterReply::failed`]
 /// so the `status`/`handle` consistency invariant cannot be violated;
 /// [`DriverRegisterReply::from_bytes`] enforces the same invariant on
@@ -119,7 +118,7 @@ impl DriverRegisterReply {
     /// # Capabilities
     ///
     /// None. Decoding is pure; the *sending* of the reply is gated by
-    /// the reply port's required send capability (`AGENTS.md` §5.2).
+    /// the reply port's required send capability.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DriverError> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(DriverError::BufferTooSmall);

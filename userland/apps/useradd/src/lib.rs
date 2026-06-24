@@ -1,14 +1,14 @@
-//! RustOS `useradd` — create a user account (Stage 6, `AGENTS.md` §3
+//! RustOS `useradd` — create a user account (Stage 6
 //! `userland/apps/`).
 //!
 //! `useradd` adds a single account to the user database that persists under
-//! `/System/Security/Users` (`AGENTS.md` §5.1, §16). It names the new account
+//! `/System/Security/Users`. It names the new account
 //! and its numeric identity — a login name, an optional user id (auto-allocated
 //! by the database when omitted), a **required** primary group id, an optional
 //! supplementary-group set, and the textual comment and home directory — and
 //! hands that record to the database through an injected seam. Group and user
 //! references are **decimal** ids: RustOS has no name-to-id seam in this tool,
-//! so a name would be interface creep (`AGENTS.md` §2.4), the same choice
+//! so a name would be interface creep, the same choice
 //! `chown` makes.
 //!
 //! # What this crate is
@@ -30,14 +30,13 @@
 //!
 //! # Not a policy point
 //!
-//! Creating an account is privileged — it needs `CAP_USER_ADMIN`
-//! (`AGENTS.md` §5.2) — but the **database** makes that decision, not this
-//! tool (`AGENTS.md` §5.4). `useradd` builds and presents a record; an
+//! Creating an account is privileged — it needs `CAP_USER_ADMIN` — but the **database** makes that decision, not this
+//! tool. `useradd` builds and presents a record; an
 //! unauthorised attempt is refused by the seam and surfaced as
 //! [`UseraddError::Create`]. The database is likewise the authority on uid
 //! collisions, group existence, and the supplementary-group bound; `useradd`
 //! validates only the syntactic shape of its arguments and never guesses a
-//! default group, uid, or home directory (`AGENTS.md` §2.1).
+//! default group, uid, or home directory.
 //!
 //! # Fail closed
 //!
@@ -48,8 +47,7 @@
 //! is a [`UseraddError::BadId`]; a name already present is a
 //! [`UseraddError::Exists`]. A database that cannot be consulted surfaces the
 //! underlying [`Errno`](rustos_abi::Errno) as [`UseraddError::Lookup`], and a
-//! refused or failed creation as [`UseraddError::Create`]. There is no panic
-//! (`AGENTS.md` §2.9).
+//! refused or failed creation as [`UseraddError::Create`]. There is no panic.
 //!
 //! # Module map
 //!
@@ -61,10 +59,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

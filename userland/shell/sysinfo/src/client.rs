@@ -75,7 +75,7 @@ fn emit(out: &dyn Output, line: &str) -> Result<(), SysinfoError> {
 ///
 /// The page walk and row rendering are the shared helpers from
 /// `lib/procinfo`; the CLI only supplies the column header and the per-row
-/// sink (`AGENTS.md` §2.2).
+/// sink.
 fn run_processes(
     all: bool,
     transport: &dyn Transport,
@@ -107,9 +107,9 @@ fn run_memory(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
 
 /// Fetch the hardware tree and report its size.
 ///
-/// The hardware-tree wire format is owned by `lib/abi` §18 and is not built
+/// The hardware-tree wire format is owned by `lib/abi` and is not built
 /// yet, so the CLI does not pretend to decode it: it honestly reports the
-/// byte length the service returned (`AGENTS.md` §2.1 — no faking).
+/// byte length the service returned (no faking).
 fn run_hardware(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     let reply = service_call(transport, SysinfoQueryId::HARDWARE_TREE, &[])?;
     emit(out, &format!("hardware tree: {} bytes", reply.len()))
@@ -159,8 +159,7 @@ fn run_uptime(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
 ///
 /// The reply is exactly [`LimitKind::COUNT`] [`ResourceLimitRecord`]s in
 /// discriminant order; the CLI decodes them positionally and prints one
-/// aligned row per resource. A reply of the wrong length fails closed
-/// (`AGENTS.md` §2.1) rather than rendering a partial table.
+/// aligned row per resource. A reply of the wrong length fails closed rather than rendering a partial table.
 fn run_limits(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     let reply = service_call(transport, SysinfoQueryId::RESOURCE_LIMITS, &[])?;
     if reply.len() != ResourceLimitRecord::WIRE_LEN * LimitKind::COUNT {
@@ -206,7 +205,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Decode an inline name buffer for display, substituting `U+FFFD` for any
-/// invalid byte rather than failing (a display routine never panics, §2.9).
+/// invalid byte rather than failing (a display routine never panics).
 fn name_lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

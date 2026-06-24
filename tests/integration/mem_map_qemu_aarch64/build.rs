@@ -4,26 +4,25 @@
 //! Three jobs on the freestanding `aarch64-unknown-none` target:
 //!
 //! 1. Hand the aarch64 `virt` linker script to the test kernel (the single
-//!    per-board script the architecture port owns — `AGENTS.md` §2.2) and dump
+//!    per-board script the architecture port owns) and dump
 //!    the canonical QEMU `virt` flattened device tree, embedding it so the test
 //!    discovers the GICv2 base and the generic-timer rate from the firmware
 //!    tree (`plans/PI.md` P3/P4). QEMU's `-kernel <ELF>` aarch64 path passes no
 //!    DTB pointer (`x0 = 0`), so the board tree is embedded at build time; the
 //!    dump helper lives in the shared harness so no aarch64 build script
-//!    re-rolls it (`AGENTS.md` §2.2).
+//!    re-rolls it.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    mem_map_program`) **position-independent** for the freestanding aarch64
 //!    target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning the anonymous-region
 //!    base + length through the `RUSTOS_MEM_MAP_ADDR` / `RUSTOS_MEM_MAP_LEN`
 //!    environment variables so this script is the single source of truth for
-//!    the region the program maps *and* the kernel's fault check verifies
-//!    (`AGENTS.md` §2.2).
+//!    the region the program maps *and* the kernel's fault check verifies.
 //! 3. Convert the linked PIE ELF to an `rxe` blob with
 //!    [`rustos_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
 //!    [`USER_BIAS`] the kernel maps the image at and stamping the kernel's
 //!    compiled-in syscall CFI tag (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`)
-//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    so [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes, the bias, and the matching [`REGION_VA`] / [`REGION_LEN`]
 //!    constants as a Rust source the test `include!`s.
 //!
@@ -32,7 +31,7 @@
 //! compiles only for the freestanding aarch64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -43,7 +42,7 @@ use std::process::Command;
 /// Virtual base the program image is mapped at. Chosen at 64 GiB — far above
 /// the kernel's 2 GiB identity map and within the 39-bit (512 GiB) TTBR0
 /// region — so the image lands on freshly walked stage-1 tables instead of
-/// colliding with an identity gigapage block (`AGENTS.md` §2.2 — the proven
+/// colliding with an identity gigapage block (the proven
 /// spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
@@ -53,12 +52,12 @@ const USER_BIAS: u64 = 0x10_0000_0000;
 /// tables and never overlaps the spawn-time image. The single source of truth:
 /// passed to the program build via `RUSTOS_MEM_MAP_ADDR` *and* emitted as the
 /// `REGION_VA` constant the kernel's fault handler checks the faulting address
-/// against, so the two halves can never disagree (`AGENTS.md` §2.2).
+/// against, so the two halves can never disagree.
 const REGION_VA: u64 = USER_BIAS + (16 << 20);
 
 /// Length in bytes of the anonymous region (two pages). Passed to the program
 /// build via `RUSTOS_MEM_MAP_LEN` and emitted as the `REGION_LEN` constant the
-/// kernel sizes its fault-range check from (`AGENTS.md` §2.2).
+/// kernel sizes its fault-range check from.
 const REGION_LEN: u64 = 2 * 4096;
 
 /// Rust target triple of the freestanding aarch64 build.
@@ -83,7 +82,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == AARCH64_TARGET {
         // The test kernel itself links with the aarch64 `virt` script the
-        // architecture port owns (the single per-board script, §2.2).
+        // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -120,7 +119,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // aarch64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -138,7 +137,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         // host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Pin the region base + length (the §2.2 single source of truth).
+        // Pin the region base + length (the single source of truth).
         .env("RUSTOS_MEM_MAP_ADDR", REGION_VA.to_string())
         .env("RUSTOS_MEM_MAP_LEN", REGION_LEN.to_string())
         .env(

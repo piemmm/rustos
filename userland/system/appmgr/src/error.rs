@@ -5,7 +5,7 @@ use rustos_abi::{BundleLayoutError, Errno, LibraryError, RxeError};
 /// Why a bundle could not be loaded, or a library reference resolved.
 ///
 /// Every variant is a refusal: the loader maps the first problem it meets to
-/// one of these and stops (`AGENTS.md` §5.4 — fail closed). There is no
+/// one of these and stops (fail closed). There is no
 /// "loaded with warnings" outcome.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -13,24 +13,23 @@ pub enum AppError {
     /// The bundle could not be read from the [`BundleStore`](crate::BundleStore);
     /// carries the underlying [`Errno`].
     Store(Errno),
-    /// The bundle's top-level layout deviates from the fixed §16.5 set.
+    /// The bundle's top-level layout deviates from the fixed set.
     Layout(BundleLayoutError),
     /// The `AppInfo` manifest could not be decoded, or targets an
     /// unsupported ABI version; carries the underlying [`Errno`].
     Manifest(Errno),
     /// The manifest's declared syscall-table hash does not match the
-    /// kernel's compiled-in hash (`AGENTS.md` §9 / §19.2).
+    /// kernel's compiled-in hash.
     InterfaceHashMismatch,
     /// The manifest's Ed25519 signature did not verify.
     Signature,
     /// The bundle's contents do not match the content hash the signature
-    /// covers (`AGENTS.md` §16.5).
+    /// covers.
     ContentHashMismatch,
-    /// A shared-library reference violated the §16.4 dynamic-loader policy.
+    /// A shared-library reference violated the dynamic-loader policy.
     Library(LibraryError),
     /// The entry-point `Run` binary is not a valid `rxe` load image, or its
-    /// CFI tag does not match the kernel's syscall interface hash
-    /// (`AGENTS.md` §9 / §19.2); carries the underlying [`RxeError`].
+    /// CFI tag does not match the kernel's syscall interface hash; carries the underlying [`RxeError`].
     RunImage(RxeError),
 }
 

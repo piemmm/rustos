@@ -1,18 +1,18 @@
 //! Deterministic fuzz harness for the encrypted-swap restore path.
 //!
 //! `EncryptedSwap::load` reads a record off a swap *device* — bytes that, in
-//! the threat model of `AGENTS.md` §4, an attacker with disk access may have
-//! rewritten at will. Per §19.6 ("every parser of untrusted input ... has a
+//! the threat model of, an attacker with disk access may have
+//! rewritten at will. Per ("every parser of untrusted input... has a
 //! fuzz target") it is driven here against arbitrary device contents.
 //!
-//! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
+//! RustOS does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded PRNG drives random pages, slots, and byte-level
 //! tampering against an in-memory swap device and asserts the invariants the
 //! restore path must uphold no matter what is on the platter:
 //!
 //! 1. `load` never panics for any device contents.
 //! 2. An untampered round-trip returns the exact page that was stored.
-//! 3. **Fail-closed** (`AGENTS.md` §5.4): any tampering with a stored record
+//! 3. **Fail-closed**: any tampering with a stored record
 //!    — ciphertext, tag, nonce, or relocation to another slot — makes `load`
 //!    return `Err`; a forgery is never accepted as plaintext.
 //! 4. On any error the caller's output buffer is fully zeroed.
@@ -20,9 +20,9 @@
 //! The device's bytes are held behind an `Rc<RefCell<..>>` so the harness
 //! retains a handle to rewrite them after the `EncryptedSwap` has taken
 //! ownership of the backend — the encrypted layer exposes no plaintext path
-//! of its own, by design (`AGENTS.md` §4).
+//! of its own, by design.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//! ## Wall-clock budget
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed. When

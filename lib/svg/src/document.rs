@@ -4,7 +4,7 @@
 //! a square design grid plus an ordered stack of filled polygon [`SvgLayer`]s
 //! (bottom layer first), exactly the shape `lib/cursor`'s `VectorCursor` and
 //! `lib/icon`'s `VectorIcon` consume. SVG is *converted once* into this form
-//! and never re-parsed on the hot compositing path (`AGENTS.md` §10).
+//! and never re-parsed on the hot compositing path.
 
 use alloc::vec::Vec;
 
@@ -19,7 +19,7 @@ use crate::xml::{self, Element};
 ///
 /// The desktop authors assets on grids of tens of units; a far larger grid is
 /// almost certainly a hostile or corrupt document and is refused rather than
-/// trusted (`AGENTS.md` §2.9).
+/// trusted.
 const MAX_DESIGN: i32 = 4096;
 
 /// The largest number of filled layers a single document may contribute.
@@ -33,7 +33,7 @@ const MAX_TOTAL_VERTICES: usize = 65_536;
 ///
 /// This mirrors `lib/cursor`'s `Shape` and `lib/icon`'s `IconLayer`; those
 /// crates map an [`SvgImage`] straight onto their own vector forms, so there
-/// is one rasterisation path (`AGENTS.md` §2.2).
+/// is one rasterisation path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SvgLayer {
     /// The straight-alpha fill colour of this layer.
@@ -76,9 +76,9 @@ impl SvgImage {
 ///
 /// The decoder is total: it returns `Ok` for a document in the supported
 /// subset and a precise [`SvgError`] for everything else, and it never panics
-/// for any input (`AGENTS.md` §2.9, §19.5). It is the single image-decoding
+/// for any input. It is the single image-decoding
 /// entry point the desktop's SVG-first asset pipeline runs untrusted on-disk
-/// assets through (`AGENTS.md` §10, §16.4).
+/// assets through.
 ///
 /// # Errors
 /// See [`SvgError`] for the closed set of rejection reasons.
@@ -176,7 +176,7 @@ fn parse_length(value: &str) -> Result<i32, SvgError> {
 /// Read an optional pointer hotspot from the `<svg>` element.
 ///
 /// Both coordinates must be present together; one without the other is a
-/// malformed asset rather than a silent default (`AGENTS.md` §2.9).
+/// malformed asset rather than a silent default.
 fn parse_hotspot(svg: &Element<'_>) -> Result<Option<(i32, i32)>, SvgError> {
     match (svg.attr("data-hotspot-x"), svg.attr("data-hotspot-y")) {
         (Some(x), Some(y)) => {

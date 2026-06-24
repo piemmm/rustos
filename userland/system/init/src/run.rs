@@ -1,19 +1,17 @@
 //! The `Run` entry-point binary of the `init` application bundle
-//! (`AGENTS.md` §16.5, `plans/PI.md` P6b).
+//! (`plans/PI.md` P6b).
 //!
 //! This is the program the kernel spawns as PID 1 once it reaches user mode
-//! (`plans/PI.md` P6c). It is a **pure-Rust** program: RustOS is Rust-only
-//! (`AGENTS.md` §1), so `init` links the Rust userland runtime
+//! (`plans/PI.md` P6c). It is a **pure-Rust** program: RustOS is Rust-only, so `init` links the Rust userland runtime
 //! `rustos-rt` — never the C ABI (`crt0` + `abi-sys`), which exists solely
-//! for programs **not** written in Rust (`AGENTS.md` §16.4). `rustos-rt`
-//! provides `_start`, the per-process stack canary (`AGENTS.md` §19.2), the
+//! for programs **not** written in Rust. `rustos-rt`
+//! provides `_start`, the per-process stack canary, the
 //! panic handler, and the syscall wrappers; `rustos_rt::entry!` names this
 //! program's `main`.
 //!
 //! `main` parses the compiled-in `startup::DEFAULT_CONFIG`, writes the
 //! first banner line to its inherited standard output (fd 1) through
-//! `rustos_rt::stdout` (the `abi-v1` `stream_write` syscall — `AGENTS.md`
-//! §20, `init` binds to the stream, never a device), then **supervises** the
+//! `rustos_rt::stdout` (the `abi-v1` `stream_write` syscall, `init` binds to the stream, never a device), then **supervises** the
 //! user's sessions: one session program per discovered text console
 //! (`console_count` / `spawn_at` — the video console and the UART are
 //! separate session contexts, `plans/PI.md` P11), reaped with wait-any and
@@ -22,8 +20,7 @@
 //!
 //! It links **only** the runtime and its own startup-config parser, never the
 //! sibling `rustos-init` orchestrator library, whose `alloc`-and-crypto
-//! dependency chain has no place in a banner-printing program (`AGENTS.md`
-//! §2.3). That parser therefore lives alongside it in [`startup`] and is
+//! dependency chain has no place in a banner-printing program. That parser therefore lives alongside it in [`startup`] and is
 //! host-tested there. The binary is built position-independent and converted
 //! to an `rxe` blob by the consuming boot path (`plans/PI.md` P6c). On the
 //! host it is an inert stub so `cargo build --workspace`, clippy, and fmt
@@ -43,32 +40,30 @@ mod program {
     use crate::supervisor::{supervise, Outcome, Sessions};
 
     /// Exit code when the compiled-in startup config does not parse. A
-    /// reserved, fail-closed value (`AGENTS.md` §2.9); the default config is
+    /// reserved, fail-closed value; the default config is
     /// well-formed, so reaching this is a build defect, not a runtime input.
     const EXIT_CONFIG_INVALID: i32 = 70;
 
     /// Exit code when launching a session program failed — the `spawn`
-    /// syscall returned a negative `-errno`. A reserved, fail-closed value
-    /// (`AGENTS.md` §2.9) distinct from [`EXIT_CONFIG_INVALID`] so the cause
+    /// syscall returned a negative `-errno`. A reserved, fail-closed value distinct from [`EXIT_CONFIG_INVALID`] so the cause
     /// is unambiguous in the audit transcript.
     const EXIT_SESSION_FAILED: i32 = 71;
 
     /// Exit code when waiting on the sessions failed — the `wait` syscall
     /// returned a negative `-errno` (the supervisor cannot reap the children
-    /// it spawned). A reserved, fail-closed value (`AGENTS.md` §2.9)
+    /// it spawned). A reserved, fail-closed value
     /// distinct from [`EXIT_SESSION_FAILED`] so the cause is unambiguous.
     const EXIT_WAIT_FAILED: i32 = 72;
 
     /// Exit code when no console's session could stay up: every console
     /// consumed its relaunch budget (`supervisor::SESSION_SPAWN_BUDGET`)
     /// without a session ever blocking, so the supervisor stops rather than
-    /// relaunching forever (`AGENTS.md` §2.1 / §2.9).
+    /// relaunching forever.
     const EXIT_SESSION_EXHAUSTED: i32 = 73;
 
     /// Exit code when the kernel reports no installed console (or refuses
     /// the count): there is nothing a session could attach its standard
-    /// streams to, so PID 1 reports the system unusable fail-closed
-    /// (`AGENTS.md` §2.9) rather than spawning stream-less sessions.
+    /// streams to, so PID 1 reports the system unusable fail-closed rather than spawning stream-less sessions.
     const EXIT_NO_CONSOLES: i32 = 74;
 
     /// The production [`Sessions`] backing: the real `rustos-rt` syscall
@@ -103,8 +98,8 @@ mod program {
     /// space, an unestablished descriptor, or a closed-fail kernel path).
     /// PID 1 cannot usefully proceed without the console it was spawned to
     /// drive, so it parks fail-closed rather than supervising sessions on a
-    /// console it never reached (`AGENTS.md` §2.9). This is a terminal park,
-    /// not a retry loop (`AGENTS.md` §2.1).
+    /// console it never reached. This is a terminal park,
+    /// not a retry loop.
     fn main() -> i32 {
         let Ok(config) = StartupConfig::parse(DEFAULT_CONFIG) else {
             return EXIT_CONFIG_INVALID;
@@ -128,7 +123,7 @@ mod program {
         // the idle drive-loop parking on `KernelArch::wait_for_interrupt`
         // and re-stepping a woken sole waiter rather than halting, so the
         // perpetual `devmgr` parks off the run queue without starving a
-        // single-CPU system (`AGENTS.md` §2.1 / §17.1 / §18.3).
+        // single-CPU system.
         //
         // The service paths arrive as `&str` from the parsed config; PID 1
         // re-borrows them as bytes into a fixed stack array (no heap,

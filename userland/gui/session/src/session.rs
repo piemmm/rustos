@@ -30,8 +30,7 @@ pub enum SessionEvent {
 ///
 /// It owns both so a runtime theme switch is a single in-place operation: the
 /// registry's active theme changes and the taskbar is re-themed to match,
-/// through one private apply path so the relay is never duplicated
-/// (`AGENTS.md` §2.2).
+/// through one private apply path so the relay is never duplicated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DesktopSession {
     themes: ThemeRegistry,
@@ -40,7 +39,7 @@ pub struct DesktopSession {
 
 impl DesktopSession {
     /// Build a session for a taskbar placed by `config`, starting from the
-    /// built-in themes with the default dark theme active (`AGENTS.md` §10).
+    /// built-in themes with the default dark theme active.
     ///
     /// The start menu is seeded with its session controls and a light/dark
     /// appearance-toggle entry labelled `appearance_label`, so the toggle is
@@ -86,7 +85,7 @@ impl DesktopSession {
     /// returns [`SessionEvent::AppearanceChanged`] with the now-active
     /// [`ThemeId`]. Any other response — including a launcher or
     /// session-control selection, which the session has no capability to act
-    /// on — is [`SessionEvent::Forward`]ed unchanged (`AGENTS.md` §10, §16.5).
+    /// on — is [`SessionEvent::Forward`]ed unchanged.
     pub fn resolve(&mut self, response: TaskbarResponse) -> SessionEvent {
         if let TaskbarResponse::MenuEntrySelected {
             action: MenuAction::ToggleAppearance,
@@ -102,8 +101,7 @@ impl DesktopSession {
     /// the now-active [`ThemeId`] and re-theming the taskbar.
     ///
     /// The switch is driven by the *active* theme's appearance, so a custom
-    /// dark theme toggles to the built-in light theme and vice versa
-    /// (`AGENTS.md` §10). It cannot fail: the two built-ins are always present.
+    /// dark theme toggles to the built-in light theme and vice versa. It cannot fail: the two built-ins are always present.
     pub fn toggle_appearance(&mut self) -> ThemeId {
         let id = self.themes.toggle_appearance();
         self.reapply_theme();
@@ -115,8 +113,7 @@ impl DesktopSession {
     /// # Errors
     ///
     /// Returns [`ThemeError::UnknownTheme`] and changes nothing (neither the
-    /// active theme nor the taskbar) if no registered theme has that id
-    /// (`AGENTS.md` §5.4 / §2.9).
+    /// active theme nor the taskbar) if no registered theme has that id.
     pub fn set_theme(&mut self, id: ThemeId) -> Result<(), ThemeError> {
         self.themes.set_active(id)?;
         self.reapply_theme();
@@ -130,7 +127,7 @@ impl DesktopSession {
     /// Reads the asset named by the active theme's
     /// [`CursorSet`](rustos_theme::CursorSet) for each cursor kind through
     /// `reader`. It cannot fail: a kind whose asset is missing, unreadable, or
-    /// malformed keeps its built-in cursor (`AGENTS.md` §2.9), so a corrupt or
+    /// malformed keeps its built-in cursor, so a corrupt or
     /// absent `/System/Graphics` simply yields the built-in cursor set.
     pub fn load_cursors<R>(&self, reader: &mut R) -> CursorTheme
     where
@@ -144,7 +141,7 @@ impl DesktopSession {
     /// `set_icons`.
     ///
     /// It cannot fail: a kind whose asset is missing, unreadable, or malformed
-    /// falls back to its built-in glyph (`AGENTS.md` §2.9).
+    /// falls back to its built-in glyph.
     pub fn load_icons<R>(&self, reader: &mut R) -> IconSet
     where
         R: GraphicsAssetReader + ?Sized,
@@ -165,7 +162,7 @@ impl DesktopSession {
     /// Re-theme the taskbar from the active theme. The single place a theme
     /// switch reaches the taskbar, so the relay is not duplicated between
     /// [`toggle_appearance`](Self::toggle_appearance) and
-    /// [`set_theme`](Self::set_theme) (`AGENTS.md` §2.2).
+    /// [`set_theme`](Self::set_theme).
     fn reapply_theme(&mut self) {
         self.taskbar.apply_theme(self.themes.active());
     }

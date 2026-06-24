@@ -10,7 +10,7 @@
 //! [`Display`] driver.
 //!
 //! All compositing happens here, in user space; the kernel only ships
-//! framebuffer access through a capability (`AGENTS.md` §10). GPU
+//! framebuffer access through a capability. GPU
 //! acceleration, when a driver exposes it, replaces this software path
 //! behind the same public surface; today the software path is the
 //! fallback every platform always has.
@@ -45,10 +45,9 @@ enum ChannelOrder {
 ///
 /// The compositor owns its output's display density as a [`Scale`]: the
 /// monitor it scans out to is a single output with one DPI, and the desktop's
-/// logical lengths become physical pixels through that one factor (`AGENTS.md`
-/// §10). It is the single source of truth for this output's scale — the
+/// logical lengths become physical pixels through that one factor. It is the single source of truth for this output's scale — the
 /// cursor controller, the taskbar presenter, and apps all *read* it rather
-/// than keeping a copy (§2.2). A multi-monitor desktop is a set of such
+/// than keeping a copy. A multi-monitor desktop is a set of such
 /// outputs, each carrying its own scale; a window's effective density is the
 /// scale of the output it is on ([`window_scale`](Self::window_scale)).
 pub struct Compositor {
@@ -75,7 +74,7 @@ impl Compositor {
     ///
     /// Returns `None` if `mode` describes a surface too large to
     /// allocate or whose stride cannot hold one scanline, failing
-    /// closed rather than panicking (§2.9).
+    /// closed rather than panicking.
     #[must_use]
     pub fn new(mode: DisplayMode, background: Color) -> Option<Self> {
         let order = channel_order(mode.format)?;
@@ -118,7 +117,7 @@ impl Compositor {
     /// The compositor owns the scale for the monitor it scans out to; the
     /// cursor controller, the taskbar presenter, and apps read it here rather
     /// than holding their own copy, so the desktop has exactly one place a
-    /// monitor's density lives (`AGENTS.md` §10 / §2.2).
+    /// monitor's density lives.
     #[must_use]
     pub const fn scale(&self) -> Scale {
         self.scale
@@ -132,7 +131,7 @@ impl Compositor {
     /// cursor, via [`CursorController::refresh`](crate::CursorController::refresh),
     /// and the taskbar, by re-presenting it). Setting the scale already in
     /// effect changes nothing and returns `false`, so the caller can skip the
-    /// refresh (`AGENTS.md` §10 / §2.2).
+    /// refresh.
     pub fn set_scale(&mut self, scale: Scale) -> bool {
         if scale == self.scale {
             return false;
@@ -148,7 +147,7 @@ impl Compositor {
     /// This is the read-only query an app uses when it must size something in
     /// physical pixels: picking the desktop density is the compositor's job,
     /// not the app's, so an app observes its window's scale here but never sets
-    /// it (`AGENTS.md` §10). With a single output it is this compositor's
+    /// it. With a single output it is this compositor's
     /// [`scale`](Self::scale); a multi-monitor compositor returns the scale of
     /// the output the window currently sits on.
     #[must_use]
@@ -178,7 +177,7 @@ impl Compositor {
     ///
     /// Hit-testing walks the z-order from the top down and uses each
     /// window's rectangular [`bounds`](Window::bounds); rounded corners
-    /// are a cosmetic compositing effect (`AGENTS.md` §2.2) and do not
+    /// are a cosmetic compositing effect and do not
     /// carve holes out of a window's input region.
     #[must_use]
     pub fn window_at(&self, point: Point) -> Option<WindowId> {
@@ -276,7 +275,7 @@ impl Compositor {
     ///
     /// The artwork comes from `lib/cursor` (a scalable, colourful, vector
     /// cursor rasterised at the display scale); the compositor only places
-    /// and blends it (`AGENTS.md` §2.2 / §2.4).
+    /// and blends it.
     pub fn set_cursor(&mut self, image: CursorImage, pointer: Point) {
         if let Some(cursor) = &self.cursor {
             self.damage.add(cursor.bounds());
@@ -367,7 +366,7 @@ impl Compositor {
 
     /// Present via the display's hardware layer engine when it can serve
     /// the current scene, falling back to the software full-frame path
-    /// otherwise (`AGENTS.md` §10 — the software path is always the
+    /// otherwise (the software path is always the
     /// fallback).
     ///
     /// The scene is encoded back-to-front as one solid background layer,
@@ -376,8 +375,7 @@ impl Compositor {
     /// hardware result matches the software compositor pixel-for-pixel. If
     /// the engine's [`AccelCaps`] cannot hold that many layers, or a layer
     /// is larger than the engine can source, the whole frame is composited
-    /// in software and presented instead — never a partial hardware frame
-    /// (§2.9).
+    /// in software and presented instead — never a partial hardware frame.
     ///
     /// # Errors
     ///
@@ -446,7 +444,7 @@ impl Compositor {
     /// Bake a `width`×`height` region into a premultiplied, display-format
     /// layer buffer placed at `(dst_x, dst_y)`. `sample` yields each
     /// surface-local pixel, or `None` for a transparent one. Returns
-    /// `None` only if the buffer size overflows `usize` (§2.9).
+    /// `None` only if the buffer size overflows `usize`.
     fn encode_layer(
         &self,
         width: u32,
@@ -566,7 +564,7 @@ fn scanout_frame(mode: &DisplayMode) -> Option<Vec<u8>> {
 
 /// Map a [`DisplayFormat`] to its [`ChannelOrder`], or `None` for a
 /// format this software compositor does not encode (it fails closed at
-/// [`Compositor::new`] rather than guessing a byte order, §2.1).
+/// [`Compositor::new`] rather than guessing a byte order).
 fn channel_order(format: DisplayFormat) -> Option<ChannelOrder> {
     match format {
         DisplayFormat::Rgba8888 => Some(ChannelOrder::Rgba),

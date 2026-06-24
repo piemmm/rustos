@@ -17,13 +17,12 @@
 //! [`DirectPhysMap`] describing the boot direct map; host unit tests
 //! wire a `SimPhysMap` that owns a real allocation standing in for
 //! physical RAM, so the very pointer a test writes "as the device"
-//! aliases the pointer the pool hands the driver (`AGENTS.md` §2.2 —
-//! one model exercised in both worlds).
+//! aliases the pointer the pool hands the driver (one model exercised in both worlds).
 //!
 //! The translation is the only place a physical address becomes a
 //! pointer; callers route every dereference through the returned
 //! [`NonNull`] and the bounds-checked helpers in [`crate::ptr`]
-//! (`AGENTS.md` §4 — no raw pointer arithmetic without a
+//! (no raw pointer arithmetic without a
 //! bounds-checked wrapper).
 
 use core::ptr::NonNull;
@@ -35,7 +34,7 @@ use crate::frame::PhysAddr;
 ///
 /// Returning [`None`] means `[phys, phys + len)` lies outside the
 /// direct map; callers fail closed rather than synthesising a pointer
-/// of their own (`AGENTS.md` §2.9, §4).
+/// of their own.
 pub trait PhysMap {
     /// Map `[phys, phys + len)` to a CPU pointer, or [`None`] if the
     /// range is not covered by the direct map.

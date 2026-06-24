@@ -10,8 +10,7 @@
 //!
 //! A terminal that cannot address the cursor (the `dumb` fallback) takes a
 //! conservative full-rewrite path instead of absolute positioning, so even the
-//! baseline degrades safely rather than emitting sequences it would not honour
-//! (`AGENTS.md` §2.9).
+//! baseline degrades safely rather than emitting sequences it would not honour.
 
 use alloc::vec::Vec;
 

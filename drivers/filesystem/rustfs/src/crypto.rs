@@ -18,30 +18,29 @@
 //! on disk, in the plaintext discovery region of every superblock slot (the
 //! "minimal unlock header" the spec permits, §7). Opening derives the wrapping
 //! key from the supplied [`VolumeKey`] and unseals the master key; a wrong key
-//! fails the AEAD authentication and the mount is refused, fail-closed
-//! (`AGENTS.md` §5.4), never a panic (§2.9).
+//! fails the AEAD authentication and the mount is refused, fail-closed, never a panic.
 //!
-//! All primitives come through `lib/crypto` (`AGENTS.md` §2.12): the KDF
+//! All primitives come through `lib/crypto`: the KDF
 //! ([`rustos_crypto::derive_key`]), the metadata MAC (HMAC-SHA256), and the
 //! AEAD (ChaCha20-Poly1305). Nothing here hand-rolls a primitive.
 //!
 //! # The key material is drawn from the platform RNG
 //!
 //! The per-volume master key, its wrapping salt, and the wrap nonce are drawn
-//! at format time from an injected [`EntropySource`] — the seam onto the §19.2
+//! at format time from an injected [`EntropySource`] — the seam onto the
 //! platform RNG (`lib/rng`'s `CsRng`, the cryptographically secure generator
-//! `AGENTS.md` §1/§4 mandates for `RustFS` keys). The master key is therefore
+//! the charter mandates for `RustFS` keys). The master key is therefore
 //! independent of the caller's volume key (and re-wrappable on a future key
 //! change) rather than derived from it. Only the wrapping key stays a
 //! deterministic KDF of the volume key and the random salt, because [`unwrap`]
 //! must recompute it from the supplied volume key to unseal the master key on
 //! mount. A failed entropy draw never yields a volume with predictable key
-//! material: provisioning fails closed (`AGENTS.md` §5.4).
+//! material: provisioning fails closed.
 //!
 //! The driver itself never reaches for a global RNG; the concrete generator is
 //! injected at the composition root, mirroring the seam `kernel/mem`'s
 //! encrypted swap, `init`'s `Spawner`, and `login`'s `Authenticator` use. That
-//! keeps the driver architecture-neutral (§17.2).
+//! keeps the driver architecture-neutral.
 
 use rustos_abi::driver::DriverError;
 use rustos_crypto::{
@@ -53,7 +52,7 @@ use rustos_crypto::{
 pub const VOLUME_KEY_LEN: usize = 32;
 
 /// A caller-supplied volume key: the installer's, recovery flow's, or storage
-/// policy service's key material that unlocks a `RustFS` volume (§7). `RustFS`
+/// policy service's key material that unlocks a `RustFS` volume. `RustFS`
 /// never persists it; only the master key it unwraps is stored, and that only
 /// in AEAD-sealed form.
 pub type VolumeKey = [u8; VOLUME_KEY_LEN];
@@ -61,11 +60,11 @@ pub type VolumeKey = [u8; VOLUME_KEY_LEN];
 /// Source of cryptographic randomness for a fresh volume's key material (the
 /// master key, the wrapping salt, and the wrap nonce) and its UUID.
 ///
-/// This is `RustFS`'s seam onto the §19.2 platform RNG: the composition root
+/// This is `RustFS`'s seam onto the platform RNG: the composition root
 /// injects the cryptographically secure generator (`lib/rng`'s `CsRng`, the
-/// generator `AGENTS.md` §1/§4 mandates for `RustFS` keys), so the driver
+/// generator the charter mandates for `RustFS` keys), so the driver
 /// itself never names or reaches for a global RNG and stays
-/// architecture-neutral (§17.2). It mirrors the injection seam `kernel/mem`'s
+/// architecture-neutral. It mirrors the injection seam `kernel/mem`'s
 /// encrypted swap, `init`'s `Spawner`, and `login`'s `Authenticator` use.
 pub trait EntropySource {
     /// Fill the whole of `out` with cryptographically secure random bytes.
@@ -73,7 +72,7 @@ pub trait EntropySource {
     /// # Errors
     ///
     /// Returns a [`DriverError`] (the implementation's fail-closed code) if
-    /// randomness is unavailable. `RustFS` fails closed (`AGENTS.md` §5.4): no
+    /// randomness is unavailable. `RustFS` fails closed: no
     /// key, salt, nonce, or UUID is derived from a failed draw, so a volume is
     /// never provisioned with predictable key material. On error the contents
     /// of `out` are unspecified and must not be used.
@@ -116,7 +115,7 @@ pub struct VolumeKeys {
     pub filename_key: AeadKey,
     /// AEAD key encrypting file data at rest.
     pub content_key: AeadKey,
-    /// Stable per-volume deduplication-domain identifier (§7). Dedupe is
+    /// Stable per-volume deduplication-domain identifier. Dedupe is
     /// allowed only within one domain; with a single volume key today there
     /// is exactly one domain, but it is carried in every chunk record and
     /// index key so the cross-domain rule holds once domains arrive. It is
@@ -172,7 +171,7 @@ impl CryptoHeader {
     ///
     /// [`AeadError::Authentication`] is never produced here; the function is
     /// infallible for a correctly-sized buffer and panics are avoided by the
-    /// caller always passing a full payload region (`AGENTS.md` §2.9).
+    /// caller always passing a full payload region.
     pub fn encode(&self, out: &mut [u8]) {
         let mut off = 0;
         out[off..off + SALT_LEN].copy_from_slice(&self.salt);
@@ -223,15 +222,15 @@ impl CryptoHeader {
 /// [`VolumeKeys`]. The master key is independent of `volume_key`, so the
 /// volume can be re-wrapped on a key change without rewriting its data. No
 /// plaintext key is ever returned for storage; the header carries only the
-/// wrapped master key (§7).
+/// wrapped master key.
 ///
 /// # Errors
 ///
 /// * [`DriverError`] (the entropy source's fail-closed code) if any random
 ///   draw is unavailable: provisioning aborts before sealing, so a volume is
-///   never created with predictable key material (`AGENTS.md` §5.4).
+///   never created with predictable key material.
 /// * [`DriverError::DeviceFault`] if sealing the master key fails (unreachable
-///   for the fixed-size buffer, but surfaced rather than panicked, §2.9).
+///   for the fixed-size buffer, but surfaced rather than panicked).
 pub fn provision(
     volume_key: &VolumeKey,
     entropy: &mut dyn EntropySource,
@@ -266,7 +265,7 @@ pub fn provision(
 ///
 /// [`AeadError::Authentication`] if `volume_key` is wrong (or the wrapped
 /// blob is corrupt): the AEAD tag fails to verify, so the caller refuses the
-/// mount, fail-closed (`AGENTS.md` §5.4).
+/// mount, fail-closed.
 pub fn unwrap(volume_key: &VolumeKey, header: &CryptoHeader) -> Result<VolumeKeys, AeadError> {
     let wrapping = wrapping_key(volume_key, &header.salt);
     let mut master = header.wrapped_master;
@@ -321,7 +320,7 @@ pub fn encrypt_region(
 /// Decrypt `region` in place under `key`, reading the nonce and tag from
 /// `trailer`. Authenticates before it yields plaintext: a bit-flip in the
 /// ciphertext, trailer, or `phys` binding fails the tag and the caller fails
-/// closed (`AGENTS.md` §5.4), never returning mis-decrypted bytes.
+/// closed, never returning mis-decrypted bytes.
 ///
 /// # Errors
 ///

@@ -14,8 +14,8 @@ use rustos_abi::Errno;
 /// Every field is borrowed from the parsed [`Command`](crate::Command), so the
 /// record allocates nothing of its own. A `None` `uid` asks the database to
 /// allocate one; `None` `comment`/`home` leave those fields to the database's
-/// documented defaults (the §16 `/Users/<name>` layout for the home
-/// directory) — `useradd` never guesses them (`AGENTS.md` §2.1).
+/// documented defaults (the `/Users/<name>` layout for the home
+/// directory) — `useradd` never guesses them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UserSpec<'a> {
     /// The login name. Already validated to match `[a-z_][a-z0-9_-]*` within
@@ -37,12 +37,12 @@ pub struct UserSpec<'a> {
 }
 
 /// Reads and writes the user database that persists under
-/// `/System/Security/Users` (`AGENTS.md` §5.1).
+/// `/System/Security/Users`.
 ///
 /// `useradd` first asks [`name_in_use`](UserDb::name_in_use) so it can report
 /// a precise "already exists" before attempting a write, then calls
 /// [`create`](UserDb::create). The database — not this tool — is the policy
-/// point (`AGENTS.md` §5.4): it enforces `CAP_USER_ADMIN`, uid uniqueness,
+/// point: it enforces `CAP_USER_ADMIN`, uid uniqueness,
 /// group existence, and the supplementary-group bound, and returns the
 /// matching [`Errno`] on refusal.
 pub trait UserDb {

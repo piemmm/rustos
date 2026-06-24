@@ -2,7 +2,7 @@
 //! on the freestanding `riscv64gc-unknown-none-elf` target. Mirrors
 //! `tests/integration/timer_preempt_qemu_riscv64/build.rs`; all riscv64
 //! verticals reference the single per-arch linker script the
-//! architecture port owns (`AGENTS.md` §2.2 — no duplication).
+//! architecture port owns (no duplication).
 
 fn main() {
     rustos_itest_harness::emit_target_cfg();

@@ -4,7 +4,7 @@
 //! [`DmaPool`] driven by `kernel/mem`'s `HostPageTable` and a small
 //! `FrameAllocator`. The [`RecordingSink`] from `crate::audit` captures
 //! the exact audit-event sequence so the security trail is asserted
-//! alongside the functional outcome (`AGENTS.md` §5.4.4).
+//! alongside the functional outcome.
 
 extern crate alloc;
 

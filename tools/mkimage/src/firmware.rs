@@ -1,4 +1,4 @@
-//! Pinned, checksummed firmware build inputs (`AGENTS.md` §19.3).
+//! Pinned, checksummed firmware build inputs.
 //!
 //! The Raspberry Pi boot blobs are third-party redistributables and are not
 //! committed to the tree. `tools/mkimage/firmware.lock` pins each required

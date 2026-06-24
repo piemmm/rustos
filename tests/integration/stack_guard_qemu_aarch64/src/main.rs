@@ -7,7 +7,7 @@
 //!
 //! The kthread kernel-stack guard (`kernel/core::kthread`) currently
 //! catches a stack overflow with a poison canary checked at the next
-//! reschedule (the binding §2.17 defence). The *deployment* form turns the
+//! reschedule (the binding defence). The *deployment* form turns the
 //! overflow into an immediate hardware fault by **unmapping** the guard
 //! page. But the boot path identity-maps RAM with coarse 1 GiB / 2 MiB
 //! *block* descriptors, and a block has no per-4 KiB leaf to clear — so the
@@ -41,8 +41,7 @@
 //!
 //! It links only the `rustos-arch-aarch64` port and supplies its own
 //! `kernel_main`. The QEMU-exit shortcut lives in this dedicated bin,
-//! never behind a Cargo feature on the arch crate (`AGENTS.md` §5.4.5 —
-//! fail closed).
+//! never behind a Cargo feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -89,7 +88,7 @@ mod kernel {
 
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// exactly the (now-unmapped) guard page, then report PASS. Anything
-    /// else is a FAILURE. Never returns (`AGENTS.md` §2.9).
+    /// else is a FAILURE. Never returns.
     extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
         let guard_va = core::ptr::addr_of!(GUARD_PAGE) as u64;
         if fault::is_abort(esr) && far == guard_va {

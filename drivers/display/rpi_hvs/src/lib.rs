@@ -5,24 +5,23 @@
 //! screen, the HVS reads a *display list* (DLIST) describing a stack of
 //! planes and composites them into the scan-out as it drives the
 //! display. This driver exposes that engine through the
-//! [`AcceleratedDisplay`] seam (`AGENTS.md` §10): the desktop compositor
+//! [`AcceleratedDisplay`] seam: the desktop compositor
 //! hands it the visible windows as [`AccelLayer`]s and the HVS composites
 //! them, so the host never blends the whole screen in software.
 //!
 //! The driver also implements the plain [`Display`] trait so the
-//! software full-frame path stays available as the mandatory fallback
-//! (`AGENTS.md` §10) — e.g. when the window stack exceeds the plane
+//! software full-frame path stays available as the mandatory fallback — e.g. when the window stack exceeds the plane
 //! budget the HVS can composite in one pass.
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`RpiHvs`] is a public *type* re-exported so the driver host can
 //! instantiate it through [`RpiHvs::open`]; the host never reaches into
 //! the type beyond the [`Display`] / [`AcceleratedDisplay`] traits. The
 //! firmware property-channel client the driver host uses to *discover*
 //! the [`HvsConfig`] scan-out surface is the shared [`rustos_vcmailbox`]
-//! crate (§2.2 — the aarch64 port's framebuffer boot console speaks the
+//! crate (the aarch64 port's framebuffer boot console speaks the
 //! same protocol), and the [`wiring`] module is the host-side bring-up
 //! seam that performs that discovery over the hardware-tree-discovered
 //! mailbox and assembles the full [`HvsConfig`] (`plans/PI.md` P7).
@@ -34,9 +33,9 @@
 //! and the display-channel control register additionally requires
 //! [`CapabilityId::MMIO_MAP`]: every region is device-visible memory
 //! reached only through the capability-gated [`MmioMapper`], never
-//! through a pointer the driver synthesises itself (`AGENTS.md` §4 — no
+//! through a pointer the driver synthesises itself (no
 //! ambient authority). The driver runs in user space; it does not
-//! request `CAP_DRV_KERNEL` (`AGENTS.md` §4 / §8).
+//! request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -63,7 +62,7 @@ pub use rustos_vcmailbox::DEFAULT_BUS_ALIAS;
 /// spell `"HVS"` with a version nibble.
 const REGISTER_HANDLE_MARKER: u64 = 0x4856_5300_0000_0001;
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -92,7 +91,7 @@ struct PlaneBuffer {
 ///
 /// Dropping the [`RpiHvs`] drops every [`RegisterWindow`] it owns, which
 /// is the driver's quiesce step (the kernel reclaims the mappings on
-/// unload, `AGENTS.md` §4). Reloading is calling [`RpiHvs::open`] again.
+/// unload). Reloading is calling [`RpiHvs::open`] again.
 pub struct RpiHvs {
     mode: DisplayMode,
     scanout: RegisterWindow,

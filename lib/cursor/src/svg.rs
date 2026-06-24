@@ -1,11 +1,11 @@
 //! Building a [`VectorCursor`] from a decoded SVG asset.
 //!
-//! Cursors are authored as SVG (the SVG-first asset rule, `AGENTS.md` §10). A
+//! Cursors are authored as SVG (the SVG-first asset rule). A
 //! decoded [`SvgImage`] is a square design grid plus an ordered stack of
 //! filled polygon layers — exactly a cursor's [`Shape`] stack — and it carries
 //! the optional pointer hotspot (`data-hotspot-x`/`data-hotspot-y`). The
 //! conversion is a direct field map, so the cursor still rasterises through
-//! `lib/raster`'s single polygon path (`AGENTS.md` §2.2). An asset without a
+//! `lib/raster`'s single polygon path. An asset without a
 //! declared hotspot pins it to the design-grid origin.
 
 use rustos_svg::{SvgError, SvgImage};
@@ -33,10 +33,9 @@ impl VectorCursor {
 /// Decode an SVG byte string into a [`VectorCursor`].
 ///
 /// This is the desktop's cursor-asset entry point for the SVG-first pipeline.
-/// SVG is untrusted input (`AGENTS.md` §19.5): the decode is total and a
+/// SVG is untrusted input: the decode is total and a
 /// malformed or out-of-subset asset returns [`SvgError`] so the caller falls
-/// back to a built-in cursor rather than crashing the compositor (`AGENTS.md`
-/// §2.9).
+/// back to a built-in cursor rather than crashing the compositor.
 ///
 /// # Errors
 /// Propagates the [`SvgError`] from [`rustos_svg::decode`].

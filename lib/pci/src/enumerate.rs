@@ -70,7 +70,7 @@ const CMD_BUS_MASTER: u32 = 1 << 2;
 /// The PCI bus driver instance.
 ///
 /// Holds the [`ConfigSpace`] backend; everything else is
-/// constructor-injected. The type is `pub(crate)` per `AGENTS.md` §8
+/// constructor-injected. The type is `pub(crate)`
 /// — outside callers reach the enumeration through `dyn Bus`.
 pub struct Pci<C: ConfigSpace> {
     config: C,
@@ -200,7 +200,7 @@ impl<C: ConfigSpace> Pci<C> {
     ///
     /// Type-1 (PCI-to-PCI bridge) and type-2 (`CardBus`) headers are
     /// recognised but produce no BAR records — they are out of scope
-    /// for Stage 4 (`AGENTS.md` §8: only the surface the first
+    /// for Stage 4 (: only the surface the first
     /// drivers need).
     ///
     /// # Errors
@@ -287,8 +287,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// resolves the device's register-block physical base and length
     /// from configuration space and asks the kernel's MMIO-map
     /// facility for a window over it. The driver never synthesises a
-    /// pointer — the kernel allocates and validates the mapping
-    /// (`AGENTS.md` §4). The returned window is what the bus driver
+    /// pointer — the kernel allocates and validates the mapping. The returned window is what the bus driver
     /// hands to the virtio transport's `PciBackend`.
     ///
     /// # Errors
@@ -338,7 +337,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// depend on. A DMA-driving driver (virtio, xHCI) calls this once
     /// before programming the device. [`route_msix`](Self::route_msix)
     /// folds the same activation into its own hand-off, so the two
-    /// share one definition (`AGENTS.md` §2.2).
+    /// share one definition.
     ///
     /// The in-tree [`ConfigSpace`] backends' accesses are infallible,
     /// so this cannot fail; the [`PciBus`](rustos_abi::driver::pci::PciBus)
@@ -417,7 +416,7 @@ impl<C: ConfigSpace> Pci<C> {
     ///   function is not a type-0 header.
     /// * [`DriverError::OutOfRange`] — the BAR's size-aligned placement
     ///   does not fit inside the window, or a 32-bit BAR would land
-    ///   above the 4 GiB line (fail closed, `AGENTS.md` §5.4).
+    ///   above the 4 GiB line (fail closed).
     pub fn assign_bar(
         &self,
         bdf: u64,
@@ -531,7 +530,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// resolves the `(bar, bar_offset, length)` triple to a physical
     /// base, and asks the kernel's MMIO-map facility for a window over
     /// exactly that region. The driver never synthesises a pointer —
-    /// the kernel allocates and validates the mapping (`AGENTS.md` §4).
+    /// the kernel allocates and validates the mapping.
     /// The four windows so produced are what
     /// `PciTransport::new` consumes.
     ///
@@ -622,7 +621,7 @@ impl<C: ConfigSpace> Pci<C> {
     /// bus driver writes it into the device's table and flips the
     /// enable bit. The driver never synthesises a pointer — the table
     /// write goes through a kernel-mapped [`RegisterWindow`] obtained
-    /// from `mapper` (`AGENTS.md` §4).
+    /// from `mapper`.
     ///
     /// # Errors
     ///
@@ -829,17 +828,17 @@ impl<C: ConfigSpace> Pci<C> {
     /// The node carries one [`HwMatchKey::pci`] of the function's
     /// `vendor:device` and its full 24-bit class
     /// ([`read_class_24`](Self::read_class_24)), so `devmgr` resolves a
-    /// driver's signed bind table against it (`AGENTS.md` §18.3). The
+    /// driver's signed bind table against it. The
     /// node's [`HwDeviceClass`] is derived from the PCI base class. Its
     /// identity (id/parent) is left unassigned: the `hw_emit_node` publish
     /// path assigns a fresh, collision-free id and the emitter's own node
-    /// as parent (`AGENTS.md` §4 / §18.1).
+    /// as parent.
     ///
     /// # Errors
     ///
     /// * [`DriverError::NotFound`] if no function responds at `bdf` (the
     ///   vendor id reads the all-ones sentinel) — fail closed, never a
-    ///   fabricated node (`AGENTS.md` §2.9 / §18.5).
+    ///   fabricated node.
     /// * [`DriverError::DeviceFault`] if the match key cannot be pushed.
     pub fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError> {
         let addr = unpack_bdf(bdf, 0);
@@ -854,8 +853,7 @@ impl<C: ConfigSpace> Pci<C> {
         // 24-bit code); `low_u8` masks to 8 bits, so the cast is lossless.
         let base_class = low_u8(class24 >> 16);
         // Identity is unassigned: the `hw_emit_node` publish path assigns a
-        // fresh, collision-free id and the emitter's own node as parent
-        // (`AGENTS.md` §4 / §18.1). Build with placeholder id/parent it
+        // fresh, collision-free id and the emitter's own node as parent. Build with placeholder id/parent it
         // overwrites.
         let mut node = HwNode::new(0, HW_NODE_ROOT, device_class_from_base(base_class));
         node.push_match_key(HwMatchKey::pci(vendor, device, class24))
@@ -896,7 +894,7 @@ const fn high_dword(value: u64) -> u32 {
 /// architecture-neutral [`HwDeviceClass`] a discovered node carries.
 ///
 /// The class is informational on the node — driver binding is decided
-/// by the [`HwMatchKey`], not the class (`AGENTS.md` §18.3) — so an
+/// by the [`HwMatchKey`], not the class — so an
 /// unrecognised base class is reported as [`HwDeviceClass::Other`]
 /// rather than guessed.
 fn device_class_from_base(base_class: u8) -> HwDeviceClass {

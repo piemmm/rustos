@@ -12,7 +12,7 @@
 //!
 //! This type therefore performs **no** pointer arithmetic and holds
 //! **no** ambient authority: it can only touch registers the kernel
-//! chose to map for the owning driver task (`AGENTS.md` §4). Every
+//! chose to map for the owning driver task. Every
 //! register access goes through the bounds-checked accessors on
 //! [`RegisterWindow`](rustos_abi::RegisterWindow).
 //!
@@ -23,7 +23,7 @@
 //! offset this module reads or writes is a compile-time constant
 //! below that bound, the infallible [`Transport`] methods can treat
 //! their accesses as in-bounds and fall back to a safe default on the
-//! (then impossible) error rather than panicking (`AGENTS.md` §2.9).
+//! (then impossible) error rather than panicking.
 //! The notify offset is device-supplied, so it is bounds-checked on
 //! the fallible [`Transport::queue_set`] path before
 //! [`Transport::notify`] ever uses it.

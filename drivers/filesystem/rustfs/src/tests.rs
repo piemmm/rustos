@@ -1,4 +1,4 @@
-//! Unit tests for the copy-on-write rustfs driver (`AGENTS.md` §7, §16).
+//! Unit tests for the copy-on-write rustfs driver.
 //!
 //! They exercise the Stage-1 foundation — format → open round-trip, the
 //! superblock-ring selection, and crash replay at every write count during a
@@ -236,7 +236,7 @@ fn open_read_only_reads_back_committed_content() {
 #[test]
 fn a_read_only_mount_refuses_every_mutation_fail_closed() {
     // Author a real file, then prove a read-only mount refuses every
-    // mutator fail-closed (`AGENTS.md` §5.4) — never a panic (§2.9) — and
+    // mutator fail-closed — never a panic — and
     // leaves the existing content intact.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
@@ -263,7 +263,7 @@ fn a_read_only_mount_refuses_every_mutation_fail_closed() {
     );
     // The inherent mutators (not part of a `Filesystem*` trait) fail closed
     // too — they must early-deny, not rely on the `commit` backstop after
-    // dirtying the device (`AGENTS.md` §5.4 / §18.6).
+    // dirtying the device.
     assert_eq!(
         ro.reflink(root, b"file", b"clone"),
         Err(DriverError::PermissionDenied)
@@ -303,7 +303,7 @@ fn a_read_only_mount_never_writes_the_device() {
     // Touch the read path and attempt (refused) mutations — including the
     // inherent `reflink`/`set_security` mutators, which must refuse before
     // writing a single block (their old `commit`-only backstop would have
-    // dirtied free blocks first, `AGENTS.md` §5.4 / §18.6 / §2.16).
+    // dirtied free blocks first).
     let root = ro.root();
     let node = ro.lookup(root, b"x").expect("the authored file exists");
     let _ = ro.read_dir(root, 0, &mut [0u8; 64]);
@@ -815,7 +815,7 @@ fn metadata_bit_flip_is_detected_and_repaired_from_the_companion() {
 fn both_metadata_copies_corrupted_fails_closed() {
     // Wound *both* physical copies of the inode-tree root. Neither
     // authenticates, so the mount fails closed with an error — never a panic
-    // and never trusting the corrupt bytes (`AGENTS.md` §5.4 / §2.9).
+    // and never trusting the corrupt bytes.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
@@ -912,7 +912,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn wrong_volume_key_refuses_the_mount() {
     // A volume formatted under one key never mounts under another: the wrapped
     // master key fails to authenticate, so `open` fails closed with
-    // `PermissionDenied` (`AGENTS.md` §5.4) — never a panic, never a misread.
+    // `PermissionDenied` — never a panic, never a misread.
     let mut fs = fmt(512, 256, 32);
     fs.create(fs.root(), b"f", NodeKind::RegularFile)
         .expect("create");
@@ -932,10 +932,10 @@ fn wrong_volume_key_refuses_the_mount() {
 #[test]
 fn passphrase_derived_key_unlocks_the_volume() {
     // The passphrase-unlock indirection (`unlock::UnlockDescriptor`) drives a
-    // real volume end to end (`AGENTS.md` §11): a volume formatted under the
+    // real volume end to end: a volume formatted under the
     // key *derived* from a passphrase mounts only when the same passphrase +
     // descriptor re-derive that key, and a wrong passphrase is refused
-    // fail-closed exactly like any other wrong key (`AGENTS.md` §5.4).
+    // fail-closed exactly like any other wrong key.
     let mut salt_entropy = TestEntropy::new();
     let desc = UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut salt_entropy)
         .expect("provision a descriptor");
@@ -1020,8 +1020,7 @@ fn filename_and_data_round_trip_through_encryption_across_remount() {
 #[test]
 fn bit_flip_in_encrypted_data_is_detected() {
     // Flipping a byte of an encrypted data block's ciphertext must be caught by
-    // the AEAD authenticator on read — a failed decrypt fails closed
-    // (`AGENTS.md` §5.4), never returning mis-decrypted bytes.
+    // the AEAD authenticator on read — a failed decrypt fails closed, never returning mis-decrypted bytes.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
@@ -1080,7 +1079,7 @@ fn read_all(fs: &mut RustFs<MemBlock>, node: NodeId, len: usize) -> alloc::vec::
 fn data_block_integrity_layers_are_distinct_and_fail_closed() {
     // Each of the two integrity layers — the fast physical checksum and the
     // logical content hash — plus the Stage-4 AEAD detects its own class of
-    // corruption, and all three fail closed (`AGENTS.md` §5.4 / §2.9). The test
+    // corruption, and all three fail closed. The test
     // isolates each layer by repairing the checks that sit in front of it.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
@@ -1260,11 +1259,11 @@ fn data_block_capacity_reserves_the_integrity_trailer() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 6: first-party compression on the §6 data-record pipeline.
+// Stage 6: first-party compression on the data-record pipeline.
 // ---------------------------------------------------------------------------
 
 /// Read the on-disk compression descriptor of file `name`'s logical block
-/// `bi` (the §8 data-record compression-state field).
+/// `bi` (the data-record compression-state field).
 fn stored_compression(fs: &mut RustFs<MemBlock>, name: &[u8], bi: u64) -> Compression {
     let phys = data_block_phys(fs, name, bi);
     let mut raw = [0u8; MAX_BLOCK_SIZE];
@@ -1286,7 +1285,7 @@ fn incompressible(len: usize) -> alloc::vec::Vec<u8> {
 
 #[test]
 fn incompressible_record_is_stored_raw_and_round_trips() {
-    // Pseudo-random data does not compress, so the §10 adaptive choice stores
+    // Pseudo-random data does not compress, so the adaptive choice stores
     // it raw — yet it must still read back byte-identically.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
@@ -1310,7 +1309,7 @@ fn incompressible_record_is_stored_raw_and_round_trips() {
 
 #[test]
 fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() {
-    // A compressible block stores fewer at-rest bytes (the §10 win), and reads
+    // A compressible block stores fewer at-rest bytes (the win), and reads
     // back byte-identical across a remount and a copy-on-write rewrite, with
     // the logical hash (Stage 7 dedupe seam) unchanged by compression.
     let mut fs = fmt(512, 256, 32);
@@ -1364,7 +1363,7 @@ fn compressible_record_shrinks_at_rest_and_round_trips_across_remount_and_cow() 
 fn integrity_still_detected_on_a_compressed_block() {
     // The Stage-5 integrity layers still guard a compressed record: a physical
     // (media) corruption and a logical-hash mismatch are both caught and fail
-    // closed (`AGENTS.md` §5.4 / §2.9).
+    // closed.
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"c", NodeKind::RegularFile)
@@ -1440,8 +1439,7 @@ fn chunk_count(fs: &mut RustFs<MemBlock>) -> usize {
 fn byte_verify_before_share_refuses_to_merge_unequal_data() {
     // A dedupe-index entry is only ever a *hint*: before sharing, the
     // candidate's bytes are compared to the incoming record, so two blocks
-    // whose index keys collide but whose bytes differ are never merged (§9 —
-    // merging unequal data is corruption). A natural logical-hash collision is
+    // whose index keys collide but whose bytes differ are never merged (merging unequal data is corruption). A natural logical-hash collision is
     // infeasible, so the colliding index entry is injected through the
     // in-memory index seam.
     let mut fs = fmt(4096, 256, 64);
@@ -1490,7 +1488,7 @@ fn byte_verify_before_share_refuses_to_merge_unequal_data() {
 fn overwriting_one_sharer_copies_on_write_and_leaves_the_other() {
     // Two files with identical content share one immutable chunk (refcount 2).
     // Overwriting one copies-on-write a fresh chunk for the writer and drops
-    // the shared chunk's refcount, leaving the other sharer's data intact (§9).
+    // the shared chunk's refcount, leaving the other sharer's data intact.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -1531,7 +1529,7 @@ fn overwriting_one_sharer_copies_on_write_and_leaves_the_other() {
 fn reflink_shares_chunks_until_one_side_is_written() {
     // A reflink is a copy-on-write clone: it shares every data block with the
     // source (refcount 2) until a side is written, when only the written
-    // blocks diverge (§9).
+    // blocks diverge.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -1581,7 +1579,7 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
     // Sharing creates one chunk record (refcount 2). Removing one sharer drops
     // it to the implicit single reference (the record disappears); removing the
     // last frees the physical block. A remount's free-space rebuild agrees:
-    // the freed space is reusable and the chunk tree is empty (§9, §4).
+    // the freed space is reusable and the chunk tree is empty.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -1621,7 +1619,7 @@ fn refcount_to_zero_frees_the_chunk_and_the_rebuild_agrees() {
 fn dedupe_index_rebuilds_from_the_chunk_tree_at_mount() {
     // The dedupe index is rebuildable, never authoritative: after a remount it
     // is rebuilt from the chunk + reverse-reference trees and yields the same
-    // sharing — a third identical write joins the existing chunk (§9).
+    // sharing — a third identical write joins the existing chunk.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -1657,7 +1655,7 @@ fn dedupe_index_rebuilds_from_the_chunk_tree_at_mount() {
 #[test]
 fn dedupe_is_scoped_to_the_encryption_domain() {
     // Every chunk record carries the volume's encryption domain, and the
-    // dedupe-index key is domain-scoped, so dedupe never crosses a domain (§7).
+    // dedupe-index key is domain-scoped, so dedupe never crosses a domain.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -1694,9 +1692,9 @@ fn dedupe_is_scoped_to_the_encryption_domain() {
 
 #[test]
 fn integrity_and_compression_hold_on_a_shared_chunk() {
-    // A shared chunk is still a §6 data record: compressed at rest, integrity-
+    // A shared chunk is still a data record: compressed at rest, integrity-
     // protected, and byte-exact across a remount and a COW rewrite. Corrupting
-    // the shared physical block fails closed for *every* sharer (§5.4 / §6).
+    // the shared physical block fails closed for *every* sharer.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
@@ -1886,8 +1884,7 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
 
 #[test]
 fn scrub_requires_the_fs_mount_capability() {
-    // Scrub is capability-gated like any privileged FS operation (§13,
-    // `AGENTS.md` §5.4): without `CAP_FS_MOUNT` it fails closed and logs the
+    // Scrub is capability-gated like any privileged FS operation: without `CAP_FS_MOUNT` it fails closed and logs the
     // refusal with its stable event ID.
     let mut fs = populated();
     let sink = RecordingSink::new();
@@ -2286,8 +2283,7 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
 
 #[test]
 fn check_rebuilds_a_corrupt_free_space_and_dedupe_derivation() {
-    // The free-space bitmap and the dedupe index are rebuildable derived state
-    // (§4, §9), never authoritative. A corrupt derivation must never keep a
+    // The free-space bitmap and the dedupe index are rebuildable derived state, never authoritative. A corrupt derivation must never keep a
     // sound volume unmountable: check rebuilds both from the authoritative
     // trees, and the result matches a freshly mounted reference.
     let bytes = populated().into_block().bytes();
@@ -2409,7 +2405,7 @@ fn check_corrects_a_refcount_divergence_and_reports_what_it_cannot_fix() {
 fn check_reports_an_unrepairable_data_block_it_cannot_fix() {
     // A both-layers-corrupt data block (a deep fault check does not yet
     // reconstruct) is recorded as an unrecoverable finding, not silently
-    // ignored or pretended fixed (`AGENTS.md` §2.1).
+    // ignored or pretended fixed.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
@@ -2567,7 +2563,7 @@ fn rescue_never_emits_a_block_that_fails_integrity() {
 }
 
 // ---------------------------------------------------------------------------
-// Stage: TRIM/discard (return freed space to the device, safely; §11).
+// Stage: TRIM/discard (return freed space to the device, safely;).
 // ---------------------------------------------------------------------------
 
 /// Format a fresh volume on a discard-capable [`MemBlock`] and clear the
@@ -2599,7 +2595,7 @@ fn enqueue_free_range(fs: &mut RustFs<MemBlock>, start: u64, end: u64) {
 #[test]
 fn trim_requires_the_fs_mount_capability() {
     // Fail closed: without CAP_FS_MOUNT trim refuses, logs the refusal, and
-    // leaves the queue untouched (`AGENTS.md` §5.4).
+    // leaves the queue untouched.
     let mut fs = fmt_discard(512, 1, 0);
     enqueue_free_range(&mut fs, 100, 110);
     let before = fs.pending_discard_count();
@@ -2616,7 +2612,7 @@ fn trim_requires_the_fs_mount_capability() {
 #[test]
 fn trim_on_a_device_without_discard_drains_the_queue() {
     // Recorded, not failed: a device without discard support drains the queue
-    // and reports `supported = false` (§11). There is no trim=off mode.
+    // and reports `supported = false`. There is no trim=off mode.
     let mut fs = fmt(512, 512, 32);
     enqueue_free_range(&mut fs, 100, 110);
     assert!(fs.pending_discard_count() > 0);
@@ -2661,7 +2657,7 @@ fn trim_coalesces_contiguous_free_blocks_into_one_range() {
 #[test]
 fn trim_aligns_inward_and_requeues_the_unaligned_edges() {
     // A run is aligned inward to the device granularity; the head and tail that
-    // fall outside the aligned window are requeued for a later pass (§11).
+    // fall outside the aligned window are requeued for a later pass.
     let mut fs = fmt_discard(512, 8, 0);
     enqueue_free_range(&mut fs, 100, 130);
     let sink = RecordingSink::new();
@@ -2709,7 +2705,7 @@ fn trim_splits_a_run_to_the_per_request_cap() {
 #[test]
 fn trim_skips_a_block_that_was_reallocated() {
     // A queued block that is no longer free (reallocated since it was freed) is
-    // skipped, never discarded — discard can never touch live data (§11, §14).
+    // skipped, never discarded — discard can never touch live data.
     let mut fs = fmt_discard(512, 1, 0);
     assert!(!fs.bit_used(100));
     fs.enqueue_discard(100);
@@ -2727,7 +2723,7 @@ fn trim_skips_a_block_that_was_reallocated() {
 #[test]
 fn trim_rate_limits_to_the_batch_size_and_drains_over_passes() {
     // More distinct runs than the per-call batch limit: the surplus runs stay
-    // queued and a second trim pass drains them (§11).
+    // queued and a second trim pass drains them.
     let mut fs = fmt_discard(2048, 1, 0);
     let runs = discard::TRIM_BATCH_RANGES + 1;
     let mut blocks = alloc::vec::Vec::new();
@@ -2759,7 +2755,7 @@ fn trim_rate_limits_to_the_batch_size_and_drains_over_passes() {
 #[test]
 fn mkfs_discards_the_whole_volume_on_a_capable_device() {
     // mkfs tells a discard-capable device the whole volume is free before the
-    // encrypted structures are laid down (§11 mkfs flow).
+    // encrypted structures are laid down (mkfs flow).
     let block = MemBlock::new(512, 512).with_discard(1, 0);
     let fs = RustFs::format(block, 32, &TEST_KEY, &mut TestEntropy::new()).expect("format");
     assert_eq!(
@@ -2772,7 +2768,7 @@ fn mkfs_discards_the_whole_volume_on_a_capable_device() {
 #[test]
 fn mkfs_on_a_device_without_discard_still_formats() {
     // A device without discard support is recorded, not failed: format still
-    // succeeds and the volume mounts (§11).
+    // succeeds and the volume mounts.
     let fs = RustFs::format(
         MemBlock::new(512, 512),
         32,
@@ -2785,10 +2781,10 @@ fn mkfs_on_a_device_without_discard_still_formats() {
 
 #[test]
 fn trim_never_discards_a_block_still_shared_by_dedupe() {
-    // The §11 hard constraint, end-to-end: a data block shared by two files
+    // The hard constraint, end-to-end: a data block shared by two files
     // (dedupe refcount 2) is not freed when one sharer is removed — refcount
     // falls to 1, the block stays reachable — so trim must never discard it and
-    // the surviving file must still read back (§11, §14).
+    // the surviving file must still read back.
     let mut fs = fmt_discard(512, 1, 0);
     let root = fs.root();
     let payload = alloc::vec![0x33u8; 64];
@@ -2826,7 +2822,7 @@ fn trim_never_discards_a_block_still_shared_by_dedupe() {
 
 #[test]
 fn the_discard_queue_is_transient_across_a_remount() {
-    // The pending-discard queue is rebuildable, transient state (§4): a crash
+    // The pending-discard queue is rebuildable, transient state: a crash
     // before trim runs simply drops it. The volume remounts cleanly, the queue
     // is empty, and no live data is lost.
     let mut fs = fmt_discard(512, 1, 0);
@@ -2914,7 +2910,7 @@ fn open_health(
 #[test]
 fn health_requires_the_fs_mount_capability() {
     // Reading health (which may trigger a scrub) is capability-gated like the
-    // other privileged FS operations (§13, `AGENTS.md` §5.4): without
+    // other privileged FS operations: without
     // `CAP_FS_MOUNT` it fails closed and logs the refusal.
     let mut fs = fmt_health(256, DeviceHealth::Unavailable);
     let sink = RecordingSink::new();
@@ -2930,7 +2926,7 @@ fn health_on_a_device_without_telemetry_still_classifies_and_persists() {
     // A device that exposes no telemetry still gets a working health
     // subsystem: the pass classifies from the filesystem-observed counters
     // alone, persists a baseline block, and never triggers a scrub it has no
-    // signal for (§11; `HealthUnavailable`).
+    // signal for (`HealthUnavailable`).
     let mut fs = fmt_health(256, DeviceHealth::Unavailable);
     assert_ne!(
         fs.health_baseline_root, 0,
@@ -2957,7 +2953,7 @@ fn health_on_a_device_without_telemetry_still_classifies_and_persists() {
 fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
     // As the device's media-error count climbs across mounts, the volume's
     // classification crosses the documented thresholds: healthy → degraded →
-    // failing (§11; no magic numbers — see `HealthThresholds::DEFAULT`).
+    // failing (no magic numbers — see `HealthThresholds::DEFAULT`).
     let t = HealthThresholds::DEFAULT;
 
     let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
@@ -2997,8 +2993,7 @@ fn health_classifies_healthy_degraded_then_failing_as_signals_accumulate() {
 #[test]
 fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
     // An unsafe-shutdown delta since the last clean baseline schedules a
-    // metadata scrub, run through the Stage-8 machinery (§11; `AGENTS.md`
-    // §2.2 — no parallel verifier). Once the baseline advances, a pass with no
+    // metadata scrub, run through the Stage-8 machinery (— no parallel verifier). Once the baseline advances, a pass with no
     // further delta does not re-scrub.
     let mut fs = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     fs.health(&GrantAll, &NullSink).expect("establish baseline");
@@ -3034,7 +3029,7 @@ fn health_triggers_a_scrub_when_the_device_reports_new_unsafe_shutdowns() {
 fn health_baseline_survives_a_crash_during_its_update() {
     // The persisted baseline is updated inside a copy-on-write transaction, so
     // a power loss at any write count during a health pass leaves a mountable
-    // volume with no live data lost (§4, §14): either the new baseline
+    // volume with no live data lost: either the new baseline
     // committed in full or the previous one remains selected.
     let mut base = fmt_health(256, DeviceHealth::Available(healthy_snapshot(0, 0)));
     let root = base.root();
@@ -3074,10 +3069,10 @@ fn health_baseline_survives_a_crash_during_its_update() {
 
 // ---------------------------------------------------------------------------
 // Stage 12: the fuzz / crash-replay / corruption-injection suites
-// (`docs/src/filesystem/rustfs-spec.md` §15.12, §16; `AGENTS.md` §7 / §19.6).
+// (`docs/src/filesystem/rustfs-spec.md` §15.12, §16;).
 //
 // These are the adversarial superset of the per-stage tests, built on the
-// same seams the earlier stages already provide (`AGENTS.md` §2.2): the §8
+// same seams the earlier stages already provide: the
 // block identity + companion mirror, the `DataFault` classes, the
 // `verify_everything` scrub/check core, and the `MemBlock` write-budget
 // fault-injection. They add no second verifier and no second on-disk decode
@@ -3099,7 +3094,7 @@ const CRASH_KEEP: &[u8] = b"keep-content-that-must-never-be-torn-or-lost";
 
 /// Build a committed crash-replay baseline: a witness file (`keep`), a victim
 /// to remove, a two-block file to truncate, a reflink source, an empty write
-/// target, and a subdirectory — every operation the §16 sweep replays already
+/// target, and a subdirectory — every operation the sweep replays already
 /// has its precondition committed.
 fn crash_baseline() -> alloc::vec::Vec<u8> {
     let mut fs = RustFs::format(
@@ -3187,10 +3182,10 @@ const CRASH_BUDGET: u32 = 200;
 
 #[test]
 fn crash_replay_at_every_commit_step_for_create_write_truncate() {
-    // §16 "crash replay at every commit step" for the namespace/data
+    // "crash replay at every commit step" for the namespace/data
     // transactions: a power loss at every write count must leave a volume that
     // mounts on a whole-transaction boundary, with the operation's effect fully
-    // present or fully absent (never torn) and no live data lost (§14).
+    // present or fully absent (never torn) and no live data lost.
     let baseline = crash_baseline();
 
     // create: the new file is either present (empty) or absent — never half-made.
@@ -3254,7 +3249,7 @@ fn crash_replay_at_every_commit_step_for_create_write_truncate() {
 
 #[test]
 fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
-    // Crash replay for the unlink / clone / discard transactions (§14, §16).
+    // Crash replay for the unlink / clone / discard transactions.
     let baseline = crash_baseline();
 
     // remove: the victim is either fully present (with its content) or gone.
@@ -3295,7 +3290,7 @@ fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
     );
 
     // trim: free a file then trim within the cut-off budget. The pending-discard
-    // queue is transient (§4) and discard never zeroes live data, so the
+    // queue is transient and discard never zeroes live data, so the
     // re-mount is always clean and the witness file survives.
     crash_replay_each_step(
         &baseline,
@@ -3313,7 +3308,7 @@ fn crash_replay_at_every_commit_step_for_remove_reflink_trim() {
 fn crash_replay_at_every_commit_step_for_maintenance_passes() {
     // Crash replay for the maintenance passes (scrub, check, health): a power
     // loss mid-pass leaves a mountable volume (ordinary recovery never needs
-    // them, §14) with no live data lost. The shared witness assertion in
+    // them) with no live data lost. The shared witness assertion in
     // `crash_replay_each_step` already covers "no live data lost".
     let baseline = crash_baseline();
     crash_replay_each_step(
@@ -3447,7 +3442,7 @@ fn corruption_baseline() -> (alloc::vec::Vec<u8>, CorruptionTargets, alloc::vec:
 }
 
 /// Flip the first payload byte of the block at `block`, breaking its keyed
-/// authenticator. `block + 1` is the companion mirror (`AGENTS.md` §2.2).
+/// authenticator. `block + 1` is the companion mirror.
 fn wound_copy(bytes: &mut [u8], block: u64) {
     let off = as_usize(block) * 4096 + HEADER_LEN;
     bytes[off] ^= 0xff;
@@ -3461,7 +3456,7 @@ fn open_corruption(bytes: alloc::vec::Vec<u8>) -> Result<RustFs<MemBlock>, Drive
 #[test]
 fn corruption_injection_single_metadata_copy_is_recovered_from_the_companion() {
     // Wound exactly one physical copy of every on-disk metadata structure
-    // class. The §8 companion-mirror seam must recover each: the volume mounts,
+    // class. The companion-mirror seam must recover each: the volume mounts,
     // scrub reports nothing unrepairable, check finds the structure sound, and
     // the witness file reads back intact (`docs/src/filesystem/rustfs-spec.md`
     // §8, §12). This is the adversarial superset of the per-stage repair tests.
@@ -3508,11 +3503,10 @@ fn corruption_injection_single_metadata_copy_is_recovered_from_the_companion() {
 #[test]
 fn corruption_injection_both_copies_of_mount_critical_metadata_never_tears() {
     // Wound *both* physical copies of a structure the mount must read. With
-    // neither copy authenticating, the §8 mirror cannot repair the block, so
-    // RustFS never trusts the corruption: it either fails the mount closed
-    // (`AGENTS.md` §5.4 / §2.9) or, because the superblock ring retains earlier
+    // neither copy authenticating, the mirror cannot repair the block, so
+    // RustFS never trusts the corruption: it either fails the mount closed or, because the superblock ring retains earlier
     // whole transactions, selects an older committed root that does not
-    // reference the wounded block and is fully consistent (§14 — a partial or
+    // reference the wounded block and is fully consistent (a partial or
     // unreadable transaction is ignored, never torn). The minimal-volume strict
     // fail-closed case is `both_metadata_copies_corrupted_fails_closed`; this is
     // its adversarial, multi-generation superset.
@@ -3558,7 +3552,7 @@ fn corruption_injection_both_copies_of_a_directory_block_are_reported_not_torn()
     // so a both-copies-bad directory still mounts — but reading the directory
     // fails closed and scrub records it as unrepairable, never silently
     // dropping or fabricating entries (`docs/src/filesystem/rustfs-spec.md`
-    // §8, §12; `AGENTS.md` §2.9).
+    // §8, §12;).
     let (baseline, t, _keep) = corruption_baseline();
     let mut bytes = baseline;
     wound_copy(&mut bytes, t.directory);
@@ -3590,7 +3584,7 @@ fn corruption_injection_both_copies_of_a_directory_block_are_reported_not_torn()
 #[test]
 fn corruption_injection_both_copies_of_a_transient_record_recover_gracefully() {
     // The scrub-progress and health-baseline records are rebuildable, transient
-    // metadata (§4): even with both copies bad the volume mounts, a fresh scrub
+    // metadata: even with both copies bad the volume mounts, a fresh scrub
     // simply restarts, a health pass re-derives from a default baseline, and no
     // live data is lost (`docs/src/filesystem/rustfs-spec.md` §11, §12).
     let (baseline, t, keep_body) = corruption_baseline();
@@ -3620,11 +3614,11 @@ fn corruption_injection_both_copies_of_a_transient_record_recover_gracefully() {
 
 #[test]
 fn corruption_injection_data_block_faults_are_classified_not_repaired() {
-    // Data blocks are not mirrored (only metadata is, §8). A wounded data block
+    // Data blocks are not mirrored (only metadata is). A wounded data block
     // is therefore detected and classified by its `DataFault` layer, and scrub
     // records the fault rather than repairing it (deep data repair is out of
-    // scope, §12); the production read path fails closed
-    // (`docs/src/filesystem/rustfs-spec.md` §12; `AGENTS.md` §2.9).
+    // scope); the production read path fails closed
+    // (`docs/src/filesystem/rustfs-spec.md` §12;).
     let mut fs = fmt(512, 256, 32);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
@@ -3664,7 +3658,7 @@ fn corruption_injection_data_block_faults_are_classified_not_repaired() {
 
 // ---------------------------------------------------------------------------
 // Sparse files: ZERO/Hole extents (`.junie/SPARSE.md`). RustFS represents a
-// hole implicitly as a gap between extent mappings (permitted by §2/§3); an
+// hole implicitly as a gap between extent mappings (permitted by); an
 // all-zero logical record is stored as such a hole rather than a physical
 // data record, and reads of a hole synthesise zero bytes.
 // ---------------------------------------------------------------------------
@@ -3707,9 +3701,9 @@ fn assert_reads_all_zero(fs: &mut RustFs<MemBlock>, name: &[u8], len: usize) {
 
 #[test]
 fn sparse_ten_mib_zero_file_allocates_no_data_payload() {
-    // §17.1: a 10 MiB all-zero file has a 10 MiB logical size, maps zero
+    // a 10 MiB all-zero file has a 10 MiB logical size, maps zero
     // physical data blocks, and reads back as zeroes. The volume is encrypted
-    // (`TEST_KEY`), so this also covers §17.10: no plaintext data payload
+    // (`TEST_KEY`), so this also covers: no plaintext data payload
     // exists for the sparse range.
     let mut fs = fmt(4096, 4096, 256);
     let root = fs.root();
@@ -3752,7 +3746,7 @@ fn sparse_ten_mib_zero_file_allocates_no_data_payload() {
 
 #[test]
 fn sparse_write_nonzero_into_hole_splits_around_data() {
-    // §17.2: writing non-zero data into the middle of a sparse file leaves the
+    // writing non-zero data into the middle of a sparse file leaves the
     // surrounding ranges as holes, the written region reads back correctly, and
     // the extent map stays ordered and non-overlapping.
     let mut fs = fmt(512, 512, 64);
@@ -3790,7 +3784,7 @@ fn sparse_write_nonzero_into_hole_splits_around_data() {
 
 #[test]
 fn sparse_overwrite_data_with_zeroes_frees_only_when_unshared() {
-    // §17.3: overwriting existing data with zeroes makes the range read as
+    // overwriting existing data with zeroes makes the range read as
     // zero, but a block still referenced by a reflink (a snapshot view) is
     // retained, so the reflink keeps seeing the old data.
     let mut fs = fmt(512, 512, 64);
@@ -3828,7 +3822,7 @@ fn sparse_overwrite_data_with_zeroes_frees_only_when_unshared() {
 
 #[test]
 fn sparse_truncate_up_creates_a_hole() {
-    // §17.4: growing a file with no written data creates a hole; reads of the
+    // growing a file with no written data creates a hole; reads of the
     // new range return zeroes and no data blocks are allocated.
     let mut fs = fmt(512, 256, 64);
     let root = fs.root();
@@ -3850,7 +3844,7 @@ fn sparse_truncate_up_creates_a_hole() {
 
 #[test]
 fn sparse_truncate_down_frees_data_but_not_holes() {
-    // §17.5: shrinking frees data extents beyond the new EOF through the normal
+    // shrinking frees data extents beyond the new EOF through the normal
     // path, while removed holes need no physical free. A file that is data
     // followed by a hole shrinks correctly either way.
     let mut fs = fmt(512, 512, 64);
@@ -3895,8 +3889,8 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
 
 #[test]
 fn sparse_reflink_preserves_holes_without_dedupe_chunks() {
-    // §17.6: cloning a sparse file keeps its holes metadata-only and creates no
-    // dedupe chunk for any zero range (§8 — a zero range is never a chunk).
+    // cloning a sparse file keeps its holes metadata-only and creates no
+    // dedupe chunk for any zero range (a zero range is never a chunk).
     let mut fs = fmt(512, 512, 64);
     let root = fs.root();
     fs.create(root, b"f", NodeKind::RegularFile)
@@ -3943,7 +3937,7 @@ fn sparse_reflink_preserves_holes_without_dedupe_chunks() {
 
 #[test]
 fn sparse_scrub_and_check_validate_metadata_only() {
-    // §17.7 / §17.8: scrub and check both pass on a sparse file. Because a hole
+    // scrub and check both pass on a sparse file. Because a hole
     // has no extent record, no physical read is attempted for it and there is
     // nothing for the integrity layers to fault on.
     let mut fs = fmt(4096, 512, 128);
@@ -3976,7 +3970,7 @@ fn sparse_scrub_and_check_validate_metadata_only() {
 
 #[test]
 fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
-    // §17.9: an all-zero record produces no zstd payload (it is a hole with no
+    // an all-zero record produces no zstd payload (it is a hole with no
     // physical block at all), whereas a repeated *non-zero* constant follows
     // the normal compression path and is backed by a compressed data record.
     let mut fs = fmt(512, 256, 32);
@@ -4012,7 +4006,7 @@ fn sparse_all_zero_bypasses_compression_but_nonzero_constant_compresses() {
 
 #[test]
 fn names_up_to_255_bytes_round_trip() {
-    // §13: the maximum name length matches ext4 (255 bytes). A maximum-length
+    // the maximum name length matches ext4 (255 bytes). A maximum-length
     // name is creatable, lookable, enumerable, and survives a remount.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
@@ -4053,7 +4047,7 @@ fn a_name_longer_than_255_bytes_is_rejected() {
 
 #[test]
 fn names_use_the_ext4_charset_rejecting_only_slash_and_nul() {
-    // §13: RustFS allows every byte ext4 allows in a name — anything except `/`
+    // RustFS allows every byte ext4 allows in a name — anything except `/`
     // and NUL — and reserves only `.` and `..`.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
@@ -4092,7 +4086,7 @@ fn names_use_the_ext4_charset_rejecting_only_slash_and_nul() {
 
 #[test]
 fn names_are_case_sensitive() {
-    // §13: names are compared byte-for-byte, so casing distinguishes entries.
+    // names are compared byte-for-byte, so casing distinguishes entries.
     let mut fs = fmt(4096, 256, 64);
     let root = fs.root();
     fs.create(root, b"File", NodeKind::RegularFile)

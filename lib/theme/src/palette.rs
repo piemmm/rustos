@@ -3,7 +3,7 @@
 //! A [`Palette`] is a fixed set of *semantic* colour roles, not a free-form
 //! map: every role is a named field, so a theme cannot omit one and a
 //! consumer cannot ask for a role that does not exist (illegal states are
-//! unrepresentable, `AGENTS.md` §2.11). The window manager, the taskbar,
+//! unrepresentable). The window manager, the taskbar,
 //! and the default apps all read these same roles, which is what makes a
 //! theme switch apply consistently everywhere from one definition.
 
@@ -13,8 +13,7 @@ use crate::color::Rgba;
 ///
 /// Roles are intentionally generic ("surface", "on-surface") rather than
 /// per-widget ("button", "menu") so that adding a widget needs no new role
-/// and adding a theme needs no new code — a theme is data (`AGENTS.md`
-/// §10).
+/// and adding a theme needs no new code — a theme is data.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Palette {
     /// The empty desktop behind every window (the compositor root).

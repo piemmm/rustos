@@ -32,13 +32,13 @@ extern "C" {
 /// # Behaviour
 ///
 /// 1. Validates the multiboot magic; mismatched magic is a closed-fail
-///    (`AGENTS.md` §5.4.3 — validate every input).
+///    (validate every input).
 /// 2. Transfers to the binary-supplied `kernel_main`.
 ///
 /// IDT installation is deferred to `kernel_main` because each test
 /// installs its *own* page-fault handler. This avoids the alternative
 /// (a kernel-side IDT that has to be re-pointed) which would touch a
-/// `static mut` from two call sites — forbidden by `AGENTS.md` §2.
+/// `static mut` from two call sites — forbidden by.
 ///
 /// # Safety
 ///

@@ -7,12 +7,12 @@
 //! against the compiled module. Each harness decides PASS/FAIL from the
 //! kernel's console markers and propagates its exit status here. The
 //! enrolled verticals are listed in [`VERTICALS`]; adding a wasm32
-//! vertical is one row there (`AGENTS.md` §2.2 — one driver, not a
+//! vertical is one row there (one driver, not a
 //! per-vertical copy of the build/run glue).
 //!
 //! Kept opt-in behind `test --wasm` (mirroring `test --qemu`) because it
 //! needs `node`, `puppeteer`, and a Chrome binary; a host lacking them
-//! fails loudly rather than skipping (`AGENTS.md` §7 — never silently
+//! fails loudly rather than skipping (never silently
 //! skip a test).
 
 use std::path::PathBuf;
@@ -56,8 +56,7 @@ const VERTICALS: &[Vertical] = &[
 /// vertical once.
 ///
 /// Call this before the (possibly repeated) [`run_once`] passes. A host
-/// lacking `node` fails loudly here rather than skipping (`AGENTS.md` §7 —
-/// never silently skip a test).
+/// lacking `node` fails loudly here rather than skipping (never silently skip a test).
 pub fn prepare(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [test --wasm] building the wasm32 browser verticals");
 

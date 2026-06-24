@@ -1,4 +1,4 @@
-//! §17.1 acceptance test: the in-tree concrete scheduler policy must pass
+//! acceptance test: the in-tree concrete scheduler policy must pass
 //! the shared [`rustos_kernel_sched_api::conformance`] suite.
 //!
 //! This is the canonical location the charter names ("the shared

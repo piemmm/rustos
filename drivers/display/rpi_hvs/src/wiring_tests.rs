@@ -111,7 +111,7 @@ fn open_discovered_rejects_a_buffer_outside_the_aperture() {
 fn open_discovered_stages_rings_and_times_out_on_a_silent_firmware() {
     // RAM-backed doorbell: the write side accepts, but nothing ever
     // answers on the property channel, so the bounded poll fails closed
-    // with the mapped `Timeout` — never an unbounded spin (§2.1).
+    // with the mapped `Timeout` — never an unbounded spin.
     let host = MockHost {
         drv_load: true,
         mmio_map: true,

@@ -48,7 +48,7 @@ pub struct Scheduler<A: SchedulerArch> {
     config: SchedulerConfig,
     /// Per-CPU fast, non-cryptographic generators for work-stealing
     /// victim selection. This is a "scheduler decision" in the sense of
-    /// `lib/rng` (`AGENTS.md` §2.2 — there is no second PRNG): the
+    /// `lib/rng` (there is no second PRNG): the
     /// project's shared [`FastRng`] (xoshiro256++), not a hand-rolled
     /// one. `next_victim` takes `&self`, so each generator's `&mut self`
     /// stepping lives behind a [`SpinLock`] — but the slot is indexed by
@@ -313,7 +313,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             // here, so the wake would be *lost* if the task then parked.
             // Record the wake as a pending token instead; the dispatch
             // loop's `Park` commit consumes it and re-readies the task
-            // rather than sleeping it (`AGENTS.md` §2.1 — no lost wake-ups).
+            // rather than sleeping it (no lost wake-ups).
             TaskState::Ready | TaskState::Running => {
                 task.set_wake_pending();
                 return Ok(());
@@ -508,14 +508,14 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.last_started.store(tick, Ordering::Release);
         task.home_cpu.store(cpu, Ordering::Release);
 
-        // Tickless preemption (`AGENTS.md` §17.1): arm this CPU's one-shot
+        // Tickless preemption: arm this CPU's one-shot
         // timer for a single quantum iff at least one *other* ready task
         // is waiting on it (a competitor the task we are about to run must
         // be preempted for), and disarm otherwise so a CPU running a sole
         // runnable task takes no timer interrupts at all. The running task
         // sits in the current slot, not the queue, so a non-empty ready
         // queue is exactly "there is a competitor". The port owns the
-        // quantum length (`set_preemption` is a pure boolean, §2.2); the
+        // quantum length (`set_preemption` is a pure boolean); the
         // host `TestArch` inherits the no-op default. Armed *before* the
         // body switches into the task so the deadline is live for the run.
         self.arch
@@ -552,8 +552,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // Close the park/unpark lost-wakeup race: if an `unpark` arrived
         // while this task was running its body (it could not move a
         // non-parked task, so it left a token), cancel the park and
-        // re-ready the task so the wake is honoured rather than dropped
-        // (`AGENTS.md` §2.1). Consume the token exactly when we would have
+        // re-ready the task so the wake is honoured rather than dropped. Consume the token exactly when we would have
         // parked, so a token left by an earlier already-honoured wake never
         // suppresses a genuine later park.
         if effective == TaskAction::Park && task.take_wake_pending() {
@@ -701,7 +700,7 @@ impl<A: SchedulerArch> Scheduler<A> {
 /// Each method forwards to the inherent implementation above; the
 /// forwarding adapter is what lets `kernel/core` select this policy by
 /// the trait while the inherent surface stays available to this crate's
-/// own dispatch internals and tests (`AGENTS.md` §17.1).
+/// own dispatch internals and tests.
 impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
     fn new(config: SchedulerConfig, arch: Arc<A>) -> SchedResult<Self> {
         Scheduler::new(config, arch)
@@ -848,7 +847,7 @@ mod tests {
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
     }
 
-    /// Tickless preemption arming (`AGENTS.md` §17.1): a CPU running a
+    /// Tickless preemption arming: a CPU running a
     /// sole runnable task disarms its one-shot timer (no competitor to
     /// preempt for), and a CPU with a second ready task arms it. Proven
     /// through the `TestArch` `set_preemption` ledger without a real

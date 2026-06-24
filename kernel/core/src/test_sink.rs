@@ -5,7 +5,7 @@
 //! test can assert the exact sequence of audit IDs emitted by
 //! [`crate::kernel_main`] or [`crate::handle_panic`]. It is gated
 //! behind `cfg(any(test, feature = "test-arch"))` so it never links
-//! into a production build (`AGENTS.md` §1 — no hacks).
+//! into a production build (no hacks).
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -69,7 +69,7 @@ impl TestSink {
     /// Used by tests that share one sink across multiple assertions and
     /// need to ignore the events emitted during set-up (e.g. the
     /// `TaskCapabilitiesDerived` records the per-task fixture builders
-    /// produce). `AGENTS.md` §7 — keep test assertions narrow.
+    /// produce). — keep test assertions narrow.
     pub fn clear(&self) {
         self.events.lock().clear();
     }

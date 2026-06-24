@@ -6,7 +6,7 @@
 //! pulls in the `loom` crate (which depends on `std`) and rewires every
 //! atomic in `kernel/sched` through the model checker — a change that
 //! is not a stable, additive feature in the Cargo sense. It is enabled
-//! by passing `RUSTFLAGS="--cfg loom"`. See `AGENTS.md` §7 and
+//! by passing `RUSTFLAGS="--cfg loom"`. See and
 //! `tests/loom.rs`.
 
 fn main() {

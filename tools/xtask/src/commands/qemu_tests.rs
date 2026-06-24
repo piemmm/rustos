@@ -1,6 +1,6 @@
 //! QEMU integration-test driver invoked by `cargo xtask test --qemu`.
 //!
-//! AGENTS.md §7 mandates that the QEMU tests share the same orchestrator
+//! the charter mandates that the QEMU tests share the same orchestrator
 //! as host-side tests and that each QEMU run has a *strict* per-test
 //! timeout with **no retries**. This module enforces both: it builds the
 //! enrolled kernels per target triple, then drives each one through
@@ -13,7 +13,7 @@
 //! monitor socket), so the only resource they contend for is host CPU. The
 //! runner weights each guest by its emulated-CPU count against a budget of
 //! the host's logical CPUs, so concurrent guest vCPUs never oversubscribe the
-//! host and no guest is starved past its wall-clock deadline (§7's
+//! host and no guest is starved past its wall-clock deadline ('s
 //! no-flaky-tests / no-retry rules hold). See [`run_once`].
 
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ use crate::Context;
 /// the flake-hunting budget; a developer running the matrix from the IDE
 /// instead gets a 30 s ceiling per test, so a hung guest fails fast rather
 /// than stalling the local run. The runners keep the full enrolled budget
-/// (the same developer-vs-runner split as the 20× test repeat, §7).
+/// (the same developer-vs-runner split as the 20× test repeat).
 const DEVELOPER_TIMEOUT_CAP: Duration = Duration::from_secs(30);
 
 /// The wall-clock budget to enforce for an enrolment on this host: the
@@ -96,7 +96,7 @@ struct QemuTest {
 
 /// Which filesystem volume (if any) the host harness plants on the
 /// test's virtio-blk backing image. Each variant names a shared
-/// single-source-of-truth image fixture (`AGENTS.md` §2.2).
+/// single-source-of-truth image fixture.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FsDisk {
     /// No filesystem volume (the test uses `disk_sectors` or no disk).
@@ -106,7 +106,7 @@ enum FsDisk {
     /// The shared [`rustos_test_rustfs_image`] rustfs volume.
     Rustfs,
     /// The shared [`rustos_test_rustfs_image`] users-root volume:
-    /// the `§16` tree with `/System/Security/Users` planted
+    /// the standard filesystem tree with `/System/Security/Users` planted
     /// (`plans/PI.md` P11).
     UsersRoot,
     /// The shared [`rustos_test_encrypted_root_image`] whole-disk image: an
@@ -129,7 +129,7 @@ enum FsDisk {
 /// vertical's serial script in lockstep with the shared
 /// [`rustos_test_encrypted_root_image`] fixture: the serial table needs
 /// `&'static str` literals, so each typed line is verified against the
-/// fixture's own constant at build time (`AGENTS.md` §2.2 — single source
+/// fixture's own constant at build time (single source
 /// of truth; drift fails the build rather than silently mistyping at the
 /// prompt).
 const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
@@ -166,7 +166,7 @@ const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery stap
 /// the line on the driver's first park) rather than dropped against an
 /// un-ready device. It is the user-space analogue of the in-kernel
 /// `input_virtio_mmio` vertical's "eventq armed" readiness marker
-/// (`AGENTS.md` §2.2 — inject only once the driver can receive).
+/// (inject only once the driver can receive).
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 
 const _: () = {
@@ -195,7 +195,7 @@ const TESTS: &[QemuTest] = &[
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
     // (emulated) cores. The host-side `rustos-test-scheduler-stress`
-    // workspace test continues to satisfy the AGENTS.md §7 unit / cross-
+    // workspace test continues to satisfy the unit / cross-
     // crate contract; this enrolment is the QEMU-on-real-cores half of
     // the same Stage-2 deliverable mandated by `PLAN.md` lines 154-158.
     QemuTest {
@@ -356,14 +356,13 @@ const TESTS: &[QemuTest] = &[
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
     // ring-3 exercise for the Arch HAL "enter user mode" primitive
-    // (`kernel/arch/x86_64/src/userentry.rs`, `rustos_arch_api::EnterUser`,
-    // `AGENTS.md` §17.2). Unlike `rustos-test-abi-sys-syscall-qemu`, which
+    // (`kernel/arch/x86_64/src/userentry.rs`, `rustos_arch_api::EnterUser`). Unlike `rustos-test-abi-sys-syscall-qemu`, which
     // issues the same `abi-sys` stub from ring 0 (the x86_64 `syscall`
     // traps identically from any privilege level and never crosses a
     // boundary), this test boots the production kernel and, on
     // `AuditEvent::BootCompleted`, builds a ring-3 address space — a
     // user-accessible, executable, non-writable alias of the
-    // `ros_sys_cap_query` stub page (W^X, §19.2) plus a USER read/write
+    // `ros_sys_cap_query` stub page (W^X) plus a USER read/write
     // stack — switches CR3, and `iretq`s to ring 3 through
     // `UserMode::new().enter_user(...)`. The stub's real `syscall`
     // (`lib/abi-sys/src/trap.rs`) then traps back through the kernel's
@@ -493,15 +492,14 @@ const TESTS: &[QemuTest] = &[
     // script builds the Rust crt0 + `ros_sys_*` runtime shim
     // (`tests/integration/cc5_program`) as a PIE `staticlib`, compiles the
     // genuinely C-language program (`cc5_program/csrc/main.c`) with the audited,
-    // version-pinned, checksummed `clang`/`ld.lld` wrapper (`tools/cc`,
-    // AGENTS.md §12), links them into one PIE image, and converts it to an `rxe`
+    // version-pinned, checksummed `clang`/`ld.lld` wrapper (`tools/cc`), links them into one PIE image, and converts it to an `rxe`
     // blob (`rustos_itest_harness::elf2rxe`) carrying the kernel's syscall CFI
     // tag. On boot the test stands up an Sv39 address space (identity-mapping
     // the kernel + MMIO), installs the trap vector and a dispatch callback, then
     // calls the production capability-checked, audited spawn caller
     // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
     // the program's U-mode image and `sret` into it. The C program checks a
-    // Time64 value across the §21 pre-1970/post-2038 boundaries, an ipc header,
+    // Time64 value across the pre-1970/post-2038 boundaries, an ipc header,
     // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
     // services those (asserting the marshalled cap id, returning a 64-bit
     // sentinel) and asserts the `exit` code is 99 before the `SiFive` Test PASS
@@ -526,7 +524,7 @@ const TESTS: &[QemuTest] = &[
     // runtime shim (`tests/integration/cc5_program`) as a PIE `staticlib`,
     // compiles the genuinely C-language program (`cc5_program/csrc/main.c`)
     // with the audited, version-pinned, checksummed `clang`/`ld.lld` wrapper
-    // (`tools/cc`, AGENTS.md §12), links them into one PIE image, and converts
+    // (`tools/cc`), links them into one PIE image, and converts
     // it to an `rxe` blob (`rustos_itest_harness::elf2rxe`) carrying the
     // kernel's syscall CFI tag. On boot the test enables `CPACR_EL1.FPEN`,
     // stands up a stage-1 address space (identity-mapping the kernel + MMIO,
@@ -534,7 +532,7 @@ const TESTS: &[QemuTest] = &[
     // the production capability-checked, audited spawn caller
     // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to
     // build the program's EL0 image and `eret` into it. The C program checks a
-    // Time64 value across the §21 pre-1970/post-2038 boundaries, an ipc header,
+    // Time64 value across the pre-1970/post-2038 boundaries, an ipc header,
     // and a sysinfo header, then issues `cap_query` + `clock_get`; the callback
     // services those (asserting the marshalled cap id, returning a 64-bit
     // sentinel) and asserts the `exit` code is 99 before the ARM semihosting
@@ -558,7 +556,7 @@ const TESTS: &[QemuTest] = &[
     // the Rust crt0 + `ros_sys_*` runtime shim (`tests/integration/cc5_program`)
     // as a PIE `staticlib`, compiles the genuinely C-language program
     // (`cc5_program/csrc/main.c`) with the audited, version-pinned, checksummed
-    // `clang`/`ld.lld` wrapper (`tools/cc`, AGENTS.md §12), links them into one
+    // `clang`/`ld.lld` wrapper (`tools/cc`), links them into one
     // PIE image, and converts it to an `rxe` blob (`rustos_itest_harness::elf2rxe`)
     // carrying the kernel's syscall CFI tag. Because the x86_64 ring-3
     // transition needs the GDT user selectors, the TSS, and `syscall`/
@@ -569,7 +567,7 @@ const TESTS: &[QemuTest] = &[
     // capability-checked, audited spawn caller
     // (`rustos_kernel_core::spawn_and_enter`, gated on `CAP_PROC_SPAWN`) to build
     // the program's ring-3 image (W^X: code RX, data RW-NX, rodata R-NX) and
-    // `iretq` into it. The C program checks a Time64 value across the §21
+    // `iretq` into it. The C program checks a Time64 value across the
     // pre-1970/post-2038 boundaries, an ipc header, and a sysinfo header, then
     // issues `cap_query` + `clock_get`; the callback services those (asserting
     // the marshalled cap id, returning a 64-bit sentinel) and asserts the `exit`
@@ -975,8 +973,7 @@ const TESTS: &[QemuTest] = &[
     // `kernel_core::spawn_kthread` whose bodies `yield_now` back and forth,
     // and drains the `step` loop. PASS once both kthreads have run their
     // full ping-pong count and exited; a switch that never resumed its
-    // task stalls the drain and the harness reports a timeout (fail-loud,
-    // `AGENTS.md` §7). Single CPU and a 60-second budget match the other
+    // task stalls the drain and the harness reports a timeout (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
         package: "rustos-test-kthread-switch-qemu-aarch64",
@@ -1004,7 +1001,7 @@ const TESTS: &[QemuTest] = &[
     // `step` loop), and drains the loop. PASS once both kthreads have run
     // their full ping-pong count and exited; a switch that never resumed
     // its task stalls the drain and the harness reports a timeout
-    // (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget match
+    // (fail-loud). Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
         package: "rustos-test-kthread-switch-qemu-riscv64",
@@ -1032,7 +1029,7 @@ const TESTS: &[QemuTest] = &[
     // back and forth, and drains the cooperative `step` loop. PASS once both
     // kthreads have run their full ping-pong count and exited; a switch that
     // never resumed its task stalls the drain and the harness reports a
-    // timeout (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget
+    // timeout (fail-loud). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-kthread-switch-qemu-x86-64",
@@ -1378,8 +1375,7 @@ const TESTS: &[QemuTest] = &[
     // allocation-free prompt path fixed), types a password the deny-all
     // authenticator refuses (`Login incorrect`), waits for the **second**
     // `Username: ` prompt of the retry loop, and finally types a 513-byte
-    // line (one byte past login's 512-byte `LINE_MAX` validation bound,
-    // `AGENTS.md` §24.4); login refuses the over-long line whole, records
+    // line (one byte past login's 512-byte `LINE_MAX` validation bound); login refuses the over-long line whole, records
     // the console error, and exits fail-closed; `init` reaps it and
     // relaunches it (`ProcessSpawned` #3). The audit sink reports PASS
     // through the ARM semihosting finisher once it has seen three
@@ -1391,7 +1387,7 @@ const TESTS: &[QemuTest] = &[
     // a full prompt→reply→re-prompt exchange *and* that supervision
     // (reap + restart) ran. Logging in for real rides the P8/P11
     // root-volume mount; until then every credential check on this board
-    // fails closed (§5.4.5). Single CPU and a 60-second budget match the
+    // fails closed. Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work tests.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-aarch64",
@@ -1421,12 +1417,10 @@ const TESTS: &[QemuTest] = &[
     // (`/System/Services/devmgr`, in `spawn_layout::SPAWN_PROGRAMS`) before the
     // login session; `devmgr` reads the discovered hardware tree
     // (`hw_tree_read`) and **truly parks** in `hw_tree_wait`, registering on the
-    // kernel's `HW_TREE_WAITQ` (Design D P-2 — no busy poll, `AGENTS.md` §2.1 /
-    // §17.1). The audit sink observes that wait-queue (a parked `devmgr` is its
+    // kernel's `HW_TREE_WAITQ` (Design D P-2 — no busy poll). The audit sink observes that wait-queue (a parked `devmgr` is its
     // only possible waiter): the instant it is non-empty the sink appends a node
     // to the authoritative `HwTreeStore` — a real generation bump / simulated
-    // hotplug that calls `hw_tree_wake` exactly as the floor bus bring-up does
-    // (`AGENTS.md` §18.4) — and reports PASS via the ARM semihosting finisher
+    // hotplug that calls `hw_tree_wake` exactly as the floor bus bring-up does — and reports PASS via the ARM semihosting finisher
     // once `devmgr` has been scheduled past the bump and re-parked. The login
     // dialogue below is reused verbatim from `spawn-session-qemu-aarch64` only
     // to keep audit events (and thus drive-loop scheduling rounds) flowing past
@@ -1468,12 +1462,11 @@ const TESTS: &[QemuTest] = &[
     // `rxe` by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It admits each as a resumable user kthread via
     // `spawn_user_kthread` (its `pre_resume` hook reactivates that task's
-    // page-table root, §4) and drains the `step` loop; the dispatch callback
+    // page-table root) and drains the `step` loop; the dispatch callback
     // maps each task's `yield`/`exit` `svc` to `reschedule_current`, suspending
     // the running task back to the dispatcher exactly as the production callback
     // does. PASS once both tasks yielded their full count and exited; a switch
-    // that never resumes stalls the drain and the harness times out (fail-loud,
-    // `AGENTS.md` §7). Single CPU and a 60-second budget match the other
+    // that never resumes stalls the drain and the harness times out (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
         package: "rustos-test-spawn-el0-timeshare-qemu-aarch64",
@@ -1497,8 +1490,7 @@ const TESTS: &[QemuTest] = &[
     // pure-Rust `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy
     // loop that issues no syscall, built PIE + converted to `rxe` by `build.rs`)
     // through the capability-checked, audited `kernel_core::spawn_image`. It
-    // then arms the **production** preemption path verbatim (`AGENTS.md` §2.2 —
-    // the `rustos_arch_aarch64::preempt` surface the bin crate's
+    // then arms the **production** preemption path verbatim (the `rustos_arch_aarch64::preempt` surface the bin crate's
     // `arm_preemption` uses): a per-CPU `PreemptStorage`, an EL0-preemption
     // callback that `reschedule_current(_, Yield)`s the running task, and the
     // periodic generic timer; EL0 runs preemptible (`SPSR_EL0T_PREEMPTIBLE`), so
@@ -1508,7 +1500,7 @@ const TESTS: &[QemuTest] = &[
     // at least once AND the task — resumed mid-loop after each preemption —
     // still completed and exited; a preemption that never fires (the `step`
     // spins forever inside EL0) or a botched resume (the task never exits)
-    // times out (fail-loud, `AGENTS.md` §7). Single CPU; a 120-second budget
+    // times out (fail-loud). Single CPU; a 120-second budget
     // covers the multi-tick busy loop under QEMU TCG.
     QemuTest {
         package: "rustos-test-preempt-el0-qemu-aarch64",
@@ -1534,7 +1526,7 @@ const TESTS: &[QemuTest] = &[
     // `rustos-test-el0-spinner` fixture (a `black_box`-guarded busy loop that
     // issues no syscall, built PIE + converted to `rxe` by `build.rs`) through
     // the capability-checked, audited `kernel_core::spawn_image`. It then arms
-    // the **production** preemption path verbatim (`AGENTS.md` §2.2 — the
+    // the **production** preemption path verbatim (the
     // `rustos_arch_riscv64::preempt` surface the bin crate's `arm_preemption`
     // uses): a per-hart `PreemptStorage`, a U-mode-preemption callback that
     // `reschedule_current(_, Yield)`s the running task, and the periodic SBI
@@ -1545,8 +1537,7 @@ const TESTS: &[QemuTest] = &[
     // involuntary preemption. PASS once the preempt callback fired at least once
     // AND the task — resumed mid-loop after each preemption — still completed
     // and exited; a preemption that never fires (the `step` spins forever inside
-    // U-mode) or a botched resume (the task never exits) times out (fail-loud,
-    // `AGENTS.md` §7). Single CPU; a 120-second budget covers the multi-tick
+    // U-mode) or a botched resume (the task never exits) times out (fail-loud). Single CPU; a 120-second budget covers the multi-tick
     // busy loop under QEMU TCG.
     QemuTest {
         package: "rustos-test-preempt-el0-qemu-riscv64",
@@ -1577,7 +1568,7 @@ const TESTS: &[QemuTest] = &[
     // repoints **both** the per-CPU `syscall` entry stack
     // (`syscall_entry::set_kernel_rsp0`) and the `TSS.RSP0` trap stack
     // (`percpu::install_tss_rsp0`) at the task's own kernel stack. It then arms
-    // the **production** ring-3-preemption path verbatim (`AGENTS.md` §2.2 — the
+    // the **production** ring-3-preemption path verbatim (the
     // `rustos_arch_x86_64::preempt::set_preempt_callback` surface the bin crate's
     // `install_irq_dispatch` uses): a callback that `reschedule_current(_,
     // Yield)`s the running task. Ring 3 runs preemptible (`userentry`'s `IF`-set
@@ -1588,7 +1579,7 @@ const TESTS: &[QemuTest] = &[
     // fired at least once AND the task — resumed mid-loop after each preemption —
     // still completed and exited; a preemption that never fires (the `step`
     // spins forever inside ring 3) or a botched resume (the task never exits)
-    // times out (fail-loud, `AGENTS.md` §7). Single CPU; a 120-second budget
+    // times out (fail-loud). Single CPU; a 120-second budget
     // covers the multi-tick busy loop under QEMU TCG.
     QemuTest {
         package: "rustos-test-preempt-el0-qemu-x86-64",
@@ -1603,7 +1594,7 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
-    // PLAN.md P-5 (`AGENTS.md` §17.1 2026-06-23 amendment): the aarch64
+    // PLAN.md P-5 (2026-06-23 amendment): the aarch64
     // in-kernel interrupt-delivery / non-preemption vertical — the dual of the
     // `preempt-el0` tests. Where those prove a runaway **EL0** task IS
     // involuntarily preempted, this proves the property the serial-stall saga
@@ -1611,10 +1602,10 @@ const TESTS: &[QemuTest] = &[
     // syscall still takes the generic-timer IRQ *during* its span (the EL1 IRQ
     // path runs `on_timer_interrupt` and the tick callback records it), but
     // because the tick was taken from EL1 the running task is NOT rescheduled
-    // (the kernel is non-preemptible, §4), so the EL0-preemption callback never
+    // (the kernel is non-preemptible), so the EL0-preemption callback never
     // fires. It reads the GICv2 base + timer rate from the embedded `virt` DTB,
     // brings up the EL1 vectors + GICv2, registers the production
-    // `rustos_arch_aarch64::preempt` surface verbatim (`AGENTS.md` §2.2 — a
+    // `rustos_arch_aarch64::preempt` surface verbatim (a
     // per-CPU `PreemptStorage`, the EL0-preemption callback, a timer-tick
     // callback, and the enabled generic-timer PPI), builds a live eevdf
     // `Scheduler`, admits one in-kernel kthread that arms the timer one-shot and
@@ -1624,8 +1615,7 @@ const TESTS: &[QemuTest] = &[
     // zero times AND the kthread resumed and ran to its voluntary completion.
     // Under the old cooperative loop (device IRQs masked across the whole task
     // run) no tick would ever be taken and the kthread would spin forever, so
-    // the run fails loudly — a failure finisher or the harness timeout
-    // (`AGENTS.md` §7). Single CPU; a 120-second budget covers the busy loop
+    // the run fails loudly — a failure finisher or the harness timeout. Single CPU; a 120-second budget covers the busy loop
     // under QEMU TCG.
     QemuTest {
         package: "rustos-test-preempt-inkernel-qemu-aarch64",
@@ -1660,7 +1650,7 @@ const TESTS: &[QemuTest] = &[
     // `ipc_send` path (caller-context resolution, copy-in, capability-gated
     // `Port::send`), and exits. PASS once the fail-closed-decoded reply
     // round-trips the stub's pinned handle; any shortfall writes a distinct
-    // failure finisher or times out (fail-loud, `AGENTS.md` §7). Single CPU
+    // failure finisher or times out (fail-loud). Single CPU
     // and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
@@ -1686,12 +1676,12 @@ const TESTS: &[QemuTest] = &[
     // capability-checked, audited `kernel_core::spawn_image`. It **retains** that
     // space live behind a `kernel_core::MemMap` producer backed by
     // `kernel_mem::map_anonymous`/`unmap_anonymous`, admits the program as a
-    // resumable user kthread (`spawn_user_kthread`, §4), and routes the
+    // resumable user kthread (`spawn_user_kthread`), and routes the
     // program's `mem_map`/`mem_unmap` `svc`s through the producer. The fixture
     // maps a region (FIXED), writes+verifies a pattern, unmaps it, then touches
     // the released range; the fault handler reports the use-after-unmap data
     // abort as PASS. A verification failure exits early (a distinct finisher)
-    // and a missing fault stalls the drain (fail-loud, `AGENTS.md` §7). Single
+    // and a missing fault stalls the drain (fail-loud). Single
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
@@ -1726,8 +1716,8 @@ const TESTS: &[QemuTest] = &[
     // `MagicValue` register (`0x74726976`) back through the mapped, caching-
     // disabled window and exits 0, which the dispatch callback reports as PASS.
     // A refused map, the wrong register value, an unexpected syscall, or no
-    // exit trips a distinct finisher or times out (fail-loud, `AGENTS.md` §7).
-    // The registry-backed grant owner-check (§5.4) is host-proven in
+    // exit trips a distinct finisher or times out (fail-loud).
+    // The registry-backed grant owner-check is host-proven in
     // `kernel/core`. Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
@@ -1762,7 +1752,7 @@ const TESTS: &[QemuTest] = &[
     // region (FIXED), writes+verifies a pattern, unmaps it, then touches the
     // released range; the fault handler reports the use-after-unmap page fault
     // as PASS. A verification failure exits early (a distinct finisher) and a
-    // missing fault stalls (fail-loud, `AGENTS.md` §7). Single CPU and a
+    // missing fault stalls (fail-loud). Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
         package: "rustos-test-mem-map-qemu-riscv64",
@@ -1796,7 +1786,7 @@ const TESTS: &[QemuTest] = &[
     // `ecall` to `reschedule_current`, so it ping-pongs with the dispatcher on
     // its own kernel stack. PASS once it yielded its full count and exited; a
     // wrong drain count, an unexpected syscall, or a stall flips
-    // `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md` §7). Single
+    // `qemu_exit::exit_failure` or times out (fail-loud). Single
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // riscv64 tests.
     QemuTest {
@@ -1819,7 +1809,7 @@ const TESTS: &[QemuTest] = &[
     // vertical and the aarch64 SP2c timeshare. On boot it reads the
     // generic-timer rate from the firmware device tree, installs the trap vector
     // + a dispatch callback, and builds **two** hardware-isolated U-mode address
-    // spaces (two `PageTablePool`s + a shared frame pool, `AGENTS.md` §4) from
+    // spaces (two `PageTablePool`s + a shared frame pool) from
     // the pure-Rust `rustos-test-el0-yielder` fixture (built PIE + converted to
     // `rxe` by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`, and admits each via `spawn_user_kthread`. Each
@@ -1833,7 +1823,7 @@ const TESTS: &[QemuTest] = &[
     // two ping-pong with the dispatcher on their own kernel stacks. PASS once
     // both yielded their full count and exited; a wrong drain count, an
     // unexpected syscall, or a stall flips `qemu_exit::exit_failure` or times
-    // out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget match
+    // out (fail-loud). Single CPU and a 60-second budget match
     // the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
         package: "rustos-test-spawn-el0-timeshare-qemu-riscv64",
@@ -1868,8 +1858,7 @@ const TESTS: &[QemuTest] = &[
     // and child timeshare the hart on their own kernel stacks (the RV1 park-safe
     // path). PASS once the producer built the child and both tasks ran to
     // `exit`; a failed spawn, an unexpected syscall, a wrong drain count, or a
-    // stall flips `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md`
-    // §7). Single CPU and a 60-second budget match the other
+    // stall flips `qemu_exit::exit_failure` or times out (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-riscv64",
@@ -1905,7 +1894,7 @@ const TESTS: &[QemuTest] = &[
     // a pattern, unmaps it, then touches the released range; the fault observer
     // reports the use-after-unmap `#PF` as PASS. A verification failure, an
     // unexpected syscall, or a missing fault flips `qemu_exit::exit_failure` or
-    // times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget
+    // times out (fail-loud). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-mem-map-qemu-x86_64",
@@ -1936,7 +1925,7 @@ const TESTS: &[QemuTest] = &[
     // `rustos_arch_x86_64::fault` observer reports the supervisor not-present
     // `#PF` on exactly that page as PASS. A split/unmap failure, a read that
     // does not fault, or a fault elsewhere flips `qemu_exit::exit_failure` or
-    // times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget
+    // times out (fail-loud). Single CPU and a 60-second budget
     // match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-stack-guard-qemu-x86_64",
@@ -1967,7 +1956,7 @@ const TESTS: &[QemuTest] = &[
     // not-present `#PF`; the `rustos_arch_x86_64::fault` observer confirms the
     // cause + faulting address and reports PASS. A body that returns without
     // faulting (guard regression) drains the loop and flips
-    // `qemu_exit::exit_failure`, or times out (fail-loud, `AGENTS.md` §7).
+    // `qemu_exit::exit_failure`, or times out (fail-loud).
     // Single CPU and a 60-second budget match the other boot-then-do-fixed-
     // work x86_64 tests.
     QemuTest {
@@ -2002,7 +1991,7 @@ const TESTS: &[QemuTest] = &[
     // `syscall` to `reschedule_current`, so it ping-pongs with the dispatcher on
     // its own kernel stack. PASS once it yielded its full count and exited; a
     // wrong drain count, an unexpected syscall, or a stall flips
-    // `qemu_exit::exit_failure` or times out (fail-loud, `AGENTS.md` §7). Single
+    // `qemu_exit::exit_failure` or times out (fail-loud). Single
     // CPU and a 60-second budget match the other boot-then-do-fixed-work x86_64
     // tests.
     QemuTest {
@@ -2044,7 +2033,7 @@ const TESTS: &[QemuTest] = &[
     // ping-pong with the dispatcher on their own kernel stacks. PASS once both
     // yielded their full count and exited; a wrong drain count, an unexpected
     // syscall, or a stall flips `qemu_exit::exit_failure` or times out
-    // (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget match the
+    // (fail-loud). Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-spawn-el0-timeshare-qemu-x86-64",
@@ -2077,7 +2066,7 @@ const TESTS: &[QemuTest] = &[
     // are observed — proving PID 1 reached and executed in ring 3 (the gated
     // banner landed before the audited syscall). A bad image, an entry fault,
     // or an unhandled first `syscall` never emits the audited syscall, so the
-    // run times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second
+    // run times out (fail-loud). Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-spawn-init-qemu-x86-64",
@@ -2118,7 +2107,7 @@ const TESTS: &[QemuTest] = &[
     // the relaunch producer no longer corrupts the kernel; see boot.rs
     // `build_memory_map` and `plans/PI.md` §X.) A regression that never builds,
     // runs, reaps, or relaunches the session never reaches the threshold, so
-    // the run times out (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second
+    // the run times out (fail-loud). Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-spawn-session-qemu-x86-64",
@@ -2145,13 +2134,12 @@ const TESTS: &[QemuTest] = &[
     // `kernel_core::spawn_image`. It **retains** that space live behind a
     // `kernel_core::MemMap` producer backed by
     // `kernel_mem::map_anonymous`/`unmap_anonymous`, admits the program as a
-    // resumable user kthread (`spawn_user_kthread`, §4), and routes the
+    // resumable user kthread (`spawn_user_kthread`), and routes the
     // program's allocator-issued `mem_map`/`mem_unmap` `svc`s through the
     // producer. The fixture Box-allocates, grows a `Vec` across several pages,
     // reallocates after freeing, verifies every value, and exits 0 — reported
     // as PASS. A non-zero exit, an unexpected syscall, or a fault writes a
-    // distinct failure finisher; a stall times out (fail-loud, `AGENTS.md`
-    // §7). Single CPU and a 60-second budget match the other
+    // distinct failure finisher; a stall times out (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
         package: "rustos-test-heap-qemu-aarch64",
@@ -2176,14 +2164,13 @@ const TESTS: &[QemuTest] = &[
     // by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It records the parent/child link with a
     // `kernel_core::KernelProcessWait` producer, admits each as a resumable
-    // user kthread (`spawn_user_kthread`, §4), and routes the child's `exit`
+    // user kthread (`spawn_user_kthread`), and routes the child's `exit`
     // and the parent's `wait`/`exit` `svc`s through the producer +
     // `reschedule_current`: the producer parks the parent until the child is
     // reapable, then the kernel copies the reaped exit code out to the parent's
     // `status` pointer. PASS once the parent reaped the child, read back the
     // agreed code, and exited 0; a wrong code, a missing reap, an unexpected
-    // syscall, or a stall writes a distinct failure finisher (fail-loud,
-    // `AGENTS.md` §7). Single CPU and a 60-second budget match the other
+    // syscall, or a stall writes a distinct failure finisher (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
         package: "rustos-test-wait-qemu-aarch64",
@@ -2210,7 +2197,7 @@ const TESTS: &[QemuTest] = &[
     // by `build.rs`) through the capability-checked, audited
     // `kernel_core::spawn_image`. It records the parent/child link with a
     // `kernel_core::KernelProcessWait` producer, admits each as a resumable
-    // user kthread (`spawn_user_kthread`, §4), and routes the child's `exit`
+    // user kthread (`spawn_user_kthread`), and routes the child's `exit`
     // and the parent's `wait`/`exit` syscalls through the producer +
     // `reschedule_current`: the producer parks the parent until the child is
     // reapable (exercising the resume-after-cooperative-park return-state path
@@ -2218,7 +2205,7 @@ const TESTS: &[QemuTest] = &[
     // the parent's `status` pointer. PASS once the parent reaped the child,
     // read back the agreed code, and exited 0; a wrong code, a missing reap, an
     // unexpected syscall, or a stall writes a distinct failure finisher
-    // (fail-loud, `AGENTS.md` §7). Single CPU and a 60-second budget match the
+    // (fail-loud). Single CPU and a 60-second budget match the
     // other boot-then-do-fixed-work x86_64 tests.
     QemuTest {
         package: "rustos-test-wait-qemu-x86-64",
@@ -2245,14 +2232,14 @@ const TESTS: &[QemuTest] = &[
     // and a parent — through the capability-checked, audited
     // `kernel_core::spawn_image`. It records the parent/child link with a
     // `kernel_core::KernelProcessWait` producer, admits each as a resumable
-    // user kthread (`spawn_user_kthread`, §4), and routes the child's `exit`
+    // user kthread (`spawn_user_kthread`), and routes the child's `exit`
     // and the parent's `wait`/`exit` `ecall`s through the producer +
     // `reschedule_current`: the producer parks the parent until the child is
     // reapable (the RV1 mid-handler-park-safe path), then the kernel copies the
     // reaped exit code out to the parent's `status` pointer. PASS once the
     // parent reaped the child, read back the agreed code, and exited 0; a wrong
     // code, a missing reap, an unexpected syscall, or a stall writes a distinct
-    // failure finisher or times out (fail-loud, `AGENTS.md` §7). Single CPU and
+    // failure finisher or times out (fail-loud). Single CPU and
     // a 60-second budget match the other boot-then-do-fixed-work riscv64 tests.
     QemuTest {
         package: "rustos-test-wait-qemu-riscv64",
@@ -2329,7 +2316,7 @@ const TESTS: &[QemuTest] = &[
     // the planted users-root rustfs volume through the real driver and
     // drives the kernel's boot-time users-database load
     // (`rustos_kernel_core::load_users_db`) — /System/Security/Users read
-    // off the volume through the §5.3-checked VFS delegation — then
+    // off the volume through the-checked VFS delegation — then
     // proves the parsed database authenticates the planted account and
     // refuses a wrong password before the ARM semihosting PASS. The
     // backing image is the fixture's users-root volume
@@ -2364,7 +2351,7 @@ const TESTS: &[QemuTest] = &[
     // the ARM semihosting PASS. The backing image is the shared whole-disk
     // fixture's bytes — authored by the real in-tree drivers and split by the
     // `root_mount` host tests — so the planted layout and the guest's unlock
-    // cannot drift (`AGENTS.md` §2.2). The root volume uses the format-floor
+    // cannot drift. The root volume uses the format-floor
     // PBKDF2 cost so the per-boot key derivation stays bounded under QEMU TCG;
     // single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work tests.
@@ -2400,7 +2387,7 @@ const TESTS: &[QemuTest] = &[
     // (`EventId(4139)`) — the witness that the kthread-admission path
     // mounted the root end to end. The runner types only the fixture
     // passphrase (verified against the shared fixture at compile time,
-    // `is_line_of`, §2.2); the database *content* authenticating
+    // `is_line_of`); the database *content* authenticating
     // `root`/`root` is proven by `root_unlock_login`, and driving the
     // per-console `login` to authenticate end to end rides the userland heap
     // (`plans/SPAWN.md` SP5b, not yet landed), so it is out of this
@@ -2694,7 +2681,7 @@ const TESTS: &[QemuTest] = &[
     // and exits, and the kernel asserts the GIC line re-reads masked
     // (mask-before-wake, `docs/src/security/irq.md`) before the semihosting
     // PASS. A regression that fails to discover, deliver, wake, or mask never
-    // reaches PASS, so the run times out (fail-loud, `AGENTS.md` §7). Single
+    // reaches PASS, so the run times out (fail-loud). Single
     // CPU and a 60-second budget match the other boot-then-do-fixed-work
     // aarch64 tests.
     QemuTest {
@@ -2712,7 +2699,7 @@ const TESTS: &[QemuTest] = &[
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
     // the `virt`-board virtio-input analogue of the x86_64 PS/2 vertical,
-    // completing the `input` row of the §1 QEMU matrix for aarch64.
+    // completing the `input` row of the QEMU matrix for aarch64.
     // `rustos-test-input-virtio-mmio-qemu-aarch64` brings the `virt` board
     // up to EL1 (FP enable + 2 GiB identity MMU + GICv2/EL1 IRQ path,
     // shared from `virtio_qemu_support`), builds the virtio-MMIO bus from
@@ -2742,7 +2729,7 @@ const TESTS: &[QemuTest] = &[
     },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
     // the `virt`-board virtio-input MMIO analogue of the aarch64 input
-    // vertical, completing the `input` row of the §1 QEMU matrix for
+    // vertical, completing the `input` row of the QEMU matrix for
     // riscv64. `rustos-test-input-virtio-mmio-qemu-riscv64` boots the
     // `virt`-board pipeline, builds the virtio-MMIO bus from the device
     // tree, provisions an `MmioTransport` through the capability-gated
@@ -2756,7 +2743,7 @@ const TESTS: &[QemuTest] = &[
     // release. The runner attaches the `virtio-keyboard-device` and drives
     // the injection; the guest never fabricates the event. The driver and
     // the shared `virtio_input_keypress` tail are the same code the
-    // aarch64 vertical runs (`AGENTS.md` §2.2). Single CPU and a 60-second
+    // aarch64 vertical runs. Single CPU and a 60-second
     // budget match the other boot-then-do-fixed-work tests.
     QemuTest {
         package: "rustos-test-input-virtio-mmio-qemu-riscv64",
@@ -2784,8 +2771,7 @@ const AARCH64_TARGET: &str = "aarch64-unknown-none";
 /// Build every enrolled QEMU test once.
 ///
 /// Call this before the (possibly repeated) [`run_once`] passes so a soak
-/// re-runs the binaries rather than rebuilding them each pass (`AGENTS.md`
-/// §7's no-flaky-tests rule: the value of repetition is in the *runs*).
+/// re-runs the binaries rather than rebuilding them each pass ('s no-flaky-tests rule: the value of repetition is in the *runs*).
 pub fn build_all(ctx: &Context) -> Result<(), String> {
     eprintln!("xtask: [test --qemu] {} test(s) enrolled", TESTS.len());
     // Group the enrolled packages by target triple and build each triple in a
@@ -2830,7 +2816,7 @@ fn build_targets() -> Vec<&'static str> {
 ///
 /// The caller ([`super::run_test`]) owns the repeat loop so a duration
 /// budget covers the whole matrix as a unit; this runs exactly one pass and
-/// never retries on failure (`AGENTS.md` §7).
+/// never retries on failure.
 ///
 /// The enrolments are independent — each plants its own per-binary backing
 /// images and drives a guest whose serial console is `-serial stdio` and
@@ -2840,8 +2826,7 @@ fn build_targets() -> Vec<&'static str> {
 /// its emulated-CPU count and the budget is the host's logical-CPU count, so
 /// the sum of concurrently-running guest vCPUs never oversubscribes the host.
 /// That keeps every guest's wall-clock deadline as reachable as it is for a
-/// solo run (no TCG starvation), so co-scheduling does not make a test flaky
-/// (§7). On a single-core host the budget collapses to one and the matrix
+/// solo run (no TCG starvation), so co-scheduling does not make a test flaky. On a single-core host the budget collapses to one and the matrix
 /// runs strictly sequentially.
 pub fn run_once(ctx: &Context) -> Result<(), String> {
     let target_dir = ctx.target_dir();
@@ -2891,8 +2876,7 @@ fn run_one(target_dir: &Path, t: &QemuTest) -> Result<(), String> {
     // Attach the shared filesystem volume as the backing image, when the
     // enrolment names one. The bytes come from a single-source-of-truth
     // image fixture the kernel-side tail also names, so the planted
-    // on-disk layout and the guest's expectations cannot drift
-    // (`AGENTS.md` §2.2): the FAT32 fixture is hand-built; the rustfs
+    // on-disk layout and the guest's expectations cannot drift: the FAT32 fixture is hand-built; the rustfs
     // fixture is authored by the real rustfs driver itself (format +
     // plant). Only the non-zero sectors are planted; the planter
     // zero-fills the rest, matching a freshly-formatted volume.

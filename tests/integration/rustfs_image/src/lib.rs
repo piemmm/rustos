@@ -7,7 +7,7 @@
 //! [`PLANTED_FILE_NAME`] / [`PLANTED_FILE_CONTENT`] through the driver's
 //! own write path, and returns the resulting bytes. The on-disk layout
 //! therefore has exactly one author — the driver — so the fixture and the
-//! driver can never drift (`AGENTS.md` §2.2).
+//! driver can never drift.
 //!
 //! The host harness (`tools/xtask`) plants those bytes on the test's
 //! backing disk before the guest boots. The freestanding guest tail
@@ -62,8 +62,7 @@ const INODE_COUNT: u32 = 64;
 pub const FIXTURE_VOLUME_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
 
 /// Deterministic stand-in for the platform RNG seam used to provision the
-/// fixture volume. A fixed sequence keeps the built image **reproducible**
-/// (`AGENTS.md` §19.3); it is fixture scaffolding, never a production source.
+/// fixture volume. A fixed sequence keeps the built image **reproducible**; it is fixture scaffolding, never a production source.
 struct FixtureEntropy {
     next: u8,
 }
@@ -105,7 +104,7 @@ pub const USERS_FIXTURE_PASSWORD: &str = "root";
 pub const USERS_FIXTURE_ITERATIONS: u32 = rustos_users::MIN_ITERATIONS;
 
 /// Fixed salt of the planted account's password record, keeping the
-/// built image reproducible (`AGENTS.md` §19.3).
+/// built image reproducible.
 const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 
 /// Serialise the users-root volume's `/System/Security/Users` database:
@@ -116,7 +115,7 @@ const USERS_FIXTURE_SALT: Salt = [0xa5; rustos_users::SALT_LEN];
 ///
 /// Propagates the [`ParseError`] if a fixture constant violates the
 /// `users-v1` bounds — a programming error in this fixture, surfaced
-/// rather than panicked (`AGENTS.md` §2.9).
+/// rather than panicked.
 pub fn users_db_text() -> Result<String, ParseError> {
     let record = UserRecord::with_password(
         Identity {
@@ -156,7 +155,7 @@ impl VecBlock {
     /// Wrap an already-laid-out image (e.g. the bytes returned by
     /// [`build_users_root_image_with_key`]) as a mountable device, so a
     /// consumer can re-open it through the real `RustFs::open` without
-    /// re-deriving the on-disk layout (`AGENTS.md` §2.2 — one block-device
+    /// re-deriving the on-disk layout (one block-device
     /// double, shared by the fixture and its consumers).
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
@@ -214,7 +213,7 @@ impl Block for VecBlock {
 /// Propagates any [`DriverError`] from the driver. The fixed geometry and
 /// payload sizes make a failure a programming error in this fixture, but
 /// the result is surfaced rather than panicked so the builder holds to
-/// `AGENTS.md` §2.9 in every path it links into.
+/// in every path it links into.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
     let dev = VecBlock::new(TOTAL_SECTORS);
     let mut fs = RustFs::format(
@@ -233,8 +232,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
     Ok(fs.into_block().into_bytes())
 }
 
-/// Build the users-root volume: a rustfs image carrying the `AGENTS.md`
-/// §16.1 top-level directories with `/System/Security/Users` holding the
+/// Build the users-root volume: a rustfs image carrying the top-level directories with `/System/Security/Users` holding the
 /// [`users_db_text`] database — the on-disk shape the production root
 /// volume gives the kernel's boot-time users-database load
 /// (`rustos_kernel_core::users`, `plans/PI.md` P11).
@@ -247,7 +245,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// Propagates any [`DriverError`] from the driver; a fixture users
 /// database that violates the `users-v1` bounds surfaces as
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
-/// surfaced rather than panicked — `AGENTS.md` §2.9).
+/// surfaced rather than panicked).
 pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
     build_users_root_image_with_key(&FIXTURE_VOLUME_KEY)
 }
@@ -257,7 +255,7 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
 /// a consumer can exercise the production passphrase-derived-key mount
 /// path (`plans/PI.md` P11 root-mount; `kernel/rustos-kernel::root_mount`)
 /// against a real on-disk volume. [`build_users_root_image`] delegates
-/// here with [`FIXTURE_VOLUME_KEY`] (`AGENTS.md` §2.2 — one authoring
+/// here with [`FIXTURE_VOLUME_KEY`] (one authoring
 /// path).
 ///
 /// # Errors
@@ -265,7 +263,7 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
 /// Propagates any [`DriverError`] from the driver; a fixture users
 /// database that violates the `users-v1` bounds surfaces as
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
-/// surfaced rather than panicked — `AGENTS.md` §2.9).
+/// surfaced rather than panicked).
 pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
     let dev = VecBlock::new(TOTAL_SECTORS);
@@ -291,10 +289,10 @@ pub fn build_users_root_image_with_key(volume_key: &VolumeKey) -> Result<Vec<u8>
     Ok(fs.into_block().into_bytes())
 }
 
-/// Re-export of the single store-planting helper (`AGENTS.md` §2.2). The
+/// Re-export of the single store-planting helper. The
 /// definition lives in the rustfs driver (`rustos_drv_fs_rustfs`) so the
 /// image builder (`tools/mkimage`) and these fixtures share one routine that
-/// gives the §18.3 / §18.6 autoload scan an identical on-disk shape.
+/// gives the autoload scan an identical on-disk shape.
 pub use rustos_drv_fs_rustfs::plant_nested_file;
 
 impl VecBlock {
@@ -386,12 +384,11 @@ mod tests {
 
     #[test]
     fn plant_nested_file_lays_a_bundle_and_creates_intermediate_directories() {
-        // The shared §18.6 store-planting helper (`plant_nested_file`): a
+        // The shared store-planting helper (`plant_nested_file`): a
         // driver bundle laid at the design-B `/System` volume's
         // `Drivers/input/virtio_kbd/Run` is created with every intermediate
         // directory and reads back byte-for-byte off the mounted volume — the
-        // on-disk shape the autoload store scan walks (`AGENTS.md` §16.2 /
-        // §18.3). Driver bundles live on the `/System` volume under design B,
+        // on-disk shape the autoload store scan walks. Driver bundles live on the `/System` volume under design B,
         // so the path is relative to that volume's root (no `System` prefix).
         let bundle: &[u8] = b"a-signed-rxe-bundle-stand-in";
         let path: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd", b"Run"];

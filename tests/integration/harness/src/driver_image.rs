@@ -1,17 +1,15 @@
 //! Build-time signed `.rxe` driver-bundle composer shared by the QEMU
-//! integration fixtures that lay a kernel-trusted driver into the system
-//! (`AGENTS.md` §2.2).
+//! integration fixtures that lay a kernel-trusted driver into the system.
 //!
 //! A signed driver bundle is a [`rustos_abi::DriverManifest`] header, the manifest's
 //! capability body, its bind table, and the program payload, with the
 //! manifest's Ed25519 signature taken over
 //! `header[..WIRE_LEN-64] || cap_body || bind_table || payload` — exactly
-//! what `rustos_drvhost::Host::verify_signature` reconstructs (`AGENTS.md`
-//! §8 / §9 / §2.17 — the payload program is authenticated, not just the
+//! what `rustos_drvhost::Host::verify_signature` reconstructs (the payload program is authenticated, not just the
 //! header). Several build scripts need to emit such a bundle (the
 //! driver-spawn vertical, the autoload-root image fixture), so the one
 //! definition of how a bundle is assembled and signed lives here rather
-//! than re-rolled in each (`AGENTS.md` §2.2). It is feature-gated
+//! than re-rolled in each. It is feature-gated
 //! (`driver-image`) so the crypto dependency is pulled in only by the
 //! build scripts that actually sign a bundle, not by every harness
 //! consumer.
@@ -35,11 +33,11 @@ pub struct SignedDriverImage {
 /// Assemble and Ed25519-sign a `.rxe` driver bundle from `seed`.
 ///
 /// The bundle declares `kind`, requests `caps`, carries `bind_keys` as its
-/// §18.3 bind table, stamps `syscall_table_hash` (the gate refuses a
-/// mismatch, §9), and wraps `payload` as the loadable program image. The
+/// bind table, stamps `syscall_table_hash` (the gate refuses a
+/// mismatch), and wraps `payload` as the loadable program image. The
 /// signature covers `header[..WIRE_LEN-64] || cap_body || bind_table ||
 /// payload` so the *payload* is authenticated and cannot be substituted
-/// after signing (`AGENTS.md` §2.17).
+/// after signing.
 ///
 /// # Panics
 ///

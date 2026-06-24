@@ -1,4 +1,4 @@
-//! RustOS `rm` — remove files and directories (Stage 6, `AGENTS.md` §3
+//! RustOS `rm` — remove files and directories (Stage 6
 //! `userland/apps/`).
 //!
 //! `rm` removes each of its operands in order. A non-directory operand (a
@@ -34,7 +34,7 @@
 //! [`RmError::Stat`] (unless `-f` makes a [`NotFound`](rustos_abi::Errno::NotFound)
 //! a no-op); a directory that cannot be enumerated is [`RmError::Read`]; a
 //! removal that fails is [`RmError::Remove`]. The first failure stops the run
-//! before any later operand, and there is no panic (`AGENTS.md` §2.9).
+//! before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -46,10 +46,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

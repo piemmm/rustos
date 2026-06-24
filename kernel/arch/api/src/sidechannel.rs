@@ -1,11 +1,11 @@
-//! Side-channel mitigation surface of the Arch HAL (`AGENTS.md` §19.1).
+//! Side-channel mitigation surface of the Arch HAL.
 //!
 //! Microarchitectural side channels (Meltdown, Spectre, MDS, L1TF, MMIO
 //! stale data) are defeated by primitives that only the architecture
 //! port can emit: kernel/user address-space separation
 //! (KPTI-equivalent), speculation barriers on the syscall entry/exit
 //! boundary, and a flush of microarchitectural buffers plus an
-//! indirect-branch-predictor barrier on every context switch. §19.1
+//! indirect-branch-predictor barrier on every context switch.
 //! makes this a closed trait set on the Arch HAL; this module is that
 //! set.
 //!
@@ -14,15 +14,15 @@
 //! * [`SideChannelMitigation`] — the per-port handle the kernel reaches
 //!   through. It exposes the three per-transition barrier primitives the
 //!   kernel calls (syscall entry, syscall exit, context switch) and a
-//!   declarative [`MitigationProfile`] describing, honestly, which §19.1
+//!   declarative [`MitigationProfile`] describing, honestly, which
 //!   mitigations the port applies for its silicon.
 //! * [`MitigationProfile`] / [`Mitigation`] — the honest declaration. A
 //!   mitigation is either [`Mitigation::Applied`] or
 //!   [`Mitigation::NotVulnerable`], and the latter must carry the
-//!   justification recorded in the port's `README.md`: §19.1 permits a
+//!   justification recorded in the port's `README.md`: the charter permits a
 //!   no-op "**only** on targets where the silicon is provably not
 //!   vulnerable and the absence is justified".
-//! * [`conformance`] — the §17.2 conformance vertical §19.1 mandates.
+//! * [`conformance`] — the conformance vertical the charter mandates.
 //!   Every port runs [`conformance::run_all`] against its handle; a port
 //!   that does not pass cannot ship.
 //!
@@ -33,16 +33,16 @@
 //! acceptance test (the instruction is only meaningful on the bare-metal
 //! target, where it cannot be observed from a unit test). The
 //! [`MitigationProfile`] closes that gap: the port must *declare* a
-//! decision for every §19.1 mitigation, and the conformance suite
+//! decision for every mitigation, and the conformance suite
 //! refuses an undeclared or unjustified omission. The instruction
-//! emission itself is reviewed in the port (`AGENTS.md` §2.10 — every
+//! emission itself is reviewed in the port (every
 //! `unsafe` block carries a `// SAFETY:`), and each port's own host
 //! tests assert the barriers are wired (not silently empty).
 
-/// One §19.1 mitigation's status on a given architecture port.
+/// One mitigation's status on a given architecture port.
 ///
 /// The port declares, per mitigation, exactly one of three honest
-/// positions. §19.1 allows a no-op ([`Mitigation::NotVulnerable`])
+/// positions. The charter allows a no-op ([`Mitigation::NotVulnerable`])
 /// **only** where the silicon is provably not vulnerable to the class
 /// the mitigation defends against, and requires the absence to be
 /// justified in the port's `README.md`; the payload carries that same
@@ -53,7 +53,7 @@
 /// KPTI-equivalent page-table isolation needs the Stage 6 user/kernel
 /// boundary). A `Pending` entry is honest and tracked — it is the
 /// truthful state of a young kernel — but it is **not** release-ready:
-/// [`MitigationProfile::is_release_ready`] rejects it, encoding §19.1's
+/// [`MitigationProfile::is_release_ready`] rejects it, encoding's
 /// "a target that does not pass cannot ship" as the release gate while
 /// keeping the per-PR honesty gate (`validate`) green during the
 /// burn-down.
@@ -63,8 +63,7 @@ pub enum Mitigation {
     Applied,
     /// The port deliberately omits this mitigation because its silicon
     /// is provably not vulnerable to the class it defends against. The
-    /// payload is the justification recorded in the port's `README.md`
-    /// (`AGENTS.md` §19.1); it must be non-empty.
+    /// payload is the justification recorded in the port's `README.md`; it must be non-empty.
     NotVulnerable(&'static str),
     /// The silicon requires this mitigation, but it cannot be built yet
     /// because it depends on a subsystem that has not landed. The
@@ -107,7 +106,7 @@ impl Mitigation {
     }
 }
 
-/// A port's honest declaration of the §19.1 mitigations it applies.
+/// A port's honest declaration of the mitigations it applies.
 ///
 /// Every field is a [`Mitigation`]: there is no "unknown" or "to be
 /// decided" — a port must take a position on each, and the conformance
@@ -150,7 +149,7 @@ pub struct MitigationEntry {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProfileError {
     /// A [`Mitigation::NotVulnerable`] decision carried an empty (or
-    /// whitespace-only) justification. §19.1 requires every omission to
+    /// whitespace-only) justification. The charter requires every omission to
     /// be justified; `field` names the offending slot.
     EmptyJustification {
         /// The [`MitigationEntry::name`] of the unjustified slot.
@@ -159,7 +158,7 @@ pub enum ProfileError {
 }
 
 impl MitigationProfile {
-    /// The five §19.1 mitigation slots, in a stable order, each paired
+    /// The five mitigation slots, in a stable order, each paired
     /// with its name.
     #[must_use]
     pub const fn entries(&self) -> [MitigationEntry; 5] {
@@ -187,7 +186,7 @@ impl MitigationProfile {
         ]
     }
 
-    /// Validate the §19.1 honesty rule: every non-applied mitigation
+    /// Validate the honesty rule: every non-applied mitigation
     /// must carry a non-empty explanation — a justification for a
     /// [`Mitigation::NotVulnerable`] no-op or a tracking note for a
     /// [`Mitigation::Pending`] gap.
@@ -212,7 +211,7 @@ impl MitigationProfile {
     /// justified [`Mitigation::NotVulnerable`], with no
     /// [`Mitigation::Pending`] gap remaining.
     ///
-    /// This encodes §19.1's "a target that does not pass this suite
+    /// This encodes's "a target that does not pass this suite
     /// cannot ship": the per-PR honesty gate ([`Self::validate`]) stays
     /// green while the burn-down advances, and this stricter predicate
     /// is the release gate that a port must satisfy before it ships.
@@ -224,8 +223,7 @@ impl MitigationProfile {
     }
 }
 
-/// The side-channel mitigation handle an architecture port exposes
-/// (`AGENTS.md` §19.1).
+/// The side-channel mitigation handle an architecture port exposes.
 ///
 /// The kernel calls the barrier primitives on the matching transition:
 /// [`Self::syscall_entry_barrier`] at the top of the syscall trap,
@@ -238,7 +236,7 @@ impl MitigationProfile {
 /// Implementations must be [`Send`] + [`Sync`]: the kernel reaches the
 /// handle from every CPU.
 pub trait SideChannelMitigation: Send + Sync {
-    /// The port's honest declaration of which §19.1 mitigations it
+    /// The port's honest declaration of which mitigations it
     /// applies. Must satisfy [`MitigationProfile::validate`].
     fn profile(&self) -> MitigationProfile;
 
@@ -256,10 +254,10 @@ pub trait SideChannelMitigation: Send + Sync {
     fn context_switch_barrier(&self);
 }
 
-/// The §17.2 / §19.1 side-channel conformance vertical.
+/// The side-channel conformance vertical.
 ///
 /// Every architecture port runs [`conformance::run_all`] against its
-/// [`SideChannelMitigation`] handle; §19.1 states "a target that does
+/// [`SideChannelMitigation`] handle; states "a target that does
 /// not pass this suite cannot ship". The suite is portable — it names
 /// only the trait — and is run on the host target, exactly like the
 /// `kernel/sched` policy conformance suite. It is the trait-level
@@ -283,7 +281,7 @@ pub mod conformance {
     }
 
     /// The profile validates and every omitted mitigation carries a
-    /// non-empty justification (§19.1 — a no-op is permitted only where
+    /// non-empty justification (a no-op is permitted only where
     /// the silicon is provably not vulnerable, *and justified*).
     fn profile_is_honest<M: SideChannelMitigation + ?Sized>(port: &M) {
         let profile = port.profile();

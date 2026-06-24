@@ -1,7 +1,7 @@
 //! Audited cryptographic primitives for RustOS.
 //!
 //! This crate exists for one purpose: to keep cryptography out of the rest
-//! of the codebase. Per `AGENTS.md` §1 no hand-rolled primitives are allowed;
+//! of the codebase. Per no hand-rolled primitives are allowed;
 //! everything here is a thin wrapper over a vetted upstream implementation
 //! ([`sha2`], [`ed25519_dalek`], and [`chacha20poly1305`]) selected so that
 //! the audit footprint never exceeds a handful of crates.

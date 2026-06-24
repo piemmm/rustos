@@ -28,14 +28,14 @@
 //! A regression that fails to start the secondary hart or to deliver the
 //! IPI never reaches the PASS write, so the run times out and the
 //! harness reports `Outcome::Timeout` — the documented fail-loud
-//! behaviour (`AGENTS.md` §7).
+//! behaviour.
 //!
 //! ## How it differs from a production kernel
 //!
 //! It links only the `rustos-arch-riscv64` port (the SMP path needs no
 //! `kernel/*` subsystem) and supplies its own `kernel_main`. The
 //! QEMU-exit shortcut lives in this dedicated bin, never behind a Cargo
-//! feature on the arch crate (`AGENTS.md` §5.4.5 — fail closed).
+//! feature on the arch crate (fail closed).
 
 #![cfg_attr(itest_riscv64, no_std)]
 #![cfg_attr(itest_riscv64, no_main)]
@@ -174,7 +174,7 @@ mod kernel {
         // hart, and `send_ipi` targets the right hart. The logical CPU
         // map is the identity over hart ids `0` and `1`.
         // Two-hart vertical: two per-CPU slots, owned by an allocator-free
-        // `static` backing (`AGENTS.md` §24.1).
+        // `static` backing.
         static STORAGE: RiscvArchStorage<2> = RiscvArchStorage::new();
         let arch = RiscvArch::with_harts(&STORAGE, boot_hartid, timebase, &[0, 1]);
 
@@ -188,7 +188,7 @@ mod kernel {
         // Register the secondary-hart stack pool sized to this two-hart
         // vertical before any `hart_start`; the `smp.s` trampoline reads
         // its published base/shift to seed the started hart's stack
-        // (`AGENTS.md` §24.1 — the pool scales with the hart count, not a
+        // (the pool scales with the hart count, not a
         // fixed `const`). The pool covers slots 0 and 1 so either hart can
         // be the started secondary.
         static SECONDARY_STACKS: smp::SecondaryStackPool<2> = smp::SecondaryStackPool::new();

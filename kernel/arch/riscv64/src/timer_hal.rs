@@ -1,4 +1,4 @@
-//! riscv64 timer programming (`AGENTS.md` §17.2 "timer programming").
+//! riscv64 timer programming ("timer programming").
 //!
 //! Implements the Arch HAL [`Timer`](rustos_arch_api::Timer) surface for
 //! riscv64 over the supervisor (SBI) timer wired in [`crate::preempt`].
@@ -6,17 +6,17 @@
 //! it installs the one scheduler-tick callback and dispatches a tick to
 //! it. The *hardware* arming/re-arming (the SBI `set_timer` call and the
 //! `sie.STIE` enable) stays in [`crate::preempt`] — it is per-hart CSR
-//! work with no architecture-neutral shape (`AGENTS.md` §2.4) — and the
+//! work with no architecture-neutral shape — and the
 //! S-mode trap handler dispatches each timer interrupt through
 //! [`Timer::dispatch_tick`](rustos_arch_api::Timer::dispatch_tick), so the
-//! callback invoke lives in exactly one place (`AGENTS.md` §2.2).
+//! callback invoke lives in exactly one place.
 //!
 //! On the bare-metal target the callback lives in [`crate::preempt`]'s
 //! lock-free static (the trap handler's source of truth), so the handle
 //! forwards to it. On the host build there is no trap handler, so the
 //! handle backs the callback with an in-handle cell solely for the
 //! [`conformance`](rustos_arch_api::timer::conformance) vertical; it is
-//! never linked into a kernel image (`AGENTS.md` §1).
+//! never linked into a kernel image.
 
 use core::sync::atomic::AtomicUsize;
 // `Ordering` is only named by the host backing cell; the bare-metal
@@ -36,7 +36,7 @@ pub struct TimerHal {
     /// Host-only backing for the tick callback. On the bare-metal target
     /// [`crate::preempt`]'s static is the source of truth and this field
     /// is never read; kept so the host and bare-metal builds share one
-    /// struct shape (`AGENTS.md` §1).
+    /// struct shape.
     #[cfg_attr(all(target_arch = "riscv64", target_os = "none"), allow(dead_code))]
     host_callback: AtomicUsize,
 }
@@ -100,7 +100,7 @@ impl Timer for TimerHal {
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
             // No SBI timer on the host; the conformance vertical only
-            // requires the call to be total (`AGENTS.md` §2.9).
+            // requires the call to be total.
             let _ = ticks_from_now;
         }
     }

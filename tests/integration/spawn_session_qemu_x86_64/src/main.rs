@@ -23,7 +23,7 @@
 //!
 //! 1. Writes its gated banner to fd 1 (`stream_write` over the COM1 backing).
 //! 2. Launches the configured long-running services first — the device
-//!    manager `/System/Services/devmgr` (`AGENTS.md` §18.3) — with an
+//!    manager `/System/Services/devmgr` — with an
 //!    (audited) `spawn`, building it a fresh PML4 (emitting `ProcessSpawned`,
 //!    #2). `devmgr` reads the discovered hardware tree (unaudited
 //!    `hw_tree_read`) and parks in `hw_tree_wait` (unaudited), so it adds
@@ -36,7 +36,7 @@
 //!    PID — the X3b deliverable.
 //! 4. Calls `wait` on that child. The cooperative drain steps login: its
 //!    `users_db_read` fails closed (no root volume, no database held), it
-//!    wires the deny-all authenticator (`AGENTS.md` §5.4.5), writes its
+//!    wires the deny-all authenticator, writes its
 //!    `Username: ` prompt, and reads a dead console (the x86_64 boot path
 //!    installs no console-read backing, so its `stream_read` on fd 0 fails
 //!    closed at `NULL_CONSOLE_READ` and `stdin` clamps to a zero-length
@@ -61,7 +61,7 @@
 //! `exit` necessarily precedes the `wait` record). A regression that never
 //! reaps+relaunches (`< 4` spawns / `< 5` audited syscalls) never reaches the
 //! threshold, so the run times out and the harness reports `Outcome::Timeout`
-//! — the documented fail-loud behaviour (`AGENTS.md` §7).
+//! — the documented fail-loud behaviour.
 //! (`stream_write`/`stream_read` and `devmgr`'s `hw_tree_read`/`hw_tree_wait`
 //! are unaudited, and login's refused `users_db_read` audits as a *rejected*
 //! record, so neither `devmgr` after its spawn nor login but its `exit`
@@ -74,7 +74,7 @@
 //! replaces the audit sink. Splitting the audit-observer behaviour into a
 //! separate bin (instead of a Cargo feature on a production crate) prevents
 //! feature unification from leaking the QEMU-exit shortcut into any production
-//! build (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what the
+//! build (fail closed; the harness never decides what the
 //! kernel does next).
 
 #![cfg_attr(itest_x86_64, no_std)]
@@ -157,7 +157,7 @@ mod kernel {
     /// Forward to the shared bridge in `rustos_kernel::x86_64::panic_ctx`. The bridge
     /// logs through `SERIAL_SINK`, not `AUDIT_SINK`, so a panic before PASS
     /// does not trip the QEMU-exit short-circuit — it halts, the run times
-    /// out, and the harness reports `Outcome::Timeout` (fail-loud, §7).
+    /// out, and the harness reports `Outcome::Timeout` (fail-loud).
     #[panic_handler]
     fn rustos_spawn_session_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)

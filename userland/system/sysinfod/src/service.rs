@@ -1,5 +1,5 @@
 //! The request dispatcher: the one place a `sysinfo` request is decoded,
-//! capability-checked, audited, and answered (`AGENTS.md` §16.6).
+//! capability-checked, audited, and answered.
 
 use rustos_abi::sysinfo::{
     spec_for, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
@@ -19,11 +19,11 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 /// writes the encoded typed response into `response`, returning the number
 /// of bytes written.
 ///
-/// The pipeline **fails closed** (`AGENTS.md` §5.4.5): the capability check
+/// The pipeline **fails closed**: the capability check
 /// happens before any data is touched, and every early return leaves
 /// `response` untouched. There is no path that answers a privileged query
 /// without first passing its capability gate — `sysinfod` is the only
-/// server of the API and the kernel exposes no bypass (`AGENTS.md` §16.6).
+/// server of the API and the kernel exposes no bypass.
 ///
 /// # Response encoding
 ///
@@ -223,7 +223,7 @@ fn mount_list(
 ///
 /// Shared by every list query so the paging arithmetic — offset bounds, the
 /// `limit` window, the buffer-capacity check, and the fail-closed
-/// `BufferTooSmall` — lives in exactly one place (`AGENTS.md` §2.2). `encode`
+/// `BufferTooSmall` — lives in exactly one place. `encode`
 /// writes record `index` into the supplied `wire_len`-byte slot.
 fn page_records(
     response: &mut [u8],

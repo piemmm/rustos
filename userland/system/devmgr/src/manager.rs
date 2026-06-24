@@ -1,17 +1,17 @@
 //! Autoload walk — match every hardware-tree node and load each winner
-//! through the driver-host load gate (`AGENTS.md` §18.3).
+//! through the driver-host load gate.
 //!
 //! The device manager owns *policy* only: which driver binds which
 //! node. The load *mechanism* — signature verification, capability
 //! gating under `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`, spawning — stays
 //! behind the [`DriverLoader`] seam, implemented by the deployment's
-//! driver host (`userland/system/drvhost`). The §17.4 layering keeps
-//! this crate on `lib/*` only, so the seam is how the §8 gate is
+//! driver host (`userland/system/drvhost`). The layering keeps
+//! this crate on `lib/*` only, so the seam is how the gate is
 //! reached without a userland→userland production edge.
 //!
 //! Every outcome is audited through [`rustos_log`] with a stable
 //! [`crate::events`] identifier: a bound node, an unbound node (never
-//! an error, `AGENTS.md` §18.4), a refused unbroken tie, and a failed
+//! an error), a refused unbroken tie, and a failed
 //! load are all visible to external audit consumers.
 
 use alloc::collections::BTreeMap;
@@ -27,13 +27,13 @@ use rustos_devmatch::{resolve, DriverCandidate, MatchResolution};
 
 use crate::events;
 
-/// Load mechanism behind the device manager (`AGENTS.md` §8).
+/// Load mechanism behind the device manager.
 ///
 /// The production implementation adapts the drvhost `Host::load`
 /// pipeline: it verifies the image's signature, checks
 /// `CAP_DRV_LOAD` (and `CAP_DRV_KERNEL` where declared) against
 /// `caller_caps`, and spawns the driver — failing closed on the first
-/// violated gate (`AGENTS.md` §5.4). The device manager never inspects
+/// violated gate. The device manager never inspects
 /// or bypasses those checks; it only consumes the outcome.
 pub trait DriverLoader {
     /// Load the image at `path` on behalf of a caller holding
@@ -42,14 +42,13 @@ pub trait DriverLoader {
     ///
     /// `resources` is the matched node's [`HwNode::resources`] — the
     /// MMIO windows, IRQ lines, and DMA constraints expressed as
-    /// capability-grant *requests* (`AGENTS.md` §4 / §18.1). The load
+    /// capability-grant *requests*. The load
     /// mechanism mints the loaded driver an unforgeable, owner-checked
     /// grant per resource and nothing more, so the driver receives only
-    /// the authority its node exposed (`AGENTS.md` §18.3 — a loaded
+    /// the authority its node exposed (a loaded
     /// driver receives only the resource capabilities its matched node
     /// requested). The resources originate kernel-side, from the
-    /// discovered hardware tree, never from an untrusted caller (§4 —
-    /// no ambient authority); the device manager only forwards them.
+    /// discovered hardware tree, never from an untrusted caller (no ambient authority); the device manager only forwards them.
     ///
     /// # Errors
     ///
@@ -77,16 +76,16 @@ pub struct NodeBinding {
 pub struct AutoloadReport {
     /// Every node bound, in tree order.
     pub bindings: Vec<NodeBinding>,
-    /// Nodes whose match keys matched no candidate (`AGENTS.md` §18.4).
+    /// Nodes whose match keys matched no candidate.
     pub unbound: u32,
     /// Nodes refused because two candidates tied at the highest
-    /// priority (`AGENTS.md` §18.3 — a packaging defect).
+    /// priority (a packaging defect).
     pub ties_rejected: u32,
     /// Nodes whose winning driver was refused by the load gate.
     pub load_failures: u32,
 }
 
-/// User-space device manager (Stage 4.HW — `AGENTS.md` §18).
+/// User-space device manager (Stage 4.HW).
 pub struct DeviceManager<'m> {
     sink: &'m dyn Sink,
 }
@@ -101,13 +100,13 @@ impl<'m> DeviceManager<'m> {
     /// Match every node of `tree` against `candidates` and load each
     /// winning driver through `loader` under `caller_caps`.
     ///
-    /// Deterministic per `AGENTS.md` §18.3: the strictly
+    /// Deterministic : the strictly
     /// highest-priority matching candidate binds; an unbroken tie
     /// between distinct candidates leaves the node unbound and is
     /// audited as a packaging defect. A node matching no candidate is
-    /// left unbound and logged — never an error (§18.4). A driver
+    /// left unbound and logged — never an error. A driver
     /// matched by several nodes is loaded once and serves them all.
-    /// A load refusal fails only that node, closed (§5.4); the walk
+    /// A load refusal fails only that node, closed; the walk
     /// continues so one bad image cannot block the rest of the boot.
     pub fn autoload(
         &self,
@@ -128,9 +127,8 @@ impl<'m> DeviceManager<'m> {
                     // tree have no driver, so this is logged at `Debug` (not
                     // `Info`) to keep the slow diagnostic UART from drowning in
                     // one line per unbound node — still logged with its stable
-                    // id when diagnostics are enabled (`AGENTS.md` §18.4 / §20
-                    // / §2.16). Kept identical to the user-space sibling
-                    // (`crate::autoload::match_and_load`, `AGENTS.md` §2.2).
+                    // id when diagnostics are enabled. Kept identical to the user-space sibling
+                    // (`crate::autoload::match_and_load`).
                     self.audit_node(events::NODE_UNBOUND, Level::Debug, node.id(), &[]);
                     report.unbound += 1;
                 }
@@ -376,7 +374,7 @@ mod tests {
     #[test]
     fn winner_is_loaded_and_bound_and_unmatched_node_stays_unbound() {
         // `NODE_UNBOUND` is a `Debug` record (filtered out on a default `Info`
-        // boot, `AGENTS.md` §20); lower the threshold so the test observes it.
+        // boot); lower the threshold so the test observes it.
         rustos_log::set_max_level(rustos_log::Level::Trace);
         let emmc = [DriverBindKey::new(5, compat(b"brcm,bcm2711-emmc2"))];
         let candidates = [DriverCandidate {
@@ -409,7 +407,7 @@ mod tests {
 
     #[test]
     fn matched_node_resources_are_forwarded_to_the_loader() {
-        // §18.3: a loaded driver receives only the resource capabilities
+        // a loaded driver receives only the resource capabilities
         // its matched node requested. The device manager must forward the
         // *matched* node's resources to the load mechanism verbatim.
         let keys = [compat(b"brcm,bcm2711-emmc2")];

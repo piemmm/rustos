@@ -9,7 +9,7 @@
 //! capability-checked, audited `rustos_kernel_core::spawn_image` caller, and
 //! admits each as a resumable user kthread (`spawn_user_kthread`, `plans/SPAWN.md`
 //! SP2) whose `pre_resume` hook reactivates that task's page-table root before
-//! every switch-in, so the two tasks stay isolated (`AGENTS.md` §4).
+//! every switch-in, so the two tasks stay isolated.
 //!
 //! Driving the cooperative `step` loop interleaves the two runnable tasks. Each
 //! task's `yield`/`exit` `svc` traps back to the dispatch callback, which maps
@@ -19,7 +19,7 @@
 //! left live), proving a real EL0→EL0 context switch under the live scheduler.
 //! A regression (a switch that never resumes, a task that never runs) stalls the
 //! drain or trips a distinct failure finisher, so the run fails loudly — by a
-//! failure code or by the harness `Outcome::Timeout` (`AGENTS.md` §7).
+//! failure code or by the harness `Outcome::Timeout`.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

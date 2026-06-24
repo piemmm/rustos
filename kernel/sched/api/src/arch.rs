@@ -4,19 +4,18 @@
 //! GIC, a CLINT or `requestAnimationFrame` directly. Every architecture
 //! port implements [`SchedulerArch`]; the host conformance suite and the
 //! implementations' unit tests use [`TestArch`], gated behind the
-//! `test-arch` Cargo feature (`AGENTS.md` §1 — no hacks: production code
+//! `test-arch` Cargo feature (no hacks: production code
 //! never carries a fake IPI/timer implementation).
 //!
 //! [`SchedulerArch`] and [`CpuId`] are defined in the Arch HAL crate
-//! `kernel/arch/api` (`AGENTS.md` §17.2) and re-exported here. Keeping the
+//! `kernel/arch/api` and re-exported here. Keeping the
 //! HAL trait in `kernel/arch/api` is what lets an architecture port
-//! implement it without depending on a scheduler crate (§17.4).
+//! implement it without depending on a scheduler crate.
 
 // The scheduler-facing Arch HAL surface ([`CpuId`], [`SchedulerArch`]) is
-// defined once in `kernel/arch/api` (`AGENTS.md` §17.2) and re-exported
+// defined once in `kernel/arch/api` and re-exported
 // here so the scheduler contract, every `kernel/sched/<impl>`, and
-// `kernel/core` all name the single canonical definition (`AGENTS.md`
-// §2.2 — no duplication).
+// `kernel/core` all name the single canonical definition (no duplication).
 pub use rustos_arch_api::{CoreClass, CpuId, SchedulerArch};
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -38,7 +37,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 /// simulated cores. This matches the production invariant — on a real
 /// port `current_cpu()` is whatever CPU the calling code happens to be
 /// running on — while staying single-threaded so the tests are
-/// deterministic and reproducible (`AGENTS.md` §7 — no flaky tests).
+/// deterministic and reproducible (no flaky tests).
 #[cfg(any(test, feature = "test-arch"))]
 #[derive(Debug, Default)]
 pub struct TestArch {

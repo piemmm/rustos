@@ -50,7 +50,7 @@ const USER_STACK_PAGES: u64 = 288;
 /// clear of the program image and the stack).
 const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 
-/// Per-process stack-canary seed handed to the program (`AGENTS.md` §19.2).
+/// Per-process stack-canary seed handed to the program.
 const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 
 /// Physical frames the test hands the spawn build (image segments + the user
@@ -150,8 +150,8 @@ fn spawn_el0_resume_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege the
-/// spawn caller requires (`AGENTS.md` §5.4). It does not widen the program's
-/// own authority (`AGENTS.md` §16.5).
+/// spawn caller requires. It does not widen the program's
+/// own authority.
 struct SpawnAuthority;
 impl CapabilityQuery for SpawnAuthority {
     fn holds(&self, cap: CapabilityId) -> bool {
@@ -166,8 +166,7 @@ impl CapabilityQuery for SpawnAuthority {
 /// suspended back to the dispatcher through [`reschedule_current`]. `yield`
 /// resumes here on the next dispatch (and the callback `sret`s back into
 /// U-mode); `exit` reaps the task and never returns to the callback. Any other
-/// syscall is unexpected from the fixture program and fails the test loudly
-/// (`AGENTS.md` §7).
+/// syscall is unexpected from the fixture program and fails the test loudly.
 extern "C" fn dispatch(number: u64, _args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let raw = number as u16;
@@ -203,7 +202,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     note(TEST_START, "riscv64 RV-X1 test: building the U-mode image");
 
     // Read the timer frequency from the firmware tree. Fail closed (finisher)
-    // if it is omitted rather than guessing a divisor (`AGENTS.md` §5.4).
+    // if it is omitted rather than guessing a divisor.
     // SAFETY: `dtb` is the verbatim `a1` pointer OpenSBI handed the boot hart;
     // `boot.s` forwards it unchanged.
     let Some(timebase) = (unsafe { Fdt::from_ptr(dtb as *const u8) })
@@ -285,7 +284,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // masked, so dispatch is the cooperative `step` loop below (the spawn-time
     // self-IPI via SBI stays pending and is never delivered).
     // Single-hart slice: one per-CPU slot, owned by an allocator-free
-    // `static` backing (`AGENTS.md` §24.1).
+    // `static` backing.
     static STORAGE: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = Arc::new(RiscvArch::new(&STORAGE, BOOT_CPU, timebase));
     let Ok(sched) = Scheduler::new(SchedulerConfig::defaults_for(1), arch) else {
@@ -294,12 +293,12 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
 
     // Admit the U-mode program as a resumable user kthread. Its `pre_resume`
     // hook runs on the dispatcher's context immediately before every switch-in:
-    // it reactivates the task's own `satp` root (isolation, §4) — the RV-X1
+    // it reactivates the task's own `satp` root (isolation) — the RV-X1
     // primitive. The kernel-stack top the hook is handed (`_top`) is unused on
     // riscv64: a single user task arms `sscratch` with its own kernel stack on
     // the first `enter_user` (`userentry`), and the RV1 trap path preserves it
     // across a mid-handler park (per-task `sscratch` repointing for *concurrent*
-    // tasks is RV-X2). `ContextSwitchHal` is the riscv64 §17.2 context-switch
+    // tasks is RV-X2). `ContextSwitchHal` is the riscv64 context-switch
     // primitive.
     let cs = ContextSwitchHal::new();
     let user_mode = UserMode::new();
@@ -327,7 +326,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // with the dispatcher through real U-mode↔kernel context switches landing
     // on its own kernel stack (the RV1 park-safe path). A switch that never
     // resumed its task would stall the drain and the harness would time out
-    // (fail-loud, `AGENTS.md` §7).
+    // (fail-loud).
     let mut steps = 0u64;
     while sched.live_task_count() != 0 && steps < MAX_STEPS {
         let _ = sched.step(BOOT_CPU);

@@ -1,4 +1,4 @@
-//! Canonical random-number ABI (`AGENTS.md` §22).
+//! Canonical random-number ABI.
 //!
 //! RustOS has exactly one kernel cryptographic random subsystem. Userland
 //! never invents its own entropy collector, PRNG, or seeding path; it asks
@@ -19,7 +19,7 @@
 //!   returning weak randomness.
 //! * After initialisation a request never blocks waiting for fresh external
 //!   entropy; if the output reserve is empty the kernel generates more bytes
-//!   synchronously from the CSPRNG (`AGENTS.md` §22).
+//!   synchronously from the CSPRNG.
 //!
 //! The numeric flag bits and the per-call length cap are part of the frozen
 //! random ABI: new behaviour is added by allocating an unused bit, never by
@@ -29,7 +29,7 @@ use crate::Errno;
 
 /// Default size, in bytes, of the kernel's per-CPU random output reserve.
 ///
-/// `AGENTS.md` §22 permits a default reserve of 2 KiB, preferably per-CPU to
+/// the charter permits a default reserve of 2 KiB, preferably per-CPU to
 /// avoid lock contention. The reserve holds CSPRNG *output* (not raw
 /// entropy); it is refilled in the background and on demand.
 pub const RANDOM_RESERVE_DEFAULT_BYTES: usize = 2048;
@@ -40,7 +40,7 @@ pub const RANDOM_RESERVE_DEFAULT_BYTES: usize = 2048;
 /// pin a CPU generating an unbounded stream in a single uninterruptible
 /// call; a caller needing more issues further requests. A request larger
 /// than [`RANDOM_RESERVE_DEFAULT_BYTES`] is still valid — the kernel simply
-/// generates the overflow synchronously from the CSPRNG (`AGENTS.md` §22).
+/// generates the overflow synchronously from the CSPRNG.
 pub const RANDOM_REQUEST_MAX_BYTES: usize = 1 << 16;
 
 // A single request may exceed one reserve's worth (the kernel tops up
@@ -55,7 +55,7 @@ const _: () = assert!(RANDOM_REQUEST_MAX_BYTES > RANDOM_RESERVE_DEFAULT_BYTES);
 /// Only the bits named here are defined; every other bit is reserved and
 /// must be zero. [`RandomFlags::from_bits`] rejects a value with any
 /// reserved bit set, so a future flag cannot be silently ignored by an older
-/// kernel (`AGENTS.md` §5.4 — validate every input, fail closed).
+/// kernel (validate every input, fail closed).
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub struct RandomFlags(u32);

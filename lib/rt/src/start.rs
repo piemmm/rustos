@@ -1,8 +1,8 @@
-//! The per-architecture program entry trampoline (`_start`) — the §1
+//! The per-architecture program entry trampoline (`_start`) — the
 //! assembly carve-out — the Rust startup driver it calls, the stack-protector
 //! symbols, and the panic handler.
 //!
-//! # Why this module contains assembly (`AGENTS.md` §1 justification)
+//! # Why this module contains assembly (justification)
 //!
 //! RustOS is Rust-only; assembly is permitted only where the architecture
 //! *strictly* requires it. A program's entry point is exactly such a case:
@@ -18,11 +18,11 @@
 //! startup vector into a C `argc`/`argv`/`envp` and calls a C `main`, whereas
 //! this runtime calls the program's Rust `main` (named through
 //! [`crate::entry!`]). RustOS's own programs use this runtime; crt0 exists
-//! only for non-Rust programs (`AGENTS.md` §1, §16.4).
+//! only for non-Rust programs.
 //!
 //! Each `_start` is gated on a build-script-emitted `rt_native_<arch>` cfg
 //! (see `build.rs`) rather than a target-architecture predicate, so the
-//! instruction-set choice stays out of the source tree the §17.2 `cfg-check`
+//! instruction-set choice stays out of the source tree the `cfg-check`
 //! guards (mirroring `lib/crt0` and `lib/abi-trap`).
 //!
 //! # Kernel → `_start` contract (`abi-v1`)
@@ -43,7 +43,7 @@ use crate::exit;
 
 /// Exit code the runtime terminates with when the kernel-supplied startup
 /// vector cannot be validated. A non-zero, reserved code (a fail-closed
-/// teardown, `AGENTS.md` §2.9) distinct from any value a well-behaved `main`
+/// teardown) distinct from any value a well-behaved `main`
 /// is likely to return.
 const EXIT_BAD_STARTUP: i32 = 70;
 
@@ -56,14 +56,14 @@ extern "Rust" {
 
 /// Storage for the program's stack-protector guard.
 ///
-/// This is the one global the §19.2 stack-canary scheme inherently requires:
+/// This is the one global the stack-canary scheme inherently requires:
 /// the compiler-inserted function prologue/epilogue of stack-protected code
 /// reads the guard word from a fixed, well-known symbol (`__stack_chk_guard`,
 /// the platform C-ABI convention). The runtime seeds it once, before any
 /// program code runs, with the per-process random value the kernel placed in
-/// the startup vector (`AGENTS.md` §22 entropy). It is wrapped in an
+/// the startup vector (entropy). It is wrapped in an
 /// [`UnsafeCell`] rather than declared `static mut` so the write goes through
-/// a single audited path with no aliasing `&mut` (`AGENTS.md` §2.1).
+/// a single audited path with no aliasing `&mut`.
 struct StackGuard(UnsafeCell<usize>);
 
 // SAFETY: the guard is written exactly once, by `install_stack_canary`,
@@ -76,7 +76,7 @@ unsafe impl Sync for StackGuard {}
 static __stack_chk_guard: StackGuard = StackGuard(UnsafeCell::new(0));
 
 /// Seed the program's stack-protector guard with the kernel-supplied
-/// per-process canary (`AGENTS.md` §19.2).
+/// per-process canary.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the low bits are the conventional guard layout.
 fn install_stack_canary(canary: u64) {
     let value = canary as usize;
@@ -92,7 +92,7 @@ fn install_stack_canary(canary: u64) {
 ///
 /// A detected stack-buffer overflow is unrecoverable; the runtime terminates
 /// the program through the `exit` syscall with a reserved non-zero code rather
-/// than returning to corrupted state (`AGENTS.md` §2.9 — fail closed).
+/// than returning to corrupted state (fail closed).
 #[no_mangle]
 extern "C" fn __stack_chk_fail() -> ! {
     exit(EXIT_BAD_STARTUP)
@@ -100,7 +100,7 @@ extern "C" fn __stack_chk_fail() -> ! {
 
 /// Panic handler: a hosted program has no unwinder, so a panic is an
 /// unrecoverable fault. Terminate through the `exit` syscall rather than
-/// returning to corrupt state (`AGENTS.md` §2.9 — fail closed). Programs are
+/// returning to corrupt state (fail closed). Programs are
 /// written to be panic-free; this satisfies the `no_std` contract once and
 /// for all rt programs, so none repeats it.
 #[panic_handler]

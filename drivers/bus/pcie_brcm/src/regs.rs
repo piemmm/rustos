@@ -2,7 +2,7 @@
 //!
 //! Byte offsets and bit positions are the BCM2711 root-complex register
 //! definitions. Only the registers this bring-up driver drives are
-//! named; an unused register is not declared (`AGENTS.md` §2.3).
+//! named; an unused register is not declared.
 //!
 //! All offsets are relative to the controller's MMIO register block —
 //! the `reg` window the `brcm,bcm2711-pcie` device-tree node advertises
@@ -63,7 +63,7 @@ pub const MISC_CTRL_RCB_64B_MODE_MASK: u32 = 0x80;
 /// `VideoCore`'s `NOTIFY_XHCI_RESET` VL805 xHCI-firmware load reaches
 /// system memory through this inbound window, so an unprogrammed
 /// `SCB0_SIZE` lets the mailbox reload complete yet leaves the firmware
-/// version at `0` and the controller stuck in `CNR` (`AGENTS.md` §15.7).
+/// version at `0` and the controller stuck in `CNR`.
 pub const MISC_CTRL_SCB0_SIZE_MASK: u32 = 0xf800_0000;
 
 // --- Inbound (RC) BAR windows ---------------------------------------------
@@ -222,7 +222,7 @@ pub const RC_SECONDARY_BUS: u8 = 1;
 /// would let the root port forward configuration to buses that no device
 /// answers — a transaction the windowed accessor already refuses to
 /// issue (`rustos_pci::mechanism_brcm`), but the bridge bound is
-/// kept honest to the topology too (`AGENTS.md` §2.3 — no speculative
+/// kept honest to the topology too (no speculative
 /// width for a switch this platform does not have).
 pub const RC_SUBORDINATE_BUS: u8 = RC_SECONDARY_BUS;
 

@@ -8,10 +8,9 @@
 //! active theme's [`Palette`] and the standard ANSI
 //! colour tables. The surface is the window manager's to place and round: the
 //! terminal paints a *rectangular* buffer and the compositor applies any corner
-//! radius through its single anti-aliased rounded-corner path (`AGENTS.md`
-//! §2.2). There is no rounding here.
+//! radius through its single anti-aliased rounded-corner path. There is no rounding here.
 //!
-//! Colour is resolved one way (`AGENTS.md` §2.2): a cell's
+//! Colour is resolved one way: a cell's
 //! [`Color::Default`](rustos_vt::Color) foreground and background take the
 //! theme's `on_surface` / `surface` roles, the 16 [`BasicColor`]s and the
 //! 256-colour palette map through the standard ANSI tables, and truecolour is
@@ -24,7 +23,7 @@
 //! Rows are drawn top to bottom and the cursor cell, when visible, is
 //! highlighted with the accent role. Every length saturates and every blit
 //! clips, so a viewport smaller than the grid paints what fits rather than
-//! panicking (`AGENTS.md` §2.9).
+//! panicking.
 
 use alloc::string::String;
 
@@ -44,7 +43,7 @@ use crate::terminal::Terminal;
 /// Only `viewport`'s dimensions are used; the window manager places the
 /// returned surface at `viewport`'s origin. Returns `None` only when those
 /// dimensions cannot be allocated (a surface that could never exist), so the
-/// caller fails closed rather than panicking (`AGENTS.md` §2.9).
+/// caller fails closed rather than panicking.
 #[must_use]
 pub fn render<S: ShellSource>(
     terminal: &Terminal<S>,

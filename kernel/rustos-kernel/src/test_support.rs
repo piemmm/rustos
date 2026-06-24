@@ -7,8 +7,7 @@
 //! [`rustos_kernel_core::enumerate_driver_store`]). Both the
 //! [`crate::system_files`] service tests and the
 //! [`crate::driver_autoload`] composition tests delegate through it, so it is
-//! defined once here rather than copy-pasted into each module (`AGENTS.md`
-//! §2.2).
+//! defined once here rather than copy-pasted into each module.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -23,7 +22,7 @@ use rustos_abi::driver::DriverError;
 const ROOT_ID: u64 = 1;
 
 /// One node of the in-memory tree: a directory (with named children) or a
-/// regular file (with byte contents), plus its §5.3 security record.
+/// regular file (with byte contents), plus its security record.
 struct Node {
     kind: NodeKind,
     children: Vec<(String, u64)>,

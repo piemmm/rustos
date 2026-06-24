@@ -12,7 +12,7 @@
 //! `SCTLR_EL1` reset state ([`crate::paging::SCTLR_MMU_OFF`]) therefore
 //! applies one level up: `boot.s`'s EL2 path writes each register
 //! **whole** with the values pinned here, never OR-ing into the live
-//! register (`AGENTS.md` §5.4 — fail closed, not "trust the reset
+//! register (fail closed, not "trust the reset
 //! state").
 //!
 //! The constants are the single Rust source of truth for the values the

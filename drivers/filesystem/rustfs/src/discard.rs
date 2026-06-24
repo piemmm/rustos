@@ -5,31 +5,31 @@
 //! [`crate::RustFs`]) as a committed transaction reclaims them
 //! ([`crate::RustFs::finish_txn`]). [`crate::RustFs::trim`] later issues
 //! the discards, leaning on the seams the earlier stages built rather
-//! than inventing a second free-tracking mechanism (`AGENTS.md` §2.2):
+//! than inventing a second free-tracking mechanism:
 //!
 //! * **Safety.** A queued block is discarded **only** if it is still
 //!   free at trim time. The mount-time free-space rebuild marks every
 //!   block reachable from the committed root — including every reflink
 //!   target and every deduped chunk at refcount >= 1 — as *used*, so a
 //!   free block is, by construction, unreachable from every retained
-//!   root, snapshot, reflink, deduped extent, and recovery root (§11).
+//!   root, snapshot, reflink, deduped extent, and recovery root.
 //!   A block that was freed and then reallocated is *used* again by
 //!   trim time and is skipped. Discard therefore never destroys data
-//!   reachable from any retained root (§14).
+//!   reachable from any retained root.
 //! * **Batched, aligned, rate-limited.** Still-free blocks are
 //!   coalesced into contiguous runs, each run is aligned **inward** to
 //!   the device's discard granularity, and at most [`TRIM_BATCH_RANGES`]
 //!   runs are issued per [`crate::RustFs::trim`] call; the remainder
-//!   stays queued for the next call (§11).
+//!   stays queued for the next call.
 //! * **No zero-readback assumption.** `RustFS` never reads a discarded
 //!   block expecting zeroes; discarded blocks are free and are fully
 //!   rewritten (header + integrity + crypto) before they are ever read
-//!   again (§11).
+//!   again.
 //! * **Recorded, not failed.** A device without discard support is
 //!   recorded in the [`TrimReport`] and the queue is drained without
-//!   error (§11). There is no `nodiscard`/`trim=off` mode (§11).
+//!   error. There is no `nodiscard`/`trim=off` mode.
 //!
-//! The queue is rebuildable, transient state (§4): a crash mid-trim
+//! The queue is rebuildable, transient state: a crash mid-trim
 //! leaves a mountable volume and never loses live data.
 
 use alloc::vec::Vec;
@@ -47,14 +47,14 @@ pub const TRIM_CLEAN: EventId = EventId(12_030);
 /// A trim pass discarded one or more block ranges to the device.
 pub const TRIM_DISCARDED: EventId = EventId(12_031);
 /// A trim pass ran on a device without discard support; the queue was
-/// drained and the outcome recorded, not failed (§11).
+/// drained and the outcome recorded, not failed.
 pub const TRIM_UNSUPPORTED: EventId = EventId(12_032);
 /// A trim pass was refused because the caller lacks `CAP_FS_MOUNT`.
 pub const TRIM_DENIED: EventId = EventId(12_033);
 
 /// Every discard event identifier falls inside the reserved `rustfs`
 /// range so the stable IDs audit-log consumers rely on never collide
-/// with another subsystem (`AGENTS.md` §19.4).
+/// with another subsystem.
 const _: () = {
     assert!(TRIM_CLEAN.0 >= RUSTFS_RANGE_START && TRIM_CLEAN.0 < RUSTFS_RANGE_END);
     assert!(TRIM_DISCARDED.0 >= RUSTFS_RANGE_START && TRIM_DISCARDED.0 < RUSTFS_RANGE_END);
@@ -64,7 +64,7 @@ const _: () = {
 
 /// Most coalesced block ranges one [`crate::RustFs::trim`] call issues
 /// before returning, leaving any remainder queued. Rate-limits a trim
-/// pass so it cannot monopolise the device (§11).
+/// pass so it cannot monopolise the device.
 pub const TRIM_BATCH_RANGES: usize = 64;
 
 /// The structured outcome of a [`crate::RustFs::trim`] pass
@@ -89,7 +89,7 @@ pub struct TrimReport {
 
 impl TrimReport {
     /// Log the closing outcome of a trim pass through `sink` with a
-    /// stable event ID (`AGENTS.md` §5.4 / §19.4).
+    /// stable event ID.
     fn log_outcome(&self, sink: &dyn Sink) {
         let (level, id, message) = if !self.supported {
             (
@@ -136,20 +136,20 @@ impl<B: Block> RustFs<B> {
     /// Only blocks that are **still free** at call time are discarded, so a
     /// block that was freed and then reallocated is skipped, never discarded:
     /// discard can never destroy data reachable from a retained root,
-    /// snapshot, reflink, or deduped extent (§11, §14). Still-free blocks are
+    /// snapshot, reflink, or deduped extent. Still-free blocks are
     /// coalesced into contiguous runs, aligned inward to the device's discard
     /// granularity, and at most [`TRIM_BATCH_RANGES`] runs are issued before
-    /// the call returns, leaving any remainder queued (§11). A device without
+    /// the call returns, leaving any remainder queued. A device without
     /// discard support is recorded in the returned [`TrimReport`] and the
-    /// queue drained — recorded, not failed (§11). The closing outcome is
+    /// queue drained — recorded, not failed. The closing outcome is
     /// logged to `sink` with a stable event ID.
     ///
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if `caps` does not grant
-    ///   [`CapabilityId::FS_MOUNT`] (fail-closed, `AGENTS.md` §5.4).
+    ///   [`CapabilityId::FS_MOUNT`] (fail-closed).
     /// * [`DriverError::DeviceFault`] if the device reports a discard fault
-    ///   (never a panic, §2.9).
+    ///   (never a panic).
     ///
     /// # Capabilities
     ///
@@ -175,7 +175,7 @@ impl<B: Block> RustFs<B> {
         let mut report = TrimReport::default();
         if !cap.supported {
             // Recorded, not failed: drain the queue (the device cannot
-            // reclaim) and report unsupported (§11).
+            // reclaim) and report unsupported.
             self.pending_discard.clear();
             report.supported = false;
             report.log_outcome(sink);
@@ -185,7 +185,7 @@ impl<B: Block> RustFs<B> {
         let gran = cap.granularity_blocks.max(1);
 
         // Keep only blocks that are still free; a reallocated block is now
-        // reachable from the committed root and must not be discarded (§11).
+        // reachable from the committed root and must not be discarded.
         let queued = core::mem::take(&mut self.pending_discard);
         let mut free_blocks: Vec<u64> = Vec::with_capacity(queued.len());
         for block in queued {
@@ -261,8 +261,7 @@ impl<B: Block> RustFs<B> {
     /// mkfs-time full-range discard (`docs/src/filesystem/rustfs-spec.md`
     /// §11 mkfs flow): tell a discard-capable device the whole volume is free
     /// before the encrypted structures are laid down. A device without discard
-    /// support is recorded (the returned `bool` is `false`), never failed
-    /// (§11).
+    /// support is recorded (the returned `bool` is `false`), never failed.
     ///
     /// # Errors
     ///

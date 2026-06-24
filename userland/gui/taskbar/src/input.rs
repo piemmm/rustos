@@ -9,17 +9,16 @@
 //!
 //! It is the taskbar counterpart of the window manager's input router, and it
 //! consumes the **same** shared [`rustos_input`] event vocabulary, so the
-//! desktop routes one event type to both (`AGENTS.md` §17.4, §2.2). Like that
+//! desktop routes one event type to both. Like that
 //! router it holds no pixels, tracks the pointer position from motion events,
 //! applies presses at that position, and never panics: a press that misses
-//! every region changes nothing (`AGENTS.md` §2.9).
+//! every region changes nothing.
 //!
 //! While the start menu is open the router treats it as modal: a primary press
 //! inside the popup ([`Taskbar::menu_layout`]) activates the entry under the
 //! pointer, a press on the start button toggles the menu shut, and a press
 //! anywhere else dismisses the menu (the standard click-away behaviour)
-//! without also acting on what it landed on — one click does one thing
-//! (`AGENTS.md` §2.1).
+//! without also acting on what it landed on — one click does one thing.
 
 use rustos_geometry::{Point, Scale};
 use rustos_input::{InputEvent, PointerButton};
@@ -94,7 +93,7 @@ impl TaskbarInput {
     }
 
     /// Process one input `event` against `taskbar`, hit-testing presses at the
-    /// desktop `scale` (the compositor's output density, `AGENTS.md` §10),
+    /// desktop `scale` (the compositor's output density),
     /// returning what changed.
     ///
     /// Only a primary-button press acts; pointer motion updates the tracked

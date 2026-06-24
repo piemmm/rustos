@@ -9,15 +9,15 @@
 //! these shells carried a *bare identification tuple* (a PCI
 //! bus/device/function triple, or an MMIO window length) and the
 //! driver was expected to synthesise register accesses itself; that
-//! violated `AGENTS.md` §4 ("no ambient authority — a process can
+//! violated ("no ambient authority — a process can
 //! only reach memory the kernel mapped for it"). The window is now
 //! the single thing a backend holds: a driver cannot fabricate one,
 //! so it can only ever touch registers the kernel chose to expose.
 //!
 //! The PCI and MMIO transports decode *different* register layouts
-//! (virtio 1.1 §4.1 modern-PCI common-config capability vs §4.2 the
+//! (virtio 1.1 §4.1 modern-PCI common-config capability vs the
 //! MMIO register map), which is why two distinct backend types exist
-//! rather than one (`AGENTS.md` §2.3 — each justifies its existence).
+//! rather than one (each justifies its existence).
 //! Both delegate the actual load/store to the bounds-checked
 //! accessors on [`RegisterWindow`]; neither performs raw pointer
 //! arithmetic.

@@ -4,18 +4,18 @@
 //! [`rustos_abi::driver::block::Block`] device and exposes it through
 //! the versioned [`rustos_abi::driver::filesystem::FilesystemRead`] and
 //! [`rustos_abi::driver::filesystem::FilesystemWrite`] surfaces
-//! (`AGENTS.md` §2.4 / §9 — new behaviour ships as a new trait, never by
+//! (new behaviour ships as a new trait, never by
 //! widening the frozen mount/unmount
 //! [`Filesystem`](rustos_abi::driver::filesystem::Filesystem)).
 //!
 //! FAT32 has no per-inode owner, mode, ACL, or capability gate; those
-//! live in the VFS metadata layer (`AGENTS.md` §5.3) that mounts this
+//! live in the VFS metadata layer that mounts this
 //! driver. The driver therefore makes **no** permission decisions
-//! (§5.4 — the VFS is the policy point, this is raw structural I/O).
+//! (the VFS is the policy point, this is raw structural I/O).
 //!
 //! # Public surface
 //!
-//! Per `AGENTS.md` §8 the only public *function* is [`register`].
+//! Per the only public *function* is [`register`].
 //! [`Fat32`] is a public *type* the driver host instantiates with
 //! [`Fat32::open`]; the host reaches into it only through the
 //! [`FilesystemRead`] and [`FilesystemWrite`] traits.
@@ -45,8 +45,7 @@
 //!
 //! Loading requires
 //! [`CapabilityId::DRV_LOAD`](rustos_abi::CapabilityId::DRV_LOAD). The
-//! driver runs in user space; it does not request `CAP_DRV_KERNEL`
-//! (`AGENTS.md` §4 / §8).
+//! driver runs in user space; it does not request `CAP_DRV_KERNEL`.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -61,7 +60,7 @@ use rustos_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x4641_5433_3200_0001; // "FAT32" + index
 
-/// Driver entry point (`AGENTS.md` §8).
+/// Driver entry point.
 ///
 /// # Errors
 ///
@@ -724,7 +723,7 @@ impl<B: Block> Fat32<B> {
     /// cluster is addressable, and the root directory (cluster 2) is
     /// created empty. The boot sector this function writes is then handed
     /// straight to [`Fat32::open`], which is the single source of truth for
-    /// the on-disk layout (`AGENTS.md` §2.2) — so a volume `format`
+    /// the on-disk layout — so a volume `format`
     /// produces is, by construction, one the driver mounts.
     ///
     /// # Errors
@@ -985,8 +984,7 @@ impl<B: Block> Fat32<B> {
     /// valid, checksum-matching long-name set precedes the short entry,
     /// and otherwise the 8.3 short name. Deleted entries, orphaned
     /// long-name fragments, volume labels, and the `.`/`..` self/parent
-    /// links are skipped (the VFS resolves `.`/`..` itself,
-    /// `AGENTS.md` §16).
+    /// links are skipped (the VFS resolves `.`/`..` itself).
     fn next_entry(&mut self, cursor: &mut DirCursor) -> Result<Option<ParsedEntry>, DriverError> {
         let mut long = LongName::new();
         let mut run_start: Option<u64> = None;

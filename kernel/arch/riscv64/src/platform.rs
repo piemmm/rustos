@@ -1,12 +1,11 @@
-//! riscv64 early-boot platform discovery (`AGENTS.md` §17.2 / §18.2).
+//! riscv64 early-boot platform discovery.
 //!
 //! Implements the Arch HAL
 //! [`PlatformDiscovery`](rustos_arch_api::PlatformDiscovery) slice by
 //! normalising the
-//! flattened device tree the `virt` board hands the kernel (`AGENTS.md`
-//! §18.2 — FDT → hardware tree) into [`rustos_abi::hwtree`] nodes. This is
+//! flattened device tree the `virt` board hands the kernel (FDT → hardware tree) into [`rustos_abi::hwtree`] nodes. This is
 //! a tracked *move* of the facts the [`crate::fdt`] reader already extracts
-//! behind the common HAL trait, not a new parser (`AGENTS.md` §2.2): the
+//! behind the common HAL trait, not a new parser: the
 //! boot path used to consume the `/memory` region and the
 //! `timebase-frequency` directly; it now reaches them as a
 //! [`rustos_abi::HwNode`] tree
@@ -54,7 +53,7 @@ impl PlatformDiscovery for FdtDiscovery<'_> {
             let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Memory);
             // A single resource can never exceed the node's bound; a
             // failure would be a logic error in the ABI, so surface it as
-            // a malformed source rather than panicking (`AGENTS.md` §2.9).
+            // a malformed source rather than panicking.
             node.push_resource(HwResource::mmio(base, size))
                 .map_err(|_| DiscoveryError::MalformedSource)?;
             sink.emit(node)?;

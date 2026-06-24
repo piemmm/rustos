@@ -1,4 +1,4 @@
-//! Context-switch surface of the Arch HAL (`AGENTS.md` §17.2 "context
+//! Context-switch surface of the Arch HAL ("context
 //! switch").
 //!
 //! Suspending the running task and resuming another on a CPU is a
@@ -6,13 +6,13 @@
 //! saves the outgoing task's callee-saved registers onto its kernel
 //! stack, records the resulting stack pointer, loads the inbound task's
 //! stack pointer, and restores its registers with the port's native
-//! prologue/epilogue assembly. §17.2 makes the architecture surface a
+//! prologue/epilogue assembly. The charter makes the architecture surface a
 //! closed set of traits on the HAL; this module is the "context switch"
 //! member of that set, so the per-task save area and the switch
 //! primitive live behind one vocabulary instead of being re-described
-//! at every call site (`AGENTS.md` §2.2). The parallel per-arch
+//! at every call site. The parallel per-arch
 //! implementations of this one trait are the deliberate shape of
-//! §17.1/§17.2 modularity, never collapsed behind `cfg` (§2.2 carve-out).
+//! modularity, never collapsed behind `cfg` (carve-out).
 //!
 //! # What lives here
 //!
@@ -22,20 +22,20 @@
 //!   suspension — and keeps the callee-saved registers *on the stack
 //!   itself* in a fixed frame owned by the switch assembly. So the
 //!   neutral save area is a single `#[repr(C)]` `u64`, layout-identical
-//!   to each port's native `TaskCtx` (one definition, §2.2).
+//!   to each port's native `TaskCtx` (one definition).
 //! * [`TaskEntry`] — the entry point a freshly prepared task first runs.
 //!   A plain `unsafe extern "C" fn(usize) -> !` (not a closure): it is
 //!   reached via the port's resume assembly, which has no Rust frame to
 //!   drop a captured environment in, and a task body never returns to
-//!   its synthesised frame (`AGENTS.md` §2.1).
+//!   its synthesised frame.
 //! * [`PrepareError`] — the fail-closed result of seeding a task's
 //!   initial frame ([`ContextSwitch::prepare`]). A bad stack is rejected,
-//!   never silently truncated (`AGENTS.md` §2.9 / §5.4).
+//!   never silently truncated.
 //! * [`ContextSwitch`] — the per-port handle the kernel reaches through.
 //!   It seeds a never-run task's first frame ([`ContextSwitch::prepare`],
 //!   host-testable pointer/layout math) and performs the bare-metal
 //!   switch ([`ContextSwitch::switch`], the port's assembly).
-//! * [`conformance`] — the §17.2 conformance vertical: a host-run
+//! * [`conformance`] — the conformance vertical: a host-run
 //!   [`conformance::run_all`] check every bare-metal port runs over its
 //!   [`ContextSwitch`] handle, proving the `prepare` contract (an empty
 //!   context is not runnable, a bad stack is rejected fail-closed, and a
@@ -51,8 +51,7 @@
 //! so, like [`crate::EnterUser::enter_user`], it carries no host
 //! conformance check; it is proven end-to-end by each port's QEMU
 //! scheduler-drive vertical (a real task switch round-trips). Inventing
-//! a host stub that "switches" would be a fake primitive (`AGENTS.md`
-//! §1).
+//! a host stub that "switches" would be a fake primitive.
 
 /// The entry point a freshly prepared [`TaskContext`] first runs.
 ///
@@ -60,7 +59,7 @@
 /// resume assembly jumps to it with the first-argument register set to
 /// the task's argument, and a task body never returns to its synthesised
 /// frame, so there is no captured environment to drop and nothing for
-/// the frame's return address to land on (`AGENTS.md` §2.1).
+/// the frame's return address to land on.
 pub type TaskEntry = unsafe extern "C" fn(usize) -> !;
 
 /// The architecture-neutral per-task register-save area.
@@ -70,8 +69,7 @@ pub type TaskEntry = unsafe extern "C" fn(usize) -> !;
 /// the callee-saved registers live on the task's own stack in a fixed
 /// frame the port's switch assembly owns. The layout is identical on
 /// every bare-metal port (a single `#[repr(C)]` `u64`), so the neutral
-/// type *is* the port's `TaskCtx` rather than a parallel definition
-/// (`AGENTS.md` §2.2).
+/// type *is* the port's `TaskCtx` rather than a parallel definition.
 ///
 /// A freshly constructed [`TaskContext`] has [`stack_pointer`] zero and
 /// is **not runnable** ([`Self::is_runnable`]): callers must seed an
@@ -109,7 +107,7 @@ impl TaskContext {
 /// ([`ContextSwitch::prepare`]).
 ///
 /// A stack that cannot hold a valid initial frame is rejected, never
-/// silently truncated or wrapped (`AGENTS.md` §2.9 / §5.4). The variants
+/// silently truncated or wrapped. The variants
 /// are the architecture-neutral union every port reports; a port maps
 /// its primitive's error onto them at the HAL boundary.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -122,15 +120,14 @@ pub enum PrepareError {
     TooSmall,
 }
 
-/// The context-switch handle an architecture port exposes (`AGENTS.md`
-/// §17.2).
+/// The context-switch handle an architecture port exposes.
 ///
 /// The kernel seeds a never-run task's first frame once with
 /// [`Self::prepare`], then suspends/resumes tasks with [`Self::switch`]
 /// at every yield/preemption point. Both operate on the neutral
 /// [`TaskContext`]; the port forwards them to its native `TaskCtx` save
 /// area and switch assembly (the layouts are identical, so the forward
-/// is a reinterpretation, not a copy — `AGENTS.md` §2.2).
+/// is a reinterpretation, not a copy).
 ///
 /// Implementations must be [`Send`] + [`Sync`]: the kernel reaches the
 /// handle from every CPU's scheduler path. A port's handle is typically
@@ -151,7 +148,7 @@ pub trait ContextSwitch: Send + Sync {
     /// Returns a [`PrepareError`] (and leaves `ctx` unchanged) if
     /// `stack_top` is zero, misaligned for the port's ABI, or too small
     /// to hold the port's initial frame. The port fails closed rather
-    /// than seed a corrupt frame (`AGENTS.md` §2.9).
+    /// than seed a corrupt frame.
     fn prepare(
         &self,
         ctx: &mut TaskContext,
@@ -231,7 +228,7 @@ pub trait ContextSwitch: Send + Sync {
     unsafe fn leave_cooperative_park(&self) {}
 }
 
-/// The §17.2 context-switch conformance vertical.
+/// The context-switch conformance vertical.
 ///
 /// Every bare-metal architecture port runs [`conformance::run_all`]
 /// against its [`ContextSwitch`] handle. The suite is portable — it

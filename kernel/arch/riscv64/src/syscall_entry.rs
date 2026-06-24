@@ -11,8 +11,7 @@
 //! * Marshalling the register-passed arguments (`a0`–`a5`) and the
 //!   syscall number (`a7`) out of the saved [`crate::trap::TrapFrame`]
 //!   into the architecture-neutral `rustos_abi` `[u64; SYSCALL_MAX_ARGS]`
-//!   layout — the same layout `kernel/arch/x86_64` builds (`AGENTS.md`
-//!   §2.2 — one ABI, no duplication).
+//!   layout — the same layout `kernel/arch/x86_64` builds (one ABI, no duplication).
 //! * The dispatch callback the trap path forwards each `ecall` to,
 //!   mirroring the [`crate::preempt`] timer-callback design. The
 //!   architecture-neutral validation / capability / audit dispatcher
@@ -65,7 +64,7 @@ pub const fn is_ecall_from_user(scause: u64) -> bool {
 /// Pack the six riscv64 syscall argument registers into the canonical
 /// `rustos_abi` layout. The order matches the ABI definition pinned in
 /// `lib/abi/src/syscalls.rs`, identical to the x86_64 port's
-/// `pack_raw_args` (`AGENTS.md` §2.2 — one ABI).
+/// `pack_raw_args` (one ABI).
 #[must_use]
 pub const fn pack_raw_args(
     a0: u64,
@@ -121,7 +120,7 @@ fn clear_dispatch_for_tests() {
 /// `a0`–`a5`, forwards them to the dispatch callback, and writes the
 /// result back into `frame.a0`. Returns `false` (and leaves `frame`
 /// untouched) when no callback is installed — the freestanding trap
-/// handler treats that as a fail-closed condition (`AGENTS.md` §5.4.5),
+/// handler treats that as a fail-closed condition,
 /// exactly as the x86_64 trampoline does.
 ///
 /// `sepc` is **not** advanced here: that is a CSR operation owned by the

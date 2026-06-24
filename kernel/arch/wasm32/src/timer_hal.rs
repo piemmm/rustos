@@ -1,4 +1,4 @@
-//! wasm32 timer programming (`AGENTS.md` §17.2 "timer programming").
+//! wasm32 timer programming ("timer programming").
 //!
 //! Implements the Arch HAL [`Timer`](rustos_arch_api::Timer) surface for
 //! wasm32 over the cooperative `requestAnimationFrame` loop wired in
@@ -6,10 +6,10 @@
 //! of the timer path: it installs the one scheduler-tick callback and
 //! dispatches a tick to it. Requesting the next animation frame stays in
 //! [`crate::preempt`] — it is host-binding work with no
-//! architecture-neutral shape (`AGENTS.md` §2.4) — and
+//! architecture-neutral shape — and
 //! [`crate::preempt::on_animation_frame`] dispatches each frame's tick
 //! through [`Timer::dispatch_tick`](rustos_arch_api::Timer::dispatch_tick),
-//! so the callback invoke lives in exactly one place (`AGENTS.md` §2.2).
+//! so the callback invoke lives in exactly one place.
 //!
 //! The handle is zero-sized: the callback lives in [`crate::preempt`]'s
 //! lock-free static (the frame loop's source of truth), so the handle
@@ -59,7 +59,7 @@ impl Timer for TimerHal {
         // it runs to completion on the host's JavaScript turn. Preemption
         // is driven through the host's equivalent yield facility — the
         // self-sustaining `requestAnimationFrame` loop
-        // ([`crate::preempt::on_animation_frame`]) — which is the §17.1
+        // ([`crate::preempt::on_animation_frame`]) — which is the
         // carve-out for a target that cannot deliver an asynchronous
         // timer interrupt. The scheduler's quantum deadline has no LAPIC/
         // generic-timer analogue here, so arming a one-shot is a no-op:
@@ -69,7 +69,7 @@ impl Timer for TimerHal {
 
     fn disarm(&self) {
         // No-op for the same reason as [`Self::arm_oneshot`]: the
-        // cooperative frame loop is the host yield facility (§17.1 wasm
+        // cooperative frame loop is the host yield facility (wasm
         // carve-out) and is not gated on a per-quantum arm/disarm.
     }
 }
@@ -83,8 +83,7 @@ mod tests {
     fn passes_timer_conformance() {
         // The handle forwards to `preempt`'s process-global callback
         // static, which the `preempt` host tests also mutate; serialise
-        // on the shared lock so the suites do not race (`AGENTS.md` §7 —
-        // no flaky tests).
+        // on the shared lock so the suites do not race (no flaky tests).
         let _guard = crate::preempt::test_state_lock();
         conformance::run_all(&TimerHal::new());
         let dynamic: &dyn Timer = &TimerHal::new();

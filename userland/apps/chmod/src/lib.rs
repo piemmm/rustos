@@ -1,4 +1,4 @@
-//! RustOS `chmod` — change file mode bits (Stage 6, `AGENTS.md` §3
+//! RustOS `chmod` — change file mode bits (Stage 6
 //! `userland/apps/`).
 //!
 //! `chmod` applies a mode to each of its file operands. The mode is either an
@@ -36,8 +36,7 @@
 //! underlying [`Errno`](rustos_abi::Errno) as [`ChmodError::Stat`]; a mode that
 //! cannot be applied is [`ChmodError::Apply`]; a directory whose entries cannot
 //! be read during a recursive descent is [`ChmodError::Read`]. The first
-//! failure stops the run before any later operand, and there is no panic
-//! (`AGENTS.md` §2.9).
+//! failure stops the run before any later operand, and there is no panic.
 //!
 //! # Module map
 //!
@@ -50,10 +49,10 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`, `AGENTS.md` §6); the only dependency is the
+//! `no_std` (with `alloc`); the only dependency is the
 //! audited `lib/abi` crate, so this userland tool never links a kernel or
-//! driver crate (`AGENTS.md` §17.4). No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md` §2.9).
+//! driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

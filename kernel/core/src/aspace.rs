@@ -2,7 +2,7 @@
 //! user-memory copy path, `PLAN.md` Stage 7).
 //!
 //! The kernel's `copy_from_user` / `copy_to_user` boundary
-//! ([`rustos_kernel_mem::uaccess`], `AGENTS.md` §5.4 /
+//! ([`rustos_kernel_mem::uaccess`] /
 //! `tests/SECURITY.md` §5) walks the *calling task's* address space.
 //! A syscall handler therefore needs to turn the caller's
 //! [`rustos_kernel_sec::TaskId`] into the pair the copy path consumes:
@@ -23,8 +23,7 @@
 //! needs) and a boxed [`PhysMap`]. The same erasure the kernel
 //! already applies to the
 //! direct map (`&dyn PhysMap`) is applied to the address space, so the
-//! registry stays one concrete, non-generic type
-//! (`AGENTS.md` §2.2 / §2.3).
+//! registry stays one concrete, non-generic type.
 //!
 //! # Lifecycle
 //!
@@ -33,7 +32,7 @@
 //! [`map_image`](rustos_kernel_mem::map_image) result handed to the
 //! spawner) and [`withdraw`](AddressSpaceRegistry::withdraw)n when the
 //! task exits. Both are fail-closed: registering an id that is already
-//! present is refused (`AGENTS.md` §5.4) rather than silently
+//! present is refused rather than silently
 //! replacing a live mapping, and resolving an unknown id yields
 //! `None`. The registry is a pure data structure with no ambient
 //! authority and no audit sink of its own — the call sites that drive
@@ -61,7 +60,7 @@ pub enum AspaceError {
     /// An address space is already registered for this task id. The
     /// registry never silently replaces a live mapping — the caller
     /// must [`withdraw`](AddressSpaceRegistry::withdraw) the old task
-    /// first (`AGENTS.md` §5.4 — fail closed).
+    /// first (fail closed).
     AlreadyPresent,
 }
 
@@ -79,53 +78,49 @@ struct TaskAddressSpace {
 /// kernel [`PhysMap`] backing it.
 ///
 /// Composed into `KernelState` as a `RwLock`-wrapped field (mirroring
-/// the `caps` and `ipc` registries, `AGENTS.md` §2.1 — the registry
+/// the `caps` and `ipc` registries — the registry
 /// owns no lock of its own, so the synchronisation policy lives with
 /// `KernelState`). It boots empty: entries appear only as tasks are
 /// spawned and disappear as they exit.
 #[derive(Default)]
 pub struct AddressSpaceRegistry {
     tasks: BTreeMap<TaskId, TaskAddressSpace>,
-    /// Each live task's standard-stream descriptor table (`AGENTS.md`
-    /// §20). Co-located with the address space because it shares the
+    /// Each live task's standard-stream descriptor table. Co-located with the address space because it shares the
     /// exact per-process lifecycle — established at spawn, withdrawn at
     /// exit — and is keyed by the same [`TaskId`]; a parallel registry +
-    /// lock would be near-duplicate plumbing (`AGENTS.md` §2.2 / §2.3).
+    /// lock would be near-duplicate plumbing.
     /// A task with no entry resolves to the fail-closed
     /// [`DescriptorTable::closed`] default, so an unestablished process
-    /// can reach no stream backing (§5.4).
+    /// can reach no stream backing.
     streams: BTreeMap<TaskId, DescriptorTable>,
-    /// Each live task's effective resource limits (`AGENTS.md` §24). Held
+    /// Each live task's effective resource limits. Held
     /// here for the same reason as [`Self::streams`]: it shares the exact
     /// per-process lifecycle (inherited at spawn, withdrawn at exit) and is
     /// keyed by the same [`TaskId`], so a parallel registry + lock would be
-    /// near-duplicate plumbing (`AGENTS.md` §2.2 / §2.3). A task with no
+    /// near-duplicate plumbing. A task with no
     /// entry resolves to the [`LimitSet::DEFAULT`] policy via
     /// [`Self::limits`].
     limits: BTreeMap<TaskId, LimitSet>,
-    /// Each live task's device-resource grants (`AGENTS.md` §4 / §18.3 —
-    /// the unforgeable, kernel-issued handles a driver task may map with
+    /// Each live task's device-resource grants (the unforgeable, kernel-issued handles a driver task may map with
     /// `mmio_map`). Co-located with the address space for the same reason
     /// as [`Self::streams`] and [`Self::limits`]: a grant shares the exact
     /// per-process lifecycle — minted when a driver is admitted, reclaimed
     /// when the task exits — and is keyed by the same [`TaskId`], so a
-    /// parallel registry + lock would be near-duplicate plumbing
-    /// (`AGENTS.md` §2.2 / §2.3). A task with no entry owns no grants, so
-    /// [`Self::grant`] resolves to `None` — fail closed (§5.4): a task can
+    /// parallel registry + lock would be near-duplicate plumbing. A task with no entry owns no grants, so
+    /// [`Self::grant`] resolves to `None` — fail closed: a task can
     /// map only the windows it was actually granted.
     grants: BTreeMap<TaskId, TaskGrants>,
     /// The discovered hardware-tree node each autoloaded **driver** task was
-    /// loaded for (`AGENTS.md` §18.3). Recorded when a driver is spawned for
+    /// loaded for. Recorded when a driver is spawned for
     /// a matched node, beside its grants, and keyed by the same kernel-trusted
     /// [`TaskId`]; an ordinary `spawn` (no matched node) records nothing.
     ///
-    /// This is the security spine of `hw_emit_node`'s tree placement
-    /// (`AGENTS.md` §4 / §5.4): when a driver publishes a discovered child,
+    /// This is the security spine of `hw_emit_node`'s tree placement: when a driver publishes a discovered child,
     /// the kernel sets the child's parent to *this* node — the emitter's own —
     /// so a driver can neither forge its position in the tree nor parent a
     /// child under a node it was not loaded for. A task with no entry resolves
     /// to `None` via [`Self::loaded_node`], so a non-driver task (or one with
-    /// no matched node) cannot emit a child at all (fail closed, §5.4).
+    /// no matched node) cannot emit a child at all (fail closed).
     /// Dropped at [`withdraw`](Self::withdraw) so a reused id never inherits a
     /// dead driver's node.
     loaded_nodes: BTreeMap<TaskId, u32>,
@@ -140,7 +135,7 @@ pub struct AddressSpaceRegistry {
 /// can never alias a later one. The whole record is dropped when the task
 /// is [`withdraw`](AddressSpaceRegistry::withdraw)n, so a reused [`TaskId`]
 /// starts from an empty grant set and cannot inherit a dead task's windows
-/// (`AGENTS.md` §5.4 — fail closed).
+/// (fail closed).
 #[derive(Default)]
 struct TaskGrants {
     /// The next handle value to issue. Starts at `1`; only ever increases,
@@ -197,8 +192,7 @@ impl AddressSpaceRegistry {
     /// [`rustos_kernel_mem::uaccess`] copy path can no longer see the new
     /// (or freed) pages. The mutating syscall handler re-freezes the live
     /// space and calls this to publish the fresh snapshot, so the very next
-    /// `copy_in` / `copy_out` reflects the current mappings (`AGENTS.md`
-    /// §5.4 — the copy path must see exactly the task's live memory; the
+    /// `copy_in` / `copy_out` reflects the current mappings (the copy path must see exactly the task's live memory; the
     /// behaviour
     /// [`FrozenAddressSpace`](rustos_kernel_mem::vmm::FrozenAddressSpace)'s
     /// docs prescribe for a remap path).
@@ -209,7 +203,7 @@ impl AddressSpaceRegistry {
     /// registered entry is **not** created here — re-freezing concerns only
     /// a task that already has a space (a kernel task has none and reaches no
     /// user copy path), so the call is a no-op returning `false` (fail
-    /// closed, `AGENTS.md` §5.4).
+    /// closed).
     pub fn reregister_space(
         &mut self,
         task: TaskId,
@@ -230,7 +224,7 @@ impl AddressSpaceRegistry {
     /// that never had a user address space, or a double `exit`) is a
     /// no-op that returns `false`. The task's standard-stream descriptor
     /// table is dropped at the same time so a reused id never inherits a
-    /// dead task's streams (`AGENTS.md` §5.4 — fail closed).
+    /// dead task's streams (fail closed).
     pub fn withdraw(&mut self, task: TaskId) -> bool {
         let had_streams = self.streams.remove(&task).is_some();
         let had_limits = self.limits.remove(&task).is_some();
@@ -240,15 +234,15 @@ impl AddressSpaceRegistry {
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
-    /// hardware-tree node `node_id` (`AGENTS.md` §18.3).
+    /// hardware-tree node `node_id`.
     ///
     /// Called by the privileged driver-spawn path beside
     /// [`mint_grant`](Self::mint_grant), under the same write lock, so a
     /// driver's matched node and its grants are established together. The
     /// `node_id` is kernel-sourced (the matched node the device manager
-    /// resolved), never caller-supplied (`AGENTS.md` §5.4). The ordinary
+    /// resolved), never caller-supplied. The ordinary
     /// `spawn` path records nothing, so a non-driver task has no loaded node
-    /// and cannot publish a child (fail closed, §5.4).
+    /// and cannot publish a child (fail closed).
     pub fn set_loaded_node(&mut self, task: TaskId, node_id: u32) {
         self.loaded_nodes.insert(task, node_id);
     }
@@ -256,10 +250,9 @@ impl AddressSpaceRegistry {
     /// The discovered hardware-tree node `task` was loaded for, or `None`
     /// when `task` is not an autoloaded driver bound to a node.
     ///
-    /// The security spine of `hw_emit_node`'s parent assignment
-    /// (`AGENTS.md` §4 / §18.1): the kernel parents a driver's published
+    /// The security spine of `hw_emit_node`'s parent assignment: the kernel parents a driver's published
     /// child under *this* node, and a `task` with no loaded node may publish
-    /// nothing (fail closed, §5.4). The `task` argument is the kernel-trusted
+    /// nothing (fail closed). The `task` argument is the kernel-trusted
     /// caller id, never caller-supplied.
     #[must_use]
     pub fn loaded_node(&self, task: TaskId) -> Option<u32> {
@@ -268,8 +261,8 @@ impl AddressSpaceRegistry {
 
     /// Mint a device-resource grant for `task`, returning the unforgeable,
     /// kernel-issued handle the task passes to `mmio_map` to reach exactly
-    /// `resource` and nothing else (`AGENTS.md` §4 — resources are
-    /// capability-grant requests, never ambient handles; §18.3 — a driver
+    /// `resource` and nothing else (resources are
+    /// capability-grant requests, never ambient handles; — a driver
     /// reaches only the resources its matched node requested).
     ///
     /// Called by the driver-admission path when a node's requested
@@ -278,8 +271,7 @@ impl AddressSpaceRegistry {
     /// so it never aliases a previously reclaimed grant, and is meaningful
     /// only when presented by `task` itself: [`Self::grant`] is keyed by
     /// the kernel-trusted caller id, so another task passing the same
-    /// numeric value resolves to nothing (handle forgery is refused,
-    /// §5.4).
+    /// numeric value resolves to nothing (handle forgery is refused).
     pub fn mint_grant(&mut self, task: TaskId, resource: HwResource) -> u64 {
         let entry = self.grants.entry(task).or_default();
         // Handle 0 is the reserved invalid value; the first minted handle
@@ -292,7 +284,7 @@ impl AddressSpaceRegistry {
     }
 
     /// Resolve the device-resource grant identified by `handle` for the
-    /// owning `task`, or `None` (fail closed, `AGENTS.md` §5.4).
+    /// owning `task`, or `None` (fail closed).
     ///
     /// Returns the granted [`HwResource`] iff `handle` was minted for
     /// `task`; `None` for an unknown handle, the reserved `0` handle, a
@@ -300,8 +292,8 @@ impl AddressSpaceRegistry {
     /// reach another driver's window by guessing a handle value), or a
     /// grant since reclaimed on exit. The `task` argument is the
     /// kernel-trusted caller id, never a caller-supplied value, so it is
-    /// the security spine of the `mmio_map` handler (§5.4 — no
-    /// trusted-caller shortcut; §18.3).
+    /// the security spine of the `mmio_map` handler (no
+    /// trusted-caller shortcut;).
     #[must_use]
     pub fn grant(&self, task: TaskId, handle: u64) -> Option<HwResource> {
         self.grants.get(&task)?.by_handle.get(&handle).copied()
@@ -310,13 +302,13 @@ impl AddressSpaceRegistry {
     /// Serialise `task`'s device-resource grants as consecutive
     /// [`GrantedResource`] records (each [`GrantedResource::WIRE_LEN`]
     /// bytes), in ascending handle order, for delivery to the task through
-    /// the `resource_grants` syscall (`AGENTS.md` §18.3 / §20).
+    /// the `resource_grants` syscall.
     ///
     /// Returns an empty vector for a task with no grants — a valid, empty
-    /// result, not an error (`AGENTS.md` §18.4 — an unbound node is
+    /// result, not an error (an unbound node is
     /// normal). The set is bounded by construction: handles are minted only
     /// by the kernel's driver-admission path, one per [`HwResource`] the
-    /// matched node requested (`AGENTS.md` §4 — no ambient authority), so a
+    /// matched node requested (no ambient authority), so a
     /// node's fixed resource maximum bounds the record count. Ascending
     /// handle order makes the delivered sequence deterministic
     /// ([`BTreeMap`] iterates by key).
@@ -333,15 +325,14 @@ impl AddressSpaceRegistry {
     }
 
     /// Returns `true` iff one of `task`'s minted device-resource grants
-    /// fully covers `resource` (`HwResource::covers`, `AGENTS.md` §18.3).
+    /// fully covers `resource` (`HwResource::covers`).
     ///
-    /// This is the security spine of `hw_emit_node` (`AGENTS.md` §18.1): a
+    /// This is the security spine of `hw_emit_node`: a
     /// user-space bus driver may publish a child node requesting `resource`
     /// only when it already holds a grant covering it, so an autoloaded
-    /// child can never be minted authority its emitter lacks (`AGENTS.md`
-    /// §4 — no ambient authority). A `task` with no grants covers nothing,
+    /// child can never be minted authority its emitter lacks (no ambient authority). A `task` with no grants covers nothing,
     /// so an ungranted task fails closed. The `task` argument is the
-    /// kernel-trusted caller id, never a caller-supplied value (§5.4).
+    /// kernel-trusted caller id, never a caller-supplied value.
     #[must_use]
     pub fn grant_covers(&self, task: TaskId, resource: &HwResource) -> bool {
         self.grants
@@ -349,8 +340,7 @@ impl AddressSpaceRegistry {
             .is_some_and(|entry| entry.by_handle.values().any(|grant| grant.covers(resource)))
     }
 
-    /// Establish `task`'s standard-stream descriptor table (`AGENTS.md`
-    /// §20).
+    /// Establish `task`'s standard-stream descriptor table.
     ///
     /// Called by the spawner when it admits a process, recording which
     /// inherited streams the child may read or write. Replacing an
@@ -367,17 +357,14 @@ impl AddressSpaceRegistry {
     /// established.
     ///
     /// The `stream_read` / `stream_write` handlers consult this to turn a
-    /// caller's `fd` into the direction its backing supports (`AGENTS.md`
-    /// §20). An unregistered task (a kernel task, or one withdrawn on
-    /// `exit`) has every descriptor closed, so it can reach no backing
-    /// (§5.4).
+    /// caller's `fd` into the direction its backing supports. An unregistered task (a kernel task, or one withdrawn on
+    /// `exit`) has every descriptor closed, so it can reach no backing.
     #[must_use]
     pub fn streams(&self, task: TaskId) -> DescriptorTable {
         self.streams.get(&task).copied().unwrap_or_default()
     }
 
-    /// Establish `task`'s full effective resource-limit set (`AGENTS.md`
-    /// §24).
+    /// Establish `task`'s full effective resource-limit set.
     ///
     /// Called by the spawner when it admits a process, recording the limits
     /// the child inherited (already intersected against the system default,
@@ -389,7 +376,7 @@ impl AddressSpaceRegistry {
     }
 
     /// Update `task`'s effective limit for a single [`LimitKind`],
-    /// leaving the other kinds untouched (`AGENTS.md` §24.3).
+    /// leaving the other kinds untouched.
     ///
     /// The `rlimit_set` handler calls this once a request has been
     /// authorised ([`crate::authorize_set`]). A task with no established
@@ -405,9 +392,9 @@ impl AddressSpaceRegistry {
     /// [`LimitSet::DEFAULT`] policy when none is established.
     ///
     /// The `rlimit_get` / `rlimit_set` handlers consult this to read a
-    /// caller's own effective limit (`AGENTS.md` §24.3). An unregistered
+    /// caller's own effective limit. An unregistered
     /// task (a kernel task, or one withdrawn on `exit`) reads the default
-    /// policy — reading one's own limit grants no authority (§16.6).
+    /// policy — reading one's own limit grants no authority.
     #[must_use]
     pub fn limits(&self, task: TaskId) -> LimitSet {
         self.limits.get(&task).copied().unwrap_or_default()
@@ -543,7 +530,7 @@ mod tests {
     fn reregister_space_of_an_unregistered_task_is_a_no_op() {
         let mut reg = AddressSpaceRegistry::new();
         // A task with no entry is never created by a re-freeze (a kernel task
-        // reaches no user copy path); the call fails closed (`AGENTS.md` §5.4).
+        // reaches no user copy path); the call fails closed.
         assert!(!reg.reregister_space(TaskId(9), user_space(1, 1)));
         assert!(!reg.contains(TaskId(9)));
         assert!(reg.resolve(TaskId(9)).is_none());
@@ -657,7 +644,7 @@ mod tests {
         assert_eq!(reg.limits(TaskId(4)), LimitSet::DEFAULT);
     }
 
-    // --- device-resource grants (`AGENTS.md` §4 / §18.3) ----------------
+    // --- device-resource grants ----------------
 
     /// A register window resource used across the grant tests.
     fn window() -> HwResource {
@@ -705,7 +692,7 @@ mod tests {
         assert_eq!(reg.grant(TaskId(2), handle + 1), None);
         // A *different* task passing the same numeric handle reaches
         // nothing — a driver cannot map another driver's window by reusing
-        // its handle value (`AGENTS.md` §5.4).
+        // its handle value.
         assert_eq!(reg.grant(TaskId(3), handle), None);
     }
 
@@ -715,7 +702,7 @@ mod tests {
         let handle = reg.mint_grant(TaskId(4), window());
         assert_eq!(reg.grant(TaskId(4), handle), Some(window()));
         // Withdrawing a task with grants but no address space still reports
-        // the slot was present and clears the grants (§4 — reclaimed on
+        // the slot was present and clears the grants (reclaimed on
         // exit).
         assert!(reg.withdraw(TaskId(4)));
         assert_eq!(reg.grant(TaskId(4), handle), None);

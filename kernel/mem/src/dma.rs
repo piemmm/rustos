@@ -1,6 +1,6 @@
 //! Per-process-heap DMA allocator.
 //!
-//! `AGENTS.md` §4 requires every kernel-side DMA facility to:
+//! the charter requires every kernel-side DMA facility to:
 //!
 //! 1. Carve allocations out of the calling process's heap, never a
 //!    global pool;
@@ -56,8 +56,7 @@
 //! # Zero-on-free
 //!
 //! [`DmaPool::free`] zeroes every byte of the data region through a
-//! volatile-clear primitive (delegated to the `zeroize` crate per
-//! `AGENTS.md` §6) **before** the frames are returned to the
+//! volatile-clear primitive (delegated to the `zeroize` crate per) **before** the frames are returned to the
 //! [`FrameAllocator`]. The driver may not see leftover bytes in a
 //! later allocation, and a forensic dump of free physical memory
 //! cannot recover the credentials the buffer once held.
@@ -104,8 +103,7 @@ pub enum DmaError {
     /// A buffer's physical frames fall outside the kernel's direct
     /// physical map, so the CPU cannot reach them. Indicates a
     /// mis-sized [`crate::phys::PhysMap`] for the platform; the pool
-    /// fails closed rather than synthesising a pointer (`AGENTS.md`
-    /// §2.9, §4).
+    /// fails closed rather than synthesising a pointer.
     DirectMap,
     /// The pool was constructed with a request that the allocator
     /// cannot satisfy (e.g. zero capacity, or a virtual base not
@@ -121,7 +119,7 @@ pub enum DmaError {
     ZeroSize,
     /// The contiguous physical block the allocator would hand out lies
     /// (wholly or partly) at or above the device's addressing limit —
-    /// the grant's DMA constraint (`AGENTS.md` §4 / §18.3). The block is
+    /// the grant's DMA constraint. The block is
     /// returned to the allocator and the request refused fail-closed
     /// rather than handing a device a buffer it cannot reach (or, worse,
     /// one outside the region the kernel granted it).
@@ -206,7 +204,7 @@ impl DmaBuffer {
     }
 }
 
-/// Borrowed-space DMA window allocator — the §2.2 single definition of the
+/// Borrowed-space DMA window allocator — the single definition of the
 /// guarded, contiguous, zeroed DMA carve.
 ///
 /// Owns only the *bookkeeping* (its virtual window base, the slot bitmap,
@@ -216,7 +214,7 @@ impl DmaBuffer {
 /// retained live address space ([`crate::live::LiveSpace`]) carve a DMA
 /// buffer into a space it owns and lends, while the owning [`DmaPool`]
 /// wrapper drives the same core over a space it owns outright — so the
-/// carve logic has exactly one home (`AGENTS.md` §2.2).
+/// carve logic has exactly one home.
 pub struct DmaWindowMap {
     base: VirtAddr,
     capacity_pages: usize,
@@ -241,7 +239,7 @@ pub struct DmaWindowMap {
 /// `CapabilityId::MEM_DMA`; the capability check itself lives in
 /// `kernel/sec::dma` so this crate stays free of the `rustos-abi`
 /// dependency. The guarded carve mechanism lives in [`DmaWindowMap`]
-/// (shared with the `dma_alloc` syscall facility, `AGENTS.md` §2.2); this
+/// (shared with the `dma_alloc` syscall facility); this
 /// type is the thin owning adapter over a space it owns outright.
 pub struct DmaPool<'a, P: PageTable> {
     address_space: AddressSpace<P>,
@@ -307,8 +305,7 @@ impl DmaWindowMap {
     /// and reaching them through `phys`.
     ///
     /// When `addr_limit` is non-zero the contiguous block must lie wholly
-    /// below it (the granted device addressing constraint, `AGENTS.md` §4 /
-    /// §18.3); a block that would reach at or above the limit is returned to
+    /// below it (the granted device addressing constraint); a block that would reach at or above the limit is returned to
     /// the allocator and the request refused with
     /// [`DmaError::AddrLimitExceeded`]. `addr_limit == 0` means "no
     /// constraint declared" (the in-kernel pool path).
@@ -324,7 +321,7 @@ impl DmaWindowMap {
     }
 
     /// Free a previously-allocated DMA buffer from the borrowed `space`,
-    /// zeroing every byte (zero-on-free, `AGENTS.md` §4) before the frames
+    /// zeroing every byte (zero-on-free) before the frames
     /// return to `frames`.
     ///
     /// # Errors
@@ -368,14 +365,14 @@ impl DmaWindowMap {
     }
 
     /// Reclaim **every** live DMA buffer from the borrowed `space`, zeroing
-    /// each backing block (zero-on-free, `AGENTS.md` §4) before its frames
+    /// each backing block (zero-on-free) before its frames
     /// return to `frames`.
     ///
     /// Best-effort teardown for [`crate::live::LiveSpace`]'s `Drop`: a driver
     /// task's exit must not leak the physical frames its DMA buffers held or
     /// leave their (possibly secret-bearing) contents recoverable. A
     /// per-buffer error on this path has no better recovery than dropping it
-    /// (`AGENTS.md` §2.9 — never a panic).
+    /// (never a panic).
     pub fn drain_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -399,7 +396,7 @@ impl DmaWindowMap {
     }
 
     /// The borrowed-space carve shared by [`Self::alloc_into`] and
-    /// [`DmaPool::alloc`] (the §2.2 single definition).
+    /// [`DmaPool::alloc`] (the single definition).
     fn alloc_inner<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -433,12 +430,11 @@ impl DmaWindowMap {
         // OOM leaves the pool's state untouched.
         let start_frame = frames.alloc_order(order)?;
 
-        // Enforce the granted device addressing limit (`AGENTS.md` §4 /
-        // §18.3): the whole contiguous block must lie below `addr_limit`
+        // Enforce the granted device addressing limit: the whole contiguous block must lie below `addr_limit`
         // (when one is declared), or the device could be handed a buffer
         // it cannot reach — or one outside the region the kernel granted
         // it. A block that exceeds the limit is returned immediately and
-        // the request refused fail-closed (`AGENTS.md` §2.9 / §5.4). The
+        // the request refused fail-closed. The
         // block was just minted, so the free matches and cannot fail.
         if addr_limit != 0 {
             let data_len = (data_pages as u64) * PAGE_SIZE as u64;
@@ -477,8 +473,7 @@ impl DmaWindowMap {
                 // Normal Non-Cacheable, so a descriptor the driver writes is
                 // visible to the device — and an event the device writes is
                 // visible to the driver — without per-access cache
-                // maintenance the driver could not perform from EL0 anyway
-                // (`AGENTS.md` §4 / §2.20). On a coherent platform it is
+                // maintenance the driver could not perform from EL0 anyway. On a coherent platform it is
                 // ordinary cacheable RAM.
                 MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::DMA_COHERENT,
             ) {
@@ -545,7 +540,7 @@ impl DmaWindowMap {
     /// `zeroize` crate's volatile clear) *before* the backing frames
     /// are returned to the [`FrameAllocator`], so neither a later
     /// allocation nor a forensic dump of free memory can recover the
-    /// credentials the buffer once held (`AGENTS.md` §4). The clear
+    /// credentials the buffer once held. The clear
     /// runs through the direct map, i.e. on the same physical frames
     /// the device used.
     ///
@@ -650,7 +645,7 @@ impl DmaWindowMap {
         // Best-effort: unmap any pages we already mapped. We
         // deliberately discard inner errors — we're already on the
         // error path, and the alternative (panicking) is forbidden
-        // by `AGENTS.md` §2.9.
+        // by.
         for i in 0..mapped_so_far {
             let virt = self.virt_of_slot(first_data_slot + i);
             if let Ok(page) = Page::from_addr(virt) {
@@ -728,7 +723,7 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// `zeroize` crate's volatile clear) *before* the backing frames
     /// are returned to the [`FrameAllocator`], so neither a later
     /// allocation nor a forensic dump of free memory can recover the
-    /// credentials the buffer once held (`AGENTS.md` §4). The clear
+    /// credentials the buffer once held. The clear
     /// runs through the direct map, i.e. on the same physical frames
     /// the device used.
     ///

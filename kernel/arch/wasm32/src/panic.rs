@@ -4,7 +4,7 @@
 //! declares its own one-liner that forwards to
 //! [`handle_panic_via_console`]. The bridge emits a single best-effort
 //! record to the host console and then traps the WebAssembly instance
-//! (`AGENTS.md` §2 — fail closed, never silently reset; §2.9 — no panic
+//! (fail closed, never silently reset; — no panic
 //! recovery in production paths).
 //!
 //! Trapping (rather than looping) is the wasm32 analogue of the

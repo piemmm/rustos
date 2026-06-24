@@ -12,7 +12,7 @@
 //! (carried back from the [`ProcessHost`](crate::ProcessHost) as an
 //! [`Errno`](rustos_abi::Errno)), so that `;`, `&&`, and `||` keep working
 //! across a failed command exactly as a POSIX shell requires. Neither path
-//! ever panics (`AGENTS.md` §2.9).
+//! ever panics.
 
 use core::fmt;
 

@@ -83,7 +83,7 @@ const STUB_HANDLE_RAW: u64 = 0x00D8_0001;
 /// was delivered — so the host PASS proves the spawn minted and delivered
 /// it. The stub does not map it: the `mmio_map` mapping mechanism is proven
 /// by the `mmio_map_qemu_aarch64` vertical, and this vertical's dispatch
-/// hook holds `NULL_MMIO_MAP_FACILITY` (`AGENTS.md` §2.2 — one proof each).
+/// hook holds `NULL_MMIO_MAP_FACILITY` (one proof each).
 const GRANT_MMIO_BASE: u64 = 0x0a00_0000;
 const GRANT_MMIO_LEN: u64 = 0x200;
 
@@ -156,7 +156,7 @@ static mut FRAME_POOL: FramePool = FramePool([0; PAGE_SIZE * FRAME_COUNT]);
 static DISPATCH_SLOT: DispatchCallbackSlot = DispatchCallbackSlot::new();
 
 /// Per-CPU bookkeeping backing the scheduler's arch handle (single-CPU
-/// vertical, `AGENTS.md` §24.1).
+/// vertical).
 static SCHED_STORAGE: Aarch64ArchStorage<1> = Aarch64ArchStorage::new();
 
 /// Per-CPU bookkeeping backing the dispatch hook + spawn ctx arch handle
@@ -190,10 +190,9 @@ fn driver_spawn_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 /// the production bin-crate callback (`dispatch_aarch64`): read the
 /// kernel-stack args frame and forward through the resident production
 /// [`KernelDispatchHook`] via the shared `dispatch_via_slot` bridge, which
-/// resolves the caller context, runs the §5.4 dispatch sequence, and turns
+/// resolves the caller context, runs the dispatch sequence, and turns
 /// a yield/exit outcome into a `reschedule_current` context switch. An
-/// empty slot or a missing caller context fails the test loudly
-/// (`AGENTS.md` §5.4.5).
+/// empty slot or a missing caller context fails the test loudly.
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     // SAFETY: the exception trampoline lays the frame out on the kernel
     // stack and only invokes us with a valid pointer; the array lives at
@@ -206,12 +205,12 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 }
 
 /// The capability set the device manager autoloads the driver under — the
-/// *caller* set the §8 gate intersects the driver manifest's request with.
+/// *caller* set the gate intersects the driver manifest's request with.
 /// `DRV_LOAD` is the gate's hard admission gate; `MEM_DMA` (the reply port's
 /// send gate) and `IRQ_BIND` are the driver-class grants the signed manifest
 /// requests, so the spawned stub's granted set is exactly `{MEM_DMA,
-/// IRQ_BIND}` (`AGENTS.md` §5.2 — manifest∩caller). A task without the
-/// driver grant cannot forge a reply (`AGENTS.md` §5.4 — fail closed).
+/// IRQ_BIND}` (manifest∩caller). A task without the
+/// driver grant cannot forge a reply (fail closed).
 fn autoload_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::DRV_LOAD);
@@ -228,8 +227,7 @@ fn reply_send_caps() -> CapabilitySet {
     caps
 }
 
-/// `/System/Drivers/` path the signed driver image is resolved under
-/// (`AGENTS.md` §16.2). Byte-for-byte; no alias resolution (§2.1).
+/// `/System/Drivers/` path the signed driver image is resolved under. Byte-for-byte; no alias resolution.
 const DRIVER_PATH_STR: &str = "/System/Drivers/drvstub.rxe";
 
 /// The discovered driver store: yields the build-signed [`DRIVER_IMAGE`]
@@ -326,7 +324,7 @@ fn bring_up_board() -> u64 {
 /// The leaked-`'static` kernel subsystems the production dispatch hook and
 /// spawn context borrow — the vertical's analogue of `KernelState`, lifted
 /// by one-shot `Box::leak` publishes exactly as `kernel_core::kernel_main`
-/// does (`AGENTS.md` §2.1: a one-shot publish, not a global mutable
+/// does (: a one-shot publish, not a global mutable
 /// static).
 struct Subsystems {
     frames: &'static FrameAllocator,
@@ -341,7 +339,7 @@ struct Subsystems {
 
 /// Build the live kernel subsystems: the `kernel/mem` frame allocator over
 /// the identity-mapped pool (so `spawn_with` draws its image, stack, and
-/// page-table frames from the production path, `AGENTS.md` §2.2), the
+/// page-table frames from the production path), the
 /// scheduler over the production `KernelArch` wrapper, and the capability /
 /// port / address-space / random / IRQ state the production hook borrows.
 fn leak_subsystems(counter_hz: u64) -> Subsystems {
@@ -384,10 +382,8 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
 }
 
 /// Bind the reply port into the live registry: the host pseudo-task holds
-/// exactly the bind authority a send-restricted port requires (`AGENTS.md`
-/// §5.2), and the port's send gate is a capability from the driver's
-/// granted set, so only the spawned driver can complete the handshake
-/// (§5.4).
+/// exactly the bind authority a send-restricted port requires, and the port's send gate is a capability from the driver's
+/// granted set, so only the spawned driver can complete the handshake.
 fn bind_reply_port(ipc: &RwLock<PortRegistry>) {
     let mut host_grant = CapabilitySet::empty();
     host_grant.insert(CapabilityId::IPC_BIND_PRIVILEGED);
@@ -425,8 +421,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // The stub `rxe`'s baked relocations must target the bias the
     // production producer maps every child at; a drifted constant would
-    // admit a child whose pointers do not match its mapping (fail closed,
-    // `AGENTS.md` §2.9).
+    // admit a child whose pointers do not match its mapping (fail closed).
     if USER_BIAS != USER_IMAGE_BIAS {
         qemu_exit::exit_failure(FAIL_BIAS);
     }
@@ -453,17 +448,17 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             sys.frames,
             // The stub is autoloaded + spawned through `SpawnDriverLoader`,
             // not the `spawn` syscall, so the hook's program registry is
-            // unused here (`AGENTS.md` §2.9 — the empty registry fails any
+            // unused here (the empty registry fails any
             // `spawn` closed).
             &EMPTY_PROGRAM_REGISTRY,
             &AARCH64_PROCESS_SPAWN,
             &NULL_PROCESS_WAIT,
             // This test exercises the driver-spawn / IPC path, not keyboard
-            // input; the arbiter stays fail-closed (`AGENTS.md` §2.9).
+            // input; the arbiter stays fail-closed.
             &NULL_INPUT_FOCUS,
             // This test exercises the driver-spawn / IPC path, not
             // `mem_map` / `mmio_map` / `dma_alloc`; those producers stay
-            // fail-closed (`AGENTS.md` §2.9).
+            // fail-closed.
             &NULL_MEM_MAP,
             &NULL_MMIO_MAP_FACILITY,
             &NULL_DMA_ALLOC_FACILITY,
@@ -472,7 +467,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
 
-    // The discovered hardware tree (`AGENTS.md` §18.1): a root and one
+    // The discovered hardware tree: a root and one
     // device node carrying the register window it exposes as a
     // capability-grant request. On a real boot `FdtDiscovery` builds this;
     // here a virtio device stands in for the metal controller (§0.4 — no
@@ -490,7 +485,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let tree = [HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root), device];
 
     // The driver candidate the discovered store yields: the signed image at
-    // `DRIVER_PATH_STR` with a bind table that matches the node (§18.3).
+    // `DRIVER_PATH_STR` with a bind table that matches the node.
     let bind_keys = [DriverBindKey::new(5, match_key)];
     let candidates = [DriverCandidate {
         path: DRIVER_PATH_STR,
@@ -499,8 +494,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     // The signed driver store, its sole trust anchor, and the production
     // spawn adapter the device manager reaches through the
-    // `SpawnDriverLoader` seam. A corrupt embedded trust anchor fails closed
-    // (`AGENTS.md` §2.9).
+    // `SpawnDriverLoader` seam. A corrupt embedded trust anchor fails closed.
     let Ok(signer) = Ed25519PublicKey::from_bytes(&DRIVER_SIGNER_PUBKEY) else {
         qemu_exit::exit_failure(FAIL_TRUST);
     };
@@ -510,7 +504,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // `KernelInitSpawner` owns the live registries and assembles the
     // `KernelSpawnCtx` internally, so this vertical reaches it through the bin
     // crate's `InitCtxDriverProcessSpawn` bridge rather than re-implementing
-    // the context assembly (`AGENTS.md` §2.2 / §17.1). `NULL_PROCESS_WAIT`:
+    // the context assembly. `NULL_PROCESS_WAIT`:
     // this vertical does not reap the long-lived spawned driver.
     let init_ctx = KernelInitSpawner::new(
         sys.frames,
@@ -524,12 +518,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
     let args: [&[u8]; 2] = [b"drvstub", REPLY_ENDPOINT_ARG];
     // The matched node id (the device node, id 2) the kernel records against
-    // the spawned driver so its `hw_emit_node` children parent under it
-    // (`AGENTS.md` §18.3).
+    // the spawned driver so its `hw_emit_node` children parent under it.
     let mut loader =
         SpawnDriverLoader::new(&trusted, &source, &SERIAL_SINK, &spawn, &args, Some(2));
 
-    // The §18.3 autoload walk: match each node against the candidates, run
+    // The autoload walk: match each node against the candidates, run
     // the signed `Host::load` gate on the winner, and spawn it with the
     // matched node's MMIO resource as its sole device-resource grant — the
     // production "drivers in user space" discovery path (`plans/PI.md` P10
@@ -552,7 +545,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // The budget-bounded cooperative wait: step the scheduler and poll the
     // reply port between steps. The stub runs, sends its register reply
     // over production `ipc_send`, and exits; a missing, malformed, or
-    // wrong-handle reply fails loudly (`AGENTS.md` §7).
+    // wrong-handle reply fails loudly.
     let mut steps = 0u64;
     while steps < MAX_STEPS {
         let _ = sys.sched.step(BOOT_CPU);

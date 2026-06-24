@@ -1,11 +1,10 @@
-//! RustOS System Information service (`sysinfod`) — Stage 6, `AGENTS.md`
-//! §16.6.
+//! RustOS System Information service (`sysinfod`) — Stage 6.
 //!
 //! RustOS has no `/proc` and no `/sys`. Every piece of live system
 //! information that those trees would have exposed is served by this single
 //! user-space service through the typed, versioned `sysinfo-v1` ABI defined
 //! in [`rustos_abi::sysinfo`]. `sysinfod` is the *only* server of that API,
-//! and the kernel exposes no path that bypasses it (`AGENTS.md` §16.6); the
+//! and the kernel exposes no path that bypasses it; the
 //! installed binary lives at `/System/Services/sysinfod`.
 //!
 //! # What this crate is
@@ -18,10 +17,10 @@
 //!    and any typed payload, failing closed on any malformed input.
 //! 2. Enforce the capability each query declares in the frozen registry
 //!    ([`SYSINFO_QUERIES`](rustos_abi::SYSINFO_QUERIES)) **before** touching
-//!    any state (`AGENTS.md` §5.4).
+//!    any state.
 //! 3. Emit a [`rustos_log`] audit record for every invocation of a query
 //!    whose registry row sets `audit` — the cross-principal, kernel, and
-//!    hardware queries (`AGENTS.md` §16.6 / §19.4) — and for every denial.
+//!    hardware queries — and for every denial.
 //! 4. Page and encode the answer supplied by an injected [`SysinfoSource`].
 //!
 //! The live data — the process table, memory accounting, the hardware tree,
@@ -38,9 +37,9 @@
 //!
 //! # Layering
 //!
-//! The crate is `no_std` (`AGENTS.md` §6) and depends only on the audited
+//! The crate is `no_std` and depends only on the audited
 //! `lib/*` crates `rustos-abi` and `rustos-log`, so a userland service never
-//! links a kernel or driver crate (`AGENTS.md` §17.4).
+//! links a kernel or driver crate.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

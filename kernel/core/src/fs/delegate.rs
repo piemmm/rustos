@@ -1,18 +1,17 @@
-//! Routing VFS resolution to a `drivers/filesystem/*` driver
-//! (`AGENTS.md` §2.4 / §5.4).
+//! Routing VFS resolution to a `drivers/filesystem/*` driver.
 //!
 //! [`DelegatedFs`] adapts a borrowed
 //! [`FilesystemRead`] driver to the VFS's path-resolution and permission
 //! model for the subtree below a driver-backed mount point. The driver
 //! supplies **structural** I/O only — it mints opaque [`NodeId`]s and
 //! reports each node's kind, size, children, and bytes; it makes no
-//! permission decision (`AGENTS.md` §5.4). Ownership, mode bits, ACLs, and
-//! the §5.3 capability gate stay in the VFS, which authorises every node
+//! permission decision. Ownership, mode bits, ACLs, and
+//! the capability gate stay in the VFS, which authorises every node
 //! before reading it and every directory it descends into. The metadata it
 //! authorises against is chosen by the [`MetaPolicy`] the call site picks:
 //! [`Uniform`] applies the mount point's [`Metadata`] to every node (the
 //! natural model for a filesystem like FAT that stores no per-file owner),
-//! while [`PerInode`] reads each node's own stored §5.3 record through
+//! while [`PerInode`] reads each node's own stored record through
 //! [`FilesystemSecurity`] (for a driver like `rustfs` that stores full
 //! per-inode ownership, mode, ACL, and capability gate).
 //!
@@ -41,7 +40,7 @@ use super::VfsError;
 ///
 /// `kind` and `size` come from the driver's on-disk layout; `meta` is the
 /// metadata the active [`MetaPolicy`] derived for the node — the mount
-/// point's template under [`Uniform`], or the node's own stored §5.3
+/// point's template under [`Uniform`], or the node's own stored
 /// record under [`PerInode`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DelegatedInfo {
@@ -91,12 +90,11 @@ pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized, P = Uniform> {
 /// How [`DelegatedFs`] derives the [`Metadata`] it authorises a node
 /// against.
 ///
-/// The two implementations are the two §5.3 sources a delegated subtree
+/// The two implementations are the two sources a delegated subtree
 /// can have: the uniform mount-point template ([`Uniform`], for a driver
 /// like FAT that stores no per-file owner) and the driver's own stored
 /// per-inode record ([`PerInode`], for a driver like `rustfs`). Both feed
-/// the *same* [`Metadata::authorize`] decision (`AGENTS.md` §5.3 / §5.4 —
-/// the VFS is the single policy point).
+/// the *same* [`Metadata::authorize`] decision (the VFS is the single policy point).
 ///
 /// The two implementors [`Uniform`] and [`PerInode`] are the only ones the
 /// crate provides; callers select between them with [`DelegatedFs::new`]
@@ -109,7 +107,7 @@ pub trait MetaPolicy<R: FilesystemRead + ?Sized> {
 /// Apply the mount point's [`Metadata`] uniformly to every delegated node.
 pub enum Uniform {}
 
-/// Apply each node's own stored §5.3 record, read through
+/// Apply each node's own stored record, read through
 /// [`FilesystemSecurity`].
 pub enum PerInode {}
 
@@ -140,7 +138,7 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R, Uniform> {
 }
 
 impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, PerInode> {
-    /// Bind `fs` so each node is judged against its *own* stored §5.3
+    /// Bind `fs` so each node is judged against its *own* stored
     /// record (read through [`FilesystemSecurity`]) rather than the mount
     /// template.
     ///
@@ -275,7 +273,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// Resolve the parent directory of the leaf addressed by `components`,
     /// authorising search on every ancestor and search + write on the
     /// parent itself, judged against the parent's own metadata under the
-    /// active [`MetaPolicy`] (`AGENTS.md` §5.3 / §5.4).
+    /// active [`MetaPolicy`].
     ///
     /// Returns the parent's [`NodeId`]; an empty `components` slice (which
     /// names the mount point itself) is rejected — the driver root cannot

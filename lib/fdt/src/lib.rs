@@ -1,17 +1,15 @@
-//! Shared flattened-device-tree (FDT / DTB) reader (`AGENTS.md` §2.2 /
-//! §18.2).
+//! Shared flattened-device-tree (FDT / DTB) reader.
 //!
 //! A flattened device tree is the boot-time hardware description that
 //! both the aarch64 and riscv64 platforms hand the kernel. The wire
 //! format is identical across architectures, so the parser lives here
 //! **once** and every architecture port builds its platform discovery on
-//! it (`AGENTS.md` §2.2 — no duplication); the arch-specific *queries*
+//! it (no duplication); the arch-specific *queries*
 //! (riscv64 `timebase-frequency`, aarch64 PSCI method / timer PPI) layer
 //! on top in each port's `fdt`/`platform` module.
 //!
 //! The parser is `no_std`, allocation-free, and bounds-checks every read
-//! against the blob length, returning [`FdtError`] rather than panicking
-//! (`AGENTS.md` §2.9). It is host-testable: [`Fdt::new`] accepts a
+//! against the blob length, returning [`FdtError`] rather than panicking. It is host-testable: [`Fdt::new`] accepts a
 //! borrowed blob so the unit tests drive it against a hand-built fixture
 //! without a freestanding target.
 //!
@@ -19,10 +17,9 @@
 //! big-endian header, a structure block of `FDT_*` tokens, and a strings
 //! block.
 //!
-//! The blob is firmware/bootloader-supplied, so it is untrusted input
-//! (`AGENTS.md` §19.5): every read is bounds-checked and a malformed tree is
-//! rejected, never trusted (§5.4 — fail closed). That decode path carries a
-//! §19.6 fuzz harness (`tests/fuzz_fdt.rs`, registered as `fuzz_fdt` in
+//! The blob is firmware/bootloader-supplied, so it is untrusted input: every read is bounds-checked and a malformed tree is
+//! rejected, never trusted (fail closed). That decode path carries a
+//! fuzz harness (`tests/fuzz_fdt.rs`, registered as `fuzz_fdt` in
 //! `cargo xtask fuzz`), which drives mutated, truncated, and arbitrary device
 //! trees through [`Fdt::new`] and every public reader and asserts none of them
 //! ever panics or reads out of bounds.
@@ -60,7 +57,7 @@ const DEFAULT_SIZE_CELLS: u32 = 1;
 
 /// Maximum node-nesting depth the walker tracks. QEMU's `virt` tree is
 /// shallow; 32 is generous headroom and bounds the parser's stack usage
-/// (`AGENTS.md` §2.9 — no unbounded recursion).
+/// (no unbounded recursion).
 const MAX_DEPTH: usize = 32;
 
 /// Reasons the FDT reader rejected a blob.
@@ -458,10 +455,9 @@ impl<'a> Fdt<'a> {
     /// Each item is a [`Node`] handle exposing the node's properties
     /// ([`Node::property`] / [`Node::is_compatible`]). The iterator yields
     /// `Err(FdtError)` and then stops if it meets a malformed token, so a
-    /// hostile blob fails closed rather than silently under-enumerating
-    /// (`AGENTS.md` §2.9). This is the generic walk the bus enumerators and
+    /// hostile blob fails closed rather than silently under-enumerating. This is the generic walk the bus enumerators and
     /// the QEMU verticals discover the `virt` tree through — one parser for
-    /// every consumer (`AGENTS.md` §2.2).
+    /// every consumer.
     #[must_use]
     pub fn nodes(&self) -> NodeIter<'a> {
         NodeIter {
@@ -573,7 +569,7 @@ impl<'a> Iterator for NodeIter<'a> {
                     let depth = self.depth;
                     self.depth += 1;
                     // Properties precede child nodes in a valid blob
-                    // (Devicetree Spec v0.4 §5.4.2), so the returned node's
+                    // (Devicetree Spec v0.4), so the returned node's
                     // `PropIter` starting here stops at the first child.
                     return Some(Ok(Node {
                         blob: self.blob,

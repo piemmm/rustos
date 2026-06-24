@@ -6,10 +6,9 @@
 //! the *contract* of one such record, [`PointerInput`]. The desktop's
 //! `no_std` GUI vocabulary (`lib/input`'s `InputEvent`) is the in-process
 //! shape the window manager and taskbar route; this ABI record is the bytes
-//! that travel the kernel boundary and decode into it (`AGENTS.md` §9 / §10 /
-//! §17.4). The kernel never hands a parser the device's structure: it hands a
+//! that travel the kernel boundary and decode into it. The kernel never hands a parser the device's structure: it hands a
 //! buffer, and [`PointerInput::from_bytes`] validates every field and fails
-//! closed (§5.4 / §19.5).
+//! closed.
 //!
 //! Keyboard input is modelled alongside the pointer by [`KeyInput`]: the
 //! *desktop-level* key event the window manager delivers to the focused
@@ -17,14 +16,13 @@
 //! non-character key) plus the [`Modifiers`] held while it was produced. As
 //! with the pointer, this is **not** the device-level report: turning raw
 //! platform keycodes and a keyboard layout into a produced character is policy
-//! that lives above the driver, not a second copy of the same data (§2.2).
+//! that lives above the driver, not a second copy of the same data.
 //! [`KeyInput::from_bytes`] validates every field and fails closed on
-//! untrusted input (§5.4 / §19.5).
+//! untrusted input.
 //!
 //! # Relationship to the driver input ABI
 //!
-//! This is **not** a duplicate of [`crate::driver::input::InputEvent`]
-//! (`AGENTS.md` §2.2). That type is the *device-level* contract an input
+//! This is **not** a duplicate of [`crate::driver::input::InputEvent`]. That type is the *device-level* contract an input
 //! driver reports across the [`Input`](crate::driver::input::Input) driver
 //! trait: raw per-axis pointer *deltas*, scroll ticks, and platform keycodes.
 //! [`PointerInput`] is the *desktop-level* event the window manager and
@@ -80,7 +78,7 @@ pub const BUTTON_NONE: u16 = 0;
 /// A `#[repr(u16)]` enum so the wire code is exactly the integer carried in
 /// the record's `button` field. The discriminants are part of the frozen
 /// pointer-input ABI; [`PointerButtonCode::from_code`] rejects any other
-/// value rather than guessing (`AGENTS.md` §5.4 — validate every input).
+/// value rather than guessing (validate every input).
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum PointerButtonCode {
@@ -118,7 +116,7 @@ impl PointerButtonCode {
 
 /// A single decoded pointer input event.
 ///
-/// The type makes illegal states unrepresentable (`AGENTS.md` §2.11): a
+/// The type makes illegal states unrepresentable: a
 /// [`Moved`](Self::Moved) carries a position and no button, while a
 /// [`Pressed`](Self::Pressed) / [`Released`](Self::Released) carries a button
 /// and no position. [`from_bytes`](Self::from_bytes) is the only way to build
@@ -165,7 +163,7 @@ impl PointerInput {
     /// Decode `bytes` into a [`PointerInput`].
     ///
     /// Every field is validated; an invalid record is refused rather than
-    /// interpreted (`AGENTS.md` §5.4 / §19.5 — fail closed on untrusted
+    /// interpreted (fail closed on untrusted
     /// input).
     ///
     /// # Errors
@@ -250,7 +248,7 @@ pub const MOD_MASK: u16 = MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META;
 ///
 /// A plain set of booleans rather than a bitmask type so a caller names the
 /// modifier it cares about; [`from_bits`](Self::from_bits) rejects any
-/// undefined bit rather than silently dropping it (`AGENTS.md` §5.4).
+/// undefined bit rather than silently dropping it.
 //
 // The four booleans are independent modifier-key states, not a state
 // machine: any combination is legal (Ctrl+Shift, Alt+Meta, none), so a flat
@@ -293,7 +291,7 @@ impl Modifiers {
     /// # Errors
     ///
     /// Returns [`Errno::OutOfRange`] if `bits` sets a bit this ABI version does
-    /// not define (`AGENTS.md` §5.4 — validate every input, fail closed).
+    /// not define (validate every input, fail closed).
     pub const fn from_bits(bits: u16) -> Result<Self, Errno> {
         if bits & !MOD_MASK != 0 {
             return Err(Errno::OutOfRange);
@@ -311,8 +309,7 @@ impl Modifiers {
 ///
 /// A `#[repr(u16)]` enum so the wire code is exactly the integer carried in a
 /// record's `named` field. The discriminants are part of the keyboard ABI;
-/// [`NamedKeyCode::from_code`] rejects any other value rather than guessing
-/// (`AGENTS.md` §5.4). Character-producing keys (letters, digits, punctuation,
+/// [`NamedKeyCode::from_code`] rejects any other value rather than guessing. Character-producing keys (letters, digits, punctuation,
 /// space) are *not* listed here — they travel as a [`KeyValue::Char`], so this
 /// set stays the small, closed list of keys that produce no character.
 #[repr(u16)]
@@ -421,7 +418,7 @@ impl NamedKeyCode {
 /// The key a [`KeyInput`] names: either a produced character or a named
 /// non-character key.
 ///
-/// The type makes illegal states unrepresentable (`AGENTS.md` §2.11): a
+/// The type makes illegal states unrepresentable: a
 /// character key carries exactly its Unicode scalar, a named key exactly its
 /// code, and the two never coexist in one record.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -503,7 +500,7 @@ impl KeyInput {
     /// Decode `bytes` into a [`KeyInput`].
     ///
     /// Every field is validated; an invalid record is refused rather than
-    /// interpreted (`AGENTS.md` §5.4 / §19.5 — fail closed on untrusted
+    /// interpreted (fail closed on untrusted
     /// input).
     ///
     /// # Errors

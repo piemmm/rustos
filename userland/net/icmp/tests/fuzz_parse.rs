@@ -1,13 +1,12 @@
 //! Deterministic fuzz harness for the `userland/net/icmp` wire parsers.
 //!
 //! Every parser in this crate decodes a byte slice that arrived from a
-//! possibly hostile peer over the link layer, so per `AGENTS.md` §19.5 /
-//! §19.6 each one is driven by a fuzz harness. This is the `userland/net`
-//! protocol-parser harness the §19.6 burn-down (PLAN.md item 5) calls for;
+//! possibly hostile peer over the link layer, so each one is driven by a fuzz harness. This is the `userland/net`
+//! protocol-parser harness the burn-down (PLAN.md item 5) calls for;
 //! it sits alongside the `lib/abi` decoder harness and the syscall
 //! dispatcher harness in the `cargo xtask fuzz` target set.
 //!
-//! RustOS does not pull in an external fuzz runner (`AGENTS.md` §2.12): a
+//! RustOS does not pull in an external fuzz runner: a
 //! deterministic, per-run-seeded LCG generates pseudo-random inputs and asserts
 //! the two invariants every parser must uphold no matter what bits a peer
 //! crafts:
@@ -22,13 +21,13 @@
 //! reply [`Responder::handle_frame`] emits fits the caller's buffer and is
 //! itself a well-formed Ethernet frame.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.6)
+//! ## Wall-clock budget
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
 //! logged seed so the suite stays fast. When `cargo xtask fuzz --soak` exports
 //! `RUSTOS_FUZZ_BUDGET_SECS`, the PRNG-driven harness keeps drawing fresh
 //! inputs from the *same continuing* stream until the deadline elapses — the
-//! §19.6 "run each harness for its wall-clock budget" contract. The seed is
+//! "run each harness for its wall-clock budget" contract. The seed is
 //! logged at the start, so a fresh-seed crash stays reproducible via
 //! `RUSTOS_FUZZ_SEED`. The structured bit-flip harness is an exhaustive
 //! boundary sweep, not a random one, so it runs once regardless of the budget.

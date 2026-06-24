@@ -19,7 +19,7 @@
 //! gating it behind a Cargo feature on `rustos-kernel`) prevents
 //! feature-unification under `cargo build --workspace` from ever
 //! leaking the QEMU-exit behaviour into the production kernel image
-//! (`AGENTS.md` §5.4.5 — fail closed; the harness never decides what
+//! (fail closed; the harness never decides what
 //! the kernel does next).
 
 #![cfg_attr(itest_x86_64, no_std)]
@@ -108,7 +108,7 @@ mod kernel {
     /// trip the QEMU-exit short-circuit — it falls through to
     /// `kernel_arch::halt`, the boot test times out, and the
     /// harness reports `Outcome::Timeout`. This is the documented
-    /// fail-loud behaviour for `AGENTS.md` §7 (no flaky tests).
+    /// fail-loud behaviour for (no flaky tests).
     #[panic_handler]
     fn rustos_kernel_arch_boot_panic(info: &PanicInfo<'_>) -> ! {
         handle_panic_via_kernel_core(info)

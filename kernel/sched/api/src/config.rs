@@ -4,7 +4,7 @@
 ///
 /// The configuration is consumed at construction and is never mutated; all
 /// limits are therefore enforceable without locks. Defaults are tuned for
-/// kernel use (`AGENTS.md` §5 — security defaults): bounded queues, a
+/// kernel use (security defaults): bounded queues, a
 /// short quantum, and a frequent priority boost.
 #[derive(Copy, Clone, Debug)]
 pub struct SchedulerConfig {

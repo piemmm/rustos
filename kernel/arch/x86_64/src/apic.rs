@@ -331,7 +331,7 @@ impl IoApicMmio for VolatileIoApicMmio {
 //
 // `tests_support` is `#[cfg(test)]`-only and `pub(crate)`. It exists so
 // the LAPIC mock is defined exactly once and reused by `apic_timer`
-// (AGENTS.md \u00a72.2 \u2014 no duplication).
+// (no duplication).
 
 #[cfg(test)]
 pub(crate) mod tests_support {

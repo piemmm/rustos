@@ -1,24 +1,22 @@
 //! The `Run` entry-point binary of the virtio-input keyboard driver, installed
 //! as a signed `/System/Drivers/` bundle and **autoloaded into user space** by
-//! `devmgr` when a virtio-input device is discovered (`AGENTS.md` §18,
+//! `devmgr` when a virtio-input device is discovered (
 //! `plans/PI.md` P10 chunk 5d-2-ii).
 //!
-//! This is the "drivers in user space" steady state (`AGENTS.md` §4) on the
+//! This is the "drivers in user space" steady state on the
 //! hardware QEMU `-M virt` actually presents (a virtio-input keyboard; the
 //! metal Pi 4 keyboard is the USB `drivers/input/usb_kbd`). The kernel mints
 //! this process exactly the device-resource grants its matched node requested
-//! — the device's register window and a DMA constraint, and no more
-//! (`AGENTS.md` §4 / §18.3) — and this program reaches them through the
-//! rt-backed `RtDriverHost`. It names no board, bus, or transport detail
-//! (`AGENTS.md` §2.20): it maps a register window by address, carves a DMA
+//! — the device's register window and a DMA constraint, and no more — and this program reaches them through the
+//! rt-backed `RtDriverHost`. It names no board, bus, or transport detail: it maps a register window by address, carves a DMA
 //! region, and speaks the bus-agnostic virtio split-virtqueue protocol via the
 //! arch-neutral `rustos_virtio_input` composition over the `rustos_virtio`
 //! MMIO transport.
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only (`AGENTS.md` §1), so it
+//! It is a **pure-Rust** program: RustOS is Rust-only, so it
 //! links the Rust userland runtime `rustos-rt`, never the C ABI (which exists
-//! solely for non-Rust programs, `AGENTS.md` §16.4). `rustos-rt` provides
-//! `_start`, the per-process stack canary (`AGENTS.md` §19.2), the panic
+//! solely for non-Rust programs). `rustos-rt` provides
+//! `_start`, the per-process stack canary, the panic
 //! handler, and the syscall wrappers; `rustos_rt::entry!` names this program's
 //! `main`. It is a separate crate from the `rustos-drv-input-virtio-input`
 //! driver shell (which the kernel still links for the transitional in-kernel
@@ -30,27 +28,26 @@
 //! * `RtDriverHost::from_grants_query` over `RtGrantSyscalls`: the host
 //!   learns its kernel-issued grants through the `resource_grants` syscall and
 //!   maps/carves them through `mmio_map` / `dma_alloc`. Every capability and
-//!   bound is re-checked kernel-side, on the far side of the trap (`AGENTS.md`
-//!   §5.4); the host adds no authority. The DMA carve is coherent kernel-side
+//!   bound is re-checked kernel-side, on the far side of the trap; the host adds no authority. The DMA carve is coherent kernel-side
 //!   (the QEMU `virt` virtio interconnect snoops the CPU caches), so no
 //!   architecture-specific cache-maintenance shim is supplied here
-//!   (`coherency = None`, keeping the program platform-neutral, §2.20).
+//!   (`coherency = None`, keeping the program platform-neutral).
 //! * `sole_register_window` over the delivered grants: the device's register
 //!   window `(base, len)` is read from the grants the kernel delivered, never a
-//!   build-time board constant (`AGENTS.md` §2.16 / §2.20).
+//!   build-time board constant.
 //! * `MmioTransport::new` over the mapped window, then `VirtioInput::open`:
 //!   brings the virtio-input device online and posts its event queue.
 //! * The poll/feed/inject loop: each decoded `InputEvent` key edge is
 //!   resolved into a `KeyInput` record by `VirtioKeyboardConsole` and
 //!   injected into the kernel input-focus arbiter through the `key_inject`
-//!   syscall, which routes it by who holds focus (`AGENTS.md` §17.4). The
+//!   syscall, which routes it by who holds focus. The
 //!   driver no longer chooses the encoding or the destination.
 //!
 //! After bring-up `main` polls the device forever, yielding between polls so
-//! the rest of the system runs (`AGENTS.md` §2.1 — a cooperative poll loop,
+//! the rest of the system runs (a cooperative poll loop,
 //! never a hard spin); a `poll` error is non-fatal and the next poll retries.
 //! A bring-up failure exits with a reserved fail-closed code, leaving the
-//! console without a keyboard rather than wedged (`AGENTS.md` §2.9); the
+//! console without a keyboard rather than wedged; the
 //! spawning supervisor decides whether to relaunch.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
@@ -74,24 +71,20 @@ mod program {
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value (`AGENTS.md`
-    /// §2.9).
+    /// delivery did not fit). A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
     /// Exit code when the delivered grants do not name the single register
-    /// window this driver needs — an unbound or mis-provisioned node
-    /// (`AGENTS.md` §18.4 / §5.4). A reserved, fail-closed value.
+    /// window this driver needs — an unbound or mis-provisioned node. A reserved, fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
 
     /// Exit code when the device bring-up failed (the register window could
     /// not be mapped, the window is not a virtio-MMIO device, or the device
-    /// rejected the virtio init sequence). A reserved, fail-closed value
-    /// (`AGENTS.md` §2.9); the console is left without a keyboard, never
+    /// rejected the virtio init sequence). A reserved, fail-closed value; the console is left without a keyboard, never
     /// wedged.
     const EXIT_BRINGUP_FAILED: i32 = 82;
 
-    /// Events drained from the device per poll. A batch size, not a capacity
-    /// (`AGENTS.md` §24.4): undrained events stay queued in the eventq and are
+    /// Events drained from the device per poll. A batch size, not a capacity: undrained events stay queued in the eventq and are
     /// read on the next poll.
     const EVENT_BATCH: usize = 16;
 
@@ -110,7 +103,7 @@ mod program {
     /// requested — the register window (`CAP_MMIO_MAP`), the DMA region
     /// (`CAP_MEM_DMA`), and the device interrupt line the report pump parks on
     /// (`CAP_IRQ_BIND`). The kernel is the authority and re-checks every trap
-    /// regardless (`AGENTS.md` §5.4): claiming a capability the process was not
+    /// regardless: claiming a capability the process was not
     /// granted only fails the trap kernel-side, never widens authority. It
     /// must list every capability the host gates on locally, or the host
     /// short-circuits a real, granted operation before it ever traps.
@@ -130,12 +123,12 @@ mod program {
     fn main() -> i32 {
         // Build the host from the grants the kernel minted for this driver.
         // Coherent DMA is carved kernel-side, so no architecture-specific
-        // cache-maintenance shim is supplied (`AGENTS.md` §2.20).
+        // cache-maintenance shim is supplied.
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         // Resolve the single granted register window — the one definition of
-        // "which window did the kernel grant me" (`AGENTS.md` §2.2 / §18.3).
+        // "which window did the kernel grant me".
         let Ok((base, len)) = sole_register_window(host.resources()) else {
             return EXIT_NO_RESOURCES;
         };
@@ -155,8 +148,7 @@ mod program {
 
         // Poll the device forever, resolving each decoded key edge into a
         // `KeyInput` record and injecting it into the input-focus arbiter,
-        // yielding between polls so PID 1 and every other task keeps running
-        // (`AGENTS.md` §2.1). A `poll` error is non-fatal: the next poll
+        // yielding between polls so PID 1 and every other task keeps running. A `poll` error is non-fatal: the next poll
         // retries rather than dropping the driver.
         let mut console = VirtioKeyboardConsole::new();
         let mut events = [EVENT_ZERO; EVENT_BATCH];

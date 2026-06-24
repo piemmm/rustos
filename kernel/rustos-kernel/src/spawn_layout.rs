@@ -7,7 +7,7 @@
 //! *same* canary seeds. Those values are equal across the ports by
 //! definition (they describe one user-space layout, not a per-architecture
 //! register layout), so they live here once rather than being copy-pasted
-//! into each `init_spawn` / `spawn_producer` sibling (`AGENTS.md` §2.2).
+//! into each `init_spawn` / `spawn_producer` sibling.
 //!
 //! The image bias itself (`INIT_USER_BIAS` / `SHELL_USER_BIAS`) is *not*
 //! here: it is baked per embedded program by `build.rs`, so it genuinely
@@ -15,13 +15,13 @@
 //! `bias + <offset>` at each call site.
 //!
 //! This module is also the single home for the data that is equal across
-//! every port *by definition* (`AGENTS.md` §2.2): the registry of embedded
+//! every port *by definition*: the registry of embedded
 //! programs the runtime `spawn` syscall resolves (their absolute paths,
 //! manifest∩user capability sets, and startup-argument vectors), the
 //! `CAP_PROC_SPAWN` [`SpawnAuthority`] every spawn seam authorises under,
 //! and PID 1 `init`'s own grant and argument vector. The per-port
 //! `ProcessSpawn` / `InitSpawn` implementations (the architecture paging
-//! glue) are the deliberate §2.2 trait carve-out and stay beside each port;
+//! glue) are the deliberate trait carve-out and stay beside each port;
 //! the values they *consume* live here once.
 
 use rustos_abi::{CapabilityId, CapabilityQuery};
@@ -39,35 +39,33 @@ include!(concat!(env!("OUT_DIR"), "/devmgr_rxe.rs"));
 // (`build.rs` `USER_BIAS`); every port maps each child at
 // [`SHELL_USER_BIAS`], so a fixture baked for a different bias is a build
 // defect caught at compile time rather than a child whose pointers do not
-// match where it is mapped (`AGENTS.md` §2.9).
+// match where it is mapped.
 const _: () = assert!(LOGIN_USER_BIAS == SHELL_USER_BIAS);
 const _: () = assert!(DEVMGR_USER_BIAS == SHELL_USER_BIAS);
 
 /// Absolute path the `Shell` session program is registered under
-/// (`AGENTS.md` §16.5 bundle layout). It must match exactly the shell path
+/// (bundle layout). It must match exactly the shell path
 /// an authenticated account's `/System/Security/Users` record names; the
-/// registry match is byte-for-byte with no alias resolution (`AGENTS.md`
-/// §2.1). One OS-wide path contract, identical on every target, so it lives
-/// here once (`AGENTS.md` §2.2).
+/// registry match is byte-for-byte with no alias resolution. One OS-wide path contract, identical on every target, so it lives
+/// here once.
 pub const SHELL_PATH: &[u8] = b"/Apps/Shell.app/Run";
 
 /// Absolute path the login service program is registered under
-/// (`AGENTS.md` §16.2, `plans/PI.md` P11). It must match exactly the
+/// (`plans/PI.md` P11). It must match exactly the
 /// `session` path PID 1 `init` reads from its startup config and hands to
 /// the `spawn` syscall (`userland/system/init/src/startup.rs`). One OS-wide
-/// path contract, identical on every target (`AGENTS.md` §2.2).
+/// path contract, identical on every target.
 pub const LOGIN_PATH: &[u8] = b"/System/Services/login";
 
-/// Absolute path the device-manager service program is registered under
-/// (`AGENTS.md` §16.2, §18.3). It must match exactly the device-manager
+/// Absolute path the device-manager service program is registered under. It must match exactly the device-manager
 /// path PID 1 `init` hands to the `spawn` syscall at startup
 /// (`userland/system/init/src/startup.rs`). One OS-wide path contract,
-/// identical on every target (`AGENTS.md` §2.2).
+/// identical on every target.
 pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr";
 
 /// The embedded programs the runtime `spawn` syscall can resolve, each
 /// carrying the capability set its manifest requests and its
-/// startup-argument vector (`AGENTS.md` §5.2, §16.5): the login service PID
+/// startup-argument vector: the login service PID
 /// 1 launches as the per-console session supervisor (`plans/PI.md` P11), and
 /// the `Shell` session program login spawns as an authenticated user's shell
 /// of choice (`plans/SPAWN.md` `SP3b`). The `rxe`s are baked at build time
@@ -77,7 +75,7 @@ pub const DEVMGR_PATH: &[u8] = b"/System/Services/devmgr";
 ///
 /// This registry is identical across every port by definition, so it is
 /// defined once here and shared rather than copy-pasted into each port's
-/// `spawn_producer` sibling (`AGENTS.md` §2.2).
+/// `spawn_producer` sibling.
 pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
     EmbeddedProgram {
         path: SHELL_PATH,
@@ -94,25 +92,23 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
             CapabilityId::PROC_SPAWN,
             CapabilityId::USERS_READ,
             // Emit its structured diagnostics through the kernel diagnostic
-            // log (serial UART on a debug build) rather than fd 2
-            // (`AGENTS.md` §19.4 / §20).
+            // log (serial UART on a debug build) rather than fd 2.
             CapabilityId::LOG_EMIT,
         ],
         args: &[b"login"],
     },
-    // The device-manager service (`AGENTS.md` §18.3): it reads the
+    // The device-manager service: it reads the
     // discovered hardware tree, matches each node against the kernel-decoded
     // driver-store catalogue, and asks the kernel to load each winning
     // bundle. It therefore requests `CAP_SYSINFO_HW` (the privileged global
-    // hardware view, §16.6 / §18.4) for `hw_tree_read`/`hw_tree_wait`,
-    // `CAP_DRV_LOAD` (the §5.2 authority the restricted driver-store
-    // `ipc_call` endpoint requires and the kernel re-checks at the §8 load
+    // hardware view) for `hw_tree_read`/`hw_tree_wait`,
+    // `CAP_DRV_LOAD` (the authority the restricted driver-store
+    // `ipc_call` endpoint requires and the kernel re-checks at the load
     // gate), and `CAP_LOG_EMIT` to emit its structured diagnostics through
-    // the kernel diagnostic log — the serial UART on a debug build (§19.4 /
-    // §20) — nothing more. It writes no standard stream, so it holds no
+    // the kernel diagnostic log — the serial UART on a debug build — nothing more. It writes no standard stream, so it holds no
     // `CAP_CONSOLE_WRITE`/`READ`, and no resource capability: the kernel
     // mints a loaded driver's grants from its matched node, never from this
-    // caller (`AGENTS.md` §4 / §5.2 — least privilege, no ambient authority).
+    // caller (least privilege, no ambient authority).
     EmbeddedProgram {
         path: DEVMGR_PATH,
         rxe: DEVMGR_RXE,
@@ -127,16 +123,14 @@ pub static SPAWN_PROGRAMS: [EmbeddedProgram; 3] = [
 
 /// The `'static` embedded-program registry every port's boot path installs
 /// through `BootInfo::with_spawn`. One shared registry over the shared
-/// [`SPAWN_PROGRAMS`] (`AGENTS.md` §2.2).
+/// [`SPAWN_PROGRAMS`].
 pub static PROGRAM_REGISTRY: ProgramRegistry = ProgramRegistry::new(&SPAWN_PROGRAMS);
 
 /// A [`CapabilityQuery`] granting exactly `CAP_PROC_SPAWN` — the privilege
 /// the spawn callers (`spawn_image` for a runtime child, `spawn_and_enter`
-/// for PID 1) require to authorise building a child image (`AGENTS.md`
-/// §5.4). It does not widen the child's authority, which is its registered
-/// program's declared set intersected with its user's grants (`AGENTS.md`
-/// §16.5). Shared by every port's `spawn_producer` and `init_spawn` seam
-/// rather than redefined in each (`AGENTS.md` §2.2).
+/// for PID 1) require to authorise building a child image. It does not widen the child's authority, which is its registered
+/// program's declared set intersected with its user's grants. Shared by every port's `spawn_producer` and `init_spawn` seam
+/// rather than redefined in each.
 pub struct SpawnAuthority;
 
 impl CapabilityQuery for SpawnAuthority {
@@ -145,8 +139,7 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// PID 1 `init`'s startup-argument vector. Shared across the ports
-/// (`AGENTS.md` §2.2).
+/// PID 1 `init`'s startup-argument vector. Shared across the ports.
 pub const INIT_ARGS: &[&[u8]] = &[b"init"];
 
 /// PID 1 `init`'s effective capability set: `CAP_CONSOLE_WRITE`, so it can
@@ -155,11 +148,10 @@ pub const INIT_ARGS: &[&[u8]] = &[b"init"];
 /// user's session program through the `spawn` syscall (`plans/SPAWN.md`
 /// `SP3b`). The boot path passes this as both the user grant and the
 /// manifest request, so the intersection the kernel derives is the same set
-/// — `init` is granted no more (`AGENTS.md` §5.2). Spawning is not ambient
+/// — `init` is granted no more. Spawning is not ambient
 /// authority: the child PID 1 launches receives only *its own*
-/// manifest∩user-grant set, never `init`'s (`AGENTS.md` §4, §16.5). The set
-/// is identical across the ports, so it is built here once (`AGENTS.md`
-/// §2.2).
+/// manifest∩user-grant set, never `init`'s. The set
+/// is identical across the ports, so it is built here once.
 pub fn init_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::CONSOLE_WRITE);
@@ -187,12 +179,12 @@ pub const USER_BLOCK_OFFSET: u64 = 0x30_0000;
 ///
 /// Every port retains a live address space and grants its tasks an
 /// `mmio_map` device window out of this region, so the offset — shared by
-/// each port's `init_spawn` and `spawn_producer` (`AGENTS.md` §2.2) — is
+/// each port's `init_spawn` and `spawn_producer` — is
 /// one value, not a per-port copy.
 pub const MMIO_WINDOW_OFFSET: u64 = 0x4000_0000;
 
 /// Pages backing the device-window region (1 MiB): generous headroom over
-/// the few device windows a driver task maps (`AGENTS.md` §24.1).
+/// the few device windows a driver task maps.
 pub const MMIO_WINDOW_PAGES: usize = 256;
 
 /// Offset of the non-`FIXED` anonymous-heap virtual window above the image
@@ -207,7 +199,7 @@ pub const ANON_WINDOW_OFFSET: u64 = 0x8000_0000;
 
 /// Pages backing the anonymous-heap window (1 GiB of *address space*). The
 /// window costs no RAM until the frame allocator backs a mapping (which
-/// fails closed as a deterministic OOM, `AGENTS.md` §4 / §24.1), so it is
+/// fails closed as a deterministic OOM), so it is
 /// sized generously for a userland heap; the placement allocator's own
 /// memory is bounded by the live-region count, not the page count.
 pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
@@ -223,14 +215,12 @@ pub const ANON_WINDOW_PAGES: usize = 0x4_0000;
 pub const DMA_WINDOW_OFFSET: u64 = 0xC000_0000;
 
 /// Pages backing the DMA-buffer window (1 MiB): generous headroom over the
-/// few small coherent buffers a driver task carves (`AGENTS.md` §24.1; a DMA
+/// few small coherent buffers a driver task carves (a DMA
 /// buffer is bounded to the [`rustos_kernel_mem::MAX_ORDER`] 8 MiB block).
 pub const DMA_WINDOW_PAGES: usize = 256;
 
-/// Per-process stack-canary seed handed to PID 1 `init` (`AGENTS.md`
-/// §19.2). Any value; the kernel RNG-seeded canary is a later stage.
+/// Per-process stack-canary seed handed to PID 1 `init`. Any value; the kernel RNG-seeded canary is a later stage.
 pub const INIT_CANARY: u64 = 0x1117_A5ED_C0DE_0001;
 
-/// Per-process stack-canary seed handed to a spawned child (`AGENTS.md`
-/// §19.2). Any value; the kernel RNG-seeded canary is a later stage.
+/// Per-process stack-canary seed handed to a spawned child. Any value; the kernel RNG-seeded canary is a later stage.
 pub const CHILD_CANARY: u64 = 0x1117_A5ED_C0DE_5E55;

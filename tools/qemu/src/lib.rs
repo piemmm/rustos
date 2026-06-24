@@ -2,7 +2,7 @@
 //!
 //! This crate is the single, documented gateway between the host build and a
 //! QEMU process used to execute a kernel-mode integration test. It exists
-//! because `AGENTS.md` §7 requires that all tests — including the QEMU-based
+//! because the charter requires that all tests — including the QEMU-based
 //! ones from Stage 2 — run under one orchestrator (`cargo xtask test`) with
 //! **no retries** and a **strict timeout**.
 //!
@@ -25,7 +25,7 @@
 //!
 //! # Timeouts and flakiness
 //!
-//! `AGENTS.md` §7 forbids flaky tests and forbids retries. The runner
+//! the charter forbids flaky tests and forbids retries. The runner
 //! therefore:
 //!
 //! * Enforces a hard wall-clock deadline supplied by the caller. A test that
@@ -155,7 +155,7 @@ pub struct BlockDevice {
 /// `MmioTransport`). The user-mode backend needs no host privileges and
 /// gives the guest a fixed SLIRP topology (guest `10.0.2.15`, gateway
 /// `10.0.2.2`), so a kernel-side test can ARP for and ICMP-echo the
-/// gateway deterministically (`AGENTS.md` §7 — no flaky tests).
+/// gateway deterministically (no flaky tests).
 ///
 /// When [`NetDevice::pcap`] is set the runner attaches a
 /// `filter-dump` that writes every frame on the interface to that host
@@ -172,7 +172,7 @@ pub struct NetDevice {
 /// A deterministic key-injection request for an input vertical.
 ///
 /// A `no_std`, non-interactive QEMU guest cannot type at itself, and the
-/// runner's stdin is `null` (`AGENTS.md` §7 — no interactivity). To make
+/// runner's stdin is `null` (no interactivity). To make
 /// a real device→driver input event deterministic, the runner attaches a
 /// `virtio-keyboard-device` and a QEMU monitor over a private unix
 /// socket, waits for the guest to print [`ready_marker`](Self::ready_marker)
@@ -196,7 +196,7 @@ pub struct KeyInjection {
 ///
 /// The guest's `-serial stdio` console is fed from the runner's stdin,
 /// but a `no_std`, non-interactive guest cannot type at itself and the
-/// runner is non-interactive (`AGENTS.md` §7). To make a real UART
+/// runner is non-interactive. To make a real UART
 /// RX→`stream_read` exchange deterministic, the runner pipes QEMU's
 /// stdin and replays the steps of [`Spec::serial_input`] strictly in
 /// order: each step waits for the guest to print
@@ -208,7 +208,7 @@ pub struct KeyInjection {
 /// Because matching advances through the log, a repeated prompt (a
 /// second `Username: ` after a refused login) anchors its own step. A
 /// run that exits before every step was sent fails: an unreached marker
-/// means the guest never made the expected exchange (`AGENTS.md` §2.5).
+/// means the guest never made the expected exchange.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SerialInjection {
     /// Serial-console substring the runner waits for before writing.
@@ -439,7 +439,7 @@ impl Spec {
     /// `QKeyCode` name, e.g. `"a"`) once the guest prints `ready_marker`
     /// on the serial console. Used by the aarch64 virtio-input vertical
     /// to make a real device→driver input event deterministic without
-    /// guest-side interactivity (`AGENTS.md` §7).
+    /// guest-side interactivity.
     #[must_use]
     pub fn with_virtio_keyboard(
         mut self,
@@ -460,7 +460,7 @@ impl Spec {
     /// → next prompt → …); the steps replay strictly in order, and a run
     /// that exits before every step was sent fails. Used by the
     /// interactive-session verticals to type at the blocked login
-    /// deterministically without runner interactivity (`AGENTS.md` §7).
+    /// deterministically without runner interactivity.
     #[must_use]
     pub fn with_serial_input(
         mut self,
@@ -574,8 +574,7 @@ impl Runner {
         }
         // Serial input rides the `-serial stdio` console: pipe stdin only
         // when a vertical asked to type at the guest, otherwise keep it
-        // closed so no stray host input can reach the guest (`AGENTS.md`
-        // §7 — deterministic, non-interactive runs).
+        // closed so no stray host input can reach the guest (deterministic, non-interactive runs).
         if spec.serial_input.is_empty() {
             cmd.stdin(Stdio::null());
         } else {
@@ -635,7 +634,7 @@ fn supervise(
     // failure to even reach the guest — a corrupted pflash store, a bad
     // device argument — would otherwise leave the serial log empty with
     // nothing explaining the non-zero exit. Reading it also stops QEMU
-    // wedging on a full stderr pipe (`AGENTS.md` §7 — no flaky tests).
+    // wedging on a full stderr pipe (no flaky tests).
     let captured_err = Arc::new(Mutex::new(String::new()));
     let err_reader = {
         let captured_err = Arc::clone(&captured_err);
@@ -669,7 +668,7 @@ fn supervise(
                 // unreached marker means the expected exchange never
                 // happened (e.g. a prompt that should have followed a
                 // reply never printed), so the run fails even when the
-                // guest itself reported success (`AGENTS.md` §2.5).
+                // guest itself reported success.
                 break 'run DoneReason::InjectionFailed(format!(
                     "serial input script incomplete: {serial_step} of {} steps sent \
                      before exit (next marker {:?} never seen)",
@@ -889,7 +888,7 @@ impl Drop for TempFile {
 ///
 /// Used for both stdout (serial, with the key/serial-injection readiness
 /// markers) and stderr (QEMU's own diagnostics, marker-free), so the two
-/// pipes share one drain loop (`AGENTS.md` §2.2). Draining stderr is not
+/// pipes share one drain loop. Draining stderr is not
 /// optional cosmetics: QEMU prints startup failures — e.g. a corrupted
 /// pflash store: `pflash … has invalid size 0` — to stderr and exits
 /// status 1, and a piped-but-unread stderr both loses that diagnostic and

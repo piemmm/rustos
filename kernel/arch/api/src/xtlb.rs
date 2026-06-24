@@ -1,13 +1,13 @@
-//! Cross-CPU TLB-shootdown surface of the Arch HAL (`AGENTS.md` §17.2
+//! Cross-CPU TLB-shootdown surface of the Arch HAL (
 //! "TLB shootdown").
 //!
 //! [`crate::tlb::TlbShootdown`] invalidates a stale cached translation on
-//! the **calling** CPU. On an SMP system (`AGENTS.md` §4 — SMP from day
+//! the **calling** CPU. On an SMP system (SMP from day
 //! one) that is not enough: after a leaf is torn down or its permissions
 //! tightened, *every other* CPU that may have walked the same page table
 //! can still hold the stale translation in its own TLB. Making the edit
 //! globally visible means reaching those CPUs and invalidating their
-//! cached entry too — the classic "TLB shootdown". §17.2 makes the
+//! cached entry too — the classic "TLB shootdown". The charter makes the
 //! architecture surface a closed set of traits on the HAL; this module is
 //! the *cross-CPU* member of the "TLB shootdown" set, the sibling of the
 //! local [`crate::tlb`] slice.
@@ -32,13 +32,13 @@
 //!
 //! Collapsing them would force every cheap local flush through the
 //! expensive cross-CPU path, or smuggle a "is this multi-CPU?" flag into
-//! the hot map/unmap loop — the interface creep `AGENTS.md` §2.4 forbids.
+//! the hot map/unmap loop — the interface creep the charter forbids.
 //!
-//! # Per-arch shape (the §17.1/§17.2 modularity carve-out)
+//! # Per-arch shape (the modularity carve-out)
 //!
 //! Each port implements the *same* trait its own way; these parallel
 //! implementations are the deliberate shape of the HAL, never collapsed
-//! behind `cfg` (`AGENTS.md` §2.2 carve-out):
+//! behind `cfg` (carve-out):
 //!
 //! * **x86_64** has no broadcast TLB invalidation, so the initiator
 //!   raises an inter-processor interrupt to every other online CPU,
@@ -77,7 +77,7 @@
 /// System-wide TLB maintenance: invalidate the calling CPU's cached
 /// translation for a single virtual page **and** that of every other
 /// online CPU, returning only once the invalidation is architecturally
-/// visible everywhere (`AGENTS.md` §17.2).
+/// visible everywhere.
 ///
 /// The kernel calls [`Self::shootdown_page`] after editing a leaf whose
 /// stale translation could be cached on another CPU — for example tearing
@@ -92,7 +92,7 @@
 ///
 /// Like [`crate::tlb::TlbShootdown`] a shootdown can only ever *discard*
 /// cached state, so it is infallible by construction: there is nothing to
-/// fail closed on (`AGENTS.md` §2.9 is satisfied vacuously — the operation
+/// fail closed on (is satisfied vacuously — the operation
 /// can neither grant authority nor leave a partial mapping). Over-
 /// invalidating (reaching a CPU that never cached the page, or flushing on
 /// the calling CPU when only a remote one was stale) is always sound;
@@ -116,7 +116,7 @@ pub trait CrossCpuTlbShootdown {
     fn shootdown_page(&self, vaddr: u64);
 }
 
-/// The §17.2 cross-CPU TLB-shootdown conformance vertical.
+/// The cross-CPU TLB-shootdown conformance vertical.
 ///
 /// Like [`crate::tlb::conformance`] it names only the trait and runs on
 /// the host: there is no privileged IPI/broadcast/SBI machinery on the

@@ -9,7 +9,7 @@
 //! once, just possibly bundled together.
 //!
 //! Capabilities are checked at *bind* time (the receiver's eligibility
-//! is fixed when it joins the channel — `AGENTS.md` §5.2) and on
+//! is fixed when it joins the channel) and on
 //! *every* signal (the sender's eligibility may have been revoked
 //! since the previous send). Refused operations fail closed with
 //! [`Errno::PermissionDenied`] + [`AuditEvent::NotifySignalDenied`].
@@ -123,7 +123,7 @@ impl NotificationChannel {
     ///
     /// [`Errno::PermissionDenied`] if `receiver` lacks any capability
     /// in `required_bind_caps`. The kernel enforces; the receiver
-    /// does not re-check (`AGENTS.md` §5.2 final bullet).
+    /// does not re-check (final bullet).
     pub fn bind<S: Sink + ?Sized>(
         &self,
         receiver: &TaskCapabilities,

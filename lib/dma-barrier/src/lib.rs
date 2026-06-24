@@ -13,8 +13,8 @@
 //! flag together with the *previous* entry's stale payload (a torn read).
 //!
 //! This crate is the single home of the architecture-specific barrier
-//! instruction (`AGENTS.md` §2.2), the user-space analogue of the syscall-trap
-//! carve-out in `rustos-abi-trap` and the §1 assembly carve-out it belongs to:
+//! instruction, the user-space analogue of the syscall-trap
+//! carve-out in `rustos-abi-trap` and the assembly carve-out it belongs to:
 //! the barrier is something the silicon strictly requires and that no
 //! target-neutral Rust can express to the right shareability domain. (Rust's
 //! own [`core::sync::atomic::fence`] lowers to an *inner*-shareable `dmb ish`
@@ -38,7 +38,7 @@
 //! targets (`x86_64`, `aarch64`, `riscv64`); each per-arch block is gated on a
 //! build-script-emitted `dma_barrier_<arch>` cfg (`build.rs`) rather than a
 //! target-architecture predicate, so the instruction choice stays out of the
-//! source tree the §17.2 `cfg-check` guards. On the host (unit tests,
+//! source tree the `cfg-check` guards. On the host (unit tests,
 //! `cargo xtask ci`) and on `wasm32` — a single-threaded sandbox with no
 //! separate DMA master — the barriers are a no-op.
 
@@ -126,7 +126,7 @@ pub fn dma_rmb() {
 /// follows, which is correct on any RISC-V implementation. (A narrower
 /// `fence w, o` would suffice on a coherent part; the full fence is chosen
 /// for correctness over a micro-optimisation on a target not yet exercised on
-/// this DMA path — `AGENTS.md` §2.16.)
+/// this DMA path.)
 #[cfg(dma_barrier_riscv64)]
 #[inline(always)]
 pub fn dma_wmb() {
@@ -167,10 +167,10 @@ mod tests {
     use super::*;
 
     /// On the host the barriers are a no-op (no separate DMA master); the
-    /// test exists so the crate carries its own unit test (`AGENTS.md` §6)
+    /// test exists so the crate carries its own unit test
     /// and so the public symbols are exercised. The real `dmb`/`fence`
     /// instructions are only emitted on the native targets and are verified
-    /// on metal (`AGENTS.md` §0.4).
+    /// on metal.
     #[test]
     fn host_barriers_are_callable_noops() {
         dma_wmb();

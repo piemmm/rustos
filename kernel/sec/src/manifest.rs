@@ -67,7 +67,7 @@ pub struct VerifiedManifest {
 /// `true` if `id` corresponds to a capability the `abi-v1` kernel knows
 /// how to grant.
 ///
-/// Reject-on-unknown is mandatory (`AGENTS.md` §5.4.3 "Validate every
+/// Reject-on-unknown is mandatory ("Validate every
 /// input; no trusted-caller shortcuts"). When `abi-v2` defines new
 /// capabilities, this function moves with the rest of the manifest
 /// verification logic to the new ABI module — `abi-v1` keeps the list

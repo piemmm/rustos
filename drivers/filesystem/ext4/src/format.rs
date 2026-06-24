@@ -10,8 +10,7 @@
 //!
 //! The on-disk shape mirrors the hand-built test fixture in
 //! `tests.rs`, generalised to an arbitrary device size and any number
-//! of block groups. There is no `mkfs` shell-out (`AGENTS.md`
-//! §12/§2.12); the layout is computed here and handed straight to the
+//! of block groups. There is no `mkfs` shell-out; the layout is computed here and handed straight to the
 //! single source of truth for the on-disk format, [`crate::Ext4::open`].
 
 use super::{

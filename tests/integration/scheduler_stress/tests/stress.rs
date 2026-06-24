@@ -1,6 +1,6 @@
 // Cast bounds in this test are compile-time constants whose values are
 // far below the truncation thresholds clippy warns about. Allowing the
-// casts here keeps the test readable (`AGENTS.md` §15 rule 10).
+// casts here keeps the test readable (rule 10).
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 //! Workspace-level scheduler stress test (Stage 2 deliverable).

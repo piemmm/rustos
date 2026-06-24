@@ -21,7 +21,7 @@
 //! The kernel-side preemption logic lives in
 //! `kernel/sched::Scheduler::on_timer_tick`; this module merely wires
 //! the x86_64 hardware into the architecture-neutral surface. The
-//! split keeps `AGENTS.md` §2.4 (no interface creep) honest — the
+//! split keeps (no interface creep) honest — the
 //! arch port owns timer state, the scheduler owns the run-queue
 //! mutation that follows from a tick.
 //!
@@ -79,10 +79,10 @@ static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// ring 3** to, packed into a `usize`. Installed by the binary before the
 /// timer is armed; absent (`0`) the tick is pure accounting and nothing is
 /// preempted, so an image that arms the timer without wiring preemption
-/// simply keeps cooperative scheduling (fail-safe, `AGENTS.md` §2.9).
+/// simply keeps cooperative scheduling (fail-safe).
 ///
 /// This is the x86_64 sibling of the aarch64/riscv64 `PREEMPT_CALLBACK_FN`
-/// (`AGENTS.md` §2.21 — the same shape over the Arch HAL): the involuntary
+/// (the same shape over the Arch HAL): the involuntary
 /// analogue of the cooperative reschedule the `syscall` path drives. A
 /// timer interrupt taken while ring 3 was running is delivered through the
 /// IDT interrupt gate onto the interrupted task's own kernel stack (the
@@ -93,12 +93,12 @@ static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// The callback runs **after** the LAPIC EOI (so the in-service bit is
 /// released before the context switch strands it) and **only** for a tick
 /// taken from ring 3 — a tick taken in ring 0 never preempts (the kernel is
-/// non-preemptible, `AGENTS.md` §4 watch-out: a half-completed kernel
+/// non-preemptible watch-out: a half-completed kernel
 /// critical section must never be switched away from). In production the
 /// kernel runs with `RFLAGS.IF == 0`, so a maskable timer IRQ is *taken*
 /// only while ring 3 runs (which `crate::userentry` enters with `IF` set);
 /// the explicit ring gate is defence-in-depth so a future in-kernel `sti`
-/// can never accidentally preempt the kernel (`AGENTS.md` §2.9).
+/// can never accidentally preempt the kernel.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
@@ -132,9 +132,9 @@ pub const LAPIC_TIMER_INITIAL_COUNT_OFFSET: usize = 0x380;
 /// recorded by [`init_local_preempt`] from the boot calibration.
 ///
 /// The scheduler arms the one-shot to this many LAPIC ticks via
-/// [`arm_oneshot`] when a CPU is contended (`AGENTS.md` §17.1 tickless);
+/// [`arm_oneshot`] when a CPU is contended (tickless);
 /// `0` until calibration runs, in which case [`arm_oneshot`] clamps to one
-/// tick so a degenerate deadline cannot wedge the CPU (§2.9).
+/// tick so a degenerate deadline cannot wedge the CPU.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static PREEMPT_QUANTUM_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -149,7 +149,7 @@ const NO_DEADLINE: u64 = u64::MAX;
 /// tickless one-shot combiner reasons in (unlike the LAPIC counter, which
 /// resets on each arm), so a blocking-wait deadline in monotonic ns is
 /// converted to an absolute TSC tick against this rate. `0` until
-/// calibration runs (the combiner then arms nothing — fail closed, §2.9).
+/// calibration runs (the combiner then arms nothing — fail closed).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static PREEMPT_TSC_HZ: AtomicU64 = AtomicU64::new(0);
 
@@ -169,15 +169,14 @@ static PREEMPT_QUANTUM_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// Absolute **TSC** tick at which the running task's preemption quantum
 /// expires, or [`NO_DEADLINE`] when none is armed (the CPU runs a sole
-/// task / is idle). One half of the tickless one-shot combiner
-/// (`AGENTS.md` §17.1). Production x86_64 is single-CPU, so a single slot
-/// suffices — sized per-CPU when SMP preemption lands (§24.1), exactly as
+/// task / is idle). One half of the tickless one-shot combiner. Production x86_64 is single-CPU, so a single slot
+/// suffices — sized per-CPU when SMP preemption lands, exactly as
 /// the single [`PREEMPT_QUANTUM_COUNT`] already is.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static PREEMPT_QUANTUM_ABS_TSC: AtomicU64 = AtomicU64::new(NO_DEADLINE);
 
 /// Absolute **TSC** tick of the nearest pending blocking-wait timeout, or
-/// [`NO_DEADLINE`] when none is pending (`AGENTS.md` §17.1 — the nearest
+/// [`NO_DEADLINE`] when none is pending (the nearest
 /// armed wakeup). The other half of the combiner.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static PREEMPT_WAKEUP_ABS_TSC: AtomicU64 = AtomicU64::new(NO_DEADLINE);
@@ -310,8 +309,7 @@ static LAPIC_TO_CPU_ID: [core::sync::atomic::AtomicU32; 256] = {
     // expansion time and never named again). This is the canonical
     // pattern for building a static `[Atomic_; N]` in `no_std` Rust;
     // see Rust RFC 1440 and the `core` source for `AtomicUsize`'s
-    // own array constructors. Allow with rationale per AGENTS.md
-    // §15.10.
+    // own array constructors. Allow with rationale.
     #[allow(clippy::declare_interior_mutable_const)]
     const ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
     [ZERO; 256]
@@ -370,8 +368,7 @@ pub fn cpu_id_for_lapic(lapic_id: u8) -> u32 {
 ///    establishes the in-handler GS convention for the kthread
 ///    cooperative-park balance and restores the user GS before `iretq`.
 ///
-/// A tick taken in ring 0 never preempts: the kernel is non-preemptible
-/// (`AGENTS.md` §4). The callback runs with interrupts disabled (the CPU
+/// A tick taken in ring 0 never preempts: the kernel is non-preemptible. The callback runs with interrupts disabled (the CPU
 /// clears `IF` on interrupt-gate delivery), so the dispatcher is
 /// non-re-entrant by construction.
 ///
@@ -398,7 +395,7 @@ unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // The LAPIC one-shot fired, so the quantum (if one was armed) is
     // consumed: clear its recorded deadline before the tick callback runs,
     // so the per-tick timed-wake sweep does not re-arm the one-shot against
-    // this already-expired quantum (`AGENTS.md` §17.1). A ring-3 tick
+    // this already-expired quantum. A ring-3 tick
     // re-arms a fresh quantum via the preempt callback's reschedule below;
     // the wakeup deadline is owned by the sweep and left untouched.
     PREEMPT_QUANTUM_ABS_TSC.store(NO_DEADLINE, Ordering::Relaxed);
@@ -428,8 +425,8 @@ unsafe extern "C" fn rustos_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1c): a tick taken
     // from ring 3 suspends the running user task back to the scheduler,
     // exactly as a cooperative `yield` does. A tick taken in ring 0 never
-    // preempts — the kernel is non-preemptible (`AGENTS.md` §4) — and an
-    // absent callback keeps the system cooperative (fail-safe, §2.9).
+    // preempts — the kernel is non-preemptible — and an
+    // absent callback keeps the system cooperative (fail-safe).
     let preempt_raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
     if preempt_raw != 0 && cpu_id != u32::MAX {
         // The CPU-pushed interrupt frame sits immediately above the saved
@@ -496,7 +493,7 @@ pub fn timer_isr_addr() -> u64 {
 // --- One-shot arming (scheduler-context, raw-pointer LAPIC writes) --
 
 /// Arm the calling CPU's LAPIC timer **one-shot** to fire once after
-/// `ticks_from_now` LAPIC ticks (clamped to one tick, `AGENTS.md` §2.9).
+/// `ticks_from_now` LAPIC ticks (clamped to one tick).
 ///
 /// Writes the LAPIC initial-count register through a bare-metal
 /// raw-pointer write to `LAPIC_BASE_PHYS`, exactly like the ISR's EOI
@@ -504,8 +501,7 @@ pub fn timer_isr_addr() -> u64 {
 /// Lapic<M>` driver. The LVT was set to one-shot mode + [`TIMER_VECTOR`]
 /// by [`init_local_preempt`] and persists, so writing the initial-count
 /// (re)starts the one-shot countdown. There is no periodic re-arm; the
-/// next fire happens only if the scheduler arms again (`AGENTS.md`
-/// §17.1).
+/// next fire happens only if the scheduler arms again.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn arm_oneshot(ticks_from_now: u64) {
     // The LAPIC initial-count register is 32-bit; clamp to the register
@@ -524,9 +520,8 @@ pub fn arm_oneshot(ticks_from_now: u64) {
 /// until the next [`arm_oneshot`].
 ///
 /// Writing `0` to the initial-count register halts the timer (Intel SDM
-/// §11.5.4), so a CPU running a sole runnable task takes no timer ticks
-/// (`AGENTS.md` §17.1 / §2.16). Disarming an already-stopped timer is a
-/// harmless no-op (§2.9).
+/// §11.5.4), so a CPU running a sole runnable task takes no timer ticks. Disarming an already-stopped timer is a
+/// harmless no-op.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn disarm() {
     // SAFETY: as in `arm_oneshot`; writing `0` to the initial-count
@@ -540,7 +535,7 @@ pub fn disarm() {
 /// The recorded per-quantum LAPIC initial-count, or `0` before
 /// calibration. The scheduler arms the one-shot to this value via
 /// [`crate::kernel_arch::X86_64Arch`]'s `set_preemption` (the single
-/// stored copy — `AGENTS.md` §2.2).
+/// stored copy).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn quantum_count() -> u64 {
@@ -549,7 +544,7 @@ pub fn quantum_count() -> u64 {
 
 /// One preemption quantum in **TSC** ticks (the value `set_preemption`
 /// adds to the current TSC to form the quantum's absolute deadline), or
-/// `0` before calibration. The single stored copy (`AGENTS.md` §2.2).
+/// `0` before calibration. The single stored copy.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn quantum_tsc() -> u64 {
@@ -597,7 +592,7 @@ const fn slot_deadline(raw: u64) -> Option<u64> {
 
 /// Record the running task's preemption-quantum deadline (absolute TSC
 /// ticks), or clear it with `None`, then reprogram the one-shot to the
-/// earlier of the quantum and any pending wakeup (`AGENTS.md` §17.1).
+/// earlier of the quantum and any pending wakeup.
 /// Called from [`crate::kernel_arch::X86_64Arch`]'s `set_preemption`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn record_quantum_deadline(deadline: Option<u64>) {
@@ -607,7 +602,7 @@ pub fn record_quantum_deadline(deadline: Option<u64>) {
 
 /// Record the nearest blocking-wait deadline (absolute TSC ticks), or
 /// clear it with `None`, then reprogram the one-shot to the earlier of
-/// this wakeup and any armed quantum (`AGENTS.md` §17.1). Called from
+/// this wakeup and any armed quantum. Called from
 /// `set_wakeup`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn record_wakeup_deadline(deadline: Option<u64>) {
@@ -617,7 +612,7 @@ pub fn record_wakeup_deadline(deadline: Option<u64>) {
 
 /// Reprogram the LAPIC one-shot to fire at the earlier of the recorded
 /// quantum and wakeup TSC deadlines, or disarm it when neither is pending
-/// (`AGENTS.md` §17.1 — the tickless one-shot is armed only for a real
+/// (the tickless one-shot is armed only for a real
 /// pending event).
 ///
 /// The earliest-of selection is the shared, host-tested
@@ -640,7 +635,7 @@ fn reprogram() {
     let lapic_hz = PREEMPT_LAPIC_HZ.load(Ordering::Relaxed);
     if tsc_hz == 0 || lapic_hz == 0 {
         // Uncalibrated: arming a nonsense count would wedge the CPU, so
-        // fail closed by leaving the timer disarmed (`AGENTS.md` §2.9).
+        // fail closed by leaving the timer disarmed.
         disarm();
         return;
     }
@@ -660,7 +655,7 @@ fn reprogram() {
 /// 1. Install the timer ISR stub in the calling CPU's per-CPU IDT at
 ///    [`TIMER_VECTOR`].
 /// 2. Program the LAPIC timer in **one-shot** mode and leave it disarmed
-///    (`AGENTS.md` §17.1 tickless), and record the per-quantum
+///    (tickless), and record the per-quantum
 ///    initial-count from `calibration` for the scheduler to arm.
 ///
 /// The function does *not* enable interrupts — the caller is
@@ -700,7 +695,7 @@ pub unsafe fn init_local_preempt<M: LapicMmio>(
 
     // 2. Program the LAPIC timer one-shot and leave it disarmed; record
     //    the per-quantum initial-count for the scheduler to arm to
-    //    (`AGENTS.md` §17.1 tickless — no periodic auto-reload).
+    //    (tickless — no periodic auto-reload).
     apic_timer::program_oneshot_disarmed(lapic, TIMER_VECTOR);
     PREEMPT_QUANTUM_COUNT.store(calibration.initial_count, Ordering::Relaxed);
 
@@ -709,7 +704,7 @@ pub unsafe fn init_local_preempt<M: LapicMmio>(
     // one-shot count can be derived from the free-running TSC), and one
     // quantum rebased onto the TSC clock (`initial_count` LAPIC ticks ->
     // TSC ticks) so `set_preemption` can form the quantum's absolute TSC
-    // deadline (`AGENTS.md` §17.1).
+    // deadline.
     PREEMPT_TSC_HZ.store(calibration.tsc_per_second, Ordering::Relaxed);
     PREEMPT_LAPIC_HZ.store(calibration.ticks_per_second, Ordering::Relaxed);
     let quantum_tsc = if calibration.ticks_per_second == 0 {

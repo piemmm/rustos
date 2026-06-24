@@ -18,7 +18,7 @@ extern "C" fn host_entry(_hartid: CpuId) -> ! {
 
 #[test]
 fn hartid_validity_tracks_the_registered_pool() {
-    // A caller-sized pool covers exactly its `N` slots (the §24.1 capacity
+    // A caller-sized pool covers exactly its `N` slots (the capacity
     // is the discovered hart count, not a baked-in `MAX_HARTS`); a second
     // pool proves registration is set-once. Declared first so they precede
     // the statements that drive them.
@@ -27,8 +27,7 @@ fn hartid_validity_tracks_the_registered_pool() {
 
     reset_secondary_stacks_for_tests();
 
-    // Before any pool is registered every id is invalid (fail closed,
-    // `AGENTS.md` §2.9).
+    // Before any pool is registered every id is invalid (fail closed).
     assert!(!is_valid_hartid(0));
     assert!(!is_valid_hartid(u32::MAX));
 

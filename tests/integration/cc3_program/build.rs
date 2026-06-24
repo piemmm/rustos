@@ -1,6 +1,6 @@
 //! Build script: classify the target so the program body compiles as a
 //! freestanding C-ABI program on the native Tier-1 targets and as an inert
-//! host stub otherwise (`AGENTS.md` §2.2, §17.2). Mirrors the other
+//! host stub otherwise. Mirrors the other
 //! `tests/integration` build scripts.
 
 fn main() {

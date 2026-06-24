@@ -5,7 +5,7 @@
 //!
 //! * `required_send_caps` — the [`CapabilitySet`] a sender's task must
 //!   hold for a send to succeed. The kernel enforces this on every
-//!   call; the receiver does **not** re-check (`AGENTS.md` §5.2 final
+//!   call; the receiver does **not** re-check (final
 //!   bullet).
 //! * `required_recv_caps` — the set the creator (and any later binder
 //!   in 2.7's syscall layer) must hold *at port creation*.
@@ -95,7 +95,7 @@ impl Port {
     ///
     /// `creator` must already hold every capability listed in
     /// `required_recv_caps`; this enforces the "bind-time check"
-    /// half of `AGENTS.md` §5.2 (the sender check happens on every
+    /// half of (the sender check happens on every
     /// [`Self::send`]). The creator additionally must hold
     /// [`rustos_abi::CapabilityId::IPC_BIND_PRIVILEGED`] when
     /// `required_send_caps` is non-empty — i.e. a port that restricts
@@ -133,7 +133,7 @@ impl Port {
 
         // The creator must already hold every required-recv capability:
         // a binder may not grant itself authority it does not already
-        // have (no ambient authority, `AGENTS.md` §4).
+        // have (no ambient authority).
         if !required_recv_caps.is_subset_of(creator.effective()) {
             record(audit, AuditEvent::PortCreateDenied, &[id_field]);
             return Err(Errno::PermissionDenied);
@@ -231,7 +231,7 @@ impl Port {
 
     /// Enqueue `payload` for delivery on this port.
     ///
-    /// The kernel enforces every check (`AGENTS.md` §5.2 final bullet):
+    /// The kernel enforces every check (final bullet):
     ///
     /// 1. **Lock-free fast path.** If the port has been destroyed,
     ///    [`Errno::NotFound`] is returned without taking the mailbox
@@ -313,7 +313,7 @@ impl Port {
         if self.state.load(Ordering::Acquire) == state::CLOSED {
             // Release the lock implicitly by dropping `q` after the
             // record call below — but emit the audit event first so
-            // the trail records the *attempt* (`AGENTS.md` §5.4.4).
+            // the trail records the *attempt*.
             drop(q);
             record(
                 audit,
@@ -342,7 +342,7 @@ impl Port {
 
     /// Dequeue the oldest delivered message, if any.
     ///
-    /// Does *not* perform a capability check: per `AGENTS.md` §5.2 the
+    /// Does *not* perform a capability check: the
     /// kernel decides whether a receiver may bind to a port at
     /// creation time, and the receiver "does not re-check" on every
     /// read. The Stage 2.7 dispatcher is responsible for routing the
@@ -359,7 +359,7 @@ impl Port {
     /// for example the receiver's `copy_to_user` faulted, or the
     /// destination buffer was too small — the message is left queued so
     /// a later [`Self::recv`] / `recv_with` re-delivers it rather than
-    /// dropping it on the floor (`AGENTS.md` §5.4, fail closed). The
+    /// dropping it on the floor (fail closed). The
     /// mailbox lock is held for the duration of `f`, so the peek and the
     /// commit are atomic against a concurrent `recv`: two receivers can
     /// never observe the same head message.
@@ -367,7 +367,7 @@ impl Port {
     /// Returns `None` when the mailbox is empty (and `f` is not called),
     /// otherwise `Some` of whatever `f` returned. Like [`Self::recv`] it
     /// performs no capability check — the receiver's authority is fixed
-    /// at bind time (`AGENTS.md` §5.2).
+    /// at bind time.
     pub fn recv_with<R, E>(
         &self,
         f: impl FnOnce(&Message) -> Result<R, E>,

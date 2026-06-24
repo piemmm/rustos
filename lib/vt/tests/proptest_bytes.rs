@@ -1,6 +1,6 @@
-//! Property test for the `lib/vt` streaming parser (`AGENTS.md` §2.9).
+//! Property test for the `lib/vt` streaming parser.
 //!
-//! Where the §19.6 fuzz harness (`tests/fuzz_vt.rs`) drives a wall-clock budget
+//! Where the fuzz harness (`tests/fuzz_vt.rs`) drives a wall-clock budget
 //! of seeded pseudo-random input, this `proptest` shrinks any counterexample to
 //! a minimal failing case. Both assert the same fail-closed invariants over
 //! arbitrary input:
@@ -10,7 +10,7 @@
 //!   sequence as feeding it all at once (the parser is a true stream — chunk
 //!   boundaries never change the result);
 //! * whatever the emitter produces for an arbitrary [`rustos_vt::Op`] parses
-//!   back to that identical operation (the §2.2 "one vocabulary" guarantee).
+//!   back to that identical operation (the "one vocabulary" guarantee).
 
 use proptest::prelude::*;
 

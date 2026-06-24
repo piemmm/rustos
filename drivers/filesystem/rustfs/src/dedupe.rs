@@ -5,9 +5,9 @@
 //! `RustFS` stores immutable physical data records ("chunks") that more than one
 //! `(file, logical block)` may share. Sharing is **exact and verified**: a
 //! candidate is shared only after its bytes are confirmed equal to the new
-//! record (§9 — *missing a duplicate is acceptable; merging unequal data is
+//! record (*missing a duplicate is acceptable; merging unequal data is
 //! corruption*). Three structures back this, reusing the one generic
-//! copy-on-write [`crate::btree`] (`AGENTS.md` §2.2 — no second B-tree):
+//! copy-on-write [`crate::btree`] (no second B-tree):
 //!
 //! * the **chunk/refcount tree** (authoritative): keyed by a chunk's physical
 //!   block, its value is a [`ChunkRecord`] — the referrer count, the
@@ -20,7 +20,7 @@
 //! * the **dedupe index** ([`DedupeIndex`], rebuildable, never authoritative):
 //!   an in-memory `(domain, length, logical hash) -> chunk` map rebuilt from
 //!   the chunk tree at mount and consulted for bounded foreground discovery on
-//!   write. Because *missing a duplicate is acceptable* (§9), the index is a
+//!   write. Because *missing a duplicate is acceptable*, the index is a
 //!   **bounded cache**, not an unbounded map: its resident RAM is capped at
 //!   [`DEDUPE_INDEX_BUDGET_BYTES`], split into a [`DEDUPE_HOT_BUDGET_BYTES`]
 //!   "frequently used" tier (candidates promoted on a dedupe hit) and a
@@ -28,7 +28,7 @@
 //!   tier is full it evicts its least-recently-used candidate rather than
 //!   growing, so the index never exceeds its budget regardless of volume size.
 //!
-//! Dedupe is allowed **only within the same encryption domain** (§7); the
+//! Dedupe is allowed **only within the same encryption domain**; the
 //! domain is carried in every chunk record and index key so the rule holds
 //! once multiple domains exist.
 
@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use crate::btree::TreeSpec;
 use crate::integrity::LOGICAL_HASH_LEN;
 
-/// Owner object stamped in every chunk-tree node header (`AGENTS.md` §8); a
+/// Owner object stamped in every chunk-tree node header; a
 /// reserved sentinel distinct from any inode number and from the inode tree's
 /// own [`u64::MAX`] owner.
 pub(crate) const CHUNK_TREE_OWNER: u64 = u64::MAX - 1;
@@ -52,7 +52,7 @@ pub(crate) const CHUNK_VALUE_LEN: usize = 8 + 8 + 4 + LOGICAL_HASH_LEN;
 
 /// Maximum referrers recorded inline in one reverse-reference record. Sharing
 /// that would exceed this declines to dedupe and writes a fresh chunk instead
-/// (§9 — missing a duplicate is acceptable), so the record never overflows and
+/// (missing a duplicate is acceptable), so the record never overflows and
 /// the referrer set stays exact and bounded.
 pub(crate) const REVERSE_REF_CAP: usize = 8;
 
@@ -82,14 +82,13 @@ pub(crate) fn reverse_ref_spec() -> TreeSpec {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ChunkRecord {
     /// Number of `(file, logical block)` referrers pointing at the chunk.
-    /// Decrementing to zero frees the chunk (§9).
+    /// Decrementing to zero frees the chunk.
     pub refcount: u64,
-    /// The encryption domain the chunk belongs to; dedupe never crosses it
-    /// (§7).
+    /// The encryption domain the chunk belongs to; dedupe never crosses it.
     pub domain: u64,
     /// Logical (plaintext) length the chunk maps, in bytes.
     pub length: u32,
-    /// SHA-256 of the chunk's plaintext — the dedupe key (§6, §9).
+    /// SHA-256 of the chunk's plaintext — the dedupe key.
     pub logical_hash: [u8; LOGICAL_HASH_LEN],
 }
 
@@ -105,8 +104,7 @@ impl ChunkRecord {
     }
 
     /// Decode a record from a chunk-tree value. Returns `None` if `value` is
-    /// too short (corruption is surfaced rather than panicked, `AGENTS.md`
-    /// §2.9).
+    /// too short (corruption is surfaced rather than panicked).
     pub(crate) fn decode(value: &[u8]) -> Option<Self> {
         if value.len() < CHUNK_VALUE_LEN {
             return None;
@@ -149,7 +147,7 @@ pub(crate) fn encode_reverse_ref(referrers: &[Referrer]) -> [u8; REVERSE_REF_VAL
 
 /// Decode a reverse-reference value into its referrer list. Returns `None` if
 /// `value` is too short or its count exceeds [`REVERSE_REF_CAP`] (corruption is
-/// surfaced, never panicked, `AGENTS.md` §2.9).
+/// surfaced, never panicked).
 pub(crate) fn decode_reverse_ref(value: &[u8]) -> Option<Vec<Referrer>> {
     if value.len() < REVERSE_REF_VALUE_LEN {
         return None;
@@ -173,7 +171,7 @@ pub(crate) fn decode_reverse_ref(value: &[u8]) -> Option<Vec<Referrer>> {
 }
 
 /// The in-memory dedupe-index key: `(domain, length, logical hash)`. It is the
-/// rebuildable map's key (§9 — the index is never authoritative), packed into
+/// rebuildable map's key (the index is never authoritative), packed into
 /// a fixed array so it orders deterministically in a `BTreeMap`.
 pub(crate) type DedupeKey = [u8; 8 + 4 + LOGICAL_HASH_LEN];
 
@@ -203,7 +201,7 @@ pub(crate) struct DedupeCandidate {
 }
 
 /// Hard upper bound on resident RAM for the whole dedupe index, in bytes.
-/// *Missing a duplicate is acceptable* (§9), so the index is a bounded cache:
+/// *Missing a duplicate is acceptable*, so the index is a bounded cache:
 /// once full it evicts rather than growing, and never exceeds this budget
 /// regardless of how much unique data the volume holds.
 pub(crate) const DEDUPE_INDEX_BUDGET_BYTES: usize = 100 * 1024 * 1024;
@@ -323,12 +321,12 @@ impl LruTier {
     }
 }
 
-/// The bounded, two-tier in-memory dedupe index (§9). A **general** tier holds
+/// The bounded, two-tier in-memory dedupe index. A **general** tier holds
 /// freshly written candidates; a smaller **hot** ("frequently used") tier holds
 /// candidates promoted on a dedupe hit. Each tier evicts its least-recently-used
 /// entry when full, so total resident RAM never exceeds
 /// [`DEDUPE_INDEX_BUDGET_BYTES`]. Dropping a candidate only forgoes a future
-/// dedupe opportunity, which is explicitly acceptable (§9).
+/// dedupe opportunity, which is explicitly acceptable.
 pub(crate) struct DedupeIndex {
     hot: LruTier,
     general: LruTier,
@@ -353,7 +351,7 @@ impl DedupeIndex {
         }
     }
 
-    /// Empty the index (used by the mount-time rebuild, §9).
+    /// Empty the index (used by the mount-time rebuild).
     pub(crate) fn clear(&mut self) {
         self.hot.clear();
         self.general.clear();
@@ -404,7 +402,7 @@ impl DedupeIndex {
         self.general.insert(key, cand);
     }
 
-    /// Forget any candidate for `key` (used when a lookup finds it stale, §9).
+    /// Forget any candidate for `key` (used when a lookup finds it stale).
     pub(crate) fn remove(&mut self, key: &DedupeKey) {
         self.hot.remove(key);
         self.general.remove(key);

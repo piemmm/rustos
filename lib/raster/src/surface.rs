@@ -23,7 +23,7 @@ impl Surface {
     ///
     /// Returns `None` if the pixel count overflows `usize` (a surface
     /// that could never be allocated), so the caller fails closed rather
-    /// than panicking (§2.9).
+    /// than panicking.
     #[must_use]
     pub fn new(width: u32, height: u32) -> Option<Self> {
         Self::filled(width, height, Pixel::TRANSPARENT)
@@ -104,7 +104,7 @@ impl Surface {
     /// supersampled polygon-fill path the desktop's vector assets share —
     /// pointer cursors (`lib/cursor`) and desktop icons (`lib/icon`)
     /// rasterise through here rather than each carrying its own scan
-    /// converter (`AGENTS.md` §2.2 / §10).
+    /// converter.
     ///
     /// Each output pixel is probed on a fixed [`SUPERSAMPLE`]×[`SUPERSAMPLE`]
     /// sub-pixel grid and the fraction of samples inside the polygon becomes
@@ -112,7 +112,7 @@ impl Surface {
     /// is filled with the even-odd rule. A polygon with fewer than three
     /// vertices covers no area and leaves the surface untouched; a
     /// degenerate `design` of zero is treated as `1`, so the call is total
-    /// and never panics (`AGENTS.md` §2.9).
+    /// and never panics.
     ///
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn fill_polygon(&mut self, polygon: &[(i32, i32)], design: u32, color: Color) {
@@ -158,8 +158,7 @@ impl Surface {
     /// premultiplied-alpha [`Pixel::over`] path, so a transparent-background
     /// sprite (a rasterised cursor or icon) lays onto the destination
     /// without a rectangular halo. A negative origin or an over-large source
-    /// simply clips the off-surface part rather than panicking (`AGENTS.md`
-    /// §2.9).
+    /// simply clips the off-surface part rather than panicking.
     ///
     /// [`Pixel::over`]: crate::color::Pixel::over
     pub fn blit(&mut self, x: i32, y: i32, src: &Surface) {
@@ -252,7 +251,7 @@ fn coverage_at(polygon: &[(i64, i64)], px: u32, py: u32) -> u32 {
 /// A horizontal ray is cast in `+x`; each edge that straddles `py` flips the
 /// inside flag when its crossing lies to the right of `px`. The comparison
 /// is cross-multiplied (with the edge's vertical direction accounted for) so
-/// no division is needed and the result stays exact (`AGENTS.md` §2.9).
+/// no division is needed and the result stays exact.
 fn point_in_polygon(polygon: &[(i64, i64)], px: i64, py: i64) -> bool {
     let mut inside = false;
     let n = polygon.len();

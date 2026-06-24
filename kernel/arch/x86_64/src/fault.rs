@@ -14,8 +14,7 @@
 //! (`rustos_arch_aarch64::fault`) synchronous-fault hooks: every other
 //! synchronous exception remains unrecoverable in this kernel slice
 //! (resuming the faulting instruction without fix-up logic would re-trap
-//! forever), so the default posture is to fail closed (`AGENTS.md`
-//! §2.9 — never silently reset). A single fault handler may be installed
+//! forever), so the default posture is to fail closed (never silently reset). A single fault handler may be installed
 //! through [`crate::fault::set_fault_handler`] before any fault can fire; the
 //! dedicated `#PF` entry then invokes it with the decoded error code, the
 //! linear address (`CR2`), and the faulting instruction pointer. With no
@@ -23,8 +22,7 @@
 //! the default thunk had (a `#PF` halts the binary through
 //! `qemu_exit::exit_failure`) — installing the dedicated entry
 //! *strengthens* x86_64 (the error code is now decoded correctly and the
-//! fault is observable) without weakening the default (`AGENTS.md`
-//! §2.17 — no security regression, §23.1 — fail closed).
+//! fault is observable) without weakening the default (no security regression — fail closed).
 //!
 //! The faulting address lives in `CR2` on x86_64 (it is *not* pushed on
 //! the stack), so the dedicated entry captures it in the prologue before
@@ -34,7 +32,7 @@
 //! # No global mutable state
 //!
 //! The slot is set-once, backed by an atomic the entry reads without a
-//! lock; a second publish fails closed (`AGENTS.md` §2.1). The error-code
+//! lock; a second publish fails closed. The error-code
 //! decode and the slot build on the host, so their unit tests run under
 //! `cargo test`; only the dedicated entry stub and the `CR2` read it
 //! feeds the handler are gated to the freestanding x86_64 target.
@@ -104,8 +102,7 @@ static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
 /// Failure modes of [`set_fault_handler`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SetFaultHandlerError {
-    /// A handler was already published; the slot is set-once per boot
-    /// (`AGENTS.md` §2.1).
+    /// A handler was already published; the slot is set-once per boot.
     AlreadyInstalled,
 }
 
@@ -143,7 +140,7 @@ pub fn fault_handler() -> Option<FaultHandlerFn> {
 #[cfg(test)]
 fn clear_fault_handler_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a handler.
-    // Production code never clears the slot (`AGENTS.md` §2.1).
+    // Production code never clears the slot.
     FAULT_HANDLER.store(0, Ordering::Release);
 }
 
@@ -169,7 +166,7 @@ pub fn page_fault_isr_addr() -> u64 {
 /// `(error_code, CR2, rip)` into the SysV argument registers and tail-
 /// calls [`rustos_arch_x86_64_page_fault_dispatch`], which is `-> !`;
 /// there is therefore no epilogue or `iretq` (a returning page-fault
-/// handler would re-trap, `AGENTS.md` §2.9).
+/// handler would re-trap).
 ///
 /// `CR2` is read in the prologue before any other memory access that
 /// could itself fault and overwrite it.
@@ -209,7 +206,7 @@ pub unsafe extern "C" fn page_fault_isr() {
 /// Forwards to the installed [`FaultHandlerFn`] when one is present;
 /// otherwise preserves the fail-closed default the no-error default
 /// thunk had — a page fault with no observer halts the binary through
-/// [`crate::qemu_exit::exit_failure`] (`AGENTS.md` §2.9 / §23.1).
+/// [`crate::qemu_exit::exit_failure`].
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn rustos_arch_x86_64_page_fault_dispatch(
@@ -271,7 +268,7 @@ mod tests {
     // Both the set-once and the round-trip assertions mutate the single
     // process-wide `FAULT_HANDLER` slot, so they live in one test: cargo
     // runs `#[test]`s in parallel threads and two of them clearing and
-    // reinstalling the same static would race (`AGENTS.md` §7 — no flaky
+    // reinstalling the same static would race (no flaky
     // tests).
     #[test]
     fn slot_is_set_once_and_round_trips() {

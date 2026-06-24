@@ -1,4 +1,4 @@
-//! 64-bit-native time types for the RustOS ABI (`AGENTS.md` §21).
+//! 64-bit-native time types for the RustOS ABI.
 //!
 //! RustOS is 64-bit-time-native: no kernel ABI, userland ABI, IPC type, log
 //! format, native filesystem, or persistent OS metadata may store absolute
@@ -16,7 +16,7 @@
 //! encoding is unambiguous. Conversions to narrower representations (for
 //! example a legacy on-disk timestamp) are **checked**: an unrepresentable
 //! value fails with [`Errno::TimestampOutOfRange`] rather than silently
-//! truncating, wrapping, saturating, or guessing a timezone (§21).
+//! truncating, wrapping, saturating, or guessing a timezone.
 //!
 //! Like the rest of this crate, the types are `no_std`, allocation-free, and
 //! encode/decode through borrowed byte slices so the same code runs in the
@@ -34,15 +34,15 @@ pub const NANOS_PER_SEC: u32 = 1_000_000_000;
 /// [`CapabilityId::TIME_HIRES`](crate::CapabilityId::TIME_HIRES).
 ///
 /// `clock_get` (`abi-v1` syscall 7) is unprivileged, so every task —
-/// including the §19.5 parser sandboxes and untrusted `userland/apps` —
+/// including the parser sandboxes and untrusted `userland/apps` —
 /// can read it. A sub-microsecond timer is a primitive for the
-/// cache- and execution-timing side channels `AGENTS.md` §19.1 hardens
+/// cache- and execution-timing side channels hardens
 /// against, so the default value handed to an untrusted caller is
 /// floored to this granularity (one microsecond). A principal that is
 /// explicitly trusted with precise timing holds `CAP_TIME_HIRES` and
 /// reads the clock at full nanosecond resolution. The value is data:
 /// tightening or relaxing it changes only this constant, not the
-/// `clock_get` ABI signature (`AGENTS.md` §5.7 — security by default).
+/// `clock_get` ABI signature (security by default).
 pub const COARSE_CLOCK_GRANULARITY_NS: u64 = 1_000;
 
 /// Floor `ns` to [`COARSE_CLOCK_GRANULARITY_NS`].
@@ -51,7 +51,7 @@ pub const COARSE_CLOCK_GRANULARITY_NS: u64 = 1_000;
 /// is `<= ns`, so the coarsened reading never exceeds the true reading
 /// and the sequence stays monotonically non-decreasing. This is the one
 /// place the coarsening arithmetic lives, so the kernel `clock_get`
-/// handler and any future fast-path reader agree (`AGENTS.md` §2.2).
+/// handler and any future fast-path reader agree.
 #[must_use]
 pub const fn coarsen_clock_ns(ns: u64) -> u64 {
     ns - (ns % COARSE_CLOCK_GRANULARITY_NS)
@@ -60,7 +60,7 @@ pub const fn coarsen_clock_ns(ns: u64) -> u64 {
 /// An absolute instant: signed seconds since the Unix epoch plus a
 /// nanosecond field in `0..NANOS_PER_SEC`.
 ///
-/// This is the RustOS canonical time type (`AGENTS.md` §21). Absolute time is
+/// This is the RustOS canonical time type. Absolute time is
 /// never stored as 32-bit seconds anywhere in the ABI; it is stored as a
 /// `Time64`.
 #[repr(C)]
@@ -112,7 +112,7 @@ impl Time64 {
     /// Returns [`Errno::TimestampOutOfRange`] if the instant falls outside the
     /// `i32`-seconds range (the classic 1901..2038 window). The check is the
     /// point of the type: a legacy filesystem driver calls this rather than
-    /// casting (§21).
+    /// casting.
     pub fn secs_i32(&self) -> Result<i32, Errno> {
         i32::try_from(self.secs).map_err(|_| Errno::TimestampOutOfRange)
     }
@@ -150,7 +150,7 @@ impl Time64 {
 /// A span of time: signed seconds plus a nanosecond field in
 /// `0..NANOS_PER_SEC`.
 ///
-/// The companion to [`Time64`] (`AGENTS.md` §21). A negative span is
+/// The companion to [`Time64`]. A negative span is
 /// represented by negative `secs` with the nanosecond field always in the
 /// canonical range, so `(secs, nanos)` orders chronologically.
 #[repr(C)]

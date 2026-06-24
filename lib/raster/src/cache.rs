@@ -4,14 +4,14 @@
 //! vector forms (a `lib/cursor` cursor, a `lib/icon` glyph, a `lib/svg`
 //! image) and rasterised into the [`Surface`](crate::Surface) the compositor
 //! blits. Rasterising is the expensive step, and it must happen only when it
-//! can change: the SVG-first rule (`AGENTS.md` §10) requires each asset to be
+//! can change: the SVG-first rule requires each asset to be
 //! converted **once** at the active scale and re-rendered only when the scale
 //! or the theme changes — never on the hot compositing path.
 //!
 //! [`RasterCache`] is that one shared mechanism. The window manager caches
 //! pointer cursors by cursor kind and the taskbar caches notification glyphs
 //! by icon kind, but both reuse this single epoch-keyed memoisation rather
-//! than each growing its own (`AGENTS.md` §2.2 / §6).
+//! than each growing its own.
 //!
 //! # Epochs
 //!
@@ -23,7 +23,7 @@
 //!
 //! Within one epoch, an asset is rendered at most once: a cache hit returns
 //! the stored image; a miss runs the caller's render closure and stores the
-//! result. Rendering may fail closed (`AGENTS.md` §2.9): a closure returning
+//! result. Rendering may fail closed: a closure returning
 //! `None` is not cached, so the asset is retried next time rather than a
 //! failure being remembered forever.
 //!
@@ -98,8 +98,7 @@ impl<K: PartialEq, V, E: PartialEq + Clone> RasterCache<K, V, E> {
     /// the lot. Within the epoch a present `key` is returned without calling
     /// `render`; an absent `key` runs `render` and stores its result.
     ///
-    /// `render` returning `None` (a degenerate asset or scale, `AGENTS.md`
-    /// §2.9) caches nothing and yields `None`, so the asset is retried on the
+    /// `render` returning `None` (a degenerate asset or scale) caches nothing and yields `None`, so the asset is retried on the
     /// next call rather than a failure being remembered.
     pub fn get_or_render<F>(&mut self, epoch: &E, key: K, render: F) -> Option<&V>
     where

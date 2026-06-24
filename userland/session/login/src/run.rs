@@ -1,34 +1,30 @@
 //! The `Run` entry-point binary of the login service, installed at
-//! `/System/Services/login` (`AGENTS.md` §16.2, `plans/PI.md` P11) — the
+//! `/System/Services/login` (`plans/PI.md` P11) — the
 //! program PID 1 `init` launches as the per-console session supervisor.
 //!
-//! This is a **pure-Rust** program: RustOS is Rust-only (`AGENTS.md` §1), so
+//! This is a **pure-Rust** program: RustOS is Rust-only, so
 //! it links the Rust userland runtime `rustos-rt` — never the C ABI, which
-//! exists solely for programs **not** written in Rust (`AGENTS.md` §16.4).
-//! `rustos-rt` provides `_start`, the per-process stack canary (`AGENTS.md`
-//! §19.2), the panic handler, the `mem_map`-backed global allocator, and the
+//! exists solely for programs **not** written in Rust.
+//! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, the `mem_map`-backed global allocator, and the
 //! syscall wrappers; `rustos_rt::entry!` names this program's `main`.
 //!
 //! `main` wires the real seams the [`rustos_login::Login`] state machine
 //! drives and supervises sessions on this console:
 //!
-//! * [`rustos_login::Prompt`] over the **inherited standard streams**
-//!   (`AGENTS.md` §20):
+//! * [`rustos_login::Prompt`] over the **inherited standard streams**:
 //!   prompts go to fd 1, input lines come from fd 0. The console stream
 //!   backing performs terminal local echo in the kernel's read line
 //!   discipline (`plans/PI.md` P11), on by default, so a typed username is
 //!   visible. The password read suppresses echo through the `stream_echo`
 //!   syscall (`rustos_rt::set_echo`) before reading and restores it after,
-//!   so the secret is never rendered (`AGENTS.md` §5.4 — never echo a
+//!   so the secret is never rendered (never echo a
 //!   credential); if echo cannot be disabled the read fails closed rather
 //!   than echoing the password.
 //! * [`rustos_login::UsersAuthenticator`] over the user database obtained
-//!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`,
-//!   `AGENTS.md` §5.1) and re-parsed with the fail-closed `rustos-users`
+//!   through the capability-gated `users_db_read` syscall (`CAP_USERS_READ`) and re-parsed with the fail-closed `rustos-users`
 //!   parser. When no database is held — an installer image, or the boot
 //!   read refused the record — a deny-all authenticator is wired instead,
-//!   so the prompt stays up and **every** login is refused (`AGENTS.md`
-//!   §5.4.5 — fail closed, never invent an account).
+//!   so the prompt stays up and **every** login is refused (fail closed, never invent an account).
 //! * [`rustos_login::SessionLauncher`] through the `spawn` syscall: the
 //!   authenticated
 //!   record's **shell of choice** is spawned and `wait`ed on; the session's
@@ -58,7 +54,7 @@ mod program {
     use rustos_users::{UsersDb, MAX_DB_LEN};
 
     /// Authentication attempts per login round before the round fails
-    /// closed and the loop opens a fresh one (`AGENTS.md` §5.4.5). The
+    /// closed and the loop opens a fresh one. The
     /// bound exists so a wedged automation cannot hold one round open
     /// forever; the supervising loop itself is the retry path.
     const MAX_ATTEMPTS: u32 = 3;
@@ -71,14 +67,13 @@ mod program {
     /// the wait returns `TimedOut` and [`supervise`] re-reads and re-parks
     /// rather than blocking forever. Five seconds is far longer than an
     /// unlock takes yet short enough to recover promptly; the wait parks the
-    /// CPU throughout, so a long bound costs nothing (`AGENTS.md` §2.1).
+    /// CPU throughout, so a long bound costs nothing.
     const DB_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
 
     /// Write all of `bytes` to standard output, looping over short writes.
     ///
     /// A write that accepts zero bytes means the stream will accept no more
-    /// (a closed or full backing); the loop stops rather than spinning
-    /// (`AGENTS.md` §2.1). Output is best-effort: a dropped tail does not
+    /// (a closed or full backing); the loop stops rather than spinning. Output is best-effort: a dropped tail does not
     /// abort the prompt.
     fn write_all_stdout(mut bytes: &[u8]) {
         while !bytes.is_empty() {
@@ -96,20 +91,18 @@ mod program {
     /// The read line discipline is shared with the kernel console echo: this
     /// runs the **buffer** half ([`rustos_login::push_line_byte`]) while the
     /// kernel console runs the matching **echo** half, both keyed off the one
-    /// `lib/vt` erase definition (`AGENTS.md` §2.2). So a Backspace rubs out
+    /// `lib/vt` erase definition. So a Backspace rubs out
     /// the last character both on screen and in `buf`; CR and LF both
     /// terminate (UART terminals commonly send CR); a line longer than `buf`
-    /// is refused, never truncated (`AGENTS.md` §2.9).
+    /// is refused, never truncated.
     ///
     /// **Allocation-free by design**: every byte lands in the caller's
     /// stack buffer, because the `mem_map`-backed userland heap is not
     /// available until its production producer lands (`plans/SPAWN.md`
     /// SP5b) — a heap allocation here would abort the process on the
-    /// first keystroke. The stream *backing* owns blocking (`AGENTS.md`
-    /// §20): each `stream_read` parks until input arrives, so a
+    /// first keystroke. The stream *backing* owns blocking: each `stream_read` parks until input arrives, so a
     /// zero-length read means the stream failed or closed — reported as
-    /// a console failure the login loop fails closed on, never spun on
-    /// (`AGENTS.md` §2.1).
+    /// a console failure the login loop fails closed on, never spun on.
     fn read_line_raw(buf: &mut [u8]) -> Result<usize, Errno> {
         let mut len = 0;
         let mut byte = [0u8; 1];
@@ -126,8 +119,7 @@ mod program {
         }
     }
 
-    /// The controlling terminal over the inherited standard streams
-    /// (`AGENTS.md` §20). The program binds only fd 0/1, never a device.
+    /// The controlling terminal over the inherited standard streams. The program binds only fd 0/1, never a device.
     struct RtPrompt;
 
     impl Prompt for RtPrompt {
@@ -142,7 +134,7 @@ mod program {
         fn read_secret(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             // Console echo is on by default, so suppress it for the
             // duration of the password read — a credential must never be
-            // rendered (`AGENTS.md` §5.4). If echo cannot be disabled (the
+            // rendered. If echo cannot be disabled (the
             // toggle failed), fail closed rather than reading a secret that
             // would echo.
             let toggled = rustos_rt::set_echo(false);
@@ -174,8 +166,7 @@ mod program {
     /// Launches the authenticated record's shell of choice through the
     /// `spawn` syscall and blocks in `wait` until the session ends
     /// (`plans/SPAWN.md` SP3/SP6). The child receives only its registered
-    /// program grant — spawning here never widens authority (`AGENTS.md`
-    /// §4, §5.2).
+    /// program grant — spawning here never widens authority.
     struct RtLauncher;
 
     impl SessionLauncher for RtLauncher {
@@ -213,11 +204,10 @@ mod program {
     /// * A delivered, valid database → [`DbLoad::Present`].
     /// * Any other refusal (no database held once the unlock resolved, no
     ///   capability) or text that failed the `users-v1` validation →
-    ///   [`DbLoad::Absent`]: the caller wires the deny-all authenticator
-    ///   (`AGENTS.md` §5.4.5).
+    ///   [`DbLoad::Absent`]: the caller wires the deny-all authenticator.
     ///
     /// The intermediate buffer holds credential records, so it is zeroed
-    /// before release (`AGENTS.md` §4). It is a stack array, **not** a heap
+    /// before release. It is a stack array, **not** a heap
     /// allocation: everything on the path to the first prompt must be
     /// allocation-free, because the userland heap is backed by the
     /// `mem_map` syscall whose production producer is still staged
@@ -232,8 +222,7 @@ mod program {
     /// instead of a stale answer being cached for the process's lifetime.
     fn load_users_db() -> DbLoad {
         let mut buf = [0u8; MAX_DB_LEN];
-        // The wrapper returns the raw `-errno` on failure (`AGENTS.md`
-        // §2.9); `WouldBlock` is the only one that means "retry", every
+        // The wrapper returns the raw `-errno` on failure; `WouldBlock` is the only one that means "retry", every
         // other refusal fails closed to the deny-all prompt.
         let pending = -i64::from(Errno::WouldBlock.as_i32());
         let state = match rustos_rt::users_db_read(&mut buf) {
@@ -261,8 +250,7 @@ mod program {
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
             // The graphical session rides the P10 WM work; until a display
-            // session exists the option is hidden, never errored
-            // (`AGENTS.md` §10).
+            // session exists the option is hidden, never errored.
             graphical_available: false,
             prompt: &prompt,
             authenticator,
@@ -274,8 +262,7 @@ mod program {
             // back to a fresh prompt; the audit trail already records the
             // outcome.
             Ok(_) | Err(LoginError::TooManyAttempts | LoginError::SessionLaunch(_)) => true,
-            // A dead console cannot prompt again: exit rather than spin
-            // (`AGENTS.md` §2.1); PID 1 supervises and relaunches login.
+            // A dead console cannot prompt again: exit rather than spin; PID 1 supervises and relaunches login.
             Err(LoginError::Console(_)) => false,
         }
     }
@@ -293,9 +280,7 @@ mod program {
     /// dead; PID 1 relaunches `login`.
     fn main() -> i32 {
         // Route each security-relevant decision through the kernel
-        // diagnostic log (the serial UART on a debug build, `AGENTS.md`
-        // §19.4 / §20) rather than fd 2. The hash-chained system audit log
-        // (§19.4) stays kernel-side; this is the diagnostic channel.
+        // diagnostic log (the serial UART on a debug build) rather than fd 2. The hash-chained system audit log stays kernel-side; this is the diagnostic channel.
         let sink = LogSink;
         // While the database read is `Pending` (the encrypted root is still
         // being unlocked) `supervise` calls this to **block** until the
@@ -303,8 +288,7 @@ mod program {
         // and `login` neither prompts nor reads the console. The kernel
         // parks the task off the run queue and wakes it the instant the
         // unlock resolves (`users_db_wait`) — never the busy yield loop that
-        // flooded the boot log with one `users_db_read` rejection per poll
-        // (`AGENTS.md` §2.1). The wait's result is advisory: `supervise`
+        // flooded the boot log with one `users_db_read` rejection per poll. The wait's result is advisory: `supervise`
         // re-reads the database on the next round regardless of whether the
         // wait was woken or timed out.
         supervise(

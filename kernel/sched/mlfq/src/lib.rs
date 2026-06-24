@@ -1,17 +1,16 @@
 //! RustOS MLFQ scheduler policy.
 //!
 //! This `kernel/sched/mlfq` crate is one concrete implementation of the
-//! [`SchedulerPolicy`] contract defined in `kernel/sched/api`
-//! (`AGENTS.md` §17.1). It is a sibling of any other policy crate (e.g. a
+//! [`SchedulerPolicy`] contract defined in `kernel/sched/api`. It is a sibling of any other policy crate (e.g. a
 //! future `kernel/sched/eevdf` or `kernel/sched/rt`); adding a policy
-//! means adding a sibling crate, never editing this one (§17.1).
+//! means adding a sibling crate, never editing this one.
 //!
 //! # Design summary
 //!
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns
 //!   one bounded `RunDeque` per [`Priority`] band; idle CPUs steal from a
 //!   victim chosen by the project's shared non-cryptographic `FastRng`
-//!   (`lib/rng`; `AGENTS.md` §2.2 — no second PRNG). The deque is a
+//!   (`lib/rng`; — no second PRNG). The deque is a
 //!   bounded Chase–Lev variant — see `runqueue` for the citation and
 //!   ordering rationale.
 //! * **MLFQ priority + fairness.** Three bands (High / Normal / Low),
@@ -19,8 +18,7 @@
 //!   anti-starvation global priority boost every `boost_interval_ticks`.
 //!   The policy is the classical MLFQ as described in Arpaci-Dusseau,
 //!   *Operating Systems: Three Easy Pieces*, ch. 8.
-//! * **Tickless boost cadence (§17.1 carve-out).** RustOS is tickless
-//!   (`AGENTS.md` §17.1): there is no global fixed-frequency timer. The
+//! * **Tickless boost cadence (carve-out).** RustOS is tickless: there is no global fixed-frequency timer. The
 //!   boost interval is far longer than one scheduling quantum and there is
 //!   only one per-CPU timer, so the boost rides the **on-demand preemption
 //!   one-shots** the kernel already arms whenever a CPU is *contended*
@@ -66,7 +64,7 @@ mod task;
 // `runqueue` is a crate-internal detail. It is exposed publicly *only*
 // under `--cfg loom` so the model-checking harness in `tests/loom.rs`
 // (a separate crate) can drive `RunDeque` directly; normal builds keep
-// it private (`AGENTS.md` §8 — minimal public surface).
+// it private (minimal public surface).
 #[cfg(loom)]
 pub mod runqueue;
 #[cfg(not(loom))]
@@ -74,8 +72,7 @@ mod runqueue;
 
 // Re-export the contract vocabulary so existing call sites
 // (`rustos_kernel_sched_mlfq::{Scheduler, Priority, …}`) keep resolving to
-// the single canonical definitions in `kernel/sched/api` (`AGENTS.md`
-// §2.2 — no duplication).
+// the single canonical definitions in `kernel/sched/api` (no duplication).
 pub use rustos_kernel_sched_api::{
     CoreClass, CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerConfig,
     SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId, TaskState,

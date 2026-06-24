@@ -1,6 +1,6 @@
 //! Allocation error type shared by every allocator in this crate.
 //!
-//! Per `AGENTS.md` §4 ("Deterministic OOM behaviour: allocation failure
+//! Per ("Deterministic OOM behaviour: allocation failure
 //! is a `Result`, never a panic.") every fallible memory operation
 //! returns [`Result<_, AllocError>`]. Callers handle the error explicitly;
 //! there is no `unwrap` or `expect` on hot paths.

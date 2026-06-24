@@ -2,7 +2,7 @@
 //! ([`rustos_arch_api::SchedulerArch`]).
 //!
 //! Like x86_64 and riscv64, the aarch64 port is a pure Arch HAL
-//! implementation (`AGENTS.md` §17.2): it implements [`SchedulerArch`]
+//! implementation: it implements [`SchedulerArch`]
 //! and exposes the monotonic clock and a CPU-park primitive, but it does
 //! **not** name `kernel/core` or implement its `KernelArch` super-trait.
 //! The downstream boot consumer wraps [`Aarch64Arch`] in a local
@@ -15,7 +15,7 @@
 //! `CNTPCT_EL0`; [`Aarch64Arch::monotonic_ns`] converts those ticks to
 //! nanoseconds using the counter frequency `CNTFRQ_EL0` reports (passed
 //! to the constructor), so the conversion factor and the tick source
-//! share one frequency (`AGENTS.md` §2.4 — no parallel measurement).
+//! share one frequency (no parallel measurement).
 //!
 //! # Inter-processor interrupts
 //!
@@ -31,7 +31,7 @@
 //! run under `cargo test`. The instruction-level primitives are gated:
 //! the aarch64 build reads `CNTPCT_EL0` and parks on `wfi`, and the host
 //! build substitutes a monotonic atomic counter *solely* so the host
-//! tests can exercise the ns conversion (`AGENTS.md` §1 — no fake
+//! tests can exercise the ns conversion (no fake
 //! primitives in production).
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -43,7 +43,7 @@ use rustos_arch_api::{
 use crate::fdt::PsciMethod;
 
 /// Sentinel stored in an [`Aarch64ArchStorage::cpu_to_mpidr`] slot that
-/// no CPU maps to — the encoded `None` (`AGENTS.md` §2.9 — an unmapped
+/// no CPU maps to — the encoded `None` (an unmapped
 /// slot is unambiguously absent, never a guessed affinity).
 ///
 /// A real `MPIDR_EL1` affinity can never be `u64::MAX`: bits `[63:40]`
@@ -52,7 +52,7 @@ use crate::fdt::PsciMethod;
 const NO_MPIDR: u64 = u64::MAX;
 
 /// Caller-owned, `&'static` per-CPU backing for an [`Aarch64Arch`]
-/// handle (`AGENTS.md` §24.1 — per-CPU bookkeeping is sized by the
+/// handle (per-CPU bookkeeping is sized by the
 /// caller from discovered hardware, never a fixed `const` ceiling baked
 /// into the arch crate).
 ///
@@ -60,8 +60,7 @@ const NO_MPIDR: u64 = u64::MAX;
 /// constructing caller sizes for its machine: a single-CPU boot path or
 /// vertical uses `Aarch64ArchStorage<1>`, a two-core vertical
 /// `Aarch64ArchStorage<2>`, and a multi-core boot path sizes `N` from the
-/// device-tree CPU count. The arch crate stays allocator-free (`AGENTS.md`
-/// §24.1 watch-out — no `alloc` in a bare-metal arch crate, which would
+/// device-tree CPU count. The arch crate stays allocator-free (watch-out — no `alloc` in a bare-metal arch crate, which would
 /// force a heap into every freestanding bin linking it), so the caller
 /// provides the storage as a `static` (allocator-free bins) or a leaked
 /// allocation (allocator-having callers); [`Aarch64Arch`] borrows it as
@@ -115,7 +114,7 @@ impl<const N: usize> Default for Aarch64ArchStorage<N> {
 /// `RiscvArch`.
 ///
 /// The per-CPU bookkeeping is borrowed from a caller-provided
-/// [`Aarch64ArchStorage`] (`AGENTS.md` §24.1), so the handle itself holds
+/// [`Aarch64ArchStorage`], so the handle itself holds
 /// no fixed-size array and imposes no compile-time CPU ceiling.
 #[derive(Debug)]
 pub struct Aarch64Arch {
@@ -147,7 +146,7 @@ pub struct Aarch64Arch {
     /// tree's per-core `capacity-dmips-mhz` ratings at boot, and the
     /// scheduler reads it through the [`SchedulerArch::core_class`]
     /// override so it can place background work on the efficiency cores of
-    /// a `big.LITTLE` part (`AGENTS.md` §17.2 — static per-CPU identity
+    /// a `big.LITTLE` part (static per-CPU identity
     /// discovered by the arch port).
     core_classes: &'static [AtomicU8],
 
@@ -156,7 +155,7 @@ pub struct Aarch64Arch {
     /// (`crate::fdt::psci_method`) and installed via
     /// [`Self::with_psci_method`]. `None` on a single-core / headless
     /// handle that never starts a secondary; starting one then fails
-    /// closed with [`SmpError::NotReady`] (`AGENTS.md` §5.4.5).
+    /// closed with [`SmpError::NotReady`].
     psci_method: Option<PsciMethod>,
 }
 
@@ -170,7 +169,7 @@ impl Aarch64Arch {
     /// zero, so [`Self::monotonic_ns`] never divides by zero.
     ///
     /// The per-CPU bookkeeping is borrowed from the caller-provided
-    /// `storage` (`AGENTS.md` §24.1); a single-CPU caller sizes it
+    /// `storage`; a single-CPU caller sizes it
     /// `Aarch64ArchStorage<1>`. Maps `boot_cpu` to an affinity of the
     /// same numeric value (the boot/timer slice runs the boot core);
     /// [`Self::with_cpus`] registers a full multi-core map.
@@ -183,7 +182,7 @@ impl Aarch64Arch {
         let this = Self::from_storage(boot_cpu, timer_hz, storage);
         // A slot beyond the caller's `N` cannot be mapped; the handle
         // then simply has no entry for `boot_cpu` — fail closed, never
-        // panic (`AGENTS.md` §2.9).
+        // panic.
         this.store_mpidr(boot_cpu, u64::from(boot_cpu));
         this
     }
@@ -192,7 +191,7 @@ impl Aarch64Arch {
     /// affinity slice (`mpidrs[cpu] == affinity`).
     ///
     /// Entries beyond the caller's storage capacity `N` are ignored — the
-    /// caller sizes `N` to its discovered core count (`AGENTS.md` §24.1).
+    /// caller sizes `N` to its discovered core count.
     /// `boot_cpu` names the dense id of the boot core.
     #[must_use]
     pub fn with_cpus<const N: usize>(
@@ -228,8 +227,7 @@ impl Aarch64Arch {
 
     /// Populate dense `cpu`'s map slot with `mpidr`. An out-of-range
     /// `cpu` (beyond the caller-sized capacity) is silently ignored, so a
-    /// sparse or undersized storage cannot corrupt memory (`AGENTS.md`
-    /// §5.4 — fail closed). Called only at construction.
+    /// sparse or undersized storage cannot corrupt memory (fail closed). Called only at construction.
     fn store_mpidr(&self, cpu: CpuId, mpidr: u64) {
         if let Some(slot) = usize::try_from(cpu)
             .ok()
@@ -263,7 +261,7 @@ impl Aarch64Arch {
     ///
     /// An out-of-range `cpu` is ignored — the table is bounded to the
     /// caller-sized [`Aarch64ArchStorage`] length, so a stray call cannot
-    /// corrupt memory (`AGENTS.md` §5.4 fail-closed). Mirrors
+    /// corrupt memory (fail-closed). Mirrors
     /// `X86_64Arch::record_core_class`.
     pub fn record_core_class(&self, cpu: CpuId, class: CoreClass) {
         if let Some(slot) = usize::try_from(cpu)
@@ -283,17 +281,17 @@ impl Aarch64Arch {
     /// [`crate::hetcore::class_for_capacity`]. A malformed tree, or a
     /// CPU node whose affinity is not in the map, leaves that core at the
     /// [`CoreClass::Performance`] default rather than guessing
-    /// (`AGENTS.md` §2.9 — fail conservative). The downstream boot
+    /// (fail conservative). The downstream boot
     /// consumer calls this once on the boot core after building the
     /// affinity map.
     ///
     /// Two device-tree passes (find the peak, then classify) carry no
     /// fixed-size buffer, so the classification scales to the caller's
-    /// storage length (`AGENTS.md` §24.1) rather than a fixed
+    /// storage length rather than a fixed
     /// compile-time CPU ceiling.
     pub fn classify_from_fdt(&self, fdt: &crate::fdt::Fdt<'_>) {
         // Reset to the homogeneous default so a re-classification leaves
-        // no stale efficiency class behind (idempotent, `AGENTS.md` §2.9).
+        // no stale efficiency class behind (idempotent).
         for slot in self.core_classes {
             slot.store(CoreClass::Performance.as_u8(), Ordering::Relaxed);
         }
@@ -371,7 +369,7 @@ impl Aarch64Arch {
     ///
     /// Reads `CNTPCT_EL0` and converts ticks to nanoseconds against this
     /// handle's `timer_hz`, so the tick source and the conversion factor
-    /// share one frequency (`AGENTS.md` §2.4). The downstream
+    /// share one frequency. The downstream
     /// `KernelArch` wrapper forwards `monotonic_ns` here.
     #[must_use]
     pub fn monotonic_ns(&self) -> u64 {
@@ -379,7 +377,7 @@ impl Aarch64Arch {
         let hz = u128::from(self.timer_hz.max(1));
         // `ticks * 1e9 / hz` in 128-bit space cannot overflow for any
         // realistic uptime, and the `max(1)` defends a malformed
-        // frequency from a division trap (`AGENTS.md` §2.9).
+        // frequency from a division trap.
         let ns = ticks.saturating_mul(1_000_000_000) / hz;
         u64::try_from(ns).unwrap_or(u64::MAX)
     }
@@ -392,7 +390,7 @@ impl SchedulerArch for Aarch64Arch {
             // Recover the running core's affinity (`crate::smp` reads
             // `MPIDR_EL1`) and reverse-map it to a dense `CpuId`. An
             // unmapped core falls back to the boot CPU rather than
-            // inventing an id (`AGENTS.md` §5.4.5 — fail closed).
+            // inventing an id (fail closed).
             let affinity = u64::from(crate::smp::current_cpu_index());
             self.cpu_for_mpidr(affinity).unwrap_or(self.boot_cpu)
         }
@@ -419,8 +417,7 @@ impl SchedulerArch for Aarch64Arch {
     }
 
     fn send_ipi(&self, target: CpuId) {
-        // Bound by the caller-sized CPU count, not a fixed ceiling
-        // (`AGENTS.md` §24.1). An out-of-range target is dropped rather
+        // Bound by the caller-sized CPU count, not a fixed ceiling. An out-of-range target is dropped rather
         // than panicking — `send_ipi` is best-effort, and strays are
         // recorded for host tests.
         if usize::try_from(target).map_or(true, |i| i >= self.cpu_to_mpidr.len()) {
@@ -451,11 +448,11 @@ impl SchedulerArch for Aarch64Arch {
     }
 
     fn set_preemption(&self, armed: bool) {
-        // Tickless preemption (`AGENTS.md` §17.1): the scheduler decided
+        // Tickless preemption: the scheduler decided
         // whether the calling CPU has a competitor to bound the running
         // task for. `armed` records the running task's quantum deadline
         // (now + the per-CPU interval recorded by `init_local_preempt`, the
-        // single stored copy — §2.2); `!armed` clears it. The deadline
+        // single stored copy); `!armed` clears it. The deadline
         // combiner then programs the single EL1 generic-timer one-shot to
         // the *earlier* of this quantum and any pending blocking-wait
         // wakeup ([`Self::set_wakeup`]), so neither suppresses the other.
@@ -479,13 +476,13 @@ impl SchedulerArch for Aarch64Arch {
     }
 
     fn set_wakeup(&self, deadline_ns: Option<u64>) {
-        // The timed half of the tickless one-shot (`AGENTS.md` §17.1): a
+        // The timed half of the tickless one-shot: a
         // blocking wait with a finite timeout records its soonest waiter
         // deadline here so the parked waiter is woken on time even when the
         // CPU has no runnable task to preempt. Convert the absolute
         // monotonic-ns deadline to an absolute `CNTPCT_EL0` tick against
         // this handle's `timer_hz` (the same frequency `monotonic_ns`
-        // converts the other way, §2.4), then record it; the combiner arms
+        // converts the other way), then record it; the combiner arms
         // the one-shot to the earlier of this wakeup and any quantum. Off
         // the freestanding target the arming is inert.
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -507,8 +504,7 @@ impl CrossCpuTlbShootdown for Aarch64Arch {
         // aarch64 needs no IPI or software acknowledge: `tlbi vaae1is`
         // is the *inner-shareable broadcast* invalidation, so the same
         // instruction the local flush issues already reaches every PE in
-        // the domain. Both paths funnel through the one shared sequence
-        // (`AGENTS.md` §2.2); the `dsb ish` + `isb` inside it provide the
+        // the domain. Both paths funnel through the one shared sequence; the `dsb ish` + `isb` inside it provide the
         // ordering the cross-CPU contract requires.
         crate::paging::invalidate_page_inner_shareable(vaddr);
     }
@@ -517,8 +513,7 @@ impl CrossCpuTlbShootdown for Aarch64Arch {
 impl SecondaryBringup for Aarch64Arch {
     unsafe fn start_secondary(&self, cpu: CpuId) -> Result<(), SmpError> {
         // Fail closed before any PSCI call: the boot core is already
-        // running, and an unmapped dense id has no `MPIDR` to power on
-        // (`AGENTS.md` §5.4.5).
+        // running, and an unmapped dense id has no `MPIDR` to power on.
         if cpu == self.boot_cpu {
             return Err(SmpError::InvalidCpu);
         }
@@ -570,7 +565,7 @@ impl SecondaryBringup for Aarch64Arch {
 /// driver bring-up can bracket a phase and report the *counter-measured*
 /// elapsed span — the measurement that, against an external wall clock,
 /// localises an over-long settle to a timer-rate mismatch versus a genuine
-/// spin (`AGENTS.md` §15.7 / §2.16 — measure, don't guess). It reads one
+/// spin (measure, don't guess). It reads one
 /// architectural register with no side effects and grants no authority.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn read_cntpct() -> u64 {
@@ -623,7 +618,7 @@ pub fn read_cntfrq() -> u64 {
 /// This is the boot path's single source of the counter rate
 /// (`plans/PI.md` P4): the Raspberry Pi 4's 54 MHz crystal and the QEMU
 /// `virt` board's host-derived rate both flow through here without a
-/// `cfg(board)` fork (`AGENTS.md` §17.2 / §2.2). The selection logic is
+/// `cfg(board)` fork. The selection logic is
 /// the host-tested pure [`crate::fdt::effective_timer_hz`]; only the
 /// register read is target-gated.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -639,11 +634,10 @@ pub fn timer_frequency_hz(fdt: &crate::fdt::Fdt<'_>) -> u64 {
 /// (`plans/PI.md` P10 — e.g. the BCM2711 PCIe root complex's reset/
 /// link-training settle delays). It spins on `CNTPCT_EL0` measured
 /// against `CNTFRQ_EL0` rather than estimating cycle counts, so it is
-/// correct at any core/timer frequency (`AGENTS.md` §2.16 — measured, not
+/// correct at any core/timer frequency (measured, not
 /// guessed). A zero counter frequency (no usable timer) returns at once
 /// rather than spinning forever; this fails *open* on the cosmetic delay
-/// only — the bring-up's own progress waits stay bounded and fail closed
-/// (`AGENTS.md` §2.1).
+/// only — the bring-up's own progress waits stay bounded and fail closed.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn busy_delay_us(us: u32) {
     let freq = read_cntfrq();
@@ -711,12 +705,12 @@ pub fn clean_invalidate_dcache_range(_start: usize, _len: usize) {}
 /// The epoch is the counter's own (firmware-seeded) zero, left
 /// unspecified; only *differences* between two timestamps are meaningful,
 /// which is exactly what a serial capture needs to read off the real wall
-/// time spent between two log lines (`AGENTS.md` §15.7 / §2.16 — measure,
+/// time spent between two log lines (measure,
 /// don't guess). It scales `CNTPCT_EL0` by the rate `CNTFRQ_EL0` reports —
 /// the same counter and rate [`busy_delay_us`] spins against — so a gap a
 /// capture shows between two lines is the same wall time those lines'
 /// work actually took. A zero `CNTFRQ_EL0` (no usable timer) reports `0`
-/// rather than dividing by it (`AGENTS.md` §2.9).
+/// rather than dividing by it.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
 pub fn uptime_ms() -> u64 {
@@ -748,7 +742,7 @@ pub fn uptime_ms() -> u64 {
 /// with no vectors installed and hang the core. Every freestanding
 /// aarch64 kernel calls this once on the boot CPU before running any
 /// code that may use FP. This is the single definition of the enable
-/// sequence (`AGENTS.md` §2.2 — no duplication); the boot consumers and
+/// sequence (no duplication); the boot consumers and
 /// the QEMU verticals all call it.
 ///
 /// # Safety
@@ -786,19 +780,19 @@ pub unsafe fn enable_fp_el1() {
 /// Available on every target — the bare-metal build parks on `wfi`, the
 /// host build spin-waits — so the host-compiled `KernelArch` wrapper and
 /// GIC IRQ fail-closed paths can forward here exactly as the x86_64 sibling
-/// forwards to [`crate::kernel_arch`]'s `halt` (`AGENTS.md` §2.21 — one
+/// forwards to [`crate::kernel_arch`]'s `halt` (one
 /// shape across ports, no `cfg(freestanding)` indirection in the bin crate).
 ///
 /// # SAFETY-INVARIANT
 ///
 /// This function never returns. The `!` return type encodes the invariant
-/// at the type level (`AGENTS.md` §2.10).
+/// at the type level.
 pub fn halt_current_cpu() -> ! {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         // SAFETY: `msr DAIFSet, #0xf` masks all interrupts; `wfi` is a
         // well-defined wait-for-interrupt hint. The loop defends against a
-        // spurious wake. This is the aarch64 form of the `AGENTS.md` §2
+        // spurious wake. This is the aarch64 form of the
         // "never silently reset" contract.
         unsafe {
             core::arch::asm!("msr DAIFSet, #0xf", options(nomem, nostack));
@@ -815,7 +809,7 @@ pub fn halt_current_cpu() -> ! {
         // Host fallback: spin-wait forever. Host tests never invoke this
         // function — the compile-time `const _` assertion in the test
         // module proves the `-> !` signature without calling it
-        // (`AGENTS.md` §7 — no host-side blocking), mirroring the x86_64
+        // (no host-side blocking), mirroring the x86_64
         // `halt` host fallback.
         loop {
             core::hint::spin_loop();
@@ -965,7 +959,7 @@ mod tests {
         assert_eq!(arch.core_class(1), CoreClass::Performance);
     }
 
-    /// §17.2 / W6: the port passes the cross-CPU TLB-shootdown
+    /// / W6: the port passes the cross-CPU TLB-shootdown
     /// conformance vertical over its real `Aarch64Arch` handle. On the
     /// host the broadcast `tlbi` is a vacuous no-op (no TLB), so the
     /// vertical asserts the observable half — the call is total and
@@ -980,7 +974,7 @@ mod tests {
         rustos_arch_api::xtlb::conformance::run_all(erased, 64u64 << 30);
     }
 
-    /// §17.2 / W14: the port passes the secondary-bring-up conformance
+    /// / W14: the port passes the secondary-bring-up conformance
     /// vertical over its real `Aarch64Arch` handle. On the host there is
     /// no PSCI firmware, so the vertical asserts the observable half —
     /// starting an unstartable id fails closed and never panics. The real
@@ -997,10 +991,10 @@ mod tests {
 
     /// The boot core and any unmapped dense id are refused before any
     /// PSCI call, and a handle with no PSCI conduit cannot start a
-    /// secondary — the fail-closed contract (`AGENTS.md` §5.4.5). (The
+    /// secondary — the fail-closed contract. (The
     /// set-once secondary-entry slot is a process-global shared with
     /// `crate::smp`'s own tests, so the accepted path is exercised there,
-    /// not re-driven here — no flaky cross-test state, `AGENTS.md` §7.)
+    /// not re-driven here — no flaky cross-test state.)
     #[test]
     fn start_secondary_fails_closed_on_unstartable_ids_and_missing_conduit() {
         // SAFETY: every call below is refused before any PSCI action, so
@@ -1025,7 +1019,7 @@ mod tests {
         }
     }
 
-    /// §17.2 / W0: the port passes the shared Arch HAL conformance
+    /// / W0: the port passes the shared Arch HAL conformance
     /// vertical over its real `SchedulerArch`, `SideChannel`,
     /// `MemoryTags`, discovery, and per-CPU storage handles
     /// (`plans/WIRING.md` Stage W0 / W2).
@@ -1049,7 +1043,7 @@ mod tests {
     /// signature the `KernelArch::halt` impl and the panic bridge forward
     /// to. Calling it would block the test runner; coercing the function
     /// pointer is enough to surface a mismatched return type at build time
-    /// (`AGENTS.md` §2.10 — encode the invariant in the type system), the
-    /// x86_64 `_HALT_RETURNS_NEVER` sibling (`AGENTS.md` §2.21).
+    /// (encode the invariant in the type system), the
+    /// x86_64 `_HALT_RETURNS_NEVER` sibling.
     const _HALT_RETURNS_NEVER: fn() -> ! = halt_current_cpu;
 }

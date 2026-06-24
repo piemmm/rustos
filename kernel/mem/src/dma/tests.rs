@@ -209,7 +209,7 @@ fn cpu_view_aliases_device_physical_frame() {
 
 #[test]
 fn reuse_after_free_sees_zeroed_buffer() {
-    // The core security invariant of `AGENTS.md` §4:
+    // The core security invariant of:
     // "Zero-on-free for any allocation that ever held credentials".
     // After freeing a buffer that held a sentinel, the next allocation
     // that lands on the same region must observe zeros, not the sentinel.
@@ -289,7 +289,7 @@ fn address_space_records_one_mapping_per_data_page() {
 
 #[test]
 fn guard_slots_are_left_unmapped() {
-    // The guard-page mechanism (`AGENTS.md` §4): the leading and
+    // The guard-page mechanism: the leading and
     // trailing guard slots bracketing the data are never mapped in the
     // address space, so the MMU faults on a register-block over-run.
     let frames = fresh_frames(16);

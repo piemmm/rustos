@@ -1,7 +1,7 @@
 //! User and group identity state held by the kernel.
 //!
 //! The on-disk identity records persist in `/System/Security/Users` and
-//! `/System/Security/Groups` (see `AGENTS.md` §5.1 and §16). Loading them is a
+//! `/System/Security/Groups` (and). Loading them is a
 //! userland responsibility; this module provides the **in-memory builder
 //! and verifier** the kernel uses to ingest already-loaded records and
 //! turn them into a frozen [`IdentityTable`] it can consult on every
@@ -22,11 +22,11 @@
 //!   unless a [`CapabilityId::RLIMIT_RAISE`] holder raised it via
 //!   [`IdentityTableBuilder::with_supplementary_group_limit`] (a hostile
 //!   or corrupted record can never grow the ceiling itself, so it can
-//!   never force unbounded kernel allocation — `AGENTS.md` §24.1/§24.4).
+//!   never force unbounded kernel allocation).
 //!
 //! # No ambient authority
 //!
-//! Per `AGENTS.md` §5.1, `uid == 0` is **not** privileged in this crate.
+//! Per, `uid == 0` is **not** privileged in this crate.
 //! [`IdentityTable::user`] returns the requested record verbatim; powers
 //! flow exclusively from the capability set attached to that record and
 //! intersected with the binary's manifest request in
@@ -45,21 +45,21 @@ use crate::audit::{record, AuditEvent};
 /// Default ceiling on the number of supplementary groups a single user
 /// record may carry.
 ///
-/// This is the §24.2 *default policy*, not a hard-wired ceiling: it bounds
+/// This is the *default policy*, not a hard-wired ceiling: it bounds
 /// the table at `O(users × DEFAULT_MAX_SUPPLEMENTARY_GROUPS)` for an
 /// unconfigured builder and is generous for both desktop and server
 /// (it matches POSIX `NGROUPS_MAX` on long-standing Unix kernels). A
 /// deployment that genuinely needs more raises the per-builder ceiling at
 /// runtime through [`IdentityTableBuilder::with_supplementary_group_limit`],
-/// gated on [`CapabilityId::RLIMIT_RAISE`] (`AGENTS.md` §24.1/§24.3) — a
+/// gated on [`CapabilityId::RLIMIT_RAISE`] — a
 /// hostile on-disk record can never raise it, so the anti-DoS bound is
-/// preserved (§24.4).
+/// preserved.
 pub const DEFAULT_MAX_SUPPLEMENTARY_GROUPS: usize = 32;
 
 /// Numeric user identifier.
 ///
 /// `uid == 0` carries **no** special powers in `kernel/sec`; see the
-/// module docs and `AGENTS.md` §5.1.
+/// module docs and.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct UserId(pub u32);
@@ -86,7 +86,7 @@ pub struct UserRecord {
     /// see [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`].
     pub supplementary_gids: Vec<GroupId>,
     /// The maximum capability set this user may ever exercise. Per
-    /// `AGENTS.md` §5.2, a task's effective set is the intersection of
+    /// , a task's effective set is the intersection of
     /// this grant with the binary's manifest request.
     pub capability_grants: CapabilitySet,
 }
@@ -169,10 +169,10 @@ pub struct IdentityTableBuilder {
     users: Vec<UserRecord>,
     groups: Vec<GroupRecord>,
     /// Effective ceiling on any user's supplementary-group set. Starts at
-    /// the §24.2 default policy [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`] and is
+    /// the default policy [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`] and is
     /// only raised by a [`CapabilityId::RLIMIT_RAISE`] holder through
     /// [`Self::with_supplementary_group_limit`]; the candidate records
-    /// themselves can never widen it (`AGENTS.md` §24.4).
+    /// themselves can never widen it.
     max_supplementary_groups: usize,
 }
 
@@ -198,15 +198,14 @@ impl IdentityTableBuilder {
     ///
     /// Lowering the ceiling to or below the [`DEFAULT_MAX_SUPPLEMENTARY_GROUPS`]
     /// default needs no privilege (a principal may always tighten its own
-    /// limit — `AGENTS.md` §24.3). Raising it *above* the default grows the
+    /// limit). Raising it *above* the default grows the
     /// capacity and therefore requires `authority` to hold
-    /// [`CapabilityId::RLIMIT_RAISE`] (§24.1/§24.3); without it the call
-    /// fails closed and the builder's ceiling is left unchanged
-    /// (`AGENTS.md` §5.4).
+    /// [`CapabilityId::RLIMIT_RAISE`]; without it the call
+    /// fails closed and the builder's ceiling is left unchanged.
     ///
     /// The ceiling is purely a validation bound on the records pushed by
     /// the (privileged) identity loader; a candidate record can never
-    /// change it, so the §24.4 anti-DoS guarantee holds regardless of
+    /// change it, so the anti-DoS guarantee holds regardless of
     /// `limit`.
     ///
     /// # Errors
@@ -319,7 +318,7 @@ impl IdentityTableBuilder {
         }
         for u in &self.users {
             // Supplementary cap — the builder's effective ceiling, which a
-            // candidate record can never raise (`AGENTS.md` §24.4).
+            // candidate record can never raise.
             if u.supplementary_gids.len() > self.max_supplementary_groups {
                 return Err(Errno::LengthOutOfRange);
             }
@@ -341,7 +340,7 @@ impl IdentityTableBuilder {
 // The audit-field formatters (`format_i32`, `format_usize`,
 // `format_hex_u64`) used to live here. They were extracted into
 // `lib/util::fmt` in Stage 2.5 once `kernel/ipc` became a second
-// caller (`AGENTS.md` §2.2 / §6). Re-exported under their original
+// caller. Re-exported under their original
 // crate-local names so the existing call sites and tests are not
 // touched purely for the rename.
 pub(crate) use rustos_util::fmt::{format_hex_u64, format_i32, format_usize};
@@ -468,7 +467,7 @@ mod tests {
     #[test]
     fn lowering_the_ceiling_needs_no_capability() {
         let mut b = IdentityTableBuilder::new();
-        // Tightening one's own limit is always permitted (§24.3), even
+        // Tightening one's own limit is always permitted, even
         // with no granted capability.
         b.with_supplementary_group_limit(4, &GrantsNothing)
             .expect("lowering is free");
@@ -484,7 +483,7 @@ mod tests {
             b.with_supplementary_group_limit(raised, &Grants(CapabilityId::USER_ADMIN)),
             Err(Errno::PermissionDenied)
         );
-        // The ceiling is left unchanged on a denied raise (§5.4).
+        // The ceiling is left unchanged on a denied raise.
         assert_eq!(
             b.supplementary_group_limit(),
             DEFAULT_MAX_SUPPLEMENTARY_GROUPS
@@ -501,7 +500,7 @@ mod tests {
         assert_eq!(b.supplementary_group_limit(), raised);
 
         // A record with more than the *default* but within the raised
-        // ceiling now verifies — the capacity grew on demand (§24.1).
+        // ceiling now verifies — the capacity grew on demand.
         let upper = u32::try_from(raised).expect("fits in u32");
         b.push_group(sample_group(0));
         for g in 1..=upper {
@@ -521,7 +520,7 @@ mod tests {
         b.with_supplementary_group_limit(raised, &Grants(CapabilityId::RLIMIT_RAISE))
             .expect("holder may grow the ceiling");
         // One past the raised ceiling: a hostile record still cannot
-        // exceed the effective bound (§24.4).
+        // exceed the effective bound.
         let upper = u32::try_from(raised).expect("fits in u32") + 1;
         b.push_group(sample_group(0));
         for g in 1..=upper {

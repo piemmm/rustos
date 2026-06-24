@@ -5,7 +5,7 @@
 //!
 //! 1. [`port`] — typed message ports declared via [`rustos_abi::ipc`].
 //!    Sender and receiver capabilities are checked **at port creation**
-//!    and on **every** send. Per `AGENTS.md` §5.2 the receiver does
+//!    and on **every** send. Per the receiver does
 //!    not re-check; the kernel enforces.
 //! 2. [`registry`] — the named-port registry mapping an
 //!    [`port::EndpointId`] to the kernel-owned [`port::Port`] bound to

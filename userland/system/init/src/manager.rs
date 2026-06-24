@@ -2,7 +2,7 @@
 //! order, and reap exited children.
 //!
 //! This is the one place a service is ordered, capability-gated, audited,
-//! and launched. The pipeline **fails closed** (`AGENTS.md` §5.4.5): a
+//! and launched. The pipeline **fails closed**: a
 //! structurally broken service graph starts nothing, and a service whose
 //! manifest over-requests authority is refused rather than narrowed
 //! silently.
@@ -31,7 +31,7 @@ use crate::service::{Pid, ReapedChild, Reaper, ServiceSpec, Spawner};
 pub struct InitConfig<'a> {
     /// The capability set init itself was granted. Every service's grant is
     /// the intersection of its manifest request with this authority; a
-    /// service may never exceed it (`AGENTS.md` §5.2).
+    /// service may never exceed it.
     pub authority: CapabilitySet,
     /// ABI version the manager accepts in service manifests. A manifest
     /// targeting a different version is refused
@@ -41,7 +41,7 @@ pub struct InitConfig<'a> {
     pub spawner: &'a dyn Spawner,
     /// Seam that reports exited children.
     pub reaper: &'a dyn Reaper,
-    /// Structured audit log sink (`AGENTS.md` §19.4).
+    /// Structured audit log sink.
     pub sink: &'a dyn Sink,
 }
 
@@ -93,7 +93,7 @@ struct RunningService {
     pid: Pid,
 }
 
-/// PID 1 service manager (Stage 6 — `AGENTS.md` §5.2).
+/// PID 1 service manager (Stage 6).
 pub struct Init<'a> {
     cfg: InitConfig<'a>,
     services: Vec<ServiceSpec>,
@@ -200,8 +200,7 @@ impl<'a> Init<'a> {
     ///
     /// A reaped process that matches a running service is logged as a
     /// service exit and removed from the running set; any other reaped
-    /// process is an inherited orphan and is logged as such (`AGENTS.md`
-    /// §16 — PID 1 reaps the whole system's zombies).
+    /// process is an inherited orphan and is logged as such (PID 1 reaps the whole system's zombies).
     pub fn reap(&mut self) -> usize {
         let mut reaped = 0;
         while let Some(child) = self.cfg.reaper.collect() {
@@ -222,7 +221,7 @@ impl<'a> Init<'a> {
 
     /// Compute a dependency-respecting start order, or report a structural
     /// defect. Ready services are emitted in registration order so the
-    /// result is deterministic (`AGENTS.md` §18.3).
+    /// result is deterministic.
     fn topological_order(&self) -> Result<Vec<usize>, InitError> {
         let n = self.services.len();
         let mut indegree = vec![0usize; n];
@@ -297,7 +296,7 @@ impl<'a> Init<'a> {
         }
 
         // granted == requested here (it is a subset of the authority); the
-        // intersection is computed explicitly to make the §5.2 grant rule
+        // intersection is computed explicitly to make the grant rule
         // visible rather than implied.
         let granted = requested.intersection(&self.cfg.authority);
 

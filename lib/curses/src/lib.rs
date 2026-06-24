@@ -23,14 +23,13 @@
 //! # One vocabulary, fail closed
 //!
 //! Every byte this crate emits or parses is a [`rustos_vt::Op`] — there is no
-//! second escape-sequence table here (`AGENTS.md` §2.2). It is `no_std` +
+//! second escape-sequence table here. It is `no_std` +
 //! `alloc` and is part of the OS — the curated `/System/Libraries/`
-//! Terminal/TUI class that applications dynamically link (`AGENTS.md` §16.4) —
+//! Terminal/TUI class that applications dynamically link —
 //! and contains
 //! no `unwrap` / `expect` / `panic!`: an out-of-range draw is a
 //! [`CursesError`], an unknown input sequence produces no event, and a
-//! colour the terminal cannot show is degraded, never emitted raw
-//! (`AGENTS.md` §2.9). Nothing here writes to fd 3 (`stdinfo`, §20).
+//! colour the terminal cannot show is degraded, never emitted raw. Nothing here writes to fd 3 (`stdinfo`).
 //!
 //! ```
 //! use rustos_curses::{render, Buffer, CursorState, Pos, Size, Window};

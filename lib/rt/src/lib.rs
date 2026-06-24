@@ -3,23 +3,22 @@
 //! This is the runtime a **first-party RustOS program written in Rust** links:
 //! it provides the program's `_start` entry trampoline, idiomatic `abi-v1`
 //! syscall wrappers, the [`entry!`] macro that names the program's `main`, and
-//! the panic handler. RustOS is Rust-only (`AGENTS.md` §1), so its own
+//! the panic handler. RustOS is Rust-only, so its own
 //! programs use this runtime and never the C ABI.
 //!
 //! # Relationship to the C ABI (`crt0` + `abi-sys`)
 //!
 //! `rustos-crt0` and `rustos-abi-sys` are the curated *System runtime / C ABI*
-//! class (`AGENTS.md` §9, §16.4): a libc-equivalent that exists **solely** so
+//! class: a libc-equivalent that exists **solely** so
 //! a program **not** written in Rust (C, …) can call `abi-v1`. They are not
 //! for RustOS's own code. `rustos-rt` is the Rust counterpart; both build on
-//! the one shared syscall trap (`rustos-abi-trap`, `AGENTS.md` §2.2), so the
+//! the one shared syscall trap (`rustos-abi-trap`), so the
 //! trap assembly is not duplicated.
 //!
 //! # Not a privileged path
 //!
 //! The wrappers add **no** authority. Every capability check and input
-//! validation happens kernel-side, on the far side of the trap (`AGENTS.md`
-//! §5.4); a Rust program reaches no syscall it could not reach otherwise.
+//! validation happens kernel-side, on the far side of the trap; a Rust program reaches no syscall it could not reach otherwise.
 //!
 //! # Using it
 //!
@@ -39,7 +38,7 @@
 //! ```
 //!
 //! `rustos-rt` provides `_start`, which validates the kernel-supplied
-//! startup vector, installs the per-process stack canary (`AGENTS.md` §19.2),
+//! startup vector, installs the per-process stack canary,
 //! calls `main`, and routes its return value through the `exit` syscall.
 //!
 //! # Targets
@@ -48,7 +47,7 @@
 //! compiled in only for the three native Tier-1 targets, gated on a
 //! build-script-emitted `rt_native_<arch>` cfg (`build.rs`) rather than a
 //! target-architecture predicate, so the instruction-set choice stays out of
-//! the source tree the §17.2 `cfg-check` guards. On the host only the
+//! the source tree the `cfg-check` guards. On the host only the
 //! host-testable syscall-wrapper marshalling is compiled.
 
 #![cfg_attr(not(test), no_std)]
@@ -73,111 +72,111 @@ pub use startup::{arg, arg_count};
 // register it as the `#[global_allocator]`, and for host unit tests of its pure
 // `HeapState` bookkeeping. A plain host build (no allocator to register, no
 // tests) needs neither, so the module is left out there to keep it dead-code
-// free (`AGENTS.md` §2.14).
+// free.
 #[cfg(any(rt_native, test))]
 mod heap;
 
 /// `exit` syscall number, read from the `abi-v1` source of truth so this
-/// crate can never disagree with the table (`AGENTS.md` §2.2).
+/// crate can never disagree with the table.
 const NUM_EXIT: u64 = SyscallNumber::EXIT.as_u16() as u64;
 
-/// `stream_write` syscall number (`AGENTS.md` §2.2, as above).
+/// `stream_write` syscall number (as above).
 const NUM_STREAM_WRITE: u64 = SyscallNumber::STREAM_WRITE.as_u16() as u64;
 
-/// `stream_read` syscall number (`AGENTS.md` §2.2, as above).
+/// `stream_read` syscall number (as above).
 const NUM_STREAM_READ: u64 = SyscallNumber::STREAM_READ.as_u16() as u64;
 
-/// `yield` syscall number (`AGENTS.md` §2.2, as above).
+/// `yield` syscall number (as above).
 const NUM_YIELD: u64 = SyscallNumber::YIELD.as_u16() as u64;
 
-/// `spawn` syscall number (`AGENTS.md` §2.2, as above).
+/// `spawn` syscall number (as above).
 const NUM_SPAWN: u64 = SyscallNumber::SPAWN.as_u16() as u64;
 
-/// `mem_map` syscall number (`AGENTS.md` §2.2, as above).
+/// `mem_map` syscall number (as above).
 const NUM_MEM_MAP: u64 = SyscallNumber::MEM_MAP.as_u16() as u64;
 
-/// `mem_unmap` syscall number (`AGENTS.md` §2.2, as above).
+/// `mem_unmap` syscall number (as above).
 const NUM_MEM_UNMAP: u64 = SyscallNumber::MEM_UNMAP.as_u16() as u64;
 
-/// `mmio_map` syscall number (`AGENTS.md` §2.2, as above).
+/// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
 
-/// `dma_alloc` syscall number (`AGENTS.md` §2.2, as above).
+/// `dma_alloc` syscall number (as above).
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
 
-/// `wait` syscall number (`AGENTS.md` §2.2, as above).
+/// `wait` syscall number (as above).
 const NUM_WAIT: u64 = SyscallNumber::WAIT.as_u16() as u64;
 
-/// `ipc_send` syscall number (`AGENTS.md` §2.2, as above).
+/// `ipc_send` syscall number (as above).
 const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
 
-/// `rlimit_get` syscall number (`AGENTS.md` §2.2, as above).
+/// `rlimit_get` syscall number (as above).
 const NUM_RLIMIT_GET: u64 = SyscallNumber::RLIMIT_GET.as_u16() as u64;
 
-/// `rlimit_set` syscall number (`AGENTS.md` §2.2, as above).
+/// `rlimit_set` syscall number (as above).
 const NUM_RLIMIT_SET: u64 = SyscallNumber::RLIMIT_SET.as_u16() as u64;
 
-/// `users_db_read` syscall number (`AGENTS.md` §2.2, as above).
+/// `users_db_read` syscall number (as above).
 const NUM_USERS_DB_READ: u64 = SyscallNumber::USERS_DB_READ.as_u16() as u64;
 
-/// `users_db_wait` syscall number (`AGENTS.md` §2.2, as above).
+/// `users_db_wait` syscall number (as above).
 const NUM_USERS_DB_WAIT: u64 = SyscallNumber::USERS_DB_WAIT.as_u16() as u64;
 
-/// `console_count` syscall number (`AGENTS.md` §2.2, as above).
+/// `console_count` syscall number (as above).
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 
-/// `stream_echo` syscall number (`AGENTS.md` §2.2, as above).
+/// `stream_echo` syscall number (as above).
 const NUM_STREAM_ECHO: u64 = SyscallNumber::STREAM_ECHO.as_u16() as u64;
 
-/// `key_inject` syscall number (`AGENTS.md` §2.2, as above).
+/// `key_inject` syscall number (as above).
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
 
-/// `display_acquire` syscall number (`AGENTS.md` §2.2, as above).
+/// `display_acquire` syscall number (as above).
 const NUM_DISPLAY_ACQUIRE: u64 = SyscallNumber::DISPLAY_ACQUIRE.as_u16() as u64;
 
-/// `display_release` syscall number (`AGENTS.md` §2.2, as above).
+/// `display_release` syscall number (as above).
 const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 
-/// `keyboard_read` syscall number (`AGENTS.md` §2.2, as above).
+/// `keyboard_read` syscall number (as above).
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 
-/// `resource_grants` syscall number (`AGENTS.md` §2.2, as above).
+/// `resource_grants` syscall number (as above).
 const NUM_RESOURCE_GRANTS: u64 = SyscallNumber::RESOURCE_GRANTS.as_u16() as u64;
 
-/// `clock_get` syscall number (`AGENTS.md` §2.2, as above).
+/// `clock_get` syscall number (as above).
 const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
 
-/// `hw_tree_read` syscall number (`AGENTS.md` §2.2, as above).
+/// `hw_tree_read` syscall number (as above).
 const NUM_HW_TREE_READ: u64 = SyscallNumber::HW_TREE_READ.as_u16() as u64;
 
-/// `hw_tree_wait` syscall number (`AGENTS.md` §2.2, as above).
+/// `hw_tree_wait` syscall number (as above).
 const NUM_HW_TREE_WAIT: u64 = SyscallNumber::HW_TREE_WAIT.as_u16() as u64;
 
-/// `ipc_call` syscall number (`AGENTS.md` §2.2, as above).
+/// `ipc_call` syscall number (as above).
 const NUM_IPC_CALL: u64 = SyscallNumber::IPC_CALL.as_u16() as u64;
 
-/// `irq_bind` syscall number (`AGENTS.md` §2.2, as above).
+/// `irq_bind` syscall number (as above).
 const NUM_IRQ_BIND: u64 = SyscallNumber::IRQ_BIND.as_u16() as u64;
 
-/// `irq_wait` syscall number (`AGENTS.md` §2.2, as above).
+/// `irq_wait` syscall number (as above).
 const NUM_IRQ_WAIT: u64 = SyscallNumber::IRQ_WAIT.as_u16() as u64;
 
-/// `call_create` syscall number (`AGENTS.md` §2.2, as above).
+/// `call_create` syscall number (as above).
 const NUM_CALL_CREATE: u64 = SyscallNumber::CALL_CREATE.as_u16() as u64;
 
-/// `call_recv` syscall number (`AGENTS.md` §2.2, as above).
+/// `call_recv` syscall number (as above).
 const NUM_CALL_RECV: u64 = SyscallNumber::CALL_RECV.as_u16() as u64;
 
-/// `call_reply` syscall number (`AGENTS.md` §2.2, as above).
+/// `call_reply` syscall number (as above).
 const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 
-/// `log_emit` syscall number (`AGENTS.md` §2.2, as above).
+/// `log_emit` syscall number (as above).
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 
-/// `hw_emit_node` syscall number (`AGENTS.md` §2.2, as above).
+/// `hw_emit_node` syscall number (as above).
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 
-/// `hw_remove_node` syscall number (`AGENTS.md` §2.2, as above).
+/// `hw_remove_node` syscall number (as above).
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
@@ -193,11 +192,11 @@ const fn i32_arg(value: i32) -> u64 {
 /// This never returns. A correct kernel never returns control from `exit`;
 /// should it nonetheless do so, this must not return to a caller that has no
 /// continuation, so it re-issues `exit`. This is a fail-closed loop over the
-/// terminating syscall, not a busy-wait (`AGENTS.md` §2.1).
+/// terminating syscall, not a busy-wait.
 pub fn exit(code: i32) -> ! {
     loop {
         // SAFETY: `raw_syscall` is always safe to invoke — the kernel
-        // validates the call on the far side of the trap (`AGENTS.md` §5.4).
+        // validates the call on the far side of the trap.
         // `exit` consumes the exit code in arg 0 and takes no memory operand.
         unsafe {
             let _ = raw_syscall(NUM_EXIT, [i32_arg(code), 0, 0, 0, 0, 0]);
@@ -207,22 +206,19 @@ pub fn exit(code: i32) -> ! {
 
 /// Write `bytes` to the calling process's standard stream `fd`
 /// (`SyscallNumber::STREAM_WRITE`), returning the number of bytes the
-/// kernel accepted (`AGENTS.md` §20).
+/// kernel accepted.
 ///
 /// The shared core of [`stdout`], [`stderr`], and [`stdinfo`]: the
 /// program names only the inherited descriptor, never a device, so the
-/// same binary works whatever the spawner backed the stream with (§20 —
-/// device independence is a property of the stream layer). The kernel
+/// same binary works whatever the spawner backed the stream with (device independence is a property of the stream layer). The kernel
 /// resolves `fd` against the caller's descriptor table and validates the
-/// `(buf, len)` pair against the caller's address space before reading it
-/// (`AGENTS.md` §5.4); a short write (fewer than `bytes.len()`) is valid,
+/// `(buf, len)` pair against the caller's address space before reading it; a short write (fewer than `bytes.len()`) is valid,
 /// so the caller loops.
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the count never exceeds `bytes.len()`.
 fn stream_write(fd: u32, bytes: &[u8]) -> usize {
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(buf, len)` against the caller's address space before touching it
-    // (`AGENTS.md` §5.4). `bytes` is a live shared `&[u8]` for the duration
+    // `(buf, len)` against the caller's address space before touching it. `bytes` is a live shared `&[u8]` for the duration
     // of the call, so the `(ptr, len)` pair denotes readable memory.
     let written = unsafe {
         raw_syscall(
@@ -233,7 +229,7 @@ fn stream_write(fd: u32, bytes: &[u8]) -> usize {
     written as usize
 }
 
-/// Write `bytes` to standard output (fd 1, `AGENTS.md` §20), returning the
+/// Write `bytes` to standard output (fd 1), returning the
 /// number of bytes the kernel accepted. The program's primary data
 /// output; a short write is valid, so the caller loops.
 #[must_use]
@@ -241,15 +237,14 @@ pub fn stdout(bytes: &[u8]) -> usize {
     stream_write(STDOUT, bytes)
 }
 
-/// Write `bytes` to standard error (fd 2, `AGENTS.md` §20): errors,
+/// Write `bytes` to standard error (fd 2): errors,
 /// warnings, and diagnostics. Returns the number of bytes accepted.
 #[must_use]
 pub fn stderr(bytes: &[u8]) -> usize {
     stream_write(STDERR, bytes)
 }
 
-/// Write `bytes` to the standard information stream (fd 3, `AGENTS.md`
-/// §20.1): optional, ignorable structured advisory metadata. Returns the
+/// Write `bytes` to the standard information stream (fd 3): optional, ignorable structured advisory metadata. Returns the
 /// number of bytes accepted (zero when no consumer is attached — fd 3 is
 /// best-effort and must never affect correctness).
 #[must_use]
@@ -257,14 +252,13 @@ pub fn stdinfo(bytes: &[u8]) -> usize {
     stream_write(STDINFO, bytes)
 }
 
-/// Read up to `buf.len()` bytes from standard input (fd 0, `AGENTS.md`
-/// §20) into `buf` (`SyscallNumber::STREAM_READ`), returning the number of
+/// Read up to `buf.len()` bytes from standard input (fd 0) into `buf` (`SyscallNumber::STREAM_READ`), returning the number of
 /// bytes read.
 ///
 /// The kernel resolves fd 0 against the caller's descriptor table and
 /// validates the `(buf, len)` pair against the caller's address space
-/// before writing it (`AGENTS.md` §5.4). The stream *backing* owns
-/// blocking (§20): a read with no pending input parks the caller in the
+/// before writing it. The stream *backing* owns
+/// blocking: a read with no pending input parks the caller in the
 /// kernel until input arrives, so a successful read returns at least one
 /// byte. A short read (fewer bytes than `buf.len()`) is valid, so the
 /// caller loops for more.
@@ -273,10 +267,10 @@ pub fn stdinfo(bytes: &[u8]) -> usize {
 /// standard `abi-v1` convention) — e.g. fd 0 is not a readable stream, or
 /// the buffer pointer faults. A reader handed a `&mut [u8]` has no way to
 /// surface an `Errno`, and an unread input stream is indistinguishable from
-/// end-of-input from the program's side (the *backing* owns blocking, §20),
+/// end-of-input from the program's side (the *backing* owns blocking),
 /// so this reports a failure as a zero-length read. The count is also
 /// clamped to `buf.len()` as defence in depth, so a buggy kernel count can
-/// never drive an out-of-bounds slice in the caller (`AGENTS.md` §5.4).
+/// never drive an out-of-bounds slice in the caller.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // usize == u64 on every native target; the clamped count never exceeds `buf.len()`.
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 stream-read encoding (count ≥ 0, else -errno).
@@ -285,8 +279,7 @@ pub fn stdin(buf: &mut [u8]) -> usize {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(buf, len)` against the caller's address space before touching it
-    // (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
+    // `(buf, len)` against the caller's address space before touching it. `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable
     // memory the kernel may fill.
     let read =
@@ -298,25 +291,25 @@ pub fn stdin(buf: &mut [u8]) -> usize {
 }
 
 /// Set whether standard input (fd 0) echoes the bytes it reads back to its
-/// console (`SyscallNumber::STREAM_ECHO`, `AGENTS.md` §20 — terminal local
+/// console (`SyscallNumber::STREAM_ECHO` — terminal local
 /// echo), returning the raw signed register (`0` on success, else
 /// `-errno`).
 ///
 /// Console echo defaults to **on**, so an interactive user sees what they
 /// type at a [`stdin`] read. A program suppresses it around a secret it
 /// must not render — login disables echo before reading a password and
-/// re-enables it afterwards (`AGENTS.md` §5.4 — never echo a credential).
+/// re-enables it afterwards (never echo a credential).
 /// Requires `CAP_CONSOLE_READ`; the kernel performs the echo itself as part
 /// of the read line discipline, so no `CAP_CONSOLE_WRITE` is needed. A
 /// build with no console wired, or an fd 0 that is not a readable stream,
-/// fails closed with `-errno` (`AGENTS.md` §2.9); the wrapper surfaces it
+/// fails closed with `-errno`; the wrapper surfaces it
 /// verbatim so the caller decides how to react.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
 pub fn set_echo(enabled: bool) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates the capability and resolves fd 0
-    // before touching any state (`AGENTS.md` §5.4).
+    // before touching any state.
     let ret = unsafe {
         raw_syscall(
             NUM_STREAM_ECHO,
@@ -327,19 +320,19 @@ pub fn set_echo(enabled: bool) -> i64 {
 }
 
 /// Inject one decoded keyboard `record` into the kernel input-focus arbiter
-/// (`SyscallNumber::KEY_INJECT`, `AGENTS.md` §20, `plans/PI.md` P11 — input
+/// (`SyscallNumber::KEY_INJECT`, `plans/PI.md` P11 — input
 /// follows the surface owner), returning the raw signed register (the bytes
 /// consumed when non-negative, else `-errno`).
 ///
 /// The producer-side call a keyboard-input driver issues after decoding a
 /// directly attached keyboard into a [`KeyInput`] key edge: the kernel
 /// validates `CAP_INPUT_INJECT` and the `(buf, len)` pair against the
-/// caller's address space (`AGENTS.md` §5.4), decodes the record fail-closed,
+/// caller's address space, decodes the record fail-closed,
 /// and routes it by who holds input focus — a *press* encoded to the focused
 /// text console's tty bytes, or the whole record delivered to the desktop
 /// keyboard channel. The driver no longer chooses the encoding or the
-/// destination (`AGENTS.md` §17.4). A malformed record or an unwired arbiter
-/// fails closed with `-errno` (`AGENTS.md` §2.9); the wrapper surfaces the
+/// destination. A malformed record or an unwired arbiter
+/// fails closed with `-errno`; the wrapper surfaces the
 /// raw signed value so the caller decides how to react.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
@@ -348,7 +341,7 @@ pub fn key_inject(record: &KeyInput) -> i64 {
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_INPUT_INJECT` and the `(buf, len)` pair against the caller's
-    // address space before reading it (`AGENTS.md` §5.4). `bytes` is a live
+    // address space before reading it. `bytes` is a live
     // stack array for the duration of the call, so the `(ptr, len)` pair
     // denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_KEY_INJECT, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
@@ -356,14 +349,14 @@ pub fn key_inject(record: &KeyInput) -> i64 {
 }
 
 /// Acquire ownership of the display and claim keyboard input focus
-/// (`SyscallNumber::DISPLAY_ACQUIRE`, `AGENTS.md` §10 / §17.3 / §20,
+/// (`SyscallNumber::DISPLAY_ACQUIRE`,
 /// `plans/PI.md` P11), returning `0` on success or `-errno`.
 ///
 /// The compositing window manager calls this when it takes over the screen:
 /// the kernel input-focus arbiter switches its foreground to the desktop
 /// keyboard channel, so subsequently injected key edges are delivered as
 /// [`KeyInput`] records the manager drains with [`keyboard_read`]. Requires
-/// `CAP_DISPLAY` (`AGENTS.md` §4 — owning the display is privileged).
+/// `CAP_DISPLAY` (owning the display is privileged).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0 on success, else -errno).
 pub fn display_acquire() -> i64 {
@@ -374,7 +367,7 @@ pub fn display_acquire() -> i64 {
 }
 
 /// Release the display and return keyboard input focus to the text console
-/// (`SyscallNumber::DISPLAY_RELEASE`, `AGENTS.md` §10 / §17.3 / §20,
+/// (`SyscallNumber::DISPLAY_RELEASE`,
 /// `plans/PI.md` P11), returning `0` on success or `-errno`.
 ///
 /// The inverse of [`display_acquire`]; requires `CAP_DISPLAY`.
@@ -388,7 +381,7 @@ pub fn display_release() -> i64 {
 }
 
 /// Read one decoded keyboard event from the kernel keyboard channel into
-/// `buf` (`SyscallNumber::KEYBOARD_READ`, `AGENTS.md` §10, `plans/PI.md`
+/// `buf` (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md`
 /// P11), returning the raw signed register (the bytes written — one
 /// [`KeyInput`] record's [`KeyInput::WIRE_LEN`], or `0` when the channel is
 /// momentarily drained — when non-negative, else `-errno`).
@@ -396,8 +389,8 @@ pub fn display_release() -> i64 {
 /// The principal that owns the display (the window manager) drains the
 /// records the arbiter routed to it while it held focus. The kernel
 /// validates `CAP_INPUT_READ` and the `(buf, len)` pair against the caller's
-/// address space (`AGENTS.md` §5.4); a `buf` shorter than
-/// [`KeyInput::WIRE_LEN`] fails closed with `-errno` (`AGENTS.md` §2.9). A
+/// address space; a `buf` shorter than
+/// [`KeyInput::WIRE_LEN`] fails closed with `-errno`. A
 /// zero return is a valid empty read, so the caller loops.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
@@ -405,7 +398,7 @@ pub fn keyboard_read(buf: &mut [u8]) -> i64 {
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_INPUT_READ` and the `(buf, len)` pair against the caller's address
-    // space before writing it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // space before writing it. `buf` is a live exclusive
     // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
     // denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_KEYBOARD_READ, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
@@ -413,8 +406,7 @@ pub fn keyboard_read(buf: &mut [u8]) -> i64 {
 }
 
 /// Enumerate the device-resource grants the kernel minted for the calling
-/// driver task into `buf` (`SyscallNumber::RESOURCE_GRANTS`, `AGENTS.md` §4 /
-/// §18.3 / §20, `plans/PI.md` P10 chunk 5d-2), returning the raw signed
+/// driver task into `buf` (`SyscallNumber::RESOURCE_GRANTS`, `plans/PI.md` P10 chunk 5d-2), returning the raw signed
 /// register: the total number of bytes written — consecutive
 /// [`rustos_abi::hwtree::GrantedResource`] records — when non-negative, else
 /// `-errno`.
@@ -422,9 +414,8 @@ pub fn keyboard_read(buf: &mut [u8]) -> i64 {
 /// A driver process calls this once at start-up to learn the unforgeable
 /// handles it passes to [`mmio_map`] / [`dma_alloc`]. It needs no capability
 /// (a task reads only its *own* grants); the kernel validates the
-/// `(buf, len)` pair against the caller's address space before writing it
-/// (`AGENTS.md` §5.4). A `buf` too small for the whole grant set fails closed
-/// with `-errno` (`BufferTooSmall`, `AGENTS.md` §2.9), so size it for the
+/// `(buf, len)` pair against the caller's address space before writing it. A `buf` too small for the whole grant set fails closed
+/// with `-errno` (`BufferTooSmall`), so size it for the
 /// matched node's resource count; a task with no grants returns `0`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
@@ -432,26 +423,26 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(buf, len)` pair against the caller's address space before writing
-    // it (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` for the
+    // it. `buf` is a live exclusive `&mut [u8]` for the
     // duration of the call, so the `(ptr, len)` pair denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
     ret as i64
 }
 
 /// Publish a discovered child device `node` into the live hardware tree
-/// (`SyscallNumber::HW_EMIT_NODE`, `AGENTS.md` §18.1 / §18.3), returning the
+/// (`SyscallNumber::HW_EMIT_NODE`), returning the
 /// raw signed register: `0` once published, else `-errno`.
 ///
 /// A user-space **bus** driver (a PCIe root complex, a USB host) calls this
 /// once per device it enumerates, so the device manager autoloads the
 /// matching driver in turn — recursive, data-driven discovery, never a
-/// compiled-in list (`AGENTS.md` §18). It is gated by
+/// compiled-in list. It is gated by
 /// [`rustos_abi::CapabilityId::HW_EMIT`], and the kernel admits the node only
 /// when every [`rustos_abi::hwtree::HwResource`] it requests is covered by one
 /// of the calling driver's own minted grants, so a child can never carry more
-/// authority than its emitter (`AGENTS.md` §4 — no ambient authority). A
+/// authority than its emitter (no ambient authority). A
 /// malformed node, an unknown parent, or an out-of-grant resource fails closed
-/// with `-errno` (`AGENTS.md` §2.9 / §5.4).
+/// with `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
 pub fn hw_emit_node(node: &HwNode) -> i64 {
@@ -459,7 +450,7 @@ pub fn hw_emit_node(node: &HwNode) -> i64 {
     let ptr = bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_HW_EMIT` and reads the `(ptr, len)` pair against the caller's
-    // address space before decoding it (`AGENTS.md` §5.4). `bytes` is a live
+    // address space before decoding it. `bytes` is a live
     // owned array for the duration of the call, so the pair denotes readable
     // memory.
     let ret = unsafe { raw_syscall(NUM_HW_EMIT_NODE, [ptr, bytes.len() as u64, 0, 0, 0, 0]) };
@@ -467,26 +458,25 @@ pub fn hw_emit_node(node: &HwNode) -> i64 {
 }
 
 /// Remove a previously-published child device node — and its whole subtree —
-/// from the live hardware tree (`SyscallNumber::HW_REMOVE_NODE`, `AGENTS.md`
-/// §18.4), returning the raw signed register: `0` once removed, else
+/// from the live hardware tree (`SyscallNumber::HW_REMOVE_NODE`), returning the raw signed register: `0` once removed, else
 /// `-errno`.
 ///
 /// The symmetric counterpart of [`hw_emit_node`]: a user-space **bus** driver
 /// that published a device with [`hw_emit_node`] calls this when the device
 /// goes away (a USB port-down, a PCIe hot-remove), so the device manager
-/// unloads the driver bound to the vanished node (`AGENTS.md` §18.4). It is
+/// unloads the driver bound to the vanished node. It is
 /// gated by the same [`rustos_abi::CapabilityId::HW_EMIT`], and the kernel
 /// retires `node_id` **only** when its parent is the calling driver's own
 /// matched node — a child the caller itself published — together with every
 /// descendant, so a driver can never remove a node it does not own
-/// (`AGENTS.md` §4 — no ambient authority). An unknown id, or a node the
-/// caller does not own, fails closed with `-errno` (`AGENTS.md` §2.9 / §5.4).
+/// (no ambient authority). An unknown id, or a node the
+/// caller does not own, fails closed with `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
 pub fn hw_remove_node(node_id: u32) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `CAP_HW_EMIT` and resolves `node_id` against the live tree on the far
-    // side of the trap (`AGENTS.md` §5.4). The call passes no memory operand —
+    // side of the trap. The call passes no memory operand —
     // `node_id` is a scalar in arg 0.
     let ret = unsafe { raw_syscall(NUM_HW_REMOVE_NODE, [u64::from(node_id), 0, 0, 0, 0, 0]) };
     ret as i64
@@ -499,10 +489,10 @@ pub fn hw_remove_node(node_id: u32) -> i64 {
 /// dispatched. It requires no capability, takes no arguments, and returns
 /// nothing (`abi-v1` `yield` is `() -> ()`). A program that must let a
 /// sibling run — without a blocking syscall to wait on — calls this rather
-/// than spinning (`AGENTS.md` §2.1).
+/// than spinning.
 pub fn yield_now() {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). `yield` takes
+    // the call on the far side of the trap. `yield` takes
     // no arguments and no memory operand, so all six argument registers are
     // zero; the kernel ignores its return value.
     unsafe {
@@ -511,7 +501,7 @@ pub fn yield_now() {
 }
 
 /// Read the kernel monotonic clock, in nanoseconds
-/// (`SyscallNumber::CLOCK_GET`, `AGENTS.md` §21).
+/// (`SyscallNumber::CLOCK_GET`).
 ///
 /// Returns a monotonically non-decreasing nanosecond reading from a clock
 /// whose epoch is unspecified — only differences between readings are
@@ -519,7 +509,7 @@ pub fn yield_now() {
 /// task); a caller without [`CapabilityId::TIME_HIRES`] reads it floored to
 /// [`rustos_abi::time::COARSE_CLOCK_GRANULARITY_NS`] (one microsecond), since
 /// a sub-microsecond timer is a side-channel primitive the kernel withholds
-/// from untrusted callers (`AGENTS.md` §19.1). The wrapper performs no
+/// from untrusted callers. The wrapper performs no
 /// coarsening of its own — the value it returns is exactly what the kernel
 /// handed back.
 ///
@@ -527,7 +517,7 @@ pub fn yield_now() {
 #[must_use]
 pub fn clock_get() -> u64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). `clock_get`
+    // the call on the far side of the trap. `clock_get`
     // takes no arguments and no memory operand, so all six argument registers
     // are zero; its result is the `U64` nanosecond reading.
     unsafe { raw_syscall(NUM_CLOCK_GET, [0, 0, 0, 0, 0, 0]) }
@@ -538,7 +528,7 @@ pub fn clock_get() -> u64 {
 /// The shared core of [`ClockDelay`]'s
 /// [`delay_us`](rustos_abi::Delay::delay_us): it reads the monotonic clock
 /// through `now` and surrenders the CPU through `yield_fn` between reads, so
-/// it is a cooperative wait rather than a hard spin (`AGENTS.md` §2.1). A
+/// it is a cooperative wait rather than a hard spin. A
 /// deadline already in the past returns immediately without yielding. The
 /// generic seams keep the loop host-testable against a deterministic clock
 /// without issuing a real trap.
@@ -559,11 +549,10 @@ const NANOS_PER_MICRO: u64 = 1_000;
 /// window — hands one of these to the bring-up code that takes a
 /// [`Delay`](rustos_abi::Delay). It lives here, in the one userland runtime,
 /// so every driver process shares a single clock-backed `Delay` rather than
-/// each rolling its own over [`clock_get`] (`AGENTS.md` §2.2).
+/// each rolling its own over [`clock_get`].
 ///
 /// The wait is cooperative: [`delay_us`](rustos_abi::Delay::delay_us) yields
-/// the CPU to other runnable tasks between clock reads instead of busy-spinning
-/// (`AGENTS.md` §2.1). It carries no authority — `clock_get` needs no
+/// the CPU to other runnable tasks between clock reads instead of busy-spinning. It carries no authority — `clock_get` needs no
 /// capability — and holds no state, so it is `Copy` and trivially shareable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClockDelay;
@@ -581,8 +570,7 @@ impl rustos_abi::Delay for ClockDelay {
         // Compute the deadline from the clock the loop polls, saturating so a
         // reading near `u64::MAX` can never wrap the deadline below `now`
         // (which would return instantly); the monotonic clock realistically
-        // never approaches that, but the wait must not silently shorten
-        // (`AGENTS.md` §2.9).
+        // never approaches that, but the wait must not silently shorten.
         let deadline = clock_get().saturating_add(u64::from(us).saturating_mul(NANOS_PER_MICRO));
         spin_until_ns(deadline, clock_get, yield_now);
     }
@@ -605,10 +593,10 @@ impl rustos_abi::Delay for ClockDelay {
 /// resolves the path against the kernel's embedded-program registry, builds
 /// the child a fresh hardware-isolated address space, and admits it
 /// **Ready** — the caller keeps running (a true concurrent spawn, not an
-/// `exec`-style hand-off, `AGENTS.md` §4 / §5.4).
+/// `exec`-style hand-off).
 ///
 /// The child's standard streams attach to the **caller's own** console
-/// ([`rustos_abi::CONSOLE_INHERIT`], `AGENTS.md` §20): a spawned session
+/// ([`rustos_abi::CONSOLE_INHERIT`]): a spawned session
 /// member (login's shell, a shell's job) stays on the console its parent
 /// was driving. To start a process on a *different* installed console —
 /// PID 1 launching one login per console (`plans/PI.md` P11) — use
@@ -619,14 +607,13 @@ impl rustos_abi::Delay for ClockDelay {
 /// negative value is `-errno` (recover the [`rustos_abi::Errno`]
 /// discriminant as `-ret`). The wrapper surfaces that raw signed value so
 /// the caller decides how to react to a failed spawn — it adds no authority
-/// and hides no error (`AGENTS.md` §2.9).
+/// and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 spawn-result encoding (PID ≥ 0, else -errno).
 pub fn spawn(path: &[u8]) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // `(path, len)` against the caller's address space before touching it
-    // (`AGENTS.md` §5.4). `path` is a live shared `&[u8]` for the duration
+    // `(path, len)` against the caller's address space before touching it. `path` is a live shared `&[u8]` for the duration
     // of the call, so the `(ptr, len)` pair denotes readable memory.
     let ret = unsafe {
         raw_syscall(
@@ -639,7 +626,7 @@ pub fn spawn(path: &[u8]) -> i64 {
 
 /// Spawn the embedded program registered under the absolute `path` with
 /// its standard streams attached to the installed console `console`
-/// (`SyscallNumber::SPAWN`, `AGENTS.md` §20, `plans/PI.md` P11).
+/// (`SyscallNumber::SPAWN`, `plans/PI.md` P11).
 ///
 /// The console-selecting form of [`spawn`]: `console` names an index in
 /// the kernel's installed console list (its length is reported by
@@ -653,8 +640,7 @@ pub fn spawn_at(path: &[u8], console: u32) -> i64 {
     let ptr = path.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // `(path, len)` against the caller's address space and `console`
-    // against the installed console list before touching any state
-    // (`AGENTS.md` §5.4). `path` is a live shared `&[u8]` for the duration
+    // against the installed console list before touching any state. `path` is a live shared `&[u8]` for the duration
     // of the call, so the `(ptr, len)` pair denotes readable memory.
     let ret = unsafe {
         raw_syscall(
@@ -666,20 +652,19 @@ pub fn spawn_at(path: &[u8], console: u32) -> i64 {
 }
 
 /// Report how many system text consoles are installed
-/// (`SyscallNumber::CONSOLE_COUNT`, `AGENTS.md` §20, `plans/PI.md` P11).
+/// (`SyscallNumber::CONSOLE_COUNT`, `plans/PI.md` P11).
 ///
 /// Requires `CAP_CONSOLE_WRITE`. The count is the index space
 /// [`spawn_at`]'s `console` argument selects from; PID 1 `init` uses it
 /// to start one login session per discovered console. The kernel encodes
 /// the result as a signed register: a non-negative value is the count,
-/// a negative value is `-errno` (the wrapper surfaces it verbatim,
-/// `AGENTS.md` §2.9).
+/// a negative value is `-errno` (the wrapper surfaces it verbatim).
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
 pub fn console_count() -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
     // pointers and the kernel validates the capability before any state
-    // is touched (`AGENTS.md` §5.4).
+    // is touched.
     let ret = unsafe { raw_syscall(NUM_CONSOLE_COUNT, [0, 0, 0, 0, 0, 0]) };
     ret as i64
 }
@@ -692,23 +677,21 @@ pub fn console_count() -> i64 {
 /// kernel maps the region at exactly `addr_hint` (page-aligned, a free
 /// range) or fails closed; otherwise `addr_hint` is advisory and `0` means
 /// "kernel chooses". The region is zeroed before it is visible and is never
-/// executable (`AGENTS.md` §19.2 — W^X); mapping one's own isolated space
-/// grants no further authority, so no capability is required
-/// (`AGENTS.md` §16.6 / §4).
+/// executable (W^X); mapping one's own isolated space
+/// grants no further authority, so no capability is required.
 ///
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the base address
 /// of the new region, and a negative value is `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`) — a frame exhaustion is
-/// reported as [`rustos_abi::Errno::OutOfMemory`] (`AGENTS.md` §4 —
-/// deterministic OOM, never a panic). The wrapper surfaces that raw signed
+/// reported as [`rustos_abi::Errno::OutOfMemory`] (deterministic OOM, never a panic). The wrapper surfaces that raw signed
 /// value so the caller decides how to react; it adds no authority and hides
-/// no error (`AGENTS.md` §2.9).
+/// no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mem_map-result encoding (base ≥ 0, else -errno).
 pub fn mem_map(len: usize, flags: MapFlags, addr_hint: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). `mem_map`
+    // the call on the far side of the trap. `mem_map`
     // dereferences no user pointer; it maps the region into the caller's own
     // space and returns its base, so no memory operand is passed.
     let ret = unsafe {
@@ -724,18 +707,17 @@ pub fn mem_map(len: usize, flags: MapFlags, addr_hint: u64) -> i64 {
 /// [`mem_map`] from the calling process's own address space
 /// (`SyscallNumber::MEM_UNMAP`, `plans/SPAWN.md` SP5).
 ///
-/// The kernel zeroes the frames it reclaims (`AGENTS.md` §4 — secret
+/// The kernel zeroes the frames it reclaims (secret
 /// hygiene) and fails closed when `(base, len)` does not name a region the
-/// caller mapped (`AGENTS.md` §5.4). Returns `0` on success or `-errno`
+/// caller mapped. Returns `0` on success or `-errno`
 /// (recover the [`rustos_abi::Errno`] discriminant as `-ret`), following the
-/// standard `abi-v1` signed-result convention; the wrapper hides no error
-/// (`AGENTS.md` §2.9).
+/// standard `abi-v1` signed-result convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mem_unmap-result encoding (0, else -errno).
 pub fn mem_unmap(base: u64, len: usize) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(base, len)` range against the caller's own address space before
-    // unmapping it (`AGENTS.md` §5.4). No user pointer is dereferenced.
+    // unmapping it. No user pointer is dereferenced.
     let ret = unsafe { raw_syscall(NUM_MEM_UNMAP, [base, len as u64, 0, 0, 0, 0]) };
     ret as i64
 }
@@ -745,15 +727,14 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
 /// (`SyscallNumber::MMIO_MAP`, `plans/PI.md` P10 chunk 5d-0).
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant handle —
-/// never a raw physical address (`AGENTS.md` §4): the kernel resolves it
+/// never a raw physical address: the kernel resolves it
 /// **owner-checked against the calling task**, confirms it names a memory
 /// window, confirms `[offset, offset + len)` lies wholly inside that window,
-/// and maps only that sub-region — caching disabled, never executable
-/// (`AGENTS.md` §5.4 / §18.3 / §19.2). A forged or another driver's handle
+/// and maps only that sub-region — caching disabled, never executable. A forged or another driver's handle
 /// resolves to nothing and is refused, as is a sub-region escaping the grant.
 /// Mapping a bounded sub-region (not the whole grant) is what lets a driver
 /// granted a large outbound bus aperture map just the single BAR it
-/// enumerated rather than the entire window (`AGENTS.md` §24.1). The call
+/// enumerated rather than the entire window. The call
 /// carries `CAP_MMIO_MAP` (enforced by the kernel before any state is
 /// touched).
 ///
@@ -762,12 +743,12 @@ pub fn mem_unmap(base: u64, len: usize) -> i64 {
 /// the newly mapped sub-region, and a negative value is `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
 /// raw signed value so the caller decides how to react; it adds no authority
-/// and hides no error (`AGENTS.md` §2.9).
+/// and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mmio_map-result encoding (base ≥ 0, else -errno).
 pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). `mmio_map`
+    // the call on the far side of the trap. `mmio_map`
     // dereferences no user pointer; it resolves the grant handle and maps the
     // requested sub-region into the caller's own space, returning its base.
     let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) };
@@ -779,11 +760,11 @@ pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
 /// P10 chunk 5d-0).
 ///
 /// `handle` is an unforgeable, kernel-issued device-resource grant handle —
-/// never a raw physical address (`AGENTS.md` §4): the kernel resolves it
+/// never a raw physical address: the kernel resolves it
 /// **owner-checked against the calling task**, confirms it names a DMA
 /// constraint, carves a physically-contiguous, zeroed, coherent buffer of
 /// `len` bytes whose physical extent lies within the grant's addressing
-/// limit (`AGENTS.md` §5.4 / §18.3), maps it `RW`, non-executable,
+/// limit, maps it `RW`, non-executable,
 /// guard-bracketed into the caller's own address space, writes the buffer's
 /// **device-visible** base address to `device_out`, and returns the base
 /// **user virtual address** the driver's CPU accesses go through. The call
@@ -796,13 +777,13 @@ pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
 /// [`rustos_abi::Errno`] discriminant as `-ret`) — `device_out` is left
 /// untouched on a negative result. The wrapper surfaces that raw signed
 /// value so the caller decides how to react; it adds no authority and hides
-/// no error (`AGENTS.md` §2.9).
+/// no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 dma_alloc-result encoding (base ≥ 0, else -errno).
 pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
     let ptr = (device_out as *mut u64) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). `device_out`
+    // the call on the far side of the trap. `device_out`
     // is a live exclusive `&mut u64` for the duration of the call, so the
     // pointer denotes writable memory the kernel may fill with the
     // device-visible base; the kernel validates it against the caller's own
@@ -812,25 +793,25 @@ pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
 }
 
 /// Bind interrupt `line` to the calling task, minting an unforgeable
-/// [`rustos_abi::IrqHandle`] (`SyscallNumber::IRQ_BIND`, `AGENTS.md` §5.2).
+/// [`rustos_abi::IrqHandle`] (`SyscallNumber::IRQ_BIND`).
 ///
 /// `line` is the architecture interrupt-line identifier the driver received
 /// as an [`HwResourceKind::Irq`](rustos_abi::hwtree::HwResourceKind) grant on
-/// its matched node (`AGENTS.md` §18.3) — a discovered value, never a board
+/// its matched node — a discovered value, never a board
 /// constant. The call carries `CAP_IRQ_BIND` (enforced by the kernel before
 /// any state is touched); the minted handle is re-keyed to the calling task,
-/// so only this task can `irq_wait` on it (`AGENTS.md` §5.4).
+/// so only this task can `irq_wait` on it.
 ///
 /// The kernel encodes the result as a signed register following the standard
 /// `abi-v1` convention: a non-negative value is the raw `IrqHandle`, and a
 /// negative value is `-errno` (recover the [`rustos_abi::Errno`] discriminant
 /// as `-ret`). The wrapper surfaces that raw signed value; it adds no
-/// authority and hides no error (`AGENTS.md` §2.9).
+/// authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 irq_bind-result encoding (handle ≥ 0, else -errno).
 pub fn irq_bind(line: u32) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). `irq_bind`
+    // the call on the far side of the trap. `irq_bind`
     // dereferences no user pointer; it records the binding and returns a
     // handle.
     let ret = unsafe { raw_syscall(NUM_IRQ_BIND, [u64::from(line), 0, 0, 0, 0, 0]) };
@@ -839,14 +820,13 @@ pub fn irq_bind(line: u32) -> i64 {
 
 /// Park the calling task until the interrupt bound to `handle` fires, the
 /// `timeout_ns` deadline elapses, or the binding disappears
-/// (`SyscallNumber::IRQ_WAIT`, `AGENTS.md` §5.2).
+/// (`SyscallNumber::IRQ_WAIT`).
 ///
 /// `handle` is the [`rustos_abi::IrqHandle`] a prior [`irq_bind`] minted for
-/// this task; the kernel re-checks the binding owner-side on every call
-/// (`AGENTS.md` §5.4) and parks the task off the run queue between polls (no
-/// busy-wait, `AGENTS.md` §2.1). Pass `u64::MAX` for an effectively unbounded
+/// this task; the kernel re-checks the binding owner-side on every call and parks the task off the run queue between polls (no
+/// busy-wait). Pass `u64::MAX` for an effectively unbounded
 /// wait. The kernel re-arms the bound line on the driver's behalf across the
-/// park (the driver holds no controller access, §4), so an interrupt-driven
+/// park (the driver holds no controller access), so an interrupt-driven
 /// driver loops `irq_wait` → drain → `irq_wait` without touching hardware
 /// interrupt-controller state.
 ///
@@ -854,12 +834,12 @@ pub fn irq_bind(line: u32) -> i64 {
 /// `abi-v1` convention: `0` on a fire, and a negative value is `-errno`
 /// (`Errno::TimedOut` on the deadline, `Errno::NotFound` for a forged or
 /// released handle — recover the discriminant as `-ret`). The wrapper
-/// surfaces that raw signed value and hides no error (`AGENTS.md` §2.9).
+/// surfaces that raw signed value and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 irq_wait-result encoding (0, else -errno).
 pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the handle owner-side on the far side of the trap (`AGENTS.md` §5.4).
+    // the handle owner-side on the far side of the trap.
     // `irq_wait` dereferences no user pointer.
     let ret = unsafe { raw_syscall(NUM_IRQ_WAIT, [handle, timeout_ns, 0, 0, 0, 0]) };
     ret as i64
@@ -872,8 +852,7 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 /// wait for whichever of the caller's children exits next. On success the
 /// kernel writes the reaped child's exit code into `status` and returns its
 /// PID. A process may only wait on its **own** children; the kernel
-/// validates the parent/child relationship and fails closed (`AGENTS.md`
-/// §4 / §5.4).
+/// validates the parent/child relationship and fails closed.
 ///
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the reaped child's
@@ -881,14 +860,14 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 /// [`rustos_abi::Errno`] discriminant as `-ret`) — `status` is left
 /// untouched on a negative result. The wrapper surfaces that raw signed
 /// value so the caller decides how to react; it adds no authority and hides
-/// no error (`AGENTS.md` §2.9).
+/// no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
 pub fn wait(pid: i32, status: &mut i32) -> i64 {
     let ptr = (status as *mut i32) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `status` pointer against the caller's address space before
-    // writing the exit code to it (`AGENTS.md` §5.4). `status` is a live
+    // writing the exit code to it. `status` is a live
     // exclusive `&mut i32` for the duration of the call, so the pointer
     // denotes writable memory the kernel may fill.
     let ret = unsafe { raw_syscall(NUM_WAIT, [i32_arg(pid), ptr, 0, 0, 0, 0]) };
@@ -896,14 +875,14 @@ pub fn wait(pid: i32, status: &mut i32) -> i64 {
 }
 
 /// Read the calling process's effective limit for resource `kind`
-/// (`SyscallNumber::RLIMIT_GET`, `AGENTS.md` §24.3).
+/// (`SyscallNumber::RLIMIT_GET`).
 ///
 /// On success the kernel writes the encoded [`ResourceLimit`] into a local
 /// buffer this wrapper decodes and returns. Reading one's own limit grants
-/// no authority and needs no capability (`AGENTS.md` §16.6 / §24.3). The
+/// no authority and needs no capability. The
 /// kernel encodes a failure as a negative register (`-errno`, the standard
 /// `abi-v1` convention); the wrapper surfaces it as `Err(-ret)` (the raw
-/// negative value) and hides no error (`AGENTS.md` §2.9).
+/// negative value) and hides no error.
 ///
 /// # Errors
 ///
@@ -915,7 +894,7 @@ pub fn rlimit_get(kind: LimitKind) -> Result<ResourceLimit, i64> {
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `out` pointer against the caller's address space before writing
-    // the encoded limit to it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // the encoded limit to it. `buf` is a live exclusive
     // local for the duration of the call, so the pointer denotes writable
     // memory the kernel may fill.
     #[allow(clippy::cast_possible_wrap)]
@@ -932,14 +911,13 @@ pub fn rlimit_get(kind: LimitKind) -> Result<ResourceLimit, i64> {
 }
 
 /// Install the calling process's limit for resource `kind`
-/// (`SyscallNumber::RLIMIT_SET`, `AGENTS.md` §24.3).
+/// (`SyscallNumber::RLIMIT_SET`).
 ///
 /// The wrapper encodes `value` into a local buffer the kernel reads. A
 /// process may freely *lower* a bound, but *raising* a hard bound above the
-/// inherited ceiling requires [`rustos_abi::CapabilityId::RLIMIT_RAISE`]
-/// (§24.3). Returns `0` on success or `-errno` (recover the
+/// inherited ceiling requires [`rustos_abi::CapabilityId::RLIMIT_RAISE`]. Returns `0` on success or `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`), the standard `abi-v1`
-/// signed-result convention; the wrapper hides no error (`AGENTS.md` §2.9).
+/// signed-result convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
@@ -947,7 +925,7 @@ pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
     let ptr = buf.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `value` pointer against the caller's address space before reading
-    // the encoded limit from it (`AGENTS.md` §5.4). `buf` is a live local
+    // the encoded limit from it. `buf` is a live local
     // for the duration of the call, so the pointer denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_RLIMIT_SET, [u64::from(kind.as_u32()), ptr, 0, 0, 0, 0]) };
     ret as i64
@@ -961,23 +939,23 @@ pub fn rlimit_set(kind: LimitKind, value: ResourceLimit) -> i64 {
 /// caller parses with the fail-closed `rustos-users` parser. Gated
 /// kernel-side on [`rustos_abi::CapabilityId::USERS_READ`] — only the
 /// authentication principal (login) holds it; the wrapper adds no
-/// authority (`AGENTS.md` §5.4). Sizing `buf` at the format's own
+/// authority. Sizing `buf` at the format's own
 /// 64 KiB maximum (`rustos-users` `MAX_DB_LEN`) always suffices: a
 /// buffer smaller than the database is refused whole — a credential
-/// database is never truncated (`AGENTS.md` §2.9).
+/// database is never truncated.
 ///
 /// # Errors
 ///
 /// Returns the raw negative kernel result (`-errno`) on failure: the
 /// caller lacks the capability, no database is held (no root volume, or
 /// the boot read refused the record — the caller fails closed and
-/// refuses every login, `AGENTS.md` §5.4.5), or `buf` is too small.
+/// refuses every login), or `buf` is too small.
 pub fn users_db_read(buf: &mut [u8]) -> Result<usize, i64> {
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(buf, len)` pair against the caller's address space before
-    // writing to it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // writing to it. `buf` is a live exclusive
     // `&mut [u8]` for the duration of the call, so the pair denotes
     // writable memory the kernel may fill.
     #[allow(clippy::cast_possible_wrap)]
@@ -987,8 +965,7 @@ pub fn users_db_read(buf: &mut [u8]) -> Result<usize, i64> {
         return Err(ret);
     }
     // Defence in depth: clamp the kernel's count to the buffer so a buggy
-    // count can never drive an out-of-bounds slice in the caller
-    // (`AGENTS.md` §5.4), exactly as `stdin` clamps.
+    // count can never drive an out-of-bounds slice in the caller, exactly as `stdin` clamps.
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(buf.len()))
@@ -1001,28 +978,28 @@ pub fn users_db_read(buf: &mut [u8]) -> Result<usize, i64> {
 /// bounds the payload against the port's advertised maximum, copies it in
 /// through the validated `copy_from_user` boundary, and enforces the
 /// port's required send capability against the **caller's** effective set
-/// before enqueueing (`AGENTS.md` §5.2 / §5.4) — the wrapper adds no
+/// before enqueueing — the wrapper adds no
 /// authority. A spawned driver process uses this to report its
 /// `register()` outcome back to the driver host on the reply endpoint
 /// handed to it through its startup args (`PLAN.md` Stage 4.HW).
 ///
 /// Returns `0` on success or `-errno` (recover the [`rustos_abi::Errno`]
 /// discriminant as `-ret`), the standard `abi-v1` signed-result
-/// convention; the wrapper hides no error (`AGENTS.md` §2.9).
+/// convention; the wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
     let ptr = payload.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(ptr, len)` pair against the caller's address space before
-    // reading it (`AGENTS.md` §5.4). `payload` is a live shared `&[u8]` for
+    // reading it. `payload` is a live shared `&[u8]` for
     // the duration of the call, so the pair denotes readable memory.
     let ret = unsafe { raw_syscall(NUM_IPC_SEND, [endpoint, ptr, payload.len() as u64, 0, 0, 0]) };
     ret as i64
 }
 
 /// Read the discovered hardware tree the kernel built at boot into `buf`
-/// (`SyscallNumber::HW_TREE_READ`, `AGENTS.md` §16.6 / §18.1 / §18.4),
+/// (`SyscallNumber::HW_TREE_READ`),
 /// returning the number of bytes copied.
 ///
 /// The copied bytes are a [`rustos_abi::HwTreeHeader`] (the store's
@@ -1031,14 +1008,12 @@ pub fn ipc_send(endpoint: u64, payload: &[u8]) -> i64 {
 /// fail-closed `from_bytes` parsers. The generation in the header is the
 /// value to pass to [`hw_tree_wait`] to block until the tree next changes.
 /// Gated kernel-side on [`rustos_abi::CapabilityId::SYSINFO_HW`] — the
-/// privileged global hardware view (`AGENTS.md` §16.6 / §18.4); the
+/// privileged global hardware view; the
 /// wrapper adds no authority.
 ///
 /// The whole inventory is copied or none: a buffer smaller than the
-/// snapshot is refused with `BufferTooSmall` rather than truncated
-/// (`AGENTS.md` §2.9), so the caller grows `buf` and retries (the node
-/// count is a discovered capacity, not a fixed ceiling — `AGENTS.md`
-/// §24.1).
+/// snapshot is refused with `BufferTooSmall` rather than truncated, so the caller grows `buf` and retries (the node
+/// count is a discovered capacity, not a fixed ceiling).
 ///
 /// # Errors
 ///
@@ -1050,7 +1025,7 @@ pub fn hw_tree_read(buf: &mut [u8]) -> Result<usize, i64> {
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(buf, len)` pair against the caller's address space before
-    // writing to it (`AGENTS.md` §5.4). `buf` is a live exclusive
+    // writing to it. `buf` is a live exclusive
     // `&mut [u8]` for the duration of the call, so the pair denotes
     // writable memory the kernel may fill.
     #[allow(clippy::cast_possible_wrap)]
@@ -1060,15 +1035,14 @@ pub fn hw_tree_read(buf: &mut [u8]) -> Result<usize, i64> {
         return Err(ret);
     }
     // Defence in depth: clamp the kernel's count to the buffer so a buggy
-    // count can never drive an out-of-bounds slice in the caller
-    // (`AGENTS.md` §5.4), exactly as `users_db_read` clamps.
+    // count can never drive an out-of-bounds slice in the caller, exactly as `users_db_read` clamps.
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(buf.len()))
 }
 
 /// Block until the discovered hardware tree changes past
-/// `last_generation` (`SyscallNumber::HW_TREE_WAIT`, `AGENTS.md` §18.4 —
+/// `last_generation` (`SyscallNumber::HW_TREE_WAIT` —
 /// reactive re-match and hotplug).
 ///
 /// `last_generation` is the generation the caller last observed through
@@ -1083,27 +1057,25 @@ pub fn hw_tree_read(buf: &mut [u8]) -> Result<usize, i64> {
 /// Returns `0` once the tree has changed, or `-errno` (recover the
 /// [`rustos_abi::Errno`] discriminant as `-ret`): `-TimedOut` if the
 /// deadline elapses first, or `-NotImplemented` if no hardware-tree store
-/// is wired. The wrapper hides no error (`AGENTS.md` §2.9).
+/// is wired. The wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). Both
+    // the call on the far side of the trap. Both
     // arguments are scalars; the call reads no caller memory.
     let ret = unsafe { raw_syscall(NUM_HW_TREE_WAIT, [last_generation, timeout_ns, 0, 0, 0, 0]) };
     ret as i64
 }
 
 /// Block until the system user database leaves its *pending*
-/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`,
-/// `AGENTS.md` §5.1, `plans/PI.md` P11 — the reactive companion to
+/// (still-being-unlocked) state (`SyscallNumber::USERS_DB_WAIT`, `plans/PI.md` P11 — the reactive companion to
 /// [`users_db_read`]).
 ///
 /// Under design B `login` is spawned before the in-kernel unlock kthread
 /// mounts the encrypted root, so an early [`users_db_read`] reports
 /// `WouldBlock` — the live-but-not-ready signal. Rather than re-reading in
-/// a yield loop (a busy spin that audited one ERROR per poll, `AGENTS.md`
-/// §2.1), the caller blocks here: the kernel parks it off the run queue and
+/// a yield loop (a busy spin that audited one ERROR per poll), the caller blocks here: the kernel parks it off the run queue and
 /// wakes it the instant the unlock reaches a terminal outcome (a database is
 /// installed, or the unlock gives up), so the next [`users_db_read`] returns
 /// the database or the inert `NotImplemented`. `timeout_ns` bounds the wait
@@ -1114,12 +1086,12 @@ pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
 /// Returns `0` once the database is no longer pending (the caller re-reads
 /// and re-classifies it), or `-errno` (recover the [`rustos_abi::Errno`]
 /// discriminant as `-ret`): `-TimedOut` if the deadline elapses first. The
-/// wrapper hides no error (`AGENTS.md` §2.9).
+/// wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn users_db_wait(timeout_ns: u64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
-    // the call on the far side of the trap (`AGENTS.md` §5.4). The single
+    // the call on the far side of the trap. The single
     // argument is a scalar; the call reads no caller memory.
     let ret = unsafe { raw_syscall(NUM_USERS_DB_WAIT, [timeout_ns, 0, 0, 0, 0, 0]) };
     ret as i64
@@ -1127,14 +1099,13 @@ pub fn users_db_wait(timeout_ns: u64) -> i64 {
 
 /// Make a synchronous capability-checked call to the kernel-owned IPC call
 /// endpoint `endpoint`: post `request`, block until the reply arrives, and
-/// copy it into `reply` (`SyscallNumber::IPC_CALL`, `AGENTS.md` §5.2 / §5.4;
+/// copy it into `reply` (`SyscallNumber::IPC_CALL`;
 /// Design D D2b). Returns the number of reply bytes written.
 ///
 /// The kernel enforces the endpoint's required send capability against the
-/// caller before posting (`AGENTS.md` §5.2 — no ambient authority), copies
+/// caller before posting (no ambient authority), copies
 /// `request` in and the reply out through the validated boundary, and blocks
-/// the caller cooperatively until the reply arrives, never busy-spinning
-/// (`AGENTS.md` §2.1). The first consumer is the reactive device manager
+/// the caller cooperatively until the reply arrives, never busy-spinning. The first consumer is the reactive device manager
 /// reading the read-only `/System` driver store over
 /// [`rustos_abi::driver_store::DRIVER_STORE_ENDPOINT`].
 ///
@@ -1144,13 +1115,13 @@ pub fn users_db_wait(timeout_ns: u64) -> i64 {
 /// send capability (`PermissionDenied`), an unknown or destroyed endpoint
 /// (`NotFound`), an oversize request (`MessageTooLarge`), a reply larger than
 /// `reply` (`BufferTooSmall`), or no call-endpoint registry wired
-/// (`NotImplemented`). The wrapper hides no error (`AGENTS.md` §2.9).
+/// (`NotImplemented`). The wrapper hides no error.
 pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize, i64> {
     let req_ptr = request.as_ptr() as usize as u64;
     let reply_ptr = reply.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // both `(ptr, len)` pairs against the caller's address space before
-    // touching them (`AGENTS.md` §5.4). `request` is a live shared `&[u8]`
+    // touching them. `request` is a live shared `&[u8]`
     // and `reply` a live exclusive `&mut [u8]` for the duration of the call.
     #[allow(clippy::cast_possible_wrap)]
     // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
@@ -1171,16 +1142,14 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
         return Err(ret);
     }
     // Defence in depth: clamp the kernel's count to the buffer so a buggy
-    // count can never drive an out-of-bounds slice in the caller
-    // (`AGENTS.md` §5.4), exactly as `hw_tree_read` clamps.
+    // count can never drive an out-of-bounds slice in the caller, exactly as `hw_tree_read` clamps.
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(reply.len()))
 }
 
 /// Emit one pre-encoded diagnostic [`rustos_abi::LogRecordRef`] wire image to
-/// the kernel's diagnostic log sink (`SyscallNumber::LOG_EMIT`, `AGENTS.md`
-/// §19.4 / §20).
+/// the kernel's diagnostic log sink (`SyscallNumber::LOG_EMIT`).
 ///
 /// Most callers use the higher-level [`LogSink`] rather than this raw form.
 /// The kernel verifies the caller holds `CAP_LOG_EMIT`, copies and fully
@@ -1191,14 +1160,14 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
 /// Returns `0` on success, or the raw negative kernel result (`-errno`): a
 /// missing `CAP_LOG_EMIT` (`PermissionDenied`), a malformed or oversize
 /// record (`LengthOutOfRange` / `OutOfRange`), or a faulting pointer
-/// (`BadAddress`). The wrapper hides no error (`AGENTS.md` §2.9).
+/// (`BadAddress`). The wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn log_emit(record: &[u8]) -> i64 {
     let ptr = record.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // the `(ptr, len)` pair against the caller's address space before reading
-    // it (`AGENTS.md` §5.4). `record` is a live shared `&[u8]` for the
+    // it. `record` is a live shared `&[u8]` for the
     // duration of the call.
     let ret = unsafe { raw_syscall(NUM_LOG_EMIT, [ptr, record.len() as u64, 0, 0, 0, 0]) };
     ret as i64
@@ -1206,7 +1175,7 @@ pub fn log_emit(record: &[u8]) -> i64 {
 
 /// Clamp `s` to at most `max` bytes at a UTF-8 character boundary.
 ///
-/// The diagnostic log is best-effort (`AGENTS.md` §20): rather than drop a
+/// The diagnostic log is best-effort: rather than drop a
 /// whole record whose message or field exceeds the `abi-v1` bound, [`LogSink`]
 /// trims it to the largest valid prefix so the line still reaches the log.
 fn clamp_utf8(s: &str, max: usize) -> &str {
@@ -1226,10 +1195,9 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
 /// This is how a first-party service routes its `rustos_log` diagnostics to
 /// the system log — the serial UART on a debug build — instead of writing
 /// them to `stderr` (fd 2), which on a framebuffer-console board lands on the
-/// screen rather than the captured serial line (`AGENTS.md` §19.4 / §20). The
+/// screen rather than the captured serial line. The
 /// emitting task must hold `CAP_LOG_EMIT`; without it the kernel refuses the
-/// call and the record is dropped (the sink is best-effort and never panics,
-/// `AGENTS.md` §2.9).
+/// call and the record is dropped (the sink is best-effort and never panics).
 ///
 /// A message or field that exceeds the `abi-v1` record bounds is clamped to
 /// the largest valid prefix and excess fields past
@@ -1242,7 +1210,7 @@ impl rustos_log::Sink for LogSink {
     fn write_event(&self, event: &rustos_log::Event<'_>) {
         // Marshal the borrowed fields into the `(key, value)` pairs the
         // encoder takes, clamping each to its bound and dropping any past
-        // `LOG_FIELDS_MAX` (best-effort, `AGENTS.md` §20).
+        // `LOG_FIELDS_MAX` (best-effort).
         let mut pairs: [(&str, &str); rustos_abi::LOG_FIELDS_MAX] =
             [("", ""); rustos_abi::LOG_FIELDS_MAX];
         let field_count = event.fields.len().min(rustos_abi::LOG_FIELDS_MAX);
@@ -1263,15 +1231,14 @@ impl rustos_log::Sink for LogSink {
             &pairs[..field_count],
         ) {
             // Best-effort: a refused or faulting emit drops the record rather
-            // than surfacing an error a `Sink` cannot return (`AGENTS.md`
-            // §2.9 / §20).
+            // than surfacing an error a `Sink` cannot return.
             let _ = log_emit(&buf[..len]);
         }
     }
 }
 
 /// Create and register a kernel-owned synchronous call endpoint the calling
-/// task then *serves* (`SyscallNumber::CALL_CREATE`, `AGENTS.md` §5.2 / §5.4;
+/// task then *serves* (`SyscallNumber::CALL_CREATE`;
 /// Design D D3 — the server half of [`ipc_call`]).
 ///
 /// `endpoint` is the well-known id callers name in [`ipc_call`]; `send_caps`
@@ -1285,7 +1252,7 @@ impl rustos_log::Sink for LogSink {
 /// missing bind capability (`PermissionDenied`), an id already bound
 /// (`AlreadyExists`), oversize bounds (`LengthOutOfRange`), or no
 /// call-endpoint registry wired (`NotImplemented`). The wrapper hides no
-/// error (`AGENTS.md` §2.9).
+/// error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn call_create(
@@ -1298,14 +1265,14 @@ pub fn call_create(
 ) -> i64 {
     // Marshal both capability sets to their fixed `WIRE_LEN` images on the
     // stack and hand the kernel their pointers; the kernel copies them in
-    // through the validated boundary (`AGENTS.md` §5.4).
+    // through the validated boundary.
     let send_bytes = send_caps.to_le_bytes();
     let recv_bytes = recv_caps.to_le_bytes();
     let send_ptr = send_bytes.as_ptr() as usize as u64;
     let recv_ptr = recv_bytes.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
     // both `CapabilitySet` pointers against the caller's address space before
-    // reading them (`AGENTS.md` §5.4). `send_bytes`/`recv_bytes` live for the
+    // reading them. `send_bytes`/`recv_bytes` live for the
     // duration of the call.
     let ret = unsafe {
         raw_syscall(
@@ -1324,26 +1291,25 @@ pub fn call_create(
 }
 
 /// Receive the next request posted to a call endpoint this task owns,
-/// blocking until one arrives (`SyscallNumber::CALL_RECV`, `AGENTS.md` §5.4;
+/// blocking until one arrives (`SyscallNumber::CALL_RECV`;
 /// Design D D3 — the server-side receive half).
 ///
 /// On success the request payload is copied into `buf`, the per-call ticket
 /// (to answer with [`call_reply`]) is written to `ticket_out`, and the number
 /// of request bytes is returned. The kernel parks the caller cooperatively
-/// until a request is posted, never busy-spinning (`AGENTS.md` §2.1).
+/// until a request is posted, never busy-spinning.
 ///
 /// # Errors
 ///
 /// Returns the raw negative kernel result (`-errno`): a request larger than
 /// `buf` (`BufferTooSmall`, left queued), a missing receive capability or a
 /// foreign endpoint (`PermissionDenied`), or an unknown/destroyed endpoint
-/// (`NotFound`). The wrapper hides no error (`AGENTS.md` §2.9).
+/// (`NotFound`). The wrapper hides no error.
 pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<usize, i64> {
     let buf_ptr = buf.as_mut_ptr() as usize as u64;
     let ticket_ptr = (ticket_out as *mut u64) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
-    // both pointers against the caller's address space before touching them
-    // (`AGENTS.md` §5.4). `buf` is a live exclusive `&mut [u8]` and
+    // both pointers against the caller's address space before touching them. `buf` is a live exclusive `&mut [u8]` and
     // `ticket_out` a live `&mut u64` for the duration of the call.
     #[allow(clippy::cast_possible_wrap)]
     // The kernel guarantees the i64 count-result encoding (count ≥ 0, else -errno).
@@ -1357,14 +1323,14 @@ pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<
         return Err(ret);
     }
     // Defence in depth: clamp the kernel's count to the buffer so a buggy
-    // count can never drive an out-of-bounds slice (`AGENTS.md` §5.4).
+    // count can never drive an out-of-bounds slice.
     #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     Ok((ret as usize).min(buf.len()))
 }
 
 /// Answer one received call on an endpoint this task owns, releasing the
-/// blocked caller (`SyscallNumber::CALL_REPLY`, `AGENTS.md` §5.4; Design D D3
+/// blocked caller (`SyscallNumber::CALL_REPLY`; Design D D3
 /// — the server-side reply half).
 ///
 /// `ticket` is the value [`call_recv`] wrote; `reply` is the reply payload.
@@ -1372,14 +1338,14 @@ pub fn call_recv(endpoint: u64, buf: &mut [u8], ticket_out: &mut u64) -> Result<
 /// reply larger than the endpoint's `max_reply` (`MessageTooLarge`), an
 /// unknown or already-answered ticket or unknown endpoint (`NotFound`), or a
 /// missing receive capability / foreign endpoint (`PermissionDenied`). The
-/// wrapper hides no error (`AGENTS.md` §2.9).
+/// wrapper hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn call_reply(endpoint: u64, ticket: u64, reply: &[u8]) -> i64 {
     let reply_ptr = reply.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
     // reply `(ptr, len)` pair against the caller's address space before
-    // reading it (`AGENTS.md` §5.4). `reply` is a live shared `&[u8]` for the
+    // reading it. `reply` is a live shared `&[u8]` for the
     // duration of the call.
     let ret = unsafe {
         raw_syscall(
@@ -1415,8 +1381,7 @@ macro_rules! entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The trap seam lives in `rustos-abi-trap` (the single trap home,
-    // `AGENTS.md` §2.2) and is reached here through the `host-seam`
+    // The trap seam lives in `rustos-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
     use rustos_abi::SYSCALL_MAX_ARGS;
     use rustos_abi_trap::seam;
@@ -1850,8 +1815,7 @@ mod tests {
 
     #[test]
     fn spin_until_ns_returns_immediately_for_a_past_deadline() {
-        // A deadline already reached must not yield even once (`AGENTS.md`
-        // §2.1 — no needless reschedule).
+        // A deadline already reached must not yield even once (no needless reschedule).
         let mut yields = 0u32;
         spin_until_ns(100, || 100, || yields += 1);
         assert_eq!(yields, 0);
@@ -1892,7 +1856,7 @@ mod tests {
     #[test]
     fn hw_tree_read_clamps_an_oversized_count_to_the_buffer_length() {
         // A kernel count larger than the buffer is clamped, never trusted
-        // into an out-of-bounds slice (`AGENTS.md` §5.4).
+        // into an out-of-bounds slice.
         let mut buf = [0u8; 8];
         let (_, _) = capture(9999, || {
             assert_eq!(hw_tree_read(&mut buf), Ok(8));

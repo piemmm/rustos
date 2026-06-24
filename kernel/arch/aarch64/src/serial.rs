@@ -13,12 +13,12 @@
 //! millisecond timestamp (epoch unspecified — only differences matter)
 //! so a serial capture reads off the real wall time between two lines.
 //! Consumers match on the `id=<id>` token, never the line start, so the
-//! prefix does not disturb them (`AGENTS.md` §15.7 / §2.16).
+//! prefix does not disturb them.
 //!
 //! # Two consoles: the display and the UART (`plans/PI.md` P7b / P11)
 //!
 //! The **boot-log** path (`ConsoleWriter`, and through it
-//! `SerialSink`) routes by build profile (`AGENTS.md` §10 — the
+//! `SerialSink`) routes by build profile (the
 //! screen is the user-facing console, the serial line is the
 //! diagnostic one):
 //!
@@ -61,16 +61,15 @@
 //! BCM2835 AUX mini-UART at the SoC's high peripheral window) overrides
 //! both by calling [`crate::console::configure_from_fdt`] early in boot.
 //! There is one console abstraction with two register backends, not two
-//! consoles (`AGENTS.md` §2.2).
+//! consoles.
 //!
 //! The sink is a zero-sized type exposed through the `SERIAL_SINK`
 //! `'static` so a bin can hand the same reference to `BootInfo`'s
-//! `log_sink` / `audit_sink` slots without a mutable static (`AGENTS.md`
-//! §2 — no global mutable state beyond the per-CPU bootstrap area). The
+//! `log_sink` / `audit_sink` slots without a mutable static (no global mutable state beyond the per-CPU bootstrap area). The
 //! underlying shared mutable state is the UART itself plus the console
 //! base/model cell in [`crate::console`], not this wrapper.
 //!
-//! # Buffered, non-blocking transmit (`AGENTS.md` §2.16 / §20)
+//! # Buffered, non-blocking transmit
 //!
 //! Both UART producers — the diagnostic log `SerialSink` and raw
 //! console output (`write_console_bytes`, the `stream_write` backing) —
@@ -115,8 +114,7 @@
 //!    but never parks) holds the loop off its idle branch. Topping up every
 //!    iteration also arms `TXIM` (at the FIFO-dry trigger above) before the
 //!    CPU parks, so the transmit ISR remains the event that wakes the idle
-//!    `wfi` and drains the rest. The fully preemptive dispatch loop
-//!    (`AGENTS.md` §17.1) runs with device IRQs enabled, so the transmit ISR
+//!    `wfi` and drains the rest. The fully preemptive dispatch loop runs with device IRQs enabled, so the transmit ISR
 //!    may *also* fire while a task runs where the silicon delivers it.
 //!
 //! An earlier revision drained the dispatch loop with a **blocking** per-byte
@@ -129,7 +127,7 @@
 //!
 //! When the ring fills, a producer block-flushes (`flush_blocking`) to bound
 //! memory (operator-directed: block when full); when the UART is genuinely
-//! wedged that flush drops bytes rather than hanging (lossy — §2.1). The boot
+//! wedged that flush drops bytes rather than hanging (lossy). The boot
 //! beacons stay on the direct, lock-free path (`beacon`) because they run with
 //! the MMU off, where the ring's lock is unusable, and must trace a hang
 //! *immediately*. This is the design `lib/log` always documented ("sinks copy
@@ -142,7 +140,7 @@ use rustos_log::{Event, Level, Sink};
 
 // The console MMIO seam is only reached by the freestanding transmit /
 // receive primitives below; the host build uses inert stubs, so importing
-// it there would be an unused import (`AGENTS.md` §7 — the module is
+// it there would be an unused import (the module is
 // host-compiled so its pure ring logic is unit-tested).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use crate::console;
@@ -154,7 +152,7 @@ use crate::console::{tx_wait, TxOutcome, TX_POLL_BUDGET};
 /// A producer copies its bytes into this RAM buffer and returns,
 /// instead of spinning in [`crate::console::tx_wait`] until the FIFO accepts every byte —
 /// so a producer never blocks the calling task on the slow UART transmit
-/// (`AGENTS.md` §2.16 / §20: logging must not stall the keyboard report
+/// (: logging must not stall the keyboard report
 /// pump). ~4 KiB per operator direction: large enough that ordinary boots
 /// never fill it, small enough to bound the kernel `.bss` footprint.
 const SERIAL_RING_CAP: usize = 4096;
@@ -167,7 +165,7 @@ const SERIAL_RING_CAP: usize = 4096;
 /// silently discards bytes: when it is full the producer drains it to the
 /// device first ([`flush_blocking`]), which becomes lossy only when the
 /// UART is wedged ([`crate::console::tx_wait`] drops a byte a dead transmitter can never
-/// accept — `AGENTS.md` §2.1, never hang).
+/// accept, never hang).
 struct SerialRing {
     buf: [u8; SERIAL_RING_CAP],
     head: usize,
@@ -228,7 +226,7 @@ impl SerialRing {
 /// allocator-less QEMU test bins (they link only this crate). This tiny
 /// guard avoids that. It is the one place the serial ring needs mutual
 /// exclusion and is **try-lock only** (no blocking acquire), so it does
-/// not re-create the general lock library's surface — the §2.2 carve-out
+/// not re-create the general lock library's surface — the carve-out
 /// for a constrained primitive the shared crate cannot supply here.
 struct RingLock {
     locked: AtomicBool,
@@ -239,7 +237,7 @@ struct RingLock {
 // hands out the `&mut SerialRing` only after a successful `compare_exchange`
 // on `locked` and releases it before returning — so at most one reference
 // exists at a time. The contents are plain bytes (no `Drop`), and the
-// kernel does not unwind, so a (forbidden, §2.9) panic inside the closure
+// kernel does not unwind, so a (forbidden) panic inside the closure
 // cannot leave a dangling borrow; it halts.
 unsafe impl Sync for RingLock {}
 
@@ -278,7 +276,7 @@ impl RingLock {
 /// The single ring through which **all** UART output is buffered — the
 /// diagnostic log [`SerialSink`] and raw console output
 /// ([`write_console_bytes`]) alike — so the two share one ordered stream
-/// on the wire (`AGENTS.md` §2.2). Producers never interleave a line
+/// on the wire. Producers never interleave a line
 /// because [`RingLock::try_with`] serialises access; a contended or
 /// re-entrant caller falls back to a direct, bounded write.
 static SERIAL_RING: RingLock = RingLock::new();
@@ -298,8 +296,7 @@ static TX_WEDGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 /// Transmit one byte through the currently-configured console UART,
 /// waiting **boundedly** while the transmitter cannot yet accept it
 /// ([`tx_wait`]): a transmitter that never drains is declared wedged
-/// and the byte dropped rather than hanging the kernel (`AGENTS.md`
-/// §2.1 — on the Pi 4 a flow-blocked, BT-attached PL011 never drains).
+/// and the byte dropped rather than hanging the kernel (on the Pi 4 a flow-blocked, BT-attached PL011 never drains).
 ///
 /// Freestanding-only: the MMIO access is meaningful solely on the target.
 /// The host build omits it (the host tests cover the `Sink` formatting
@@ -342,7 +339,7 @@ fn putchar(_byte: u8) {}
 /// exactly once (no spin, no budget). The non-blocking counterpart of the
 /// readiness check inside [`putchar`]: [`drain_ready`] uses it to push only
 /// the bytes the FIFO has room for and stop, so a buffered drain never
-/// waits on the device (`AGENTS.md` §2.1 / §2.16).
+/// waits on the device.
 ///
 /// Freestanding-only: the host build reports "not ready" so the host
 /// [`drain_ready`] is a no-op (the queue discipline is host-tested through
@@ -391,7 +388,7 @@ fn tx_send(_byte: u8) {}
 /// a new line (operator-directed: block when full). A healthy UART
 /// transmits every byte (the producer waits as long as the FIFO needs);
 /// a wedged UART makes [`putchar`] drop each byte after a single poll, so
-/// the ring still empties without hanging (lossy — `AGENTS.md` §2.1).
+/// the ring still empties without hanging (lossy).
 fn flush_blocking(ring: &mut SerialRing) {
     flush_n(ring, SERIAL_RING_CAP);
 }
@@ -400,15 +397,14 @@ fn flush_blocking(ring: &mut SerialRing) {
 /// wedged-aware [`putchar`].
 ///
 /// The per-byte drain the whole-ring [`flush_blocking`] uses, so the
-/// wedged-aware policy lives in one place (`AGENTS.md` §2.2). Unlike the
+/// wedged-aware policy lives in one place. Unlike the
 /// opportunistic
 /// [`drain_ready`] (which pushes only what the FIFO has room for *right
 /// now* and never updates the wedged state), each [`putchar`] here waits
 /// **boundedly** for FIFO room — so a healthy-but-slow UART makes
 /// guaranteed forward progress, while a genuinely wedged transmitter is
 /// detected once (a single budget expiry) and every remaining byte is then
-/// dropped after a single poll, emptying the ring without hanging (lossy —
-/// `AGENTS.md` §2.1). `SERIAL_RING_CAP` bounds the ring, so a `max` of
+/// dropped after a single poll, emptying the ring without hanging (lossy ). `SERIAL_RING_CAP` bounds the ring, so a `max` of
 /// `SERIAL_RING_CAP` drains it in full.
 fn flush_n(ring: &mut SerialRing, max: usize) {
     let mut sent = 0;
@@ -427,7 +423,7 @@ fn flush_n(ring: &mut SerialRing, max: usize) {
 /// (blocking / lossy-if-wedged) when it is full so there is always room.
 /// The single per-byte enqueue both UART producers share — the buffered
 /// log line ([`RingWriter`]) and raw console output ([`write_console_bytes`])
-/// — so the full-ring policy lives in one place (`AGENTS.md` §2.2).
+/// — so the full-ring policy lives in one place.
 fn enqueue_byte(ring: &mut SerialRing, byte: u8) {
     if !ring.push_byte(byte) {
         flush_blocking(ring);
@@ -447,9 +443,8 @@ fn buffered_uart_write(bytes: &[u8]) {
         }
         // Push what the FIFO accepts now and arm the transmit interrupt to
         // the rest, so the ISR drains the remainder at the UART's real
-        // throughput without this caller spinning on the device
-        // (`AGENTS.md` §2.16). Same non-blocking step the dispatch-loop
-        // pump and the ISR use (`pump`, §2.2).
+        // throughput without this caller spinning on the device. Same non-blocking step the dispatch-loop
+        // pump and the ISR use (`pump`).
         pump(ring);
     });
     if buffered.is_none() {
@@ -479,7 +474,7 @@ fn drain_ready(ring: &mut SerialRing) {
 /// The single definition the producer ([`buffered_uart_write`]), the transmit
 /// ISR ([`service_uart_tx_irq`]) and the idle-park pump ([`pump_tx`]) all
 /// share, so the "push now, defer the rest to the interrupt" policy lives in
-/// one place (`AGENTS.md` §2.2). Never spins on the device.
+/// one place. Never spins on the device.
 fn pump(ring: &mut SerialRing) {
     drain_ready(ring);
     sync_tx_irq_to_backlog(ring);
@@ -554,11 +549,11 @@ impl core::fmt::Write for RingWriter<'_> {
 ///
 /// The single definition shared by the buffered UART path ([`RingWriter`])
 /// and the direct fallback / video path ([`ConsoleWriter`]) so the line
-/// format lives in one place (`AGENTS.md` §2.2). The leading `[t=<ms>ms]`
+/// format lives in one place. The leading `[t=<ms>ms]`
 /// is a monotonic `CNTPCT_EL0`-derived timestamp; consumers match on the
-/// `id=<id>` token, never the line start (§15.7 / §2.16). Write errors are
+/// `id=<id>` token, never the line start. Write errors are
 /// ignored: the sinks are infallible MMIO/RAM writes and the logging path
-/// must not panic (§2.9).
+/// must not panic.
 fn write_formatted<W: core::fmt::Write>(w: &mut W, event: &Event<'_>) {
     let _ = write!(
         w,
@@ -579,11 +574,11 @@ fn write_formatted<W: core::fmt::Write>(w: &mut W, event: &Event<'_>) {
 ///
 /// This is the non-blocking counterpart of [`putchar`]: it polls the
 /// model's receive-ready bit once and, if a byte is waiting, reads the
-/// data register. It never busy-waits for input (`AGENTS.md` §2.1) — the
+/// data register. It never busy-waits for input — the
 /// caller drains what is available and returns; waiting for input is the
 /// stream layer's job, not the device's (kernel-core's
 /// `BlockingConsoleRead` parks an empty-handed `stream_read` caller on
-/// the scheduler, `AGENTS.md` §20).
+/// the scheduler).
 ///
 /// Freestanding-only: the host build returns `None` (no device), so the
 /// consuming [`read_console_bytes`] reports a zero-length read there.
@@ -626,7 +621,7 @@ fn getchar() -> Option<u8> {
 /// Both the unlock kthread and `login` then read the interrupt-fed
 /// `UART_INPUT` queue and **park** off the run queue between keystrokes; this
 /// interrupt is what drains the FIFO into that queue and wakes the parked
-/// reader when a byte arrives (`AGENTS.md` §2.1 / §17.1 / §20 — the stream
+/// reader when a byte arrives (the stream
 /// backing owns blocking, and it does so by parking, never busy-polling the
 /// raw FIFO).
 ///
@@ -644,7 +639,7 @@ pub fn enable_rx_interrupt() {
 /// Apply one [`console::RegRmw`] to the live console MMIO:
 /// `*reg = (*reg & !step.clear) | step.set`, skipping a no-op step. The
 /// single register read-modify-write the receive- and transmit-interrupt
-/// enable/disable helpers share (`AGENTS.md` §2.2).
+/// enable/disable helpers share.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn apply_reg_rmw(base: usize, step: console::RegRmw) {
     if step.is_noop() {
@@ -706,7 +701,7 @@ pub fn clear_rx_interrupt() {}
 /// device raises an interrupt as its transmit FIFO drains, driving
 /// [`service_uart_tx_irq`] to refill the FIFO from the buffered ring at the
 /// UART's real throughput — independent of the scheduler ever reaching its
-/// idle wait (`AGENTS.md` §2.16 / §20: logging must never stall a task).
+/// idle wait (: logging must never stall a task).
 ///
 /// Applies [`ConsoleModel::tx_interrupt_enable`]: on the PL011 it first lowers
 /// the transmit FIFO trigger to 1/8 full (`UARTIFLS.TXIFLSEL`) so the
@@ -762,7 +757,7 @@ pub fn disable_tx_interrupt() {}
 /// opportunistic [`drain_ready`]) and the transmit ISR ([`service_uart_tx_irq`]),
 /// so `TXIM` is armed exactly when there is buffered output to push and
 /// disarmed the instant there is not — no empty-FIFO interrupt storm, no
-/// stranded backlog (`AGENTS.md` §2.2 — one definition of the policy).
+/// stranded backlog (one definition of the policy).
 fn sync_tx_irq_to_backlog(ring: &SerialRing) {
     if ring.is_empty() {
         disable_tx_interrupt();
@@ -780,7 +775,7 @@ fn sync_tx_irq_to_backlog(ring: &SerialRing) {
 /// what lets the one shared UART interrupt line carry both directions safely:
 /// while the receive interrupt is masked (the passphrase FIFO-poll window) it
 /// never appears, so this returns `false` and the receive bytes are left for
-/// the poll (`AGENTS.md` §5.4 — fail closed by construction). On a transmit
+/// the poll (fail closed by construction). On a transmit
 /// interrupt it pushes whatever the FIFO accepts now (`drain_ready`, no
 /// spin) and re-syncs `TXIM` to the remaining backlog (`sync_tx_irq_to_backlog`),
 /// so the FIFO is refilled as it drains until the ring empties and the
@@ -831,13 +826,13 @@ pub fn prime_tx_irq() {
 ///
 /// Non-blocking: it drains the receive FIFO into `buf` and stops at the
 /// first byte that is not yet available (or when `buf` is full), so it
-/// never busy-waits for input (`AGENTS.md` §2.1). A read with no pending
+/// never busy-waits for input. A read with no pending
 /// input returns `0` — a valid short read kernel-core's
 /// `BlockingConsoleRead` turns into a scheduler park, re-polling when the
 /// caller is next dispatched, so user space only ever sees a read with
-/// bytes (`AGENTS.md` §20 — the backing owns blocking). This is the
+/// bytes (the backing owns blocking). This is the
 /// device-side **backing** the stream layer attaches to fd 0
-/// (`plans/PI.md` P6e-2 / `AGENTS.md` §20); it is not a program-facing
+/// (`plans/PI.md` P6e-2); it is not a program-facing
 /// interface.
 ///
 /// Freestanding-only receive (the host build's `getchar` yields
@@ -865,7 +860,7 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
 /// translation: it is the raw byte sink the `stream_write` syscall
 /// (`abi-v1` number 11) emits a user program's output through, so the
 /// bytes reach the device exactly as the program wrote them
-/// (`plans/PI.md` P6c-2, `AGENTS.md` §10 / §16.4). It deliberately
+/// (`plans/PI.md` P6c-2). It deliberately
 /// never routes to the video console: the UART is its own stream
 /// backing with its own login session (`plans/PI.md` P11), so a
 /// program attached to the UART console writes the serial line and
@@ -875,9 +870,8 @@ pub fn read_console_bytes(buf: &mut [u8]) -> usize {
 /// Buffered, like the log sink: the bytes are copied into the shared
 /// serial ring (`buffered_uart_write`) and the call returns without
 /// spinning on the slow UART, so a program writing fd 1 to the serial
-/// console never blocks the CPU on the transmit (`AGENTS.md` §2.16 /
-/// §20). Routing both the log line and console output through the one
-/// ring also keeps them in a single ordered stream on the wire (§2.2).
+/// console never blocks the CPU on the transmit. Routing both the log line and console output through the one
+/// ring also keeps them in a single ordered stream on the wire.
 ///
 /// Freestanding-only transmit (the host build's `putchar` is inert),
 /// so the host tests of the consuming `ConsoleWrite` adapter observe the
@@ -906,7 +900,7 @@ pub fn write_console_bytes(bytes: &[u8]) -> usize {
 /// video console (its render lock has the same MMU-off hazard), so a
 /// screen mirror could itself wedge the very boot a beacon exists to
 /// trace. The serial line is the single, always-safe bisection channel
-/// (`AGENTS.md` §2.9 — never hang).
+/// (never hang).
 ///
 /// Freestanding-only (the whole module is gated to the bare-metal
 /// target): the transmit is meaningful solely on the Pi's UART, so it
@@ -974,8 +968,7 @@ impl Sink for SerialSink {
         // Release build with a live framebuffer console: the user-facing
         // screen is the log's sink, and a framebuffer write is a fast
         // memory store, not a slow serial transmit — render directly,
-        // unbuffered. The ring exists to decouple the *UART* (`AGENTS.md`
-        // §10 — the screen is the user console; §2.16 — don't buffer what
+        // unbuffered. The ring exists to decouple the *UART* (the screen is the user console; — don't buffer what
         // isn't slow).
         if !cfg!(debug_assertions) && crate::video::is_active() {
             let mut w = ConsoleWriter;
@@ -986,7 +979,7 @@ impl Sink for SerialSink {
         // UART path (always, on a debug build): copy the formatted line
         // into the in-memory ring and return, so the calling task is never
         // blocked spinning on the slow UART transmit — the defect that let
-        // logging starve the keyboard report pump (`AGENTS.md` §2.16 / §20;
+        // logging starve the keyboard report pump (
         // `lib/log`: "sinks copy the event into a ring buffer consumed by
         // an async drainer"). `RingLock::try_with` — try-lock only, never a
         // blocking acquire — keeps this re-entrancy- and deadlock-free: if
@@ -1001,8 +994,7 @@ impl Sink for SerialSink {
             // interrupt to whatever the FIFO could not take: the transmit ISR
             // ([`service_uart_tx_irq`]) refills the FIFO as it drains, at the
             // UART's real throughput, without this task ever blocking on the
-            // device or the drain waiting for the scheduler to idle
-            // (`AGENTS.md` §2.16 / §20).
+            // device or the drain waiting for the scheduler to idle.
             drain_ready(ring);
             sync_tx_irq_to_backlog(ring);
         });

@@ -12,7 +12,7 @@
 //!
 //! Splitting this surface out mirrors [`crate::x86_64`] and keeps
 //! [`crate::Spec`] honest as a per-arch tagged union without duplicating
-//! any glue (`AGENTS.md` §2.2 / §2.4 — no duplication, no interface
+//! any glue (no duplication, no interface
 //! creep).
 //!
 //! # Boot model
@@ -41,8 +41,8 @@
 //! # No `unwrap` / `expect` / `panic!`
 //!
 //! The `virt` argv assembly is infallible, so this module has no
-//! production `Result` to propagate (AGENTS.md §2.9). The only `expect`s
-//! in this file live inside `#[cfg(test)]` blocks per §2.9's tests
+//! production `Result` to propagate. The only `expect`s
+//! in this file live inside `#[cfg(test)]` blocks 's tests
 //! carve-out.
 
 use std::ffi::OsString;

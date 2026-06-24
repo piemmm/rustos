@@ -5,9 +5,8 @@
 //! authored once on its design grid is rendered at whatever pixel size a
 //! display's DPI calls for. The fill is anti-aliased and composited through
 //! `lib/raster`'s single supersampled [`Surface::fill_polygon`] path, so the
-//! cursor library owns no scan converter or colour arithmetic of its own
-//! (`AGENTS.md` §2.2 / §10). Out-of-range scales and degenerate cursors fail
-//! closed with `None` rather than panicking (`AGENTS.md` §2.9).
+//! cursor library owns no scan converter or colour arithmetic of its own. Out-of-range scales and degenerate cursors fail
+//! closed with `None` rather than panicking.
 
 use alloc::vec::Vec;
 
@@ -74,7 +73,7 @@ impl VectorCursor {
     ///
     /// Returns `None` for a degenerate cursor or scale, or if the resulting
     /// pixel buffer cannot be allocated — the caller falls back to a smaller
-    /// scale or a different cursor rather than crashing (`AGENTS.md` §2.9).
+    /// scale or a different cursor rather than crashing.
     /// Each shape is filled through the shared [`Surface::fill_polygon`] path
     /// in stack order, so a dark outline beneath a light body stays legible.
     ///

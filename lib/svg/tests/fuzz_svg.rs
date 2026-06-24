@@ -1,14 +1,14 @@
 //! Deterministic fuzz harness for the SVG decoder
-//! (`AGENTS.md` §19.5 / §19.6 — the desktop's untrusted image-decoding parser).
+//! (the desktop's untrusted image-decoding parser).
 //!
 //! [`rustos_svg::decode`] parses on-disk `/System/Graphics` assets that, on a
-//! real system, may have been written or corrupted by anything. Per §19.6 that
+//! real system, may have been written or corrupted by anything. Per that
 //! decode path is driven by a fuzz harness whose single invariant is:
 //!
 //! * `decode` never panics for any input — it returns `Ok` for a document in
 //!   the supported subset and `Err` (fail closed) for everything else.
 //!
-//! RustOS pulls in no external fuzz runner (`AGENTS.md` §2.12): a per-run-seeded
+//! RustOS pulls in no external fuzz runner: a per-run-seeded
 //! LCG draws pseudo-random byte strings, mutates real SVG templates, and
 //! assembles structured-but-hostile documents. A plain `cargo test` runs the
 //! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask

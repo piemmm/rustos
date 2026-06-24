@@ -6,8 +6,8 @@
 //! raw ELF, so the consuming test's build script converts the freshly linked
 //! program ELF into an `rxe` blob with [`elf_to_rxe`] and embeds the bytes.
 //!
-//! The converter is deliberately strict (`AGENTS.md` §5.4 — fail closed). It
-//! accepts only what the §19.2 hardening invariants and the fixture's link
+//! The converter is deliberately strict (fail closed). It
+//! accepts only what the hardening invariants and the fixture's link
 //! recipe (`tests/integration/cc3_program/program.ld`) produce:
 //!
 //! * a little-endian ELF64 **`ET_DYN`** (PIE) image for one of the three native
@@ -34,7 +34,7 @@
 //! [`rustos_abi::rxe::LoadImage`] still enforces every invariant.
 //!
 //! The `rxe` wire format itself is never re-encoded here: the header and
-//! segment records come from [`rustos_abi::rxe`]'s own encoders (§2.2).
+//! segment records come from [`rustos_abi::rxe`]'s own encoders.
 
 use rustos_abi::rxe::{
     LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_SEGMENTS, RXE_PAGE_SIZE,
@@ -45,7 +45,7 @@ use rustos_abi::ABI_VERSION_CURRENT;
 /// Why an ELF image could not be converted to an `rxe` load image.
 ///
 /// Every variant is a hard refusal: the converter never silently drops or
-/// guesses at malformed or unsupported input (`AGENTS.md` §5.4).
+/// guesses at malformed or unsupported input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Elf2RxeError {
@@ -56,7 +56,7 @@ pub enum Elf2RxeError {
     /// The image is not little-endian ELF64 (the only class the native
     /// Tier-1 targets use).
     NotElf64Le,
-    /// The image is not `ET_DYN`; §19.2 requires a position-independent
+    /// The image is not `ET_DYN`; the charter requires a position-independent
     /// executable.
     NotPositionIndependent,
     /// `e_machine` is not one of the three native Tier-1 machines.
@@ -160,7 +160,7 @@ struct LoadSeg {
 ///
 /// `cfi_tag` is the syscall-interface hash the emitted image declares; it must
 /// match the kernel's compiled-in hash, or [`rustos_abi::rxe::LoadImage::parse`]
-/// will reject the image (§9 / §19.2). `load_bias` is the virtual base the
+/// will reject the image. `load_bias` is the virtual base the
 /// image will be mapped at: every `R_*_RELATIVE` target is patched to
 /// `addend + load_bias`, so the caller must map each segment at `vaddr +
 /// load_bias` (the kernel spawn path does exactly that). Pass `0` to map at the

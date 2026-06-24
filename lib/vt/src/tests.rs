@@ -1,9 +1,8 @@
 //! Unit tests for the shared vocabulary.
 //!
-//! The headline guarantee is that the emitter and the parser agree
-//! (`AGENTS.md` §2.2): the `*_round_trip` tests encode an [`Op`] and assert it
+//! The headline guarantee is that the emitter and the parser agree: the `*_round_trip` tests encode an [`Op`] and assert it
 //! parses straight back. The `*_never_panics`/robustness tests exercise the
-//! fail-closed parser (`AGENTS.md` §2.9) on hostile and partial input.
+//! fail-closed parser on hostile and partial input.
 
 use alloc::string::{String, ToString};
 use alloc::vec;

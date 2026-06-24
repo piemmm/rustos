@@ -50,7 +50,7 @@
 //! for this crate so `cargo build -p rustos-test-irq-qemu-x86-64`
 //! and `cargo xtask test --qemu` do the obvious thing; release
 //! builds that enable it are rejected by the `compile_error!` guard
-//! below (AGENTS.md §1 — no hacks; §5.4.5 — fail closed).
+//! below (no hacks; — fail closed).
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -116,7 +116,7 @@ mod kernel {
     /// Set once the IRQ scenario has been driven, so a stray
     /// duplicate `BootCompleted` (which the catalogue disallows but
     /// the audit pipeline cannot statically prove) never re-enters
-    /// the test logic. AGENTS.md §5.4.5 — fail closed.
+    /// the test logic. — fail closed.
     static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
     // --- Test parameters ----------------------------------------
@@ -288,8 +288,7 @@ mod kernel {
         //    `0..max_redirection_entry + 1`; a `None` here would mean
         //    QEMU advertised an MADT without the standard 24-pin
         //    IO-APIC, which is an environment defect rather than a
-        //    test failure — surface as `exit_failure` per
-        //    AGENTS.md §5.4.5.
+        //    test failure — surface as `exit_failure` per.
         let Some(_vector) = arch_irq::global_routing().vector_for_gsi(PIT_GSI) else {
             qemu_exit::exit_failure();
         };
@@ -437,7 +436,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // No audit observer, no IRQ scenario, no QEMU exit affordance:
     // the run will time out under `tools/qemu::Runner`, which is
     // the correct fail-loud signal for "test-hooks feature was
-    // disabled for a QEMU enrolment that needs it". AGENTS.md §7
+    // disabled for a QEMU enrolment that needs it".
     // — no flaky tests; the timeout is deterministic.
     loop {
         // SAFETY: `cli; hlt` is the documented parked-CPU sequence.

@@ -13,20 +13,19 @@
 //! `/System` mount could not outlive the unlock call.
 //!
 //! Design D needs the `/System` store reachable for the life of the system
-//! (on-demand and reactive driver loads, `AGENTS.md` §18.3 / §18.4), so the
+//! (on-demand and reactive driver loads), so the
 //! one device must back **two concurrent partition windows**. This module
 //! is that primitive: a [`SharedBlock`] owns the device behind a
 //! `lib/sync` [`SpinLock`] and hands out as many [`SharedBlockHandle`]s as
 //! there are windows, each of which is itself a [`Block`]. Every read /
 //! write / discard takes the lock for the duration of the single device
 //! operation, so concurrent windows on different CPUs are serialised
-//! (`AGENTS.md` §4 — SMP from day one, explicit synchronisation).
+//! (SMP from day one, explicit synchronisation).
 //!
 //! The device's [`BlockGeometry`] is immutable for the life of a disk, so
 //! it is queried **once** at construction and cached: [`SharedBlock::geometry`]
 //! and the handle's [`Block::geometry`] are then lock-free and infallible,
-//! keeping that hot, frequently-read value off the lock (`AGENTS.md`
-//! §2.16). Geometry is the only cached value; every byte-moving operation
+//! keeping that hot, frequently-read value off the lock. Geometry is the only cached value; every byte-moving operation
 //! goes to the device under the lock.
 //!
 //! A plain [`SpinLock`] (not the IRQ-safe variant) is correct here: block
@@ -37,7 +36,7 @@
 //! operation and contention is low (at most the unlock window vs. the
 //! driver-store window), matching the [`SpinLock`] use case.
 //!
-//! Architecture-neutral (`AGENTS.md` §2.2 / §2.20): the layer names no
+//! Architecture-neutral: the layer names no
 //! device type and no architecture — it is generic over any [`Block`], so
 //! every port shares this one definition and the per-device bring-up
 //! (virtio-blk, EMMC2, …) wraps its brought-up device in it.
@@ -61,10 +60,10 @@ use rustos_sync::SpinLock;
 /// interior access exclusive), so it may be shared by `&` across CPUs.
 pub struct SharedBlock<B: Block> {
     /// The owned device. Every byte-moving operation locks this for the
-    /// duration of one device call (`AGENTS.md` §4).
+    /// duration of one device call.
     device: SpinLock<B>,
     /// The device geometry, queried once at construction. Immutable for the
-    /// life of a disk, so it is served lock-free (`AGENTS.md` §2.16).
+    /// life of a disk, so it is served lock-free.
     geometry: BlockGeometry,
 }
 
@@ -75,8 +74,7 @@ impl<B: Block> SharedBlock<B> {
     ///
     /// Propagates [`Block::geometry`]'s error if the device geometry could
     /// not be queried — the device is never wrapped on a geometry fault, so
-    /// no handle can be handed out for an unusable device (fail closed,
-    /// `AGENTS.md` §5.4 / §2.9).
+    /// no handle can be handed out for an unusable device (fail closed).
     pub fn new(device: B) -> Result<Self, DriverError> {
         let geometry = device.geometry()?;
         Ok(Self {
@@ -101,7 +99,7 @@ impl<B: Block> SharedBlock<B> {
 
 // SAFETY: `SharedBlock` is the kernel's disk-sharing boundary, and it is the
 // single place that vouches for sharing a brought-up block device across the
-// tasks that drive it (`AGENTS.md` §4 — disk access is a common,
+// tasks that drive it (disk access is a common,
 // capability-checked kernel service, reached by the disk-owning kthread, the
 // driver-store serve kthread, and the encrypted-root unlock kthread over one
 // `&'static SharedBlock`). The auto-derived `Send`/`Sync` are conservatively
@@ -123,7 +121,7 @@ impl<B: Block> SharedBlock<B> {
 //      `root_unlock`), so the device and its pointers outlive every handle.
 // This is the irreducible `unsafe` for in-kernel device sharing; it is
 // confined to this one boundary type rather than scattered across the virtio
-// transport/host (`AGENTS.md` §2.10 — encapsulated behind a safe API).
+// transport/host (encapsulated behind a safe API).
 unsafe impl<B: Block> Send for SharedBlock<B> {}
 // SAFETY: as for `Send` above — `&SharedBlock` hands out `SharedBlockHandle`s
 // whose every device op locks `self.device`, so concurrent `&` access from
@@ -144,7 +142,7 @@ pub struct SharedBlockHandle<'a, B: Block> {
 impl<B: Block> Block for SharedBlockHandle<'_, B> {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         // Served from the cache: immutable for the life of the disk, so no
-        // lock and no device round-trip (`AGENTS.md` §2.16).
+        // lock and no device round-trip.
         Ok(self.shared.geometry)
     }
 
@@ -202,7 +200,7 @@ impl<B: Block> Block for SharedBlockHandle<'_, B> {
 /// driver store and unlocking the encrypted root — as concurrent windows
 /// onto that one disk ([`SharedBlock`]). Under Design D the `/System` store
 /// must stay reachable *after* boot for on-demand and reactive (hotplug)
-/// driver loads (`AGENTS.md` §18.3 / §18.4), and `/System` must stay mounted
+/// driver loads, and `/System` must stay mounted
 /// anyway so other subsystems can reach it.
 ///
 /// The device backing (DMA pool, MMIO map, IRQ waiter, virtio host) is
@@ -213,7 +211,7 @@ impl<B: Block> Block for SharedBlockHandle<'_, B> {
 /// IPC endpoint, independent of the user-data passphrase) and the
 /// **encrypted-root unlock** task. Each reaches the disk through a fresh
 /// [`SharedBlockHandle`] from [`Self::window`], serialised against the other
-/// by the `SharedBlock` lock (`AGENTS.md` §4 — disk access is a common,
+/// by the `SharedBlock` lock (disk access is a common,
 /// capability-checked kernel service). [`Self::hold`] parks the calling task
 /// for life when it has no endpoint to serve.
 pub struct DriverStoreService<B: Block> {
@@ -229,8 +227,7 @@ impl<B: Block> DriverStoreService<B> {
 
     /// A fresh read-only window onto the boot disk holding the `/System`
     /// driver store. Each call hands out an independent [`SharedBlockHandle`];
-    /// the `SharedBlock` lock serialises device operations across windows
-    /// (`AGENTS.md` §4), so the autoload window and the encrypted-root unlock
+    /// the `SharedBlock` lock serialises device operations across windows, so the autoload window and the encrypted-root unlock
     /// window never interleave a device operation.
     #[must_use]
     pub fn window(&self) -> SharedBlockHandle<'_, B> {
@@ -243,9 +240,9 @@ impl<B: Block> DriverStoreService<B> {
     /// `/System` store endpoint to serve (no volume, or the bind failed): the
     /// disk-owning task still owns the leaked `'static` disk, so it parks
     /// rather than exiting, and an `ipc_call` to the unbound store endpoint
-    /// fails closed with `NotFound` rather than blocking (`AGENTS.md` §2.9).
+    /// fails closed with `NotFound` rather than blocking.
     /// It **parks** rather than yields, so it consumes no CPU while idle
-    /// (`AGENTS.md` §2.1 — never a busy-yield loop); a spurious wake re-parks.
+    /// (never a busy-yield loop); a spurious wake re-parks.
     /// Takes `&self` because the service is a leaked `'static` value shared by
     /// reference, never owned by one frame.
     pub fn hold(&self, coop: &CooperativeYield<'_>) -> ! {

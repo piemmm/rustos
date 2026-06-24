@@ -1,8 +1,8 @@
-//! `cargo xtask spec-review` implementation (`AGENTS.md` §19.7).
+//! `cargo xtask spec-review` implementation.
 //!
-//! §19.7 lets AI assistance *draft* specifications, proofs, models, and fuzz
+//! lets AI assistance *draft* specifications, proofs, models, and fuzz
 //! harnesses, but the verifier — not the model — is the only oracle. A draft
-//! that has not yet been reviewed by a human under the §2.6 senior-developer
+//! that has not yet been reviewed by a human under the senior-developer
 //! bar must carry a marker, and this checker "fails CI if any such marker
 //! reaches `main`". It is the gate that keeps an unreviewed, AI-drafted
 //! load-bearing artefact out of the trunk.

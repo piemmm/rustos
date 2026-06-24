@@ -9,7 +9,7 @@
 //! 2. On the freestanding x86_64 target, hand the production x86_64 kernel
 //!    linker script to the test kernel (it boots the real `rustos-kernel`
 //!    pipeline, so it links exactly like the other freestanding x86_64
-//!    integration binaries — `AGENTS.md` §2.2).
+//!    integration binaries).
 //!
 //! Unlike the `mem_map` / `spawn` x86_64 verticals this test spawns no
 //! ring-3 program, so it needs no `rxe` fixture: the split / unmap / fault
@@ -28,7 +28,7 @@ fn main() {
     if target == X86_64_TARGET {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let manifest_dir = manifest_dir.trim_end_matches('/');
-        // The single per-arch script the architecture port owns (§2.2);
+        // The single per-arch script the architecture port owns;
         // mirrors `kernel/rustos-kernel/build.rs` and the sibling x86_64
         // integration binaries.
         let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");

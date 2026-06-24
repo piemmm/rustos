@@ -26,8 +26,8 @@ pub enum Command {
 /// A parsed `groupadd` group specification.
 ///
 /// The gid is **decimal** (RustOS has no name-to-id seam in this tool, so a
-/// name would be interface creep, `AGENTS.md` §2.4). A missing `-g` is left to
-/// the database to allocate rather than guessed here (`AGENTS.md` §2.1).
+/// name would be interface creep). A missing `-g` is left to
+/// the database to allocate rather than guessed here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewGroup {
     /// The group name, validated against [`validate_name`].

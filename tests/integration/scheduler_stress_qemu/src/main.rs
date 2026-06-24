@@ -4,7 +4,7 @@
 //!
 //! `PLAN.md`'s Stage 2 deliverable text mandates that the scheduler
 //! stress test exercise `≥ 4 emulated cores`. The host-side
-//! `rustos-test-scheduler-stress` crate satisfies the AGENTS.md §7
+//! `rustos-test-scheduler-stress` crate satisfies the
 //! cross-crate contract by simulating four cores through `TestArch`;
 //! this binary executes the same kind of workload under QEMU on
 //! `-smp 4` with the actual x86_64 AP bring-up code from
@@ -42,7 +42,7 @@
 #![deny(missing_docs)]
 // Workload sizing constants are hand-tuned for the 256 MiB QEMU spec; a
 // few lossless `as` casts (CPU id u32 → i32 for arithmetic, atomic u32
-// reads) keep the boot-path code readable. AGENTS.md §15 rule 10
+// reads) keep the boot-path code readable. rule 10
 // requires every `#[allow]` carry a justification — this is it.
 #![cfg_attr(
     itest_x86_64,

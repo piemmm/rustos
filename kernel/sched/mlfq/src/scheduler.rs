@@ -53,7 +53,7 @@ impl CpuState {
             // races. There are at most `cpus - 1` concurrent stealers,
             // so a few attempts always succeed when the band is
             // non-empty. Capped to keep the dispatch path lock-free in
-            // the system-wide sense (`AGENTS.md` §2.1 — no spin loops).
+            // the system-wide sense (no spin loops).
             for _ in 0..8 {
                 match self.bands[i].steal() {
                     Steal::Stolen(id) => return Some((p, id)),
@@ -81,7 +81,7 @@ impl CpuState {
     /// Whether any band holds a ready task. The running task sits in the
     /// current-task slot, not in a band, so a `true` here means there is a
     /// **competitor** the running task must be preempted for — the
-    /// tickless one-shot arming decision (`AGENTS.md` §17.1).
+    /// tickless one-shot arming decision.
     fn has_ready_competitor(&self) -> bool {
         self.bands.iter().any(RunDeque::has_ready)
     }
@@ -94,7 +94,7 @@ impl CpuState {
 /// Internally the scheduler owns:
 ///
 /// * a fixed array of per-CPU state blocks — no global mutable state
-///   outside these per-CPU areas (`AGENTS.md` §4 "SMP from day one"),
+///   outside these per-CPU areas ("SMP from day one"),
 /// * a registry of tasks keyed by [`TaskId`] under a single
 ///   reader-preferring `RwLock`; only [`Self::spawn`] and the
 ///   bookkeeping for [`Self::exit`] take the write lock,
@@ -108,7 +108,7 @@ pub struct Scheduler<A: SchedulerArch> {
     last_boost_tick: AtomicU64,
     /// Per-CPU fast, non-cryptographic generators for work-stealing
     /// victim selection. This is a "scheduler decision" in the sense of
-    /// `lib/rng` (`AGENTS.md` §2.2 — there is no second PRNG): the
+    /// `lib/rng` (there is no second PRNG): the
     /// project's shared [`FastRng`] (xoshiro256++), not a hand-rolled
     /// one. `next_victim` takes `&self`, so each generator's `&mut self`
     /// stepping lives behind a [`SpinLock`] — but the slot is indexed by
@@ -128,7 +128,7 @@ pub struct Scheduler<A: SchedulerArch> {
     /// assert that preemption is actually firing — a silent regression
     /// to cooperative scheduling would otherwise pass the workload-
     /// correctness checks while breaking the security model
-    /// (`AGENTS.md` §5: a runaway task on one CPU must not be able to
+    /// (: a runaway task on one CPU must not be able to
     /// indefinitely block another).
     preemptions: Box<[AtomicU64]>,
     /// Per-CPU **current-task** slot.
@@ -145,7 +145,7 @@ pub struct Scheduler<A: SchedulerArch> {
     /// The slot is the publication point read by the syscall entry
     /// path (`kernel/rustos-kernel::dispatch::production_dispatch`,
     /// Stage 2.7 follow-up (f5)). Per the `kernel/sync::RwLock`
-    /// process-context rule (`AGENTS.md` §1), readers must run in
+    /// process-context rule, readers must run in
     /// process context on the issuing CPU — which is how syscall
     /// entry is reached on every architecture. There is no global
     /// mutable state: every CPU has its own atomic word.
@@ -154,7 +154,7 @@ pub struct Scheduler<A: SchedulerArch> {
     ///
     /// Snapshotted once at construction from the arch HAL
     /// ([`SchedulerArch::core_class`]); the class is a static identity
-    /// property (`AGENTS.md` §17.2) so a snapshot is authoritative for
+    /// property so a snapshot is authoritative for
     /// the scheduler's lifetime.
     core_classes: Box<[CoreClass]>,
     /// Dense list of the performance-class CPUs.
@@ -314,8 +314,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// homogeneous machine `preferred_home` returns `home_cpu` unchanged.
     /// If the chosen CPU's queue is full the task is parked in the global
     /// overflow list and any CPU that next runs [`Self::step`] will pick
-    /// it up; this preserves the "spawn never panics" invariant
-    /// (`AGENTS.md` §2.9).
+    /// it up; this preserves the "spawn never panics" invariant.
     ///
     /// # Errors
     /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
@@ -346,7 +345,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // Wake the placed CPU. Spawning at higher priority than what is
         // running there should preempt — but at this layer we have no
         // visibility into "what is running there", so we always notify
-        // and let the arch port decide. (`AGENTS.md` §2.4 — no creep.)
+        // and let the arch port decide. (no creep.)
         self.arch.send_ipi(placed);
         Ok(id)
     }
@@ -356,7 +355,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// Also clears any per-CPU current-task slot whose entry equals
     /// `id` so the slot does not outlive the task's run
-    /// (`AGENTS.md` §5.4 fail-closed: no syscall must reach a parked
+    /// (fail-closed: no syscall must reach a parked
     /// task as its caller).
     ///
     /// # Errors
@@ -403,7 +402,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             // Not yet committed to park: a `cas` to Ready would be a no-op,
             // so record the wake as a pending token instead. The dispatch
             // loop's `Park` commit consumes it and re-readies the task
-            // rather than sleeping it (`AGENTS.md` §2.1 — no lost wake-ups).
+            // rather than sleeping it (no lost wake-ups).
             TaskState::Ready | TaskState::Running => {
                 task.set_wake_pending();
                 return Ok(());
@@ -466,7 +465,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// On every call the per-CPU preemption counter is incremented.
     /// The counter is exposed via [`Self::preemption_count`] /
     /// [`Self::total_preemption_count`] so integration tests can
-    /// assert that preemption fires (`AGENTS.md` §7: a silent
+    /// assert that preemption fires (: a silent
     /// regression to cooperative scheduling must fail loudly, not
     /// pass).
     ///
@@ -492,7 +491,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// [`SchedulerArch::send_ipi`] already documents the inverse
     /// direction — the scheduler asking the arch to nudge a CPU into
     /// rescheduling. Adding a parallel `preempt_to` trait method
-    /// would be interface creep (`AGENTS.md` §2.4) because the two
+    /// would be interface creep because the two
     /// requests have the same downstream effect on a real port. The
     /// timer-ISR path is *inward*, from arch into scheduler, so it
     /// belongs on the scheduler type and not on the arch trait.
@@ -680,15 +679,15 @@ impl<A: SchedulerArch> Scheduler<A> {
         task.last_started.store(tick, Ordering::Release);
         task.home_cpu.store(cpu, Ordering::Release);
 
-        // Tickless preemption (`AGENTS.md` §17.1): arm this CPU's one-shot
+        // Tickless preemption: arm this CPU's one-shot
         // timer for a single quantum iff another ready task is queued (a
         // competitor), and disarm otherwise so a CPU running a sole
         // runnable task takes no timer interrupts. The port owns the
-        // quantum length; `set_preemption` is a pure boolean (§2.2). The
+        // quantum length; `set_preemption` is a pure boolean. The
         // contended-CPU one-shots that result are also what service MLFQ's
         // anti-starvation boost cadence (`maybe_priority_boost`) without
         // any global fixed-frequency tick — see the crate `README.md`
-        // (§17.1 carve-out). Armed *before* the body switches into the
+        // (carve-out). Armed *before* the body switches into the
         // task so the deadline is live for the run.
         self.arch
             .set_preemption(self.cpus[cpu as usize].has_ready_competitor());
@@ -735,8 +734,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 // arrived while the body ran left a token (it could not
                 // move a non-parked task). Consume it and re-ready the task
                 // at its current band — no demotion, this is not a
-                // voluntary yield — rather than sleeping it (`AGENTS.md`
-                // §2.1). Otherwise park as usual.
+                // voluntary yield — rather than sleeping it. Otherwise park as usual.
                 if task.take_wake_pending() {
                     task.store_state(TaskState::Ready);
                     let dest = self.preferred_home(prio, cpu);
@@ -834,9 +832,9 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// This is the lookup the syscall entry path uses to recover the
     /// caller's [`TaskId`] before consulting the capability table
-    /// (`AGENTS.md` §5.4 step 1: identify the caller — kernel-provided,
+    /// (step 1: identify the caller — kernel-provided,
     /// not caller-supplied). Per the `kernel/sync::RwLock`
-    /// process-context rule (`AGENTS.md` §1), this method must be
+    /// process-context rule, this method must be
     /// called only in process context on the issuing CPU; it must not
     /// be invoked from an interrupt handler.
     ///
@@ -868,7 +866,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// path lives in the scheduler's internal `dispatch` routine and is
     /// reached when the task body itself returns
     /// [`crate::TaskAction::Yield`]; that keeps the two yield
-    /// notions distinct, avoiding the interface creep `AGENTS.md` §2.4
+    /// notions distinct, avoiding the interface creep
     /// forbids.
     ///
     /// # Errors
@@ -929,7 +927,7 @@ impl<A: SchedulerArch> Scheduler<A> {
 /// Each method forwards to the inherent implementation above; the
 /// forwarding adapter is what lets `kernel/core` select this policy by
 /// the trait while the inherent surface stays available to this crate's
-/// own dispatch internals and tests (`AGENTS.md` §17.1).
+/// own dispatch internals and tests.
 impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
     fn new(config: SchedulerConfig, arch: Arc<A>) -> SchedResult<Self> {
         Scheduler::new(config, arch)
@@ -1055,7 +1053,7 @@ mod tests {
         assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
     }
 
-    /// Tickless preemption arming (`AGENTS.md` §17.1): a CPU running a
+    /// Tickless preemption arming: a CPU running a
     /// sole runnable task disarms its one-shot timer, and a CPU with a
     /// second ready task arms it. Asserted through the `TestArch`
     /// `set_preemption` ledger.
@@ -1360,7 +1358,7 @@ mod tests {
             .expect("spawn");
         // Freshly-spawned task is Ready, not Running — `yield_current`
         // models an in-flight syscall yield and must reject anything
-        // else (`AGENTS.md` §5.4 fail-closed).
+        // else (fail-closed).
         assert_eq!(sched.yield_current(id), Err(SchedError::InvalidState));
     }
 

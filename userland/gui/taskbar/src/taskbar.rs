@@ -22,7 +22,7 @@ use crate::tasks::TaskList;
 /// extents and `thickness` are *logical* pixels authored at the reference
 /// density (`rustos_geometry::REFERENCE_DPI`); the desktop's [`Scale`]
 /// converts them to physical pixels at layout time, so the bar stays a
-/// comfortable physical size across panel densities (`AGENTS.md` §10).
+/// comfortable physical size across panel densities.
 ///
 /// Extents are measured along the bar's main axis (width for a horizontal
 /// bar, height for a vertical one); `thickness` is the cross-axis size.
@@ -53,7 +53,7 @@ impl TaskbarConfig {
     ///
     /// [`BarLayout::compute`](crate::layout::BarLayout::compute) uses this so
     /// the logical→physical conversion is the one in
-    /// [`Scale::scale_length`], never re-derived here (`AGENTS.md` §2.2).
+    /// [`Scale::scale_length`], never re-derived here.
     #[must_use]
     pub fn scaled(&self, scale: Scale) -> Self {
         Self {
@@ -90,7 +90,7 @@ impl TaskbarConfig {
 ///
 /// The bar does **not** own a UI scale: the desktop density belongs to the
 /// output, so the scale is supplied by the compositor at layout, hit-test,
-/// and render time (`AGENTS.md` §10 / §2.2). A runtime DPI change is therefore
+/// and render time. A runtime DPI change is therefore
 /// transparent to the taskbar model — the bar is simply laid out and
 /// re-presented at the new density, with no state to update here.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,8 +126,7 @@ impl Taskbar {
         &self.config
     }
 
-    /// The corner radius the window manager applies to the bar (`AGENTS.md`
-    /// §2.2).
+    /// The corner radius the window manager applies to the bar.
     #[must_use]
     pub const fn corner_radius(&self) -> u32 {
         self.corner_radius
@@ -179,7 +178,7 @@ impl Taskbar {
 
     /// Adopt a new theme, updating the corner radius the window manager will
     /// apply. The rest of the taskbar's state is unchanged, so a runtime
-    /// dark/light switch needs no relayout of the model (`AGENTS.md` §10).
+    /// dark/light switch needs no relayout of the model.
     pub fn apply_theme(&mut self, theme: &Theme) {
         self.corner_radius = theme.metrics().taskbar_corner_radius;
         self.popup_corner_radius = theme.metrics().popup_corner_radius;
@@ -191,7 +190,7 @@ impl Taskbar {
     }
 
     /// Compute the bar's geometry for its current task and icon counts at the
-    /// desktop `scale` (the compositor's output density, `AGENTS.md` §10).
+    /// desktop `scale` (the compositor's output density).
     #[must_use]
     pub fn layout(&self, scale: Scale) -> BarLayout {
         BarLayout::compute(
@@ -214,7 +213,7 @@ impl Taskbar {
     ///
     /// The popup opens outward from the start button on the bar's edge and
     /// carries one row per start-menu entry; the window manager places and
-    /// rounds it exactly as it does the bar (`AGENTS.md` §2.2). This is
+    /// rounds it exactly as it does the bar. This is
     /// meaningful only while [`StartMenu::is_open`](crate::StartMenu::is_open)
     /// is `true`; the caller checks that.
     #[must_use]

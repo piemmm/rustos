@@ -1,13 +1,12 @@
-//! Host unit tests for [`RiscvArch`] (`AGENTS.md` §7 — tests live in
+//! Host unit tests for [`RiscvArch`] (tests live in
 //! their own file beside the code they cover).
 
 use super::*;
 
 // Each test owns a distinct function-local `static` backing — the same
 // allocator-free `&'static`-storage pattern the bare-metal verticals
-// use (`AGENTS.md` §24.1) — so no two handles alias one another's
-// per-CPU bookkeeping under the parallel test runner (`AGENTS.md` §7 —
-// no flaky shared state). Every test constructs exactly one handle, so a
+// use — so no two handles alias one another's
+// per-CPU bookkeeping under the parallel test runner (no flaky shared state). Every test constructs exactly one handle, so a
 // single local `static` per test suffices.
 
 #[test]
@@ -49,7 +48,7 @@ fn timebase_is_round_tripped() {
 #[test]
 fn zero_timebase_does_not_divide_by_zero() {
     // A malformed (zero) frequency must not trap; `monotonic_ns` clamps
-    // the divisor to 1 (`AGENTS.md` §2.9 — fail safe).
+    // the divisor to 1 (fail safe).
     static S: RiscvArchStorage<1> = RiscvArchStorage::new();
     let arch = RiscvArch::new(&S, 0, 0);
     let _ = arch.monotonic_ns();
@@ -103,7 +102,7 @@ fn send_ipi_drops_unmapped_target_into_stray_counter() {
     assert_eq!(arch.host_ipi_count(4), 0);
 }
 
-/// §17.2 / W0: the port passes the shared Arch HAL conformance vertical
+/// / W0: the port passes the shared Arch HAL conformance vertical
 /// over its real `SchedulerArch`, `SideChannel`, `MemoryTags`,
 /// discovery, and per-CPU storage handles (`plans/WIRING.md` Stage W0 /
 /// W2).
@@ -123,7 +122,7 @@ fn passes_arch_hal_conformance_suite() {
     );
 }
 
-/// §17.2 / W6: the port passes the cross-CPU TLB-shootdown conformance
+/// / W6: the port passes the cross-CPU TLB-shootdown conformance
 /// vertical over its real `RiscvArch` handle. On the host the local
 /// `sfence.vma` is a vacuous no-op (no TLB) and there is no firmware to
 /// call, so the vertical asserts the observable half — the call is total
@@ -139,7 +138,7 @@ fn passes_cross_cpu_tlb_shootdown_conformance() {
     rustos_arch_api::xtlb::conformance::run_all(erased, 100u64 << 30);
 }
 
-/// §17.2 / W14: the port passes the secondary-bring-up conformance
+/// / W14: the port passes the secondary-bring-up conformance
 /// vertical over its real `RiscvArch` handle. On the host there is no SBI
 /// firmware, so the vertical asserts the observable half — starting an
 /// unstartable id fails closed and never panics. The real SBI HSM
@@ -155,10 +154,9 @@ fn passes_secondary_bringup_conformance() {
 }
 
 /// The boot hart and any unmapped / out-of-range dense id are refused
-/// before any firmware call — the fail-closed contract (`AGENTS.md`
-/// §5.4.5). (The set-once secondary-entry slot is a process-global
+/// before any firmware call — the fail-closed contract. (The set-once secondary-entry slot is a process-global
 /// shared with `crate::smp`'s own tests, so it is exercised there, not
-/// re-driven here — `AGENTS.md` §7, no flaky cross-test state.)
+/// re-driven here, no flaky cross-test state.)
 #[test]
 fn start_secondary_rejects_boot_and_unmapped_ids() {
     static S: RiscvArchStorage<2> = RiscvArchStorage::new();

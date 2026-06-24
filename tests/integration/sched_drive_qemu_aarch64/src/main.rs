@@ -32,8 +32,7 @@
 //! A regression in any wired path (no context switch, no dispatch, no
 //! timer tick, no IPI delivery) either trips a dedicated failure finisher
 //! or never reaches the PASS write, so the run fails loudly — by an
-//! explicit failure code or by the harness `Outcome::Timeout`
-//! (`AGENTS.md` §7).
+//! explicit failure code or by the harness `Outcome::Timeout`.
 //!
 //! ## Discovered GICv2 base + timer rate (PI Stage P4)
 //!
@@ -59,7 +58,7 @@
 //! `kernel_core::kernel_main` init pipeline (which halts after boot and
 //! keeps its scheduler private). The QEMU-exit shortcut lives in this
 //! dedicated bin, never behind a Cargo feature on the arch crate
-//! (`AGENTS.md` §5.4.5 — fail closed).
+//! (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -224,8 +223,7 @@ mod kernel {
     /// The generic-timer scheduler-tick callback. Drives the live
     /// scheduler's per-CPU preemption counter through
     /// [`Scheduler::on_timer_tick`]. ISR-safe: `on_timer_tick` is wait-free
-    /// (one bounds check + one `fetch_add`). RustOS is tickless
-    /// (`AGENTS.md` §17.1): the one-shot does not auto-reload, so the
+    /// (one bounds check + one `fetch_add`). RustOS is tickless: the one-shot does not auto-reload, so the
     /// callback re-arms the next one-shot itself (standing in for the
     /// scheduler's `set_preemption`) so the timer keeps driving the live
     /// scheduler while this CPU idles in `wfi` below.
@@ -340,8 +338,7 @@ mod kernel {
 
         // 2. Build the live scheduler over the arch port and publish it for
         //    the IRQ-path callbacks.
-        // Per-CPU bookkeeping backing for this single-CPU vertical
-        // (`AGENTS.md` §24.1).
+        // Per-CPU bookkeeping backing for this single-CPU vertical.
         static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
             rustos_arch_aarch64::Aarch64ArchStorage::new();
         let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
@@ -360,7 +357,7 @@ mod kernel {
         preempt::set_ipi_callback(on_ipi);
 
         // Register the per-CPU preemption backing (sized to this
-        // single-CPU vertical, `AGENTS.md` §24.1) so the timer slot
+        // single-CPU vertical) so the timer slot
         // `init_local_preempt` records exists.
         static PREEMPT_STORAGE: preempt::PreemptStorage<1> = preempt::PreemptStorage::new();
         if PREEMPT_STORAGE.register().is_err() {
@@ -423,7 +420,7 @@ mod kernel {
         // 4. Wait until the generic-timer IRQ has driven the live scheduler
         //    at least MIN_PREEMPTIONS times. A regression that fails to
         //    deliver or re-arm the timer never reaches the bound, so the
-        //    harness reports a timeout (fail-loud, `AGENTS.md` §7).
+        //    harness reports a timeout (fail-loud).
         while sched.preemption_count(BOOT_CPU).unwrap_or(0) < MIN_PREEMPTIONS {
             // SAFETY: `wfi` is a wait-for-interrupt hint with no
             // architectural side effects; the timer interrupt wakes it.

@@ -5,19 +5,19 @@
 //! Two jobs on the freestanding `riscv64gc-unknown-none-elf` target:
 //!
 //! 1. Hand the riscv64 `virt` linker script to the test kernel (the single
-//!    per-arch script the architecture port owns — `AGENTS.md` §2.2), exactly
+//!    per-arch script the architecture port owns), exactly
 //!    as the sibling riscv64 integration binaries do.
 //! 2. Compile the pure-Rust EL0 fixture program (`tests/integration/
 //!    el0_yielder_program`) **position-independent** for the freestanding
 //!    riscv64 target (its own `program.ld` roots `rustos-rt`'s `_start`), into a
 //!    private target directory under `OUT_DIR`, pinning its yield count through
 //!    the `RUSTOS_EL0_YIELDS` environment variable so this script is the single
-//!    source of truth for the count (`AGENTS.md` §2.2), then convert the linked
+//!    source of truth for the count, then convert the linked
 //!    PIE ELF to an `rxe` blob with [`rustos_itest_harness::elf2rxe::elf_to_rxe`],
 //!    baking relocations for the [`USER_BIAS`] the kernel maps the image at and
 //!    stamping the kernel's compiled-in syscall CFI tag
 //!    (`rustos_kernel_syscall::SYSCALL_TABLE_HASH`) so
-//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it (§9 / §19.2); emit the
+//!    [`rustos_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes, the bias, and the matching [`YIELDS_PER_TASK`] constant as a Rust
 //!    source the test `include!`s.
 //!
@@ -26,7 +26,7 @@
 //! compiles only for the freestanding riscv64 target.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;
@@ -37,13 +37,13 @@ use std::process::Command;
 /// Virtual base the program image is mapped at. Chosen at 64 GiB — far above
 /// the kernel's 4 GiB identity map — so the image lands on freshly walked Sv39
 /// tables instead of colliding with an identity gigapage leaf (the proven
-/// riscv64 spawn layout, `AGENTS.md` §2.2).
+/// riscv64 spawn layout).
 const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// How many times the EL0 task yields before exiting. The single source of
 /// truth: passed to the program build via `RUSTOS_EL0_YIELDS` *and* emitted as
 /// the `YIELDS_PER_TASK` constant the kernel asserts against, so the two halves
-/// can never disagree (`AGENTS.md` §2.2). Large enough that an accidental
+/// can never disagree. Large enough that an accidental
 /// single run cannot satisfy the PASS check, small enough to drain well within
 /// the harness budget.
 const YIELDS_PER_TASK: u32 = 16;
@@ -69,7 +69,7 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_default();
     if target == RISCV64_TARGET {
         // The test kernel itself links with the riscv64 `virt` script the
-        // architecture port owns (the single per-arch script, §2.2).
+        // architecture port owns (the single per-arch script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/riscv64/link/riscv64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -100,7 +100,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
 
     // The program links no architecture crate, so `program.ld`'s
     // `ENTRY(_start)` roots `rustos-rt`'s trampoline; it is built
-    // position-independent (`AGENTS.md` §19.2). Scope the PIE link flags to the
+    // position-independent. Scope the PIE link flags to the
     // riscv64 target so the program's own host build script is unaffected, and
     // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
     // (`-Z build-std`). `alloc` is required because `rustos-rt` registers a
@@ -118,7 +118,7 @@ fn build_and_convert_program(manifest_dir: &str, out_dir: &str, program_dir: &st
         // host build script).
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
-        // Pin the program's yield count (the §2.2 single source of truth).
+        // Pin the program's yield count (the single source of truth).
         .env("RUSTOS_EL0_YIELDS", YIELDS_PER_TASK.to_string())
         .env(
             "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS",

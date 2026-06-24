@@ -67,7 +67,7 @@
 //! `rustos-arch-aarch64` port, and the default `rustos-kernel-sched-eevdf`
 //! policy directly and supplies its own `kernel_main`. The QEMU-exit
 //! shortcut lives in this dedicated bin, never behind a Cargo feature on a
-//! library crate (`AGENTS.md` §5.4.5 — fail closed).
+//! library crate (fail closed).
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -212,7 +212,7 @@ mod kernel {
 
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// the unmapped guard page, then report PASS. Anything else is a
-    /// FAILURE. Never returns (`AGENTS.md` §2.9).
+    /// FAILURE. Never returns.
     extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
         let base = guard_page();
         if fault::is_abort(esr) && far >= base && far < base + STACK_GUARD_BYTES {
@@ -334,8 +334,7 @@ mod kernel {
         // Build the live scheduler over the arch port and admit a kthread on
         // the arena-backed, guard-unmapped stack. The body overruns into the
         // guard page on its first (and only) dispatch.
-        // Per-CPU bookkeeping backing for this single-CPU vertical
-        // (`AGENTS.md` §24.1).
+        // Per-CPU bookkeeping backing for this single-CPU vertical.
         static ARCH_STORAGE: rustos_arch_aarch64::Aarch64ArchStorage<1> =
             rustos_arch_aarch64::Aarch64ArchStorage::new();
         let arch = Arc::new(Aarch64Arch::new(&ARCH_STORAGE, BOOT_CPU, counter_hz));
@@ -375,7 +374,7 @@ mod kernel {
         // kthread, whose overrun faults into `on_fault` (which exits PASS).
         // If the guard page were wrongly left mapped the body would return
         // (Exit) and the loop would drain — a guard regression we report
-        // below rather than letting it pass silently (`AGENTS.md` §2.9).
+        // below rather than letting it pass silently.
         let mut steps = 0u64;
         while sched.live_task_count() != 0 && steps < MAX_STEPS {
             let _ = sched.step(BOOT_CPU);

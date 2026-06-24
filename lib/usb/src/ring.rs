@@ -13,7 +13,7 @@
 //! caller-provided snapshot. The owner of the device-shared memory —
 //! on metal a capability-granted DMA region, in host tests a plain
 //! buffer — performs every read and write, so the cycle/wrap/full
-//! logic is proven host-side without hardware (`AGENTS.md` §2.2) and
+//! logic is proven host-side without hardware and
 //! DMA publication (cache cleaning, address translation, write
 //! ordering) stays with the seam that owns the memory.
 
@@ -179,7 +179,7 @@ impl ProducerRing {
     ///
     /// * [`DriverError::OutOfRange`] if nothing is in flight — a
     ///   completion event for work never enqueued is a controller
-    ///   fault, surfaced rather than absorbed (`AGENTS.md` §2.9).
+    ///   fault, surfaced rather than absorbed.
     pub fn retire_one(&mut self) -> Result<(), DriverError> {
         if self.in_flight() == 0 {
             return Err(DriverError::OutOfRange);

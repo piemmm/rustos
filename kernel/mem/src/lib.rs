@@ -10,10 +10,10 @@
 //!
 //! 1. [`sensitive`] — zero-on-free buffers for credentials, keys, and
 //!    capability tokens, backed by the audited `zeroize` crate
-//!    (`AGENTS.md` §4: "Zero-on-free for any allocation that ever held
+//!    (: "Zero-on-free for any allocation that ever held
 //!    credentials, keys, or capability tokens").
 //! 2. [`slab`] — fixed-size kernel object allocator with guard pages on
-//!    both sides of every slab (`AGENTS.md` §4: "Guard pages around
+//!    both sides of every slab (: "Guard pages around
 //!    kernel slabs").
 //! 3. [`vmm`] — per-process [`AddressSpace`], generic over a
 //!    [`PageTable`] backend (a port's HAL page-table implementation).
@@ -28,13 +28,12 @@
 //!
 //! Every allocator entry point returns
 //! `Result<_, `[`AllocError`]`>`. No path panics on out-of-memory
-//! (`AGENTS.md` §4: *"Deterministic OOM behaviour: allocation failure
+//! (: *"Deterministic OOM behaviour: allocation failure
 //! is a `Result`, never a panic."*).
 //!
 //! # Unsafe and pointer arithmetic
 //!
-//! Every `unsafe` block carries a `// SAFETY:` rationale per `AGENTS.md`
-//! §2.10. Raw pointer arithmetic only happens inside the bounds-checked
+//! Every `unsafe` block carries a `// SAFETY:` rationale. Raw pointer arithmetic only happens inside the bounds-checked
 //! helpers in [`ptr`]; no other module is allowed to call
 //! `<*mut _>::add` / `<*mut _>::offset` directly.
 //!

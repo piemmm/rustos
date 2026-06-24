@@ -4,7 +4,7 @@
 //! [`MmioMap`] driven by `kernel/mem`'s `HostPageTable`. The
 //! [`RecordingSink`] from `crate::audit` captures the exact audit
 //! sequence so the security trail is asserted alongside the
-//! functional outcome (`AGENTS.md` §5.4.4).
+//! functional outcome.
 
 extern crate alloc;
 

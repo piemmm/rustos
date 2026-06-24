@@ -3,7 +3,7 @@
 //!
 //! These are the single definition every other module builds on: the emitter
 //! writes them and the parser recognises them, so the wire format lives in one
-//! place (`AGENTS.md` §2.2). The names follow the ECMA-48 / ANSI X3.64
+//! place. The names follow the ECMA-48 / ANSI X3.64
 //! mnemonics.
 
 /// Bell (`BEL`, `^G`).
@@ -130,7 +130,7 @@ pub const PASTE_END: u16 = 201;
 /// Both are accepted because terminals disagree: a serial terminal commonly
 /// sends `BS` for its Backspace key while xterm-class terminals (and the
 /// RustOS keymap, which maps `Backspace` to `DEL`) send `DEL`. This is the
-/// single definition of "which byte erases" (`AGENTS.md` §2.2), shared by the
+/// single definition of "which byte erases", shared by the
 /// kernel console echo and a reader's line buffer so the two never disagree.
 #[must_use]
 pub const fn is_line_erase(byte: u8) -> bool {
@@ -140,6 +140,5 @@ pub const fn is_line_erase(byte: u8) -> bool {
 /// The bytes that visually rub out one already-echoed character on a terminal:
 /// backspace over the glyph, overwrite it with a space, then backspace again so
 /// the cursor rests where the glyph was. The read line discipline writes this
-/// when it erases a character so the screen matches the edited line
-/// (`AGENTS.md` §20).
+/// when it erases a character so the screen matches the edited line.
 pub const ERASE_ECHO: [u8; 3] = [BS, b' ', BS];

@@ -1,4 +1,4 @@
-//! Encrypted swap layer (`AGENTS.md` §4, §19.2).
+//! Encrypted swap layer.
 //!
 //! When the kernel pages anonymous, stack, or capability-bearing memory out
 //! to a backing store, the bytes that leave RAM are sealed here first. This
@@ -8,7 +8,7 @@
 //!
 //! # Fail-closed by construction
 //!
-//! `AGENTS.md` §4 requires that "the kernel refuses to activate a swap
+//! the charter requires that "the kernel refuses to activate a swap
 //! device that is not wrapped by the encrypted-swap layer, and fails closed
 //! rather than falling back to plaintext". RustOS enforces this with the
 //! type system rather than a runtime check: a [`SwapBackend`] (the raw,
@@ -17,16 +17,16 @@
 //! it is [`EncryptedSwap`], whose sole constructor
 //! [`EncryptedSwap::activate`] takes a [`SwapKey`]. There is no plaintext
 //! code path to fall back to, so a plaintext swap is unrepresentable
-//! (`AGENTS.md` §2.11 — illegal states unrepresentable).
+//! (illegal states unrepresentable).
 //!
 //! # Key lifetime
 //!
 //! The [`SwapKey`] is an **ephemeral per-boot** key drawn from the platform
-//! RNG (the §19.2 entropy source, injected here as [`EntropySource`] until
+//! RNG (the entropy source, injected here as [`EntropySource`] until
 //! that source lands). It is zeroed on drop and never persisted: there is no
 //! serialisation path and no accessor that copies the key bytes out of the
 //! crate. A power cycle therefore destroys the key, so paged-out secrets
-//! cannot be recovered at rest (`AGENTS.md` §4).
+//! cannot be recovered at rest.
 //!
 //! # Nonce discipline
 //!
@@ -62,7 +62,7 @@ pub type SwapPage = [u8; PAGE_SIZE];
 
 /// Reason a swap operation failed.
 ///
-/// Every variant is a fail-closed outcome (`AGENTS.md` §5.4): the caller
+/// Every variant is a fail-closed outcome: the caller
 /// must treat the page as unavailable, never as plaintext.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -97,7 +97,7 @@ impl core::fmt::Display for SwapError {
 
 /// Source of cryptographic randomness for keys and nonce salts.
 ///
-/// This is the seam for the §19.2 platform RNG. Until that subsystem lands,
+/// This is the seam for the platform RNG. Until that subsystem lands,
 /// the kernel injects a concrete implementation (mirroring the seam pattern
 /// used by `init`'s `Spawner` and `login`'s `Authenticator`); the swap layer
 /// itself never reaches for a global RNG.
@@ -178,7 +178,7 @@ impl Drop for SwapKey {
     fn drop(&mut self) {
         // SAFETY-INVARIANT: `Zeroize::zeroize` uses volatile writes the
         // compiler may not elide, so the ephemeral key is gone once the
-        // `EncryptedSwap` that owns it is torn down (`AGENTS.md` §4 — the
+        // `EncryptedSwap` that owns it is torn down (the
         // key is discarded, never persisted).
         self.bytes.zeroize();
     }
@@ -199,7 +199,7 @@ impl<B: SwapBackend> EncryptedSwap<B> {
     ///
     /// Draws the per-activation nonce salt from `entropy`. This is the sole
     /// constructor: a swap device cannot be used any other way, which is how
-    /// RustOS refuses plaintext swap (`AGENTS.md` §4).
+    /// RustOS refuses plaintext swap.
     ///
     /// # Errors
     ///
@@ -275,7 +275,7 @@ impl<B: SwapBackend> EncryptedSwap<B> {
     /// Read and authenticate the record at `slot` into `out`.
     ///
     /// On any failure `out` is zeroed before the error is returned, so a
-    /// caller can never observe forged or stale plaintext (`AGENTS.md` §5.4).
+    /// caller can never observe forged or stale plaintext.
     ///
     /// # Errors
     ///

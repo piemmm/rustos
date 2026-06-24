@@ -1,9 +1,9 @@
-//! Stateful property model for the `kernel/ipc` port (`AGENTS.md` §19.7
+//! Stateful property model for the `kernel/ipc` port (
 //! Bronze).
 //!
-//! [`Port`] is the capability-checked IPC dispatch endpoint. §19.7 requires it
+//! [`Port`] is the capability-checked IPC dispatch endpoint. The charter requires it
 //! to carry a `proptest`-style stateful model alongside its unit tests and the
-//! §19.6 fuzz harness (`tests/fuzz_port.rs`). Where the fuzz harness hammers
+//! fuzz harness (`tests/fuzz_port.rs`). Where the fuzz harness hammers
 //! raw `(caps, payload)` bytes for crashes, this model generates a *structured*
 //! sequence of `send` / `recv` / `destroy` commands and replays it against an
 //! independent reference model, letting proptest **shrink** any counterexample
@@ -11,21 +11,21 @@
 //!
 //! * `send` is **fail-closed** in the exact `Port::send` precedence — closed
 //!   port, then capabilities, then size, then capacity — checked against a
-//!   mirror that never consults the live port (`AGENTS.md` §5.4).
+//!   mirror that never consults the live port.
 //! * a delivered message round-trips through `recv` byte-for-byte in FIFO
 //!   order, so a sender cannot mutate an accepted payload.
 //! * occupancy equals the model and never exceeds the declared capacity.
 //! * once destroyed, every send fails closed regardless of authority.
 //!
-//! ## Wall-clock budget (`AGENTS.md` §19.7)
+//! ## Wall-clock budget
 //!
 //! The shared `rustos_fuzzseed::prop::drive` runner owns the seed/budget
-//! policy (one definition, §2.2): a plain `cargo test` runs [`SMOKE_CASES`]
+//! policy (one definition): a plain `cargo test` runs [`SMOKE_CASES`]
 //! sequences **once** from a fresh, logged seed; `cargo xtask proptest --soak`
 //! exports `RUSTOS_PROPTEST_BUDGET_SECS` and the runner repeats
 //! [`BUDGET_BATCH_CASES`] batches off the same continuing RNG until the
 //! deadline. The seed is logged at the start of each run (pinnable via
-//! `--seed`), so a fresh-seed counterexample is still reproducible (§2.1).
+//! `--seed`), so a fresh-seed counterexample is still reproducible.
 
 use std::collections::VecDeque;
 

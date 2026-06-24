@@ -1,11 +1,10 @@
-//! Host unit tests for the PLIC register driver (`AGENTS.md` §7 —
-//! tests live in their own file beside the code they cover).
+//! Host unit tests for the PLIC register driver (tests live in their own file beside the code they cover).
 //!
 //! These exercise the register arithmetic and the inherent
 //! arm/mask/unmask/claim surface against an in-memory mock. The
 //! mask-before-wake contract through `kernel/irq`'s `IrqTable` is
 //! exercised downstream, where the `IrqController` bridge lives
-//! (`AGENTS.md` §17.2 — the arch port owns no `kernel/irq` dependency).
+//! (the arch port owns no `kernel/irq` dependency).
 
 use super::*;
 use std::collections::HashMap;
@@ -135,7 +134,7 @@ fn claim_and_complete_round_trip_the_claim_register() {
     assert_eq!(c.plic.mmio.read32(regs::claim(1)), 8);
 }
 
-/// §17.2 / W3: the PLIC controller passes the shared Arch HAL
+/// / W3: the PLIC controller passes the shared Arch HAL
 /// interrupt-controller + interrupt-entry conformance verticals over its
 /// real handle (`plans/WIRING.md` Stage W3). Source `8` is addressable on
 /// a `max_source = 31` controller; `32` is out of range. The empty mock

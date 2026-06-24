@@ -5,7 +5,7 @@
 //! root-unlock-admission vertical:
 //!
 //! 1. Hand the aarch64 `virt` linker script to `rustc` — the single per-board
-//!    linker script the architecture port owns (`AGENTS.md` §2.2).
+//!    linker script the architecture port owns.
 //! 2. Dump the canonical QEMU `virt` flattened device tree and embed it,
 //!    because QEMU's `-kernel <ELF>` aarch64 path passes no DTB pointer
 //!    (`x0 = 0`); the boot pipeline is handed a pointer to this embedded blob so
@@ -15,11 +15,10 @@
 //!    device at run time, QEMU populates two slots' live `DeviceID` registers —
 //!    one virtio-block (the encrypted root) and one virtio-input (the keyboard)
 //!    — which the bootstrap-floor enumeration probes. The dump helper lives in
-//!    the shared harness so no aarch64 build script re-rolls it (`AGENTS.md`
-//!    §2.2).
+//!    the shared harness so no aarch64 build script re-rolls it.
 //!
 //! Re-running `build.rs` produces byte-identical output, so the test is
-//! deterministic (`AGENTS.md` §7).
+//! deterministic.
 
 use std::env;
 use std::fmt::Write as _;

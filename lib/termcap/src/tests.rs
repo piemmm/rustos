@@ -1,4 +1,4 @@
-//! Unit tests for the compiled-in capability database (`AGENTS.md` §7).
+//! Unit tests for the compiled-in capability database.
 
 use alloc::vec::Vec;
 

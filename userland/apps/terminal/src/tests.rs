@@ -2,7 +2,7 @@
 //!
 //! Everything is exercised without a kernel: the [`ShellSource`] seam is an
 //! in-memory queue, so the grid, the control parser, the shell glue, and the
-//! renderer are all testable in isolation (`AGENTS.md` §7).
+//! renderer are all testable in isolation.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -202,7 +202,7 @@ fn csi_erase_in_display_two_clears_everything() {
 fn unrecognised_escape_and_high_bytes_are_dropped() {
     // A non-CSI escape (ESC c), a private mode we do not model (bracketed
     // paste, ESC[?2004l), and a stray high byte all leave the visible text
-    // intact: the shared parser drops what it does not recognise (§2.9).
+    // intact: the shared parser drops what it does not recognise.
     let grid = render_bytes(10, 2, b"a\x1bcb\x1b[?2004lc\xffd");
     assert_eq!(row_text(&grid, 0), "abcd");
 }
@@ -418,7 +418,7 @@ fn saved_cursor_round_trips_position_and_pen() {
 
 #[test]
 fn emitter_output_is_parsed_identically_by_the_consumer() {
-    // The §2.2 "one vocabulary" guarantee: the emulator consumes exactly what
+    // The "one vocabulary" guarantee: the emulator consumes exactly what
     // `lib/vt`'s emitter produces. Encode a representative operation stream and
     // feed the bytes straight into the consumer's grid.
     let ops = [

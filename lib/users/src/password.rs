@@ -2,11 +2,11 @@
 //!
 //! A [`PasswordRecord`] is the only secret-bearing field of a user record.
 //! It never stores the password itself: only the PBKDF2-HMAC-SHA256 hash
-//! (`lib/crypto`, `AGENTS.md` §2.12), the per-record random salt, and the
-//! iteration cost. Decoding is fail-closed (`AGENTS.md` §5.4): a record with
+//! (`lib/crypto`), the per-record random salt, and the
+//! iteration cost. Decoding is fail-closed: a record with
 //! the wrong scheme tag, an out-of-range cost, or a salt/hash of the wrong
 //! width yields no record. Verification is constant-time with respect to the
-//! stored hash (`AGENTS.md` §19.1).
+//! stored hash.
 
 use core::fmt;
 use core::num::NonZeroU32;
@@ -29,7 +29,7 @@ pub type Salt = [u8; SALT_LEN];
 
 /// Inclusive PBKDF2 iteration bounds a record may carry. A cost below the
 /// floor would make offline guessing cheap; one above the ceiling is a
-/// denial-of-service on every login attempt. Both are §24.4 validation
+/// denial-of-service on every login attempt. Both are validation
 /// bounds, fixed by policy, not capacities.
 pub const MIN_ITERATIONS: u32 = 1_000;
 /// See [`MIN_ITERATIONS`].
@@ -41,7 +41,7 @@ pub const DEFAULT_ITERATIONS: u32 = 600_000;
 
 /// Longest password, in bytes, the verifier will derive a hash from. A
 /// longer offering is rejected outright — an unbounded input would let an
-/// attacker buy arbitrarily long derivations (§24.4 validation bound).
+/// attacker buy arbitrarily long derivations (validation bound).
 pub const MAX_PASSWORD_LEN: usize = 256;
 
 /// A decoded, validated stored-password record.

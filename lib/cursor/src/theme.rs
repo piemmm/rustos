@@ -2,8 +2,7 @@
 //! [`CursorKind`] — and the built-in default set.
 //!
 //! A [`CursorTheme`] is the cursor analogue of `lib/theme`'s palette: a fixed
-//! record with one cursor per kind, so a lookup can never miss (`AGENTS.md`
-//! §2.11). The theme names a cursor by [`CursorKind`]; this crate turns that
+//! record with one cursor per kind, so a lookup can never miss. The theme names a cursor by [`CursorKind`]; this crate turns that
 //! name into actual scalable, colourful artwork. Because a `CursorTheme` is
 //! plain data built from [`VectorCursor`]s, an entirely different cursor set
 //! is just a different `CursorTheme` — that is the "replaceable with other
@@ -38,7 +37,7 @@ const BUSY_SECONDARY: Color = Color::rgb(250, 198, 64);
 /// One [`VectorCursor`] per [`CursorKind`].
 ///
 /// Stored as fixed fields rather than a map so every kind is always defined
-/// and [`cursor`](Self::cursor) is total (`AGENTS.md` §2.11).
+/// and [`cursor`](Self::cursor) is total.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorTheme {
     arrow: VectorCursor,
@@ -198,7 +197,7 @@ fn builtin_busy() -> VectorCursor {
 
 /// Build a two-layer cursor: a dark [`OUTLINE`] enlarged about the
 /// silhouette's centroid, then the light [`BODY`] at its authored size. The
-/// enlarged layer shows through as a uniform border (`AGENTS.md` §2.2 — one
+/// enlarged layer shows through as a uniform border (one
 /// outline mechanism, not a per-cursor hack).
 fn outlined(hotspot_x: i32, hotspot_y: i32, silhouette: &[(i32, i32)]) -> VectorCursor {
     let (cx, cy) = centroid(silhouette);
@@ -222,7 +221,7 @@ fn centroid(points: &[(i32, i32)]) -> (i32, i32) {
 
 /// Scale `points` about `(cx, cy)` by the rational factor `num/den`,
 /// returning design-grid [`Vertex`]es. A zero denominator leaves the points
-/// unscaled rather than dividing by zero (`AGENTS.md` §2.9).
+/// unscaled rather than dividing by zero.
 fn scaled_about(points: &[(i32, i32)], cx: i32, cy: i32, num: i32, den: i32) -> Vec<Vertex> {
     let den = if den == 0 { 1 } else { den };
     let scale = |c: i32, centre: i32| -> i32 {
