@@ -89,6 +89,7 @@ pub mod panic;
 pub mod procwait;
 pub mod random;
 pub mod rlimit;
+pub mod sharedreg;
 // The single scheduler selection point. Internal:
 // the concrete policy must not leak to crates that should depend on the
 // `rustos_kernel_sched_api` contract instead.
@@ -114,7 +115,8 @@ pub use console::{
 pub use devres::{
     dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, DmaCarve,
     DmaConstraint, MmioMapFacility, MsiAllocFacility, NullDmaAllocFacility, NullMmioMapFacility,
-    NullMsiAllocFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY,
+    NullMsiAllocFacility, NullSharedMemFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 pub use dispatch_slot::{
     AlreadyInstalledError, DispatchCallbackSlot, DispatchHook, DispatchOutcome, RescheduleAction,
@@ -137,7 +139,7 @@ pub use kthread::{
     KTHREAD_MAX_CPUS, KTHREAD_STACK_BYTES,
 };
 pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
-pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap};
+pub use live_producer::{LiveDmaAlloc, LiveMemMap, LiveMmioMap, LiveSharedMem};
 pub use memmap::{MemMap, NullMemMap, NULL_MEM_MAP};
 pub use panic::{handle_panic, panic_dump, PanicContext};
 pub use procwait::{

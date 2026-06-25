@@ -36,7 +36,7 @@ use rustos_kernel_core::AddressSpaceRegistry;
 use rustos_kernel_core::{
     BootReserve, DispatchCallbackSlot, KernelDispatchHook, KernelInitSpawner, RandomReserve,
     EMPTY_PROGRAM_REGISTRY, NULL_DMA_ALLOC_FACILITY, NULL_INPUT_FOCUS, NULL_MEM_MAP,
-    NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT,
+    NULL_MMIO_MAP_FACILITY, NULL_PROCESS_WAIT, NULL_SHARED_MEM_FACILITY,
 };
 use rustos_kernel_ipc::{EndpointId, Port, PortRegistry};
 use rustos_kernel_irq::{IrqTable, UnsupportedController};
@@ -515,6 +515,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.arch,
         &NULL_PROCESS_WAIT,
         sys.irq_table,
+        &NULL_SHARED_MEM_FACILITY,
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
     let args: [&[u8]; 2] = [b"drvstub", REPLY_ENDPOINT_ARG];

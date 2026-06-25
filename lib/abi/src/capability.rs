@@ -303,6 +303,32 @@ impl CapabilityId {
     /// and per-endpoint grant checks before state touches; — a driver
     /// receives only its matched node's resources).
     pub const IPC_ENDPOINT: Self = Self(28);
+    /// Participate in cross-process shared memory: create a shared-memory
+    /// region, and map a region the kernel has granted you.
+    ///
+    /// A shared-memory region is a block of kernel-owned RAM two cooperating
+    /// processes map into their own address spaces to exchange bulk data
+    /// without a kernel copy. Reach is **not** a process-wide capability
+    /// *class* but a per-region, id-scoped **grant** — the same
+    /// device-resource grant machinery that scopes an MMIO window, an IRQ
+    /// line, or a call endpoint to one driver (no ambient authority). It is
+    /// the data-buffer half of the USB request-block transport
+    /// (`plans/USB.md`): a host-controller driver creates one region per
+    /// device it serves (the kernel mints it the matching
+    /// [`HwResource::shared`](crate::hwtree::HwResource::shared) grant, so it
+    /// may forward the region onto a child node it publishes), and only a
+    /// task the kernel later grants that exact region — the autoloaded class
+    /// driver bound to the emitted device node — may map it.
+    ///
+    /// Holding this capability alone confers no reach: mapping a region
+    /// requires *also* holding the per-region grant the kernel resolves
+    /// against the calling task, so two class drivers behind one controller
+    /// cannot reach each other's buffer even though both hold the class
+    /// capability (capability and per-region grant checks before state
+    /// touches; — a driver receives only its matched node's resources).
+    /// Creating a region is gated by this capability so a region is never
+    /// minted ambiently.
+    pub const SHM: Self = Self(29);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -342,6 +368,7 @@ impl CapabilityId {
         (Self::LOG_EMIT, "CAP_LOG_EMIT"),
         (Self::HW_EMIT, "CAP_HW_EMIT"),
         (Self::IPC_ENDPOINT, "CAP_IPC_ENDPOINT"),
+        (Self::SHM, "CAP_SHM"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -464,6 +491,7 @@ mod tests {
         assert_eq!(CapabilityId::LOG_EMIT.as_u16(), 26);
         assert_eq!(CapabilityId::HW_EMIT.as_u16(), 27);
         assert_eq!(CapabilityId::IPC_ENDPOINT.as_u16(), 28);
+        assert_eq!(CapabilityId::SHM.as_u16(), 29);
     }
 
     #[test]
@@ -495,9 +523,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=28 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=29 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=28 {
+        for raw in 1..=29 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

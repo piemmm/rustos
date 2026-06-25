@@ -322,6 +322,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            build_shared_mem_facility(state.arch.as_ref(), &state.frame_allocator),
         )));
         init.spawn_init(ctx);
     }
@@ -431,6 +432,16 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// driver the device manager unloads. PID-1 admission and the
     /// driver-spawn path do not consult it.
     irq: &'a IrqTable,
+    /// The shared-memory facility
+    /// [`terminate_driver_process`](InitSpawnCtx::terminate_driver_process)
+    /// frees a torn-down driver's shared-memory regions through (the same
+    /// producer the `shm_*` syscalls drive). The driver-store unload runs in
+    /// the service's own context, not the driver's, so the facility scrubs +
+    /// frees a region's frames through the kernel direct map. A build with no
+    /// facility wired passes the fail-closed
+    /// [`crate::devres::NULL_SHARED_MEM_FACILITY`]; PID-1 admission and the
+    /// driver-spawn path do not consult it.
+    shared_mem_facility: &'static (dyn crate::devres::SharedMemFacility + 'static),
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -454,6 +465,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
         arch: &'a A,
         process_wait: &'static (dyn ProcessWait + 'static),
         irq: &'a IrqTable,
+        shared_mem_facility: &'static (dyn crate::devres::SharedMemFacility + 'static),
     ) -> Self {
         Self {
             frames,
@@ -464,6 +476,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             arch,
             process_wait,
             irq,
+            shared_mem_facility,
         }
     }
 
@@ -792,6 +805,15 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the driver (the same withdrawal the `exit` syscall path will drive).
         self.aspaces.write().withdraw(sec_id);
 
+        // Release every shared-memory mapping the driver held, dropping each
+        // reference and zeroing + freeing any region whose last reference this
+        // releases. Mirrors the `exit` syscall's reclaim; the region frames
+        // are scrubbed through the kernel direct map, so freeing works even
+        // though this teardown runs in the driver-store service's context, not
+        // the driver's own (a driver may be the region owner whose last
+        // grantee already vanished).
+        crate::sharedreg::reclaim_task(self.shared_mem_facility, sec_id);
+
         // Destroy every synchronous call endpoint the driver served before
         // dropping its capability record, mirroring the `exit` syscall: a
         // user-space service that is torn down must not leave callers blocked
@@ -845,7 +867,17 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 /// through [`kernel_main`]. Splitting it out lets the unit tests in
 /// this module assert phase-by-phase behaviour without the trailing
 /// `arch.halt()` swallowing the test thread.
+// `run_phases` is the single linear boot sequence whose phase order the
+// `docs/src/architecture/kernel.md` init-order section documents step by
+// step; keeping every phase (mem, sec, sched, irq, state assembly, the live
+// producers, and the dispatcher install) in one place is what makes that
+// order auditable in one read. Splitting it to satisfy the line lint would
+// scatter the documented order across helpers for no clarity gain, so the
+// length is allowed deliberately (the producer and dispatcher-facility
+// construction are already factored into `live_producers` /
+// `build_shared_mem_facility`).
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_lines)]
 fn run_phases<A: KernelArch>(
     boot: BootInfo<'_, A>,
     log_sink: &'static (dyn Sink + Sync),
@@ -1017,7 +1049,8 @@ fn run_phases<A: KernelArch>(
     // with `NotImplemented` exactly as the `NULL_*` defaults did. All are
     // `Box::leak`'d for the same one-shot-publish reason as the hook, arch-
     // generic so this names no concrete port.
-    let (mem_map, mmio_map_facility, dma_alloc_facility) = live_producers(state.arch.as_ref());
+    let (mem_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
+        live_producers(state.arch.as_ref(), &state.frame_allocator);
 
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
     // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
@@ -1060,13 +1093,13 @@ fn run_phases<A: KernelArch>(
         // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
         // `hw_tree_wait` fail-closed when no inventory was seeded.
         .with_hw_tree(hw_tree)
-        // Serve the user-space `log_emit` syscall through the same diagnostic
-        // sink the kernel routes its own records through; the audit sink stays
-        // kernel-only.
+        // Serve `log_emit` through the kernel diagnostic sink; the audit sink
+        // stays kernel-only.
         .with_log_sink(log_sink)
-        // Serve `msi_alloc` through the architecture port's MSI controller
-        // when it has one; `None` leaves it fail-closed `NotImplemented`.
-        .with_msi_alloc_facility(state.arch.as_ref().msi_alloc_facility()),
+        // Serve `msi_alloc` through the arch MSI controller (`None` is fail-closed).
+        .with_msi_alloc_facility(state.arch.as_ref().msi_alloc_facility())
+        // Serve `shm_*` through the `kernel/mem`-backed shared-memory producer.
+        .with_shared_mem_facility(shared_mem_facility),
         )))
         .map_err(InitError::DispatcherAlreadyInstalled)?;
     phase_ready(log_sink, Phase::Syscall);
@@ -1085,25 +1118,53 @@ fn run_phases<A: KernelArch>(
 }
 
 /// Build and `Box::leak` the production `mem_map` / `mmio_map` / `dma_alloc`
-/// producers over the per-task retained live address space
-/// (`plans/PI.md` 5d-0-ii (b′)/(c)).
+/// / `shm_*` producers over the per-task retained live address space
+/// (`plans/PI.md` 5d-0-ii (b′)/(c); `plans/USB.md` for shared memory).
 ///
 /// Each is arch-generic (it reads the current CPU from the `'static` `arch`
 /// handle and routes to the calling task's own live space) and `Box::leak`'d for the one-shot-publish reason `KernelState`
-/// is. Factored out of [`run_phases`] so the three
-/// long-typed bindings live in one place.
+/// is. The shared-memory producer additionally draws the region backing
+/// from `frames` (the kernel allocator). Factored out of [`run_phases`] so
+/// the four long-typed bindings live in one place.
 fn live_producers<A: KernelArch>(
     arch: &'static A,
+    frames: &'static FrameAllocator,
 ) -> (
     &'static (dyn crate::memmap::MemMap + 'static),
     &'static (dyn crate::devres::MmioMapFacility + 'static),
     &'static (dyn crate::devres::DmaAllocFacility + 'static),
+    &'static (dyn crate::devres::SharedMemFacility + 'static),
 ) {
     (
         Box::leak(Box::new(crate::live_producer::LiveMemMap::new(arch))),
         Box::leak(Box::new(crate::live_producer::LiveMmioMap::new(arch))),
         Box::leak(Box::new(crate::live_producer::LiveDmaAlloc::new(arch))),
+        build_shared_mem_facility(arch, frames),
     )
+}
+
+/// Build (and `Box::leak`) the production shared-memory facility over the
+/// arch direct physical map and the kernel frame allocator, or the
+/// fail-closed [`crate::devres::NULL_SHARED_MEM_FACILITY`] when the port
+/// wires no direct map (then `shm_*` return `NotImplemented`).
+///
+/// The one definition both the syscall handler (via [`live_producers`]) and
+/// the [`KernelInitSpawner`] driver-unload path build their facility from, so
+/// the construction logic is not duplicated. The two call sites get distinct
+/// leaked instances, which is correct: [`crate::live_producer::LiveSharedMem`]
+/// holds only `'static` borrows of the shared frame allocator, direct map,
+/// and arch, so a region created through one instance frees correctly through
+/// the other (both drive the same allocator and direct map).
+fn build_shared_mem_facility<A: KernelArch>(
+    arch: &'static A,
+    frames: &'static FrameAllocator,
+) -> &'static (dyn crate::devres::SharedMemFacility + 'static) {
+    match arch.direct_phys_map() {
+        Some(physmap) => Box::leak(Box::new(crate::live_producer::LiveSharedMem::new(
+            arch, frames, physmap,
+        ))),
+        None => &crate::devres::NULL_SHARED_MEM_FACILITY,
+    }
 }
 
 /// In-memory record of the live kernel subsystems built by
@@ -1354,6 +1415,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
         );
 
         let before = state.scheduler.live_task_count();
@@ -1395,6 +1457,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
         );
 
         assert_eq!(state.arch.pump_console_tx_count(), 0);
@@ -1464,6 +1527,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
         );
 
         let producer = RecordingSpawn {
@@ -1509,6 +1573,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
         );
 
         // An unknown handle names no live driver: fail closed, reclaim

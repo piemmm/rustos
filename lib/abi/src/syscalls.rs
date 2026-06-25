@@ -996,6 +996,80 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::IRQ_BIND),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::SHM_CREATE,
+        name: "shm_create",
+        arg_count: 2,
+        args: [
+            // The region length in bytes, then the out pointer the new
+            // region's id is written to.
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the mapped base virtual address (or, by the shared
+        // register convention, a negated errno) back to the caller; the
+        // region id is written to the `id_out` user pointer, exactly as
+        // `dma_alloc` writes the device address.
+        ret: AbiType::U64,
+        // Creating a shared region the caller then grants to another task is
+        // privileged, never ambient: only a service holding `CAP_SHM` may
+        // mint one, and the kernel grants the creator only the matching
+        // per-region resource. It IS audited per call — minting cross-process
+        // shared memory is a security-relevant grant and is low-volume (once
+        // per served device at bring-up), so the record cannot drown the log,
+        // exactly like `mmio_map` / `dma_alloc`.
+        required_capability: Some(CapabilityId::SHM),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SHM_MAP,
+        name: "shm_map",
+        arg_count: 1,
+        args: [
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the mapped base virtual address (or a negated errno)
+        // back to the driver, exactly like `mmio_map`.
+        ret: AbiType::U64,
+        // Mapping a granted shared region is privileged, never ambient: only
+        // a driver granted the matched node's shared-region resource holds
+        // `CAP_SHM`, and the kernel resolves the unforgeable grant handle
+        // against the calling task so a driver maps only the one region it was
+        // granted. It IS audited per call — handing a principal a window onto
+        // another process's memory is a security-relevant grant and is
+        // low-volume (once per buffer at driver init), so the record cannot
+        // drown the log, exactly like `mmio_map`.
+        required_capability: Some(CapabilityId::SHM),
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SHM_UNMAP,
+        name: "shm_unmap",
+        arg_count: 2,
+        args: [
+            AbiType::U64,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The release half of `shm_create` / `shm_map`; same unprivileged,
+        // unaudited posture as `mem_unmap` — it only releases the caller's
+        // own shared mapping and drops its reference to the region.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

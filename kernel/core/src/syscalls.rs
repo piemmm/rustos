@@ -74,7 +74,7 @@
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
 use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
-use rustos_abi::hwtree::HwResource;
+use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
     decode_log_record, CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags,
@@ -89,7 +89,7 @@ use rustos_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
 use rustos_kernel_mem::{
-    copy_in, copy_out, FrameAllocator, PhysMap, UaccessError, UserAddressSpace, VirtAddr,
+    copy_in, copy_out, FrameAllocator, PhysMap, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use rustos_kernel_sched_api::Priority;
 use rustos_kernel_sec::{CapTable, TaskCapabilities, TaskId as SecTaskId, UserId};
@@ -107,7 +107,8 @@ use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::devres::{
     dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, MmioMapFacility,
-    MsiAllocFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY,
+    MsiAllocFacility, SharedMemFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
+    NULL_MSI_ALLOC_FACILITY, NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
@@ -308,6 +309,14 @@ where
     /// the real store through [`Self::with_hw_tree`] once the inventory is
     /// seeded. Held as a `'static` borrow, exactly like the users database.
     hw_tree: &'static (dyn HwTreeSource + 'static),
+    /// The shared-memory producer the `shm_create` / `shm_map` / `shm_unmap`
+    /// syscalls drive to allocate, zero, map, and free cross-process
+    /// shared-memory regions in the caller's own live address space
+    /// (`plans/USB.md`). Defaults to [`NULL_SHARED_MEM_FACILITY`] (fail closed
+    /// with [`Errno::NotImplemented`]); the boot path installs the concrete
+    /// `kernel/mem`-backed producer through [`Self::with_shared_mem_facility`].
+    /// Held as a `'static` borrow, exactly like the MMIO-map producer.
+    shared_mem_facility: &'static (dyn SharedMemFacility + 'static),
 }
 
 impl<'a, A> KernelSyscallHandlers<'a, A>
@@ -413,6 +422,11 @@ where
             // discovered inventory and installs the holder: `hw_tree_read` / `hw_tree_wait` fail closed with
             // `NotImplemented`.
             hw_tree: &NULL_HW_TREE,
+            // The shared-memory facility is unwired until the boot path
+            // installs the `kernel/mem`-backed producer: `shm_create` /
+            // `shm_map` / `shm_unmap` fail closed with `NotImplemented`,
+            // never fabricating a region.
+            shared_mem_facility: &NULL_SHARED_MEM_FACILITY,
         }
     }
 
@@ -614,6 +628,25 @@ where
         msi_alloc_facility: &'static (dyn MsiAllocFacility + 'static),
     ) -> Self {
         self.msi_alloc_facility = msi_alloc_facility;
+        self
+    }
+
+    /// Install the shared-memory producer the `shm_create` / `shm_map` /
+    /// `shm_unmap` syscalls drive, consuming and returning `self`
+    /// (`plans/USB.md`). Also publishes the producer to the shared-region
+    /// registry so the exit / driver-unload reclaim paths can free a
+    /// region's frames without it being threaded through their wiring.
+    ///
+    /// Until this is called the handler holds [`NULL_SHARED_MEM_FACILITY`],
+    /// so `shm_*` fail closed with [`Errno::NotImplemented`]. The producer
+    /// must be `'static`: it lives for the lifetime of the running kernel,
+    /// exactly like the MMIO-map producer.
+    #[must_use]
+    pub fn with_shared_mem_facility(
+        mut self,
+        shared_mem_facility: &'static (dyn SharedMemFacility + 'static),
+    ) -> Self {
+        self.shared_mem_facility = shared_mem_facility;
         self
     }
 
@@ -850,6 +883,13 @@ where
         if crate::callreg::unregister_owned_by(caller.caps.task().0, self.audit) > 0 {
             crate::waitq::call_wake();
         }
+        // Release every shared-memory mapping this task held, dropping each
+        // reference and zeroing + freeing any region whose last reference this
+        // releases (zero-on-free). Done here, while the exiting task is still
+        // the current one, so the registry can scrub a freed region's frames
+        // through its own live space before the scheduler reap drops it. A
+        // task that mapped none reclaims nothing (idempotent).
+        crate::sharedreg::reclaim_task(self.shared_mem_facility, task);
         let _ = self.caps.write().remove(task);
         Ok(0)
     }
@@ -2696,6 +2736,99 @@ where
         );
         Ok(rustos_abi::MsiAllocation::WIRE_LEN as u64)
     }
+
+    fn shm_create(&self, caller: &CallerContext<'_>, len: usize, id_out: u64) -> SyscallResult {
+        // Step 2 (capability) was enforced by the dispatcher: the `shm_create`
+        // spec carries `CAP_SHM`. Step 3 (validate every input): a zero-length
+        // region names nothing; reject it before touching any state.
+        if len == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let pages = (len as u64).div_ceil(PAGE_SIZE as u64);
+        // Allocate + zero + map the region into the caller's own live space
+        // through the installed shared-memory facility, and record it
+        // (refs = 1) against the caller as owner. A build with no facility
+        // wired holds the fail-closed default and returns `NotImplemented`.
+        // On any failure no region is recorded and the frames (if any) are
+        // returned to the allocator, so a failed create leaks nothing.
+        let (base_va, id) =
+            crate::sharedreg::create(self.shared_mem_facility, caller.task_id, pages)?;
+        // The map grew the caller's live space; re-freeze the registry
+        // snapshot so the `id_out` copy (and any later copy) sees current
+        // memory, exactly as `mem_map` / `mmio_map` do.
+        self.refreeze_caller_aspace(caller);
+        // Write the kernel-minted region id out through the validated
+        // `copy_to_user` boundary. A faulting `id_out` releases the region we
+        // just created (dropping its only reference, which frees and scrubs
+        // its frames) and fails closed, so a faulting call leaves no orphan
+        // region behind and never widens authority.
+        let id_bytes = id.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(id_out), &id_bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => {
+                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
+                self.refreeze_caller_aspace(caller);
+                return Err(copy_fault_errno(err));
+            }
+            None => {
+                let _ = crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base_va);
+                self.refreeze_caller_aspace(caller);
+                return Err(Errno::BadAddress);
+            }
+        }
+        // Grant the calling task the per-region resource, so it may forward
+        // the region onto a child node it publishes (`hw_emit_node`'s
+        // coverage check tests against exactly this) and an autoloaded class
+        // driver inherits it as its sole reach. Minted against
+        // `caller.task_id` (kernel-trusted), exactly like the `msi_alloc`
+        // grant path; the handle is unused here.
+        let _handle = self
+            .aspaces
+            .write()
+            .mint_grant(caller.task_id, HwResource::shared(id));
+        Ok(base_va)
+    }
+
+    fn shm_map(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
+        // Step 2 (capability) was enforced by the dispatcher: the `shm_map`
+        // spec carries `CAP_SHM`. Step 3 (validate every input): resolve
+        // `handle` to a granted resource **for the calling task**
+        // (`caller.task_id` is kernel-trusted), so a forged or another
+        // driver's handle resolves to nothing and is refused, exactly as
+        // `mmio_map` / `dma_alloc` resolve their grants.
+        let Some(resource) = self.aspaces.read().grant(caller.task_id, handle) else {
+            return Err(Errno::NotFound);
+        };
+        // The grant must name a shared region; reject any other kind before
+        // mapping (fail closed).
+        if resource.kind() != Some(HwResourceKind::Shared) {
+            return Err(Errno::OutOfRange);
+        }
+        // Map the region (its id is the grant's base) into the caller's own
+        // live space and account the mapping so the region's frames are not
+        // freed while the caller still maps them. A region torn down between
+        // grant and map fails closed `NotFound`.
+        let base_va =
+            crate::sharedreg::map(self.shared_mem_facility, caller.task_id, resource.base())?;
+        // The map grew the caller's live space; re-freeze its snapshot.
+        self.refreeze_caller_aspace(caller);
+        Ok(base_va)
+    }
+
+    fn shm_unmap(&self, caller: &CallerContext<'_>, base: u64, _len: usize) -> SyscallResult {
+        // No capability: this releases only the caller's own mapping (the
+        // `mem_unmap` posture). Resolve `(caller, base)` against the
+        // per-task mapping records, tear down only that mapping's page-table
+        // entries, and drop the caller's reference; the region's frames are
+        // zeroed and freed at its last reference. A `base` that does not name
+        // a live shared mapping of the caller fails closed `NotFound`.
+        crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base)?;
+        // The unmap shrank the caller's live space; re-freeze its snapshot.
+        self.refreeze_caller_aspace(caller);
+        Ok(0)
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -3225,6 +3358,25 @@ where
         if let Some(facility) = msi_alloc_facility {
             self.handlers = self.handlers.with_msi_alloc_facility(facility);
         }
+        self
+    }
+
+    /// Install the shared-memory producer the `shm_create` / `shm_map` /
+    /// `shm_unmap` syscalls drive, consuming and returning `self`
+    /// (`plans/USB.md`).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_shared_mem_facility`]: the boot path
+    /// passes the `kernel/mem`-backed producer (built over the arch direct
+    /// physical map). It also publishes the producer to the shared-region
+    /// registry so the exit / driver-unload reclaim paths can free a region's
+    /// frames.
+    #[must_use]
+    pub fn with_shared_mem_facility(
+        mut self,
+        shared_mem_facility: &'static (dyn SharedMemFacility + 'static),
+    ) -> Self {
+        self.handlers = self.handlers.with_shared_mem_facility(shared_mem_facility);
         self
     }
 
@@ -7342,6 +7494,12 @@ mod tests {
         fn alloc_dma(&mut self, _len: usize, _limit: u64) -> Result<DmaMapping, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn map_shared(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn unmap_shared(&mut self, _base: u64, _len: usize) -> Result<(), LiveSpaceError> {
+            Err(LiveSpaceError::Anon(AnonError::NotMapped))
+        }
         fn freeze(&self) -> FrozenAddressSpace {
             self.space.freeze()
         }
@@ -10484,6 +10642,152 @@ mod tests {
         handle.join().expect("server thread joins");
         assert_eq!(written, 4);
         crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// A recording [`crate::devres::SharedMemFacility`] double: it hands out
+    /// a fixed physical base + VA and records the calls, so a handler test can
+    /// assert `shm_create` mapped and granted without wiring a real
+    /// `kernel/mem` producer or a published live space.
+    struct RecordingSharedFacility {
+        va: u64,
+    }
+    impl crate::devres::SharedMemFacility for RecordingSharedFacility {
+        fn alloc_region(&self, _pages: u64) -> Result<(u64, u32), Errno> {
+            Ok((0xAB00_0000, 0))
+        }
+        fn map_region(&self, _phys_base: u64, _pages: u64) -> Result<u64, Errno> {
+            Ok(self.va)
+        }
+        fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
+            Ok(())
+        }
+        fn free_region(&self, _phys_base: u64, _order: u32, _pages: u64) {}
+    }
+
+    /// `shm_create` maps the region into the caller, mints the caller the
+    /// per-region `HwResource::shared(id)` grant (so it can forward it onto a
+    /// node it publishes), and writes the kernel-minted id out to `id_out`.
+    #[test]
+    fn shm_create_mints_the_region_grant_and_writes_the_id() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // A two-page caller space; `id_out` is page 2 (`0x2000`) so the test
+        // reads the written id back with `read_reply_page`.
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(7), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(7, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_1000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+
+        let va = h
+            .shm_create(&ctx, 4096, 0x2000)
+            .expect("shm_create succeeds");
+        assert_eq!(
+            va, 0x2_0000_1000,
+            "the mapped base flows back to the caller"
+        );
+        // The kernel-minted region id was written to `id_out` (page 2).
+        let id_bytes = read_reply_page(
+            aspaces.read().resolve(SecTaskId(7)).expect("registered").1,
+            8,
+        );
+        let id = u64::from_le_bytes(id_bytes.try_into().expect("8 bytes"));
+        // The caller now holds the per-region grant for exactly that id, so it
+        // can forward the region onto a node it emits; a neighbouring id is
+        // not covered (the grant is scoped to one region).
+        assert!(aspaces
+            .read()
+            .grant_covers(SecTaskId(7), &rustos_abi::HwResource::shared(id)));
+        assert!(!aspaces
+            .read()
+            .grant_covers(SecTaskId(7), &rustos_abi::HwResource::shared(id + 1)));
+        // Cleanup so the global region registry does not leak across tests.
+        let _ = crate::sharedreg::unmap(facility, SecTaskId(7), va);
+    }
+
+    /// `shm_map` fails closed for a forged handle (`NotFound`) and for a grant
+    /// of the wrong kind (`OutOfRange`) before mapping anything.
+    #[test]
+    fn shm_map_fails_closed_for_forged_and_wrong_kind_grants() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // No registered aspace needed: both failures are decided from the
+        // grant table before any region is mapped or any buffer touched.
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(8, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_2000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+
+        // A handle the task was never granted resolves to nothing.
+        assert_eq!(h.shm_map(&ctx, 0x9999), Err(Errno::NotFound));
+        // A grant of the wrong kind (an IRQ line) is refused before mapping.
+        let handle = aspaces
+            .write()
+            .mint_grant(SecTaskId(8), rustos_abi::HwResource::irq(33, 1));
+        assert_eq!(h.shm_map(&ctx, handle), Err(Errno::OutOfRange));
+    }
+
+    /// `shm_create` on a build with no shared-memory facility wired fails
+    /// closed with `NotImplemented`, never fabricating a region.
+    #[test]
+    fn shm_create_without_facility_is_not_implemented() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(9, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(9),
+            caps: &caps,
+        };
+        // No `with_shared_mem_facility`: the handler holds the fail-closed
+        // `NULL_SHARED_MEM_FACILITY`.
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.shm_create(&ctx, 4096, 0x2000), Err(Errno::NotImplemented));
+        // A zero-length region is rejected before the facility is consulted.
+        assert_eq!(h.shm_create(&ctx, 0, 0x2000), Err(Errno::LengthOutOfRange));
     }
 
     /// `call_recv` / `call_reply` against an unbound id fail closed with

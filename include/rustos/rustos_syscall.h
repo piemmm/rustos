@@ -63,6 +63,9 @@ extern "C" {
 #define ROS_SYS_HW_EMIT_NODE 37u
 #define ROS_SYS_HW_REMOVE_NODE 38u
 #define ROS_SYS_MSI_ALLOC 39u
+#define ROS_SYS_SHM_CREATE 40u
+#define ROS_SYS_SHM_MAP 41u
+#define ROS_SYS_SHM_UNMAP 42u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -105,6 +108,9 @@ int32_t ros_sys_log_emit(void * a0, uintptr_t a1);
 int32_t ros_sys_hw_emit_node(void * a0, uintptr_t a1);
 int32_t ros_sys_hw_remove_node(uint64_t a0);
 uint64_t ros_sys_msi_alloc(void * a0, uintptr_t a1);
+uint64_t ros_sys_shm_create(uintptr_t a0, void * a1);
+uint64_t ros_sys_shm_map(uint64_t a0);
+int32_t ros_sys_shm_unmap(uint64_t a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

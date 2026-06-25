@@ -219,6 +219,22 @@ pub const DMA_WINDOW_OFFSET: u64 = 0xC000_0000;
 /// buffer is bounded to the [`rustos_kernel_mem::MAX_ORDER`] 8 MiB block).
 pub const DMA_WINDOW_PAGES: usize = 256;
 
+/// Offset of the cross-process shared-memory virtual window above the image
+/// bias: placed 4 GiB above the bias - above the DMA window (which spans
+/// `[3 GiB, 3 GiB + 1 MiB)`) and far clear of the program image, stack,
+/// startup block, device, anonymous-heap, and DMA windows below it - and
+/// well below the 64 GiB user/identity ceiling the spawn-window check
+/// guards. The `shm_create` / `shm_map` syscalls map a granted shared
+/// region out of `[bias + SHARED_WINDOW_OFFSET, ... +
+/// SHARED_WINDOW_PAGES * 4 KiB)`. One value shared by every port for the
+/// same reason as [`MMIO_WINDOW_OFFSET`].
+pub const SHARED_WINDOW_OFFSET: u64 = 0x1_0000_0000;
+
+/// Pages backing the shared-memory window (1 MiB): generous headroom over
+/// the few small shared regions a driver task maps (an URB data buffer is
+/// a handful of pages).
+pub const SHARED_WINDOW_PAGES: usize = 256;
+
 /// Per-process stack-canary seed handed to PID 1 `init`. Any value; the kernel RNG-seeded canary is a later stage.
 pub const INIT_CANARY: u64 = 0x1117_A5ED_C0DE_0001;
 

@@ -684,6 +684,74 @@ impl SyscallNumber {
     /// device's interrupt routes to the allocated line.
     pub const MSI_ALLOC: Self = Self(39);
 
+    /// Create a cross-process **shared-memory region** the calling task owns
+    /// and maps, and that it may then grant to another task
+    /// (`plans/USB.md` — the URB transport data buffer).
+    ///
+    /// Arguments: `len: usize` — the region size in bytes (rounded up to
+    /// whole pages); `id_out: *mut u64` — a user pointer the kernel writes
+    /// the new region's kernel-allocated, unforgeable id to on success.
+    /// Returns the base **user virtual address** the region is mapped at
+    /// (`RW`, non-executable, cacheable, guard-bracketed), or `-errno`.
+    ///
+    /// The kernel allocates a physically-contiguous block of RAM it owns,
+    /// zeroes it (no cross-process leak), maps it into the caller's own
+    /// address space, records the region against the caller as its owner,
+    /// and **grants the calling task a device resource for the region** (a
+    /// [`crate::hwtree::HwResource::shared`]), so the owner may both map it
+    /// and forward it onto a child node it publishes through
+    /// [`SyscallNumber::HW_EMIT_NODE`] — never ambient authority. The region
+    /// and its frames live until the owner and every grantee have released
+    /// their mappings (or exited), at which point the frames are zeroed and
+    /// freed. Gated by [`crate::CapabilityId::SHM`]; a zero length, frame
+    /// exhaustion (deterministic OOM), or a build with no shared-memory
+    /// facility wired fails closed.
+    pub const SHM_CREATE: Self = Self(40);
+
+    /// Map a shared-memory region the kernel has **granted** the calling
+    /// task into its own address space (`plans/USB.md` — the class driver
+    /// mapping the buffer its matched node carried).
+    ///
+    /// Arguments: `handle: u64` — an unforgeable, kernel-issued
+    /// device-resource grant handle the driver received for the matched
+    /// hardware-tree node it binds (a [`crate::hwtree::HwResourceKind::Shared`]
+    /// region). Returns the base **user virtual address** the region is
+    /// mapped at (`RW`, non-executable, cacheable, guard-bracketed), or
+    /// `-errno`.
+    ///
+    /// The kernel resolves the handle **against the calling task**
+    /// (rejecting forgery exactly as [`SyscallNumber::MMIO_MAP`] does),
+    /// confirms it names a shared region, maps that region's existing
+    /// kernel-owned frames into the caller's own address space, and accounts
+    /// the mapping against the region so its frames are not freed while the
+    /// caller still maps them. A driver therefore reaches exactly the one
+    /// region the kernel granted it and no other process's buffer
+    /// (no ambient authority). Gated by [`crate::CapabilityId::SHM`]; an
+    /// unknown or non-owned handle, a grant of the wrong kind, a region that
+    /// has been torn down, or a build with no shared-memory facility wired
+    /// fails closed.
+    pub const SHM_MAP: Self = Self(41);
+
+    /// Release a shared-memory mapping the calling task established with
+    /// [`SyscallNumber::SHM_CREATE`] or [`SyscallNumber::SHM_MAP`]
+    /// (`plans/USB.md` — a per-device buffer released on hot-removal).
+    ///
+    /// Arguments: `base: u64` — the base user virtual address the map
+    /// returned; `len: usize` — its length in bytes. Returns `0`, or
+    /// `-errno`.
+    ///
+    /// The kernel validates the `(base, len)` names a shared mapping of the
+    /// **calling task**, tears down only that mapping's page-table entries,
+    /// and drops the caller's reference to the underlying region; when the
+    /// owner and every grantee have released the region its frames are zeroed
+    /// (zero-on-free) and returned to the allocator. Needs **no capability**:
+    /// it only releases the caller's own mapping (the
+    /// [`SyscallNumber::MEM_UNMAP`] posture). A `(base, len)` that does not
+    /// name a live shared mapping of the caller fails closed with
+    /// [`crate::Errno::NotFound`]; a build with no shared-memory facility
+    /// wired fails closed with [`crate::Errno::NotImplemented`].
+    pub const SHM_UNMAP: Self = Self(42);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -798,6 +866,9 @@ mod tests {
         assert_eq!(SyscallNumber::HW_EMIT_NODE.as_u16(), 37);
         assert_eq!(SyscallNumber::HW_REMOVE_NODE.as_u16(), 38);
         assert_eq!(SyscallNumber::MSI_ALLOC.as_u16(), 39);
+        assert_eq!(SyscallNumber::SHM_CREATE.as_u16(), 40);
+        assert_eq!(SyscallNumber::SHM_MAP.as_u16(), 41);
+        assert_eq!(SyscallNumber::SHM_UNMAP.as_u16(), 42);
     }
 
     #[test]

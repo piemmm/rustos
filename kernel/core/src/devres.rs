@@ -210,6 +210,98 @@ impl MsiAllocFacility for NullMsiAllocFacility {
 /// The shared [`NullMsiAllocFacility`] the syscall handler defaults to.
 pub static NULL_MSI_ALLOC_FACILITY: NullMsiAllocFacility = NullMsiAllocFacility;
 
+/// The kernel-side producer that backs the cross-process shared-memory
+/// syscalls (`shm_create` / `shm_map` / `shm_unmap`, `plans/USB.md`).
+///
+/// A shared-memory region is a physically-contiguous block of kernel-owned
+/// RAM the kernel allocates once, zeroes, and maps (cacheable, `RW`,
+/// non-executable, guard-bracketed) into one or more processes' own live
+/// address spaces so they can exchange bulk data without a kernel copy. The
+/// *policy* — the per-region registry, reference counting, the per-region
+/// capability grant, and the capability gate — lives in `kernel/core`; this
+/// trait performs only the *mechanism* that needs the frame allocator and
+/// the running task's live space:
+///
+/// * [`alloc_region`](Self::alloc_region) — allocate a contiguous,
+///   **zeroed** block of `pages` frames (no cross-process leak);
+/// * [`map_region`](Self::map_region) — map an existing region into the
+///   **calling** task's own live space;
+/// * [`unmap_region`](Self::unmap_region) — release the caller's mapping;
+/// * [`free_region`](Self::free_region) — zero (zero-on-free) and return a
+///   region's frames to the allocator at its last reference.
+///
+/// Zeroing on allocation and on free is done through the kernel direct map
+/// of *whatever task is currently running* (the map is identical in every
+/// process and covers all RAM), so the last-reference free works even when
+/// the task whose teardown drops it is not the region's owner (a hot-removed
+/// driver torn down by the device manager). Implementations must be [`Sync`]
+/// like [`MmioMapFacility`].
+pub trait SharedMemFacility: Sync {
+    /// Allocate a physically-contiguous, **zeroed** block of `pages` frames
+    /// the kernel owns, returning its physical base and the buddy `order`
+    /// the caller must hand back to [`Self::free_region`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when no contiguous block is free (deterministic
+    /// OOM), [`Errno::OutOfRange`] when `pages` exceeds the maximum buddy
+    /// block, [`Errno::LengthOutOfRange`] when `pages` is zero, or
+    /// [`Errno::NotImplemented`] for the inert default.
+    fn alloc_region(&self, pages: u64) -> Result<(u64, u32), Errno>;
+
+    /// Map the existing region of `pages` frames beginning at `phys_base`
+    /// into the calling task's own live space, returning its base user
+    /// virtual address.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] (no virtual slot), [`Errno::NotImplemented`]
+    /// (no live space / inert default), or another stable code the platform
+    /// reports.
+    fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno>;
+
+    /// Release the calling task's shared mapping based at `base` (`len`
+    /// bytes), tearing down only its page-table entries.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if `base` does not name a live shared mapping of
+    /// the caller, or [`Errno::NotImplemented`] for the inert default.
+    fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno>;
+
+    /// Zero the `pages` frames beginning at `phys_base` (zero-on-free) and
+    /// return the `order` buddy block to the allocator. Best-effort: a frame
+    /// that cannot be reached for scrubbing is dropped rather than panicking
+    /// (the inert default is a no-op).
+    fn free_region(&self, phys_base: u64, order: u32, pages: u64);
+}
+
+/// The shared-memory facility installed before any real one exists.
+///
+/// Every operation fails closed with [`Errno::NotImplemented`] (and
+/// [`free_region`](SharedMemFacility::free_region) is an inert no-op), so a
+/// `shm_*` syscall on a build with no live-space producer announces an inert
+/// interface rather than pretending a region exists. Mirrors
+/// [`NullMmioMapFacility`].
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullSharedMemFacility;
+
+impl SharedMemFacility for NullSharedMemFacility {
+    fn alloc_region(&self, _pages: u64) -> Result<(u64, u32), Errno> {
+        Err(Errno::NotImplemented)
+    }
+    fn map_region(&self, _phys_base: u64, _pages: u64) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+    fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
+    fn free_region(&self, _phys_base: u64, _order: u32, _pages: u64) {}
+}
+
+/// The shared [`NullSharedMemFacility`] the syscall handler defaults to.
+pub static NULL_SHARED_MEM_FACILITY: NullSharedMemFacility = NullSharedMemFacility;
+
 /// Validate that the caller's `[offset, offset + len)` sub-region of a
 /// granted [`HwResource`] is a memory window `mmio_map` can map, returning
 /// the `(phys_base, len)` the [`MmioMapFacility`] takes (the sub-region's

@@ -100,6 +100,9 @@ const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
+const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
+const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
+const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -889,6 +892,67 @@ pub extern "C" fn sys_msi_alloc(out: *mut c_void, len: usize) -> u64 {
     unsafe { raw_syscall(NUM_MSI_ALLOC, [ptr_arg(out), len as u64, 0, 0, 0, 0]) }
 }
 
+/// `shm_create`: allocate a cross-process shared-memory region of `len`
+/// bytes (rounded up to whole pages), map it into the calling process's own
+/// address space, and write the new region's kernel-allocated, unforgeable
+/// id to `id_out` (`SyscallNumber::SHM_CREATE`). Returns the base **user
+/// virtual address** the region is mapped at (`RW`, non-executable,
+/// cacheable, guard-bracketed), or a `ROS_E_*` code reinterpreted into the
+/// result.
+///
+/// The kernel zeroes the region before it is visible (no cross-process
+/// leak), records the caller as its owner, and grants the caller the matching
+/// per-region device resource so it may forward the region onto a child node
+/// it publishes — never ambient authority. Gated kernel-side on `ROS_CAP_SHM`;
+/// a zero length, frame exhaustion, or a build with no shared-memory facility
+/// fails closed.
+#[must_use]
+#[export_name = "ros_sys_shm_create"]
+pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
+    // SAFETY: see `sys_dma_alloc`; the kernel validates the `id_out` pointer
+    // against the caller's address space before writing the region id to it.
+    unsafe { raw_syscall(NUM_SHM_CREATE, [len as u64, ptr_arg(id_out), 0, 0, 0, 0]) }
+}
+
+/// `shm_map`: map a shared-memory region the kernel has **granted** the
+/// calling task into its own address space (`SyscallNumber::SHM_MAP`).
+/// Returns the base **user virtual address** the region is mapped at, or a
+/// `ROS_E_*` code reinterpreted into the result.
+///
+/// `handle` is an unforgeable, kernel-issued device-resource grant the driver
+/// received for the matched hardware-tree node it binds. The kernel resolves
+/// it against the calling task, confirms it names a shared region, and maps
+/// that region's existing frames into the caller's own address space; a
+/// forged/non-owned handle, a wrong-kind grant, a torn-down region, or a build
+/// with no shared-memory facility fails closed. Gated kernel-side on
+/// `ROS_CAP_SHM`.
+#[must_use]
+#[export_name = "ros_sys_shm_map"]
+pub extern "C" fn sys_shm_map(handle: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel resolves the grant handle against the caller and returns the
+    // mapped region's base virtual address.
+    unsafe { raw_syscall(NUM_SHM_MAP, [handle, 0, 0, 0, 0, 0]) }
+}
+
+/// `shm_unmap`: release the shared-memory mapping of `len` bytes based at
+/// `base` the calling task established with [`sys_shm_create`] or
+/// [`sys_shm_map`] (`SyscallNumber::SHM_UNMAP`). Returns a `ROS_E_*` code.
+///
+/// The kernel validates the `(base, len)` names a shared mapping of the
+/// calling task, tears down only that mapping's page-table entries, and drops
+/// the caller's reference to the region; the region's frames are zeroed and
+/// freed when the owner and every grantee have released it. Needs no
+/// capability (the `mem_unmap` posture). A `(base, len)` that does not name a
+/// live shared mapping of the caller fails closed.
+#[must_use]
+#[export_name = "ros_sys_shm_unmap"]
+pub extern "C" fn sys_shm_unmap(base: u64, len: usize) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates the `(base, len)` range
+    // against the caller's address space before unmapping it.
+    unsafe { ret_i32(raw_syscall(NUM_SHM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,6 +1007,9 @@ mod tests {
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
+        (NUM_SHM_CREATE, "shm_create", 2),
+        (NUM_SHM_MAP, "shm_map", 1),
+        (NUM_SHM_UNMAP, "shm_unmap", 2),
     ];
 
     #[test]
@@ -1340,6 +1407,40 @@ mod tests {
         });
         assert_eq!(number, NUM_MEM_UNMAP);
         assert_eq!(args[0], 0x4000);
+        assert_eq!(args[1], 0x2000);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_create_marshals_len_and_id_out_pointer() {
+        let mut id = 0u64;
+        let ptr = core::ptr::addr_of_mut!(id).cast::<c_void>();
+        let (number, args) = capture(0x9000_0000, || {
+            assert_eq!(sys_shm_create(0x2000, ptr), 0x9000_0000);
+        });
+        assert_eq!(number, NUM_SHM_CREATE);
+        assert_eq!(args[0], 0x2000);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_map_marshals_the_grant_handle() {
+        let (number, args) = capture(0x9000_4000, || {
+            assert_eq!(sys_shm_map(0x2A), 0x9000_4000);
+        });
+        assert_eq!(number, NUM_SHM_MAP);
+        assert_eq!(args[0], 0x2A);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_unmap_marshals_base_and_len() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_shm_unmap(0x9000_4000, 0x2000), 0);
+        });
+        assert_eq!(number, NUM_SHM_UNMAP);
+        assert_eq!(args[0], 0x9000_4000);
         assert_eq!(args[1], 0x2000);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }

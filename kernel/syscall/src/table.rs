@@ -853,6 +853,66 @@ pub trait SyscallHandlers {
     fn msi_alloc(&self, _caller: &CallerContext<'_>, _out: u64, _out_len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Create a cross-process shared-memory region the caller owns and maps,
+    /// and may then grant to another task (`plans/USB.md`).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SHM`] and that `id_out` is a non-null `UserPtr`. The
+    /// implementation allocates a physically-contiguous, **zeroed** block of
+    /// RAM the kernel owns, maps it into the caller's own address space,
+    /// records the region against the caller as its owner, **grants the
+    /// calling task a device resource for the region** (so it may forward it
+    /// onto a child node it publishes), writes the kernel-minted region id to
+    /// `id_out` through the validated boundary, and returns the base user
+    /// virtual address. A zero length, frame exhaustion, or a build with no
+    /// facility wired fails closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn shm_create(&self, _caller: &CallerContext<'_>, _len: usize, _id_out: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Map a shared-memory region the kernel has granted the calling task
+    /// into its own address space (`plans/USB.md`).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::SHM`]. `handle` is an unforgeable, kernel-issued
+    /// device-resource grant the driver received for the hardware-tree node
+    /// it binds; the implementation resolves it **against the calling task**
+    /// (rejecting forgery exactly as [`Self::mmio_map`]), confirms the grant
+    /// names a shared region, maps that region's existing kernel-owned frames
+    /// into the caller's own address space, accounts the mapping so the
+    /// frames are not freed while the caller still maps them, and returns its
+    /// base user virtual address. An unknown or non-owned handle, a grant of
+    /// the wrong kind, or a torn-down region fails closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn shm_map(&self, _caller: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Release a shared-memory mapping the calling task established with
+    /// [`Self::shm_create`] or [`Self::shm_map`] (`plans/USB.md`).
+    ///
+    /// The call needs no capability (it releases only the caller's own
+    /// mapping, the [`SyscallNumber::MEM_UNMAP`] posture). The implementation
+    /// validates `(base, len)` names a live shared mapping of the caller,
+    /// tears down only that mapping's page-table entries, and drops the
+    /// caller's reference to the region; the region's frames are zeroed and
+    /// freed at its last reference. A `(base, len)` that does not name a live
+    /// shared mapping fails closed with [`Errno::NotFound`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn shm_unmap(&self, _caller: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1184,6 +1244,25 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[1] is its capacity in bytes.
                 let out_len = decode_len(args.0[1])?;
                 self.handlers.msi_alloc(caller, args.0[0], out_len)
+            }
+            SyscallNumber::SHM_CREATE => {
+                // args[0] is the region length in bytes; args[1] is the
+                // non-null `id_out` `UserPtr` the handler writes the region
+                // id to (dispatcher-checked).
+                let len = decode_len(args.0[0])?;
+                self.handlers.shm_create(caller, len, args.0[1])
+            }
+            SyscallNumber::SHM_MAP => {
+                // args[0] is an opaque `Handle` u64; the handler resolves it
+                // against the calling task and the grant table (forgery +
+                // ownership are checked there).
+                self.handlers.shm_map(caller, args.0[0])
+            }
+            SyscallNumber::SHM_UNMAP => {
+                // args[0] is the base virtual address the map returned; args[1]
+                // is its length in bytes.
+                let len = decode_len(args.0[1])?;
+                self.handlers.shm_unmap(caller, args.0[0], len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1785,6 +1864,23 @@ mod tests {
             // controller / device-resource grant here.
             Ok(out_len as u64)
         }
+
+        fn shm_create(&self, _c: &CallerContext<'_>, len: usize, _id_out: u64) -> SyscallResult {
+            self.record("shm_create");
+            // Echo the length so the reachability test can assert the
+            // dispatcher decoded the argument without wiring a real region.
+            Ok(len as u64)
+        }
+
+        fn shm_map(&self, _c: &CallerContext<'_>, handle: u64) -> SyscallResult {
+            self.record("shm_map");
+            Ok(handle)
+        }
+
+        fn shm_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+            self.record("shm_unmap");
+            Ok(0)
+        }
     }
 
     #[test]
@@ -1813,6 +1909,7 @@ mod tests {
                 CapabilityId::SYSINFO_HW,
                 CapabilityId::LOG_EMIT,
                 CapabilityId::HW_EMIT,
+                CapabilityId::SHM,
             ],
             &sink,
         );

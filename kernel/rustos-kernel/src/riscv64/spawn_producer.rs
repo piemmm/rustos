@@ -94,6 +94,11 @@ const ANON_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET
 /// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
 /// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
 const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
+/// Base of a spawned child's cross-process shared-memory virtual region:
+/// the retained [`LiveSpace`]'s shared-window allocator maps each granted
+/// `shm_map` region out of `[SHARED_WINDOW_BASE, SHARED_WINDOW_BASE +
+/// SHARED_WINDOW_PAGES * 4 KiB)`.
+const SHARED_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -108,7 +113,8 @@ const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 /// and the spawn fails closed rather than building tables
 /// the walk cannot reach — the same window the child's image data frames
 /// already use.
-static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+pub static SPAWN_TABLE_PHYSMAP: DirectPhysMap =
+    DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's Sv39 hierarchy is built from.
@@ -329,6 +335,8 @@ impl ProcessSpawn for RiscvProcessSpawn {
                 spawn_layout::ANON_WINDOW_PAGES,
                 VirtAddr::new(DMA_WINDOW_BASE),
                 spawn_layout::DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                spawn_layout::SHARED_WINDOW_PAGES,
             )
             .ok()
             .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),

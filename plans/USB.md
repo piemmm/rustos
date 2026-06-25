@@ -277,6 +277,39 @@ the live controller behaviour is host- and CI-proven first.
     both hold the class capability. Covered by host unit tests (ABI
     kind/`covers`/round-trip; kernel `call_create` grant-mint, `ipc_call`
     denied-without-grant, and round-trips-with-grant).
+- **U3a2 — cross-process shared-memory primitive `[x]` (DONE).** The URB data
+  path needs a shared-memory buffer the class driver owns and the HCD maps
+  (§1.3); RustOS had only per-process `mem_map`. The kernel now provides a
+  generic, capability- and grant-scoped shared-memory primitive (Option B:
+  the buffer is plain cacheable RAM with **no** DMA properties, so a class
+  driver holds zero DMA authority and the HCD will bounce-copy into its own
+  DMA ring — smallest attack surface, no IOMMU coupling):
+  - `CapabilityId::SHM` (29) gates participation; `HwResourceKind::Shared`
+    (6) + `HwResource::shared(id)` is the per-region grant (exact-id `covers`
+    like the endpoint grant, required capability `SHM`). Three syscalls
+    `shm_create` (40) / `shm_map` (41) / `shm_unmap` (42); C header
+    regenerated (`ROS_CAP_SHM`, `ros_sys_shm_*`).
+  - `shm_create` allocates a physically-contiguous, **zeroed** kernel-owned
+    region, maps it cacheable `RW`/non-exec/guard-bracketed into the caller's
+    own live space (a fourth per-task window beside MMIO/anon/DMA, reusing the
+    guarded-window mechanism with cacheable flags — `MmioWindowMap::
+    map_cacheable_into`), records it against the owner, and mints the owner
+    `HwResource::shared(id)` so it can forward the region onto an emitted node
+    (`hw_emit_node` coverage unchanged). `shm_map` resolves the inherited
+    grant against the calling task (forgery/wrong-kind fail closed), maps the
+    *same* frames into the grantee, and refcounts. The region's frames are
+    **scrubbed and freed only at the last reference** (`shm_unmap`, exit, or
+    the U1 driver-unload teardown), so two class drivers behind one controller
+    cannot reach each other's buffer and a hot-removed driver's frames are
+    zero-on-freed even though the teardown runs in the device manager's
+    context (the facility scrubs through the arch direct map, new
+    `KernelArch::direct_phys_map`). Mechanism: `kernel/core` `SharedRegion`
+    registry (`sharedreg`, facility-as-parameter — no global) + the
+    `SharedMemFacility` seam over `LiveSharedMem`; per-arch direct-map wiring
+    in all three ports. Covered by host unit tests (ABI kind/`covers`/round-
+    trip; `LiveSpace::map_shared`/`unmap_shared`; sharedreg refcount + last-
+    ref free + reclaim + fail-closed; shm handler grant-mint/id-write,
+    forged/wrong-kind, no-facility).
 - **U3b — xHCI HCD process `[ ]`.** Turn `drivers/bus/usb/xhci` into a `Run`
   binary that binds `usb,xhci`, owns the controller (the bring-up code moves
   from `usb_kbd` unchanged — it is already platform-neutral), enumerates,
@@ -284,15 +317,11 @@ the live controller behaviour is host- and CI-proven first.
   (U3a), serves the URB transport endpoint, and watches root-hub PORTSC →
   `hw_remove_node` on disconnect. Host stub + the metal acceptance for live
   enumerate/emit.
-  - **Prerequisite — cross-process shared memory for URB data buffers.** The
-    URB names a shared-memory buffer (`UrbRequest::buffer`) the class driver
-    owns and the HCD maps for the transfer (§1.3); RustOS has no cross-process
-    shared-memory primitive yet (only per-process `mem_map` anonymous memory
-    and the kernel-copied call request/reply payloads). The HCD's data path
-    needs one (a capability-gated shared-memory IPC object both the class
-    driver and the HCD map, minted from the matched node like the endpoint
-    grant), which is its own kernel increment. Build it before, or as part of,
-    U3b — it must not be faked or busy-polled (§2.1, §2.23).
+  - The shared-memory buffer the class driver owns and the HCD maps is the
+    U3a2 primitive (`shm_create`/`shm_map`); the HCD bounce-copies between
+    that buffer and its own DMA-granted ring, so the class driver holds no
+    DMA grant. `lib/rt`/`lib/drvrt` wrappers for `shm_*` land with this
+    increment's consumer (none today, so they are not added speculatively).
   - Because `usb_kbd` binds the `usb,xhci` controller node today
     (`rustos_hid::KEYBOARD_BIND_KEYS` matches `XHCI_COMPATIBLE`), U3b and U4
     are coupled: a controller node cannot have two matching drivers, so the
@@ -305,12 +334,12 @@ the live controller behaviour is host- and CI-proven first.
   detach → `usb_kbd` unloaded, controller stays up; re-attach → autoloads
   again. Retire any transitional scaffolding and update `PLAN.md` / §3 / §16.4.
 
-U1, U2, and U3a (the unload mechanism, the URB transport ABI/`lib/usb`
-server-client, and the per-endpoint grant mechanism) are landed and host-/CI-
-proven. U3b (the live HCD process) is the next increment; its open
-prerequisite is the cross-process shared-memory primitive for URB data
-buffers, and it lands together with the U4 `usb_kbd` rebind (they cannot both
-bind the controller node).
+U1, U2, U3a, and U3a2 (the unload mechanism, the URB transport ABI/`lib/usb`
+server-client, the per-endpoint grant mechanism, and the cross-process
+shared-memory primitive) are landed and host-/CI-proven. U3b (the live HCD
+process) is the next increment; it builds on the U3a endpoint grant + the
+U3a2 shared-memory buffer, and lands together with the U4 `usb_kbd` rebind
+(they cannot both bind the controller node).
 
 ---
 

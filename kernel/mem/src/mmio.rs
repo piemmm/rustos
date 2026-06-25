@@ -219,6 +219,58 @@ impl MmioWindowMap {
         phys_base: u64,
         len: usize,
     ) -> Result<MmioRegion, MmioError> {
+        // Device registers: caching disabled, never executable.
+        self.map_with_flags(
+            space,
+            phys_base,
+            len,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::NO_CACHE | MapFlags::USER,
+        )
+    }
+
+    /// Map `len` bytes beginning at `phys_base` into the borrowed `space` as
+    /// **cacheable** `RW|USER` (normal, write-back) memory, guard-bracketed,
+    /// returning the [`MmioRegion`].
+    ///
+    /// Identical guard-bracketed slot mechanism as [`Self::map_into`], but
+    /// the data pages are mapped cacheable rather than device-strongly-
+    /// ordered, because the physical frames are ordinary kernel RAM (a
+    /// cross-process shared-memory region), not device registers. The frames
+    /// are **not** owned by this allocator: they were allocated elsewhere
+    /// (the shared-region registry) and this only installs page-table
+    /// entries for them, so [`Self::unmap_at`] / a space drop releases only
+    /// the mapping, never the frames. Like [`Self::map_into`] it writes
+    /// nothing to the frames (the registry zeroed them on allocation).
+    ///
+    /// # Errors
+    ///
+    /// The same set as [`Self::map_into`].
+    pub fn map_cacheable_into<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<MmioRegion, MmioError> {
+        self.map_with_flags(
+            space,
+            phys_base,
+            len,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+        )
+    }
+
+    /// The shared guard-bracketed mapping mechanism behind [`Self::map_into`]
+    /// (device, caching-disabled) and [`Self::map_cacheable_into`] (shared
+    /// RAM, cacheable): the only difference between the two is the data-page
+    /// `data_flags`, so there is one definition of the slot/guard/rollback
+    /// logic, never two.
+    fn map_with_flags<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        phys_base: u64,
+        len: usize,
+        data_flags: MapFlags,
+    ) -> Result<MmioRegion, MmioError> {
         if len == 0 {
             return Err(MmioError::InvalidRegion);
         }
@@ -261,19 +313,17 @@ impl MmioWindowMap {
                     return Err(MmioError::PageTable(e));
                 }
             };
-            if let Err(e) = space.map(
-                page,
-                frame,
-                MapFlags::READ | MapFlags::WRITE | MapFlags::NO_CACHE | MapFlags::USER,
-            ) {
+            if let Err(e) = space.map(page, frame, data_flags) {
                 self.rollback_partial_map(space, first_data_slot, i);
                 return Err(MmioError::PageTable(e));
             }
         }
 
-        // No zeroing here: these are the device's own registers, not
-        // RAM the mapper owns. Writing them on map would clobber live
-        // hardware state.
+        // No zeroing here: the mapper does not own these frames. For a
+        // device window they are the device's own registers (writing them
+        // on map would clobber live hardware state); for a shared-memory
+        // region the owning registry already zeroed the frames on
+        // allocation. The mapper only installs page-table entries.
         for s in leading_guard_slot..=trailing_guard_slot {
             self.slot_used[s] = true;
         }
@@ -308,9 +358,30 @@ impl MmioWindowMap {
         space: &mut AddressSpace<P>,
         region: MmioRegion,
     ) -> Result<(), MmioError> {
+        self.unmap_at(space, region.virt)
+    }
+
+    /// Tear down the mapping based at `virt` (the base [`MmioRegion::virt`] a
+    /// prior [`Self::map_into`] / [`Self::map_cacheable_into`] returned) from
+    /// the borrowed `space`, keyed by its base virtual address alone.
+    ///
+    /// The shared-memory map path holds only the base virtual address it
+    /// handed userland (not the whole opaque [`MmioRegion`]), so it releases
+    /// by base; [`Self::unmap_from`] is the by-region wrapper over this.
+    ///
+    /// # Errors
+    ///
+    /// * [`MmioError::UnknownRegion`] — `virt` is not a live mapping of this
+    ///   allocator (covers double-unmap).
+    /// * [`MmioError::PageTable`] — propagated from [`AddressSpace::unmap`].
+    pub fn unmap_at<P: PageTable>(
+        &mut self,
+        space: &mut AddressSpace<P>,
+        virt: VirtAddr,
+    ) -> Result<(), MmioError> {
         let record = self
             .regions
-            .remove(&region.virt.as_u64())
+            .remove(&virt.as_u64())
             .ok_or(MmioError::UnknownRegion)?;
         let data_pages = record.data_pages;
         let first_data_slot = record.leading_guard_slot + 1;

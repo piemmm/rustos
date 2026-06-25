@@ -286,6 +286,21 @@ impl KernelArch for RiscvBinArch {
         // this slice (the default no-op).
         arm_preemption(self.arch.timebase_hz());
     }
+
+    fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
+        // The identity direct map (`virtual == physical` over the configured
+        // `[0, IDENTITY_GIB GiB)` window, covering RAM) the shared-memory
+        // facility scrubs region frames through. On a host build there is no
+        // S-mode RAM to map, so none is offered and `shm_*` stays fail-closed.
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            Some(&crate::riscv64::spawn_producer::SPAWN_TABLE_PHYSMAP)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+        {
+            None
+        }
+    }
 }
 
 // SAFETY-INVARIANT: `RiscvBinArch::halt` returns the bottom type. The

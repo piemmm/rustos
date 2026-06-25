@@ -305,6 +305,18 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn shm_create(&self, _c: &CallerContext<'_>, _len: usize, _id_out: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn shm_map(&self, _c: &CallerContext<'_>, _handle: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn shm_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
 }
 
 /// The capabilities the `abi-v1` table actually gates on, in ascending id

@@ -127,6 +127,11 @@ const ANON_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET;
 /// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
 /// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
 const DMA_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
+/// Base of PID 1's cross-process shared-memory virtual region: the retained
+/// [`LiveSpace`]'s shared-window allocator maps each granted `shm_map`
+/// region out of `[SHARED_WINDOW_BASE, SHARED_WINDOW_BASE +
+/// SHARED_WINDOW_PAGES * 4 KiB)`.
+const SHARED_WINDOW_BASE: u64 = INIT_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
 
 /// Page-table pool backing PID 1's PML4 hierarchy.
 ///
@@ -332,6 +337,8 @@ impl InitSpawn for X86_64InitSpawn {
                 spawn_layout::ANON_WINDOW_PAGES,
                 VirtAddr::new(DMA_WINDOW_BASE),
                 spawn_layout::DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                spawn_layout::SHARED_WINDOW_PAGES,
             )
             .ok()
             .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),

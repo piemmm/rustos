@@ -23,10 +23,13 @@
 //! [`Errno::NotImplemented`] rather than touching another task's memory.
 
 use rustos_abi::{Errno, MapFlags};
-use rustos_kernel_mem::{page_count_for, AnonError, DmaError, LiveSpaceError, MmioError};
+use rustos_kernel_mem::{
+    page_count_for, AllocError, AnonError, DmaError, Frame, FrameAllocator, LiveSpaceError,
+    MmioError, PhysAddr, PhysMap, MAX_ORDER, PAGE_SIZE,
+};
 use rustos_kernel_sched_api::SchedulerArch;
 
-use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility};
+use crate::devres::{DmaAllocFacility, DmaCarve, MmioMapFacility, SharedMemFacility};
 use crate::kthread::with_current_live_space;
 use crate::memmap::MemMap;
 
@@ -77,6 +80,40 @@ fn dma_errno(err: DmaError) -> Errno {
         // bad-address error.
         _ => Errno::BadAddress,
     }
+}
+
+/// Fold an [`AllocError`] onto a stable [`Errno`]: exhaustion is
+/// [`Errno::OutOfMemory`] (deterministic OOM), a too-large order is
+/// [`Errno::OutOfRange`], a zero-size request is [`Errno::LengthOutOfRange`],
+/// and any other (out-of-range frame/address) fails closed to
+/// [`Errno::OutOfRange`].
+fn alloc_errno(err: AllocError) -> Errno {
+    match err {
+        AllocError::OutOfMemory => Errno::OutOfMemory,
+        AllocError::ZeroSize => Errno::LengthOutOfRange,
+        // `SizeUnsupported`, `OutOfRange`, and any future variant fail closed
+        // to an out-of-range error.
+        _ => Errno::OutOfRange,
+    }
+}
+
+/// The smallest buddy order whose `2^order` frames cover `pages`, or an
+/// [`Errno`] if `pages` is zero or exceeds the largest allocatable block.
+fn order_for(pages: u64) -> Result<u32, Errno> {
+    if pages == 0 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    // `2^order >= pages`: the bit width of `pages - 1` (zero for a single
+    // page, where `pages - 1 == 0`).
+    let order = if pages == 1 {
+        0
+    } else {
+        u64::BITS - (pages - 1).leading_zeros()
+    };
+    if order > MAX_ORDER {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(order)
 }
 
 /// Fold a [`LiveSpaceError`] onto a stable [`Errno`].
@@ -221,6 +258,126 @@ where
     }
 }
 
+/// The production shared-memory facility: allocates, zeroes, maps, and frees
+/// cross-process shared-memory regions over the kernel frame allocator and
+/// the calling task's own live address space (`plans/USB.md`).
+///
+/// `arch` is read for the current CPU (the slot the calling task's live
+/// space the *mapping* lands in is published on, exactly like
+/// [`LiveMmioMap`]); `frames` is the kernel allocator the region's
+/// physically-contiguous backing is drawn from and returned to; `physmap` is
+/// the kernel direct map the region's frames are scrubbed through on
+/// allocation and on free. Scrubbing through the direct map (not a user
+/// mapping) is what makes the last-reference free's zero-on-free hold even
+/// when the task whose teardown drops it is a kernel thread with no live
+/// address space (a hot-removed driver torn down by the device manager).
+pub struct LiveSharedMem<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    arch: &'static A,
+    frames: &'static FrameAllocator,
+    physmap: &'static (dyn PhysMap + Sync),
+}
+
+impl<A> LiveSharedMem<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    /// Build the producer over the `'static` arch handle, the kernel frame
+    /// allocator, and the kernel direct physical map.
+    ///
+    /// `physmap` is the kernel-privileged view of all RAM (identity on
+    /// aarch64 / riscv64, higher-half on x86_64); the facility scrubs a
+    /// region's frames through it on allocation and on free, independent of
+    /// any user mapping, so the zero-on-free guarantee holds even when the
+    /// task whose teardown frees the region's last reference is a kernel
+    /// thread with no live address space (a driver-store unload).
+    #[must_use]
+    pub const fn new(
+        arch: &'static A,
+        frames: &'static FrameAllocator,
+        physmap: &'static (dyn PhysMap + Sync),
+    ) -> Self {
+        Self {
+            arch,
+            frames,
+            physmap,
+        }
+    }
+
+    /// Scrub `pages` frames beginning at `phys_base` through the kernel
+    /// direct map. A frame the map cannot reach is left untouched (best
+    /// effort, never a panic) — but it cannot become user-visible
+    /// un-scrubbed, because every region is also scrubbed on allocation.
+    fn scrub(&self, phys_base: u64, pages: u64) {
+        let Some(len) = usize::try_from(pages)
+            .ok()
+            .and_then(|p| p.checked_mul(PAGE_SIZE))
+        else {
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        if let Some(ptr) = self.physmap.translate(PhysAddr::new(phys_base), len) {
+            // SAFETY: `translate` returned a pointer valid for `len` bytes of
+            // the kernel direct map. The frames are the region's own backing,
+            // owned by the registry and not mapped writable anywhere else at
+            // scrub time (allocation has not yet handed them out / free has
+            // dropped the last mapping), so no concurrent access aliases them.
+            unsafe {
+                core::ptr::write_bytes(ptr.as_ptr(), 0, len);
+            }
+        }
+    }
+}
+
+impl<A> SharedMemFacility for LiveSharedMem<A>
+where
+    A: SchedulerArch + Send + Sync + 'static,
+{
+    fn alloc_region(&self, pages: u64) -> Result<(u64, u32), Errno> {
+        let order = order_for(pages)?;
+        // Allocate the physically-contiguous backing block the region owns,
+        // then scrub it before it can become user-visible (no cross-process
+        // leak). Scrubbing through the kernel direct map needs no user
+        // mapping, so it is robust in every context.
+        let frame = self.frames.alloc_order(order).map_err(alloc_errno)?;
+        let phys_base = frame.start().as_u64();
+        self.scrub(phys_base, pages);
+        Ok((phys_base, order))
+    }
+
+    fn map_region(&self, phys_base: u64, pages: u64) -> Result<u64, Errno> {
+        let len = usize::try_from(pages)
+            .ok()
+            .and_then(|p| p.checked_mul(PAGE_SIZE))
+            .ok_or(Errno::OutOfRange)?;
+        let cpu = self.arch.current_cpu();
+        with_current_live_space(cpu, |space| space.map_shared(phys_base, len))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
+
+    fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno> {
+        let cpu = self.arch.current_cpu();
+        with_current_live_space(cpu, |space| space.unmap_shared(base, len))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
+    }
+
+    fn free_region(&self, phys_base: u64, order: u32, pages: u64) {
+        // Scrub before returning the frames to the allocator (zero-on-free)
+        // through the kernel direct map, then free the buddy block. Robust in
+        // every context, including a kernel-thread teardown with no live
+        // address space.
+        self.scrub(phys_base, pages);
+        let frame = Frame::containing(PhysAddr::new(phys_base));
+        let _ = self.frames.free_order(frame, order);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +457,23 @@ mod tests {
                     cpu_va: 0xD000_2000,
                     phys_base: DMA_PHYS,
                 }),
+            }
+        }
+
+        fn map_shared(&mut self, _phys_base: u64, _len: usize) -> Result<u64, LiveSpaceError> {
+            // The shared-memory producer's map/unmap routing is exercised at
+            // the syscall-handler level and end-to-end in QEMU; this double
+            // only satisfies the trait for the other producers' tests.
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(0x9000_5000),
+            }
+        }
+
+        fn unmap_shared(&mut self, _base_va: u64, _len: usize) -> Result<(), LiveSpaceError> {
+            match self.next.take() {
+                Some(err) => Err(err),
+                None => Ok(()),
             }
         }
 

@@ -194,6 +194,30 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// Hand the kernel core the architecture's **direct physical map** — the
+    /// kernel-privileged view through which it can read and write any RAM
+    /// frame by physical address — so the shared-memory facility can scrub a
+    /// region's frames on allocation and on free (`plans/USB.md`; the
+    /// zero-on-free guarantee).
+    ///
+    /// The map is irreducibly architecture-specific: the aarch64 / riscv64
+    /// ports identity-map RAM (`virtual == physical`), while x86_64 maps it
+    /// into the higher half at a fixed offset, so — like
+    /// [`Self::msi_alloc_facility`] — the port supplies the concrete map and
+    /// the kernel core installs it. The reference must be `'static` and is
+    /// read once, during [`crate::Phase::Syscall`].
+    ///
+    /// # Default
+    ///
+    /// The default returns [`None`]: a port that wires no direct map (the
+    /// `TestArch` mock, `wasm32`) leaves the handler's fail-closed
+    /// [`crate::devres::NullSharedMemFacility`] in place, so `shm_*` return
+    /// [`rustos_abi::Errno::NotImplemented`].
+    #[must_use]
+    fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
+        None
+    }
+
     /// Hand the architecture port a `'static` reference to the
     /// kernel-wide [`IrqTable`] once [`crate::Phase::Irq`] has
     /// constructed it.

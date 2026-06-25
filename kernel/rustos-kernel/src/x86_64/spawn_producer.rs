@@ -109,6 +109,11 @@ const ANON_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET
 /// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
 /// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
 const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
+/// Base of a spawned child's cross-process shared-memory virtual region:
+/// the retained [`LiveSpace`]'s shared-window allocator maps each granted
+/// `shm_map` region out of `[SHARED_WINDOW_BASE, SHARED_WINDOW_BASE +
+/// SHARED_WINDOW_PAGES * 4 KiB)`.
+const SHARED_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -126,6 +131,17 @@ const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 /// spawn fails closed — the same window the child's
 /// image data frames resolve under.
 static SPAWN_TABLE_PHYSMAP: DirectPhysMap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+
+/// The higher-half kernel direct map (`KERNEL_VMA_BASE + phys`, the same
+/// `[KERNEL_VMA_BASE, KERNEL_VMA_BASE + PHYSMAP_SPAN)` window the spawn path
+/// writes a child's image through) the kernel core hands the shared-memory
+/// facility to scrub region frames through (`plans/USB.md`).
+///
+/// Unlike [`SPAWN_TABLE_PHYSMAP`] (the low identity window used only for the
+/// page-table walk), this is the map through which the kernel reaches *any*
+/// RAM frame the allocator hands out, so it is the correct view for the
+/// region zero-on-free scrub.
+pub static SHM_PHYSMAP: DirectPhysMap = DirectPhysMap::new(KERNEL_VMA_BASE, PHYSMAP_SPAN);
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's PML4 hierarchy is built from.
@@ -356,6 +372,8 @@ impl ProcessSpawn for X86_64ProcessSpawn {
                 spawn_layout::ANON_WINDOW_PAGES,
                 VirtAddr::new(DMA_WINDOW_BASE),
                 spawn_layout::DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                spawn_layout::SHARED_WINDOW_PAGES,
             )
             .ok()
             .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),

@@ -183,6 +183,43 @@ pub trait LiveUserSpace: Send {
     /// addressing-limit exceeded, no virtual slot, …).
     fn alloc_dma(&mut self, len: usize, addr_limit: u64) -> Result<DmaMapping, LiveSpaceError>;
 
+    /// Map `len` bytes of an existing, kernel-owned, physically-contiguous
+    /// **shared-memory region** beginning at `phys_base` into this space as
+    /// cacheable `RW|USER` (never executable), guard-bracketed, returning the
+    /// kernel-chosen base user virtual address.
+    ///
+    /// Unlike [`Self::map_device_window`] the frames are ordinary RAM (mapped
+    /// cacheable, not device-ordered); unlike [`Self::alloc_dma`] the frames
+    /// are **not** allocated or owned by this space \u2014 they belong to the
+    /// shared-region registry, which zeroed them on allocation and frees them
+    /// only when the owner and every grantee have released the region. This
+    /// installs page-table entries only, so a space drop or
+    /// [`Self::unmap_shared`] releases the *mapping* without touching the
+    /// frames (a second process may still map them).
+    ///
+    /// The producer has already resolved and owner-checked the per-region
+    /// grant the region comes from; this only performs the page-table
+    /// mechanism.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`] (no free
+    /// virtual slot, page-table refusal, \u2026) \u2014 the shared mapping reuses the
+    /// guarded-window mechanism.
+    fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
+
+    /// Release the shared-region mapping based at `base_va` from this space,
+    /// tearing down only its page-table entries (the registry owns the
+    /// frames). `len` is advisory \u2014 the allocator releases exactly the pages
+    /// it recorded for `base_va`.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] \u2014 [`MmioError::UnknownRegion`] if `base_va`
+    /// does not name a live shared mapping of this space (fail closed), or a
+    /// page-table error.
+    fn unmap_shared(&mut self, base_va: u64, len: usize) -> Result<(), LiveSpaceError>;
+
     /// Snapshot this space's current live mappings into a `Send + Sync`
     /// [`FrozenAddressSpace`], the form the kernel-wide address-space
     /// registry holds for the user-memory copy path.
@@ -218,7 +255,13 @@ pub trait LiveUserSpace: Send {
 /// * `anon` — the per-task placement allocator that chooses the base for a
 ///   non-`FIXED` anonymous mapping out of this task's heap window;
 /// * `dma` — the per-task guarded DMA-buffer allocator that carves a
-///   physically-contiguous coherent buffer out of this task's DMA window.
+///   physically-contiguous coherent buffer out of this task's DMA window;
+/// * `shared` — the per-task guarded allocator that maps a kernel-owned
+///   cross-process shared-memory region (cacheable RAM) into this task's
+///   shared-memory window. It reuses the [`MmioWindowMap`] guarded-window
+///   mechanism (one slot/guard definition) but maps cacheable, not
+///   device-ordered, and owns no frames (the region's frames belong to the
+///   shared-region registry).
 pub struct LiveSpace<P: PageTable, M: PhysMap> {
     space: AddressSpace<P>,
     physmap: M,
@@ -226,6 +269,7 @@ pub struct LiveSpace<P: PageTable, M: PhysMap> {
     mmio: MmioWindowMap,
     anon: AnonWindowMap,
     dma: DmaWindowMap,
+    shared: MmioWindowMap,
 }
 
 impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
@@ -267,6 +311,8 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         anon_window_pages: usize,
         dma_window_base: VirtAddr,
         dma_window_pages: usize,
+        shared_window_base: VirtAddr,
+        shared_window_pages: usize,
     ) -> Result<Self, MmioError> {
         let mmio = MmioWindowMap::new(mmio_window_base, mmio_window_pages)?;
         // An anonymous-heap-window config error is the same class of fault as
@@ -278,6 +324,10 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
         // (the [`DmaWindowMap`] constructor returns its own `DmaError`).
         let dma = DmaWindowMap::new(dma_window_base, dma_window_pages)
             .map_err(|_| MmioError::InvalidMapConfig)?;
+        // The shared-memory window reuses the guarded-window mechanism, in
+        // its own virtual range distinct from the device-window range so the
+        // two never collide.
+        let shared = MmioWindowMap::new(shared_window_base, shared_window_pages)?;
         Ok(Self {
             space,
             physmap,
@@ -285,6 +335,7 @@ impl<P: PageTable, M: PhysMap> LiveSpace<P, M> {
             mmio,
             anon,
             dma,
+            shared,
         })
     }
 
@@ -391,6 +442,27 @@ where
         })
     }
 
+    fn map_shared(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {
+        // Reuse the guarded-window mechanism, mapping cacheable RAM rather
+        // than device registers. The frames are owned by the shared-region
+        // registry, so the space installs page-table entries only.
+        let region = self
+            .shared
+            .map_cacheable_into(&mut self.space, phys_base, len)?;
+        Ok(region.virt().as_u64())
+    }
+
+    fn unmap_shared(&mut self, base_va: u64, _len: usize) -> Result<(), LiveSpaceError> {
+        // Release exactly the pages the shared-window allocator recorded for
+        // this base; `len` is advisory (the record is authoritative). The
+        // frames are not freed here - they belong to the registry, which
+        // frees them when the owner and every grantee have released the
+        // region.
+        self.shared
+            .unmap_at(&mut self.space, VirtAddr::new(base_va))
+            .map_err(LiveSpaceError::from)
+    }
+
     fn freeze(&self) -> FrozenAddressSpace {
         // One freeze definition lives on `AddressSpace`; this only erases the
         // backend `P` for the registry.
@@ -421,7 +493,7 @@ mod tests {
     use crate::dma::DmaError;
     use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
     use crate::phys::SimPhysMap;
-    use crate::uaccess::copy_in;
+    use crate::uaccess::{copy_in, copy_out};
     use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
 
     extern crate std;
@@ -469,6 +541,11 @@ mod tests {
     const DMA_WINDOW_BASE: u64 = 0x1_0000_0000;
     const DMA_WINDOW_PAGES: usize = 64;
 
+    /// The user virtual window shared-memory regions are mapped into —
+    /// distinct from the device, anon, DMA, and `FIXED` regions above.
+    const SHARED_WINDOW_BASE: u64 = 0x2_0000_0000;
+    const SHARED_WINDOW_PAGES: usize = 64;
+
     fn live() -> LiveSpace<HostPageTable, SimPhysMap> {
         LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),
@@ -480,6 +557,8 @@ mod tests {
             ANON_WINDOW_PAGES,
             VirtAddr::new(DMA_WINDOW_BASE),
             DMA_WINDOW_PAGES,
+            VirtAddr::new(SHARED_WINDOW_BASE),
+            SHARED_WINDOW_PAGES,
         )
         .expect("a page-aligned, non-zero window is valid")
     }
@@ -693,6 +772,8 @@ mod tests {
                 ANON_WINDOW_PAGES,
                 VirtAddr::new(DMA_WINDOW_BASE),
                 DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                SHARED_WINDOW_PAGES,
             )
             .expect("windows are valid");
             live.alloc_dma(2 * PAGE_SIZE, 0)
@@ -707,6 +788,44 @@ mod tests {
             frames.free_frames(),
             before,
             "every DMA frame is returned to the allocator on teardown"
+        );
+    }
+
+    #[test]
+    fn map_shared_maps_a_cacheable_region_in_its_window_and_unmaps_by_base() {
+        let mut live = live();
+        // A real frame reachable through the sim direct map; map_shared only
+        // installs page-table entries (the registry owns/zeroes the frames).
+        let phys = SIM_BASE;
+        let len = 2 * PAGE_SIZE;
+        let base = live.map_shared(phys, len).expect("maps the region");
+        // The mapping lands inside the configured shared window, past the
+        // leading guard page, and clear of the DMA window below it.
+        assert!(
+            base > SHARED_WINDOW_BASE
+                && base < SHARED_WINDOW_BASE + (SHARED_WINDOW_PAGES as u64) * PAGE_SIZE as u64,
+            "shared VA lies inside the configured window, past the leading guard"
+        );
+        // The region is read/write through the CPU mapping: a write is
+        // visible on read-back through the same backing frames.
+        let sim = sim();
+        let payload = [0x5Au8; 16];
+        copy_out(live.space(), &sim, VirtAddr::new(base), &payload).expect("writable user range");
+        let mut back = [0u8; 16];
+        copy_in(live.space(), &sim, VirtAddr::new(base), &mut back).expect("readable user range");
+        assert_eq!(back, payload, "shared region round-trips reads and writes");
+        // Unmapping by base tears down the page-table entries; the frames are
+        // not freed here (the registry owns them).
+        live.unmap_shared(base, len).expect("unmaps by base");
+        assert_eq!(
+            live.space().mapped_pages(),
+            0,
+            "the shared mapping's pages are gone after unmap"
+        );
+        // A double-unmap of the same base fails closed.
+        assert!(
+            live.unmap_shared(base, len).is_err(),
+            "double-unmap of a shared region fails closed"
         );
     }
 

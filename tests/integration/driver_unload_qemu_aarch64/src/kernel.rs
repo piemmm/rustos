@@ -53,6 +53,7 @@ use rustos_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_B
 use rustos_kernel::driver_spawn_loader::{InitCtxDriverProcessSpawn, SpawnDriverLoader};
 use rustos_kernel_core::{
     AddressSpaceRegistry, InitSpawnCtx, KernelInitSpawner, NULL_PROCESS_WAIT,
+    NULL_SHARED_MEM_FACILITY,
 };
 use rustos_kernel_irq::IrqTable;
 use rustos_kernel_mem::{
@@ -365,6 +366,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.arch,
         &NULL_PROCESS_WAIT,
         sys.irq_table,
+        &NULL_SHARED_MEM_FACILITY,
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
     let args: [&[u8]; 1] = [b"drvstub"];

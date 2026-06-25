@@ -217,6 +217,21 @@ impl KernelArch for Aarch64BinArch {
         }
     }
 
+    fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
+        // The configured-identity direct map (`virtual == physical` over the
+        // discovered RAM/Device gigapages) the shared-memory facility scrubs
+        // region frames through. On a host build there is no real RAM to map,
+        // so none is offered and `shm_*` stays fail-closed.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            Some(&crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            None
+        }
+    }
+
     fn install_irq_dispatch(&self, table: &'static IrqTable) {
         // Publish the freshly built `IrqTable` and register the production
         // device-IRQ dispatcher with the arch crate's EL1 IRQ-vector seam,

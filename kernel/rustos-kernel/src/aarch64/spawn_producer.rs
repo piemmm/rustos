@@ -83,6 +83,11 @@ const ANON_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::ANON_WINDOW_OFFSET
 /// [`rustos_kernel_mem::DmaWindowMap`] carves each `dma_alloc` buffer out of
 /// `[DMA_WINDOW_BASE, DMA_WINDOW_BASE + DMA_WINDOW_PAGES·4 KiB)`.
 const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
+/// Base of a spawned child's cross-process shared-memory virtual region:
+/// the retained [`LiveSpace`]'s shared-window allocator maps each granted
+/// `shm_map` region out of `[SHARED_WINDOW_BASE, SHARED_WINDOW_BASE +
+/// SHARED_WINDOW_PAGES * 4 KiB)`.
+const SHARED_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::SHARED_WINDOW_OFFSET;
 
 /// Identity direct map the page-table frame source translates a freshly
 /// allocated frame's physical address through to a CPU-dereferenceable
@@ -103,7 +108,7 @@ const DMA_WINDOW_BASE: u64 = SHELL_USER_BIAS + spawn_layout::DMA_WINDOW_OFFSET;
 /// allocator draws from outside the window fails the translate and the
 /// spawn fails closed rather than building tables the
 /// walk cannot reach.
-struct ConfiguredIdentityPhysMap;
+pub struct ConfiguredIdentityPhysMap;
 
 impl PhysMap for ConfiguredIdentityPhysMap {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
@@ -113,7 +118,12 @@ impl PhysMap for ConfiguredIdentityPhysMap {
 
 /// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table
 /// frame source borrows.
-static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPhysMap;
+///
+/// Also handed to the kernel core as the arch direct physical map the
+/// shared-memory facility scrubs region frames through (`plans/USB.md`): it
+/// covers the same RAM the allocator draws from, so any region frame is
+/// reachable for the zero-on-free scrub.
+pub static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPhysMap;
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's stage-1 hierarchy is built from.
@@ -374,6 +384,8 @@ impl ProcessSpawn for Aarch64ProcessSpawn {
                 spawn_layout::ANON_WINDOW_PAGES,
                 VirtAddr::new(DMA_WINDOW_BASE),
                 spawn_layout::DMA_WINDOW_PAGES,
+                VirtAddr::new(SHARED_WINDOW_BASE),
+                spawn_layout::SHARED_WINDOW_PAGES,
             )
             .ok()
             .map(|live| Box::new(live) as Box<dyn LiveUserSpace + Send>),

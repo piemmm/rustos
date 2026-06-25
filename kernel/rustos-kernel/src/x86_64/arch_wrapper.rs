@@ -455,6 +455,22 @@ impl KernelArch for BinArch {
         let ticks = rdtsc.read();
         self.calibration.tsc_ticks_to_ns(ticks)
     }
+
+    fn direct_phys_map(&self) -> Option<&'static (dyn rustos_kernel_mem::PhysMap + Sync)> {
+        // The higher-half kernel direct map through which the kernel reaches
+        // any RAM frame the allocator hands out — the view the shared-memory
+        // facility scrubs region frames through. On a host build there is no
+        // ring-0 physical map, so none is offered and `shm_*` stays
+        // fail-closed.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            Some(&crate::x86_64::spawn_producer::SHM_PHYSMAP)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            None
+        }
+    }
 }
 
 // SAFETY-INVARIANT: `BinArch::halt` returns the bottom type. The

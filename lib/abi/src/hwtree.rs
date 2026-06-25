@@ -414,6 +414,15 @@ pub enum HwResourceKind {
     /// resource as its sole grant, so it can reach exactly its own
     /// interface's endpoint and nothing else (no ambient authority).
     Endpoint = 5,
+    /// A cross-process **shared-memory region** the holder may map: `base`
+    /// is the shared-region id, `len` is `1` (a single region). It is not a
+    /// memory window of fixed physical hardware but the right to map one
+    /// kernel-owned region a server created (the USB request-block transport
+    /// data buffer one host-controller driver serves per device it
+    /// enumerates, `plans/USB.md`). The matched class driver receives this
+    /// resource as its sole grant, so it can map exactly its own interface's
+    /// buffer and nothing else (no ambient authority).
+    Shared = 6,
 }
 
 impl HwResourceKind {
@@ -433,6 +442,7 @@ impl HwResourceKind {
             3 => Some(Self::Dma),
             4 => Some(Self::BusWindow),
             5 => Some(Self::Endpoint),
+            6 => Some(Self::Shared),
             _ => None,
         }
     }
@@ -453,6 +463,10 @@ impl HwResourceKind {
             // generic per-endpoint call-IPC capability; the per-endpoint
             // grant (this resource) scopes it to one endpoint id.
             Self::Endpoint => CapabilityId::IPC_ENDPOINT,
+            // Mapping a granted shared-memory region is gated by the generic
+            // shared-memory capability; the per-region grant (this resource)
+            // scopes it to one region id.
+            Self::Shared => CapabilityId::SHM,
         }
     }
 }
@@ -554,6 +568,16 @@ impl HwResource {
     #[must_use]
     pub fn endpoint(id: u64) -> Self {
         Self::new(HwResourceKind::Endpoint, id, 1, 0)
+    }
+
+    /// A cross-process shared-memory region the holder may map (`id` is the
+    /// shared-region id). The grant covers exactly the one region: a
+    /// host-controller driver mints it for itself when it creates the
+    /// region, forwards it onto the per-device node it emits, and the
+    /// autoloaded class driver inherits it as its sole reach.
+    #[must_use]
+    pub fn shared(id: u64) -> Self {
+        Self::new(HwResourceKind::Shared, id, 1, 0)
     }
 
     fn new(kind: HwResourceKind, base: u64, len: u64, flags: u32) -> Self {
@@ -713,10 +737,11 @@ impl HwResource {
             (HwResourceKind::Mmio, HwResourceKind::Mmio)
             | (HwResourceKind::Port, HwResourceKind::Port)
             | (HwResourceKind::Irq, HwResourceKind::Irq)
-            | (HwResourceKind::Endpoint, HwResourceKind::Endpoint) => {
-                // A call-endpoint grant is an untranslated `[id, id+len)`
-                // range exactly like an IRQ line range: the child endpoint
-                // must lie wholly within the parent grant.
+            | (HwResourceKind::Endpoint, HwResourceKind::Endpoint)
+            | (HwResourceKind::Shared, HwResourceKind::Shared) => {
+                // A call-endpoint or shared-region grant is an untranslated
+                // `[id, id+len)` range exactly like an IRQ line range: the
+                // child must lie wholly within the parent grant.
                 interval_contains(self.base, self.len, child.base, child.len)
             }
             // Every other kind pairing fails closed.
@@ -1390,6 +1415,10 @@ mod tests {
             HwResourceKind::Endpoint.required_capability(),
             CapabilityId::IPC_ENDPOINT
         );
+        assert_eq!(
+            HwResourceKind::Shared.required_capability(),
+            CapabilityId::SHM
+        );
     }
 
     #[test]
@@ -1408,6 +1437,28 @@ mod tests {
         assert!(!ep.covers(&HwResource::irq(0xC0FF_EE01, 1)));
         // The endpoint kind decodes from its wire discriminant.
         assert_eq!(HwResourceKind::from_u16(5), Some(HwResourceKind::Endpoint));
+    }
+
+    #[test]
+    fn shared_resource_round_trips_and_covers_only_itself() {
+        let region = HwResource::shared(0x5EED_0001);
+        assert_eq!(region.kind(), Some(HwResourceKind::Shared));
+        assert_eq!(region.base(), 0x5EED_0001);
+        assert_eq!(region.length(), 1);
+        assert_eq!(region.required_capability(), Ok(CapabilityId::SHM));
+        assert_eq!(
+            HwResource::from_bytes(&region.to_le_bytes()).unwrap(),
+            region
+        );
+        // A shared-region grant covers exactly its own id and no neighbour,
+        // and never a different resource kind.
+        assert!(region.covers(&HwResource::shared(0x5EED_0001)));
+        assert!(!region.covers(&HwResource::shared(0x5EED_0002)));
+        assert!(!region.covers(&HwResource::shared(0x5EED_0000)));
+        assert!(!region.covers(&HwResource::endpoint(0x5EED_0001)));
+        assert!(!region.covers(&HwResource::irq(0x5EED_0001, 1)));
+        // The shared kind decodes from its wire discriminant.
+        assert_eq!(HwResourceKind::from_u16(6), Some(HwResourceKind::Shared));
     }
 
     #[test]
