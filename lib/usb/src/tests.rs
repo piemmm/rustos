@@ -3003,13 +3003,15 @@ fn describe_device_emits_the_hid_child_node() {
     let emitted = node.match_keys()[0];
     assert_eq!(emitted, HwMatchKey::usb(0x046D, 0xC077, 0x03_01_01));
 
-    // The generic HID boot-keyboard bind key (`usb_hid::BIND_KEYS`)
-    // resolves against the emitted node by class (vendor/product
-    // wildcard), exactly as `devmgr` will.
-    let keyboard_key = rustos_drv_input_usb_hid::BIND_KEYS[0].key;
+    // A HID boot-keyboard class bind key (HID class `0x03_01_01`, the key the
+    // `usb_kbd` class driver carries) resolves against the emitted node by
+    // class (vendor/product wildcard), exactly as `devmgr` will. Constructed
+    // inline so this protocol crate does not depend on a concrete driver.
+    let keyboard_key = HwMatchKey::usb(0, 0, 0x03_01_01);
     assert!(keyboard_key.matches(&emitted));
-    // A boot-mouse bind key must not bind a keyboard interface.
-    let mouse_key = rustos_drv_input_usb_hid::BIND_KEYS[1].key;
+    // A boot-mouse bind key (HID class `0x03_01_02`) must not bind a keyboard
+    // interface.
+    let mouse_key = HwMatchKey::usb(0, 0, 0x03_01_02);
     assert!(!mouse_key.matches(&emitted));
 }
 

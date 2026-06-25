@@ -1,7 +1,14 @@
 //! Unit tests for the URB transport seam: a control-IN and an interrupt-IN
-//! round-trip through the client → `serve_urb` → mock engine path, and the
-//! fail-closed validation `serve_urb` applies before the engine is ever
-//! touched.
+//! round-trip through the client → `drive_urb`/`frame_completion` → mock
+//! engine path, and the fail-closed validation `drive_urb` applies before the
+//! engine is ever touched.
+//!
+//! The host double is *synchronous* (an in-process call cannot wait for a
+//! controller interrupt), so it maps `drive_urb`'s asynchronous `Ok(None)`
+//! ("interrupt-IN report not arrived yet") to a retryable
+//! [`Errno::WouldBlock`] completion. In the live HCD that same `Ok(None)`
+//! holds the caller's URB call outstanding until the completion interrupt
+//! fires (`plans/USB.md` §1.1).
 
 extern crate alloc;
 
@@ -10,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use super::{serve_urb, UrbCall, UrbClient, UrbEngine};
+use super::{drive_urb, frame_completion, UrbCall, UrbClient, UrbEngine};
 use rustos_abi::usb_urb::{
     UrbRequest, UsbDirection, UsbTransferType, URB_COMPLETION_LEN, URB_REQUEST_LEN,
 };
@@ -63,9 +70,10 @@ impl UrbEngine for MockEngine {
     }
 }
 
-/// An in-process [`UrbCall`] that routes a URB straight into [`serve_urb`]
-/// over a shared buffer — the host stand-in for the kernel IPC call the class
-/// driver issues. The shared buffer is the single memory both sides see.
+/// An in-process [`UrbCall`] that routes a URB straight through
+/// [`drive_urb`]/[`frame_completion`] over a shared buffer — the host stand-in
+/// for the kernel IPC call the class driver issues. The shared buffer is the
+/// single memory both sides see.
 struct DirectCall {
     engine: Rc<RefCell<MockEngine>>,
     buffer: Rc<RefCell<Vec<u8>>>,
@@ -75,7 +83,15 @@ impl UrbCall for DirectCall {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         let mut buffer = self.buffer.borrow_mut();
         let mut engine = self.engine.borrow_mut();
-        serve_urb(request, &mut buffer, &mut *engine, reply)
+        // The synchronous host double surfaces a not-yet-ready interrupt-IN
+        // (`Ok(None)`) as the retryable `WouldBlock`; the live HCD instead
+        // holds the call outstanding until its completion interrupt.
+        let result = match drive_urb(request, &mut buffer, &mut *engine) {
+            Ok(Some(transferred)) => Ok(transferred),
+            Ok(None) => Err(Errno::WouldBlock),
+            Err(err) => Err(err),
+        };
+        frame_completion(reply, result)
     }
 }
 
@@ -86,7 +102,12 @@ fn serve_one(urb: &UrbRequest, buffer_len: usize, engine: &mut MockEngine) -> Re
     let n = urb.encode(&mut request).expect("encodes");
     let mut buffer = vec![0u8; buffer_len];
     let mut reply = [0u8; URB_COMPLETION_LEN];
-    let len = serve_urb(&request[..n], &mut buffer, engine, &mut reply).expect("frames a reply");
+    let result = match drive_urb(&request[..n], &mut buffer, engine) {
+        Ok(Some(transferred)) => Ok(transferred),
+        Ok(None) => Err(Errno::WouldBlock),
+        Err(err) => Err(err),
+    };
+    let len = frame_completion(&mut reply, result).expect("frames a reply");
     rustos_abi::usb_urb::decode_completion(&reply[..len])
 }
 
@@ -249,7 +270,14 @@ fn malformed_request_is_framed_in_band() {
     let short = [0u8; URB_REQUEST_LEN - 1];
     let mut buffer = [0u8; 8];
     let mut reply = [0u8; URB_COMPLETION_LEN];
-    let len = serve_urb(&short, &mut buffer, &mut engine, &mut reply).expect("frames a reply");
+    // A truncated request fails `drive_urb` decode before the engine; the
+    // error is framed in band exactly as the HCD would reply it.
+    let result = match drive_urb(&short, &mut buffer, &mut engine) {
+        Ok(Some(transferred)) => Ok(transferred),
+        Ok(None) => Err(Errno::WouldBlock),
+        Err(err) => Err(err),
+    };
+    let len = frame_completion(&mut reply, result).expect("frames a reply");
     assert_eq!(
         rustos_abi::usb_urb::decode_completion(&reply[..len]),
         Err(Errno::LengthOutOfRange)

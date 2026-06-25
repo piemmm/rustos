@@ -75,11 +75,9 @@ pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
 /// it, so this is a fixed protocol working set for one device, not a
 /// scalable capacity.
 ///
-/// It lives here, beside the engine that consumes it, so every host that
-/// carves a controller's DMA region — the PCI bus driver's wiring
-/// (`drivers/bus/usb`) and the arch-neutral user-space keyboard driver
-/// (`drivers/input/usb_hid`) — depends on one definition rather than each
-/// carrying its own copy.
+/// It lives here, beside the engine that consumes it, so the host-controller
+/// driver (`drivers/bus/usb/xhci`) that carves a controller's DMA region
+/// depends on one definition rather than carrying its own copy.
 pub const XHCI_DMA_BYTES: usize = 256 * 1024;
 
 // Worst case (255 slots + 31 scratchpad pages at 4 KiB) is ~132 KiB;

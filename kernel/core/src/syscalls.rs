@@ -2658,9 +2658,10 @@ where
         // emitter-chosen id can never collide with an existing node
         // (load-bearing, the driver-store load path
         // resolves a matched node by id). A build with no store wired fails
-        // closed with `NotImplemented`. Returns `Ok(0)`
-        // once published (the `Errno`-return ABI shape).
-        self.hw_tree.publish(parent_id, decoded).map(|()| 0)
+        // closed with `NotImplemented`. Returns the kernel-assigned node id
+        // once published, so the emitter can later retract this child by id
+        // (a USB host controller removing the interface node on a port-down).
+        self.hw_tree.publish(parent_id, decoded).map(u64::from)
     }
 
     fn hw_remove_node(&self, caller: &CallerContext<'_>, node_id: u64) -> SyscallResult {
@@ -9425,12 +9426,15 @@ mod tests {
         fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(self.blob.clone())
         }
-        fn publish(&self, parent_id: u32, node: rustos_abi::HwNode) -> Result<(), Errno> {
+        fn publish(&self, parent_id: u32, node: rustos_abi::HwNode) -> Result<u32, Errno> {
             // Record the kernel-resolved parent the handler passed alongside
             // the node, so a test can assert the child is parented under the
-            // emitter's own loaded node.
+            // emitter's own loaded node. Model the real store's identity
+            // assignment with a deterministic id (a fixed base plus the
+            // publish count) so the handler's id-return path is exercised.
+            let id = 100u32 + u32::try_from(self.published.read().len()).unwrap_or(0);
             self.published.write().push((parent_id, node));
-            Ok(())
+            Ok(id)
         }
         fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {
             // Model the store's fail-closed ownership gate: a node listed as
@@ -9907,9 +9911,11 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_hw_tree(source);
+        // The handler returns the store-assigned id (the test-double's first
+        // assignment is 100), so the emitter can later retract the child.
         assert_eq!(
             h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
-            Ok(0)
+            Ok(100)
         );
         let published = source.published.read();
         assert_eq!(published.len(), 1, "the covered node was published");
@@ -9966,9 +9972,10 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_hw_tree(source);
+        // The handler returns the store-assigned id (first assignment 100).
         assert_eq!(
             h.hw_emit_node(&ctx, 0x1000, rustos_abi::HwNode::WIRE_LEN),
-            Ok(0)
+            Ok(100)
         );
         assert_eq!(
             source.published.read().len(),

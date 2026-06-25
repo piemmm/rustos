@@ -1,6 +1,6 @@
 [package]
 name = "rustos-hid"
-description = "RustOS HID boot-protocol decode, console producer, and xHCI boot-keyboard orchestration (§2.2, §6, §17.4 — plans/PI.md P10): the arch-neutral, transport-agnostic HID logic both the in-kernel keyboard scaffold and the user-space keyboard driver process compose, so neither a driver nor the kernel re-implements it. no_std, fail-closed (§2.9)."
+description = "RustOS HID boot-protocol decode + console producer (§2.2, §6, §17.4 — plans/USB.md): the arch-neutral, transport-agnostic HID boot-report decode the USB-HID class drivers compose, so a class driver does not re-implement it. Controller bring-up lives in the host-controller driver, not here. no_std, fail-closed (§2.9)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,11 +21,6 @@ rustos-input = { path = "../input", version = "=0.0.0" }
 # `KeyInput` record a driver injects through `key_inject` — the one definition
 # of the `Key`→record map (§2.2).
 rustos-keymap = { path = "../keymap", version = "=0.0.0" }
-# The bus-agnostic xHCI protocol + single-device enumeration engine the
-# boot-keyboard orchestration brings up over its granted register BAR + DMA.
-# A `lib/*` crate (§17.4); the xHCI controller driver (drivers/bus/usb)
-# consumes the same crate, neither this nor that driver naming the other.
-rustos-usb = { path = "../usb", version = "=0.0.0" }
 
 [lints]
 workspace = true

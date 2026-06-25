@@ -76,11 +76,18 @@ pub trait HwTreeSource: Sync {
     /// resolves a matched node by its id. The node is always added, never
     /// dropped, and only the generation advances.
     ///
+    /// Returns the **kernel-assigned** [`id`](rustos_abi::HwNode::id) the
+    /// store gave the published node, so the emitter can later name it to
+    /// [`Self::remove`] when the device goes away (a USB host controller
+    /// retracts the interface node it emitted on a port-down). The emitter
+    /// cannot choose or predict the id — only the store assigns it — so
+    /// returning it here is the one way the emitter learns what it published.
+    ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`] — a
     /// build with no store wired never accepts a published node.
-    fn publish(&self, parent_id: u32, node: HwNode) -> Result<(), Errno>;
+    fn publish(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno>;
 
     /// Remove the child `node_id` — and its whole subtree — from the live
     /// tree, bumping the generation so every parked `hw_tree_wait` caller
@@ -127,7 +134,7 @@ impl HwTreeSource for NullHwTreeSource {
         Err(Errno::NotImplemented)
     }
 
-    fn publish(&self, _parent_id: u32, _node: HwNode) -> Result<(), Errno> {
+    fn publish(&self, _parent_id: u32, _node: HwNode) -> Result<u32, Errno> {
         Err(Errno::NotImplemented)
     }
 

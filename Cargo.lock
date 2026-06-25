@@ -691,7 +691,10 @@ name = "rustos-drv-bus-usb"
 version = "0.0.0"
 dependencies = [
  "rustos-abi",
- "rustos-pci",
+ "rustos-caps",
+ "rustos-drvrt",
+ "rustos-log",
+ "rustos-rt",
  "rustos-usb",
 ]
 
@@ -774,13 +777,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustos-drv-input-usb-hid"
-version = "0.0.0"
-dependencies = [
- "rustos-abi",
-]
-
-[[package]]
 name = "rustos-drv-input-usb-kbd"
 version = "0.0.0"
 dependencies = [
@@ -790,7 +786,7 @@ dependencies = [
  "rustos-hid",
  "rustos-log",
  "rustos-rt",
- "rustos-util",
+ "rustos-usb",
 ]
 
 [[package]]
@@ -917,7 +913,6 @@ dependencies = [
  "rustos-abi",
  "rustos-input",
  "rustos-keymap",
- "rustos-usb",
 ]
 
 [[package]]
@@ -2797,7 +2792,6 @@ version = "0.0.0"
 dependencies = [
  "rustos-abi",
  "rustos-dma-barrier",
- "rustos-drv-input-usb-hid",
  "rustos-hid",
 ]
 
@@ -2874,9 +2868,10 @@ dependencies = [
  "rustos-abi",
  "rustos-crypto",
  "rustos-drv-bus-pcie-brcm",
+ "rustos-drv-bus-usb",
  "rustos-drv-bus-usb-vl805",
+ "rustos-drv-input-usb-kbd",
  "rustos-fuzzseed",
- "rustos-hid",
  "rustos-itest-harness",
  "rustos-kernel-syscall",
  "rustos-mkimage",

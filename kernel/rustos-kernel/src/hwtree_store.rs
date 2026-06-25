@@ -348,7 +348,7 @@ impl HwTreeSource for HwTreeStoreSource {
         Ok(HW_TREE.encode_snapshot())
     }
 
-    fn publish(&self, parent_id: u32, node: HwNode) -> Result<(), Errno> {
+    fn publish(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno> {
         // Publish the user-space-emitted child under `parent_id` into the one
         // authoritative inventory; `publish_child` assigns it a fresh,
         // collision-free id, sets its parent to the emitter's own node, bumps
@@ -357,9 +357,9 @@ impl HwTreeSource for HwTreeStoreSource {
         // verified the caller's `CAP_HW_EMIT`, resolved `parent_id` to the
         // caller's own matched node, and checked that every requested resource
         // is covered by one of its grants, so the store only
-        // assigns identity and records it.
-        HW_TREE.publish_child(parent_id, node);
-        Ok(())
+        // assigns identity and records it. The assigned id flows back to the
+        // emitter so it can later retract this child by id.
+        Ok(HW_TREE.publish_child(parent_id, node))
     }
 
     fn remove(&self, parent_id: u32, node_id: u32) -> Result<(), Errno> {

@@ -66,7 +66,12 @@ pub const PCIE_BRCM_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_pcie", b"bcm2711"
 /// subtype `usb`, the chip leaf `vl805`.
 pub const VL805_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"vl805", b"Run"];
 
-/// Store path of the USB boot-keyboard driver bundle: class `input`, the
+/// Store path of the xHCI USB host-controller driver (HCD) bundle: class
+/// `bus`, subtype `usb`, the `xhci` leaf naming the (vendor-neutral) generic
+/// host-controller class it drives.
+pub const USB_XHCI_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"xhci", b"Run"];
+
+/// Store path of the USB boot-keyboard class-driver bundle: class `input`, the
 /// `usb_kbd` leaf naming the (vendor-neutral) driver.
 pub const USB_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_kbd", b"Run"];
 
@@ -177,14 +182,46 @@ pub fn build_vl805_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
     )
 }
 
-/// Build and sign the USB boot-keyboard driver bundle.
+/// Build and sign the xHCI USB host-controller driver (HCD) bundle.
 ///
-/// It maps the xHCI register BAR (`CAP_MMIO_MAP`), carves the controller's DMA
-/// working set (`CAP_MEM_DMA`), brings the controller up, enumerates the boot
-/// keyboard, and injects each decoded key edge into the kernel input-focus
-/// arbiter (`CAP_INPUT_INJECT`) — and nothing more. Carries
-/// `rustos_hid::KEYBOARD_BIND_KEYS`, so it autoloads against the `usb,xhci`
+/// It maps the controller's register BAR (`CAP_MMIO_MAP`), carves its DMA
+/// working set (`CAP_MEM_DMA`), binds the completion interrupt
+/// (`CAP_IRQ_BIND`), creates the shared URB data buffer (`CAP_SHM`), binds the
+/// restricted-sender URB transport endpoint (`CAP_IPC_BIND_PRIVILEGED`),
+/// publishes the per-interface node (`CAP_HW_EMIT`), and emits a one-shot
+/// bring-up diagnostic (`CAP_LOG_EMIT`) — and nothing more. Carries
+/// `rustos_drv_bus_usb::BIND_KEYS`, so it autoloads against the `usb,xhci`
 /// node the VL805 driver emitted.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_xhci_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        "rustos-drv-bus-usb",
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::MEM_DMA,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::SHM,
+            CapabilityId::IPC_BIND_PRIVILEGED,
+            CapabilityId::HW_EMIT,
+            CapabilityId::LOG_EMIT,
+        ],
+        rustos_drv_bus_usb::BIND_KEYS,
+    )
+}
+
+/// Build and sign the USB boot-keyboard **class**-driver bundle.
+///
+/// A pure HID class driver: it injects decoded key edges into the kernel
+/// input-focus arbiter (`CAP_INPUT_INJECT`), maps the shared URB buffer its
+/// host-controller driver forwarded (`CAP_SHM`), submits URBs on its one
+/// interface's transport endpoint (`CAP_IPC_ENDPOINT`), and emits a one-shot
+/// beacon (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO, DMA, or
+/// IRQ authority. Carries `rustos_drv_input_usb_kbd::BIND_KEYS`, so it
+/// autoloads against the HID boot-keyboard interface node the HCD emitted.
 ///
 /// # Errors
 ///
@@ -194,21 +231,12 @@ pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
         ctx,
         "rustos-drv-input-usb-kbd",
         &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
             CapabilityId::INPUT_INJECT,
-            // Park on the controller's MSI completion interrupt rather than
-            // busy-polling: `irq_bind`/`irq_wait` are gated on `CAP_IRQ_BIND`.
-            // The kernel grants the bound line only when the matched node
-            // carried the forwarded MSI IRQ resource; a boot shape with no MSI
-            // simply never binds and falls back to the poll path.
-            CapabilityId::IRQ_BIND,
-            // Emit the one-shot structured bring-up diagnostic when the
-            // controller does not come up; the
-            // kernel gates `log_emit` on `CAP_LOG_EMIT`.
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
             CapabilityId::LOG_EMIT,
         ],
-        rustos_hid::KEYBOARD_BIND_KEYS,
+        rustos_drv_input_usb_kbd::BIND_KEYS,
     )
 }
 
@@ -262,6 +290,7 @@ fn cross_compile_driver(ctx: &Context, package: &str) -> Result<Vec<u8>, String>
         "rustos-drv-bus-mailbox-vcmailbox" => "drivers/bus/mailbox/vcmailbox",
         "rustos-drv-bus-pcie-brcm" => "drivers/bus/pcie_brcm",
         "rustos-drv-bus-usb-vl805" => "drivers/bus/usb/vl805",
+        "rustos-drv-bus-usb" => "drivers/bus/usb/xhci",
         "rustos-drv-input-usb-kbd" => "drivers/input/usb_kbd",
         other => return Err(format!("image: no source dir mapped for driver {other}")),
     };

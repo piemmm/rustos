@@ -254,6 +254,17 @@ impl GrantSyscalls for MockSyscalls {
         n as i64
     }
 
+    fn shm_map(&self, handle: u64) -> i64 {
+        // Map the whole granted shared region: return its backing buffer's
+        // base VA, mirroring the kernel mapping the region's frames into the
+        // caller. An unknown handle fails closed `NotFound`.
+        let backings = self.backings.borrow();
+        match backings.iter().find(|b| b.handle == handle) {
+            Some(b) => b.buffer.as_ptr() as usize as i64,
+            None => -i64::from(Errno::NotFound.as_i32()),
+        }
+    }
+
     fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64 {
         self.emitted.borrow_mut().push(*node);
         self.emit_result.get()
@@ -894,4 +905,73 @@ fn emit_node_surfaces_a_kernel_refusal_fail_closed() {
         DriverHost::emit_node(&host, child),
         Err(DriverError::PermissionDenied)
     );
+}
+
+// --- URB transport: the class driver's endpoint id + shared buffer ------
+
+/// A grant handle for the forwarded shared URB buffer.
+const SHM_HANDLE: u64 = 9;
+
+#[test]
+fn urb_endpoint_reads_the_endpoint_grant_base() {
+    // A class driver's matched interface node carried a per-endpoint grant;
+    // its `base` is the URB transport endpoint id the driver `ipc_call`s.
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::new(
+        caps(&[]),
+        mock,
+        &[GrantedResource::new(7, HwResource::endpoint(0xD012_5701))],
+        None,
+    )
+    .unwrap();
+    assert_eq!(host.urb_endpoint(), Some(0xD012_5701));
+}
+
+#[test]
+fn urb_endpoint_is_none_without_an_endpoint_grant() {
+    let mock = MockSyscalls::new();
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::MMIO_MAP]), mock, &[regs_grant()], None).unwrap();
+    assert_eq!(host.urb_endpoint(), None);
+}
+
+#[test]
+fn map_shared_maps_the_granted_region() {
+    // The HCD created the region and forwarded it as a `Shared` grant; the
+    // class driver maps the same frames through `shm_map`.
+    let mock = MockSyscalls::new();
+    let base = mock.back(SHM_HANDLE, 64, 0);
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::SHM]),
+        mock,
+        &[GrantedResource::new(SHM_HANDLE, HwResource::shared(0x5147))],
+        None,
+    )
+    .unwrap();
+    assert_eq!(host.map_shared(), Ok(base));
+}
+
+#[test]
+fn map_shared_without_a_grant_is_not_found() {
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::new(caps(&[CapabilityId::SHM]), mock, &[regs_grant()], None).unwrap();
+    assert_eq!(host.map_shared(), Err(DriverError::NotFound));
+}
+
+#[test]
+fn map_shared_surfaces_a_kernel_refusal_fail_closed() {
+    // An unknown/forged grant handle fails the `shm_map` closed; the host
+    // never fabricates a mapping.
+    let mock = MockSyscalls::new();
+    // No backing registered for `SHM_HANDLE`, so the mock's `shm_map` returns
+    // `NotFound`, which the host folds to `Unsupported` (a non-permission
+    // kernel refusal).
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::SHM]),
+        mock,
+        &[GrantedResource::new(SHM_HANDLE, HwResource::shared(0x5147))],
+        None,
+    )
+    .unwrap();
+    assert_eq!(host.map_shared(), Err(DriverError::Unsupported));
 }

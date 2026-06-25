@@ -55,6 +55,7 @@
 #![deny(missing_docs)]
 
 use rustos_abi::input::KeyInput;
+use rustos_abi::waitset::{WaitSetOp, WaitSourceKind};
 use rustos_abi::{
     HwNode, LimitKind, MapFlags, ResourceLimit, SyscallNumber, CONSOLE_INHERIT, STDERR, STDIN,
     STDINFO, STDOUT,
@@ -178,6 +179,24 @@ const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 
 /// `hw_remove_node` syscall number (as above).
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
+
+/// `shm_create` syscall number (as above).
+const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
+
+/// `shm_map` syscall number (as above).
+const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
+
+/// `shm_unmap` syscall number (as above).
+const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
+
+/// `waitset_create` syscall number (as above).
+const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
+
+/// `waitset_ctl` syscall number (as above).
+const NUM_WAITSET_CTL: u64 = SyscallNumber::WAITSET_CTL.as_u16() as u64;
+
+/// `waitset_wait` syscall number (as above).
+const NUM_WAITSET_WAIT: u64 = SyscallNumber::WAITSET_WAIT.as_u16() as u64;
 
 /// `msi_alloc` syscall number (as above).
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
@@ -475,8 +494,14 @@ pub fn msi_alloc() -> Result<rustos_abi::MsiAllocation, i64> {
 }
 
 /// Publish a discovered child device `node` into the live hardware tree
-/// (`SyscallNumber::HW_EMIT_NODE`), returning the
-/// raw signed register: `0` once published, else `-errno`.
+/// (`SyscallNumber::HW_EMIT_NODE`), returning the raw signed register: the
+/// **kernel-assigned node id** (`≥ 0`) once published, else `-errno`.
+///
+/// The store owns identity — the emitter cannot choose the id — so this
+/// returned id is the one way the emitter learns what it published, which it
+/// needs to later retract the node with [`hw_remove_node`] (a USB host
+/// controller removing the interface node it emitted on a port-down). A
+/// caller that does not retract its nodes (most bus drivers) may ignore it.
 ///
 /// A user-space **bus** driver (a PCIe root complex, a USB host) calls this
 /// once per device it enumerates, so the device manager autoloads the
@@ -1401,6 +1426,167 @@ pub fn call_reply(endpoint: u64, ticket: u64, reply: &[u8]) -> i64 {
     ret as i64
 }
 
+/// Create a kernel-owned, zeroed, cross-process shared-memory region and map
+/// it into the calling task (`SyscallNumber::SHM_CREATE`; `plans/USB.md`
+/// U3a2 — the URB data-buffer primitive).
+///
+/// `len` is the region length in bytes; the kernel allocates a
+/// physically-contiguous, zeroed region, maps it cacheable `RW`/non-exec,
+/// guard-bracketed, into the caller's own address space, records the caller
+/// as its owner, and mints the owner the matching per-region
+/// [`HwResourceKind::Shared`](rustos_abi::hwtree::HwResourceKind) grant so it
+/// may forward the region onto a node it emits. The region id is written to
+/// `id_out`. The call carries `CAP_SHM` (enforced kernel-side before any
+/// state is touched).
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the base virtual address of
+/// the newly mapped region, and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`) — `id_out` is left untouched
+/// on a negative result. The wrapper surfaces that raw signed value; it adds
+/// no authority and hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 shm_create-result encoding (base ≥ 0, else -errno).
+pub fn shm_create(len: usize, id_out: &mut u64) -> i64 {
+    let id_ptr = (id_out as *mut u64) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `id_out` is a live exclusive
+    // `&mut u64` for the duration of the call, so the pointer denotes writable
+    // memory the kernel may fill with the new region's id; the kernel
+    // validates it against the caller's own address space before writing.
+    let ret = unsafe { raw_syscall(NUM_SHM_CREATE, [len as u64, id_ptr, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Map a **granted** shared-memory region into the calling task
+/// (`SyscallNumber::SHM_MAP`; `plans/USB.md` U3a2).
+///
+/// `handle` is an unforgeable, kernel-issued per-region grant handle — never
+/// a raw address: the kernel resolves it **owner-checked against the calling
+/// task**, confirms it names a shared region, maps the *same* frames cacheable
+/// `RW`/non-exec, guard-bracketed, into the caller's own address space, and
+/// bumps the region's reference count so neither holder frees frames the other
+/// still maps. A forged or wrong-kind handle resolves to nothing and is
+/// refused. The call carries `CAP_SHM` (enforced kernel-side).
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the base virtual address of
+/// the mapping, and a negative value is `-errno` (recover the
+/// [`rustos_abi::Errno`] discriminant as `-ret`). The wrapper surfaces that
+/// raw signed value; it adds no authority and hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 shm_map-result encoding (base ≥ 0, else -errno).
+pub fn shm_map(handle: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `shm_map` dereferences no user
+    // pointer; it resolves the grant handle and maps the region into the
+    // caller's own space, returning its base.
+    let ret = unsafe { raw_syscall(NUM_SHM_MAP, [handle, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Release the calling task's mapping of a shared-memory region
+/// (`SyscallNumber::SHM_UNMAP`; `plans/USB.md` U3a2).
+///
+/// `(base, len)` is the mapping a prior [`shm_create`] or [`shm_map`]
+/// returned; the kernel validates the range against the caller's own address
+/// space, unmaps it, and drops the caller's reference to the region — the
+/// region's frames are scrubbed and freed only when the last reference is
+/// dropped. Returns `0` on success, or the raw negative kernel result
+/// (`-errno`). The wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn shm_unmap(base: u64, len: usize) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(base, len)` range against the caller's own address space before
+    // unmapping it. No user pointer is dereferenced.
+    let ret = unsafe { raw_syscall(NUM_SHM_UNMAP, [base, len as u64, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Create a kernel **wait-set**: a multiplexing object that observes the
+/// readiness of several event sources so one task can service them all
+/// without a busy-poll (`SyscallNumber::WAITSET_CREATE`; `plans/USB.md` U3a3
+/// — the asynchronous host-controller event loop).
+///
+/// Needs no capability of its own: a wait-set only ever observes resources
+/// the caller already holds, each owner-checked when it is added with
+/// [`waitset_ctl`]. The kernel encodes the result as a signed register: a
+/// non-negative value is the wait-set handle, and a negative value is
+/// `-errno`. The wrapper surfaces that raw signed value unchanged.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 waitset_create-result encoding (handle ≥ 0, else -errno).
+pub fn waitset_create() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `waitset_create` takes
+    // no arguments and dereferences no user pointer. It mints a handle.
+    let ret = unsafe { raw_syscall(NUM_WAITSET_CREATE, [0, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Add or remove a member of a wait-set (`SyscallNumber::WAITSET_CTL`;
+/// `plans/USB.md` U3a3).
+///
+/// `set` is the handle [`waitset_create`] minted. `op` is [`WaitSetOp::Add`]
+/// or [`WaitSetOp::Del`]; `kind` selects whether `id` names an IPC call
+/// endpoint the caller serves ([`WaitSourceKind::Endpoint`]) or an
+/// [`IrqHandle`](rustos_abi::IrqHandle) the caller bound
+/// ([`WaitSourceKind::Irq`]); `token` is the caller's opaque value reported by
+/// [`waitset_wait`] when this member is ready. On `Add` the kernel resolves
+/// and **owner-checks** the named resource against the calling task before
+/// recording it, so the set can never observe authority the caller lacks.
+///
+/// Returns `0` on success, or the raw negative kernel result (`-errno`): an
+/// unowned/unknown resource or wrong `(kind, id)` (`NotFound`), a duplicate
+/// member (`AlreadyExists`), or an unknown `op`/`kind` (`OutOfRange`). The
+/// wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn waitset_ctl(set: u64, op: WaitSetOp, kind: WaitSourceKind, id: u64, token: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; `waitset_ctl` dereferences
+    // no user pointer — it resolves `id` against the caller's own resources and
+    // records the membership change.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_WAITSET_CTL,
+            [
+                set,
+                u64::from(op.as_u32()),
+                u64::from(kind.as_u32()),
+                id,
+                token,
+                0,
+            ],
+        )
+    };
+    ret as i64
+}
+
+/// Block until a member of a wait-set is ready (`SyscallNumber::WAITSET_WAIT`;
+/// `plans/USB.md` U3a3).
+///
+/// `set` is the handle [`waitset_create`] minted; `timeout_ns` is the relative
+/// deadline in nanoseconds (`u64::MAX` for no timeout). The kernel parks the
+/// caller off the run queue (never busy-spinning), re-arms each IRQ member's
+/// line, and — on the first ready member — writes that member's `token` to
+/// `token_out` and returns. An IRQ member's fired edge is consumed exactly
+/// like [`irq_wait`]; an endpoint member's readiness is a non-consuming peek
+/// drained by [`call_recv`].
+///
+/// Returns `0` when a member became ready (its token is in `token_out`), or the
+/// raw negative kernel result (`-errno`): `TimedOut` on the deadline, or
+/// `NotFound` for a forged set handle. The wrapper hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
+pub fn waitset_wait(set: u64, timeout_ns: u64, token_out: &mut u64) -> i64 {
+    let token_ptr = (token_out as *mut u64) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; `token_out` is a live
+    // exclusive `&mut u64` for the duration of the call, so the pointer denotes
+    // writable memory the kernel may fill with the ready member's token; the
+    // kernel validates it against the caller's own address space before writing.
+    let ret = unsafe { raw_syscall(NUM_WAITSET_WAIT, [set, timeout_ns, token_ptr, 0, 0, 0]) };
+    ret as i64
+}
+
 /// Define the program's entry point.
 ///
 /// `$entry` must be a `fn() -> i32`; the macro exports the runtime's
@@ -2003,6 +2189,98 @@ mod tests {
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
             assert_eq!(ipc_call(1, &[1, 2], &mut reply), Err(want));
+        });
+    }
+
+    #[test]
+    fn shm_create_marshals_len_and_the_id_out_pointer() {
+        let mut id = 0u64;
+        let (number, args) = capture(0x4000, || {
+            assert_eq!(shm_create(0x2000, &mut id), 0x4000);
+        });
+        assert_eq!(number, NUM_SHM_CREATE);
+        assert_eq!(args[0], 0x2000); // length
+        assert_eq!(args[1], core::ptr::addr_of_mut!(id) as usize as u64); // id_out
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_create_surfaces_negative_errno_encoding() {
+        let mut id = 0u64;
+        let want = -i64::from(rustos_abi::Errno::PermissionDenied.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(shm_create(0x1000, &mut id), want);
+        });
+    }
+
+    #[test]
+    fn shm_map_marshals_the_handle() {
+        let (number, args) = capture(0x8000, || {
+            assert_eq!(shm_map(0xDEAD), 0x8000);
+        });
+        assert_eq!(number, NUM_SHM_MAP);
+        assert_eq!(args[0], 0xDEAD);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_unmap_marshals_base_and_len() {
+        let (number, args) = capture(0, || {
+            assert_eq!(shm_unmap(0x9000, 0x2000), 0);
+        });
+        assert_eq!(number, NUM_SHM_UNMAP);
+        assert_eq!(args[0], 0x9000);
+        assert_eq!(args[1], 0x2000);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn waitset_create_marshals_no_arguments() {
+        let (number, args) = capture(7, || {
+            assert_eq!(waitset_create(), 7);
+        });
+        assert_eq!(number, NUM_WAITSET_CREATE);
+        assert_eq!(args, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn waitset_ctl_marshals_set_op_kind_id_and_token() {
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                waitset_ctl(3, WaitSetOp::Add, WaitSourceKind::Irq, 0x1234, 0xAA),
+                0
+            );
+        });
+        assert_eq!(number, NUM_WAITSET_CTL);
+        assert_eq!(args[0], 3); // set handle
+        assert_eq!(args[1], u64::from(WaitSetOp::Add.as_u32()));
+        assert_eq!(args[2], u64::from(WaitSourceKind::Irq.as_u32()));
+        assert_eq!(args[3], 0x1234); // resource id
+        assert_eq!(args[4], 0xAA); // token
+        assert_eq!(args[5], 0);
+    }
+
+    #[test]
+    fn waitset_wait_marshals_set_timeout_and_the_token_out_pointer() {
+        let mut token = 0u64;
+        let (number, args) = capture(0, || {
+            assert_eq!(waitset_wait(5, u64::MAX, &mut token), 0);
+        });
+        assert_eq!(number, NUM_WAITSET_WAIT);
+        assert_eq!(args[0], 5); // set handle
+        assert_eq!(args[1], u64::MAX); // timeout
+        assert_eq!(args[2], core::ptr::addr_of_mut!(token) as usize as u64); // token_out
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn waitset_wait_surfaces_negative_errno_encoding() {
+        let mut token = 0u64;
+        let want = -i64::from(rustos_abi::Errno::TimedOut.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(waitset_wait(5, 0, &mut token), want);
         });
     }
 }

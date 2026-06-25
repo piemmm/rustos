@@ -1,79 +1,65 @@
-# `rustos-drv-input-usb-kbd`
+# `rustos-drv-input-usb-kbd` — USB HID boot-keyboard class driver
 
-The autoloaded **user-space USB boot-keyboard driver process** — the `Run`
-binary `devmgr` spawns when a HID boot-keyboard interface is discovered behind a
-USB host (`AGENTS.md` §18, `plans/PI.md` P10 chunk 5d-2-ii). This is the
-"drivers in user space" steady state (`AGENTS.md` §4).
+`plans/USB.md` U4. The autoloaded **user-space HID boot-keyboard *class*
+driver** — the `Run` binary `devmgr` spawns when a HID boot-keyboard
+**interface** node is discovered (`AGENTS.md` §18). The crate is a `lib` (its
+`BIND_KEYS` bind table, host-compilable for the image builder) **and** a `Run`
+binary (the process).
+
+It is a pure class driver: it touches **no** controller register, owns **no**
+controller DMA, holds **no** IRQ line. The host-controller driver
+(`drivers/bus/usb/xhci`) owns the controller and serves this interface's
+transfers over the bus-agnostic URB transport. The same binary works behind any
+host controller that speaks the URB transport (`AGENTS.md` §2.20 / §17.4).
 
 ## What it does
 
-`main` (in `src/main.rs`, a freestanding pure-Rust `rustos-rt` program):
+`main` (a freestanding pure-Rust `rustos-rt` program):
 
-1. Builds `rustos_drvrt::RtDriverHost::from_grants_query` over the
-   device-resource grants the kernel minted for this process (coherency `None` —
-   the kernel carves coherent DMA, so the binary stays platform-neutral,
-   `AGENTS.md` §2.20).
-2. Derives its xHCI register BAR window + DMA aperture bound from the same
-   delivered grants with `rustos_hid::derive_keyboard_resources` over
-   `RtDriverHost::resources()` — no second `resource_grants` syscall, no
-   build-time board constant (`AGENTS.md` §2.16 / §2.20).
-3. Runs `rustos_hid::bring_up_boot_keyboard_diagnostic` to carve DMA, map the
-   BAR, bring the controller up, and enumerate the boot keyboard.
-4. Services the keyboard **event-driven** wherever the hardware allows it.
-   When its matched node carried an MSI interrupt line (the PCIe bus driver
-   allocated the VL805's MSI vector and routed it to a kernel virtual line,
-   handed over as the node's IRQ resource), it enables the xHCI completion
-   interrupter, `irq_bind`s the line, and parks on `irq_wait` — woken only on
-   a transfer completion, never busy-polling a quiet endpoint (`AGENTS.md`
-   §2.23). It acknowledges the interrupter before draining each report batch
-   so a completion posted mid-drain re-asserts rather than being lost. Only
-   when no interrupt line is available does it fall back to a cooperative
-   `rustos_hid::pump_once` poll loop, yielding between polls. Either way each
-   decoded key edge is injected into the kernel input-focus arbiter through
-   the `key_inject` syscall.
+1. Builds `rustos_drvrt::RtDriverHost::from_grants_query` over its granted
+   resources (the interface node's two transport grants — no MMIO/DMA).
+2. Reads the URB transport endpoint id (`RtDriverHost::urb_endpoint`) and maps
+   the shared URB data buffer the HCD forwarded (`RtDriverHost::map_shared` →
+   `shm_map`).
+3. Runs `rustos_hid::pump_once` over a `UrbReportSource`: each `next_report`
+   submits a **blocking** interrupt-IN URB (`rustos_usb::UrbClient` over
+   `ipc_call`) and copies the delivered report out of the shared buffer. The
+   HCD leaves the call outstanding and replies only when the controller's
+   completion interrupt delivers a report, so this driver **parks in the kernel
+   between keystrokes** rather than busy-polling (`AGENTS.md` §2.23).
+4. Decodes each boot report through `rustos_hid` and injects each key edge into
+   the kernel input-focus arbiter via `key_inject`.
 
-Every capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); the
-host adds no authority. A bring-up failure emits a **one-shot structured
-diagnostic** (`log_emit`, event `4126`) naming the phase that stalled and the
-controller state observed there — the reset sub-stage + `USBCMD`/`USBSTS` for a
-controller-open stall, or the `stage`/`completion`/`reject`/`evtype`
-breadcrumbs + root-port `PORTSC` for an enumeration stall (`AGENTS.md` §15.7) —
-then exits with a reserved fail-closed code (`80` no host, `81` no resources,
-`82` bring-up failed), leaving the console without a keyboard rather than
-wedged (`AGENTS.md` §2.9); the spawning supervisor decides whether to
-relaunch. QEMU models no Pi USB, so this diagnostic is how an on-metal capture
-localises the stall (`AGENTS.md` §0.4) — it is the user-space replacement for
-the deleted in-kernel scaffold's per-stage logging.
+A failure to acquire the host or the transport grants exits with a reserved
+fail-closed code (`80` no host, `81` no transport), leaving the console without
+a keyboard rather than wedged (`AGENTS.md` §2.9).
+
+## Least privilege (`AGENTS.md` §5.4)
+
+`CAP_INPUT_INJECT` (inject key edges), `CAP_SHM` (map the granted URB buffer),
+`CAP_IPC_ENDPOINT` (submit URBs on its one interface's transport endpoint),
+`CAP_LOG_EMIT` (one-shot beacon). A compromised keyboard driver cannot
+reprogram the controller, reach another device's buffer, or touch the bus.
 
 ## Why a separate crate
 
-The reusable HID decode + orchestration lives in `lib/hid` and the §8 driver
-identity (`register` + bind table) in `drivers/input/usb_hid`. This crate is a
-*separate* binary so it can link the userland runtime `rustos-rt` without
-pulling it into the kernel-linked `usb_hid` driver, and it depends only on
-`lib/*` crates (`lib/hid`, `lib/drvrt`, `lib/rt`, `lib/caps`, `lib/abi`) so the
-§17.4 layering holds (no `drivers/*`→`drivers/*` edge).
+The reusable HID boot-report **decode** lives in `lib/hid`; this crate is a
+*separate* binary so it links the userland runtime `rustos-rt` and depends only
+on `lib/*` crates (`lib/hid`, `lib/usb`, `lib/drvrt`, `lib/rt`, `lib/caps`,
+`lib/abi`) — reaching its host-controller driver only through the public URB
+transport ABI, so the §17.4 layering holds (no `drivers/*`→`drivers/*` edge).
 
 ## Supported hardware / limitations
 
-Any HID **boot-protocol** keyboard reachable through an xHCI controller whose
-register BAR and DMA constraint the kernel granted this process (the Pi 4's
-VL805, discovered and enumerated by `drivers/bus/pcie_brcm` +
-`drivers/bus/usb`). Boot protocol only — no report-descriptor parse. The live
-controller bring-up and report pump are an on-metal acceptance item; QEMU
-models no Pi USB timing (`AGENTS.md` §0.4).
-
-## Capabilities
-
-Granted at spawn from its matched node's requested resources: `CAP_MMIO_MAP`
-(the register BAR), `CAP_MEM_DMA` (the DMA region), `CAP_INPUT_INJECT`
-(`key_inject`), `CAP_IRQ_BIND` (`irq_bind`/`irq_wait` on the routed MSI line —
-absent on a boot shape with no IRQ grant, where the driver falls back to
-polling), and `CAP_LOG_EMIT` (the one-shot bring-up diagnostic, §19.4).
+Any HID **boot-protocol** keyboard interface a host-controller driver enumerates
+and serves over the URB transport (the Pi 4's USB-A ports via the xHCI HCD).
+Boot protocol only — no report-descriptor parse. The live report path is an
+on-metal acceptance item; QEMU models no Pi USB timing (`AGENTS.md` §0.4).
 
 ## Tests
 
-The decode/orchestration logic is host-tested in `lib/hid`; this crate is the
-thin wiring binary (an inert host stub off bare-metal targets, so
-`cargo build --workspace` / clippy / fmt cover it). The end-to-end path is the
-metal acceptance item.
+The decode logic is host-tested in `lib/hid`; the URB transport in `lib/usb`;
+the grant accessors in `lib/drvrt`. This crate is the thin wiring binary (an
+inert host stub off bare-metal targets, so `cargo build --workspace` / clippy /
+fmt cover it). The end-to-end path is the metal acceptance item (`plans/USB.md`
+U5).

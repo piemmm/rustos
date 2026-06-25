@@ -1,6 +1,6 @@
 [package]
 name = "rustos-drv-bus-usb"
-description = "RustOS xHCI USB host-controller driver (protocol layers)."
+description = "RustOS xHCI USB host-controller driver (HCD): owns one controller, enumerates the attached device, publishes a per-interface node, and serves the bus-agnostic URB transport to the autoloaded class driver (AGENTS.md §2.20 / §17.4, plans/USB.md U3b)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,47 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[dependencies]
-rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
-# The bus-agnostic xHCI protocol (the `XhciHost` seam, the `Xhci`
-# controller engine, the TRB/ring vocabulary, and the `UsbDevice`
-# enumeration engine) lives in `lib/usb` so the device-class drivers can
-# consume it without depending on this bus driver crate (`AGENTS.md`
-# §17.4 — `drivers/* → lib/*` only). This crate adds the concrete PCI
-# discovery / BAR / DMA wiring and the §8 `register` entry on top of it.
-rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
-# The PCI/PCIe configuration-access mechanism + the shared bus-driver
-# locate/BAR primitives (`find_function_by_class`, `assign_and_map_bar`)
-# live in `lib/pci` so this driver and the root-complex bus driver
-# (`drivers/bus/pcie_brcm`) share one definition without a forbidden
-# `drivers/* → drivers/*` edge (`AGENTS.md` §2.2 / §17.4).
-rustos-pci = { path = "../../../../lib/pci", version = "=0.0.0" }
-
 [lints]
 workspace = true
+
+# This crate is a `lib` (the HCD's host-testable bring-up + URB-serve logic,
+# proven host-side over mocks) **and** a `Run` binary (`src/main.rs`, the
+# autoloaded HCD process). The `lib` builds on the host and the freestanding
+# targets and depends only on other `lib/*` crates so the §17.4 layering holds
+# (no `drivers/*`→`drivers/*` edge). The `Run` binary links the userland
+# runtime `rustos-rt` only on the bare-metal targets it is actually built for;
+# on the host it is an inert stub (`src/main.rs` / `build.rs`), mirroring
+# `drivers/input/usb_kbd` (`AGENTS.md` §2.2).
+
+[dependencies]
+# The frozen `abi-v1` surface (`HwNode`, `HwResource`, `DriverError`, the URB
+# transport types) the `lib` and the `Run` binary both build over.
+rustos-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The bus-agnostic xHCI protocol (the `XhciHost` seam, the `Xhci` controller
+# engine, the TRB/ring vocabulary, the `UsbDevice` enumeration engine, and the
+# URB transport `drive_urb`/`UrbEngine`) lives in `lib/usb` so the device-class
+# drivers consume it without depending on this bus driver crate (`AGENTS.md`
+# §17.4 — `drivers/* → lib/*` only). The HCD adds the concrete bring-up
+# orchestration and the per-interface URB-serve state machine on top of it.
+rustos-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
+
+# Everything the freestanding `Run` program links beyond the `lib` is pulled in
+# only for the bare-metal targets the binary is actually built for; on the host
+# the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed `DriverHost` and the URB endpoint's
+# send-cap gate are built over (§5.2).
+rustos-caps = { path = "../../../../lib/caps", version = "=0.0.0" }
+# The user-space driver runtime: turns the kernel-issued device-resource grants
+# into the `DriverHost` the bring-up consumes (`mmio_map` / `dma_alloc` /
+# `resource_grants`).
+rustos-drvrt = { path = "../../../../lib/drvrt", version = "=0.0.0" }
+# The pure-Rust userland runtime (`AGENTS.md` §1 / §16.4): `_start`, the stack
+# canary, the panic handler, and the syscall wrappers the HCD event loop drives
+# (`shm_create`, `call_create`/`call_recv`/`call_reply`, `waitset_*`,
+# `irq_bind`, `hw_emit_node`/`hw_remove_node`, `LogSink`).
+rustos-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
+# The structured diagnostic event vocabulary (`Event`/`Field`/`Level`) the HCD
+# emits its one-shot bring-up / disconnect diagnostics through, routed to the
+# kernel log by `rustos_rt::LogSink` (`AGENTS.md` §19.4).
+rustos-log = { path = "../../../../lib/log", version = "=0.0.0" }

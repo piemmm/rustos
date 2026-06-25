@@ -335,20 +335,3 @@ fn unload_then_reload_decodes_again() {
     assert_eq!(kbd.poll(&mut out), Ok(1));
     assert_eq!(out[0], key(0x05, 1));
 }
-
-#[test]
-fn keyboard_bind_table_matches_the_published_xhci_controller_node() {
-    use rustos_abi::HwMatchKey;
-
-    assert_eq!(KEYBOARD_BIND_KEYS.len(), 1);
-    assert_eq!(KEYBOARD_BIND_KEYS[0].priority, KEYBOARD_BIND_PRIORITY);
-    // The controller node the VL805 bus driver publishes (`node B`) carries
-    // the shared `usb,xhci` `compatible` key; the keyboard driver's bind
-    // table matches exactly it.
-    let node_b = HwMatchKey::compatible(XHCI_COMPATIBLE).expect("fits");
-    assert!(KEYBOARD_BIND_KEYS[0].key.matches(&node_b));
-    // A different controller `compatible` string does not match — the bind
-    // is exact, never a wildcard (`HwMatchKey::matches`).
-    let other = HwMatchKey::compatible(b"acme,other-xhci").expect("fits");
-    assert!(!KEYBOARD_BIND_KEYS[0].key.matches(&other));
-}

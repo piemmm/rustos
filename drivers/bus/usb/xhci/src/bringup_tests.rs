@@ -1,16 +1,14 @@
-//! Host tests for the arch-neutral boot-keyboard driver-process
-//! orchestration ([`super::bring_up_boot_keyboard`]).
+//! Host tests for the arch-neutral xHCI controller bring-up orchestration
+//! ([`super::bring_up_controller`]).
 //!
-//! QEMU models no Pi USB timing, so these tests
-//! prove the composition and its fail-closed paths against in-process mocks
-//! (an MMIO mapper backing real heap, a DMA host minting leaked
-//! [`DmaSlab`]s, a no-op [`Delay`]). The live controller bring-up — the
-//! first 32-bit read off a real BAR returning a plausible `CAPLENGTH` — is
-//! the on-metal acceptance item; over the inert zeroed window here
-//! [`Xhci::open`](rustos_usb::Xhci::open) fails closed with
-//! [`DriverError::DeviceFault`], which is exactly the boundary the "reaches
-//! the controller" test asserts (mirroring `drivers/bus/usb`'s `wiring`
-//! tests).
+//! QEMU models no Pi USB timing, so these tests prove the composition and its
+//! fail-closed paths against in-process mocks (an MMIO mapper backing real
+//! heap, a DMA host minting leaked [`DmaSlab`]s, a no-op [`Delay`]). The live
+//! controller bring-up — the first 32-bit read off a real BAR returning a
+//! plausible `CAPLENGTH` — is the on-metal acceptance item; over the inert
+//! zeroed window here [`Xhci::open`](rustos_usb::Xhci::open) fails closed with
+//! [`DriverError::DeviceFault`], which is exactly the boundary the "reaches the
+//! controller" test asserts.
 
 extern crate alloc;
 
@@ -25,13 +23,13 @@ use rustos_abi::{
 };
 
 use super::{
-    bring_up_boot_keyboard, bring_up_boot_keyboard_diagnostic, derive_keyboard_resources,
-    BringupPhase, KeyboardResources,
+    bring_up_controller, bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
+    ControllerResources,
 };
 use rustos_usb::XhciOpenStage;
 
-/// The controller's register BAR base/len the keyboard driver maps (the
-/// metal VL805 BAR0 is 4 KiB).
+/// The controller's register BAR base/len the HCD maps (the metal VL805 BAR0
+/// is 4 KiB).
 const BAR_BASE: u64 = 0x6000_0000;
 const BAR_LEN: usize = 0x1000;
 /// Device-visible base the DMA host hands out for an in-aperture carve.
@@ -42,11 +40,10 @@ const APERTURE_TOP: u64 = 0xC000_0000;
 /// Leak a `len`-byte, 4-byte-aligned, zeroed buffer and return a pointer to
 /// it.
 ///
-/// The leak is deliberate: a window/slab minted here lives for the whole
-/// test process, satisfying the lifetime contracts of
+/// The leak is deliberate: a window/slab minted here lives for the whole test
+/// process, satisfying the lifetime contracts of
 /// [`RegisterWindow::from_mapping`] and [`DmaSlab::from_leaked`] without
-/// bookkeeping (the mock-host `'static` storage strategy, as
-/// `drivers/bus/usb`'s `wiring` tests).
+/// bookkeeping (the mock-host `'static` storage strategy).
 fn leak_aligned(len: usize) -> NonNull<u8> {
     let words = len.div_ceil(4).max(1);
     let buf: Box<[u32]> = alloc::vec![0u32; words].into_boxed_slice();
@@ -81,9 +78,9 @@ impl DmaHost for MockDmaHost {
             return Err(DriverError::LengthOutOfRange);
         }
         let ptr = leak_aligned(size);
-        // SAFETY: `ptr` covers `size` zeroed bytes and lives for the whole
-        // test process; `phys` is the test's device-visible base for `ptr[0]`.
-        // Drop is a no-op (the `from_leaked` contract).
+        // SAFETY: `ptr` covers `size` zeroed bytes and lives for the whole test
+        // process; `phys` is the test's device-visible base for `ptr[0]`. Drop
+        // is a no-op (the `from_leaked` contract).
         Ok(unsafe { DmaSlab::from_leaked(self.phys, ptr, size, PoolId::MOCK, 0) })
     }
 }
@@ -137,8 +134,11 @@ fn host_with(phys: u64, mmio_map: bool, mapper: bool, dma: bool) -> MockHost {
     }
 }
 
-fn bring_up(host: &MockHost, dma_aperture_top: u64) -> Result<super::KeyboardSource, DriverError> {
-    bring_up_boot_keyboard(host, &NoopDelay, BAR_BASE, BAR_LEN, dma_aperture_top)
+fn bring_up(
+    host: &MockHost,
+    dma_aperture_top: u64,
+) -> Result<super::ControllerDevice, DriverError> {
+    bring_up_controller(host, &NoopDelay, BAR_BASE, BAR_LEN, dma_aperture_top)
 }
 
 #[test]
@@ -199,9 +199,9 @@ fn propagates_a_dma_allocation_failure() {
 #[test]
 fn reaches_the_controller_hand_off() {
     // Everything valid: the carve fits and the BAR maps, so the orchestration
-    // hands the (inert, zeroed) window to the engine, which fails closed on
-    // the implausible capability block. That fault is the on-metal boundary;
-    // the assertion proves the composition reached the controller hand-off.
+    // hands the (inert, zeroed) window to the engine, which fails closed on the
+    // implausible capability block. That fault is the on-metal boundary; the
+    // assertion proves the composition reached the controller hand-off.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, true, true);
     assert_eq!(
         bring_up(&host, APERTURE_TOP).err(),
@@ -213,11 +213,11 @@ fn reaches_the_controller_hand_off() {
 fn diagnostic_localises_the_controller_open_stall() {
     // The diagnostic variant reaches the controller hand-off (carve fits, BAR
     // maps) and the inert zeroed window fails `Xhci::open` at the capability
-    // stage. The structured error must name the `ControllerOpen` phase and
-    // the `Capability` reset sub-stage, so a metal capture localises the
-    // stall rather than seeing a bare `DeviceFault`.
+    // stage. The structured error must name the `ControllerOpen` phase and the
+    // `Capability` reset sub-stage, so a metal capture localises the stall
+    // rather than seeing a bare `DeviceFault`.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, true, true);
-    let err = bring_up_boot_keyboard_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
+    let err = bring_up_controller_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
         .err()
         .expect("an inert controller window fails closed");
     assert_eq!(err.phase, BringupPhase::ControllerOpen);
@@ -234,7 +234,7 @@ fn diagnostic_localises_a_setup_stall() {
     // exists: the structured error names the `Setup` phase and carries no
     // controller snapshot.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, false, true);
-    let err = bring_up_boot_keyboard_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
+    let err = bring_up_controller_diagnostic(&host, &NoopDelay, BAR_BASE, BAR_LEN, APERTURE_TOP)
         .err()
         .expect("a host with no mapper fails closed");
     assert_eq!(err.phase, BringupPhase::Setup);
@@ -245,17 +245,17 @@ fn diagnostic_localises_a_setup_stall() {
 
 #[test]
 fn derives_a_bus_window_bar_and_translated_dma_aperture() {
-    // The Pi 4 shape: the BAR is granted as an outbound PCIe-bus window
-    // (the driver names it by its far-side bus address), and the DMA
-    // constraint is a translated inbound viewport whose device-visible top is
-    // the far-side base plus extent.
+    // The Pi 4 shape: the BAR is granted as an outbound PCIe-bus window (the
+    // HCD names it by its far-side bus address), and the DMA constraint is a
+    // translated inbound viewport whose device-visible top is the far-side base
+    // plus extent.
     let resources = [
         HwResource::bus_window(0x6_0000_0000, 0x9310, 0xC000_0000),
         HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0xC000_0000),
     ];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()),
-        Ok(KeyboardResources {
+        derive_controller_resources(resources.iter()),
+        Ok(ControllerResources {
             bar_base: 0xC000_0000,
             bar_len: 0x9310,
             dma_aperture_top: 0xC000_0000 + 0x4000_0000,
@@ -273,8 +273,8 @@ fn derives_an_mmio_bar_and_untranslated_dma_aperture() {
         HwResource::dma(0x4000_0000, 0x10_0000),
     ];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()),
-        Ok(KeyboardResources {
+        derive_controller_resources(resources.iter()),
+        Ok(ControllerResources {
             bar_base: 0xA00_0000,
             bar_len: 0x1000,
             dma_aperture_top: 0x4000_0000,
@@ -284,15 +284,15 @@ fn derives_an_mmio_bar_and_untranslated_dma_aperture() {
 
 #[test]
 fn ignores_an_irq_grant_when_deriving() {
-    // An IRQ line the matched node also requested is not part of this
-    // driver's bring-up and must not disturb the derivation.
+    // An IRQ line the matched node also requested is not part of this derive
+    // and must not disturb it.
     let resources = [
         HwResource::mmio(0xA00_0000, 0x1000),
         HwResource::irq(33, 1),
         HwResource::dma(0x4000_0000, 0x10_0000),
     ];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()).map(|r| r.bar_len),
+        derive_controller_resources(resources.iter()).map(|r| r.bar_len),
         Ok(0x1000)
     );
 }
@@ -301,7 +301,7 @@ fn ignores_an_irq_grant_when_deriving() {
 fn rejects_a_missing_register_window() {
     let resources = [HwResource::dma(0x4000_0000, 0x10_0000)];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()).err(),
+        derive_controller_resources(resources.iter()).err(),
         Some(DriverError::NotFound)
     );
 }
@@ -310,7 +310,7 @@ fn rejects_a_missing_register_window() {
 fn rejects_a_missing_dma_constraint() {
     let resources = [HwResource::mmio(0xA00_0000, 0x1000)];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()).err(),
+        derive_controller_resources(resources.iter()).err(),
         Some(DriverError::NotFound)
     );
 }
@@ -323,7 +323,7 @@ fn rejects_an_ambiguous_double_register_window() {
         HwResource::dma(0x4000_0000, 0x10_0000),
     ];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()).err(),
+        derive_controller_resources(resources.iter()).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -336,7 +336,7 @@ fn rejects_an_ambiguous_double_dma_constraint() {
         HwResource::dma(0x8000_0000, 0x10_0000),
     ];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()).err(),
+        derive_controller_resources(resources.iter()).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -348,7 +348,7 @@ fn rejects_a_zero_length_register_window() {
         HwResource::dma(0x4000_0000, 0x10_0000),
     ];
     assert_eq!(
-        derive_keyboard_resources(resources.iter()).err(),
+        derive_controller_resources(resources.iter()).err(),
         Some(DriverError::OutOfRange)
     );
 }

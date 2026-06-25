@@ -6,8 +6,9 @@
 //! Device, `GET_DESCRIPTOR(device)`, `SET_PROTOCOL(boot)`, Configure
 //! Endpoint, and a primed interrupt-IN transfer ring. It then
 //! implements the [`ReportSource`] seam from
-//! `rustos_abi::driver::input`, so the `drivers/input/usb_hid`
-//! decoders consume reports straight off the transfer ring.
+//! `rustos_abi::driver::input`, so the host-controller driver serves reports
+//! straight off the transfer ring over the URB transport to a class driver
+//! (`drivers/input/usb_kbd`), whose `rustos_hid` decoders consume them.
 //!
 //! # Memory seam
 //!
@@ -884,8 +885,8 @@ const REJECT_BUDGET_TIMEOUT: u8 = 4;
 /// [`UsbDevice::enumerate_hid`] then brings the device on `port` to
 /// the configured state (boot protocol when the device accepts it)
 /// with a primed interrupt-IN ring, after which
-/// [`ReportSource::next_report`] drains reports for the
-/// `drivers/input/usb_hid` decoders.
+/// [`ReportSource::next_report`] drains reports the host-controller driver
+/// serves over the URB transport to the `drivers/input/usb_kbd` decoders.
 pub struct UsbDevice<H: XhciHost, M: DmaRegion> {
     xhci: Xhci<H>,
     dma: M,
@@ -1054,6 +1055,20 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     #[must_use]
     pub const fn slot(&self) -> u8 {
         self.slot
+    }
+
+    /// The root-hub port the enumerated device is reached through (`0` before
+    /// enumeration assigns it).
+    ///
+    /// A host-controller driver reads the matching
+    /// [`Self::root_port_status_raw`] to watch for the device disconnecting
+    /// (the `CCS` connect bit clearing), so it can retract the interface node
+    /// it published. For a device behind the onboard hub this is the *hub's*
+    /// root port; detecting a downstream-of-hub disconnect needs the hub's own
+    /// per-port status and is a finer-grained watch.
+    #[must_use]
+    pub const fn root_port(&self) -> u8 {
+        self.root_port
     }
 
     /// Enable interrupt generation on the controller's interrupter so a

@@ -294,6 +294,58 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             .find(|slot| slot.resource.kind() == Some(HwResourceKind::Irq))?;
         u32::try_from(slot.resource.base()).ok()
     }
+
+    /// The URB-transport call-endpoint id the class driver submits URBs to,
+    /// from the single [`HwResourceKind::Endpoint`] grant its matched
+    /// interface node carried, or `None` if it holds no such grant.
+    ///
+    /// [`HwResource::base`] holds the endpoint id of an endpoint grant. The
+    /// class driver names this id in [`ipc_call`](rustos_rt::ipc_call) to
+    /// reach its host-controller driver's URB transport; the kernel admits the
+    /// call only because the driver inherited this per-endpoint grant (no
+    /// ambient authority — it cannot reach another interface's endpoint).
+    #[must_use]
+    pub fn urb_endpoint(&self) -> Option<u64> {
+        self.grants
+            .iter()
+            .flatten()
+            .find(|slot| slot.resource.kind() == Some(HwResourceKind::Endpoint))
+            .map(|slot| slot.resource.base())
+    }
+
+    /// Map the cross-process shared URB data buffer the class driver was
+    /// granted, returning its base user virtual address.
+    ///
+    /// Resolves the single [`HwResourceKind::Shared`] grant its matched
+    /// interface node carried and maps it through `shm_map`; the host-controller
+    /// driver created the region and forwarded the grant, so the class driver
+    /// maps the *same* frames without holding any DMA authority. Fails closed
+    /// if no shared grant was delivered or the map is refused.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if the driver holds no shared-region grant
+    ///   (an unbound or mis-provisioned interface node).
+    /// * [`DriverError::PermissionDenied`] if the kernel refuses the map (the
+    ///   driver lacks `CAP_SHM`), else [`DriverError::Unsupported`] for any
+    ///   other kernel refusal.
+    pub fn map_shared(&self) -> Result<u64, DriverError> {
+        let slot = self
+            .grants
+            .iter()
+            .flatten()
+            .find(|slot| slot.resource.kind() == Some(HwResourceKind::Shared))
+            .ok_or(DriverError::NotFound)?;
+        let ret = self.syscalls.shm_map(slot.handle);
+        if ret < 0 {
+            return Err(match decode_errno(ret) {
+                Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
+                _ => DriverError::Unsupported,
+            });
+        }
+        #[allow(clippy::cast_sign_loss)] // `ret >= 0` checked above; it is a user VA.
+        Ok(ret as u64)
+    }
 }
 
 impl<S: GrantSyscalls> MmioMapper for RtDriverHost<S> {

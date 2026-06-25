@@ -360,39 +360,59 @@ the live controller behaviour is host- and CI-proven first.
     edge-consume + token-write, pending-endpoint readiness drained by recv).
     `lib/rt`/`lib/drvrt` wrappers + a QEMU vertical land with U3b (the first
     consumer); not added speculatively (§2.4).
-- **U3b — xHCI HCD process `[ ]`.** Turn `drivers/bus/usb/xhci` into a `Run`
-  binary that binds `usb,xhci`, owns the controller (the bring-up code moves
-  from `usb_kbd` unchanged — it is already platform-neutral), enumerates,
-  emits one per-interface node carrying its `HwResource::endpoint` grant
-  (U3a), serves the URB transport endpoint, and watches root-hub PORTSC →
-  `hw_remove_node` on disconnect. Host stub + the metal acceptance for live
-  enumerate/emit.
-  - The shared-memory buffer the class driver owns and the HCD maps is the
-    U3a2 primitive (`shm_create`/`shm_map`); the HCD bounce-copies between
-    that buffer and its own DMA-granted ring, so the class driver holds no
-    DMA grant. The HCD multiplexes its URB endpoints + controller IRQ on a
-    `U3a3` wait-set (the async event loop, §1.1). `lib/rt`/`lib/drvrt`
-    wrappers for `shm_*` and `waitset_*` land with this increment's consumer
-    (none today, so they are not added speculatively).
-  - Because `usb_kbd` binds the `usb,xhci` controller node today
-    (`rustos_hid::KEYBOARD_BIND_KEYS` matches `XHCI_COMPATIBLE`), U3b and U4
-    are coupled: a controller node cannot have two matching drivers, so the
-    HCD landing and the `usb_kbd` rebind land together (no staged migration).
-- **U4 — `usb_kbd` as a pure HID class driver `[ ]`.** Rebind it to the
-  emitted HID-interface node, delete the in-process controller bring-up
-  (§2.14), and pump reports over the URB transport client. Update its bind
-  table (HID boot-keyboard class key, not the xHCI class key) and README.
+- **U3b — xHCI HCD process `[x]` (DONE, live path metal-only).**
+  `drivers/bus/usb/xhci` (`rustos-drv-bus-usb`) is now a `lib`+`Run`-binary
+  crate: it binds `usb,xhci` (`BIND_KEYS = compatible(XHCI_COMPATIBLE)`, the
+  role `lib/hid::KEYBOARD_BIND_KEYS` held), owns the controller, enumerates,
+  emits one per-interface node, and serves the URB transport. The host-testable
+  logic is in the `lib` target:
+  - `bringup` (moved from the deleted `lib/hid::service`, returning the raw
+    `UsbDevice` rather than a decoded `BootKeyboard`): `derive_controller_
+    resources` + `bring_up_controller[_diagnostic]`, host-tested over mocks up
+    to the controller hand-off (`Xhci::open` fails closed on an inert window —
+    the metal boundary).
+  - `serve`: the alloc-free `UrbService` (≤1 outstanding interrupt-IN URB,
+    second concurrent submit → `AlreadyExists`, driven on submit/IRQ via
+    `lib/usb::drive_urb`/`frame_completion`) + `attach_transport_grants` (adds
+    the endpoint + shm grants onto the `describe_device` node). Host-tested.
+  - `main.rs` (freestanding): `from_grants_query` → bring-up → `shm_create`
+    (the URB buffer) + grant-restricted `call_create` (probed id range) →
+    `describe_device`/`attach_transport_grants`/`hw_emit_node` (now returns the
+    assigned node id) → enable interrupter + `irq_bind` → **async wait-set
+    loop** (URB endpoint + controller IRQ): recv → `UrbService::on_submit`
+    (reply now or hold); IRQ → ack + `on_event` (reply the completed URB) +
+    root-port `CCS` watch → `hw_remove_node`. Bounce-copy is internal to the
+    engine's `interrupt_in` writing the report into the HCD's shm mapping; the
+    class driver holds no DMA grant. `lib/rt` `shm_*`/`waitset_*` wrappers and
+    `lib/drvrt` `urb_endpoint()`/`map_shared()` landed as the consumers.
+  - `hw_emit_node` was evolved to **return the kernel-assigned node id** (the
+    emitter cannot choose it but needs it to `hw_remove_node` on disconnect);
+    `drvrt`/existing bus drivers treat `≥0` as success unchanged.
+- **U4 — `usb_kbd` as a pure HID class driver `[x]` (DONE).** Rewritten as a
+  `lib`+`Run` crate binding the HID boot-keyboard **interface** key
+  (`HwMatchKey::usb(0,0,0x03_01_01)`, in its own `lib` `BIND_KEYS`), holding no
+  MMIO/DMA/IRQ — only `CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/
+  `CAP_LOG_EMIT`. It `map_shared`s the granted buffer and runs `pump_once` over
+  a `UrbReportSource: ReportSource` that submits a **blocking** interrupt-IN URB
+  (`UrbClient` over `ipc_call`) and copies the report out of the shared buffer —
+  event-driven, parking in the kernel between keystrokes (§2.23). The
+  controller bring-up is deleted (§2.14); the redundant never-shipped
+  `drivers/input/usb_hid` stub is deleted. Image builder ships both the
+  `xhci` HCD bundle (`bus_usb/xhci`) and the retuned `usb_kbd` class-driver
+  bundle.
 - **U5 — end-to-end metal acceptance + cleanup `[ ]`.** Attach → keystroke;
   detach → `usb_kbd` unloaded, controller stays up; re-attach → autoloads
-  again. Retire any transitional scaffolding and update `PLAN.md` / §3 / §16.4.
+  again. The HCD's disconnect→`hw_remove_node` is wired (root-port `CCS`);
+  two refinements are staged here, not yet built: **re-enumeration on
+  re-attach** (the `UsbDevice` engine is one-shot; a fresh connect needs a
+  reset+re-enumerate path) and **hub-downstream disconnect detection** (the
+  current watch is the device's root port; a device behind the onboard hub
+  needs the hub's per-port status). Update `README.md` matrix on metal sign-off.
 
-U1, U2, U3a, U3a2, and U3a3 (the unload mechanism, the URB transport
-ABI/`lib/usb` server-client, the per-endpoint grant mechanism, the
-cross-process shared-memory primitive, and the wait-set multi-event wait)
-are landed and host-/CI-proven. U3b (the live HCD process) is the next
-increment; it builds on the U3a endpoint grant, the U3a2 shared-memory
-buffer, and the U3a3 wait-set event loop, and lands together with the U4
-`usb_kbd` rebind (they cannot both bind the controller node).
+U1, U2, U3a, U3a2, U3a3, U3b, and U4 are landed; the modular split is complete
+and host-/CI-proven. U5 (live metal acceptance + the two staged refinements
+above) is the remaining increment, and is inherently metal-only (QEMU models
+no Pi USB, §0.4).
 
 ---
 

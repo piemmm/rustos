@@ -31,7 +31,7 @@ rustos-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 # straight off this crate's interrupt-IN transfer ring. Test scaffolding
 # only (a `[dev-dependencies]` edge, excluded from the §17.4 layering
 # graph) — neither crate depends on this one, so there is no cycle. The
-# decoders live in `lib/hid` (`BootKeyboard`); the §18.3 bind table lives in
-# the `usb_hid` driver (`BIND_KEYS`).
+# decoders live in `lib/hid` (`BootKeyboard`); the §18.3 bind keys a class
+# driver carries are constructed inline in the test, so this protocol crate
+# depends on no concrete driver.
 rustos-hid = { path = "../hid", version = "=0.0.0" }
-rustos-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }

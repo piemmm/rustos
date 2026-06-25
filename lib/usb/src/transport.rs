@@ -8,12 +8,19 @@
 //! * [`UrbEngine`] is the controller-side seam — the operations the HCD's
 //!   real engine ([`crate::device::UsbDevice`]) performs to satisfy a URB. A
 //!   host test drives it with a mock engine.
-//! * [`serve_urb`] is the controller-side server transformation: decode a URB
-//!   frame, validate it fail-closed against the interface, drive the engine,
-//!   and frame the completion in band.
+//! * [`drive_urb`] is the controller-side server transformation: decode a URB
+//!   frame, validate it fail-closed against the interface, and drive the
+//!   engine. It is **asynchronous**: an interrupt-IN report that has not
+//!   arrived yet returns `Ok(None)`, so the HCD holds the caller's URB call
+//!   outstanding and re-drives it on its next controller interrupt rather than
+//!   busy-polling or blocking one interface inside another's handler
+//!   (`plans/USB.md` §1.1, the async event loop). [`frame_completion`] frames
+//!   the outcome into the in-band completion the HCD replies with.
 //! * [`UrbClient`] is the class-side client over a [`UrbCall`] transport
-//!   (the synchronous IPC call the class driver issues): it builds the URB,
-//!   submits it, and decodes the completion.
+//!   (the IPC call the class driver issues): it builds the URB, submits it,
+//!   and decodes the completion. The call blocks in the kernel until the HCD
+//!   replies (when the report arrives), so the class driver parks rather than
+//!   spinning.
 //!
 //! Only the URB descriptor and the completion cross the endpoint; the
 //! transfer's *data* lives in the separately-mapped shared-memory buffer the
@@ -30,7 +37,7 @@ use rustos_abi::{DriverError, Errno};
 /// The controller-side operations the URB transport server drives.
 ///
 /// The HCD's live engine implements this; a malformed transfer never reaches
-/// it because [`serve_urb`] validates the URB first. Only the boot-protocol
+/// it because [`drive_urb`] validates the URB first. Only the boot-protocol
 /// transfers the keyboard stack needs are present: a control-IN transfer
 /// (used during enumeration and for class-IN requests) and a non-blocking
 /// interrupt-IN poll (the report path). Control-OUT and bulk are deliberately
@@ -57,9 +64,31 @@ pub trait UrbEngine {
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError>;
 }
 
-/// Validate `request` against the interface, run it on `engine`, and return
-/// the bytes transferred — the body behind [`serve_urb`].
-fn run_urb<E: UrbEngine>(request: &[u8], data: &mut [u8], engine: &mut E) -> Result<u32, Errno> {
+/// Decode `request`, validate it fail-closed against the interface, and drive
+/// it on `engine` over the shared `data` buffer, returning the transfer
+/// outcome.
+///
+/// This is the controller-side body the HCD runs after
+/// [`call_recv`](rustos_abi::SyscallNumber::CALL_RECV). It is **asynchronous**:
+///
+/// * `Ok(Some(n))` — the transfer completed; `n` bytes landed in `data`. The
+///   HCD frames a completion with [`frame_completion`] and replies now.
+/// * `Ok(None)` — an interrupt-IN report has not arrived yet. The HCD leaves
+///   the caller's URB call outstanding and re-drives this same `request` on
+///   its next controller interrupt (the report path); it never busy-polls and
+///   never blocks one interface inside another's handler.
+/// * `Err(_)` — a malformed or illegal URB (a bad endpoint/direction/transfer
+///   type, an oversize length), refused **before** the engine is touched, or a
+///   controller fault. The HCD frames an error completion and replies now, so
+///   the blocked caller always fails closed.
+///
+/// Re-decoding the stored `request` each time it is driven keeps the
+/// validation in one place and costs only a fixed-size parse.
+pub fn drive_urb<E: UrbEngine>(
+    request: &[u8],
+    data: &mut [u8],
+    engine: &mut E,
+) -> Result<Option<u32>, Errno> {
     let urb = UrbRequest::decode(request)?;
     let length = urb.length as usize;
     // The transfer may never run past the mapped shared buffer.
@@ -78,10 +107,13 @@ fn run_urb<E: UrbEngine>(request: &[u8], data: &mut [u8], engine: &mut E) -> Res
             if urb.direction != UsbDirection::In {
                 return Err(Errno::NotImplemented);
             }
+            // A control transfer completes synchronously within the call.
             let transferred = engine
                 .control_in(urb.setup, slice)
                 .map_err(DriverError::as_errno)?;
-            u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)
+            Ok(Some(
+                u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)?,
+            ))
         }
         UsbTransferType::Interrupt => {
             // An interrupt transfer targets a device endpoint, never the
@@ -93,11 +125,12 @@ fn run_urb<E: UrbEngine>(request: &[u8], data: &mut [u8], engine: &mut E) -> Res
                 return Err(Errno::OutOfRange);
             }
             match engine.interrupt_in(slice).map_err(DriverError::as_errno)? {
-                Some(transferred) => {
-                    u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)
-                }
-                // No report yet — the benign, retryable outcome.
-                None => Err(Errno::WouldBlock),
+                Some(transferred) => Ok(Some(
+                    u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)?,
+                )),
+                // No report yet — hold the URB outstanding (Ok(None)), do not
+                // fabricate a completion.
+                None => Ok(None),
             }
         }
         // Bulk is out of scope for the boot-protocol stack (`plans/USB.md`
@@ -106,29 +139,21 @@ fn run_urb<E: UrbEngine>(request: &[u8], data: &mut [u8], engine: &mut E) -> Res
     }
 }
 
-/// Serve one URB frame: decode and validate it, drive `engine` over the
-/// shared `data` buffer the URB names, and frame the completion into `reply`,
+/// Frame a completed transfer outcome into a URB completion in `reply`,
 /// returning the reply length.
 ///
-/// This is the wire-level transformation the HCD runs between
-/// [`call_recv`](rustos_abi::SyscallNumber::CALL_RECV) and
-/// [`call_reply`](rustos_abi::SyscallNumber::CALL_REPLY). Every failure — a
-/// malformed URB, an endpoint/direction that does not belong to the
-/// interface, an oversize length, or a controller fault — becomes an in-band
-/// status-framed error completion, so the blocked caller is always answered
-/// and fails closed.
+/// `Ok(n)` becomes a success completion carrying the bytes transferred; an
+/// `Err` becomes a status-framed error completion, so the blocked caller is
+/// always answered and fails closed. This is the wire transformation the HCD
+/// runs immediately before
+/// [`call_reply`](rustos_abi::SyscallNumber::CALL_REPLY).
 ///
 /// # Errors
 ///
 /// [`Errno::BufferTooSmall`] if `reply` cannot hold a completion frame (it
 /// must be at least [`URB_COMPLETION_LEN`]). The caller sizes it so.
-pub fn serve_urb<E: UrbEngine>(
-    request: &[u8],
-    data: &mut [u8],
-    engine: &mut E,
-    reply: &mut [u8],
-) -> Result<usize, Errno> {
-    match run_urb(request, data, engine) {
+pub fn frame_completion(reply: &mut [u8], result: Result<u32, Errno>) -> Result<usize, Errno> {
+    match result {
         Ok(transferred) => encode_completion(reply, transferred),
         Err(err) => encode_error_completion(reply, err),
     }
@@ -138,8 +163,8 @@ pub fn serve_urb<E: UrbEngine>(
 ///
 /// A class driver implements this over the kernel
 /// [`ipc_call`](rustos_abi::SyscallNumber::IPC_CALL) surface (`plans/USB.md`
-/// U4); a host test implements it by routing the bytes straight to
-/// [`serve_urb`].
+/// U4); a host test implements it by routing the bytes through [`drive_urb`]
+/// and [`frame_completion`].
 pub trait UrbCall {
     /// Send the encoded URB `request` to the HCD and read the framed
     /// completion into `reply`, returning its length.
@@ -168,9 +193,10 @@ impl<T: UrbCall> UrbClient<T> {
     ///
     /// # Errors
     ///
-    /// The carried completion [`Errno`] (e.g. [`Errno::WouldBlock`] when an
-    /// interrupt-IN report has not arrived yet), or an encode/transport
-    /// error.
+    /// The carried completion [`Errno`] (a controller/device fault, or a
+    /// rejected URB), or an encode/transport error. The call blocks in the
+    /// kernel until the HCD replies, so a not-yet-ready interrupt-IN report
+    /// parks the caller rather than surfacing a retryable error.
     fn submit(&mut self, urb: &UrbRequest) -> Result<u32, Errno> {
         let mut request = [0u8; URB_REQUEST_LEN];
         let n = urb.encode(&mut request)?;
@@ -201,9 +227,9 @@ impl<T: UrbCall> UrbClient<T> {
     ///
     /// # Errors
     ///
-    /// The carried completion [`Errno`] (or an encode/transport error) —
-    /// notably [`Errno::WouldBlock`] when no report is pending yet, which the
-    /// caller treats as "retry", not a fault.
+    /// The carried completion [`Errno`] (a controller/device fault), or an
+    /// encode/transport error. The call blocks until a report arrives, so the
+    /// class driver parks rather than busy-polling for the next report.
     pub fn interrupt_in(&mut self, endpoint: u8, buffer: u64, length: u32) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,

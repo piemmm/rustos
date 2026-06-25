@@ -1,15 +1,14 @@
-//! RustOS HID boot-protocol decode, console producer, and xHCI boot
-//! orchestration (`lib/hid`).
+//! RustOS HID boot-protocol decode + console producer (`lib/hid`).
 //!
-//! This is the arch-neutral, transport-agnostic HID logic the USB-HID
-//! keyboard/mouse driver is built from. It lives in `lib/*` — not in the
-//! driver crate — so **both** the in-kernel keyboard scaffold (transitional,
-//! `plans/PI.md` P10) and the user-space keyboard driver process
-//! (`drivers/input/usb_kbd`, the autoloaded steady state) compose it without a
-//! `drivers/*`→`drivers/*` dependency, exactly as the
-//! bus-agnostic xHCI protocol lives in [`rustos_usb`] rather than the xHCI
-//! driver. The thin `drivers/input/usb_hid` driver keeps
-//! only the `register` entry and the bind table.
+//! This is the arch-neutral, transport-agnostic HID boot-protocol *decode*
+//! logic the USB-HID keyboard/mouse **class** drivers are built from. It lives
+//! in `lib/*` — not in a driver crate — so a class driver
+//! (`drivers/input/usb_kbd`, …) composes it without a `drivers/*`→`drivers/*`
+//! dependency, exactly as the bus-agnostic xHCI protocol lives in the
+//! `rustos_usb` crate rather than the xHCI driver. Controller bring-up and
+//! enumeration are **not** here: they belong to the host-controller driver
+//! (`drivers/bus/usb/xhci`), which serves a class driver's transfers over the
+//! URB transport (`plans/USB.md`).
 //!
 //! # What it decodes
 //!
@@ -25,11 +24,11 @@
 //!
 //! The decoders ([`BootKeyboard`], [`BootMouse`]) are written against the
 //! [`ReportSource`] seam, defined in `lib/abi` (`rustos_abi::driver::input`)
-//! because its producer is the xHCI driver (`drivers/bus/usb`) servicing the
-//! device's interrupt-IN endpoint, and a `lib/*` crate depends only on other
-//! `lib/*` crates. Host tests drive the decoders over a
-//! mock report queue — the `emmc2`/`rpi_hvs` seam shape:
-//! the protocol layer is proven host-side, the transport below it on metal.
+//! because its producer is the class driver's URB transport (which submits
+//! interrupt-IN URBs to the host-controller driver servicing the device's
+//! interrupt-IN endpoint), and a `lib/*` crate depends only on other `lib/*`
+//! crates. Host tests drive the decoders over a mock report queue: the
+//! protocol layer is proven host-side, the transport below it on metal.
 //!
 //! # Event encoding
 //!
@@ -53,17 +52,6 @@
 //!   wheel motion as `Scroll` on [`AXIS_Y`], matching the `lib/abi` axis
 //!   encoding (`lib/abi/src/driver/input.rs`).
 //!
-//! # Boot-keyboard orchestration
-//!
-//! [`service::bring_up_boot_keyboard`] is the composition a user-space USB
-//! boot-keyboard driver runs at start-up: over its
-//! [`DriverHost`](rustos_abi::DriverHost) it carves the device-shared DMA
-//! region, maps the granted xHCI register BAR, brings the controller up over
-//! [`rustos_usb`], and enumerates the boot keyboard.
-//! [`service::derive_keyboard_resources`] turns the kernel-issued
-//! device-resource grants into the BAR + DMA-aperture bounds that orchestration
-//! needs. Both are arch-neutral and name no board.
-//!
 //! [`Input`]: rustos_abi::driver::input::Input
 //! [`InputEventKind::Key`]: rustos_abi::driver::input::InputEventKind::Key
 //! [`Key`]: rustos_input::Key
@@ -73,13 +61,11 @@
 #![deny(missing_docs)]
 
 use rustos_abi::driver::input::{InputEvent, InputEventKind};
-use rustos_abi::{DriverBindKey, DriverError, HwMatchKey};
-use rustos_usb::XHCI_COMPATIBLE;
+use rustos_abi::DriverError;
 
 pub mod console;
 pub mod keyboard;
 pub mod mouse;
-pub mod service;
 
 #[cfg(test)]
 mod tests;
@@ -88,39 +74,6 @@ pub use console::{pump_once, ConsoleSink, KeyboardConsole};
 pub use keyboard::BootKeyboard;
 pub use mouse::BootMouse;
 pub use rustos_abi::driver::input::ReportSource;
-pub use service::{
-    bring_up_boot_keyboard, bring_up_boot_keyboard_diagnostic, derive_keyboard_resources,
-    BringupPhase, KeyboardBringupError, KeyboardResources, KeyboardSource,
-};
-
-/// The bind priority [`KEYBOARD_BIND_KEYS`] carries.
-///
-/// An exact `compatible`-string match for the controller node, mirroring the
-/// other `compatible`-keyed drivers (`drivers/bus/pcie_brcm`,
-/// `drivers/storage/emmc2`, priority 10).
-const KEYBOARD_BIND_PRIORITY: u16 = 10;
-
-/// The user-space USB boot-keyboard driver's hardware bind table: the xHCI USB host controller, matched by the
-/// [`XHCI_COMPATIBLE`] `compatible` string the
-/// bus driver publishes the controller node under (`drivers/bus/usb/vl805`'s
-/// `node B`). The single source of truth the `drivers/input/usb_kbd` signed
-/// manifest's bind table is authored from and `devmgr` resolves the
-/// controller node against.
-///
-/// The keyboard driver brings the whole xHCI controller up itself — the
-/// `Xhci` controller object cannot cross a process boundary, so it binds the
-/// controller node directly rather than a separately-emitted HID-interface
-/// node (`plans/PI.md` P10 D5).
-pub const KEYBOARD_BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    KEYBOARD_BIND_PRIORITY,
-    match HwMatchKey::compatible(XHCI_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: `XHCI_COMPATIBLE` is well within `HW_COMPATIBLE_MAX`.
-        // A too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("XHCI_COMPATIBLE fits HW_COMPATIBLE_MAX"),
-    },
-)];
 
 /// `code` value for the X axis in the platform-neutral
 /// [`InputEventKind::Pointer`] / [`InputEventKind::Scroll`] encoding

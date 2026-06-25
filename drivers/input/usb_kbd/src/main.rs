@@ -1,255 +1,152 @@
-//! The `Run` entry-point binary of the USB boot-keyboard driver, installed as
-//! a signed `/System/Drivers/` bundle and **autoloaded into user space** by
-//! `devmgr` when a HID boot-keyboard interface is discovered behind a USB host
-//! (`plans/PI.md` P10 chunk 5d-2-ii).
+//! The `Run` entry-point binary of the USB **HID boot-keyboard class driver**,
+//! installed as a signed `/System/Drivers/` bundle and autoloaded into user
+//! space by `devmgr` when a HID boot-keyboard **interface** node is discovered
+//! (`plans/USB.md` U4).
 //!
-//! This is the "drivers in user space" steady state: the
-//! board bus chain (`drivers/bus/pcie_brcm` + `drivers/bus/usb`) brings the
-//! controller up and emits the enumerated HID device into the hardware tree,
-//! the kernel mints this process exactly the device-resource grants its
-//! matched node requested — its already-assigned xHCI register BAR and a DMA
-//! constraint, and no more — and this program reaches
-//! them through the rt-backed `RtDriverHost`. It names no board, PCI, or
-//! BCM2711 detail: it maps a register window by address,
-//! carves a DMA region, and speaks the bus-agnostic xHCI protocol via the
-//! arch-neutral `rustos_hid` composition.
+//! This is a pure *class* driver: it touches **no** controller register, owns
+//! **no** controller DMA, and holds no IRQ line. The USB host-controller
+//! driver (`drivers/bus/usb/xhci`) owns the controller, enumerates the device,
+//! publishes one node per interface carrying the device's `vid:pid:class`
+//! match keys, and **serves that interface's transfers** over the bus-agnostic
+//! URB transport. This driver binds the HID boot-keyboard interface node, maps
+//! the shared URB data buffer it was granted, submits interrupt-IN URBs to read
+//! reports, decodes each boot report through the arch-neutral `rustos_hid`
+//! composition, and injects keystrokes through `key_inject`. It knows neither
+//! the controller type nor the bus — the same binary works unchanged behind
+//! any host controller that speaks the URB transport (`AGENTS.md` §2.20 /
+//! §17.4).
 //!
-//! It is a **pure-Rust** program: RustOS is Rust-only, so it
-//! links the Rust userland runtime `rustos-rt` — never the C ABI, which exists
-//! solely for programs **not** written in Rust.
-//! `rustos-rt` provides `_start`, the per-process stack canary, the panic handler, and the syscall wrappers; `rustos_rt::entry!`
-//! names this program's `main`. It is a separate crate from the
-//! `rustos-drv-input-usb-hid` driver (which the kernel still links for the
-//! transitional in-kernel scaffold) so the userland runtime never enters the
-//! kernel's dependency graph.
+//! # Least privilege (`AGENTS.md` §5.4)
 //!
-//! `main` wires the real seams the bring-up and the report pump drive:
+//! It holds only `CAP_INPUT_INJECT` (inject decoded key edges), `CAP_SHM` (map
+//! the granted URB buffer), `CAP_IPC_ENDPOINT` (submit URBs on its one
+//! interface's transport endpoint), and `CAP_LOG_EMIT` (one-shot diagnostics).
+//! A compromised keyboard driver cannot reprogram the controller, reach
+//! another device's buffer, or touch the bus.
 //!
-//! * `RtDriverHost::from_grants_query` over `RtGrantSyscalls`: the host
-//!   learns its kernel-issued grants through the `resource_grants` syscall and
-//!   maps/carves them through `mmio_map` / `dma_alloc`. Every capability and
-//!   bound is re-checked kernel-side, on the far side of the trap; the host adds no authority. The DMA carve is coherent kernel-side,
-//!   so no architecture-specific cache-maintenance shim is supplied here
-//!   (`coherency = None`, keeping the program platform-neutral).
-//! * `derive_keyboard_resources` over the same delivered grants
-//!   (`RtDriverHost::resources`): the register BAR window and the DMA
-//!   aperture bound are read from the grants the kernel delivered, never a
-//!   build-time board constant.
-//! * `bring_up_boot_keyboard`: carves the device-shared DMA region (aperture
-//!   checked before any register is touched), maps the BAR,
-//!   brings the xHCI controller up, and enumerates the boot keyboard.
-//! * The `KeyInjectSink` over the `key_inject` syscall: each decoded key
-//!   edge is injected into the kernel input-focus arbiter, which routes it by
-//!   who holds focus. The driver no longer chooses the
-//!   encoding or the destination.
+//! # Event-driven, never a busy-poll (`AGENTS.md` §2.23)
 //!
-//! After bring-up `main` services the keyboard event-driven wherever the
-//! hardware allows it. When the matched node carried an MSI interrupt line
-//! (the PCIe bus driver allocated the VL805's MSI vector and routed it to a
-//! kernel virtual line, handed to this driver as the node's IRQ resource),
-//! `main` enables the xHCI completion interrupter, binds the line, and parks
-//! on `irq_wait`: the driver is woken only when the controller signals a
-//! transfer completion, never busy-polling a quiet endpoint. It acknowledges
-//! the interrupter before draining each report batch, so a completion posted
-//! during the drain re-asserts rather than being lost. Only when no interrupt
-//! line is available (a boot shape with no IRQ grant, or the interrupter could
-//! not be enabled) does it fall back to a cooperative `pump_once` poll loop,
-//! yielding between polls so the rest of the system runs. A `pump_once` error
-//! is non-fatal on either path and the next iteration retries. A bring-up
-//! failure exits with a reserved fail-closed code, leaving the console without
-//! a keyboard rather than wedged; the spawning supervisor decides whether to
-//! relaunch.
+//! Reading the next report is a **blocking** `ipc_call` (the URB submit): the
+//! host-controller driver leaves the call outstanding and replies only when the
+//! controller's completion interrupt delivers a report, so this driver parks in
+//! the kernel between keystrokes rather than spinning. The service loop is just
+//! `pump_once` over the URB-backed report source.
 //!
-//! On the host it is an inert stub so `cargo build --workspace`, clippy, and
-//! fmt still cover the file.
+//! It is a **pure-Rust** program (`AGENTS.md` §1); on the host it is an inert
+//! stub so `cargo build --workspace`, clippy, and fmt still cover the file. The
+//! live report path is metal-only (QEMU models no Pi USB, §0.4).
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
+// The driver's identity — its [`BIND_KEYS`](rustos_drv_input_usb_kbd::BIND_KEYS)
+// bind table — lives in the crate's `lib` target so the host image builder can
+// author the signed manifest from it; this binary is the `Run` entry point.
+
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use rustos_abi::driver::input::ReportSource;
     use rustos_abi::input::KeyInput;
-    use rustos_abi::{CapabilityId, DriverError};
+    use rustos_abi::{CapabilityId, DriverError, Errno};
     use rustos_caps::CapabilitySet;
     use rustos_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use rustos_hid::{
-        bring_up_boot_keyboard_diagnostic, derive_keyboard_resources, pump_once, BringupPhase,
-        ConsoleSink, KeyboardBringupError, KeyboardConsole,
-    };
-    use rustos_log::{log, Event, EventId, Field, Level};
-    use rustos_rt::{ClockDelay, LogSink};
-    use rustos_util::fmt::format_hex_u64;
-
-    /// Diagnostic event id for a one-shot bring-up failure capture, naming
-    /// the phase that stalled and the controller state observed there. The user-space replacement for the deleted
-    /// in-kernel scaffold's `4126` localisation record, now emitted over
-    /// `log_emit`; the kernel attributes it to this driver task.
-    const USB_KBD_BRINGUP_FAILED: EventId = EventId(4126);
-
-    /// Diagnostic event id for the one-shot "controller up, pumping reports"
-    /// beacon, so a metal capture confirms bring-up reached the report loop
-    /// (the counterpart of the historical enumeration-complete log).
-    const USB_KBD_READY: EventId = EventId(4101);
-
-    /// Emit a one-shot structured diagnostic naming where boot-keyboard
-    /// bring-up stalled, so the on-metal capture pins the failing controller
-    /// step (QEMU models no Pi USB, §0.4). Best-effort:
-    /// a refused or faulting `log_emit` drops the record rather than wedging
-    /// the driver.
-    ///
-    /// For a [`BringupPhase::ControllerOpen`] stall the record carries the
-    /// reset sub-stage and its `USBCMD`/`USBSTS`; for a
-    /// [`BringupPhase::Enumerate`] stall it carries the `stage`/`completion`/
-    /// `reject`/`evtype` breadcrumbs and the root-port `PORTSC` — the
-    /// `stage=N completion=M` signature that historically localised every
-    /// enumeration stall.
-    fn log_bringup_failure(err: &KeyboardBringupError) {
-        let mut err_buf = [0u8; 16];
-        let mut a_buf = [0u8; 16];
-        let mut b_buf = [0u8; 16];
-        let mut c_buf = [0u8; 16];
-        let mut d_buf = [0u8; 16];
-        let mut e_buf = [0u8; 16];
-
-        // Up to `LOG_FIELDS_MAX` (8) fields; populated per phase. `phase` and
-        // the coarse error code are always present.
-        let mut fields: [Field<'_>; 8] = [Field { key: "", value: "" }; 8];
-        let mut n = 0usize;
-        fields[n] = Field {
-            key: "phase",
-            value: err.phase.as_str(),
-        };
-        n += 1;
-        fields[n] = Field {
-            key: "err_hex",
-            // The error is a small non-negative ABI discriminant; widen
-            // without sign-extension for a stable hex rendering.
-            value: format_hex_u64(err.error.as_i32() as u32 as u64, &mut err_buf),
-        };
-        n += 1;
-        match err.phase {
-            BringupPhase::ControllerOpen => {
-                if let Some(stage) = err.open_stage {
-                    fields[n] = Field {
-                        key: "open_stage",
-                        value: stage.as_str(),
-                    };
-                    n += 1;
-                }
-                if let Some(usbcmd) = err.usbcmd {
-                    fields[n] = Field {
-                        key: "usbcmd_hex",
-                        value: format_hex_u64(u64::from(usbcmd), &mut a_buf),
-                    };
-                    n += 1;
-                }
-                if let Some(usbsts) = err.usbsts {
-                    fields[n] = Field {
-                        key: "usbsts_hex",
-                        value: format_hex_u64(u64::from(usbsts), &mut b_buf),
-                    };
-                    n += 1;
-                }
-            }
-            BringupPhase::Enumerate => {
-                let stage = err.enum_stage.map_or(0, |s| s.as_u8());
-                fields[n] = Field {
-                    key: "stage_hex",
-                    value: format_hex_u64(u64::from(stage), &mut a_buf),
-                };
-                n += 1;
-                fields[n] = Field {
-                    key: "completion_hex",
-                    value: format_hex_u64(u64::from(err.last_completion), &mut b_buf),
-                };
-                n += 1;
-                fields[n] = Field {
-                    key: "reject_hex",
-                    value: format_hex_u64(u64::from(err.last_reject), &mut c_buf),
-                };
-                n += 1;
-                fields[n] = Field {
-                    key: "evtype_hex",
-                    value: format_hex_u64(u64::from(err.last_event_type), &mut d_buf),
-                };
-                n += 1;
-                if let Some(portsc) = err.port1_portsc {
-                    fields[n] = Field {
-                        key: "portsc_hex",
-                        value: format_hex_u64(u64::from(portsc), &mut e_buf),
-                    };
-                    n += 1;
-                }
-            }
-            BringupPhase::Setup
-            | BringupPhase::DmaCarve
-            | BringupPhase::DmaAperture
-            | BringupPhase::BarMap
-            | BringupPhase::ControllerStart => {}
-        }
-        log(
-            &LogSink,
-            &Event {
-                level: Level::Error,
-                id: USB_KBD_BRINGUP_FAILED,
-                message: "usb-keyboard: boot-keyboard bring-up failed",
-                fields: &fields[..n],
-            },
-        );
-    }
+    use rustos_hid::{pump_once, BootKeyboard, ConsoleSink, KeyboardConsole, REPORT_BUF_LEN};
+    use rustos_log::{log, Event, EventId, Level};
+    use rustos_rt::LogSink;
+    use rustos_usb::transport::{UrbCall, UrbClient};
 
     /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value.
+    /// kernel-delivered grants. A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
-    /// Exit code when the delivered grants do not name the register BAR and a
-    /// DMA constraint this driver needs — an unbound or mis-provisioned node. A reserved, fail-closed value.
-    const EXIT_NO_RESOURCES: i32 = 81;
+    /// Exit code when the matched interface node did not carry the URB
+    /// transport endpoint and shared-buffer grants this driver needs.
+    const EXIT_NO_TRANSPORT: i32 = 81;
 
-    /// Exit code when the controller/keyboard bring-up failed (no USB
-    /// function, a DMA carve outside the aperture, a mapping failure, or an
-    /// empty enumeration). A reserved, fail-closed value;
-    /// the console is left without a keyboard, never wedged.
-    const EXIT_BRINGUP_FAILED: i32 = 82;
+    /// Diagnostic event id: the one-shot "bound, pumping reports" beacon.
+    const USB_KBD_READY: EventId = EventId(4101);
 
-    /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `dma_alloc` trap, so a missing grant fails fast without a
-    /// round trip. It mirrors the resources the matched node requested — the
-    /// register BAR (`CAP_MMIO_MAP`) and the DMA region (`CAP_MEM_DMA`). The
-    /// kernel is the authority and re-checks every trap regardless: claiming a capability the process was not granted
-    /// only fails the trap kernel-side, never widens authority.
+    /// The interrupt-IN endpoint number named in the URB. The host-controller
+    /// driver serves the device's single enumerated interrupt-IN endpoint
+    /// regardless of this value (it only rejects endpoint 0), so any non-zero
+    /// number names "the boot keyboard's report endpoint" for a single-endpoint
+    /// boot device.
+    const INTERRUPT_ENDPOINT: u8 = 1;
+
+    /// The capability set the driver host re-checks up front; the kernel is
+    /// the authority and re-checks every trap. It is the least-privilege set a
+    /// pure HID class driver needs — no MMIO, DMA, or IRQ.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::MEM_DMA);
-        // The driver parks on the controller's completion interrupt rather
-        // than busy-polling when the matched node carried an MSI IRQ line
-        // (the PCIe bus driver allocated + routed it); `irq_bind`/`irq_wait`
-        // are gated on `CAP_IRQ_BIND`. A boot shape with no IRQ grant simply
-        // never binds and falls back to the poll path.
-        caps.insert(CapabilityId::IRQ_BIND);
-        // The driver emits a one-shot structured bring-up diagnostic through
-        // `log_emit` when the controller does not come up, which the kernel
-        // gates on `CAP_LOG_EMIT`. The kernel
-        // re-checks every trap regardless; claiming a capability the process
-        // was not granted only fails the trap, never widens authority.
+        caps.insert(CapabilityId::INPUT_INJECT);
+        caps.insert(CapabilityId::SHM);
+        caps.insert(CapabilityId::IPC_ENDPOINT);
         caps.insert(CapabilityId::LOG_EMIT);
         caps
+    }
+
+    /// The class-side URB transport: one synchronous, capability-checked
+    /// `ipc_call` to the host-controller driver's per-interface endpoint.
+    struct IpcUrbCall {
+        endpoint: u64,
+    }
+
+    impl UrbCall for IpcUrbCall {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            // The call blocks in the kernel until the HCD replies (when the
+            // report arrives), so this driver parks rather than busy-polling.
+            rustos_rt::ipc_call(self.endpoint, request, reply).map_err(|neg| {
+                Errno::from_i32(i32::try_from(-neg).unwrap_or(0)).unwrap_or(Errno::NotFound)
+            })
+        }
+    }
+
+    /// A [`ReportSource`] over the URB transport: each `next_report` submits an
+    /// interrupt-IN URB and copies the delivered report out of the shared
+    /// buffer the host-controller driver wrote it into.
+    struct UrbReportSource {
+        client: UrbClient<IpcUrbCall>,
+        /// Base user virtual address of this driver's mapping of the shared URB
+        /// data buffer (`RtDriverHost::map_shared`). The host-controller driver
+        /// maps the same frames and writes each report here before replying.
+        shm_base: u64,
+    }
+
+    impl ReportSource for UrbReportSource {
+        fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
+            // Submit the interrupt-IN URB and block until the HCD delivers a
+            // report into the shared buffer; a transport/controller fault is a
+            // non-fatal poll error the service loop retries.
+            let transferred = self
+                .client
+                .interrupt_in(INTERRUPT_ENDPOINT, self.shm_base, REPORT_BUF_LEN as u32)
+                .map_err(|_| DriverError::DeviceFault)?;
+            let n = (transferred as usize).min(REPORT_BUF_LEN).min(buf.len());
+            // SAFETY: `RtDriverHost::map_shared` mapped at least
+            // `REPORT_BUF_LEN` bytes of the granted shared region RW into this
+            // process at `shm_base` (the host-controller driver sized the
+            // region for a boot report), and that mapping outlives this read.
+            // The HCD's write to the same frames happens-before this read: the
+            // URB reply we just received is the kernel's release of that write.
+            // We read only `n ≤ REPORT_BUF_LEN` bytes, wholly in-bounds.
+            let shm = unsafe {
+                core::slice::from_raw_parts(self.shm_base as usize as *const u8, REPORT_BUF_LEN)
+            };
+            buf[..n].copy_from_slice(&shm[..n]);
+            Ok(Some(n))
+        }
     }
 
     /// A [`ConsoleSink`] that injects each decoded keyboard record into the
     /// kernel input-focus arbiter through the `key_inject` syscall.
     ///
-    /// The user-space counterpart of the in-kernel `ArbiterConsoleSink`: [`pump_once`] hands it one whole [`KeyInput`]
-    /// record's wire bytes per key edge; it decodes them fail-closed and
-    /// injects the record. The kernel validates `CAP_INPUT_INJECT` and routes
-    /// the record by who holds input focus. A malformed
-    /// record or a refused injection surfaces as [`DriverError::DeviceFault`]
-    /// rather than silently dropping input; the pump loop
-    /// treats it as a non-fatal poll error and retries.
+    /// [`pump_once`] hands it one whole [`KeyInput`] record's wire bytes per
+    /// key edge; it decodes them fail-closed and injects the record. A
+    /// malformed record or a refused injection surfaces as
+    /// [`DriverError::DeviceFault`] (a non-fatal poll error), never silently
+    /// dropping input.
     struct KeyInjectSink;
 
     impl ConsoleSink for KeyInjectSink {
@@ -262,111 +159,50 @@ mod program {
         }
     }
 
-    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime
-    /// is set up and routes its return value through the `exit` syscall.
+    /// Program entry point. `rustos-rt`'s `_start` calls it once the runtime is
+    /// set up and routes its return value through the `exit` syscall.
     ///
     /// On success this never returns: the report pump runs for the life of the
     /// driver process.
     fn main() -> i32 {
-        // Build the host from the grants the kernel minted for this driver.
-        // Coherent DMA is carved kernel-side, so no architecture-specific
-        // cache-maintenance shim is supplied.
+        // No MMIO/DMA grants to map, so no coherency shim is needed.
         let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
-        // Derive the BAR window and DMA aperture from the same delivered
-        // grants the host maps over — no build-time board constant, no second
-        // `resource_grants` syscall.
-        let Ok(resources) = derive_keyboard_resources(host.resources()) else {
-            return EXIT_NO_RESOURCES;
+        // The matched interface node carried two transport grants: the URB
+        // call endpoint (its id) and the shared data buffer (mapped here).
+        let Some(endpoint) = host.urb_endpoint() else {
+            return EXIT_NO_TRANSPORT;
         };
-        // The one userland clock-backed `Delay` for the hardware-dictated
-        // hub settle windows.
-        let delay = ClockDelay::new();
-        let mut keyboard = match bring_up_boot_keyboard_diagnostic(
-            &host,
-            &delay,
-            resources.bar_base,
-            resources.bar_len,
-            resources.dma_aperture_top,
-        ) {
-            Ok(keyboard) => keyboard,
-            Err(err) => {
-                // Pin the failing controller step on the captured serial log
-                // before exiting fail-closed: QEMU models no Pi USB, so this
-                // one-shot diagnostic is how a metal run localises the stall. The console is left without a
-                // keyboard, never wedged.
-                log_bringup_failure(&err);
-                return EXIT_BRINGUP_FAILED;
-            }
+        let Ok(shm_base) = host.map_shared() else {
+            return EXIT_NO_TRANSPORT;
         };
-        // One-shot beacon: bring-up reached the report loop. A metal capture
-        // that shows this but no keystrokes localises the residual to the
-        // pump path rather than bring-up.
+
+        let source = UrbReportSource {
+            client: UrbClient::new(IpcUrbCall { endpoint }),
+            shm_base,
+        };
+        let mut keyboard = BootKeyboard::new(source);
+        let mut console = KeyboardConsole::new();
+        let mut sink = KeyInjectSink;
+
         log(
             &LogSink,
             &Event {
                 level: Level::Info,
                 id: USB_KBD_READY,
-                message: "usb-keyboard: controller up, pumping reports",
+                message: "usb-keyboard: bound, pumping reports over URB transport",
                 fields: &[],
             },
         );
 
-        let mut console = KeyboardConsole::new();
-        let mut sink = KeyInjectSink;
-
-        // Primary path — interrupt-driven. If the matched node carried an MSI
-        // IRQ line (the PCIe bus driver allocated + routed the VL805's MSI to
-        // it), enable the controller's completion interrupter, bind the line,
-        // and park on it: the driver is woken only when the controller signals
-        // a completion, never busy-polling a quiet endpoint (the §2.23
-        // event-driven mandate). The kernel re-arms the MSI line across each
-        // park, so the driver touches no interrupt-controller state itself.
-        if let Some(line) = host.irq_line() {
-            if keyboard.source_mut().enable_interrupter().is_ok() {
-                let handle = rustos_rt::irq_bind(line);
-                if handle >= 0 {
-                    // The kernel encodes a bound handle as a non-negative
-                    // register; reinterpret it for `irq_wait`.
-                    #[allow(clippy::cast_sign_loss)]
-                    let handle = handle as u64;
-                    // Drain anything already queued from enumeration before the
-                    // first park, so a report that completed before the
-                    // interrupter was armed is not stranded.
-                    while matches!(pump_once(&mut keyboard, &mut console, &mut sink), Ok(n) if n > 0)
-                    {
-                    }
-                    loop {
-                        // Park (unbounded) until the completion interrupt fires;
-                        // a negative result means the binding was released, so
-                        // drop to the poll fallback rather than spin.
-                        if rustos_rt::irq_wait(handle, u64::MAX) < 0 {
-                            break;
-                        }
-                        // Acknowledge the interrupter *before* draining, so a
-                        // completion the controller posts during the drain
-                        // re-asserts and is not lost, then drain every queued
-                        // report. A `pump_once` error ends the drain and we
-                        // re-park (the next interrupt re-tries).
-                        let _ = keyboard.source_mut().acknowledge_interrupt();
-                        while matches!(
-                            pump_once(&mut keyboard, &mut console, &mut sink),
-                            Ok(n) if n > 0
-                        ) {}
-                    }
-                }
-            }
-        }
-
-        // Fallback — no MSI/interrupt path available (no IRQ grant, the
-        // interrupter could not be enabled, or the binding was released):
-        // the bounded cooperative poll loop, yielding between polls so PID 1
-        // and every other task keeps running. A `pump_once` error is
-        // non-fatal: the next poll retries rather than dropping the driver.
+        // Event-driven service loop: `pump_once` reads the next report through
+        // the URB-backed source, which blocks in the kernel on the `ipc_call`
+        // until the host-controller driver delivers one — so this loop parks
+        // between keystrokes and never busy-polls (§2.23). A `pump_once` error
+        // is non-fatal: the next iteration re-submits.
         loop {
             let _ = pump_once(&mut keyboard, &mut console, &mut sink);
-            rustos_rt::yield_now();
         }
     }
 
@@ -374,10 +210,10 @@ mod program {
 }
 
 // --- Host stub ----------------------------------------------------------
-//
-// On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `rustos-rt` `_start` path — is not compiled, so
-// this inert `main` keeps the crate building under the host tooling. It
-// performs no I/O.
 #[cfg(not(freestanding))]
-fn main() {}
+fn main() {
+    // On the host this binary is an inert stub: the freestanding `Run` program
+    // above is built only for the bare-metal driver targets. Keeping a host
+    // `main` lets `cargo build --workspace`, clippy, and fmt still cover the
+    // file, mirroring the other driver `Run` binaries.
+}
