@@ -200,6 +200,23 @@ impl KernelArch for Aarch64BinArch {
         }
     }
 
+    fn msi_alloc_facility(
+        &self,
+    ) -> Option<&'static (dyn rustos_kernel_core::MsiAllocFacility + 'static)> {
+        // The Pi 4's BCM2711 root-complex MSI controller backs `msi_alloc` so
+        // a user-space bus driver can wire the VL805 xHCI for message-signalled
+        // interrupts. On a host build there is no `VolatileMsiMmio`, so no
+        // facility is offered and `msi_alloc` stays fail-closed.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            Some(&crate::aarch64::gic_irq::BRCM_MSI_ALLOC_FACILITY)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            None
+        }
+    }
+
     fn install_irq_dispatch(&self, table: &'static IrqTable) {
         // Publish the freshly built `IrqTable` and register the production
         // device-IRQ dispatcher with the arch crate's EL1 IRQ-vector seam,

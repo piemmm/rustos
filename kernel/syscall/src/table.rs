@@ -829,6 +829,30 @@ pub trait SyscallHandlers {
     fn hw_remove_node(&self, _caller: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Allocate a message-signalled interrupt vector and report the
+    /// architecture-built MSI doorbell for a PCI function.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::IRQ_BIND`] and that `out` is a non-null `UserPtr`.
+    /// The implementation allocates a free MSI vector, brings the
+    /// platform's MSI controller up if it is not already, **grants the
+    /// calling task a device resource for the resulting virtual interrupt
+    /// line** (so it may both `irq_bind` it and forward it as an
+    /// [`rustos_abi::hwtree::HwResource::irq`] onto a child node), and writes
+    /// the encoded [`rustos_abi::MsiAllocation`] into the caller's `out`
+    /// buffer through the validated boundary, returning the number of bytes
+    /// written. A platform with no MSI controller fails closed with
+    /// [`Errno::NotImplemented`]; an exhausted vector space fails closed with
+    /// [`Errno::OutOfRange`]; a buffer shorter than
+    /// [`rustos_abi::MsiAllocation::WIRE_LEN`] fails closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn msi_alloc(&self, _caller: &CallerContext<'_>, _out: u64, _out_len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1154,6 +1178,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[0] is the `HwNode::id` to remove (a plain `u64`,
                 // resolved against the live tree by the handler).
                 self.handlers.hw_remove_node(caller, args.0[0])
+            }
+            SyscallNumber::MSI_ALLOC => {
+                // args[0] is the non-null out `UserPtr` (dispatcher-checked);
+                // args[1] is its capacity in bytes.
+                let out_len = decode_len(args.0[1])?;
+                self.handlers.msi_alloc(caller, args.0[0], out_len)
             }
             _ => Err(Errno::NotFound),
         }
@@ -1746,6 +1776,14 @@ mod tests {
         fn hw_remove_node(&self, _c: &CallerContext<'_>, _node_id: u64) -> SyscallResult {
             self.record("hw_remove_node");
             Ok(0)
+        }
+
+        fn msi_alloc(&self, _c: &CallerContext<'_>, _out: u64, out_len: usize) -> SyscallResult {
+            self.record("msi_alloc");
+            // Echo the buffer length so the reachability test can assert the
+            // dispatcher decoded both arguments without wiring a real MSI
+            // controller / device-resource grant here.
+            Ok(out_len as u64)
         }
     }
 

@@ -167,6 +167,33 @@ pub trait KernelArch: SchedulerArch {
         IrqRouting::unsupported()
     }
 
+    /// Hand the kernel core the architecture's MSI-allocation facility, if
+    /// it has one, so the `msi_alloc` syscall can mint message-signalled
+    /// interrupt vectors for PCI functions.
+    ///
+    /// Allocating an MSI vector and bringing the platform's MSI controller
+    /// up is irreducibly architecture-specific (the BCM2711 root-complex MSI
+    /// controller on the Pi 4, an IO-APIC/LAPIC MSI domain on x86_64), so —
+    /// like [`Self::irq_routing`] — the port supplies the concrete producer
+    /// and the kernel core installs it into the syscall handler. The
+    /// reference must be `'static` (the port backs it with a `static` or a
+    /// `Box::leak`'d allocation) and is read once, during
+    /// [`crate::Phase::Syscall`].
+    ///
+    /// # Default
+    ///
+    /// The default returns [`None`]: a port with no MSI controller
+    /// (`wasm32`, test harnesses, and ports that have not wired one) leaves
+    /// the handler's fail-closed [`crate::devres::NullMsiAllocFacility`] in
+    /// place, so `msi_alloc` returns [`rustos_kernel_irq`]-style
+    /// `NotImplemented`.
+    #[must_use]
+    fn msi_alloc_facility(
+        &self,
+    ) -> Option<&'static (dyn crate::devres::MsiAllocFacility + 'static)> {
+        None
+    }
+
     /// Hand the architecture port a `'static` reference to the
     /// kernel-wide [`IrqTable`] once [`crate::Phase::Irq`] has
     /// constructed it.

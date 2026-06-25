@@ -19,9 +19,18 @@ USB host (`AGENTS.md` §18, `plans/PI.md` P10 chunk 5d-2-ii). This is the
    build-time board constant (`AGENTS.md` §2.16 / §2.20).
 3. Runs `rustos_hid::bring_up_boot_keyboard_diagnostic` to carve DMA, map the
    BAR, bring the controller up, and enumerate the boot keyboard.
-4. Loops `rustos_hid::pump_once`, injecting each decoded key edge into the
-   kernel input-focus arbiter through the `key_inject` syscall and yielding
-   between polls (`AGENTS.md` §2.1).
+4. Services the keyboard **event-driven** wherever the hardware allows it.
+   When its matched node carried an MSI interrupt line (the PCIe bus driver
+   allocated the VL805's MSI vector and routed it to a kernel virtual line,
+   handed over as the node's IRQ resource), it enables the xHCI completion
+   interrupter, `irq_bind`s the line, and parks on `irq_wait` — woken only on
+   a transfer completion, never busy-polling a quiet endpoint (`AGENTS.md`
+   §2.23). It acknowledges the interrupter before draining each report batch
+   so a completion posted mid-drain re-asserts rather than being lost. Only
+   when no interrupt line is available does it fall back to a cooperative
+   `rustos_hid::pump_once` poll loop, yielding between polls. Either way each
+   decoded key edge is injected into the kernel input-focus arbiter through
+   the `key_inject` syscall.
 
 Every capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); the
 host adds no authority. A bring-up failure emits a **one-shot structured
@@ -58,7 +67,9 @@ models no Pi USB timing (`AGENTS.md` §0.4).
 
 Granted at spawn from its matched node's requested resources: `CAP_MMIO_MAP`
 (the register BAR), `CAP_MEM_DMA` (the DMA region), `CAP_INPUT_INJECT`
-(`key_inject`), and `CAP_LOG_EMIT` (the one-shot bring-up diagnostic, §19.4).
+(`key_inject`), `CAP_IRQ_BIND` (`irq_bind`/`irq_wait` on the routed MSI line —
+absent on a boot shape with no IRQ grant, where the driver falls back to
+polling), and `CAP_LOG_EMIT` (the one-shot bring-up diagnostic, §19.4).
 
 ## Tests
 

@@ -23,8 +23,8 @@
 
 use rustos_abi::driver::mmio::MmioMapError;
 use rustos_abi::{
-    CapabilityId, DriverError, DriverHost, HwNode, HwResource, HwResourceKind, MmioMapper, PciBus,
-    RegisterWindow,
+    CapabilityId, DriverError, DriverHost, HwNode, HwResource, HwResourceKind, MmioMapper,
+    MsiMessage, PciBus, RegisterWindow,
 };
 use rustos_pci::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_brcm,
@@ -372,6 +372,30 @@ pub fn publish_usb_function(
         windows.inbound_pcie_base,
     ))
     .map_err(|_| DriverError::NoSpace)?;
+
+    // Wire the controller for message-signalled interrupts so the matched
+    // xHCI driver parks on its completion interrupt rather than busy-polling
+    // (`plans/PI.md` U-MSI). Allocate a vector through the host (the kernel
+    // mints it, brings the platform MSI controller up, and grants this driver
+    // a device resource for the resulting virtual line), program the VL805's
+    // MSI capability with the returned doorbell, and forward the line as the
+    // node's IRQ grant request — covered by the grant `alloc_msi` just minted,
+    // so `hw_emit_node` admits it (no ambient authority). Best-effort: a
+    // platform with no MSI controller (`alloc_msi` → `NotImplemented`) or a
+    // function with no MSI capability (`route_msi` → `NotFound`) simply
+    // publishes the node without an IRQ resource, leaving the matched driver
+    // to fall back to its poll path rather than blocking enumeration.
+    if let Ok(allocation) = host.alloc_msi() {
+        let message = MsiMessage {
+            address: allocation.address,
+            data: allocation.data,
+        };
+        if bus.route_msi(bdf, message).is_ok() {
+            node.push_resource(HwResource::irq(u64::from(allocation.line), 1))
+                .map_err(|_| DriverError::NoSpace)?;
+        }
+    }
+
     host.emit_node(node)?;
     Ok(node)
 }

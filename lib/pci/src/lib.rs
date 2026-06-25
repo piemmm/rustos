@@ -272,4 +272,8 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
     fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError> {
         Pci::describe_function(self, bdf)
     }
+
+    fn route_msi(&self, bdf: u64, message: MsiMessage) -> Result<(), DriverError> {
+        Pci::route_msi(self, bdf, message)
+    }
 }

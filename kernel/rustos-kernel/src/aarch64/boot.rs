@@ -1045,5 +1045,23 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     if let Some(intid) = crate::aarch64::root_unlock::console_spi(&fdt) {
         crate::aarch64::gic_irq::set_uart_console_intid(intid);
     }
+    // Configure the BCM2711 root-complex MSI controller the `msi_alloc`
+    // syscall drives: point it at the discovered RC register base and record
+    // the shared GIC SPI its internal MSI controller raises (the
+    // `brcm,bcm2711-pcie` node's second `interrupts` entry). A tree with no
+    // such node leaves the controller unconfigured and `msi_alloc` fails
+    // closed (the QEMU `virt` shape). Done post-MMU because both the
+    // register-base store and the SPI `OnceCell` need the MMU on, exactly
+    // like the console-interrupt record above.
+    #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+    if let (Some(pcie), Some(msi_intid)) = (
+        platform::pcie_bringup(&fdt),
+        crate::aarch64::root_unlock::pcie_msi_spi(&fdt),
+    ) {
+        if let Ok(base) = usize::try_from(pcie.regs_phys) {
+            rustos_arch_aarch64::brcm_msi::configure(base);
+            crate::aarch64::gic_irq::set_brcm_msi_spi(msi_intid);
+        }
+    }
     out
 }

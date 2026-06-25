@@ -1046,6 +1046,114 @@ fn route_msix_propagates_capability_denial() {
     );
 }
 
+// ---- MSI (not MSI-X) interrupt routing -----------------------------------
+
+/// A function advertising the legacy **MSI** capability at byte 0x50,
+/// 64-bit-address capable — the shape the Pi 4's VL805 xHCI presents.
+/// `addr64` selects whether the Message Control "64-bit capable" bit
+/// (MC bit 7) is set, so a test can exercise both the 64-bit and the
+/// 32-bit-only data-register placement.
+fn msi_fixture(addr64: bool) -> MockConfigSpace {
+    // Message Control occupies the high 16 bits of the header dword;
+    // bit 7 (→ dword bit 23) advertises 64-bit addressing.
+    let msg_ctrl: u32 = if addr64 { 0x0080 } else { 0x0000 };
+    let func = MockFunction {
+        bus: 0,
+        device: 6,
+        function: 0,
+        regs: vec![
+            id(VL805_VENDOR, VL805_DEVICE),
+            status_with_caplist(),
+            class(0x0C03),
+            header(0x00),
+            cap_pointer(0x50),
+            // MSI cap @ 0x50 (dword 20): id=0x05, next=0, Message Control.
+            (20, (msg_ctrl << 16) | 0x05),
+        ],
+        sizing: vec![],
+    };
+    MockConfigSpace::new(vec![func])
+}
+
+fn msi_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 6,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+}
+
+#[test]
+fn route_msi_programs_address_data_and_enables_single_vector() {
+    let config = msi_fixture(true);
+    let state = config.shared_state();
+    let pci = Pci::new(config);
+    // A BCM2711-style doorbell pair: the RC MSI controller's target
+    // address and the data word selecting one vector.
+    let message = MsiMessage {
+        address: 0xFFFF_FFFC,
+        data: 0x0000_6540,
+    };
+
+    pci.route_msi(msi_bdf(), message).expect("routes msi");
+
+    let st = state.borrow();
+    let find = |register: u8| {
+        st.writes
+            .iter()
+            .rev()
+            .find(|(a, _)| a.bus == 0 && a.device == 6 && a.function == 0 && a.register == register)
+            .map(|(_, v)| *v)
+    };
+    // Message Address low at cap+4 (dword 21), with bits 1:0 forced 0.
+    assert_eq!(find(21), Some(0xFFFF_FFFC), "message address low");
+    // Message Address high at cap+8 (dword 22) — zero here.
+    assert_eq!(find(22), Some(0x0000_0000), "message address high");
+    // Message Data at cap+0x0C (dword 23), 16-bit value in the low half.
+    assert_eq!(find(23), Some(0x0000_6540), "message data");
+    // Header (dword 20): MSI Enable set, Multiple Message Enable cleared
+    // (one vector), cap_id/next preserved in the low byte.
+    let header = find(20).expect("header written");
+    assert_eq!(header & (1 << 16), 1 << 16, "MSI Enable set");
+    assert_eq!(header & (0x7 << 20), 0, "Multiple Message Enable cleared");
+    assert_eq!(header & 0xFF, 0x05, "cap_id preserved");
+    // Bus mastering was enabled (an MSI is an upstream memory write).
+    let command = find(1).expect("command written");
+    assert_eq!(command & 0b100, 0b100, "bus-master enabled");
+}
+
+#[test]
+fn route_msi_reports_not_found_without_msi_capability() {
+    // The q35 virtio function advertises MSI-X, not legacy MSI.
+    let pci = Pci::new(q35_fixture());
+    let message = MsiMessage {
+        address: 0xFFFF_FFFC,
+        data: 0x6540,
+    };
+    assert_eq!(
+        pci.route_msi(virtio_bdf(), message).unwrap_err(),
+        DriverError::NotFound
+    );
+}
+
+#[test]
+fn route_msi_rejects_a_64bit_address_on_a_32bit_capability() {
+    // A 32-bit-only MSI capability cannot express a doorbell above 4 GiB:
+    // writing the low half alone would deliver to the wrong address, so
+    // fail closed rather than silently truncate.
+    let pci = Pci::new(msi_fixture(false));
+    let message = MsiMessage {
+        address: 0x1_0000_0000,
+        data: 0x6540,
+    };
+    assert_eq!(
+        pci.route_msi(msi_bdf(), message).unwrap_err(),
+        DriverError::OutOfRange
+    );
+}
+
 /// The mechanism-#1 constructor yields a value usable through all
 /// three frozen `abi-v1` bus seams without naming the concrete `Pci`
 /// type. Construction stores the [`PortIo`] backend and issues no port

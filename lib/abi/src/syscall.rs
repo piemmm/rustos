@@ -659,6 +659,31 @@ impl SyscallNumber {
     /// node and leaves the *load* to the device manager.
     pub const HW_REMOVE_NODE: Self = Self(38);
 
+    /// Allocate a message-signalled interrupt (MSI) vector for a PCI
+    /// function and report the architecture-built doorbell to program into
+    /// the function's MSI capability.
+    ///
+    /// Arguments: `out: *const u8` — a non-null pointer to a caller buffer
+    /// the kernel fills with an encoded [`crate::MsiAllocation`] (the
+    /// allocated virtual interrupt line plus the MSI doorbell address and
+    /// data word); `out_len: usize` — its capacity. Returns the number of
+    /// bytes written ([`crate::MsiAllocation::WIRE_LEN`]), or `-errno`.
+    ///
+    /// Gated by [`crate::CapabilityId::IRQ_BIND`] — the same privilege a
+    /// driver needs to `irq_bind` the resulting line. The kernel's
+    /// interrupt controller mints a free MSI vector, lazily brings the
+    /// platform's MSI controller up, and **grants the calling task a device
+    /// resource for the virtual line**, so the caller may both bind it and
+    /// forward it (as an [`crate::hwtree::HwResource::irq`]) onto a child
+    /// node it publishes through [`SyscallNumber::HW_EMIT_NODE`] — never
+    /// ambient authority. A platform with no MSI controller fails closed
+    /// with [`crate::Errno::NotImplemented`]; exhaustion of the vector space
+    /// fails closed with [`crate::Errno::OutOfRange`]. The returned doorbell
+    /// is opaque to the caller — a bus driver writes it verbatim into the
+    /// function's MSI capability (the message-address/data registers) so the
+    /// device's interrupt routes to the allocated line.
+    pub const MSI_ALLOC: Self = Self(39);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -772,6 +797,7 @@ mod tests {
         assert_eq!(SyscallNumber::LOG_EMIT.as_u16(), 36);
         assert_eq!(SyscallNumber::HW_EMIT_NODE.as_u16(), 37);
         assert_eq!(SyscallNumber::HW_REMOVE_NODE.as_u16(), 38);
+        assert_eq!(SyscallNumber::MSI_ALLOC.as_u16(), 39);
     }
 
     #[test]

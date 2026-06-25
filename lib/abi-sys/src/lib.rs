@@ -99,6 +99,7 @@ const NUM_CALL_REPLY: u64 = SyscallNumber::CALL_REPLY.as_u16() as u64;
 const NUM_LOG_EMIT: u64 = SyscallNumber::LOG_EMIT.as_u16() as u64;
 const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
+const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -866,6 +867,28 @@ pub extern "C" fn sys_hw_remove_node(node_id: u64) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_HW_REMOVE_NODE, [node_id, 0, 0, 0, 0, 0])) }
 }
 
+/// `msi_alloc`: allocate a message-signalled interrupt (MSI) vector for a PCI
+/// function and write the encoded `rustos_abi::MsiAllocation` (the virtual
+/// interrupt line plus the doorbell address/data to program into the
+/// function's MSI capability) into `out` (a buffer of `len` bytes)
+/// (`SyscallNumber::MSI_ALLOC`). Returns the number of bytes written, or a
+/// `ROS_E_*` code reinterpreted into the result.
+///
+/// A user-space bus driver wiring a PCI function for MSI calls this; it is
+/// gated kernel-side on `ROS_CAP_IRQ_BIND` (the same privilege the driver
+/// needs to `irq_bind` the returned line). The kernel grants the caller a
+/// device resource for the line, so it may both bind it and forward it as an
+/// IRQ resource onto a child node it publishes (no ambient authority); a
+/// platform with no MSI controller fails closed.
+#[must_use]
+#[export_name = "ros_sys_msi_alloc"]
+pub extern "C" fn sys_msi_alloc(out: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_resource_grants`. The kernel validates the `(out, len)`
+    // pair against the caller's address space before writing the encoded
+    // allocation.
+    unsafe { raw_syscall(NUM_MSI_ALLOC, [ptr_arg(out), len as u64, 0, 0, 0, 0]) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,6 +942,7 @@ mod tests {
         (NUM_LOG_EMIT, "log_emit", 2),
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 1),
+        (NUM_MSI_ALLOC, "msi_alloc", 2),
     ];
 
     #[test]

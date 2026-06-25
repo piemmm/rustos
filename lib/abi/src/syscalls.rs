@@ -968,6 +968,34 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::HW_EMIT),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::MSI_ALLOC,
+        name: "msi_alloc",
+        arg_count: 2,
+        args: [
+            // The out buffer the encoded `MsiAllocation` is written into,
+            // then its capacity.
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` register convention
+        // `resource_grants` / `dma_alloc` use.
+        ret: AbiType::U64,
+        // Allocating an MSI vector is gated on `CAP_IRQ_BIND` — the same
+        // privilege the driver needs to `irq_bind` the line it returns — and
+        // is never ambient: the kernel mints a vector, brings the MSI
+        // controller up, and grants the caller the matching device resource.
+        // It IS audited per call — handing a principal an interrupt line is a
+        // security-relevant grant and is low-volume (once per device at
+        // bring-up), so the record cannot drown the log, exactly like
+        // `mmio_map` / `dma_alloc`.
+        required_capability: Some(CapabilityId::IRQ_BIND),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

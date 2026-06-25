@@ -948,9 +948,10 @@ fn run_phases<A: KernelArch>(
     // the same reason as `KernelState`: its borrows reference
     // `KernelState` fields and must therefore be `'static`.
     phase_started(log_sink, Phase::Syscall);
-    let hook: &'static KernelDispatchHook<'static, A> = Box::leak(Box::new(
-        KernelDispatchHook::new(
-            &state.scheduler,
+    dispatcher_callback_slot
+        .install_dispatcher(Box::leak(Box::new(
+            KernelDispatchHook::new(
+                &state.scheduler,
             &state.caps,
             state.arch.as_ref(),
             audit_sink,
@@ -983,16 +984,14 @@ fn run_phases<A: KernelArch>(
         // (Design D); the default `NULL_HW_TREE` keeps `hw_tree_read` /
         // `hw_tree_wait` fail-closed when no inventory was seeded.
         .with_hw_tree(hw_tree)
-        // Serve the user-space `log_emit` syscall through the *same*
-        // diagnostic sink the kernel routes its own records through (the
-        // serial UART on a debug build, the video console on release), so a
-        // capability-gated service's diagnostics land where the kernel's do. The default no-op sink would silently
-        // drop them; this is the diagnostic sink only — the audit sink stays
+        // Serve the user-space `log_emit` syscall through the same diagnostic
+        // sink the kernel routes its own records through; the audit sink stays
         // kernel-only.
-        .with_log_sink(log_sink),
-    ));
-    dispatcher_callback_slot
-        .install_dispatcher(hook)
+        .with_log_sink(log_sink)
+        // Serve `msi_alloc` through the architecture port's MSI controller
+        // when it has one; `None` leaves it fail-closed `NotImplemented`.
+        .with_msi_alloc_facility(state.arch.as_ref().msi_alloc_facility()),
+        )))
         .map_err(InitError::DispatcherAlreadyInstalled)?;
     phase_ready(log_sink, Phase::Syscall);
 

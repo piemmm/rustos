@@ -83,12 +83,14 @@ where
 {
     let mut bar: Option<&HwResource> = None;
     let mut dma: Option<&HwResource> = None;
+    let mut irq: Option<&HwResource> = None;
     // One pass: a grant iterator is consumed once, and the grant order is not
     // guaranteed, so latch the first of each kind.
     for resource in resources {
         match resource.kind() {
             Some(HwResourceKind::Mmio) if bar.is_none() => bar = Some(resource),
             Some(HwResourceKind::Dma) if dma.is_none() => dma = Some(resource),
+            Some(HwResourceKind::Irq) if irq.is_none() => irq = Some(resource),
             _ => {}
         }
     }
@@ -101,6 +103,17 @@ where
         .map_err(|_| DriverError::DeviceFault)?;
     node.push_resource(*bar).map_err(|_| DriverError::NoSpace)?;
     node.push_resource(*dma).map_err(|_| DriverError::NoSpace)?;
+    // Forward the MSI interrupt line the PCIe bus driver allocated and routed
+    // for the controller (when present), so the matched xHCI driver receives
+    // an `irq_bind`-able grant and services completions on its interrupt
+    // rather than busy-polling (`plans/PI.md` U-MSI). The kernel's
+    // `hw_emit_node` coverage check admits it exactly because this driver
+    // holds the same forwarded IRQ grant on node A. A boot shape with no MSI
+    // (no such grant) simply omits it and the matched driver falls back to its
+    // poll path.
+    if let Some(irq) = irq {
+        node.push_resource(*irq).map_err(|_| DriverError::NoSpace)?;
+    }
     Ok(node)
 }
 

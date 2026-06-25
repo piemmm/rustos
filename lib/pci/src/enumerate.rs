@@ -67,6 +67,18 @@ const CMD_MEMORY_SPACE: u32 = 1 << 1;
 /// (an MSI-X interrupt is itself an upstream memory write).
 const CMD_BUS_MASTER: u32 = 1 << 2;
 
+/// MSI Message Control "MSI Enable" bit (PCI Local Bus 3.0 §6.8.1.3,
+/// MC bit 0). The Message Control register occupies the high 16 bits of
+/// the MSI capability header dword, so MC bit 0 lands at dword bit 16.
+const MSI_CTRL_ENABLE: u32 = 1 << 16;
+
+/// MSI Message Control "Multiple Message Enable" field (MC bits 6:4 →
+/// dword bits 22:20): the log2 of how many vectors the function may use.
+/// Cleared to request exactly one vector — RustOS routes a single MSI per
+/// function, so a device must not spread interrupts across vectors the
+/// kernel did not allocate.
+const MSI_CTRL_MME_MASK: u32 = 0x7 << 20;
+
 /// The PCI bus driver instance.
 ///
 /// Holds the [`ConfigSpace`] backend; everything else is
@@ -714,6 +726,99 @@ impl<C: ConfigSpace> Pci<C> {
         let updated = (header | MSIX_CTRL_ENABLE) & !MSIX_CTRL_FUNCTION_MASK;
         self.config.write32(header_addr, updated);
         Ok(())
+    }
+
+    /// Program function `bdf`'s **MSI** (not MSI-X) capability with
+    /// `message`, force a single vector, and enable it.
+    ///
+    /// The MSI interrupt-routing hand-off for a function that advertises
+    /// the legacy MSI capability rather than MSI-X (the Pi 4's VL805 xHCI
+    /// host): the kernel's interrupt controller mints the
+    /// [`MsiMessage`] (the doorbell address + the data word that selects
+    /// the vector — on the BCM2711 PCIe RC, the internal MSI controller's
+    /// doorbell), and this writes it into the capability's Message Address
+    /// and Message Data registers, then sets MSI Enable with Multiple
+    /// Message Enable cleared (exactly one vector).
+    ///
+    /// Unlike [`route_msix`](Self::route_msix) this needs no `MmioMapper`:
+    /// the MSI capability lives entirely in configuration space, reached
+    /// through the same [`ConfigSpace`] backend, so there is no BAR table
+    /// to map. Bus mastering is enabled first, since an MSI is itself an
+    /// upstream memory write the function cannot issue with the bus-master
+    /// bit clear (PCI Local Bus 3.0 §6.2.2).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — the function advertises no MSI
+    ///   capability (or no capability list at all).
+    /// * [`DriverError::OutOfRange`] — `message.address` needs 64-bit
+    ///   addressing but the capability is 32-bit only (writing the low
+    ///   half alone would deliver to the wrong address — fail closed).
+    pub fn route_msi(&self, bdf: u64, message: MsiMessage) -> Result<(), DriverError> {
+        // An MSI is an upstream memory write; without bus mastering the
+        // function can never deliver it (PCI Local Bus 3.0 §6.2.2).
+        self.enable_bus_master(bdf);
+
+        let (cap_offset, addr64) = self.find_msi(bdf)?;
+        let base = unpack_bdf(bdf, 0);
+        // Message Address (low). Bits 1:0 are reserved and must be written
+        // zero (the doorbell is at least dword-aligned, §6.8.1.1).
+        self.config.write32(
+            addr_with_byte_offset(base, cap_offset + 4),
+            (message.address & 0xFFFF_FFFC) as u32,
+        );
+        if addr64 {
+            // 64-bit capable: upper address dword at +0x08, Message Data
+            // at +0x0C (§6.8.1). The data is a 16-bit field; the upper
+            // half is reserved for a function without per-vector masking,
+            // so writing it zero is correct.
+            self.config.write32(
+                addr_with_byte_offset(base, cap_offset + 8),
+                (message.address >> 32) as u32,
+            );
+            self.config.write32(
+                addr_with_byte_offset(base, cap_offset + 0x0C),
+                message.data & 0xFFFF,
+            );
+        } else {
+            // 32-bit capable only: a doorbell above 4 GiB cannot be
+            // expressed, so fail closed rather than truncate it.
+            if message.address >> 32 != 0 {
+                return Err(DriverError::OutOfRange);
+            }
+            self.config.write32(
+                addr_with_byte_offset(base, cap_offset + 8),
+                message.data & 0xFFFF,
+            );
+        }
+        // Enable MSI and force Multiple Message Enable to 0 (one vector),
+        // so the function delivers only the single doorbell the kernel
+        // allocated. The Message Control register is the high 16 bits of
+        // the capability header dword; cap_id / next-pointer in the low
+        // 16 bits are read-only and ignore writes.
+        let header_addr = addr_with_byte_offset(base, cap_offset);
+        let header = self.config.read32(header_addr);
+        let updated = (header & !MSI_CTRL_MME_MASK) | MSI_CTRL_ENABLE;
+        self.config.write32(header_addr, updated);
+        Ok(())
+    }
+
+    /// Locate the function's MSI capability, returning its
+    /// `(cap_offset, addressing_64bit)`.
+    fn find_msi(&self, bdf: u64) -> Result<(u8, bool), DriverError> {
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let n = self.capabilities(bdf, &mut caps)?;
+        caps[..n]
+            .iter()
+            .find_map(|c| match *c {
+                Capability::Msi {
+                    offset,
+                    addressing_64bit,
+                    ..
+                } => Some((offset, addressing_64bit)),
+                _ => None,
+            })
+            .ok_or(DriverError::NotFound)
     }
 
     /// Locate the function's MSI-X capability, returning its

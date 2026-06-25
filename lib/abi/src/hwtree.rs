@@ -816,6 +816,82 @@ impl GrantedResource {
     }
 }
 
+/// The result of an `msi_alloc` syscall ([`crate::SyscallNumber::MSI_ALLOC`]):
+/// the kernel-allocated virtual interrupt line plus the architecture-built
+/// MSI doorbell the caller writes verbatim into a PCI function's MSI
+/// capability.
+///
+/// A bus driver that wires a PCI function for message-signalled interrupts
+/// asks the kernel to allocate a vector; the kernel mints a free vector,
+/// grants the caller a device resource for [`line`](Self::line) (so it may
+/// both `irq_bind` it and forward it as an [`HwResource::irq`] onto a child
+/// node), and reports the doorbell `(address, data)` the function's MSI
+/// capability must be programmed with so its message routes to that line.
+/// The doorbell is **opaque** to the driver — only the kernel's interrupt
+/// controller knows what address/data its MSI controller decodes.
+///
+/// The wire form is the explicit little-endian byte layout
+/// [`to_le_bytes`](Self::to_le_bytes) produces, so the record is
+/// endianness-stable across the user/kernel boundary exactly like
+/// [`GrantedResource`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MsiAllocation {
+    /// The MSI doorbell target address the function's MSI capability
+    /// Message-Address register is programmed with.
+    pub address: u64,
+    /// The MSI data word the function's MSI capability Message-Data
+    /// register is programmed with (selects the vector at the controller).
+    pub data: u32,
+    /// The kernel virtual interrupt line the allocated vector is delivered
+    /// on — what the driver `irq_bind`s, and what it forwards as an
+    /// [`HwResource::irq`] onto the child node the interrupt belongs to.
+    pub line: u32,
+}
+
+impl MsiAllocation {
+    /// Encoded size on the wire: the `u64` address, the `u32` data, and the
+    /// `u32` line.
+    pub const WIRE_LEN: usize = 8 + 4 + 4;
+
+    /// Build an allocation record from its parts.
+    #[must_use]
+    pub const fn new(address: u64, data: u32, line: u32) -> Self {
+        Self {
+            address,
+            data,
+            line,
+        }
+    }
+
+    /// Encode `self` little-endian: the address at offset `0`, the data at
+    /// `8`, the line at `12`.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.address);
+        put_u32(&mut out, 8, self.data);
+        put_u32(&mut out, 12, self.line);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is shorter than
+    /// [`Self::WIRE_LEN`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(Self {
+            address: read_u64(bytes, 0),
+            data: read_u32(bytes, 8),
+            line: read_u32(bytes, 12),
+        })
+    }
+}
+
 impl HwMatchKey {
     /// A zeroed slot, used to pad a node's fixed-size match-key array.
     const EMPTY: Self = Self {

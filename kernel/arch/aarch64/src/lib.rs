@@ -79,6 +79,13 @@ core::arch::global_asm!(include_str!("vectors.s"));
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 core::arch::global_asm!(include_str!("smp.s"));
 
+/// BCM2711 PCIe root-complex MSI controller (Raspberry Pi 4): the
+/// register-level driver for the root complex's internal MSI controller,
+/// which demultiplexes the VL805 xHCI's message-signalled interrupts onto
+/// one shared GIC SPI. Host-testable register/demux logic over an
+/// [`brcm_msi::MsiMmio`] seam; the real MMIO is the freestanding
+/// `brcm_msi::VolatileMsiMmio` over the discovered root-complex base.
+pub mod brcm_msi;
 /// Board-discovered console model + runtime MMIO base (`plans/PI.md` P2):
 /// the one console abstraction ([`console::ConsoleModel`] — PL011 / BCM2835
 /// AUX mini-UART register layouts) the freestanding `serial` sink

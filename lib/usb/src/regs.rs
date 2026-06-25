@@ -84,6 +84,14 @@ pub const USBCMD_RUN: u32 = 1 << 0;
 /// `USBCMD` Host Controller Reset: self-clearing when reset completes.
 pub const USBCMD_HCRST: u32 = 1 << 1;
 
+/// `USBCMD` Interrupter Enable (INTE, §5.4.1): the global gate that lets
+/// the controller assert an interrupt (the MSI write, on a PCIe controller
+/// such as the VL805) when an enabled interrupter has a pending event. With
+/// it clear the controller only posts events to the ring and software must
+/// poll; with it set, plus a per-interrupter [`IMAN_IE`], a posted event
+/// raises the device's interrupt.
+pub const USBCMD_INTE: u32 = 1 << 2;
+
 /// `USBSTS` `HCHalted`: set while the controller is halted.
 pub const USBSTS_HCH: u32 = 1 << 0;
 
@@ -138,6 +146,27 @@ pub const PORTSC_RW1C_MASK: u32 = 0x00FE_0002;
 /// Byte offset of interrupter 0 within the runtime block (§5.5.2):
 /// the interrupter array starts at `RTSOFF + 0x20`.
 pub const IR0_BASE: usize = 0x20;
+
+/// `IMAN` — interrupter management register, interrupter base + `0x00`
+/// (§5.5.2.1). Carries the Interrupt Pending and Interrupt Enable bits.
+pub const IR_IMAN: usize = 0x00;
+
+/// `IMAN` Interrupt Pending (IP, bit 0, write-1-to-clear): the controller
+/// sets it when this interrupter has a pending event and an interrupt was
+/// (or would be) generated. The interrupt handler clears it by writing it
+/// back as 1 before draining the event ring, so an event arriving during
+/// the drain re-sets it and re-fires rather than being lost (§4.17.5).
+pub const IMAN_IP: u32 = 1 << 0;
+
+/// `IMAN` Interrupt Enable (IE, bit 1): when set (together with the global
+/// [`USBCMD_INTE`]), a pending event on this interrupter asserts the
+/// device's interrupt. A read-modify-write that clears IP must keep IE set.
+pub const IMAN_IE: u32 = 1 << 1;
+
+/// `IMOD` — interrupter moderation register, interrupter base + `0x04`
+/// (§5.5.2.2). The low 16 bits (IMODI) are the minimum inter-interrupt
+/// interval in 250 ns increments; `0` disables moderation (lowest latency).
+pub const IR_IMOD: usize = 0x04;
 
 /// `ERSTSZ` — event ring segment table size, interrupter base + `0x08`
 /// (§5.5.2.3.1).

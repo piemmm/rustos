@@ -40,7 +40,7 @@
 //! [`CapabilityId::DRV_KERNEL`](crate::CapabilityId::DRV_KERNEL).
 //! Class traits document their own per-method capability gates.
 
-use crate::hwtree::{HwMatchKey, HwNode, HwResource};
+use crate::hwtree::{HwMatchKey, HwNode, HwResource, MsiAllocation};
 use crate::le::{put_u16, read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
@@ -905,6 +905,44 @@ pub trait DriverHost {
     /// mutation.
     fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
         let _ = node;
+        Err(DriverError::Unsupported)
+    }
+
+    /// Allocate a message-signalled interrupt (MSI) vector for a PCI
+    /// function this bus driver enumerated, returning the [`MsiAllocation`]
+    /// the kernel minted — the virtual interrupt line plus the doorbell
+    /// `(address, data)` to program into the function's MSI capability.
+    ///
+    /// A PCI bus driver wiring a function for MSI (the BCM2711 PCIe driver
+    /// arming the VL805 xHCI) calls this, programs the function's MSI
+    /// capability with the returned doorbell (`PciBus`-side), and forwards
+    /// the returned line as an [`HwResource::irq`] on the child node it
+    /// publishes through [`Self::emit_node`], so the downstream driver binds
+    /// it with `irq_bind`/`irq_wait`. The kernel grants the calling task a
+    /// device resource for the line, so the forwarded resource is covered by
+    /// a grant the emitter already holds (no ambient authority).
+    ///
+    /// The default implementation returns [`DriverError::Unsupported`], the
+    /// correct shape for a host with no MSI facility wired (a unit-test seam,
+    /// or a platform with no MSI controller). This is an `abi-v1` *internal*
+    /// addition; the default body keeps every existing host impl
+    /// source-compatible.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the host exposes no MSI facility
+    ///   (the default).
+    /// * [`DriverError::PermissionDenied`] if the host's `CAP_IRQ_BIND`
+    ///   check fails.
+    /// * [`DriverError::OutOfRange`] if the platform's MSI vector space is
+    ///   exhausted, or [`DriverError::NotImplemented`] on a platform with no
+    ///   MSI controller (the host fails closed).
+    ///
+    /// # Capabilities
+    ///
+    /// None at the call site; the kernel enforces `CAP_IRQ_BIND` on the
+    /// underlying `msi_alloc` syscall.
+    fn alloc_msi(&self) -> Result<MsiAllocation, DriverError> {
         Err(DriverError::Unsupported)
     }
 }

@@ -19,6 +19,7 @@
 //! discipline; while `abi-v1` is unfrozen it may still evolve in place, every caller updated in the same change.
 
 use super::bus::Bus;
+use super::msix::MsiMessage;
 use super::{DriverError, MmioMapper, RegisterWindow};
 use crate::HwNode;
 
@@ -175,6 +176,36 @@ pub trait PciBus: Bus {
     /// * [`DriverError::DeviceFault`] if the configuration read cannot be
     ///   completed by the bus transport, or the node cannot be assembled.
     fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError>;
+
+    /// Program function `bdf`'s legacy **MSI** capability with `message`,
+    /// force a single vector, and enable it.
+    ///
+    /// The non-virtio counterpart of
+    /// [`MsixBus::route_msix`](super::msix::MsixBus::route_msix) for a
+    /// function that advertises the legacy MSI capability rather than MSI-X
+    /// (the Pi 4's VL805 xHCI host): the kernel's interrupt controller mints
+    /// the opaque [`MsiMessage`] (doorbell address + data), and this writes
+    /// it into the capability's Message-Address/Message-Data registers, then
+    /// sets MSI Enable with Multiple-Message-Enable cleared (exactly one
+    /// vector). Unlike `route_msix` it needs no [`MmioMapper`] — the MSI
+    /// capability lives entirely in configuration space.
+    ///
+    /// The default implementation returns [`DriverError::Unsupported`], the
+    /// correct shape for a bus seam that does not provision MSI (a test
+    /// double, or a transport with no configuration-space MSI capability).
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the seam provisions no MSI (the
+    ///   default).
+    /// * [`DriverError::NotFound`] if the function advertises no MSI
+    ///   capability.
+    /// * [`DriverError::OutOfRange`] if `message.address` needs 64-bit
+    ///   addressing but the capability is 32-bit only (fail closed).
+    fn route_msi(&self, bdf: u64, message: MsiMessage) -> Result<(), DriverError> {
+        let _ = (bdf, message);
+        Err(DriverError::Unsupported)
+    }
 }
 
 #[cfg(test)]

@@ -43,11 +43,22 @@
 //!   who holds focus. The driver no longer chooses the
 //!   encoding or the destination.
 //!
-//! After bring-up `main` polls the keyboard forever with `pump_once`,
-//! yielding between polls so the rest of the system runs (a
-//! cooperative poll loop, never a hard spin); a `pump_once` error is non-fatal
-//! and the next poll retries. A bring-up failure exits with a reserved
-//! fail-closed code, leaving the console without a keyboard rather than wedged; the spawning supervisor decides whether to relaunch.
+//! After bring-up `main` services the keyboard event-driven wherever the
+//! hardware allows it. When the matched node carried an MSI interrupt line
+//! (the PCIe bus driver allocated the VL805's MSI vector and routed it to a
+//! kernel virtual line, handed to this driver as the node's IRQ resource),
+//! `main` enables the xHCI completion interrupter, binds the line, and parks
+//! on `irq_wait`: the driver is woken only when the controller signals a
+//! transfer completion, never busy-polling a quiet endpoint. It acknowledges
+//! the interrupter before draining each report batch, so a completion posted
+//! during the drain re-asserts rather than being lost. Only when no interrupt
+//! line is available (a boot shape with no IRQ grant, or the interrupter could
+//! not be enabled) does it fall back to a cooperative `pump_once` poll loop,
+//! yielding between polls so the rest of the system runs. A `pump_once` error
+//! is non-fatal on either path and the next iteration retries. A bring-up
+//! failure exits with a reserved fail-closed code, leaving the console without
+//! a keyboard rather than wedged; the spawning supervisor decides whether to
+//! relaunch.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -214,6 +225,12 @@ mod program {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MMIO_MAP);
         caps.insert(CapabilityId::MEM_DMA);
+        // The driver parks on the controller's completion interrupt rather
+        // than busy-polling when the matched node carried an MSI IRQ line
+        // (the PCIe bus driver allocated + routed it); `irq_bind`/`irq_wait`
+        // are gated on `CAP_IRQ_BIND`. A boot shape with no IRQ grant simply
+        // never binds and falls back to the poll path.
+        caps.insert(CapabilityId::IRQ_BIND);
         // The driver emits a one-shot structured bring-up diagnostic through
         // `log_emit` when the controller does not come up, which the kernel
         // gates on `CAP_LOG_EMIT`. The kernel
@@ -296,12 +313,57 @@ mod program {
             },
         );
 
-        // Poll the keyboard forever, injecting each decoded key edge into the
-        // input-focus arbiter and yielding between polls so PID 1 and every
-        // other task keeps running. A `pump_once` error is
-        // non-fatal: the next poll retries rather than dropping the driver.
         let mut console = KeyboardConsole::new();
         let mut sink = KeyInjectSink;
+
+        // Primary path — interrupt-driven. If the matched node carried an MSI
+        // IRQ line (the PCIe bus driver allocated + routed the VL805's MSI to
+        // it), enable the controller's completion interrupter, bind the line,
+        // and park on it: the driver is woken only when the controller signals
+        // a completion, never busy-polling a quiet endpoint (the §2.23
+        // event-driven mandate). The kernel re-arms the MSI line across each
+        // park, so the driver touches no interrupt-controller state itself.
+        if let Some(line) = host.irq_line() {
+            if keyboard.source_mut().enable_interrupter().is_ok() {
+                let handle = rustos_rt::irq_bind(line);
+                if handle >= 0 {
+                    // The kernel encodes a bound handle as a non-negative
+                    // register; reinterpret it for `irq_wait`.
+                    #[allow(clippy::cast_sign_loss)]
+                    let handle = handle as u64;
+                    // Drain anything already queued from enumeration before the
+                    // first park, so a report that completed before the
+                    // interrupter was armed is not stranded.
+                    while matches!(pump_once(&mut keyboard, &mut console, &mut sink), Ok(n) if n > 0)
+                    {
+                    }
+                    loop {
+                        // Park (unbounded) until the completion interrupt fires;
+                        // a negative result means the binding was released, so
+                        // drop to the poll fallback rather than spin.
+                        if rustos_rt::irq_wait(handle, u64::MAX) < 0 {
+                            break;
+                        }
+                        // Acknowledge the interrupter *before* draining, so a
+                        // completion the controller posts during the drain
+                        // re-asserts and is not lost, then drain every queued
+                        // report. A `pump_once` error ends the drain and we
+                        // re-park (the next interrupt re-tries).
+                        let _ = keyboard.source_mut().acknowledge_interrupt();
+                        while matches!(
+                            pump_once(&mut keyboard, &mut console, &mut sink),
+                            Ok(n) if n > 0
+                        ) {}
+                    }
+                }
+            }
+        }
+
+        // Fallback — no MSI/interrupt path available (no IRQ grant, the
+        // interrupter could not be enabled, or the binding was released):
+        // the bounded cooperative poll loop, yielding between polls so PID 1
+        // and every other task keeps running. A `pump_once` error is
+        // non-fatal: the next poll retries rather than dropping the driver.
         loop {
             let _ = pump_once(&mut keyboard, &mut console, &mut sink);
             rustos_rt::yield_now();

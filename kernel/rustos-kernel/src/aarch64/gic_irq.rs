@@ -49,12 +49,14 @@
 // `arch_wrapper`), so both imports are gated to where they compile rather
 // than left unused under clippy's `-D warnings`.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rustos_arch_aarch64::gic::{GicController, GicMmio};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use rustos_kernel_core::IrqRouting;
 use rustos_kernel_irq::{IrqController, IrqTable, MaskError};
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+use rustos_sync::once::Once;
 use rustos_sync::once::OnceCell;
 
 /// Set while the console UART's receive line is **masked at the GIC because
@@ -257,16 +259,205 @@ pub static GIC_IRQ_CONTROLLER: GicIrqController<rustos_arch_aarch64::gic::Volati
         rustos_arch_aarch64::gic::MAX_INTID,
     ));
 
-/// The [`IrqRouting`] the aarch64 boot path installs: the GICv2 controller
-/// plus the GICv2 maximum INTID as the inclusive bind ceiling.
+/// The [`IrqRouting`] the aarch64 boot path installs: the [composite
+/// controller](CompositeIrqController) routing real GIC INTIDs to the GICv2
+/// distributor and virtual MSI lines to the BCM2711 root-complex MSI
+/// controller, with [`MSI_LINE_TOP`] as the inclusive bind ceiling so a
+/// driver may `irq_bind` either a GIC SPI or an allocated MSI line.
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 #[must_use]
 pub fn gic_irq_routing() -> IrqRouting {
     IrqRouting {
-        max_line: rustos_arch_aarch64::gic::MAX_INTID,
-        controller: &GIC_IRQ_CONTROLLER,
+        max_line: MSI_LINE_TOP,
+        controller: &COMPOSITE_IRQ_CONTROLLER,
     }
 }
+
+// --- BCM2711 root-complex MSI: composite controller + vector allocator ---
+//
+// The VL805 xHCI raises an MSI the BCM2711 PCIe root complex demultiplexes
+// onto one shared GIC SPI; the kernel owns that controller (a chained
+// interrupt handler a user-space driver cannot be) and fans the SPI out to
+// per-vector *virtual* IRQ lines a driver binds with `irq_wait`. The virtual
+// lines live in a range immediately above the GIC INTID ceiling, so one
+// composite `IrqController` routes a real GIC INTID to the GIC and a virtual
+// MSI line to the root-complex controller without the kernel IRQ core needing
+// a second controller field (`plans/PI.md` U-MSI).
+
+/// Base of the virtual MSI interrupt-line range, immediately above the GICv2
+/// INTID ceiling so the two line spaces never overlap.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub const MSI_LINE_BASE: u32 = rustos_arch_aarch64::gic::MAX_INTID + 1;
+
+/// Inclusive top of the virtual MSI interrupt-line range
+/// (`MSI_LINE_BASE + NUM_MSI_VECTORS - 1`).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub const MSI_LINE_TOP: u32 = MSI_LINE_BASE + rustos_arch_aarch64::brcm_msi::NUM_MSI_VECTORS - 1;
+
+/// The kernel-side BCM2711 root-complex MSI controller over the discovered RC
+/// register base. A zero-sized `VolatileMsiMmio` handle reads the base
+/// `brcm_msi::configure` resolved from the device tree on every access, so the
+/// controller carries no board constant.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static BRCM_MSI: rustos_arch_aarch64::brcm_msi::BrcmMsi<
+    rustos_arch_aarch64::brcm_msi::VolatileMsiMmio,
+> = rustos_arch_aarch64::brcm_msi::BrcmMsi::new(rustos_arch_aarch64::brcm_msi::VolatileMsiMmio);
+
+/// The discovered shared GIC SPI INTID the root-complex MSI controller raises
+/// (the `brcm,bcm2711-pcie` node's MSI `interrupts` entry — a discovered
+/// value, never a board constant). Recorded once by the boot path
+/// ([`set_brcm_msi_spi`]); empty on a board with no such controller, which
+/// leaves [`allocate_msi_vector`] failing closed.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static BRCM_MSI_SPI: OnceCell<u32> = OnceCell::new();
+
+/// One-shot bring-up of the root-complex MSI controller (program its
+/// doorbell, route + enable its shared GIC SPI), run on the first allocation.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static BRCM_MSI_READY: Once<()> = Once::new();
+
+/// Bitmap of allocated MSI vectors (bit `v` set means vector `v` is in use).
+/// Vectors are minted by [`allocate_msi_vector`]; a driver holds its line for
+/// its lifetime, so a set-only bitmap suffices (no free path today).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+static BRCM_MSI_ALLOCATED: AtomicU32 = AtomicU32::new(0);
+
+/// Record the discovered shared GIC SPI INTID the root-complex MSI controller
+/// raises. Idempotent (publish-once); a board with no such controller never
+/// calls it and [`allocate_msi_vector`] fails closed.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub fn set_brcm_msi_spi(intid: u32) {
+    let _ = BRCM_MSI_SPI.set(intid);
+}
+
+/// The virtual-MSI vector a routing line names, or [`None`] if `line` is a
+/// real GIC INTID.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+fn msi_vector_of_line(line: u32) -> Option<u32> {
+    if (MSI_LINE_BASE..=MSI_LINE_TOP).contains(&line) {
+        Some(line - MSI_LINE_BASE)
+    } else {
+        None
+    }
+}
+
+/// A kernel-side [`IrqController`] routing a real GIC INTID to
+/// [`GIC_IRQ_CONTROLLER`] and a virtual MSI line to [`BRCM_MSI`].
+///
+/// This is the one line->controller fan-out the kernel IRQ core drives
+/// through `IrqRouting.controller`: a line in `[MSI_LINE_BASE, MSI_LINE_TOP]`
+/// is a BCM2711 MSI vector (masked/unmasked at the root complex's `INTR2`
+/// block), every other line is a GIC INTID. It adds no policy of its own —
+/// each half delegates to the range-checked controller it wraps.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub struct CompositeIrqController;
+
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+impl IrqController for CompositeIrqController {
+    fn mask(&self, line: u32) -> Result<(), MaskError> {
+        match msi_vector_of_line(line) {
+            Some(vector) => {
+                BRCM_MSI.mask(vector);
+                Ok(())
+            }
+            None => GIC_IRQ_CONTROLLER.mask(line),
+        }
+    }
+
+    fn rearm(&self, line: u32) -> Result<(), MaskError> {
+        match msi_vector_of_line(line) {
+            // The MSI controller's shared GIC SPI is routed + enabled once at
+            // controller bring-up; re-arming a vector only unmasks its
+            // `INTR2` bit for the next message.
+            Some(vector) => {
+                BRCM_MSI.unmask(vector);
+                Ok(())
+            }
+            None => GIC_IRQ_CONTROLLER.rearm(line),
+        }
+    }
+}
+
+/// The `'static` composite controller [`IrqTable::fire`] masks through and
+/// the `irq_wait` park path re-arms through.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub static COMPOSITE_IRQ_CONTROLLER: CompositeIrqController = CompositeIrqController;
+
+/// Allocate a free BCM2711 MSI vector, bring the controller up on first use,
+/// and return the [`MsiAllocation`](rustos_abi::MsiAllocation) the `msi_alloc`
+/// syscall reports.
+///
+/// The returned line is `MSI_LINE_BASE + vector`; the doorbell is
+/// `brcm_msi::msi_message(vector)`. The vector's `INTR2` bit stays **masked**
+/// until the binding driver's first `irq_wait` re-arm unmasks it, so no
+/// message is delivered before a waiter exists. Fails closed with
+/// [`Errno::NotImplemented`](rustos_abi::Errno) when no MSI SPI was discovered
+/// (no controller on this board) and [`Errno::OutOfRange`](rustos_abi::Errno)
+/// when every vector is in use.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub fn allocate_msi_vector() -> Result<rustos_abi::MsiAllocation, rustos_abi::Errno> {
+    // No discovered MSI SPI means no root-complex MSI controller on this
+    // board: fail closed rather than fabricating a vector.
+    let Some(spi) = BRCM_MSI_SPI.get().ok().flatten().copied() else {
+        return Err(rustos_abi::Errno::NotImplemented);
+    };
+    // Bring the controller up exactly once: program its doorbell + data
+    // pattern and mask every vector, then route + enable its shared GIC SPI
+    // so a later message reaches the chained dispatcher. Every vector stays
+    // masked, so enabling the SPI is additive — no message fires until a
+    // vector is unmasked by its driver's first `irq_wait`.
+    let _ = BRCM_MSI_READY.call_once_infallible(|| {
+        BRCM_MSI.init();
+        // SAFETY: the GIC distributor + CPU interface are up
+        // (`install_device_irq_dispatch` ran `gic::init`) and the EL1 device
+        // dispatch is installed, so routing this discovered SPI to the boot
+        // CPU addresses live distributor MMIO and a delivered SPI reaches
+        // `production_device_irq_dispatch`.
+        unsafe {
+            rustos_arch_aarch64::gic::route_spi(spi, CPU0_TARGET);
+        }
+        let _ = GIC_IRQ_CONTROLLER.unmask_line(spi);
+    });
+    // Claim the lowest free vector with a CAS loop over the set-only bitmap.
+    let vector = loop {
+        let current = BRCM_MSI_ALLOCATED.load(Ordering::Acquire);
+        let Some(vector) = (0..rustos_arch_aarch64::brcm_msi::NUM_MSI_VECTORS)
+            .find(|v| current & (1u32 << v) == 0)
+        else {
+            return Err(rustos_abi::Errno::OutOfRange);
+        };
+        let updated = current | (1u32 << vector);
+        if BRCM_MSI_ALLOCATED
+            .compare_exchange(current, updated, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break vector;
+        }
+    };
+    let (address, data) = rustos_arch_aarch64::brcm_msi::msi_message(vector);
+    Ok(rustos_abi::MsiAllocation::new(
+        address,
+        data,
+        MSI_LINE_BASE + vector,
+    ))
+}
+
+/// The `'static` [`MsiAllocFacility`](rustos_kernel_core::MsiAllocFacility)
+/// the `msi_alloc` syscall handler drives (installed by the boot path through
+/// [`rustos_kernel_core::KernelArch::msi_alloc_facility`]).
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub struct BrcmMsiAllocFacility;
+
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+impl rustos_kernel_core::MsiAllocFacility for BrcmMsiAllocFacility {
+    fn allocate(&self) -> Result<rustos_abi::MsiAllocation, rustos_abi::Errno> {
+        allocate_msi_vector()
+    }
+}
+
+/// The shared [`BrcmMsiAllocFacility`] the boot path installs.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+pub static BRCM_MSI_ALLOC_FACILITY: BrcmMsiAllocFacility = BrcmMsiAllocFacility;
 
 /// The production device-IRQ dispatcher the arch crate's EL1 IRQ-vector
 /// path invokes with each acknowledged non-timer GIC INTID.
@@ -311,7 +502,24 @@ pub extern "C" fn production_device_irq_dispatch(intid: u32) {
     let Ok(Some(table)) = IRQ_TABLE_SLOT.get() else {
         return;
     };
-    let _ = table.fire(intid, &GIC_IRQ_CONTROLLER);
+    // The BCM2711 root-complex MSI controller multiplexes up to 32 message
+    // vectors onto one shared GIC SPI: this is the *chained* handler. When
+    // that SPI fires, read which vectors are pending, fire each onto its
+    // virtual MSI line (masking that vector before the waiter wakes —
+    // mask-before-wake holds through the composite controller), and clear its
+    // `INTR2` status so the level-sensitive SPI deasserts rather than
+    // re-storming. A vector with no binding still has its status cleared, so a
+    // stray message cannot wedge the line.
+    if BRCM_MSI_SPI.get().ok().flatten().copied() == Some(intid) {
+        let pending = BRCM_MSI.pending();
+        for vector in rustos_arch_aarch64::brcm_msi::pending_vectors(pending) {
+            let _ = table.fire(MSI_LINE_BASE + vector, &COMPOSITE_IRQ_CONTROLLER);
+            BRCM_MSI.clear(vector);
+        }
+        rustos_kernel_core::irq_wake();
+        return;
+    }
+    let _ = table.fire(intid, &COMPOSITE_IRQ_CONTROLLER);
     // Wake any `irq_wait` caller parked on a bound line: `fire` set the
     // per-line ready flag (after masking — mask-before-wake holds), so a
     // woken waiter that consumes it observes the mask. A spurious wake for

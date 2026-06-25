@@ -179,6 +179,9 @@ const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 /// `hw_remove_node` syscall number (as above).
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 
+/// `msi_alloc` syscall number (as above).
+const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
+
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
 #[inline]
@@ -427,6 +430,48 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
     // duration of the call, so the `(ptr, len)` pair denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_RESOURCE_GRANTS, [ptr, buf.len() as u64, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// Allocate a message-signalled interrupt (MSI) vector for a PCI function
+/// (`SyscallNumber::MSI_ALLOC`), returning the
+/// [`rustos_abi::MsiAllocation`] the kernel minted — the virtual interrupt
+/// line plus the doorbell `(address, data)` to program into the function's
+/// MSI capability.
+///
+/// A user-space **bus** driver wiring a PCI function for MSI calls this; it
+/// is gated by [`rustos_abi::CapabilityId::IRQ_BIND`] (the same privilege the
+/// driver needs to `irq_bind` the returned line). The kernel grants the
+/// caller a device resource for the line, so it may both `irq_bind` it and
+/// forward it as an [`rustos_abi::hwtree::HwResource::irq`] onto a child node
+/// it publishes — never ambient authority.
+///
+/// # Errors
+///
+/// Returns the raw negative kernel result (`-errno`) on failure — most
+/// commonly `NotImplemented` on a platform with no MSI controller, or
+/// `OutOfRange` when the vector space is exhausted — and treats a malformed
+/// short reply as a fail-closed error rather than a usable value.
+pub fn msi_alloc() -> Result<rustos_abi::MsiAllocation, i64> {
+    let mut buf = [0u8; rustos_abi::MsiAllocation::WIRE_LEN];
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_IRQ_BIND` and the `(buf, len)` pair against the caller's address
+    // space before writing the encoded allocation. `buf` is a live exclusive
+    // local for the duration of the call, so the pair denotes writable memory.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the i64 count-or-`-errno` encoding.
+    let ret = unsafe { raw_syscall(NUM_MSI_ALLOC, [ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(ret);
+    }
+    // A success that wrote fewer bytes than the record needs is malformed;
+    // fail closed rather than decode a partial doorbell. `ret` is
+    // non-negative here, so the `try_from` only rejects an impossible value.
+    match usize::try_from(ret) {
+        Ok(written) if written >= rustos_abi::MsiAllocation::WIRE_LEN => {}
+        _ => return Err(-(rustos_abi::Errno::BufferTooSmall as i64)),
+    }
+    rustos_abi::MsiAllocation::from_bytes(&buf).map_err(|e| -(e as i64))
 }
 
 /// Publish a discovered child device `node` into the live hardware tree

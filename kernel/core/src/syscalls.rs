@@ -107,7 +107,7 @@ use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
 use crate::devres::{
     dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility, MmioMapFacility,
-    NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
+    MsiAllocFacility, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY, NULL_MSI_ALLOC_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction};
 use crate::hwtree::{HwTreeSource, NULL_HW_TREE};
@@ -293,6 +293,14 @@ where
     /// producer through [`Self::with_dma_alloc_facility`]. Held as a `'static`
     /// borrow, exactly like the MMIO-map producer.
     dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
+    /// The architecture MSI-alloc producer the `msi_alloc` syscall drives to
+    /// mint an MSI vector and report its doorbell (`plans/PI.md` U-MSI).
+    /// Defaults to [`NULL_MSI_ALLOC_FACILITY`] (fail closed with
+    /// [`Errno::NotImplemented`] on a platform with no MSI controller); the
+    /// boot path installs the concrete arch producer through
+    /// [`Self::with_msi_alloc_facility`]. Held as a `'static` borrow, exactly
+    /// like the MMIO-map and DMA-alloc producers.
+    msi_alloc_facility: &'static (dyn MsiAllocFacility + 'static),
     /// The kernel-held discovered hardware tree the `hw_tree_read` /
     /// `hw_tree_wait` syscalls serve (
     /// Design D). Defaults to [`NULL_HW_TREE`] (fail closed with
@@ -396,6 +404,11 @@ where
             // `NotImplemented` with no DMA facility) — never carving against
             // an ungranted constraint.
             dma_alloc_facility: &NULL_DMA_ALLOC_FACILITY,
+            // The MSI-alloc facility is unwired until the boot path installs
+            // the arch producer: `msi_alloc` fails closed with
+            // `NotImplemented` (a platform with no MSI controller) — never
+            // fabricating a vector.
+            msi_alloc_facility: &NULL_MSI_ALLOC_FACILITY,
             // Hardware-tree store unwired until the boot path seeds the
             // discovered inventory and installs the holder: `hw_tree_read` / `hw_tree_wait` fail closed with
             // `NotImplemented`.
@@ -584,6 +597,23 @@ where
         dma_alloc_facility: &'static (dyn DmaAllocFacility + 'static),
     ) -> Self {
         self.dma_alloc_facility = dma_alloc_facility;
+        self
+    }
+
+    /// Install the architecture MSI-alloc producer the `msi_alloc` syscall
+    /// drives, consuming and returning `self` (`plans/PI.md` U-MSI).
+    ///
+    /// Until this is called the handler holds [`NULL_MSI_ALLOC_FACILITY`],
+    /// so `msi_alloc` fails closed with [`Errno::NotImplemented`] (a
+    /// platform with no MSI controller). The producer must be `'static`: it
+    /// lives for the lifetime of the running kernel, exactly like the
+    /// MMIO-map and DMA-alloc producers.
+    #[must_use]
+    pub const fn with_msi_alloc_facility(
+        mut self,
+        msi_alloc_facility: &'static (dyn MsiAllocFacility + 'static),
+    ) -> Self {
+        self.msi_alloc_facility = msi_alloc_facility;
         self
     }
 
@@ -2582,6 +2612,48 @@ where
         // with no store wired fails closed `NotImplemented`. Returns `Ok(0)` once removed (the `Errno`-return ABI shape).
         self.hw_tree.remove(parent_id, node_id).map(|()| 0)
     }
+
+    fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
+        // Step 2 (capability) was enforced by the dispatcher: the `msi_alloc`
+        // spec carries `CAP_IRQ_BIND`. Step 3 (validate every input): the out
+        // buffer must be able to hold the whole encoded record before
+        // anything is allocated, so a short buffer fails closed without
+        // consuming a vector.
+        if out_len < rustos_abi::MsiAllocation::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // Mechanism: the installed arch producer mints a free MSI vector,
+        // brings the platform's MSI controller up if it is not already, and
+        // builds the doorbell. The default `NULL_MSI_ALLOC_FACILITY` fails
+        // closed with `NotImplemented` (a platform with no MSI controller);
+        // an exhausted vector space surfaces as `OutOfRange`.
+        let allocation = self.msi_alloc_facility.allocate()?;
+        // Copy the encoded record out through the validated `copy_to_user`
+        // boundary *before* minting the grant: a faulting `out` pointer fails
+        // closed with `BadAddress` and the caller never learns the line, so
+        // leaving the grant unminted keeps a faulting call from widening the
+        // caller's authority.
+        let bytes = allocation.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        // Grant the calling task a device resource for the allocated virtual
+        // line, so it may both `irq_bind` it and forward it as an
+        // `HwResource::irq` onto a child node it publishes (the `hw_emit_node`
+        // grant-coverage check tests against exactly this). Minted against
+        // `caller.task_id` (kernel-trusted), exactly like the driver-admission
+        // grant path; the handle is unused here — the *line*, not a handle, is
+        // what the driver presents to `irq_bind` and forwards.
+        let _handle = self.aspaces.write().mint_grant(
+            caller.task_id,
+            HwResource::irq(u64::from(allocation.line), 1),
+        );
+        Ok(rustos_abi::MsiAllocation::WIRE_LEN as u64)
+    }
 }
 
 /// The [`SpawnCtx`] the `spawn` syscall handler hands its architecture
@@ -3091,6 +3163,26 @@ where
     #[must_use]
     pub fn with_log_sink(mut self, log_sink: &'a (dyn Sink + Sync)) -> Self {
         self.handlers = self.handlers.with_log_sink(log_sink);
+        self
+    }
+
+    /// Install the architecture MSI-alloc producer the `msi_alloc` syscall
+    /// drives, consuming and returning `self` (`plans/PI.md` U-MSI).
+    ///
+    /// The hook-level mirror of
+    /// [`KernelSyscallHandlers::with_msi_alloc_facility`]: the boot path
+    /// passes the architecture port's [`KernelArch::msi_alloc_facility`]
+    /// directly. [`None`] (a port with no MSI controller) is a no-op that
+    /// leaves `msi_alloc` fail-closed with [`Errno::NotImplemented`], so the
+    /// caller need not branch on it.
+    #[must_use]
+    pub fn with_msi_alloc_facility(
+        mut self,
+        msi_alloc_facility: Option<&'static (dyn MsiAllocFacility + 'static)>,
+    ) -> Self {
+        if let Some(facility) = msi_alloc_facility {
+            self.handlers = self.handlers.with_msi_alloc_facility(facility);
+        }
         self
     }
 

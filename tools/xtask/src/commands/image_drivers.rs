@@ -197,6 +197,12 @@ pub fn build_usb_kbd_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
             CapabilityId::MMIO_MAP,
             CapabilityId::MEM_DMA,
             CapabilityId::INPUT_INJECT,
+            // Park on the controller's MSI completion interrupt rather than
+            // busy-polling: `irq_bind`/`irq_wait` are gated on `CAP_IRQ_BIND`.
+            // The kernel grants the bound line only when the matched node
+            // carried the forwarded MSI IRQ resource; a boot shape with no MSI
+            // simply never binds and falls back to the poll path.
+            CapabilityId::IRQ_BIND,
             // Emit the one-shot structured bring-up diagnostic when the
             // controller does not come up; the
             // kernel gates `log_emit` on `CAP_LOG_EMIT`.

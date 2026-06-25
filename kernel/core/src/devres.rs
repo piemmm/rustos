@@ -34,7 +34,7 @@
 //! `kernel/core`.
 
 use rustos_abi::hwtree::{HwResource, HwResourceKind};
-use rustos_abi::Errno;
+use rustos_abi::{Errno, MsiAllocation};
 
 /// The kernel-side producer that maps a validated device window into the
 /// caller's own live address space.
@@ -156,6 +156,59 @@ impl MmioMapFacility for NullMmioMapFacility {
 /// path; the boot path replaces it with the real producer through
 /// `KernelSyscallHandlers::with_mmio_map_facility`.
 pub static NULL_MMIO_MAP_FACILITY: NullMmioMapFacility = NullMmioMapFacility;
+
+/// The kernel-side producer that allocates a message-signalled interrupt
+/// (MSI) vector and reports the architecture-built doorbell for it (the
+/// `msi_alloc` syscall seam).
+///
+/// Allocating an MSI vector and bringing the platform's MSI controller up
+/// is irreducibly architecture-specific (the BCM2711 root-complex MSI
+/// controller, an x86 IO-APIC/LAPIC MSI domain, …), so — like
+/// [`MmioMapFacility`] / [`DmaAllocFacility`] — the concrete producer is
+/// installed at boot through a `with_*` builder and the handler reaches it
+/// through this trait. The handler owns the *policy* (capability gate,
+/// minting the caller's device-resource grant, copying the result out); this
+/// trait performs only the *mechanism* — minting a free vector, lazily
+/// bringing the controller up, and building the doorbell.
+///
+/// Implementations must be [`Sync`], shared by the per-CPU handlers exactly
+/// like [`MmioMapFacility`].
+pub trait MsiAllocFacility: Sync {
+    /// Allocate one MSI vector and return the [`MsiAllocation`] naming the
+    /// virtual interrupt line it is delivered on and the doorbell
+    /// `(address, data)` a PCI function's MSI capability is programmed with
+    /// to route its message to that line.
+    ///
+    /// Idempotently brings the platform's MSI controller up on the first
+    /// allocation (routing + enabling its shared interrupt line).
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`Errno`] — [`Errno::OutOfRange`] when the vector
+    /// space is exhausted, or another stable code the platform reports. The
+    /// default producer ([`NullMsiAllocFacility`]) returns
+    /// [`Errno::NotImplemented`] to mark an inert interface (a platform with
+    /// no MSI controller).
+    fn allocate(&self) -> Result<MsiAllocation, Errno>;
+}
+
+/// The MSI-alloc facility installed before any real one exists.
+///
+/// Every allocation fails closed with [`Errno::NotImplemented`] — the
+/// fail-closed default, so an `msi_alloc` issued on a platform with no MSI
+/// controller announces an inert interface rather than fabricating a vector.
+/// Mirrors [`NullMmioMapFacility`].
+#[derive(Debug, Default, Copy, Clone)]
+pub struct NullMsiAllocFacility;
+
+impl MsiAllocFacility for NullMsiAllocFacility {
+    fn allocate(&self) -> Result<MsiAllocation, Errno> {
+        Err(Errno::NotImplemented)
+    }
+}
+
+/// The shared [`NullMsiAllocFacility`] the syscall handler defaults to.
+pub static NULL_MSI_ALLOC_FACILITY: NullMsiAllocFacility = NullMsiAllocFacility;
 
 /// Validate that the caller's `[offset, offset + len)` sub-region of a
 /// granted [`HwResource`] is a memory window `mmio_map` can map, returning

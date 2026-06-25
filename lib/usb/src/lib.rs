@@ -694,6 +694,56 @@ impl<H: XhciHost> Xhci<H> {
         self.write_ir0(regs::IR_ERDP + 4, high_dword(erdp))
     }
 
+    /// Enable interrupt generation on interrupter 0 so a posted event
+    /// asserts the device's interrupt (the MSI write, on the PCIe VL805)
+    /// rather than only landing on the event ring for a poller to find.
+    ///
+    /// Disables interrupt moderation (`IMOD = 0`, lowest completion
+    /// latency — a boot keyboard posts at most one report per a few
+    /// milliseconds, so there is nothing to coalesce), sets the
+    /// per-interrupter Interrupt Enable while clearing any stale Interrupt
+    /// Pending the firmware hand-off left latched, then sets the global
+    /// `USBCMD.INTE`. Idempotent: re-enabling an already-enabled
+    /// interrupter re-clears IP and re-sets the same bits.
+    ///
+    /// A driver that drives the controller interrupt-driven calls this once
+    /// after [`Self::start`] and after its device's interrupt has been
+    /// routed to it (the MSI capability programmed, the line bound), so an
+    /// asserted interrupt has somewhere to be delivered. A poll-only
+    /// consumer never calls it and the controller stays interrupt-silent.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window rejects a write.
+    pub fn enable_interrupter(&mut self) -> Result<(), DriverError> {
+        self.write_ir0(regs::IR_IMOD, 0)?;
+        // Write IE together with IP: IP is write-1-to-clear, so this both
+        // arms the interrupter and discards any pending bit a prior owner
+        // (firmware) left set, without a read-modify-write that could race
+        // the controller setting IP.
+        self.write_ir0(regs::IR_IMAN, regs::IMAN_IE | regs::IMAN_IP)?;
+        let usbcmd = self.read_op(regs::USBCMD)?;
+        self.write_op(regs::USBCMD, usbcmd | regs::USBCMD_INTE)
+    }
+
+    /// Acknowledge interrupter 0's pending interrupt by clearing
+    /// `IMAN.IP`, keeping Interrupt Enable set (§4.17.5).
+    ///
+    /// Called at the **start** of servicing a delivered interrupt, before
+    /// the event ring is drained: clearing IP first means a completion that
+    /// the controller posts while the handler is draining re-sets IP and
+    /// re-asserts the interrupt, so no event edge is lost (the drain then
+    /// advances `ERDP` via [`Self::ack_event`]). Writing IP as 1 clears it;
+    /// the companion IE bit is re-written set so the interrupter stays
+    /// armed.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window rejects the write.
+    pub fn acknowledge_interrupt(&mut self) -> Result<(), DriverError> {
+        self.write_ir0(regs::IR_IMAN, regs::IMAN_IE | regs::IMAN_IP)
+    }
+
     /// Reset a root-hub port and wait for it to come back enabled
     /// (§4.19.5 — required before a USB2 device can be addressed).
     ///

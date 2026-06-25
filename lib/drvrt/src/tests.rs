@@ -258,6 +258,12 @@ impl GrantSyscalls for MockSyscalls {
         self.emitted.borrow_mut().push(*node);
         self.emit_result.get()
     }
+
+    fn msi_alloc(&self) -> Result<rustos_abi::MsiAllocation, i64> {
+        // A canned allocation: a doorbell pair and a virtual line, so a test
+        // exercising the MSI-routing path sees a stable, non-failing result.
+        Ok(rustos_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, 1024))
+    }
 }
 
 fn caps(set: &[CapabilityId]) -> CapabilitySet {

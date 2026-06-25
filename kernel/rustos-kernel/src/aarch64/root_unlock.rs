@@ -160,6 +160,39 @@ pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
     None
 }
 
+/// Find the GICv2 INTID of the BCM2711 PCIe root complex's internal **MSI
+/// controller** — the shared SPI it raises when an endpoint behind the
+/// bridge (the VL805 xHCI) sends a message-signalled interrupt — decoded
+/// through [`gic_intid_from_cells`], a discovered value and never a board
+/// constant.
+///
+/// The brcmstb PCIe binding lists two GIC interrupts on the
+/// `brcm,bcm2711-pcie` node: the first is the root complex's own
+/// (legacy-INTx aggregation), the **second** is the internal MSI
+/// controller's shared line (Linux's `pcie-brcmstb.c` maps interrupt index
+/// 1). Each specifier is the 3-cell `<type number flags>` GIC triple, so
+/// the MSI entry's type/number cells sit at byte offsets 12 and 16.
+///
+/// [`None`] when the tree describes no `brcm,bcm2711-pcie` node, the node
+/// carries fewer than two interrupt specifiers, or the MSI specifier is not
+/// a GICv2 SPI/PPI this port can route (fail closed — `msi_alloc` then
+/// reports no controller).
+pub(crate) fn pcie_msi_spi(fdt: &Fdt<'_>) -> Option<u32> {
+    use rustos_arch_aarch64::fdt::gic_intid_from_cells;
+    for node in fdt.nodes() {
+        let node = node.ok()?;
+        if !node.is_compatible("brcm,bcm2711-pcie") {
+            continue;
+        }
+        let interrupts = node.property("interrupts")?;
+        // Second specifier: the MSI controller's shared SPI.
+        let kind = interrupts.read_be_u32(12).ok()?;
+        let number = interrupts.read_be_u32(16).ok()?;
+        return gic_intid_from_cells(kind, number);
+    }
+    None
+}
+
 /// A blocking [`IrqWaiter`] for the unlock kthread: it **re-arms** the
 /// device's GIC line, then parks on a race-free `wfi` until the next
 /// completion.

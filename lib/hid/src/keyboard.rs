@@ -159,6 +159,19 @@ impl<S: ReportSource> BootKeyboard<S> {
             pending: PendingEvents::new(),
         }
     }
+
+    /// Mutable access to the underlying report source.
+    ///
+    /// A driver that owns the concrete source (e.g. the USB boot-keyboard
+    /// driver holding an xHCI [`ReportSource`]) reaches it through here to
+    /// drive source-specific controls the generic decoder has no business
+    /// knowing about — enabling the controller's completion interrupt and
+    /// acknowledging it around an `irq_wait`, so the keyboard is serviced
+    /// on its interrupt rather than busy-polled. The decode state is
+    /// untouched, so interleaving these calls with [`Input::poll`] is safe.
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
 }
 
 impl<S: ReportSource> Input for BootKeyboard<S> {

@@ -242,6 +242,10 @@ struct MockXhci {
     erstsz: u32,
     erstba: [u32; 2],
     erdp: [u32; 2],
+    /// Interrupter 0 management register (`IMAN`): IE/IP bits.
+    iman: u32,
+    /// Interrupter 0 moderation register (`IMOD`).
+    imod: u32,
     // Device-model ring consumer / event producer state.
     cmd_index: usize,
     cmd_cycle: bool,
@@ -274,6 +278,13 @@ struct MockXhci {
     /// When set, report completions forge a residual above the TRB
     /// length (a hostile controller claim).
     forge_report_residual: bool,
+    /// When set, the **next** interrupt report posts this completion code
+    /// (instead of Success/ShortPacket) and clears the knob — modelling a
+    /// single odd transfer event the driver rejects per-report. The
+    /// endpoint must still be re-armed so the following report is
+    /// delivered (a single rejected report must never silence the
+    /// keyboard).
+    fault_one_report_completion: Option<CompletionCode>,
     /// A root-hub port (0-based) whose device only reports Current
     /// Connect Status once software writes Port Power — modelling a
     /// port-power-controlled controller (the VL805, `HCCPARAMS1`
@@ -405,6 +416,8 @@ impl MockXhci {
             erstsz: 0,
             erstba: [0; 2],
             erdp: [0; 2],
+            iman: 0,
+            imod: 0,
             cmd_index: 0,
             cmd_cycle: true,
             ep0_base: 0,
@@ -427,6 +440,7 @@ impl MockXhci {
             stall_class_requests: false,
             fault_class_requests: false,
             forge_report_residual: false,
+            fault_one_report_completion: None,
             latent_device_port: None,
             hcsparams2: 0,
             pagesize: 0,
@@ -510,6 +524,36 @@ impl MockXhci {
 
     fn ir0(offset: usize) -> usize {
         MOCK_RTSOFF as usize + regs::IR0_BASE + offset
+    }
+
+    /// Capture a write to an interrupter-0 register (the event-ring
+    /// pointers and the interrupt-management/moderation registers),
+    /// returning `true` if `offset` named one. Split out of `write32` to
+    /// keep that dispatcher under the line bound.
+    fn write_interrupter(&mut self, offset: usize, value: u32) -> bool {
+        if offset == Self::ir0(regs::IR_ERSTSZ) {
+            self.erstsz = value;
+        } else if offset == Self::ir0(regs::IR_ERSTBA) {
+            self.erstba[0] = value;
+        } else if offset == Self::ir0(regs::IR_ERSTBA) + 4 {
+            self.erstba[1] = value;
+        } else if offset == Self::ir0(regs::IR_ERDP) {
+            self.erdp[0] = value;
+        } else if offset == Self::ir0(regs::IR_ERDP) + 4 {
+            self.erdp[1] = value;
+        } else if offset == Self::ir0(regs::IR_IMAN) {
+            // IP (bit 0) is write-1-to-clear; IE (bit 1) is read/write.
+            // Clear IP if the write has it set, then store IE.
+            if value & regs::IMAN_IP != 0 {
+                self.iman &= !regs::IMAN_IP;
+            }
+            self.iman = (self.iman & regs::IMAN_IP) | (value & regs::IMAN_IE);
+        } else if offset == Self::ir0(regs::IR_IMOD) {
+            self.imod = value;
+        } else {
+            return false;
+        }
+        true
     }
 
     fn qword(pair: [u32; 2]) -> u64 {
@@ -1005,7 +1049,11 @@ impl MockXhci {
             } else {
                 trb.status - u32::try_from(report.len()).expect("report fits")
             };
-            let code = if residual > 0 {
+            let code = if let Some(bad) = self.fault_one_report_completion.take() {
+                // A single odd completion the driver rejects per-report;
+                // consumed once so the following report is normal.
+                bad
+            } else if residual > 0 {
                 CompletionCode::ShortPacket
             } else {
                 CompletionCode::Success
@@ -1144,24 +1192,7 @@ impl XhciHost for MockXhci {
             self.crcr[1] = value;
             return Ok(());
         }
-        if offset == Self::ir0(regs::IR_ERSTSZ) {
-            self.erstsz = value;
-            return Ok(());
-        }
-        if offset == Self::ir0(regs::IR_ERSTBA) {
-            self.erstba[0] = value;
-            return Ok(());
-        }
-        if offset == Self::ir0(regs::IR_ERSTBA) + 4 {
-            self.erstba[1] = value;
-            return Ok(());
-        }
-        if offset == Self::ir0(regs::IR_ERDP) {
-            self.erdp[0] = value;
-            return Ok(());
-        }
-        if offset == Self::ir0(regs::IR_ERDP) + 4 {
-            self.erdp[1] = value;
+        if self.write_interrupter(offset, value) {
             return Ok(());
         }
         let portsc_base = Self::op(regs::PORTSC_BASE);
@@ -2760,11 +2791,112 @@ fn report_source_rearms_across_the_ring_wrap() {
 }
 
 #[test]
+fn report_source_rearms_after_a_rejected_completion() {
+    // A single transfer event the driver rejects per-report (an
+    // unexpected completion code) must still leave the interrupt endpoint
+    // re-armed, so the *next* report is delivered. Before the re-arm
+    // hardening this returned the error *before* retiring/arming the ring,
+    // so the endpoint went silent forever and a busy-polling keyboard
+    // driver kept reading an empty event ring while the keyboard appeared
+    // dead after one keystroke (the on-metal HDMI-console symptom). This
+    // fails before the fix (the second report never arrives) and passes
+    // after.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+
+    let mock = device.host_mut();
+    // The next report posts a non-Success/ShortPacket completion code the
+    // decode rejects; the one after is normal.
+    mock.fault_one_report_completion = Some(CompletionCode::StallError);
+    mock.pending_reports
+        .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
+    mock.pending_reports
+        .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
+    mock.process_int_ring();
+
+    let mut buf = [0u8; REPORT_LEN];
+    // The rejected report surfaces a per-report fault…
+    assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+    // …but the endpoint was re-armed, so the following good report still
+    // arrives rather than the keyboard going permanently silent.
+    assert_eq!(device.next_report(&mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(buf, [0, 0, 0x05, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(&mut buf), Ok(None));
+}
+
+#[test]
 fn next_report_before_enumeration_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     let mut buf = [0u8; REPORT_LEN];
     assert_eq!(device.next_report(&mut buf), Err(DriverError::DeviceFault));
+}
+
+#[test]
+fn enable_interrupter_arms_iman_imod_and_usbcmd_inte() {
+    // A driver that services the keyboard interrupt-driven enables the
+    // controller interrupter once: this sets the per-interrupter Interrupt
+    // Enable, disables moderation (lowest completion latency), clears any
+    // stale Interrupt Pending the firmware left, and sets the global
+    // `USBCMD.INTE` so a posted event asserts the device's interrupt.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    // Seed a stale Interrupt Pending the firmware hand-off could leave.
+    device.host_mut().iman = regs::IMAN_IP;
+
+    device.enable_interrupter().expect("enable interrupter");
+
+    let host = device.host_mut();
+    assert_eq!(
+        host.iman & regs::IMAN_IE,
+        regs::IMAN_IE,
+        "interrupter Interrupt Enable is set"
+    );
+    assert_eq!(
+        host.iman & regs::IMAN_IP,
+        0,
+        "the stale Interrupt Pending was cleared"
+    );
+    assert_eq!(
+        host.imod, 0,
+        "interrupt moderation disabled (lowest latency)"
+    );
+    assert_eq!(
+        host.usbcmd & regs::USBCMD_INTE,
+        regs::USBCMD_INTE,
+        "global Interrupter Enable is set"
+    );
+}
+
+#[test]
+fn acknowledge_interrupt_clears_pending_and_keeps_enable() {
+    // Servicing a delivered interrupt clears `IMAN.IP` (write-1-to-clear)
+    // before draining the event ring, keeping Interrupt Enable set so the
+    // interrupter stays armed for the next completion (xHCI §4.17.5).
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    device.enumerate_hid(1).expect("enumeration succeeds");
+    device.enable_interrupter().expect("enable interrupter");
+    // The controller posts an event and sets Interrupt Pending.
+    device.host_mut().iman |= regs::IMAN_IP;
+
+    device
+        .acknowledge_interrupt()
+        .expect("acknowledge interrupt");
+
+    let host = device.host_mut();
+    assert_eq!(
+        host.iman & regs::IMAN_IP,
+        0,
+        "Interrupt Pending was cleared"
+    );
+    assert_eq!(
+        host.iman & regs::IMAN_IE,
+        regs::IMAN_IE,
+        "Interrupt Enable stays set after the acknowledge"
+    );
 }
 
 #[test]

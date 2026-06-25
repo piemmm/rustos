@@ -1322,6 +1322,62 @@ order (one fully-gated increment each):
        in `.junie/next-pi-prompt.md` ("DESIGN D"). The in-kernel scaffold stays
        the live metal keyboard and stays wired until the **D5** atomic flip, so
        the working keyboard never regresses (§2.17); D5 is metal-only-verifiable.
+       - **U-MSI — interrupt-driven USB keyboard over BCM2711 PCIe MSI — DONE
+         (host-proven + whole gate; metal-confirmation pending, §0.4).**
+         Supersedes every busy-poll/keep-alive workaround (§2.23). The VL805
+         xHCI completion is now an interrupt the keyboard driver parks on: the
+         VL805 raises an MSI write, the BCM2711 PCIe root complex's internal MSI
+         controller demultiplexes it onto its one shared GIC SPI, a kernel
+         chained handler fans it out to a per-vector virtual IRQ line, and
+         user-space `usb_kbd` `irq_wait`s on that line over the proven
+         `irq_bind`/`irq_wait` + re-arm path. No kernel/irq core change was
+         needed — a composite line-range `IrqController` routes GIC INTIDs vs.
+         MSI virtual lines. The end-to-end path is:
+         - `lib/usb`: `Xhci::enable_interrupter` (IMAN.IE / IMOD=0 /
+           USBCMD.INTE) + `acknowledge_interrupt` (clear IMAN.IP, keep IE),
+           surfaced on `UsbDevice` and reached through `BootKeyboard::source_mut`.
+         - `lib/pci`: `route_msi(bdf, MsiMessage)` on the `PciBus` seam (program
+           the legacy MSI capability: Message-Address lo/hi + Data, MSI Enable,
+           Multiple-Message-Enable forced to one vector; fail closed on a
+           64-bit doorbell against a 32-bit-only capability).
+         - `kernel/arch/aarch64/src/brcm_msi.rs`: the BCM2711 RC MSI register
+           driver (doorbell/data-config programming, per-vector
+           mask/unmask/clear, `pending`/`pending_vectors` demux, `msi_message`
+           builder) over an `MsiMmio` seam; freestanding `VolatileMsiMmio` over
+           the discovered RC base. Constants (`0x4044`/`0x4048`/`0x404c`, INTR2
+           `0x4500`, target `0xFFFF_FFFC`, data magic `0x6540`) from Linux
+           `pcie-brcmstb.c` + the BCM2711 datasheet, isolated for metal check.
+         - `kernel/rustos-kernel/src/aarch64/gic_irq.rs`: the `'static`
+           `CompositeIrqController` (a line in `[MSI_LINE_BASE, MSI_LINE_TOP]`
+           routes to the brcm MSI controller, else the GIC), the lazy
+           `BrcmMsi` bring-up + free-vector bitmap allocator
+           (`allocate_msi_vector`), the `BrcmMsiAllocFacility`, and the chained
+           demux in `production_device_irq_dispatch` (read `pending`, fire each
+           vector's virtual line — mask-before-wake via the composite — clear
+           its INTR2 status, then `irq_wake`). `gic_irq_routing` now returns the
+           composite controller with `MSI_LINE_TOP` as the bind ceiling.
+         - `msi_alloc` syscall (`abi-v1` #39, `CAP_IRQ_BIND`, `MsiAllocation`
+           out-record): the `MsiAllocFacility` kernel seam installed via
+           `KernelArch::msi_alloc_facility`; the handler allocs a vector, mints
+           the caller an `HwResource::irq` grant for the virtual line, and
+           copies the doorbell out. Wrappers in `lib/rt`/`lib/abi-sys`/`lib/drvrt`
+           (`DriverHost::alloc_msi`).
+         - `boot.rs` configures the RC base (`brcm_msi::configure`) and records
+           the MSI GIC SPI (the `brcm,bcm2711-pcie` node's 2nd `interrupts`
+           entry, `pcie_msi_spi`) post-MMU.
+         - `pcie_brcm::publish_usb_function` allocs+routes MSI (best-effort) and
+           forwards `HwResource::irq(line)` on the VL805 node; `vl805::
+           build_xhci_node` forwards it onto the xHCI node; `usb_kbd` enables
+           the interrupter, `irq_bind`s the granted line, and runs
+           `loop { irq_wait; acknowledge_interrupt; drain }`, falling back to the
+           bounded poll loop only when no IRQ grant is present (no MSI board).
+           `usb_kbd`'s bundle manifest carries `CAP_IRQ_BIND`.
+         - **Metal confirmation pending:** QEMU models no Pi PCIe/USB/MSI
+           (§0.4), so the doorbell offsets/magic and the end-to-end MSI delivery
+           are verified on the host (unit tests + the whole gate) and need an
+           on-metal re-test of the HDMI keyboard across a post-activity idle.
+           If a vector's offsets prove wrong on metal, only `brcm_msi.rs`'s
+           isolated constants change.
        - **D1 — runtime hardware-inventory store — DONE (host-proven + whole
          gate).** `kernel/rustos-kernel::hwtree_store::HwTreeStore` (`seed` /
          `append` / `snapshot`, growable §24.1) is the single authoritative

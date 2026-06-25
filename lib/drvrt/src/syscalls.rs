@@ -86,6 +86,15 @@ pub trait GrantSyscalls {
     ///
     /// Mirrors [`rustos_rt::hw_emit_node`].
     fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64;
+
+    /// Allocate a message-signalled interrupt (MSI) vector for a PCI
+    /// function, returning the [`rustos_abi::MsiAllocation`] the kernel
+    /// minted (the virtual interrupt line plus the doorbell to program into
+    /// the function's MSI capability), or the raw negative kernel result
+    /// (`-errno`) on failure. Carries `CAP_IRQ_BIND`.
+    ///
+    /// Mirrors [`rustos_rt::msi_alloc`].
+    fn msi_alloc(&self) -> Result<rustos_abi::MsiAllocation, i64>;
 }
 
 /// The production [`GrantSyscalls`]: forward to `rustos_rt`'s wrappers.
@@ -136,5 +145,10 @@ impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn hw_emit_node(&self, node: &rustos_abi::HwNode) -> i64 {
         rustos_rt::hw_emit_node(node)
+    }
+
+    #[inline]
+    fn msi_alloc(&self) -> Result<rustos_abi::MsiAllocation, i64> {
+        rustos_rt::msi_alloc()
     }
 }

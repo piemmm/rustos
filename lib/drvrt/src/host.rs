@@ -286,7 +286,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     /// first line of an IRQ resource; an out-of-range line value is refused
     /// fail-closed (a `u32` line cannot exceed the kernel's bind ceiling once
     /// truncated — the kernel re-validates on the far side of the trap).
-    fn irq_line(&self) -> Option<u32> {
+    pub fn irq_line(&self) -> Option<u32> {
         let slot = self
             .grants
             .iter()
@@ -487,6 +487,18 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         }
         Ok(())
     }
+
+    fn alloc_msi(&self) -> Result<rustos_abi::MsiAllocation, DriverError> {
+        // Allocate an MSI vector through `msi_alloc`: the kernel mints a
+        // vector, grants this task a device resource for the resulting line
+        // (so it may forward it as an `HwResource::irq` on the node it
+        // publishes), and returns the doorbell to program into the function's
+        // MSI capability. The host adds no authority — `CAP_IRQ_BIND` is
+        // enforced kernel-side. A refusal fails closed.
+        self.syscalls
+            .msi_alloc()
+            .map_err(|ret| decode_errno(ret).map_or(DriverError::DeviceFault, msi_alloc_error))
+    }
 }
 
 /// Map a non-positive `mmio_map` result to a [`MmioMapError`].
@@ -565,6 +577,22 @@ fn ipc_driver_error(errno: Errno) -> DriverError {
 fn emit_node_error(errno: Errno) -> DriverError {
     match errno {
         Errno::PermissionDenied => DriverError::PermissionDenied,
+        _ => DriverError::DeviceFault,
+    }
+}
+
+/// Map an [`Errno`] surfaced by a refused `msi_alloc` to a [`DriverError`].
+///
+/// `PermissionDenied` (the driver lacks `CAP_IRQ_BIND`) keeps its identity;
+/// `NotImplemented` (no MSI controller on this platform) and `OutOfRange`
+/// (the vector space is exhausted) are preserved so the bus driver can tell a
+/// missing controller from genuine exhaustion; everything else folds to
+/// [`DriverError::DeviceFault`] so the allocation fails closed.
+fn msi_alloc_error(errno: Errno) -> DriverError {
+    match errno {
+        Errno::PermissionDenied => DriverError::PermissionDenied,
+        Errno::NotImplemented => DriverError::NotImplemented,
+        Errno::OutOfRange => DriverError::OutOfRange,
         _ => DriverError::DeviceFault,
     }
 }

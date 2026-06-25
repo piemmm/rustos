@@ -1056,6 +1056,39 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
         self.slot
     }
 
+    /// Enable interrupt generation on the controller's interrupter so a
+    /// posted transfer event asserts the device's interrupt (the MSI write,
+    /// on the PCIe VL805) rather than only landing on the event ring.
+    ///
+    /// A driver that services this device interrupt-driven calls it once,
+    /// after enumeration and after its interrupt line has been routed to it,
+    /// then parks on `irq_wait` instead of busy-polling [`ReportSource::
+    /// next_report`]. A poll-only consumer never calls it. Delegates to
+    /// [`Xhci::enable_interrupter`].
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window rejects a write.
+    pub fn enable_interrupter(&mut self) -> Result<(), DriverError> {
+        self.xhci.enable_interrupter()
+    }
+
+    /// Acknowledge the controller interrupter's pending interrupt
+    /// (`IMAN.IP`), keeping it armed (xHCI §4.17.5).
+    ///
+    /// Called at the **start** of servicing a delivered interrupt — before
+    /// the reports are drained through [`ReportSource::next_report`] — so a
+    /// completion the controller posts during the drain re-asserts the
+    /// interrupt and is not lost. Delegates to
+    /// [`Xhci::acknowledge_interrupt`].
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window rejects the write.
+    pub fn acknowledge_interrupt(&mut self) -> Result<(), DriverError> {
+        self.xhci.acknowledge_interrupt()
+    }
+
     /// Device-visible address of byte `offset` within the region.
     fn phys_of(&self, offset: usize) -> u64 {
         self.dma.phys() + offset as u64
@@ -2034,6 +2067,79 @@ impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
     }
 }
 
+impl<H: XhciHost, M: DmaRegion> UsbDevice<H, M> {
+    /// Decode one completed interrupt-IN [`TrbType::TransferEvent`] (already
+    /// confirmed to target this device's slot and interrupt endpoint) into a
+    /// report length, copying the report bytes into `buf`.
+    ///
+    /// This performs only the *validation and copy* of one transfer; it does
+    /// **not** touch the transfer ring. Re-arming the endpoint is the caller's
+    /// (`next_report`) unconditional responsibility, so that a transfer whose
+    /// completion code or buffer mapping this method rejects still leaves the
+    /// endpoint re-armed for the next report (a single odd transfer must never
+    /// silence the keyboard).
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] for an unexpected completion code, a
+    /// completed-TRB address outside the interrupt ring, a misaligned or
+    /// out-of-range ring slot, or a residual larger than the report.
+    fn decode_transfer_report(&mut self, event: Trb, buf: &mut [u8]) -> Result<usize, DriverError> {
+        match event.completion_code() {
+            Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {}
+            _ => return Err(DriverError::DeviceFault),
+        }
+        // Map the completed TRB back to its slot's report buffer,
+        // validating every step of the controller's claim.
+        let ring_base = self.phys_of(self.layout.int_ring);
+        let offset = event
+            .parameter
+            .checked_sub(ring_base)
+            .ok_or(DriverError::DeviceFault)?;
+        let trb_len = trb::TRB_LEN as u64;
+        if offset % trb_len != 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        let slot = usize::try_from(offset / trb_len).map_err(|_| DriverError::DeviceFault)?;
+        if slot >= RING_TRBS - 1 {
+            return Err(DriverError::DeviceFault);
+        }
+        let residual =
+            usize::try_from(event.transfer_residual()).map_err(|_| DriverError::DeviceFault)?;
+        let len = REPORT_LEN
+            .checked_sub(residual)
+            .ok_or(DriverError::DeviceFault)?;
+        if len == 0 || len > buf.len() {
+            return Err(DriverError::DeviceFault);
+        }
+        self.dma
+            .read(self.layout.report_bufs + slot * REPORT_LEN, &mut buf[..len])?;
+        Ok(len)
+    }
+
+    /// Retire the just-completed interrupt-IN transfer and prime a fresh one,
+    /// ringing the endpoint doorbell so the controller delivers the next
+    /// report.
+    ///
+    /// Called by [`ReportSource::next_report`] for **every** completed
+    /// transfer event addressed to this endpoint — including one whose report
+    /// was rejected by [`Self::decode_transfer_report`] — so the interrupt
+    /// endpoint is never left un-armed (which would permanently stall input:
+    /// a busy-polling driver would keep reading an empty event ring forever
+    /// while the keyboard appears dead).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a transfer-ring or doorbell failure ([`DriverError::Busy`]
+    /// if the ring is unexpectedly full, or the register-window error from the
+    /// doorbell write).
+    fn rearm_interrupt_endpoint(&mut self) -> Result<(), DriverError> {
+        self.int_ring.retire_one()?;
+        self.arm_report()?;
+        self.xhci.ring_doorbell(self.slot, u32::from(self.int_dci))
+    }
+}
+
 impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
     fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
         if self.slot == 0 {
@@ -2044,6 +2150,7 @@ impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
         // segment's TRBs, and `next_report` never blocks.
         for _ in 0..RING_TRBS {
             let Some(event) = self.poll_event()? else {
+                // No event pending.
                 return Ok(None);
             };
             match event.trb_type() {
@@ -2052,42 +2159,18 @@ impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
                 _ => return Err(DriverError::DeviceFault),
             }
             if event.slot_id() != self.slot || event.endpoint_id() != self.int_dci {
+                // Not this endpoint's transfer — surface the controller fault
+                // without disturbing our own transfer ring.
                 return Err(DriverError::DeviceFault);
             }
-            match event.completion_code() {
-                Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {}
-                _ => return Err(DriverError::DeviceFault),
-            }
-            // Map the completed TRB back to its slot's report buffer,
-            // validating every step of the controller's claim.
-            let ring_base = self.phys_of(self.layout.int_ring);
-            let offset = event
-                .parameter
-                .checked_sub(ring_base)
-                .ok_or(DriverError::DeviceFault)?;
-            let trb_len = trb::TRB_LEN as u64;
-            if offset % trb_len != 0 {
-                return Err(DriverError::DeviceFault);
-            }
-            let slot = usize::try_from(offset / trb_len).map_err(|_| DriverError::DeviceFault)?;
-            if slot >= RING_TRBS - 1 {
-                return Err(DriverError::DeviceFault);
-            }
-            let residual =
-                usize::try_from(event.transfer_residual()).map_err(|_| DriverError::DeviceFault)?;
-            let len = REPORT_LEN
-                .checked_sub(residual)
-                .ok_or(DriverError::DeviceFault)?;
-            if len == 0 || len > buf.len() {
-                return Err(DriverError::DeviceFault);
-            }
-            self.dma
-                .read(self.layout.report_bufs + slot * REPORT_LEN, &mut buf[..len])?;
-            self.int_ring.retire_one()?;
-            self.arm_report()?;
-            self.xhci
-                .ring_doorbell(self.slot, u32::from(self.int_dci))?;
-            return Ok(Some(len));
+            // Decode this completed transfer first, then re-arm the endpoint
+            // **unconditionally**: an unexpected completion code or a
+            // malformed buffer mapping is surfaced as a per-report error, but
+            // the endpoint is always re-primed so a single odd report can
+            // never leave it silent and wedge the keyboard.
+            let decoded = self.decode_transfer_report(event, buf);
+            self.rearm_interrupt_endpoint()?;
+            return decoded.map(Some);
         }
         Ok(None)
     }
