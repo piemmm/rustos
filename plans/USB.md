@@ -232,14 +232,27 @@ the live controller behaviour is host- and CI-proven first.
   `tests/integration/driver_unload_qemu_aarch64` `-M virt` vertical
   (autoload → `terminate_driver_process` → assert live-task count 1→0 + caps
   /aspace reclaimed + idempotent `NotFound`). Whole gate green.
-- **U2 — URB transport ABI + `lib/usb` transport server/client `[ ]`.**
-  Host-testable with a mock controller. Define `lib/abi/src/usb_urb.rs` (URB
-  request/completion records, endpoint addressing) and regenerate the C header.
-  Refactor `lib/usb` to expose a controller-side transport server (drains URB
-  calls, drives the existing ring/enumeration engine) and a class-side
-  transport client (submits URBs, awaits completions). Host unit tests over a
-  mock ring assert a control + interrupt-IN round-trip and fail-closed
-  validation (bad endpoint, oversize length, illegal direction).
+- **U2 — URB transport ABI + `lib/usb` transport server/client `[x]` (DONE).**
+  The wire contract lives in `lib/abi/src/usb_urb.rs`: `UrbRequest` (endpoint,
+  `UsbTransferType`, `UsbDirection`, shared-buffer handle, length, control
+  SETUP; fixed `URB_REQUEST_LEN`) with fail-closed `decode` (truncation,
+  unknown type/direction, endpoint > `MAX_ENDPOINT`), and a status-framed
+  completion (`encode_completion`/`encode_error_completion`/`decode_completion`,
+  bytes transferred or an in-band `Errno`). It is a driver↔driver IPC format
+  (like `driver_store`/`mailbox_ipc`), so it is not part of the C-header
+  surface (`cargo xtask c-header` produced no `include/` diff). `lib/usb` gained
+  the `transport` module: the `UrbEngine` controller-side seam (`UsbDevice`
+  implements it — `control_in` over the EP0 control transfer, `interrupt_in`
+  over the `ReportSource` poll), `serve_urb` (decode → validate against the
+  interface fail-closed → drive the engine over the shared buffer → frame the
+  completion in band; a not-yet-arrived report is `WouldBlock`), and the
+  class-side `UrbCall`/`UrbClient` (`control_in`/`interrupt_in` build, submit,
+  and decode). Covered by host unit tests (ABI round-trip/fail-closed; the URB
+  decoders added to the `lib/abi` fuzz harness; a control-IN + interrupt-IN
+  round-trip through `UrbClient` → `serve_urb` → mock engine over a shared
+  buffer; and `serve_urb` fail-closed for a bad endpoint, oversize length,
+  illegal direction, bulk, and a malformed frame, each proven not to reach the
+  engine). Whole gate green.
 - **U3 — xHCI HCD process `[ ]`.** Turn `drivers/bus/usb/xhci` into a `Run`
   binary that binds `usb,xhci`, owns the controller (the bring-up code moves
   from `usb_kbd` unchanged — it is already platform-neutral), enumerates,

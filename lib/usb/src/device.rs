@@ -2175,3 +2175,21 @@ impl<H: XhciHost, M: DmaRegion> ReportSource for UsbDevice<H, M> {
         Ok(None)
     }
 }
+
+impl<H: XhciHost, M: DmaRegion> crate::transport::UrbEngine for UsbDevice<H, M> {
+    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
+        // The engine's control transfer lands the IN data in the device's
+        // control-data DMA buffer; copy out only the bytes the device
+        // delivered, never past the caller's shared buffer.
+        let requested = u32::try_from(data.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+        let transferred = self.control(setup, requested)?;
+        let transferred = usize::try_from(transferred).map_err(|_| DriverError::DeviceFault)?;
+        let copied = transferred.min(data.len());
+        self.dma.read(self.layout.ctrl_data, &mut data[..copied])?;
+        Ok(copied)
+    }
+
+    fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+        self.next_report(data)
+    }
+}

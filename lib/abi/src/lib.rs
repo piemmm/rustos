@@ -38,6 +38,7 @@ pub mod syscall;
 pub mod syscalls;
 pub mod sysinfo;
 pub mod time;
+pub mod usb_urb;
 
 pub use appinfo::{
     body_len as appinfo_body_len, mime_type_at, resolve_library, validate_bundle_layout,

@@ -7,7 +7,31 @@
 
 use super::*;
 
+extern crate std;
+
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 extern "C" fn host_cb(_cpu: CpuId) {}
+
+/// Serialises the tests that mutate the process-global preempt slots.
+///
+/// The callback function slots, the registered [`PreemptStorage`] pointers,
+/// and the per-hart interval/cpu-id/deadline slots are process globals. The
+/// test harness runs tests on several threads, so without serialisation one
+/// test's `clear_for_tests` / `reset_preempt_storage_for_tests` can wipe the
+/// state another is mid-way through asserting on — an order-dependent flake.
+/// Every test that touches that shared state holds this lock for its whole
+/// body, so the stateful tests run one at a time (no flaky tests).
+static PREEMPT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire [`PREEMPT_TEST_LOCK`], recovering a poisoned lock: a panicking
+/// sibling test must not wedge the rest, and the guarded state is reset at
+/// each test's start anyway.
+fn lock_preempt_tests() -> MutexGuard<'static, ()> {
+    PREEMPT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 #[test]
 fn enable_bit_and_cause_match_privileged_spec() {
@@ -37,6 +61,7 @@ fn external_interrupt_is_not_a_timer_interrupt() {
 
 #[test]
 fn callback_round_trips() {
+    let _guard = lock_preempt_tests();
     clear_for_tests();
     assert!(timer_callback().is_none());
     set_timer_callback(host_cb);
@@ -64,6 +89,7 @@ fn interval_for_hz_clamps_to_at_least_one() {
 
 #[test]
 fn diagnostic_slots_start_clear() {
+    let _guard = lock_preempt_tests();
     clear_for_tests();
     assert_eq!(timer_interval_ticks(), 0);
     assert_eq!(timer_cpu_id(), u32::MAX);
@@ -79,6 +105,7 @@ fn per_hart_slots_track_the_registered_storage() {
     static STORAGE: PreemptStorage<4> = PreemptStorage::new();
     static STORAGE2: PreemptStorage<2> = PreemptStorage::new();
 
+    let _guard = lock_preempt_tests();
     reset_preempt_storage_for_tests();
 
     // Before any storage is registered the per-hart observers fail closed
@@ -156,6 +183,7 @@ fn supervisor_software_interrupt_is_recognised() {
 
 #[test]
 fn ipi_callback_round_trips() {
+    let _guard = lock_preempt_tests();
     clear_for_tests();
     assert!(ipi_callback().is_none());
     set_ipi_callback(host_cb);
@@ -168,6 +196,7 @@ fn ipi_callback_round_trips() {
 
 #[test]
 fn preempt_callback_round_trips_through_its_own_slot() {
+    let _guard = lock_preempt_tests();
     clear_for_tests();
     assert!(preempt_callback().is_none());
     set_preempt_callback(host_cb);

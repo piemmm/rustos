@@ -61,6 +61,29 @@ build on the *same* engine without depending on each other — exactly the split
   it) and the binding controller driver (`drivers/input/usb_kbd`'s
   `KEYBOARD_BIND_KEYS`) share (§2.2 / §2.20).
 
+- `transport` — the **bus-agnostic URB transport seam** the modular USB stack
+  (`plans/USB.md`) is built on. The wire contract is `rustos_abi::usb_urb`: a
+  `UrbRequest` (endpoint, transfer type, direction, shared-buffer handle,
+  length, control SETUP) and a status-framed completion (bytes transferred, or
+  an in-band `Errno`). `transport` adds the two ends both sides share:
+  - `UrbEngine` — the controller-side operation seam the HCD's live engine
+    performs (`UsbDevice` implements it: `control_in` over the EP0 control
+    transfer, `interrupt_in` over the `ReportSource` report poll).
+  - `serve_urb` — the controller-side server transformation: decode a URB,
+    validate it fail-closed against the interface (control ⇒ endpoint 0 / IN;
+    interrupt ⇒ a device endpoint / IN; an oversize length, a bulk or
+    control-OUT transfer, or a malformed frame is refused **before** the engine
+    is touched), drive the engine over the shared buffer, and frame the
+    completion in band. A not-yet-arrived interrupt-IN report is the benign,
+    retryable `Errno::WouldBlock`.
+  - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
+    `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
+    straight to `serve_urb`), and `UrbClient::{control_in, interrupt_in}` build
+    the URB, submit it, and decode the completion. A class driver speaks only
+    this ABI, so the same binary works behind any controller that serves it —
+    it touches no controller register and no other interface's buffer (§5.4,
+    `plans/USB.md` §1.3).
+
 ## Design
 
 - `no_std`, `#![forbid(unsafe_op_in_unsafe_fn)]`, `lib/abi`-only.

@@ -152,6 +152,29 @@ fn exercise(bytes: &[u8]) {
         }
     }
     exercise_process(bytes);
+    exercise_usb_urb(bytes);
+}
+
+/// Drive the URB transport decoders on `bytes`.
+///
+/// Split out of [`exercise`] so each helper stays a single, readable unit;
+/// the contract is identical (must not panic; an accepted decode round-trips
+/// through its encoder). The completion frame has no struct, so its decoder
+/// is exercised directly for the "must not panic" half of the contract.
+fn exercise_usb_urb(bytes: &[u8]) {
+    use rustos_abi::usb_urb::{UrbRequest, URB_REQUEST_LEN};
+    if let Ok(req) = UrbRequest::decode(bytes) {
+        let mut buf = [0u8; URB_REQUEST_LEN];
+        req.encode(&mut buf)
+            .expect("an accepted URB request must re-encode");
+        let redecoded =
+            UrbRequest::decode(&buf).expect("round-trip of an accepted URB request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    // The completion decoder accepts any byte slice and either reports the
+    // transferred count or a fail-closed errno; the contract is that it never
+    // panics for an arbitrary input.
+    let _ = rustos_abi::usb_urb::decode_completion(bytes);
 }
 
 /// Drive the resource-limit decoder on `bytes`.

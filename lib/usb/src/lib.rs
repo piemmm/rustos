@@ -45,6 +45,7 @@ use rustos_abi::{DriverError, RegisterWindow};
 pub mod device;
 pub mod regs;
 pub mod ring;
+pub mod transport;
 pub mod trb;
 
 #[cfg(test)]
