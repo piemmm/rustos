@@ -315,6 +315,32 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn waitset_create(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn waitset_ctl(
+        &self,
+        _c: &CallerContext<'_>,
+        _set: u64,
+        _op: u32,
+        _kind: u32,
+        _id: u64,
+        _token: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn waitset_wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _set: u64,
+        _timeout_ns: u64,
+        _token_out: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
 }
 
 /// Silent sink — fuzz output must not pollute test stdout. Capacity

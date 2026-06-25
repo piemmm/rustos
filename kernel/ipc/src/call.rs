@@ -334,6 +334,18 @@ impl CallEndpoint {
         self.inner.lock().outstanding()
     }
 
+    /// `true` if a posted request is waiting to be received (the readiness a
+    /// wait-set member of kind `Endpoint` observes).
+    ///
+    /// Non-consuming: it peeks the receive queue without dequeuing, so the
+    /// subsequent [`recv_call`](Self::recv_call) is what actually takes the
+    /// request. A closed endpoint is never ready (its queue was cleared by
+    /// [`destroy`](Self::destroy) and stays empty).
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        !self.inner.lock().pending.is_empty()
+    }
+
     /// Mark the endpoint closed and cancel every in-flight call.
     ///
     /// Idempotent and fail-closed: subsequent [`post`](Self::post)s return

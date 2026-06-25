@@ -176,7 +176,7 @@ impl SyscallNumber {
     /// Wait for a child process to exit, reaping it and reporting its
     /// exit code (`plans/SPAWN.md` SP6).
     ///
-    /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_ANY`] to
+    /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_PID_ANY`] to
     /// wait for any of the caller's children) and `status: *mut i32` (a
     /// non-null user pointer the kernel writes the reaped child's exit
     /// code into). Returns the reaped child's PID. A process may only wait
@@ -752,6 +752,65 @@ impl SyscallNumber {
     /// wired fails closed with [`crate::Errno::NotImplemented`].
     pub const SHM_UNMAP: Self = Self(42);
 
+    /// Create a kernel **wait-set**: a growable, caller-owned object that
+    /// multiplexes readiness of several heterogeneous event sources so one
+    /// process can service them all without a busy poll loop (`plans/USB.md`
+    /// — the asynchronous host-controller event loop).
+    ///
+    /// Takes no arguments. Returns an opaque, kernel-minted wait-set handle
+    /// (unforgeable in the same sense as an [`IrqHandle`]: re-checked against
+    /// the calling task on every later use), or `-errno`.
+    ///
+    /// A wait-set is the scalable analogue of `epoll`/`kqueue`: membership is
+    /// registered once with [`SyscallNumber::WAITSET_CTL`] and persists across
+    /// waits, so [`SyscallNumber::WAITSET_WAIT`] passes only the set handle —
+    /// never a per-wait array — and the set grows on demand rather than
+    /// capping the number of sources at a fixed ceiling. Needs no capability:
+    /// the set observes only resources the caller already holds, each
+    /// owner-checked when it is added.
+    pub const WAITSET_CREATE: Self = Self(43);
+
+    /// Add or remove a member of a wait-set created with
+    /// [`SyscallNumber::WAITSET_CREATE`] (`plans/USB.md`).
+    ///
+    /// Arguments: `set: u64` — the wait-set handle; `op: u32` — a
+    /// [`crate::WaitSetOp`] (`Add` / `Del`); `kind: u32` — a
+    /// [`crate::WaitSourceKind`] (`Endpoint` / `Irq`); `id: u64` — the
+    /// resource the member names (an IPC call-endpoint id the caller serves,
+    /// or an [`IrqHandle`] the caller bound); `token: u64` — an opaque,
+    /// caller-chosen value [`SyscallNumber::WAITSET_WAIT`] reports back when
+    /// this member is ready. Returns `0`, or `-errno`.
+    ///
+    /// On `Add` the kernel **resolves and owner-checks the named resource
+    /// against the calling task before recording it** (no ambient authority):
+    /// an endpoint not owned by the caller, or an IRQ handle not bound by it,
+    /// fails the call closed. The set thus only ever observes resources the
+    /// caller already holds. A handle that is not the caller's own wait-set,
+    /// an unknown `op`/`kind`, or `Del` of an absent member fails closed.
+    pub const WAITSET_CTL: Self = Self(44);
+
+    /// Block until **any one** member of a wait-set is ready, reporting which
+    /// (`plans/USB.md`).
+    ///
+    /// Arguments: `set: u64` — the wait-set handle; `timeout_ns: u64` — a
+    /// relative timeout, or [`u64::MAX`] for "no timeout" (block until a
+    /// member is ready); `token_out: *mut u64` — a non-null user pointer the
+    /// kernel writes the ready member's caller-chosen token to on success.
+    /// Returns `0` (a member was ready, its token written to `token_out`), or
+    /// `-errno` ([`crate::Errno::TimedOut`] when the timeout elapses with no
+    /// member ready).
+    ///
+    /// The caller *parks* off the run queue between readiness checks — it is
+    /// woken when an IPC request is posted to one of its member endpoints,
+    /// when one of its member IRQ lines fires, or by the timeout — so an idle
+    /// service burns no CPU (the charter forbids spinning a core). Each
+    /// member is re-checked against the calling task as it is scanned, so a
+    /// member whose resource was torn down fails that member closed. Needs no
+    /// capability (it only observes resources the caller already holds, each
+    /// owner-checked when added). A handle that is not the caller's own
+    /// wait-set, or a faulting `token_out`, fails closed.
+    pub const WAITSET_WAIT: Self = Self(45);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -778,7 +837,7 @@ impl SyscallNumber {
 /// caller's children exits next (the POSIX `waitpid(-1, …)` convention).
 /// A named constant keeps the sentinel from appearing as a bare `-1` at
 /// every call site.
-pub const WAIT_ANY: i32 = -1;
+pub const WAIT_PID_ANY: i32 = -1;
 
 /// Opaque, kernel-issued handle to a bound hardware interrupt line.
 ///
@@ -869,6 +928,9 @@ mod tests {
         assert_eq!(SyscallNumber::SHM_CREATE.as_u16(), 40);
         assert_eq!(SyscallNumber::SHM_MAP.as_u16(), 41);
         assert_eq!(SyscallNumber::SHM_UNMAP.as_u16(), 42);
+        assert_eq!(SyscallNumber::WAITSET_CREATE.as_u16(), 43);
+        assert_eq!(SyscallNumber::WAITSET_CTL.as_u16(), 44);
+        assert_eq!(SyscallNumber::WAITSET_WAIT.as_u16(), 45);
     }
 
     #[test]

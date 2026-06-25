@@ -310,7 +310,7 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already validated that `pid` is a sign-extended
     /// `i32` and that `status` is a non-null `UserPtr`. `pid` is either a
-    /// specific child's PID or [`rustos_abi::WAIT_ANY`] (wait for any
+    /// specific child's PID or [`rustos_abi::WAIT_PID_ANY`] (wait for any
     /// child). The implementation validates the parent/child relationship —
     /// a process may only reap its **own** children
     /// — blocks the caller until a child is reapable, and copies the exit
@@ -913,6 +913,75 @@ pub trait SyscallHandlers {
     fn shm_unmap(&self, _caller: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Create a caller-owned wait-set that multiplexes the readiness of
+    /// several event sources, returning its kernel-minted handle
+    /// (`plans/USB.md`).
+    ///
+    /// Needs no capability (the dispatcher gates nothing): the set observes
+    /// only resources the caller already holds, each owner-checked when it is
+    /// added. The implementation mints a fresh handle and records an empty set
+    /// owned by the calling task.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn waitset_create(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Add or remove a member of a wait-set (`plans/USB.md`).
+    ///
+    /// `set` is the wait-set handle; `op` is a [`rustos_abi::WaitSetOp`];
+    /// `kind` is a [`rustos_abi::WaitSourceKind`]; `id` names the resource (an
+    /// IPC call-endpoint id or an [`rustos_abi::IrqHandle`] raw value); `token`
+    /// is the caller's opaque tag. On `Add` the implementation **resolves and
+    /// owner-checks the named resource against the calling task** before
+    /// recording it (no ambient authority), and owner-checks the set itself; a
+    /// resource the caller does not own, a handle that is not the caller's own
+    /// wait-set, an unknown `op`/`kind`, or a duplicate/absent member fails
+    /// closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn waitset_ctl(
+        &self,
+        _caller: &CallerContext<'_>,
+        _set: u64,
+        _op: u32,
+        _kind: u32,
+        _id: u64,
+        _token: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Block until any one member of a wait-set is ready, writing the ready
+    /// member's caller-chosen token to `token_out` (`plans/USB.md`).
+    ///
+    /// `set` is the wait-set handle; `timeout_ns` is a relative timeout
+    /// ([`u64::MAX`] = no timeout); `token_out` is the non-null user pointer the
+    /// token is written to. The implementation owner-checks the set, parks the
+    /// caller off the run queue between readiness checks (woken by an IPC post
+    /// to a member endpoint, a member IRQ firing, or the timeout — never a busy
+    /// spin), re-checks each member against the caller as it scans, and on a
+    /// ready member writes its token and returns `0`. A timeout returns
+    /// [`Errno::TimedOut`]; a handle that is not the caller's own wait-set, or a
+    /// faulting `token_out`, fails closed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn waitset_wait(
+        &self,
+        _caller: &CallerContext<'_>,
+        _set: u64,
+        _timeout_ns: u64,
+        _token_out: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -1263,6 +1332,26 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // is its length in bytes.
                 let len = decode_len(args.0[1])?;
                 self.handlers.shm_unmap(caller, args.0[0], len)
+            }
+            SyscallNumber::WAITSET_CREATE => {
+                // No arguments; the handler mints a handle for the caller.
+                self.handlers.waitset_create(caller)
+            }
+            SyscallNumber::WAITSET_CTL => {
+                // args[0] is the wait-set handle; args[1]/[2] are the op and
+                // source kind (`u32` each, validated by the handler); args[3]
+                // is the resource id; args[4] is the caller's token.
+                let op = decode_u32(args.0[1]);
+                let kind = decode_u32(args.0[2]);
+                self.handlers
+                    .waitset_ctl(caller, args.0[0], op, kind, args.0[3], args.0[4])
+            }
+            SyscallNumber::WAITSET_WAIT => {
+                // args[0] is the wait-set handle; args[1] is the relative
+                // timeout (`u64::MAX` = no timeout); args[2] is the non-null
+                // `token_out` `UserPtr` (dispatcher-checked).
+                self.handlers
+                    .waitset_wait(caller, args.0[0], args.0[1], args.0[2])
             }
             _ => Err(Errno::NotFound),
         }
@@ -1881,6 +1970,38 @@ mod tests {
             self.record("shm_unmap");
             Ok(0)
         }
+
+        fn waitset_create(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("waitset_create");
+            // Echo a handle so the reachability test sees a non-error result.
+            Ok(1)
+        }
+
+        fn waitset_ctl(
+            &self,
+            _c: &CallerContext<'_>,
+            set: u64,
+            _op: u32,
+            _kind: u32,
+            _id: u64,
+            _token: u64,
+        ) -> SyscallResult {
+            self.record("waitset_ctl");
+            // Echo the set handle so the test can assert the dispatcher decoded
+            // the arguments without wiring a real wait-set.
+            Ok(set)
+        }
+
+        fn waitset_wait(
+            &self,
+            _c: &CallerContext<'_>,
+            _set: u64,
+            _timeout_ns: u64,
+            _token_out: u64,
+        ) -> SyscallResult {
+            self.record("waitset_wait");
+            Ok(0)
+        }
     }
 
     #[test]
@@ -2399,12 +2520,12 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
 
-        // `WAIT_ANY` (-1) is sign-extended through all 64 bits; the
+        // `WAIT_PID_ANY` (-1) is sign-extended through all 64 bits; the
         // dispatcher must recover it as `i32::-1` and forward it. The Mock
         // echoes the pid back reinterpreted as `u32`, i.e. `u32::MAX`.
         let mut args = RawArgs::ZERO;
         #[allow(clippy::cast_sign_loss)]
-        let extended = i64::from(rustos_abi::WAIT_ANY) as u64;
+        let extended = i64::from(rustos_abi::WAIT_PID_ANY) as u64;
         args.0[0] = extended;
         args.0[1] = 0x1000; // status
         assert_eq!(

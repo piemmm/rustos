@@ -103,6 +103,9 @@ const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
 const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
+const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
+const NUM_WAITSET_CTL: u64 = SyscallNumber::WAITSET_CTL.as_u16() as u64;
+const NUM_WAITSET_WAIT: u64 = SyscallNumber::WAITSET_WAIT.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
 const NO_ARGS: [u64; SYSCALL_MAX_ARGS] = [0; SYSCALL_MAX_ARGS];
@@ -560,7 +563,7 @@ pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {
 /// writing its exit code to `status` (`SyscallNumber::WAIT`). Returns the
 /// reaped child's PID, or a `ROS_E_*` code reinterpreted into the result.
 ///
-/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_ANY`] to
+/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
 /// wait for any child. A process may only wait on its **own** children; the
 /// kernel validates the parent/child relationship and the `status` pointer
 /// before writing to it, and fails closed
@@ -953,6 +956,68 @@ pub extern "C" fn sys_shm_unmap(base: u64, len: usize) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_SHM_UNMAP, [base, len as u64, 0, 0, 0, 0])) }
 }
 
+/// `waitset_create`: create a caller-owned wait-set that multiplexes the
+/// readiness of several event sources (`SyscallNumber::WAITSET_CREATE`).
+/// Returns the kernel-minted, opaque wait-set handle, or a `ROS_E_*` code
+/// reinterpreted into the result.
+///
+/// Takes no arguments and needs no capability: the set observes only resources
+/// the caller already holds, each owner-checked when added. Members are
+/// registered with [`sys_waitset_ctl`] and waited on with [`sys_waitset_wait`].
+#[must_use]
+#[export_name = "ros_sys_waitset_create"]
+pub extern "C" fn sys_waitset_create() -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is involved; the kernel mints a
+    // handle for the calling task and returns it.
+    unsafe { raw_syscall(NUM_WAITSET_CREATE, NO_ARGS) }
+}
+
+/// `waitset_ctl`: add or remove a member of wait-set `set`
+/// (`SyscallNumber::WAITSET_CTL`). Returns a `ROS_E_*` code.
+///
+/// `op` is a `ROS_WAITSET_OP_*` value (`Add` / `Del`); `kind` is a
+/// `ROS_WAIT_SOURCE_*` value (`Endpoint` / `Irq`); `id` names the resource (an
+/// IPC call-endpoint id the caller serves, or an `IrqHandle` the caller bound);
+/// `token` is the caller's opaque tag reported back by [`sys_waitset_wait`]. On
+/// `Add` the kernel resolves and owner-checks the named resource against the
+/// calling task before recording it — never ambient authority; a resource the
+/// caller does not own, a handle that is not the caller's own wait-set, an
+/// unknown `op`/`kind`, or a duplicate/absent member fails closed.
+#[must_use]
+#[export_name = "ros_sys_waitset_ctl"]
+pub extern "C" fn sys_waitset_ctl(set: u64, op: u32, kind: u32, id: u64, token: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // validates the set handle and the named resource against the caller.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_WAITSET_CTL,
+            [set, u64::from(op), u64::from(kind), id, token, 0],
+        ))
+    }
+}
+
+/// `waitset_wait`: block until any one member of wait-set `set` is ready,
+/// writing the ready member's caller-chosen token to `token_out`
+/// (`SyscallNumber::WAITSET_WAIT`). Returns a `ROS_E_*` code (`0` on a ready
+/// member, `ROS_E_TIMED_OUT` when `timeout_ns` elapses first).
+///
+/// `timeout_ns` is a relative timeout, or `UINT64_MAX` for "no timeout". The
+/// caller parks off the run queue between readiness checks — woken by an IPC
+/// post to a member endpoint, a member IRQ firing, or the timeout — so an idle
+/// service burns no CPU. Needs no capability.
+#[must_use]
+#[export_name = "ros_sys_waitset_wait"]
+pub extern "C" fn sys_waitset_wait(set: u64, timeout_ns: u64, token_out: *mut c_void) -> i32 {
+    // SAFETY: see `sys_yield`. The kernel validates `token_out` against the
+    // caller's address space before writing the ready member's token to it.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_WAITSET_WAIT,
+            [set, timeout_ns, ptr_arg(token_out), 0, 0, 0],
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,6 +1075,9 @@ mod tests {
         (NUM_SHM_CREATE, "shm_create", 2),
         (NUM_SHM_MAP, "shm_map", 1),
         (NUM_SHM_UNMAP, "shm_unmap", 2),
+        (NUM_WAITSET_CREATE, "waitset_create", 0),
+        (NUM_WAITSET_CTL, "waitset_ctl", 5),
+        (NUM_WAITSET_WAIT, "waitset_wait", 3),
     ];
 
     #[test]
@@ -1446,6 +1514,43 @@ mod tests {
     }
 
     #[test]
+    fn waitset_create_takes_no_args_and_returns_the_handle() {
+        let (number, args) = capture(0x7700_0001, || {
+            assert_eq!(sys_waitset_create(), 0x7700_0001);
+        });
+        assert_eq!(number, NUM_WAITSET_CREATE);
+        assert_eq!(&args, &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn waitset_ctl_marshals_set_op_kind_id_and_token() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_waitset_ctl(0x7700_0001, 0, 1, 0xABCD, 0x55), 0);
+        });
+        assert_eq!(number, NUM_WAITSET_CTL);
+        assert_eq!(args[0], 0x7700_0001);
+        assert_eq!(args[1], 0);
+        assert_eq!(args[2], 1);
+        assert_eq!(args[3], 0xABCD);
+        assert_eq!(args[4], 0x55);
+        assert_eq!(args[5], 0);
+    }
+
+    #[test]
+    fn waitset_wait_marshals_set_timeout_and_token_out_pointer() {
+        let mut token = 0u64;
+        let ptr = core::ptr::addr_of_mut!(token).cast::<c_void>();
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_waitset_wait(0x7700_0001, u64::MAX, ptr), 0);
+        });
+        assert_eq!(number, NUM_WAITSET_WAIT);
+        assert_eq!(args[0], 0x7700_0001);
+        assert_eq!(args[1], u64::MAX);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
     fn wait_marshals_pid_and_status_pointer() {
         let mut status = 0i32;
         let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
@@ -1464,10 +1569,10 @@ mod tests {
         let mut status = 0i32;
         let ptr = core::ptr::addr_of_mut!(status).cast::<c_void>();
         let (number, args) = capture(3, || {
-            let _ = sys_wait(rustos_abi::WAIT_ANY, ptr);
+            let _ = sys_wait(rustos_abi::WAIT_PID_ANY, ptr);
         });
         assert_eq!(number, NUM_WAIT);
-        // `WAIT_ANY` (-1) sign-extends to all-ones in the argument register.
+        // `WAIT_PID_ANY` (-1) sign-extends to all-ones in the argument register.
         assert_eq!(args[0], u64::MAX);
     }
 

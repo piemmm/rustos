@@ -71,7 +71,7 @@ pub trait Sessions {
     /// `spawn` with an explicit console selector: launch `path` attached
     /// to installed console `console`, returning the PID or `-errno`.
     fn spawn_at(&mut self, path: &[u8], console: u32) -> i64;
-    /// `wait` with `WAIT_ANY`: block until any child exits, reap it, and
+    /// `wait` with `WAIT_PID_ANY`: block until any child exits, reap it, and
     /// return its PID (writing the exit code to `status`), or `-errno`.
     fn wait_any(&mut self, status: &mut i32) -> i64;
 }

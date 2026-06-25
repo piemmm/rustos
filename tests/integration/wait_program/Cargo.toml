@@ -18,7 +18,7 @@ path = "src/main.rs"
 # The program is a pure-Rust RustOS program (`AGENTS.md` §1), so it links the
 # pure-Rust userland runtime `rustos-rt` — never the C ABI (`crt0` + `abi-sys`),
 # which exists solely for non-Rust programs (`AGENTS.md` §16.4). It names
-# `rustos-abi` only for the `WAIT_ANY` constant the parent passes to `wait`.
+# `rustos-abi` only for the `WAIT_PID_ANY` constant the parent passes to `wait`.
 # Only on the three native Tier-1 targets (`target_os = "none"`); on the host it
 # is an inert stub so `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]

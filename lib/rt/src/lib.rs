@@ -893,7 +893,7 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 /// Wait for a child process to exit, reaping it and reading back its exit
 /// code (`SyscallNumber::WAIT`, `plans/SPAWN.md` SP6).
 ///
-/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_ANY`] to
+/// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`] to
 /// wait for whichever of the caller's children exits next. On success the
 /// kernel writes the reaped child's exit code into `status` and returns its
 /// PID. A process may only wait on its **own** children; the kernel
@@ -1761,10 +1761,10 @@ mod tests {
     fn wait_marshals_wait_any_as_a_sign_extended_minus_one() {
         let mut status = 0i32;
         let (number, args) = capture(3, || {
-            assert_eq!(wait(rustos_abi::WAIT_ANY, &mut status), 3);
+            assert_eq!(wait(rustos_abi::WAIT_PID_ANY, &mut status), 3);
         });
         assert_eq!(number, NUM_WAIT);
-        // `WAIT_ANY` (-1) sign-extends to all-ones in the argument register.
+        // `WAIT_PID_ANY` (-1) sign-extends to all-ones in the argument register.
         assert_eq!(args[0], u64::MAX);
     }
 

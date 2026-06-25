@@ -113,6 +113,19 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 - It knows nothing of PCIe, the VL805, or any board: it received its register
   window and DMA constraint as grants on its matched node, exactly as today
   (`usb_kbd`'s current platform-neutral bring-up moves here unchanged).
+- **It is a single asynchronous event loop, never a per-URB blocking server
+  (§2.23).** The HCD must service two independent event streams at once —
+  incoming URB-submit IPC calls on the per-interface endpoints it serves, and
+  its controller's completion/PORTSC interrupts on the event ring — for
+  arbitrarily many interfaces (the USB-mouse-alongside-keyboard case, §0).
+  Blocking inside one interface's URB handler would stall every other
+  interface, so the loop **multiplexes**: it parks on a kernel **wait-set**
+  (`U3a3`) holding its URB-submit endpoints *and* its controller IRQ line,
+  wakes on whichever is ready, and either accepts a new URB (queues it on the
+  ring, leaving the caller's URB call outstanding) or drains the event ring on
+  an interrupt and **replies to the now-complete URB calls** — completions are
+  delivered asynchronously, not synchronously per submit. One CPU-free park
+  covers all interfaces; an idle controller burns nothing.
 
 ### 1.2 The class driver
 
@@ -310,6 +323,43 @@ the live controller behaviour is host- and CI-proven first.
     trip; `LiveSpace::map_shared`/`unmap_shared`; sharedreg refcount + last-
     ref free + reclaim + fail-closed; shm handler grant-mint/id-write,
     forged/wrong-kind, no-facility).
+- **U3a3 — wait-set multi-event wait primitive `[x]` (DONE).** The HCD is a
+  single async event loop (§1.1) that must wake on *either* an incoming URB
+  IPC call *or* its controller interrupt, for arbitrarily many interfaces.
+  RustOS had no multi-source wait (`call_recv` parks on one endpoint,
+  `irq_wait` on one line), and after the split the class driver holds no
+  controller IRQ to park on — so without this it could only busy-poll
+  (forbidden, §2.23) or block one interface behind another. The kernel now
+  provides a growable, caller-owned **wait-set** (the scalable `epoll`/`kqueue`
+  analogue — membership registered once, no fixed source ceiling, §24.1):
+  - `SyscallNumber::WAITSET_CREATE` (43, no args → handle) /
+    `WAITSET_CTL` (44, set/op/kind/id/token → errno) /
+    `WAITSET_WAIT` (45, set/timeout/token_out → errno). `lib/abi/src/waitset.rs`
+    holds the two scalar enums `WaitSetOp` (`Add`/`Del`) and `WaitSourceKind`
+    (`Endpoint`/`Irq`); no packed wire format (the values cross as registers),
+    so no C-header surface beyond the three syscall stubs.
+  - A member names a resource the caller **already holds** — an IPC endpoint it
+    serves or an `IrqHandle` it bound. `WAITSET_CTL(Add)` resolves and
+    **owner-checks that resource against the kernel-trusted caller before
+    recording it** (no ambient authority): an unowned endpoint / unbound IRQ
+    fails closed `NotFound`. `WAITSET_WAIT` parks the caller on the shared
+    `SERVE_WAITQ` + `IRQ_WAITQ` with the timeout as the deadline (woken by an
+    endpoint post, a member line firing, or the timed sweep — never a spin),
+    re-arms each IRQ member's line before parking, re-checks each member
+    against the caller as it scans, writes the ready member's token through the
+    validated user boundary **before** consuming the IRQ edge (a faulting
+    `token_out` drops no interrupt), and reports first-ready. Needs no
+    capability of its own. Wait-sets are reclaimed on task exit and by the U1
+    driver-unload teardown.
+  - Mechanism: `kernel/core/src/waitset.rs` (growable, handle-keyed registry,
+    owner-checked, global pure-data behind a `SpinLock` like `callreg`);
+    `CallEndpoint::has_pending` (non-consuming readiness peek, drained by
+    `call_recv`); reuses `IrqTable::line_for`/`ready_for`/`try_wait_step`.
+    Covered by host unit tests (registry create/add/remove/duplicate/owner-
+    check/release; handler owner-checked ctl, timeout, fired-IRQ readiness +
+    edge-consume + token-write, pending-endpoint readiness drained by recv).
+    `lib/rt`/`lib/drvrt` wrappers + a QEMU vertical land with U3b (the first
+    consumer); not added speculatively (§2.4).
 - **U3b — xHCI HCD process `[ ]`.** Turn `drivers/bus/usb/xhci` into a `Run`
   binary that binds `usb,xhci`, owns the controller (the bring-up code moves
   from `usb_kbd` unchanged — it is already platform-neutral), enumerates,
@@ -320,8 +370,10 @@ the live controller behaviour is host- and CI-proven first.
   - The shared-memory buffer the class driver owns and the HCD maps is the
     U3a2 primitive (`shm_create`/`shm_map`); the HCD bounce-copies between
     that buffer and its own DMA-granted ring, so the class driver holds no
-    DMA grant. `lib/rt`/`lib/drvrt` wrappers for `shm_*` land with this
-    increment's consumer (none today, so they are not added speculatively).
+    DMA grant. The HCD multiplexes its URB endpoints + controller IRQ on a
+    `U3a3` wait-set (the async event loop, §1.1). `lib/rt`/`lib/drvrt`
+    wrappers for `shm_*` and `waitset_*` land with this increment's consumer
+    (none today, so they are not added speculatively).
   - Because `usb_kbd` binds the `usb,xhci` controller node today
     (`rustos_hid::KEYBOARD_BIND_KEYS` matches `XHCI_COMPATIBLE`), U3b and U4
     are coupled: a controller node cannot have two matching drivers, so the
@@ -334,12 +386,13 @@ the live controller behaviour is host- and CI-proven first.
   detach → `usb_kbd` unloaded, controller stays up; re-attach → autoloads
   again. Retire any transitional scaffolding and update `PLAN.md` / §3 / §16.4.
 
-U1, U2, U3a, and U3a2 (the unload mechanism, the URB transport ABI/`lib/usb`
-server-client, the per-endpoint grant mechanism, and the cross-process
-shared-memory primitive) are landed and host-/CI-proven. U3b (the live HCD
-process) is the next increment; it builds on the U3a endpoint grant + the
-U3a2 shared-memory buffer, and lands together with the U4 `usb_kbd` rebind
-(they cannot both bind the controller node).
+U1, U2, U3a, U3a2, and U3a3 (the unload mechanism, the URB transport
+ABI/`lib/usb` server-client, the per-endpoint grant mechanism, the
+cross-process shared-memory primitive, and the wait-set multi-event wait)
+are landed and host-/CI-proven. U3b (the live HCD process) is the next
+increment; it builds on the U3a endpoint grant, the U3a2 shared-memory
+buffer, and the U3a3 wait-set event loop, and lands together with the U4
+`usb_kbd` rebind (they cannot both bind the controller node).
 
 ---
 

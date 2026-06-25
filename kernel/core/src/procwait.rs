@@ -31,7 +31,7 @@
 
 use alloc::collections::BTreeMap;
 
-use rustos_abi::{Errno, WAIT_ANY};
+use rustos_abi::{Errno, WAIT_PID_ANY};
 use rustos_kernel_sched_api::SchedulerArch;
 use rustos_kernel_sec::TaskId;
 use rustos_sync::SpinLock;
@@ -70,7 +70,7 @@ pub trait ProcessWait: Sync {
     /// Block `parent` until the child selected by `pid` exits, reap it, and
     /// return the reaped child's PID and exit code.
     ///
-    /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_ANY`]
+    /// `pid` is either a specific child's PID or [`rustos_abi::WAIT_PID_ANY`]
     /// to wait for whichever of `parent`'s children exits next. The handler
     /// has already validated that the caller passed a non-null `status`
     /// pointer (the dispatcher rejects a null `UserPtr`); the implementation
@@ -80,7 +80,7 @@ pub trait ProcessWait: Sync {
     /// # Errors
     ///
     /// Returns [`Errno::NotFound`] when `pid` does not name a child of
-    /// `parent` (and `parent` has no children, for [`rustos_abi::WAIT_ANY`]).
+    /// `parent` (and `parent` has no children, for [`rustos_abi::WAIT_PID_ANY`]).
     /// The default producer ([`NullProcessWait`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn wait(&self, parent: TaskId, pid: i32) -> Result<ReapedChild, Errno>;
@@ -147,7 +147,7 @@ pub enum Reap {
     /// block and retry.
     Blocked,
     /// `pid` names no child of the calling parent (and the parent has no
-    /// children at all, for [`rustos_abi::WAIT_ANY`]).
+    /// children at all, for [`rustos_abi::WAIT_PID_ANY`]).
     NoChild,
 }
 
@@ -201,20 +201,20 @@ impl ProcessTable {
 
     /// Try to reap a child of `parent` selected by `pid`.
     ///
-    /// `pid` is [`rustos_abi::WAIT_ANY`] for any child or a specific child's
+    /// `pid` is [`rustos_abi::WAIT_PID_ANY`] for any child or a specific child's
     /// id. Among the matching children: the first (lowest-id, for
     /// determinism) that has already exited is removed
     /// and returned as [`Reap::Ready`]; if matching children exist but none
     /// has exited the result is [`Reap::Blocked`]; if no child matches it is
-    /// [`Reap::NoChild`]. A negative `pid` other than [`rustos_abi::WAIT_ANY`]
+    /// [`Reap::NoChild`]. A negative `pid` other than [`rustos_abi::WAIT_PID_ANY`]
     /// names no child and fails closed with [`Reap::NoChild`].
     #[must_use]
     pub fn reap(&mut self, parent: TaskId, pid: i32) -> Reap {
-        let target: Option<u64> = if pid == WAIT_ANY {
+        let target: Option<u64> = if pid == WAIT_PID_ANY {
             None
         } else {
             // A specific child id must be a valid non-negative task id; any
-            // other negative selector (not WAIT_ANY) names no child and fails
+            // other negative selector (not WAIT_PID_ANY) names no child and fails
             // closed rather than matching anything.
             match u64::try_from(pid) {
                 Ok(id) => Some(id),
@@ -353,10 +353,10 @@ mod tests {
             NULL_PROCESS_WAIT.wait(TaskId(7), 9),
             Err(Errno::NotImplemented)
         );
-        // A WAIT_ANY request announces the inert interface too, rather than
+        // A WAIT_PID_ANY request announces the inert interface too, rather than
         // pretending a child was reaped.
         assert_eq!(
-            NullProcessWait.wait(TaskId(1), rustos_abi::WAIT_ANY),
+            NullProcessWait.wait(TaskId(1), rustos_abi::WAIT_PID_ANY),
             Err(Errno::NotImplemented)
         );
         // The bookkeeping hooks are inert no-ops on the null producer.
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn reap_unknown_child_is_no_child() {
         let mut table = ProcessTable::new();
-        assert_eq!(table.reap(TaskId(1), WAIT_ANY), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY), Reap::NoChild);
         assert_eq!(table.reap(TaskId(1), 9), Reap::NoChild);
     }
 
@@ -375,7 +375,7 @@ mod tests {
     fn registered_but_unexited_child_blocks() {
         let mut table = ProcessTable::new();
         table.register(TaskId(1), TaskId(2));
-        assert_eq!(table.reap(TaskId(1), WAIT_ANY), Reap::Blocked);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY), Reap::Blocked);
         // Selecting the specific child blocks the same way.
         assert_eq!(table.reap(TaskId(1), 2), Reap::Blocked);
     }
@@ -386,11 +386,11 @@ mod tests {
         table.register(TaskId(1), TaskId(2));
         table.record_exit(TaskId(2), 7);
         assert_eq!(
-            table.reap(TaskId(1), WAIT_ANY),
+            table.reap(TaskId(1), WAIT_PID_ANY),
             Reap::Ready(ReapedChild { pid: 2, code: 7 })
         );
         // A second reap finds nothing — the zombie was removed.
-        assert_eq!(table.reap(TaskId(1), WAIT_ANY), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(1), WAIT_PID_ANY), Reap::NoChild);
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         table.register(TaskId(1), TaskId(2));
         table.record_exit(TaskId(2), 0);
         // Task 9 is not the parent of child 2, so it sees no child.
-        assert_eq!(table.reap(TaskId(9), WAIT_ANY), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(9), WAIT_PID_ANY), Reap::NoChild);
         assert_eq!(table.reap(TaskId(9), 2), Reap::NoChild);
         // The real parent still reaps it.
         assert_eq!(
@@ -428,7 +428,7 @@ mod tests {
         let mut table = ProcessTable::new();
         // No panic, no entry created for an untracked task (PID 1, a kthread).
         table.record_exit(TaskId(42), 3);
-        assert_eq!(table.reap(TaskId(0), WAIT_ANY), Reap::NoChild);
+        assert_eq!(table.reap(TaskId(0), WAIT_PID_ANY), Reap::NoChild);
     }
 
     #[test]
@@ -440,11 +440,11 @@ mod tests {
         table.record_exit(TaskId(3), 30);
         // Deterministic: the lowest-id reapable child is returned first.
         assert_eq!(
-            table.reap(TaskId(1), WAIT_ANY),
+            table.reap(TaskId(1), WAIT_PID_ANY),
             Reap::Ready(ReapedChild { pid: 3, code: 30 })
         );
         assert_eq!(
-            table.reap(TaskId(1), WAIT_ANY),
+            table.reap(TaskId(1), WAIT_PID_ANY),
             Reap::Ready(ReapedChild { pid: 5, code: 50 })
         );
     }
@@ -454,7 +454,7 @@ mod tests {
         let mut table = ProcessTable::new();
         table.register(TaskId(1), TaskId(2));
         table.record_exit(TaskId(2), 0);
-        // -2 is not WAIT_ANY and not a valid child id: fail closed.
+        // -2 is not WAIT_PID_ANY and not a valid child id: fail closed.
         assert_eq!(table.reap(TaskId(1), -2), Reap::NoChild);
     }
 
@@ -477,11 +477,11 @@ mod tests {
         // vertical).
         p.record_exit(TaskId(2), 9);
         assert_eq!(
-            p.wait(TaskId(1), WAIT_ANY),
+            p.wait(TaskId(1), WAIT_PID_ANY),
             Ok(ReapedChild { pid: 2, code: 9 })
         );
         // The zombie was consumed; a second wait finds no child.
-        assert_eq!(p.wait(TaskId(1), WAIT_ANY), Err(Errno::NotFound));
+        assert_eq!(p.wait(TaskId(1), WAIT_PID_ANY), Err(Errno::NotFound));
     }
 
     #[test]
@@ -490,7 +490,7 @@ mod tests {
         p.register_child(TaskId(1), TaskId(2));
         p.record_exit(TaskId(2), 0);
         // Task 9 never spawned child 2: it may not reap it.
-        assert_eq!(p.wait(TaskId(9), WAIT_ANY), Err(Errno::NotFound));
+        assert_eq!(p.wait(TaskId(9), WAIT_PID_ANY), Err(Errno::NotFound));
         assert_eq!(p.wait(TaskId(9), 2), Err(Errno::NotFound));
     }
 
@@ -502,6 +502,6 @@ mod tests {
         // the producer fails closed with `NotImplemented` rather than
         // busy-spinning forever.
         p.register_child(TaskId(1), TaskId(2));
-        assert_eq!(p.wait(TaskId(1), WAIT_ANY), Err(Errno::NotImplemented));
+        assert_eq!(p.wait(TaskId(1), WAIT_PID_ANY), Err(Errno::NotImplemented));
     }
 }

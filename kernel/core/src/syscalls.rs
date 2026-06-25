@@ -78,8 +78,8 @@ use rustos_abi::hwtree::{HwResource, HwResourceKind};
 use rustos_abi::input::KeyInput;
 use rustos_abi::{
     decode_log_record, CapabilityId, DescriptorTable, Errno, IrqHandle, LimitKind, MapFlags,
-    RandomFlags, ResourceLimit, StreamMode, SyscallNumber, CONSOLE_INHERIT, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
+    RandomFlags, ResourceLimit, StreamMode, SyscallNumber, WaitSetOp, WaitSourceKind,
+    CONSOLE_INHERIT, LOG_FIELDS_MAX, LOG_RECORD_MAX, RANDOM_REQUEST_MAX_BYTES,
 };
 use rustos_caps::CapabilitySet;
 use rustos_kernel_ipc::{
@@ -890,6 +890,10 @@ where
         // through its own live space before the scheduler reap drops it. A
         // task that mapped none reclaims nothing (idempotent).
         crate::sharedreg::reclaim_task(self.shared_mem_facility, task);
+        // Drop every wait-set this task owned. A wait-set holds no resource of
+        // its own (its members only *name* endpoints and IRQ lines, reclaimed
+        // above), so dropping the sets is the whole reclamation; idempotent.
+        crate::waitset::release_owned_by(task.0);
         let _ = self.caps.write().remove(task);
         Ok(0)
     }
@@ -2827,6 +2831,198 @@ where
         crate::sharedreg::unmap(self.shared_mem_facility, caller.task_id, base)?;
         // The unmap shrank the caller's live space; re-freeze its snapshot.
         self.refreeze_caller_aspace(caller);
+        Ok(0)
+    }
+
+    fn waitset_create(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // No capability (the dispatcher gates none): a wait-set observes only
+        // resources the caller already holds, each owner-checked when it is
+        // added. Mint a fresh handle and record an empty set owned by the
+        // kernel-trusted `caller.task_id` (never a caller-supplied value), so
+        // only this task can later add to, wait on, or have the set observed.
+        Ok(crate::waitset::create(caller.task_id.0))
+    }
+
+    fn waitset_ctl(
+        &self,
+        caller: &CallerContext<'_>,
+        set: u64,
+        op: u32,
+        kind: u32,
+        id: u64,
+        token: u64,
+    ) -> SyscallResult {
+        // Validate the scalar arguments (fail closed on an unknown op/kind)
+        // before touching any state.
+        let op = WaitSetOp::from_u32(op)?;
+        let kind = WaitSourceKind::from_u32(kind)?;
+        match op {
+            WaitSetOp::Add => {
+                // Resolve and owner-check the *resource* the member names
+                // against the kernel-trusted caller before recording it: a
+                // wait-set may observe only resources the caller already holds
+                // (no ambient authority). A resource that is unknown or owned
+                // by another task resolves to nothing and fails closed
+                // `NotFound` — which never confirms a foreign resource's
+                // existence. The registry then owner-checks the *set* and
+                // refuses a duplicate `(kind, id)`.
+                match kind {
+                    WaitSourceKind::Endpoint => {
+                        let owned = crate::callreg::lookup(EndpointId(id))
+                            .is_some_and(|ep| ep.owner() == caller.task_id.0);
+                        if !owned {
+                            return Err(Errno::NotFound);
+                        }
+                    }
+                    WaitSourceKind::Irq => {
+                        if self
+                            .irq
+                            .line_for(IrqHandle::from_raw(id), caller.task_id)
+                            .is_none()
+                        {
+                            return Err(Errno::NotFound);
+                        }
+                    }
+                }
+                crate::waitset::add(
+                    caller.task_id.0,
+                    set,
+                    crate::waitset::Member { kind, id, token },
+                )
+                .map(|()| 0)
+            }
+            // Removing a member only edits the caller's own set; the registry
+            // owner-checks the set and fails closed if the member is absent.
+            WaitSetOp::Del => crate::waitset::remove(caller.task_id.0, set, kind, id).map(|()| 0),
+        }
+    }
+
+    fn waitset_wait(
+        &self,
+        caller: &CallerContext<'_>,
+        set: u64,
+        timeout_ns: u64,
+        token_out: u64,
+    ) -> SyscallResult {
+        // Owner-checked membership snapshot (a forged/foreign handle fails
+        // closed `NotFound`). Membership can be mutated only by this same
+        // task, which is about to park inside this call, so one snapshot is
+        // stable for the whole wait.
+        let members = crate::waitset::members(caller.task_id.0, set)?;
+
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let sched_task = caller.task_id.0;
+        // One saturating add from the clock so a `u64::MAX` timeout stays
+        // `NO_DEADLINE` (explicit wake only) rather than wrapping to a tiny
+        // value (fail closed) — exactly as `irq_wait` computes it.
+        let deadline_ns = self.arch.monotonic_ns(cpu).saturating_add(timeout_ns);
+
+        // Register on both wake channels *before* the first scan so an event
+        // arriving in the register/park window is not lost: `SERVE_WAITQ`
+        // (an IPC request posted to a member endpoint, `NO_DEADLINE`) and
+        // `IRQ_WAITQ` (a member line firing, plus the timed sweep that
+        // enforces the timeout). `register` is idempotent.
+        crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
+
+        // `(kind, id, token)` of the ready member; `id`/`kind` drive the
+        // post-write IRQ-edge consume.
+        let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
+            let now = self.arch.monotonic_ns(cpu);
+            let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
+            // Scan in registration order; first ready wins. The IRQ ready
+            // flag is *peeked* (`ready_for`), not consumed, here so a faulting
+            // `token_out` below never drops a delivered edge. Each member is
+            // re-checked against the caller as it is scanned, so a member whose
+            // resource was torn down simply is not ready.
+            for m in &members {
+                let is_ready = match m.kind {
+                    WaitSourceKind::Endpoint => crate::callreg::lookup(EndpointId(m.id))
+                        .is_some_and(|ep| ep.owner() == sched_task && ep.has_pending()),
+                    WaitSourceKind::Irq => {
+                        let handle = IrqHandle::from_raw(m.id);
+                        self.irq.line_for(handle, caller.task_id).is_some()
+                            && self.irq.ready_for(handle)
+                    }
+                };
+                if is_ready {
+                    ready = Some((m.kind, m.id, m.token));
+                    break;
+                }
+            }
+
+            if let Some(found) = ready {
+                break Ok(found);
+            }
+            if now >= deadline_ns {
+                break Err(Errno::TimedOut);
+            }
+
+            // Re-arm every IRQ member's line before parking: a user-space
+            // driver holds no controller access, so the kernel routes + unmasks
+            // the line on its behalf (mask-before-wake). Best-effort and
+            // idempotent — a refusal leaves the line as-is and the deadline
+            // still bounds the wait.
+            for m in &members {
+                if m.kind == WaitSourceKind::Irq {
+                    if let Some(line) = self.irq.line_for(IrqHandle::from_raw(m.id), caller.task_id)
+                    {
+                        let _ = self.irq_controller.rearm(line);
+                    }
+                }
+            }
+            // Arm the one-shot to the nearest pending `IRQ_WAITQ` deadline
+            // (which includes this wait's), then *park* off the run queue until
+            // woken by an endpoint post (`serve_wake`), a member line firing
+            // (`irq_wake`), or the timed sweep — never a busy spin. The
+            // wake-pending token closes the poll/park race exactly as
+            // `call_recv` / `irq_wait` rely on.
+            self.arch
+                .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+            if !crate::kthread::reschedule_current(cpu, RescheduleAction::Park) {
+                match self.sched.yield_current(sched_task) {
+                    Ok(()) | Err(SchedError::InvalidState) => {}
+                    Err(SchedError::NoSuchTask) => break Err(Errno::NotFound),
+                    Err(_) => break Err(Errno::OutOfRange),
+                }
+            }
+        };
+
+        crate::waitq::SERVE_WAITQ.deregister(sched_task);
+        crate::waitq::IRQ_WAITQ.deregister(sched_task);
+        // Re-point the one-shot at whatever deadline any *remaining* waiter
+        // needs (or clear it) so a finished wait leaves no stale arming.
+        self.arch
+            .set_wakeup(crate::waitq::IRQ_WAITQ.earliest_deadline());
+
+        let (kind, id, token) = outcome?;
+
+        // Write the ready member's token through the validated boundary
+        // *before* consuming an IRQ edge, so a faulting `token_out` (a buggy
+        // caller) fails closed `BadAddress` without dropping a delivered
+        // interrupt.
+        let token_bytes = token.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(token_out), &token_bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+
+        // Consume an IRQ winner's edge now (the same `swap` `irq_wait`
+        // performs) so the next wait re-arms and parks rather than
+        // re-reporting the same fire; an endpoint winner is left for
+        // `call_recv` to drain (the scan only peeked it). A `u64::MAX`
+        // deadline means `try_wait_step` never returns `TimedOut` here; a
+        // binding torn down between the scan and now resolves to nothing and
+        // consumes nothing (harmless).
+        if kind == WaitSourceKind::Irq {
+            let now = self.arch.monotonic_ns(cpu);
+            let _ = self
+                .irq
+                .try_wait_step(IrqHandle::from_raw(id), caller.task_id, now, u64::MAX);
+        }
         Ok(0)
     }
 }
@@ -10788,6 +10984,251 @@ mod tests {
         assert_eq!(h.shm_create(&ctx, 4096, 0x2000), Err(Errno::NotImplemented));
         // A zero-length region is rejected before the facility is consulted.
         assert_eq!(h.shm_create(&ctx, 0, 0x2000), Err(Errno::LengthOutOfRange));
+    }
+
+    /// Wire constants for the wait-set control arguments, named so the tests
+    /// read as the syscall's caller would write them.
+    const WS_OP_ADD: u32 = rustos_abi::WaitSetOp::Add as u32;
+    const WS_OP_DEL: u32 = rustos_abi::WaitSetOp::Del as u32;
+    const WS_KIND_ENDPOINT: u32 = rustos_abi::WaitSourceKind::Endpoint as u32;
+    const WS_KIND_IRQ: u32 = rustos_abi::WaitSourceKind::Irq as u32;
+
+    /// `waitset_create` mints a handle, and `waitset_ctl(Add)` owner-checks the
+    /// named resource against the caller before recording it: a bound IRQ line
+    /// is accepted, a forged IRQ handle and an unknown endpoint are refused, a
+    /// duplicate `(kind,id)` is refused, and `Del` round-trips. A forged set
+    /// handle and an unknown op/kind all fail closed.
+    #[test]
+    fn waitset_create_and_ctl_owner_check_resources() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let set = h.waitset_create(&ctx).expect("create mints a handle");
+        assert!(set != 0, "handle is non-zero");
+
+        // A line the caller bound is an acceptable IRQ member.
+        let line = h.irq_bind(&ctx, 5).expect("bind");
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_IRQ, line, 0xAA),
+            Ok(0)
+        );
+        // A forged IRQ handle the caller never bound is refused.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_IRQ, 0xDEAD_BEEF, 0xBB),
+            Err(Errno::NotFound)
+        );
+        // An unknown endpoint id is refused (the caller serves none).
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_ENDPOINT, 0x1234, 0xCC),
+            Err(Errno::NotFound)
+        );
+        // A duplicate `(kind,id)` is refused even with a different token.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_IRQ, line, 0x99),
+            Err(Errno::AlreadyExists)
+        );
+        // `Del` removes the member; a second `Del` fails closed.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_DEL, WS_KIND_IRQ, line, 0),
+            Ok(0)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_DEL, WS_KIND_IRQ, line, 0),
+            Err(Errno::NotFound)
+        );
+        // A handle that is not the caller's own wait-set fails closed.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set + 999, WS_OP_ADD, WS_KIND_IRQ, line, 0),
+            Err(Errno::NotFound)
+        );
+        // Unknown op / kind are rejected before any state is touched.
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, 7, WS_KIND_IRQ, line, 0),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, 7, line, 0),
+            Err(Errno::OutOfRange)
+        );
+
+        // Cleanup so the global wait-set registry does not leak across tests.
+        assert_eq!(crate::waitset::release_owned_by(8), 1);
+    }
+
+    /// `waitset_wait` with no member ready and a zero timeout returns
+    /// `TimedOut` without writing `token_out` (so it needs no mapped page).
+    #[test]
+    fn waitset_wait_times_out_when_no_member_ready() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(8),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = h.waitset_create(&ctx).expect("create");
+        let line = h.irq_bind(&ctx, 5).expect("bind");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_IRQ, line, 0xAA)
+            .expect("add irq member");
+        // The line has not fired: a zero-timeout wait expires without writing.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        assert_eq!(crate::waitset::release_owned_by(8), 1);
+    }
+
+    /// A fired IRQ member makes `waitset_wait` report that member's token and
+    /// consume the edge: the token is written to `token_out`, and a second
+    /// wait times out (the fire was consumed, exactly like `irq_wait`).
+    #[test]
+    fn waitset_wait_reports_a_fired_irq_member_and_consumes_the_edge() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(7), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let permissive = PermissiveController;
+        let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = h.waitset_create(&ctx).expect("create");
+        let line = h.irq_bind(&ctx, 5).expect("bind");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_IRQ, line, 0x1234)
+            .expect("add irq member");
+
+        // Fire the line externally (the arch trap path would do this); the
+        // ready flag is then set.
+        irq.fire(5, &permissive).expect("fire");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        // The ready member's token was written to `token_out` (page 2).
+        let token_bytes = read_reply_page(
+            aspaces.read().resolve(SecTaskId(7)).expect("registered").1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x1234
+        );
+        // The edge was consumed: a second wait with no new fire times out.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        assert_eq!(crate::waitset::release_owned_by(7), 1);
+    }
+
+    /// A pending request on a member endpoint makes `waitset_wait` report that
+    /// member's token (a non-consuming peek), and `call_recv` is what drains
+    /// it: after draining, a second wait times out.
+    #[test]
+    fn waitset_wait_reports_a_pending_endpoint_member_drained_by_recv() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(7), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(7, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+
+        // An unrestricted endpoint owned by the caller (task 7), with a posted
+        // request waiting to be received (so `has_pending()` is true).
+        let id = 0xCA11_5001;
+        let creator = make_caps_record(7, &[], sink);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &creator,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 64,
+                    max_reply: 64,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("endpoint"),
+        );
+        crate::callreg::register(ep.clone()).expect("registered");
+        let poster = make_caps_record(99, &[], sink);
+        ep.post(&poster, b"x", sink).expect("post a request");
+
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_ENDPOINT, id, 0x77)
+            .expect("add endpoint member");
+
+        // The pending request makes the endpoint member ready; its token is
+        // reported.
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces.read().resolve(SecTaskId(7)).expect("registered").1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x77
+        );
+        // The wait did not consume the request (it only peeked); draining it
+        // with `recv_call` is what clears readiness, after which a second wait
+        // times out.
+        assert!(matches!(ep.recv_call(usize::MAX), RecvCall::Received(_)));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        crate::callreg::unregister(EndpointId(id));
+        assert_eq!(crate::waitset::release_owned_by(7), 1);
     }
 
     /// `call_recv` / `call_reply` against an unbound id fail closed with

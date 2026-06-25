@@ -80,7 +80,7 @@ mod program {
             rustos_rt::spawn_at(path, console)
         }
         fn wait_any(&mut self, status: &mut i32) -> i64 {
-            rustos_rt::wait(rustos_abi::WAIT_ANY, status)
+            rustos_rt::wait(rustos_abi::WAIT_PID_ANY, status)
         }
     }
 

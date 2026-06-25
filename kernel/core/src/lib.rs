@@ -98,6 +98,7 @@ pub mod spawn;
 pub mod syscalls;
 pub mod users;
 pub mod waitq;
+pub mod waitset;
 
 #[cfg(any(test, feature = "test-arch"))]
 pub mod test_arch;

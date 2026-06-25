@@ -39,6 +39,7 @@ pub mod syscalls;
 pub mod sysinfo;
 pub mod time;
 pub mod usb_urb;
+pub mod waitset;
 
 pub use appinfo::{
     body_len as appinfo_body_len, mime_type_at, resolve_library, validate_bundle_layout,
@@ -95,7 +96,7 @@ pub use stdinfo::{
     Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,
     STDINFO_VERSION_V1,
 };
-pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN, WAIT_ANY};
+pub use syscall::{IrqHandle, SyscallNumber, SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY};
 pub use syscalls::{
     encoded_table, spec_for, AbiType, SyscallSpec, ENCODED_TABLE, ENCODED_TABLE_LEN, SYSCALLS,
     SYSCALL_ENCODED_RECORD_LEN, SYSCALL_MAX_ARGS, SYSCALL_NAME_MAX,
@@ -110,6 +111,7 @@ pub use sysinfo::{
     SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
 };
 pub use time::{coarsen_clock_ns, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC};
+pub use waitset::{WaitSetOp, WaitSourceKind};
 
 /// ABI version tag for the frozen `abi-v1` interface.
 ///

@@ -590,7 +590,7 @@ landing).
 
 1. **`waitpid`-style, not a global reaper (§2.13).** `wait(pid: i32,
    status: *mut i32) -> i64`: `pid` selects a specific child or
-   `rustos_abi::WAIT_ANY` (`-1`) for any child; on success the kernel writes
+   `rustos_abi::WAIT_PID_ANY` (`-1`) for any child; on success the kernel writes
    the child's exit code to `status` and returns the reaped child's PID
    (`< 0` is `-errno`, the standard signed-result convention).
 2. **Own children only (§4 / §16.6).** A process may only reap children it
@@ -609,7 +609,7 @@ landing).
 **Staging:**
 
 - **SP6a — abi-v1 surface + fail-closed seam (host-proven) `[x]`.**
-  `lib/abi`: `SyscallNumber::WAIT` (**16**) + `WAIT_ANY` const + the
+  `lib/abi`: `SyscallNumber::WAIT` (**16**) + `WAIT_PID_ANY` const + the
   `SyscallSpec` row (`wait(I32 pid, UserPtr status) -> U64`, **unprivileged,
   audited**) + frozen-number test. `lib/abi-sys`: the `ros_sys_wait` C stub
   (`#[export_name]`, panic-free) + drift-registry row + marshalling tests;

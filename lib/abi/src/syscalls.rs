@@ -1070,6 +1070,71 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::WAITSET_CREATE,
+        name: "waitset_create",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `Handle` carries the kernel-minted wait-set handle (or, by the
+        // shared register convention, a negated errno), exactly like
+        // `irq_bind` returns its bound-line handle.
+        ret: AbiType::Handle,
+        // Needs no capability: the set observes only resources the caller
+        // already holds, each owner-checked when added. Low-volume (once per
+        // multiplexing service) but not security-relevant on its own, so it is
+        // not audited.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::WAITSET_CTL,
+        name: "waitset_ctl",
+        arg_count: 5,
+        args: [
+            // The wait-set handle, the op (Add/Del), the source kind
+            // (Endpoint/Irq), the resource id (endpoint id or IRQ handle),
+            // then the caller's opaque token for this member.
+            AbiType::Handle,
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Needs no capability: an `Add` resolves and owner-checks the named
+        // resource against the kernel-trusted caller before recording it (a
+        // resource the caller does not own fails closed), so the set can never
+        // observe authority the caller lacks. Modifying membership is
+        // low-volume and not audited per call.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::WAITSET_WAIT,
+        name: "waitset_wait",
+        arg_count: 3,
+        args: [
+            // The wait-set handle, the relative timeout in nanoseconds
+            // (`u64::MAX` = no timeout), then the non-null `token_out`
+            // `UserPtr` the ready member's token is written to.
+            AbiType::Handle,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Needs no capability of its own: it only *observes* readiness of
+        // resources the caller already holds (the members owner-checked when
+        // added) and re-checks each against the kernel-trusted caller as it is
+        // scanned. Like the other high-volume blocking waiters (`call_recv`,
+        // `irq_wait`) it is not audited per call, to avoid drowning the audit
+        // log.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

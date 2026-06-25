@@ -66,6 +66,9 @@ extern "C" {
 #define ROS_SYS_SHM_CREATE 40u
 #define ROS_SYS_SHM_MAP 41u
 #define ROS_SYS_SHM_UNMAP 42u
+#define ROS_SYS_WAITSET_CREATE 43u
+#define ROS_SYS_WAITSET_CTL 44u
+#define ROS_SYS_WAITSET_WAIT 45u
 
 /* Syscall entry points, implemented by the user-space stub library. */
 void ros_sys_yield(void);
@@ -111,6 +114,9 @@ uint64_t ros_sys_msi_alloc(void * a0, uintptr_t a1);
 uint64_t ros_sys_shm_create(uintptr_t a0, void * a1);
 uint64_t ros_sys_shm_map(uint64_t a0);
 int32_t ros_sys_shm_unmap(uint64_t a0, uintptr_t a1);
+uint64_t ros_sys_waitset_create(void);
+int32_t ros_sys_waitset_ctl(uint64_t a0, uint32_t a1, uint32_t a2, uint64_t a3, uint64_t a4);
+int32_t ros_sys_waitset_wait(uint64_t a0, uint64_t a1, void * a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

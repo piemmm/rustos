@@ -824,6 +824,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             crate::waitq::call_wake();
         }
 
+        // Drop every wait-set the driver owned, mirroring the `exit` syscall.
+        // A wait-set holds no resource of its own (its members only *name* the
+        // endpoints and IRQ lines reclaimed around here), so dropping the sets
+        // is the whole reclamation; idempotent.
+        crate::waitset::release_owned_by(handle);
+
         // Release every IRQ line the driver bound (`docs/src/security/irq.md`):
         // the kernel unmasks no lines on teardown; a later driver that wants
         // the same line re-issues `irq_bind`.

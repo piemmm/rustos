@@ -943,7 +943,7 @@ on its own before the next.
       shell's foreground job control and `init` supervising the session
       (reap, restart) need a way to block on and reap a child — `spawn` was
       spawn-and-forget. **SP6 is COMPLETE** (`plans/SPAWN.md` SP6): SP6a
-      landed the `abi-v1` surface (`SyscallNumber::WAIT` #16 + `WAIT_ANY`, the
+      landed the `abi-v1` surface (`SyscallNumber::WAIT` #16 + `WAIT_PID_ANY`, the
       `wait(I32 pid, UserPtr status) -> U64` row, unprivileged + audited),
       the `ros_sys_wait` C stub + regenerated header, the `rustos_rt::wait`
       wrapper, the `kernel/syscall` dispatch arm + doubles, and the

@@ -348,7 +348,7 @@ principal (the same §16.6 baseline). It is, however, *audited* — reaping a
 child is a process-lifecycle state change (a principal disappears), exactly
 as `spawn` and `exit` are audited (`AGENTS.md` §5.4.4); `wait` blocks rather
 than polls, so the per-call record does not drown the log. `pid` is either
-a specific child's PID or `rustos_abi::WAIT_ANY` (`-1`, wait for any child);
+a specific child's PID or `rustos_abi::WAIT_PID_ANY` (`-1`, wait for any child);
 `status` is a non-null user pointer the kernel writes the reaped child's
 exit code to. The handler reaches the scheduler-side reaper through the
 `kernel/core::procwait::ProcessWait` seam, which is installed at boot like
