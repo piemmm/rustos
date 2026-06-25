@@ -514,6 +514,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.aspaces,
         sys.arch,
         &NULL_PROCESS_WAIT,
+        sys.irq_table,
     );
     let spawn = InitCtxDriverProcessSpawn::new(&init_ctx, &AARCH64_PROCESS_SPAWN);
     let args: [&[u8]; 2] = [b"drvstub", REPLY_ENDPOINT_ARG];

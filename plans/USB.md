@@ -205,17 +205,33 @@ USB attach/detach is metal-only on the Pi 4 (QEMU cannot model the VL805,
 `plans/PI.md` §0.4), so the increments are ordered so that everything *except*
 the live controller behaviour is host- and CI-proven first.
 
-- **U1 — kernel driver-unload mechanism + devmgr unload reaction `[ ]`.**
-  Host-testable, needs no USB hardware. Add `StoreRequest::Unload { handle }`
-  to `lib/abi/src/driver_store.rs` and the kernel teardown in
-  `kernel/rustos-kernel/src/driver_store_server.rs` +
-  `driver_spawn_loader.rs` (reclaim grants/endpoints, deregister, audit).
-  Give `devmgr` a `node_id → loaded handle` binding map and a generation-bump
-  diff that unloads the driver whose bound node vanished. Unit-test the
-  teardown (idempotent, fail-closed, grants reclaimed) and the devmgr diff
-  (vanished bound node → exactly one unload; unrelated bump → none). Add a
-  `tests/integration` QEMU vertical: emit a node, autoload a stub driver,
-  `hw_remove_node` it, assert the driver is unloaded.
+- **U1 — kernel driver-unload mechanism + devmgr unload reaction `[x]` (DONE).**
+  `StoreRequest::Unload { handle }` (+ status-only reply) lives in
+  `lib/abi/src/driver_store.rs`; the endpoint request cap is now
+  `MAX_REQUEST_LEN`. The kernel teardown is the symmetric partner of
+  `spawn_driver_process`: `InitSpawnCtx::terminate_driver_process(handle)`
+  (kernel/core, implemented by `KernelInitSpawner`, which gained the IRQ-table
+  borrow) reaps the driver's scheduler task (`scheduler.exit` drops its
+  control block → kernel stack, live address space, page-table frames), then
+  withdraws its address-space-registry entry (grants/streams/limits/matched
+  node), destroys its served endpoints (+`call_wake`), releases its IRQ
+  bindings, and drops its capability record — idempotent, fail-closed
+  (`NotFound` for an already-gone handle), audited (`AuditEvent::DriverUnloaded`,
+  4033). The bin reaches it through `DriverProcessSpawn::terminate_driver` and
+  the driver-store server serves `StoreRequest::Unload` via `unload_reply`. In
+  `devmgr`, `AutoloadState` gained a `node_id → NodeDriver{bundle_id,handle}`
+  binding map (recorded in `match_and_load`); `service::react_once` runs
+  `autoload::unload_vanished` after each match pass, tearing down (via
+  `store::unload_driver`) any bound node absent from the new snapshot — only
+  when its driver's *last* bound node has vanished — and purging the
+  loaded-bundle cache so a re-attach reloads (`NODE_UNLOADED`, 13_008). Covered
+  by host unit tests (ABI round-trip/fail-closed; kernel teardown against the
+  real `KernelState` registries; server serve; store unload round-trip;
+  `unload_vanished` vanish/present/shared-last-node/fail-soft; service-level
+  vanish→unload, no-vanish→none, vanish-then-reattach→reload) and the
+  `tests/integration/driver_unload_qemu_aarch64` `-M virt` vertical
+  (autoload → `terminate_driver_process` → assert live-task count 1→0 + caps
+  /aspace reclaimed + idempotent `NotFound`). Whole gate green.
 - **U2 — URB transport ABI + `lib/usb` transport server/client `[ ]`.**
   Host-testable with a mock controller. Define `lib/abi/src/usb_urb.rs` (URB
   request/completion records, endpoint addressing) and regenerate the C header.

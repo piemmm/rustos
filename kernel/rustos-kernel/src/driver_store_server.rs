@@ -38,7 +38,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
-use rustos_abi::driver_store::{self, StoreRequest, DRIVER_STORE_ENDPOINT, LOAD_REQUEST_LEN};
+use rustos_abi::driver_store::{self, StoreRequest, DRIVER_STORE_ENDPOINT, MAX_REQUEST_LEN};
 use rustos_abi::hwtree::HwResource;
 use rustos_abi::Errno;
 use rustos_caps::CapabilitySet;
@@ -55,17 +55,17 @@ use crate::hwtree_store::HwTreeStore;
 use crate::root_mount::RootVolume;
 use crate::system_files::SystemFileService;
 
-/// Maximum request payload the driver-store endpoint accepts: a
-/// [`StoreRequest::Load`] (the single longest request — a
-/// [`StoreRequest::Catalogue`] is one opcode byte — a
-/// validation bound, not a scaling capacity).
+/// Maximum request payload the driver-store endpoint accepts: the longest
+/// of every request encoding (a [`StoreRequest::Catalogue`] is one opcode
+/// byte; a [`StoreRequest::Load`] and a [`StoreRequest::Unload`] are each
+/// nine) — a validation bound, not a scaling capacity.
 ///
 /// Derived from the shared protocol bound so the server's
 /// request cap can never drift from what a valid request encodes.
-// `LOAD_REQUEST_LEN` (9) is far below `u32::MAX`, so the narrowing cast
+// `MAX_REQUEST_LEN` (9) is far below `u32::MAX`, so the narrowing cast
 // cannot truncate; it is itself a fixed protocol constant.
 #[allow(clippy::cast_possible_truncation)]
-pub const DRIVER_STORE_MAX_REQUEST: u32 = LOAD_REQUEST_LEN as u32;
+pub const DRIVER_STORE_MAX_REQUEST: u32 = MAX_REQUEST_LEN as u32;
 
 /// Maximum reply payload the driver-store endpoint emits, and the size of
 /// the server's per-reply staging buffer. Comfortably holds a full store
@@ -237,6 +237,7 @@ where
         Ok(StoreRequest::Load { bundle_id, node_id }) => {
             load_reply(buf, service, ctx, store, bundle_id, node_id, audit)
         }
+        Ok(StoreRequest::Unload { handle }) => unload_reply(buf, ctx, handle),
     };
     result.unwrap_or_else(|err| {
         // The chosen reply did not fit `DRIVER_STORE_MAX_REPLY`; report the
@@ -287,6 +288,24 @@ where
 {
     match load_matched_driver(service, ctx, store, bundle_id, node_id, audit) {
         Ok(handle) => driver_store::encode_load_reply(buf, handle),
+        Err(err) => driver_store::encode_error_reply(buf, err),
+    }
+}
+
+/// Tear down the driver instance named by `handle` through the kernel
+/// teardown seam ([`DriverProcessSpawn::terminate_driver`]) and frame the
+/// status-only reply.
+///
+/// The symmetric partner of [`load_reply`]: the device manager unloads a
+/// driver whose matched hardware-tree node has vanished. The endpoint's
+/// `CAP_DRV_LOAD` send-capability requirement already gates the caller, so
+/// this adds no further check — it drives the *mechanism* the device
+/// manager's *policy* selected. Teardown is idempotent; a `handle` naming no
+/// live driver surfaces [`Errno::NotFound`] in band rather than failing the
+/// frame.
+fn unload_reply(buf: &mut [u8], ctx: &StoreServeContext<'_>, handle: u64) -> Result<usize, Errno> {
+    match ctx.spawn.terminate_driver(handle) {
+        Ok(()) => driver_store::encode_unload_reply(buf),
         Err(err) => driver_store::encode_error_reply(buf, err),
     }
 }
@@ -498,7 +517,8 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
     use rustos_abi::driver_store::{
-        decode_catalogue_reply, decode_load_reply, reply_status, StoreRequest,
+        decode_catalogue_reply, decode_load_reply, decode_unload_reply, reply_status, StoreRequest,
+        LOAD_REQUEST_LEN, UNLOAD_REQUEST_LEN,
     };
     use rustos_abi::hwtree::{HwResource, HW_NODE_ROOT};
     use rustos_abi::{
@@ -581,16 +601,20 @@ mod tests {
     /// load threaded for the kernel to record against the child.
     type RecordedSpawn = (Vec<u8>, CapabilitySet, Vec<HwResource>, Option<u32>);
 
-    /// Records every `spawn_driver` so a test can assert the gate forwarded
-    /// exactly the matched node's grants.
+    /// Records every `spawn_driver` (so a test can assert the gate forwarded
+    /// exactly the matched node's grants) and every `terminate_driver`
+    /// handle (so the unload-serving test can assert the server drove the
+    /// teardown seam).
     struct RecordingSpawn {
         calls: RefCell<Vec<RecordedSpawn>>,
+        terminations: RefCell<Vec<u64>>,
     }
 
     impl RecordingSpawn {
         fn new() -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                terminations: RefCell::new(Vec::new()),
             }
         }
     }
@@ -609,6 +633,17 @@ mod tests {
                 .push((rxe.to_vec(), granted, grants.to_vec(), node_id));
             Ok(0x4242)
         }
+
+        fn terminate_driver(&self, handle: u64) -> Result<(), Errno> {
+            self.terminations.borrow_mut().push(handle);
+            // Handle 0 stands in for an already-gone driver so the server's
+            // fail-closed unload path is exercised too.
+            if handle == 0 {
+                Err(Errno::NotFound)
+            } else {
+                Ok(())
+            }
+        }
     }
 
     /// A spawn that must never be reached (the load fails before spawning).
@@ -623,6 +658,10 @@ mod tests {
             _node_id: Option<u32>,
         ) -> Result<u64, Errno> {
             panic!("the load must fail closed before spawning");
+        }
+
+        fn terminate_driver(&self, _handle: u64) -> Result<(), Errno> {
+            panic!("this test never unloads a driver");
         }
     }
 
@@ -975,6 +1014,52 @@ mod tests {
             reply_status(&reply).is_err(),
             "an untrusted bundle never loads"
         );
+    }
+
+    #[test]
+    fn an_unload_drives_the_teardown_seam_and_frames_ok() {
+        // The device manager unloads a driver whose matched node vanished:
+        // the server drives the kernel teardown seam with the handle and
+        // frames a status-only success reply.
+        let mut fs = service_with(&[]);
+        let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
+        let spawn = RecordingSpawn::new();
+        let nodes = SliceNodes(&[]);
+        let store = store_of(&service);
+        let serve_ctx = ctx(&[], &spawn, &nodes);
+
+        let req = StoreRequest::Unload { handle: 0x4242 };
+        let mut rbuf = [0u8; UNLOAD_REQUEST_LEN];
+        let n = req.encode(&mut rbuf).expect("encode");
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
+        assert_eq!(decode_unload_reply(&reply), Ok(()));
+        assert_eq!(
+            spawn.terminations.borrow().as_slice(),
+            &[0x4242],
+            "the server drove the teardown seam with the requested handle"
+        );
+    }
+
+    #[test]
+    fn an_unload_of_an_already_gone_handle_is_in_band_not_found() {
+        // Tearing down a handle naming no live driver is the benign,
+        // idempotent miss the device manager may hit when it diffs the same
+        // vanished node twice; the server surfaces it in band, never a panic.
+        let mut fs = service_with(&[]);
+        let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
+        let spawn = RecordingSpawn::new();
+        let nodes = SliceNodes(&[]);
+        let store = store_of(&service);
+        let serve_ctx = ctx(&[], &spawn, &nodes);
+
+        // Handle 0 is the recording double's stand-in for an already-gone
+        // driver (it returns `NotFound`).
+        let req = StoreRequest::Unload { handle: 0 };
+        let mut rbuf = [0u8; UNLOAD_REQUEST_LEN];
+        let n = req.encode(&mut rbuf).expect("encode");
+        let reply = build_reply(&service, &serve_ctx, &store, &rbuf[..n], &NullSink);
+        assert_eq!(reply_status(&reply), Err(Errno::NotFound));
+        assert_eq!(spawn.terminations.borrow().as_slice(), &[0]);
     }
 
     #[test]

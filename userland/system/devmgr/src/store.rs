@@ -26,7 +26,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use rustos_abi::driver_store::{
-    decode_catalogue_reply, decode_load_reply, StoreRequest, LOAD_REQUEST_LEN,
+    decode_catalogue_reply, decode_load_reply, decode_unload_reply, StoreRequest, LOAD_REQUEST_LEN,
+    UNLOAD_REQUEST_LEN,
 };
 use rustos_abi::{DriverBindKey, Errno, DRIVER_MANIFEST_MAX_BIND_KEYS};
 use rustos_devmatch::DriverCandidate;
@@ -147,13 +148,41 @@ pub fn load_driver<C: DriverStoreCall + ?Sized>(
     decode_load_reply(&reply[..reply_len])
 }
 
+/// Ask the kernel to unload the driver instance named by `handle` (the value
+/// a prior [`load_driver`] returned), the symmetric partner of
+/// [`load_driver`].
+///
+/// The kernel reaps the driver's task and reclaims its grants, served
+/// endpoints, IRQ bindings, and address space. `reply` is the caller-owned
+/// buffer the framed status-only reply is received into. Teardown is
+/// idempotent: unloading a handle naming no live driver surfaces a benign
+/// [`Errno::NotFound`].
+///
+/// # Errors
+///
+/// The [`Errno`] from the transport ([`DriverStoreCall::call`]) or the
+/// in-band error the kernel framed (e.g. [`Errno::NotFound`] for an
+/// already-gone handle) — surfaced fail-closed.
+pub fn unload_driver<C: DriverStoreCall + ?Sized>(
+    call: &mut C,
+    handle: u64,
+    reply: &mut [u8],
+) -> Result<(), Errno> {
+    let mut request = [0u8; UNLOAD_REQUEST_LEN];
+    let request_len = StoreRequest::Unload { handle }.encode(&mut request)?;
+    let reply_len = call.call(&request[..request_len], reply)?;
+    decode_unload_reply(&reply[..reply_len])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use alloc::vec;
 
-    use rustos_abi::driver_store::{encode_catalogue_reply, encode_error_reply, encode_load_reply};
+    use rustos_abi::driver_store::{
+        encode_catalogue_reply, encode_error_reply, encode_load_reply, encode_unload_reply,
+    };
     use rustos_abi::HwMatchKey;
 
     fn bind(priority: u16, virtio: u32) -> DriverBindKey {
@@ -166,6 +195,7 @@ mod tests {
     struct ScriptedStore {
         catalogue: Vec<(u32, Vec<DriverBindKey>)>,
         last_load: Option<(u32, u32)>,
+        last_unload: Option<u64>,
     }
 
     impl DriverStoreCall for ScriptedStore {
@@ -182,6 +212,10 @@ mod tests {
                 StoreRequest::Load { bundle_id, node_id } => {
                     self.last_load = Some((bundle_id, node_id));
                     encode_load_reply(reply, 0xAB00 + u64::from(bundle_id))
+                }
+                StoreRequest::Unload { handle } => {
+                    self.last_unload = Some(handle);
+                    encode_unload_reply(reply)
                 }
             }
         }
@@ -213,6 +247,7 @@ mod tests {
                 (20, vec![bind(4, 16), bind(7, 1)]),
             ],
             last_load: None,
+            last_unload: None,
         };
         let mut buf = [0u8; 1024];
         let drivers = fetch_catalogue(&mut store, &mut buf).expect("a readable store");
@@ -230,6 +265,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: Vec::new(),
             last_load: None,
+            last_unload: None,
         };
         let mut buf = [0u8; 64];
         assert!(fetch_catalogue(&mut store, &mut buf)
@@ -259,6 +295,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: Vec::new(),
             last_load: None,
+            last_unload: None,
         };
         let mut buf = [0u8; 64];
         let handle = load_driver(&mut store, 7, 0x0001_3002, &mut buf).expect("the load succeeds");
@@ -275,6 +312,30 @@ mod tests {
         assert_eq!(
             load_driver(&mut store, 0, 2, &mut buf),
             Err(Errno::SignatureInvalid)
+        );
+    }
+
+    #[test]
+    fn unload_driver_round_trips_the_handle() {
+        let mut store = ScriptedStore {
+            catalogue: Vec::new(),
+            last_load: None,
+            last_unload: None,
+        };
+        let mut buf = [0u8; 64];
+        unload_driver(&mut store, 0xDEAD_BEEF, &mut buf).expect("the unload succeeds");
+        assert_eq!(store.last_unload, Some(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn unload_driver_surfaces_an_already_gone_handle_fail_closed() {
+        // The kernel reports a handle naming no live driver as `NotFound`;
+        // the client surfaces it (the device manager treats it as benign).
+        let mut store = FailingStore(Errno::NotFound);
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            unload_driver(&mut store, 0x1234, &mut buf),
+            Err(Errno::NotFound)
         );
     }
 }

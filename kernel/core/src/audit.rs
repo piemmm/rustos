@@ -113,6 +113,16 @@ pub enum AuditEvent {
     /// The partially built address space is discarded by the caller
     /// (fail closed).
     ProcessSpawnFailed,
+    /// A loaded driver process was torn down: its scheduler task was
+    /// reaped and its grants, served endpoints, IRQ bindings, capability
+    /// record, and address space reclaimed.
+    ///
+    /// Emitted by [`crate::spawn::InitSpawnCtx::terminate_driver_process`]
+    /// when the device manager unloads a driver whose hardware-tree node
+    /// vanished. The record carries the torn-down driver `handle`. Tearing
+    /// an already-gone handle down is a benign
+    /// [`rustos_abi::Errno::NotFound`] and emits no record (idempotent).
+    DriverUnloaded,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -161,6 +171,7 @@ impl AuditEvent {
             Self::ProcessSpawned => 4030,
             Self::ProcessSpawnDenied => 4031,
             Self::ProcessSpawnFailed => 4032,
+            Self::DriverUnloaded => 4033,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::DriverStoreScanned => 4042,
@@ -185,6 +196,7 @@ impl AuditEvent {
             Self::ProcessSpawned => "process spawned",
             Self::ProcessSpawnDenied => "process spawn denied",
             Self::ProcessSpawnFailed => "process spawn failed",
+            Self::DriverUnloaded => "driver unloaded",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::DriverStoreScanned => "driver store scanned",
@@ -224,6 +236,7 @@ mod tests {
             AuditEvent::ProcessSpawned,
             AuditEvent::ProcessSpawnDenied,
             AuditEvent::ProcessSpawnFailed,
+            AuditEvent::DriverUnloaded,
             AuditEvent::UsersDbLoaded,
             AuditEvent::UsersDbRejected,
             AuditEvent::DriverStoreScanned,
@@ -251,6 +264,7 @@ mod tests {
             AuditEvent::ProcessSpawned.id().0,
             AuditEvent::ProcessSpawnDenied.id().0,
             AuditEvent::ProcessSpawnFailed.id().0,
+            AuditEvent::DriverUnloaded.id().0,
             AuditEvent::UsersDbLoaded.id().0,
             AuditEvent::UsersDbRejected.id().0,
             AuditEvent::DriverStoreScanned.id().0,

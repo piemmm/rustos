@@ -44,12 +44,18 @@ pub const TREE_OBSERVED: EventId = EventId(13_006);
 /// key count. Emitted at `Debug` (one record per node, filtered out by
 /// default — lower the level to trace what reached the device manager).
 pub const NODE_OBSERVED: EventId = EventId(13_007);
+/// A bound driver was unloaded because its hardware-tree node vanished
+/// (hot-removal). The mirror of [`NODE_BOUND`]: the device
+/// manager diffed a generation bump, found a bound node gone, and asked the
+/// kernel to tear its driver down. Carries the unbound `node` and the torn-
+/// down driver `handle`.
+pub const NODE_UNLOADED: EventId = EventId(13_008);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 7] = [
+    const ALL: [EventId; 8] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -57,6 +63,7 @@ mod tests {
         DRIVER_STORE_UNAVAILABLE,
         TREE_OBSERVED,
         NODE_OBSERVED,
+        NODE_UNLOADED,
     ];
 
     #[test]

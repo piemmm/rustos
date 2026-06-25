@@ -1666,6 +1666,35 @@ const TESTS: &[QemuTest] = &[
         keyboard: None,
         serial: &[],
     },
+    // plans/USB.md U1: the aarch64 driver-*unload* vertical — the symmetric
+    // partner of the driver-spawn handshake above. It reuses the same signed
+    // driver-stub fixture and the production devmgr-driven autoload/spawn path
+    // (discover the `virt` board, build the live registries, `DeviceManager::
+    // autoload` through `SpawnDriverLoader` + `InitCtxDriverProcessSpawn` over
+    // `Aarch64ProcessSpawn::spawn_with`), so the driver is admitted Ready with
+    // its capability record + address-space-registry entry minted. It then
+    // drives the production unload mechanism `InitSpawnCtx::
+    // terminate_driver_process` (the seam the driver-store server runs for
+    // `StoreRequest::Unload`) and asserts the scheduler task was reaped
+    // (live-task count 1→0) and its caps + address space reclaimed, and that a
+    // second unload of the now-gone handle fails closed with `NotFound`
+    // (idempotent). PASS once teardown reclaimed everything; any shortfall
+    // writes a distinct failure finisher or times out (fail-loud). The driver
+    // is never dispatched, so it issues no syscall and needs no reply port.
+    // Single CPU and a 60-second budget match the driver-spawn vertical.
+    QemuTest {
+        package: "rustos-test-driver-unload-qemu-aarch64",
+        binary: "rustos-test-driver-unload-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        disk_sectors: None,
+        virtio_net: false,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        keyboard: None,
+        serial: &[],
+    },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
     // `mem_unmap` vertical — the first proof that an EL0 process obtains and
     // releases anonymous `RW` memory at runtime via `abi-v1`, on the `virt`

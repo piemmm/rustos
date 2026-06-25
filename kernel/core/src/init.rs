@@ -37,6 +37,7 @@ use rustos_kernel_sched_api::{Priority, StepOutcome};
 use rustos_kernel_sec::{CapTable, IdentityTable, TaskCapabilities, TaskId as SecTaskId, UserId};
 use rustos_log::{set_max_level, Field, Level, Sink};
 use rustos_sync::RwLock;
+use rustos_util::fmt::format_hex_u64;
 
 use crate::aspace::AddressSpaceRegistry;
 use crate::audit::{emit, AuditEvent};
@@ -320,6 +321,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
+            &state.irq,
         )));
         init.spawn_init(ctx);
     }
@@ -422,6 +424,13 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// driver-spawn path. A boot path that wired no real producer passes the
     /// fail-closed [`crate::NULL_PROCESS_WAIT`].
     process_wait: &'static (dyn ProcessWait + 'static),
+    /// The kernel IRQ table, so
+    /// [`terminate_driver_process`](InitSpawnCtx::terminate_driver_process)
+    /// can release every line a torn-down driver bound — the same
+    /// [`IrqTable::release_for`] the `exit` syscall runs, here driven for a
+    /// driver the device manager unloads. PID-1 admission and the
+    /// driver-spawn path do not consult it.
+    irq: &'a IrqTable,
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -444,6 +453,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         arch: &'a A,
         process_wait: &'static (dyn ProcessWait + 'static),
+        irq: &'a IrqTable,
     ) -> Self {
         Self {
             frames,
@@ -453,6 +463,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             aspaces,
             arch,
             process_wait,
+            irq,
         }
     }
 
@@ -748,6 +759,71 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             node_id,
         );
         spawn.spawn_with(rxe, &ctx, caps, args)
+    }
+
+    fn terminate_driver_process(&self, handle: u64) -> Result<(), Errno> {
+        // The handle is the driver's PID, which is its scheduler task id and,
+        // equally, the numeric its security id was minted under
+        // (`admit_process` builds `SecTaskId(task_id)`). Reclaim every
+        // kernel-held piece of the driver under that one id.
+        let sched_id = handle;
+        let sec_id = SecTaskId(handle);
+
+        // Presence is keyed on the address-space registry entry every spawned
+        // driver registers: if neither it nor a capability record exists, no
+        // live driver bears this handle, so the unload is a benign idempotent
+        // miss (the device manager may diff the same vanished node twice).
+        let known =
+            self.aspaces.read().contains(sec_id) || self.caps.read().caps_for(sec_id).is_some();
+        if !known {
+            return Err(Errno::NotFound);
+        }
+
+        // Reap the scheduler task: mark it Exited (never dispatched again) and
+        // drop its body, reclaiming its kernel stack, live address space, and
+        // page-table frames. A parked driver (the common case — a driver
+        // blocked in `irq_wait` / a served-endpoint park) drops immediately;
+        // a vanished id is a benign no-op. Idempotent, never a panic.
+        let _ = self.scheduler.exit(sched_id);
+
+        // Withdraw the address-space-registry entry: reclaims the driver's
+        // device-resource grants, standard streams, resource limits, and
+        // matched-node record together, so no stale grant or mapping survives
+        // the driver (the same withdrawal the `exit` syscall path will drive).
+        self.aspaces.write().withdraw(sec_id);
+
+        // Destroy every synchronous call endpoint the driver served before
+        // dropping its capability record, mirroring the `exit` syscall: a
+        // user-space service that is torn down must not leave callers blocked
+        // in `ipc_call` forever — destroying its endpoints cancels their
+        // in-flight calls, and waking `CALL_WAITQ` re-runs each parked caller's
+        // poll so it abandons fail-closed.
+        if crate::callreg::unregister_owned_by(handle, self.audit) > 0 {
+            crate::waitq::call_wake();
+        }
+
+        // Release every IRQ line the driver bound (`docs/src/security/irq.md`):
+        // the kernel unmasks no lines on teardown; a later driver that wants
+        // the same line re-issues `irq_bind`.
+        let _ = self.irq.release_for(sec_id);
+
+        // Drop the capability record last, so a concurrent `cap_query` racing
+        // this teardown never observes a task whose caps vanished while the
+        // scheduler still believed it lived — the same ordering the `exit`
+        // syscall keeps.
+        let _ = self.caps.write().remove(sec_id);
+
+        let mut handle_buf = [0u8; 16];
+        emit(
+            self.audit,
+            Level::Info,
+            AuditEvent::DriverUnloaded,
+            &[Field {
+                key: "handle",
+                value: format_hex_u64(handle, &mut handle_buf),
+            }],
+        );
+        Ok(())
     }
 }
 
@@ -1277,6 +1353,7 @@ mod tests {
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
+            &state.irq,
         );
 
         let before = state.scheduler.live_task_count();
@@ -1317,6 +1394,7 @@ mod tests {
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
+            &state.irq,
         );
 
         assert_eq!(state.arch.pump_console_tx_count(), 0);
@@ -1385,6 +1463,7 @@ mod tests {
             &state.aspaces,
             state.arch.as_ref(),
             process_wait,
+            &state.irq,
         );
 
         let producer = RecordingSpawn {
@@ -1407,6 +1486,62 @@ mod tests {
         assert_eq!(rxe_seen.as_slice(), rxe);
         assert!(had_drv_load, "the gate-derived capability set is forwarded");
         assert_eq!(arg_count, 1);
+    }
+
+    #[test]
+    fn terminate_driver_process_reclaims_a_known_driver_and_is_idempotent() {
+        // The hot-removal mechanism: when the device manager unloads a
+        // driver whose hardware-tree node vanished, the kernel reclaims its
+        // capability record (and, on the full path, its scheduler task,
+        // grants, served endpoints, and IRQ bindings) and audits the unload.
+        // Tearing the same handle down twice is a benign idempotent miss.
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let ctx = KernelInitSpawner::new(
+            &state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+        );
+
+        // An unknown handle names no live driver: fail closed, reclaim
+        // nothing, never a panic.
+        assert_eq!(ctx.terminate_driver_process(0x9999), Err(Errno::NotFound));
+
+        // Make a handle "known" exactly as `admit_process` does for a spawned
+        // driver: a capability record minted under its `SecTaskId`.
+        let handle = 0x4242u64;
+        let sec = SecTaskId(handle);
+        let mut caps = CapabilitySet::empty();
+        caps.insert(rustos_abi::CapabilityId::DRV_LOAD);
+        let record = TaskCapabilities::derive(sec, UserId(0), caps, caps, audit_sink);
+        state.caps.write().insert(record);
+        assert!(state.caps.read().caps_for(sec).is_some());
+
+        audit_sink.clear();
+        // Teardown reclaims the capability record and audits the unload.
+        assert_eq!(ctx.terminate_driver_process(handle), Ok(()));
+        assert!(
+            state.caps.read().caps_for(sec).is_none(),
+            "the driver's capability record is reclaimed"
+        );
+        assert!(
+            audit_sink
+                .event_ids()
+                .contains(&AuditEvent::DriverUnloaded.id().0),
+            "a successful unload is audited"
+        );
+
+        // A second teardown of the now-gone handle is a benign idempotent
+        // miss — never a panic, never a double-reclaim.
+        assert_eq!(ctx.terminate_driver_process(handle), Err(Errno::NotFound));
     }
 
     #[test]

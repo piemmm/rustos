@@ -52,11 +52,32 @@ pub const DRIVER_STORE_ENDPOINT: u64 = 0xD012_5701;
 const OP_CATALOGUE: u8 = 1;
 /// Request opcode: load the bundle `bundle_id` for the matched `node_id`.
 const OP_LOAD: u8 = 2;
+/// Request opcode: unload the driver instance named by `handle`.
+const OP_UNLOAD: u8 = 3;
 
 /// Encoded length of a [`StoreRequest::Load`]: opcode + `bundle_id` (u32) +
-/// `node_id` (u32). A [`StoreRequest::Catalogue`] is the single opcode byte,
-/// so this is also the endpoint's maximum request size.
+/// `node_id` (u32).
 pub const LOAD_REQUEST_LEN: usize = 1 + 4 + 4;
+
+/// Encoded length of a [`StoreRequest::Unload`]: opcode + `handle` (u64).
+pub const UNLOAD_REQUEST_LEN: usize = 1 + 8;
+
+/// The endpoint's maximum request size: the longest of every request
+/// encoding ([`StoreRequest::Catalogue`] is one opcode byte; a
+/// [`StoreRequest::Load`] is [`LOAD_REQUEST_LEN`]; a [`StoreRequest::Unload`]
+/// is [`UNLOAD_REQUEST_LEN`]). Derived from the protocol bounds so the
+/// server's request cap can never drift from what a valid request encodes.
+pub const MAX_REQUEST_LEN: usize = if LOAD_REQUEST_LEN > UNLOAD_REQUEST_LEN {
+    LOAD_REQUEST_LEN
+} else {
+    UNLOAD_REQUEST_LEN
+};
+
+// The endpoint sizes its request cap from `MAX_REQUEST_LEN`; statically prove
+// it admits the longest valid request so the cap can never drift below a
+// request a client legitimately encodes.
+const _: () = assert!(MAX_REQUEST_LEN >= LOAD_REQUEST_LEN);
+const _: () = assert!(MAX_REQUEST_LEN >= UNLOAD_REQUEST_LEN);
 
 /// A request posted to the driver-store endpoint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -72,6 +93,23 @@ pub enum StoreRequest {
         /// The matched hardware-tree node ([`crate::HwNode::id`]) whose
         /// resource grants the kernel mints for the loaded driver.
         node_id: u32,
+    },
+    /// Unload a driver instance the device manager previously loaded, named
+    /// by the [`crate::DriverHandle`] a [`StoreRequest::Load`] returned.
+    ///
+    /// The symmetric partner of [`StoreRequest::Load`]: the kernel tears the
+    /// driver process down — reclaiming its grants, served endpoints, IRQ
+    /// bindings, and address space, and deregistering it — so a device whose
+    /// hardware-tree node has vanished leaves no running driver behind.
+    /// Teardown is idempotent and fails closed: unloading an
+    /// already-gone handle is a benign [`crate::Errno::NotFound`], never a
+    /// panic. Capability-gated exactly as [`StoreRequest::Load`] is
+    /// (`CAP_DRV_LOAD`); the device manager owns *which* handle to unload,
+    /// the kernel owns the teardown *mechanism*.
+    Unload {
+        /// The driver instance to tear down — the value a prior
+        /// [`StoreRequest::Load`] reply carried ([`decode_load_reply`]).
+        handle: u64,
     },
 }
 
@@ -99,6 +137,14 @@ impl StoreRequest {
                 put_u32(buf, 5, node_id);
                 Ok(LOAD_REQUEST_LEN)
             }
+            StoreRequest::Unload { handle } => {
+                if buf.len() < UNLOAD_REQUEST_LEN {
+                    return Err(Errno::BufferTooSmall);
+                }
+                buf[0] = OP_UNLOAD;
+                put_u64(buf, 1, handle);
+                Ok(UNLOAD_REQUEST_LEN)
+            }
         }
     }
 
@@ -122,6 +168,14 @@ impl StoreRequest {
                 Ok(StoreRequest::Load {
                     bundle_id: read_u32(bytes, 1),
                     node_id: read_u32(bytes, 5),
+                })
+            }
+            OP_UNLOAD => {
+                if bytes.len() < UNLOAD_REQUEST_LEN {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                Ok(StoreRequest::Unload {
+                    handle: read_u64(bytes, 1),
                 })
             }
             _ => Err(Errno::OutOfRange),
@@ -361,6 +415,38 @@ pub fn decode_load_reply(reply: &[u8]) -> Result<u64, Errno> {
     Ok(read_u64(reply, REPLY_STATUS_LEN))
 }
 
+/// Encode a successful [`StoreRequest::Unload`] reply.
+///
+/// Unload carries no payload — the teardown either succeeds (status `0`) or
+/// fails closed with an in-band error reply ([`encode_error_reply`]), so a
+/// success frame is the status word alone.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] if `buf` is shorter than the status word.
+pub fn encode_unload_reply(buf: &mut [u8]) -> Result<usize, Errno> {
+    if buf.len() < REPLY_STATUS_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    put_i32(buf, 0, 0);
+    Ok(REPLY_STATUS_LEN)
+}
+
+/// Confirm a [`StoreRequest::Unload`] reply: `Ok(())` when the teardown
+/// succeeded, else the carried [`Errno`].
+///
+/// A thin alias over [`reply_status`] (an unload reply is status-only), kept
+/// so the client reads as the symmetric partner of [`decode_load_reply`].
+///
+/// # Errors
+///
+/// The carried [`Errno`] for an error frame (e.g. [`Errno::NotFound`] for an
+/// already-gone handle), or [`Errno::BufferTooSmall`] if `reply` is shorter
+/// than the status word.
+pub fn decode_unload_reply(reply: &[u8]) -> Result<(), Errno> {
+    reply_status(reply)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +592,46 @@ mod tests {
         let mut buf = [0u8; REPLY_STATUS_LEN];
         put_i32(&mut buf, 0, 0);
         assert_eq!(decode_load_reply(&buf), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn unload_request_round_trips() {
+        let req = StoreRequest::Unload {
+            handle: 0xDEAD_BEEF_0000_0001,
+        };
+        let mut buf = [0u8; UNLOAD_REQUEST_LEN];
+        let n = req.encode(&mut buf).expect("encodes");
+        assert_eq!(n, UNLOAD_REQUEST_LEN);
+        assert_eq!(StoreRequest::decode(&buf[..n]), Ok(req));
+    }
+
+    #[test]
+    fn unload_request_rejects_truncated_body_and_small_buffer() {
+        // An `Unload` opcode with a truncated body is rejected, never read
+        // past its bytes.
+        assert_eq!(
+            StoreRequest::decode(&[OP_UNLOAD, 1, 2, 3]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut buf = [0u8; UNLOAD_REQUEST_LEN - 1];
+        assert_eq!(
+            StoreRequest::Unload { handle: 1 }.encode(&mut buf),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn unload_reply_round_trips_success() {
+        let mut buf = [0u8; REPLY_STATUS_LEN];
+        let n = encode_unload_reply(&mut buf).expect("encodes");
+        assert_eq!(decode_unload_reply(&buf[..n]), Ok(()));
+    }
+
+    #[test]
+    fn unload_reply_surfaces_an_in_band_error_fail_closed() {
+        // An already-gone handle is reported in band as `NotFound`.
+        let mut buf = [0u8; 16];
+        let n = encode_error_reply(&mut buf, Errno::NotFound).expect("encodes");
+        assert_eq!(decode_unload_reply(&buf[..n]), Err(Errno::NotFound));
     }
 }

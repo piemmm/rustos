@@ -322,6 +322,43 @@ pub trait InitSpawnCtx {
         let _ = (spawn, rxe, caps, grants, args, node_id);
         Err(Errno::NotImplemented)
     }
+
+    /// Tear down a previously [`spawn_driver_process`](Self::spawn_driver_process)ed
+    /// driver named by `handle` (its returned PID), reclaiming **all** of its
+    /// kernel-held state, and return whether a live driver was found.
+    ///
+    /// This is the symmetric partner of
+    /// [`spawn_driver_process`](Self::spawn_driver_process), the kernel
+    /// *mechanism* the device manager's hot-removal *policy* drives: when a
+    /// bound hardware-tree node vanishes the manager asks the kernel to
+    /// unload the driver it loaded for it. The production implementation:
+    ///
+    /// * reaps the driver's scheduler task (so it is never dispatched again
+    ///   and its kernel stack, live address space, and page-table frames are
+    ///   reclaimed when its control block drops);
+    /// * withdraws its address-space-registry entry — reclaiming its
+    ///   device-resource grants, standard streams, resource limits, and
+    ///   matched-node record (no stale grant can outlive the driver);
+    /// * destroys every synchronous call endpoint it served, waking blocked
+    ///   callers so they abandon fail-closed rather than park forever;
+    ///   releases every IRQ binding it held; and drops its capability record.
+    ///
+    /// Teardown is **idempotent** and **fails closed**: tearing down a
+    /// `handle` that names no live driver reclaims nothing and returns
+    /// [`Errno::NotFound`], never a panic and never a partial state. It adds
+    /// no ambient authority — it only reclaims state the kernel itself
+    /// minted for the named task.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if `handle` names no live driver (already gone, or
+    /// never a driver). The default returns it unconditionally: a context
+    /// that wired no scheduler holds no driver to unload, mirroring
+    /// [`spawn_driver_process`](Self::spawn_driver_process)'s default.
+    fn terminate_driver_process(&self, handle: u64) -> Result<(), Errno> {
+        let _ = handle;
+        Err(Errno::NotFound)
+    }
 }
 
 /// Why a [`spawn_and_enter`] call did not transfer control to a new program.

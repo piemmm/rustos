@@ -52,10 +52,13 @@ pub mod observe;
 pub mod service;
 pub mod store;
 
-pub use autoload::{match_and_load, AutoloadState, LoadedBundles, NodeReport, ReportedNodes};
+pub use autoload::{
+    match_and_load, unload_vanished, AutoloadState, LoadedBundles, NodeBindings, NodeDriver,
+    NodeReport, ReportedNodes,
+};
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
 pub use service::{run, HwTreeService};
-pub use store::{fetch_catalogue, load_driver, CatalogueDriver, DriverStoreCall};
+pub use store::{fetch_catalogue, load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
 // The deterministic match policy is the shared `lib/devmatch` definition: re-exported here so existing consumers and the
 // crate's public surface are unchanged.
 pub use rustos_devmatch::{best_bind_priority, resolve, DriverCandidate, MatchResolution};

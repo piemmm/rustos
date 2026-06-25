@@ -84,6 +84,21 @@ pub trait DriverProcessSpawn {
         args: &[&[u8]],
         node_id: Option<u32>,
     ) -> Result<u64, Errno>;
+
+    /// Tear down a previously [`spawn_driver`](Self::spawn_driver)ed driver
+    /// named by `handle`, reclaiming all of its kernel-held state.
+    ///
+    /// The symmetric partner of [`spawn_driver`](Self::spawn_driver): the
+    /// driver-store server drives this when the device manager unloads a
+    /// driver whose matched hardware-tree node has vanished. The kernel reaps
+    /// the driver's task and reclaims its grants, served endpoints, IRQ
+    /// bindings, capability record, and address space.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if `handle` names no live driver (already gone, or
+    /// never a driver) — a benign, idempotent miss, never a panic.
+    fn terminate_driver(&self, handle: u64) -> Result<(), Errno>;
 }
 
 /// The production [`DriverProcessSpawn`]: drive a driver spawn through the
@@ -133,6 +148,10 @@ impl DriverProcessSpawn for InitCtxDriverProcessSpawn<'_> {
     ) -> Result<u64, Errno> {
         self.init_ctx
             .spawn_driver_process(self.producer, rxe, granted, grants, args, node_id)
+    }
+
+    fn terminate_driver(&self, handle: u64) -> Result<(), Errno> {
+        self.init_ctx.terminate_driver_process(handle)
     }
 }
 
@@ -348,6 +367,13 @@ mod tests {
                 .borrow_mut()
                 .push((rxe.to_vec(), granted, grants.to_vec()));
             self.result
+        }
+
+        fn terminate_driver(&self, _handle: u64) -> Result<(), Errno> {
+            // The spawn-path tests never unload; teardown is exercised by the
+            // kernel-core `terminate_driver_process` test and the QEMU
+            // vertical.
+            Err(Errno::NotFound)
         }
     }
 

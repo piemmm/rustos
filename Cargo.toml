@@ -210,6 +210,7 @@ members = [
     "tests/integration/spawn_session_qemu_riscv64",
     "tests/integration/driver_register_program",
     "tests/integration/driver_spawn_qemu_aarch64",
+    "tests/integration/driver_unload_qemu_aarch64",
     "tests/integration/spawn_el0_resume_qemu_x86_64",
     "tests/integration/spawn_el0_timeshare_qemu_x86_64",
     "tests/integration/spawn_init_qemu_x86_64",

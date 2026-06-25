@@ -23,7 +23,7 @@ use rustos_abi::{Errno, HwNode, HwTreeHeader};
 use rustos_devmatch::DriverCandidate;
 use rustos_log::{log as log_event, Event, Level, Sink};
 
-use crate::autoload::{match_and_load, AutoloadState};
+use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
 use crate::observe::for_each_node;
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
@@ -165,6 +165,12 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     let candidates: Vec<DriverCandidate<'_>> =
         drivers.iter().map(CatalogueDriver::candidate).collect();
     match_and_load(&nodes, drivers, &candidates, store, reply_buf, state, sink);
+    // Hot-removal reaction: a bound node missing from this snapshot means its
+    // device is gone, so tear its driver down. The same generation-bump path
+    // that loads a newly-appeared node's driver unloads a vanished one's
+    // (re-plug then re-loads it), so connect and disconnect are symmetric.
+    let present: alloc::collections::BTreeSet<u32> = nodes.iter().map(HwNode::id).collect();
+    unload_vanished(&|id| present.contains(&id), store, reply_buf, state, sink);
     Ok(header.generation())
 }
 
@@ -252,7 +258,9 @@ mod tests {
     use alloc::vec;
     use core::cell::RefCell;
 
-    use rustos_abi::driver_store::{encode_catalogue_reply, encode_load_reply, StoreRequest};
+    use rustos_abi::driver_store::{
+        encode_catalogue_reply, encode_load_reply, encode_unload_reply, StoreRequest,
+    };
     use rustos_abi::hwtree::{HwDeviceClass, HwMatchKey, HW_NODE_ROOT};
     use rustos_abi::DriverBindKey;
 
@@ -329,6 +337,7 @@ mod tests {
     struct ScriptedStore {
         catalogue: Vec<(u32, Vec<DriverBindKey>)>,
         loads: RefCell<Vec<(u32, u32)>>,
+        unloads: RefCell<Vec<u64>>,
     }
 
     impl DriverStoreCall for ScriptedStore {
@@ -346,6 +355,10 @@ mod tests {
                     self.loads.borrow_mut().push((bundle_id, node_id));
                     // A distinct, non-zero handle per bundle.
                     encode_load_reply(reply, u64::from(bundle_id) + 0x1000)
+                }
+                StoreRequest::Unload { handle } => {
+                    self.unloads.borrow_mut().push(handle);
+                    encode_unload_reply(reply)
                 }
             }
         }
@@ -400,6 +413,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: vec![(7, vec![bind(5, kbd)])],
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -431,6 +445,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: vec![(7, vec![bind(5, HwMatchKey::virtio(0x1234))])],
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -464,6 +479,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: vec![(4, vec![bind(2, key)])],
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -509,6 +525,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: vec![(7, vec![bind(5, kbd)]), (8, vec![bind(5, net)])],
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -519,6 +536,108 @@ mod tests {
         // the appeared network node loads bundle 8 on the reaction.
         assert_eq!(store.loads.borrow().as_slice(), &[(7, 2), (8, 3)]);
         assert_eq!(tree.waited_on, vec![1]);
+    }
+
+    #[test]
+    fn a_reaction_unloads_a_driver_whose_bound_node_vanished() {
+        // Hot-removal: a node bound on the first cycle disappears on the
+        // reaction (the device was unplugged), so the device manager asks the
+        // kernel to unload exactly its driver and nothing else.
+        let kbd = HwMatchKey::virtio(0x1234);
+        let first = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, kbd),
+            ],
+        );
+        // The keyboard node is gone at the next generation.
+        let second = encode(2, &[HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)]);
+        let mut tree = ScriptedTree::new(vec![first, second]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, kbd)])],
+            loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+
+        // Bundle 7 loaded with handle `0x1000 + 7` on the first cycle, and
+        // that exact handle is unloaded when its node vanished.
+        assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
+        assert_eq!(store.unloads.borrow().as_slice(), &[0x1000 + 7]);
+        assert!(sink.ids().contains(&events::NODE_UNLOADED.0));
+    }
+
+    #[test]
+    fn a_reaction_with_no_vanished_node_unloads_nothing() {
+        // A generation bump that drops no bound node (here a settled tree
+        // re-observed) must unload nothing — only a *vanished* bound node
+        // triggers a teardown.
+        let kbd = HwMatchKey::virtio(0x1234);
+        let snapshot_nodes = [
+            HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+            input_node(2, kbd),
+        ];
+        let first = encode(1, &snapshot_nodes);
+        let second = encode(2, &snapshot_nodes);
+        let mut tree = ScriptedTree::new(vec![first, second]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, kbd)])],
+            loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(1)).expect("one reaction");
+
+        // The keyboard stays bound across both cycles; nothing is unloaded.
+        assert_eq!(store.loads.borrow().as_slice(), &[(7, 2)]);
+        assert!(store.unloads.borrow().is_empty());
+        assert!(!sink.ids().contains(&events::NODE_UNLOADED.0));
+    }
+
+    #[test]
+    fn a_vanished_then_reattached_node_unloads_then_reloads() {
+        // Re-plug works with no reboot: a bound node vanishes (unload), then
+        // re-appears at a later generation (re-load) — the symmetric
+        // connect/disconnect path the same generation-bump loop drives.
+        let kbd = HwMatchKey::virtio(0x1234);
+        let present = encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, kbd),
+            ],
+        );
+        let gone = encode(2, &[HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root)]);
+        let again = encode(
+            3,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, kbd),
+            ],
+        );
+        let mut tree = ScriptedTree::new(vec![present, gone, again]);
+        let mut store = ScriptedStore {
+            catalogue: vec![(7, vec![bind(5, kbd)])],
+            loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(&mut tree, &mut store, &sink, &mut reply_buf, Some(2)).expect("two reactions");
+
+        // Loaded on cycle 1, unloaded on cycle 2 (node gone), loaded again on
+        // cycle 3 (node re-appeared) — the loaded-bundle cache was purged on
+        // the unload so the re-attach reloads rather than reporting a stale
+        // cached handle.
+        assert_eq!(store.loads.borrow().as_slice(), &[(7, 2), (7, 2)]);
+        assert_eq!(store.unloads.borrow().as_slice(), &[0x1000 + 7]);
     }
 
     #[test]
@@ -547,6 +666,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: vec![(7, vec![bind(5, HwMatchKey::virtio(0x1234))])],
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -599,6 +719,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: Vec::new(),
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -617,6 +738,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: Vec::new(),
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         let mut reply_buf = [0u8; 4096];
@@ -728,6 +850,7 @@ mod tests {
         let mut store = ScriptedStore {
             catalogue: vec![(7, vec![bind(5, target)])],
             loads: RefCell::new(Vec::new()),
+            unloads: RefCell::new(Vec::new()),
         };
         let sink = RecordingSink::new();
         // Heap-allocated (not a 64 KiB stack array) so the test matches the
