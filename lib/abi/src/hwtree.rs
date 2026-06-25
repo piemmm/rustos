@@ -405,6 +405,15 @@ pub enum HwResourceKind {
     /// a plain [`Mmio`](Self::Mmio) register window that needs no
     /// translation.
     BusWindow = 4,
+    /// A synchronous IPC **call endpoint** a driver may submit to: `base`
+    /// is the endpoint id, `len` is `1` (a single endpoint). It is not a
+    /// memory window or an interrupt line but the right to `ipc_call` one
+    /// grant-restricted endpoint a server created (the USB request-block
+    /// transport one host-controller driver serves per device it
+    /// enumerates, `plans/USB.md`). The matched class driver receives this
+    /// resource as its sole grant, so it can reach exactly its own
+    /// interface's endpoint and nothing else (no ambient authority).
+    Endpoint = 5,
 }
 
 impl HwResourceKind {
@@ -423,6 +432,7 @@ impl HwResourceKind {
             2 => Some(Self::Port),
             3 => Some(Self::Dma),
             4 => Some(Self::BusWindow),
+            5 => Some(Self::Endpoint),
             _ => None,
         }
     }
@@ -439,6 +449,10 @@ impl HwResourceKind {
             Self::Mmio | Self::Port | Self::BusWindow => CapabilityId::MMIO_MAP,
             Self::Irq => CapabilityId::IRQ_BIND,
             Self::Dma => CapabilityId::MEM_DMA,
+            // Submitting to a grant-restricted call endpoint is gated by the
+            // generic per-endpoint call-IPC capability; the per-endpoint
+            // grant (this resource) scopes it to one endpoint id.
+            Self::Endpoint => CapabilityId::IPC_ENDPOINT,
         }
     }
 }
@@ -530,6 +544,16 @@ impl HwResource {
     #[must_use]
     pub fn bus_window(cpu_base: u64, len: u64, translated_base: u64) -> Self {
         Self::new_xlate(HwResourceKind::BusWindow, cpu_base, len, 0, translated_base)
+    }
+
+    /// A synchronous IPC call endpoint the holder may submit to (`id` is
+    /// the grant-restricted call-endpoint id). The grant covers exactly the
+    /// one endpoint: a host-controller driver mints it for itself when it
+    /// creates the endpoint, forwards it onto the per-device node it emits,
+    /// and the autoloaded class driver inherits it as its sole reach.
+    #[must_use]
+    pub fn endpoint(id: u64) -> Self {
+        Self::new(HwResourceKind::Endpoint, id, 1, 0)
     }
 
     fn new(kind: HwResourceKind, base: u64, len: u64, flags: u32) -> Self {
@@ -688,7 +712,11 @@ impl HwResource {
             }
             (HwResourceKind::Mmio, HwResourceKind::Mmio)
             | (HwResourceKind::Port, HwResourceKind::Port)
-            | (HwResourceKind::Irq, HwResourceKind::Irq) => {
+            | (HwResourceKind::Irq, HwResourceKind::Irq)
+            | (HwResourceKind::Endpoint, HwResourceKind::Endpoint) => {
+                // A call-endpoint grant is an untranslated `[id, id+len)`
+                // range exactly like an IRQ line range: the child endpoint
+                // must lie wholly within the parent grant.
                 interval_contains(self.base, self.len, child.base, child.len)
             }
             // Every other kind pairing fails closed.
@@ -1358,6 +1386,28 @@ mod tests {
             HwResourceKind::BusWindow.required_capability(),
             CapabilityId::MMIO_MAP
         );
+        assert_eq!(
+            HwResourceKind::Endpoint.required_capability(),
+            CapabilityId::IPC_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn endpoint_resource_round_trips_and_covers_only_itself() {
+        let ep = HwResource::endpoint(0xC0FF_EE01);
+        assert_eq!(ep.kind(), Some(HwResourceKind::Endpoint));
+        assert_eq!(ep.base(), 0xC0FF_EE01);
+        assert_eq!(ep.length(), 1);
+        assert_eq!(ep.required_capability(), Ok(CapabilityId::IPC_ENDPOINT));
+        assert_eq!(HwResource::from_bytes(&ep.to_le_bytes()).unwrap(), ep);
+        // An endpoint grant covers exactly its own id and no neighbour, and
+        // never a different resource kind.
+        assert!(ep.covers(&HwResource::endpoint(0xC0FF_EE01)));
+        assert!(!ep.covers(&HwResource::endpoint(0xC0FF_EE02)));
+        assert!(!ep.covers(&HwResource::endpoint(0xC0FF_EE00)));
+        assert!(!ep.covers(&HwResource::irq(0xC0FF_EE01, 1)));
+        // The endpoint kind decodes from its wire discriminant.
+        assert_eq!(HwResourceKind::from_u16(5), Some(HwResourceKind::Endpoint));
     }
 
     #[test]

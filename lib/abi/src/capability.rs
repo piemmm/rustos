@@ -280,6 +280,29 @@ impl CapabilityId {
     /// inventory is privileged rather than ambient: only an autoloaded bus
     /// driver is granted it, never an ordinary task.
     pub const HW_EMIT: Self = Self(27);
+    /// Participate in per-endpoint-granted synchronous call IPC: create a
+    /// grant-restricted call endpoint, and submit calls to one.
+    ///
+    /// A *grant-restricted* call endpoint is one whose authority is not a
+    /// process-wide capability *class* but a per-endpoint, region-scoped
+    /// **grant** keyed to the endpoint's id — the same device-resource grant
+    /// machinery that scopes an MMIO window or an IRQ line to one driver
+    /// (no ambient authority). It is the primitive a host-controller driver
+    /// uses to serve one private call endpoint per device it enumerates (the
+    /// USB request-block transport, `plans/USB.md`): the server creates the
+    /// endpoint (and the kernel mints it the matching
+    /// [`HwResource::endpoint`](crate::hwtree::HwResource::endpoint) grant, so
+    /// it may forward the endpoint onto a child node it publishes), and only a
+    /// task the kernel later grants that exact endpoint — the autoloaded class
+    /// driver bound to the emitted device node — may call it.
+    ///
+    /// Holding this capability alone confers no reach: a caller may submit to
+    /// a grant-restricted endpoint only if it *also* holds the per-endpoint
+    /// grant, so two class drivers behind one controller cannot reach each
+    /// other's endpoint even though both hold the class capability (capability
+    /// and per-endpoint grant checks before state touches; — a driver
+    /// receives only its matched node's resources).
+    pub const IPC_ENDPOINT: Self = Self(28);
 
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
@@ -318,6 +341,7 @@ impl CapabilityId {
         (Self::MAILBOX, "CAP_MAILBOX"),
         (Self::LOG_EMIT, "CAP_LOG_EMIT"),
         (Self::HW_EMIT, "CAP_HW_EMIT"),
+        (Self::IPC_ENDPOINT, "CAP_IPC_ENDPOINT"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -439,6 +463,7 @@ mod tests {
         assert_eq!(CapabilityId::MAILBOX.as_u16(), 25);
         assert_eq!(CapabilityId::LOG_EMIT.as_u16(), 26);
         assert_eq!(CapabilityId::HW_EMIT.as_u16(), 27);
+        assert_eq!(CapabilityId::IPC_ENDPOINT.as_u16(), 28);
     }
 
     #[test]
@@ -470,9 +495,9 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=27 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=28 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=27 {
+        for raw in 1..=28 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }

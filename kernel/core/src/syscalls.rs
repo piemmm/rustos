@@ -2150,6 +2150,26 @@ where
             return Err(Errno::NotFound);
         };
 
+        // A grant-restricted endpoint (one that requires `CAP_IPC_ENDPOINT`
+        // of its senders) is reachable only by a task the kernel granted the
+        // matching per-endpoint resource. This is what keeps two class
+        // drivers behind one host controller from reaching each other's
+        // transport endpoint even though both hold the class capability: the
+        // per-endpoint grant is minted only onto the driver whose matched
+        // node carried this endpoint. Checked against the kernel-trusted
+        // caller id before any buffer is copied, and fails closed — the
+        // endpoint's own `post` still re-checks the class capability.
+        if ep
+            .required_send_caps()
+            .contains(rustos_abi::CapabilityId::IPC_ENDPOINT)
+            && !self
+                .aspaces
+                .read()
+                .grant_covers(caller.task_id, &HwResource::endpoint(endpoint))
+        {
+            return Err(Errno::PermissionDenied);
+        }
+
         // Bound the request copy *before* allocating: refuse a payload
         // larger than the endpoint advertises (itself capped at
         // `IPC_MESSAGE_MAX_PAYLOAD_LEN` at create time). The same
@@ -2294,13 +2314,20 @@ where
         let send_set = CapabilitySet::from_le_bytes(&send_buf)?;
         let recv_set = CapabilitySet::from_le_bytes(&recv_buf)?;
 
+        // A grant-restricted endpoint declares its authority by requiring the
+        // generic per-endpoint capability `CAP_IPC_ENDPOINT` of its senders:
+        // holding the class is necessary but not sufficient — only a task the
+        // kernel also grants the matching per-endpoint resource may call it.
+        let grant_restricted = send_set.contains(rustos_abi::CapabilityId::IPC_ENDPOINT);
+        let endpoint_id = endpoint;
+
         // Build the endpoint owned by the calling task. `CallEndpoint::create`
         // runs the bind-time authority checks against the caller's effective
         // set *before* the endpoint exists: the
         // creator must hold every `recv` capability it requires, and must
         // hold `CAP_IPC_BIND_PRIVILEGED` to bind a restricted-sender endpoint.
         let endpoint = CallEndpoint::create(
-            EndpointId(endpoint),
+            EndpointId(endpoint_id),
             caller.caps,
             send_set,
             recv_set,
@@ -2315,6 +2342,21 @@ where
         // live id is never silently re-pointed: a clash fails closed with
         // `AlreadyExists` and the freshly built endpoint is dropped.
         crate::callreg::register(alloc::sync::Arc::new(endpoint))?;
+
+        // Mint the creator the per-endpoint grant for a grant-restricted
+        // endpoint — mirroring `msi_alloc`'s grant for an allocated IRQ line.
+        // The server gains a grant only for an endpoint it itself owns (no
+        // ambient authority), so it may forward the endpoint onto a device
+        // node it publishes (`hw_emit_node`'s coverage check tests against
+        // exactly this grant) and the autoloaded class driver inherits it as
+        // its sole reach. Minted only after the endpoint is registered, so a
+        // clashing id leaves no orphan grant behind.
+        if grant_restricted {
+            let _ = self
+                .aspaces
+                .write()
+                .mint_grant(caller.task_id, HwResource::endpoint(endpoint_id));
+        }
         Ok(0)
     }
 
@@ -10265,6 +10307,182 @@ mod tests {
             h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4),
             Err(Errno::AlreadyExists)
         );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Wire image of a one-capability send set, for seeding a `call_create`
+    /// request page.
+    fn one_cap_image(cap: CapabilityId) -> [u8; CapabilitySet::WIRE_LEN] {
+        let mut set = CapabilitySet::empty();
+        set.insert(cap);
+        set.to_le_bytes()
+    }
+
+    /// Creating a grant-restricted endpoint (its required send capability is
+    /// `CAP_IPC_ENDPOINT`) mints the creator the matching per-endpoint grant,
+    /// so it may forward the endpoint onto a node it publishes and the
+    /// autoloaded class driver inherits it — exactly as `msi_alloc` grants an
+    /// allocated IRQ line.
+    #[test]
+    fn call_create_grant_restricted_mints_the_endpoint_grant() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // Page 1 is the send-set image {CAP_IPC_ENDPOINT}; page 2 (recv) is
+        // the zeroed empty set.
+        let (space, physmap) = call_aspace(&one_cap_image(CapabilityId::IPC_ENDPOINT));
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(5), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // A restricted-sender endpoint requires CAP_IPC_BIND_PRIVILEGED to bind.
+        let caps = make_caps_record(5, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(5),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+
+        let id = 0xCA11_4001;
+        // No grant for the endpoint before creation.
+        assert!(!aspaces
+            .read()
+            .grant_covers(SecTaskId(5), &rustos_abi::HwResource::endpoint(id)));
+        assert_eq!(h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4), Ok(0));
+        // The creator now holds the per-endpoint grant for exactly this id.
+        assert!(aspaces
+            .read()
+            .grant_covers(SecTaskId(5), &rustos_abi::HwResource::endpoint(id)));
+        // …and not for a neighbouring id (the grant is scoped to one endpoint).
+        assert!(!aspaces
+            .read()
+            .grant_covers(SecTaskId(5), &rustos_abi::HwResource::endpoint(id + 1)));
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// Register a grant-restricted endpoint (required send cap
+    /// `CAP_IPC_ENDPOINT`) owned by task 1, returning it for unregistration.
+    fn register_grant_restricted_endpoint(id: u64, sink: &(dyn Sink + Sync)) -> Arc<CallEndpoint> {
+        let creator = make_caps_record(1, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+        let mut send = CapabilitySet::empty();
+        send.insert(CapabilityId::IPC_ENDPOINT);
+        let ep = Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &creator,
+                send,
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 128,
+                    max_reply: 128,
+                    capacity: 4,
+                },
+                sink,
+            )
+            .expect("grant-restricted endpoint"),
+        );
+        crate::callreg::register(ep.clone()).expect("registered");
+        ep
+    }
+
+    /// `ipc_call` to a grant-restricted endpoint by a caller that holds the
+    /// class capability but **not** the per-endpoint grant fails closed with
+    /// `PermissionDenied`, before any buffer is copied — so one class driver
+    /// cannot reach another's transport endpoint.
+    #[test]
+    fn ipc_call_grant_restricted_without_grant_is_permission_denied() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        // Caller holds the class capability but was never granted the endpoint.
+        let caps = make_caps_record(2, &[CapabilityId::IPC_ENDPOINT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let id = 0xCA11_4002;
+        let _ep = register_grant_restricted_endpoint(id, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64),
+            Err(Errno::PermissionDenied)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `ipc_call` to a grant-restricted endpoint by a caller that holds both
+    /// the class capability and the per-endpoint grant round-trips normally —
+    /// the grant is exactly what the autoloaded class driver inherits from its
+    /// matched node.
+    #[test]
+    fn ipc_call_grant_restricted_with_grant_round_trips() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let tid = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn caller task");
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(SecTaskId(tid), space, physmap)
+            .expect("registration succeeds");
+        let id = 0xCA11_4003;
+        // The caller was granted exactly this endpoint (as an autoloaded class
+        // driver would inherit it from its matched node).
+        aspaces
+            .write()
+            .mint_grant(SecTaskId(tid), rustos_abi::HwResource::endpoint(id));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(tid, &[CapabilityId::IPC_ENDPOINT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(tid),
+            caps: &caps,
+        };
+        let ep = register_grant_restricted_endpoint(id, sink);
+        let server_ep = ep.clone();
+        let handle = std::thread::spawn(move || loop {
+            if let RecvCall::Received(call) = server_ep.recv_call(usize::MAX) {
+                assert_eq!(call.request, b"ping");
+                server_ep
+                    .reply(call.ticket, b"pong", &TestSink::new())
+                    .expect("reply");
+                break;
+            }
+            std::thread::yield_now();
+        });
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let written = h
+            .ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+            .expect("granted call completes");
+        handle.join().expect("server thread joins");
+        assert_eq!(written, 4);
         crate::callreg::unregister(EndpointId(id));
     }
 

@@ -253,12 +253,50 @@ the live controller behaviour is host- and CI-proven first.
   buffer; and `serve_urb` fail-closed for a bad endpoint, oversize length,
   illegal direction, bulk, and a malformed frame, each proven not to reach the
   engine). Whole gate green.
-- **U3 — xHCI HCD process `[ ]`.** Turn `drivers/bus/usb/xhci` into a `Run`
+- **U3a — per-endpoint URB-transport grant mechanism `[x]` (DONE).** §1.3
+  requires the right to submit URBs for an interface to be "minted kernel-side
+  from the matched node, never ambient" — a mechanism that did not exist. It
+  now does, modelled on `msi_alloc`'s allocate-then-grant pattern and reusing
+  the existing region-scoped grant machinery, so no `kernel/ipc` change was
+  needed:
+  - `CapabilityId::IPC_ENDPOINT` (28) is the generic "participate in
+    per-endpoint-granted call IPC" capability; `HwResourceKind::Endpoint` (5)
+    + `HwResource::endpoint(id)` is the per-endpoint grant (its `base` is the
+    call-endpoint id, `covers` is exact-id containment like an IRQ line, its
+    required capability is `IPC_ENDPOINT`). The C header regenerated
+    (`ROS_CAP_IPC_ENDPOINT`).
+  - A *grant-restricted* endpoint is one whose required send caps include
+    `CAP_IPC_ENDPOINT`. `call_create` mints the creator the matching
+    `HwResource::endpoint(id)` grant when it binds such an endpoint, so the
+    server may forward the endpoint onto a node it emits (`hw_emit_node`'s
+    existing coverage check admits it unchanged) and the autoloaded class
+    driver inherits the grant from its matched node like any MMIO/DMA/IRQ
+    resource. `ipc_call` denies a grant-restricted endpoint fail-closed unless
+    the caller's grants cover the endpoint id — so two class drivers behind
+    one controller cannot reach each other's transport endpoint even though
+    both hold the class capability. Covered by host unit tests (ABI
+    kind/`covers`/round-trip; kernel `call_create` grant-mint, `ipc_call`
+    denied-without-grant, and round-trips-with-grant).
+- **U3b — xHCI HCD process `[ ]`.** Turn `drivers/bus/usb/xhci` into a `Run`
   binary that binds `usb,xhci`, owns the controller (the bring-up code moves
   from `usb_kbd` unchanged — it is already platform-neutral), enumerates,
-  emits one per-interface node, serves the URB transport endpoint, and watches
-  root-hub PORTSC → `hw_remove_node` on disconnect. Host stub + the metal
-  acceptance for live enumerate/emit.
+  emits one per-interface node carrying its `HwResource::endpoint` grant
+  (U3a), serves the URB transport endpoint, and watches root-hub PORTSC →
+  `hw_remove_node` on disconnect. Host stub + the metal acceptance for live
+  enumerate/emit.
+  - **Prerequisite — cross-process shared memory for URB data buffers.** The
+    URB names a shared-memory buffer (`UrbRequest::buffer`) the class driver
+    owns and the HCD maps for the transfer (§1.3); RustOS has no cross-process
+    shared-memory primitive yet (only per-process `mem_map` anonymous memory
+    and the kernel-copied call request/reply payloads). The HCD's data path
+    needs one (a capability-gated shared-memory IPC object both the class
+    driver and the HCD map, minted from the matched node like the endpoint
+    grant), which is its own kernel increment. Build it before, or as part of,
+    U3b — it must not be faked or busy-polled (§2.1, §2.23).
+  - Because `usb_kbd` binds the `usb,xhci` controller node today
+    (`rustos_hid::KEYBOARD_BIND_KEYS` matches `XHCI_COMPATIBLE`), U3b and U4
+    are coupled: a controller node cannot have two matching drivers, so the
+    HCD landing and the `usb_kbd` rebind land together (no staged migration).
 - **U4 — `usb_kbd` as a pure HID class driver `[ ]`.** Rebind it to the
   emitted HID-interface node, delete the in-process controller bring-up
   (§2.14), and pump reports over the URB transport client. Update its bind
@@ -267,8 +305,12 @@ the live controller behaviour is host- and CI-proven first.
   detach → `usb_kbd` unloaded, controller stays up; re-attach → autoloads
   again. Retire any transitional scaffolding and update `PLAN.md` / §3 / §16.4.
 
-U1 is the foundation (hot-removal needs a way to unload), is fully host- and
-QEMU-testable, and unblocks the rest; it is the next increment to implement.
+U1, U2, and U3a (the unload mechanism, the URB transport ABI/`lib/usb`
+server-client, and the per-endpoint grant mechanism) are landed and host-/CI-
+proven. U3b (the live HCD process) is the next increment; its open
+prerequisite is the cross-process shared-memory primitive for URB data
+buffers, and it lands together with the U4 `usb_kbd` rebind (they cannot both
+bind the controller node).
 
 ---
 
