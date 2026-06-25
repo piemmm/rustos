@@ -3187,6 +3187,20 @@ wasm32 (no trap instruction).
   targets, exercising `Time64`/ipc/sysinfo + `cap_query`/`clock_get`; the new
   decoders are fuzzed with a regression corpus.
 
+## USB — modular USB stack + device hot-removal (`plans/USB.md`)
+
+**Status: planned (U1–U5).** Splits the metal-proven single-process keyboard
+chain into the three independent layers the §17 modularity contracts require:
+a bus driver emits the controller node, a user-space host-controller driver
+(HCD, `drivers/bus/usb/xhci`) owns one controller and serves a bus-agnostic
+URB transport IPC, and per-device class drivers (`drivers/input/usb_kbd`, …)
+bind emitted per-interface nodes and submit URBs — no bus↔class hardwiring
+(§2.20, §17.4). Hot-removal is structural: the HCD watches root-hub ports and
+calls `hw_remove_node`, and `devmgr` reacts by unloading the bound driver
+through a new kernel driver-unload mechanism (`StoreRequest::Unload`). U1
+(kernel driver-unload + devmgr unload reaction, fully host/QEMU-testable) is
+the next increment; see `plans/USB.md` for the binding design and staging.
+
 ---
 
 ## Cache-Aware Scheduling (LLC-aware task aggregation)

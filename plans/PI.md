@@ -3991,7 +3991,9 @@ keyboard never regresses (§2.17), until the final flip:
   mailbox (per-driver manifest∩ still binds, §5.2). The `hw_remove_node`
   syscall (no. 38) landed as the kernel-side mirror of `hw_emit_node`
   (ownership-checked subtree removal + generation bump); the device-manager
-  unload reaction is Design D D4 (the bus port-watcher consumer). The live
+  unload reaction and the modular host-controller-driver / class-driver split
+  it serves are staged in `plans/USB.md` (U1 — kernel driver-unload mechanism
+  + devmgr unload-on-removal reaction — is the next increment). The live
   enumerate→emit→autoload chain is metal-gated (§0.9): no `-M virt` Pi-USB
   vertical exists (§0.4). **Metal acceptance:** top-down autoload from
   `/System` and a keystroke with the scaffold gone.
