@@ -15,6 +15,41 @@ The shell has two equally important jobs:
 This document is normative unless a section is explicitly marked as an
 implementation note.
 
+## Companion specifications
+
+This document was written before the resource-alias, storage-namespace, and
+terminal-stack designs existed. It defers to them and MUST stay consistent
+with them; where this document and one of them disagree, the owning document
+below wins for the area it owns, and `AGENTS.md` wins over all of them.
+
+- **Resource aliases and selector namespaces** (`plans/ALIAS.md`). Owns the
+  typed, non-filesystem resource reference grammar
+  `namespace:selector[@guard][::facet][?params]` and the namespace registry
+  (`sys:`, `info:`, `stats:`, `state:`, `disk:`, `part:`, `vol:`, `tty:`,
+  `net:`, `cap:`, …). The shell consumes resource references in redirection
+  targets, command arguments, completion, and typed shell values; it never
+  defines its own parallel namespace registry or a second reference parser.
+- **Drives, volumes, aliases, and path namespace** (`plans/DRIVES.md`). Owns
+  filesystem path spelling: storage is a forest of named roots, addressed by
+  the user shorthand `Alias:/path` (internal `alias::Alias/path`) and the
+  stable `id::<volume-id>/path`, with `/` retained only as a synthetic session
+  compatibility view. The shell consumes alias paths in `cd`, prompt display,
+  word expansion, and completion through the single shared path parser; it
+  never hard-codes a fixed top-level directory set or a second path parser.
+- **Terminal vocabulary, termcap, and curses** (`plans/CURSES.md`). Owns the
+  shared ANSI/VT/xterm escape vocabulary (`lib/vt`), the compiled-in
+  capability database (`lib/termcap`), and the curses/TUI screen model
+  (`lib/curses`). The shell's interactive rendering, key decoding, and any
+  full-screen affordance go through that one vocabulary, never a second
+  divergent escape-sequence definition (`AGENTS.md` §2.2).
+
+A note on the word **alias**. This document already used "alias" for an
+ordinary shell *command* alias (`alias ll='ls -l'`), expanded by the lexer.
+That meaning is unchanged. It is distinct from a **resource alias**
+(`ALIAS.md`, e.g. `disk:backup`) and a **path/root alias** (`DRIVES.md`, e.g.
+`Home:`). Where ambiguity is possible this document says "command alias",
+"resource alias", or "path alias" explicitly.
+
 ## Terminology
 
 The keywords **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY**
@@ -78,7 +113,13 @@ External effects are reached through injected seams:
   It reads interactive command-line input from `stdin` (fd 0), writes the
   prompt and REPL `stdout` text to `stdout` (fd 1), and writes REPL
   diagnostics to `stderr` (fd 2). It is never a console/UART device handle
-  (`AGENTS.md` §20).
+  (`AGENTS.md` §20). Interactive line editing, prompt rendering, key/escape
+  decoding, and any full-screen affordance are expressed through the shared
+  terminal stack of `plans/CURSES.md` (`lib/vt` vocabulary, `lib/termcap`
+  capabilities keyed off the inherited `TERM`, and `lib/curses` for screen
+  models), never a second, shell-private escape-sequence vocabulary
+  (`AGENTS.md` §2.2). An unknown or missing `TERM` degrades to a safe baseline
+  rather than failing (`AGENTS.md` §2.9).
 - `CompletionHost`: lists commands, paths, variables, jobs, command metadata,
   cached `stdinfo`, and command descriptors for tab completion.
 - `InfoHost`: provides the shell-owned best-effort sink or capture path for
@@ -161,9 +202,14 @@ $'line\ntext'
 
 The shell SHOULD converge on the following zsh-compatible expansion order:
 
-1. Alias expansion.
+1. Command-alias expansion (the lexer's `alias ll='ls -l'` substitution; not a
+   resource or path alias — see "Companion specifications").
 2. Brace expansion.
-3. Tilde expansion.
+3. Tilde expansion. `~` and `~user` are a zsh convenience; the canonical home
+   reference is the `Home:` path alias (`plans/DRIVES.md`). A bare `~` expands
+   to the current user's home root, which the path layer maps to `Home:/`.
+   Tilde expansion is resolved through the single shared path parser, never a
+   second home-directory lookup.
 4. Parameter expansion.
 5. Command substitution.
 6. Arithmetic expansion.
@@ -312,72 +358,86 @@ information about the command's `stdout` or operation.
 
 ## Redirection target namespaces
 
-RustOS has no `/dev`. The only top-level directories are `/System`,
-`/Users`, `/Apps`, and `/Storage`; `/dev`, `/proc`, `/sys`, `/etc`, and the
-other legacy POSIX names are reserved and refused (`AGENTS.md` §16.1). The
-Unix idiom of redirecting to or from a device file (`> /dev/null`,
-`< /dev/zero`, `< /dev/random`) therefore cannot be a filesystem path in
-RustOS. These sinks and sources are instead **stream backings**
-(`AGENTS.md` §20): a redirection MAY name a *registered namespace* target
-that the shell resolves to a kernel stream-backing object instead of a
+RustOS has no `/dev`, `/proc`, `/sys`, or `/etc`, and storage is not one
+fixed Unix tree (`AGENTS.md` §16.1; `plans/DRIVES.md`). The Unix idiom of
+redirecting to or from a device file (`> /dev/null`, `< /dev/zero`,
+`< /dev/random`) therefore cannot be a filesystem path in RustOS. Those
+sinks and sources, and every other non-filesystem stream a redirection can
+name, are **resource references** owned by `plans/ALIAS.md`: a typed
+reference of the form `namespace:selector[@guard][::facet][?params]` that the
+shell resolves to a kernel **stream backing** (`AGENTS.md` §20) instead of a
 path.
+
+The shell does not define its own namespace registry. The recognised
+namespaces (`sys:`, `tty:`, `disk:`, `vol:`, …) and their selector grammar
+live in `ALIAS.md`; the parser is the single shared resource-reference parser
+(`ALIAS.md` §16.1), never a second shell-private one (`AGENTS.md` §2.2). A
+redirection MAY name a resource reference **only when that resource exposes a
+stream facet** (`ALIAS.md` §15.3); resolving a non-stream resource (e.g. an
+`info:`/`stats:` answer) in target position MUST fail closed.
 
 ### Syntax
 
-A redirection target of the form `name:leaf` whose `name` is a registered
+A redirection target whose prefix before `:` is a registered resource
 namespace is resolved as a stream backing, not a filesystem path:
 
 ```sh
-ls  > sys:null        # discard stdout
-cmd < sys:zero        # read an endless run of 0x00
-cmd < sys:random      # read CSPRNG bytes (AGENTS.md §22)
-ls  > sys:full        # writes fail closed with NoSpace
+ls  > sys:null            # discard stdout
+cmd < sys:zero            # read an endless run of 0x00
+cmd < sys:random          # read CSPRNG bytes (AGENTS.md §22)
+ls  > sys:full            # writes fail closed with NoSpace
+tty monitor tty:debug > log.txt   # a tty resource's stream facet
 ```
 
-`sys:` is the only registered namespace at this stage and it carries the
-well-known streams `null`, `zero`, `random`, and `full`. The resolution
-rule below is written for *whatever* prefix is registered; only a
-registered prefix is ever special.
+`sys:` carries the well-known byte streams below; the broader namespace set
+and its identity guards (`@fingerprint`), facets (`::raw`), and query
+parameters (`?…`) are defined in `ALIAS.md`. The resolution rule below is
+written for *whatever* namespace is registered; only a registered namespace
+is ever special.
 
-### Resolution rule (namespace vs. filesystem path)
+### Resolution rule (resource reference vs. path alias vs. filesystem path)
 
 The shell MUST apply this test before any VFS lookup. A target is resolved
-as a namespace **only** when every clause holds; otherwise it is an
-ordinary filesystem path:
+as a resource reference **only** when every clause holds; otherwise it is a
+path (a `DRIVES.md` alias path or an ordinary filesystem path):
 
 ```
 if the target is a relative path
 and its first path component contains ':'
-and the substring before that ':' is a registered namespace
+and the substring before that ':' is a registered resource namespace
+and the character immediately after that ':' is not '/'
 and that prefix is neither "." nor ".."
-then resolve the target as a namespace stream backing
-else resolve the target as a filesystem path
+then resolve the target as a resource-reference stream backing
+else resolve the target as a path (alias path or filesystem path)
 ```
 
-The consequence is that every real file stays addressable on every mounted
-volume — nothing on disk is consulted for a namespace target, and a path
-escape always exists:
+The "character after `:` is not `/`" clause keeps the two `:` worlds apart:
+a `DRIVES.md` path alias is always written `Alias:/path` (the `:` is
+immediately followed by `/`), so it resolves as a path, while a resource
+reference's selector never begins with `/`. The consequence is that every
+real file stays addressable on every mounted root — nothing on disk is
+consulted for a resource target, and a path escape always exists:
 
-| target            | resolves to                                              |
-|-------------------|----------------------------------------------------------|
-| `sys:random`      | namespace stream backing (relative, registered prefix)   |
-| `/sys:random`     | absolute filesystem path (not a relative path)           |
-| `./sys:random`    | filesystem path (first component is `.`)                 |
-| `foo/sys:random`  | filesystem path (first component `foo` has no `:`)       |
-| `foo:bar`         | filesystem path (`foo` is not a registered namespace)    |
+| target            | resolves to                                                  |
+|-------------------|--------------------------------------------------------------|
+| `sys:random`      | resource-reference stream backing (registered namespace)     |
+| `Home:/notes`     | path alias (prefix followed by `/`, `plans/DRIVES.md`)       |
+| `/sys:random`     | absolute filesystem path (not a relative path)               |
+| `./sys:random`    | filesystem path (first component is `.`)                     |
+| `foo/sys:random`  | filesystem path (first component `foo` has no `:`)           |
+| `foo:bar`         | filesystem path (`foo` is not a registered namespace)        |
 
 This matters because `:` is a legal filename byte on ext2/3/4 and POSIX
 volumes (only `NUL` and `/` are forbidden), so no printable sigil can be
 "reserved" on disk. The rule reserves nothing on any filesystem; it only
-gives a registered prefix a meaning in *target position*, and a real file
+gives a registered namespace a meaning in *target position*, and a real file
 named `sys:random` is always reachable as `./sys:random` or when quoted.
 
 ### Well-known streams
 
-The registered namespace targets resolve to a **closed** set of stream
-backings defined once in `lib/abi` as a versioned, hashed,
-frozen-on-release enum (`AGENTS.md` §9, §23.2) — never a string-keyed
-device table:
+The `sys:` byte-stream targets resolve to a **closed** set of stream backings
+defined once in `lib/abi` as a versioned, hashed, frozen-on-release enum
+(`AGENTS.md` §9, §23.2) — never a string-keyed device table:
 
 | target        | read behavior         | write behavior        |
 |---------------|-----------------------|-----------------------|
@@ -392,19 +452,27 @@ entropy source, PRNG, or seeding path.
 
 ### Capabilities and failure
 
-Acquiring a stream backing is a capability-checked syscall that returns a
-descriptor wired to the chosen fd (`AGENTS.md` §5.4, §20); `null`, `zero`,
-and `full` need no special capability, and `random` rides the §22 API's
-own checks. There is no ambient "open any device" surface (`AGENTS.md`
-§4).
+Resolving a resource reference is a capability-checked operation that returns
+a typed capability/descriptor, never a bare pathname (`ALIAS.md` §3.11,
+§4); the shell supplies the redirection's direction as the resolve intent
+(`Read` for `<`, `Write` for `>`/`>>`). The `sys:` byte streams need no
+special capability beyond the §22 checks for `random`; other namespaces carry
+their own capability and identity requirements (`ALIAS.md` §6). A destructive
+target in non-interactive execution MUST carry an identity guard
+(`ALIAS.md` §6.5); the shell MUST NOT silently resolve an unguarded
+destructive resource. There is no ambient "open any device" surface
+(`AGENTS.md` §4).
 
 Resolution MUST fail closed (`AGENTS.md` §5.4):
 
-- A target with a **registered** namespace prefix but an **unknown leaf**
-  (e.g. `sys:nul`) MUST be a hard error. The shell MUST NOT fall back to
+- A target with a **registered** namespace prefix but an **unknown or
+  non-stream** selector/facet (e.g. `sys:nul`, or a non-stream `info:` answer
+  in target position) MUST be a hard error. The shell MUST NOT fall back to
   creating a file, so a typo can never silently produce junk on disk.
-- An **unregistered** prefix is not special: it is an ordinary filesystem
-  path, exactly as the resolution rule states.
+- An identity guard that does not match, is ambiguous, or is stale MUST fail
+  with the `ALIAS.md` diagnostic rather than resolving (`ALIAS.md` §9.3).
+- An **unregistered** prefix is not special: it is a path, exactly as the
+  resolution rule states.
 
 ## Standard streams
 
@@ -1056,6 +1124,72 @@ known after boundary: text
 
 It MUST NOT invent fields.
 
+## Paths, roots, and the current directory
+
+RustOS storage is a **forest of named roots**, not one fixed Unix tree
+(`plans/DRIVES.md`). The shell treats paths accordingly, and it never
+hard-codes a top-level directory set such as `/System`, `/Users`, `/Apps`,
+`/Storage`; those are default *view entries* backed by the path aliases
+`System:`, `Users:`, `Apps:`, `Storage:`, not a frozen list the shell knows.
+
+### Accepted path forms
+
+A path argument or path-position token MAY be any of:
+
+```text
+Home:/Documents/spec.md          # user shorthand: an alias path (DRIVES.md)
+id::<volume-id>/snapshots/2026    # stable canonical root + inner path
+/Users/ian/Documents             # synthetic session view path (compatibility)
+../src                           # relative path inside the current root
+Documents/report.md              # relative path inside the current directory
+```
+
+All path forms are parsed by the **single shared path parser** (`DRIVES.md`
+§16) used by the kernel, drivers, GUI, and shell alike; the shell MUST NOT
+add a second path parser (`AGENTS.md` §2.2). Parsing a name into an object is
+only a name-to-object step: every open/read/write still enforces inode
+permissions, ACLs, capability gates, mount flags, and MAC policy
+(`AGENTS.md` §5.3).
+
+### `cd` and the current directory
+
+`cd` accepts alias paths, the synthetic view path, and relative paths:
+
+```sh
+cd Home:/Documents
+cd System:/Kernel
+cd /Users/ian/Documents      # synthetic view path
+cd ../src                    # relative to current root
+```
+
+A malformed selector such as `cd Home:Documents` (alias without `:/`) or
+`cd C:Users` (drive-letter style) MUST fail closed, not guess. There is no
+per-drive current directory: the shell has exactly **one** current directory,
+held as a root handle plus a directory handle (`DRIVES.md` §17.2). A relative
+path resolves inside the current root; it can never silently cross to another
+root.
+
+The current directory MUST survive the synthetic `/` view being absent,
+hidden, or unhealthy: a process holding a root + directory handle keeps
+working even when no `/` view or `Storage:` catalog is present
+(`DRIVES.md` §3.2).
+
+### Prompt display
+
+The prompt SHOULD display the current location as an alias path when an alias
+maps to the current root, falling back to the stable ID otherwise
+(`DRIVES.md` §17.1):
+
+```text
+Home:/Projects/RustOS>
+System:/Kernel>
+id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/>
+```
+
+The prompt is REPL `stdout` text rendered through the shared terminal stack
+(see the `Console` seam); it is never written to a discovered console device
+(`AGENTS.md` §20).
+
 ## Tab expansion and completion
 
 Tab expansion is a required feature of the interactive shell. It SHOULD feel
@@ -1073,6 +1207,12 @@ zsh-like but use schema metadata where available.
 6. Completion MUST mark inferred, stale, partial, and unknown schemas.
 7. Completion MUST degrade gracefully to path/word completion when schema is
    unavailable.
+8. Completion of a resource reference (`plans/ALIAS.md`) MUST be
+   namespace-aware and command-intent-aware: for a destructive command it
+   MUST insert an identity-guarded reference (e.g. `format disk:backup@7K2M`),
+   and it MUST NOT hide an identity mismatch (`ALIAS.md` §15.1). Resolving a
+   guard or listing candidates for display is a read-only step that obeys
+   principles 1–3.
 
 ### Completion result model
 
@@ -1100,7 +1240,8 @@ At command position:
 <TAB>
 ```
 
-Suggest builtins, functions, aliases, external commands, and executable paths.
+Suggest builtins, functions, command aliases, external commands, and
+executable paths.
 
 After a command option prefix:
 
@@ -1246,9 +1387,38 @@ cmd 2> <TAB>
 cmd 3> <TAB>
 ```
 
-Suggest paths. For `3>`, the completion menu SHOULD annotate the target as a
-`stdinfo` JSONL capture and MAY prefer `.jsonl` names, but it MUST still allow
-any valid path.
+Suggest paths, alias paths (`Home:/`, `System:/`, …), and — where a stream
+facet applies — registered resource namespaces (`sys:null`, `tty:debug`, …).
+For `3>`, the completion menu SHOULD annotate the target as a `stdinfo` JSONL
+capture and MAY prefer `.jsonl` names, but it MUST still allow any valid path.
+
+For a resource reference (`plans/ALIAS.md`):
+
+```sh
+cmd < sys:<TAB>
+disk info disk:<TAB>
+format disk:backup<TAB>
+```
+
+Within a namespace, suggest the namespace's selectors and, for destructive
+intents, complete to a guarded reference and show resource cards rather than
+bare names (`ALIAS.md` §15.1):
+
+```text
+disk:backup@7K2M      Samsung SSD 870 EVO   4 TiB   pinned, non-removable
+disk:installer@P91Q   SanDisk Ultra USB     32 GiB  removable, empty
+```
+
+For an alias path (`plans/DRIVES.md`):
+
+```sh
+cd <TAB>
+cd Home:/<TAB>
+```
+
+Suggest the path aliases in scope and then entries inside the selected root.
+Resource references and alias paths are completed through the same shared
+parsers the shell uses to resolve them, never a second completion-only parser.
 
 For file descriptors:
 
@@ -1423,6 +1593,16 @@ The shell MAY implement `schema`, `fields`, `headers`, `views`, `describe`,
 `render`, and `save` as optimized builtins, but the corresponding user-visible
 programs MUST exist.
 
+The resource and storage management verbs — `show`, `describe`, `watch`,
+`resolve`, `pin`, `unpin` and the namespace-specific wrappers `disk`, `tty`,
+`stats`, `vol`, etc. (`plans/ALIAS.md` §15.4), and the storage/alias tools of
+`plans/DRIVES.md` — are **external userland programs**, not shell builtins:
+they resolve resources and mutate persistent alias state through
+capability-checked services, which is not shell-process state. The shell only
+parses their resource-reference and alias-path arguments (through the shared
+parsers) and completes them (see Tab expansion and completion); it MUST NOT
+reimplement resolution or alias storage in-process.
+
 ## Job control
 
 A backgrounded pipeline (`&`) is added to the job table as running and prints:
@@ -1491,11 +1671,23 @@ should still implement and test the target semantics described here.
 - fd 3 capture, close, append, and best-effort no-consumer behavior
 - redirection target namespace resolution: `sys:null`, `sys:zero`,
   `sys:full`, and `sys:random` resolve to stream backings
-- namespace-vs-path disambiguation: `/sys:x`, `./sys:x`, and `foo/sys:x`
-  resolve to filesystem paths, while bare `sys:x` resolves to a namespace
+- resource-reference vs. path-alias vs. filesystem-path disambiguation:
+  `/sys:x`, `./sys:x`, and `foo/sys:x` resolve to filesystem paths, bare
+  `sys:x` resolves to a resource reference, and `Home:/x` resolves to a path
+  alias (prefix followed by `/`), not a stream backing
+- a non-stream resource in target position (e.g. an `info:`/`stats:` answer)
+  fails closed rather than resolving
 - an unknown leaf under a registered namespace (`sys:nul`) fails closed
   without creating a file
 - an unregistered prefix (`foo:bar`) resolves to a filesystem path
+- `cd` accepts alias paths (`Home:/Documents`), the synthetic view path
+  (`/Users/ian`), and relative paths, and fails closed on malformed selectors
+  (`Home:Documents`, `C:Users`); the shell keeps one current directory as a
+  root+directory handle with no per-drive current directory
+- prompt display renders an alias path when an alias maps to the current
+  root and the stable ID otherwise
+- resource-reference completion is namespace-aware, inserts an identity guard
+  for a destructive command, and does not hide an identity mismatch
 - parse-error fail-closed behavior
 - builtin behavior and status propagation
 - job control table behavior
@@ -1537,7 +1729,22 @@ views { ls; }
 ls | select name,size | render csv --header >files.csv
 ```
 
+It speaks the RustOS storage and resource namespaces instead of Unix device
+files and a single root tree:
+
+```sh
+cd Home:/Projects/RustOS         # alias path into a named root (DRIVES.md)
+cat Backup:/snapshots/latest/log
+head -c 64 < sys:random          # a resource reference's stream facet (ALIAS.md)
+disk info disk:backup@7K2M       # an identity-guarded resource reference
+```
+
 `stdout` carries primary data. `stderr` carries diagnostics. `stdinfo` on fd 3
 carries optional advisory JSONL. Native tools may preserve typed records across
 pipes, but files, terminals, and legacy tools get stable rendered text unless
 the user explicitly asks for another representation.
+
+Path spelling and named roots are owned by `plans/DRIVES.md`, typed resource
+references by `plans/ALIAS.md`, and the terminal vocabulary by
+`plans/CURSES.md`; this shell consumes all three through their single shared
+parsers/libraries and never reimplements them.
