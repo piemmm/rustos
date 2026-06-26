@@ -13,6 +13,7 @@ use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use crate::frame::{FrameAllocator, PAGE_SIZE};
 use crate::phys::SimPhysMap;
 use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
+use core::cell::Cell;
 
 /// Physical base of the usable RAM region in the synthetic map. Frame
 /// 16 leaves the low frames free for hypothetical reserved regions,
@@ -56,6 +57,48 @@ fn pool_with_capacity<'a>(
         sim,
     )
     .expect("pool constructs")
+}
+
+struct RecordingPhysMap<'a> {
+    inner: &'a SimPhysMap,
+    calls: Cell<usize>,
+    last_phys: Cell<u64>,
+    last_len: Cell<usize>,
+}
+
+impl<'a> RecordingPhysMap<'a> {
+    fn new(inner: &'a SimPhysMap) -> Self {
+        Self {
+            inner,
+            calls: Cell::new(0),
+            last_phys: Cell::new(0),
+            last_len: Cell::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.get()
+    }
+
+    fn last_phys(&self) -> u64 {
+        self.last_phys.get()
+    }
+
+    fn last_len(&self) -> usize {
+        self.last_len.get()
+    }
+}
+
+impl PhysMap for RecordingPhysMap<'_> {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        self.inner.translate(phys, len)
+    }
+
+    fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+        self.calls.set(self.calls.get() + 1);
+        self.last_phys.set(phys.as_u64());
+        self.last_len.set(len);
+    }
 }
 
 #[test]
@@ -251,6 +294,46 @@ fn free_zeroes_the_physical_frame() {
     // handed to any live allocation.
     let view = unsafe { core::slice::from_raw_parts(dev.as_ptr(), PAGE_SIZE) };
     assert!(view.iter().all(|&b| b == 0), "free must zero the frame");
+}
+
+#[test]
+fn alloc_cleans_direct_map_alias_after_zeroing() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let rec = RecordingPhysMap::new(&sim);
+    let mut pool = DmaPool::new(
+        AddressSpace::new(HostPageTable::new()),
+        VirtAddr::new(0x1000_0000),
+        8,
+        &frames,
+        &rec,
+    )
+    .expect("pool constructs");
+    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    assert_eq!(rec.calls(), 1);
+    assert_eq!(rec.last_phys(), buf.phys().as_u64());
+    assert_eq!(rec.last_len(), PAGE_SIZE);
+}
+
+#[test]
+fn free_cleans_direct_map_alias_after_zeroing() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let rec = RecordingPhysMap::new(&sim);
+    let mut pool = DmaPool::new(
+        AddressSpace::new(HostPageTable::new()),
+        VirtAddr::new(0x1000_0000),
+        8,
+        &frames,
+        &rec,
+    )
+    .expect("pool constructs");
+    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    rec.calls.set(0);
+    pool.free(buf).expect("free");
+    assert_eq!(rec.calls(), 1);
+    assert_eq!(rec.last_phys(), buf.phys().as_u64());
+    assert_eq!(rec.last_len(), PAGE_SIZE);
 }
 
 #[test]

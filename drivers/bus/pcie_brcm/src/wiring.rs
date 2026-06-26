@@ -383,8 +383,9 @@ pub fn publish_usb_function(
     // so `hw_emit_node` admits it (no ambient authority). Best-effort: a
     // platform with no MSI controller (`alloc_msi` → `NotImplemented`) or a
     // function with no MSI capability (`route_msi` → `NotFound`) simply
-    // publishes the node without an IRQ resource, leaving the matched driver
-    // to fall back to its poll path rather than blocking enumeration.
+    // publishes the node without an IRQ resource; the matched driver then
+    // waits only for URB submissions and cannot complete interrupt-driven
+    // transfers until hardware supplies an IRQ-capable path.
     if let Ok(allocation) = host.alloc_msi() {
         let message = MsiMessage {
             address: allocation.address,

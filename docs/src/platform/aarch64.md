@@ -1372,26 +1372,22 @@ processing the command ring at all. One contributor is a **cache
 coherency** gap: the BCM2711 PCIe root complex is **not** I/O-coherent
 (it does not snoop the CPU caches — this is why the VideoCore mailbox
 buffer and the HVS framebuffer already perform explicit cache
-maintenance), yet the xHCI device-shared DMA region is plain cacheable,
-identity-mapped RAM whose `DmaRegion for DmaSlab` read/write did **no**
-maintenance, so a command-ring TRB the CPU wrote could sit in a dirty
-cache line the controller never saw (and symmetrically the CPU could read
-a stale event ring). `DmaSlab` therefore gained an optional
-`SlabCoherencyFn` (`with_coherency`) and a `sync_range(offset, len)` that
-cleans **and** invalidates the touched range to the point of coherency;
-the USB driver's `DmaRegion` impl invalidates **before** every read and
-cleans **after** every write, and the kernel host
-(`keyboard_service::FrameDmaHost`) wires the aarch64
-`clean_invalidate_dcache_range` (`dc civac` + `dsb`) into every slab it
-mints (a slab minted without a shim — coherent interconnect / host test —
-skips maintenance). Host-proven by
-`dma_slab_sync_range_brackets_only_in_bounds_ranges_through_the_hook`
-(lib/virtio) and
-`dma_slab_region_brackets_writes_and_reads_with_cache_maintenance`
-(lib/usb). Necessary, but on its own **not sufficient**: a rebuilt
-image carrying the maintenance still captured `4126 stage_hex=2
-completion_hex=0`, so the controller had a second reason not to consume
-the command ring.
+maintenance). The user-space driver maps its device-shared DMA slab
+Normal-Non-Cacheable, but the kernel zeroes each allocated/freeing carve
+through the cacheable direct-map alias; those dirty zero cache lines must
+be cleaned and invalidated before the controller or a later owner uses the
+same frames. The production `PhysMap` therefore exposes a
+`clean_invalidate(phys, len)` hook; `DmaPool` calls it after zeroing on
+allocation and free, and the aarch64 configured identity map routes it to
+`clean_invalidate_dcache_range` (`dc civac` + `dsb`). Coherent ports and
+host tests keep the no-op default. Host-proven by
+`alloc_cleans_direct_map_alias_after_zeroing` and
+`free_cleans_direct_map_alias_after_zeroing` in `kernel/mem`, plus the
+existing `DmaSlab` coherency tests for user-space slab read/write
+bracketing. Necessary, but on its own **not sufficient**: a rebuilt image
+carrying the earlier user-slab maintenance still captured `4126
+stage_hex=2 completion_hex=0`, so the controller had a second reason not
+to consume the command ring.
 
 **Scratchpad buffers.** That residual was the missing
 xHCI **scratchpad buffers**. `HCSPARAMS2` carries a *Max Scratchpad

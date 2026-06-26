@@ -508,6 +508,7 @@ impl DmaWindowMap {
         for b in data.iter_mut() {
             *b = 0;
         }
+        phys.clean_invalidate(start_frame.start(), data_len);
 
         // Mark every slot — guard and data alike — as used so no
         // future allocation can overlap them.
@@ -583,6 +584,7 @@ impl DmaWindowMap {
         unsafe { slice_within(ptr.as_ptr(), data_len, 0, data_len) }
             .ok_or(DmaError::DirectMap)?
             .zeroize();
+        phys.clean_invalidate(record.start_frame.start(), data_len);
 
         // 2. Unmap data pages.
         for i in 0..data_pages {

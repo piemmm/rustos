@@ -11,7 +11,7 @@ use core::cell::RefCell;
 
 use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, DeviceDescriptor, DmaRegion, EnumStage,
-    InterfaceInfo, UsbDevice, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
+    InterfaceInfo, UsbDevice, EVENT_RING_SEGMENT_MIN_TRBS, PRIMED_REPORTS, REPORT_LEN, RING_TRBS,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -35,6 +35,14 @@ const MOCK_DMA_BASE: u64 = 0x0010_0000;
 const MOCK_DMA_LEN: usize = 0x2000;
 /// The mock's 64-byte contexts (its `HCCPARAMS1` sets CSZ).
 const MOCK_CTX_SIZE: usize = 64;
+
+#[test]
+fn event_ring_segment_meets_xhci_minimum() {
+    let ring_trbs = core::hint::black_box(RING_TRBS);
+    let event_min = core::hint::black_box(EVENT_RING_SEGMENT_MIN_TRBS);
+    assert!(ring_trbs >= event_min);
+    assert_eq!(ring_trbs, 16);
+}
 
 /// Memory shared between the engine's [`DmaRegion`] and the mock
 /// controller's device model — the in-memory stand-in for DMA.

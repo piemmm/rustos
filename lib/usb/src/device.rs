@@ -67,7 +67,12 @@ pub trait DmaRegion {
 /// scalable capacities: each ring only ever holds
 /// the single in-flight command or control TD plus the primed
 /// interrupt TRBs below.
-pub const RING_TRBS: usize = 8;
+pub const RING_TRBS: usize = 16;
+
+/// Minimum TRBs in an xHCI event-ring segment.
+pub const EVENT_RING_SEGMENT_MIN_TRBS: usize = 16;
+
+const _: () = assert!(RING_TRBS >= EVENT_RING_SEGMENT_MIN_TRBS);
 
 /// Interrupt-IN transfers kept primed on the transfer ring, so the
 /// device always has somewhere to deliver the next report.

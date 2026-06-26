@@ -39,6 +39,11 @@ pub trait PhysMap {
     /// Map `[phys, phys + len)` to a CPU pointer, or [`None`] if the
     /// range is not covered by the direct map.
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>>;
+
+    /// Clean and invalidate the direct-map alias of `[phys, phys + len)` to
+    /// the point of coherency after the kernel has written bytes that a
+    /// non-coherent DMA master will also access.
+    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {}
 }
 
 /// The kernel's direct physical map: physical `p` is reachable at the

@@ -114,6 +114,15 @@ impl PhysMap for ConfiguredIdentityPhysMap {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
         DirectPhysMap::identity((configured_identity_gigapages() as u64) << 30).translate(phys, len)
     }
+
+    fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+        if let Some(ptr) = self.translate(phys, len) {
+            rustos_arch_aarch64::kernel_arch::clean_invalidate_dcache_range(
+                ptr.as_ptr() as usize,
+                len,
+            );
+        }
+    }
 }
 
 /// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table
