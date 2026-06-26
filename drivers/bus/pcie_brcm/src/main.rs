@@ -87,16 +87,20 @@ mod program {
     const EXIT_BRINGUP_FAILED: i32 = 82;
 
     /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `hw_emit_node` trap, so a missing grant fails fast without
-    /// a round trip. It mirrors the authority this driver needs — mapping the
-    /// controller window and the BAR probe (`CAP_MMIO_MAP`) and publishing the
-    /// enumerated child node (`CAP_HW_EMIT`). The kernel is the authority and
-    /// re-checks every trap regardless: claiming a
+    /// `mmio_map` / `msi_alloc` / `hw_emit_node` trap, so a missing grant fails
+    /// fast without a round trip. It mirrors the authority this driver needs —
+    /// mapping the controller window and the BAR probe (`CAP_MMIO_MAP`),
+    /// allocating the controller's MSI vector so the matched xHCI driver parks
+    /// on its completion interrupt rather than busy-polling (`CAP_IRQ_BIND`,
+    /// which the `msi_alloc` trap is gated on), and publishing the enumerated
+    /// child node with its forwarded grants (`CAP_HW_EMIT`). The kernel is the
+    /// authority and re-checks every trap regardless: claiming a
     /// capability the process was not granted only fails the trap kernel-side,
     /// never widens authority.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
         caps.insert(CapabilityId::MMIO_MAP);
+        caps.insert(CapabilityId::IRQ_BIND);
         caps.insert(CapabilityId::HW_EMIT);
         caps
     }

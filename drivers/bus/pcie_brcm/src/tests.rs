@@ -909,6 +909,10 @@ struct StubPciBus {
     /// The PCIe-bus base `map_bar_window` reports for the BAR (so a test can
     /// place it inside or outside the outbound window).
     bar_bus_base: u64,
+    /// Whether the function advertises an MSI capability `route_msi` can
+    /// program; `false` models a function with no MSI capability (the
+    /// default trait behaviour: `Unsupported`).
+    route_msi_ok: bool,
     /// The assign/enable/map call sequence, in order.
     calls: RefCell<Vec<&'static str>>,
 }
@@ -918,6 +922,7 @@ impl StubPciBus {
         Self {
             has_usb: true,
             bar_bus_base,
+            route_msi_ok: false,
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -972,6 +977,15 @@ impl PciBus for StubPciBus {
         Ok(0)
     }
 
+    fn route_msi(&self, _bdf: u64, _message: rustos_abi::MsiMessage) -> Result<(), DriverError> {
+        self.calls.borrow_mut().push("route_msi");
+        if self.route_msi_ok {
+            Ok(())
+        } else {
+            Err(DriverError::NotFound)
+        }
+    }
+
     fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
         // Identity is unassigned (the kernel sets it on publish, D5b.2a); the
         // node carries the VL805's `vendor:device:class` match key.
@@ -986,6 +1000,9 @@ impl PciBus for StubPciBus {
 /// and captures the node published through [`DriverHost::emit_node`].
 struct RecordingHost {
     emit_ok: bool,
+    /// The virtual line `alloc_msi` returns, or `None` to model a host with
+    /// no MSI facility (the default trait behaviour: `Unsupported`).
+    msi_line: Option<u32>,
     mapper: MockMapper,
     emitted: RefCell<Option<HwNode>>,
 }
@@ -994,6 +1011,7 @@ impl RecordingHost {
     fn new(emit_ok: bool) -> Self {
         Self {
             emit_ok,
+            msi_line: None,
             mapper: MockMapper { grant: true },
             emitted: RefCell::new(None),
         }
@@ -1002,7 +1020,10 @@ impl RecordingHost {
 
 impl DriverHost for RecordingHost {
     fn has_capability(&self, cap: CapabilityId) -> bool {
-        matches!(cap, CapabilityId::MMIO_MAP | CapabilityId::HW_EMIT)
+        matches!(
+            cap,
+            CapabilityId::MMIO_MAP | CapabilityId::IRQ_BIND | CapabilityId::HW_EMIT
+        )
     }
 
     fn kind(&self) -> DriverKind {
@@ -1019,6 +1040,13 @@ impl DriverHost for RecordingHost {
         }
         *self.emitted.borrow_mut() = Some(node);
         Ok(())
+    }
+
+    fn alloc_msi(&self) -> Result<rustos_abi::MsiAllocation, DriverError> {
+        match self.msi_line {
+            Some(line) => Ok(rustos_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, line)),
+            None => Err(DriverError::Unsupported),
+        }
     }
 }
 
@@ -1097,6 +1125,54 @@ fn publish_usb_function_propagates_a_refused_emit() {
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::PermissionDenied)
     );
+}
+
+#[test]
+fn publish_usb_function_forwards_the_msi_line_as_an_irq_grant() {
+    // When the host allocates an MSI vector and the function's MSI capability
+    // is programmed, the published node carries the resulting virtual line as
+    // an `Irq` grant request, so the matched xHCI driver parks on its
+    // completion interrupt rather than busy-polling. The line is covered by
+    // the grant `alloc_msi` minted, so the kernel's `hw_emit_node` admits it.
+    const MSI_LINE: u32 = 0x4A;
+    let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
+    bus.route_msi_ok = true;
+    let mut host = RecordingHost::new(true);
+    host.msi_line = Some(MSI_LINE);
+    wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
+
+    // The MSI capability was programmed before the node was published.
+    assert!(bus.calls.borrow().contains(&"route_msi"));
+    let emitted = host.emitted.borrow();
+    let emitted = emitted.as_ref().expect("a node was emitted");
+    let irq = emitted
+        .resources()
+        .iter()
+        .find(|r| r.kind() == Some(HwResourceKind::Irq))
+        .expect("an Irq grant");
+    assert_eq!(irq.base(), u64::from(MSI_LINE));
+    assert_eq!(irq.length(), 1);
+}
+
+#[test]
+fn publish_usb_function_omits_the_irq_grant_when_msi_is_unavailable() {
+    // Best-effort: a function with no programmable MSI capability
+    // (`route_msi` → `NotFound`) still publishes the node — without an `Irq`
+    // grant — rather than blocking enumeration, leaving the matched driver to
+    // fall back to its poll path. The vector `alloc_msi` minted is simply not
+    // forwarded.
+    let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
+    bus.route_msi_ok = false;
+    let mut host = RecordingHost::new(true);
+    host.msi_line = Some(0x4A);
+    wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
+
+    let emitted = host.emitted.borrow();
+    let emitted = emitted.as_ref().expect("a node was emitted");
+    assert!(emitted
+        .resources()
+        .iter()
+        .all(|r| r.kind() != Some(HwResourceKind::Irq)));
 }
 
 #[test]

@@ -240,14 +240,19 @@ pub fn service_caps() -> CapabilitySet {
 /// *own* minimal bring-up authority): the kthread, standing in for
 /// `devmgr`, must be able to hand an autoloaded driver the resource
 /// capabilities its class needs, but never holds them ambiently itself. It is
-/// [`service_caps`] plus [`CapabilityId::INPUT_INJECT`],
-/// [`CapabilityId::IRQ_BIND`], and [`CapabilityId::IPC_BIND_PRIVILEGED`], so an
-/// autoloaded driver whose signed manifest requests one of them can be granted
-/// it: an input driver (e.g. the virtio-input keyboard) the keyboard-injection
-/// authority `key_inject` requires and the `irq_bind`/`irq_wait` authority its
-/// interrupt-driven event loop parks on, and a bus *service* driver (e.g. the
-/// `VideoCore` `vcmailbox` mailbox) the privilege to bind the restricted-sender
-/// endpoint its consumers call it through. A storage or other driver — whose
+/// [`service_caps`] plus the resource capabilities an autoloaded driver's
+/// class may legitimately request: [`CapabilityId::INPUT_INJECT`] and
+/// [`CapabilityId::IRQ_BIND`] for an input driver (e.g. the virtio-input
+/// keyboard) — the keyboard-injection authority `key_inject` requires and the
+/// `irq_bind`/`irq_wait` authority its interrupt-driven event loop parks on;
+/// [`CapabilityId::IPC_BIND_PRIVILEGED`] for a bus *service* driver (e.g. the
+/// `VideoCore` `vcmailbox` mailbox) to bind the restricted-sender endpoint its
+/// consumers call it through; [`CapabilityId::HW_EMIT`] and
+/// [`CapabilityId::MAILBOX`] for the user-space USB bus drivers (`pcie_brcm`,
+/// `vl805`) that publish enumerated devices and reload controller firmware;
+/// and [`CapabilityId::SHM`] / [`CapabilityId::IPC_ENDPOINT`] for the
+/// USB host-controller driver and its HID class driver to stand up and submit
+/// on the per-interface URB transport. A storage or other driver — whose
 /// manifest does not request them — receives nothing extra (the per-driver
 /// intersection still binds — no ambient authority).
 /// The driver never receives `CAP_DRV_LOAD`: it is the *caller's* key to the
@@ -295,6 +300,18 @@ pub fn autoload_caps() -> CapabilitySet {
     // still binds, so a driver that does not request it receives nothing
     // extra (no ambient authority).
     caps.insert(CapabilityId::LOG_EMIT);
+    // The USB host-controller driver (`drivers/bus/usb/xhci`) stands up the
+    // per-interface URB transport seam: it creates the shared URB data buffer
+    // (`CAP_SHM`) and binds the restricted-sender URB endpoint, minting the
+    // grant it forwards onto the interface node so the class driver can submit
+    // URBs. The bound class driver (the HID keyboard) maps that forwarded
+    // shared buffer (`CAP_SHM`) and submits URBs on the endpoint
+    // (`CAP_IPC_ENDPOINT`). The delegatable set carries both so such signed
+    // drivers can be granted them; a driver that does not request them
+    // receives nothing extra (the per-driver manifest intersection still
+    // binds, so no ambient authority).
+    caps.insert(CapabilityId::SHM);
+    caps.insert(CapabilityId::IPC_ENDPOINT);
     caps
 }
 
@@ -728,6 +745,14 @@ mod tests {
             // kthread itself (no ambient authority).
             CapabilityId::HW_EMIT,
             CapabilityId::MAILBOX,
+            // The USB host-controller driver creates the shared URB data
+            // buffer (`CAP_SHM`); the HID class driver maps that forwarded
+            // buffer (`CAP_SHM`) and submits URBs on its interface's transport
+            // endpoint (`CAP_IPC_ENDPOINT`). Both are delegatable to a signed
+            // manifest that requests them and neither is held by the kthread
+            // itself (no ambient authority).
+            CapabilityId::SHM,
+            CapabilityId::IPC_ENDPOINT,
         ] {
             assert!(!service.contains(cap));
             assert!(autoload.contains(cap));

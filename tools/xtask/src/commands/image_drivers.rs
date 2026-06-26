@@ -143,8 +143,11 @@ pub fn build_vcmailbox_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
 /// Build and sign the BCM2711 PCIe root-complex bus-driver bundle.
 ///
 /// It maps its discovered register window (`CAP_MMIO_MAP`), trains the link,
-/// assigns the VL805 BAR, and publishes the enumerated USB host function into
-/// the live hardware tree (`CAP_HW_EMIT`) — and nothing more (no ambient authority;). Carries
+/// assigns the VL805 BAR, allocates the controller's MSI vector so the matched
+/// xHCI driver parks on its completion interrupt rather than busy-polling
+/// (`CAP_IRQ_BIND`, which the `msi_alloc` trap is gated on), and publishes the
+/// enumerated USB host function into the live hardware tree (`CAP_HW_EMIT`) —
+/// and nothing more (no ambient authority). Carries
 /// `rustos_drv_bus_pcie_brcm::BIND_KEYS`, so it autoloads against the
 /// discovered `brcm,bcm2711-pcie` node.
 ///
@@ -155,7 +158,11 @@ pub fn build_pcie_brcm_bundle(ctx: &Context) -> Result<Vec<u8>, String> {
     build_bundle(
         ctx,
         "rustos-drv-bus-pcie-brcm",
-        &[CapabilityId::MMIO_MAP, CapabilityId::HW_EMIT],
+        &[
+            CapabilityId::MMIO_MAP,
+            CapabilityId::IRQ_BIND,
+            CapabilityId::HW_EMIT,
+        ],
         rustos_drv_bus_pcie_brcm::BIND_KEYS,
     )
 }
