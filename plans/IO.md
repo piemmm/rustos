@@ -1,4 +1,4 @@
-# IO.md — First-party Rust I/O abstraction over the standard streams
+# IO.md — First-party Rust I/O abstraction over the descriptor table
 
 This is a staged build plan for RustOS's userland I/O **library** layer. It is
 **binding under `AGENTS.md`**; read `AGENTS.md` and `PLAN.md` first. Every rule
@@ -9,9 +9,11 @@ vocabulary, no duplication).
 
 **Note:** `abi-v1` is *not* frozen, despite what `AGENTS.md` / `PLAN.md` say —
 the standing task direction supersedes that language. This plan, however, adds
-**no** ABI surface: it is a pure-Rust convenience layer over the existing
-`abi-v1` standard-stream syscalls, so `lib/abi`, the syscall table, and the C
-header are untouched by it.
+**no** ABI surface of its own: it is a pure-Rust convenience layer over the
+existing `abi-v1` `stream_read` / `stream_write` traps, so `lib/abi`, the
+syscall table, and the C header are untouched by it. The descriptor-*producing*
+ABI it consumes (opening a file or a resource reference to a new fd) is owned by
+its sibling plans, not invented here (§4, §5).
 
 ## 0. Why this exists
 
@@ -29,7 +31,8 @@ RustOS equivalent of the `std::io` surface that real shells and tools program
 against instead of hand-marshalling byte slices and re-looping every short
 read/write themselves:
 
-- a `Read` / `Write` trait layer (over the §20 streams, never over a device);
+- a `Read` / `Write` trait layer (over a stream descriptor, never over a
+  device);
 - buffered readers/writers so a tool is not one syscall per byte;
 - line reading for the REPL (`stdin` → lines);
 - `write!` / `writeln!`-style formatting into a stream without a heap
@@ -38,27 +41,105 @@ read/write themselves:
 Without this each program re-implements the same short-write loop and the same
 "read until newline" logic — exactly the duplication `AGENTS.md` §2.2 forbids.
 
+A second, equally important reason this plan exists is **groundwork**. The
+standard-stream floor (§20) is the *first* user of the descriptor table, not
+the only one. Filesystem reads/writes (`plans/DRIVES.md`), resource-reference
+streams such as `sys:null` / `tty:` / `disk:` (`plans/ALIAS.md`,
+`plans/SHELL.md`), USB-storage-backed files, serial/tty backings, and pipes are
+all *future* fd backings the kernel resolves the same descriptors against. If
+this layer is bound to "the four standard streams" it will force a **second**
+I/O vocabulary the day files or devices land — the §2.2 defect. So this layer
+is designed **fd-generic from IO1**: one `Read`/`Write` definition that the
+standard streams, opened files, and opened resource references all reuse. This
+plan does not *create* those other backings; it makes sure the byte-movement
+vocabulary they share already exists and has exactly one definition.
+
+## 0a. Status — what already exists vs. what this plan adds
+
+The descriptor-table **floor** this layer sits on is **already implemented**
+(`PLAN.md` Stage 6); this plan adds only the Rust library on top. Marked so a
+future reader does not re-do landed work (`AGENTS.md` task direction — mark
+done items):
+
+- **DONE — `abi-v1` standard-stream syscalls.** `stream_write(fd, buf, len)`
+  and `stream_read(fd, buf, len)` exist in `lib/abi`'s syscall table and
+  **already take an arbitrary `fd`** resolved against the per-process
+  descriptor table (`kernel/syscall`). They are *not* hard-wired to fd 0/1/2/3
+  — the wrappers are. Consequence: a fd-generic `Read`/`Write` needs **no new
+  syscall** (see §4).
+- **DONE — per-process descriptor table + per-console sessions.** Each
+  descriptor records its kernel stream backing; the spawner establishes a
+  child's fd 0/1/2/3 at spawn time (`spawn`'s console selector,
+  `console_count`), and the read line discipline (echo, CR/LF) is the kernel's
+  (`stream_echo`). Current backings are the discovered text consoles
+  (video + UART) only.
+- **DONE — `lib/rt` thin wrappers.** `rustos_rt::{stdin, stdout, stderr,
+  stdinfo, set_echo}` marshal byte slices over the traps. `lib/rt` registers
+  the process heap (`AGENTS.md` §25), so `alloc` is available to this layer.
+- **DONE — `stdinfo` framing.** The `StdInfoRecord` JSONL model lives in
+  `lib/abi` (`stdinfo.rs`, `AGENTS.md` §20.1). This layer carries the bytes; it
+  does not redefine the record.
+- **NOT STARTED — this plan (IO1–IO4).** The `Read`/`Write` trait layer,
+  buffering, formatting, and userland adoption do not exist yet. `PLAN.md`
+  marks the I/O abstraction "planned (not started)".
+- **NOT STARTED, OWNED ELSEWHERE — the descriptor-*producing* ABI.** The
+  syscall(s) that resolve a file path or a resource reference to a *new* fd, and
+  the closed `sys:` stream-backing enum, are unimplemented and are owned by
+  `plans/DRIVES.md` (files), `plans/ALIAS.md` + `plans/SHELL.md` (resource
+  references). This plan depends on them but must not invent them (§5).
+
 ## 1. Scope and decisions (binding for this plan)
 
 - **One I/O vocabulary, rolled first-party** (`AGENTS.md` §2.2, §2.12): a
   single `Read`/`Write` trait pair plus the buffering and formatting built on
-  them. No second I/O abstraction is introduced anywhere; the existing
-  `lib/rt` free functions become the *backing* the trait impls call, not a
-  parallel surface (see §4).
+  them, defined **once** and reused by every fd backing — the standard streams
+  today, opened files / resource references / tty / pipes tomorrow. No second
+  I/O abstraction is introduced anywhere; the existing `lib/rt` free functions
+  become the *backing* the standard-stream handles call, not a parallel surface
+  (see §4).
+- **fd-generic, not stream-specific** (the groundwork, `AGENTS.md` §2.2): the
+  trait layer operates on an **owned stream descriptor** (a thin, safe wrapper
+  over a raw `fd`), not on four hard-coded singletons. `Stdin`/`Stdout`/
+  `Stderr`/`StdInfo` are the *well-known* descriptors (fd 0/1/2/3); any fd a
+  sibling plan later opens (a file, a `sys:`/`tty:`/`disk:` backing, a pipe end)
+  is read/written through the **same** traits. This is what guarantees there is
+  never a second I/O vocabulary when storage, USB, or serial land.
 - **Strictly a layer over `abi-v1` — no new authority** (`AGENTS.md` §5.4):
-  every trait method ultimately calls an existing `lib/rt` wrapper
-  (`stdout`/`stderr`/`stdinfo`/`stdin`), which traps to an existing syscall.
-  This crate adds **no** syscall, no capability, and no `lib/abi` type. A
-  program reaches no I/O it could not already reach.
-- **Bind to the standard streams, never a device** (`AGENTS.md` §20): the only
-  concrete I/O objects this layer exposes are the four inherited standard
-  streams (`stdin`/`stdout`/`stderr`/`stdinfo`). It exposes **no** console,
-  UART, or framebuffer object, so it cannot be used to bypass §20.
+  every trait method ultimately calls `stream_read(fd, …)` / `stream_write(fd,
+  …)`, which the kernel resolves against the caller's descriptor table and
+  capability set. This crate adds **no** syscall, no capability, and no
+  `lib/abi` type. A program reaches no I/O it could not already reach: holding
+  an `OwnedStream` is holding an fd the kernel already gave the process, never
+  ambient authority to open a new one.
+- **Open is not this layer's job** (`AGENTS.md` §2.4, §17.4): obtaining a *new*
+  fd — opening a file under a capability/`FileCap` (`plans/DRIVES.md`),
+  resolving a resource reference with a `Read`/`Write` resolve intent to a
+  stream backing (`plans/ALIAS.md` §15.3, `plans/SHELL.md`) — is a
+  capability-bearing operation owned by those plans. This layer **consumes** the
+  resulting fd; it exposes no `open()`/`resolve()` and so cannot be used to
+  widen authority (§5).
+- **Bind to descriptors, never a device** (`AGENTS.md` §20): the only concrete
+  I/O objects this layer constructs on its own are the four inherited standard
+  streams. It exposes **no** console, UART, or framebuffer object and never
+  calls a device syscall (`console_read`/`console_write` are a kernel-internal
+  *backing* the stream layer attaches to fd 0/1 during boot, never a
+  program-facing surface, §20). An `OwnedStream` for any other fd is only ever
+  *handed in* by the owning plan's open/resolve call — this layer never
+  fabricates one.
 - **`fd 3` (`stdinfo`) keeps its §20.1 semantics**: best-effort, non-blocking,
   ignorable, never affecting correctness. The `Write` impl for the stdinfo
   stream must not let a full/absent consumer turn into an error a program
   depends on; structured `StdInfoRecord` framing stays in `lib/abi`
-  (`AGENTS.md` §20.1) — this crate only carries the bytes.
+  (`AGENTS.md` §20.1) — this layer only carries the bytes.
+- **Logging is not I/O over this layer** (`AGENTS.md` §19.4, §20.1;
+  `plans/SYSLOG.md`): security/audit and structured log *records* flow through
+  `lib/log` (a logging syscall / IPC / trusted runtime path that attaches
+  system-attested origin), **never** as bytes written through these traits. A
+  CLI tool that *displays* logs (`log show`, `log find`, …) writes its rendered
+  text to `stdout`/`stderr`/`stdinfo` through this layer like any other program,
+  but the authoritative log path is `lib/log`, not this crate. This layer must
+  expose no "log to a stream" shortcut that would become a second, unattested
+  log path (§2.2, §2.4).
 - **Fail closed, no panics** (`AGENTS.md` §2.9, §5.4): a short read/write is a
   value the API loops over, EOF is represented honestly, and no path uses
   `unwrap`/`expect`/`panic!`. A formatting error surfaces as an `Err`, not a
@@ -91,10 +172,14 @@ userland (shells/apps/services) → rustos_rt::io                    [the I/O su
 Rationale for a **module inside `lib/rt`** rather than a new `lib/io` crate:
 the trait layer is meaningless without the runtime's stream wrappers it sits
 on, it adds no authority, and a one-purpose sibling crate that only re-exports
-`lib/rt` would be the bloat `AGENTS.md` §2.3/§15.5 forbids. If IO1 finds a
-concrete second consumer that must use the I/O traits *without* `lib/rt`'s
-`_start`/panic machinery, a `lib/io` crate is justified instead and §3/§17.4
-of `AGENTS.md` are updated in the same change. Either way there is exactly one
+`lib/rt` would be the bloat `AGENTS.md` §2.3/§15.5 forbids. The fd-generic
+design (§1) does **not** by itself justify a separate crate: an `OwnedStream`
+is still just an fd the runtime owns, and the open/resolve calls that mint new
+fds live in their own plans' crates, not here. If IO1 finds a concrete second
+consumer that must use the I/O traits *without* `lib/rt`'s `_start`/panic
+machinery (for example a `lib/*` crate consumed by both userland and a
+non-`rt` context), a `lib/io` crate is justified instead and §3/§17.4 of
+`AGENTS.md` are updated in the same change. Either way there is exactly one
 `Read`/`Write` definition.
 
 This layer is **not** a curated `/System/Libraries/` class: it is internal
@@ -107,17 +192,23 @@ which *is* a curated class — see `plans/CURSES.md`.)
 Each stage is one fully-gated landing (`AGENTS.md` §7 / §2.15): code + tests +
 rustdoc + the relevant `docs/` page, whole-project gate green.
 
-- **IO1 — `Read`/`Write` traits + the four standard streams.**
+- **IO1 — `Read`/`Write` traits + the owned stream handle + the four standard
+  streams.**
   Define the `Read` and `Write` traits (short-read/short-write loops handled
   *inside* `write_all` / `read` helpers so callers stop re-implementing them),
-  an `Error`/`Result` that fails closed, and the concrete zero-sized stream
-  handles `Stdin`/`Stdout`/`Stderr`/`StdInfo` whose impls call the existing
-  `lib/rt` wrappers. `stdinfo`'s `Write` honours §20.1 (best-effort). Confirm
-  the §2 placement decision and record it in `AGENTS.md` §3 if a new crate is
-  chosen. Tests: short-write loop reaches full length, EOF/`read` semantics,
-  stdinfo never errors on no-consumer. Docs: `docs/src/lib/rt-io.md` (or
-  `docs/src/lib/io.md`) + the crate `README.md` stability tier (`AGENTS.md`
-  §6).
+  an `Error`/`Result` that fails closed, the fd-generic `OwnedStream` handle
+  these traits are implemented on (a thin safe wrapper over a raw `fd` the
+  process already owns — RAII, no ambient open), and the well-known
+  zero-cost accessors `Stdin`/`Stdout`/`Stderr`/`StdInfo` (fd 0/1/2/3) whose
+  impls call the existing `lib/rt` wrappers. `stdinfo`'s `Write` honours §20.1
+  (best-effort, never an error on no consumer). Confirm the §2 placement
+  decision and record it in `AGENTS.md` §3 if a new crate is chosen. Tests:
+  short-write loop reaches full length, EOF/`read` semantics, `stdinfo` never
+  errors on no-consumer, and a `Read`/`Write` over a *non-standard* fd
+  (exercised with a pipe/test backing) uses the identical code path as the
+  standard streams (proves §2.2 — one vocabulary).
+  Docs: `docs/src/lib/rt-io.md` (or `docs/src/lib/io.md`) + the crate
+  `README.md` stability tier (`AGENTS.md` §6).
 - **IO2 — buffering.** `BufWriter` (coalesces small writes, explicit `flush`,
   flush-on-drop best-effort) and `BufReader` with `read_line` / `lines` for the
   REPL. Fixed-capacity buffers for the allocation-free path. Tests: buffer
@@ -137,14 +228,66 @@ rustdoc + the relevant `docs/` page, whole-project gate green.
   the existing shell/init/utility tests still pass against the new surface; the
   `spawn_session_qemu_aarch64` vertical still proves a child's fd-1 output.
 
-## 4. Non-negotiable invariants (recap)
+## 4. How the siblings plug in (groundwork, no IO.md ABI)
 
-- Adds no `abi-v1` surface, no syscall, no capability — pure layer over the
-  existing `lib/rt` stream wrappers (`AGENTS.md` §5.4).
-- Exposes only the four inherited standard streams; no device object
-  (`AGENTS.md` §20).
-- One `Read`/`Write` definition for the whole OS userland (`AGENTS.md` §2.2);
-  IO4 deletes the duplicated loops it supersedes (`AGENTS.md` §2.14).
+This layer is the *consumer* end of one fd-generic vocabulary; the sibling
+plans own the *producer* end (the open/resolve calls that mint new fds and the
+kernel stream backings behind them). Recorded here so each future feature has a
+clear, roadblock-free path and **does not** grow a second I/O surface. None of
+the producer ABI is invented in this plan.
+
+- **Filesystem reads/writes (`plans/DRIVES.md`).** Opening a path resolves to a
+  capability-checked file/handle (`root_handle` + `directory_handle`,
+  `FileCap`, delegated handles — never a bare pathname, `AGENTS.md` §4, §5.3).
+  That open call yields an fd; this layer's `Read`/`Write` move the bytes. The
+  block/USB-storage → filesystem-driver → file-handle → fd chain is owned by
+  the storage/filesystem plans; the **only** requirement this plan places on
+  them is that the readable/writable end is an fd resolved against the
+  descriptor table, so no separate "file I/O" trait is needed.
+- **USB storage (no roadblock).** A USB mass-storage device is reached through
+  the normal driver path (`drivers/bus/usb/*`, `drivers/storage/*`,
+  `plans/USB.md`) and surfaces as a block device the filesystem driver mounts;
+  files on it open to fds exactly as above. The driver's own device I/O (MMIO
+  doorbells, DMA rings, `dma-barrier`) is a *different* layer (`lib/drvrt`,
+  device-resource grants) and deliberately does **not** use these standard-
+  stream traits — keeping that boundary explicit is part of the groundwork.
+- **Serial / tty and the `sys:` byte streams (`plans/ALIAS.md`,
+  `plans/SHELL.md`).** A redirection or command resolves a resource reference
+  (`tty:debug`, `sys:null`, `sys:zero`, `sys:full`, `sys:random`, `disk:`) with
+  a `Read`/`Write` resolve intent to a **closed, versioned, hashed `lib/abi`
+  stream-backing enum** (owned by `ALIAS.md`/`SHELL.md`, not a string-keyed
+  device table). The resolver hands back an fd; this layer reads/writes it. A
+  serial console used interactively is just another fd backing — the shell
+  still binds only fd 0/1/2/3 and never a UART device (`AGENTS.md` §20).
+  `sys:random` draws from the one kernel CSPRNG (`AGENTS.md` §22), never a
+  second entropy path.
+- **Logging (`plans/SYSLOG.md`, `AGENTS.md` §19.4).** Structured/audited log
+  *records* never travel through these traits; they go through `lib/log`. The
+  `log` CLI tools render text to `stdout`/`stderr`/`stdinfo` through this layer,
+  but this layer offers no record-to-stream path that would bypass the
+  attested journal ingress (§1).
+- **Pipes and redirection (`plans/SHELL.md`).** `cmd | next`, `cmd >file`,
+  `cmd 3>info.jsonl`, `cmd 3>&-` all work by the spawner wiring the child's fd
+  0/1/2/3 to the appropriate stream backings *before* exec; the child still
+  only names descriptors. The fd-generic traits make a piped/redirected fd
+  indistinguishable from an inherited standard stream to the program — which is
+  exactly the device independence §20 requires.
+
+## 5. Non-negotiable invariants (recap)
+
+- Adds no `abi-v1` surface, no syscall, no capability — a pure layer over the
+  existing `lib/rt` stream wrappers and the existing fd-taking `stream_read` /
+  `stream_write` traps (`AGENTS.md` §5.4).
+- One fd-generic `Read`/`Write` definition for the whole OS userland
+  (`AGENTS.md` §2.2): the four standard streams today, and every file / resource
+  / tty / pipe fd a sibling plan later opens, share it; IO4 deletes the
+  duplicated loops it supersedes (`AGENTS.md` §2.14).
+- Exposes only the four inherited standard streams as objects it constructs;
+  any other fd is *handed in* by the owning plan's capability-checked
+  open/resolve call. No device object, no `open()`/`resolve()` here, no ambient
+  authority (`AGENTS.md` §20, §4, §2.4).
+- Log records go through `lib/log`, never these traits (`AGENTS.md` §19.4,
+  §20.1; `plans/SYSLOG.md`).
 - `no_std`, fail-closed, no `unwrap`/`expect`/`panic!` in production paths
   (`AGENTS.md` §2.9), no stubs (§15.1), tests + docs in the same change
   (§7, §13).

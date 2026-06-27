@@ -2443,12 +2443,19 @@ services program against an abstraction instead of re-implementing the same
 short-write loop and "read until newline" logic (which would be the
 duplication `AGENTS.md` §2.2 forbids). It is a pure layer over the existing
 `abi-v1` stream syscalls: it adds **no** ABI surface, **no** syscall, and
-**no** capability (`AGENTS.md` §5.4), exposes only the four standard streams
-(never a device, §20), and is `no_std` + fail-closed (§2.9). RustOS does
+**no** capability (`AGENTS.md` §5.4), and is `no_std` + fail-closed (§2.9). The
+`Read`/`Write` vocabulary is **fd-generic** — implemented on an owned stream
+descriptor so the four standard streams *and* any file / resource-reference /
+tty / pipe fd a sibling plan later opens (`plans/DRIVES.md`, `plans/ALIAS.md`,
+`plans/SHELL.md`) reuse the one definition (§2.2), with no second I/O surface.
+The layer itself constructs only the four inherited standard streams and never
+a device (§20): opening a *new* fd is a capability-checked operation owned by
+those sibling plans, never invented here. RustOS does
 **not** build a system-wide C `stdio` — the *System runtime / C ABI* class
 stays minimal and a third-party C program brings its own libc in its bundle
-(`AGENTS.md` §16.4, `plans/CCOMPAT.md`). Staged IO1 (traits + the four stream
-handles) → IO2 (buffering) → IO3 (formatting) → IO4 (adopt across userland and
+(`AGENTS.md` §16.4, `plans/CCOMPAT.md`). Staged IO1 (traits + the fd-generic
+owned stream handle + the four standard streams) → IO2 (buffering) → IO3
+(formatting) → IO4 (adopt across userland and
 delete the hand-rolled loops, §2.14) in `plans/IO.md`, which is binding under
 `AGENTS.md`.
 
